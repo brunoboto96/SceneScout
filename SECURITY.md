@@ -23,7 +23,7 @@ SceneScout drives a real browser against applications that may hold real data,
 so its safety net is part of its security surface. These are in scope and
 taken seriously:
 
-- **A write-policy bypass** — a request that `read-only` or `safe-write` mode
+- **A write-policy bypass** — a request that `observe`, `read-only` or `safe-write` mode
   should have blocked (see [`src/engine/policy.ts`](src/engine/policy.ts)) and
   did not.
 - **Ownership confusion in `safe-write`** — the engine editing or deleting a
@@ -38,6 +38,11 @@ taken seriously:
 
 Not a vulnerability: `read-only` mode allowing an ordinary, non-destructive
 form `POST`. That is documented behaviour — see the safety model in the README.
+`observe` mode is the one that blocks those too. A non-GET HTTP request leaving
+the page in `observe` mode is a bypass, unless it is a login, a logout or a token
+refresh. Frames sent over a WebSocket are outside the policy in every mode; the
+engine warns about an open socket in `observe` mode, and that limit is documented
+rather than a vulnerability.
 
 ## Using it safely
 

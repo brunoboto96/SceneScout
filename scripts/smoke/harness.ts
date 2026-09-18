@@ -25,6 +25,8 @@ export interface ServerStats {
   itemPosts: number;
   /** DELETEs that reached the server for the worker-sync fixture's record — must stay 0 in read-only mode. */
   workerDeletes: number;
+  /** Every non-GET request that reached the server, as "METHOD /path" → count. What the write policy let through, seen from the other side. */
+  writes: Record<string, number>;
 }
 
 /** Everything a suite needs. `projectDir` is shared on purpose: later suites assert on memory earlier ones wrote. */
@@ -84,11 +86,15 @@ export function settle(ms: number): Promise<void> {
 
 /** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
 export async function startFixtureServer(): Promise<{ baseUrl: string; stats: ServerStats; close: () => void }> {
-  const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0 };
+  const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, writes: {} };
   // Tiny server for the test app: static pages + a minimal items API for
   // write-policy testing.
   const server = http.createServer((req, res) => {
     const urlPath = (req.url ?? "/").split("?")[0];
+    if (req.method && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+      const key = `${req.method} ${urlPath}`;
+      stats.writes[key] = (stats.writes[key] ?? 0) + 1;
+    }
     if ((urlPath === "/api/upload" || urlPath === "/api/avatar") && req.method === "POST") {
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
