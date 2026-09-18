@@ -389,41 +389,53 @@ export function geometryIssues(
  * rendering correctly.
  */
 export const BROKEN_IMAGES_SCRIPT = `(() => {
-  const out = [];
+  const images = [];
+  let total = 0;
   for (const img of Array.from(document.images)) {
     const src = img.currentSrc || img.getAttribute("src") || "";
     if (!src || src.indexOf("data:") === 0 || /\\.svg(\\?|#|$)/i.test(src)) continue;
     if (!img.complete || img.naturalWidth > 0 || img.naturalHeight > 0) continue;
+    // Visible means it occupies space. The box test is what catches an image
+    // inside a display:none ANCESTOR (a closed modal, an inactive tab): display
+    // is not inherited, so the image's own computed style still says "inline".
+    // It also drops tracking pixels, whose endpoint answers 204 by design.
     const r = img.getBoundingClientRect();
+    if (r.width <= 2 || r.height <= 2) continue;
     const cs = window.getComputedStyle(img);
     if (cs.display === "none" || cs.visibility === "hidden") continue;
-    out.push({ alt: (img.getAttribute("alt") || "").trim().slice(0, 80), src: src.slice(0, 160), testid: img.getAttribute("data-testid"), width: Math.round(r.width), height: Math.round(r.height) });
-    if (out.length >= 20) break;
+    total += 1;
+    if (images.length < 20) images.push({ alt: (img.getAttribute("alt") || "").trim().slice(0, 80), src: src.slice(0, 160), testid: img.getAttribute("data-testid") });
   }
-  return out;
+  return { images, total };
 })()`;
 
 export interface BrokenImage {
   alt: string;
   src: string;
   testid: string | null;
-  width: number;
-  height: number;
+}
+
+/** What the page script returns: up to 20 images, and how many there were in all. */
+export interface BrokenImageScan {
+  images: BrokenImage[];
+  total: number;
 }
 
 /** Snapshot lines for images that failed to load. The origin is dropped when it is the page's own, to keep the line short. */
-export function brokenImageIssues(images: BrokenImage[], pageUrl: string): string[] {
+export function brokenImageIssues(scan: BrokenImageScan, pageUrl: string): string[] {
   let origin = "";
   try {
     origin = new URL(pageUrl).origin;
   } catch {
     /* an unparseable page URL just means the full src is shown */
   }
-  const lines = images.slice(0, 5).map((img) => {
-    const src = origin && img.src.startsWith(origin) ? img.src.slice(origin.length) : img.src;
+  // Only a real origin match: "http://x" is also a prefix of "http://x.other.test/a.png".
+  const short = (src: string): string => (origin && (src === origin || src.startsWith(`${origin}/`)) ? src.slice(origin.length) || "/" : src);
+  const lines = scan.images.slice(0, 5).map((img) => {
     const name = img.alt ? `"${img.alt}"` : "(no alt text)";
-    return `image ${name}${img.testid ? ` [testid=${img.testid}]` : ""} FAILED TO LOAD — ${src}`;
+    return `image ${name}${img.testid ? ` [testid=${img.testid}]` : ""} FAILED TO LOAD — ${short(img.src)}`;
   });
-  if (images.length > 5) lines.push(`…and ${images.length - 5} more images that failed to load`);
+  const total = Math.max(scan.total, scan.images.length);
+  if (total > 5) lines.push(`…and ${total - 5} more images that failed to load`);
   return lines;
 }

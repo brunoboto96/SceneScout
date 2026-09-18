@@ -605,8 +605,12 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       imgSection,
     );
     check("a broken image with no alt text says so", /image \(no alt text\) FAILED TO LOAD — \/login\.html/.test(imgSnap), imgSection);
-    check("an image that loaded is NOT reported", !/A pixel that loads" .*FAILED TO LOAD/.test(imgSnap), imgSection);
-    check("a hidden broken image is NOT reported", !/"Hidden".*FAILED TO LOAD/.test(imgSnap), imgSection);
+    // Gated on the section existing, so these cannot pass just because the feature is absent.
+    const hasSection = /BROKEN IMAGES:/.test(imgSnap);
+    check("an image that loaded is NOT reported", hasSection && !/A pixel that loads" .*FAILED TO LOAD/.test(imgSnap), imgSection);
+    check("a broken image hidden by its own display:none is NOT reported", hasSection && !/"Hidden".*FAILED TO LOAD/.test(imgSnap), imgSection);
+    check("a broken image inside a display:none ANCESTOR is NOT reported", hasSection && !/In a closed panel/.test(imgSection), imgSection);
+    check("a 1×1 tracking pixel is NOT reported", hasSection && !/beacon/.test(imgSection), imgSection);
     check("an image is listed by its alt text, as an image", /image "A pixel that loads" \[testid=img-ok/.test(imgSnap), imgSnap.slice(0, 500));
 
     console.log("geometry: a pinned control under other pinned chrome is caught by hit test, intended layering is not");

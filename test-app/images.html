@@ -18,6 +18,11 @@
       <img src="/login.html" width="120" height="60" />
       <!-- Hidden: a broken image nobody can see is not a visible defect. -->
       <img src="/img/also-missing.png" alt="Hidden" style="display: none" />
+      <!-- Hidden by an ANCESTOR: a closed panel. display is not inherited, so the
+           image's own computed style says "inline"; only its box says it is gone. -->
+      <div style="display: none"><img src="/img/in-closed-panel.png" alt="In a closed panel" width="120" height="60" /></div>
+      <!-- A tracking pixel. Its endpoint is not an image on purpose. -->
+      <img src="/api/beacon" alt="" width="1" height="1" />
       <a href="/" data-testid="images-home">Home</a>
     </main>
   </body>

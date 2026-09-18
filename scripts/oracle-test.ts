@@ -211,20 +211,35 @@ test("a pinned control covered by other pinned chrome is reported, ahead of box 
 
 test("images that failed to load are named by their alt text and their source", () => {
   const lines = brokenImageIssues(
-    [
-      { alt: "Weekly chart", src: "http://x/img/chart.png", testid: "dash-chart", width: 640, height: 180 },
-      { alt: "", src: "https://cdn.example.com/a.jpg", testid: null, width: 120, height: 60 },
-    ],
+    {
+      images: [
+        { alt: "Weekly chart", src: "http://x/img/chart.png", testid: "dash-chart" },
+        { alt: "", src: "https://cdn.example.com/a.jpg", testid: null },
+      ],
+      total: 2,
+    },
     "http://x/dashboard",
   );
   assert.deepEqual(lines, [
     'image "Weekly chart" [testid=dash-chart] FAILED TO LOAD — /img/chart.png',
     "image (no alt text) FAILED TO LOAD — https://cdn.example.com/a.jpg",
   ]);
-  // A page full of them is summarised.
-  const many = Array.from({ length: 8 }, (_, i) => ({ alt: `Photo ${i}`, src: `http://x/p${i}.png`, testid: null, width: 10, height: 10 }));
-  const summarised = brokenImageIssues(many, "http://x/");
-  assert.equal(summarised.length, 6);
-  assert.match(summarised[5], /and 3 more images that failed to load/);
-  assert.deepEqual(brokenImageIssues([], "http://x/"), []);
+  assert.deepEqual(brokenImageIssues({ images: [], total: 0 }, "http://x/"), []);
+});
+
+test("the page's origin is stripped only on a real origin match", () => {
+  const src = (s: string, page: string) => brokenImageIssues({ images: [{ alt: "a", src: s, testid: null }], total: 1 }, page)[0].split(" — ")[1];
+  assert.equal(src("http://x/a.png", "http://x/p"), "/a.png");
+  // "http://x" is a string prefix of both of these, and neither is the same origin.
+  assert.equal(src("http://x.other.test/a.png", "http://x/p"), "http://x.other.test/a.png");
+  assert.equal(src("http://localhost:30001/a.png", "http://localhost:3000/p"), "http://localhost:30001/a.png");
+  assert.equal(src("http://x", "http://x/p"), "/", "never an empty source");
+});
+
+test("a page full of broken images reports the real total, not the sample size", () => {
+  // The page script returns at most 20 images but counts them all.
+  const sample = Array.from({ length: 20 }, (_, i) => ({ alt: `Photo ${i}`, src: `http://x/p${i}.png`, testid: null }));
+  const lines = brokenImageIssues({ images: sample, total: 95 }, "http://x/");
+  assert.equal(lines.length, 6);
+  assert.match(lines[5], /and 90 more images that failed to load/);
 });

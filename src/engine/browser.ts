@@ -11,7 +11,7 @@ import {
   type Rect,
   BROKEN_IMAGES_SCRIPT,
   brokenImageIssues,
-  type BrokenImage,
+  type BrokenImageScan,
 } from "./collector.js";
 import { OracleMonitor, formatViolations } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
@@ -805,7 +805,10 @@ export class BrowserEngine {
     const geometry = geometryIssues(elements, page.viewportSize() ?? { width: 1280, height: 900 });
     geometry.push(...(await probeOverlays(page)));
     const hiddenFileInputs = await this.hiddenFileInputs(page);
-    const brokenImages = brokenImageIssues(((await page.evaluate(BROKEN_IMAGES_SCRIPT).catch(() => [])) as BrokenImage[]) ?? [], url);
+    const brokenImages = brokenImageIssues(
+      ((await page.evaluate(BROKEN_IMAGES_SCRIPT).catch(() => null)) as BrokenImageScan | null) ?? { images: [], total: 0 },
+      url,
+    );
     const cov = memory.coverage();
     const unvisited = this.unvisitedKnownRoutes();
     const title = await page.title();
