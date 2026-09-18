@@ -289,6 +289,17 @@ export function scanProject(projectDir: string): ScanResult {
     const found = codeRoutes(frontendDir);
     routes.push(...found.routes);
     codeRouteFiles = found.files;
+    if (found.unresolved.length > 0) {
+      notes.push(
+        `${found.unresolved.length} lazily loaded route branch(es) could not be followed (${found.unresolved.slice(0, 3).join(", ")}${found.unresolved.length > 3 ? ", …" : ""}): ` +
+          `the branch's own path is listed, the pages under it are not. Links found while exploring add them.`,
+      );
+    }
+    if (found.truncated) {
+      notes.push(
+        `The source tree was too large or too deep to list completely, so a router file may have been missed; routes read from source may be incomplete.`,
+      );
+    }
   }
   // Say so when filesystem discovery cannot help. Returning [] silently left
   // the agent to assume the app genuinely had no routes, when in fact nothing

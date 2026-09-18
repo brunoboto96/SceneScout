@@ -342,6 +342,58 @@ console.log("code routes: <Route> elements");
   );
 }
 
+console.log("code routes: things that look like routes and are not");
+{
+  const carried = `
+    const routes = [
+      { path: '/orders', component: Orders, meta: { title: 'Orders', breadcrumbs: [{ path: 'orders', component: Crumb }] }, props: { link: { path: 'b', component: L } } },
+    ]`;
+  check(
+    "a route-shaped object under meta or props is data carried by a route, not a child route",
+    sorted(resolveRoutes(readRouteObjects(carried))) === sorted(["/orders"]),
+    sorted(resolveRoutes(readRouteObjects(carried))),
+  );
+
+  const menu = `const nav = [{ path: '/external-docs', name: 'Docs', icon: 'book' }, { path: 'dashboard', name: 'Dashboard', meta: { order: 1 } }];`;
+  check(
+    "name and meta alone do not make a route record (a sidebar entry has them too)",
+    resolveRoutes(readRouteObjects(menu)).length === 0,
+    sorted(resolveRoutes(readRouteObjects(menu))),
+  );
+
+  const commented = `
+    <Routes>
+      <Route path="/" element={<Home />} />
+      {/* <Route path="/legacy-billing" element={<OldBilling />} /> */}
+      // <Route path="/dead" element={<Dead />} />
+      <Route path="/docs" element={<a href="https://example.com/x">docs</a>} />
+    </Routes>`;
+  check(
+    "a commented-out <Route> is not read; a // inside a URL does not start a comment",
+    sorted(resolveRoutes(readRouteElements(commented))) === sorted(["/", "/docs"]),
+    sorted(resolveRoutes(readRouteElements(commented))),
+  );
+
+  const apostrophe = `
+    <Routes>
+      <Route path="/" element={<Home />} />
+      <Route path="/lost" element={<div>We couldn't find that page</div>} />
+      <Route path="/orders" element={<Orders />} />
+    </Routes>`;
+  check(
+    "an apostrophe in JSX text does not swallow the routes after it",
+    sorted(resolveRoutes(readRouteElements(apostrophe))) === sorted(["/", "/lost", "/orders"]),
+    sorted(resolveRoutes(readRouteElements(apostrophe))),
+  );
+
+  const regexQuote = `const SLUG = /['"]/g;\nexport const router = createBrowserRouter([{ path: "/", element: <Home /> }, { path: "/orders", element: <Orders /> }]);`;
+  check(
+    "a quote inside a regex does not swallow the file",
+    sorted(resolveRoutes(readRouteObjects(regexQuote))) === sorted(["/", "/orders"]),
+    sorted(resolveRoutes(readRouteObjects(regexQuote))),
+  );
+}
+
 console.log("code routes: through scanProject");
 {
   const mk = (deps: Record<string, string>, files: Record<string, string>): string => {
@@ -399,7 +451,7 @@ console.log("code routes: through scanProject");
       // known parent ("/detail" would be an invented page). Its absolute path is fine.
       "src/features/billing/routes.tsx": `import { RouteObject } from "react-router-dom";
         export const billingRoutes: RouteObject[] = [{ path: "detail", element: <Detail /> }, { path: "/billing", element: <Billing /> }];`,
-      // Mentions a router but is not a root: a bare relative path here has no known parent.
+      // Not named like a router file and mounts nothing, so it is never read at all.
       "src/features/orders/routes.fragment.tsx": `import { Route } from "react-router-dom"; export const orderRoutes = <Route path="detail" element={<Detail />} />;`,
     },
   );
@@ -411,6 +463,88 @@ console.log("code routes: through scanProject");
   );
   check("a relative path whose parent is unknown is never promoted to a top-level page", !r.routes.includes("/detail"), sorted(r.routes));
   fs.rmSync(react, { recursive: true, force: true });
+
+  // Descendant routes: <Routes> inside a component reached through a splat
+  // route. Its paths are relative to "/admin", which a static read cannot know.
+  const descendant = mk(
+    { react: "^18.0.0", "react-router-dom": "^6.0.0" },
+    {
+      "src/App.tsx": `import { BrowserRouter, Routes, Route } from "react-router-dom";
+        export default () => (<BrowserRouter><Routes><Route path="/" element={<Home />} /><Route path="admin/*" element={<AdminApp />} /></Routes></BrowserRouter>);`,
+      "src/admin/AdminApp.tsx": `import { Routes, Route, useRoutes } from "react-router-dom";
+        export const AdminApp = () => (<Routes><Route path="users" element={<Users />} /><Route path="/admin/audit" element={<Audit />} /></Routes>);
+        export const More = () => useRoutes([{ path: "roles", element: <Roles /> }]);`,
+    },
+  );
+  const d = scanProject(descendant);
+  check(
+    "a nested <Routes>/useRoutes block never yields top-level pages from its relative paths",
+    !d.routes.includes("/users") && !d.routes.includes("/roles"),
+    sorted(d.routes),
+  );
+  check("its absolute paths are still read, and so is the entry file", sorted(d.routes) === sorted(["/", "/admin/audit"]), sorted(d.routes));
+  fs.rmSync(descendant, { recursive: true, force: true });
+
+  // The common split: the router is created in main.tsx, the routes live in App.tsx.
+  const split = mk(
+    { react: "^18.0.0", "react-router-dom": "^6.0.0" },
+    {
+      "src/main.tsx": `import { BrowserRouter } from "react-router-dom"; root.render(<BrowserRouter><App /></BrowserRouter>);`,
+      "src/App.tsx": `import { Routes, Route } from "react-router-dom"; export default () => (<Routes><Route path="orders" element={<Orders />} /><Route index element={<Home />} /></Routes>);`,
+    },
+  );
+  check(
+    "the ONLY file that mounts routes is the root, so its relative paths are trusted",
+    sorted(scanProject(split).routes) === sorted(["/", "/orders"]),
+    sorted(scanProject(split).routes),
+  );
+  fs.rmSync(split, { recursive: true, force: true });
+
+  // Angular's classic lazy shape: loadChildren points at an NgModule, the routes are in its sibling.
+  const ngModule = mk(
+    { "@angular/core": "^16.0.0", "@angular/router": "^16.0.0" },
+    {
+      "src/app/app-routing.module.ts": `import { RouterModule, Routes } from '@angular/router';
+        const routes: Routes = [
+          { path: '', component: HomeComponent },
+          { path: 'admin', loadChildren: () => import('./admin/admin.module').then((m) => m.AdminModule) },
+          { path: 'reports', loadChildren: () => import('@app/reports/reports.module').then((m) => m.ReportsModule) },
+        ];
+        @NgModule({ imports: [RouterModule.forRoot(routes)] }) export class AppRoutingModule {}`,
+      "src/app/admin/admin.module.ts": `@NgModule({ imports: [AdminRoutingModule] }) export class AdminModule {}`,
+      "src/app/admin/admin-routing.module.ts": `import { RouterModule, Routes } from '@angular/router';
+        const routes: Routes = [{ path: '', component: AdminHome }, { path: 'users', component: AdminUsers }];
+        @NgModule({ imports: [RouterModule.forChild(routes)] }) export class AdminRoutingModule {}`,
+    },
+  );
+  const ng = scanProject(ngModule);
+  check(
+    "an NgModule's routes are found in its sibling routing module, under the branch that loads it",
+    sorted(ng.routes) === sorted(["/", "/admin", "/admin/users", "/reports"]),
+    sorted(ng.routes),
+  );
+  check(
+    "a branch behind a path alias is listed by its own path, and the scan says its pages were not followed",
+    ng.notes.some((n: string) => /could not be followed \(@app\/reports\/reports\.module\)/.test(n)),
+    JSON.stringify(ng.notes),
+  );
+  fs.rmSync(ngModule, { recursive: true, force: true });
+
+  // A checkout that lives under a directory whose NAME is on the skip list.
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ft-skipname-"));
+  const under = path.join(parent, "build", "myapp");
+  fs.mkdirSync(path.join(under, "src"), { recursive: true });
+  fs.writeFileSync(path.join(under, "package.json"), JSON.stringify({ name: "app", dependencies: { vue: "^3.0.0", "vue-router": "^4.0.0" } }));
+  fs.writeFileSync(
+    path.join(under, "src", "router.ts"),
+    `import { createRouter } from 'vue-router'; export default createRouter({ routes: [{ path: '/', component: H }, { path: '/orders', component: O }] })`,
+  );
+  check(
+    "skip rules apply to paths inside the project, not to where the project happens to live",
+    sorted(scanProject(under).routes) === sorted(["/", "/orders"]),
+    sorted(scanProject(under).routes),
+  );
+  fs.rmSync(parent, { recursive: true, force: true });
 
   const vueApp = mk(
     { vue: "^3.0.0", "vue-router": "^4.0.0", vite: "^5.0.0" },

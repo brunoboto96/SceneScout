@@ -17,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 /** Keys that make an object literal with a `path` a route record rather than, say, a build config. */
+/** `name` and `meta` are deliberately absent: a sidebar or breadcrumb entry is `{ path, name }` too. */
 const ROUTE_RECORD_KEYS = [
   "element",
   "Component",
@@ -30,9 +31,6 @@ const ROUTE_RECORD_KEYS = [
   "redirect",
   "redirectTo",
   "index",
-  "name",
-  "meta",
-  "canActivate",
 ];
 
 interface Frame {
@@ -43,6 +41,8 @@ interface Frame {
   path?: string;
   lazyImport?: string;
   currentKey?: string;
+  /** The key of the nearest enclosing object under which this frame was opened (`children`, `meta`, …). */
+  via?: string;
 }
 
 export interface RouteRecord {
@@ -59,6 +59,15 @@ export interface RouteRecord {
 /** Read a JS string literal starting at `i` (which points at the quote). Returns the value and the index after it, or null for a template literal with interpolation. */
 function readString(src: string, i: number): { value: string | null; end: number } {
   const quote = src[i];
+  // A ' or " string cannot span lines. When there is no closing quote before
+  // the newline this is not a string at all — an apostrophe in JSX text
+  // ("couldn't"), a quote inside a regex (/['"]/) — and treating it as one
+  // swallowed the rest of the file, routes included.
+  if (quote !== "`") {
+    let k = i + 1;
+    while (k < src.length && src[k] !== quote && src[k] !== "\n") k += src[k] === "\\" ? 2 : 1;
+    if (src[k] !== quote) return { value: null, end: i + 1 };
+  }
   let j = i + 1;
   let value = "";
   let interpolated = false;
@@ -121,7 +130,8 @@ export function readRouteObjects(src: string): RouteRecord[] {
     if (c === "{" || c === "[" || c === "(") {
       // `{` opens an object literal when it follows something a value can follow.
       const isObject = c === "{" && /[[(,:=?]|^$|r/.test(lastSignificant === "return" ? "r" : lastSignificant);
-      frames.push({ kind: isObject ? "obj" : "other", parent: nearestObj(), keys: new Set() });
+      const enclosing = nearestObj();
+      frames.push({ kind: isObject ? "obj" : "other", parent: enclosing, keys: new Set(), via: enclosing === -1 ? undefined : frames[enclosing].currentKey });
       stack.push(frames.length - 1);
       lastSignificant = c;
       i += 1;
@@ -161,7 +171,17 @@ export function readRouteObjects(src: string): RouteRecord[] {
 
   // Keep the frames that are route records, in source order, and re-link parents among them.
   const isRecord = (f: Frame): boolean => f.path !== undefined && ROUTE_RECORD_KEYS.some((k) => f.keys.has(k));
-  const recordFrames = frames.map((f, index) => ({ f, index })).filter(({ f }) => f.kind === "obj" && isRecord(f));
+  // A record belongs to the route tree only when every object between it and
+  // the top was entered through `children` (or `routes`, the router's own
+  // option). `{ path, component }` under `meta.breadcrumbs` or `props.link` is
+  // data carried BY a route, not a route.
+  const inRouteTree = (f: Frame): boolean => {
+    for (let cur: Frame | undefined = f; cur && cur.parent !== -1; cur = frames[cur.parent]) {
+      if (cur.via !== "children" && cur.via !== "routes") return false;
+    }
+    return true;
+  };
+  const recordFrames = frames.map((f, index) => ({ f, index })).filter(({ f }) => f.kind === "obj" && isRecord(f) && inRouteTree(f));
   const position = new Map(recordFrames.map(({ index }, pos) => [index, pos]));
   return recordFrames.map(({ f }) => {
     let p = f.parent;
@@ -173,8 +193,44 @@ export function readRouteObjects(src: string): RouteRecord[] {
   });
 }
 
+/**
+ * The source with comments blanked out, offsets preserved. `<Route>` tags are
+ * found by pattern, so a commented-out route would otherwise be read as live.
+ */
+export function maskComments(src: string): string {
+  const out = src.split("");
+  let i = 0;
+  const blank = (from: number, to: number): void => {
+    for (let k = from; k < to && k < out.length; k++) if (out[k] !== "\n") out[k] = " ";
+  };
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '"' || c === "'" || c === "`") {
+      i = readString(src, i).end;
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "/" && src[i - 1] !== ":") {
+      let j = i;
+      while (j < src.length && src[j] !== "\n") j += 1;
+      blank(i, j);
+      i = j;
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      const j = end === -1 ? src.length : end + 2;
+      blank(i, j);
+      i = j;
+      continue;
+    }
+    i += 1;
+  }
+  return out.join("");
+}
+
 /** `<Route path="…">` elements (React Router), with their nesting. */
-export function readRouteElements(src: string): RouteRecord[] {
+export function readRouteElements(source: string): RouteRecord[] {
+  const src = maskComments(source);
   const out: RouteRecord[] = [];
   const open: number[] = [];
   const tagRe = /<\/?Route\b/g;
@@ -245,23 +301,46 @@ export function resolveRoutes(records: RouteRecord[], prefix = "", absoluteTopOn
   return [...out];
 }
 
-/** Text that marks a file as the ROOT of a router configuration, where a relative top-level path means "relative to /". */
-const ROOT_MARKERS =
-  /createBrowserRouter\s*\(|createHashRouter\s*\(|createMemoryRouter\s*\(|useRoutes\s*\(|<Routes\b|<BrowserRouter\b|<HashRouter\b|createRouter\s*\(|new\s+VueRouter\s*\(|RouterModule\s*\.\s*forRoot\s*\(|provideRouter\s*\(/;
+/**
+ * Text that marks a file as the ENTRY of a router: the place where the router
+ * is created or mounted at the app's root. A relative top-level path there
+ * means "relative to /".
+ */
+const ENTRY_MARKERS =
+  /createBrowserRouter\s*\(|createHashRouter\s*\(|createMemoryRouter\s*\(|<RouterProvider\b|<BrowserRouter\b|<HashRouter\b|<MemoryRouter\b|createRouter\s*\(|new\s+VueRouter\s*\(|RouterModule\s*\.\s*forRoot\s*\(|provideRouter\s*\(/;
+/**
+ * `<Routes>` and `useRoutes()` mount routes wherever they are rendered — at
+ * the root, or inside a component reached through a splat route
+ * (`<Route path="admin/*">`). In the second case their paths are relative to
+ * that parent, which this reader cannot see, so a file with only these markers
+ * is trusted for relative paths only when it is the single such file in the
+ * project.
+ */
+const MOUNT_MARKERS = /<Routes\b|useRoutes\s*\(/;
 /** Angular's conventional root files: relative top-level paths there are relative to "/". */
 const ANGULAR_ROOT_FILENAMES = /(^|[\\/])(app\.routes|app-routing\.module)\.(ts|js|mjs)$/;
-/** Conventional names for router files in general. Accepted as roots, but only their ABSOLUTE top-level paths are trusted. */
+/** Conventional names for router files in general. Read, but only their ABSOLUTE top-level paths are trusted. */
 const ROUTER_FILENAMES = /(^|[\\/])(routes|router|router[\\/]index)\.(ts|tsx|js|jsx|mjs)$/;
 const ROUTER_MENTION = /react-router|vue-router|@angular\/router|<Route\b|createBrowserRouter|RouterModule|provideRouter/;
 const SOURCE_EXT = /\.(ts|tsx|js|jsx|mjs)$/;
+/** Matched against the path RELATIVE to the scanned root: a checkout that happens to live under a directory called `build` or `tests` must still be read. */
 const SKIP = /(^|[\\/])(node_modules|dist|build|coverage|\.next|\.nuxt|\.svelte-kit|__tests__|e2e|tests?)([\\/]|$)|\.(spec|test|stories|d)\.[a-z]+$/;
+/** Files read for routes. Candidates are listed first, so the budget is spent on likely router files. */
 const MAX_FILES = 600;
+/** Paths listed before giving up on a very large tree. */
+const MAX_LISTED = 20_000;
+const MAX_DEPTH = 14;
 const MAX_BYTES = 400_000;
+const LIKELY_ROUTER_FILE = /(^|[\\/])(app\.routes|app-routing\.module|routes|router|index|main|App|app)\.(ts|tsx|js|jsx|mjs)$|rout/i;
 
-function sourceFiles(root: string): string[] {
-  const out: string[] = [];
+function sourceFiles(root: string): { files: string[]; truncated: boolean } {
+  const listed: string[] = [];
+  let truncated = false;
   const walk = (dir: string, depth: number): void => {
-    if (depth > 8 || out.length >= MAX_FILES) return;
+    if (depth > MAX_DEPTH || listed.length >= MAX_LISTED) {
+      truncated = true;
+      return;
+    }
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -270,19 +349,26 @@ function sourceFiles(root: string): string[] {
     }
     for (const e of entries) {
       const p = path.join(dir, e.name);
-      if (SKIP.test(p) || e.name.startsWith(".")) continue;
+      if (e.name.startsWith(".") || SKIP.test(path.relative(root, p))) continue;
       if (e.isDirectory()) walk(p, depth + 1);
-      else if (SOURCE_EXT.test(e.name) && out.length < MAX_FILES) out.push(p);
+      else if (SOURCE_EXT.test(e.name)) listed.push(p);
     }
   };
   walk(root, 0);
-  return out;
+  // Likely router files first; within each group, shallower paths first.
+  const depthOf = (f: string): number => f.split(path.sep).length;
+  listed.sort((a, b) => Number(LIKELY_ROUTER_FILE.test(b)) - Number(LIKELY_ROUTER_FILE.test(a)) || depthOf(a) - depthOf(b) || a.localeCompare(b));
+  if (listed.length > MAX_FILES) truncated = true;
+  return { files: listed.slice(0, MAX_FILES), truncated };
 }
 
-function resolveImport(fromFile: string, spec: string): string | null {
+/** Resolve a relative import to a file INSIDE `root`. Bare and aliased specifiers, and anything outside the project, are not followed. */
+function resolveImport(root: string, fromFile: string, spec: string): string | null {
   if (!spec.startsWith(".")) return null;
   const base = path.resolve(path.dirname(fromFile), spec);
   for (const candidate of [base, ...[".ts", ".tsx", ".js", ".jsx", ".mjs"].map((x) => base + x), ...["index.ts", "index.js"].map((x) => path.join(base, x))]) {
+    const rel = path.relative(root, candidate);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) continue;
     if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
   }
   return null;
@@ -297,19 +383,48 @@ function readSource(file: string): string | null {
   }
 }
 
+/**
+ * The file that holds a lazily loaded branch's routes. Angular's classic shape
+ * points `loadChildren` at an NgModule (`admin.module`) whose routes live in
+ * its sibling `admin-routing.module`; the standalone shape points straight at
+ * the routes file.
+ */
+function lazyRouteFile(root: string, fromFile: string, spec: string): string | null {
+  const direct = resolveImport(root, fromFile, spec);
+  if (direct) {
+    const src = readSource(direct);
+    if (src !== null && readRouteObjects(src).length > 0) return direct;
+  }
+  const sibling = /\.module$/.test(spec) ? resolveImport(root, fromFile, spec.replace(/\.module$/, "-routing.module")) : null;
+  return sibling ?? null;
+}
+
+interface ReadContext {
+  root: string;
+  seen: Set<string>;
+  /** Module specifiers of lazy branches that could not be followed. */
+  unresolved: string[];
+}
+
 /** Routes of one file, following Angular `loadChildren` imports: each child file's routes are prefixed with the path of the record that loads it. */
-function routesOfFile(file: string, prefix: string, seen: Set<string>, absoluteTopOnly = false): string[] {
-  if (seen.has(file)) return [];
-  seen.add(file);
+function routesOfFile(ctx: ReadContext, file: string, prefix: string, absoluteTopOnly: boolean): string[] {
+  // A child loaded under two parents keeps the first prefix only: a miss, never an invention.
+  if (ctx.seen.has(file)) return [];
+  ctx.seen.add(file);
   const src = readSource(file);
   if (src === null) return [];
   const records = readRouteObjects(src);
   const out = [...resolveRoutes(records, prefix, absoluteTopOnly), ...resolveRoutes(readRouteElements(src), prefix, absoluteTopOnly)];
   records.forEach((r, idx) => {
     if (!r.lazyImport) return;
-    const child = resolveImport(file, r.lazyImport);
     const lazyPrefix = recordPath(records, idx, prefix, absoluteTopOnly);
-    if (child && lazyPrefix !== null) out.push(...routesOfFile(child, lazyPrefix === "/" ? "" : lazyPrefix, seen));
+    if (lazyPrefix === null) return;
+    // The record's own path is a page whichever way the branch resolves: it is
+    // where the lazily loaded module mounts.
+    out.push(lazyPrefix);
+    const child = lazyRouteFile(ctx.root, file, r.lazyImport);
+    if (child) out.push(...routesOfFile(ctx, child, lazyPrefix === "/" ? "" : lazyPrefix, absoluteTopOnly));
+    else ctx.unresolved.push(r.lazyImport);
   });
   return out;
 }
@@ -318,30 +433,39 @@ export interface CodeRouteResult {
   routes: string[];
   /** Files the routes were read from, relative to the frontend directory. */
   files: string[];
+  /** Lazy branches whose routes could not be followed (an alias, a package, a file this reader could not find). */
+  unresolved: string[];
+  /** The tree was too large or too deep to list completely, so a router file may have been missed. */
+  truncated: boolean;
 }
 
 /** Read routes from router configuration under `frontendDir`. Empty when none is recognisable. */
 export function codeRoutes(frontendDir: string): CodeRouteResult {
   const srcDir = fs.existsSync(path.join(frontendDir, "src")) ? path.join(frontendDir, "src") : frontendDir;
-  // A file is a trusted root when it visibly mounts a router, or follows
-  // Angular's root naming. A file that is merely CALLED routes/router is read
-  // too, but only its absolute paths count.
-  const roots: Array<{ file: string; trusted: boolean }> = [];
-  for (const file of sourceFiles(srcDir)) {
+  const { files: candidates, truncated } = sourceFiles(srcDir);
+  const mentions: Array<{ file: string; src: string }> = [];
+  for (const file of candidates) {
     const src = readSource(file);
-    if (src === null || !ROUTER_MENTION.test(src)) continue;
-    if (ROOT_MARKERS.test(src) || ANGULAR_ROOT_FILENAMES.test(file)) roots.push({ file, trusted: true });
-    else if (ROUTER_FILENAMES.test(file)) roots.push({ file, trusted: false });
+    if (src !== null && ROUTER_MENTION.test(src)) mentions.push({ file, src: maskComments(src) });
+  }
+  const mountFiles = mentions.filter(({ src }) => MOUNT_MARKERS.test(src));
+  const roots: Array<{ file: string; trusted: boolean }> = [];
+  for (const { file, src } of mentions) {
+    const entry = ENTRY_MARKERS.test(src) || ANGULAR_ROOT_FILENAMES.test(file);
+    // The only file that mounts routes must be the root, wherever the router itself is created.
+    const soleMount = MOUNT_MARKERS.test(src) && mountFiles.length === 1;
+    if (entry || soleMount) roots.push({ file, trusted: true });
+    else if (MOUNT_MARKERS.test(src) || ROUTER_FILENAMES.test(file)) roots.push({ file, trusted: false });
   }
   // Trusted roots first, so a child file they load lazily is claimed with its prefix before it can be read bare.
   roots.sort((a, b) => Number(b.trusted) - Number(a.trusted));
-  const seen = new Set<string>();
+  const ctx: ReadContext = { root: frontendDir, seen: new Set(), unresolved: [] };
   const routes = new Set<string>();
   const files: string[] = [];
-  for (const { file: f, trusted } of roots) {
-    const found = routesOfFile(f, "", seen, !trusted);
-    if (found.length > 0) files.push(path.relative(frontendDir, f));
+  for (const { file, trusted } of roots) {
+    const found = routesOfFile(ctx, file, "", !trusted);
+    if (found.length > 0) files.push(path.relative(frontendDir, file));
     for (const r of found) routes.add(r);
   }
-  return { routes: [...routes].sort(), files };
+  return { routes: [...routes].sort(), files, unresolved: [...new Set(ctx.unresolved)], truncated };
 }
