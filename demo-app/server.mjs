@@ -17,7 +17,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "public");
-const TYPES = { ".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml" };
+const TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css",
+  ".js": "text/javascript",
+  ".svg": "image/svg+xml",
+  ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
+};
 
 export function createDemoServer() {
   let nextId = 1043;
