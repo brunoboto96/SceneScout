@@ -283,7 +283,7 @@ Nothing else is installed: `npx` runs the package from npm's cache. Per-project 
 
 ## 🔌 Other MCP clients
 
-The engine is a plain MCP server over stdio, so any client can drive it. The server entry is always the same command — `npx -y scenescout serve` — only the config file differs. Download the browser once with `npx -y scenescout install --browser-only`.
+The engine is a plain MCP server over stdio, so any client can drive it. The Claude Code route is the one this project tests. The entries below follow each client's own documentation for a local stdio server and have not been run by the maintainer; if one is out of date, a correction is welcome (say which client version you checked). The server entry is always the same command — `npx -y scenescout serve` — only the config file differs. Download the browser once with `npx -y scenescout install --browser-only`.
 
 <details>
 <summary><strong>Cursor</strong> — <code>~/.cursor/mcp.json</code> (or <code>.cursor/mcp.json</code> in a project)</summary>
@@ -318,6 +318,60 @@ The engine is a plain MCP server over stdio, so any client can drive it. The ser
 [mcp_servers.scenescout]
 command = "npx"
 args = ["-y", "scenescout", "serve"]
+```
+
+</details>
+
+<details>
+<summary><strong>Gemini CLI</strong> — <code>~/.gemini/settings.json</code> (or <code>.gemini/settings.json</code> in a project)</summary>
+
+```json
+{
+  "mcpServers": {
+    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"] }
+  }
+}
+```
+
+Or from the command line: `gemini mcp add scenescout npx -y scenescout serve`
+
+</details>
+
+<details>
+<summary><strong>Windsurf</strong> — <code>~/.codeium/windsurf/mcp_config.json</code></summary>
+
+```json
+{
+  "mcpServers": {
+    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"] }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Cline</strong> — MCP Servers → Configure → Configure MCP Servers (or <code>~/.cline/mcp.json</code> for the CLI)</summary>
+
+```json
+{
+  "mcpServers": {
+    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"], "disabled": false, "autoApprove": [] }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Zed</strong> — <code>settings.json</code> (command palette: <code>zed: open settings file</code>)</summary>
+
+```json
+{
+  "context_servers": {
+    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"], "env": {} }
+  }
+}
 ```
 
 </details>
