@@ -593,17 +593,18 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     // labelled, enabled — and every click lands on the bar.
     await engine.navigate("/covered.html");
     const coveredSnap = await engine.snapshot(true);
+    const geo = coveredSnap.match(/GEOMETRY[\s\S]{0,600}/)?.[0] ?? coveredSnap.slice(0, 400);
     check(
-      "a sticky Save button under a fixed bar is reported as covered",
-      /"Save changes" is COVERED by pinned chrome \[promo-bar\]/.test(coveredSnap),
-      coveredSnap.match(/GEOMETRY[\s\S]{0,400}/)?.[0] ?? coveredSnap.slice(0, 400),
+      "a sticky Save button under a fixed bar is reported as covered, and the unlabelled bar is described by its text",
+      /"Save changes" is COVERED by pinned chrome <div> "Try the new importer, dismiss"/.test(coveredSnap),
+      geo,
     );
     check(
-      "links under a sticky header inside a scrollable panel are NOT reported (they scroll out from under it)",
-      !/Item [A-F]" is COVERED/.test(coveredSnap),
-      coveredSnap.match(/GEOMETRY[\s\S]{0,400}/)?.[0] ?? "",
+      "a first-column link slid under a sticky grid header is NOT reported (the grid scrolls it back out)",
+      !/Row \d open" is COVERED/.test(coveredSnap),
+      geo,
     );
-    check("a fixed button that covers nothing is NOT reported", !/"Help" is COVERED/.test(coveredSnap));
+    check("a control under a consent banner is NOT reported (an overlay the user dismisses, not broken layout)", !/"Help" is COVERED/.test(coveredSnap), geo);
 
     await engine.navigate("/");
     const roSnap = await engine.snapshot(true);

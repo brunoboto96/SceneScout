@@ -595,6 +595,7 @@ export class BrowserEngine {
       clipped?: boolean;
       layer?: number;
       chrome?: boolean;
+      coveredBy?: string | null;
     };
     // SPAs (and dev servers mid-recompile) can present an empty shell for a
     // few seconds — and a shell that already renders its chrome (sidebar,

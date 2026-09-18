@@ -138,38 +138,62 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
   // a click aimed at the control lands on that element instead.
   // Deliberately narrow, to stay quiet on intended layering:
   //  - only interactive controls, and only while their centre is in the viewport;
-  //  - the control must be pinned with NO scrollable ancestor in between, or
+  //  - the control must be pinned with NO scrollable pane anywhere above it, or
   //    scrolling that pane would simply bring it out from under;
-  //  - dialogs and anything covering half the viewport are overlays, not
-  //    chrome (the overlay oracle owns those).
+  //  - dialogs, menus, consent banners, toasts and anything covering half the
+  //    viewport are overlays, not chrome.
   const INTERACTIVE_ROLES = ["button", "link", "textbox", "combobox", "checkbox", "radio", "switch", "tab", "menuitem", "file"];
-  const pinnedRootOf = (node, stopAtScroller) => {
+  const isScroller = (n) => {
+    const cs = window.getComputedStyle(n);
+    return /(auto|scroll)/.test(cs.overflowY + cs.overflowX) && (n.scrollHeight > n.clientHeight + 1 || n.scrollWidth > n.clientWidth + 1);
+  };
+  /** Nearest fixed/sticky ancestor-or-self. */
+  const pinnedRootOf = (node) => {
     for (let n = node; n && n !== document.documentElement; n = n.parentElement) {
-      const cs = window.getComputedStyle(n);
-      // The scroller test comes FIRST: a pane that is both sticky and
-      // scrollable pins itself, not its rows — they scroll inside it.
-      if (stopAtScroller && n !== node && /(auto|scroll)/.test(cs.overflowY + cs.overflowX) && (n.scrollHeight > n.clientHeight + 1 || n.scrollWidth > n.clientWidth + 1)) return null;
-      if (cs.position === "fixed" || cs.position === "sticky") return n;
+      const pos = window.getComputedStyle(n).position;
+      if (pos === "fixed" || pos === "sticky") return n;
     }
     return null;
   };
+  /**
+   * Is there a scrollable pane anywhere between this node and the document?
+   * Checked over the WHOLE chain, above the pinned root as well as below it: a
+   * sticky first-column cell inside a scrolling grid is pinned within that
+   * grid, and scrolling the grid brings it out from under the sticky header.
+   * position:fixed escapes every ancestor's scrolling, so the walk stops there.
+   */
+  const insideScrollablePane = (node) => {
+    for (let n = node; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+      if (n !== node && isScroller(n)) return true;
+      if (window.getComputedStyle(n).position === "fixed") return false;
+    }
+    return false;
+  };
+  // Pinned things that are overlays by nature, not layout: consent banners sit
+  // over everything until dismissed, toasts are gone in seconds. A click they
+  // intercept is real but it is not an app defect, and the consent case would
+  // otherwise fire on the first snapshot of nearly every site.
+  const TRANSIENT_SEL = '[role="alert"], [role="status"], [aria-live], [class*="toast" i], [class*="snackbar" i], [class*="cookie" i], [class*="consent" i], [id*="cookie" i], [id*="consent" i]';
   const describe = (node) => {
     const tid = node.getAttribute("data-testid");
     if (tid) return "[" + tid + "]";
-    const text = (node.innerText || node.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40);
+    const text = (node.innerText || node.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 40);
     return "<" + node.tagName.toLowerCase() + ">" + (text ? ' "' + text + '"' : "");
   };
   const coveredByPinnedChrome = (el, rect, role) => {
     if (INTERACTIVE_ROLES.indexOf(role) === -1) return null;
     const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
     if (cx < 0 || cy < 0 || cx >= window.innerWidth || cy >= window.innerHeight) return null;
-    const ownRoot = pinnedRootOf(el, true);
-    if (!ownRoot) return null;
+    const ownRoot = pinnedRootOf(el);
+    if (!ownRoot || insideScrollablePane(el)) return null;
     const top = document.elementFromPoint(cx, cy);
     if (!top || top === el || el.contains(top) || top.contains(el)) return null;
-    const coverRoot = pinnedRootOf(top, false);
+    const coverRoot = pinnedRootOf(top);
     if (!coverRoot || coverRoot === ownRoot || coverRoot.contains(ownRoot) || ownRoot.contains(coverRoot)) return null;
-    if (coverRoot.closest('${DIALOG_LIKE_SEL}')) return null;
+    // A dialog's fixed wrapper often carries no role or class itself; the
+    // role="dialog" is on a child. Look both ways.
+    const OVERLAY_SEL = '${DIALOG_LIKE_SEL}, ' + TRANSIENT_SEL + ', [role="menu"], [role="listbox"], [role="tooltip"]';
+    if (coverRoot.closest(OVERLAY_SEL) || coverRoot.querySelector(OVERLAY_SEL) || top.closest(OVERLAY_SEL)) return null;
     const cr = coverRoot.getBoundingClientRect();
     if (cr.width * cr.height > window.innerWidth * window.innerHeight * 0.5) return null;
     return describe(coverRoot);
