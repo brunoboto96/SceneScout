@@ -162,8 +162,12 @@ async function main(): Promise<void> {
       res.end(fs.readFileSync(path.join(appDir, "login.html")));
       return;
     }
-    const file = path.join(appDir, urlPath === "/" ? "index.html" : urlPath);
-    if (fs.existsSync(file) && fs.statSync(file).isFile()) {
+    // The path comes from the request, so keep it inside the fixture directory:
+    // resolve it, then require the result to still be under appDir. Without
+    // this, "/../../<anything>" served any file the test runner could read.
+    const file = path.resolve(appDir, `.${path.posix.normalize(`/${urlPath === "/" ? "index.html" : urlPath}`)}`);
+    const insideAppDir = file.startsWith(appDir + path.sep);
+    if (insideAppDir && fs.existsSync(file) && fs.statSync(file).isFile()) {
       res.writeHead(200, { "content-type": "text/html" });
       res.end(fs.readFileSync(file));
     } else {
@@ -171,7 +175,9 @@ async function main(): Promise<void> {
       res.end("not found");
     }
   });
-  await new Promise<void>((resolve) => server.listen(0, resolve));
+  // Loopback only. With no host, Node listens on every interface, and a test
+  // fixture server has no business being reachable from the network.
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as { port: number }).port;
   const baseUrl = `http://127.0.0.1:${port}`;
 

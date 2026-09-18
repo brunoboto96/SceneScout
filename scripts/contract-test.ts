@@ -16,7 +16,7 @@ import path from "node:path";
 import test, { afterEach } from "node:test";
 import { isNonPageRoute, normalizePath } from "../dist/engine/fingerprint.js";
 import { MemoryStore } from "../dist/engine/memory.js";
-import { classifyFilledStates, computeGaps, formatRouteCoverage } from "../dist/engine/report.js";
+import { classifyFilledStates, computeGaps, escapeTableCell, formatRouteCoverage } from "../dist/engine/report.js";
 
 let dirs: string[] = [];
 function freshStore(): MemoryStore {
@@ -321,4 +321,18 @@ test("coverage counts link-discovered routes, not only the ones found in source"
 
   assert.match(formatRouteCoverage(["/a"], []), /1\/1 ✓/);
   assert.match(formatRouteCoverage([], []), /No routes known yet.*Snapshot the landing page/, "an empty contract tells the agent how to fill it");
+});
+
+test("app text cannot break out of a report table cell", () => {
+  // Escaping the pipe alone is not enough: an input that already ends in a
+  // backslash turns the escaped pipe back into a live column separator.
+  assert.equal(escapeTableCell("a|b"), "a\\|b");
+  assert.equal(escapeTableCell("a\\|b"), "a\\\\\\|b", "backslash is escaped first, so the pipe stays escaped");
+  assert.equal(escapeTableCell("line one\nline two\r\nthree"), "line one line two three", "a newline would end the row");
+  assert.equal(escapeTableCell("GET /api/orders → 500"), "GET /api/orders → 500", "ordinary text is untouched");
+  // Every pipe in the output is preceded by an odd number of backslashes.
+  for (const nasty of ["\\|", "\\\\|", "x\\\\\\|y", "||"]) {
+    const out = escapeTableCell(nasty);
+    for (const m of out.matchAll(/(\\*)\|/g)) assert.equal(m[1].length % 2, 1, `live pipe in ${JSON.stringify(out)}`);
+  }
 });
