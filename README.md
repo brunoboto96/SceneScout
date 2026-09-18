@@ -264,15 +264,19 @@ src/
   cli.ts            scan · serve · install · doctor · status
   installer.ts      setup logic (skill link, MCP registration, diagnostics)
   engine/
-    browser.ts      the ONLY file that needs a real browser
+    browser.ts      the engine class: attach, snapshot, actions, crawl, plans
+    probes.ts       in-page scroll + overlay + focus probes (needs a browser too)
     fingerprint.ts  route + element-set identity (state hashing)
     oracles.ts      console/page/network/HTTP error detection
     policy.ts       the write-policy safety net
+    ownership.ts    safe-write: which records did this run create?
+    uploads.ts      disk uploads, fenced to the project by real path
+    journey.ts      task-ease measurement from the action log
     design.ts       the design audit + page scoring
     memory.ts       cross-run storage + finding dedup
     report.ts       the gap ledger + report generation
-    …               collector · dispatch · fixtures · authloss
-scripts/            the 11 test suites
+    …               collector · dispatch · fixtures · authloss · reaper
+scripts/            the 11 test suites (smoke/ holds the real-browser ones)
 test-app/           fixtures for the real-browser smoke tests
 skill/scenescout/   the Claude Code skill (SKILL.md)
 docs/adr/           why it's built this way
