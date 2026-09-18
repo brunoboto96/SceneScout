@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { analyzeDesign, contrastRatio, styleSignature } from "../src/engine/design.ts";
+import { formatJourney, measureJourney } from "../src/engine/journey.ts";
 
 const VIEWPORT = { width: 1280, height: 900 };
 
@@ -145,4 +146,58 @@ test("an element with no testid is still identifiable across pages", () => {
     "span:two words",
     "whitespace and case must not fork one component into many",
   );
+});
+
+// ---------------------------------------------------------------------------
+// Task ease: what a journey cost, read from the action log.
+// ---------------------------------------------------------------------------
+
+const step = (action: string, url: string, result?: string) => ({ at: "2026-01-01T00:00:00.000Z", action, url: `http://x${url}`, result });
+
+test("a direct path is reported as efficient", () => {
+  const m = measureJourney([step("click", "/orders"), step("type", "/orders/new"), step("click", "/orders/new"), step("click", "/orders/41")], true);
+  assert.equal(m.interactions, 4);
+  assert.equal(m.distinctScreens, 3, "/orders/41 is the /orders/:id screen");
+  assert.deepEqual(m.routeSeq, ["/orders", "/orders/new", "/orders/:id"], "consecutive actions on one screen are one step of the path");
+  assert.equal(m.backtracks, 0);
+  assert.deepEqual(m.verdict, ["✓ efficient — direct path, no backtracking, proportionate interaction count"]);
+});
+
+test("returning to a screen already left is a backtrack, and it is the headline", () => {
+  // orders → settings → orders: the user went looking in the wrong place.
+  const m = measureJourney([step("click", "/orders"), step("click", "/settings"), step("click", "/orders"), step("click", "/orders/new")], true);
+  assert.equal(m.backtracks, 1);
+  assert.match(m.verdict[0], /1 backtrack/);
+});
+
+test("typing a URL mid-journey contaminates the measurement and says so", () => {
+  const m = measureJourney([step("click", "/"), step("navigate", "/reports/export"), step("click", "/reports/export")], true);
+  assert.equal(m.shortcuts, 1);
+  assert.ok(m.verdict.some((v) => /direct-URL jump/.test(v)));
+  assert.equal(m.navigations, 1);
+  assert.equal(m.interactions, 2, "a navigation is not an interaction");
+});
+
+test("an abandoned journey is never called efficient", () => {
+  const m = measureJourney([step("click", "/orders")], false);
+  assert.ok(m.verdict.some((v) => /TASK NOT COMPLETED/.test(v)));
+  assert.ok(!m.verdict.some((v) => /efficient/.test(v)));
+  assert.match(formatJourney({ goal: "export last month", completed: false, seconds: 9 }, m), /^JOURNEY ABANDONED — "export last month"/);
+});
+
+test("policy blocks are reported as tester safety, not held against the app", () => {
+  const m = measureJourney([step("click", "/orders"), step("write-policy:blocked", "/orders"), step("click", "/orders", "REFUSED: destructive label")], true);
+  assert.equal(m.policyBlocks, 1);
+  assert.equal(m.refusals, 1);
+  assert.equal(m.interactions, 2, "the block itself is not something the user did");
+  assert.match(formatJourney({ goal: "g", completed: true, seconds: 1 }, m), /Policy: 1 write-policy blocks, 1 refusals \(tester safety, not app defects\)/);
+});
+
+test("the screen and interaction thresholds fire just past their limits, not at them", () => {
+  const screens = (n: number) => Array.from({ length: n }, (_, i) => step("click", `/s${i}`));
+  assert.ok(!measureJourney(screens(4), true).verdict.some((v) => /distinct screens/.test(v)));
+  assert.ok(measureJourney(screens(5), true).verdict.some((v) => /5 distinct screens/.test(v)));
+  const clicks = (n: number) => Array.from({ length: n }, () => step("click", "/form"));
+  assert.ok(!measureJourney(clicks(15), true).verdict.some((v) => /interactions —/.test(v)));
+  assert.ok(measureJourney(clicks(16), true).verdict.some((v) => /16 interactions/.test(v)));
 });

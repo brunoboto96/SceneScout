@@ -846,6 +846,6 @@ export function analyzeDesign(
     [header, ...sections, ...chromeSection, summary, scoreLine].join("\n\n") +
     `\n\nJudge with product context: ⚠ lines are measurable defects; → lines are craft suggestions (how the page could be BETTER, not just what's broken). ` +
     `Not every flag is a bug — dense data tables legitimately use small targets. The score is a comparator across pages and runs, not an absolute verdict. ` +
-    `File real defects with ft_finding (category "visual"/"a11y") and genuine improvement opportunities as severity-low "ux-polish", quoting the concrete numbers.`;
+    `File real defects with scout_finding (category "visual"/"a11y") and genuine improvement opportunities as severity-low "ux-polish", quoting the concrete numbers.`;
   return { report, score, signatures };
 }

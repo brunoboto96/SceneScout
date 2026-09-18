@@ -151,7 +151,7 @@ export interface RouteFacts {
   audited?: boolean;
   /** At least one state-changing request originated from this route (forms/actions actually exercised, not just looked at). */
   mutated?: boolean;
-  /** ft_journey measurements that STARTED on this route (completed or not). */
+  /** scout_journey measurements that STARTED on this route (completed or not). */
   journeys?: number;
   /**
    * ...of which the user actually finished. The gap ledger counts only these:
@@ -751,7 +751,7 @@ export class MemoryStore {
   }
 
   readAssumptions(): string {
-    if (!fs.existsSync(this.assumptionsPath)) return "(no ASSUMPTIONS.md yet — record what you learn with ft_note as you explore)";
+    if (!fs.existsSync(this.assumptionsPath)) return "(no ASSUMPTIONS.md yet — record what you learn with scout_note as you explore)";
     return fs.readFileSync(this.assumptionsPath, "utf8");
   }
 
@@ -827,10 +827,10 @@ export class MemoryStore {
         // not crash the whole engine process over a transient filesystem
         // issue. But it also must not vanish: without this, every write
         // from here on silently stops persisting and nothing downstream
-        // (ft_coverage, the final report) would know coverage tracking
+        // (scout_coverage, the final report) would know coverage tracking
         // broke. Log it (stderr — safe under stdio MCP transport, which
-        // owns stdout) and store it for the next ft_coverage/ft_close to
-        // surface. Explicit flush() callers (resolveFinding, ft_close, …)
+        // owns stdout) and store it for the next scout_coverage/scout_close to
+        // surface. Explicit flush() callers (resolveFinding, scout_close, …)
         // still throw and are handled at the MCP tool boundary directly.
         const msg = err instanceof Error ? err.message : String(err);
         this.lastSaveError = msg;
@@ -838,10 +838,10 @@ export class MemoryStore {
       }
     }, 500);
     // Deliberately NOT unref'd: a pending coverage write briefly holds the
-    // process open so an exit without ft_close still lands the last save.
+    // process open so an exit without scout_close still lands the last save.
   }
 
-  /** Set when a debounced background write failed — cleared on the next successful write. Surfaced by ft_coverage/ft_close so a broken persistence path is never silently invisible. */
+  /** Set when a debounced background write failed — cleared on the next successful write. Surfaced by scout_coverage/scout_close so a broken persistence path is never silently invisible. */
   lastSaveError: string | null = null;
 
   /**

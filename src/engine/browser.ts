@@ -1,16 +1,20 @@
 import { chromium, type Browser, type BrowserContext, type FileChooser, type Locator, type Page } from "playwright";
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
 import { AUTH_LOSS_PREFIX, MemoryStore, type ActionLogEntry } from "./memory.js";
 import { AuthLossTracker } from "./authloss.js";
-import { COLLECT_INTERACTABLES_SCRIPT, DIALOG_LIKE_SEL, VISIBLE_SRC, geometryIssues, type Rect } from "./collector.js";
+import { COLLECT_INTERACTABLES_SCRIPT, VISIBLE_SRC, geometryIssues, type Rect } from "./collector.js";
 import { OracleMonitor, formatViolations } from "./oracles.js";
+import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
+import { formatJourney, measureJourney } from "./journey.js";
+import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
+import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
+import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
 import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire } from "./policy.js";
 import { scanProject } from "../scan.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignPayload, type FocusSample } from "./design.js";
-import { FIXTURE_KINDS, acceptMatches, generatedUpload, isFixtureKind, mimeForName, type FixtureFile, type FixtureKind } from "./fixtures.js";
+import { acceptMatches, generatedUpload, type FixtureKind } from "./fixtures.js";
 
 /**
  * Write-policy tiers — the DB behind the app may be live, so the guarantee
@@ -82,53 +86,6 @@ interface FileInputListing {
   visible: boolean;
 }
 
-/** Launch flag stamped into our browsers' command lines so the reaper can recognise them. */
-export const BROWSER_MARKER = "scenescout-session";
-/** Markers earlier versions stamped. Launch uses only the current one; the reaper must still recognise a browser orphaned by a crash just before an upgrade. */
-const REAPABLE_MARKERS = [BROWSER_MARKER, "scenecraft-session"];
-
-/**
- * Kill orphaned Playwright browser processes left behind by a crashed or
- * SIGKILL'd previous run (a dead parent can't close its browser, and the
- * leftover has been observed to wedge subsequent launches). Conservative on
- * three axes: the command line must point into the ms-playwright cache, the
- * parent must be gone (re-parented to pid 1), AND the command line must carry
- * our marker (passed as a launch flag precisely so it shows up in `ps`).
- *
- * That last check is why this is narrow enough to run at startup. Matching on
- * "orphaned Playwright browser" alone reaches every Playwright process on the
- * machine — someone else's test suite, an unrelated automation job, a browser
- * whose wrapper died while its owner lived — and SIGKILLs it. Only reap what
- * this tool launched.
- *
- * Best-effort and POSIX-only; returns how many were reaped.
- */
-export function reapOrphanBrowsers(): number {
-  if (process.platform === "win32") return 0;
-  let reaped = 0;
-  try {
-    const psOut = execFileSync("ps", ["-eo", "pid=,ppid=,command="], { encoding: "utf8", timeout: 5000 });
-    for (const line of psOut.split("\n")) {
-      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
-      if (!m) continue;
-      const [, pidStr, ppidStr, command] = m;
-      if (!command.includes("ms-playwright") || !/chrom|firefox|webkit/i.test(command)) continue;
-      if (!REAPABLE_MARKERS.some((marker) => command.includes(marker))) continue;
-      if (Number(ppidStr) !== 1) continue;
-      try {
-        process.kill(Number(pidStr), "SIGKILL");
-        reaped += 1;
-      } catch {
-        /* already gone or not ours to kill */
-      }
-    }
-  } catch {
-    /* ps unavailable or timed out — reaping is best-effort */
-  }
-  if (reaped > 0) console.error(`[scenescout] reaped ${reaped} orphaned browser process(es) from a previous run`);
-  return reaped;
-}
-
 interface SnapshotElement extends InteractableInfo {
   ref: string;
   key: string;
@@ -166,13 +123,10 @@ function pathnameOf(url: string): string {
   }
 }
 
-const ACTION_TIMEOUT_MS = 5000;
 /** Budget for the forced retry of a click whose strict wait timed out — it skips that wait, so needs little. */
 const FORCED_CLICK_TIMEOUT_MS = 1500;
 /** How long after a trigger click resolves a file chooser may still open (apps fetch an upload URL first). */
 const CHOOSER_GRACE_MS = 2000;
-/** A renamed disk upload travels as an in-memory payload; keep that to what Playwright carries comfortably. */
-const MAX_RENAMED_UPLOAD_BYTES = 50 * 1024 * 1024;
 /** How long a hover waits for delay-gated tooltips (component libraries warm up for as long as ~1500ms). */
 const HOVER_REVEAL_WINDOW_MS = 2500;
 
@@ -212,27 +166,10 @@ function fileInputLabel(d: FileInputListing): string {
 }
 
 /** What an upload will send, however it was chosen. */
-interface ResolvedUpload {
-  payload: string | FixtureFile;
-  name: string;
-  mime: string;
-  bytes: number;
-  source: string;
-}
-
 /** The generated-fixture case: kind inferred from the input's accept unless given. */
 function generatedPayload(meta: FileInputMeta, opts: Omit<UploadOptions, "ref">): ResolvedUpload {
   const { file, source } = generatedUpload(meta.probed ? meta.accept : undefined, opts.fixture, opts.name);
   return { payload: file, name: file.name, mime: file.mimeType, bytes: file.buffer.length, source };
-}
-
-/** A plan's upload `value`: blank → fixture inferred from accept; a kind → that fixture; anything else → a project-relative path. */
-function planUploadOptions(value: string | undefined): Omit<UploadOptions, "ref"> {
-  const spec = (value ?? "").trim();
-  if (spec === "") return {};
-  const kind = spec.toLowerCase();
-  if (isFixtureKind(kind)) return { fixture: kind };
-  return { filePath: spec };
 }
 
 /**
@@ -270,7 +207,7 @@ export class BrowserEngine {
   private lastSnap: { route: string; byKey: Map<string, { ref: string; label: string; disabled: boolean }> } | null = null;
   /** Non-parameterized routes discovered by the project scan — the objective completion contract. */
   knownRoutes: string[] = [];
-  /** Real path of the attached project — the fence for ft_upload's filePath. */
+  /** Real path of the attached project — the fence for scout_upload's filePath. */
   private projectDir = "";
   /** Set when the project's real path could not be resolved — named in fence refusals, which it may then cause. */
   private projectDirNote = "";
@@ -336,7 +273,7 @@ export class BrowserEngine {
   private readonly localCreatedResources: string[] = [];
   /** Design audits run this session — the report gate requires at least one. */
   designAuditCount = 0;
-  /** Active task-efficiency measurement (ft_journey), if any. */
+  /** Active task-efficiency measurement (scout_journey), if any. */
   private journey: { goal: string; startedAt: number; fromLog: number; startUrl: string } | null = null;
 
   /**
@@ -354,13 +291,13 @@ export class BrowserEngine {
       startUrl: page.url(),
     };
     this.logAction({ action: "journey:start", target: goal, url: page.url() });
-    return `JOURNEY STARTED — "${goal}"\nFrom: ${page.url()}\nNow perform the task the way a first-time user would (click through the UI; don't jump straight to a known deep URL, or the measurement is meaningless). Call ft_journey {action:"end"} when the task is complete or you conclude it can't be.`;
+    return `JOURNEY STARTED — "${goal}"\nFrom: ${page.url()}\nNow perform the task the way a first-time user would (click through the UI; don't jump straight to a known deep URL, or the measurement is meaningless). Call scout_journey {action:"end"} when the task is complete or you conclude it can't be.`;
   }
 
   /** Close the journey and report its interaction cost + friction signals. */
   endJourney(completed: boolean, note?: string): string {
     const j = this.journey;
-    if (!j) return `No journey in progress — start one with ft_journey {action:"start", goal:"…"}.`;
+    if (!j) return `No journey in progress — start one with scout_journey {action:"start", goal:"…"}.`;
     const page = this.requirePage();
     this.journey = null;
     // Filter to THIS session's actions: the action log is shared across every
@@ -369,49 +306,7 @@ export class BrowserEngine {
     const log = (this.memory?.actionLog ?? []).slice(j.fromLog).filter((e) => (e.session ?? this.sessionKey) === this.sessionKey);
     const seconds = Math.round((Date.now() - j.startedAt) / 1000);
 
-    const interactions = log.filter((e) => /^(click|type|select|press|plan:(click|type|select|press))/.test(e.action));
-    const navigations = log.filter((e) => /^(navigate|back|plan:navigate|plan:back)/.test(e.action));
-    const routeOf = (u: string): string => {
-      try {
-        return normalizePath(new URL(u).pathname);
-      } catch {
-        return u;
-      }
-    };
-    const routeSeq = log.map((e) => routeOf(e.url)).filter((r, i, a) => i === 0 || r !== a[i - 1]);
-    const distinct = new Set(routeSeq);
-    // A backtrack = returning to a route already left behind. Real users do
-    // this when the path wasn't obvious; it is the clearest signal that
-    // information scent failed, and it is invisible to a pass/fail test.
-    const seen = new Set<string>();
-    let backtracks = 0;
-    for (const r of routeSeq) {
-      if (seen.has(r)) backtracks += 1;
-      seen.add(r);
-    }
-    const blocked = log.filter((e) => e.action === "write-policy:blocked").length;
-    const refusals = log.filter((e) => /refused|REFUSED/.test(e.result ?? "")).length;
-
-    const verdict: string[] = [];
-    if (backtracks > 0)
-      verdict.push(
-        `⚠ ${backtracks} backtrack(s) — the route was re-visited after leaving it, which usually means the next step wasn't discoverable from where the user was`,
-      );
-    if (distinct.size > 4)
-      verdict.push(
-        `⚠ ${distinct.size} distinct screens for one task — each hand-off is a chance to lose the user; consider whether steps can be combined or done in place`,
-      );
-    if (interactions.length > 15)
-      verdict.push(
-        `⚠ ${interactions.length} interactions — high for a single task; check for over-asking (optional fields up-front) or repeated confirmation steps`,
-      );
-    const shortcuts = log.filter((e) => /^(navigate|plan:navigate)$/.test(e.action)).length;
-    if (shortcuts > 0)
-      verdict.push(
-        `⚠ ${shortcuts} direct-URL jump(s) during the journey — a first-time user cannot type URLs, so the measurement is contaminated: either re-run clicking through the UI, or the destination is unreachable by UI navigation (which is itself a finding).`,
-      );
-    if (!completed) verdict.push(`⚠ TASK NOT COMPLETED — this is the strongest possible finding: the journey is blocked or undiscoverable. File it.`);
-    if (verdict.length === 0) verdict.push(`✓ efficient — direct path, no backtracking, proportionate interaction count`);
+    const measured = measureJourney(log, completed);
 
     try {
       // Only a COMPLETED journey is a measurement of task ease. An abandoned
@@ -422,19 +317,7 @@ export class BrowserEngine {
       /* fact recording is best-effort */
     }
     this.logAction({ action: "journey:end", target: j.goal, url: page.url(), result: completed ? "completed" : "abandoned" });
-    return [
-      `JOURNEY ${completed ? "COMPLETED" : "ABANDONED"} — "${j.goal}"`,
-      ``,
-      `Interaction cost: ${interactions.length} interactions · ${navigations.length} navigations · ${distinct.size} distinct screens · ${seconds}s`,
-      `Path: ${routeSeq.slice(0, 12).join(" → ")}${routeSeq.length > 12 ? " → …" : ""}`,
-      ...(blocked > 0 || refusals > 0 ? [`Policy: ${blocked} write-policy blocks, ${refusals} refusals (tester safety, not app defects)`] : []),
-      ...(note ? [`Note: ${note}`] : []),
-      ``,
-      `Efficiency read:`,
-      ...verdict.map((v) => `  ${v}`),
-      ``,
-      `Judge with product context: a 3-screen approval flow with an e-signature step is legitimately longer than "add a comment". Compare against what the task NEEDS, then file genuine friction as ux-confusing (blocked/undiscoverable) or ux-polish (works but costs more than it should), quoting these numbers.`,
-    ].join("\n");
+    return formatJourney({ goal: j.goal, completed, seconds, note }, measured);
   }
   /** Whether the browser window is visible — headed hover results carry a physical-cursor caveat. */
   private headed = false;
@@ -493,7 +376,7 @@ export class BrowserEngine {
     this.designAuditCount = 0;
 
     // The engine learns the route list itself so completion is an objective,
-    // enforceable contract (ft_report refuses while known routes are unvisited)
+    // enforceable contract (scout_report refuses while known routes are unvisited)
     // rather than a prompt suggestion the driver may ignore.
     try {
       this.knownRoutes = scanProject(opts.projectDir)
@@ -657,7 +540,7 @@ export class BrowserEngine {
       `${opts.storageStatePath ? `, auth=${opts.storageStatePath}` : ""}). ` +
       `Memory: ${this.memory.dir}.${this.memory.loadWarning ? ` WARNING: ${this.memory.loadWarning}` : ""}` +
       `${this.memory.legacyDirNote ? ` ${this.memory.legacyDirNote}` : ""}` +
-      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""} Call ft_snapshot to see the current state.` +
+      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""} Call scout_snapshot to see the current state.` +
       authWarning
     );
   }
@@ -677,7 +560,7 @@ export class BrowserEngine {
 
   private requirePage(): Page {
     if (!this.page || !this.memory) {
-      throw new Error("Not attached. Call ft_attach first with the app URL and project path.");
+      throw new Error("Not attached. Call scout_attach first with the app URL and project path.");
     }
     return this.page;
   }
@@ -906,7 +789,7 @@ export class BrowserEngine {
     }
 
     const geometry = geometryIssues(elements, page.viewportSize() ?? { width: 1280, height: 900 });
-    geometry.push(...(await this.probeOverlays(page)));
+    geometry.push(...(await probeOverlays(page)));
     const hiddenFileInputs = await this.hiddenFileInputs(page);
     const cov = memory.coverage();
     const unvisited = this.unvisitedKnownRoutes();
@@ -920,7 +803,7 @@ export class BrowserEngine {
       (geometry.length > 0 ? `\nGEOMETRY issues:\n` + geometry.map((g) => `  ⚠ ${g}`).join("\n") : "") +
       (hiddenFileInputs.length > 0
         ? `\nFILE INPUTS not listed above (hidden behind a styled control — a user never sees the input itself): ${hiddenFileInputs.join("; ")}. ` +
-          `ft_upload {ref} on the control that opens one, or ft_upload {} when it is the page's only file input.`
+          `scout_upload {ref} on the control that opens one, or scout_upload {} when it is the page's only file input.`
         : "") +
       formatViolations(this.oracles.drain()) +
       (elements.length === 0 ? "\n⚠ DEAD END: no interactable elements found on this page." : "")
@@ -939,11 +822,11 @@ export class BrowserEngine {
     const page = this.requirePage();
     const el = this.refs.get(ref);
     if (!el) {
-      throw new Error(`Unknown ref "${ref}". Refs are only valid from the latest ft_snapshot — take a new snapshot.`);
+      throw new Error(`Unknown ref "${ref}". Refs are only valid from the latest scout_snapshot — take a new snapshot.`);
     }
     if (page.url() !== this.snapshotUrl) {
       this.refs.clear();
-      throw new Error(`Page URL changed since the last snapshot (now ${page.url()}). Take a new ft_snapshot.`);
+      throw new Error(`Page URL changed since the last snapshot (now ${page.url()}). Take a new scout_snapshot.`);
     }
     // String EXPRESSION via page.evaluate (locator.evaluate treats a string as
     // an expression, not a function — the element arg never binds).
@@ -954,11 +837,13 @@ export class BrowserEngine {
       )
       .catch(() => null)) as { testid: string | null; label: string } | null;
     if (!live) {
-      throw new Error(`Element ${ref} no longer exists in the DOM — take a new ft_snapshot.`);
+      throw new Error(`Element ${ref} no longer exists in the DOM — take a new scout_snapshot.`);
     }
     if (el.testid && live.testid !== el.testid) {
       this.refs.clear();
-      throw new Error(`Element under ${ref} changed (expected testid=${el.testid}, found ${live.testid ?? "none"}) — the DOM shifted; take a new ft_snapshot.`);
+      throw new Error(
+        `Element under ${ref} changed (expected testid=${el.testid}, found ${live.testid ?? "none"}) — the DOM shifted; take a new scout_snapshot.`,
+      );
     }
     return { el, liveLabel: live.label };
   }
@@ -1008,181 +893,42 @@ export class BrowserEngine {
     return `OK: ${action} ${target}\nURL now: ${url}` + (navigated ? " (page changed — take a new snapshot)" : "") + mutations + formatViolations(violations);
   }
 
-  /** True when a path targets a resource this session created (id segment + collection-family match). */
+  /** Does this request path address a record this run created? Rules live in ownership.ts. */
   private isOwnedResource(pathname: string): boolean {
-    const segments = pathname.split("/");
-    for (let i = 0; i < segments.length; i++) {
-      const collections = this.ownedIds.get(segments[i]);
-      if (!collections) continue;
-      const parent = segments.slice(0, i).join("/");
-      for (const c of collections) {
-        if (pathname.startsWith(c)) return true;
-        // Creation URL and CRUD URL can diverge below a shared collection
-        // (POST /api/documents/quick → PUT /api/documents/:id): for an id
-        // this session DID create, the request's parent path and the stored
-        // creation collection prefixing each other means the same resource
-        // family. Guard: the shorter side must have ≥2 real segments so a
-        // bare "/api" can never match across collections.
-        const shorter = parent.length <= c.length ? parent : c;
-        if (shorter.split("/").filter(Boolean).length >= 2 && (c.startsWith(parent) || parent.startsWith(c))) return true;
-      }
-    }
-    return false;
-  }
-
-  /** Collections that hold identities/accounts — never claimable as session-created, whatever the response says. */
-  private static readonly IDENTITY_COLLECTION_RE = /\b(users?|accounts?|profiles?|members?|identit(y|ies)|me)\b/i;
-
-  /** Matches the original, unprefixed id shape: bare "id"/"_id"/"uuid" only. */
-  private static readonly BARE_ID_KEY_RE = /^(id|_id|uuid)$/i;
-
-  /**
-   * Matches a resource-prefixed id key: snake_case-suffixed ("widget_id",
-   * "order_item_id") or camelCase-suffixed ("widgetId"). Many REST APIs
-   * name a create response's own primary key after the resource rather than
-   * a bare "id" — an unprefixed-only match silently drops every one of those
-   * responses from ownership tracking. Kept as a SEPARATE, more-strictly-
-   * filtered bucket from BARE_ID_KEY_RE (see recordCreation): this shape is
-   * exactly what a foreign key echoing a client-supplied value also looks
-   * like ("template_id"), so it must never ride the explicitCreation bypass
-   * that lets a bare id survive even when its value was in the request body.
-   */
-  private static readonly PREFIXED_ID_KEY_RE = /^[a-z][a-z0-9_]*_(id|uuid)$/i;
-  private static readonly PREFIXED_ID_KEY_CAMEL_RE = /[a-z0-9](Id|Uuid|UUID)$/;
-
-  /**
-   * RPC-style action verbs that follow a resource collection in
-   * create-from/clone/bulk endpoints (POST /api/things/from-template/:id,
-   * /api/things/clone/:id, ...). A collection derived for ownership matching
-   * must stop BEFORE one of these, or a later plain CRUD path on the created
-   * resource (/api/things/:id) won't share a path prefix with the creation
-   * URL and legitimate follow-up writes get wrongly blocked. Deliberately
-   * does NOT also stop at a bare numeric segment: a nested create like
-   * POST /api/documents/5/comments has no ownership-scoping problem (its
-   * exact pathname already prefixes any later path under that comment), and
-   * truncating there would only widen the stored collection unnecessarily.
-   */
-  private static readonly ACTION_SEGMENT_RE = /^(from|via|clone|duplicate|copy|bulk|import|export|generate|batch)([-_].+)?$/i;
-
-  /** Collapse a creation request's pathname down to its resource collection, stopping before any RPC-action segment. */
-  private static deriveCollection(pathname: string): string {
-    const segments = pathname.split("/");
-    const kept: string[] = [];
-    for (const seg of segments) {
-      if (seg !== "" && BrowserEngine.ACTION_SEGMENT_RE.test(seg)) break;
-      kept.push(seg);
-    }
-    const collection = kept.join("/");
-    return collection || pathname; // never produce an empty collection
-  }
-
-  /** Strip an id-key's id/uuid suffix and normalize away separators, for comparing against a URL path segment (e.g. "document_id" → "document", "sopDocumentUuid" → "sopdocument"). */
-  private static keyStem(key: string): string {
-    return key
-      .replace(/(?:_)?(id|uuid)$/i, "")
-      .replace(/[-_]/g, "")
-      .toLowerCase();
+    return isOwnedResource(this.ownedIds, pathname);
   }
 
   /**
-   * True when a prefixed id key plausibly names the resource this creation
-   * URL is actually about — e.g. "widget_id" for a request under
-   * "/api/widgets/...". Without this, any OTHER *_id-shaped field a
-   * create response happens to include (owner_id, parent_id, assigned_to_id
-   * — server-derived, so never caught by the request-echo filter) would be
-   * wrongly claimed as the new resource's own id. A stem that shares no
-   * substring relationship with any path segment is assumed foreign.
-   */
-  private static keyMatchesUrl(key: string, pathname: string): boolean {
-    const stem = BrowserEngine.keyStem(key);
-    if (!stem) return false;
-    return (
-      pathname
-        .split("/")
-        .filter(Boolean)
-        // RPC-action segments (from-template, clone, ...) aren't the resource's
-        // name — a foreign key that happens to be named after the verb itself
-        // (e.g. "duplicate_id" on a POST .../duplicate endpoint) must not pass
-        // just because it echoes the verb.
-        .filter((seg) => !BrowserEngine.ACTION_SEGMENT_RE.test(seg))
-        .some((seg) => {
-          const normSeg = seg.replace(/[-_]/g, "").toLowerCase();
-          return normSeg.length > 0 && (normSeg.includes(stem) || stem.includes(normSeg));
-        })
-    );
-  }
-
-  /**
-   * Extract created-resource ids from a successful POST response (JSON body +
-   * Location header). Precision matters more than recall here: an id wrongly
-   * claimed as "ours" licenses real deletes on pre-existing data, so upsert
-   * echoes (ids the client already sent in the URL or body) and identity
-   * collections are excluded. A 201 or Location header marks a true creation.
+   * Register what a successful POST created. The decision — which ids a
+   * response genuinely minted — is the pure extractCreatedIds() in
+   * ownership.ts; this method only gathers the evidence from the response and
+   * records the verdict.
    */
   private async recordCreation(res: import("playwright").Response): Promise<void> {
-    const url = new URL(res.url());
-    // The identity check runs against the raw pathname (broadest net); the
-    // stored collection is collapsed via deriveCollection so a later plain
-    // CRUD path on the created resource still prefix-matches it even when
-    // creation went through an RPC-style action endpoint.
-    const identityCollection = BrowserEngine.IDENTITY_COLLECTION_RE.test(url.pathname);
-    const collection = BrowserEngine.deriveCollection(url.pathname);
-    // Kept as two buckets, not one merged list: a bare "id" is unambiguously
-    // the response's own subject, so a 201/Location can excuse it appearing
-    // in the request body too (client-supplied-id creates). A prefixed key
-    // ("template_id") is exactly what an echoed FOREIGN key also looks like,
-    // so it must always be checked against the request body — never excused
-    // by explicitCreation — or a 201 response that echoes a foreign id
-    // (e.g. {document_id, template_id}) would wrongly grant ownership of
-    // the template.
-    const bareIds: string[] = [];
-    const prefixedIds: string[] = [];
-    const location = res.headers()["location"];
-    if (location) {
-      const last = location.split("?")[0].split("/").filter(Boolean).pop();
-      if (last) bareIds.push(last);
-    }
+    let body: unknown;
     if ((res.headers()["content-type"] ?? "").includes("json")) {
       try {
-        const body = (await res.json()) as Record<string, unknown>;
-        const scan = (obj: unknown): void => {
-          if (!obj || typeof obj !== "object") return;
-          for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-            const isIdValue = typeof v === "string" || typeof v === "number";
-            if (isIdValue && BrowserEngine.BARE_ID_KEY_RE.test(k)) bareIds.push(String(v));
-            else if (
-              isIdValue &&
-              (BrowserEngine.PREFIXED_ID_KEY_RE.test(k) || BrowserEngine.PREFIXED_ID_KEY_CAMEL_RE.test(k)) &&
-              BrowserEngine.keyMatchesUrl(k, url.pathname)
-            )
-              prefixedIds.push(String(v));
-            else if (k === "data" || k === "result" || k === "item") scan(v);
-          }
-        };
-        scan(body);
+        body = await res.json();
       } catch {
-        /* non-JSON or oversized body — Location header may still have covered it */
+        /* non-JSON or oversized body — the Location header may still cover it */
       }
     }
-    // An upsert echoes an id the client already had; a create mints a new one.
-    // An id already in the REQUEST PATH is never ours (POST /items/123 targets
-    // an existing resource whatever the response says); a 201/Location only
-    // excuses a BARE id echoed in the request body (see bucket comment above).
-    const explicitCreation = res.status() === 201 || !!location;
-    const requestBody = res.request().postData() ?? "";
-    const notEchoedInPath = (id: string) => !url.pathname.includes(id);
-    const candidates = [
-      ...bareIds.filter((id) => notEchoedInPath(id) && (explicitCreation || !requestBody.includes(id))),
-      ...prefixedIds.filter((id) => notEchoedInPath(id) && !requestBody.includes(id)),
-    ];
-    for (const id of candidates.slice(0, 5)) {
+    const verdict = extractCreatedIds({
+      pathname: new URL(res.url()).pathname,
+      status: res.status(),
+      location: res.headers()["location"],
+      body,
+      requestBody: res.request().postData() ?? "",
+    });
+    for (const id of verdict.ids) {
       // Identity/account collections still appear on the cleanup list (the
       // record was genuinely created), but never grant mutation rights.
-      if (!identityCollection) {
-        if (!this.ownedIds.has(id)) this.ownedIds.set(id, new Set());
-        this.ownedIds.get(id)!.add(collection);
+      if (!verdict.identityCollection) {
+        const key = normalizeId(id);
+        if (!this.ownedIds.has(key)) this.ownedIds.set(key, new Set());
+        this.ownedIds.get(key)!.add(verdict.collection);
       }
-      const desc = `${collection} id=${id}`;
+      const desc = `${verdict.collection} id=${id}`;
       if (!this.createdResources.includes(desc)) {
         this.createdResources.push(desc);
         this.logAction({ action: "created-resource", target: desc, url: this.page?.url() ?? "" });
@@ -1363,7 +1109,7 @@ export class BrowserEngine {
       )) as { existing: string; caretAppendable: boolean };
     } catch (err) {
       throw new Error(
-        `Could not read the field's existing content before typing — aborting rather than risk overwriting it (${err instanceof Error ? err.message.split("\n")[0] : err}). Take a new ft_snapshot and retry.`,
+        `Could not read the field's existing content before typing — aborting rather than risk overwriting it (${err instanceof Error ? err.message.split("\n")[0] : err}). Take a new scout_snapshot and retry.`,
       );
     }
     const { existing, caretAppendable } = state;
@@ -1415,7 +1161,7 @@ export class BrowserEngine {
       // trace, leaving every upload form stranded. Point at the tool that can.
       return (
         `${ref} is a file input ("${el.name || el.testid || "unnamed"}") — text cannot be typed into it. ` +
-        `Use ft_upload {ref:"${ref}"}: a small valid fixture is generated and matched to the input's accept attribute, or pass fixture / filePath.`
+        `Use scout_upload {ref:"${ref}"}: a small valid fixture is generated and matched to the input's accept attribute, or pass fixture / filePath.`
       );
     }
     const refusal = this.actionPolicyCheck(el, liveLabel);
@@ -1486,7 +1232,7 @@ export class BrowserEngine {
   }
 
   /**
-   * Shared by ft_upload and plan `upload` steps: pick where the file goes,
+   * Shared by scout_upload and plan `upload` steps: pick where the file goes,
    * resolve what to send, set it, and describe what happened. Refusals come
    * back as text, not throws — a path outside the fence or an ambiguous page
    * is an answer the driver acts on, not an engine failure.
@@ -1584,46 +1330,9 @@ export class BrowserEngine {
     };
   }
 
-  /** A real file to upload, inside the project fence — nothing here touches the page. */
+  /** A file from disk, fenced to the project under test — the rule itself is resolveDiskUpload() in uploads.ts. */
   private resolveDiskUpload(filePath: string, name?: string): { refused: string } | ResolvedUpload {
-    if (!this.projectDir) return { refused: "Not attached — uploads need a session with a project." };
-    const resolved = path.resolve(this.projectDir, filePath);
-    // realpath, so a symlink inside the project cannot point the upload at a
-    // file outside it. A missing path stays as resolved and is reported below.
-    let real = resolved;
-    try {
-      real = fs.realpathSync(resolved);
-    } catch {
-      /* missing — the stat below says so */
-    }
-    const rel = path.relative(this.projectDir, real);
-    if (rel.startsWith("..") || path.isAbsolute(rel)) {
-      return {
-        refused:
-          `REFUSED: filePath ${filePath} is outside the attached project (${this.projectDir})${this.projectDirNote}. Uploads are fenced to the project under test, ` +
-          `as navigation is fenced to its origin — copy the fixture into the project (e.g. .scenescout/fixtures/) or omit filePath to upload a generated one.`,
-      };
-    }
-    const stat = fs.statSync(real, { throwIfNoEntry: false });
-    if (!stat?.isFile()) {
-      return {
-        refused: `filePath not found (or not a file): ${real}. To upload a generated file instead, omit filePath (or pass fixture: ${FIXTURE_KINDS.join(" | ")}).`,
-      };
-    }
-    const finalName = name ?? path.basename(real);
-    const mime = mimeForName(finalName);
-    if (!name) return { payload: real, name: finalName, mime, bytes: stat.size, source: `from disk: ${rel}` };
-    // A renamed upload has to travel as an in-memory payload.
-    if (stat.size > MAX_RENAMED_UPLOAD_BYTES) {
-      return { refused: `Renaming an upload reads it into memory; ${real} is ${stat.size} bytes — pass it without name, or use a smaller file.` };
-    }
-    return {
-      payload: { name: finalName, mimeType: mime, buffer: fs.readFileSync(real) },
-      name: finalName,
-      mime,
-      bytes: stat.size,
-      source: `from disk: ${rel}, as ${finalName}`,
-    };
+    return resolveDiskUpload({ projectDir: this.projectDir, projectDirNote: this.projectDirNote }, filePath, name);
   }
 
   /** Selector for transient hover-revealed surfaces (tooltips, poppers, hover cards). */
@@ -1650,7 +1359,7 @@ export class BrowserEngine {
   }
 
   /**
-   * Shared reveal detection used by ft_hover and plan hover steps. Takes the
+   * Shared reveal detection used by scout_hover and plan hover steps. Takes the
    * pre-hover baselines, polls the overlay selector across the reveal window
    * (tooltips are delay-gated — component libraries commonly warm up for as
    * long as 1500ms), and falls back to a visible-text diff for tooltips built
@@ -1776,7 +1485,7 @@ export class BrowserEngine {
   /**
    * Enter/Space activate the focused element — apply the same destructive
    * policy as click, or the keyboard becomes a read-only bypass. Shared by
-   * ft_press and plan press steps; returns a refusal message or null.
+   * scout_press and plan press steps; returns a refusal message or null.
    */
   private async vetFocusedActivation(key: string): Promise<string | null> {
     if (!(this.readOnly && /^(Enter|NumpadEnter|Space| )$/i.test(key))) return null;
@@ -1977,7 +1686,7 @@ export class BrowserEngine {
     const targets = (paths && paths.length > 0 ? paths : this.unvisitedKnownRoutes().map((r) => this.navigablePath(r))).slice(0, 150);
     if (targets.length === 0) {
       return this.allKnownRoutes().length > 0
-        ? "Nothing to crawl: every known route has been visited. Use ft_coverage for remaining unexercised elements."
+        ? "Nothing to crawl: every known route has been visited. Use scout_coverage for remaining unexercised elements."
         : "No routes to crawl yet: no scanned or link-discovered routes. Take a snapshot first (links harvest routes) or pass explicit paths.";
     }
 
@@ -2067,7 +1776,7 @@ export class BrowserEngine {
       // Crawl is the bulk navigator and the place a mid-run token death shows
       // up first — a 150-route sweep against dead credentials. Emitting the
       // banner only from navigate() left exactly that case silent until someone
-      // happened to call ft_navigate afterwards.
+      // happened to call scout_navigate afterwards.
       this.authLoss.batchVerdict() +
       `CRAWL of ${targets.length} route(s):\n` +
       summary.join("\n") +
@@ -2075,7 +1784,7 @@ export class BrowserEngine {
       (this.allKnownRoutes().length > 0
         ? `\n\nRoutes visited: ${this.allKnownRoutes().length - unvisited.length}/${this.allKnownRoutes().length}${unvisited.length > 0 ? ` — still unvisited: ${unvisited.slice(0, 20).join(", ")}${unvisited.length > 20 ? " …" : ""}` : ""}`
         : "") +
-      `\nTake ft_snapshot to inspect the current page, or navigate into a problem route.`
+      `\nTake scout_snapshot to inspect the current page, or navigate into a problem route.`
     );
   }
 
@@ -2135,7 +1844,7 @@ export class BrowserEngine {
           // consume them), and plans inherit the same native-user refusals.
           const v = (step.value ?? step.target ?? "bottom").trim();
           const edge = v === "top" || v === "bottom" ? (v as "top" | "bottom") : undefined;
-          const r = await this.performScroll(edge, edge ? undefined : Number.parseInt(v, 10) || 600);
+          const r = await performScroll(this.requirePage(), edge, edge ? undefined : Number.parseInt(v, 10) || 600);
           if (r.refused) {
             transcript.push(`${desc} → ${r.refused}`);
             break;
@@ -2214,7 +1923,7 @@ export class BrowserEngine {
         // state and mark the acted-on element class as exercised.
         // Hover is deliberately excluded: a hover is a look, not an
         // interaction — marking it exercised would hide the element from
-        // ft_coverage before it was ever clicked.
+        // scout_coverage before it was ever clicked.
         if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "upload") {
           try {
             // Record the state the action LANDED on (it may be a new screen
@@ -2281,7 +1990,7 @@ export class BrowserEngine {
         if (/Timeout/i.test(firstLine)) {
           hint = ` (timeout${diagnosticLine ? ` — ${diagnosticLine}` : ""} — the target may no longer match: element relabeled, removed, or genuinely covered by an overlay; re-snapshot to see current state)`;
         } else if (/Input of type "file" cannot be filled/i.test(firstLine)) {
-          hint = ` (this is a file input — use an {action:"upload"} step, or ft_upload)`;
+          hint = ` (this is a file input — use an {action:"upload"} step, or scout_upload)`;
         }
         transcript.push(`${desc} → FAILED: ${firstLine}${hint}`);
         break;
@@ -2293,7 +2002,7 @@ export class BrowserEngine {
     // Count step lines, not transcript lines — hover reveals and scroll
     // positions push informational entries that are not steps.
     const ran = transcript.filter((l) => /^\d+\. /.test(l)).length;
-    return `PLAN (${ran}/${Math.min(steps.length, 20)} steps ran):\n${transcript.join("\n")}\nTake ft_snapshot to see the resulting state.`;
+    return `PLAN (${ran}/${Math.min(steps.length, 20)} steps ran):\n${transcript.join("\n")}\nTake scout_snapshot to see the resulting state.`;
   }
 
   /** Computed-style design audit of the current page — visual judgment material without pixels. */
@@ -2301,7 +2010,7 @@ export class BrowserEngine {
     const page = this.requirePage();
     await this.settle();
     const payload = (await page.evaluate(DESIGN_COLLECT_SCRIPT)) as DesignPayload;
-    payload.page.focusSamples = await this.probeFocusIndicators(page);
+    payload.page.focusSamples = await probeFocusIndicators(page);
     this.designAuditCount += 1;
     // The census is built from previous audits, so the first few pages of a run
     // score with chrome included and later ones don't. That is the same warm-up
@@ -2334,298 +2043,12 @@ export class BrowserEngine {
    */
   async scroll(to?: "top" | "bottom", by?: number, target?: string): Promise<string> {
     this.actionStartedAt = Date.now();
-    const { refused, note } = target ? await this.scrollContainer(target, to, by) : await this.performScroll(to, by);
+    const { refused, note } = target ? await scrollContainer(this.requirePage(), target, to, by) : await performScroll(this.requirePage(), to, by);
     if (refused) return refused;
     const amount = Math.trunc(by ?? 600);
     const label = to ?? `${amount >= 0 ? "down" : "up"} ${Math.abs(amount)}px`;
     const result = await this.afterAction("scroll", target ? `${label} in ${target}` : label);
     return result + note;
-  }
-
-  /**
-   * Scroll ONE named region rather than the page. The page-level heuristic
-   * picks the largest scrollable pane, so a smaller independently-scrolling
-   * region — a sidebar nav beside a taller main pane — is otherwise
-   * unreachable, and its content reads as truncated when it is merely scrolled
-   * away. Resolves the element, then scrolls the nearest scrollable ancestor
-   * (the target itself is usually the content, not the scroll port).
-   */
-  private async scrollContainer(target: string, to?: "top" | "bottom", by?: number): Promise<{ refused?: string; note: string }> {
-    const page = this.requirePage();
-    let locator;
-    if (target.startsWith("testid=")) locator = page.locator(`[data-testid=${JSON.stringify(target.slice(7))}]`).first();
-    else if (target.startsWith("text=")) locator = page.getByText(target.slice(5), { exact: false }).first();
-    else if (target.startsWith("label=")) locator = page.getByLabel(target.slice(6)).first();
-    else return { refused: `Scroll target must be "testid=…", "text=…" or "label=…" (got: ${target})`, note: "" };
-
-    const amount = Math.trunc(by ?? 600);
-    const outcome = await locator
-      .evaluate(
-        (el: Element, args: { edge: string | null; delta: number }) => {
-          const scrollable = (n: Element): boolean => {
-            const s = getComputedStyle(n);
-            const oy = s.overflowY;
-            return (oy === "auto" || oy === "scroll") && n.scrollHeight > n.clientHeight + 4;
-          };
-          let node: Element | null = el;
-          while (node && node !== document.body && !scrollable(node)) node = node.parentElement;
-          if (!node || node === document.body) return null;
-          const before = node.scrollTop;
-          if (args.edge === "top") node.scrollTo(0, 0);
-          else if (args.edge === "bottom") node.scrollTo(0, node.scrollHeight);
-          else node.scrollBy(0, args.delta);
-          const tid = node.getAttribute("data-testid");
-          const cls = typeof node.className === "string" && node.className.trim() ? "." + node.className.trim().split(/\s+/)[0] : "";
-          return {
-            name: node.tagName.toLowerCase() + (tid ? `[data-testid="${tid}"]` : cls),
-            before,
-            y: Math.round(node.scrollTop),
-            max: Math.max(0, node.scrollHeight - node.clientHeight),
-          };
-        },
-        { edge: to ?? null, delta: amount },
-        { timeout: ACTION_TIMEOUT_MS },
-      )
-      .catch(() => undefined);
-    if (outcome === undefined) return { refused: `Scroll target not found: ${target}`, note: "" };
-
-    if (!outcome) {
-      return {
-        note: `\nNothing to scroll: ${target} has no scrollable ancestor — its content is not clipped by a scroll port, so everything it holds is already laid out on the page.`,
-      };
-    }
-    const pct = outcome.max > 0 ? Math.round((outcome.y / outcome.max) * 100) : 100;
-    const edge = outcome.y >= outcome.max - 4 ? " — at its bottom" : outcome.y <= 4 ? " — at its top" : "";
-    const moved = Math.abs(outcome.y - outcome.before) > 4;
-    return {
-      note: `\nScrolled ${outcome.name}: ${outcome.y}px of ${outcome.max}px (${pct}%)${edge}.` + (moved ? "" : ` It did not move — already at that position.`),
-    };
-  }
-
-  /**
-   * The user-emulating scroll core, shared by ft_scroll and plan steps. Does
-   * NOT run afterAction — plan steps drain oracles themselves, and draining
-   * here would empty the queue their abort-on-fresh-violation check reads.
-   */
-  private async performScroll(to?: "top" | "bottom", by?: number): Promise<{ refused?: string; note: string }> {
-    const page = this.requirePage();
-    // `lock` matters because overflow:hidden only blocks USER scrolling
-    // (wheel/keys/touch) — window.scrollTo sails right through it. Emulating a
-    // native user means refusing to scroll where they couldn't. A lock is
-    // legitimate while ANY overlay is up — dialog-like panel (DIALOG_LIKE_SEL,
-    // so role-less hand-rolled modals count) or a full-viewport backdrop.
-    const read = `({y: window.scrollY, dh: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0), vh: window.innerHeight,
-      lock: [getComputedStyle(document.documentElement).overflowY, document.body ? getComputedStyle(document.body).overflowY : ""].some((o) => o === "hidden" || o === "clip"),
-      ov: [...document.querySelectorAll('${DIALOG_LIKE_SEL}')].some((d) => { const r = d.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
-        || [...document.querySelectorAll("body *")].some((e) => { const s = getComputedStyle(e); if (s.position !== "fixed") return false; const r = e.getBoundingClientRect(); return r.width >= window.innerWidth * 0.9 && r.height >= window.innerHeight * 0.9; })})`;
-    const before = (await page.evaluate(read)) as { y: number; dh: number; vh: number; lock: boolean; ov: boolean };
-    const amount = Math.trunc(by ?? 600);
-    const wantedDown = to === "bottom" || (!to && amount > 0);
-    const hadRoomDown = before.dh > before.vh + 50 && before.y < before.dh - before.vh - 4;
-    if (before.lock && !before.ov && wantedDown && hadRoomDown) {
-      return {
-        refused:
-          `⚠ SCROLL LOCKED: the document is ${Math.round(before.dh - before.vh)}px taller than the viewport but page scrolling is disabled (overflow hidden on body/html) with NO open dialog — ` +
-          `a real user cannot reach anything below the fold (classic leaked modal scroll-lock; check the snapshot's OVERLAY lines and file it). Did not scroll.`,
-        note: "",
-      };
-    }
-    if (before.dh <= before.vh + 50) {
-      // App-shell layout: the document fits the viewport and real scrolling
-      // happens inside an inner pane. Reporting "at the bottom (100%)" here
-      // would tell the brain it has seen a whole page it never scrolled.
-      const inner = (await page.evaluate(`(() => {
-        let best = null;
-        for (const e of document.querySelectorAll("body *")) {
-          const s = getComputedStyle(e);
-          if (s.overflowY !== "auto" && s.overflowY !== "scroll") continue;
-          if (e.scrollHeight <= e.clientHeight + 50) continue;
-          const r = e.getBoundingClientRect();
-          if (r.width < 100 || r.height < 100) continue;
-          if (!best || r.width * r.height > best.a) best = { a: r.width * r.height, e };
-        }
-        if (!best) return null;
-        const e = best.e;
-        const to = ${JSON.stringify(to ?? null)};
-        if (to === "top") e.scrollTo(0, 0);
-        else if (to === "bottom") e.scrollTo(0, e.scrollHeight);
-        else e.scrollBy(0, ${amount});
-        const tid = e.getAttribute("data-testid");
-        const cls = typeof e.className === "string" && e.className.trim() ? "." + e.className.trim().split(/\s+/)[0] : "";
-        return { name: e.tagName.toLowerCase() + (tid ? '[data-testid="' + tid + '"]' : cls), y: Math.round(e.scrollTop), max: Math.max(0, e.scrollHeight - e.clientHeight) };
-      })()`)) as { name: string; y: number; max: number } | null;
-      if (!inner) return { note: `\nPage does not scroll — the content fits the viewport and no scrollable inner container was found.` };
-      const pct = inner.max > 0 ? Math.round((inner.y / inner.max) * 100) : 100;
-      return {
-        note: `\nThe document itself does not scroll (app-shell layout) — scrolled the inner container ${inner.name} instead: ${inner.y}px of ${inner.max}px (${pct}%)${inner.y >= inner.max - 4 ? " — at its bottom" : inner.y <= 4 ? " — at its top" : ""}.`,
-      };
-    }
-    if (to === "top") await page.evaluate("window.scrollTo(0, 0)");
-    else if (to === "bottom") await page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)");
-    else await page.evaluate(`window.scrollBy(0, ${amount})`);
-    const after = (await page.evaluate(read)) as { y: number; dh: number; vh: number };
-    const max = Math.max(0, after.dh - after.vh);
-    const pct = max > 0 ? Math.round((after.y / max) * 100) : 100;
-    let note = `\nScroll position: ${Math.round(after.y)}px of ${max}px (${pct}%)${after.y >= max - 4 ? " — at the bottom" : after.y <= 4 ? " — at the top" : ""}.`;
-    if (wantedDown && hadRoomDown && Math.abs(after.y - before.y) <= 4) {
-      note +=
-        before.lock && before.ov
-          ? `\nPage scroll is locked by an open overlay (normal modal behaviour).`
-          : `\n⚠ SCROLL LOCKED: the document is ${Math.round(before.dh - before.vh)}px taller than the viewport but the page did not scroll — content below the fold is unreachable (file it).`;
-    }
-    return { note };
-  }
-
-  /**
-   * Overlay/modal defect probe, run on every snapshot. Native `page.on("dialog")`
-   * only sees browser dialogs; APP modals (backdrop + positioned panel) are just
-   * DOM, and their canonical failure modes — a grayed-out page with an EMPTY
-   * dialog, a dialog shoved off-centre leaving a blank band, a backdrop with no
-   * dialog at all, a dialog taller than the viewport with no way to reach its
-   * buttons — all look perfectly healthy to the interactables collector.
-   * Best-effort: probe failure must never break the snapshot.
-   */
-  private async probeOverlays(page: Page): Promise<string[]> {
-    try {
-      return (await page.evaluate(`(() => {
-        const issues = [];
-        const vw = window.innerWidth, vh = window.innerHeight;
-        const visible = (el) => {
-          const r = el.getBoundingClientRect();
-          const s = getComputedStyle(el);
-          return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
-        };
-        // Backdrops: fixed, near-full-viewport, visually darkening/blurring.
-        const backdrops = [];
-        for (const el of document.querySelectorAll("body *")) {
-          if (!visible(el)) continue;
-          const s = getComputedStyle(el);
-          if (s.position !== "fixed") continue;
-          const r = el.getBoundingClientRect();
-          if (r.width < vw * 0.9 || r.height < vh * 0.9) continue;
-          const m = (s.backgroundColor || "").match(/rgba?\\((\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)(?:\\s*,\\s*([0-9.]+))?/);
-          const alpha = m ? (m[4] === undefined ? 1 : Number(m[4])) : 0;
-          const darkens = (alpha > 0.05 && alpha < 0.98) || ((s.backdropFilter || "") + "").includes("blur");
-          if (darkens) backdrops.push(el);
-        }
-        const hasContent = (el) => {
-          const t = (el.textContent || "").trim();
-          return t.length >= 10 || el.querySelectorAll("button, a[href], input, select, textarea").length > 0;
-        };
-        // Dialogs: aria/role/class-marked panels (role-less hand-rolled modals
-        // count). Do NOT exclude backdrops here — a modal that carries its own
-        // dim background (a full-screen [role=alertdialog] that IS the backdrop
-        // and centres its card inside) is both, and excluding it would wrongly
-        // read as "backdrop with no dialog".
-        const dialogsAll = [...document.querySelectorAll('${DIALOG_LIKE_SEL}')].filter((d) => visible(d));
-        // Leaked modal scroll-lock: content extends past the fold, the page
-        // itself cannot scroll (overflow hidden on body/html), and NO overlay
-        // of any kind — dialog-like panel OR backdrop — is up to justify the
-        // lock; everything below the fold is unreachable and the page looks
-        // perfectly healthy otherwise.
-        const docH = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
-        const ovLock = [getComputedStyle(document.documentElement).overflowY, document.body ? getComputedStyle(document.body).overflowY : ""].some((o) => o === "hidden" || o === "clip");
-        if (ovLock && docH > vh + 50 && dialogsAll.length === 0 && backdrops.length === 0) {
-          issues.push("OVERLAY: page scrolling is DISABLED (overflow hidden on body/html) with " + Math.round(docH - vh) + "px of content below the fold and NO open dialog to justify it — likely a leaked modal scroll-lock; users cannot reach the rest of the page");
-        }
-        if (backdrops.length === 0) return issues;
-        if (dialogsAll.length === 0) {
-          // No marked dialog anywhere. Only a genuine stuck-grey-screen if the
-          // backdrop region itself holds nothing to interact with.
-          if (!backdrops.some(hasContent)) {
-            issues.push("OVERLAY: page is covered by a modal backdrop but NO dialog content was found — the page is grayed out with nothing to interact with (user is stuck)");
-          }
-          return issues;
-        }
-        // The actual CARD, for geometry/emptiness checks: a full-viewport dialog
-        // is a centring wrapper, not the panel — descend to its largest content
-        // child that is smaller than the viewport.
-        const panelOf = (el) => {
-          const r = el.getBoundingClientRect();
-          if (r.width < vw * 0.9 || r.height < vh * 0.9) return el;
-          let best = null;
-          for (const c of el.querySelectorAll("*")) {
-            if (!visible(c)) continue;
-            const cr = c.getBoundingClientRect();
-            if (cr.width >= vw * 0.9 && cr.height >= vh * 0.9) continue;
-            if (cr.width < 40 || cr.height < 40 || !hasContent(c)) continue;
-            if (!best || cr.width * cr.height > best.a) best = { a: cr.width * cr.height, c };
-          }
-          return best ? best.c : el;
-        };
-        const panels = [];
-        for (const d of dialogsAll) { const p = panelOf(d); if (p && panels.indexOf(p) < 0) panels.push(p); }
-        for (const d of panels.slice(0, 3)) {
-          const r = d.getBoundingClientRect();
-          const text = (d.textContent || "").trim();
-          const controls = d.querySelectorAll("button, a[href], input, select, textarea").length;
-          const name = d.getAttribute("data-testid") ? "[" + d.getAttribute("data-testid") + "]" : "<" + d.tagName.toLowerCase() + ">";
-          if (text.length < 10 && controls === 0) {
-            issues.push("OVERLAY: open dialog " + name + " appears EMPTY (" + text.length + " chars, 0 controls) over a grayed-out page — likely failed content load or broken conditional render");
-            continue;
-          }
-          const topGap = r.top, bottomGap = vh - r.bottom;
-          if (r.height < vh && Math.abs(topGap - bottomGap) > vh * 0.35 && (topGap > vh * 0.4 || bottomGap > vh * 0.4)) {
-            issues.push("OVERLAY: dialog " + name + " is far off-centre — " + Math.round(Math.max(topGap, bottomGap)) + "px empty band " + (topGap > bottomGap ? "above" : "below") + " it while the page is grayed out (broken centering)");
-          }
-          if (r.bottom > vh + 8 && d.scrollHeight <= d.clientHeight + 8) {
-            issues.push("OVERLAY: dialog " + name + " extends " + Math.round(r.bottom - vh) + "px below the viewport with NO internal scroll — its lower controls may be unreachable");
-          }
-        }
-        return issues;
-      })()`)) as string[];
-    } catch {
-      return [];
-    }
-  }
-
-  /**
-   * Keyboard-focus sampling for the design audit. Uses TRUSTED Tab presses:
-   * programmatic el.focus() does not match :focus-visible on buttons/links in
-   * Chromium, so an in-page probe would flag every default-styled control as
-   * focusless. As Tab advances, the previous stop is naturally blurred, so
-   * each stop's focused style (captured at visit time) can be diffed against
-   * its blurred style (captured in one pass at the end) without fighting the
-   * tab order. Best-effort: any failure returns an empty sample set rather
-   * than failing the audit.
-   */
-  private async probeFocusIndicators(page: Page): Promise<FocusSample[]> {
-    const styleSig = "s.outlineStyle + '|' + s.outlineWidth + '|' + s.outlineColor + '|' + s.boxShadow + '|' + s.borderColor + '|' + s.backgroundColor";
-    const stops: Array<{ i: number; label: string; focused: string }> = [];
-    try {
-      for (let i = 0; i < 15; i++) {
-        await page.keyboard.press("Tab");
-        const info = (await page.evaluate(`(() => {
-          const el = document.activeElement;
-          if (!el || el === document.body || el === document.documentElement) return null;
-          if (el.hasAttribute("data-ft-focus-probe")) return "wrapped";
-          el.setAttribute("data-ft-focus-probe", "${i}");
-          const s = getComputedStyle(el);
-          const tid = el.getAttribute("data-testid");
-          const name = ((el.textContent || el.getAttribute("aria-label") || "").trim().replace(/\\s+/g, " ").slice(0, 30));
-          return { label: tid ? "[" + tid + "]" : "<" + el.tagName.toLowerCase() + "> " + JSON.stringify(name), focused: ${styleSig} };
-        })()`)) as { label: string; focused: string } | "wrapped" | null;
-        if (info === null || info === "wrapped") break;
-        stops.push({ i, ...info });
-      }
-      await page.evaluate("document.activeElement && document.activeElement.blur && document.activeElement.blur()");
-      const blurred = (await page.evaluate(`(() => {
-        const out = {};
-        for (const el of document.querySelectorAll("[data-ft-focus-probe]")) {
-          const s = getComputedStyle(el);
-          out[el.getAttribute("data-ft-focus-probe")] = ${styleSig};
-          el.removeAttribute("data-ft-focus-probe");
-        }
-        return out;
-      })()`)) as Record<string, string>;
-      // A stop that vanished between passes gets the benefit of the doubt.
-      return stops.map((st) => ({
-        label: st.label,
-        indicator: blurred[String(st.i)] === undefined ? true : st.focused !== blurred[String(st.i)],
-      }));
-    } catch {
-      return [];
-    }
   }
 
   async screenshot(): Promise<{ base64: string; mimeType: string }> {
@@ -2650,7 +2073,7 @@ export class BrowserEngine {
   /**
    * Launch the browser with a hard timeout and one self-healing retry: a
    * leftover browser from a crashed previous run has been observed to wedge
-   * fresh launches indefinitely (the failure surfaces as ft_attach hanging).
+   * fresh launches indefinitely (the failure surfaces as scout_attach hanging).
    * On the first failure or timeout, reap orphaned Playwright processes and
    * try once more before giving up with a diagnosable error.
    */
@@ -2702,11 +2125,11 @@ export class BrowserEngine {
       this.memory?.flush();
     } catch (err) {
       // A failed final flush must not block browser teardown, but it must
-      // not vanish either — record it so ft_close can tell the caller the
+      // not vanish either — record it so scout_close can tell the caller the
       // very last save may not have landed.
       if (this.memory) this.memory.lastSaveError = err instanceof Error ? err.message : String(err);
     }
-    // Bounded teardown: a wedged renderer must not hang ft_close forever.
+    // Bounded teardown: a wedged renderer must not hang scout_close forever.
     // If teardown overruns the cap, the leftover process is reaped by the
     // orphan cleaner on the next attach (or server start).
     await BrowserEngine.settleWithin(

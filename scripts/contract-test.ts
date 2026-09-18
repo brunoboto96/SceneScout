@@ -1,7 +1,7 @@
 /**
  * Unit tests for the COMPLETION CONTRACT — route identity and the gap ledger.
  *
- * This is the mechanism the whole product rests on: `ft_report` refusing to
+ * This is the mechanism the whole product rests on: `scout_report` refusing to
  * certify a run while the ledger is non-empty. It shipped untested, and two of
  * its rules were quietly failing open — a route-identity collision that made
  * two static pages aliases of each other, and an arithmetic mismatch that
@@ -141,11 +141,11 @@ test("ledger: an abandoned journey does not count as task ease being measured", 
   store.visitState("/x#a", "http://x/x", "/x", ["button:go"]);
   store.markRouteFact("/x", { journeys: 1, journeysCompleted: 0 });
   assert.ok(
-    computeGaps(store).some((g) => g.includes("COMPLETED ft_journey")),
+    computeGaps(store).some((g) => g.includes("COMPLETED scout_journey")),
     "an abandoned journey leaves the ease gap open",
   );
   store.markRouteFact("/x", { journeys: 1, journeysCompleted: 1 });
-  assert.ok(!computeGaps(store).some((g) => g.includes("ft_journey")), "a completed one closes it");
+  assert.ok(!computeGaps(store).some((g) => g.includes("scout_journey")), "a completed one closes it");
 });
 
 test("ledger: a form filled but never submitted is a gap", () => {

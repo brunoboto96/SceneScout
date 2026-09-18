@@ -89,7 +89,7 @@ export class SessionQueue {
    * Dropping it WHILE a call is in flight would be a correctness bug, not
    * housekeeping: the next call for that key would find no chain, start
    * immediately, and interleave with the call still running — precisely the
-   * overlap this class exists to prevent. `ft_close` runs on its own control
+   * overlap this class exists to prevent. `scout_close` runs on its own control
    * chain, so it really can land mid-call. A still-busy key is marked instead
    * and dropped when it drains.
    */

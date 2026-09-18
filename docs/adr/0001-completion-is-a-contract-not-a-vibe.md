@@ -18,7 +18,7 @@ The engine — not the prompt — decides whether a run is complete.
 
 It scans the project's routes itself, tracks per-route facts (visited /
 exercised / audited / mutated / journeyed) and per-role access, and
-`ft_report {level}` **gate-checks** those facts before it will produce a report.
+`scout_report {level}` **gate-checks** those facts before it will produce a report.
 At `extensive` it refuses outright while the GAP LEDGER is non-empty; lower
 levels generate but disclose their gaps in the document.
 

@@ -36,8 +36,15 @@ browser behaviour in `smoke.ts` backed by a `test-app/` fixture.
 
 ## Consequences
 
-Ten suites instead of one, and a handful of small modules instead of one big
-file. `browser.ts` is still ~2,400 lines and still the largest thing here —
-splitting the remaining browser-bound responsibilities is worthwhile but is a
-refactor with real regression risk, and belongs in its own change rather than
-riding along with behavioural fixes.
+Many suites instead of one, and a handful of small modules instead of one big
+file.
+
+**Update.** The split this record deferred has since been done as its own
+change: safe-write ownership (`ownership.ts`), the disk-upload fence
+(`uploads.ts`), journey measurement (`journey.ts`) and orphan-browser selection
+(`reaper.ts`) became pure, table-tested modules, and the in-page scroll and
+overlay probes moved to `probes.ts`. `browser.ts` went from about 2,700 lines
+to about 2,150 and now holds the engine class itself: attach, snapshot, the
+actions, crawl and plan execution. What remains is genuinely bound to a live
+page. The browser suite was split the same way, into independent suites under
+`scripts/smoke/`, so one failure no longer hides the checks after it.
