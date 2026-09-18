@@ -165,7 +165,15 @@ export function registerMcp(opts: { launch: string[]; serverPath: string; run: R
   let result = add();
   if (result.missing) return { status: "claude-missing", manual };
   let replaced = false;
+  const notes: string[] = [];
   if (result.status !== 0 && /already exists/i.test(result.stderr + result.stdout)) {
+    // Look before replacing. The usual case is our own earlier registration
+    // with a stale path, which is replaced quietly. A registration that runs
+    // something else — a second checkout, a fork — is still replaced, because
+    // one name can hold one server, but the user is told what it ran so they
+    // can put it back.
+    const previous = describeOtherRegistration(opts);
+    if (previous) notes.push(previous);
     const removed = opts.run("claude", ["mcp", "remove", "--scope", "user", MCP_NAME]);
     if (removed.status !== 0) {
       return { status: "failed", manual, detail: (removed.stderr || removed.stdout).trim() };
@@ -179,7 +187,25 @@ export function registerMcp(opts: { launch: string[]; serverPath: string; run: R
     const detail = replaced ? `the previous registration was removed, and re-adding it failed: ${reason}` : reason;
     return { status: "failed", manual, detail };
   }
-  return { status: "registered", replaced, ...removeLegacyRegistrations(opts) };
+  const legacy = removeLegacyRegistrations(opts);
+  return { status: "registered", replaced, removedLegacy: legacy.removedLegacy, notes: [...notes, ...legacy.notes] };
+}
+
+/**
+ * A note describing the registration about to be replaced, when it starts
+ * something other than this install. Null when it is ours (same server script,
+ * or the same npx launcher), or when it cannot be read — an unreadable listing
+ * is not evidence of somebody else's server.
+ */
+function describeOtherRegistration(opts: { launch: string[]; serverPath: string; run: Runner }): string | null {
+  const got = opts.run("claude", ["mcp", "get", MCP_NAME]);
+  if (got.missing || got.status !== 0) return null;
+  const { command, serverPath: args } = parseRegistration(got.stdout + got.stderr);
+  if (args === null) return null;
+  const sameScript = samePath(args, opts.serverPath);
+  const sameNpx = args === NPX_SERVE_ARGS.join(" ");
+  if (sameScript || sameNpx) return null;
+  return `replaced an existing "${MCP_NAME}" registration that ran something else: ${[command, args].filter(Boolean).join(" ")} — re-register that one under a different name if you still need it`;
 }
 
 /**
