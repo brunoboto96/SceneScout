@@ -85,10 +85,10 @@ export function isDestructive(...labels: Array<string | null | undefined>): bool
   return labels.some((label) => typeof label === "string" && label.length > 0 && DESTRUCTIVE_PATTERNS.some((re) => re.test(label)));
 }
 
-export function destructiveRefusal(label: string): string {
+export function destructiveRefusal(label: string, mode: string = "read-only"): string {
   return (
-    `REFUSED by read-only policy: "${label}" matches a destructive-action pattern. ` +
-    `This run is read-only; do not attempt this element again. If destructive flows must be tested, ` +
+    `REFUSED by ${mode} policy: "${label}" matches a destructive-action pattern. ` +
+    `This run is ${mode}; do not attempt this element again. If destructive flows must be tested, ` +
     `the user has to re-attach with mode="destructive" against a disposable/seeded environment.`
   );
 }
@@ -117,6 +117,42 @@ export const WRITE_MODES = ["observe", "read-only", "safe-write", "destructive"]
  * before this is asked. `owned` means the request addresses a record this run
  * created (always false outside safe-write, where nothing is tracked).
  */
+/**
+ * In observe mode, the only auth requests let through are the ones a session
+ * needs in order to exist: logging in, logging out, refreshing a token. Whole
+ * path SEGMENTS, never substrings — `/users/login-history/clear` and
+ * `/api/tokens` (mint an API token) are not logins — and `session(s)` only as
+ * the last segment, where a POST means "log in", not "act on session 123".
+ */
+const OBSERVE_AUTH_SEGMENT_RE =
+  /^(login|log-in|signin|sign-in|logout|log-out|signout|sign-out|refresh|token|oauth|oauth2|sso|callback|authorize|authenticate)$/i;
+
+/**
+ * Is this request an auth flow that must work even though the mode would
+ * otherwise block it?
+ *
+ * Never for a destructive-looking request, in any mode: the exemption used to
+ * be tested first, so `POST /api/session/123/delete` went through in read-only
+ * because its path contains "session".
+ *
+ * In observe mode the exemption is much narrower than elsewhere. Signing up,
+ * changing or resetting a password, verifying an email and creating a user all
+ * change data on the target, and observe promises that nothing is created.
+ */
+export function isAuthExempt(mode: WriteMode, method: string, pathname: string, destructiveWire: boolean): boolean {
+  if (method !== "POST" || destructiveWire) return false;
+  if (mode !== "observe") return AUTH_FLOW_RE.test(pathname);
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments.length === 0) return false;
+  const last = segments[segments.length - 1];
+  if (/^sessions?$/i.test(last)) return true;
+  // The matching segment must be at, or next to, the end: /auth/token/refresh, /oauth/token, /login.
+  return (
+    segments.slice(-2).some((seg) => OBSERVE_AUTH_SEGMENT_RE.test(seg)) &&
+    !/^(users?|accounts?|members?|password|signup|sign-up|register|verify|invite|invitations?)$/i.test(last)
+  );
+}
+
 export function allowsWrite(mode: WriteMode, method: string, destructiveWire: boolean, owned: boolean): boolean {
   if (mode === "destructive") return true;
   if (mode === "observe") return false;

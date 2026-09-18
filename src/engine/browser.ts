@@ -20,7 +20,7 @@ import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
-import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire, allowsWrite, type WriteMode } from "./policy.js";
+import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire, allowsWrite, type WriteMode, isAuthExempt } from "./policy.js";
 import { scanProject } from "../scan.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignPayload, type FocusSample } from "./design.js";
 import { acceptMatches, generatedUpload, type FixtureKind } from "./fixtures.js";
@@ -233,6 +233,14 @@ export class BrowserEngine {
   }
   /** Requests blocked by the write policy since the last action (timestamped for attribution). */
   private blockedRequests: Array<{ at: number; sig: string }> = [];
+  /**
+   * WebSockets this session's pages opened. The write policy works on HTTP
+   * requests; frames sent over a socket are not inspected. In observe mode that
+   * is a hole in "nothing leaves the page", so it is said out loud rather than
+   * left for the reader to discover.
+   */
+  private readonly openSockets = new Set<string>();
+  private socketsWarned = false;
   /** When the current action began — requests recorded before this are late arrivals from a previous action. */
   private actionStartedAt = 0;
   /**
@@ -402,6 +410,12 @@ export class BrowserEngine {
     // Label-based read-only blocking can't catch every mutation (an innocuous
     // "Add to Cart" fires a POST). Track non-GET traffic so actions that
     // changed server state are at least REPORTED in read-only runs.
+    this.openSockets.clear();
+    this.socketsWarned = false;
+    const watchSockets = (p: Page): void => void p.on("websocket", (ws) => this.openSockets.add(ws.url().slice(0, 120)));
+    // The first page already exists by now; later ones (popups) arrive as events.
+    if (this.page) watchSockets(this.page);
+    this.context.on("page", watchSockets);
     this.context.on("request", (req) => {
       const type = req.resourceType();
       if (type === "xhr" || type === "fetch") this.xhrCount += 1;
@@ -421,7 +435,8 @@ export class BrowserEngine {
       // here let a REFUSED destructive POST mark the route as mutated — a form
       // that was never submitted reading as tested, in read-only mode where by
       // definition nothing is.
-      if (this.mode === "observe" && !AUTH_FLOW_RE.test(pathnameOf(req.url()))) return;
+      // Same test the route handler uses: in observe only an exempt auth request goes out.
+      if (this.mode === "observe" && !isAuthExempt(this.mode, method, pathnameOf(req.url()), isDestructiveWire(pathnameOf(req.url()), req.postData()))) return;
       if (this.readOnly && isDestructiveWire(pathnameOf(req.url()), req.postData())) return;
       const pageUrl = this.page?.url();
       if (pageUrl && this.memory) {
@@ -441,10 +456,11 @@ export class BrowserEngine {
         if (method === "GET" || method === "HEAD" || method === "OPTIONS") return route.continue();
         const url = req.url();
         const pathname = pathnameOf(url);
-        // Auth/session flows (login, refresh, logout) must work in every mode.
-        if (AUTH_FLOW_RE.test(pathname) && method === "POST") return route.continue();
-
         const destructiveWire = isDestructiveWire(pathname, req.postData());
+        // Auth/session flows must work in every mode — but never a destructive
+        // one, and in observe only the requests a login itself needs.
+        if (isAuthExempt(this.mode, method, pathname, destructiveWire)) return route.continue();
+
         let owned = this.isOwnedResource(pathname);
         // A single UI action commonly fires create-then-immediately-save
         // (POST gets an id, PUT saves content under it) faster than the
@@ -814,6 +830,7 @@ export class BrowserEngine {
         ? `\nFILE INPUTS not listed above (hidden behind a styled control — a user never sees the input itself): ${hiddenFileInputs.join("; ")}. ` +
           `scout_upload {ref} on the control that opens one, or scout_upload {} when it is the page's only file input.`
         : "") +
+      this.socketNotice() +
       formatViolations(this.oracles.drain()) +
       (elements.length === 0 ? "\n⚠ DEAD END: no interactable elements found on this page." : "")
     );
@@ -869,7 +886,7 @@ export class BrowserEngine {
     // same holds for choosing a file: selection is not the send.
     if (el.role === "textbox" || el.role === "file") return null;
     if (el.destructive || isDestructive(liveLabel)) {
-      return destructiveRefusal(liveLabel || el.name || el.testid || el.ref);
+      return destructiveRefusal(liveLabel || el.name || el.testid || el.ref, this.mode);
     }
     return null;
   }
@@ -879,14 +896,23 @@ export class BrowserEngine {
     await this.settle();
     let url = page.url();
     if (url !== "about:blank" && !this.isSameOrigin(url)) {
-      // A click carried us off the app's origin — bounce back and say so.
+      // Either a click carried us off the app's origin, or the write policy
+      // aborted a NAVIGATION (a native form post) and the browser is showing
+      // its error page. The second is the tester's own doing and must say so:
+      // reported as an off-origin bounce, it hid the block, and the caller then
+      // read the unchanged URL as "the app silently discarded the data".
+      const policyAbortedNavigation = url.startsWith("chrome-error://") && this.blockedRequests.length > 0;
       this.logAction({ action, target, url });
-      this.logAction({ action: "origin-fence:bounced", target: url.slice(0, 200), url });
+      this.logAction({ action: policyAbortedNavigation ? "write-policy:navigation-blocked" : "origin-fence:bounced", target: url.slice(0, 200), url });
       await page.goBack({ waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
       url = page.url();
       this.refs.clear();
+      const blocked = this.drainBlocked();
       return (
-        `OK: ${action} ${target}\nNavigated off-origin and was bounced back to ${url}. Exploration is fenced to ${this.baseUrl}.` +
+        (policyAbortedNavigation
+          ? `OK: ${action} ${target}\nThe page tried to navigate with a request the write policy blocked, so the browser showed an error page; returned to ${url}.`
+          : `OK: ${action} ${target}\nNavigated off-origin and was bounced back to ${url}. Exploration is fenced to ${this.baseUrl}.`) +
+        blocked +
         formatViolations(this.oracles.drain())
       );
     }
@@ -971,6 +997,17 @@ export class BrowserEngine {
     );
   }
 
+  /** Once per session, in observe mode only: say that socket frames are outside the policy. */
+  private socketNotice(): string {
+    if (this.mode !== "observe" || this.socketsWarned || this.openSockets.size === 0) return "";
+    this.socketsWarned = true;
+    return (
+      `\n⚠ OBSERVE LIMIT: this app holds an open WebSocket (${[...this.openSockets].slice(0, 2).join(", ")}). ` +
+      `The write policy blocks HTTP requests; frames sent over a socket are NOT inspected. ` +
+      `Do not perform actions that send data over it (chat messages, live edits, presence) — look, do not type, in socket-driven widgets — and say so in your summary.`
+    );
+  }
+
   /** xhr/fetch requests seen this session — lets clicks detect silent no-op submits. */
   private xhrCount = 0;
 
@@ -997,7 +1034,7 @@ export class BrowserEngine {
       .join("; ");
     const extra = fresh.length > 5 ? ` (+${fresh.length - 5} more)` : "";
     return this.readOnly
-      ? `\n⚠ READ-ONLY notice: this action fired state-changing requests — server state may have mutated despite read-only mode: ${list}${extra}. Consider whether this flow should be avoided or the environment confirmed disposable.`
+      ? `\n⚠ READ-ONLY notice: this action fired state-changing requests — server state may have mutated despite ${this.mode} mode: ${list}${extra}. Consider whether this flow should be avoided or the environment confirmed disposable.`
       : `\n(state-changing requests: ${list}${extra})`;
   }
 
@@ -1080,7 +1117,10 @@ export class BrowserEngine {
     const forcedNote = forced
       ? `\nℹ NOTE: the strict click timed out waiting for this element to be the stable, unobstructed top hit at its coordinates, so a forced click was used instead (which still landed — this succeeded). Something is likely rendered on top of it (an icon, a decorative layer, an animating wrapper) or it delegates via a label; cross-check against any GEOMETRY overlap on this element before treating that as a real bug.`
       : "";
-    if (submitLike && this.xhrCount === xhrBefore && page.url() === this.snapshotUrl) {
+    // Not when the write policy blocked the submission: a native form POST or a
+    // beacon is not counted as xhr/fetch, so an aborted one looks exactly like
+    // "fired nothing" — and the note would blame the app for the tool's block.
+    if (submitLike && this.xhrCount === xhrBefore && this.lastActionBlocked === 0 && page.url() === this.snapshotUrl) {
       return (
         result +
         `\nℹ NOTE: this submit-style click fired ZERO network requests and no navigation — if the UI showed success, the data may have been silently discarded (worth verifying; category: other/silent-failure).` +
@@ -1193,7 +1233,7 @@ export class BrowserEngine {
           .catch(() => "")) as string;
         if (isDestructive(submitLabel)) {
           this.logAction({ action: "type:enter-refused", target: submitLabel, url: page.url() });
-          return `Filled ${el.role} "${el.name}" but did NOT press Enter. ` + destructiveRefusal(submitLabel);
+          return `Filled ${el.role} "${el.name}" but did NOT press Enter. ` + destructiveRefusal(submitLabel, this.mode);
         }
       }
       await locator.press("Enter", { timeout: ACTION_TIMEOUT_MS });
@@ -1485,7 +1525,7 @@ export class BrowserEngine {
         .catch(() => "")) as string;
       if (isDestructive(value) || isDestructive(optionLabel)) {
         this.logAction({ action: "select:refused", target: optionLabel || value, url: page.url() });
-        return destructiveRefusal(optionLabel || value);
+        return destructiveRefusal(optionLabel || value, this.mode);
       }
     }
     await page.locator(`xpath=${el.xpath}`).selectOption(value, { timeout: ACTION_TIMEOUT_MS });
@@ -1509,7 +1549,7 @@ export class BrowserEngine {
       .catch(() => "");
     if (typeof focusedLabel === "string" && isDestructive(focusedLabel)) {
       this.logAction({ action: "press:refused", target: focusedLabel, url: page.url() });
-      return destructiveRefusal(focusedLabel);
+      return destructiveRefusal(focusedLabel, this.mode);
     }
     return null;
   }
@@ -1891,7 +1931,7 @@ export class BrowserEngine {
           const label = await liveLabel(loc);
           preLabel = label;
           if (this.readOnly && (step.action === "click" || step.action === "select" || step.action === "upload") && isDestructive(label, step.value)) {
-            transcript.push(`${desc} → ${destructiveRefusal(label || step.target)}`);
+            transcript.push(`${desc} → ${destructiveRefusal(label || step.target, this.mode)}`);
             break;
           }
           if (step.action === "click") forcedClick = (await this.resilientClick(loc, ACTION_TIMEOUT_MS)).forced;
@@ -1912,7 +1952,7 @@ export class BrowserEngine {
                 const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
                 const submitLabel = (await submit.textContent({ timeout: 1000 }).catch(() => "")) ?? "";
                 if (isDestructive(submitLabel)) {
-                  transcript.push(`${desc} → filled, Enter withheld: ${destructiveRefusal(submitLabel.trim())}`);
+                  transcript.push(`${desc} → filled, Enter withheld: ${destructiveRefusal(submitLabel.trim(), this.mode)}`);
                   break;
                 }
               }

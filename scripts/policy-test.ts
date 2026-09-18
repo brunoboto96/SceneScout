@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { allowsWrite, AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire, WRITE_MODES } from "../src/engine/policy.ts";
+import { allowsWrite, AUTH_FLOW_RE, destructiveRefusal, isAuthExempt, isDestructive, isDestructiveWire, WRITE_MODES } from "../src/engine/policy.ts";
 import {
   deriveCollection,
   extractCreatedIds,
@@ -395,4 +395,52 @@ test("the wire decision, mode by mode", () => {
   assert.deepEqual(table("safe-write"), [true, false, true, false, true, false, true], "safe-write edits and deletes only what the run created");
   assert.deepEqual(table("destructive"), [true, true, true, true, true, true, true]);
   assert.deepEqual([...WRITE_MODES], ["observe", "read-only", "safe-write", "destructive"], "ordered from strictest to loosest");
+});
+
+test("the auth exemption never covers a destructive request, in any mode", () => {
+  // The exemption used to be tested before the destructive check, so a path
+  // that merely contained "session" or "auth" carried a delete through read-only.
+  for (const mode of WRITE_MODES) {
+    assert.equal(isAuthExempt(mode, "POST", "/api/session/123/delete", true), false, mode);
+    assert.equal(isAuthExempt(mode, "POST", "/api/auth/users/5/delete", true), false, mode);
+    assert.equal(isAuthExempt(mode, "PUT", "/api/auth/login", false), false, `${mode}: only POST is ever exempt`);
+  }
+  assert.equal(isAuthExempt("read-only", "POST", "/api/auth/login", false), true);
+  assert.equal(isAuthExempt("read-only", "POST", "/signup", false), true, "outside observe, signing up is part of the auth surface a tester walks");
+});
+
+test("in observe mode only the requests a login itself needs are exempt", () => {
+  const exempt = (p: string): boolean => isAuthExempt("observe", "POST", p, false);
+  // A session has to be able to exist.
+  for (const p of [
+    "/login",
+    "/api/auth/login",
+    "/api/v1/auth/sign-in",
+    "/auth/token/refresh",
+    "/oauth/token",
+    "/api/session",
+    "/api/sessions",
+    "/logout",
+    "/sso/callback",
+  ]) {
+    assert.equal(exempt(p), true, `${p} should be let through`);
+  }
+  // Everything else changes data on the target, whatever word is in its path.
+  for (const p of [
+    "/signup",
+    "/api/auth/signup",
+    "/api/auth/register",
+    "/api/auth/users", // invite or create a user
+    "/account/password",
+    "/api/user/password/change",
+    "/password/reset/confirm",
+    "/verify/documents/12/approve",
+    "/users/login-history/clear", // "login" as part of a longer segment
+    "/api/tokens", // mint an API token
+    "/api/session/123/extend", // acts ON a session
+    "/api/orders",
+    "/",
+  ]) {
+    assert.equal(exempt(p), false, `${p} must be blocked in observe`);
+  }
 });
