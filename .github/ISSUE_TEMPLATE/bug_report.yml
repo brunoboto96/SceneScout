@@ -1,0 +1,42 @@
+name: Bug report
+description: Something SceneScout did wrong — a crash, a false finding, a missed block, noise in a report.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security problem?** Do not file it here — see [SECURITY.md](../blob/main/SECURITY.md).
+        Please describe the app under test in general terms only. Do not paste its name, real URLs, real user data, or tokens.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what SceneScout did, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest page or sequence that shows it. A few lines of HTML are ideal — they can become the regression fixture.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: The tool result, report excerpt, or `npm run doctor` output. Redact anything sensitive.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: SceneScout version
+      description: "`scenescout --version`, or the version in package.json"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Node version, and the MCP client you drive it from.
+      placeholder: macOS 15, Node 24, Claude Code

@@ -11,15 +11,51 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  suite:
+    name: ${{ matrix.os }} · node ${{ matrix.node }}${{ matrix.unit-only && ' · unit' || '' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The supported floor and the current LTS, on the platform CI is cheapest on.
+          - { os: ubuntu-latest, node: 20 }
+          - { os: ubuntu-latest, node: 24 }
+          # Where most contributors actually run it.
+          - { os: macos-latest, node: 24 }
+          # Path handling, symlink fallback and the installer are the Windows
+          # risks, and they are all pure logic — no browser needed to catch them.
+          - { os: windows-latest, node: 24, unit-only: true }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: npm test
+      - name: Formatting
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        run: npm run format:check
+      - name: Unit suites
+        if: matrix.unit-only
+        run: npm run build && npm run test:unit
+      - name: Install browser
+        if: ${{ !matrix.unit-only }}
+        run: npx playwright install --with-deps chromium
+      - name: All suites
+        if: ${{ !matrix.unit-only }}
+        run: npm test
+
+  # The branch ruleset requires ONE check, named "test". A matrix reports one
+  # check per cell under changing names, so this job is the stable name that
+  # summarises them: green only when every cell is.
+  test:
+    needs: suite
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every matrix cell passed
+        run: |
+          echo "suite result: ${{ needs.suite.result }}"
+          test "${{ needs.suite.result }}" = "success"

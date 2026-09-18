@@ -53,8 +53,7 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
  */
 
 /** A destructive verb occupying a URL PATH segment. Bare keywords are meaningful here — a path is not prose. */
-const DESTRUCTIVE_URL_RE =
-  /(\/|\b|_)(delete|remove|purge|destroy|archive|revoke|deactivate|wipe|bulk[-_]?delete|force[-_]?delete)(\/|\b|_)/i;
+const DESTRUCTIVE_URL_RE = /(\/|\b|_)(delete|remove|purge|destroy|archive|revoke|deactivate|wipe|bulk[-_]?delete|force[-_]?delete)(\/|\b|_)/i;
 
 /**
  * Structured destructive intent inside a body — never a bare keyword.
@@ -83,9 +82,7 @@ export function isDestructiveWire(url: string, body?: string | null): boolean {
 export const AUTH_FLOW_RE = /\/(auth|login|logout|signin|sign-in|signup|sign-up|session|token|verify|oauth|sso|password)\b/i;
 
 export function isDestructive(...labels: Array<string | null | undefined>): boolean {
-  return labels.some(
-    (label) => typeof label === "string" && label.length > 0 && DESTRUCTIVE_PATTERNS.some((re) => re.test(label)),
-  );
+  return labels.some((label) => typeof label === "string" && label.length > 0 && DESTRUCTIVE_PATTERNS.some((re) => re.test(label)));
 }
 
 export function destructiveRefusal(label: string): string {

@@ -2,13 +2,7 @@ import { chromium, type Browser, type BrowserContext, type FileChooser, type Loc
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import {
-  elementKey,
-  fingerprintState,
-  isNonPageRoute,
-  normalizePath,
-  type InteractableInfo,
-} from "./fingerprint.js";
+import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
 import { AUTH_LOSS_PREFIX, MemoryStore, type ActionLogEntry } from "./memory.js";
 import { AuthLossTracker } from "./authloss.js";
 import { COLLECT_INTERACTABLES_SCRIPT, DIALOG_LIKE_SEL, VISIBLE_SRC, geometryIssues, type Rect } from "./collector.js";
@@ -400,11 +394,17 @@ export class BrowserEngine {
 
     const verdict: string[] = [];
     if (backtracks > 0)
-      verdict.push(`⚠ ${backtracks} backtrack(s) — the route was re-visited after leaving it, which usually means the next step wasn't discoverable from where the user was`);
+      verdict.push(
+        `⚠ ${backtracks} backtrack(s) — the route was re-visited after leaving it, which usually means the next step wasn't discoverable from where the user was`,
+      );
     if (distinct.size > 4)
-      verdict.push(`⚠ ${distinct.size} distinct screens for one task — each hand-off is a chance to lose the user; consider whether steps can be combined or done in place`);
+      verdict.push(
+        `⚠ ${distinct.size} distinct screens for one task — each hand-off is a chance to lose the user; consider whether steps can be combined or done in place`,
+      );
     if (interactions.length > 15)
-      verdict.push(`⚠ ${interactions.length} interactions — high for a single task; check for over-asking (optional fields up-front) or repeated confirmation steps`);
+      verdict.push(
+        `⚠ ${interactions.length} interactions — high for a single task; check for over-asking (optional fields up-front) or repeated confirmation steps`,
+      );
     const shortcuts = log.filter((e) => /^(navigate|plan:navigate)$/.test(e.action)).length;
     if (shortcuts > 0)
       verdict.push(
@@ -439,7 +439,17 @@ export class BrowserEngine {
   /** Whether the browser window is visible — headed hover results carry a physical-cursor caveat. */
   private headed = false;
   /** Non-GET requests fired since the last action — surfaces silent state mutation in read-only runs (timestamped for attribution). */
-  private mutationRequests: Array<{ at: number; sig: string }> = [];
+  private mutationRequests: Array<{ at: number; sig: string; req: import("playwright").Request }> = [];
+  /**
+   * Requests the write policy aborted, by identity. The request event fires for
+   * every non-GET the page ATTEMPTS, before the route handler decides its fate,
+   * so without this the same DELETE was reported twice with opposite meanings:
+   * "server state may have mutated despite read-only mode" and "WRITE-POLICY
+   * blocked". Identity rather than URL matching: two requests to one URL can
+   * meet different fates, and a blocked /items/7/archive must not hide an
+   * allowed POST /items that shares its prefix.
+   */
+  private readonly abortedByPolicy = new WeakSet<import("playwright").Request>();
   /** Raw mutation sigs of the most recent action (pre-dedup) — double-submit detection. */
   private lastActionMutationSigs: string[] = [];
   /** Write-policy blocks drained by the last action — counted, so an action can know a request fired even when the policy stopped it. */
@@ -517,7 +527,7 @@ export class BrowserEngine {
       // tester mutated — reporting them trains the driver to ignore the notice.
       if (BENIGN_MUTATION_RE.test(req.url())) return;
       if (this.mutationRequests.length < 20) {
-        this.mutationRequests.push({ at: Date.now(), sig: `${method} ${req.url().slice(0, 120)}` });
+        this.mutationRequests.push({ at: Date.now(), sig: `${method} ${req.url().slice(0, 120)}`, req });
       }
       // Gap-ledger fact: this route's forms/actions were actually EXERCISED,
       // not just looked at — the difference between visited and tested.
@@ -587,6 +597,7 @@ export class BrowserEngine {
         }
         if (this.blockedRequests.length < 20) this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}` });
         this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}`, url: this.page?.url() ?? "" });
+        this.abortedByPolicy.add(req);
         return route.abort("blockedbyclient");
       });
     }
@@ -626,9 +637,7 @@ export class BrowserEngine {
     } catch (err) {
       // Don't leave a half-attached engine (leaked browser, snapshots of about:blank).
       await this.close();
-      throw new Error(
-        `Could not load ${opts.url} — is the app running? (${err instanceof Error ? err.message.split("\n")[0] : err})`,
-      );
+      throw new Error(`Could not load ${opts.url} — is the app running? (${err instanceof Error ? err.message.split("\n")[0] : err})`);
     }
     await this.settle();
     this.logAction({ action: "attach", url: this.page.url() });
@@ -637,8 +646,7 @@ export class BrowserEngine {
     // is all this used to do — reads as success and names the very file that
     // just failed, so a run would proceed for hundreds of calls against a
     // logged-out browser. The file existing was the only thing ever checked.
-    const authFailed =
-      Boolean(opts.storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), this.page.url(), this.baseUrl);
+    const authFailed = Boolean(opts.storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), this.page.url(), this.baseUrl);
     const authWarning = authFailed
       ? `\n⚠ AUTH FAILED — the storage state at ${opts.storageStatePath} did not produce a signed-in session: ` +
         `attaching landed on ${this.page.url()}, a login page. Regenerate it (its token has most likely expired) and re-attach. ` +
@@ -688,9 +696,17 @@ export class BrowserEngine {
   private async collect(): Promise<{ elements: SnapshotElement[]; truncated: boolean }> {
     const page = this.requirePage();
     type RawElement = {
-      tag: string; role: string; name: string; testid: string | null;
-      xpath: string; disabled: boolean; href: string | null; rect: Rect;
-      clipped?: boolean; layer?: number; chrome?: boolean;
+      tag: string;
+      role: string;
+      name: string;
+      testid: string | null;
+      xpath: string;
+      disabled: boolean;
+      href: string | null;
+      rect: Rect;
+      clipped?: boolean;
+      layer?: number;
+      chrome?: boolean;
     };
     // SPAs (and dev servers mid-recompile) can present an empty shell for a
     // few seconds — and a shell that already renders its chrome (sidebar,
@@ -745,7 +761,12 @@ export class BrowserEngine {
     const { elements } = await this.collect();
     const url = page.url();
     const fp = fingerprintState(url, elements);
-    this.memory?.visitState(fp, url, normalizePath(url), elements.map((el) => el.key));
+    this.memory?.visitState(
+      fp,
+      url,
+      normalizePath(url),
+      elements.map((el) => el.key),
+    );
     return { fp, elements, url };
   }
 
@@ -815,7 +836,12 @@ export class BrowserEngine {
     const route = normalizePath(url);
     const fp = fingerprintState(url, elements);
     this.currentFingerprint = fp;
-    const isNew = memory.visitState(fp, url, route, elements.map((el) => el.key));
+    const isNew = memory.visitState(
+      fp,
+      url,
+      route,
+      elements.map((el) => el.key),
+    );
     memory.recordRoleAccess(this.role, route, "reached");
     this.logAction({ action: "snapshot", url, result: fp });
 
@@ -932,9 +958,7 @@ export class BrowserEngine {
     }
     if (el.testid && live.testid !== el.testid) {
       this.refs.clear();
-      throw new Error(
-        `Element under ${ref} changed (expected testid=${el.testid}, found ${live.testid ?? "none"}) — the DOM shifted; take a new ft_snapshot.`,
-      );
+      throw new Error(`Element under ${ref} changed (expected testid=${el.testid}, found ${live.testid ?? "none"}) — the DOM shifted; take a new ft_snapshot.`);
     }
     return { el, liveLabel: live.label };
   }
@@ -981,12 +1005,7 @@ export class BrowserEngine {
       // errors ("take a new snapshot") instead of acting on the wrong element.
       this.refs.clear();
     }
-    return (
-      `OK: ${action} ${target}\nURL now: ${url}` +
-      (navigated ? " (page changed — take a new snapshot)" : "") +
-      mutations +
-      formatViolations(violations)
-    );
+    return `OK: ${action} ${target}\nURL now: ${url}` + (navigated ? " (page changed — take a new snapshot)" : "") + mutations + formatViolations(violations);
   }
 
   /** True when a path targets a resource this session created (id segment + collection-family match). */
@@ -1059,7 +1078,10 @@ export class BrowserEngine {
 
   /** Strip an id-key's id/uuid suffix and normalize away separators, for comparing against a URL path segment (e.g. "document_id" → "document", "sopDocumentUuid" → "sopdocument"). */
   private static keyStem(key: string): string {
-    return key.replace(/(?:_)?(id|uuid)$/i, "").replace(/[-_]/g, "").toLowerCase();
+    return key
+      .replace(/(?:_)?(id|uuid)$/i, "")
+      .replace(/[-_]/g, "")
+      .toLowerCase();
   }
 
   /**
@@ -1074,18 +1096,20 @@ export class BrowserEngine {
   private static keyMatchesUrl(key: string, pathname: string): boolean {
     const stem = BrowserEngine.keyStem(key);
     if (!stem) return false;
-    return pathname
-      .split("/")
-      .filter(Boolean)
-      // RPC-action segments (from-template, clone, ...) aren't the resource's
-      // name — a foreign key that happens to be named after the verb itself
-      // (e.g. "duplicate_id" on a POST .../duplicate endpoint) must not pass
-      // just because it echoes the verb.
-      .filter((seg) => !BrowserEngine.ACTION_SEGMENT_RE.test(seg))
-      .some((seg) => {
-        const normSeg = seg.replace(/[-_]/g, "").toLowerCase();
-        return normSeg.length > 0 && (normSeg.includes(stem) || stem.includes(normSeg));
-      });
+    return (
+      pathname
+        .split("/")
+        .filter(Boolean)
+        // RPC-action segments (from-template, clone, ...) aren't the resource's
+        // name — a foreign key that happens to be named after the verb itself
+        // (e.g. "duplicate_id" on a POST .../duplicate endpoint) must not pass
+        // just because it echoes the verb.
+        .filter((seg) => !BrowserEngine.ACTION_SEGMENT_RE.test(seg))
+        .some((seg) => {
+          const normSeg = seg.replace(/[-_]/g, "").toLowerCase();
+          return normSeg.length > 0 && (normSeg.includes(stem) || stem.includes(normSeg));
+        })
+    );
   }
 
   /**
@@ -1175,7 +1199,10 @@ export class BrowserEngine {
   private drainBlocked(): string {
     this.lastActionBlocked = this.blockedRequests.length;
     if (this.blockedRequests.length === 0) return "";
-    const list = this.blockedRequests.slice(0, 5).map((e) => this.lateMark(e)).join("; ");
+    const list = this.blockedRequests
+      .slice(0, 5)
+      .map((e) => this.lateMark(e))
+      .join("; ");
     const extra = this.blockedRequests.length > 5 ? ` (+${this.blockedRequests.length - 5} more)` : "";
     this.blockedRequests = [];
     return (
@@ -1197,15 +1224,20 @@ export class BrowserEngine {
     // Raw (pre-dedup) sigs from this action — double-submit detection needs
     // to see the DUPLICATES that the reporting dedup below intentionally hides.
     this.lastActionMutationSigs = this.mutationRequests.map((e) => e.sig);
-    const fresh = this.mutationRequests.filter((entry) => {
-      const key = entry.sig.split("?")[0];
-      if (this.reportedMutationSigs.has(key)) return false;
-      this.reportedMutationSigs.add(key);
-      return true;
-    });
+    const fresh = this.mutationRequests
+      .filter((entry) => !this.abortedByPolicy.has(entry.req))
+      .filter((entry) => {
+        const key = entry.sig.split("?")[0];
+        if (this.reportedMutationSigs.has(key)) return false;
+        this.reportedMutationSigs.add(key);
+        return true;
+      });
     this.mutationRequests = [];
     if (fresh.length === 0) return "";
-    const list = fresh.slice(0, 5).map((e) => this.lateMark(e)).join("; ");
+    const list = fresh
+      .slice(0, 5)
+      .map((e) => this.lateMark(e))
+      .join("; ");
     const extra = fresh.length > 5 ? ` (+${fresh.length - 5} more)` : "";
     return this.readOnly
       ? `\n⚠ READ-ONLY notice: this action fired state-changing requests — server state may have mutated despite read-only mode: ${list}${extra}. Consider whether this flow should be avoided or the environment confirmed disposable.`
@@ -1443,8 +1475,7 @@ export class BrowserEngine {
     // repeat upload prints nothing there, and a write-policy block prints
     // something else entirely. Only requests recorded AFTER the file was set
     // count — the trigger click's own traffic is not the upload.
-    const firedOnSelect =
-      this.lastActionMutationSigs.length > outcome.mutationsBefore || this.lastActionBlocked > outcome.blockedBefore;
+    const firedOnSelect = this.lastActionMutationSigs.length > outcome.mutationsBefore || this.lastActionBlocked > outcome.blockedBefore;
     return (
       after +
       outcome.notes +
@@ -1474,14 +1505,15 @@ export class BrowserEngine {
     if ("refused" in target) return refuse(target.refused);
     const { input, chooser, how } = target;
 
-    const meta: FileInputMeta = await (input
-      ? input.evaluate(describeFileInput, undefined, { timeout: ACTION_TIMEOUT_MS })
-      : chooser!.element().evaluate(describeFileInput)
+    const meta: FileInputMeta = await (
+      input ? input.evaluate(describeFileInput, undefined, { timeout: ACTION_TIMEOUT_MS }) : chooser!.element().evaluate(describeFileInput)
     ).catch(() => ({ accept: null, multiple: false, label: "", disabled: false, probed: false }));
     // setInputFiles never checks `disabled` — it would report success on a
     // control no user can operate.
     if (meta.disabled) {
-      return refuse(`The file input${meta.label ? ` "${meta.label}"` : ""} is disabled — a user cannot choose a file here. If it should be enabled in this state, that is a finding.`);
+      return refuse(
+        `The file input${meta.label ? ` "${meta.label}"` : ""} is disabled — a user cannot choose a file here. If it should be enabled in this state, that is a finding.`,
+      );
     }
 
     const file = disk ?? generatedPayload(meta, opts);
@@ -1493,9 +1525,10 @@ export class BrowserEngine {
     // The set call succeeding means the browser took the payload — not that
     // the app kept it. Read the input back: an app that rejects client-side
     // clears it, and then nothing would ever be sent on submit.
-    const kept = await (input
-      ? input.evaluate((node) => (node as HTMLInputElement).files?.length ?? 0, undefined, { timeout: ACTION_TIMEOUT_MS })
-      : chooser!.element().evaluate((node) => (node as HTMLInputElement).files?.length ?? 0)
+    const kept = await (
+      input
+        ? input.evaluate((node) => (node as HTMLInputElement).files?.length ?? 0, undefined, { timeout: ACTION_TIMEOUT_MS })
+        : chooser!.element().evaluate((node) => (node as HTMLInputElement).files?.length ?? 0)
     ).catch(() => -1);
 
     const inputDesc = [
@@ -1519,9 +1552,7 @@ export class BrowserEngine {
   }
 
   /** Where the file goes: the input itself, the chooser a control opens, or the page's only file input. */
-  private async pickUploadTarget(
-    locator: Locator | null,
-  ): Promise<{ refused: string } | { input: Locator | null; chooser: FileChooser | null; how: string }> {
+  private async pickUploadTarget(locator: Locator | null): Promise<{ refused: string } | { input: Locator | null; chooser: FileChooser | null; how: string }> {
     const page = this.requirePage();
     const fileInputs = page.locator('input[type="file"]');
     const listAll = async (): Promise<string> => (await this.listFileInputs(page)).map(fileInputLabel).join("; ");
@@ -1540,14 +1571,13 @@ export class BrowserEngine {
     // outlasts the click's own — forced retry included — plus a grace period
     // after it, for apps that fetch an upload URL before opening the picker. A
     // wait shorter than the click reported such controls as "uploads nothing".
-    const opened = page
-      .waitForEvent("filechooser", { timeout: ACTION_TIMEOUT_MS + FORCED_CLICK_TIMEOUT_MS + CHOOSER_GRACE_MS })
-      .catch(() => null);
+    const opened = page.waitForEvent("filechooser", { timeout: ACTION_TIMEOUT_MS + FORCED_CLICK_TIMEOUT_MS + CHOOSER_GRACE_MS }).catch(() => null);
     await this.resilientClick(locator, ACTION_TIMEOUT_MS);
     const chooser = await Promise.race([opened, page.waitForTimeout(CHOOSER_GRACE_MS).then(() => null)]);
     if (chooser) return { input: null, chooser, how: "via the file chooser the click opened" };
     const n = await fileInputs.count();
-    if (n === 1) return { input: fileInputs.first(), chooser: null, how: "the click opened no file chooser, so the file was set on the page's only file input" };
+    if (n === 1)
+      return { input: fileInputs.first(), chooser: null, how: "the click opened no file chooser, so the file was set on the page's only file input" };
     if (n === 0) return { refused: "The click opened no file chooser and the page has no file input — this control does not upload anything." };
     return {
       refused: `The click opened no file chooser and the page has ${n} file inputs (${await listAll()}) — pass the ref of the file input, or of the control that opens the one you want.`,
@@ -1576,7 +1606,9 @@ export class BrowserEngine {
     }
     const stat = fs.statSync(real, { throwIfNoEntry: false });
     if (!stat?.isFile()) {
-      return { refused: `filePath not found (or not a file): ${real}. To upload a generated file instead, omit filePath (or pass fixture: ${FIXTURE_KINDS.join(" | ")}).` };
+      return {
+        refused: `filePath not found (or not a file): ${real}. To upload a generated file instead, omit filePath (or pass fixture: ${FIXTURE_KINDS.join(" | ")}).`,
+      };
     }
     const finalName = name ?? path.basename(real);
     const mime = mimeForName(finalName);
@@ -1585,7 +1617,13 @@ export class BrowserEngine {
     if (stat.size > MAX_RENAMED_UPLOAD_BYTES) {
       return { refused: `Renaming an upload reads it into memory; ${real} is ${stat.size} bytes — pass it without name, or use a smaller file.` };
     }
-    return { payload: { name: finalName, mimeType: mime, buffer: fs.readFileSync(real) }, name: finalName, mime, bytes: stat.size, source: `from disk: ${rel}, as ${finalName}` };
+    return {
+      payload: { name: finalName, mimeType: mime, buffer: fs.readFileSync(real) },
+      name: finalName,
+      mime,
+      bytes: stat.size,
+      source: `from disk: ${rel}, as ${finalName}`,
+    };
   }
 
   /** Selector for transient hover-revealed surfaces (tooltips, poppers, hover cards). */
@@ -1642,7 +1680,12 @@ export class BrowserEngine {
     if (bodyBefore === null || churning) return { revealed: [], fallbackUsed: false };
     const bodyAfter = (await page.evaluate(`document.body ? document.body.innerText : ""`).catch(() => null)) as string | null;
     if (bodyAfter === null) return { revealed: [], fallbackUsed: false };
-    const beforeLines = new Set(bodyBefore.split("\n").map((l) => l.trim()).filter(Boolean));
+    const beforeLines = new Set(
+      bodyBefore
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean),
+    );
     revealed = bodyAfter
       .split("\n")
       .map((l) => l.trim())
@@ -1962,7 +2005,12 @@ export class BrowserEngine {
       const finalUrl = page.url();
       const route = normalizePath(finalUrl);
       const fp = fingerprintState(finalUrl, elements);
-      memory.visitState(fp, finalUrl, route, elements.map((el) => el.key));
+      memory.visitState(
+        fp,
+        finalUrl,
+        route,
+        elements.map((el) => el.key),
+      );
       memory.recordRoleAccess(this.role, route, "reached");
       // If we landed somewhere else (auth wall, canonical redirect), the
       // REQUESTED route still counts as covered for THIS role — a role that
@@ -1990,11 +2038,9 @@ export class BrowserEngine {
       const unnamed = elements.filter((el) => !el.name).length;
       const missingTestid = elements.filter((el) => !el.testid && !el.disabled).length;
 
-      const flags = [
-        loginRedirect ? "AUTH-REDIRECT" : null,
-        deadEnd ? "DEAD-END" : null,
-        violations.length > 0 ? `${violations.length}⚠` : null,
-      ].filter(Boolean);
+      const flags = [loginRedirect ? "AUTH-REDIRECT" : null, deadEnd ? "DEAD-END" : null, violations.length > 0 ? `${violations.length}⚠` : null].filter(
+        Boolean,
+      );
       summary.push(
         `${path} — ${status} · ${elements.length} el` +
           (missingTestid ? ` · ${missingTestid} no-testid` : "") +
@@ -2006,7 +2052,9 @@ export class BrowserEngine {
           .slice(0, 3)
           .map((v) => `    ${v.kind}: ${v.detail.slice(0, 160)}`)
           .join("\n");
-        problems.push(`${path}${loginRedirect ? " → redirected to login (auth missing/expired?)" : ""}${deadEnd ? " → dead end" : ""}${detail ? `\n${detail}` : ""}`);
+        problems.push(
+          `${path}${loginRedirect ? " → redirected to login (auth missing/expired?)" : ""}${deadEnd ? " → dead end" : ""}${detail ? `\n${detail}` : ""}`,
+        );
       }
     }
     // Crawl leaves the page wherever it ended — refs from before are gone.
@@ -2174,7 +2222,12 @@ export class BrowserEngine {
             const { elements } = await this.collect();
             const url = page.url();
             const fp = fingerprintState(url, elements);
-            this.memory!.visitState(fp, url, normalizePath(url), elements.map((el) => el.key));
+            this.memory!.visitState(
+              fp,
+              url,
+              normalizePath(url),
+              elements.map((el) => el.key),
+            );
             this.memory!.recordRoleAccess(this.role, normalizePath(url), "reached");
             lastCapture = { fp, elements, url };
             // …but mark the acted-on element in the state it came FROM, using
@@ -2281,9 +2334,7 @@ export class BrowserEngine {
    */
   async scroll(to?: "top" | "bottom", by?: number, target?: string): Promise<string> {
     this.actionStartedAt = Date.now();
-    const { refused, note } = target
-      ? await this.scrollContainer(target, to, by)
-      : await this.performScroll(to, by);
+    const { refused, note } = target ? await this.scrollContainer(target, to, by) : await this.performScroll(to, by);
     if (refused) return refused;
     const amount = Math.trunc(by ?? 600);
     const label = to ?? `${amount >= 0 ? "down" : "up"} ${Math.abs(amount)}px`;
@@ -2299,11 +2350,7 @@ export class BrowserEngine {
    * away. Resolves the element, then scrolls the nearest scrollable ancestor
    * (the target itself is usually the content, not the scroll port).
    */
-  private async scrollContainer(
-    target: string,
-    to?: "top" | "bottom",
-    by?: number,
-  ): Promise<{ refused?: string; note: string }> {
+  private async scrollContainer(target: string, to?: "top" | "bottom", by?: number): Promise<{ refused?: string; note: string }> {
     const page = this.requirePage();
     let locator;
     if (target.startsWith("testid=")) locator = page.locator(`[data-testid=${JSON.stringify(target.slice(7))}]`).first();
@@ -2351,9 +2398,7 @@ export class BrowserEngine {
     const edge = outcome.y >= outcome.max - 4 ? " — at its bottom" : outcome.y <= 4 ? " — at its top" : "";
     const moved = Math.abs(outcome.y - outcome.before) > 4;
     return {
-      note:
-        `\nScrolled ${outcome.name}: ${outcome.y}px of ${outcome.max}px (${pct}%)${edge}.` +
-        (moved ? "" : ` It did not move — already at that position.`),
+      note: `\nScrolled ${outcome.name}: ${outcome.y}px of ${outcome.max}px (${pct}%)${edge}.` + (moved ? "" : ` It did not move — already at that position.`),
     };
   }
 
@@ -2411,7 +2456,9 @@ export class BrowserEngine {
       })()`)) as { name: string; y: number; max: number } | null;
       if (!inner) return { note: `\nPage does not scroll — the content fits the viewport and no scrollable inner container was found.` };
       const pct = inner.max > 0 ? Math.round((inner.y / inner.max) * 100) : 100;
-      return { note: `\nThe document itself does not scroll (app-shell layout) — scrolled the inner container ${inner.name} instead: ${inner.y}px of ${inner.max}px (${pct}%)${inner.y >= inner.max - 4 ? " — at its bottom" : inner.y <= 4 ? " — at its top" : ""}.` };
+      return {
+        note: `\nThe document itself does not scroll (app-shell layout) — scrolled the inner container ${inner.name} instead: ${inner.y}px of ${inner.max}px (${pct}%)${inner.y >= inner.max - 4 ? " — at its bottom" : inner.y <= 4 ? " — at its top" : ""}.`,
+      };
     }
     if (to === "top") await page.evaluate("window.scrollTo(0, 0)");
     else if (to === "bottom") await page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)");
@@ -2421,9 +2468,10 @@ export class BrowserEngine {
     const pct = max > 0 ? Math.round((after.y / max) * 100) : 100;
     let note = `\nScroll position: ${Math.round(after.y)}px of ${max}px (${pct}%)${after.y >= max - 4 ? " — at the bottom" : after.y <= 4 ? " — at the top" : ""}.`;
     if (wantedDown && hadRoomDown && Math.abs(after.y - before.y) <= 4) {
-      note += before.lock && before.ov
-        ? `\nPage scroll is locked by an open overlay (normal modal behaviour).`
-        : `\n⚠ SCROLL LOCKED: the document is ${Math.round(before.dh - before.vh)}px taller than the viewport but the page did not scroll — content below the fold is unreachable (file it).`;
+      note +=
+        before.lock && before.ov
+          ? `\nPage scroll is locked by an open overlay (normal modal behaviour).`
+          : `\n⚠ SCROLL LOCKED: the document is ${Math.round(before.dh - before.vh)}px taller than the viewport but the page did not scroll — content below the fold is unreachable (file it).`;
     }
     return { note };
   }
@@ -2542,8 +2590,7 @@ export class BrowserEngine {
    * than failing the audit.
    */
   private async probeFocusIndicators(page: Page): Promise<FocusSample[]> {
-    const styleSig =
-      "s.outlineStyle + '|' + s.outlineWidth + '|' + s.outlineColor + '|' + s.boxShadow + '|' + s.borderColor + '|' + s.backgroundColor";
+    const styleSig = "s.outlineStyle + '|' + s.outlineWidth + '|' + s.outlineColor + '|' + s.boxShadow + '|' + s.borderColor + '|' + s.backgroundColor";
     const stops: Array<{ i: number; label: string; focused: string }> = [];
     try {
       for (let i = 0; i < 15; i++) {

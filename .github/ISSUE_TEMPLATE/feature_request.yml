@@ -1,0 +1,39 @@
+name: Feature or change proposal
+description: Propose it here BEFORE writing code. Most feature ideas are declined or reshaped, and an issue costs minutes.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [VISION.md](../blob/main/VISION.md) first — it lists what is in scope and what is likely to be declined.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can a tester not do today, or what does SceneScout get wrong? Describe the problem, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+    validations:
+      required: true
+  - type: checkboxes
+    id: fit
+    attributes:
+      label: Fit
+      options:
+        - label: It works for any web app, not one app or one vendor's stack
+          required: true
+        - label: It does not put a model, an API key, telemetry, or an account requirement inside the engine
+          required: true
+        - label: It does not weaken read-only mode or make a write mode the default
+          required: true
+  - type: dropdown
+    id: build
+    attributes:
+      label: Would you build it?
+      options: ["Yes, if accepted", "No, proposing only"]
+    validations:
+      required: true

@@ -18,6 +18,10 @@ updates:
       # TypeScript 7 breaks this project's module resolution.
       - dependency-name: typescript
         update-types: ["version-update:semver-major"]
+      # Types must describe the OLDEST supported Node (engines: >=20), or the
+      # compiler stops flagging APIs that do not exist there.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
       # @modelcontextprotocol/sdk builds its tool schemas against zod v3's API.
       - dependency-name: zod
         update-types: ["version-update:semver-major"]

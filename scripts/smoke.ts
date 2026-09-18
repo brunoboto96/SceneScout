@@ -3,6 +3,12 @@
  * test app, drives BrowserEngine directly, and asserts oracles, read-only
  * policy, memory, findings, and report generation all work.
  */
+// This suite imports the COMPILED engine on purpose, unlike the pure-logic
+// suites that import ../src directly. The engine passes functions into the page
+// with page.evaluate(); run through tsx, the transpiler wraps them in a helper
+// that does not exist inside the browser, and they fail there in ways that look
+// like app behaviour ("scroll target not found"). `npm run smoke` rebuilds
+// first, so this still tests your edit, not the previous build.
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -231,7 +237,11 @@ async function main(): Promise<void> {
 
     console.log("native behaviours: append typing + hover reveal");
     const appendResult = await engine.type(refOf("Composer"), "tell me a joke");
-    check("type appends to a prefilled field and reports prior content", appendResult.includes("APPENDED") && appendResult.includes("@skill/klingon"), appendResult);
+    check(
+      "type appends to a prefilled field and reports prior content",
+      appendResult.includes("APPENDED") && appendResult.includes("@skill/klingon"),
+      appendResult,
+    );
     const replaceResult = await engine.type(refOf("Composer"), "fresh start", false, true);
     check(
       "replace=true overwrites and the appended value had actually landed",
@@ -239,7 +249,11 @@ async function main(): Promise<void> {
       replaceResult,
     );
     const clearResult = await engine.type(refOf("Composer"), "");
-    check("empty textValue clears a prefilled field instead of appending a space", clearResult.includes('replaced existing content "fresh start"'), clearResult);
+    check(
+      "empty textValue clears a prefilled field instead of appending a space",
+      clearResult.includes('replaced existing content "fresh start"'),
+      clearResult,
+    );
     const ceAppend = await engine.type(refOf("Notes editor"), "and more");
     check("contenteditable append preserves existing rich content", ceAppend.includes("APPENDED") && ceAppend.includes("Draft note"), ceAppend);
     const ceReplace = await engine.type(refOf("Notes editor"), "reset", false, true);
@@ -249,11 +263,19 @@ async function main(): Promise<void> {
       ceReplace,
     );
     const emailAppend = await engine.type(refOf("Draft email"), "com");
-    check("selection-unsupported input appends without a separator and without throwing", emailAppend.includes("APPENDED") && emailAppend.includes("user@example."), emailAppend);
+    check(
+      "selection-unsupported input appends without a separator and without throwing",
+      emailAppend.includes("APPENDED") && emailAppend.includes("user@example."),
+      emailAppend,
+    );
     const emailReplace = await engine.type(refOf("Draft email"), "z@y.io", false, true);
     check("email append concatenated cleanly", emailReplace.includes('replaced existing content "user@example.com"'), emailReplace);
     const hoverResult = await engine.hover(refOf("1 error"));
-    check("hover reveals tooltip via overlay diff (no aria-describedby on this badge)", hoverResult.includes("Revealed on hover") && hoverResult.includes("agent node"), hoverResult);
+    check(
+      "hover reveals tooltip via overlay diff (no aria-describedby on this badge)",
+      hoverResult.includes("Revealed on hover") && hoverResult.includes("agent node"),
+      hoverResult,
+    );
     const hoverDescribed = await engine.hover(refOf("3 notices"));
     check("hover surfaces aria-describedby text", hoverDescribed.includes("Held for moderator approval"), hoverDescribed);
     const hoverFallback = await engine.hover(refOf("2 warnings"));
@@ -267,11 +289,7 @@ async function main(): Promise<void> {
 
     console.log("read-only: form-submit and select bypass attempts");
     const enterAttempt = await engine.type(refOf("Type DELETE to confirm"), "DELETE", true);
-    check(
-      "type+Enter toward destructive submit refused",
-      enterAttempt.includes("did NOT press Enter") && enterAttempt.includes("REFUSED"),
-      enterAttempt,
-    );
+    check("type+Enter toward destructive submit refused", enterAttempt.includes("did NOT press Enter") && enterAttempt.includes("REFUSED"), enterAttempt);
     const selAttempt = await engine.select(refOf("Bulk actions"), "delete-all");
     check("destructive select option refused", selAttempt.includes("REFUSED"), selAttempt);
 
@@ -307,7 +325,11 @@ async function main(): Promise<void> {
     check("clipped text detected", design.includes("CLIPPED") && design.includes("design-clipped"), design);
 
     console.log("task efficiency (journey cost + page-level ease heuristics)");
-    check("form burden flagged when required fields aren't marked", design.includes("TASK EFFICIENCY") && /NONE marked required|only \d+ are required/.test(design), design);
+    check(
+      "form burden flagged when required fields aren't marked",
+      design.includes("TASK EFFICIENCY") && /NONE marked required|only \d+ are required/.test(design),
+      design,
+    );
     await engine.navigate("/");
     engine.startJourney("Submit feedback");
     const jSnap = await engine.snapshot(true);
@@ -329,7 +351,11 @@ async function main(): Promise<void> {
     check("ending with no journey in progress is handled, not thrown", engine.endJourney(true).includes("No journey in progress"));
 
     console.log("design connoisseur tier (readability, palette, slop tells, affordances, layout)");
-    check("over-long measure flagged with a char count", design.includes("READABILITY") && design.includes("craft-long-measure") && /characters per line/.test(design), design);
+    check(
+      "over-long measure flagged with a char count",
+      design.includes("READABILITY") && design.includes("craft-long-measure") && /characters per line/.test(design),
+      design,
+    );
     check("cramped line-height flagged", /line-height 1\.1\d? is cramped/.test(design), design);
     check("justified text flagged", design.includes("craft-justified") && design.includes("rivers"), design);
     check("long ALL-CAPS flagged", design.includes("craft-uppercase"), design);
@@ -341,10 +367,18 @@ async function main(): Promise<void> {
     check("violet gradient tell detected", design.includes("violet/purple gradient"), design);
     check("neon glow tell detected", design.includes("neon glow"), design);
     check("elevation variety flagged", design.includes("distinct box-shadow styles"), design);
-    check("missing keyboard focus indicator flagged on the seeded button", design.includes("craft-no-focus") && design.includes("NO visible focus indicator"), design);
+    check(
+      "missing keyboard focus indicator flagged on the seeded button",
+      design.includes("craft-no-focus") && design.includes("NO visible focus indicator"),
+      design,
+    );
     check("keyboard-focusing a default-styled control does NOT false-positive", !/NO visible focus indicator[^\n]*nav-home-link/.test(design), design);
     check("horizontal overflow reported as a responsive break", design.includes("scrolls horizontally"), design);
-    check("screen-reader-only text is NOT reported as clipped", !/CLIPPED[\s\S]{0,400}sr-only-label/.test(design), design.match(/CLIPPED text[^\n]*(\n  [^\n]*)*/)?.[0] ?? "no clipped section");
+    check(
+      "screen-reader-only text is NOT reported as clipped",
+      !/CLIPPED[\s\S]{0,400}sr-only-label/.test(design),
+      design.match(/CLIPPED text[^\n]*(\n  [^\n]*)*/)?.[0] ?? "no clipped section",
+    );
     check("system summary always present", design.includes("SYSTEM SUMMARY:") && design.includes("spacing on 4px grid"), design);
 
     console.log("overlay/modal oracle (app modals, not native dialogs)");
@@ -356,11 +390,19 @@ async function main(): Promise<void> {
     };
     await engine.click(ovRef("Toggle broken modal"));
     const brokenSnap = await engine.snapshot(true);
-    check("empty off-centre dialog over a grayed page is flagged", brokenSnap.includes("OVERLAY") && brokenSnap.includes("appears EMPTY"), brokenSnap.match(/OVERLAY[^\n]*/)?.[0] ?? brokenSnap.slice(0, 400));
+    check(
+      "empty off-centre dialog over a grayed page is flagged",
+      brokenSnap.includes("OVERLAY") && brokenSnap.includes("appears EMPTY"),
+      brokenSnap.match(/OVERLAY[^\n]*/)?.[0] ?? brokenSnap.slice(0, 400),
+    );
     await engine.click(ovRef("Toggle broken modal"));
     await engine.click(ovRef("Toggle orphan backdrop"));
     const orphanSnap = await engine.snapshot(true);
-    check("backdrop with NO dialog (user stuck on grayed page) is flagged", orphanSnap.includes("NO dialog content"), orphanSnap.match(/OVERLAY[^\n]*/)?.[0] ?? orphanSnap.slice(0, 400));
+    check(
+      "backdrop with NO dialog (user stuck on grayed page) is flagged",
+      orphanSnap.includes("NO dialog content"),
+      orphanSnap.match(/OVERLAY[^\n]*/)?.[0] ?? orphanSnap.slice(0, 400),
+    );
     await engine.click(ovRef("Toggle orphan backdrop"));
     const clearSnap = await engine.snapshot(true);
     check("overlay flags clear once the modal is closed", !clearSnap.includes("OVERLAY:"), clearSnap.match(/OVERLAY[^\n]*/)?.[0] ?? "clean");
@@ -375,17 +417,29 @@ async function main(): Promise<void> {
     };
     await engine.click(wmRef("Toggle wrapped modal"));
     const wrappedSnap = await engine.snapshot(true);
-    check("a modal carrying its own backdrop is not misread as empty/contentless", !wrappedSnap.includes("NO dialog content") && !wrappedSnap.includes("appears EMPTY") && !wrappedSnap.includes("far off-centre"), wrappedSnap.match(/[^\n]*OVERLAY[^\n]*/g)?.join(" | ") ?? "clean");
+    check(
+      "a modal carrying its own backdrop is not misread as empty/contentless",
+      !wrappedSnap.includes("NO dialog content") && !wrappedSnap.includes("appears EMPTY") && !wrappedSnap.includes("far off-centre"),
+      wrappedSnap.match(/[^\n]*OVERLAY[^\n]*/g)?.join(" | ") ?? "clean",
+    );
     await engine.click(wmRef("Toggle wrapped modal")); // close so it can't leak into later snapshots
 
     console.log("page quality score");
-    check("audit output carries a multi-indicator PAGE SCORE", /PAGE SCORE: \d+\/100 \([A-E]\) — a11y \d+ · craft \d+ · consistency \d+ · task-clarity \d+/.test(design), design.match(/PAGE SCORE[^\n]*/)?.[0] ?? design.slice(-300));
+    check(
+      "audit output carries a multi-indicator PAGE SCORE",
+      /PAGE SCORE: \d+\/100 \([A-E]\) — a11y \d+ · craft \d+ · consistency \d+ · task-clarity \d+/.test(design),
+      design.match(/PAGE SCORE[^\n]*/)?.[0] ?? design.slice(-300),
+    );
     const homeScore = engine.memory!.pageScores["/"];
     check("score persisted to memory per route", !!homeScore && homeScore.overall >= 0 && homeScore.overall <= 100, JSON.stringify(homeScore));
 
     console.log("scroll: user scrolling, lock oracle, clipped-ancestor unreachability");
     const preScrollSnap = await engine.snapshot(true);
-    check("control clipped inside an overflow-hidden container flagged as UNREACHABLE", preScrollSnap.includes("UNREACHABLE") && preScrollSnap.includes("clip-unreachable"), preScrollSnap.match(/[^\n]*UNREACHABLE[^\n]*/)?.[0] ?? preScrollSnap.slice(0, 300));
+    check(
+      "control clipped inside an overflow-hidden container flagged as UNREACHABLE",
+      preScrollSnap.includes("UNREACHABLE") && preScrollSnap.includes("clip-unreachable"),
+      preScrollSnap.match(/[^\n]*UNREACHABLE[^\n]*/)?.[0] ?? preScrollSnap.slice(0, 300),
+    );
     const scrollDown = await engine.scroll("bottom");
     check("scroll reports position and reaches the bottom", /Scroll position: \d+px of \d+px \(100%\) — at the bottom/.test(scrollDown), scrollDown);
     await engine.scroll("top");
@@ -398,7 +452,11 @@ async function main(): Promise<void> {
     const lockedScroll = await engine.scroll("bottom");
     check("locked page flags SCROLL LOCKED with the unreachable content measured", lockedScroll.includes("SCROLL LOCKED"), lockedScroll);
     const lockedSnap = await engine.snapshot(true);
-    check("snapshot passively detects the leaked scroll-lock as an OVERLAY issue", lockedSnap.includes("scrolling is DISABLED") && lockedSnap.includes("leaked modal scroll-lock"), lockedSnap.match(/[^\n]*DISABLED[^\n]*/)?.[0] ?? lockedSnap.slice(0, 300));
+    check(
+      "snapshot passively detects the leaked scroll-lock as an OVERLAY issue",
+      lockedSnap.includes("scrolling is DISABLED") && lockedSnap.includes("leaked modal scroll-lock"),
+      lockedSnap.match(/[^\n]*DISABLED[^\n]*/)?.[0] ?? lockedSnap.slice(0, 300),
+    );
     await engine.click(sRef("Toggle scroll lock"));
     const unlockedScroll = await engine.scroll("bottom");
     check("unlocking restores scrolling", !unlockedScroll.includes("SCROLL LOCKED") && /at the bottom/.test(unlockedScroll), unlockedScroll);
@@ -412,30 +470,68 @@ async function main(): Promise<void> {
     const missing = await engine.scroll("bottom", undefined, "testid=does-not-exist");
     check("a missing scroll target is refused, not silently ignored", missing.includes("Scroll target not found"), missing);
 
-    check("out-of-flow escapes (fixed / absolute past a static wrapper) are NOT flagged UNREACHABLE", !/"(Fixed-escape action|Static-escape action)" is UNREACHABLE/.test(preScrollSnap), preScrollSnap.match(/[^\n]*UNREACHABLE[^\n]*/g)?.join(" | ") ?? "no UNREACHABLE lines");
+    check(
+      "out-of-flow escapes (fixed / absolute past a static wrapper) are NOT flagged UNREACHABLE",
+      !/"(Fixed-escape action|Static-escape action)" is UNREACHABLE/.test(preScrollSnap),
+      preScrollSnap.match(/[^\n]*UNREACHABLE[^\n]*/g)?.join(" | ") ?? "no UNREACHABLE lines",
+    );
     await engine.click(sRef("Toggle healthy modal"));
     const modalScroll = await engine.scroll("bottom");
     check("a role-less modal's scroll-lock is respected as healthy (no SCROLL LOCKED refusal)", !modalScroll.includes("SCROLL LOCKED"), modalScroll);
     const modalSnap = await engine.snapshot(true);
-    check("no leaked-lock OVERLAY while the role-less modal is open", !modalSnap.includes("scrolling is DISABLED"), modalSnap.match(/[^\n]*OVERLAY[^\n]*/g)?.join(" | ") ?? "clean");
+    check(
+      "no leaked-lock OVERLAY while the role-less modal is open",
+      !modalSnap.includes("scrolling is DISABLED"),
+      modalSnap.match(/[^\n]*OVERLAY[^\n]*/g)?.join(" | ") ?? "clean",
+    );
     const closeRef = modalSnap.match(/(e\d+) [a-z]+ "Close modal"/)?.[1];
     if (!closeRef) throw new Error("close ref not found");
     await engine.click(closeRef);
     await engine.scroll("top");
-    const planScroll = await engine.runPlan([{ action: "scroll", value: "bottom" }, { action: "scroll", value: "top" }]);
+    const planScroll = await engine.runPlan([
+      { action: "scroll", value: "bottom" },
+      { action: "scroll", value: "top" },
+    ]);
     check("plans support scroll steps", planScroll.includes("2/2 steps ran"), planScroll);
 
     console.log("fixed-chrome share (synthetic — a fixture banner would intercept other tests' clicks)");
     const { analyzeDesign, DESIGN_COLLECT_SCRIPT } = await import("../dist/engine/design.js");
     const rawPayload = (await (engine as any).page.evaluate(DESIGN_COLLECT_SCRIPT)) as { records: Array<{ fixed: boolean }> };
-    check("in-browser collector records position:sticky/fixed on real elements", rawPayload.records.some((r) => r.fixed), `fixed records: ${rawPayload.records.filter((r) => r.fixed).length}`);
+    check(
+      "in-browser collector records position:sticky/fixed on real elements",
+      rawPayload.records.some((r) => r.fixed),
+      `fixed records: ${rawPayload.records.filter((r) => r.fixed).length}`,
+    );
     const mk = (over: Record<string, unknown>) => ({
-      tag: "div", testid: null, text: "chrome", textLen: 6, interactive: false,
-      rect: { x: 0, y: 0, w: 1280, h: 300 }, fontSize: 14, fontWeight: 400, fontFamily: "x",
-      lineHeight: 20, textTransform: "", textAlign: "", underline: false,
-      color: "rgba(20, 20, 20, 1)", bg: "rgb(255, 255, 255)", padding: [8, 8, 8, 8], marginV: [0, 0],
-      radius: 0, shadow: "", clipped: false, fixed: false, required: false, submitish: false,
-      sideStripe: false, gradientText: false, glass: false, glow: false, aiGradient: false, ...over,
+      tag: "div",
+      testid: null,
+      text: "chrome",
+      textLen: 6,
+      interactive: false,
+      rect: { x: 0, y: 0, w: 1280, h: 300 },
+      fontSize: 14,
+      fontWeight: 400,
+      fontFamily: "x",
+      lineHeight: 20,
+      textTransform: "",
+      textAlign: "",
+      underline: false,
+      color: "rgba(20, 20, 20, 1)",
+      bg: "rgb(255, 255, 255)",
+      padding: [8, 8, 8, 8],
+      marginV: [0, 0],
+      radius: 0,
+      shadow: "",
+      clipped: false,
+      fixed: false,
+      required: false,
+      submitish: false,
+      sideStripe: false,
+      gradientText: false,
+      glass: false,
+      glow: false,
+      aiGradient: false,
+      ...over,
     });
     const chromeResult = analyzeDesign(
       {
@@ -448,27 +544,39 @@ async function main(): Promise<void> {
       },
       { width: 1280, height: 900 },
     );
-    check("fixed/sticky chrome eating >25% of the viewport is flagged", chromeResult.report.includes("fixed/sticky chrome occupies"), chromeResult.report.match(/[^\n]*chrome occupies[^\n]*/)?.[0] ?? chromeResult.report.slice(0, 400));
+    check(
+      "fixed/sticky chrome eating >25% of the viewport is flagged",
+      chromeResult.report.includes("fixed/sticky chrome occupies"),
+      chromeResult.report.match(/[^\n]*chrome occupies[^\n]*/)?.[0] ?? chromeResult.report.slice(0, 400),
+    );
 
     console.log("finding dedup v2 (evidence + fuzzy title)");
     const [, fresh1] = engine.memory!.addFinding({
-      severity: "medium", category: "http-error",
+      severity: "medium",
+      category: "http-error",
       title: "Dashboard calls /api/reports as User → 403",
-      detail: "x", evidence: "GET /api/reports 403",
-      url: engine.currentUrl, state: engine.currentState,
+      detail: "x",
+      evidence: "GET /api/reports 403",
+      url: engine.currentUrl,
+      state: engine.currentState,
     });
     const [, fresh2] = engine.memory!.addFinding({
-      severity: "medium", category: "console-error",
+      severity: "medium",
+      category: "console-error",
       title: "Reports dashboard endpoint returns 403 for User role on every load",
-      detail: "y", evidence: "GET /api/reports 403",
-      url: engine.currentUrl, state: engine.currentState,
+      detail: "y",
+      evidence: "GET /api/reports 403",
+      url: engine.currentUrl,
+      state: engine.currentState,
     });
     check("evidence dedup catches rephrased finding", fresh1 && !fresh2);
     const [, fresh3] = engine.memory!.addFinding({
-      severity: "medium", category: "http-error",
+      severity: "medium",
+      category: "http-error",
       title: "Dashboard calls /api/reports as a User and gets 403 errors",
       detail: "z",
-      url: engine.currentUrl, state: engine.currentState,
+      url: engine.currentUrl,
+      state: engine.currentState,
     });
     check("fuzzy title dedup catches paraphrase without evidence", !fresh3);
 
@@ -529,7 +637,11 @@ async function main(): Promise<void> {
     await engine.navigate("/index.html");
     const gateSnap = await engine.snapshot(true);
     const gateToggleRef = gateSnap.match(/(e\d+) \w+ "[^"]*" \[testid=gate-toggle[,\]]/)?.[1] ?? "";
-    check("the gated submit starts disabled", /e\d+ button "Confirm order" \[testid=gate-submit, disabled/.test(gateSnap), gateSnap.match(/[^\n]*gate-submit[^\n]*/)?.[0] ?? "");
+    check(
+      "the gated submit starts disabled",
+      /e\d+ button "Confirm order" \[testid=gate-submit, disabled/.test(gateSnap),
+      gateSnap.match(/[^\n]*gate-submit[^\n]*/)?.[0] ?? "",
+    );
     await engine.click(gateToggleRef);
     const afterGate = await engine.snapshot();
     // Nothing is added, removed or relabeled — only `disabled` flipped.
@@ -545,16 +657,28 @@ async function main(): Promise<void> {
     console.log("completion contract + link discovery");
     check("links harvested into route contract", engine.allKnownRoutes().includes("/broken.html"), JSON.stringify(engine.allKnownRoutes()));
     engine.knownRoutes = ["/zzz-never-visited"];
-    check("unvisited tracks scanned + discovered union", engine.unvisitedKnownRoutes().includes("/zzz-never-visited"), JSON.stringify(engine.unvisitedKnownRoutes()));
+    check(
+      "unvisited tracks scanned + discovered union",
+      engine.unvisitedKnownRoutes().includes("/zzz-never-visited"),
+      JSON.stringify(engine.unvisitedKnownRoutes()),
+    );
     // A PERMISSION redirect satisfies the contract for the role that was
     // refused: a viewer who cannot see an admin page must not block the run.
     engine.memory!.markAttempted("/zzz-never-visited", "landed:/", engine.role);
-    check("a permission redirect satisfies the contract", !engine.unvisitedKnownRoutes().includes("/zzz-never-visited"), JSON.stringify(engine.unvisitedKnownRoutes()));
+    check(
+      "a permission redirect satisfies the contract",
+      !engine.unvisitedKnownRoutes().includes("/zzz-never-visited"),
+      JSON.stringify(engine.unvisitedKnownRoutes()),
+    );
     // ...but only for THAT role. Keyed by route alone, a low-privilege role
     // bouncing off an admin page erased it from the admin's ledger forever.
     const otherRole = engine.role;
     engine.role = "some-other-role";
-    check("another role's redirect does not answer for this one", engine.unvisitedKnownRoutes().includes("/zzz-never-visited"), JSON.stringify(engine.unvisitedKnownRoutes()));
+    check(
+      "another role's redirect does not answer for this one",
+      engine.unvisitedKnownRoutes().includes("/zzz-never-visited"),
+      JSON.stringify(engine.unvisitedKnownRoutes()),
+    );
     engine.role = otherRole;
     // An AUTH-LOSS bounce must never satisfy it. A token expiring mid-run made
     // every later navigation land on /login; each was recorded as "attempted",
@@ -570,7 +694,11 @@ async function main(): Promise<void> {
     // made them the same route, so reaching one certified the other — on the
     // two routes a tester least wants silently skipped.
     engine.knownRoutes = ["/404", "/500"];
-    check("static numeric routes are unvisited before they are reached", engine.unvisitedKnownRoutes().includes("/404"), JSON.stringify(engine.unvisitedKnownRoutes()));
+    check(
+      "static numeric routes are unvisited before they are reached",
+      engine.unvisitedKnownRoutes().includes("/404"),
+      JSON.stringify(engine.unvisitedKnownRoutes()),
+    );
     engine.memory!.visitState("/404#probe", `${baseUrl}/404`, "/404", []);
     check("visiting /404 covers /404", !engine.unvisitedKnownRoutes().includes("/404"), JSON.stringify(engine.unvisitedKnownRoutes()));
     check("...and does NOT also cover /500", engine.unvisitedKnownRoutes().includes("/500"), JSON.stringify(engine.unvisitedKnownRoutes()));
@@ -579,7 +707,10 @@ async function main(): Promise<void> {
 
     console.log("i18n destructive policy");
     const { isDestructive } = await import("../dist/engine/policy.js");
-    check("multilingual destructive labels blocked", isDestructive("Löschen") && isDestructive("Excluir conta") && isDestructive("削除") && !isDestructive("Los geht's"));
+    check(
+      "multilingual destructive labels blocked",
+      isDestructive("Löschen") && isDestructive("Excluir conta") && isDestructive("削除") && !isDestructive("Los geht's"),
+    );
 
     console.log("findings + report");
     const [finding, isNew] = engine.memory!.addFinding({
@@ -628,7 +759,11 @@ async function main(): Promise<void> {
     if (!syncRef) throw new Error("Sync now button not found");
     const syncResult = await engine.click(syncRef);
     await settle(600);
-    check("read-only: the worker-issued DELETE is reported as blocked", syncResult.includes("WRITE-POLICY blocked") && syncResult.includes("/api/items/999"), syncResult);
+    check(
+      "read-only: the worker-issued DELETE is reported as blocked",
+      syncResult.includes("WRITE-POLICY blocked") && syncResult.includes("/api/items/999"),
+      syncResult,
+    );
     check("read-only: the worker-issued DELETE never reaches the server", workerDeletes === 0, `server received ${workerDeletes} DELETE(s)`);
 
     await engine.navigate("/");
@@ -640,6 +775,10 @@ async function main(): Promise<void> {
     };
     const roBlocked = await engine.click(roRefOf("Sync foreign item"));
     check("read-only blocks DELETE despite harmless label", roBlocked.includes("WRITE-POLICY blocked") && roBlocked.includes("DELETE"), roBlocked);
+    // The request event fires before the policy decides, so the same DELETE used
+    // to be reported twice with opposite meanings. A blocked write did not
+    // happen; saying it "may have mutated" invites a false finding.
+    check("a blocked write is not ALSO reported as a possible mutation", !roBlocked.includes("may have mutated"), roBlocked);
 
     console.log("resilient click: forces past a real hit-test interception, not past a disabled control");
     // "Fake switch" is a <span> thumb painted over a visually-hidden <input>,
@@ -654,9 +793,7 @@ async function main(): Promise<void> {
     check("forced-click note explains the fallback was used", switchClick.includes("forced click was used instead"), switchClick);
     // White-box: reach into the private `page` field rather than growing the
     // public API just to verify this regression.
-    const switchChecked = await (engine as unknown as { page: import("playwright").Page }).page
-      .locator("#fake-switch")
-      .isChecked();
+    const switchChecked = await (engine as unknown as { page: import("playwright").Page }).page.locator("#fake-switch").isChecked();
     check("the forced click actually toggled the input (native label-forwarding)", switchChecked === true);
 
     // "Locked action" is a genuinely disabled <button> — force MUST NOT
@@ -690,7 +827,11 @@ async function main(): Promise<void> {
     };
     await engine2.click(swRefOf("Create item"));
     await until("item creation to register", () => engine2.createdResources.some((r) => r.includes("/api/items") && r.includes("id=42")));
-    check("creation tracked with id + collection", engine2.createdResources.some((r) => r.includes("/api/items") && r.includes("id=42")), JSON.stringify(engine2.createdResources));
+    check(
+      "creation tracked with id + collection",
+      engine2.createdResources.some((r) => r.includes("/api/items") && r.includes("id=42")),
+      JSON.stringify(engine2.createdResources),
+    );
     const ownResult = await engine2.click(swRefOf("Sync own item"));
     check("PUT on own resource allowed", !ownResult.includes("WRITE-POLICY blocked"), ownResult);
     await engine2.click(swRefOf("Create document"));
@@ -812,7 +953,11 @@ async function main(): Promise<void> {
     check("a disk file can be uploaded under another name", renamed.includes("as renamed.csv"), renamed);
     await engine2.click(refByTestid(upSnap, "upload-submit-action"));
     await until("the renamed upload to land", () => uploadLog.some((u) => u.filename === "renamed.csv"));
-    check("…and the server receives the override name, not the disk name", uploadLog.some((u) => u.filename === "renamed.csv"), JSON.stringify(uploadLog));
+    check(
+      "…and the server receives the override name, not the disk name",
+      uploadLog.some((u) => u.filename === "renamed.csv"),
+      JSON.stringify(uploadLog),
+    );
     const both = await engine2.upload({ ref: attachmentRef, filePath: "real-fixture.csv", fixture: "pdf" });
     check("filePath and fixture together are refused rather than one silently winning", both.includes("not both"), both);
     // A refused disk path must be refused BEFORE the trigger is clicked: the
@@ -854,7 +999,11 @@ async function main(): Promise<void> {
     check("a styled trigger routes the file through the chooser it opens", viaChooser.includes("via the file chooser"), viaChooser);
     check("accept=image/* picked a PNG fixture", viaChooser.includes("scenescout-fixture.png"), viaChooser);
     await until("the upload-on-select request", () => uploadLog.some((u) => u.filename === "scenescout-fixture.png"));
-    check("upload-on-select carried real PNG bytes", uploadLog.some((u) => u.filename === "scenescout-fixture.png" && u.sawPng), JSON.stringify(uploadLog));
+    check(
+      "upload-on-select carried real PNG bytes",
+      uploadLog.some((u) => u.filename === "scenescout-fixture.png" && u.sawPng),
+      JSON.stringify(uploadLog),
+    );
     check("an app that uploads on selection is reported as such", viaChooser.includes("sent a request on selection"), viaChooser);
     const noRef = await engine2.upload({ fixture: "png", name: "avatar-2.png" });
     check("with no ref, the page's only (hidden) file input is targeted directly", noRef.includes("OK: upload") && noRef.includes("only file input"), noRef);
@@ -885,8 +1034,15 @@ async function main(): Promise<void> {
     console.log("assumptions — cumulative written knowledge");
     const noted = engine2.memory!.addAssumption("roles", "qa-role reviews and approves quality records; cannot administer users", "smoke");
     check("assumption recorded", noted === true);
-    check("duplicate assumption rejected", engine2.memory!.addAssumption("roles", "qa-role reviews and approves quality records; cannot administer users", "smoke") === false);
-    check("assumptions read back as prose", engine2.memory!.readAssumptions().includes("qa-role reviews and approves"), engine2.memory!.readAssumptions().slice(0, 300));
+    check(
+      "duplicate assumption rejected",
+      engine2.memory!.addAssumption("roles", "qa-role reviews and approves quality records; cannot administer users", "smoke") === false,
+    );
+    check(
+      "assumptions read back as prose",
+      engine2.memory!.readAssumptions().includes("qa-role reviews and approves"),
+      engine2.memory!.readAssumptions().slice(0, 300),
+    );
 
     console.log("multi-session: two engines, two live browsers, ONE shared memory (multi-role collaboration)");
     const { MemoryStore } = await import("../dist/engine/memory.js");
@@ -908,10 +1064,17 @@ async function main(): Promise<void> {
     );
     check("sessions share one memory instance (no write races, findings merge)", engA.memory === engB.memory);
     const [sharedFinding] = sharedStore.addFinding({
-      severity: "low", category: "other", title: "multi-session shared-memory probe",
-      detail: "d", url: engA.currentUrl, state: "/multi#probe",
+      severity: "low",
+      category: "other",
+      title: "multi-session shared-memory probe",
+      detail: "d",
+      url: engA.currentUrl,
+      state: "/multi#probe",
     });
-    check("finding recorded via one role is visible to the other", engB.memory!.findings.some((f) => f.id === sharedFinding.id));
+    check(
+      "finding recorded via one role is visible to the other",
+      engB.memory!.findings.some((f) => f.id === sharedFinding.id),
+    );
     // Concurrency: two sessions' work must OVERLAP in time, not queue. Each
     // navigate is a real round-trip; if the server serialized every call
     // globally (the pre-0.9 behaviour) the elapsed time would be ~the sum of
@@ -945,7 +1108,11 @@ async function main(): Promise<void> {
       order.indexOf("A:start") < order.indexOf("B:end") && order.indexOf("B:start") < order.indexOf("A:end"),
       order.join(" → "),
     );
-    check("each session kept its own page after concurrent navigation", engA.currentUrl.includes("page2") && !engB.currentUrl.includes("page2"), `${engA.currentUrl} vs ${engB.currentUrl}`);
+    check(
+      "each session kept its own page after concurrent navigation",
+      engA.currentUrl.includes("page2") && !engB.currentUrl.includes("page2"),
+      `${engA.currentUrl} vs ${engB.currentUrl}`,
+    );
 
     // Journey isolation: the action log is SHARED across sessions, so a journey
     // measured in one role must not absorb a concurrent role's navigations —
@@ -979,25 +1146,41 @@ async function main(): Promise<void> {
     };
     await engC.click(refIn(cSnap, "Create item")); // role C creates /api/items/42
     await until("role C's creation to reach the shared ownership set", () => engD.createdResources.some((r) => r.includes("id=42")));
-    check("creation by role C is visible in the shared run ownership", engD.createdResources.some((r) => r.includes("id=42")), JSON.stringify(engD.createdResources));
+    check(
+      "creation by role C is visible in the shared run ownership",
+      engD.createdResources.some((r) => r.includes("id=42")),
+      JSON.stringify(engD.createdResources),
+    );
     const dSnap = await engD.snapshot(true);
     const dResult = await engD.click(refIn(dSnap, "Sync own item")); // role D mutates C's resource
-    check(
-      "role D may mutate a resource role C created (multi-role handoff not blocked)",
-      !dResult.includes("WRITE-POLICY blocked"),
-      dResult,
-    );
+    check("role D may mutate a resource role C created (multi-role handoff not blocked)", !dResult.includes("WRITE-POLICY blocked"), dResult);
     const dForeign = await engD.click(refIn(dSnap, "Sync foreign item"));
     check("foreign resources are still blocked for both roles", dForeign.includes("WRITE-POLICY blocked"), dForeign);
     await engC.close();
     await engD.close();
 
     console.log("role capability matrix + gap ledger + bounded report summary");
-    check("role access recorded per role", Object.keys(sharedStore.roleAccess).includes("role-alpha") && Object.keys(sharedStore.roleAccess).includes("role-beta"), JSON.stringify(sharedStore.roleAccess));
+    check(
+      "role access recorded per role",
+      Object.keys(sharedStore.roleAccess).includes("role-alpha") && Object.keys(sharedStore.roleAccess).includes("role-beta"),
+      JSON.stringify(sharedStore.roleAccess),
+    );
     const multiReport = generateReport(sharedStore, [], { routesVisited: 2, routesTotal: 2, designAudits: 0 });
-    check("report renders the role capability matrix when ≥2 roles ran", multiReport.markdown.includes("Role capability matrix"), multiReport.markdown.match(/Role capability matrix[^\n]*/)?.[0] ?? "missing");
-    check("gap ledger enumerates what was NOT tested", multiReport.markdown.includes("Gap ledger") && multiReport.markdown.includes("never design-audited"), multiReport.markdown.match(/## Gap ledger[\s\S]{0,300}/)?.[0] ?? "missing");
-    check("tool-facing summary is bounded (full reports blew client token limits)", multiReport.summary.length < 4000 && multiReport.summary.includes("Gap ledger"), `summary length ${multiReport.summary.length}`);
+    check(
+      "report renders the role capability matrix when ≥2 roles ran",
+      multiReport.markdown.includes("Role capability matrix"),
+      multiReport.markdown.match(/Role capability matrix[^\n]*/)?.[0] ?? "missing",
+    );
+    check(
+      "gap ledger enumerates what was NOT tested",
+      multiReport.markdown.includes("Gap ledger") && multiReport.markdown.includes("never design-audited"),
+      multiReport.markdown.match(/## Gap ledger[\s\S]{0,300}/)?.[0] ?? "missing",
+    );
+    check(
+      "tool-facing summary is bounded (full reports blew client token limits)",
+      multiReport.summary.length < 4000 && multiReport.summary.includes("Gap ledger"),
+      `summary length ${multiReport.summary.length}`,
+    );
 
     console.log("report honesty: stale scores flagged, one-role routes kept out of the permission matrix");
     {
@@ -1006,19 +1189,56 @@ async function main(): Promise<void> {
       const rs = new MS(repDir);
       // A score written BEFORE this session (a previous run's measurement) must
       // not silently rank as if it were re-measured today.
-      rs.setPageScore("/stale-page", { overall: 40, a11y: 40, craft: 40, consistency: 40, clarity: 40, at: "2020-01-01T00:00:00.000Z", url: "http://x/stale-page" });
-      rs.setPageScore("/fresh-page", { overall: 90, a11y: 90, craft: 90, consistency: 90, clarity: 90, at: new Date().toISOString(), url: "http://x/fresh-page" });
+      rs.setPageScore("/stale-page", {
+        overall: 40,
+        a11y: 40,
+        craft: 40,
+        consistency: 40,
+        clarity: 40,
+        at: "2020-01-01T00:00:00.000Z",
+        url: "http://x/stale-page",
+      });
+      rs.setPageScore("/fresh-page", {
+        overall: 90,
+        a11y: 90,
+        craft: 90,
+        consistency: 90,
+        clarity: 90,
+        at: new Date().toISOString(),
+        url: "http://x/fresh-page",
+      });
       // alpha and beta both tried /shared and diverged — a real boundary.
       // Only alpha ever tried /alpha-only — that is coverage, not permission.
       rs.recordRoleAccess("alpha", "/shared", "reached");
       rs.recordRoleAccess("beta", "/shared", "landed:/login");
       rs.recordRoleAccess("alpha", "/alpha-only", "reached");
       const rep = generateReport(rs, [], { routesVisited: 2, routesTotal: 2, designAudits: 1 });
-      check("a score carried over from an earlier run is marked stale", /\/stale-page[^\n]*stale/.test(rep.markdown), rep.markdown.match(/\|[^\n]*stale-page[^\n]*/)?.[0] ?? "no row");
-      check("a score measured this session is NOT marked stale", !/\/fresh-page[^\n]*stale/.test(rep.markdown), rep.markdown.match(/\|[^\n]*fresh-page[^\n]*/)?.[0] ?? "no row");
-      check("a genuinely divergent route stays in the permission matrix", /\|\s*`\/shared`/.test(rep.markdown), rep.markdown.match(/\|[^\n]*\/shared[^\n]*/)?.[0] ?? "missing");
-      check("a route only ONE role visited is excluded (coverage gap, not a denial)", !/\|\s*`\/alpha-only`/.test(rep.markdown), rep.markdown.match(/\|[^\n]*alpha-only[^\n]*/)?.[0] ?? "correctly absent");
-      check("the omission is disclosed rather than silent", rep.markdown.includes("visited by only ONE role"), rep.markdown.match(/[^\n]*only ONE role[^\n]*/)?.[0] ?? "not disclosed");
+      check(
+        "a score carried over from an earlier run is marked stale",
+        /\/stale-page[^\n]*stale/.test(rep.markdown),
+        rep.markdown.match(/\|[^\n]*stale-page[^\n]*/)?.[0] ?? "no row",
+      );
+      check(
+        "a score measured this session is NOT marked stale",
+        !/\/fresh-page[^\n]*stale/.test(rep.markdown),
+        rep.markdown.match(/\|[^\n]*fresh-page[^\n]*/)?.[0] ?? "no row",
+      );
+      check(
+        "a genuinely divergent route stays in the permission matrix",
+        /\|\s*`\/shared`/.test(rep.markdown),
+        rep.markdown.match(/\|[^\n]*\/shared[^\n]*/)?.[0] ?? "missing",
+      );
+      check(
+        "a route only ONE role visited is excluded (coverage gap, not a denial)",
+        !/\|\s*`\/alpha-only`/.test(rep.markdown),
+        rep.markdown.match(/\|[^\n]*alpha-only[^\n]*/)?.[0] ?? "correctly absent",
+      );
+      check(
+        "the omission is disclosed rather than silent",
+        rep.markdown.includes("visited by only ONE role"),
+        rep.markdown.match(/[^\n]*only ONE role[^\n]*/)?.[0] ?? "not disclosed",
+      );
+      rs.flush(); // settle the debounced write before its directory goes away
       fs.rmSync(repDir, { recursive: true, force: true });
     }
 

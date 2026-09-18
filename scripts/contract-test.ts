@@ -14,17 +14,38 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
-import { isNonPageRoute, normalizePath } from "../dist/engine/fingerprint.js";
-import { MemoryStore } from "../dist/engine/memory.js";
-import { classifyFilledStates, computeGaps, escapeTableCell, formatRouteCoverage } from "../dist/engine/report.js";
+import { isNonPageRoute, normalizePath } from "../src/engine/fingerprint.ts";
+import { MemoryStore } from "../src/engine/memory.ts";
+import { classifyFilledStates, computeGaps, escapeTableCell, formatRouteCoverage } from "../src/engine/report.ts";
 
 let dirs: string[] = [];
+/**
+ * Stores opened by the running test. Each holds a debounced write timer; a
+ * temp dir deleted while one is pending makes that write fail half a second
+ * later, and a green run then prints a wall of "memory write failed" lines —
+ * which is exactly what a newcomer's first `npm test` looked like.
+ */
+let stores: MemoryStore[] = [];
+
 function freshStore(): MemoryStore {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-contract-"));
   dirs.push(dir);
-  return new MemoryStore(dir);
+  const store = new MemoryStore(dir);
+  stores.push(store);
+  return store;
 }
+
 afterEach(() => {
+  // flush() cancels the pending timer; a store whose dir a test deleted on
+  // purpose has nothing left to write, which is fine.
+  for (const store of stores) {
+    try {
+      store.flush();
+    } catch {
+      /* the test removed this store's directory deliberately */
+    }
+  }
+  stores = [];
   for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
   dirs = [];
 });
@@ -159,7 +180,10 @@ test("ledger: attaching a file is filling a form too", () => {
   const viaPlan = freshStore();
   viaPlan.visitState("/attach#b", "http://x/attach", "/attach", ["file:attachment", "tid:attach-submit-btn"]);
   viaPlan.markExercised("/attach#b", "file:attachment", "plan:upload");
-  assert.ok(computeGaps(viaPlan).some((g) => g.includes("NEVER submitted")), "a plan's upload step counts the same way");
+  assert.ok(
+    computeGaps(viaPlan).some((g) => g.includes("NEVER submitted")),
+    "a plan's upload step counts the same way",
+  );
 });
 
 test("ledger: typing in a register's SEARCH box is not an unsubmitted form", () => {
@@ -202,12 +226,12 @@ test("ledger: submitting a WIZARD clears its earlier steps", () => {
     store.visitState(`${route}#a`, `http://x/customers/new?${step}`, route, ["textbox:name", "button:next"]);
     store.markExercised(`${route}#a`, "textbox:name", "type");
   }
-  assert.ok(computeGaps(store).some((g) => g.includes("NEVER submitted")), "before submission the wizard is an open gap");
-  store.markRouteFact("/customers/new?step=3", { mutated: true });
   assert.ok(
-    !computeGaps(store).some((g) => g.includes("NEVER submitted")),
-    "the final step's POST answers for the whole wizard, not just its own URL",
+    computeGaps(store).some((g) => g.includes("NEVER submitted")),
+    "before submission the wizard is an open gap",
   );
+  store.markRouteFact("/customers/new?step=3", { mutated: true });
+  assert.ok(!computeGaps(store).some((g) => g.includes("NEVER submitted")), "the final step's POST answers for the whole wizard, not just its own URL");
 });
 
 test("ledger: a TAB sibling does not clear another tab's abandoned form", () => {
@@ -245,7 +269,10 @@ test("ledger: 'search' inside a longer word is not a filter", () => {
   const store = freshStore();
   store.visitState("/r#a", "http://x/r", "/r", ["tid:research-title-input", "tid:research-save-btn"]);
   store.markExercised("/r#a", "tid:research-title-input", "type");
-  assert.ok(computeGaps(store).some((g) => g.includes("NEVER submitted")), "'research' is not 'search'");
+  assert.ok(
+    computeGaps(store).some((g) => g.includes("NEVER submitted")),
+    "'research' is not 'search'",
+  );
 });
 
 test("ledger: a state at the collector cap is never suppressed for want of a submit", () => {
@@ -256,7 +283,10 @@ test("ledger: a state at the collector cap is never suppressed for want of a sub
   const keys = Array.from({ length: 150 }, (_, i) => `tid:field-${i}`);
   store.visitState("/dense#a", "http://x/dense", "/dense", keys);
   store.markExercised("/dense#a", "tid:field-0", "type");
-  assert.ok(computeGaps(store).some((g) => g.includes("NEVER submitted") && g.includes("/dense")), "a truncated state must not self-exempt");
+  assert.ok(
+    computeGaps(store).some((g) => g.includes("NEVER submitted") && g.includes("/dense")),
+    "a truncated state must not self-exempt",
+  );
 });
 
 test("ledger: a filled state with no submit is DISCLOSED, not silently dropped and not gating", () => {

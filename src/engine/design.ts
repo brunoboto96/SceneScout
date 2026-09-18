@@ -277,11 +277,7 @@ export function contrastRatio(fg: string, bg: string): number | null {
   if (!f || !b) return null;
   // Composite a translucent text color over the (already-opaque) background.
   const [fr, fg_, fb, fa] = f;
-  const eff: [number, number, number] = [
-    fr * fa + b[0] * (1 - fa),
-    fg_ * fa + b[1] * (1 - fa),
-    fb * fa + b[2] * (1 - fa),
-  ];
+  const eff: [number, number, number] = [fr * fa + b[0] * (1 - fa), fg_ * fa + b[1] * (1 - fa), fb * fa + b[2] * (1 - fa)];
   const [l1, l2] = [luminance(eff), luminance([b[0], b[1], b[2]])].sort((a, z) => z - a);
   return (l1 + 0.05) / (l2 + 0.05);
 }
@@ -295,11 +291,10 @@ function hueOf([r, g, b]: [number, number, number]): number | null {
   if (max === r) h = ((g - b) / (max - min)) % 6;
   else if (max === g) h = (b - r) / (max - min) + 2;
   else h = (r - g) / (max - min) + 4;
-  return Math.round(((h * 60 + 360) % 360));
+  return Math.round((h * 60 + 360) % 360);
 }
 
-const label = (r: StyleRecord): string =>
-  r.testid ? `[${r.testid}]` : `<${r.tag}> "${r.text.slice(0, 30) || "(no text)"}"`;
+const label = (r: StyleRecord): string => (r.testid ? `[${r.testid}]` : `<${r.tag}> "${r.text.slice(0, 30) || "(no text)"}"`);
 
 /**
  * Stable identity for one styled element, used to recognise the SAME component
@@ -391,7 +386,13 @@ export function analyzeDesign(
   // ---- 1. CONTRAST (WCAG): normal text needs 4.5:1, large text (≥24px, or ≥18.7px bold) needs 3:1.
   const contrastFails = contrastFailures(records);
   if (contrastFails.length > 0) {
-    sections.push(`CONTRAST failures (${contrastFails.length}):\n` + contrastFails.slice(0, 8).map((s) => `  ⚠ ${s}`).join("\n"));
+    sections.push(
+      `CONTRAST failures (${contrastFails.length}):\n` +
+        contrastFails
+          .slice(0, 8)
+          .map((s) => `  ⚠ ${s}`)
+          .join("\n"),
+    );
   }
 
   // ---- 2. TYPOGRAPHY entropy: a page using >7 font sizes or >2 families usually
@@ -403,7 +404,9 @@ export function analyzeDesign(
     sections.push(
       `TYPOGRAPHY: ${sizes.length} distinct font sizes (${sizes.slice(0, 12).join(", ")}${sizes.length > 12 ? "…" : ""})` +
         (families.length > 2 ? ` · ${families.length} font families (${families.slice(0, 4).join(", ")})` : "") +
-        (nearDupSizes.length > 0 ? `\n  → sizes <1px apart (${nearDupSizes.join(", ")}) are drift, not scale steps — a type scale wants ≥1.15× between steps` : ""),
+        (nearDupSizes.length > 0
+          ? `\n  → sizes <1px apart (${nearDupSizes.join(", ")}) are drift, not scale steps — a type scale wants ≥1.15× between steps`
+          : ""),
     );
   }
 
@@ -433,10 +436,30 @@ export function analyzeDesign(
           : `→ ${label(r)} — line-height ${ratio} is loose; lines drift apart`,
       ),
   );
-  capped(2, prose.filter((p) => p.textLen > 120 && p.fontSize < 13).map((r) => `→ ${label(r)} — ${r.fontSize}px body text for a long passage; 14–16px reads better`));
-  capped(2, records.filter((p) => p.textAlign === "justify" && p.textLen > 80).map((r) => `→ ${label(r)} — justified text produces uneven word rivers on the web; left-align`));
-  capped(2, records.filter((p) => p.textTransform === "uppercase" && p.textLen > 30).map((r) => `→ ${label(r)} — ${r.textLen} chars of ALL-CAPS; caps suit short labels, hurt scanning at length`));
-  if (readability.length > 0) sections.push(`READABILITY:\n` + readability.slice(0, 14).map((s) => `  ${s}`).join("\n"));
+  capped(
+    2,
+    prose.filter((p) => p.textLen > 120 && p.fontSize < 13).map((r) => `→ ${label(r)} — ${r.fontSize}px body text for a long passage; 14–16px reads better`),
+  );
+  capped(
+    2,
+    records
+      .filter((p) => p.textAlign === "justify" && p.textLen > 80)
+      .map((r) => `→ ${label(r)} — justified text produces uneven word rivers on the web; left-align`),
+  );
+  capped(
+    2,
+    records
+      .filter((p) => p.textTransform === "uppercase" && p.textLen > 30)
+      .map((r) => `→ ${label(r)} — ${r.textLen} chars of ALL-CAPS; caps suit short labels, hurt scanning at length`),
+  );
+  if (readability.length > 0)
+    sections.push(
+      `READABILITY:\n` +
+        readability
+          .slice(0, 14)
+          .map((s) => `  ${s}`)
+          .join("\n"),
+    );
 
   // ---- 4. SPACING scale: paddings AND vertical margins off a 4px grid suggest ad-hoc values.
   const gridStats = (values: number[]): { pct: number; top: Array<[number, number]>; n: number } => {
@@ -453,23 +476,35 @@ export function analyzeDesign(
   const pad = gridStats(records.flatMap((r) => r.padding));
   const mar = gridStats(records.flatMap((r) => r.marginV));
   const spacingLines: string[] = [];
-  if (pad.n > 10 && pad.pct > 20) spacingLines.push(`${pad.pct}% of paddings are off a 4px grid — ad-hoc values: ${pad.top.map(([v, n]) => `${v}px×${n}`).join(", ")}`);
-  if (mar.n > 10 && mar.pct > 20) spacingLines.push(`${mar.pct}% of vertical margins are off a 4px grid — ad-hoc values: ${mar.top.map(([v, n]) => `${v}px×${n}`).join(", ")}`);
+  if (pad.n > 10 && pad.pct > 20)
+    spacingLines.push(`${pad.pct}% of paddings are off a 4px grid — ad-hoc values: ${pad.top.map(([v, n]) => `${v}px×${n}`).join(", ")}`);
+  if (mar.n > 10 && mar.pct > 20)
+    spacingLines.push(`${mar.pct}% of vertical margins are off a 4px grid — ad-hoc values: ${mar.top.map(([v, n]) => `${v}px×${n}`).join(", ")}`);
   if (spacingLines.length > 0) sections.push(`SPACING: ` + spacingLines.join("\n  "));
 
   // ---- 5. Touch/click targets below ~24px are hard to hit. Inline links are
   //      exempt (mirrors the WCAG 2.2 target-size exception); worst offenders first.
-  const tiny = records
-    .filter((r) => r.interactive && tooSmall(r))
-    .sort((a, b) => a.rect.w * a.rect.h - b.rect.w * b.rect.h);
+  const tiny = records.filter((r) => r.interactive && tooSmall(r)).sort((a, b) => a.rect.w * a.rect.h - b.rect.w * b.rect.h);
   if (tiny.length > 0) {
-    sections.push(`TINY targets (${tiny.length}, smallest first):\n` + tiny.slice(0, 6).map((r) => `  ⚠ ${label(r)} — ${r.rect.w}×${r.rect.h}px`).join("\n"));
+    sections.push(
+      `TINY targets (${tiny.length}, smallest first):\n` +
+        tiny
+          .slice(0, 6)
+          .map((r) => `  ⚠ ${label(r)} — ${r.rect.w}×${r.rect.h}px`)
+          .join("\n"),
+    );
   }
 
   // ---- 6. Clipped text (overflow hidden without ellipsis) — content silently cut off.
   const clipped = records.filter((r) => r.clipped);
   if (clipped.length > 0) {
-    sections.push(`CLIPPED text (${clipped.length}):\n` + clipped.slice(0, 6).map((r) => `  ⚠ ${label(r)} — text wider than its box, no ellipsis`).join("\n"));
+    sections.push(
+      `CLIPPED text (${clipped.length}):\n` +
+        clipped
+          .slice(0, 6)
+          .map((r) => `  ⚠ ${label(r)} — text wider than its box, no ellipsis`)
+          .join("\n"),
+    );
   }
 
   // ---- 7. Near-miss alignment: columns whose left edges differ by 1–4px look "off" without being nameable from a screenshot.
@@ -477,7 +512,10 @@ export function analyzeDesign(
   for (const r of records) {
     if (r.rect.x >= 0 && r.rect.x < viewport.width) xCounts.set(r.rect.x, (xCounts.get(r.rect.x) ?? 0) + 1);
   }
-  const columns = [...xCounts.entries()].filter(([, n]) => n >= 4).map(([x]) => x).sort((a, b) => a - b);
+  const columns = [...xCounts.entries()]
+    .filter(([, n]) => n >= 4)
+    .map(([x]) => x)
+    .sort((a, b) => a - b);
   const nearMiss: string[] = [];
   for (let i = 1; i < columns.length && nearMiss.length < 4; i++) {
     const delta = columns[i] - columns[i - 1];
@@ -500,12 +538,17 @@ export function analyzeDesign(
   }
   const buttonHeights = [...new Set(buttons.filter((b) => b.rect.h >= 12 && b.rect.h <= 80).map((b) => Math.round(b.rect.h / 2) * 2))].sort((a, b) => a - b);
   if (buttonHeights.length > 3) {
-    consistency.push(`→ buttons render at ${buttonHeights.length} different heights (${buttonHeights.slice(0, 8).join(", ")}px) — 1–2 control sizes read as a system`);
+    consistency.push(
+      `→ buttons render at ${buttonHeights.length} different heights (${buttonHeights.slice(0, 8).join(", ")}px) — 1–2 control sizes read as a system`,
+    );
   }
   const shadows = new Map<string, number>();
   for (const r of records) if (r.shadow) shadows.set(r.shadow, (shadows.get(r.shadow) ?? 0) + 1);
   if (shadows.size > 4) {
-    const top = [...shadows.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([s]) => `"${s.slice(0, 40)}"`);
+    const top = [...shadows.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([s]) => `"${s.slice(0, 40)}"`);
     consistency.push(`→ ${shadows.size} distinct box-shadow styles (${top.join(", ")}…) — an elevation system needs 2–3 levels, not one per component`);
   }
   if (consistency.length > 0) sections.push(`CONSISTENCY:\n` + consistency.map((s) => `  ${s}`).join("\n"));
@@ -514,7 +557,9 @@ export function analyzeDesign(
   const palette: string[] = [];
   const pureBlack = prose.filter((r) => r.color === "rgba(0, 0, 0, 1)" && (parseRgb(r.bg) ?? [0, 0, 0]).slice(0, 3).every((c) => c >= 250));
   if (pureBlack.length > 0) {
-    palette.push(`→ pure #000-on-#fff body text (${pureBlack.length} block(s), e.g. ${label(pureBlack[0])}) — near-black (rgb(23,23,23)-ish) reads softer at length`);
+    palette.push(
+      `→ pure #000-on-#fff body text (${pureBlack.length} block(s), e.g. ${label(pureBlack[0])}) — near-black (rgb(23,23,23)-ish) reads softer at length`,
+    );
   }
   const grayFreq = new Map<string, number>();
   const hueFamilies = new Map<number, number>();
@@ -531,18 +576,23 @@ export function analyzeDesign(
       }
       const hue = hueOf(rgb);
       if (hue !== null) {
-        const bucket = Math.round(hue / 30) * 30 % 360;
+        const bucket = (Math.round(hue / 30) * 30) % 360;
         hueFamilies.set(bucket, (hueFamilies.get(bucket) ?? 0) + 1);
       }
     }
   }
   if (grayFreq.size > 6) {
-    const top = [...grayFreq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k]) => `rgb(${k})`);
+    const top = [...grayFreq.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([k]) => `rgb(${k})`);
     palette.push(`→ ${grayFreq.size} distinct grays (${top.join(", ")}…) — a deliberate gray scale runs 4–6 steps; near-duplicates suggest ad-hoc values`);
   }
   if (hueFamilies.size > 5) {
     const hues = [...hueFamilies.keys()].sort((a, b) => a - b);
-    palette.push(`→ ${hueFamilies.size} accent hue families (~${hues.join("°, ")}°) — focused palettes run 1–3 hues plus semantic status colors (charts are a legitimate exception)`);
+    palette.push(
+      `→ ${hueFamilies.size} accent hue families (~${hues.join("°, ")}°) — focused palettes run 1–3 hues plus semantic status colors (charts are a legitimate exception)`,
+    );
   }
   if (palette.length > 0) sections.push(`PALETTE:\n` + palette.map((s) => `  ${s}`).join("\n"));
 
@@ -570,7 +620,9 @@ export function analyzeDesign(
   }
   for (const [key, arr] of cardKey) {
     if (arr.length >= 4 && slopTells.length < 8) {
-      slopTells.push(`→ ${arr.length} identical ${key}px cards (e.g. ${label(arr[0])}) — same-size card grids read as template output; vary sizes or drop the cards`);
+      slopTells.push(
+        `→ ${arr.length} identical ${key}px cards (e.g. ${label(arr[0])}) — same-size card grids read as template output; vary sizes or drop the cards`,
+      );
       break;
     }
   }
@@ -583,7 +635,8 @@ export function analyzeDesign(
   if (h1s.length > 1) structure.push(`→ ${h1s.length} <h1> elements — one page, one primary heading`);
   const levelsUsed = [...new Set(page.headings.map((h) => h.level))].sort((a, b) => a - b);
   for (let i = 1; i < levelsUsed.length; i++) {
-    if (levelsUsed[i] - levelsUsed[i - 1] > 1) structure.push(`→ heading levels skip h${levelsUsed[i - 1]}→h${levelsUsed[i]} — screen-reader outlines lose a level`);
+    if (levelsUsed[i] - levelsUsed[i - 1] > 1)
+      structure.push(`→ heading levels skip h${levelsUsed[i - 1]}→h${levelsUsed[i]} — screen-reader outlines lose a level`);
   }
   const avgSize = new Map<number, number>();
   for (const lvl of levelsUsed) {
@@ -593,7 +646,9 @@ export function analyzeDesign(
   for (let i = 1; i < levelsUsed.length; i++) {
     const [hi, lo] = [levelsUsed[i - 1], levelsUsed[i]];
     if ((avgSize.get(lo) ?? 0) > (avgSize.get(hi) ?? 0) + 1) {
-      structure.push(`→ h${lo} renders larger than h${hi} (${Math.round(avgSize.get(lo)!)}px vs ${Math.round(avgSize.get(hi)!)}px) — visual hierarchy contradicts the semantic one`);
+      structure.push(
+        `→ h${lo} renders larger than h${hi} (${Math.round(avgSize.get(lo)!)}px vs ${Math.round(avgSize.get(hi)!)}px) — visual hierarchy contradicts the semantic one`,
+      );
     }
   }
   if (structure.length > 0) sections.push(`STRUCTURE:\n` + structure.map((s) => `  ${s}`).join("\n"));
@@ -603,7 +658,10 @@ export function analyzeDesign(
   const focusless = page.focusSamples.filter((f) => !f.indicator);
   if (focusless.length > 0) {
     affordances.push(
-      `⚠ ${focusless.length}/${page.focusSamples.length} keyboard tab stops show NO visible focus indicator (outline/shadow/border unchanged on focus): ${focusless.slice(0, 6).map((f) => f.label).join(", ")}${focusless.length > 6 ? " …" : ""}`,
+      `⚠ ${focusless.length}/${page.focusSamples.length} keyboard tab stops show NO visible focus indicator (outline/shadow/border unchanged on focus): ${focusless
+        .slice(0, 6)
+        .map((f) => f.label)
+        .join(", ")}${focusless.length > 6 ? " …" : ""}`,
     );
   }
   const bodyColorFreq = new Map<string, number>();
@@ -618,13 +676,17 @@ export function analyzeDesign(
   if (affordances.length > 0) sections.push(`AFFORDANCES:\n` + affordances.map((s) => `  ${s}`).join("\n"));
 
   // ---- 12. IMAGES: aspect-ratio distortion (rendered box fights the source's proportions).
-  const distorted = page.images
-    .map((img) => ({ img, off: Math.abs((img.rw / img.rh) / (img.nw / img.nh) - 1) }))
-    .filter(({ off }) => off > 0.12);
+  const distorted = page.images.map((img) => ({ img, off: Math.abs(img.rw / img.rh / (img.nw / img.nh) - 1) })).filter(({ off }) => off > 0.12);
   if (distorted.length > 0) {
     sections.push(
       `IMAGES (${distorted.length} distorted):\n` +
-        distorted.slice(0, 5).map(({ img, off }) => `  ⚠ ${img.label} — rendered ${img.rw}×${img.rh} vs natural ${img.nw}×${img.nh} (aspect off by ${Math.round(off * 100)}%; use object-fit)`).join("\n"),
+        distorted
+          .slice(0, 5)
+          .map(
+            ({ img, off }) =>
+              `  ⚠ ${img.label} — rendered ${img.rw}×${img.rh} vs natural ${img.nw}×${img.nh} (aspect off by ${Math.round(off * 100)}%; use object-fit)`,
+          )
+          .join("\n"),
     );
   }
 
@@ -651,7 +713,9 @@ export function analyzeDesign(
   }
   const chromeH = [...chromeBands.values()].reduce((a, b) => a + b, 0);
   if (chromeH > viewport.height * 0.25) {
-    layout.push(`→ fixed/sticky chrome occupies ~${Math.min(100, Math.round((chromeH / viewport.height) * 100))}% of the viewport (${Math.round(chromeH)}px of bars that follow every scroll) — content gets a letterbox; consider collapsing chrome on scroll`);
+    layout.push(
+      `→ fixed/sticky chrome occupies ~${Math.min(100, Math.round((chromeH / viewport.height) * 100))}% of the viewport (${Math.round(chromeH)}px of bars that follow every scroll) — content gets a letterbox; consider collapsing chrome on scroll`,
+    );
   }
   if (layout.length > 0) sections.push(`LAYOUT:\n` + layout.map((l) => `  ${l}`).join("\n"));
 
@@ -673,16 +737,23 @@ export function analyzeDesign(
   });
   const foldH = viewport.height;
   if (prominent.length === 0) {
-    effort.push(`→ no visually dominant action on this page — nothing is filled/coloured enough to read as "the next step"; a user must read every control to decide what to do`);
+    effort.push(
+      `→ no visually dominant action on this page — nothing is filled/coloured enough to read as "the next step"; a user must read every control to decide what to do`,
+    );
   } else if (prominent.length > 3) {
     effort.push(
-      `→ ${prominent.length} equally-prominent actions compete for attention (${prominent.slice(0, 4).map((r) => label(r)).join(", ")}…) — when everything is emphasised nothing is; demote secondary actions to outline/text style`,
+      `→ ${prominent.length} equally-prominent actions compete for attention (${prominent
+        .slice(0, 4)
+        .map((r) => label(r))
+        .join(", ")}…) — when everything is emphasised nothing is; demote secondary actions to outline/text style`,
     );
   }
   const aboveFold = prominent.filter((r) => r.rect.y >= 0 && r.rect.y < foldH);
   if (prominent.length > 0 && aboveFold.length === 0) {
     const nearest = prominent.reduce((a, b) => (a.rect.y < b.rect.y ? a : b));
-    effort.push(`→ the primary action (${label(nearest)}) sits ${Math.round(nearest.rect.y - foldH)}px below the fold — the user must scroll before seeing what this page is for`);
+    effort.push(
+      `→ the primary action (${label(nearest)}) sits ${Math.round(nearest.rect.y - foldH)}px below the fold — the user must scroll before seeing what this page is for`,
+    );
   }
   // Form burden: how much is being asked, and how much of it is actually needed.
   const fields = records.filter((r) => r.interactive && /input|select|textarea/.test(r.tag));
@@ -702,7 +773,9 @@ export function analyzeDesign(
   const hasHeading = page.headings.length > 0;
   const submits = records.filter((r) => r.submitish && r.interactive);
   if (!hasHeading && records.length > 20) {
-    effort.push(`→ no heading element on a content-bearing page — nothing states what this screen is, which hurts orientation and screen-reader navigation alike`);
+    effort.push(
+      `→ no heading element on a content-bearing page — nothing states what this screen is, which hurts orientation and screen-reader navigation alike`,
+    );
   }
   if (fields.length >= 3 && submits.length === 0) {
     effort.push(`→ ${fields.length} input fields but no obvious submit/confirm control detected — a user filling this in has no clear way to commit it`);
@@ -724,7 +797,13 @@ export function analyzeDesign(
   const a11yScore = floor0(100 - contrastFails.length * 4 - focusless.length * 6 - tiny.length * 3);
   const craftScore = floor0(100 - readability.length * 4 - palette.length * 4 - slopTells.length * 5 - clipped.length * 3 - distorted.length * 4);
   const consistencyScore = floor0(
-    100 - consistency.length * 8 - (pad.n > 10 && pad.pct > 20 ? 10 : 0) - (mar.n > 10 && mar.pct > 20 ? 6 : 0) - nearMiss.length * 3 - (sizes.length > 7 ? 5 : 0) - (nearDupSizes.length > 0 ? 5 : 0),
+    100 -
+      consistency.length * 8 -
+      (pad.n > 10 && pad.pct > 20 ? 10 : 0) -
+      (mar.n > 10 && mar.pct > 20 ? 6 : 0) -
+      nearMiss.length * 3 -
+      (sizes.length > 7 ? 5 : 0) -
+      (nearDupSizes.length > 0 ? 5 : 0),
   );
   const clarityScore = floor0(100 - effort.length * 8 - (page.scrollW > viewport.width + 8 ? 15 : 0) - structure.length * 4);
   const overall = Math.round(a11yScore * 0.3 + craftScore * 0.25 + consistencyScore * 0.2 + clarityScore * 0.25);
@@ -750,7 +829,10 @@ export function analyzeDesign(
     if (chromeIssues.length > 0) {
       chromeSection.push(
         `SHARED CHROME (${chromeRecords.length} shell elements, excluded from this page's score and reported here instead):\n` +
-          [...new Set(chromeIssues)].slice(0, CHROME_ISSUE_CAP).map((s) => `  ⚠ ${s}`).join("\n") +
+          [...new Set(chromeIssues)]
+            .slice(0, CHROME_ISSUE_CAP)
+            .map((s) => `  ⚠ ${s}`)
+            .join("\n") +
           `\n  → these belong to the app shell and recur on every page that renders it. File ONE finding for the shell, not one per page.`,
       );
     }

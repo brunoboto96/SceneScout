@@ -6,8 +6,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { scanProject } from "../dist/scan.js";
-import { normalizePath, fingerprintState } from "../dist/engine/fingerprint.js";
+import { scanProject } from "../src/scan.ts";
+import { normalizePath, fingerprintState } from "../src/engine/fingerprint.ts";
 
 let failures = 0;
 function check(name: string, cond: boolean, context?: string): void {
@@ -21,10 +21,7 @@ function check(name: string, cond: boolean, context?: string): void {
 function makeNextApp(root: string, name: string, routes: string[]): void {
   const dir = path.join(root, name);
   fs.mkdirSync(path.join(dir, "pages"), { recursive: true });
-  fs.writeFileSync(
-    path.join(dir, "package.json"),
-    JSON.stringify({ name, dependencies: { next: "^14.0.0", react: "^18.0.0" }, scripts: { dev: "next dev" } }),
-  );
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name, dependencies: { next: "^14.0.0", react: "^18.0.0" }, scripts: { dev: "next dev" } }));
   for (const route of routes) {
     const file = path.join(dir, "pages", route === "/" ? "index.tsx" : `${route.slice(1)}.tsx`);
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -61,14 +58,26 @@ try {
   const result = scanProject(tmp);
   check("primary workspace is the larger app", result.frontendDir === path.join(tmp, "frontend"), String(result.frontendDir));
   check("routes come from the primary app", result.routes.includes("/orders") && result.routes.length === 7, result.routes.join(","));
-  check("secondary workspace reported in notes", result.notes.some((n) => n.includes("control")), result.notes.join(" | "));
-  check("full-stack marker noted", result.notes.some((n) => n.includes("backend running")), result.notes.join(" | "));
+  check(
+    "secondary workspace reported in notes",
+    result.notes.some((n) => n.includes("control")),
+    result.notes.join(" | "),
+  );
+  check(
+    "full-stack marker noted",
+    result.notes.some((n) => n.includes("backend running")),
+    result.notes.join(" | "),
+  );
   check("framework detected", result.framework === "next");
 
   const single = fs.mkdtempSync(path.join(os.tmpdir(), "ft-scan-single-"));
   makeNextApp(single, ".", ["/", "/about"]);
   const singleResult = scanProject(single);
-  check("single-app project: root is the workspace", singleResult.frontendDir === fs.realpathSync(single) || singleResult.frontendDir === single, String(singleResult.frontendDir));
+  check(
+    "single-app project: root is the workspace",
+    singleResult.frontendDir === fs.realpathSync(single) || singleResult.frontendDir === single,
+    String(singleResult.frontendDir),
+  );
   fs.rmSync(single, { recursive: true, force: true });
 
   const empty = fs.mkdtempSync(path.join(os.tmpdir(), "ft-scan-empty-"));
@@ -81,17 +90,27 @@ try {
 
 console.log("finding lifecycle: retro-merge + resolve");
 {
-  const { MemoryStore } = await import("../dist/engine/memory.js");
+  const { MemoryStore } = await import("../src/engine/memory.ts");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mem-"));
   fs.mkdirSync(path.join(dir, ".scenescout"), { recursive: true });
   const mkFinding = (id: string, title: string, evidence: string | undefined, state: string) => ({
-    id, severity: "medium", category: "http-error", title, detail: "d", evidence,
-    url: "http://x/", state, repro: [], foundAt: "2026-08-16T00:00:00.000Z", runs: 1,
+    id,
+    severity: "medium",
+    category: "http-error",
+    title,
+    detail: "d",
+    evidence,
+    url: "http://x/",
+    state,
+    repro: [],
+    foundAt: "2026-08-16T00:00:00.000Z",
+    runs: 1,
   });
   fs.writeFileSync(
     path.join(dir, ".scenescout", "memory.json"),
     JSON.stringify({
-      version: 1, states: {},
+      version: 1,
+      states: {},
       findings: [
         mkFinding("aaa", "Dashboard calls /api/reports as User → 403", undefined, "/#x"),
         mkFinding("bbb", "Dashboard calls /api/reports for User role → 403 on every load", undefined, "/#y"),
@@ -104,33 +123,48 @@ console.log("finding lifecycle: retro-merge + resolve");
   check("retro-merge collapses paraphrased dups", store.findings.length === 3, `got ${store.findings.length}`);
   // Literal-match dedup: token overlap below threshold, but both carry "(role not recorded)".
   const [, litNew1] = store.addFinding({
-    severity: "medium", category: "data-inconsistency",
+    severity: "medium",
+    category: "data-inconsistency",
     title: 'Order audit-trail entries display "(role not recorded)" for the acting user',
-    detail: "d", url: "http://x/tickets/1", state: "/tickets/:id#a",
+    detail: "d",
+    url: "http://x/tickets/1",
+    state: "/tickets/:id#a",
   });
   const [, litNew2] = store.addFinding({
-    severity: "medium", category: "other",
+    severity: "medium",
+    category: "other",
     title: 'Audit-trail history entry shows "(role not recorded)" for actor',
-    detail: "d2", url: "http://x/tickets/2", state: "/tickets/:id#b",
+    detail: "d2",
+    url: "http://x/tickets/2",
+    state: "/tickets/:id#b",
   });
   check("shared literal dedups low-overlap paraphrase", litNew1 && !litNew2);
   // Regression: same distinctive literal but DIFFERENT evidence strings must still merge.
   const [, evLit1] = store.addFinding({
-    severity: "medium", category: "data-inconsistency",
+    severity: "medium",
+    category: "data-inconsistency",
     title: 'History rows render "(actor missing entirely)" in the trail',
-    detail: "d", evidence: "audit-trail entry actor blank on ORD-61",
-    url: "http://x/orders/1", state: "/orders/:id#a",
+    detail: "d",
+    evidence: "audit-trail entry actor blank on ORD-61",
+    url: "http://x/orders/1",
+    state: "/orders/:id#a",
   });
   const [, evLit2] = store.addFinding({
-    severity: "medium", category: "other",
+    severity: "medium",
+    category: "other",
     title: 'Trail displays "(actor missing entirely)" for each event',
-    detail: "d2", evidence: "trail rows show placeholder instead of user",
-    url: "http://x/orders/2", state: "/orders/:id#b",
+    detail: "d2",
+    evidence: "trail rows show placeholder instead of user",
+    url: "http://x/orders/2",
+    state: "/orders/:id#b",
   });
   check("shared literal overrides differing evidence", evLit1 && !evLit2);
   store.markAttempted("/admin/import", "landed:/login");
   check("attempted routes recorded", store.attemptedRoutes["/admin/import"] === "landed:/login");
-  check("distinct evidence NOT merged", store.findings.some((f: { id: string }) => f.id === "ccc") && store.findings.some((f: { id: string }) => f.id === "ddd"));
+  check(
+    "distinct evidence NOT merged",
+    store.findings.some((f: { id: string }) => f.id === "ccc") && store.findings.some((f: { id: string }) => f.id === "ddd"),
+  );
   const merged = store.findings.find((f: { id: string }) => f.id === "aaa");
   check("merged finding sums runs", merged?.runs === 2, String(merged?.runs));
   store.resolveFinding("ccc");
@@ -148,10 +182,7 @@ console.log("App Router: organisational directories are not part of the URL");
     fs.writeFileSync(file, "export default function P(){return null}");
   };
   fs.mkdirSync(app, { recursive: true });
-  fs.writeFileSync(
-    path.join(dir, "package.json"),
-    JSON.stringify({ name: "approuter", dependencies: { next: "^14.0.0", react: "^18.0.0" } }),
-  );
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "approuter", dependencies: { next: "^14.0.0", react: "^18.0.0" } }));
   page("");
   page("(marketing)/about"); // route group — shares a layout, adds nothing to the URL
   page("(shop)/(promos)/sale"); // nested groups
@@ -197,10 +228,7 @@ console.log("SvelteKit route discovery");
     fs.writeFileSync(file, "<h1>p</h1>");
   };
   fs.mkdirSync(routesDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(dir, "package.json"),
-    JSON.stringify({ name: "sk", devDependencies: { "@sveltejs/kit": "^2.0.0", vite: "^5.0.0" } }),
-  );
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "sk", devDependencies: { "@sveltejs/kit": "^2.0.0", vite: "^5.0.0" } }));
   page("");
   page("about");
   page("(app)/dashboard"); // group
@@ -216,10 +244,7 @@ console.log("SvelteKit route discovery");
 console.log("a framework with no filesystem routes says so instead of reporting none");
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-cra-"));
-  fs.writeFileSync(
-    path.join(dir, "package.json"),
-    JSON.stringify({ name: "cra", dependencies: { "react-scripts": "^5.0.0", react: "^18.0.0" } }),
-  );
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "cra", dependencies: { "react-scripts": "^5.0.0", react: "^18.0.0" } }));
   const scan = scanProject(dir);
   check("no routes found for a code-routed app", scan.routes.length === 0);
   check(
