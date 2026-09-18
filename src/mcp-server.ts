@@ -737,7 +737,7 @@ server.registerTool(
   "scout_screenshot",
   {
     description:
-      "Take a JPEG screenshot of the current viewport. LAST RESORT: geometry issues are in scout_snapshot and style/contrast/spacing issues are in scout_design_audit — use a screenshot only for pixel-native content (broken images, canvas, visual gestalt) that computed data cannot capture.",
+      "Take a JPEG screenshot of the current viewport. LAST RESORT: geometry issues are in scout_snapshot and style/contrast/spacing issues are in scout_design_audit — images that failed to load are listed in scout_snapshot under BROKEN IMAGES — use a screenshot only for pixel-native content (a canvas, visual gestalt) that computed data cannot capture.",
     inputSchema: { session: sessionParam },
   },
   serializedPerSession("scout_screenshot", async (_args: { session?: string }, session) => {

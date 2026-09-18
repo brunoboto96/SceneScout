@@ -586,6 +586,33 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     );
     check("read-only: the worker-issued DELETE never reaches the server", stats.workerDeletes === 0, `server received ${stats.workerDeletes} DELETE(s)`);
 
+    console.log("images: one that failed to load is reported from the DOM, even when no request failed");
+    // The HTTP oracle catches a 404. It cannot catch an image URL that answers
+    // 200 with something that is not an image — an HTML error page, a wrong
+    // content type — because no request failed. Only the DOM shows the browser
+    // gave up on it.
+    await engine.navigate("/images.html");
+    const imgSnap = await engine.snapshot(true);
+    const imgSection = imgSnap.match(/BROKEN IMAGES:[\s\S]{0,500}/)?.[0] ?? imgSnap.slice(0, 300);
+    check(
+      "a 404 image is reported with its alt text",
+      /image "Weekly chart" \[testid=img-404\] FAILED TO LOAD — \/img\/never-deployed\.png/.test(imgSnap),
+      imgSection,
+    );
+    check(
+      "an image URL that returns 200 with a non-image body is reported too",
+      /image "Team photo" \[testid=img-not-an-image\] FAILED TO LOAD — \/page2\.html/.test(imgSnap),
+      imgSection,
+    );
+    check("a broken image with no alt text says so", /image \(no alt text\) FAILED TO LOAD — \/login\.html/.test(imgSnap), imgSection);
+    // Gated on the section existing, so these cannot pass just because the feature is absent.
+    const hasSection = /BROKEN IMAGES:/.test(imgSnap);
+    check("an image that loaded is NOT reported", hasSection && !/A pixel that loads" .*FAILED TO LOAD/.test(imgSnap), imgSection);
+    check("a broken image hidden by its own display:none is NOT reported", hasSection && !/"Hidden".*FAILED TO LOAD/.test(imgSnap), imgSection);
+    check("a broken image inside a display:none ANCESTOR is NOT reported", hasSection && !/In a closed panel/.test(imgSection), imgSection);
+    check("a 1×1 tracking pixel is NOT reported", hasSection && !/beacon/.test(imgSection), imgSection);
+    check("an image is listed by its alt text, as an image", /image "A pixel that loads" \[testid=img-ok/.test(imgSnap), imgSnap.slice(0, 500));
+
     console.log("geometry: a pinned control under other pinned chrome is caught by hit test, intended layering is not");
     // Boxes cannot say which of two overlapping pinned elements is on top, so
     // the box oracle skips chrome/chrome pairs. A sticky action row under a

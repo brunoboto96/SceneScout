@@ -59,7 +59,7 @@ Every finding comes with a repro trace and a Playwright regression-test skeleton
 ## ✨ Why it's different
 
 - 🧠 **Claude is the brain — no API key.** The engine contains no LLM. Exploration runs on your Claude Code subscription; SceneScout just gives it deterministic tools.
-- 📐 **Structured scene, not pixels.** The agent reads element lists *with layout geometry*, not screenshots. Overlap and off-screen bugs are computed from boxes — deterministic, no vision guessing. (Screenshots exist only for pixel-native residue like broken images.)
+- 📐 **Structured scene, not pixels.** The agent reads element lists *with layout geometry*, not screenshots. Overlap and off-screen bugs are computed from boxes — deterministic, no vision guessing. Images that failed to load are read from the DOM too. (Screenshots exist only for pixel-native residue like a canvas or a rendering glitch.)
 - 🛡️ **Read-only by default, enforced on the wire.** Destructive actions are blocked at the network layer, not by asking the model nicely. Opt into writes only against disposable data.
 - ✅ **Completion is a contract, not a vibe.** The engine knows the app's routes and *refuses* to file an "extensive" report while any known route is unvisited, unexercised, or un-audited. "Explored a bit and stopped" is structurally impossible.
 - 🧭 **It remembers.** UI states are fingerprinted and stored in the project's `.scenescout/`. Run N+1 skips what run N already covered, and every run starts smarter than the last.
@@ -410,7 +410,7 @@ Found a way past the write policy, or another security problem? Please report it
 <details>
 <summary><strong>Full capability list</strong> — every behavior, for the curious</summary>
 
-- **Structured render-state, not pixels.** Element lists with geometry; screenshots reserved for pixel-native residue (broken images, canvas).
+- **Structured render-state, not pixels.** Element lists with geometry; screenshots reserved for pixel-native residue (canvas, rendering glitches). Images that failed to load are reported from the DOM, including ones whose URL answered 200 with something that is not an image.
 - **Diff snapshots with stable refs.** Re-snapshots return only what changed (10.7 kB → 0.7 kB on a 130-element page); old refs stay valid.
 - **Geometry oracles.** Overlap and off-screen defects computed from layout boxes.
 - **Oracles after every action.** Console errors, page errors, failed requests, HTTP 4xx/5xx drained into every tool result.

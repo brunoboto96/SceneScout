@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Image fixtures</title>
+  </head>
+  <body>
+    <main>
+      <h1>Image fixtures</h1>
+      <!-- Loads: must never be reported. -->
+      <img src="/pixel.png" alt="A pixel that loads" width="40" height="40" data-testid="img-ok" />
+      <!-- 404: the HTTP oracle sees this one too. -->
+      <img src="/img/never-deployed.png" alt="Weekly chart" width="120" height="60" data-testid="img-404" />
+      <!-- 200, but the body is an HTML page. No failed request, no HTTP error:
+           only the DOM knows the browser gave up on it. -->
+      <img src="/page2.html" alt="Team photo" width="120" height="60" data-testid="img-not-an-image" />
+      <!-- The same, with no alt text at all. -->
+      <img src="/login.html" width="120" height="60" />
+      <!-- Hidden: a broken image nobody can see is not a visible defect. -->
+      <img src="/img/also-missing.png" alt="Hidden" style="display: none" />
+      <!-- Hidden by an ANCESTOR: a closed panel. display is not inherited, so the
+           image's own computed style says "inline"; only its box says it is gone. -->
+      <div style="display: none"><img src="/img/in-closed-panel.png" alt="In a closed panel" width="120" height="60" /></div>
+      <!-- A tracking pixel. Its endpoint is not an image on purpose. -->
+      <img src="/api/beacon" alt="" width="1" height="1" />
+      <a href="/" data-testid="images-home">Home</a>
+    </main>
+  </body>
+</html>
