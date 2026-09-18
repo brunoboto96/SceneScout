@@ -2,6 +2,7 @@
  * A second engine on the same project: cross-run memory, safe-write ownership, the double-submit probe, uploads, and written assumptions.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { check, settle, until, type SmokeContext } from "./harness.ts";
@@ -10,6 +11,8 @@ export const title = "cross-run memory, safe-write, uploads";
 
 export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise<void> {
   const engine2 = new BrowserEngine();
+  /** A directory this suite creates OUTSIDE the project, for the upload-fence check. Removed in the finally below. */
+  let outsideDir: string | null = null;
   try {
     console.log("memory survives a new engine (cross-run persistence)");
     await engine2.attach({ url: baseUrl, projectDir, mode: "read-only" });
@@ -197,7 +200,13 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     check("filePath outside the attached project is refused (fenced like the origin)", escaped.startsWith("REFUSED"), escaped);
     // The other way out of the fence: a path INSIDE the project that is a
     // symlink to a file outside it. Only realpath catches this.
-    fs.symlinkSync("/etc/hosts", path.join(projectDir, "escape-link"));
+    // The target is a real file this test creates outside the project. A
+    // system path such as /etc/hosts does not exist on Windows: the link then
+    // dangles and the upload is reported as "not found", which says nothing
+    // about the fence.
+    outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "scout-outside-"));
+    fs.writeFileSync(path.join(outsideDir, "outside.txt"), "not part of the project");
+    fs.symlinkSync(path.join(outsideDir, "outside.txt"), path.join(projectDir, "escape-link"));
     const viaSymlink = await engine2.upload({ ref: attachmentRef, filePath: "escape-link" });
     check("a symlink inside the project pointing outside it is refused too", viaSymlink.startsWith("REFUSED"), viaSymlink);
     fs.writeFileSync(path.join(projectDir, "real-fixture.csv"), "a,b\n1,2\n");
@@ -298,5 +307,6 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     );
   } finally {
     await engine2.close().catch(() => {});
+    if (outsideDir) fs.rmSync(outsideDir, { recursive: true, force: true });
   }
 }
