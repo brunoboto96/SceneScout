@@ -152,3 +152,59 @@ test("errors caused by the tester's own write-policy block are not held against 
     "failed requests are decided by identity, not wording",
   );
 });
+
+test("a pinned control covered by other pinned chrome is reported, ahead of box overlaps", () => {
+  // The hit test runs in the page; this pins how its verdict is reported.
+  const covered = geometryIssues(
+    [
+      el({
+        ref: "e1",
+        name: "Save changes",
+        role: "button",
+        xpath: "/html/body/main/div[2]/button[1]",
+        rect: { x: 24, y: 850, w: 120, h: 32 },
+        chrome: true,
+        coveredBy: "[promo-bar]",
+      }),
+      el({
+        ref: "e2",
+        name: "Try the new importer",
+        role: "generic",
+        xpath: "/html/body/div[1]",
+        rect: { x: 0, y: 844, w: 1280, h: 56 },
+        chrome: true,
+        layer: 7,
+      }),
+    ],
+    VIEWPORT,
+  );
+  assert.equal(covered.length, 1);
+  assert.match(covered[0], /^e1 button "Save changes" is COVERED by pinned chrome \[promo-bar\]/);
+
+  // Without a hit-test verdict the chrome/chrome pair stays quiet, as before:
+  // two pieces of pinned chrome overlapping is usually intended layering.
+  const quiet = geometryIssues(
+    [
+      el({ ref: "e1", name: "Save changes", role: "button", xpath: "/html/body/main/div[2]/button[1]", rect: { x: 24, y: 850, w: 120, h: 32 }, chrome: true }),
+      el({ ref: "e2", name: "Bar", role: "generic", xpath: "/html/body/div[1]", rect: { x: 0, y: 844, w: 1280, h: 56 }, chrome: true }),
+    ],
+    VIEWPORT,
+  );
+  assert.deepEqual(quiet, []);
+
+  // A page full of them is summarised, not listed.
+  const many = Array.from({ length: 6 }, (_, i) =>
+    el({
+      ref: `e${i}`,
+      name: `Action ${i}`,
+      role: "button",
+      xpath: `/html/body/div[${i + 1}]/button[1]`,
+      rect: { x: 10 + i * 200, y: 850, w: 100, h: 30 },
+      chrome: true,
+      coveredBy: "[bar]",
+    }),
+  );
+  const summarised = geometryIssues(many, VIEWPORT);
+  assert.equal(summarised.filter((l) => /is COVERED/.test(l)).length, 3);
+  assert.ok(summarised.some((l) => /and 3 more pinned controls covered/.test(l)));
+});

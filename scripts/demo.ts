@@ -170,6 +170,14 @@ async function main(): Promise<void> {
     await engine.navigate("/order.html?id=1042");
     snap = show("snapshot /order", await engine.snapshot(true));
     await shot("order-detail");
+    finding({
+      severity: "high",
+      category: "visual",
+      title: "The Save notes button is covered by the bar at the bottom of the order page",
+      detail:
+        "The save row is sticky at the bottom of the viewport, and a fixed bar added later sits on top of it. The button is present, labelled and enabled, but it cannot be seen, and a click aimed at it lands on the bar. It only becomes reachable after scrolling to the very end of the page. Found by hit-testing the button's centre, since box overlap cannot tell which of two pinned elements is on top.",
+      evidence: '"Save notes" is COVERED by pinned chrome [order-stickybar]',
+    });
     show("click Save notes", await engine.click(refOf(snap, "order-save")));
     snap = await engine.snapshot(true);
     show("click Delete order (read-only)", await engine.click(refOf(snap, "order-delete")));

@@ -34,13 +34,5 @@ Stop here if you would rather see what a run finds on its own.
 | New order | Email field has a placeholder but no label | Snapshot and crawl count it as unnamed |
 | Reports | Export CSV throws | Page-error oracle |
 | Reports → Scheduled | No navigation, no way back | Crawl flags a dead end |
+| Order | A fixed bar at the bottom covers the sticky Save notes row | Geometry oracle, by hit-testing the button's centre (visible in `examples/screenshots/order-detail.png`) |
 | Order, Settings | Delete order / Delete workspace | Not defects: they show the read-only policy refusing destructive controls |
-
-## What it deliberately does not catch
-
-On the order page a fixed bar at the bottom of the viewport covers the sticky
-"Save notes" row. It is visible in `examples/screenshots/order-detail.png`, and
-the geometry oracle says nothing. That is by design: two pieces of fixed or
-sticky chrome overlapping is almost always intentional layering, so the oracle
-skips that pair to avoid flooding reports with false positives. This page is
-the counter-example, kept here so the limit is documented rather than hidden.
