@@ -333,8 +333,6 @@ args = ["-y", "scenescout", "serve"]
 }
 ```
 
-Or from the command line: `gemini mcp add scenescout npx -y scenescout serve`
-
 </details>
 
 <details>
