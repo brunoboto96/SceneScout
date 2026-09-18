@@ -366,3 +366,17 @@ test("app text cannot break out of a report table cell", () => {
     for (const m of out.matchAll(/(\\*)\|/g)) assert.equal(m[1].length % 2, 1, `live pipe in ${JSON.stringify(out)}`);
   }
 });
+
+test("ledger: in observe mode an unsubmitted form is explained, not dropped", () => {
+  // observe blocks every submission, so every filled form ends up here. It is
+  // still untested surface and must stay in the ledger — but worded as the
+  // mode's doing, with how to cover it, rather than as the run giving up.
+  const store = freshStore();
+  store.visitState("/widgets/new#a", "http://x/widgets/new", "/widgets/new", ["textbox:title", "tid:widget-submit-btn"]);
+  store.markExercised("/widgets/new#a", "textbox:title", "type");
+  const observed = computeGaps(store, { routesVisited: 1, routesTotal: 1, designAudits: 1, mode: "observe" }).find((g) => g.includes("NEVER submitted"));
+  assert.ok(observed, "the gap is still listed");
+  assert.match(observed, /expected in observe mode.*untested.*read-only mode/);
+  const normal = computeGaps(store, { routesVisited: 1, routesTotal: 1, designAudits: 1, mode: "read-only" }).find((g) => g.includes("NEVER submitted"));
+  assert.ok(normal && !/observe/.test(normal), "other modes get the plain wording");
+});

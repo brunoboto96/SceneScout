@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire } from "../src/engine/policy.ts";
+import { allowsWrite, AUTH_FLOW_RE, destructiveRefusal, isAuthExempt, isDestructive, isDestructiveWire, WRITE_MODES } from "../src/engine/policy.ts";
 import {
   deriveCollection,
   extractCreatedIds,
@@ -371,4 +371,76 @@ test("ownership: ids match whatever case or encoding the URL uses", () => {
   const spaced: OwnedIds = new Map([[normalizeId("Q3 plan"), new Set(["/api/docs"])]]);
   assert.equal(isOwnedResource(spaced, "/api/docs/Q3%20plan"), true);
   assert.equal(normalizeId("100%"), "100%", "a stray percent sign is compared as written, not thrown on");
+});
+
+test("the wire decision, mode by mode", () => {
+  // columns: method, destructive-looking?, addresses a record this run created?
+  const cases: Array<[string, boolean, boolean]> = [
+    ["POST", false, false], // an ordinary form submission
+    ["POST", true, false], // POST /items/7/archive
+    ["POST", true, true], // ...on our own record
+    ["PUT", false, false],
+    ["PUT", false, true],
+    ["DELETE", false, false],
+    ["DELETE", false, true],
+  ];
+  const table = (mode: (typeof WRITE_MODES)[number]) => cases.map(([method, destructive, owned]) => allowsWrite(mode, method, destructive, owned));
+
+  assert.deepEqual(
+    table("observe"),
+    [false, false, false, false, false, false, false],
+    "observe lets nothing but GETs leave the page — not even an ordinary form POST, not even on a record the run owns",
+  );
+  assert.deepEqual(table("read-only"), [true, false, true, false, false, false, false], "read-only lets plain POSTs through and nothing that edits or deletes");
+  assert.deepEqual(table("safe-write"), [true, false, true, false, true, false, true], "safe-write edits and deletes only what the run created");
+  assert.deepEqual(table("destructive"), [true, true, true, true, true, true, true]);
+  assert.deepEqual([...WRITE_MODES], ["observe", "read-only", "safe-write", "destructive"], "ordered from strictest to loosest");
+});
+
+test("the auth exemption never covers a destructive request, in any mode", () => {
+  // The exemption used to be tested before the destructive check, so a path
+  // that merely contained "session" or "auth" carried a delete through read-only.
+  for (const mode of WRITE_MODES) {
+    assert.equal(isAuthExempt(mode, "POST", "/api/session/123/delete", true), false, mode);
+    assert.equal(isAuthExempt(mode, "POST", "/api/auth/users/5/delete", true), false, mode);
+    assert.equal(isAuthExempt(mode, "PUT", "/api/auth/login", false), false, `${mode}: only POST is ever exempt`);
+  }
+  assert.equal(isAuthExempt("read-only", "POST", "/api/auth/login", false), true);
+  assert.equal(isAuthExempt("read-only", "POST", "/signup", false), true, "outside observe, signing up is part of the auth surface a tester walks");
+});
+
+test("in observe mode only the requests a login itself needs are exempt", () => {
+  const exempt = (p: string): boolean => isAuthExempt("observe", "POST", p, false);
+  // A session has to be able to exist.
+  for (const p of [
+    "/login",
+    "/api/auth/login",
+    "/api/v1/auth/sign-in",
+    "/auth/token/refresh",
+    "/oauth/token",
+    "/api/session",
+    "/api/sessions",
+    "/logout",
+    "/sso/callback",
+  ]) {
+    assert.equal(exempt(p), true, `${p} should be let through`);
+  }
+  // Everything else changes data on the target, whatever word is in its path.
+  for (const p of [
+    "/signup",
+    "/api/auth/signup",
+    "/api/auth/register",
+    "/api/auth/users", // invite or create a user
+    "/account/password",
+    "/api/user/password/change",
+    "/password/reset/confirm",
+    "/verify/documents/12/approve",
+    "/users/login-history/clear", // "login" as part of a longer segment
+    "/api/tokens", // mint an API token
+    "/api/session/123/extend", // acts ON a session
+    "/api/orders",
+    "/",
+  ]) {
+    assert.equal(exempt(p), false, `${p} must be blocked in observe`);
+  }
 });

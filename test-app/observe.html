@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Observe-mode fixtures</title>
+  </head>
+  <body>
+    <main>
+      <h1>Observe-mode fixtures</h1>
+      <!-- A login is the one kind of write a session needs in order to exist. -->
+      <button type="button" data-testid="observe-login" onclick="fetch('/api/auth/login', { method: 'POST', body: '{}' })">Log in</button>
+      <!-- These change data on the target, whatever word is in their path. -->
+      <button type="button" data-testid="observe-signup" onclick="fetch('/api/auth/signup', { method: 'POST', body: '{}' })">Create account</button>
+      <button type="button" data-testid="observe-invite" onclick="fetch('/api/auth/users', { method: 'POST', body: '{}' })">Invite teammate</button>
+      <button type="button" data-testid="observe-password" onclick="fetch('/api/account/password', { method: 'POST', body: '{}' })">Change password</button>
+      <!-- A native form post: a document request, not xhr/fetch. -->
+      <form method="post" action="/api/observe-native-post" data-testid="observe-native-form">
+        <label for="msg">Feedback</label>
+        <input id="msg" name="msg" value="hello" data-testid="observe-native-input" />
+        <button type="submit" data-testid="observe-native-submit">Send feedback</button>
+      </form>
+    </main>
+    <script>
+      // A socket-driven widget. Nothing listens at this address in the fixture
+      // server; opening it is enough for the browser to report the socket.
+      try {
+        new WebSocket("ws://" + location.host + "/live");
+      } catch (e) {
+        /* a blocked socket is fine for this fixture */
+      }
+    </script>
+  </body>
+</html>

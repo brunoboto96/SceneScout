@@ -223,13 +223,13 @@ server.registerTool(
   "scout_attach",
   {
     description:
-      "Launch a browser and attach to a running web app. Write policy is enforced at the NETWORK layer: mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass a Playwright storage-state JSON to explore as an authenticated role. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
+      "Launch a browser and attach to a running web app. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass a Playwright storage-state JSON to explore as an authenticated role. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
     inputSchema: {
       url: z.string().describe("Base URL of the running app, e.g. http://localhost:3000"),
       projectPath: z.string().describe("Absolute path to the project (memory + report live in .scenescout/ here)"),
       storageStatePath: z.string().optional().describe("Optional Playwright storage-state JSON path for authenticated exploration"),
       mode: z
-        .enum(["read-only", "safe-write", "destructive"])
+        .enum(["observe", "read-only", "safe-write", "destructive"])
         .default("read-only")
         .describe("Write policy (see tool description). Never choose 'destructive' yourself — user opt-in only."),
       headed: z.boolean().default(false).describe("Show the browser window"),
@@ -258,7 +258,7 @@ server.registerTool(
       url: string;
       projectPath: string;
       storageStatePath?: string;
-      mode?: "read-only" | "safe-write" | "destructive";
+      mode?: "observe" | "read-only" | "safe-write" | "destructive";
       headed?: boolean;
       viewportWidth?: number;
       viewportHeight?: number;
@@ -916,10 +916,14 @@ server.registerTool(
         routesTotal: all.length,
         designAudits: eng.designAuditCount,
         unvisitedRoutes: unvisited,
+        mode: eng.mode,
       });
       if (lvl === "extensive" && gapList.length > 0) {
         gates.push(
           `Level 'extensive' claims completeness, so it refuses while the GAP LEDGER is non-empty:\n` +
+            (eng.mode === "observe"
+              ? `(observe mode blocks every form submission, so the unsubmitted-forms gap cannot be closed in this mode: report at level 'medium', which discloses it.)\n`
+              : "") +
             gapList.map((g) => `  ⚠ ${g}`).join("\n") +
             `\nClose the gaps (or report at level 'medium', which discloses them instead).`,
         );
@@ -937,6 +941,7 @@ server.registerTool(
         designAudits: eng.designAuditCount,
         createdResources: eng.createdResources,
         unvisitedRoutes: unvisited,
+        mode: eng.mode,
         policyAttributed: eng.oracleLog.policyAttributed,
       });
       void p;
