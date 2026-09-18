@@ -765,7 +765,9 @@ export class MemoryStore {
 
   /** Append one dated, attributed bullet under a section; exact-duplicate notes are dropped. Returns whether it was new. */
   addAssumption(section: string, note: string, attribution: string): boolean {
-    const clean = note.trim().replace(/\s+/g, " ");
+    // Notes are free prose the agent often builds from app output; this file is
+    // the one most likely to be pasted into a ticket.
+    const clean = redactSecrets(note.trim().replace(/\s+/g, " "));
     if (!clean) return false;
     let content = fs.existsSync(this.assumptionsPath)
       ? fs.readFileSync(this.assumptionsPath, "utf8")
@@ -1023,6 +1025,9 @@ export class MemoryStore {
       ...input,
       title: redactSecrets(input.title),
       detail: redactSecrets(input.detail),
+      // The page URL is persisted AND printed in the report. A finding filed on
+      // a reset/invite/magic-link page carries that page's `?token=…`.
+      url: redactSecrets(input.url),
       evidence: input.evidence ? redactSecrets(input.evidence) : input.evidence,
     };
     const route = f.state.split("#")[0];

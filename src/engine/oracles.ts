@@ -1,4 +1,5 @@
 import type { Page } from "playwright";
+import { redactSecrets } from "./memory.js";
 
 export interface OracleViolation {
   kind: "console_error" | "page_error" | "request_failed" | "http_error";
@@ -12,6 +13,16 @@ export interface OracleViolation {
 
 /** URLs whose failures are noise, not findings (favicons, source maps). */
 const BENIGN_URL_RE = /favicon|\.map($|\?)/i;
+
+/**
+ * Violations quote request URLs verbatim — query string included — and end up
+ * in tool output, memory and the report. A failed `GET /api/x?api_key=…` or a
+ * 500 on a magic-link page must not re-publish the credential it carried.
+ * Redacted at record time so no later consumer has to remember to.
+ */
+export function redactViolation<T extends { detail: string; url: string }>(v: T): T {
+  return { ...v, detail: redactSecrets(v.detail), url: redactSecrets(v.url) };
+}
 
 /**
  * Invariant oracles: passive listeners that record violations regardless of
@@ -88,7 +99,7 @@ export class OracleMonitor {
   private static readonly MAX_REPORTED_SIGS = 5000;
 
   private record(v: Omit<OracleViolation, "at" | "repeat">): void {
-    const violation: OracleViolation = { ...v, at: new Date().toISOString() };
+    const violation: OracleViolation = { ...redactViolation(v), at: new Date().toISOString() };
     this.buffer.push(violation);
     this.all.push(violation);
   }

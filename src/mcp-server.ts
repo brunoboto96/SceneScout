@@ -29,7 +29,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { BrowserEngine, reapOrphanBrowsers } from "./engine/browser.js";
-import { MemoryStore } from "./engine/memory.js";
+import { MemoryStore, redactSecrets } from "./engine/memory.js";
 import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
 import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
 import { computeGaps, formatRouteCoverage, generateReport } from "./engine/report.js";
@@ -116,7 +116,8 @@ function writeStatus(session: string, phase: "running" | "idle", tool: string): 
           session,
           role: engines.get(session)?.role ?? "anonymous",
           sessions: [...engines.keys()],
-          url: engines.get(session)?.currentUrl ?? "",
+          // status.json is a poll target that gets pasted into bug reports.
+          url: redactSecrets(engines.get(session)?.currentUrl ?? ""),
           at: new Date().toISOString(),
         },
         null,

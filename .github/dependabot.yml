@@ -1,0 +1,31 @@
+# Version updates. Security updates are enabled separately in the repository
+# settings. The two major-version ignores below may also hold back a security
+# fix that only exists in that next major, so watch Dependabot ALERTS for
+# typescript and zod rather than relying on a pull request appearing.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for routine bumps instead of one per package.
+      minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Pinned on purpose — see "Pinned dependencies" in CLAUDE.md.
+      # TypeScript 7 breaks this project's module resolution.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      # @modelcontextprotocol/sdk builds its tool schemas against zod v3's API.
+      - dependency-name: zod
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
