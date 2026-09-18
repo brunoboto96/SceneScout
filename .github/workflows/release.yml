@@ -29,8 +29,32 @@ permissions:
   contents: read
 
 jobs:
-  release:
+  # A merged pull request labelled `skip-publish` makes this push a no-op for
+  # releases: no version pull request is opened or updated, nothing is
+  # published. Docs-only changes do not need it — without a changeset nothing is
+  # released anyway — so it is an explicit override, for example to land several
+  # changes before the version pull request is refreshed.
+  gate:
     if: github.repository == 'brunoboto96/SceneScout'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      skip: ${{ steps.label.outputs.skip }}
+    steps:
+      - id: label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          labels=$(gh api "repos/$GH_REPO/commits/${{ github.sha }}/pulls" --jq '[.[].labels[].name] | join(",")')
+          echo "labels on the merged pull request: ${labels:-none}"
+          if echo ",$labels," | grep -q ",skip-publish,"; then echo "skip=true" >> "$GITHUB_OUTPUT"; else echo "skip=false" >> "$GITHUB_OUTPUT"; fi
+
+  release:
+    needs: gate
+    if: needs.gate.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

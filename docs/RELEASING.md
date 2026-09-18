@@ -22,6 +22,15 @@ Nothing is published while the repository variable `NPM_PUBLISH` is anything
 other than `enabled`. The version pull request is still opened and kept up to
 date, so merged changesets stay visible; only the publish step is skipped.
 
+## Skipping a release run
+
+A merged pull request labelled `skip-publish` makes the release workflow stand
+down for that push: the version pull request is not opened or refreshed and
+nothing is published. It is rarely needed. A change with no changeset, such as
+a docs-only pull request, never causes a release in the first place. The label
+is an explicit override for the cases where a change does carry a changeset and
+the release should wait.
+
 ## One-time setup
 
 Publishing uses [npm trusted publishing](https://docs.npmjs.com/trusted-publishers):
