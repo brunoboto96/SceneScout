@@ -9,7 +9,7 @@
 ![node >= 20](https://img.shields.io/badge/node-%E2%89%A5%2020-339933?logo=node.js&logoColor=white)
 ![MCP server](https://img.shields.io/badge/MCP-server-8A2BE2)
 
-[✨ Why](#-why-its-different) · [🎯 Two ways to use it](#-two-ways-to-use-it) · [🚀 Quickstart](#-quickstart) · [🧰 Toolbox](#-the-toolbox) · [🔒 Safety](#-safety-model) · [🩺 Troubleshooting](#-troubleshooting)
+[👀 See it work](#-see-it-work) · [✨ Why](#-why-its-different) · [🎯 Two ways to use it](#-two-ways-to-use-it) · [🚀 Quickstart](#-quickstart) · [🧰 Toolbox](#-the-toolbox) · [🔌 Other clients](#-other-mcp-clients) · [🔒 Safety](#-safety-model) · [🩺 Troubleshooting](#-troubleshooting)
 
 </div>
 
@@ -24,6 +24,29 @@ SceneScout is an [MCP](https://modelcontextprotocol.io) server that hands an age
 ```
 
 Scripted E2E suites answer one question — *"does this exact flow still work?"* — and say nothing about the 95% of the app they don't touch. SceneScout covers both gaps: it finds what's **broken** (crashes, dead ends, permission leaks) *and* reports how the product could be **better** (confusing flows, weak hierarchy, design-system drift), with concrete measurements.
+
+
+## 👀 See it work
+
+This is a real run against the small demo app bundled in this repository. The screenshot was taken by SceneScout; the badge sitting on top of a button and the missing chart are two of the nine findings it filed.
+
+<p align="center"><img src="examples/screenshots/dashboard.png" alt="The demo app's dashboard: a yellow badge covers the All orders button, and the weekly chart image is broken" width="720" /></p>
+
+An excerpt of the report it wrote — [read the whole thing](examples/report.md):
+
+> **🔴 [HIGH] A double-click on Create order creates two orders**
+> Evidence: `2× click fired the same state-changing request 2× (POST /api/orders)`
+> The submit button stays enabled while the request is in flight, and the endpoint accepts the repeat.
+>
+> **🔴 [HIGH] Filtering orders by Archived fails, and the page shows an empty table instead of an error**
+> Evidence: `GET /api/orders?status=archived → HTTP 500`
+>
+> **🟠 [MEDIUM] The "New: bulk import" badge sits on top of the All orders button**
+> Evidence: `"All orders" overlaps "New: bulk import" (81%)` — measured from layout boxes, no screenshot needed.
+>
+> **Gap ledger — what was NOT tested:** 4/7 visited routes never design-audited · single-role run, so permission boundaries are untested
+
+Every finding comes with a repro trace and a Playwright regression-test skeleton. Try it yourself in two minutes: `npm run demo:serve`, then `/scenescout --url http://127.0.0.1:4173` — see [demo-app/](demo-app/). It also documents [one defect the tool deliberately does not flag](demo-app/README.md#what-it-deliberately-does-not-catch).
 
 ---
 
@@ -75,47 +98,66 @@ SceneScout needs only a URL. Give it the source code as well and it gets noticea
 | | |
 |---|---|
 | **Node** | ≥ 20 |
-| **Claude Code** | installed and signed in ([get it here](https://claude.ai/code)) |
+| **An MCP client** | [Claude Code](https://claude.ai/code) is the first-class one (it loads the skill); [others work too](#-other-mcp-clients) |
 | **A web app to test** | SceneScout tests a *live* app: start yours locally first (e.g. `npm run dev`, `make dev-up`), or have the URL of a deployed one you're allowed to test |
 
 ### 1️⃣ Install
 
+Pick one. All three end with the same 24 tools.
+
+**A · Claude Code plugin** — the skill and the server in one step:
+
+```
+/plugin marketplace add brunoboto96/SceneScout
+/plugin install scenescout@scenescout-marketplace
+```
+
+Then download the browser once: `npx -y scenescout install --browser-only`. The command is `/scenescout:scenescout`.
+
+**B · npm, for Claude Code or any other MCP client:**
+
+```bash
+npx -y scenescout install      # skill + Chromium (~150 MB, one-time) + registers the server with Claude Code
+```
+
+Using a different client? Skip the registration and [add the server to its config](#-other-mcp-clients) instead: `npx -y scenescout install --browser-only`.
+
+**C · From source**, to hack on it:
+
 ```bash
 git clone https://github.com/brunoboto96/SceneScout.git scenescout && cd scenescout
 npm install        # installs dependencies and builds
-npm run setup      # skill + Chromium + MCP registration, in one step
+npm run setup      # same as `scenescout install`, pointed at this checkout
 ```
 
-`npm run setup` does three things, and tells you which ones it did:
+<details>
+<summary>What <code>install</code> / <code>npm run setup</code> actually does</summary>
 
-1. links the `/scenescout` skill into `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`) — a `scenescout` folder it didn't create is moved aside to a `.backup-…` copy, never deleted,
-2. downloads the Chromium build SceneScout drives (one-time, ~150 MB — skipped if you already have it),
+1. links the `/scenescout` skill into `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`) — a `scenescout` folder it didn't create is moved aside to a `.backup-…` copy, never deleted. When run through `npx` it copies instead of linking, because the npx cache is temporary,
+2. downloads the Chromium build SceneScout drives (skipped if you already have it),
 3. registers the MCP server with Claude Code at user scope, using an **absolute** node path so it works under nvm/fnm.
 
-Re-run it any time: after moving the folder or switching node versions it refreshes the stored paths. It exits non-zero if any step failed, so `npm run setup && …` is safe to chain.
+Re-run it any time: after moving the folder or switching node versions it refreshes the stored paths. It exits non-zero if any step failed, so it is safe to chain. Opt out of a step with `--no-register` or `--skip-browser`.
+
+If `claude` isn't on the PATH of the shell you ran it from, it prints the registration command instead of running it:
+
+```bash
+claude mcp add --scope user scenescout -- npx -y scenescout serve
+```
+
+</details>
 
 ### 2️⃣ Check it
 
 ```bash
-npm run doctor
+npx -y scenescout doctor       # from source: npm run doctor
 ```
 
 Every line should be a ✓. Anything that isn't prints the exact command that fixes it. Then **start a fresh Claude Code session** so it picks up the new tools.
 
-<details>
-<summary>Registering the MCP server by hand</summary>
-
-If `claude` isn't on the PATH of the shell you ran setup from, setup prints this command instead of running it:
-
-```bash
-claude mcp add --scope user scenescout -- "$(which node)" "$(pwd)/dist/mcp-server.js"
-```
-
-Opt out of individual steps with `npm run setup -- --no-register` or `-- --skip-browser`.
-
-</details>
-
 ### 3️⃣ Run it
+
+No app handy? `npm run demo:serve` in a source checkout starts the [demo app](demo-app/) on `http://127.0.0.1:4173`.
 
 From Claude Code, inside the project you want to test (or, for a [remote URL](#-two-ways-to-use-it), any folder):
 
@@ -243,14 +285,61 @@ Then delete the clone. Per-project memory lives in each tested project's `.scene
 
 ---
 
-## 🔌 Using it standalone
+## 🔌 Other MCP clients
 
-The engine is client-agnostic — any MCP client can drive it over stdio:
+The engine is a plain MCP server over stdio, so any client can drive it. The server entry is always the same command — `npx -y scenescout serve` — only the config file differs. Download the browser once with `npx -y scenescout install --browser-only`.
+
+<details>
+<summary><strong>Cursor</strong> — <code>~/.cursor/mcp.json</code> (or <code>.cursor/mcp.json</code> in a project)</summary>
+
+```json
+{
+  "mcpServers": {
+    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"] }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>VS Code</strong> (GitHub Copilot agent mode) — <code>.vscode/mcp.json</code></summary>
+
+```json
+{
+  "servers": {
+    "scenescout": { "type": "stdio", "command": "npx", "args": ["-y", "scenescout", "serve"] }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Codex CLI</strong> — <code>~/.codex/config.toml</code></summary>
+
+```toml
+[mcp_servers.scenescout]
+command = "npx"
+args = ["-y", "scenescout", "serve"]
+```
+
+</details>
+
+<details>
+<summary><strong>Anything else</strong></summary>
+
+Most clients accept the same `mcpServers` JSON shape shown for Cursor. From a source checkout, the command is `node` with the absolute path to `dist/mcp-server.js`.
+
+</details>
+
+**The skill is what makes it good.** The tools are only hands and eyes; [`skills/scenescout/SKILL.md`](skills/scenescout/SKILL.md) is the method — what to look at first, when to stop, what counts as a finding. Claude Code loads it as a skill. In another client, give the agent that file as its instructions (a rule, a custom mode, or pasted into the first message).
+
+The CLI is also useful on its own:
 
 ```bash
-node dist/mcp-server.js            # start the MCP server
-node dist/cli.js scan <path>       # just run project discovery
-node dist/cli.js status <path>     # live status of a running engine
+npx -y scenescout scan <path>       # project discovery: framework, routes, saved logins
+npx -y scenescout status <path>     # what a running engine is doing right now
 ```
 
 ---
@@ -278,7 +367,7 @@ src/
     …               collector · dispatch · fixtures · authloss · reaper
 scripts/            the 11 test suites (smoke/ holds the real-browser ones)
 test-app/           fixtures for the real-browser smoke tests
-skill/scenescout/   the Claude Code skill (SKILL.md)
+skills/scenescout/   the Claude Code skill (SKILL.md)
 docs/adr/           why it's built this way
 ```
 

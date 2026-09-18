@@ -31,8 +31,8 @@ function tmp(prefix: string): string {
 
 /** A package root with just enough in it to install from. */
 function fakePackage(root = tmp("sc-pkg-")): string {
-  fs.mkdirSync(path.join(root, "skill", "scenescout"), { recursive: true });
-  fs.writeFileSync(path.join(root, "skill", "scenescout", "SKILL.md"), "# skill v1");
+  fs.mkdirSync(path.join(root, "skills", "scenescout"), { recursive: true });
+  fs.writeFileSync(path.join(root, "skills", "scenescout", "SKILL.md"), "# skill v1");
   fs.mkdirSync(path.join(root, "dist"), { recursive: true });
   fs.writeFileSync(path.join(root, "dist", "mcp-server.js"), "");
   return root;
@@ -65,7 +65,7 @@ test("installSkill links the skill into the given home, not the real one", () =>
   assert.equal(result.mode, "symlink");
   assert.equal(fs.readFileSync(path.join(result.dest, "SKILL.md"), "utf8"), "# skill v1");
   // A symlink means an edit in the checkout is live without reinstalling.
-  fs.writeFileSync(path.join(packageRoot, "skill", "scenescout", "SKILL.md"), "# skill v2");
+  fs.writeFileSync(path.join(packageRoot, "skills", "scenescout", "SKILL.md"), "# skill v2");
   assert.equal(fs.readFileSync(path.join(result.dest, "SKILL.md"), "utf8"), "# skill v2");
 });
 
@@ -76,7 +76,7 @@ test("installSkill replaces its OWN earlier installs: a symlink, and a marked co
   const cached = fakePackage(path.join(tmp("sc-npm-"), "_npx", "abc", "node_modules", "scenescout"));
   assert.equal(installSkill({ packageRoot: cached, claudeDir }).mode, "copy");
   const packageRoot = fakePackage();
-  fs.writeFileSync(path.join(packageRoot, "skill", "scenescout", "SKILL.md"), "# skill v2");
+  fs.writeFileSync(path.join(packageRoot, "skills", "scenescout", "SKILL.md"), "# skill v2");
   const second = installSkill({ packageRoot, claudeDir });
   assert.equal(second.mode, "symlink");
   assert.deepEqual(second.notes, [], "replacing our own install needs no warning");
@@ -130,8 +130,8 @@ test("installSkill drops the pre-rename skill when it is provably its own link",
   fs.mkdirSync(skills, { recursive: true });
   // What the pre-rename installer left behind: a link into the checkout, now dangling.
   // One per earlier name of the tool.
-  fs.symlinkSync(path.join(packageRoot, "skill", "frontend-tester"), path.join(skills, "frontend-tester"), "dir");
-  fs.symlinkSync(path.join(packageRoot, "skill", "scenecraft"), path.join(skills, "scenecraft"), "dir");
+  fs.symlinkSync(path.join(packageRoot, "skills", "frontend-tester"), path.join(skills, "frontend-tester"), "dir");
+  fs.symlinkSync(path.join(packageRoot, "skills", "scenecraft"), path.join(skills, "scenecraft"), "dir");
   const result = installSkill({ packageRoot, claudeDir });
   assert.equal(fs.lstatSync(path.join(skills, "frontend-tester"), { throwIfNoEntry: false }), undefined);
   assert.equal(fs.lstatSync(path.join(skills, "scenecraft"), { throwIfNoEntry: false }), undefined);
@@ -143,7 +143,7 @@ test("installSkill reinstalls over its own DANGLING link (the checkout was moved
   const claudeDir = tmp("sc-claude-");
   const skills = path.join(claudeDir, "skills");
   fs.mkdirSync(skills, { recursive: true });
-  fs.symlinkSync(path.join(tmp("sc-gone-"), "skill", "scenescout"), path.join(skills, "scenescout"), "dir");
+  fs.symlinkSync(path.join(tmp("sc-gone-"), "skills", "scenescout"), path.join(skills, "scenescout"), "dir");
   const result = installSkill({ packageRoot: fakePackage(), claudeDir });
   assert.equal(fs.readFileSync(path.join(result.dest, "SKILL.md"), "utf8"), "# skill v1");
   assert.deepEqual(result.notes, []);
@@ -377,4 +377,34 @@ test("diagnose compares the registration by real path, not by spelling", () => {
     checks.filter((c) => !c.ok),
     [],
   );
+});
+
+test("the plugin manifest ships the same version and starts the published server", () => {
+  // Claude Code offers a plugin update only when plugin.json's own version
+  // changes, so a release that bumps package.json alone never reaches plugin
+  // users. `npm run version-packages` keeps them together; this pins it.
+  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) as { version: string; name: string; bin: Record<string, string> };
+  const plugin = JSON.parse(fs.readFileSync(path.join(root, ".claude-plugin", "plugin.json"), "utf8")) as {
+    version: string;
+    name: string;
+    mcpServers: Record<string, { command: string; args: string[] }>;
+  };
+  const marketplace = JSON.parse(fs.readFileSync(path.join(root, ".claude-plugin", "marketplace.json"), "utf8")) as {
+    name: string;
+    plugins: Array<{ name: string; source: string }>;
+  };
+
+  assert.equal(plugin.version, pkg.version);
+  // The server entry must run the package that is actually published, through a bin it actually has.
+  const server = plugin.mcpServers.scenescout;
+  assert.deepEqual([server.command, ...server.args], ["npx", "-y", pkg.name, "serve"]);
+  assert.ok("scenescout" in pkg.bin);
+  // The install command in the README is `scenescout@<marketplace name>`.
+  assert.deepEqual(
+    marketplace.plugins.map((p) => p.name),
+    [plugin.name],
+  );
+  assert.notEqual(marketplace.name, plugin.name, "a marketplace may not share its plugin's name");
+  assert.ok(fs.existsSync(path.join(root, "skills", "scenescout", "SKILL.md")), "plugins load skills from skills/<name>/SKILL.md");
 });

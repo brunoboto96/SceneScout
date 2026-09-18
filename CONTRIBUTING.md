@@ -31,8 +31,12 @@ scope, and it will save you from building something that cannot be merged.
   invisible in review because the words are ordinary.
 - **Say what problem it solves** and show evidence it works: test output, a
   before/after, a repro.
-- **Do not bump the version or edit release notes.** The maintainer does that
-  when releasing.
+- **Add a changeset** when the change affects what users get: `npx changeset`,
+  pick `patch`, `minor` or `major`, and write one or two sentences for the
+  changelog. Docs-only, test-only and CI-only changes do not need one. See
+  [.changeset/README.md](.changeset/README.md).
+- **Do not edit the version or `CHANGELOG.md` by hand.** They are generated
+  from the changesets when the maintainer releases.
 - Keep "Allow edits by maintainers" enabled so a nearly-there pull request can
   be finished rather than closed.
 

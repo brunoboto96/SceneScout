@@ -72,7 +72,7 @@ function removeOwned(entry: string): void {
 }
 
 export function installSkill(opts: { packageRoot: string; claudeDir: string; now?: () => number }): SkillInstall {
-  const src = path.join(opts.packageRoot, "skill", SKILL_NAME);
+  const src = path.join(opts.packageRoot, "skills", SKILL_NAME);
   if (!fs.existsSync(path.join(src, "SKILL.md"))) {
     throw new Error(`skill source not found at ${src} — is this a complete SceneScout checkout?`);
   }

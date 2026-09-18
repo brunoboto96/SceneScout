@@ -27,7 +27,8 @@ Usage:
   scenescout scan <projectPath>     Discover framework, routes, auth states
   scenescout serve                  Run the MCP server (stdio)
   scenescout install                One-step setup: skill + Chromium + MCP registration
-                                    (--skip-browser, --no-register to opt out of a step)
+                                    (--skip-browser, --no-register to opt out of a step;
+                                     --browser-only when the skill and server came from a plugin)
   scenescout doctor                 Check the setup and print the fix for anything missing
   scenescout status [projectPath]   What is the engine doing right now? (live status + recent actions)
 `);
@@ -144,13 +145,18 @@ async function install(flags: string[]): Promise<void> {
   // A step that fails is reported AND fails the command: `setup && next-step`
   // must not carry on past a missing browser or an unregistered server.
   let failed = false;
-  const skill = installSkill({ packageRoot, claudeDir: resolveClaudeDir(process.env, os.homedir()) });
-  for (const note of skill.notes) console.log(`· ${note}`);
-  console.log(
-    skill.mode === "symlink"
-      ? `✓ Skill installed (symlink): ${skill.dest} → ${skill.src}`
-      : `✓ Skill installed (copy): ${skill.dest} — re-run install after upgrading SceneScout.`,
-  );
+  // A plugin install already brings the skill and the server registration; the
+  // only thing it cannot bring is the browser download.
+  const browserOnly = flags.includes("--browser-only");
+  if (!browserOnly) {
+    const skill = installSkill({ packageRoot, claudeDir: resolveClaudeDir(process.env, os.homedir()) });
+    for (const note of skill.notes) console.log(`· ${note}`);
+    console.log(
+      skill.mode === "symlink"
+        ? `✓ Skill installed (symlink): ${skill.dest} → ${skill.src}`
+        : `✓ Skill installed (copy): ${skill.dest} — re-run install after upgrading SceneScout.`,
+    );
+  }
 
   if (flags.includes("--skip-browser")) {
     console.log("· Browser download skipped (--skip-browser).");
@@ -168,7 +174,9 @@ async function install(flags: string[]): Promise<void> {
     }
   }
 
-  if (flags.includes("--no-register")) {
+  if (browserOnly) {
+    // nothing to register
+  } else if (flags.includes("--no-register")) {
     console.log(`· MCP registration skipped (--no-register). To do it by hand:\n\n  ${manualRegisterCommand(process.execPath, serverPath)}\n`);
   } else {
     const reg = registerMcp({ nodePath: process.execPath, serverPath, run: spawnRunner });
@@ -190,6 +198,10 @@ async function install(flags: string[]): Promise<void> {
   if (failed) {
     console.log("\nSetup is incomplete — fix the lines marked ✗ or · above, then run:  npm run doctor");
     process.exitCode = 1;
+    return;
+  }
+  if (browserOnly) {
+    console.log("\nThe browser is ready — attach again.");
     return;
   }
   console.log("\nStart a FRESH Claude Code session, then in any project run:  /scenescout");

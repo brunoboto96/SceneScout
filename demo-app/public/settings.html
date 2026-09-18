@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Settings · Harbor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-dashboard">Dashboard</a><a href="/orders.html" data-testid="nav-orders">Orders</a
+        ><a href="/reports.html" data-testid="nav-reports">Reports</a><a href="/settings.html" data-testid="nav-settings" aria-current="page">Settings</a>
+      </nav>
+    </header>
+    <main>
+      <h1>Settings</h1>
+      <p class="lede">Workspace preferences.</p>
+      <label for="name">Workspace name</label>
+      <input id="name" value="Harbor Demo" data-testid="settings-name" />
+      <label for="tz">Time zone</label>
+      <select id="tz" data-testid="settings-timezone">
+        <option>UTC</option>
+        <option>Europe/Lisbon</option>
+        <option>America/New_York</option>
+      </select>
+      <div class="row" style="margin-top: 16px">
+        <button class="primary" id="save" data-testid="settings-save">Save changes</button><span id="ok" class="muted" role="status"></span>
+      </div>
+      <h2>Danger zone</h2>
+      <p class="muted">Removes every order in this workspace. This cannot be undone.</p>
+      <button class="danger" id="wipe" data-testid="settings-delete-workspace">Delete workspace</button>
+    </main>
+    <footer>Harbor order desk · demo data only</footer>
+    <script>
+      document.getElementById("save").addEventListener("click", () => {
+        document.getElementById("ok").textContent = "Saved.";
+      });
+      document.getElementById("wipe").addEventListener("click", async () => {
+        await fetch("/api/workspace", { method: "DELETE" });
+        document.getElementById("ok").textContent = "Workspace deleted.";
+      });
+    </script>
+  </body>
+</html>

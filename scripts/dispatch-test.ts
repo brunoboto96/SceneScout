@@ -13,6 +13,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
+import { explainLaunchFailure, isMissingBrowser } from "../src/engine/launch.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
 
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -200,4 +201,26 @@ test("the orphan reaper only ever selects browsers this tool launched and abando
   ].join("\n");
   assert.deepEqual(orphanPids(ps), [101, 102]);
   assert.deepEqual(orphanPids(""), []);
+});
+
+test("a browser that was never downloaded gets one instruction, not a stack of text", () => {
+  // Playwright's real wording, abbreviated. This is the most likely first-run
+  // failure for anyone who installed from npm and skipped the setup step.
+  const playwright = [
+    "browserType.launch: Executable doesn't exist at /home/u/.cache/ms-playwright/chromium-1200/chrome-linux/chrome",
+    "╔═════════════════════════════════════════════════════╗",
+    "║ Looks like Playwright was just installed or updated. ║",
+    "║ Please run the following command to download new browsers: ║",
+    "║     npx playwright install                           ║",
+  ].join("\n");
+  assert.equal(isMissingBrowser(playwright), true);
+  const advice = explainLaunchFailure(playwright, 0);
+  assert.match(advice, /npx -y scenescout install --browser-only/);
+  assert.doesNotMatch(advice, /╔|ms-playwright/, "the box and the cache path are noise to the reader");
+
+  // Any other failure keeps its reason, on one line, and says what was cleaned up.
+  const other = explainLaunchFailure("browser launch timed out after 30s\n    at attempt (browser.js:1)", 2);
+  assert.equal(isMissingBrowser("browser launch timed out after 30s"), false);
+  assert.match(other, /launch failed twice \(browser launch timed out after 30s\) — 2 orphaned browser/);
+  assert.doesNotMatch(other, /at attempt/);
 });

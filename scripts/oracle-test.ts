@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { geometryIssues } from "../src/engine/collector.ts";
-import { redactViolation } from "../src/engine/oracles.ts";
+import { POLICY_BLOCK_WINDOW_MS, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
 
 const VIEWPORT = { width: 1280, height: 900 };
 
@@ -129,4 +129,19 @@ test("a violation never re-publishes a credential carried in the request URL", (
   // evidence into noise.
   const plain = { kind: "http_error", severity: "medium", detail: "GET http://x/api/orders?page=2&sort=asc → 404", url: "http://x/orders?tab=history" };
   assert.deepEqual(redactViolation(plain), plain);
+});
+
+test("errors caused by the tester's own write-policy block are not held against the app", () => {
+  // An aborted request surfaces three ways. None of them is the app's doing.
+  assert.equal(isPolicyInduced({ kind: "request_failed", detail: "PUT http://x/api/orders/7 → net::ERR_BLOCKED_BY_CLIENT.Inspector" }, null), true);
+  assert.equal(isPolicyInduced({ kind: "console_error", detail: "Failed to load resource: net::ERR_BLOCKED_BY_CLIENT.Inspector" }, null), true);
+  assert.equal(isPolicyInduced({ kind: "page_error", detail: "Failed to fetch" }, 40), true, "the uncaught rejection that follows the abort");
+
+  // "Failed to fetch" on its own is a real finding: the app's request failed
+  // and nothing caught it. Only the window after a block excuses it.
+  assert.equal(isPolicyInduced({ kind: "page_error", detail: "Failed to fetch" }, null), false, "no block happened");
+  assert.equal(isPolicyInduced({ kind: "page_error", detail: "Failed to fetch" }, POLICY_BLOCK_WINDOW_MS + 1), false, "too long after the block");
+  // And a block excuses nothing else.
+  assert.equal(isPolicyInduced({ kind: "page_error", detail: "Cannot read properties of undefined (reading 'rows')" }, 10), false);
+  assert.equal(isPolicyInduced({ kind: "http_error", detail: "GET http://x/api/orders → HTTP 500" }, 10), false);
 });

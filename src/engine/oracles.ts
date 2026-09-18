@@ -24,6 +24,28 @@ export function redactViolation<T extends { detail: string; url: string }>(v: T)
   return { ...v, detail: redactSecrets(v.detail), url: redactSecrets(v.url) };
 }
 
+/** How long after a write-policy block a generic "fetch failed" error is still attributed to it. */
+export const POLICY_BLOCK_WINDOW_MS = 2000;
+
+/**
+ * Is this violation a consequence of the tester's OWN write-policy block
+ * rather than something the app did?
+ *
+ * Aborting a request makes the browser report a failed request, a console
+ * error, and — when the app does not catch the rejection — a page error. Left
+ * in, a report lists the tool's own safety net as three defects of the app
+ * under test, and a reader has no way to tell them from real ones.
+ *
+ * `ERR_BLOCKED_BY_CLIENT` is unambiguous: only an abort produces it. A bare
+ * "Failed to fetch" is not, so it is attributed to the block only inside a
+ * short window after one.
+ */
+export function isPolicyInduced(v: { kind: string; detail: string }, msSincePolicyBlock: number | null): boolean {
+  if (/ERR_BLOCKED_BY_CLIENT/.test(v.detail)) return true;
+  if (msSincePolicyBlock === null || msSincePolicyBlock > POLICY_BLOCK_WINDOW_MS) return false;
+  return (v.kind === "page_error" || v.kind === "console_error") && /Failed to fetch|NetworkError when attempting to fetch|Load failed/i.test(v.detail);
+}
+
 /**
  * Invariant oracles: passive listeners that record violations regardless of
  * what the agent is doing. The engine drains the buffer after every action and
@@ -98,7 +120,15 @@ export class OracleMonitor {
    */
   private static readonly MAX_REPORTED_SIGS = 5000;
 
+  private lastPolicyBlockAt: number | null = null;
+
+  /** Called by the engine when the write policy aborts a request, so the errors that abort causes are not held against the app. */
+  notePolicyBlock(): void {
+    this.lastPolicyBlockAt = Date.now();
+  }
+
   private record(v: Omit<OracleViolation, "at" | "repeat">): void {
+    if (isPolicyInduced(v, this.lastPolicyBlockAt === null ? null : Date.now() - this.lastPolicyBlockAt)) return;
     const violation: OracleViolation = { ...redactViolation(v), at: new Date().toISOString() };
     this.buffer.push(violation);
     this.all.push(violation);

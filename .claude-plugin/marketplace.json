@@ -1,0 +1,15 @@
+{
+  "name": "scenescout-marketplace",
+  "description": "SceneScout: exploratory UI testing for any web app, driven by Claude.",
+  "owner": {
+    "name": "brunoboto96",
+    "url": "https://github.com/brunoboto96"
+  },
+  "plugins": [
+    {
+      "name": "scenescout",
+      "source": "./",
+      "description": "Exploratory UI testing: browser tools that let Claude explore a running web app like a curious user, find what is broken or confusing, and write a coverage-checked report."
+    }
+  ]
+}
