@@ -260,6 +260,18 @@ export function parseRegistration(listing: string): { command: string | null; se
   return { command: field("Command"), serverPath: field("Args") };
 }
 
+/**
+ * The command that repairs a setup, for THIS kind of install. A source checkout
+ * has `npm run setup`; someone who installed from npm has no such script, and
+ * telling them to run it sends them looking for a package.json they never had.
+ */
+export function repairCommands(packageRoot: string): { setup: string; build: string } {
+  const isCheckout = fs.existsSync(path.join(packageRoot, "tsconfig.json")) && fs.existsSync(path.join(packageRoot, "src"));
+  return isCheckout
+    ? { setup: "npm run setup", build: "npm run build" }
+    : { setup: "npx -y scenescout install", build: "npx -y scenescout@latest install   (the installed package is incomplete; fetch it again)" };
+}
+
 export type Check = { name: string; ok: boolean; detail: string; fix?: string };
 
 /** Everything a working setup needs, each with the command that repairs it. */
@@ -279,24 +291,25 @@ export function diagnose(opts: {
   run: Runner;
 }): Check[] {
   const checks: Check[] = [];
+  const repair = repairCommands(opts.packageRoot);
   const major = Number(opts.nodeVersion.replace(/^v/, "").split(".")[0]);
   checks.push({ name: "node >= 20", ok: major >= 20, detail: opts.nodeVersion, fix: "install Node 20 or newer" });
 
   const server = path.join(opts.packageRoot, "dist", "mcp-server.js");
-  checks.push({ name: "engine built", ok: fs.existsSync(server), detail: server, fix: "npm run build" });
+  checks.push({ name: "engine built", ok: fs.existsSync(server), detail: server, fix: repair.build });
 
   const chromiumOk = !!opts.chromiumPath && fs.existsSync(opts.chromiumPath);
   checks.push({
     name: "chromium downloaded",
     ok: chromiumOk,
     detail: opts.chromiumPath ?? "playwright could not name a browser path",
-    fix: "npm run setup   (or: npx playwright install chromium)",
+    fix: `${repair.setup}   (or: npx playwright install chromium)`,
   });
 
   if (opts.scope === "engine") return checks;
 
   const skill = path.join(opts.claudeDir, "skills", SKILL_NAME, "SKILL.md");
-  checks.push({ name: "skill installed", ok: fs.existsSync(skill), detail: skill, fix: "npm run setup" });
+  checks.push({ name: "skill installed", ok: fs.existsSync(skill), detail: skill, fix: repair.setup });
 
   const got = opts.run("claude", ["mcp", "get", MCP_NAME]);
   if (got.missing) {
@@ -309,7 +322,7 @@ export function diagnose(opts: {
   } else {
     const listing = got.stdout + got.stderr;
     if (got.status !== 0) {
-      checks.push({ name: "MCP server registered", ok: false, detail: "no server named scenescout", fix: "npm run setup" });
+      checks.push({ name: "MCP server registered", ok: false, detail: "no server named scenescout", fix: repair.setup });
     } else {
       const { command, serverPath } = parseRegistration(listing);
       if (serverPath === null) {
@@ -323,11 +336,11 @@ export function diagnose(opts: {
           name: "MCP server registered",
           ok: absolute,
           detail: absolute ? `via ${command} ${serverPath}` : `registered with a bare \`${command}\` command, which Claude Code may not find on its PATH`,
-          fix: "scenescout install",
+          fix: repair.setup,
         });
       } else if (!samePath(serverPath, server)) {
         // The usual aftermath of moving or deleting a checkout.
-        checks.push({ name: "MCP server registered", ok: false, detail: `registered, but pointing at ${serverPath} — not this install`, fix: "npm run setup" });
+        checks.push({ name: "MCP server registered", ok: false, detail: `registered, but pointing at ${serverPath} — not this install`, fix: repair.setup });
       } else if (command !== null && !path.isAbsolute(command)) {
         // A bare "node" resolves in your shell and then fails inside Claude
         // Code, whose launch environment often lacks the nvm/fnm PATH.
@@ -335,7 +348,7 @@ export function diagnose(opts: {
           name: "MCP server registered",
           ok: false,
           detail: `registered with a bare \`${command}\` command, which Claude Code may not find on its PATH`,
-          fix: "npm run setup",
+          fix: repair.setup,
         });
       } else {
         checks.push({ name: "MCP server registered", ok: true, detail: server });
