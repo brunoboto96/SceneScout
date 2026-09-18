@@ -46,7 +46,7 @@ function violationRollup(oracleLog: OracleViolation[]): string[] {
     ``,
     `| Count | Signature |`,
     `|---|---|`,
-    ...top.map(([sig, g]) => `| ${g.count} | \`${sig.replace(/\|/g, "\\|")}\` |`),
+    ...top.map(([sig, g]) => `| ${g.count} | \`${escapeTableCell(sig)}\` |`),
     ``,
   ];
 }
@@ -123,6 +123,18 @@ function offersSubmit(elements: Record<string, unknown>): boolean {
  * that basis.
  */
 const COLLECTOR_CAP = 150;
+
+/**
+ * Make app-controlled text safe inside a Markdown table cell. The backslash
+ * must be escaped FIRST: escaping only the pipe turns an input of `\|` into
+ * `\\|`, which Markdown reads as a literal backslash followed by a live
+ * column separator — the app's own error text could then break the table, or
+ * forge an extra column in a report people trust. Newlines end a row, so they
+ * are flattened too.
+ */
+export function escapeTableCell(text: string): string {
+  return text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
 
 /**
  * Split routes where something was typed/picked/attached into the ones that
