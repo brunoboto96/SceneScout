@@ -17,12 +17,14 @@ import {
   diagnose,
   installSkill,
   isEphemeralRoot,
+  launchCommand,
   manualRegisterCommand,
+  NPX_SERVE_ARGS,
   parseRegistration,
   registerMcp,
   resolveClaudeDir,
-  type RunResult,
   type Runner,
+  type RunResult,
 } from "../src/installer.ts";
 
 function tmp(prefix: string): string {
@@ -179,14 +181,14 @@ test("installSkill refuses an incomplete package instead of wiping the existing 
 
 test("registerMcp registers at user scope with the absolute node path", () => {
   const { run, calls } = scripted([ok(), notRegistered]);
-  const result = registerMcp({ nodePath: "/opt/node/bin/node", serverPath: "/opt/sc/dist/mcp-server.js", run });
+  const result = registerMcp({ launch: ["/opt/node/bin/node", "/opt/sc/dist/mcp-server.js"], serverPath: "/opt/sc/dist/mcp-server.js", run });
   assert.deepEqual(result, { status: "registered", replaced: false, removedLegacy: [], notes: [] });
   assert.deepEqual(calls.slice(0, 1), [["claude", "mcp", "add", "--scope", "user", "scenescout", "--", "/opt/node/bin/node", "/opt/sc/dist/mcp-server.js"]]);
 });
 
 test("registerMcp is idempotent: an existing registration is replaced so moved paths heal", () => {
   const { run, calls } = scripted([fail("MCP server scenescout already exists in user config"), ok(), ok(), notRegistered]);
-  const result = registerMcp({ nodePath: "/n", serverPath: "/s.js", run });
+  const result = registerMcp({ launch: ["/n", "/s.js"], serverPath: "/s.js", run });
   assert.deepEqual(result, { status: "registered", replaced: true, removedLegacy: [], notes: [] });
   assert.deepEqual(calls.map((c) => c.slice(1, 3).join(" ")).slice(0, 3), ["mcp add", "mcp remove", "mcp add"]);
 });
@@ -197,7 +199,7 @@ test("registerMcp removes a pre-rename registration that points at this same ser
   const packageRoot = fakePackage();
   const serverPath = path.join(packageRoot, "dist", "mcp-server.js");
   const { run, calls } = scripted([ok(), ok(`scenecraft:\n  Command: /usr/bin/node\n  Args: ${serverPath}\n`), ok()]);
-  const result = registerMcp({ nodePath: "/n", serverPath, run });
+  const result = registerMcp({ launch: ["/n", serverPath], serverPath, run });
   assert.deepEqual(result, { status: "registered", replaced: false, removedLegacy: ["scenecraft"], notes: [] });
   assert.deepEqual(calls[2], ["claude", "mcp", "remove", "scenecraft"]);
 });
@@ -207,13 +209,13 @@ test("the legacy removal names the scope `get` reported, and owns up when it fai
   const serverPath = path.join(packageRoot, "dist", "mcp-server.js");
   const listing = `scenecraft:\n  Scope: User config (available in all your projects)\n  Command: /usr/bin/node\n  Args: ${serverPath}\n`;
   const scoped = scripted([ok(), ok(listing), ok()]);
-  registerMcp({ nodePath: "/n", serverPath, run: scoped.run });
+  registerMcp({ launch: ["/n", serverPath], serverPath, run: scoped.run });
   assert.deepEqual(scoped.calls[2], ["claude", "mcp", "remove", "--scope", "user", "scenecraft"]);
 
   // A removal that should have happened and did not leaves every tool
   // duplicated; install must say so, not report a clean success.
   const refused = scripted([ok(), ok(listing), fail("exists in multiple scopes")]);
-  const result = registerMcp({ nodePath: "/n", serverPath, run: refused.run });
+  const result = registerMcp({ launch: ["/n", serverPath], serverPath, run: refused.run });
   assert.equal(result.status, "registered", "a duplicate registration is a nuisance, not a failed install");
   assert.deepEqual(result.status === "registered" && result.removedLegacy, []);
   assert.match(result.status === "registered" ? result.notes.join("\n") : "", /could not be removed.*claude mcp remove scenecraft/);
@@ -226,16 +228,16 @@ test("registerMcp leaves a same-named server alone when it is not this one", () 
   const packageRoot = fakePackage();
   const serverPath = path.join(packageRoot, "dist", "mcp-server.js");
   const { run } = scripted([ok(), ok("scenecraft:\n  Command: /usr/bin/node\n  Args: /somewhere/else/server.js\n")]);
-  assert.deepEqual(registerMcp({ nodePath: "/n", serverPath, run }), { status: "registered", replaced: false, removedLegacy: [], notes: [] });
+  assert.deepEqual(registerMcp({ launch: ["/n", serverPath], serverPath, run }), { status: "registered", replaced: false, removedLegacy: [], notes: [] });
   const http = scripted([ok(), ok("scenecraft:\n  Type: http\n  URL: https://example.test/mcp\n")]);
-  assert.deepEqual(registerMcp({ nodePath: "/n", serverPath, run: http.run }).status, "registered");
+  assert.deepEqual(registerMcp({ launch: ["/n", serverPath], serverPath, run: http.run }).status, "registered");
 });
 
 test("registerMcp says so when a failed re-add left the user with NO registration", () => {
   // remove succeeded, the second add did not: the machine is now worse off
   // than before install ran, and the message must not hide that.
   const { run } = scripted([fail("MCP server scenescout already exists in user config"), ok(), fail("config is locked")]);
-  const result = registerMcp({ nodePath: "/n", serverPath: "/s.js", run });
+  const result = registerMcp({ launch: ["/n", "/s.js"], serverPath: "/s.js", run });
   assert.equal(result.status, "failed");
   assert.match(result.status === "failed" ? result.detail : "", /previous registration was removed.*config is locked/);
   assert.equal(result.status === "failed" && result.manual, "claude mcp add --scope user scenescout -- /n /s.js");
@@ -243,14 +245,14 @@ test("registerMcp says so when a failed re-add left the user with NO registratio
 
 test("registerMcp without the claude CLI hands back the command instead of failing silently", () => {
   const { run } = scripted([absent]);
-  const result = registerMcp({ nodePath: "/n", serverPath: "/s.js", run });
+  const result = registerMcp({ launch: ["/n", "/s.js"], serverPath: "/s.js", run });
   assert.equal(result.status, "claude-missing");
   assert.equal(result.status === "claude-missing" && result.manual, "claude mcp add --scope user scenescout -- /n /s.js");
 });
 
 test("registerMcp reports a real failure with its reason and does not retry blindly", () => {
   const { run, calls } = scripted([fail("error: unknown option '--scope'")]);
-  const result = registerMcp({ nodePath: "/n", serverPath: "/s.js", run });
+  const result = registerMcp({ launch: ["/n", "/s.js"], serverPath: "/s.js", run });
   assert.equal(result.status, "failed");
   assert.match(result.status === "failed" ? result.detail : "", /unknown option/);
   assert.equal(calls.length, 1);
@@ -258,7 +260,7 @@ test("registerMcp reports a real failure with its reason and does not retry blin
 
 test("the printed command survives paths with spaces", () => {
   assert.equal(
-    manualRegisterCommand("/Applications/My Tools/node", "/home/a b/dist/mcp-server.js"),
+    manualRegisterCommand(["/Applications/My Tools/node", "/home/a b/dist/mcp-server.js"]),
     'claude mcp add --scope user scenescout -- "/Applications/My Tools/node" "/home/a b/dist/mcp-server.js"',
   );
 });
@@ -407,4 +409,38 @@ test("the plugin manifest ships the same version and starts the published server
   );
   assert.notEqual(marketplace.name, plugin.name, "a marketplace may not share its plugin's name");
   assert.ok(fs.existsSync(path.join(root, "skills", "scenescout", "SKILL.md")), "plugins load skills from skills/<name>/SKILL.md");
+});
+
+test("an install run through npx registers the npx launcher, never a path inside npm's cache", () => {
+  // The cache is npm's to clear. A registration pointing into it works today
+  // and stops silently some weeks later, with no error the user can connect to
+  // the cause.
+  const cached = path.join(path.sep, "home", "u", ".npm", "_npx", "ab12", "node_modules", "scenescout");
+  const nodePath = path.join(path.sep, "opt", "node", "bin", "node");
+  const launch = launchCommand({ packageRoot: cached, nodePath, serverPath: path.join(cached, "dist", "mcp-server.js") });
+  assert.deepEqual(launch.slice(1), NPX_SERVE_ARGS);
+  assert.ok(path.isAbsolute(launch[0]) && /npx(\.cmd)?$/.test(launch[0]), "an absolute npx beside the running node, so it starts under nvm too");
+  assert.ok(!launch.join(" ").includes("_npx"), "nothing in the registration points into the cache");
+
+  // A clone or a global install is stable: register the script directly.
+  const stable = path.join(path.sep, "opt", "tools", "scenescout");
+  const server = path.join(stable, "dist", "mcp-server.js");
+  assert.deepEqual(launchCommand({ packageRoot: stable, nodePath, serverPath: server }), [nodePath, server]);
+});
+
+test("diagnose accepts an npx registration and vets its launcher", () => {
+  const packageRoot = fakePackage();
+  const claudeDir = tmp("sc-claude-");
+  installSkill({ packageRoot, claudeDir });
+  const chromiumPath = path.join(packageRoot, "chromium");
+  fs.writeFileSync(chromiumPath, "");
+  const base = { packageRoot, claudeDir, nodeVersion: "v22.1.0", chromiumPath };
+  const good = diagnose({ ...base, run: scripted([ok("scenescout:\n  Command: /opt/node/bin/npx\n  Args: -y scenescout serve\n")]).run });
+  assert.deepEqual(
+    good.filter((c) => !c.ok),
+    [],
+  );
+  const bare = diagnose({ ...base, run: scripted([ok("scenescout:\n  Command: npx\n  Args: -y scenescout serve\n")]).run }).filter((c) => !c.ok);
+  assert.equal(bare.length, 1);
+  assert.match(bare[0].detail, /bare `npx`/);
 });

@@ -13,7 +13,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { diagnose, installSkill, manualRegisterCommand, registerMcp, resolveClaudeDir, spawnRunner } from "./installer.js";
+import { diagnose, installSkill, launchCommand, manualRegisterCommand, registerMcp, resolveClaudeDir, spawnRunner } from "./installer.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME } from "./engine/memory.js";
 import { formatScan, scanProject } from "./scan.js";
 
@@ -177,9 +177,11 @@ async function install(flags: string[]): Promise<void> {
   if (browserOnly) {
     // nothing to register
   } else if (flags.includes("--no-register")) {
-    console.log(`· MCP registration skipped (--no-register). To do it by hand:\n\n  ${manualRegisterCommand(process.execPath, serverPath)}\n`);
+    console.log(
+      `· MCP registration skipped (--no-register). To do it by hand:\n\n  ${manualRegisterCommand(launchCommand({ packageRoot, nodePath: process.execPath, serverPath }))}\n`,
+    );
   } else {
-    const reg = registerMcp({ nodePath: process.execPath, serverPath, run: spawnRunner });
+    const reg = registerMcp({ launch: launchCommand({ packageRoot, nodePath: process.execPath, serverPath }), serverPath, run: spawnRunner });
     if (reg.status === "registered") {
       console.log(`✓ MCP server ${reg.replaced ? "re-registered (paths refreshed)" : "registered"} with Claude Code at user scope.`);
       for (const name of reg.removedLegacy) console.log(`· removed the pre-rename MCP registration "${name}" (it pointed at this same server).`);
