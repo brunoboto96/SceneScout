@@ -7,6 +7,7 @@ import { AUTH_LOSS_PREFIX, MemoryStore, type ActionLogEntry } from "./memory.js"
 import { AuthLossTracker } from "./authloss.js";
 import { COLLECT_INTERACTABLES_SCRIPT, DIALOG_LIKE_SEL, VISIBLE_SRC, geometryIssues, type Rect } from "./collector.js";
 import { OracleMonitor, formatViolations } from "./oracles.js";
+import { extractCreatedIds, isOwnedResource } from "./ownership.js";
 import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire } from "./policy.js";
 import { scanProject } from "../scan.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignPayload, type FocusSample } from "./design.js";
@@ -1008,181 +1009,41 @@ export class BrowserEngine {
     return `OK: ${action} ${target}\nURL now: ${url}` + (navigated ? " (page changed — take a new snapshot)" : "") + mutations + formatViolations(violations);
   }
 
-  /** True when a path targets a resource this session created (id segment + collection-family match). */
+  /** Does this request path address a record this run created? Rules live in ownership.ts. */
   private isOwnedResource(pathname: string): boolean {
-    const segments = pathname.split("/");
-    for (let i = 0; i < segments.length; i++) {
-      const collections = this.ownedIds.get(segments[i]);
-      if (!collections) continue;
-      const parent = segments.slice(0, i).join("/");
-      for (const c of collections) {
-        if (pathname.startsWith(c)) return true;
-        // Creation URL and CRUD URL can diverge below a shared collection
-        // (POST /api/documents/quick → PUT /api/documents/:id): for an id
-        // this session DID create, the request's parent path and the stored
-        // creation collection prefixing each other means the same resource
-        // family. Guard: the shorter side must have ≥2 real segments so a
-        // bare "/api" can never match across collections.
-        const shorter = parent.length <= c.length ? parent : c;
-        if (shorter.split("/").filter(Boolean).length >= 2 && (c.startsWith(parent) || parent.startsWith(c))) return true;
-      }
-    }
-    return false;
-  }
-
-  /** Collections that hold identities/accounts — never claimable as session-created, whatever the response says. */
-  private static readonly IDENTITY_COLLECTION_RE = /\b(users?|accounts?|profiles?|members?|identit(y|ies)|me)\b/i;
-
-  /** Matches the original, unprefixed id shape: bare "id"/"_id"/"uuid" only. */
-  private static readonly BARE_ID_KEY_RE = /^(id|_id|uuid)$/i;
-
-  /**
-   * Matches a resource-prefixed id key: snake_case-suffixed ("widget_id",
-   * "order_item_id") or camelCase-suffixed ("widgetId"). Many REST APIs
-   * name a create response's own primary key after the resource rather than
-   * a bare "id" — an unprefixed-only match silently drops every one of those
-   * responses from ownership tracking. Kept as a SEPARATE, more-strictly-
-   * filtered bucket from BARE_ID_KEY_RE (see recordCreation): this shape is
-   * exactly what a foreign key echoing a client-supplied value also looks
-   * like ("template_id"), so it must never ride the explicitCreation bypass
-   * that lets a bare id survive even when its value was in the request body.
-   */
-  private static readonly PREFIXED_ID_KEY_RE = /^[a-z][a-z0-9_]*_(id|uuid)$/i;
-  private static readonly PREFIXED_ID_KEY_CAMEL_RE = /[a-z0-9](Id|Uuid|UUID)$/;
-
-  /**
-   * RPC-style action verbs that follow a resource collection in
-   * create-from/clone/bulk endpoints (POST /api/things/from-template/:id,
-   * /api/things/clone/:id, ...). A collection derived for ownership matching
-   * must stop BEFORE one of these, or a later plain CRUD path on the created
-   * resource (/api/things/:id) won't share a path prefix with the creation
-   * URL and legitimate follow-up writes get wrongly blocked. Deliberately
-   * does NOT also stop at a bare numeric segment: a nested create like
-   * POST /api/documents/5/comments has no ownership-scoping problem (its
-   * exact pathname already prefixes any later path under that comment), and
-   * truncating there would only widen the stored collection unnecessarily.
-   */
-  private static readonly ACTION_SEGMENT_RE = /^(from|via|clone|duplicate|copy|bulk|import|export|generate|batch)([-_].+)?$/i;
-
-  /** Collapse a creation request's pathname down to its resource collection, stopping before any RPC-action segment. */
-  private static deriveCollection(pathname: string): string {
-    const segments = pathname.split("/");
-    const kept: string[] = [];
-    for (const seg of segments) {
-      if (seg !== "" && BrowserEngine.ACTION_SEGMENT_RE.test(seg)) break;
-      kept.push(seg);
-    }
-    const collection = kept.join("/");
-    return collection || pathname; // never produce an empty collection
-  }
-
-  /** Strip an id-key's id/uuid suffix and normalize away separators, for comparing against a URL path segment (e.g. "document_id" → "document", "sopDocumentUuid" → "sopdocument"). */
-  private static keyStem(key: string): string {
-    return key
-      .replace(/(?:_)?(id|uuid)$/i, "")
-      .replace(/[-_]/g, "")
-      .toLowerCase();
+    return isOwnedResource(this.ownedIds, pathname);
   }
 
   /**
-   * True when a prefixed id key plausibly names the resource this creation
-   * URL is actually about — e.g. "widget_id" for a request under
-   * "/api/widgets/...". Without this, any OTHER *_id-shaped field a
-   * create response happens to include (owner_id, parent_id, assigned_to_id
-   * — server-derived, so never caught by the request-echo filter) would be
-   * wrongly claimed as the new resource's own id. A stem that shares no
-   * substring relationship with any path segment is assumed foreign.
-   */
-  private static keyMatchesUrl(key: string, pathname: string): boolean {
-    const stem = BrowserEngine.keyStem(key);
-    if (!stem) return false;
-    return (
-      pathname
-        .split("/")
-        .filter(Boolean)
-        // RPC-action segments (from-template, clone, ...) aren't the resource's
-        // name — a foreign key that happens to be named after the verb itself
-        // (e.g. "duplicate_id" on a POST .../duplicate endpoint) must not pass
-        // just because it echoes the verb.
-        .filter((seg) => !BrowserEngine.ACTION_SEGMENT_RE.test(seg))
-        .some((seg) => {
-          const normSeg = seg.replace(/[-_]/g, "").toLowerCase();
-          return normSeg.length > 0 && (normSeg.includes(stem) || stem.includes(normSeg));
-        })
-    );
-  }
-
-  /**
-   * Extract created-resource ids from a successful POST response (JSON body +
-   * Location header). Precision matters more than recall here: an id wrongly
-   * claimed as "ours" licenses real deletes on pre-existing data, so upsert
-   * echoes (ids the client already sent in the URL or body) and identity
-   * collections are excluded. A 201 or Location header marks a true creation.
+   * Register what a successful POST created. The decision — which ids a
+   * response genuinely minted — is the pure extractCreatedIds() in
+   * ownership.ts; this method only gathers the evidence from the response and
+   * records the verdict.
    */
   private async recordCreation(res: import("playwright").Response): Promise<void> {
-    const url = new URL(res.url());
-    // The identity check runs against the raw pathname (broadest net); the
-    // stored collection is collapsed via deriveCollection so a later plain
-    // CRUD path on the created resource still prefix-matches it even when
-    // creation went through an RPC-style action endpoint.
-    const identityCollection = BrowserEngine.IDENTITY_COLLECTION_RE.test(url.pathname);
-    const collection = BrowserEngine.deriveCollection(url.pathname);
-    // Kept as two buckets, not one merged list: a bare "id" is unambiguously
-    // the response's own subject, so a 201/Location can excuse it appearing
-    // in the request body too (client-supplied-id creates). A prefixed key
-    // ("template_id") is exactly what an echoed FOREIGN key also looks like,
-    // so it must always be checked against the request body — never excused
-    // by explicitCreation — or a 201 response that echoes a foreign id
-    // (e.g. {document_id, template_id}) would wrongly grant ownership of
-    // the template.
-    const bareIds: string[] = [];
-    const prefixedIds: string[] = [];
-    const location = res.headers()["location"];
-    if (location) {
-      const last = location.split("?")[0].split("/").filter(Boolean).pop();
-      if (last) bareIds.push(last);
-    }
+    let body: unknown;
     if ((res.headers()["content-type"] ?? "").includes("json")) {
       try {
-        const body = (await res.json()) as Record<string, unknown>;
-        const scan = (obj: unknown): void => {
-          if (!obj || typeof obj !== "object") return;
-          for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-            const isIdValue = typeof v === "string" || typeof v === "number";
-            if (isIdValue && BrowserEngine.BARE_ID_KEY_RE.test(k)) bareIds.push(String(v));
-            else if (
-              isIdValue &&
-              (BrowserEngine.PREFIXED_ID_KEY_RE.test(k) || BrowserEngine.PREFIXED_ID_KEY_CAMEL_RE.test(k)) &&
-              BrowserEngine.keyMatchesUrl(k, url.pathname)
-            )
-              prefixedIds.push(String(v));
-            else if (k === "data" || k === "result" || k === "item") scan(v);
-          }
-        };
-        scan(body);
+        body = await res.json();
       } catch {
-        /* non-JSON or oversized body — Location header may still have covered it */
+        /* non-JSON or oversized body — the Location header may still cover it */
       }
     }
-    // An upsert echoes an id the client already had; a create mints a new one.
-    // An id already in the REQUEST PATH is never ours (POST /items/123 targets
-    // an existing resource whatever the response says); a 201/Location only
-    // excuses a BARE id echoed in the request body (see bucket comment above).
-    const explicitCreation = res.status() === 201 || !!location;
-    const requestBody = res.request().postData() ?? "";
-    const notEchoedInPath = (id: string) => !url.pathname.includes(id);
-    const candidates = [
-      ...bareIds.filter((id) => notEchoedInPath(id) && (explicitCreation || !requestBody.includes(id))),
-      ...prefixedIds.filter((id) => notEchoedInPath(id) && !requestBody.includes(id)),
-    ];
-    for (const id of candidates.slice(0, 5)) {
+    const verdict = extractCreatedIds({
+      pathname: new URL(res.url()).pathname,
+      status: res.status(),
+      location: res.headers()["location"],
+      body,
+      requestBody: res.request().postData() ?? "",
+    });
+    for (const id of verdict.ids) {
       // Identity/account collections still appear on the cleanup list (the
       // record was genuinely created), but never grant mutation rights.
-      if (!identityCollection) {
+      if (!verdict.identityCollection) {
         if (!this.ownedIds.has(id)) this.ownedIds.set(id, new Set());
-        this.ownedIds.get(id)!.add(collection);
+        this.ownedIds.get(id)!.add(verdict.collection);
       }
-      const desc = `${collection} id=${id}`;
+      const desc = `${verdict.collection} id=${id}`;
       if (!this.createdResources.includes(desc)) {
         this.createdResources.push(desc);
         this.logAction({ action: "created-resource", target: desc, url: this.page?.url() ?? "" });

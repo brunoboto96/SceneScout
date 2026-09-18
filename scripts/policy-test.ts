@@ -12,6 +12,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire } from "../src/engine/policy.ts";
+import { deriveCollection, extractCreatedIds, isOwnedResource, keyMatchesUrl, type CreationEvidence, type OwnedIds } from "../src/engine/ownership.ts";
 import { AUTH_LOSS_STREAK, AuthLossTracker, LOGIN_ROUTE_RE } from "../src/engine/authloss.ts";
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
 
@@ -254,4 +255,82 @@ test("the two copies of the login pattern have not drifted apart", () => {
   // the engine that detects them. This is that test.
   assert.equal(LOGIN_ROUTE_RE_STORAGE.source, LOGIN_ROUTE_RE.source, "storage-layer and engine-layer login patterns must stay identical");
   assert.equal(LOGIN_ROUTE_RE_STORAGE.flags, LOGIN_ROUTE_RE.flags);
+});
+
+// ---------------------------------------------------------------------------
+// Ownership (safe-write): which records did this run create?
+// A wrong "yes" here licenses a real DELETE on pre-existing data.
+// ---------------------------------------------------------------------------
+
+const created = (over: Partial<CreationEvidence>): CreationEvidence => ({ pathname: "/api/widgets", status: 201, requestBody: "", ...over });
+
+test("ownership: a plain create claims the id the server minted", () => {
+  assert.deepEqual(extractCreatedIds(created({ body: { id: 41, name: "w" } })), { collection: "/api/widgets", identityCollection: false, ids: ["41"] });
+  assert.deepEqual(extractCreatedIds(created({ status: 200, body: { data: { uuid: "a1b2" } } })).ids, ["a1b2"], "ids nested under data/result/item are found");
+  assert.deepEqual(extractCreatedIds(created({ location: "/api/widgets/77?x=1", body: undefined })).ids, ["77"], "a Location header alone is enough");
+});
+
+test("ownership: an id named after its resource is claimed, a foreign key beside it is not", () => {
+  // {widget_id, owner_id}: owner_id is server-derived, so the request-echo
+  // filter never sees it — only the key-names-this-URL rule keeps it out.
+  const v = extractCreatedIds(created({ body: { widget_id: 9, owner_id: 3, createdById: 3 } }));
+  assert.deepEqual(v.ids, ["9"]);
+  assert.equal(keyMatchesUrl("widget_id", "/api/widgets"), true);
+  assert.equal(keyMatchesUrl("owner_id", "/api/widgets"), false);
+  assert.equal(keyMatchesUrl("orderItemId", "/api/order-items"), true, "camelCase key against a hyphenated segment");
+  assert.equal(keyMatchesUrl("duplicate_id", "/api/widgets/duplicate"), false, "a key named after the RPC verb does not name the resource");
+});
+
+test("ownership: an id the client already sent is an echo, not a creation", () => {
+  // Upsert: 200 with the id that was in the request body.
+  assert.deepEqual(extractCreatedIds(created({ status: 200, body: { id: "555" }, requestBody: '{"id":"555","name":"x"}' })).ids, []);
+  // ...but a 201 excuses a BARE id the client supplied (client-generated ids).
+  assert.deepEqual(extractCreatedIds(created({ status: 201, body: { id: "555" }, requestBody: '{"id":"555"}' })).ids, ["555"]);
+  // A PREFIXED key is never excused: it is exactly what an echoed foreign key looks like.
+  const fromTemplate = extractCreatedIds(created({ pathname: "/api/widgets/from-template/5", status: 201, body: { widget_id: 88, template_id: 5 }, requestBody: '{"template_id":5}' }));
+  assert.deepEqual(fromTemplate.ids, ["88"], "the template that was copied FROM is not ours");
+  // An id in the request PATH addresses an existing record, whatever comes back.
+  assert.deepEqual(extractCreatedIds(created({ pathname: "/api/widgets/123/publish", body: { id: 123 } })).ids, []);
+});
+
+test("ownership: identity collections are listed for cleanup but never grant write access", () => {
+  const v = extractCreatedIds(created({ pathname: "/api/users", body: { id: 12 } }));
+  assert.equal(v.identityCollection, true);
+  assert.deepEqual(v.ids, ["12"]);
+  assert.equal(extractCreatedIds(created({ pathname: "/api/widgets", body: { id: 12 } })).identityCollection, false);
+});
+
+test("ownership: one response cannot mint a page of ownership", () => {
+  const body = { data: { id: 1 }, result: { id: 2 }, item: { id: 3 }, uuid: "u4", _id: "x5", id: 6 };
+  assert.equal(extractCreatedIds(created({ body })).ids.length, 5);
+});
+
+test("ownership: a creation through an RPC endpoint still owns the record's plain CRUD path", () => {
+  assert.equal(deriveCollection("/api/widgets/from-template/5"), "/api/widgets");
+  assert.equal(deriveCollection("/api/widgets/5/comments"), "/api/widgets/5/comments", "a nested create is not truncated at the numeric segment");
+  assert.equal(deriveCollection("/clone"), "/clone", "never an empty collection");
+
+  const owned: OwnedIds = new Map([["88", new Set(["/api/widgets"])]]);
+  assert.equal(isOwnedResource(owned, "/api/widgets/88"), true);
+  assert.equal(isOwnedResource(owned, "/api/widgets/88/attachments/2"), true, "anything under our record");
+  assert.equal(isOwnedResource(owned, "/api/widgets/89"), false, "a neighbour is not ours");
+  assert.equal(isOwnedResource(owned, "/api/gadgets/88"), false, "the same id in another collection is a different record");
+});
+
+test("ownership: a shallow shared prefix never matches across collections", () => {
+  // Created via POST /api/widgets/quick, later saved via PUT /api/widgets/:id —
+  // parent and collection prefix each other, and both are ≥2 segments deep.
+  const quick: OwnedIds = new Map([["7", new Set(["/api/widgets/quick"])]]);
+  assert.equal(isOwnedResource(quick, "/api/widgets/7"), true);
+  // A record created through a generic endpoint stores a collection that
+  // prefixes the whole app. It must own its own path and nothing else: numeric
+  // ids collide across tables, and "7" being ours in one says nothing about
+  // /api/gadgets/7, which existed before the run.
+  const generic: OwnedIds = new Map([["7", new Set(["/api"])]]);
+  assert.equal(isOwnedResource(generic, "/api/7"), true);
+  assert.equal(isOwnedResource(generic, "/api/gadgets/7"), false);
+  assert.equal(isOwnedResource(generic, "/api/gadgets/7/children/1"), false);
+  // An id that merely appears deeper in an unrelated path is not ours either.
+  const owned: OwnedIds = new Map([["88", new Set(["/api/widgets"])]]);
+  assert.equal(isOwnedResource(owned, "/api/widgets/12/links/88"), false, "88 here is a link target under someone else's widget 12");
 });
