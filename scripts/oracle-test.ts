@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { geometryIssues } from "../dist/engine/collector.js";
+import { redactViolation } from "../dist/engine/oracles.js";
 
 const VIEWPORT = { width: 1280, height: 900 };
 
@@ -98,4 +99,24 @@ test("clipped-unreachable controls are reported and capped with a count", () => 
     issues.some((i) => i.includes("…and 6 more")),
     "the remainder is disclosed as a count, never silently dropped",
   );
+});
+
+test("a violation never re-publishes a credential carried in the request URL", () => {
+  // Violations quote the failing request's full URL and are printed in tool
+  // output, stored in memory and rendered into the report.
+  const v = redactViolation({
+    kind: "http_error",
+    severity: "high",
+    detail: "GET http://x/api/export?api_key=sk9f8a7b6c5d4e3f2a1b&page=2 → 500",
+    url: "http://x/reset?token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc",
+  });
+  assert.doesNotMatch(v.detail, /sk9f8a7b6c5d4e3f2a1b/);
+  assert.match(v.detail, /GET http:\/\/x\/api\/export\?api_key=\[redacted\]&page=2 → 500/, "the rest of the evidence stays readable");
+  assert.doesNotMatch(v.url, /eyJhbGci/);
+  assert.equal(v.kind, "http_error");
+
+  // An ordinary URL must come through untouched — over-redaction turns
+  // evidence into noise.
+  const plain = { kind: "http_error", severity: "medium", detail: "GET http://x/api/orders?page=2&sort=asc → 404", url: "http://x/orders?tab=history" };
+  assert.deepEqual(redactViolation(plain), plain);
 });

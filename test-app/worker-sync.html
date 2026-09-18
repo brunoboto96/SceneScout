@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Worker sync</title>
+  </head>
+  <body>
+    <main>
+      <h1>Background sync</h1>
+      <p id="worker-state" data-testid="worker-state">worker: starting</p>
+      <button id="sync" data-testid="worker-sync-btn" type="button">Sync now</button>
+    </main>
+    <script>
+      const state = document.getElementById("worker-state");
+      let worker = null;
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker
+          .register("/sw.js")
+          .then(() => navigator.serviceWorker.ready)
+          .then((reg) => {
+            worker = reg.active;
+            state.textContent = "worker: active";
+          })
+          .catch(() => {
+            state.textContent = "worker: unavailable";
+          });
+      } else {
+        state.textContent = "worker: unavailable";
+      }
+      document.getElementById("sync").addEventListener("click", () => {
+        if (worker) worker.postMessage("sync");
+      });
+    </script>
+  </body>
+</html>

@@ -661,3 +661,21 @@ test("the legacy memory dir is NOT moved out from under a pre-rename engine that
   assert.equal(fs.existsSync(path.join(project, MEMORY_DIRNAME, "status.json")), true);
 });
 
+
+test("a secret in the page URL or in a note is not persisted", () => {
+  // Title/detail/evidence were already redacted; the URL was not, and it is
+  // both stored and printed in the report. A finding filed on a reset or
+  // magic-link page carried that page's token into memory.json and report.md.
+  const store = freshStore();
+  const [finding] = store.addFinding({
+    severity: "medium", category: "other", title: "Reset form accepts a blank password", detail: "d",
+    url: "http://x/reset?token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc", state: "/reset#a",
+  });
+  assert.doesNotMatch(finding.url, /eyJhbGci/);
+  assert.match(finding.url, /^http:\/\/x\/reset\?token=/, "the page is still identifiable");
+
+  store.addAssumption("risks", "Integration page shows api_key=sk9f8a7b6c5d4e3f2a1b in plain text", "qa");
+  const notes = fs.readFileSync(path.join(store.dir, "ASSUMPTIONS.md"), "utf8");
+  assert.doesNotMatch(notes, /sk9f8a7b6c5d4e3f2a1b/);
+  assert.match(notes, /Integration page shows api_key=\[redacted\] in plain text/);
+});
