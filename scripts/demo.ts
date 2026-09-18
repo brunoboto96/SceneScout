@@ -245,7 +245,7 @@ async function annotatedDashboard(baseUrl: string): Promise<void> {
           "left:" + (r.left + scrollX - pad) + "px;top:" + (r.top + scrollY - pad) + "px;width:" + (r.width + pad * 2) + "px;height:" + (r.height + pad * 2) + "px";
         const tag = document.createElement("div");
         tag.textContent = n + " · " + text;
-        tag.style.cssText = "position:absolute;background:#dc2626;color:#fff;font:600 13px system-ui,sans-serif;padding:4px 10px;border-radius:999px;white-space:nowrap;z-index:9999;" +
+        tag.style.cssText = "position:absolute;background:#dc2626;color:#fff;font:600 13px Inter,sans-serif;padding:4px 10px;border-radius:999px;white-space:nowrap;z-index:9999;" +
           "left:" + (r.right + scrollX + pad + 10) + "px;top:" + (r.top + scrollY + r.height / 2 - 13) + "px";
         document.body.append(box, tag);
       };

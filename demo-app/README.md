@@ -15,9 +15,11 @@ Then, from Claude Code:
 
 `npm run demo` does a scripted run instead and regenerates
 [examples/report.md](../examples/report.md) and the screenshots beside it.
-The committed copies were generated on macOS. The app uses the system font,
-so layout-derived numbers (overlap percentages, page scores) and the
-screenshots can differ slightly when regenerated on another platform.
+The app ships its own font (Inter, SIL Open Font License, in
+`public/fonts/`), so the numbers in the report that come from layout are the
+same on every platform. CI regenerates the report on Linux and fails if it
+differs from the committed one. The screenshots are rendered by each
+platform's own text rasteriser and can differ by a few pixels.
 
 ## What is seeded (spoilers)
 
