@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { SHARED_CHROME_ROUTE, type Finding, type MemoryStore, type PageScore } from "./memory.js";
 import type { OracleViolation } from "./oracles.js";
+import type { WriteMode } from "./policy.js";
 
 function playwrightSkeleton(f: Finding): string {
   const routeClass = f.state.split("#")[0].split("?")[0];
@@ -68,7 +69,7 @@ export interface ReportExtras {
   /** Errors caused by the write policy's own blocks, which were not counted as violations. */
   policyAttributed?: number;
   /** The write mode the run used. In "observe" no form can be submitted, which the ledger must say rather than blame the run. */
-  mode?: "observe" | "read-only" | "safe-write" | "destructive";
+  mode?: WriteMode;
 }
 
 /**

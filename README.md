@@ -230,7 +230,7 @@ That refusal *is* the guarantee: an extensive report can only exist when nothing
 
 ## 🔒 Safety model
 
-- 🔵 **`observe`** (`--observe`) lets nothing but `GET` requests leave the page, login and token refresh excepted. No form submission reaches the server. It is what the skill picks for a remote URL with no source, where an ordinary form POST would create a real record. Forms that could not be submitted are listed in the gap ledger.
+- 🔵 **`observe`** (`--observe`) lets nothing but `GET` requests leave the page. The one exception is what a session needs in order to exist: logging in, logging out and refreshing a token. Signing up, changing or resetting a password and creating users are blocked like any other write. WebSocket frames are not inspected; the engine says so when the app opens a socket. It is what the skill picks for a remote URL with no source, where an ordinary form POST would create a real record. Forms that could not be submitted are listed in the gap ledger.
 - 🟢 **`read-only` by default.** Destructive-labeled elements (delete/revoke/archive/…) **and** all `PUT/PATCH/DELETE` + destructive `POST`s are blocked at the network layer — see [`src/engine/policy.ts`](src/engine/policy.ts). Non-destructive `POST`s are allowed, because submitting forms is how a tester finds validation bugs — so read-only means *nothing existing is changed or removed*, not *nothing is ever created*.
 - 🟡 **`safe-write`** (`--safe-write`) lets the agent create data and edit/delete **only what it created** this run — never pre-existing records.
 - 🔴 **`destructive`** (`--allow-destructive`) allows everything, and only ever when *you* confirm the environment is disposable. The skill will never choose this itself.

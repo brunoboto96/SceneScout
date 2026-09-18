@@ -921,6 +921,9 @@ server.registerTool(
       if (lvl === "extensive" && gapList.length > 0) {
         gates.push(
           `Level 'extensive' claims completeness, so it refuses while the GAP LEDGER is non-empty:\n` +
+            (eng.mode === "observe"
+              ? `(observe mode blocks every form submission, so the unsubmitted-forms gap cannot be closed in this mode: report at level 'medium', which discloses it.)\n`
+              : "") +
             gapList.map((g) => `  ⚠ ${g}`).join("\n") +
             `\nClose the gaps (or report at level 'medium', which discloses them instead).`,
         );

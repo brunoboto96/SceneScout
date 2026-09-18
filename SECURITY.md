@@ -38,8 +38,11 @@ taken seriously:
 
 Not a vulnerability: `read-only` mode allowing an ordinary, non-destructive
 form `POST`. That is documented behaviour — see the safety model in the README.
-`observe` mode is the one that blocks those too; a non-GET request leaving the
-page in `observe` mode (other than a login or token refresh) is a bypass.
+`observe` mode is the one that blocks those too. A non-GET HTTP request leaving
+the page in `observe` mode is a bypass, unless it is a login, a logout or a token
+refresh. Frames sent over a WebSocket are outside the policy in every mode; the
+engine warns about an open socket in `observe` mode, and that limit is documented
+rather than a vulnerability.
 
 ## Using it safely
 
