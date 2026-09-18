@@ -4,7 +4,15 @@ import path from "node:path";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
 import { AUTH_LOSS_PREFIX, MemoryStore, type ActionLogEntry } from "./memory.js";
 import { AuthLossTracker } from "./authloss.js";
-import { COLLECT_INTERACTABLES_SCRIPT, VISIBLE_SRC, geometryIssues, type Rect } from "./collector.js";
+import {
+  COLLECT_INTERACTABLES_SCRIPT,
+  VISIBLE_SRC,
+  geometryIssues,
+  type Rect,
+  BROKEN_IMAGES_SCRIPT,
+  brokenImageIssues,
+  type BrokenImageScan,
+} from "./collector.js";
 import { OracleMonitor, formatViolations } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
@@ -797,6 +805,10 @@ export class BrowserEngine {
     const geometry = geometryIssues(elements, page.viewportSize() ?? { width: 1280, height: 900 });
     geometry.push(...(await probeOverlays(page)));
     const hiddenFileInputs = await this.hiddenFileInputs(page);
+    const brokenImages = brokenImageIssues(
+      ((await page.evaluate(BROKEN_IMAGES_SCRIPT).catch(() => null)) as BrokenImageScan | null) ?? { images: [], total: 0 },
+      url,
+    );
     const cov = memory.coverage();
     const unvisited = this.unvisitedKnownRoutes();
     const title = await page.title();
@@ -807,6 +819,7 @@ export class BrowserEngine {
       `\n` +
       body +
       (geometry.length > 0 ? `\nGEOMETRY issues:\n` + geometry.map((g) => `  ⚠ ${g}`).join("\n") : "") +
+      (brokenImages.length > 0 ? `\nBROKEN IMAGES:\n` + brokenImages.map((b) => `  ⚠ ${b}`).join("\n") : "") +
       (hiddenFileInputs.length > 0
         ? `\nFILE INPUTS not listed above (hidden behind a styled control — a user never sees the input itself): ${hiddenFileInputs.join("; ")}. ` +
           `scout_upload {ref} on the control that opens one, or scout_upload {} when it is the page's only file input.`
