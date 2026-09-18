@@ -43,12 +43,13 @@ by hand.
    (`npm login`):
    ```bash
    npm ci && npm run build
-   npm publish --access public --provenance=false --otp=<code from your authenticator>
+   npm publish --access public --provenance=false
    ```
    `--provenance=false` is needed because `package.json` asks for provenance,
-   which can only be generated inside a supported CI system. `--otp` is needed
-   when the npm account has two-factor authentication for publishing, which a
-   classic or short-lived access token does not bypass.
+   which can only be generated inside a supported CI system. npm then asks for
+   the account's second factor: with a passkey or security key it prints a
+   link to approve in the browser; with an authenticator app, pass
+   `--otp=<code>`. Version 1.0.0 was published this way.
 2. **Trusted publisher.** On npmjs.com open the package, then Settings →
    Trusted Publisher → GitHub Actions, and enter organization or user
    `brunoboto96`, repository `SceneScout`, workflow filename `release.yml`.

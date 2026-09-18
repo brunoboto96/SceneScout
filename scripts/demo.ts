@@ -16,6 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { chromium } from "playwright";
 import { BrowserEngine } from "../dist/engine/browser.js";
 import { computeGaps, generateReport } from "../dist/engine/report.js";
 // @ts-expect-error — plain .mjs, no types; it exports createDemoServer().
@@ -192,6 +193,8 @@ async function main(): Promise<void> {
       show(`design audit ${route}`, await engine.designAudit());
     }
 
+    await annotatedDashboard(baseUrl);
+
     engine.memory!.addAssumption("app", "Harbor is a single-role order desk: no login, every visitor can create, edit and delete orders.", "demo");
     engine.memory!.addAssumption("risks", "Forms do not guard against repeat submission; check every new create flow with a double-click.", "demo");
 
@@ -216,6 +219,41 @@ async function main(): Promise<void> {
     server.closeAllConnections();
     server.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The README's picture: the dashboard with its two visible defects outlined and
+ * numbered. Without the callouts a reader takes the broken chart for a broken
+ * README. This one is drawn with Playwright directly, because it injects
+ * markers into the page — something the engine never does to an app under test.
+ * The unmarked screenshots next to it are the engine's own.
+ */
+async function annotatedDashboard(baseUrl: string): Promise<void> {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 700 } });
+    await page.goto(baseUrl, { waitUntil: "networkidle" });
+    await page.evaluate(`(() => {
+      const mark = (testid, n, text, pad) => {
+        const r = document.querySelector('[data-testid="' + testid + '"]').getBoundingClientRect();
+        const box = document.createElement("div");
+        box.style.cssText = "position:absolute;border:3px solid #dc2626;border-radius:10px;pointer-events:none;z-index:9999;" +
+          "left:" + (r.left + scrollX - pad) + "px;top:" + (r.top + scrollY - pad) + "px;width:" + (r.width + pad * 2) + "px;height:" + (r.height + pad * 2) + "px";
+        const tag = document.createElement("div");
+        tag.textContent = n + " · " + text;
+        tag.style.cssText = "position:absolute;background:#dc2626;color:#fff;font:600 13px system-ui,sans-serif;padding:4px 10px;border-radius:999px;white-space:nowrap;z-index:9999;" +
+          "left:" + (r.right + scrollX + pad + 10) + "px;top:" + (r.top + scrollY + r.height / 2 - 13) + "px";
+        document.body.append(box, tag);
+      };
+      mark("dash-new-badge", "1", "badge covers the “All orders” button", 6);
+      const img = document.querySelector('[data-testid="dash-chart"]');
+      img.style.display = "inline-block";
+      mark("dash-chart", "2", "chart image fails to load (404)", 6);
+    })()`);
+    await page.screenshot({ path: path.join(outDir, "screenshots", "dashboard-annotated.png") });
+  } finally {
+    await browser.close();
   }
 }
 

@@ -5,6 +5,7 @@
 **Exploratory UI testing, driven by an AI agent.**
 
 [![test](https://github.com/brunoboto96/SceneScout/actions/workflows/test.yml/badge.svg)](https://github.com/brunoboto96/SceneScout/actions/workflows/test.yml)
+[![npm](https://img.shields.io/npm/v/scenescout.svg)](https://www.npmjs.com/package/scenescout)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![node >= 20](https://img.shields.io/badge/node-%E2%89%A5%2020-339933?logo=node.js&logoColor=white)
 ![MCP server](https://img.shields.io/badge/MCP-server-8A2BE2)
@@ -28,9 +29,11 @@ Scripted E2E suites answer one question — *"does this exact flow still work?"*
 
 ## 👀 See it work
 
-This is a real run against the small demo app bundled in this repository. The screenshot was taken by SceneScout; the badge sitting on top of a button and the missing chart are two of the ten findings it filed.
+This is a real run against the small demo app bundled in this repository. The app has bugs planted in it on purpose, and two of them are visible on its dashboard:
 
-<p align="center"><img src="examples/screenshots/dashboard.png" alt="The demo app's dashboard: a yellow badge covers the All orders button, and the weekly chart image is broken" width="720" /></p>
+<p align="center"><img src="examples/screenshots/dashboard-annotated.png" alt="The demo app's dashboard with two defects outlined in red: 1, a yellow badge covering the All orders button; 2, the weekly chart image failing to load" width="760" /></p>
+
+**The broken chart is the demo app's bug, not this page's** — it is one of the ten findings SceneScout filed, next to the badge sitting on a button. The red callouts were added for this README; the [unmarked screenshots](examples/screenshots/) are the ones the engine took.
 
 An excerpt of the report it wrote — [read the whole thing](examples/report.md):
 
@@ -41,8 +44,11 @@ An excerpt of the report it wrote — [read the whole thing](examples/report.md)
 > **🔴 [HIGH] Filtering orders by Archived fails, and the page shows an empty table instead of an error**
 > Evidence: `GET /api/orders?status=archived → HTTP 500`
 >
-> **🟠 [MEDIUM] The "New: bulk import" badge sits on top of the All orders button**
+> **🟠 [MEDIUM] The "New: bulk import" badge sits on top of the All orders button** *(callout 1)*
 > Evidence: `"All orders" overlaps "New: bulk import" (81%)` — measured from layout boxes, no screenshot needed.
+>
+> **🟡 [LOW] The dashboard chart image is missing** *(callout 2)*
+> Evidence: `GET /img/weekly-chart.png → HTTP 404`
 >
 > **Gap ledger — what was NOT tested:** 4/7 visited routes never design-audited · single-role run, so permission boundaries are untested
 
@@ -103,39 +109,29 @@ SceneScout needs only a URL. Give it the source code as well and it gets noticea
 
 ### 1️⃣ Install
 
-Pick one. All three end with the same 24 tools.
+It is on npm. Nothing to clone:
 
-**A · Claude Code plugin** — the skill and the server in one step:
+```bash
+npx -y scenescout install      # skill + Chromium (~150 MB, one-time) + registers the server with Claude Code
+```
+
+**Prefer a Claude Code plugin?** The skill and the server arrive together:
 
 ```
 /plugin marketplace add brunoboto96/SceneScout
 /plugin install scenescout@scenescout-marketplace
 ```
 
-Then download the browser once: `npx -y scenescout install --browser-only`. The command is `/scenescout:scenescout`.
+Then download the browser once with `npx -y scenescout install --browser-only`. The command becomes `/scenescout:scenescout`.
 
-**B · npm, for Claude Code or any other MCP client:**
-
-```bash
-npx -y scenescout install      # skill + Chromium (~150 MB, one-time) + registers the server with Claude Code
-```
-
-Using a different client? Skip the registration and [add the server to its config](#-other-mcp-clients) instead: `npx -y scenescout install --browser-only`.
-
-**C · From source**, to hack on it:
-
-```bash
-git clone https://github.com/brunoboto96/SceneScout.git scenescout && cd scenescout
-npm install        # installs dependencies and builds
-npm run setup      # same as `scenescout install`, pointed at this checkout
-```
+**Another MCP client?** Run `npx -y scenescout install --browser-only` and [add the server to its config](#-other-mcp-clients).
 
 <details>
-<summary>What <code>install</code> / <code>npm run setup</code> actually does</summary>
+<summary>What <code>install</code> actually does</summary>
 
-1. links the `/scenescout` skill into `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`) — a `scenescout` folder it didn't create is moved aside to a `.backup-…` copy, never deleted. When run through `npx` it copies instead of linking, because the npx cache is temporary,
+1. puts the `/scenescout` skill into `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`) — a `scenescout` folder it didn't create is moved aside to a `.backup-…` copy, never deleted,
 2. downloads the Chromium build SceneScout drives (skipped if you already have it),
-3. registers the MCP server with Claude Code at user scope, using an **absolute** node path so it works under nvm/fnm.
+3. registers the MCP server with Claude Code at user scope as `npx -y scenescout serve`, using the **absolute** path of `npx` so it works under nvm/fnm.
 
 Re-run it any time: after moving the folder or switching node versions it refreshes the stored paths. It exits non-zero if any step failed, so it is safe to chain. Opt out of a step with `--no-register` or `--skip-browser`.
 
@@ -150,15 +146,15 @@ claude mcp add --scope user scenescout -- npx -y scenescout serve
 ### 2️⃣ Check it
 
 ```bash
-npx -y scenescout doctor            # routes B and C (from source: npm run doctor)
-npx -y scenescout doctor --engine   # route A, or another MCP client: node + build + browser only
+npx -y scenescout doctor            # everything, for the default install
+npx -y scenescout doctor --engine   # plugin install or another MCP client: node + build + browser only
 ```
 
 Every line should be a ✓. Anything that isn't prints the exact command that fixes it. Then **start a fresh session** in your client so it picks up the new tools.
 
 ### 3️⃣ Run it
 
-No app handy? `npm run demo:serve` in a source checkout starts the [demo app](demo-app/) on `http://127.0.0.1:4173`.
+No app handy? Clone this repository and run `npm run demo:serve`: the [demo app](demo-app/) starts on `http://127.0.0.1:4173`.
 
 From Claude Code, inside the project you want to test (or, for a [remote URL](#-two-ways-to-use-it), any folder):
 
@@ -258,22 +254,21 @@ A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app
 
 ## 🩺 Troubleshooting
 
-Run `npm run doctor` first — it checks every setup item below (everything but the last row, which is about your app) and prints the fix.
+Run `npx -y scenescout doctor` first — it checks every setup item below (everything but the last row, which is about your app) and prints the fix.
 
 | Symptom | Cause and fix |
 |---|---|
-| `/scenescout` isn't a known command | The skill isn't linked, or the session predates it. `npm run setup`, then start a **fresh** Claude Code session. |
-| The `scout_*` tools don't appear | The MCP server isn't registered, or points at an old path. `npm run setup` re-registers it; `claude mcp list` should show `scenescout` as connected. |
-| `npm install` fails at the build step | The build needs the dev dependencies (TypeScript). Don't pass `--omit=dev` or set `NODE_ENV=production` when installing from a clone. |
-| *"Executable not found in $PATH"* | The server was registered with a bare `node`. `npm run setup` registers the absolute path. |
+| `/scenescout` isn't a known command | The skill isn't linked, or the session predates it. `npx -y scenescout install`, then start a **fresh** Claude Code session. |
+| The `scout_*` tools don't appear | The MCP server isn't registered, or points at an old path. `npx -y scenescout install` re-registers it; `claude mcp list` should show `scenescout` as connected. |
+| *"Executable not found in $PATH"* | The server was registered with a bare `node`. `npx -y scenescout install` registers an absolute path. |
 | *"Executable doesn't exist … chromium"* | The browser download was skipped or failed. `npx playwright install chromium` (on Linux add `--with-deps`). |
-| Tools broke after moving the folder or changing node version | The registration stores absolute paths. `npm run setup` refreshes them. |
+| Tools broke after moving the folder or changing node version | The registration stores absolute paths. `npx -y scenescout install` refreshes them. |
 | Attach fails or every route lands on the login page | Your app isn't running at `--url`, or the `--role` storage state has expired — regenerate it the way your project's Playwright setup does. |
 
 ### ⬆️ Upgrading from an older version
 
-- **Tools are now `scout_*`.** Up to v0.23 they were prefixed `ft_`. The rename happened before the first npm release, with no aliases, so an agent's context carries one tool list rather than two. Re-run `npm run setup` so the installed skill matches the server.
-- **Earlier names.** This tool was previously called SceneCraft (and, before that, frontend-tester). `npm run setup` cleans up after both: it removes the old skill link and the old `scenecraft` MCP registration when they point at this install, and the first attach in a project moves its `.scenecraft/` memory folder to `.scenescout/` so earlier coverage and findings carry over.
+- **Tools are now `scout_*`.** Up to v0.23 they were prefixed `ft_`. The rename happened before the first npm release, with no aliases, so an agent's context carries one tool list rather than two. Re-run `npx -y scenescout install` so the installed skill matches the server.
+- **Earlier names.** This tool was previously called SceneCraft (and, before that, frontend-tester). `scenescout install` cleans up after both: it removes the old skill link and the old `scenecraft` MCP registration when they point at this install, and the first attach in a project moves its `.scenecraft/` memory folder to `.scenescout/` so earlier coverage and findings carry over.
 
 ### 🧹 Uninstall
 
@@ -282,7 +277,7 @@ claude mcp remove --scope user scenescout
 rm -rf ~/.claude/skills/scenescout
 ```
 
-Then delete the clone. Per-project memory lives in each tested project's `.scenescout/` folder; delete it there if you want it gone.
+Nothing else is installed: `npx` runs the package from npm's cache. Per-project memory lives in each tested project's `.scenescout/` folder; delete it there if you want it gone.
 
 ---
 
@@ -330,7 +325,7 @@ args = ["-y", "scenescout", "serve"]
 <details>
 <summary><strong>Anything else</strong></summary>
 
-Most clients accept the same `mcpServers` JSON shape shown for Cursor. From a source checkout, the command is `node` with the absolute path to `dist/mcp-server.js`.
+Most clients accept the same `mcpServers` JSON shape shown for Cursor.
 
 </details>
 
@@ -391,14 +386,18 @@ The load-bearing choices are recorded as ADRs — read the relevant one before c
 
 ## 🔧 Development
 
+Working on SceneScout itself is the only reason to clone it:
+
 ```bash
-npm run build     # tsc
-npm test          # build + 11 suites: scan, oracle, policy, fixture, dispatch, design,
-                  #                     contract, memory, install, smoke, mcp-check
-npm run dev       # run the CLI from source (tsx)
+git clone https://github.com/brunoboto96/SceneScout.git scenescout && cd scenescout
+npm install        # installs dependencies and builds
+npm run setup      # same as `scenescout install`, but registers THIS checkout (the skill is linked, so edits are live)
+npm test           # build + 11 suites: scan, oracle, policy, fixture, dispatch, design,
+                   #                     contract, memory, install, smoke, mcp-check
+npm run demo       # regenerate examples/ from the demo app
 ```
 
-Contributing? Start with [VISION.md](VISION.md) (what is in scope) and [CONTRIBUTING.md](CONTRIBUTING.md) (how changes land), then see [CLAUDE.md](CLAUDE.md) for the house rules — chiefly: bug fixes need a regression test at the cheapest layer that can fail, keep the repo project-agnostic (ADR 6), and `npm run build && npm test` must pass before committing.
+Contributing? Start with [VISION.md](VISION.md) (what is in scope) and [CONTRIBUTING.md](CONTRIBUTING.md) (how changes land), then see [CLAUDE.md](CLAUDE.md) for the house rules — chiefly: bug fixes need a regression test at the cheapest layer that can fail, keep the repo project-agnostic (ADR 6), and `npm test` must pass.
 
 ## 🔐 Security
 
