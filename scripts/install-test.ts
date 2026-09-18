@@ -420,6 +420,20 @@ test("the plugin manifest ships the same version and starts the published server
   assert.ok(fs.existsSync(path.join(root, "skills", "scenescout", "SKILL.md")), "plugins load skills from skills/<name>/SKILL.md");
 });
 
+test("the versioning step formats the files it rewrites", () => {
+  // sync-plugin-version writes plugin.json with JSON.stringify, which lays
+  // arrays out differently from Prettier. If `version-packages` does not format
+  // afterwards, the generated version pull request fails the format check and a
+  // release cannot merge. The step was lost once in a rebase; this pins it.
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  const steps = pkg.scripts["version-packages"].split("&&").map((s) => s.trim());
+  const sync = steps.findIndex((s) => s.includes("sync-plugin-version"));
+  const format = steps.findIndex((s) => s.startsWith("prettier --write") && s.includes(".claude-plugin/plugin.json") && s.includes("package.json"));
+  assert.ok(sync >= 0, "version-packages must sync the plugin version");
+  assert.ok(format > sync, "version-packages must run Prettier over plugin.json and package.json after the sync");
+});
+
 test("an install run through npx registers the npx launcher, never a path inside npm's cache", () => {
   // The cache is npm's to clear. A registration pointing into it works today
   // and stops silently some weeks later, with no error the user can connect to
