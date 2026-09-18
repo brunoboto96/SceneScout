@@ -13,7 +13,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FIXTURE_KINDS, acceptMatches, fixtureKindFor, generatedUpload, isFixtureKind, mimeForName, syntheticFile } from "../dist/engine/fixtures.js";
+import { FIXTURE_KINDS, acceptMatches, fixtureKindFor, generatedUpload, isFixtureKind, mimeForName, syntheticFile } from "../src/engine/fixtures.ts";
 
 test("generatedUpload says honestly where the kind came from", () => {
   assert.match(generatedUpload(".pdf").source, /generated pdf fixture \(inferred from accept\)/);

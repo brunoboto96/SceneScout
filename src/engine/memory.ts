@@ -79,7 +79,6 @@ function roleRouteKey(role: string, route: string): string {
   return `${role}${route.startsWith("/") ? "" : "/"}${route}`;
 }
 
-
 /**
  * Secrets an app leaks into its own error UI must not be re-published by the
  * tool that found them. Findings quote app output verbatim, and that output has
@@ -103,10 +102,7 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   // internal word breaks. Without it this matched ordinary English: "Password
   // requirements are not enforced" became "Password [redacted] are not
   // enforced", and a mangled finding just reads as the agent writing nonsense.
-  [
-    /\b(api[-_]?key|secret|password|token)(["'\s:=]+)(?=[A-Za-z0-9._~+/=-]*\d)(?=[A-Za-z0-9._~+/=-]*[A-Za-z])[A-Za-z0-9._~+/=]{12,}/gi,
-    "$1$2[redacted]",
-  ],
+  [/\b(api[-_]?key|secret|password|token)(["'\s:=]+)(?=[A-Za-z0-9._~+/=-]*\d)(?=[A-Za-z0-9._~+/=-]*[A-Za-z])[A-Za-z0-9._~+/=]{12,}/gi, "$1$2[redacted]"],
 ];
 
 /**
@@ -219,7 +215,7 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
       elements[key] = {
         exercised: (prev?.exercised ?? false) || el.exercised,
         // Keep whichever action was actually recorded; ours wins a tie.
-        ...(el.lastAction ?? prev?.lastAction ? { lastAction: el.lastAction ?? prev?.lastAction } : {}),
+        ...((el.lastAction ?? prev?.lastAction) ? { lastAction: el.lastAction ?? prev?.lastAction } : {}),
         absentStreak: Math.min(prev?.absentStreak ?? 0, el.absentStreak ?? 0),
       };
     }
@@ -252,8 +248,7 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
   }
   out.findings = [...byId.values()];
 
-  const unionRecord = <T>(a?: Record<string, T>, b?: Record<string, T>): Record<string, T> | undefined =>
-    a || b ? { ...(b ?? {}), ...(a ?? {}) } : undefined;
+  const unionRecord = <T>(a?: Record<string, T>, b?: Record<string, T>): Record<string, T> | undefined => (a || b ? { ...(b ?? {}), ...(a ?? {}) } : undefined);
   out.discoveredRoutes = unionRecord(mine.discoveredRoutes, theirs.discoveredRoutes);
   out.attemptedRoutes = unionRecord(mine.attemptedRoutes, theirs.attemptedRoutes);
   out.designElements = unionRecord(mine.designElements, theirs.designElements);
@@ -290,7 +285,10 @@ const MAX_DISCOVERED_ROUTES = 300;
 /** Shared finding-similarity helpers (used by live dedup and retro-merge). */
 function findingTokens(s: string): Set<string> {
   return new Set(
-    s.toLowerCase().replace(/[^a-z0-9/ ]+/g, " ").split(/\s+/)
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9/ ]+/g, " ")
+      .split(/\s+/)
       .filter((t) => t.length > 2)
       // crude stemming so entries/entry, displays/display collide
       .map((t) => t.replace(/ies$/, "y").replace(/(?<=\w{3})e?s$/, "")),
@@ -386,10 +384,7 @@ function sharesEndpointSignature(a: { evidence?: string }, b: { evidence?: strin
  *   400 for a zero quantity), and the loser's title, detail and severity are
  *   discarded on merge.
  */
-function sameEndpointBug(
-  existing: { status?: string; category: string; evidence?: string },
-  incoming: { category: string; evidence?: string },
-): boolean {
+function sameEndpointBug(existing: { status?: string; category: string; evidence?: string }, incoming: { category: string; evidence?: string }): boolean {
   if (existing.status === "resolved") return false;
   if (existing.category !== incoming.category) return false;
   return sharesEndpointSignature(existing, incoming);
@@ -555,10 +550,7 @@ export class MemoryStore {
     fs.mkdirSync(this.dir, { recursive: true });
     this.gitIgnoreNote = writeSelfIgnore(this.dir);
     this.memoryPath = path.join(this.dir, "memory.json");
-    this.sessionLogPath = path.join(
-      this.dir,
-      `session-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
-    );
+    this.sessionLogPath = path.join(this.dir, `session-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
     this.sweepStaleTemps();
     this.data = this.load();
     this.fileSig = this.currentSig();
@@ -1032,9 +1024,7 @@ export class MemoryStore {
     };
     const route = f.state.split("#")[0];
     const id = shortHash(`${f.category}|${f.title.toLowerCase().trim()}|${route}`);
-    const existing = this.data.findings.find(
-      (x) => x.id === id || (x.state.split("#")[0] === route && sameFinding(x, f)) || sameEndpointBug(x, f),
-    );
+    const existing = this.data.findings.find((x) => x.id === id || (x.state.split("#")[0] === route && sameFinding(x, f)) || sameEndpointBug(x, f));
     if (existing) {
       existing.runs += 1;
       existing.foundAt = new Date().toISOString();
@@ -1050,8 +1040,7 @@ export class MemoryStore {
         existing.id === id ||
         (!!existing.evidence &&
           !!f.evidence &&
-          existing.evidence.toLowerCase().replace(/\s+/g, " ").trim() ===
-            f.evidence.toLowerCase().replace(/\s+/g, " ").trim());
+          existing.evidence.toLowerCase().replace(/\s+/g, " ").trim() === f.evidence.toLowerCase().replace(/\s+/g, " ").trim());
       if (existing.status === "resolved" && exactMatch) {
         existing.status = "open";
         existing.regressedAt = existing.foundAt;
@@ -1081,7 +1070,10 @@ export class MemoryStore {
     const finding: Finding = {
       ...f,
       id,
-      repro: log.slice(start).slice(-12).map((a) => `${a.action}${a.target ? ` ${a.target}` : ""} @ ${a.url}`),
+      repro: log
+        .slice(start)
+        .slice(-12)
+        .map((a) => `${a.action}${a.target ? ` ${a.target}` : ""} @ ${a.url}`),
       foundAt: new Date().toISOString(),
       runs: 1,
     };
@@ -1181,10 +1173,7 @@ export class MemoryStore {
     for (const sigs of Object.values(map)) {
       for (const sig of sigs) perKey.set(sig, (perKey.get(sig) ?? 0) + 1);
     }
-    const minRoutes = Math.min(
-      Math.max(CHROME_MIN_ROUTES, Math.ceil(routes.length * CHROME_ROUTE_SHARE)),
-      CHROME_ABSOLUTE_ROUTES,
-    );
+    const minRoutes = Math.min(Math.max(CHROME_MIN_ROUTES, Math.ceil(routes.length * CHROME_ROUTE_SHARE)), CHROME_ABSOLUTE_ROUTES);
     const keys = new Set<string>();
     if (routes.length < CHROME_MIN_ROUTES) return keys;
     for (const [sig, n] of perKey) if (n >= minRoutes) keys.add(sig);
@@ -1216,12 +1205,7 @@ export class MemoryStore {
     }
     // Only meaningful once there are enough routes to tell "on every page" from
     // "on the two pages that exist"; require a majority of them.
-    const chromeMinRoutes = Math.min(
-      Math.max(CHROME_MIN_ROUTES, Math.ceil(routeCount * CHROME_ROUTE_SHARE)),
-      CHROME_ABSOLUTE_ROUTES,
-    );
-    return (key: string): boolean =>
-      routeCount >= CHROME_MIN_ROUTES && (routesPerKey.get(key) ?? 0) >= chromeMinRoutes;
+    const chromeMinRoutes = Math.min(Math.max(CHROME_MIN_ROUTES, Math.ceil(routeCount * CHROME_ROUTE_SHARE)), CHROME_ABSOLUTE_ROUTES);
+    return (key: string): boolean => routeCount >= CHROME_MIN_ROUTES && (routesPerKey.get(key) ?? 0) >= chromeMinRoutes;
   }
-
 }

@@ -13,7 +13,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { diagnose, installSkill, isEphemeralRoot, manualRegisterCommand, parseRegistration, registerMcp, resolveClaudeDir, type RunResult, type Runner } from "../dist/installer.js";
+import {
+  diagnose,
+  installSkill,
+  isEphemeralRoot,
+  manualRegisterCommand,
+  parseRegistration,
+  registerMcp,
+  resolveClaudeDir,
+  type RunResult,
+  type Runner,
+} from "../src/installer.ts";
 
 function tmp(prefix: string): string {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
@@ -102,7 +112,11 @@ test("installSkill never deletes a directory it did not install", () => {
 
   const result = installSkill({ packageRoot, claudeDir, now: () => 42 });
   assert.equal(fs.readFileSync(path.join(skills, "frontend-tester", "SKILL.md"), "utf8"), "# someone's own skill", "a foreign legacy-named skill survives");
-  assert.equal(fs.readFileSync(path.join(skills, "scenescout.backup-42", "SKILL.md"), "utf8"), "# hand-edited", "an unowned scenescout/ is moved aside, not deleted");
+  assert.equal(
+    fs.readFileSync(path.join(skills, "scenescout.backup-42", "SKILL.md"), "utf8"),
+    "# hand-edited",
+    "an unowned scenescout/ is moved aside, not deleted",
+  );
   assert.equal(fs.readFileSync(path.join(skills, "scenescout", "SKILL.md"), "utf8"), "# skill v1", "the install still completes");
   assert.equal(result.notes.length, 2, "both decisions are reported to the user");
   assert.match(result.notes.join("\n"), /left .*frontend-tester alone/);
@@ -252,10 +266,19 @@ test("the printed command survives paths with spaces", () => {
 test("diagnose names each broken piece and its fix", () => {
   const packageRoot = tmp("sc-bare-"); // nothing built, no skill source
   const claudeDir = tmp("sc-claude-");
-  const checks = diagnose({ packageRoot, claudeDir, nodeVersion: "v18.19.0", chromiumPath: path.join(packageRoot, "no-such-chromium"), run: scripted([absent]).run });
+  const checks = diagnose({
+    packageRoot,
+    claudeDir,
+    nodeVersion: "v18.19.0",
+    chromiumPath: path.join(packageRoot, "no-such-chromium"),
+    run: scripted([absent]).run,
+  });
   const failing = checks.filter((c) => !c.ok).map((c) => c.name);
   assert.deepEqual(failing, ["node >= 20", "engine built", "chromium downloaded", "skill installed", "claude CLI on PATH"]);
-  assert.ok(checks.every((c) => c.ok || c.fix), "every failure says how to fix it");
+  assert.ok(
+    checks.every((c) => c.ok || c.fix),
+    "every failure says how to fix it",
+  );
 });
 
 test("diagnose passes a complete setup and flags a registration pointing elsewhere", () => {
@@ -266,10 +289,25 @@ test("diagnose passes a complete setup and flags a registration pointing elsewhe
   fs.writeFileSync(chromiumPath, "");
   const server = path.join(packageRoot, "dist", "mcp-server.js");
 
-  const healthy = diagnose({ packageRoot, claudeDir, nodeVersion: "v22.1.0", chromiumPath, run: scripted([ok(`scenescout:\n  Command: ${process.execPath}\n  Args: ${server}`)]).run });
-  assert.deepEqual(healthy.filter((c) => !c.ok), []);
+  const healthy = diagnose({
+    packageRoot,
+    claudeDir,
+    nodeVersion: "v22.1.0",
+    chromiumPath,
+    run: scripted([ok(`scenescout:\n  Command: ${process.execPath}\n  Args: ${server}`)]).run,
+  });
+  assert.deepEqual(
+    healthy.filter((c) => !c.ok),
+    [],
+  );
 
-  const moved = diagnose({ packageRoot, claudeDir, nodeVersion: "v22.1.0", chromiumPath, run: scripted([ok(`scenescout:\n  Command: ${process.execPath}\n  Args: /old/place/dist/mcp-server.js`)]).run });
+  const moved = diagnose({
+    packageRoot,
+    claudeDir,
+    nodeVersion: "v22.1.0",
+    chromiumPath,
+    run: scripted([ok(`scenescout:\n  Command: ${process.execPath}\n  Args: /old/place/dist/mcp-server.js`)]).run,
+  });
   const bad = moved.filter((c) => !c.ok);
   assert.equal(bad.length, 1);
   assert.match(bad[0].detail, /pointing at \/old\/place\/dist\/mcp-server\.js — not this install/);
@@ -282,7 +320,13 @@ test("diagnose fails a registration that names a bare `node`, which Claude Code 
   const chromiumPath = path.join(packageRoot, "chromium");
   fs.writeFileSync(chromiumPath, "");
   const server = path.join(packageRoot, "dist", "mcp-server.js");
-  const checks = diagnose({ packageRoot, claudeDir, nodeVersion: "v22.1.0", chromiumPath, run: scripted([ok(`scenescout:\n  Command: node\n  Args: ${server}\n`)]).run });
+  const checks = diagnose({
+    packageRoot,
+    claudeDir,
+    nodeVersion: "v22.1.0",
+    chromiumPath,
+    run: scripted([ok(`scenescout:\n  Command: node\n  Args: ${server}\n`)]).run,
+  });
   const bad = checks.filter((c) => !c.ok);
   assert.equal(bad.length, 1);
   assert.match(bad[0].detail, /bare `node`/);
@@ -303,7 +347,10 @@ test("diagnose separates 'not registered' from 'registered but unreadable'", () 
   // A listing we cannot parse (a future layout) is not proof of a wrong
   // install — flagging it would be a failure `install` can never clear.
   const unreadable = diagnose({ ...base, run: scripted([ok("scenescout — stdio — connected")]).run });
-  assert.deepEqual(unreadable.filter((c) => !c.ok), []);
+  assert.deepEqual(
+    unreadable.filter((c) => !c.ok),
+    [],
+  );
   assert.match(unreadable.find((c) => c.name === "MCP server registered")!.detail, /could not read its path/);
 });
 
@@ -326,5 +373,8 @@ test("diagnose compares the registration by real path, not by spelling", () => {
   fs.symlinkSync(packageRoot, alias, "dir");
   const listing = `scenescout:\n  Scope: User config\n  Command: ${process.execPath}\n  Args: ${path.join(alias, "dist", "mcp-server.js")}\n  Environment:\n`;
   const checks = diagnose({ packageRoot, claudeDir, nodeVersion: "v22.1.0", chromiumPath, run: scripted([ok(listing)]).run });
-  assert.deepEqual(checks.filter((c) => !c.ok), []);
+  assert.deepEqual(
+    checks.filter((c) => !c.ok),
+    [],
+  );
 });

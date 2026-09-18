@@ -41,11 +41,16 @@
     "prepare": "npm run build",
     "setup": "node dist/cli.js install",
     "doctor": "node dist/cli.js doctor",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "dev": "tsx src/cli.ts",
     "serve": "node dist/mcp-server.js",
-    "smoke": "tsx scripts/smoke.ts",
-    "mcp-check": "tsx scripts/mcp-check.ts",
-    "test": "npm run build && npm run scan-test && npm run oracle-test && npm run policy-test && npm run fixture-test && npm run dispatch-test && npm run design-test && npm run contract-test && npm run memory-test && npm run install-test && npm run smoke && npm run mcp-check",
+    "smoke": "npm run build && npm run smoke:run",
+    "smoke:run": "tsx scripts/smoke.ts",
+    "mcp-check": "npm run build && npm run mcp-check:run",
+    "mcp-check:run": "tsx scripts/mcp-check.ts",
+    "test": "npm run build && npm run test:unit && npm run smoke:run && npm run mcp-check:run",
+    "test:unit": "npm run scan-test && npm run oracle-test && npm run policy-test && npm run fixture-test && npm run dispatch-test && npm run design-test && npm run contract-test && npm run memory-test && npm run install-test",
     "scan-test": "tsx scripts/scan-test.ts",
     "oracle-test": "tsx --test scripts/oracle-test.ts",
     "policy-test": "tsx --test scripts/policy-test.ts",
@@ -62,7 +67,8 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
-    "@types/node": "^26.5.1",
+    "@types/node": "^20.19.0",
+    "prettier": "3.9.8",
     "tsx": "^4.23.13",
     "typescript": "^5.9.3"
   }

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/brunoboto96/SceneScout/security/advisories/new
+    about: Privately, please — not as a public issue.
+  - name: Question or idea to discuss
+    url: https://github.com/brunoboto96/SceneScout/discussions
+    about: How to use it, whether something is in scope, show what you found with it.

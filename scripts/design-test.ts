@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeDesign, contrastRatio, styleSignature } from "../dist/engine/design.js";
+import { analyzeDesign, contrastRatio, styleSignature } from "../src/engine/design.ts";
 
 const VIEWPORT = { width: 1280, height: 900 };
 

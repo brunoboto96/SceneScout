@@ -235,7 +235,9 @@ export function geometryIssues(
     if (el.clipped && w > 0 && h > 0) {
       clippedTotal += 1;
       if (clippedTotal <= 3) {
-        issues.push(`${el.ref} ${el.role} "${el.name}" is UNREACHABLE — fully clipped inside an overflow-hidden ancestor (at ${x},${y}; the container cannot scroll to reveal it)`);
+        issues.push(
+          `${el.ref} ${el.role} "${el.name}" is UNREACHABLE — fully clipped inside an overflow-hidden ancestor (at ${x},${y}; the container cannot scroll to reveal it)`,
+        );
       }
     }
   }

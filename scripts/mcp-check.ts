@@ -14,9 +14,30 @@ const serverPath = path.join(here, "..", "dist", "mcp-server.js");
 const packageRoot = path.join(here, "..");
 
 const EXPECTED_TOOLS = [
-  "ft_scan", "ft_attach", "ft_session", "ft_journey", "ft_note", "ft_snapshot", "ft_click", "ft_type", "ft_upload", "ft_hover", "ft_select",
-  "ft_navigate", "ft_back", "ft_press", "ft_scroll", "ft_screenshot", "ft_finding", "ft_crawl", "ft_run_plan", "ft_design_audit", "ft_resolve",
-  "ft_coverage", "ft_report", "ft_close",
+  "ft_scan",
+  "ft_attach",
+  "ft_session",
+  "ft_journey",
+  "ft_note",
+  "ft_snapshot",
+  "ft_click",
+  "ft_type",
+  "ft_upload",
+  "ft_hover",
+  "ft_select",
+  "ft_navigate",
+  "ft_back",
+  "ft_press",
+  "ft_scroll",
+  "ft_screenshot",
+  "ft_finding",
+  "ft_crawl",
+  "ft_run_plan",
+  "ft_design_audit",
+  "ft_resolve",
+  "ft_coverage",
+  "ft_report",
+  "ft_close",
 ];
 
 async function main(): Promise<void> {
@@ -77,9 +98,7 @@ async function main(): Promise<void> {
   console.log(`✓ skill documents every non-exempt tool parameter`);
 
   const result = await client.callTool({ name: "ft_scan", arguments: { projectPath: packageRoot } });
-  const text = (result.content as Array<{ type: string; text?: string }>)
-    .map((c) => c.text ?? "")
-    .join("");
+  const text = (result.content as Array<{ type: string; text?: string }>).map((c) => c.text ?? "").join("");
   if (!text.includes("Project:")) {
     console.error(`MCP CHECK FAILED — ft_scan returned unexpected output:\n${text}`);
     process.exit(1);

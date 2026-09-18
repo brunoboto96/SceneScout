@@ -1,8 +1,8 @@
 /**
  * Unit tests for the memory layer: finding dedup (the tiered sameFinding via
  * addFinding), retroMerge, regression reopening, and coverage aggregation.
- * Drives the compiled MemoryStore against a temp directory — see smoke.ts for
- * why dist/ is imported rather than src/.
+ * Drives the MemoryStore from src/ against a temp directory, so this suite
+ * tests your edit with no build step.
  *
  * Runs on node:test (built into Node ≥20, no dependency) so each case is
  * isolated, failures print a real diff, and one case can be run alone:
@@ -14,18 +14,47 @@ import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
 import { execFileSync } from "node:child_process";
-import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME, MemoryStore, adoptLegacyMemoryDir, mergeMemory, redactSecrets } from "../dist/engine/memory.js";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME, MemoryStore, adoptLegacyMemoryDir, mergeMemory, redactSecrets } from "../src/engine/memory.ts";
 
 /** Temp dirs created by the running test, cleaned up even when it fails. */
 let dirs: string[] = [];
 
+/**
+ * Stores opened by the running test. Each holds a debounced write timer; a
+ * temp dir deleted while one is pending makes that write fail half a second
+ * later, and a green run then prints a wall of "memory write failed" lines —
+ * which is exactly what a newcomer's first `npm test` looked like.
+ */
+let stores: MemoryStore[] = [];
+
 function freshStore(): MemoryStore {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
   dirs.push(dir);
-  return new MemoryStore(dir);
+  const store = new MemoryStore(dir);
+  stores.push(store);
+  return store;
+}
+
+/** Open a store on an existing directory, tracked so its pending write is settled before cleanup. */
+function openStore(dir: string): MemoryStore {
+  const store = new MemoryStore(dir);
+  stores.push(store);
+  return store;
 }
 
 afterEach(() => {
+  // flush() cancels the pending timer; a store whose dir a test deleted on
+  // purpose has nothing left to write, which is fine.
+  for (const store of stores) {
+    try {
+      store.flush();
+    } catch {
+      /* the test removed this store's directory deliberately */
+    }
+  }
+  stores = [];
   for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
   dirs = [];
 });
@@ -92,8 +121,20 @@ test("dedup: an endpoint signature match needs the SAME status, not just the sam
 
 test("dedup: endpoint signatures collapse record ids so one bug is not filed per record", () => {
   const store = freshStore();
-  const [, new1] = store.addFinding({ ...base, state: "/orders/:id#1", title: "Effectiveness 404 on order 176", detail: "x", evidence: "GET /api/orders/176/effectiveness 404" });
-  const [, new2] = store.addFinding({ ...base, state: "/orders/:id#2", title: "Effectiveness 404 on order 181", detail: "y", evidence: "GET /api/orders/181/effectiveness 404" });
+  const [, new1] = store.addFinding({
+    ...base,
+    state: "/orders/:id#1",
+    title: "Effectiveness 404 on order 176",
+    detail: "x",
+    evidence: "GET /api/orders/176/effectiveness 404",
+  });
+  const [, new2] = store.addFinding({
+    ...base,
+    state: "/orders/:id#2",
+    title: "Effectiveness 404 on order 181",
+    detail: "y",
+    evidence: "GET /api/orders/181/effectiveness 404",
+  });
   assert.equal(new2, false, "the same endpoint failing on two records is one finding");
   assert.ok(new1, "the first is new");
 });
@@ -136,7 +177,13 @@ test("dedup: a RESOLVED finding never swallows a new bug on the same endpoint", 
   const store = freshStore();
   const [first] = store.addFinding({ ...base, state: "/a#1", title: "Create 500s on empty payload", detail: "x", evidence: "POST /api/orders 500" });
   store.resolveFinding(first.id);
-  const [, isNew] = store.addFinding({ ...base, state: "/b#2", title: "Create 500s when the customer is archived", detail: "y", evidence: "POST /api/orders 500 archived customer" });
+  const [, isNew] = store.addFinding({
+    ...base,
+    state: "/b#2",
+    title: "Create 500s when the customer is archived",
+    detail: "y",
+    evidence: "POST /api/orders 500 archived customer",
+  });
   assert.equal(isNew, true, "a fixed bug must not absorb a different new one on the same endpoint");
 });
 
@@ -144,7 +191,14 @@ test("dedup: the endpoint rule needs the same CATEGORY", () => {
   // One endpoint+status can carry two genuinely different bugs.
   const store = freshStore();
   store.addFinding({ ...base, category: "security", state: "/a#1", title: "Role boundary leaks", detail: "x", evidence: "GET /api/admin 403" });
-  const [, isNew] = store.addFinding({ ...base, category: "ux-confusing", state: "/b#2", title: "403 shows a blank page with no explanation", detail: "y", evidence: "GET /api/admin 403" });
+  const [, isNew] = store.addFinding({
+    ...base,
+    category: "ux-confusing",
+    state: "/b#2",
+    title: "403 shows a blank page with no explanation",
+    detail: "y",
+    evidence: "GET /api/admin 403",
+  });
   assert.equal(isNew, true, "a security finding and a UX finding on one endpoint are two bugs");
 });
 
@@ -158,7 +212,12 @@ test("dedup: a finding with no METHOD+path evidence is untouched by the endpoint
 test("dedup tier 2: a literal quoted in a TITLE bridges differing evidence", () => {
   const store = freshStore();
   const [, new1] = store.addFinding({ ...base, title: 'Save shows "Document not found anymore"', detail: "x", evidence: "PUT /api/docs/1 404" });
-  const [, new2] = store.addFinding({ ...base, title: "Editing fails with an error toast", detail: 'Toast says "Document not found anymore" after save.', evidence: "toast document-not-found" });
+  const [, new2] = store.addFinding({
+    ...base,
+    title: "Editing fails with an error toast",
+    detail: 'Toast says "Document not found anymore" after save.',
+    evidence: "toast document-not-found",
+  });
   assert.equal(new1, true);
   assert.equal(new2, false, "one states the string in its title, the other in its detail — same bug");
 });
@@ -236,14 +295,28 @@ test("retroMerge: duplicates stored by an older build collapse on load", () => {
   const memDir = path.join(dir, ".scenescout");
   fs.mkdirSync(memDir, { recursive: true });
   const dup = (id: string, title: string, runs: number, status?: string) => ({
-    id, severity: "medium", category: "http-error", title, detail: "d",
-    evidence: "GET /api/reports 403", url: "http://x/a", state: "/a#f1", repro: [], foundAt: "2026-01-01T00:00:00Z", runs, ...(status ? { status } : {}),
+    id,
+    severity: "medium",
+    category: "http-error",
+    title,
+    detail: "d",
+    evidence: "GET /api/reports 403",
+    url: "http://x/a",
+    state: "/a#f1",
+    repro: [],
+    foundAt: "2026-01-01T00:00:00Z",
+    runs,
+    ...(status ? { status } : {}),
   });
   fs.writeFileSync(
     path.join(memDir, "memory.json"),
-    JSON.stringify({ version: 1, states: {}, findings: [dup("aaa", "Reports endpoint 403 for User", 2), dup("bbb", "User role denied by reports endpoint", 3, "resolved")] }),
+    JSON.stringify({
+      version: 1,
+      states: {},
+      findings: [dup("aaa", "Reports endpoint 403 for User", 2), dup("bbb", "User role denied by reports endpoint", 3, "resolved")],
+    }),
   );
-  const store = new MemoryStore(dir);
+  const store = openStore(dir);
   assert.equal(store.findings.length, 1, "duplicates should merge to one entry");
   assert.equal(store.findings[0]?.runs, 5, "run counts should sum");
   assert.equal(store.findings[0]?.status, "resolved", "resolved status should survive the merge");
@@ -345,7 +418,7 @@ test("an existing artifact .gitignore is left exactly as the user left it", () =
   const store = freshStore();
   const ignorePath = path.join(store.dir, ".gitignore");
   fs.writeFileSync(ignorePath, "# hand-edited\n!report.md\n");
-  const second = new MemoryStore(path.dirname(store.dir));
+  const second = openStore(path.dirname(store.dir));
   assert.equal(fs.readFileSync(ignorePath, "utf8"), "# hand-edited\n!report.md\n", "never rewrite a file we do not own");
   assert.equal(second.gitIgnoreNote, null, "and say nothing when nothing changed");
 });
@@ -364,8 +437,20 @@ test("a failed background write is recorded, not thrown, and clears on recovery"
   // hitting ENOENT with nothing to catch it.
   const store = freshStore();
   fs.rmSync(store.dir, { recursive: true, force: true });
-  store.visitState("/a#f1", "http://x/a", "/a", ["button:save"]); // schedules a debounced save() at 500ms
-  await sleep(700);
+  // The failure is also logged to stderr — the only trace an operator sees.
+  // Capture it: that asserts the log exists, and keeps a deliberate failure
+  // from printing an alarming line into an otherwise green run.
+  const logged: string[] = [];
+  const realError = console.error;
+  console.error = (...args: unknown[]) => void logged.push(args.join(" "));
+  try {
+    store.visitState("/a#f1", "http://x/a", "/a", ["button:save"]); // schedules a debounced save() at 500ms
+    await sleep(700);
+  } finally {
+    console.error = realError;
+  }
+  assert.equal(logged.length, 1, "exactly one log line per failed write");
+  assert.match(logged[0], /background memory write failed: ENOENT/);
   assert.equal(typeof store.lastSaveError, "string", "failure recorded on lastSaveError instead of thrown");
   assert.ok((store.lastSaveError ?? "").length > 0);
 
@@ -408,7 +493,7 @@ test("attempts recorded before role-scoping still count, for every role", () => 
   const data = JSON.parse(fs.readFileSync(raw, "utf8"));
   data.attemptedRoutes = { "/legacy": "landed:/" };
   fs.writeFileSync(raw, JSON.stringify(data));
-  const reloaded = new MemoryStore(projectDir);
+  const reloaded = openStore(projectDir);
   assert.ok("/legacy" in reloaded.attemptedByRole("anyone"), "never drop coverage a previous run earned");
 });
 
@@ -432,8 +517,7 @@ test("credentials quoted from app output are redacted before they are persisted"
 
 test("redaction is stable, so the same leak re-found is one finding, not two", () => {
   const store = freshStore();
-  const mk = (key: string) =>
-    store.addFinding({ ...base, title: "Upstream error leaks a key", detail: `key: sk-live-${key}`, evidence: "POST /api/ai 500" });
+  const mk = (key: string) => store.addFinding({ ...base, title: "Upstream error leaks a key", detail: `key: sk-live-${key}`, evidence: "POST /api/ai 500" });
   const [, firstIsNew] = mk("AAAABBBBCCCCDDDD");
   const [second, secondIsNew] = mk("QQQQRRRRSSSSTTTT");
   assert.ok(firstIsNew, "first sighting is new");
@@ -486,7 +570,7 @@ test("legacy login bounces are re-filed as auth loss on load", () => {
   data.attemptedRoutes = { "/documents": "landed:/login", "/admin": "landed:/" };
   fs.writeFileSync(raw, JSON.stringify(data));
 
-  const reloaded = new MemoryStore(projectDir);
+  const reloaded = openStore(projectDir);
   assert.ok(!("/documents" in reloaded.attemptedByRole("admin")), "the login bounce no longer counts");
   assert.ok("/admin" in reloaded.attemptedByRole("admin"), "a genuine permission redirect still does");
 });
@@ -547,15 +631,19 @@ test("a second PROCESS writing the same project does not erase our findings", ()
   store.flush();
 
   const child = `
-    import { MemoryStore } from ${JSON.stringify(new URL("../dist/engine/memory.js", import.meta.url).href)};
+    import { MemoryStore } from ${JSON.stringify(new URL("../src/engine/memory.ts", import.meta.url).href)};
     const s = new MemoryStore(${JSON.stringify(projectDir)});
     s.addFinding({ severity: "high", category: "http-error", title: "Theirs: delete button 403s",
       detail: "y", evidence: "DELETE /api/x 403", url: "http://x/b", state: "/b#f1" });
     s.flush();
   `;
-  const childFile = path.join(projectDir, "child.mjs");
+  const childFile = path.join(projectDir, "child.mts");
   fs.writeFileSync(childFile, child);
-  execFileSync(process.execPath, [childFile], { stdio: "pipe" });
+  // Through tsx, like this suite itself, so the second process runs src/ too.
+  // The loader is resolved from HERE: the child lives in a temp dir with no
+  // node_modules of its own to find "tsx" in.
+  const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+  execFileSync(process.execPath, ["--import", pathToFileURL(tsxLoader).href, childFile], { stdio: "pipe" });
 
   // Now we flush again, exactly as a live run would keep doing.
   store.addFinding({ ...base, title: "Ours: second finding", detail: "z", evidence: "GET /api/y 404" });
@@ -596,8 +684,32 @@ test("merging is idempotent — repeated flushes do not inflate counters", () =>
 });
 
 test("merging keeps coverage from both sides of a shared state", () => {
-  const mine = { version: 1 as const, states: { "/a#1": { url: "u", route: "/a", firstSeen: "2026-01-02", visits: 1, elements: { "button:save": { exercised: true }, "button:open": { exercised: false } } } }, findings: [] };
-  const theirs = { version: 1 as const, states: { "/a#1": { url: "u", route: "/a", firstSeen: "2026-01-01", visits: 4, elements: { "button:save": { exercised: false }, "button:cancel": { exercised: true } } } }, findings: [] };
+  const mine = {
+    version: 1 as const,
+    states: {
+      "/a#1": {
+        url: "u",
+        route: "/a",
+        firstSeen: "2026-01-02",
+        visits: 1,
+        elements: { "button:save": { exercised: true }, "button:open": { exercised: false } },
+      },
+    },
+    findings: [],
+  };
+  const theirs = {
+    version: 1 as const,
+    states: {
+      "/a#1": {
+        url: "u",
+        route: "/a",
+        firstSeen: "2026-01-01",
+        visits: 4,
+        elements: { "button:save": { exercised: false }, "button:cancel": { exercised: true } },
+      },
+    },
+    findings: [],
+  };
   const merged = mergeMemory(mine, theirs);
   const els = merged.states["/a#1"].elements;
   assert.equal(els["button:save"].exercised, true, "exercised anywhere counts as exercised");
@@ -611,7 +723,7 @@ test("a crashed flush does not leave temp files behind forever", () => {
   const store = freshStore();
   const stale = path.join(store.dir, "memory.json.99999.0.tmp");
   fs.writeFileSync(stale, "{}");
-  const reopened = new MemoryStore(path.dirname(store.dir));
+  const reopened = openStore(path.dirname(store.dir));
   assert.ok(!fs.existsSync(stale), "a leftover temp from a dead process is swept on load");
   assert.ok(reopened.dir.length > 0);
 });
@@ -625,7 +737,7 @@ test("a project's memory survives the tool's rename", () => {
   const legacy = path.join(project, LEGACY_MEMORY_DIRNAME);
   fs.mkdirSync(legacy);
   fs.writeFileSync(path.join(legacy, "ASSUMPTIONS.md"), "earlier notes");
-  const seeded = new MemoryStore(project); // first attach after the rename
+  const seeded = openStore(project); // first attach after the rename
   assert.match(seeded.legacyDirNote ?? "", /Moved this project's memory/);
   assert.equal(fs.existsSync(legacy), false, "the old directory is moved, not copied");
   assert.equal(fs.readFileSync(path.join(project, MEMORY_DIRNAME, "ASSUMPTIONS.md"), "utf8"), "earlier notes");
@@ -638,7 +750,7 @@ test("a project's memory survives the tool's rename", () => {
   assert.equal(fs.readFileSync(path.join(project, MEMORY_DIRNAME, "ASSUMPTIONS.md"), "utf8"), "earlier notes");
   const untouched = fs.mkdtempSync(path.join(os.tmpdir(), "ft-new-"));
   dirs.push(untouched);
-  assert.equal(new MemoryStore(untouched).legacyDirNote, null, "a fresh project has nothing to adopt");
+  assert.equal(openStore(untouched).legacyDirNote, null, "a fresh project has nothing to adopt");
 });
 
 test("the legacy memory dir is NOT moved out from under a pre-rename engine that is still running", () => {
@@ -661,15 +773,18 @@ test("the legacy memory dir is NOT moved out from under a pre-rename engine that
   assert.equal(fs.existsSync(path.join(project, MEMORY_DIRNAME, "status.json")), true);
 });
 
-
 test("a secret in the page URL or in a note is not persisted", () => {
   // Title/detail/evidence were already redacted; the URL was not, and it is
   // both stored and printed in the report. A finding filed on a reset or
   // magic-link page carried that page's token into memory.json and report.md.
   const store = freshStore();
   const [finding] = store.addFinding({
-    severity: "medium", category: "other", title: "Reset form accepts a blank password", detail: "d",
-    url: "http://x/reset?token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc", state: "/reset#a",
+    severity: "medium",
+    category: "other",
+    title: "Reset form accepts a blank password",
+    detail: "d",
+    url: "http://x/reset?token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc",
+    state: "/reset#a",
   });
   assert.doesNotMatch(finding.url, /eyJhbGci/);
   assert.match(finding.url, /^http:\/\/x\/reset\?token=/, "the page is still identifiable");

@@ -9,8 +9,8 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { geometryIssues } from "../dist/engine/collector.js";
-import { redactViolation } from "../dist/engine/oracles.js";
+import { geometryIssues } from "../src/engine/collector.ts";
+import { redactViolation } from "../src/engine/oracles.ts";
 
 const VIEWPORT = { width: 1280, height: 900 };
 
@@ -51,7 +51,11 @@ test("a dialog stacked over page content is NOT an overlap", () => {
     ],
     VIEWPORT,
   );
-  assert.deepEqual(issues.filter((i) => i.includes("overlaps")), [], "different layers are stacked by design");
+  assert.deepEqual(
+    issues.filter((i) => i.includes("overlaps")),
+    [],
+    "different layers are stacked by design",
+  );
 });
 
 test("two pieces of fixed chrome overlapping is intended layering, not a collision", () => {
@@ -62,7 +66,10 @@ test("two pieces of fixed chrome overlapping is intended layering, not a collisi
     ],
     VIEWPORT,
   );
-  assert.deepEqual(issues.filter((i) => i.includes("overlaps")), []);
+  assert.deepEqual(
+    issues.filter((i) => i.includes("overlaps")),
+    [],
+  );
 });
 
 test("a nested control inside its own wrapper is not an overlap", () => {
@@ -73,7 +80,10 @@ test("a nested control inside its own wrapper is not an overlap", () => {
     ],
     VIEWPORT,
   );
-  assert.deepEqual(issues.filter((i) => i.includes("overlaps")), []);
+  assert.deepEqual(
+    issues.filter((i) => i.includes("overlaps")),
+    [],
+  );
 });
 
 test("an element rendered off the reachable page area is reported", () => {
