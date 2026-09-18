@@ -193,8 +193,6 @@ async function main(): Promise<void> {
       show(`design audit ${route}`, await engine.designAudit());
     }
 
-    await annotatedDashboard(baseUrl);
-
     engine.memory!.addAssumption("app", "Harbor is a single-role order desk: no login, every visitor can create, edit and delete orders.", "demo");
     engine.memory!.addAssumption("risks", "Forms do not guard against repeat submission; check every new create flow with a double-click.", "demo");
 
@@ -211,6 +209,9 @@ async function main(): Promise<void> {
     show("gap ledger", computeGaps(engine.memory!, extras).join("\n") || "(empty)");
     const report = generateReport(engine.memory!, engine.oracleLog.all, extras);
     fs.writeFileSync(path.join(outDir, "report.md"), stabilise(report.markdown, projectDir));
+    // After the report: the annotated picture is for the README only, and a
+    // failure drawing it must not leave examples/ with a stale report.
+    await annotatedDashboard(baseUrl);
     console.log(
       `\nWrote ${path.relative(process.cwd(), path.join(outDir, "report.md"))} and ${fs.readdirSync(path.join(outDir, "screenshots")).length} screenshots.`,
     );
@@ -236,7 +237,9 @@ async function annotatedDashboard(baseUrl: string): Promise<void> {
     await page.goto(baseUrl, { waitUntil: "networkidle" });
     await page.evaluate(`(() => {
       const mark = (testid, n, text, pad) => {
-        const r = document.querySelector('[data-testid="' + testid + '"]').getBoundingClientRect();
+        const target = document.querySelector('[data-testid="' + testid + '"]');
+        if (!target) throw new Error("annotated dashboard: the demo app has no element with data-testid " + testid);
+        const r = target.getBoundingClientRect();
         const box = document.createElement("div");
         box.style.cssText = "position:absolute;border:3px solid #dc2626;border-radius:10px;pointer-events:none;z-index:9999;" +
           "left:" + (r.left + scrollX - pad) + "px;top:" + (r.top + scrollY - pad) + "px;width:" + (r.width + pad * 2) + "px;height:" + (r.height + pad * 2) + "px";
@@ -248,7 +251,7 @@ async function annotatedDashboard(baseUrl: string): Promise<void> {
       };
       mark("dash-new-badge", "1", "badge covers the “All orders” button", 6);
       const img = document.querySelector('[data-testid="dash-chart"]');
-      img.style.display = "inline-block";
+      if (img) img.style.display = "inline-block";
       mark("dash-chart", "2", "chart image fails to load (404)", 6);
     })()`);
     await page.screenshot({ path: path.join(outDir, "screenshots", "dashboard-annotated.png") });

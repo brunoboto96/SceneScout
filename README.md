@@ -52,7 +52,7 @@ An excerpt of the report it wrote — [read the whole thing](examples/report.md)
 >
 > **Gap ledger — what was NOT tested:** 4/7 visited routes never design-audited · single-role run, so permission boundaries are untested
 
-Every finding comes with a repro trace and a Playwright regression-test skeleton. Try it yourself in two minutes: `npm run demo:serve`, then `/scenescout --url http://127.0.0.1:4173` — see [demo-app/](demo-app/). Its README lists every seeded defect and which oracle catches it.
+Every finding comes with a repro trace and a Playwright regression-test skeleton. To try it yourself, clone this repository, run `npm run demo:serve`, then `/scenescout --url http://127.0.0.1:4173` — see [demo-app/](demo-app/). Its README lists every seeded defect and which oracle catches it.
 
 ---
 
@@ -131,7 +131,7 @@ Then download the browser once with `npx -y scenescout install --browser-only`. 
 
 1. puts the `/scenescout` skill into `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`) — a `scenescout` folder it didn't create is moved aside to a `.backup-…` copy, never deleted,
 2. downloads the Chromium build SceneScout drives (skipped if you already have it),
-3. registers the MCP server with Claude Code at user scope as `npx -y scenescout serve`, using the **absolute** path of `npx` so it works under nvm/fnm.
+3. registers the MCP server with Claude Code at user scope. Run through `npx`, the launcher is `npx -y scenescout serve`, with the absolute path of `npx` where one sits beside node, so it works under nvm/fnm. From a clone or a global install it is the absolute node path plus that install's `dist/mcp-server.js`.
 
 Re-run it any time: after moving the folder or switching node versions it refreshes the stored paths. It exits non-zero if any step failed, so it is safe to chain. Opt out of a step with `--no-register` or `--skip-browser`.
 
@@ -392,8 +392,8 @@ Working on SceneScout itself is the only reason to clone it:
 git clone https://github.com/brunoboto96/SceneScout.git scenescout && cd scenescout
 npm install        # installs dependencies and builds
 npm run setup      # same as `scenescout install`, but registers THIS checkout (the skill is linked, so edits are live)
-npm test           # build + 11 suites: scan, oracle, policy, fixture, dispatch, design,
-                   #                     contract, memory, install, smoke, mcp-check
+npm test           # build + 12 suites: scan, oracle, policy, fixture, dispatch, design,
+                   #                     contract, memory, install, hygiene, smoke, mcp-check
 npm run demo       # regenerate examples/ from the demo app
 ```
 
