@@ -188,10 +188,16 @@ test("registerMcp registers at user scope with the absolute node path", () => {
 });
 
 test("registerMcp is idempotent: an existing registration is replaced so moved paths heal", () => {
-  const { run, calls } = scripted([fail("MCP server scenescout already exists in user config"), ok(), ok(), notRegistered]);
+  const { run, calls } = scripted([
+    fail("MCP server scenescout already exists in user config"),
+    ok("scenescout:\n  Command: /n\n  Args: /s.js\n"),
+    ok(),
+    ok(),
+    notRegistered,
+  ]);
   const result = registerMcp({ launch: ["/n", "/s.js"], serverPath: "/s.js", run });
   assert.deepEqual(result, { status: "registered", replaced: true, removedLegacy: [], notes: [] });
-  assert.deepEqual(calls.map((c) => c.slice(1, 3).join(" ")).slice(0, 3), ["mcp add", "mcp remove", "mcp add"]);
+  assert.deepEqual(calls.map((c) => c.slice(1, 3).join(" ")).slice(0, 4), ["mcp add", "mcp get", "mcp remove", "mcp add"]);
 });
 
 test("registerMcp removes a pre-rename registration that points at this same server", () => {
@@ -237,7 +243,7 @@ test("registerMcp leaves a same-named server alone when it is not this one", () 
 test("registerMcp says so when a failed re-add left the user with NO registration", () => {
   // remove succeeded, the second add did not: the machine is now worse off
   // than before install ran, and the message must not hide that.
-  const { run } = scripted([fail("MCP server scenescout already exists in user config"), ok(), fail("config is locked")]);
+  const { run } = scripted([fail("MCP server scenescout already exists in user config"), notRegistered, ok(), fail("config is locked")]);
   const result = registerMcp({ launch: ["/n", "/s.js"], serverPath: "/s.js", run });
   assert.equal(result.status, "failed");
   assert.match(result.status === "failed" ? result.detail : "", /previous registration was removed.*config is locked/);
@@ -473,4 +479,40 @@ test("the engine-only doctor does not fail a plugin install for lacking a skill 
   // The default scope still checks everything.
   const full = diagnose({ ...base, run: scripted([absent]).run });
   assert.ok(full.some((c) => c.name === "skill installed" && !c.ok));
+});
+
+test("replacing a registration that ran something else says what it ran", () => {
+  // One name holds one server, so install still replaces it — but a second
+  // checkout or a fork registered under the same name must not vanish silently.
+  const packageRoot = fakePackage();
+  const serverPath = path.join(packageRoot, "dist", "mcp-server.js");
+  const launch = ["/opt/node/bin/node", serverPath];
+  const exists = fail("MCP server scenescout already exists in user config");
+
+  const other = scripted([
+    exists,
+    ok("scenescout:\n  Scope: User config\n  Command: /usr/bin/node\n  Args: /home/u/fork/dist/mcp-server.js\n"),
+    ok(),
+    ok(),
+    notRegistered,
+  ]);
+  const replacedOther = registerMcp({ launch, serverPath, run: other.run });
+  assert.equal(replacedOther.status, "registered");
+  assert.equal(replacedOther.status === "registered" && replacedOther.replaced, true);
+  const notes = replacedOther.status === "registered" ? replacedOther.notes.join("\n") : "";
+  assert.match(notes, /replaced an existing "scenescout" registration that ran something else: \/usr\/bin\/node \/home\/u\/fork\/dist\/mcp-server\.js/);
+
+  // Our own earlier registration — same script, a stale node path — is the
+  // routine case and is replaced without comment.
+  const own = scripted([exists, ok(`scenescout:\n  Command: /old/node\n  Args: ${serverPath}\n`), ok(), ok(), notRegistered]);
+  const replacedOwn = registerMcp({ launch, serverPath, run: own.run });
+  assert.deepEqual(replacedOwn.status === "registered" && replacedOwn.notes, []);
+
+  // So is an npx registration, which names no script at all.
+  const npx = scripted([exists, ok("scenescout:\n  Command: npx\n  Args: -y scenescout serve\n"), ok(), ok(), notRegistered]);
+  assert.deepEqual((registerMcp({ launch, serverPath, run: npx.run }) as { notes: string[] }).notes, []);
+
+  // A listing that cannot be read is not evidence of somebody else's server.
+  const unreadable = scripted([exists, ok("scenescout — stdio — connected"), ok(), ok(), notRegistered]);
+  assert.deepEqual((registerMcp({ launch, serverPath, run: unreadable.run }) as { notes: string[] }).notes, []);
 });
