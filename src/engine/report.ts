@@ -65,6 +65,8 @@ export interface ReportExtras {
   createdResources?: string[];
   /** Known routes never visited — first entry of the gap ledger. */
   unvisitedRoutes?: string[];
+  /** Errors caused by the write policy's own blocks, which were not counted as violations. */
+  policyAttributed?: number;
 }
 
 /**
@@ -354,6 +356,9 @@ export function generateReport(memory: MemoryStore, oracleLog: OracleViolation[]
   lines.push(`| States explored | ${cov.states} |`);
   if (extras) lines.push(`| Design audits this session | ${extras.designAudits} |`);
   lines.push(`| Oracle violations this session | ${oracleLog.length} |`);
+  if (extras?.policyAttributed) {
+    lines.push(`| Errors caused by the tester's own write-policy blocks (not counted above) | ${extras.policyAttributed} |`);
+  }
   lines.push(`| Elements exercised (informational — denominator grows with every state) | ${cov.elementsExercised}/${cov.elementsTotal} |`);
   lines.push(``);
 

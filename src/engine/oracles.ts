@@ -1,4 +1,4 @@
-import type { Page } from "playwright";
+import type { Page, Request } from "playwright";
 import { redactSecrets } from "./memory.js";
 
 export interface OracleViolation {
@@ -22,6 +22,30 @@ const BENIGN_URL_RE = /favicon|\.map($|\?)/i;
  */
 export function redactViolation<T extends { detail: string; url: string }>(v: T): T {
   return { ...v, detail: redactSecrets(v.detail), url: redactSecrets(v.url) };
+}
+
+/** How long after a write-policy block a generic "fetch failed" error is still attributed to it. */
+export const POLICY_BLOCK_WINDOW_MS = 2000;
+
+/**
+ * Is this console or page error a consequence of the tester's OWN write-policy
+ * block rather than something the app did?
+ *
+ * Aborting a request makes the browser print a console error, and — when the
+ * app does not catch the rejection — raise a page error. Left in, a report
+ * lists the tool's own safety net as defects of the app under test. (The
+ * failed REQUEST itself is matched exactly, by request identity, in the
+ * monitor; these two carry no request to match on, so they are attributed by
+ * wording and by time.)
+ *
+ * Both rules need a block to have happened in the current action's window. A
+ * bare "Failed to fetch" is otherwise a real defect — a wrong origin, a CORS
+ * error, a refused connection — and must be reported.
+ */
+export function isPolicyInduced(v: { kind: string; detail: string }, msSincePolicyBlock: number | null): boolean {
+  if (msSincePolicyBlock === null || msSincePolicyBlock > POLICY_BLOCK_WINDOW_MS) return false;
+  if (v.kind !== "page_error" && v.kind !== "console_error") return false;
+  return /ERR_BLOCKED_BY_CLIENT|Failed to fetch|NetworkError when attempting to fetch|Load failed/i.test(v.detail);
 }
 
 /**
@@ -63,6 +87,10 @@ export class OracleMonitor {
       // Aborted requests are routine during SPA navigation.
       if (failure.includes("ERR_ABORTED")) return;
       if (BENIGN_URL_RE.test(req.url())) return;
+      if (this.abortedByPolicy(req)) {
+        this.policyAttributed += 1;
+        return;
+      }
       this.record({
         kind: "request_failed",
         severity: "medium",
@@ -98,7 +126,32 @@ export class OracleMonitor {
    */
   private static readonly MAX_REPORTED_SIGS = 5000;
 
+  private lastPolicyBlockAt: number | null = null;
+  private abortedByPolicy: (req: Request) => boolean = () => false;
+
+  /**
+   * Errors attributed to the write policy's own blocks and therefore not
+   * recorded as violations. Counted, so a report can say how many there were:
+   * dropping them silently would make a clean run and a run that hid three
+   * errors look the same.
+   */
+  policyAttributed = 0;
+
+  /** The engine knows exactly which requests it aborted; failed requests are matched against that, not against wording. */
+  setPolicyAbortCheck(check: (req: Request) => boolean): void {
+    this.abortedByPolicy = check;
+  }
+
+  /** Called by the engine when the write policy aborts a request, so the errors that abort causes are not held against the app. */
+  notePolicyBlock(): void {
+    this.lastPolicyBlockAt = Date.now();
+  }
+
   private record(v: Omit<OracleViolation, "at" | "repeat">): void {
+    if (isPolicyInduced(v, this.lastPolicyBlockAt === null ? null : Date.now() - this.lastPolicyBlockAt)) {
+      this.policyAttributed += 1;
+      return;
+    }
     const violation: OracleViolation = { ...redactViolation(v), at: new Date().toISOString() };
     this.buffer.push(violation);
     this.all.push(violation);
@@ -114,6 +167,9 @@ export class OracleMonitor {
   drain(register = true): OracleViolation[] {
     const out = this.buffer;
     this.buffer = [];
+    // The attribution window belongs to the action that caused the block. A
+    // delivered drain ends that action, so the window must not reach into the next one.
+    if (register) this.lastPolicyBlockAt = null;
     for (const v of out) {
       // Same normalization as the report rollup, so "the same violation"
       // means the same thing in tool output and in the final report.

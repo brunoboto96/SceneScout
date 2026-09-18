@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dashboard · Harbor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-dashboard" aria-current="page">Dashboard</a><a href="/orders.html" data-testid="nav-orders">Orders</a
+        ><a href="/reports.html" data-testid="nav-reports">Reports</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
+      </nav>
+    </header>
+    <main>
+      <h1>Good morning</h1>
+      <p class="lede">Four orders on the desk, two waiting to ship.</p>
+      <div class="cards">
+        <div class="card">
+          <div class="n" data-testid="stat-open">2</div>
+          <div class="l">Open orders</div>
+        </div>
+        <div class="card">
+          <div class="n" data-testid="stat-shipped">2</div>
+          <div class="l">Shipped this week</div>
+        </div>
+        <div class="card">
+          <div class="n" data-testid="stat-revenue">$1,909</div>
+          <div class="l">Revenue this week</div>
+        </div>
+      </div>
+      <h2>Shortcuts</h2>
+      <div class="row">
+        <a class="btn primary" href="/orders-new.html" data-testid="dash-new-order">New order</a>
+        <a class="btn" href="/orders.html" data-testid="dash-all-orders">All orders</a>
+      </div>
+      <!-- SEEDED DEFECT: a negative margin pulls this badge up over the "All orders" button. -->
+      <span class="newbadge" data-testid="dash-new-badge">New: bulk import</span>
+      <h2>This week</h2>
+      <!-- SEEDED DEFECT: the chart image was never deployed. -->
+      <img src="/img/weekly-chart.png" alt="Orders per day this week" width="640" height="180" data-testid="dash-chart" />
+    </main>
+    <footer>Harbor order desk · demo data only</footer>
+  </body>
+</html>

@@ -58,13 +58,13 @@ async function main(): Promise<void> {
   // effectively unshipped, however well the engine implements it. scout_scroll
   // shipped a whole version before the skill described it, and nothing caught
   // that but a human noticing.
-  const skillPath = path.join(packageRoot, "skill", "scenescout", "SKILL.md");
+  const skillPath = path.join(packageRoot, "skills", "scenescout", "SKILL.md");
   const skill = fs.readFileSync(skillPath, "utf8");
   const undocumented = names.filter((t) => !skill.includes(t));
   if (undocumented.length > 0) {
     console.error(
       `MCP CHECK FAILED — the skill never mentions: ${undocumented.join(", ")}\n` +
-        `Every registered tool must appear in skill/scenescout/SKILL.md, or the agent will never use it.`,
+        `Every registered tool must appear in skills/scenescout/SKILL.md, or the agent will never use it.`,
     );
     process.exit(1);
   }
@@ -102,7 +102,7 @@ async function main(): Promise<void> {
     console.error(
       `MCP CHECK FAILED — the skill never mentions these parameters: ${paramGaps.join(", ")}\n` +
         `A parameter the skill doesn't name is a parameter the agent will never pass. Document it in\n` +
-        `skill/scenescout/SKILL.md, or add it to PARAM_EXEMPT in this script if it is genuinely internal.`,
+        `skills/scenescout/SKILL.md, or add it to PARAM_EXEMPT in this script if it is genuinely internal.`,
     );
     process.exit(1);
   }

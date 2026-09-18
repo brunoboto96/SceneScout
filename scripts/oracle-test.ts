@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { geometryIssues } from "../src/engine/collector.ts";
-import { redactViolation } from "../src/engine/oracles.ts";
+import { POLICY_BLOCK_WINDOW_MS, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
 
 const VIEWPORT = { width: 1280, height: 900 };
 
@@ -129,4 +129,26 @@ test("a violation never re-publishes a credential carried in the request URL", (
   // evidence into noise.
   const plain = { kind: "http_error", severity: "medium", detail: "GET http://x/api/orders?page=2&sort=asc → 404", url: "http://x/orders?tab=history" };
   assert.deepEqual(redactViolation(plain), plain);
+});
+
+test("errors caused by the tester's own write-policy block are not held against the app", () => {
+  // The console error and the uncaught rejection that follow an abort. (The
+  // failed request itself is matched by request identity inside the monitor.)
+  assert.equal(isPolicyInduced({ kind: "console_error", detail: "Failed to load resource: net::ERR_BLOCKED_BY_CLIENT.Inspector" }, 30), true);
+  assert.equal(isPolicyInduced({ kind: "page_error", detail: "Failed to fetch" }, 40), true);
+
+  // Without a block in the window, the very same text is the app's own
+  // failure — a wrong origin, a CORS error, a refused connection — and stays.
+  for (const detail of ["Failed to fetch", "Failed to load resource: net::ERR_BLOCKED_BY_CLIENT"]) {
+    assert.equal(isPolicyInduced({ kind: "page_error", detail }, null), false, `${detail}: no block happened (e.g. destructive mode never blocks)`);
+    assert.equal(isPolicyInduced({ kind: "page_error", detail }, POLICY_BLOCK_WINDOW_MS + 1), false, `${detail}: too long after the block`);
+  }
+  // A block excuses nothing that is not a fetch failure.
+  assert.equal(isPolicyInduced({ kind: "page_error", detail: "Cannot read properties of undefined (reading 'rows')" }, 10), false);
+  assert.equal(isPolicyInduced({ kind: "http_error", detail: "GET http://x/api/orders → HTTP 500" }, 10), false);
+  assert.equal(
+    isPolicyInduced({ kind: "request_failed", detail: "PUT http://x/api/orders/7 → net::ERR_BLOCKED_BY_CLIENT" }, 10),
+    false,
+    "failed requests are decided by identity, not wording",
+  );
 });

@@ -1,0 +1,62 @@
+name: release
+
+# How a release happens:
+#   1. Pull requests carry changesets (see .changeset/README.md).
+#   2. On every push to main this workflow collects them into a "Version
+#      Packages" pull request: version bump, CHANGELOG.md, plugin.json.
+#   3. The maintainer merges that pull request. This workflow runs again, finds
+#      no pending changesets, and publishes to npm, tags vX.Y.Z and creates the
+#      GitHub Release.
+#
+# Publishing uses npm trusted publishing (OIDC): npm verifies that the request
+# comes from THIS workflow in THIS repository, so no npm token is stored
+# anywhere. It is switched on by the repository variable NPM_PUBLISH=enabled,
+# set once the package exists on npm and the trusted publisher is configured.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: github.repository == 'brunoboto96/SceneScout' && vars.NPM_PUBLISH == 'enabled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # push the version branch, tags and the GitHub Release
+      pull-requests: write # open the "Version Packages" pull request
+      id-token: write # npm trusted publishing + provenance
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Changesets reads history to work out what changed, and pushes a branch.
+          fetch-depth: 0
+      # No `registry-url` here on purpose: it makes setup-node write an .npmrc
+      # that expects NODE_AUTH_TOKEN, and a configured-but-empty token stops
+      # npm from taking the trusted-publishing path.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      # Trusted publishing needs npm 11.5.1 or newer. Pinned, not @latest: this
+      # job can publish, so what runs in it should not change on its own.
+      - run: npm install -g npm@11.19.1
+      # --ignore-scripts: no dependency's install script runs in a job that can
+      # mint a publish token. The build the release needs is run explicitly by
+      # `npm run release`.
+      - run: npm ci --ignore-scripts
+      - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          version-script: npm run version-packages
+          publish-script: npm run release
+          pr-title: Version Packages
+          commit-message: Version Packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
