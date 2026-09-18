@@ -1,0 +1,69 @@
+{
+  "name": "scenescout",
+  "version": "0.23.0",
+  "description": "SceneScout — AI-agent exploratory UI testing engine: an MCP server exposing Playwright browser tools with state-fingerprint memory, invariant oracles, structured findings and reports. Claude Code (or any MCP client) is the brain.",
+  "license": "MIT",
+  "author": "brunoboto96",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brunoboto96/SceneScout.git"
+  },
+  "homepage": "https://github.com/brunoboto96/SceneScout#readme",
+  "bugs": {
+    "url": "https://github.com/brunoboto96/SceneScout/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "exploratory-testing",
+    "ui-testing",
+    "playwright",
+    "claude-code",
+    "qa",
+    "ai-agent"
+  ],
+  "type": "module",
+  "bin": {
+    "scenescout": "dist/cli.js"
+  },
+  "main": "dist/mcp-server.js",
+  "files": [
+    "dist",
+    "skill",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "setup": "node dist/cli.js install",
+    "doctor": "node dist/cli.js doctor",
+    "dev": "tsx src/cli.ts",
+    "serve": "node dist/mcp-server.js",
+    "smoke": "tsx scripts/smoke.ts",
+    "mcp-check": "tsx scripts/mcp-check.ts",
+    "test": "npm run build && npm run scan-test && npm run oracle-test && npm run policy-test && npm run fixture-test && npm run dispatch-test && npm run design-test && npm run contract-test && npm run memory-test && npm run install-test && npm run smoke && npm run mcp-check",
+    "scan-test": "tsx scripts/scan-test.ts",
+    "oracle-test": "tsx --test scripts/oracle-test.ts",
+    "policy-test": "tsx --test scripts/policy-test.ts",
+    "fixture-test": "tsx --test scripts/fixture-test.ts",
+    "dispatch-test": "tsx --test scripts/dispatch-test.ts",
+    "design-test": "tsx --test scripts/design-test.ts",
+    "contract-test": "tsx --test scripts/contract-test.ts",
+    "memory-test": "tsx --test scripts/memory-test.ts",
+    "install-test": "tsx --test scripts/install-test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "playwright": "^1.49.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,101 @@
+/**
+ * Unit tests for the geometry oracles. These rules used to be reachable only
+ * by launching Chromium and hand-building an HTML fixture, which is why their
+ * false-positive classes (dialog-over-page, stacked chrome, carousels) kept
+ * shipping. `geometryIssues` is a pure function over layout boxes — table-test
+ * it directly and keep the browser suite for things that need a renderer.
+ *
+ *   npx tsx --test --test-name-pattern "dialog" scripts/oracle-test.ts
+ */
+import assert from "node:assert/strict";
+import test from "node:test";
+import { geometryIssues } from "../dist/engine/collector.js";
+
+const VIEWPORT = { width: 1280, height: 900 };
+
+type El = Parameters<typeof geometryIssues>[0][number];
+
+/** Minimal element; every field the oracle reads, defaulted to "ordinary". */
+function el(over: Partial<El> & { ref: string; xpath: string }): El {
+  return {
+    name: over.ref,
+    role: "button",
+    rect: { x: 0, y: 0, w: 100, h: 40 },
+    layer: 0,
+    chrome: false,
+    clipped: false,
+    ...over,
+  } as El;
+}
+
+test("two controls colliding in the same layer are reported", () => {
+  const issues = geometryIssues(
+    [
+      el({ ref: "e1", xpath: "/html/body/div[1]/button[1]", rect: { x: 20, y: 10, w: 120, h: 32 } }),
+      el({ ref: "e2", xpath: "/html/body/div[1]/button[2]", rect: { x: 30, y: 14, w: 120, h: 32 } }),
+    ],
+    VIEWPORT,
+  );
+  assert.equal(issues.filter((i) => i.includes("overlaps")).length, 1, "a genuine same-layer collision must still fire");
+});
+
+test("a dialog stacked over page content is NOT an overlap", () => {
+  // The defect this pins: a modal parented to <body> inherited layer 0, so it
+  // "overlapped" 100% of the content it was designed to cover, and every
+  // confirm dialog produced a screenful of phantom geometry warnings.
+  const issues = geometryIssues(
+    [
+      el({ ref: "e1", xpath: "/html/body/main[1]/div[1]", rect: { x: 0, y: 100, w: 1280, h: 600 }, layer: 0 }),
+      el({ ref: "e2", xpath: "/html/body/div[9]", rect: { x: 400, y: 300, w: 400, h: 200 }, layer: 7 }),
+    ],
+    VIEWPORT,
+  );
+  assert.deepEqual(issues.filter((i) => i.includes("overlaps")), [], "different layers are stacked by design");
+});
+
+test("two pieces of fixed chrome overlapping is intended layering, not a collision", () => {
+  const issues = geometryIssues(
+    [
+      el({ ref: "e1", xpath: "/html/body/nav[1]/a[1]", rect: { x: 0, y: 800, w: 240, h: 40 }, chrome: true }),
+      el({ ref: "e2", xpath: "/html/body/footer[1]/button[1]", rect: { x: 10, y: 805, w: 240, h: 40 }, chrome: true }),
+    ],
+    VIEWPORT,
+  );
+  assert.deepEqual(issues.filter((i) => i.includes("overlaps")), []);
+});
+
+test("a nested control inside its own wrapper is not an overlap", () => {
+  const issues = geometryIssues(
+    [
+      el({ ref: "e1", xpath: "/html/body/div[1]", rect: { x: 0, y: 0, w: 200, h: 60 } }),
+      el({ ref: "e2", xpath: "/html/body/div[1]/button[1]", rect: { x: 5, y: 5, w: 190, h: 50 } }),
+    ],
+    VIEWPORT,
+  );
+  assert.deepEqual(issues.filter((i) => i.includes("overlaps")), []);
+});
+
+test("an element rendered off the reachable page area is reported", () => {
+  const issues = geometryIssues([el({ ref: "e1", xpath: "/html/body/button[1]", rect: { x: -5000, y: 100, w: 100, h: 30 } })], VIEWPORT);
+  assert.equal(issues.filter((i) => i.includes("outside the reachable page area")).length, 1);
+});
+
+test("below-the-fold content is reachable and never flagged", () => {
+  const issues = geometryIssues([el({ ref: "e1", xpath: "/html/body/button[1]", rect: { x: 20, y: 5000, w: 100, h: 30 } })], VIEWPORT);
+  assert.deepEqual(issues, [], "scrolling reveals it — that is not a defect");
+});
+
+test("clipped-unreachable controls are reported and capped with a count", () => {
+  // One transform-based carousel legitimately clips dozens of off-track slides;
+  // an uncapped list floods GEOMETRY and starves the overlap oracle.
+  const many = Array.from({ length: 9 }, (_, i) =>
+    el({ ref: `e${i}`, xpath: `/html/body/div[1]/button[${i + 1}]`, clipped: true, rect: { x: 10, y: 10 + i, w: 80, h: 20 } }),
+  );
+  const issues = geometryIssues(many, VIEWPORT);
+  const unreachable = issues.filter((i) => i.includes("UNREACHABLE"));
+  assert.equal(unreachable.length, 3, "at most three are listed individually");
+  assert.ok(
+    issues.some((i) => i.includes("…and 6 more")),
+    "the remainder is disclosed as a count, never silently dropped",
+  );
+});

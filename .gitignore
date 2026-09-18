@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.scenescout/
+.scenecraft/
+.frontend-tester/
+.qa-v*/
+
+# local scratch written by test runs
+.scenescout-fixtures/
+.scenecraft-fixtures/
+.tmp-fixtures/
+*.tgz

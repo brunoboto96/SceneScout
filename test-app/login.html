@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Sign in</title>
+  </head>
+  <body>
+    <!--
+      Where a dead session lands. Served at /login (no extension) by the smoke
+      server, because the engine's login heuristic matches a path SEGMENT —
+      "/login.html" is not a login route, "/login" is, and real apps use the
+      latter.
+    -->
+    <main>
+      <h1>Sign in</h1>
+      <form data-testid="login-form">
+        <label for="login-email">Email</label>
+        <input id="login-email" data-testid="login-email" type="email" />
+        <button data-testid="login-submit" type="button">Sign in</button>
+      </form>
+    </main>
+  </body>
+</html>

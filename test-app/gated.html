@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gated area</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="gated-heading">Gated area</h1>
+      <button data-testid="gated-action" type="button">Do the thing</button>
+    </main>
+    <script>
+      // A CLIENT-SIDE auth guard, redirecting AFTER hydration rather than via a
+      // server 302. This is the shape that matters: reading page.url() straight
+      // after goto() showed the requested path, the bounce went unnoticed, and
+      // the engine reported OK for a page it never reached. A server redirect
+      // would already be visible at goto-time and would not pin the bug.
+      //
+      // "Authenticated" is a localStorage flag the test sets via a storage
+      // state, so the same page can be driven both ways.
+      setTimeout(function () {
+        try {
+          if (localStorage.getItem("smoke-auth") === "yes") return;
+        } catch (e) {
+          /* storage unavailable — treat as signed out */
+        }
+        location.replace("/login?redirectTo=" + encodeURIComponent(location.pathname));
+      }, 40);
+    </script>
+  </body>
+</html>
