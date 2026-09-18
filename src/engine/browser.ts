@@ -101,6 +101,8 @@ interface SnapshotElement extends InteractableInfo {
   /** Inside position:fixed/sticky chrome — overlaps between chrome are intended layering. */
   chrome?: boolean;
   rect: Rect;
+  /** Set when the control is pinned chrome whose centre is owned by other pinned chrome (hit-tested in the page). */
+  coveredBy?: string | null;
 }
 
 const SETTLE_MS = 400;
@@ -593,6 +595,7 @@ export class BrowserEngine {
       clipped?: boolean;
       layer?: number;
       chrome?: boolean;
+      coveredBy?: string | null;
     };
     // SPAs (and dev servers mid-recompile) can present an empty shell for a
     // few seconds — and a shell that already renders its chrome (sidebar,

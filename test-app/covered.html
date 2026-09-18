@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Pinned chrome fixtures</title>
+    <style>
+      body { margin: 0; font: 15px/1.4 system-ui, sans-serif; }
+      main { padding: 64px 24px 80px; }
+      .filler { height: 1600px; }
+      /* DEFECT: a sticky action row... */
+      .actions { position: sticky; bottom: 0; padding: 10px 0; background: #fff; }
+      /* ...and a fixed bar added later that lands on top of it. No data-testid
+         and multi-line text on purpose, so the oracle has to describe it. */
+      .promo { position: fixed; left: 0; right: 0; bottom: 0; height: 56px; background: #222; color: #fff; padding: 0 24px; line-height: 56px; }
+
+      /* NOT a defect: a consent banner over a fixed Help button. It intercepts
+         the click, but it is an overlay the user dismisses, not broken layout. */
+      .help { position: fixed; right: 16px; top: 12px; }
+      .cookie-banner { position: fixed; left: 0; right: 0; top: 0; height: 52px; background: #fde68a; padding: 0 24px; line-height: 52px; }
+
+      /* NOT a defect: a data grid with a sticky header row and a sticky first
+         column, inside a scrolling pane. A first-column link that slides under
+         the header scrolls back out again. */
+      .grid-scroll { width: 360px; height: 130px; overflow: auto; border: 1px solid #ccc; margin-top: 16px; }
+      .grid-scroll table { border-collapse: collapse; width: 600px; }
+      .grid-scroll th { position: sticky; top: 0; background: #eee; height: 36px; z-index: 2; }
+      .grid-scroll td { height: 36px; padding: 0 8px; background: #fff; }
+      .grid-scroll td:first-child { position: sticky; left: 0; z-index: 1; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Pinned chrome fixtures</h1>
+      <button class="help" data-testid="help-btn" type="button">Help</button>
+      <div class="cookie-banner" data-testid="cookie-banner">We use cookies. <button type="button" data-testid="cookie-accept">Accept</button></div>
+
+      <div class="grid-scroll" data-testid="grid-scroll">
+        <table>
+          <thead><tr><th>Order</th><th>Customer</th><th>Total</th></tr></thead>
+          <tbody>
+            <tr><td><a href="#r1" data-testid="row-1-link">Row 1 open</a></td><td>Alder</td><td>10</td></tr>
+            <tr><td><a href="#r2" data-testid="row-2-link">Row 2 open</a></td><td>Birch</td><td>20</td></tr>
+            <tr><td><a href="#r3" data-testid="row-3-link">Row 3 open</a></td><td>Cedar</td><td>30</td></tr>
+            <tr><td><a href="#r4" data-testid="row-4-link">Row 4 open</a></td><td>Dogwood</td><td>40</td></tr>
+            <tr><td><a href="#r5" data-testid="row-5-link">Row 5 open</a></td><td>Elm</td><td>50</td></tr>
+            <tr><td><a href="#r6" data-testid="row-6-link">Row 6 open</a></td><td>Fir</td><td>60</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>Long content comes BEFORE the action row, so the row is stuck to the bottom of the viewport.</p>
+      <div class="filler" aria-hidden="true"></div>
+      <div class="actions"><button data-testid="save-btn" type="button">Save changes</button></div>
+    </main>
+    <div class="promo">
+      Try the new importer,
+      dismiss
+    </div>
+    <script>
+      // Slide the second row half under the sticky header, the state the grid
+      // fixture exists for. 54px: row 2 spans 72-108 before scrolling, so its
+      // link centre lands inside the header's 0-36 band.
+      document.querySelector('[data-testid="grid-scroll"]').scrollTop = 54;
+    </script>
+  </body>
+</html>
