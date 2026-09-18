@@ -373,6 +373,7 @@ export class BrowserEngine {
       this.projectDirNote = ` (its real path could not be resolved: ${err instanceof Error ? err.message : String(err)} — a symlinked project path may be wrongly refused)`;
     }
     this.oracles = new OracleMonitor();
+    this.oracles.setPolicyAbortCheck((req) => this.abortedByPolicy.has(req));
     this.lastSnap = null;
     this.designAuditCount = 0;
 

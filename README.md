@@ -150,10 +150,11 @@ claude mcp add --scope user scenescout -- npx -y scenescout serve
 ### 2️⃣ Check it
 
 ```bash
-npx -y scenescout doctor       # from source: npm run doctor
+npx -y scenescout doctor            # routes B and C (from source: npm run doctor)
+npx -y scenescout doctor --engine   # route A, or another MCP client: node + build + browser only
 ```
 
-Every line should be a ✓. Anything that isn't prints the exact command that fixes it. Then **start a fresh Claude Code session** so it picks up the new tools.
+Every line should be a ✓. Anything that isn't prints the exact command that fixes it. Then **start a fresh session** in your client so it picks up the new tools.
 
 ### 3️⃣ Run it
 

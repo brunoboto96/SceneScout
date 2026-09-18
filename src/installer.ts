@@ -136,7 +136,9 @@ export const NPX_SERVE_ARGS = ["-y", "scenescout", "serve"];
 export function launchCommand(opts: { packageRoot: string; nodePath: string; serverPath: string }): string[] {
   if (!isEphemeralRoot(opts.packageRoot)) return [opts.nodePath, opts.serverPath];
   const npx = path.join(path.dirname(opts.nodePath), process.platform === "win32" ? "npx.cmd" : "npx");
-  return [npx, ...NPX_SERVE_ARGS];
+  // Some Node installs ship without npm beside the binary; a bare "npx" that
+  // resolves on PATH is better than an absolute path to nothing.
+  return [fs.existsSync(npx) ? npx : "npx", ...NPX_SERVE_ARGS];
 }
 
 export function mcpAddArgs(launch: string[]): string[] {
@@ -235,7 +237,21 @@ export function parseRegistration(listing: string): { command: string | null; se
 export type Check = { name: string; ok: boolean; detail: string; fix?: string };
 
 /** Everything a working setup needs, each with the command that repairs it. */
-export function diagnose(opts: { packageRoot: string; claudeDir: string; nodeVersion: string; chromiumPath: string | null; run: Runner }): Check[] {
+export function diagnose(opts: {
+  /**
+   * "engine" checks only what every install needs (node, the build, the
+   * browser). The skill and the `claude mcp` registration are checked for the
+   * default "claude-code" scope only: a plugin install gets both from the
+   * plugin, and another MCP client has neither, so reporting them as failures
+   * there would send the user to fix something that is not broken.
+   */
+  scope?: "claude-code" | "engine";
+  packageRoot: string;
+  claudeDir: string;
+  nodeVersion: string;
+  chromiumPath: string | null;
+  run: Runner;
+}): Check[] {
   const checks: Check[] = [];
   const major = Number(opts.nodeVersion.replace(/^v/, "").split(".")[0]);
   checks.push({ name: "node >= 20", ok: major >= 20, detail: opts.nodeVersion, fix: "install Node 20 or newer" });
@@ -250,6 +266,8 @@ export function diagnose(opts: { packageRoot: string; claudeDir: string; nodeVer
     detail: opts.chromiumPath ?? "playwright could not name a browser path",
     fix: "npm run setup   (or: npx playwright install chromium)",
   });
+
+  if (opts.scope === "engine") return checks;
 
   const skill = path.join(opts.claudeDir, "skills", SKILL_NAME, "SKILL.md");
   checks.push({ name: "skill installed", ok: fs.existsSync(skill), detail: skill, fix: "npm run setup" });

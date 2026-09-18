@@ -59,9 +59,8 @@ async function main(): Promise<void> {
 
   try {
     show("attach", await engine.attach({ url: baseUrl, projectDir, mode: "read-only" }));
-    const home = show("snapshot /", await engine.snapshot());
+    show("snapshot /", await engine.snapshot());
     await shot("dashboard");
-    void home;
     finding({
       severity: "medium",
       category: "visual",
@@ -196,6 +195,7 @@ async function main(): Promise<void> {
       designAudits: engine.designAuditCount,
       createdResources: engine.createdResources,
       unvisitedRoutes: unvisited,
+      policyAttributed: engine.oracleLog.policyAttributed,
     };
     show("gap ledger", computeGaps(engine.memory!, extras).join("\n") || "(empty)");
     const report = generateReport(engine.memory!, engine.oracleLog.all, extras);
@@ -204,7 +204,8 @@ async function main(): Promise<void> {
       `\nWrote ${path.relative(process.cwd(), path.join(outDir, "report.md"))} and ${fs.readdirSync(path.join(outDir, "screenshots")).length} screenshots.`,
     );
   } finally {
-    await engine.close().catch(() => {});
+    await engine.close().catch((err: unknown) => console.error(`closing the browser failed: ${err instanceof Error ? err.message : String(err)}`));
+    server.closeAllConnections();
     server.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
   }

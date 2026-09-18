@@ -31,20 +31,33 @@ export function createDemoServer() {
     res.writeHead(status, { "content-type": "application/json" });
     res.end(JSON.stringify(body));
   };
+  /** Parsed JSON body, or {} — never rejects, never hangs, never grows past 64 KiB. */
   const readBody = (req) =>
     new Promise((resolve) => {
       const chunks = [];
-      req.on("data", (c) => chunks.push(c));
+      let size = 0;
+      const done = (value) => resolve(value);
+      req.on("data", (c) => {
+        size += c.length;
+        if (size > 64 * 1024) {
+          req.destroy();
+          return done({});
+        }
+        chunks.push(c);
+      });
       req.on("end", () => {
         try {
-          resolve(JSON.parse(Buffer.concat(chunks).toString() || "{}"));
+          done(JSON.parse(Buffer.concat(chunks).toString() || "{}"));
         } catch {
-          resolve({});
+          done({});
         }
       });
+      // A client that disconnects mid-body must not leave the handler waiting forever.
+      req.on("error", () => done({}));
+      req.on("aborted", () => done({}));
     });
 
-  return http.createServer(async (req, res) => {
+  const handle = async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const p = url.pathname;
 
@@ -67,7 +80,9 @@ export function createDemoServer() {
       if (!order) return json(res, 404, { error: "Order not found" });
       if (req.method === "GET") return json(res, 200, order);
       if (req.method === "PUT") {
-        Object.assign(order, await readBody(req));
+        // Only the editable field: a body must not be able to rewrite an order's id.
+        const body = await readBody(req);
+        if (typeof body.notes === "string") order.notes = body.notes.slice(0, 2000);
         return json(res, 200, order);
       }
       if (req.method === "DELETE") {
@@ -89,7 +104,18 @@ export function createDemoServer() {
     }
     res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
     res.end("<!doctype html><title>Not found</title><h1>404</h1><p>Nothing here.</p>");
+  };
+
+  // A malformed request target or a file that vanishes mid-read must produce a
+  // 500, not an unhandled rejection that takes the whole demo down.
+  const server = http.createServer((req, res) => {
+    handle(req, res).catch(() => {
+      if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain" });
+      res.end("Internal Server Error");
+    });
   });
+  server.on("clientError", (_err, socket) => socket.destroy());
+  return server;
 }
 
 // Run directly: `node demo-app/server.mjs [port]`

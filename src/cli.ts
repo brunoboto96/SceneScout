@@ -30,6 +30,8 @@ Usage:
                                     (--skip-browser, --no-register to opt out of a step;
                                      --browser-only when the skill and server came from a plugin)
   scenescout doctor                 Check the setup and print the fix for anything missing
+                                    (--engine: only node, the build and the browser — for plugin
+                                     installs and other MCP clients)
   scenescout status [projectPath]   What is the engine doing right now? (live status + recent actions)
 `);
   process.exit(exitCode);
@@ -210,8 +212,9 @@ async function install(flags: string[]): Promise<void> {
   console.log("Something off? Run:  npm run doctor");
 }
 
-async function doctor(): Promise<void> {
+async function doctor(flags: string[]): Promise<void> {
   const checks = diagnose({
+    scope: flags.includes("--engine") ? "engine" : "claude-code",
     packageRoot,
     claudeDir: resolveClaudeDir(process.env, os.homedir()),
     nodeVersion: process.version,
@@ -262,7 +265,7 @@ try {
       break;
     }
     case "doctor": {
-      await doctor();
+      await doctor(args);
       break;
     }
     case "status": {

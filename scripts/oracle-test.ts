@@ -132,16 +132,23 @@ test("a violation never re-publishes a credential carried in the request URL", (
 });
 
 test("errors caused by the tester's own write-policy block are not held against the app", () => {
-  // An aborted request surfaces three ways. None of them is the app's doing.
-  assert.equal(isPolicyInduced({ kind: "request_failed", detail: "PUT http://x/api/orders/7 → net::ERR_BLOCKED_BY_CLIENT.Inspector" }, null), true);
-  assert.equal(isPolicyInduced({ kind: "console_error", detail: "Failed to load resource: net::ERR_BLOCKED_BY_CLIENT.Inspector" }, null), true);
-  assert.equal(isPolicyInduced({ kind: "page_error", detail: "Failed to fetch" }, 40), true, "the uncaught rejection that follows the abort");
+  // The console error and the uncaught rejection that follow an abort. (The
+  // failed request itself is matched by request identity inside the monitor.)
+  assert.equal(isPolicyInduced({ kind: "console_error", detail: "Failed to load resource: net::ERR_BLOCKED_BY_CLIENT.Inspector" }, 30), true);
+  assert.equal(isPolicyInduced({ kind: "page_error", detail: "Failed to fetch" }, 40), true);
 
-  // "Failed to fetch" on its own is a real finding: the app's request failed
-  // and nothing caught it. Only the window after a block excuses it.
-  assert.equal(isPolicyInduced({ kind: "page_error", detail: "Failed to fetch" }, null), false, "no block happened");
-  assert.equal(isPolicyInduced({ kind: "page_error", detail: "Failed to fetch" }, POLICY_BLOCK_WINDOW_MS + 1), false, "too long after the block");
-  // And a block excuses nothing else.
+  // Without a block in the window, the very same text is the app's own
+  // failure — a wrong origin, a CORS error, a refused connection — and stays.
+  for (const detail of ["Failed to fetch", "Failed to load resource: net::ERR_BLOCKED_BY_CLIENT"]) {
+    assert.equal(isPolicyInduced({ kind: "page_error", detail }, null), false, `${detail}: no block happened (e.g. destructive mode never blocks)`);
+    assert.equal(isPolicyInduced({ kind: "page_error", detail }, POLICY_BLOCK_WINDOW_MS + 1), false, `${detail}: too long after the block`);
+  }
+  // A block excuses nothing that is not a fetch failure.
   assert.equal(isPolicyInduced({ kind: "page_error", detail: "Cannot read properties of undefined (reading 'rows')" }, 10), false);
   assert.equal(isPolicyInduced({ kind: "http_error", detail: "GET http://x/api/orders → HTTP 500" }, 10), false);
+  assert.equal(
+    isPolicyInduced({ kind: "request_failed", detail: "PUT http://x/api/orders/7 → net::ERR_BLOCKED_BY_CLIENT" }, 10),
+    false,
+    "failed requests are decided by identity, not wording",
+  );
 });

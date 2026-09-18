@@ -11,6 +11,7 @@ Generated: (by `npm run demo`)
 | States explored | 7 |
 | Design audits this session | 3 |
 | Oracle violations this session | 9 |
+| Errors caused by the tester's own write-policy blocks (not counted above) | 3 |
 | Elements exercised (informational — denominator grows with every state) | 6/38 |
 
 ## Page quality scores (worst first)

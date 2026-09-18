@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   diagnose,
   installSkill,
@@ -385,7 +386,8 @@ test("the plugin manifest ships the same version and starts the published server
   // Claude Code offers a plugin update only when plugin.json's own version
   // changes, so a release that bumps package.json alone never reaches plugin
   // users. `npm run version-packages` keeps them together; this pins it.
-  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+  // fileURLToPath, not URL.pathname: on Windows the latter is "/D:/…", which resolves to "D:\\D:\\…".
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) as { version: string; name: string; bin: Record<string, string> };
   const plugin = JSON.parse(fs.readFileSync(path.join(root, ".claude-plugin", "plugin.json"), "utf8")) as {
     version: string;
@@ -416,11 +418,16 @@ test("an install run through npx registers the npx launcher, never a path inside
   // and stops silently some weeks later, with no error the user can connect to
   // the cause.
   const cached = path.join(path.sep, "home", "u", ".npm", "_npx", "ab12", "node_modules", "scenescout");
-  const nodePath = path.join(path.sep, "opt", "node", "bin", "node");
+  // A node install with npx beside it, as nvm, fnm and the official installers lay it out.
+  const bin = tmp("sc-nodebin-");
+  const nodePath = path.join(bin, "node");
+  fs.writeFileSync(path.join(bin, process.platform === "win32" ? "npx.cmd" : "npx"), "");
   const launch = launchCommand({ packageRoot: cached, nodePath, serverPath: path.join(cached, "dist", "mcp-server.js") });
   assert.deepEqual(launch.slice(1), NPX_SERVE_ARGS);
   assert.ok(path.isAbsolute(launch[0]) && /npx(\.cmd)?$/.test(launch[0]), "an absolute npx beside the running node, so it starts under nvm too");
   assert.ok(!launch.join(" ").includes("_npx"), "nothing in the registration points into the cache");
+  // A node that ships without npm: a bare npx on PATH beats an absolute path to nothing.
+  assert.equal(launchCommand({ packageRoot: cached, nodePath: path.join(tmp("sc-bare-"), "node"), serverPath: "x" })[0], "npx");
 
   // A clone or a global install is stable: register the script directly.
   const stable = path.join(path.sep, "opt", "tools", "scenescout");
@@ -443,4 +450,27 @@ test("diagnose accepts an npx registration and vets its launcher", () => {
   const bare = diagnose({ ...base, run: scripted([ok("scenescout:\n  Command: npx\n  Args: -y scenescout serve\n")]).run }).filter((c) => !c.ok);
   assert.equal(bare.length, 1);
   assert.match(bare[0].detail, /bare `npx`/);
+});
+
+test("the engine-only doctor does not fail a plugin install for lacking a skill link or a registration", () => {
+  // A plugin supplies the skill and the server itself, and another MCP client
+  // has neither. The default doctor reported both as broken and told the user
+  // to install a second, competing copy.
+  const packageRoot = fakePackage();
+  const chromiumPath = path.join(packageRoot, "chromium");
+  fs.writeFileSync(chromiumPath, "");
+  const base = { packageRoot, claudeDir: tmp("sc-claude-"), nodeVersion: "v22.1.0", chromiumPath };
+  const engine = diagnose({ ...base, scope: "engine", run: scripted([]).run });
+  assert.deepEqual(
+    engine.map((c) => c.name),
+    ["node >= 20", "engine built", "chromium downloaded"],
+  );
+  assert.deepEqual(
+    engine.filter((c) => !c.ok),
+    [],
+    "and it never shells out to `claude`",
+  );
+  // The default scope still checks everything.
+  const full = diagnose({ ...base, run: scripted([absent]).run });
+  assert.ok(full.some((c) => c.name === "skill installed" && !c.ok));
 });

@@ -15,6 +15,9 @@ Then, from Claude Code:
 
 `npm run demo` does a scripted run instead and regenerates
 [examples/report.md](../examples/report.md) and the screenshots beside it.
+The committed copies were generated on macOS. The app uses the system font,
+so layout-derived numbers (overlap percentages, page scores) and the
+screenshots can differ slightly when regenerated on another platform.
 
 ## What is seeded (spoilers)
 
