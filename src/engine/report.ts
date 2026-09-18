@@ -190,6 +190,30 @@ function mutatedSiblingStep(route: string, facts: Record<string, { mutated?: boo
 }
 
 /**
+ * The route line of ft_coverage.
+ *
+ * It must count the SAME route set the report enforces — scanned routes plus
+ * link-discovered ones. It used to count scanned routes only while taking the
+ * unvisited list from the full set: a project with no scannable routes (any
+ * code-routed framework, or a remote URL with no source at all) was told "no
+ * enumerable route list" while dozens of discovered routes sat unvisited, and
+ * a project with a few scanned routes and many discovered ones got a negative
+ * visited count.
+ */
+export function formatRouteCoverage(allRoutes: string[], unvisited: string[]): string {
+  if (allRoutes.length === 0) {
+    return "No routes known yet — none were found in source and no links have been harvested. Snapshot the landing page and main navigation to discover them.";
+  }
+  const visited = allRoutes.length - unvisited.length;
+  return (
+    `Routes visited: ${visited}/${allRoutes.length}` +
+    (unvisited.length > 0
+      ? ` — UNVISITED: ${unvisited.slice(0, 25).join(", ")}${unvisited.length > 25 ? " …" : ""} (ft_crawl covers these in one call)`
+      : " ✓")
+  );
+}
+
+/**
  * The GAP LEDGER — an explicit enumeration of what was NOT tested. This is
  * what turns "extensive" from a vibe into a verifiable claim: a run is only
  * as trustworthy as its list of known gaps, and an empty ledger is the only

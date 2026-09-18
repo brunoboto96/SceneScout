@@ -32,7 +32,7 @@ import { BrowserEngine, reapOrphanBrowsers } from "./engine/browser.js";
 import { MemoryStore } from "./engine/memory.js";
 import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
 import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
-import { computeGaps, generateReport } from "./engine/report.js";
+import { computeGaps, formatRouteCoverage, generateReport } from "./engine/report.js";
 import { formatScan, scanProject } from "./scan.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
@@ -789,10 +789,7 @@ server.registerTool(
           ? [`⚠ MEMORY WRITE FAILING: ${eng.memory.lastSaveError} — coverage/findings since the last successful write are NOT persisted to disk. If this doesn't clear on its own, check the project directory still exists and is writable.`]
           : []),
         `States known: ${cov.states} · Elements exercised: ${cov.elementsExercised}/${cov.elementsTotal}`,
-        eng.knownRoutes.length > 0
-          ? `Routes visited: ${eng.knownRoutes.length - unvisited.length}/${eng.knownRoutes.length}` +
-            (unvisited.length > 0 ? ` — UNVISITED: ${unvisited.slice(0, 25).join(", ")}${unvisited.length > 25 ? " …" : ""} (ft_crawl covers these in one call)` : " ✓")
-          : `No enumerable route list for this project — coverage is state-based only.`,
+        formatRouteCoverage(eng.allKnownRoutes(), unvisited),
         `Unexercised elements by route:`,
         ...cov.unexercised.slice(0, 25).map((u) => `  ${u.state}: ${u.keys.slice(0, 6).join(", ")}${u.keys.length > 6 ? ` … +${u.keys.length - 6}` : ""}`),
       ];

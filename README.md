@@ -1,6 +1,18 @@
-# SceneScout
+<div align="center">
+
+# 🔭 SceneScout
 
 **Exploratory UI testing, driven by an AI agent.**
+
+[![test](https://github.com/brunoboto96/SceneScout/actions/workflows/test.yml/badge.svg)](https://github.com/brunoboto96/SceneScout/actions/workflows/test.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![node >= 20](https://img.shields.io/badge/node-%E2%89%A5%2020-339933?logo=node.js&logoColor=white)
+![MCP server](https://img.shields.io/badge/MCP-server-8A2BE2)
+
+[✨ Why](#-why-its-different) · [🎯 Two ways to use it](#-two-ways-to-use-it) · [🚀 Quickstart](#-quickstart) · [🧰 Toolbox](#-the-toolbox) · [🔒 Safety](#-safety-model) · [🩺 Troubleshooting](#-troubleshooting)
+
+</div>
+
 SceneScout is an [MCP](https://modelcontextprotocol.io) server that hands an agent a *structured view* of a running web app — every element, its geometry, and a set of always-on correctness oracles — and lets the agent explore it like a curious user. Claude Code is the brain; SceneScout is the hands, eyes, and memory.
 
 ```
@@ -15,7 +27,7 @@ Scripted E2E suites answer one question — *"does this exact flow still work?"*
 
 ---
 
-## Why it's different
+## ✨ Why it's different
 
 - 🧠 **Claude is the brain — no API key.** The engine contains no LLM. Exploration runs on your Claude Code subscription; SceneScout just gives it deterministic tools.
 - 📐 **Structured scene, not pixels.** The agent reads element lists *with layout geometry*, not screenshots. Overlap and off-screen bugs are computed from boxes — deterministic, no vision guessing. (Screenshots exist only for pixel-native residue like broken images.)
@@ -25,17 +37,48 @@ Scripted E2E suites answer one question — *"does this exact flow still work?"*
 
 ---
 
-## Quickstart
+## 🎯 Two ways to use it
 
-### Prerequisites
+SceneScout needs only a URL. Give it the source code as well and it gets noticeably better.
+
+| | 🏠 **Next to the codebase** *(recommended)* | 🌐 **Against a remote URL** |
+|---|---|---|
+| **You run it from** | the app's repository | any folder — an empty `qa/` directory is fine |
+| **It plays the role of** | a developer-tester who can read the code | a black-box QA tester, like a person with a browser |
+| **How it finds pages** | 📂 reads file-based routes from the source (Next.js, SvelteKit, Nuxt) **and** follows links. Code-routed apps fall back to links | 🔗 follows same-origin links only — pages nothing links to, or on another subdomain, stay unknown |
+| **"Did we cover everything?"** | checked against the routes found in source *plus* discovered links — an unvisited one blocks the report | checked against the pages it managed to discover |
+| **Setup it figures out** | framework, dev command, saved Playwright logins (`playwright/.auth/`), whether the app uses `data-testid` | none — you pass the URL, and the path to a login state if the app needs one |
+| **What a finding looks like** | the symptom, **plus** the file behind it and a suggested fix | the symptom, a repro trace, and a regression-test skeleton |
+| **Typical target** | `localhost` while you build | staging, a preview deploy, a client's site |
+
+**Why the codebase helps.** The agent driving SceneScout is Claude Code, which can already read your repository. With the source at hand — and a file-routed framework — it knows the app's static routes before opening the browser, so coverage is measured against the real app instead of whatever happened to be linked. It can also check a suspicion against the code before reporting it: "there is no way to export this table" is a much stronger finding once the agent has confirmed no export handler exists. And when something breaks it can open the component or handler responsible and tell you *where* and *how* to fix it — "the save button does nothing" becomes "`OrderForm` swallows the rejected promise in `onSubmit`; surface the error and re-enable the button".
+
+**Why it still works without it.** Everything SceneScout *observes* comes from the running page — elements, layout geometry, console and network errors, design-audit scores, task-ease measurements — and none of that needs source code. Point it at a URL you are allowed to test and it behaves like a thorough QA tester: it explores, reproduces, and files findings with evidence.
+
+```
+# next to the code — run inside the app's repository
+/scenescout --url http://localhost:3000
+
+# remote — run from any folder; memory and the report are kept there
+/scenescout --url https://staging.example.com --role ./auth/qa.json
+```
+
+> [!IMPORTANT]
+> Only test sites you own or are authorized to test. A remote environment is more likely to hold real data. The default **read-only** mode blocks `PUT`/`PATCH`/`DELETE` and destructive-looking requests, but an ordinary form submission (a plain `POST`: contact form, comment, order, signup) still reaches the server and can create a record. On a site with real data, tell the agent which forms not to submit. See the [safety model](#-safety-model).
+
+---
+
+## 🚀 Quickstart
+
+### 📦 Prerequisites
 
 | | |
 |---|---|
 | **Node** | ≥ 20 |
 | **Claude Code** | installed and signed in ([get it here](https://claude.ai/code)) |
-| **A running web app** | SceneScout tests a *live* app — start yours first (e.g. `npm run dev`, `make dev-up`) |
+| **A web app to test** | SceneScout tests a *live* app: start yours locally first (e.g. `npm run dev`, `make dev-up`), or have the URL of a deployed one you're allowed to test |
 
-### 1 · Install
+### 1️⃣ Install
 
 ```bash
 git clone https://github.com/brunoboto96/SceneScout.git scenescout && cd scenescout
@@ -51,7 +94,7 @@ npm run setup      # skill + Chromium + MCP registration, in one step
 
 Re-run it any time: after moving the folder or switching node versions it refreshes the stored paths. It exits non-zero if any step failed, so `npm run setup && …` is safe to chain.
 
-### 2 · Check it
+### 2️⃣ Check it
 
 ```bash
 npm run doctor
@@ -72,21 +115,21 @@ Opt out of individual steps with `npm run setup -- --no-register` or `-- --skip-
 
 </details>
 
-### 3 · Run it
+### 3️⃣ Run it
 
-From Claude Code, inside *any* project:
+From Claude Code, inside the project you want to test (or, for a [remote URL](#-two-ways-to-use-it), any folder):
 
 ```
 /scenescout --level medium --url http://localhost:3000 --role qa
 ```
 
-The skill scans the project, attaches read-only, explores, and writes findings to `.scenescout/report.md`. That's it.
+The skill scans the project (if there is one), attaches read-only, explores, and writes findings to `.scenescout/report.md`. That's it.
 
-**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name>` (a Playwright storage-state to explore as) · `--safe-write` / `--allow-destructive`.
+**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (a Playwright storage-state to explore as: a name found by the scan, or a path to the JSON file) · `--safe-write` / `--allow-destructive`.
 
 ---
 
-## How a run works
+## 🔄 How a run works
 
 One curiosity loop, repeated — breadth first, then judgment where it matters:
 
@@ -108,7 +151,7 @@ Snapshots are cheap: re-snapshotting a route returns only *what changed*, with s
 
 ---
 
-## The toolbox
+## 🧰 The toolbox
 
 24 deterministic tools. The agent picks; you rarely call these by hand.
 
@@ -132,7 +175,7 @@ A few that punch above their weight:
 
 ---
 
-## Test levels
+## 📊 Test levels
 
 Each level is an **enforced contract** — `ft_report` checks it before finalizing.
 
@@ -146,31 +189,31 @@ That refusal *is* the guarantee: an extensive report can only exist when nothing
 
 ---
 
-## Safety model
+## 🔒 Safety model
 
-- **`read-only` by default.** Destructive-labeled elements (delete/revoke/archive/…) **and** all `PUT/PATCH/DELETE` + destructive `POST`s are blocked at the network layer — see [`src/engine/policy.ts`](src/engine/policy.ts).
-- **`safe-write`** (`--safe-write`) lets the agent create data and edit/delete **only what it created** this run — never pre-existing records.
-- **`destructive`** (`--allow-destructive`) allows everything, and only ever when *you* confirm the environment is disposable. The skill will never choose this itself.
-- Findings, memory, and reports live in the tested project's `.scenescout/` — gitignore it or commit it, your call.
+- 🟢 **`read-only` by default.** Destructive-labeled elements (delete/revoke/archive/…) **and** all `PUT/PATCH/DELETE` + destructive `POST`s are blocked at the network layer — see [`src/engine/policy.ts`](src/engine/policy.ts). Non-destructive `POST`s are allowed, because submitting forms is how a tester finds validation bugs — so read-only means *nothing existing is changed or removed*, not *nothing is ever created*.
+- 🟡 **`safe-write`** (`--safe-write`) lets the agent create data and edit/delete **only what it created** this run — never pre-existing records.
+- 🔴 **`destructive`** (`--allow-destructive`) allows everything, and only ever when *you* confirm the environment is disposable. The skill will never choose this itself.
+- 📂 Findings, memory, and reports live in a `.scenescout/` folder where you ran it. It ignores itself in git, so a stray `git add -A` never commits test data.
 
 A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app bug.
 
 ---
 
-## What you get
+## 📋 What you get
 
 `.scenescout/report.md` — a deduplicated, worst-first report with:
 
-- **Findings** with repro traces and generated Playwright regression-test skeletons.
-- **Page scores** (0–100: a11y · craft · consistency · task-clarity), ranked worst-first, with stale scores from old runs marked as such.
-- **A role capability matrix** — what each role could and couldn't reach.
-- **A gap ledger** — everything *not* done, so the report is honest about its own coverage.
+- 🐛 **Findings** with repro traces and generated Playwright regression-test skeletons.
+- 💯 **Page scores** (0–100: a11y · craft · consistency · task-clarity), ranked worst-first, with stale scores from old runs marked as such.
+- 👥 **A role capability matrix** — what each role could and couldn't reach.
+- 🧾 **A gap ledger** — everything *not* done, so the report is honest about its own coverage.
 
-Watch a run live: `node dist/cli.js status <project-path>`.
+👀 Watch a run live: `node dist/cli.js status <project-path>`.
 
 ---
 
-## Troubleshooting
+## 🩺 Troubleshooting
 
 Run `npm run doctor` first — it checks every setup item below (everything but the last row, which is about your app) and prints the fix.
 
@@ -184,11 +227,11 @@ Run `npm run doctor` first — it checks every setup item below (everything but 
 | Tools broke after moving the folder or changing node version | The registration stores absolute paths. `npm run setup` refreshes them. |
 | Attach fails or every route lands on the login page | Your app isn't running at `--url`, or the `--role` storage state has expired — regenerate it the way your project's Playwright setup does. |
 
-### Upgrading from an older name
+### ⬆️ Upgrading from an older name
 
 This tool was previously called SceneCraft (and, before that, frontend-tester). `npm run setup` cleans up after both: it removes the old skill link and the old `scenecraft` MCP registration when they point at this install, and the first attach in a project moves its `.scenecraft/` memory folder to `.scenescout/` so earlier coverage and findings carry over.
 
-### Uninstall
+### 🧹 Uninstall
 
 ```bash
 claude mcp remove --scope user scenescout
@@ -199,7 +242,7 @@ Then delete the clone. Per-project memory lives in each tested project's `.scene
 
 ---
 
-## Using it standalone
+## 🔌 Using it standalone
 
 The engine is client-agnostic — any MCP client can drive it over stdio:
 
@@ -211,7 +254,7 @@ node dist/cli.js status <path>     # live status of a running engine
 
 ---
 
-## Project layout
+## 📁 Project layout
 
 ```
 src/
@@ -238,7 +281,7 @@ docs/adr/           why it's built this way
 
 ---
 
-## Design decisions
+## 🧠 Design decisions
 
 The load-bearing choices are recorded as ADRs — read the relevant one before changing a rule it covers:
 
@@ -251,7 +294,7 @@ The load-bearing choices are recorded as ADRs — read the relevant one before c
 
 ---
 
-## Development
+## 🔧 Development
 
 ```bash
 npm run build     # tsc
@@ -262,7 +305,7 @@ npm run dev       # run the CLI from source (tsx)
 
 Contributing? See [CLAUDE.md](CLAUDE.md) for the house rules — chiefly: bug fixes need a regression test at the cheapest layer that can fail, keep the repo project-agnostic (ADR 6), and `npm run build && npm test` must pass before committing.
 
-## License
+## 📄 License
 
 [MIT](LICENSE).
 
