@@ -11,6 +11,8 @@ export const title = "cross-run memory, safe-write, uploads";
 
 export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise<void> {
   const engine2 = new BrowserEngine();
+  /** A directory this suite creates OUTSIDE the project, for the upload-fence check. Removed in the finally below. */
+  let outsideDir: string | null = null;
   try {
     console.log("memory survives a new engine (cross-run persistence)");
     await engine2.attach({ url: baseUrl, projectDir, mode: "read-only" });
@@ -202,7 +204,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     // system path such as /etc/hosts does not exist on Windows: the link then
     // dangles and the upload is reported as "not found", which says nothing
     // about the fence.
-    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "scout-outside-"));
+    outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "scout-outside-"));
     fs.writeFileSync(path.join(outsideDir, "outside.txt"), "not part of the project");
     fs.symlinkSync(path.join(outsideDir, "outside.txt"), path.join(projectDir, "escape-link"));
     const viaSymlink = await engine2.upload({ ref: attachmentRef, filePath: "escape-link" });
@@ -305,5 +307,6 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     );
   } finally {
     await engine2.close().catch(() => {});
+    if (outsideDir) fs.rmSync(outsideDir, { recursive: true, force: true });
   }
 }
