@@ -92,20 +92,3 @@ export function destructiveRefusal(label: string): string {
     `the user has to re-attach with mode="destructive" against a disposable/seeded environment.`
   );
 }
-
-/**
- * Mutation notices must not include requests the policy aborted.
- *
- * The request event fires for every non-GET the page attempts, before the
- * route handler decides its fate. Reporting all of them told the agent, about
- * one and the same DELETE, both "server state may have mutated despite
- * read-only mode" and "WRITE-POLICY blocked" — two opposite facts, and an
- * invitation to file a false finding against the app under test.
- *
- * Signatures are `METHOD url` truncated to different lengths by the two
- * recorders, so a blocked signature is matched by prefix.
- */
-export function withoutBlocked<T extends { sig: string }>(mutations: T[], blocked: Array<{ sig: string }>): T[] {
-  if (blocked.length === 0) return mutations;
-  return mutations.filter((m) => !blocked.some((b) => b.sig.startsWith(m.sig) || m.sig.startsWith(b.sig)));
-}

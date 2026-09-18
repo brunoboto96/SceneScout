@@ -775,6 +775,10 @@ async function main(): Promise<void> {
     };
     const roBlocked = await engine.click(roRefOf("Sync foreign item"));
     check("read-only blocks DELETE despite harmless label", roBlocked.includes("WRITE-POLICY blocked") && roBlocked.includes("DELETE"), roBlocked);
+    // The request event fires before the policy decides, so the same DELETE used
+    // to be reported twice with opposite meanings. A blocked write did not
+    // happen; saying it "may have mutated" invites a false finding.
+    check("a blocked write is not ALSO reported as a possible mutation", !roBlocked.includes("may have mutated"), roBlocked);
 
     console.log("resilient click: forces past a real hit-test interception, not past a disabled control");
     // "Fake switch" is a <span> thumb painted over a visually-hidden <input>,

@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire, withoutBlocked } from "../src/engine/policy.ts";
+import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire } from "../src/engine/policy.ts";
 import { AUTH_LOSS_STREAK, AuthLossTracker, LOGIN_ROUTE_RE } from "../src/engine/authloss.ts";
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
 
@@ -254,16 +254,4 @@ test("the two copies of the login pattern have not drifted apart", () => {
   // the engine that detects them. This is that test.
   assert.equal(LOGIN_ROUTE_RE_STORAGE.source, LOGIN_ROUTE_RE.source, "storage-layer and engine-layer login patterns must stay identical");
   assert.equal(LOGIN_ROUTE_RE_STORAGE.flags, LOGIN_ROUTE_RE.flags);
-});
-
-test("a request the policy blocked is not also reported as a possible mutation", () => {
-  // The two recorders truncate the URL to different lengths, so the match is
-  // by prefix — in either direction.
-  const long = "http://x/api/items/" + "9".repeat(130);
-  const mutations = [{ sig: "DELETE http://x/api/items/999" }, { sig: "POST http://x/api/items" }, { sig: `PUT ${long}`.slice(0, 124) }];
-  const blocked = [{ sig: "DELETE http://x/api/items/999" }, { sig: `PUT ${long}`.slice(0, 144) }];
-  assert.deepEqual(withoutBlocked(mutations, blocked), [{ sig: "POST http://x/api/items" }], "only the request that went through is a possible mutation");
-  assert.equal(withoutBlocked(mutations, []).length, 3, "nothing blocked, nothing dropped");
-  // A different method on the same URL did go through and must still be reported.
-  assert.deepEqual(withoutBlocked([{ sig: "POST http://x/api/items/999" }], blocked), [{ sig: "POST http://x/api/items/999" }]);
 });

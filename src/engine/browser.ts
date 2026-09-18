@@ -7,7 +7,7 @@ import { AUTH_LOSS_PREFIX, MemoryStore, type ActionLogEntry } from "./memory.js"
 import { AuthLossTracker } from "./authloss.js";
 import { COLLECT_INTERACTABLES_SCRIPT, DIALOG_LIKE_SEL, VISIBLE_SRC, geometryIssues, type Rect } from "./collector.js";
 import { OracleMonitor, formatViolations } from "./oracles.js";
-import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire, withoutBlocked } from "./policy.js";
+import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire } from "./policy.js";
 import { scanProject } from "../scan.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignPayload, type FocusSample } from "./design.js";
 import { FIXTURE_KINDS, acceptMatches, generatedUpload, isFixtureKind, mimeForName, type FixtureFile, type FixtureKind } from "./fixtures.js";
@@ -439,7 +439,17 @@ export class BrowserEngine {
   /** Whether the browser window is visible — headed hover results carry a physical-cursor caveat. */
   private headed = false;
   /** Non-GET requests fired since the last action — surfaces silent state mutation in read-only runs (timestamped for attribution). */
-  private mutationRequests: Array<{ at: number; sig: string }> = [];
+  private mutationRequests: Array<{ at: number; sig: string; req: import("playwright").Request }> = [];
+  /**
+   * Requests the write policy aborted, by identity. The request event fires for
+   * every non-GET the page ATTEMPTS, before the route handler decides its fate,
+   * so without this the same DELETE was reported twice with opposite meanings:
+   * "server state may have mutated despite read-only mode" and "WRITE-POLICY
+   * blocked". Identity rather than URL matching: two requests to one URL can
+   * meet different fates, and a blocked /items/7/archive must not hide an
+   * allowed POST /items that shares its prefix.
+   */
+  private readonly abortedByPolicy = new WeakSet<import("playwright").Request>();
   /** Raw mutation sigs of the most recent action (pre-dedup) — double-submit detection. */
   private lastActionMutationSigs: string[] = [];
   /** Write-policy blocks drained by the last action — counted, so an action can know a request fired even when the policy stopped it. */
@@ -517,7 +527,7 @@ export class BrowserEngine {
       // tester mutated — reporting them trains the driver to ignore the notice.
       if (BENIGN_MUTATION_RE.test(req.url())) return;
       if (this.mutationRequests.length < 20) {
-        this.mutationRequests.push({ at: Date.now(), sig: `${method} ${req.url().slice(0, 120)}` });
+        this.mutationRequests.push({ at: Date.now(), sig: `${method} ${req.url().slice(0, 120)}`, req });
       }
       // Gap-ledger fact: this route's forms/actions were actually EXERCISED,
       // not just looked at — the difference between visited and tested.
@@ -587,6 +597,7 @@ export class BrowserEngine {
         }
         if (this.blockedRequests.length < 20) this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}` });
         this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}`, url: this.page?.url() ?? "" });
+        this.abortedByPolicy.add(req);
         return route.abort("blockedbyclient");
       });
     }
@@ -1213,12 +1224,14 @@ export class BrowserEngine {
     // Raw (pre-dedup) sigs from this action — double-submit detection needs
     // to see the DUPLICATES that the reporting dedup below intentionally hides.
     this.lastActionMutationSigs = this.mutationRequests.map((e) => e.sig);
-    const fresh = withoutBlocked(this.mutationRequests, this.blockedRequests).filter((entry) => {
-      const key = entry.sig.split("?")[0];
-      if (this.reportedMutationSigs.has(key)) return false;
-      this.reportedMutationSigs.add(key);
-      return true;
-    });
+    const fresh = this.mutationRequests
+      .filter((entry) => !this.abortedByPolicy.has(entry.req))
+      .filter((entry) => {
+        const key = entry.sig.split("?")[0];
+        if (this.reportedMutationSigs.has(key)) return false;
+        this.reportedMutationSigs.add(key);
+        return true;
+      });
     this.mutationRequests = [];
     if (fresh.length === 0) return "";
     const list = fresh

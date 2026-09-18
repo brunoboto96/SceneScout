@@ -90,7 +90,7 @@ try {
 
 console.log("finding lifecycle: retro-merge + resolve");
 {
-  const { MemoryStore } = await import("../dist/engine/memory.js");
+  const { MemoryStore } = await import("../src/engine/memory.ts");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mem-"));
   fs.mkdirSync(path.join(dir, ".scenescout"), { recursive: true });
   const mkFinding = (id: string, title: string, evidence: string | undefined, state: string) => ({

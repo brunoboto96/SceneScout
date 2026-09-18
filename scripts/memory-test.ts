@@ -1,8 +1,8 @@
 /**
  * Unit tests for the memory layer: finding dedup (the tiered sameFinding via
  * addFinding), retroMerge, regression reopening, and coverage aggregation.
- * Drives the compiled MemoryStore against a temp directory — see smoke.ts for
- * why dist/ is imported rather than src/.
+ * Drives the MemoryStore from src/ against a temp directory, so this suite
+ * tests your edit with no build step.
  *
  * Runs on node:test (built into Node ≥20, no dependency) so each case is
  * isolated, failures print a real diff, and one case can be run alone:
@@ -14,6 +14,8 @@ import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME, MemoryStore, adoptLegacyMemoryDir, mergeMemory, redactSecrets } from "../src/engine/memory.ts";
 
 /** Temp dirs created by the running test, cleaned up even when it fails. */
@@ -629,15 +631,19 @@ test("a second PROCESS writing the same project does not erase our findings", ()
   store.flush();
 
   const child = `
-    import { MemoryStore } from ${JSON.stringify(new URL("../dist/engine/memory.js", import.meta.url).href)};
+    import { MemoryStore } from ${JSON.stringify(new URL("../src/engine/memory.ts", import.meta.url).href)};
     const s = new MemoryStore(${JSON.stringify(projectDir)});
     s.addFinding({ severity: "high", category: "http-error", title: "Theirs: delete button 403s",
       detail: "y", evidence: "DELETE /api/x 403", url: "http://x/b", state: "/b#f1" });
     s.flush();
   `;
-  const childFile = path.join(projectDir, "child.mjs");
+  const childFile = path.join(projectDir, "child.mts");
   fs.writeFileSync(childFile, child);
-  execFileSync(process.execPath, [childFile], { stdio: "pipe" });
+  // Through tsx, like this suite itself, so the second process runs src/ too.
+  // The loader is resolved from HERE: the child lives in a temp dir with no
+  // node_modules of its own to find "tsx" in.
+  const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+  execFileSync(process.execPath, ["--import", pathToFileURL(tsxLoader).href, childFile], { stdio: "pipe" });
 
   // Now we flush again, exactly as a live run would keep doing.
   store.addFinding({ ...base, title: "Ours: second finding", detail: "z", evidence: "GET /api/y 404" });
