@@ -149,7 +149,10 @@ test("a path that leaves the project is refused — by .., by absolute path, and
   fs.mkdirSync(`${projectDir}-backup`);
   fs.writeFileSync(path.join(`${projectDir}-backup`, "x.txt"), "x");
   const sibling = resolveDiskUpload({ projectDir }, `../${path.basename(projectDir)}-backup/x.txt`);
-  assert.ok("refused" in sibling, "a name-prefix sibling is not inside the project");
+  assert.ok(
+    "refused" in sibling && /outside the attached project/.test(sibling.refused),
+    "a name-prefix sibling is refused BY THE FENCE, not merely reported missing",
+  );
 });
 
 test("a missing file, a directory, and an unattached session each say what is wrong", () => {

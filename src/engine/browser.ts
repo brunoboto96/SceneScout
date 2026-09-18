@@ -6,7 +6,7 @@ import { AUTH_LOSS_PREFIX, MemoryStore, type ActionLogEntry } from "./memory.js"
 import { AuthLossTracker } from "./authloss.js";
 import { COLLECT_INTERACTABLES_SCRIPT, VISIBLE_SRC, geometryIssues, type Rect } from "./collector.js";
 import { OracleMonitor, formatViolations } from "./oracles.js";
-import { extractCreatedIds, isOwnedResource } from "./ownership.js";
+import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
 import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
@@ -924,8 +924,9 @@ export class BrowserEngine {
       // Identity/account collections still appear on the cleanup list (the
       // record was genuinely created), but never grant mutation rights.
       if (!verdict.identityCollection) {
-        if (!this.ownedIds.has(id)) this.ownedIds.set(id, new Set());
-        this.ownedIds.get(id)!.add(verdict.collection);
+        const key = normalizeId(id);
+        if (!this.ownedIds.has(key)) this.ownedIds.set(key, new Set());
+        this.ownedIds.get(key)!.add(verdict.collection);
       }
       const desc = `${verdict.collection} id=${id}`;
       if (!this.createdResources.includes(desc)) {

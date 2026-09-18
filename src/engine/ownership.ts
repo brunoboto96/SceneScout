@@ -52,30 +52,83 @@ const MAX_IDS_PER_RESPONSE = 5;
 /** id → the collection paths it was created under. */
 export type OwnedIds = Map<string, Set<string>>;
 
-/** Does this request path address a record this run created? */
+/** Ids are compared case-insensitively and percent-decoded: an API may mint "7B2E…" and route on "/widgets/7b2e…". */
+export function normalizeId(id: string): string {
+  let decoded = id;
+  try {
+    decoded = decodeURIComponent(id);
+  } catch {
+    /* a stray "%" — compare it as written */
+  }
+  return decoded.toLowerCase();
+}
+
+/** A path segment that looks like a record id (number, uuid, long hex/token) rather than a collection or verb name. */
+function looksLikeId(segment: string): boolean {
+  return /^\d+$/.test(segment) || /^[0-9a-f]{8,}$/i.test(segment) || /^[0-9a-f]{8}-[0-9a-f-]{12,}$/i.test(segment);
+}
+
+/** True when none of these path segments is a record id. */
+function noIdsIn(segments: string[]): boolean {
+  return segments.filter(Boolean).every((seg) => !looksLikeId(seg));
+}
+
+/**
+ * Words that act ON a record when they appear between a collection and an id
+ * (/api/widgets/archive/9). An allowlist, not "any non-id word": the word in
+ * that position is just as often a SUB-COLLECTION (/api/widgets/links/9 is
+ * link 9, not widget 9), and guessing wrong licenses a write on a record this
+ * run never created.
+ */
+const RECORD_VERB_RE =
+  /^(delete|remove|destroy|archive|unarchive|restore|update|edit|patch|save|publish|unpublish|rename|move|duplicate|clone|copy|bulk|batch)([-_].+)?$/i;
+
+/**
+ * Words that mean "create one, a particular way" when they follow a collection
+ * in a creation URL (/api/documents/quick). Same reasoning: /api/widgets/links
+ * is where links are created, and a link's id says nothing about widgets.
+ */
+const CREATE_VARIANT_RE = /^(quick|instant|new|create|add|draft|init|start|upload|compose)([-_].+)?$/i;
+
+const allMatch = (segments: string[], re: RegExp): boolean => segments.length > 0 && segments.every((seg) => re.test(seg));
+
+/**
+ * Does this request path address a record this run created?
+ *
+ * For each path segment that is an id we own, the request's PARENT path (the
+ * segments before the id) is compared with each collection the id was created
+ * under. Four shapes are accepted, and every one refuses to step across
+ * another record's id — because numeric ids collide across tables, "9 is ours
+ * under tasks" says nothing about project 9:
+ *
+ *  1. direct:   created under /api/widgets        → /api/widgets/9[/…]
+ *  2. a record verb in the CRUD path (allowlisted):     /api/widgets       → /api/widgets/archive/9
+ *  3. a create variant in the creation path (allowlisted): /api/widgets/quick → /api/widgets/9
+ *  4. shallow nesting: /api/projects/3/tasks       → /api/tasks/9
+ */
 export function isOwnedResource(ownedIds: OwnedIds, pathname: string): boolean {
   const segments = pathname.split("/");
   for (let i = 0; i < segments.length; i++) {
-    const collections = ownedIds.get(segments[i]);
+    const collections = ownedIds.get(normalizeId(segments[i]));
     if (!collections) continue;
     const parent = segments.slice(0, i).join("/");
-    for (const c of collections) {
-      // The id must sit DIRECTLY under the collection it was created in. A
-      // bare prefix test is not enough: a record created through a generic
-      // endpoint (POST /api, POST /rpc) stores the collection "/api", which
-      // prefixes every path in the app — so creating record 7 anywhere would
-      // have licensed a DELETE on /api/<any collection>/7, and numeric ids
-      // collide across tables all the time.
-      const own = `${c.replace(/\/$/, "")}/${segments[i]}`;
-      if (pathname === own || pathname.startsWith(`${own}/`)) return true;
-      // Creation URL and CRUD URL can diverge below a shared collection
-      // (POST /api/documents/quick → PUT /api/documents/:id): the record's
-      // parent path is then an ANCESTOR of the stored creation collection.
-      // Only that direction is accepted. The reverse — the stored collection
-      // being an ancestor of the parent — is what /api/widgets/12/links/88
-      // looks like: 88 sitting under somebody else's widget 12. Guard: the
-      // parent must have ≥2 real segments so a bare "/api" never matches.
-      if (parent.split("/").filter(Boolean).length >= 2 && c.startsWith(`${parent}/`)) return true;
+    const parentSegs = parent.split("/").filter(Boolean);
+    for (const stored of collections) {
+      const c = stored.replace(/\/$/, "");
+      const cSegs = c.split("/").filter(Boolean);
+      // 1. The id sits directly under the collection it was created in.
+      if (parent === c) return true;
+      // 2. Verb-suffixed CRUD routes. (/api/widgets/12/links/88 is refused:
+      //    12 is somebody else's record and "links" is a sub-collection.)
+      if (parent.startsWith(`${c}/`) && allMatch(parentSegs.slice(cSegs.length), RECORD_VERB_RE)) return true;
+      // 3. Creation went through a variant endpoint below the collection. The
+      //    parent needs ≥2 segments so a bare "/api" never matches.
+      if (parentSegs.length >= 2 && c.startsWith(`${parent}/`) && allMatch(cSegs.slice(parentSegs.length), CREATE_VARIANT_RE)) return true;
+      // 4. Shallow nesting: created under a parent record, addressed at the
+      //    top level afterwards. Same collection name, and the creation path
+      //    really was nested under an id.
+      const last = cSegs[cSegs.length - 1];
+      if (last && parentSegs[parentSegs.length - 1] === last && cSegs.slice(0, -1).some(looksLikeId) && noIdsIn(parentSegs)) return true;
     }
   }
   return false;

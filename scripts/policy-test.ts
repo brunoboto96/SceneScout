@@ -12,7 +12,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire } from "../src/engine/policy.ts";
-import { deriveCollection, extractCreatedIds, isOwnedResource, keyMatchesUrl, type CreationEvidence, type OwnedIds } from "../src/engine/ownership.ts";
+import {
+  deriveCollection,
+  extractCreatedIds,
+  isOwnedResource,
+  keyMatchesUrl,
+  normalizeId,
+  type CreationEvidence,
+  type OwnedIds,
+} from "../src/engine/ownership.ts";
 import { AUTH_LOSS_STREAK, AuthLossTracker, LOGIN_ROUTE_RE } from "../src/engine/authloss.ts";
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
 
@@ -307,32 +315,60 @@ test("ownership: one response cannot mint a page of ownership", () => {
   assert.equal(extractCreatedIds(created({ body })).ids.length, 5);
 });
 
-test("ownership: a creation through an RPC endpoint still owns the record's plain CRUD path", () => {
+test("ownership: the creation collection is collapsed before any RPC verb", () => {
   assert.equal(deriveCollection("/api/widgets/from-template/5"), "/api/widgets");
   assert.equal(deriveCollection("/api/widgets/5/comments"), "/api/widgets/5/comments", "a nested create is not truncated at the numeric segment");
   assert.equal(deriveCollection("/clone"), "/clone", "never an empty collection");
-
-  const owned: OwnedIds = new Map([["88", new Set(["/api/widgets"])]]);
-  assert.equal(isOwnedResource(owned, "/api/widgets/88"), true);
-  assert.equal(isOwnedResource(owned, "/api/widgets/88/attachments/2"), true, "anything under our record");
-  assert.equal(isOwnedResource(owned, "/api/widgets/89"), false, "a neighbour is not ours");
-  assert.equal(isOwnedResource(owned, "/api/gadgets/88"), false, "the same id in another collection is a different record");
 });
 
-test("ownership: a shallow shared prefix never matches across collections", () => {
-  // Created via POST /api/widgets/quick, later saved via PUT /api/widgets/:id —
-  // parent and collection prefix each other, and both are ≥2 segments deep.
-  const quick: OwnedIds = new Map([["7", new Set(["/api/widgets/quick"])]]);
-  assert.equal(isOwnedResource(quick, "/api/widgets/7"), true);
-  // A record created through a generic endpoint stores a collection that
-  // prefixes the whole app. It must own its own path and nothing else: numeric
-  // ids collide across tables, and "7" being ours in one says nothing about
-  // /api/gadgets/7, which existed before the run.
-  const generic: OwnedIds = new Map([["7", new Set(["/api"])]]);
-  assert.equal(isOwnedResource(generic, "/api/7"), true);
-  assert.equal(isOwnedResource(generic, "/api/gadgets/7"), false);
-  assert.equal(isOwnedResource(generic, "/api/gadgets/7/children/1"), false);
-  // An id that merely appears deeper in an unrelated path is not ours either.
-  const owned: OwnedIds = new Map([["88", new Set(["/api/widgets"])]]);
-  assert.equal(isOwnedResource(owned, "/api/widgets/12/links/88"), false, "88 here is a link target under someone else's widget 12");
+const owns = (collection: string, id: string, pathname: string): boolean => isOwnedResource(new Map([[id, new Set([collection])]]) as OwnedIds, pathname);
+
+test("ownership: the four path shapes a created record is reached by", () => {
+  // 1. directly under the collection, and anything beneath the record
+  assert.equal(owns("/api/widgets", "88", "/api/widgets/88"), true);
+  assert.equal(owns("/api/widgets", "88", "/api/widgets/88/attachments/2"), true);
+  assert.equal(owns("/widgets", "88", "/widgets/88"), true, "an API with no /api prefix");
+  assert.equal(owns("/api/widgets/", "88", "/api/widgets/88"), true, "a stored trailing slash");
+  // 2. a verb between the collection and the id
+  assert.equal(owns("/api/widgets", "88", "/api/widgets/archive/88"), true);
+  assert.equal(owns("/api/widgets", "88", "/api/widgets/bulk/delete/88"), true);
+  // 3. a verb in the CREATION path, below the collection
+  assert.equal(owns("/api/widgets/quick", "7", "/api/widgets/7"), true);
+  // 4. created nested under a parent record, addressed at the top level afterwards
+  assert.equal(owns("/api/projects/3/tasks", "9", "/api/tasks/9"), true);
+  assert.equal(owns("/api/projects/3/tasks", "9", "/api/projects/3/tasks/9"), true);
+});
+
+test("ownership never steps across another record's id", () => {
+  // Numeric ids collide across tables: "9 is ours under tasks" says nothing
+  // about project 9, order 77, or widget 12's link 88 — all pre-existing data.
+  assert.equal(owns("/api/projects/3/tasks", "9", "/api/projects/9"), false, "a task's id is not a project's id");
+  assert.equal(owns("/api/orders/5/items", "77", "/api/orders/77"), false);
+  assert.equal(owns("/api/widgets", "88", "/api/widgets/12/links/88"), false, "88 under somebody else's widget 12");
+  assert.equal(owns("/api/widgets", "88", "/api/widgets/89"), false, "a neighbour");
+  assert.equal(owns("/api/widgets", "88", "/api/gadgets/88"), false, "the same id in another collection");
+  assert.equal(owns("/api/projects/3/tasks", "9", "/api/projects/4/tasks/9"), false, "same id under a different parent record");
+  assert.equal(owns("/api/widgets", "88", "/api/widgets/0a1b2c3d4e5f/88"), false, "a hex token in between is an id too");
+  assert.equal(owns("/api/projects/3/tasks", "9", "/api/subtasks/9"), false, "shallow nesting needs the SAME collection name");
+  assert.equal(owns("/api/tasks", "9", "/api/v2/tasks/9"), false, "a flat create does not license a differently-rooted path");
+  // The word between a collection and an id is as often a SUB-COLLECTION as a
+  // verb, so only allowlisted verbs are accepted in either position.
+  assert.equal(owns("/api/widgets", "88", "/api/widgets/links/88"), false, "link 88 is not widget 88");
+  assert.equal(owns("/api/widgets/links", "7", "/api/widgets/7"), false, "creating link 7 does not license a write on widget 7");
+});
+
+test("ownership: a generic creation endpoint owns its own path and nothing else", () => {
+  // POST /api (or /rpc) stores a collection that prefixes the whole app.
+  assert.equal(owns("/api", "7", "/api/7"), true);
+  assert.equal(owns("/api", "7", "/api/gadgets/7"), false);
+  assert.equal(owns("/api", "7", "/api/gadgets/7/children/1"), false);
+});
+
+test("ownership: ids match whatever case or encoding the URL uses", () => {
+  const owned: OwnedIds = new Map([[normalizeId("7B2E9F10-AAAA-4BBB-8CCC-1234567890AB"), new Set(["/api/widgets"])]]);
+  assert.equal(isOwnedResource(owned, "/api/widgets/7b2e9f10-aaaa-4bbb-8ccc-1234567890ab"), true);
+  assert.equal(isOwnedResource(owned, "/api/widgets/7B2E9F10-AAAA-4BBB-8CCC-1234567890AB"), true);
+  const spaced: OwnedIds = new Map([[normalizeId("Q3 plan"), new Set(["/api/docs"])]]);
+  assert.equal(isOwnedResource(spaced, "/api/docs/Q3%20plan"), true);
+  assert.equal(normalizeId("100%"), "100%", "a stray percent sign is compared as written, not thrown on");
 });

@@ -70,6 +70,17 @@ async function main(): Promise<void> {
   }
   console.log(`✓ skill documents all ${names.length} tools`);
 
+  // The reverse direction: a tool name the skill mentions but the server does
+  // not register. The skill's first step stops the run when its probe tool is
+  // missing, so one stale name there halts every run at setup.
+  const mentioned = new Set([...skill.matchAll(/\b(?:mcp__[a-z_]+__)?((?:scout|ft)_[a-z_]+)\b/g)].map((m) => m[1]).filter((n) => !n.endsWith("_")));
+  const unknown = [...mentioned].filter((n) => !names.includes(n));
+  if (unknown.length > 0) {
+    console.error(`MCP CHECK FAILED — the skill refers to tools the server does not register: ${unknown.join(", ")}`);
+    process.exit(1);
+  }
+  console.log(`✓ skill names no tool the server lacks`);
+
   // Tool-NAME coverage is the floor, not the ceiling. A parameter added to an
   // already-documented tool leaves the name present, so the check above stays
   // green while the agent has no idea the parameter exists — which is exactly
