@@ -10,3 +10,30 @@ dist/
 .scenecraft-fixtures/
 .tmp-fixtures/
 *.tgz
+
+# ── never commit these ───────────────────────────────────────────────────────
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.p12
+*.pfx
+*.key
+
+# Saved logins. A Playwright storage state holds live session cookies for
+# whatever app it was recorded against.
+playwright/.auth/
+**/*storage-state*.json
+**/*storageState*.json
+
+# Editors, operating systems, logs, coverage
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.log
+npm-debug.log*
+coverage/
