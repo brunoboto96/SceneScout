@@ -61,6 +61,8 @@ async function main(): Promise<void> {
   const uploadLog: Array<{ filename: string; bytes: number; sawPdf: boolean; sawPng: boolean }> = [];
   /** POSTs to /api/items — a click on "Create item" fires exactly one, so this counts clicks that actually happened. */
   let itemPosts = 0;
+  /** DELETEs that reached the server for the worker-sync fixture's record — must stay 0 in read-only mode. */
+  let workerDeletes = 0;
   // Tiny server for the test app: static pages + a minimal items API for
   // write-policy testing.
   const server = http.createServer((req, res) => {
@@ -94,6 +96,13 @@ async function main(): Promise<void> {
       res.end(JSON.stringify({ id: "7", name: "existing item" }));
       return;
     }
+    if (urlPath === "/sw.js") {
+      // A worker script must be served as JavaScript or registration is refused.
+      res.writeHead(200, { "content-type": "text/javascript" });
+      res.end(fs.readFileSync(path.join(appDir, "sw.js")));
+      return;
+    }
+    if (urlPath === "/api/items/999" && req.method === "DELETE") workerDeletes += 1;
     if (urlPath.startsWith("/api/items/") && (req.method === "PUT" || req.method === "DELETE")) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
@@ -593,6 +602,29 @@ async function main(): Promise<void> {
     check("report lists unexplored surface", markdown.includes("Unexplored surface"));
 
     console.log("write policy: read-only blocks foreign mutations at the network layer");
+    console.log("write policy: a request issued by a service worker cannot slip past it");
+    // A guard, not a bug fix: request interception covering worker-issued
+    // requests is the browser driver's behaviour, not ours, and it has not
+    // always been the default. An app with an offline-sync worker sends its
+    // writes from the worker, so if a driver upgrade ever stopped routing those,
+    // a DELETE would pass straight through read-only mode with nothing logged —
+    // the one guarantee the safety model makes, silently void. The worker must
+    // be ACTIVE for this to prove anything, so that is asserted too.
+    await engine.navigate("/worker-sync.html");
+    let workerSnap = await engine.snapshot(true);
+    const workerDeadline = Date.now() + 5000;
+    while (workerSnap.includes("worker: starting") && Date.now() < workerDeadline) {
+      await settle(100);
+      workerSnap = await engine.snapshot(true);
+    }
+    check("the fixture's service worker is active (otherwise this proves nothing)", workerSnap.includes("worker: active"), workerSnap.slice(0, 300));
+    const syncRef = workerSnap.match(/(e\d+) button "Sync now"/)?.[1];
+    if (!syncRef) throw new Error("Sync now button not found");
+    const syncResult = await engine.click(syncRef);
+    await settle(600);
+    check("read-only: the worker-issued DELETE is reported as blocked", syncResult.includes("WRITE-POLICY blocked") && syncResult.includes("/api/items/999"), syncResult);
+    check("read-only: the worker-issued DELETE never reaches the server", workerDeletes === 0, `server received ${workerDeletes} DELETE(s)`);
+
     await engine.navigate("/");
     const roSnap = await engine.snapshot(true);
     const roRefOf = (label: string): string => {

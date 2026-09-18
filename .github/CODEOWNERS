@@ -1,0 +1,15 @@
+# Every change needs the maintainer's review. Together with the ruleset on main
+# ("require review from code owners"), the maintainer's approval is the only one
+# that can land someone else's pull request. GitHub does not let an author
+# approve their own pull request, so the maintainer lands their own work through
+# the ruleset's admin bypass — which nobody else has.
+* @brunoboto96
+
+# Listed explicitly so they stay owned even if the catch-all above is ever
+# narrowed: the ownership rules themselves, everything CI and releases run, and
+# the files that decide what gets published and under which terms.
+/.github/          @brunoboto96
+/package.json      @brunoboto96
+/package-lock.json @brunoboto96
+/LICENSE           @brunoboto96
+/SECURITY.md       @brunoboto96

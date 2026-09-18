@@ -303,7 +303,11 @@ npm test          # build + 11 suites: scan, oracle, policy, fixture, dispatch, 
 npm run dev       # run the CLI from source (tsx)
 ```
 
-Contributing? See [CLAUDE.md](CLAUDE.md) for the house rules — chiefly: bug fixes need a regression test at the cheapest layer that can fail, keep the repo project-agnostic (ADR 6), and `npm run build && npm test` must pass before committing.
+Contributing? Start with [VISION.md](VISION.md) (what is in scope) and [CONTRIBUTING.md](CONTRIBUTING.md) (how changes land), then see [CLAUDE.md](CLAUDE.md) for the house rules — chiefly: bug fixes need a regression test at the cheapest layer that can fail, keep the repo project-agnostic (ADR 6), and `npm run build && npm test` must pass before committing.
+
+## 🔐 Security
+
+Found a way past the write policy, or another security problem? Please report it privately — see [SECURITY.md](SECURITY.md).
 
 ## 📄 License
 
