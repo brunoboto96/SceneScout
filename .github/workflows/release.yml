@@ -37,7 +37,8 @@ jobs:
       contents: write # push the version branch, tags and the GitHub Release
       pull-requests: write # open the "Version Packages" pull request
       id-token: write # npm trusted publishing + provenance
-      actions: write # start the test workflow on the version branch
+    outputs:
+      pr-number: ${{ steps.changesets.outputs.pr-number }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -68,8 +69,22 @@ jobs:
           commit-message: Version Packages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # A separate job, so the permission to start workflows is never held by the
+  # job that runs repository code and can publish. It keys off pr-number, which
+  # the action sets only after it has pushed the version branch and opened or
+  # updated the pull request; has-changesets is also true for an empty
+  # changeset, where no branch exists to run on.
+  test-version-pr:
+    needs: release
+    if: needs.release.outputs.pr-number != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
       - name: Run the test suite on the version pull request
-        if: steps.changesets.outputs.has-changesets == 'true'
         run: gh workflow run test.yml --ref changeset-release/main
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

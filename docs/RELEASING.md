@@ -12,8 +12,7 @@ edit the version or `CHANGELOG.md` (see [.changeset/README.md](../.changeset/REA
 3. Approve and merge that pull request. It is opened with the Actions token,
    and GitHub does not run `pull_request` workflows for pull requests opened
    that way, so the release workflow starts the `test` workflow on the version
-   branch itself. The checks appear on the pull request a few minutes after it
-   is opened or updated. Its author is the Actions bot, so the maintainer's
+   branch itself. The checks appear on the pull request once that run starts. Its author is the Actions bot, so the maintainer's
    approval counts as the code-owner review. Its diff is generated and limited
    to the version, the changelog, `plugin.json` and the deleted changeset files.
 4. The workflow runs again on that merge, finds no pending changesets, and
