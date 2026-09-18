@@ -42,6 +42,8 @@ function hits(re: RegExp, allowFiles: RegExp | null = null): string[] {
   return out;
 }
 
+const SELF = /^scripts\/hygiene-test\.ts$/;
+
 // ── the rules ───────────────────────────────────────────────────────────────
 
 /** Paths that hold run output, saved sessions or local secrets. */
@@ -114,18 +116,15 @@ test("no run output, saved login, env file or key is tracked", () => {
 });
 
 test("every email address in the repository is on a reserved example domain", () => {
-  const found = hits(EMAIL_RE).filter((h) => !isAllowedEmail(h.slice(h.lastIndexOf(" ") + 1)));
+  // This file is excluded from all three content scans: its own test strings are, by design, the shapes the rules reject.
+  const found = hits(EMAIL_RE, SELF).filter((h) => !isAllowedEmail(h.slice(h.lastIndexOf(" ") + 1)));
   assert.deepEqual(found, [], "use someone@example.com — a real address here is somebody's personal data");
 });
 
 test("no path into a real person's home directory", () => {
-  assert.deepEqual(
-    hits(HOME_PATH_RE, /^scripts\/hygiene-test\.ts$/),
-    [],
-    "write <project> or a /home/u/ placeholder; a real path names a person and often the app they were testing",
-  );
+  assert.deepEqual(hits(HOME_PATH_RE, SELF), [], "write <project> or a /home/u/ placeholder; a real path names a person and often the app they were testing");
 });
 
 test("no credential shaped like a real service's token", () => {
-  assert.deepEqual(hits(SECRET_RE, /^scripts\/hygiene-test\.ts$/), [], "rotate it now — a secret that reached a commit is compromised — then remove it");
+  assert.deepEqual(hits(SECRET_RE, SELF), [], "rotate it now — a secret that reached a commit is compromised — then remove it");
 });
