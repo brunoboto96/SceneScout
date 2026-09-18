@@ -16,6 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { chromium } from "playwright";
 import { BrowserEngine } from "../dist/engine/browser.js";
 import { computeGaps, generateReport } from "../dist/engine/report.js";
 // @ts-expect-error — plain .mjs, no types; it exports createDemoServer().
@@ -208,6 +209,9 @@ async function main(): Promise<void> {
     show("gap ledger", computeGaps(engine.memory!, extras).join("\n") || "(empty)");
     const report = generateReport(engine.memory!, engine.oracleLog.all, extras);
     fs.writeFileSync(path.join(outDir, "report.md"), stabilise(report.markdown, projectDir));
+    // After the report: the annotated picture is for the README only, and a
+    // failure drawing it must not leave examples/ with a stale report.
+    await annotatedDashboard(baseUrl);
     console.log(
       `\nWrote ${path.relative(process.cwd(), path.join(outDir, "report.md"))} and ${fs.readdirSync(path.join(outDir, "screenshots")).length} screenshots.`,
     );
@@ -216,6 +220,43 @@ async function main(): Promise<void> {
     server.closeAllConnections();
     server.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The README's picture: the dashboard with its two visible defects outlined and
+ * numbered. Without the callouts a reader takes the broken chart for a broken
+ * README. This one is drawn with Playwright directly, because it injects
+ * markers into the page — something the engine never does to an app under test.
+ * The unmarked screenshots next to it are the engine's own.
+ */
+async function annotatedDashboard(baseUrl: string): Promise<void> {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 700 } });
+    await page.goto(baseUrl, { waitUntil: "networkidle" });
+    await page.evaluate(`(() => {
+      const mark = (testid, n, text, pad) => {
+        const target = document.querySelector('[data-testid="' + testid + '"]');
+        if (!target) throw new Error("annotated dashboard: the demo app has no element with data-testid " + testid);
+        const r = target.getBoundingClientRect();
+        const box = document.createElement("div");
+        box.style.cssText = "position:absolute;border:3px solid #dc2626;border-radius:10px;pointer-events:none;z-index:9999;" +
+          "left:" + (r.left + scrollX - pad) + "px;top:" + (r.top + scrollY - pad) + "px;width:" + (r.width + pad * 2) + "px;height:" + (r.height + pad * 2) + "px";
+        const tag = document.createElement("div");
+        tag.textContent = n + " · " + text;
+        tag.style.cssText = "position:absolute;background:#dc2626;color:#fff;font:600 13px system-ui,sans-serif;padding:4px 10px;border-radius:999px;white-space:nowrap;z-index:9999;" +
+          "left:" + (r.right + scrollX + pad + 10) + "px;top:" + (r.top + scrollY + r.height / 2 - 13) + "px";
+        document.body.append(box, tag);
+      };
+      mark("dash-new-badge", "1", "badge covers the “All orders” button", 6);
+      const img = document.querySelector('[data-testid="dash-chart"]');
+      if (img) img.style.display = "inline-block";
+      mark("dash-chart", "2", "chart image fails to load (404)", 6);
+    })()`);
+    await page.screenshot({ path: path.join(outDir, "screenshots", "dashboard-annotated.png") });
+  } finally {
+    await browser.close();
   }
 }
 

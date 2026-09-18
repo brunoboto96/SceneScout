@@ -23,6 +23,7 @@ import {
   NPX_SERVE_ARGS,
   parseRegistration,
   registerMcp,
+  repairCommands,
   resolveClaudeDir,
   type Runner,
   type RunResult,
@@ -515,4 +516,30 @@ test("replacing a registration that ran something else says what it ran", () => 
   // A listing that cannot be read is not evidence of somebody else's server.
   const unreadable = scripted([exists, ok("scenescout — stdio — connected"), ok(), ok(), notRegistered]);
   assert.deepEqual((registerMcp({ launch, serverPath, run: unreadable.run }) as { notes: string[] }).notes, []);
+});
+
+test("doctor names a repair command that exists for the way the tool was installed", () => {
+  // From npm there is no package.json script to run; from a checkout there is,
+  // and it registers that checkout rather than the published package.
+  const fromNpm = fakePackage();
+  assert.equal(repairCommands(fromNpm).setup, "npx -y scenescout install");
+  const checkout = fakePackage();
+  fs.writeFileSync(path.join(checkout, "tsconfig.json"), "{}");
+  fs.mkdirSync(path.join(checkout, "src"));
+  assert.deepEqual(repairCommands(checkout), { setup: "npm run setup", build: "npm run build" });
+
+  const fixes = diagnose({
+    packageRoot: fromNpm,
+    claudeDir: tmp("sc-claude-"),
+    nodeVersion: "v22.1.0",
+    chromiumPath: null,
+    run: scripted([fail('No MCP server named "scenescout".')]).run,
+  })
+    .filter((c) => !c.ok)
+    .map((c) => c.fix ?? "");
+  assert.ok(fixes.length >= 2);
+  assert.ok(
+    fixes.every((f) => !/npm run/.test(f)),
+    `an npm install was told to run a checkout script: ${fixes.join(" | ")}`,
+  );
 });

@@ -200,7 +200,7 @@ async function install(flags: string[]): Promise<void> {
   }
 
   if (failed) {
-    console.log("\nSetup is incomplete — fix the lines marked ✗ or · above, then run:  npm run doctor");
+    console.log("\nSetup is incomplete — fix the lines marked ✗ or · above, then run:  scenescout doctor");
     process.exitCode = 1;
     return;
   }
@@ -209,7 +209,7 @@ async function install(flags: string[]): Promise<void> {
     return;
   }
   console.log("\nStart a FRESH Claude Code session, then in any project run:  /scenescout");
-  console.log("Something off? Run:  npm run doctor");
+  console.log("Something off? Run:  scenescout doctor");
 }
 
 async function doctor(flags: string[]): Promise<void> {
