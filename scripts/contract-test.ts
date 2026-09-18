@@ -16,7 +16,7 @@ import path from "node:path";
 import test, { afterEach } from "node:test";
 import { isNonPageRoute, normalizePath } from "../dist/engine/fingerprint.js";
 import { MemoryStore } from "../dist/engine/memory.js";
-import { classifyFilledStates, computeGaps } from "../dist/engine/report.js";
+import { classifyFilledStates, computeGaps, formatRouteCoverage } from "../dist/engine/report.js";
 
 let dirs: string[] = [];
 function freshStore(): MemoryStore {
@@ -301,4 +301,24 @@ test("ledger: an empty ledger is reachable — the contract can actually be sati
   store.recordRoleAccess("admin", "/x", "reached");
   store.recordRoleAccess("viewer", "/x", "reached");
   assert.deepEqual(computeGaps(store, { unvisitedRoutes: [] } as never), []);
+});
+
+test("coverage counts link-discovered routes, not only the ones found in source", () => {
+  // A project with no scannable routes (a code-routed SPA, or a remote URL with
+  // no source at all) used to be told there was no route list while discovered
+  // routes sat unvisited — the one mode where the agent most needs the list.
+  const discoveredOnly = formatRouteCoverage(["/", "/orders", "/settings"], ["/settings"]);
+  assert.match(discoveredOnly, /Routes visited: 2\/3/);
+  assert.match(discoveredOnly, /UNVISITED: \/settings/);
+  assert.doesNotMatch(discoveredOnly, /No routes known/);
+
+  // Visited is derived from the same set as the total, so it can never go
+  // negative when discovered routes outnumber scanned ones.
+  const many = Array.from({ length: 30 }, (_, i) => `/r${i}`);
+  const line = formatRouteCoverage(many, many.slice(1));
+  assert.match(line, /Routes visited: 1\/30/);
+  assert.match(line, / …/, "a long unvisited list is truncated, and says so");
+
+  assert.match(formatRouteCoverage(["/a"], []), /1\/1 ✓/);
+  assert.match(formatRouteCoverage([], []), /No routes known yet.*Snapshot the landing page/, "an empty contract tells the agent how to fill it");
 });
