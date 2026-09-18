@@ -1,6 +1,6 @@
 {
   "name": "scenescout",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "SceneScout — AI-agent exploratory UI testing engine: an MCP server exposing Playwright browser tools with state-fingerprint memory, invariant oracles, structured findings and reports. Claude Code (or any MCP client) is the brain.",
   "license": "MIT",
   "author": "brunoboto96",
