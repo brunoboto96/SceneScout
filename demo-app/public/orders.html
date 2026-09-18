@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orders · Harbor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-dashboard">Dashboard</a><a href="/orders.html" data-testid="nav-orders" aria-current="page">Orders</a
+        ><a href="/reports.html" data-testid="nav-reports">Reports</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
+      </nav>
+    </header>
+    <main>
+      <h1>Orders</h1>
+      <p class="lede">Everything on the desk. Filter by status, open an order to edit its notes.</p>
+      <div class="row">
+        <label for="status" style="margin: 0">Status</label>
+        <select id="status" data-testid="orders-status-filter" style="max-width: 200px">
+          <option value="">All</option>
+          <option value="open">Open</option>
+          <option value="shipped">Shipped</option>
+          <option value="archived">Archived</option>
+        </select>
+        <a class="btn primary" href="/orders-new.html" data-testid="orders-new-btn">New order</a>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Order</th>
+            <th>Customer</th>
+            <th>Items</th>
+            <th>Total</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="rows" data-testid="orders-rows"></tbody>
+      </table>
+    </main>
+    <footer>Harbor order desk · demo data only</footer>
+    <script>
+      const rows = document.getElementById("rows");
+      async function load() {
+        const status = document.getElementById("status").value;
+        const res = await fetch("/api/orders" + (status ? "?status=" + status : ""));
+        // SEEDED DEFECT: a failed response is rendered as an empty table, with no message.
+        const orders = res.ok ? await res.json() : [];
+        rows.innerHTML = orders
+          .map(
+            (o) =>
+              `<tr><td><a href="/order.html?id=${o.id}" data-testid="order-link-${o.id}">#${o.id}</a></td><td>${o.customer}</td><td>${o.items}</td><td>$${o.total.toFixed(2)}</td><td><span class="pill ${o.status}">${o.status}</span></td></tr>`,
+          )
+          .join("");
+      }
+      document.getElementById("status").addEventListener("change", load);
+      load();
+    </script>
+  </body>
+</html>

@@ -13,7 +13,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { diagnose, installSkill, manualRegisterCommand, registerMcp, resolveClaudeDir, spawnRunner } from "./installer.js";
+import { diagnose, installSkill, launchCommand, manualRegisterCommand, registerMcp, resolveClaudeDir, spawnRunner } from "./installer.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME } from "./engine/memory.js";
 import { formatScan, scanProject } from "./scan.js";
 
@@ -27,8 +27,11 @@ Usage:
   scenescout scan <projectPath>     Discover framework, routes, auth states
   scenescout serve                  Run the MCP server (stdio)
   scenescout install                One-step setup: skill + Chromium + MCP registration
-                                    (--skip-browser, --no-register to opt out of a step)
+                                    (--skip-browser, --no-register to opt out of a step;
+                                     --browser-only when the skill and server came from a plugin)
   scenescout doctor                 Check the setup and print the fix for anything missing
+                                    (--engine: only node, the build and the browser — for plugin
+                                     installs and other MCP clients)
   scenescout status [projectPath]   What is the engine doing right now? (live status + recent actions)
 `);
   process.exit(exitCode);
@@ -144,13 +147,18 @@ async function install(flags: string[]): Promise<void> {
   // A step that fails is reported AND fails the command: `setup && next-step`
   // must not carry on past a missing browser or an unregistered server.
   let failed = false;
-  const skill = installSkill({ packageRoot, claudeDir: resolveClaudeDir(process.env, os.homedir()) });
-  for (const note of skill.notes) console.log(`· ${note}`);
-  console.log(
-    skill.mode === "symlink"
-      ? `✓ Skill installed (symlink): ${skill.dest} → ${skill.src}`
-      : `✓ Skill installed (copy): ${skill.dest} — re-run install after upgrading SceneScout.`,
-  );
+  // A plugin install already brings the skill and the server registration; the
+  // only thing it cannot bring is the browser download.
+  const browserOnly = flags.includes("--browser-only");
+  if (!browserOnly) {
+    const skill = installSkill({ packageRoot, claudeDir: resolveClaudeDir(process.env, os.homedir()) });
+    for (const note of skill.notes) console.log(`· ${note}`);
+    console.log(
+      skill.mode === "symlink"
+        ? `✓ Skill installed (symlink): ${skill.dest} → ${skill.src}`
+        : `✓ Skill installed (copy): ${skill.dest} — re-run install after upgrading SceneScout.`,
+    );
+  }
 
   if (flags.includes("--skip-browser")) {
     console.log("· Browser download skipped (--skip-browser).");
@@ -168,10 +176,14 @@ async function install(flags: string[]): Promise<void> {
     }
   }
 
-  if (flags.includes("--no-register")) {
-    console.log(`· MCP registration skipped (--no-register). To do it by hand:\n\n  ${manualRegisterCommand(process.execPath, serverPath)}\n`);
+  if (browserOnly) {
+    // nothing to register
+  } else if (flags.includes("--no-register")) {
+    console.log(
+      `· MCP registration skipped (--no-register). To do it by hand:\n\n  ${manualRegisterCommand(launchCommand({ packageRoot, nodePath: process.execPath, serverPath }))}\n`,
+    );
   } else {
-    const reg = registerMcp({ nodePath: process.execPath, serverPath, run: spawnRunner });
+    const reg = registerMcp({ launch: launchCommand({ packageRoot, nodePath: process.execPath, serverPath }), serverPath, run: spawnRunner });
     if (reg.status === "registered") {
       console.log(`✓ MCP server ${reg.replaced ? "re-registered (paths refreshed)" : "registered"} with Claude Code at user scope.`);
       for (const name of reg.removedLegacy) console.log(`· removed the pre-rename MCP registration "${name}" (it pointed at this same server).`);
@@ -192,12 +204,17 @@ async function install(flags: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  if (browserOnly) {
+    console.log("\nThe browser is ready — attach again.");
+    return;
+  }
   console.log("\nStart a FRESH Claude Code session, then in any project run:  /scenescout");
   console.log("Something off? Run:  npm run doctor");
 }
 
-async function doctor(): Promise<void> {
+async function doctor(flags: string[]): Promise<void> {
   const checks = diagnose({
+    scope: flags.includes("--engine") ? "engine" : "claude-code",
     packageRoot,
     claudeDir: resolveClaudeDir(process.env, os.homedir()),
     nodeVersion: process.version,
@@ -248,7 +265,7 @@ try {
       break;
     }
     case "doctor": {
-      await doctor();
+      await doctor(args);
       break;
     }
     case "status": {

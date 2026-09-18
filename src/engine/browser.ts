@@ -8,6 +8,7 @@ import { COLLECT_INTERACTABLES_SCRIPT, VISIBLE_SRC, geometryIssues, type Rect } 
 import { OracleMonitor, formatViolations } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
+import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
@@ -372,6 +373,7 @@ export class BrowserEngine {
       this.projectDirNote = ` (its real path could not be resolved: ${err instanceof Error ? err.message : String(err)} — a symlinked project path may be wrongly refused)`;
     }
     this.oracles = new OracleMonitor();
+    this.oracles.setPolicyAbortCheck((req) => this.abortedByPolicy.has(req));
     this.lastSnap = null;
     this.designAuditCount = 0;
 
@@ -481,6 +483,7 @@ export class BrowserEngine {
         if (this.blockedRequests.length < 20) this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}` });
         this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}`, url: this.page?.url() ?? "" });
         this.abortedByPolicy.add(req);
+        this.oracles.notePolicyBlock();
         return route.abort("blockedbyclient");
       });
     }
@@ -2106,15 +2109,14 @@ export class BrowserEngine {
     try {
       return await attempt();
     } catch (firstErr) {
+      const firstMessage = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      // A browser that was never downloaded will not appear on a second try.
+      if (isMissingBrowser(firstMessage)) throw new Error(explainLaunchFailure(firstMessage, 0));
       const reaped = reapOrphanBrowsers();
       try {
         return await attempt();
       } catch {
-        throw new Error(
-          `browser launch failed twice (${firstErr instanceof Error ? firstErr.message : firstErr})` +
-            (reaped > 0 ? ` — ${reaped} orphaned browser process(es) were reaped between attempts` : "") +
-            `. Check disk space and that Playwright's chromium is installed (npx playwright install chromium).`,
-        );
+        throw new Error(explainLaunchFailure(firstMessage, reaped));
       }
     }
   }

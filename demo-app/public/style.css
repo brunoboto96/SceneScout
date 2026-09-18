@@ -1,0 +1,238 @@
+:root {
+  --ink: #1c2430;
+  --muted: #5b6675;
+  --line: #dfe4ea;
+  --brand: #0f6fde;
+  --bg: #f6f8fa;
+  --danger: #c0392b;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  font:
+    15px/1.5 system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+header.bar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 12px 28px;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
+header.bar .logo {
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  text-decoration: none;
+}
+header.bar nav {
+  display: flex;
+  gap: 18px;
+}
+header.bar nav a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 4px 2px;
+  border-bottom: 2px solid transparent;
+}
+header.bar nav a[aria-current="page"] {
+  color: var(--ink);
+  border-color: var(--brand);
+}
+main {
+  max-width: 980px;
+  margin: 28px auto;
+  padding: 0 28px 96px;
+}
+h1 {
+  font-size: 26px;
+  margin: 0 0 4px;
+  letter-spacing: -0.02em;
+}
+h2 {
+  font-size: 17px;
+  margin: 28px 0 10px;
+}
+p.lede {
+  color: var(--muted);
+  margin: 0 0 22px;
+}
+.cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+.card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px 18px;
+}
+.card .n {
+  font-size: 28px;
+  font-weight: 700;
+}
+.card .l {
+  color: var(--muted);
+  font-size: 13px;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+th,
+td {
+  text-align: left;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+th {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: #fbfcfd;
+}
+tr:last-child td {
+  border-bottom: 0;
+}
+.pill {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e8f1fd;
+  color: #0b4fa3;
+}
+.pill.shipped {
+  background: #e7f6ec;
+  color: #17693a;
+}
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 0 0 14px;
+}
+label {
+  display: block;
+  font-weight: 600;
+  margin: 14px 0 4px;
+}
+input,
+select,
+textarea {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid #c4ccd6;
+  border-radius: 8px;
+  background: #fff;
+  width: 100%;
+  max-width: 420px;
+}
+button,
+.btn {
+  font: inherit;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #c4ccd6;
+  background: #fff;
+  cursor: pointer;
+  color: var(--ink);
+  text-decoration: none;
+  display: inline-block;
+}
+button.primary,
+.btn.primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+button.danger {
+  background: #fff;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid #8ab8f5;
+  outline-offset: 2px;
+}
+.muted {
+  color: var(--muted);
+}
+/* SEEDED DEFECT: helper text too faint to read (fails WCAG contrast). */
+.hint {
+  color: #b8c0ca;
+  font-size: 13px;
+  margin-top: 4px;
+}
+.notice {
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: #fff4e5;
+  border: 1px solid #f3d19c;
+  margin: 0 0 16px;
+}
+.error {
+  color: var(--danger);
+  margin-top: 8px;
+}
+/* The save row sticks to the bottom of the viewport on long pages... */
+.savebar {
+  position: sticky;
+  bottom: 0;
+  margin-top: 14px;
+  padding: 10px 0;
+  background: var(--bg);
+}
+/* ...SEEDED DEFECT: and so does this bar, which was added later and sits on top of it. */
+.stickybar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #1c2430;
+  color: #fff;
+  padding: 14px 28px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.stickybar a {
+  color: #9cc5ff;
+}
+/* SEEDED DEFECT: positioned by eye with a negative margin; it lands on top of a button. */
+.newbadge {
+  display: inline-block;
+  position: relative;
+  top: -52px;
+  left: 118px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: #fde68a;
+  color: #713f12;
+  font-size: 13px;
+  font-weight: 600;
+}
+footer {
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 24px;
+}

@@ -937,6 +937,7 @@ server.registerTool(
         designAudits: eng.designAuditCount,
         createdResources: eng.createdResources,
         unvisitedRoutes: unvisited,
+        policyAttributed: eng.oracleLog.policyAttributed,
       });
       void p;
       return text(summary, session);

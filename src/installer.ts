@@ -72,7 +72,7 @@ function removeOwned(entry: string): void {
 }
 
 export function installSkill(opts: { packageRoot: string; claudeDir: string; now?: () => number }): SkillInstall {
-  const src = path.join(opts.packageRoot, "skill", SKILL_NAME);
+  const src = path.join(opts.packageRoot, "skills", SKILL_NAME);
   if (!fs.existsSync(path.join(src, "SKILL.md"))) {
     throw new Error(`skill source not found at ${src} — is this a complete SceneScout checkout?`);
   }
@@ -118,14 +118,35 @@ function quote(arg: string): string {
   return /^[A-Za-z0-9_\/.:=@-]+$/.test(arg) ? arg : `"${arg.replace(/(["\\$`])/g, "\\$1")}"`;
 }
 
-export function mcpAddArgs(nodePath: string, serverPath: string): string[] {
-  // The absolute node path matters: Claude Code's launch environment often
-  // lacks the shell PATH (nvm/fnm), and a bare "node" fails to start.
-  return ["mcp", "add", "--scope", "user", MCP_NAME, "--", nodePath, serverPath];
+/** The arguments after `--` that start the published package through npx. */
+export const NPX_SERVE_ARGS = ["-y", "scenescout", "serve"];
+
+/**
+ * The command Claude Code should run to start the server.
+ *
+ * From a stable location (a clone, a global install) that is this node binary
+ * plus the server script. From an npx run it must NOT be: the script then lives
+ * in npm's cache, which npm may clear at any time, leaving a registration that
+ * silently stops working. There the launcher is `npx -y scenescout serve`,
+ * which fetches the package again if it has to.
+ *
+ * Both use an ABSOLUTE binary path: Claude Code's launch environment often
+ * lacks the shell PATH (nvm/fnm), and a bare "node" or "npx" fails to start.
+ */
+export function launchCommand(opts: { packageRoot: string; nodePath: string; serverPath: string }): string[] {
+  if (!isEphemeralRoot(opts.packageRoot)) return [opts.nodePath, opts.serverPath];
+  const npx = path.join(path.dirname(opts.nodePath), process.platform === "win32" ? "npx.cmd" : "npx");
+  // Some Node installs ship without npm beside the binary; a bare "npx" that
+  // resolves on PATH is better than an absolute path to nothing.
+  return [fs.existsSync(npx) ? npx : "npx", ...NPX_SERVE_ARGS];
 }
 
-export function manualRegisterCommand(nodePath: string, serverPath: string): string {
-  return ["claude", ...mcpAddArgs(nodePath, serverPath)].map(quote).join(" ");
+export function mcpAddArgs(launch: string[]): string[] {
+  return ["mcp", "add", "--scope", "user", MCP_NAME, "--", ...launch];
+}
+
+export function manualRegisterCommand(launch: string[]): string {
+  return ["claude", ...mcpAddArgs(launch)].map(quote).join(" ");
 }
 
 export type McpRegistration =
@@ -138,9 +159,9 @@ export type McpRegistration =
  * registration under our name is replaced, so re-running install after moving
  * the checkout or switching node versions repairs the stored paths.
  */
-export function registerMcp(opts: { nodePath: string; serverPath: string; run: Runner }): McpRegistration {
-  const manual = manualRegisterCommand(opts.nodePath, opts.serverPath);
-  const add = () => opts.run("claude", mcpAddArgs(opts.nodePath, opts.serverPath));
+export function registerMcp(opts: { launch: string[]; serverPath: string; run: Runner }): McpRegistration {
+  const manual = manualRegisterCommand(opts.launch);
+  const add = () => opts.run("claude", mcpAddArgs(opts.launch));
   let result = add();
   if (result.missing) return { status: "claude-missing", manual };
   let replaced = false;
@@ -216,7 +237,21 @@ export function parseRegistration(listing: string): { command: string | null; se
 export type Check = { name: string; ok: boolean; detail: string; fix?: string };
 
 /** Everything a working setup needs, each with the command that repairs it. */
-export function diagnose(opts: { packageRoot: string; claudeDir: string; nodeVersion: string; chromiumPath: string | null; run: Runner }): Check[] {
+export function diagnose(opts: {
+  /**
+   * "engine" checks only what every install needs (node, the build, the
+   * browser). The skill and the `claude mcp` registration are checked for the
+   * default "claude-code" scope only: a plugin install gets both from the
+   * plugin, and another MCP client has neither, so reporting them as failures
+   * there would send the user to fix something that is not broken.
+   */
+  scope?: "claude-code" | "engine";
+  packageRoot: string;
+  claudeDir: string;
+  nodeVersion: string;
+  chromiumPath: string | null;
+  run: Runner;
+}): Check[] {
   const checks: Check[] = [];
   const major = Number(opts.nodeVersion.replace(/^v/, "").split(".")[0]);
   checks.push({ name: "node >= 20", ok: major >= 20, detail: opts.nodeVersion, fix: "install Node 20 or newer" });
@@ -231,6 +266,8 @@ export function diagnose(opts: { packageRoot: string; claudeDir: string; nodeVer
     detail: opts.chromiumPath ?? "playwright could not name a browser path",
     fix: "npm run setup   (or: npx playwright install chromium)",
   });
+
+  if (opts.scope === "engine") return checks;
 
   const skill = path.join(opts.claudeDir, "skills", SKILL_NAME, "SKILL.md");
   checks.push({ name: "skill installed", ok: fs.existsSync(skill), detail: skill, fix: "npm run setup" });
@@ -253,6 +290,15 @@ export function diagnose(opts: { packageRoot: string; claudeDir: string; nodeVer
         // An unreadable listing is not evidence of a wrong install; claiming so
         // would produce a failure that re-running install can never clear.
         checks.push({ name: "MCP server registered", ok: true, detail: "registered (could not read its path from `claude mcp get` to verify it)" });
+      } else if (serverPath === NPX_SERVE_ARGS.join(" ")) {
+        // Registered through npx: there is no script path to compare, only the launcher to vet.
+        const absolute = command !== null && path.isAbsolute(command);
+        checks.push({
+          name: "MCP server registered",
+          ok: absolute,
+          detail: absolute ? `via ${command} ${serverPath}` : `registered with a bare \`${command}\` command, which Claude Code may not find on its PATH`,
+          fix: "scenescout install",
+        });
       } else if (!samePath(serverPath, server)) {
         // The usual aftermath of moving or deleting a checkout.
         checks.push({ name: "MCP server registered", ok: false, detail: `registered, but pointing at ${serverPath} — not this install`, fix: "npm run setup" });

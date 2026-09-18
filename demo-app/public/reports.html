@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reports · Harbor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-dashboard">Dashboard</a><a href="/orders.html" data-testid="nav-orders">Orders</a
+        ><a href="/reports.html" data-testid="nav-reports" aria-current="page">Reports</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
+      </nav>
+    </header>
+    <main>
+      <h1>Reports</h1>
+      <p class="lede">Weekly numbers for the desk.</p>
+      <div class="cards">
+        <div class="card">
+          <div class="n">17</div>
+          <div class="l">Orders this month</div>
+        </div>
+        <div class="card">
+          <div class="n">$6,420</div>
+          <div class="l">Revenue this month</div>
+        </div>
+        <div class="card">
+          <div class="n">1.4 d</div>
+          <div class="l">Average time to ship</div>
+        </div>
+      </div>
+      <h2>Export</h2>
+      <div class="row">
+        <button id="export" data-testid="reports-export-csv">Export CSV</button>
+        <a class="btn" href="/reports-scheduled.html" data-testid="reports-scheduled-link">Scheduled reports</a>
+      </div>
+    </main>
+    <footer>Harbor order desk · demo data only</footer>
+    <script>
+      document.getElementById("export").addEventListener("click", () => {
+        // SEEDED DEFECT: the export helper was renamed and this call site was missed.
+        const csv = window.reportData.rows.map((r) => r.join(",")).join("\n");
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+        a.download = "report.csv";
+        a.click();
+      });
+    </script>
+  </body>
+</html>

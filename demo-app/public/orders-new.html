@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>New order · Harbor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-dashboard">Dashboard</a><a href="/orders.html" data-testid="nav-orders" aria-current="page">Orders</a
+        ><a href="/reports.html" data-testid="nav-reports">Reports</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
+      </nav>
+    </header>
+    <main>
+      <h1>New order</h1>
+      <p class="lede">Takes a few seconds. You can add line items after it is created.</p>
+      <form id="f" data-testid="new-order-form" novalidate>
+        <label for="customer">Customer</label>
+        <input id="customer" name="customer" data-testid="new-order-customer" autocomplete="off" />
+        <div class="hint">The company or person the order is for.</div>
+        <label for="items">Number of items</label>
+        <input id="items" name="items" type="number" min="1" value="1" data-testid="new-order-items" />
+        <!-- SEEDED DEFECT: this field has no label, only a placeholder. -->
+        <input name="email" type="email" placeholder="Confirmation email (optional)" data-testid="new-order-email" style="margin-top: 14px" />
+        <div class="row" style="margin-top: 18px">
+          <button class="primary" type="submit" data-testid="new-order-submit">Create order</button>
+          <a class="btn" href="/orders.html" data-testid="new-order-cancel">Cancel</a>
+        </div>
+        <div id="msg" role="status" data-testid="new-order-msg"></div>
+      </form>
+    </main>
+    <footer>Harbor order desk · demo data only</footer>
+    <script>
+      document.getElementById("f").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const customer = document.getElementById("customer").value.trim();
+        // SEEDED DEFECT: an empty customer silently does nothing — no message, no focus.
+        if (!customer) return;
+        // SEEDED DEFECT: the button stays enabled while the request is in flight.
+        const res = await fetch("/api/orders", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ customer, items: Number(document.getElementById("items").value) }),
+        });
+        const order = await res.json();
+        document.getElementById("msg").innerHTML = `Order <a href="/order.html?id=${order.id}" data-testid="new-order-created-link">#${order.id}</a> created.`;
+      });
+    </script>
+  </body>
+</html>
