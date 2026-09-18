@@ -4,7 +4,7 @@ Status: accepted
 
 ## Context
 
-The GAP LEDGER is the product's trust mechanism: `ft_report {level:'extensive'}`
+The GAP LEDGER is the product's trust mechanism: `scout_report {level:'extensive'}`
 refuses while the ledger is non-empty, so "nothing known was left untested" is a
 checkable claim rather than a promise. That only works if two things hold.
 

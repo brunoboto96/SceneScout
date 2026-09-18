@@ -14,6 +14,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { FIXTURE_KINDS, acceptMatches, fixtureKindFor, generatedUpload, isFixtureKind, mimeForName, syntheticFile } from "../src/engine/fixtures.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { planUploadOptions, resolveDiskUpload } from "../src/engine/uploads.ts";
 
 test("generatedUpload says honestly where the kind came from", () => {
   assert.match(generatedUpload(".pdf").source, /generated pdf fixture \(inferred from accept\)/);
@@ -102,4 +106,74 @@ test("mime by extension covers what fixtures produce and the common office/image
   assert.equal(mimeForName("a.jpeg"), "image/jpeg");
   assert.equal(mimeForName("a.docx"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
   assert.equal(mimeForName("noext"), "application/octet-stream");
+});
+
+// ---------------------------------------------------------------------------
+// Disk uploads: the fence. `filePath` makes the engine read a file and hand
+// its bytes to the app under test, so an unfenced path is an exfiltration tool.
+// ---------------------------------------------------------------------------
+
+function project(): { projectDir: string; outside: string } {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ft-upload-")));
+  const projectDir = path.join(root, "project");
+  fs.mkdirSync(path.join(projectDir, "fixtures"), { recursive: true });
+  fs.writeFileSync(path.join(projectDir, "fixtures", "note.txt"), "inside");
+  const outside = path.join(root, "secret.txt");
+  fs.writeFileSync(outside, "outside the project");
+  return { projectDir, outside };
+}
+
+test("a file inside the project is uploaded from disk, by relative or absolute path", () => {
+  const { projectDir } = project();
+  const rel = resolveDiskUpload({ projectDir }, "fixtures/note.txt");
+  assert.ok(!("refused" in rel), JSON.stringify(rel));
+  assert.equal(rel.payload, path.join(projectDir, "fixtures", "note.txt"), "streamed from disk, not read into memory");
+  assert.equal(rel.name, "note.txt");
+  assert.equal(rel.bytes, 6);
+  const abs = resolveDiskUpload({ projectDir }, path.join(projectDir, "fixtures", "note.txt"));
+  assert.ok(!("refused" in abs));
+});
+
+test("a path that leaves the project is refused — by .., by absolute path, and through a symlink", () => {
+  const { projectDir, outside } = project();
+  for (const attempt of ["../secret.txt", "fixtures/../../secret.txt", outside]) {
+    const r = resolveDiskUpload({ projectDir }, attempt);
+    assert.ok("refused" in r && /outside the attached project/.test(r.refused), `${attempt} → ${JSON.stringify(r)}`);
+  }
+  // The one a string check cannot catch: a link INSIDE the project whose
+  // target is outside it. Only comparing real paths stops this.
+  fs.symlinkSync(outside, path.join(projectDir, "fixtures", "innocent.txt"));
+  const viaLink = resolveDiskUpload({ projectDir }, "fixtures/innocent.txt");
+  assert.ok("refused" in viaLink && /outside the attached project/.test(viaLink.refused), JSON.stringify(viaLink));
+  // A sibling directory that merely shares the project's name as a prefix is outside too.
+  fs.mkdirSync(`${projectDir}-backup`);
+  fs.writeFileSync(path.join(`${projectDir}-backup`, "x.txt"), "x");
+  const sibling = resolveDiskUpload({ projectDir }, `../${path.basename(projectDir)}-backup/x.txt`);
+  assert.ok(
+    "refused" in sibling && /outside the attached project/.test(sibling.refused),
+    "a name-prefix sibling is refused BY THE FENCE, not merely reported missing",
+  );
+});
+
+test("a missing file, a directory, and an unattached session each say what is wrong", () => {
+  const { projectDir } = project();
+  assert.match((resolveDiskUpload({ projectDir }, "fixtures/nope.pdf") as { refused: string }).refused, /not found \(or not a file\)/);
+  assert.match((resolveDiskUpload({ projectDir }, "fixtures") as { refused: string }).refused, /not found \(or not a file\)/);
+  assert.match((resolveDiskUpload({ projectDir: "" }, "fixtures/note.txt") as { refused: string }).refused, /Not attached/);
+});
+
+test("a renamed upload travels in memory under the new name and its mime type", () => {
+  const { projectDir } = project();
+  const r = resolveDiskUpload({ projectDir }, "fixtures/note.txt", "report.pdf");
+  assert.ok(!("refused" in r));
+  assert.equal(r.name, "report.pdf");
+  assert.equal(r.mime, "application/pdf");
+  assert.ok(typeof r.payload !== "string" && r.payload.buffer.toString() === "inside");
+});
+
+test("a plan's upload value is a fixture kind, a path, or nothing", () => {
+  assert.deepEqual(planUploadOptions(undefined), {});
+  assert.deepEqual(planUploadOptions("  "), {});
+  assert.deepEqual(planUploadOptions("PDF"), { fixture: "pdf" });
+  assert.deepEqual(planUploadOptions("fixtures/scan.pdf"), { filePath: "fixtures/scan.pdf" });
 });

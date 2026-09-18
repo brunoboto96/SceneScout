@@ -134,8 +134,8 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
           : inputType === "radio" ? "radio"
           : inputType === "submit" || inputType === "button" ? "button"
           // A file input is not a text field: fill() refuses it, and calling
-          // it a textbox sent the driver to ft_type, which could only throw.
-          // Its own role routes it to ft_upload instead.
+          // it a textbox sent the driver to scout_type, which could only throw.
+          // Its own role routes it to scout_upload instead.
           : inputType === "file" ? "file"
           : "textbox")
         : "generic");

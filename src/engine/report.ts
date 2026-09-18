@@ -231,7 +231,7 @@ function mutatedSiblingStep(route: string, facts: Record<string, { mutated?: boo
 }
 
 /**
- * The route line of ft_coverage.
+ * The route line of scout_coverage.
  *
  * It must count the SAME route set the report enforces — scanned routes plus
  * link-discovered ones. It used to count scanned routes only while taking the
@@ -248,7 +248,9 @@ export function formatRouteCoverage(allRoutes: string[], unvisited: string[]): s
   const visited = allRoutes.length - unvisited.length;
   return (
     `Routes visited: ${visited}/${allRoutes.length}` +
-    (unvisited.length > 0 ? ` — UNVISITED: ${unvisited.slice(0, 25).join(", ")}${unvisited.length > 25 ? " …" : ""} (ft_crawl covers these in one call)` : " ✓")
+    (unvisited.length > 0
+      ? ` — UNVISITED: ${unvisited.slice(0, 25).join(", ")}${unvisited.length > 25 ? " …" : ""} (scout_crawl covers these in one call)`
+      : " ✓")
   );
 }
 
@@ -319,7 +321,7 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
   const journeyTotal = Object.values(facts).reduce((a, f) => a + (f.journeysCompleted ?? 0), 0);
   if (journeyTotal === 0) {
     gaps.push(
-      `no COMPLETED ft_journey measurements — task EASE is untested. An abandoned journey is a finding, not coverage: it proves a task is blocked, not that it was measured.`,
+      `no COMPLETED scout_journey measurements — task EASE is untested. An abandoned journey is a finding, not coverage: it proves a task is blocked, not that it was measured.`,
     );
   }
   const roles = Object.keys(memory.roleAccess);
@@ -485,7 +487,7 @@ export function generateReport(memory: MemoryStore, oracleLog: OracleViolation[]
   if (historical.length > 0) {
     lines.push(`## Historical findings — not re-verified this session (${historical.length})`);
     lines.push(``);
-    lines.push(`Recorded in earlier runs and not re-confirmed. Re-test before acting; resolve fixed ones with \`ft_resolve <id>\`.`);
+    lines.push(`Recorded in earlier runs and not re-confirmed. Re-test before acting; resolve fixed ones with \`scout_resolve <id>\`.`);
     lines.push(``);
     for (const f of historical) renderFinding(f);
   }

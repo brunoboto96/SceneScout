@@ -299,7 +299,7 @@ export function scanProject(projectDir: string): ScanResult {
     }
   }
   if (authStates.length > 0) {
-    notes.push(`Playwright auth storage states found — pass one to ft_attach as storageStatePath to explore as that role.`);
+    notes.push(`Playwright auth storage states found — pass one to scout_attach as storageStatePath to explore as that role.`);
   }
 
   let readmeExcerpt: string | null = null;
