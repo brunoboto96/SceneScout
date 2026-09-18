@@ -88,7 +88,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       emailAppend.includes("APPENDED") && emailAppend.includes("user@example."),
       emailAppend,
     );
-    const emailReplace = await engine.type(refOf("Draft email"), "z@y.io", false, true);
+    const emailReplace = await engine.type(refOf("Draft email"), "z@y.test", false, true);
     check("email append concatenated cleanly", emailReplace.includes('replaced existing content "user@example.com"'), emailReplace);
     const hoverResult = await engine.hover(refOf("1 error"));
     check(

@@ -366,7 +366,7 @@ src/
     memory.ts       cross-run storage + finding dedup
     report.ts       the gap ledger + report generation
     …               collector · dispatch · fixtures · authloss · reaper
-scripts/            the 11 test suites (smoke/ holds the real-browser ones)
+scripts/            the 12 test suites (smoke/ holds the real-browser ones)
 test-app/           fixtures for the real-browser smoke tests
 skills/scenescout/   the Claude Code skill (SKILL.md)
 docs/adr/           why it's built this way
