@@ -67,6 +67,8 @@ export interface ReportExtras {
   unvisitedRoutes?: string[];
   /** Errors caused by the write policy's own blocks, which were not counted as violations. */
   policyAttributed?: number;
+  /** The write mode the run used. In "observe" no form can be submitted, which the ledger must say rather than blame the run. */
+  mode?: "observe" | "read-only" | "safe-write" | "destructive";
 }
 
 /**
@@ -317,7 +319,12 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
   const { unsubmitted } = classifyFilledStates(memory, facts);
   if (unsubmitted.length > 0) {
     gaps.push(
-      `${unsubmitted.length} route(s) had a form filled but NEVER submitted (no state-changing request left the page): ${unsubmitted.slice(0, 8).join(", ")}${unsubmitted.length > 8 ? " …" : ""}`,
+      `${unsubmitted.length} route(s) had a form filled but NEVER submitted (no state-changing request left the page): ${unsubmitted.slice(0, 8).join(", ")}${unsubmitted.length > 8 ? " …" : ""}` +
+        // In observe mode this is the mode working, not the run falling short —
+        // but it is still untested surface, so it stays in the ledger, explained.
+        (extras?.mode === "observe"
+          ? ` — expected in observe mode, which blocks every form submission by design; what the server does with these forms is untested. Cover them in read-only mode against an environment where creating records is acceptable.`
+          : ""),
     );
   }
   const journeyTotal = Object.values(facts).reduce((a, f) => a + (f.journeysCompleted ?? 0), 0);

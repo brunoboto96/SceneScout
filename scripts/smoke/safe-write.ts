@@ -16,6 +16,21 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     const snap4 = await engine2.snapshot();
     check("second run sees prior coverage", snap4.includes("(revisited)"), snap4);
 
+    console.log("write policy: observe lets nothing but GETs leave the page");
+    // read-only lets an ordinary form POST through, because submitting forms is
+    // how validation bugs are found. On a target holding real data that POST
+    // creates a record somebody has to clean up. observe is the mode for that.
+    await engine2.attach({ url: baseUrl, projectDir, mode: "observe" });
+    const obSnap = await engine2.snapshot(true);
+    const obRef = obSnap.match(/(e\d+) button "Create item"/)?.[1];
+    if (!obRef) throw new Error("Create item button not found");
+    const postsBefore = stats.itemPosts;
+    const obResult = await engine2.click(obRef);
+    await settle(400);
+    check("observe: a plain create POST is reported as blocked", obResult.includes("WRITE-POLICY blocked (observe)") && obResult.includes("POST"), obResult);
+    check("observe: the POST never reaches the server", stats.itemPosts === postsBefore, `server received ${stats.itemPosts - postsBefore} POST(s)`);
+    check("observe: the blocked request is not also reported as a possible mutation", !obResult.includes("may have mutated"), obResult);
+
     console.log("write policy: safe-write allows create + own-resource mutations only");
     await engine2.attach({ url: baseUrl, projectDir, mode: "safe-write" });
     const swSnap = await engine2.snapshot(true);

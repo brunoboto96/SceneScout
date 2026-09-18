@@ -92,3 +92,36 @@ export function destructiveRefusal(label: string): string {
     `the user has to re-attach with mode="destructive" against a disposable/seeded environment.`
   );
 }
+
+/**
+ * Write-policy tiers. The database behind the app may be live, so the
+ * guarantee lives at the network layer (HTTP verbs), not in button labels.
+ *
+ * - "observe":     nothing but GET, HEAD and OPTIONS leaves the page (login and
+ *                  token refresh excepted). For a target holding real data,
+ *                  where even an ordinary form submission creates a record
+ *                  somebody has to clean up.
+ * - "read-only":   destructive-labelled controls are refused, and
+ *                  PUT/PATCH/DELETE plus destructive-looking POSTs are blocked.
+ *                  Plain POSTs pass, because submitting forms is how
+ *                  validation bugs are found, and are reported.
+ * - "safe-write":  create freely; the engine tracks what THIS RUN creates and
+ *                  allows PUT/PATCH/DELETE only on those records.
+ * - "destructive": everything allowed. Explicit opt-in, disposable data only.
+ */
+export type WriteMode = "observe" | "read-only" | "safe-write" | "destructive";
+export const WRITE_MODES = ["observe", "read-only", "safe-write", "destructive"] as const;
+
+/**
+ * May this non-GET request leave the page? Auth-flow requests are let through
+ * before this is asked. `owned` means the request addresses a record this run
+ * created (always false outside safe-write, where nothing is tracked).
+ */
+export function allowsWrite(mode: WriteMode, method: string, destructiveWire: boolean, owned: boolean): boolean {
+  if (mode === "destructive") return true;
+  if (mode === "observe") return false;
+  // POST: creation/RPC passes unless it looks destructive and is not ours.
+  if (method === "POST") return !destructiveWire || owned;
+  // PUT/PATCH/DELETE: only in safe-write, only on this run's own records.
+  return mode === "safe-write" && owned;
+}

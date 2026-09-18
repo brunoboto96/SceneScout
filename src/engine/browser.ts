@@ -20,24 +20,12 @@ import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
-import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire } from "./policy.js";
+import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire, allowsWrite, type WriteMode } from "./policy.js";
 import { scanProject } from "../scan.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignPayload, type FocusSample } from "./design.js";
 import { acceptMatches, generatedUpload, type FixtureKind } from "./fixtures.js";
 
-/**
- * Write-policy tiers — the DB behind the app may be live, so the guarantee
- * lives at the network layer (HTTP verbs), not in button labels:
- * - "read-only":  UI destructive-label blocking + network block of
- *                 PUT/PATCH/DELETE and destructive-keyword POSTs. Plain POSTs
- *                 pass (search/login are POSTs) but are reported.
- * - "safe-write": create freely; the engine tracks what THIS SESSION creates
- *                 (ids from POST responses) and allows PUT/PATCH/DELETE only
- *                 on those resources. Label blocking off — deleting your own
- *                 record is the point.
- * - "destructive": everything allowed (explicit opt-in for disposable envs).
- */
-export type WriteMode = "read-only" | "safe-write" | "destructive";
+export type { WriteMode } from "./policy.js";
 
 export interface AttachOptions {
   url: string;
@@ -235,7 +223,8 @@ export class BrowserEngine {
 
   /** UI-label blocking applies only in read-only mode (safe-write enforces at the network layer instead). */
   get readOnly(): boolean {
-    return this.mode === "read-only";
+    // observe is read-only and then some: every UI-level refusal applies to it too.
+    return this.mode === "read-only" || this.mode === "observe";
   }
   /** Append to the shared action log, stamped with THIS session so per-session
    *  reads (journey paths) can separate concurrent roles' interleaved actions. */
@@ -432,6 +421,7 @@ export class BrowserEngine {
       // here let a REFUSED destructive POST mark the route as mutated — a form
       // that was never submitted reading as tested, in read-only mode where by
       // definition nothing is.
+      if (this.mode === "observe" && !AUTH_FLOW_RE.test(pathnameOf(req.url()))) return;
       if (this.readOnly && isDestructiveWire(pathnameOf(req.url()), req.postData())) return;
       const pageUrl = this.page?.url();
       if (pageUrl && this.memory) {
@@ -471,7 +461,7 @@ export class BrowserEngine {
         }
         // POST: creation/RPC passes unless it smells destructive and isn't ours.
         // PUT/PATCH/DELETE: only in safe-write, only on our own resources.
-        const allow = method === "POST" ? !destructiveWire || owned : this.mode === "safe-write" && owned;
+        const allow = allowsWrite(this.mode, method, destructiveWire, owned);
         if (allow) {
           // Ownership tracking (safe-write): register the creation-tracking
           // task BEFORE the POST goes out. Registering from a context
@@ -973,9 +963,11 @@ export class BrowserEngine {
     return (
       `\n🛡 WRITE-POLICY blocked (${this.mode}): ${list}${extra}. ` +
       `This is the tester's safety policy, NOT an app bug — do not file a finding for the resulting error UI. ` +
-      (this.mode === "read-only"
-        ? `Re-attach with mode="safe-write" to test create/edit flows, or "destructive" (user-approved disposable env only).`
-        : `In safe-write, updates/deletes are only allowed on resources this session created (${this.createdResources.length} so far).`)
+      (this.mode === "observe"
+        ? `observe mode blocks every request that is not a GET, so no form submission reaches the server. Re-attach with mode="read-only" ONLY if the user confirms that ordinary form submissions are acceptable on this target.`
+        : this.mode === "read-only"
+          ? `Re-attach with mode="safe-write" to test create/edit flows, or "destructive" (user-approved disposable env only).`
+          : `In safe-write, updates/deletes are only allowed on resources this session created (${this.createdResources.length} so far).`)
     );
   }
 

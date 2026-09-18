@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire } from "../src/engine/policy.ts";
+import { allowsWrite, AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire, WRITE_MODES } from "../src/engine/policy.ts";
 import {
   deriveCollection,
   extractCreatedIds,
@@ -371,4 +371,28 @@ test("ownership: ids match whatever case or encoding the URL uses", () => {
   const spaced: OwnedIds = new Map([[normalizeId("Q3 plan"), new Set(["/api/docs"])]]);
   assert.equal(isOwnedResource(spaced, "/api/docs/Q3%20plan"), true);
   assert.equal(normalizeId("100%"), "100%", "a stray percent sign is compared as written, not thrown on");
+});
+
+test("the wire decision, mode by mode", () => {
+  // columns: method, destructive-looking?, addresses a record this run created?
+  const cases: Array<[string, boolean, boolean]> = [
+    ["POST", false, false], // an ordinary form submission
+    ["POST", true, false], // POST /items/7/archive
+    ["POST", true, true], // ...on our own record
+    ["PUT", false, false],
+    ["PUT", false, true],
+    ["DELETE", false, false],
+    ["DELETE", false, true],
+  ];
+  const table = (mode: (typeof WRITE_MODES)[number]) => cases.map(([method, destructive, owned]) => allowsWrite(mode, method, destructive, owned));
+
+  assert.deepEqual(
+    table("observe"),
+    [false, false, false, false, false, false, false],
+    "observe lets nothing but GETs leave the page — not even an ordinary form POST, not even on a record the run owns",
+  );
+  assert.deepEqual(table("read-only"), [true, false, true, false, false, false, false], "read-only lets plain POSTs through and nothing that edits or deletes");
+  assert.deepEqual(table("safe-write"), [true, false, true, false, true, false, true], "safe-write edits and deletes only what the run created");
+  assert.deepEqual(table("destructive"), [true, true, true, true, true, true, true]);
+  assert.deepEqual([...WRITE_MODES], ["observe", "read-only", "safe-write", "destructive"], "ordered from strictest to loosest");
 });

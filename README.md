@@ -93,7 +93,7 @@ SceneScout needs only a URL. Give it the source code as well and it gets noticea
 ```
 
 > [!IMPORTANT]
-> Only test sites you own or are authorized to test. A remote environment is more likely to hold real data. The default **read-only** mode blocks `PUT`/`PATCH`/`DELETE` and destructive-looking requests, but an ordinary form submission (a plain `POST`: contact form, comment, order, signup) still reaches the server and can create a record. On a site with real data, tell the agent which forms not to submit. See the [safety model](#-safety-model).
+> Only test sites you own or are authorized to test. A remote environment is more likely to hold real data, so for a remote URL with no source the skill attaches in **`observe`** mode: nothing but `GET` requests leaves the page. The default **read-only** mode blocks `PUT`/`PATCH`/`DELETE` and destructive-looking requests, but an ordinary form submission (a plain `POST`: contact form, comment, order, signup) still reaches the server and can create a record. Say so when that is acceptable on your target. See the [safety model](#-safety-model).
 
 ---
 
@@ -164,7 +164,7 @@ From Claude Code, inside the project you want to test (or, for a [remote URL](#-
 
 The skill scans the project (if there is one), attaches read-only, explores, and writes findings to `.scenescout/report.md`. That's it.
 
-**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (a Playwright storage-state to explore as: a name found by the scan, or a path to the JSON file) · `--safe-write` / `--allow-destructive`.
+**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (a Playwright storage-state to explore as: a name found by the scan, or a path to the JSON file) · `--observe` / `--safe-write` / `--allow-destructive`.
 
 ---
 
@@ -230,6 +230,7 @@ That refusal *is* the guarantee: an extensive report can only exist when nothing
 
 ## 🔒 Safety model
 
+- 🔵 **`observe`** (`--observe`) lets nothing but `GET` requests leave the page, login and token refresh excepted. No form submission reaches the server. It is what the skill picks for a remote URL with no source, where an ordinary form POST would create a real record. Forms that could not be submitted are listed in the gap ledger.
 - 🟢 **`read-only` by default.** Destructive-labeled elements (delete/revoke/archive/…) **and** all `PUT/PATCH/DELETE` + destructive `POST`s are blocked at the network layer — see [`src/engine/policy.ts`](src/engine/policy.ts). Non-destructive `POST`s are allowed, because submitting forms is how a tester finds validation bugs — so read-only means *nothing existing is changed or removed*, not *nothing is ever created*.
 - 🟡 **`safe-write`** (`--safe-write`) lets the agent create data and edit/delete **only what it created** this run — never pre-existing records.
 - 🔴 **`destructive`** (`--allow-destructive`) allows everything, and only ever when *you* confirm the environment is disposable. The skill will never choose this itself.
