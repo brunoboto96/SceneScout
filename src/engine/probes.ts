@@ -74,7 +74,7 @@ export async function scrollContainer(page: Page, target: string, to?: "top" | "
 }
 
 /**
- * The user-emulating scroll core, shared by ft_scroll and plan steps. Does
+ * The user-emulating scroll core, shared by scout_scroll and plan steps. Does
  * NOT run afterAction — plan steps drain oracles themselves, and draining
  * here would empty the queue their abort-on-fresh-violation check reads.
  */
@@ -268,8 +268,8 @@ export async function probeFocusIndicators(page: Page): Promise<FocusSample[]> {
       const info = (await page.evaluate(`(() => {
         const el = document.activeElement;
         if (!el || el === document.body || el === document.documentElement) return null;
-        if (el.hasAttribute("data-ft-focus-probe")) return "wrapped";
-        el.setAttribute("data-ft-focus-probe", "${i}");
+        if (el.hasAttribute("data-scout-focus-probe")) return "wrapped";
+        el.setAttribute("data-scout-focus-probe", "${i}");
         const s = getComputedStyle(el);
         const tid = el.getAttribute("data-testid");
         const name = ((el.textContent || el.getAttribute("aria-label") || "").trim().replace(/\\s+/g, " ").slice(0, 30));
@@ -281,10 +281,10 @@ export async function probeFocusIndicators(page: Page): Promise<FocusSample[]> {
     await page.evaluate("document.activeElement && document.activeElement.blur && document.activeElement.blur()");
     const blurred = (await page.evaluate(`(() => {
       const out = {};
-      for (const el of document.querySelectorAll("[data-ft-focus-probe]")) {
+      for (const el of document.querySelectorAll("[data-scout-focus-probe]")) {
         const s = getComputedStyle(el);
-        out[el.getAttribute("data-ft-focus-probe")] = ${styleSig};
-        el.removeAttribute("data-ft-focus-probe");
+        out[el.getAttribute("data-scout-focus-probe")] = ${styleSig};
+        el.removeAttribute("data-scout-focus-probe");
       }
       return out;
     })()`)) as Record<string, string>;

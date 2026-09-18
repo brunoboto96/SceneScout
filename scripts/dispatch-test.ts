@@ -96,7 +96,7 @@ test("forget() drops a closed session's chain", async () => {
 });
 
 test("forget() during an IN-FLIGHT call does not let the next call interleave", async () => {
-  // ft_close runs on its own control chain, so it really can land mid-call.
+  // scout_close runs on its own control chain, so it really can land mid-call.
   // Dropping the chain there would let the next call start immediately and
   // overlap with the one still running — the exact corruption this class
   // exists to prevent, reintroduced as "cleanup".
@@ -140,12 +140,12 @@ test("clear() forgets every key", async () => {
 
 test("a slow call resolves with the timeout value instead of hanging", async () => {
   const never = new Promise<string>(() => {});
-  const out = await withWatchdog("ft_click", never, 20, (label, ms) => `timeout:${label}:${ms}`);
-  assert.equal(out, "timeout:ft_click:20");
+  const out = await withWatchdog("scout_click", never, 20, (label, ms) => `timeout:${label}:${ms}`);
+  assert.equal(out, "timeout:scout_click:20");
 });
 
 test("a call that beats the watchdog returns its own result", async () => {
-  const out = await withWatchdog("ft_click", Promise.resolve("real"), 50, () => "timeout");
+  const out = await withWatchdog("scout_click", Promise.resolve("real"), 50, () => "timeout");
   assert.equal(out, "real");
 });
 
@@ -168,7 +168,7 @@ test("a rejection ARRIVING AFTER the timeout does not become an unhandled reject
   process.on("unhandledRejection", onUnhandled);
   try {
     const late = new Promise<string>((_, reject) => setTimeout(() => reject(new Error("late failure")), 30));
-    const out = await withWatchdog("ft_navigate", late, 10, () => "timed-out");
+    const out = await withWatchdog("scout_navigate", late, 10, () => "timed-out");
     assert.equal(out, "timed-out");
     await tick(60); // let the late rejection land
     assert.equal(unhandled, null, "the losing side of the race must be caught, or Node crashes the process");
@@ -179,7 +179,7 @@ test("a rejection ARRIVING AFTER the timeout does not become an unhandled reject
 
 test("a call that rejects before the timeout still rejects to its caller", async () => {
   await assert.rejects(
-    withWatchdog("ft_click", Promise.reject(new Error("real failure")), 1000, () => "timeout"),
+    withWatchdog("scout_click", Promise.reject(new Error("real failure")), 1000, () => "timeout"),
     /real failure/,
   );
 });

@@ -462,7 +462,7 @@ async function main(): Promise<void> {
     check("unlocking restores scrolling", !unlockedScroll.includes("SCROLL LOCKED") && /at the bottom/.test(unlockedScroll), unlockedScroll);
     console.log("scroll: a named secondary region can be scrolled independently");
     const sideBefore = await engine.scroll("bottom", undefined, "testid=side-scroller");
-    check("ft_scroll {target} scrolls that region, not the page's largest pane", /Scrolled .*side-scroller.*at its bottom/.test(sideBefore), sideBefore);
+    check("scout_scroll {target} scrolls that region, not the page's largest pane", /Scrolled .*side-scroller.*at its bottom/.test(sideBefore), sideBefore);
     const sideBack = await engine.scroll("top", undefined, "testid=side-scroller");
     check("the same region scrolls back to its top", /at its top/.test(sideBack), sideBack);
     const noScroll = await engine.scroll("bottom", undefined, "testid=nav-home-link");
@@ -918,7 +918,7 @@ async function main(): Promise<void> {
     );
     const attachmentRef = refByTestid(upSnap, "upload-attachment-input");
     const typedIntoFile = await engine2.type(attachmentRef, "not a file");
-    check("typing into a file input is redirected to ft_upload instead of throwing", typedIntoFile.includes("ft_upload"), typedIntoFile);
+    check("typing into a file input is redirected to scout_upload instead of throwing", typedIntoFile.includes("scout_upload"), typedIntoFile);
     const direct = await engine2.upload({ ref: attachmentRef });
     check(
       "a visible file input takes a generated fixture, kind inferred from accept=.pdf",

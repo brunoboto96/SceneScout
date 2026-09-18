@@ -1,7 +1,7 @@
 /**
  * Where an upload's bytes come from, and the fence around reading them off disk.
  *
- * `ft_upload {filePath}` makes the engine read a file chosen by whoever drives
+ * `scout_upload {filePath}` makes the engine read a file chosen by whoever drives
  * it and hand the bytes to the app under test. Unfenced, that is a way to
  * exfiltrate any file the tester's account can read (an SSH key, a browser
  * profile) into a web form. So disk uploads are confined to the attached

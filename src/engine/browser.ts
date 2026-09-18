@@ -207,7 +207,7 @@ export class BrowserEngine {
   private lastSnap: { route: string; byKey: Map<string, { ref: string; label: string; disabled: boolean }> } | null = null;
   /** Non-parameterized routes discovered by the project scan — the objective completion contract. */
   knownRoutes: string[] = [];
-  /** Real path of the attached project — the fence for ft_upload's filePath. */
+  /** Real path of the attached project — the fence for scout_upload's filePath. */
   private projectDir = "";
   /** Set when the project's real path could not be resolved — named in fence refusals, which it may then cause. */
   private projectDirNote = "";
@@ -273,7 +273,7 @@ export class BrowserEngine {
   private readonly localCreatedResources: string[] = [];
   /** Design audits run this session — the report gate requires at least one. */
   designAuditCount = 0;
-  /** Active task-efficiency measurement (ft_journey), if any. */
+  /** Active task-efficiency measurement (scout_journey), if any. */
   private journey: { goal: string; startedAt: number; fromLog: number; startUrl: string } | null = null;
 
   /**
@@ -291,13 +291,13 @@ export class BrowserEngine {
       startUrl: page.url(),
     };
     this.logAction({ action: "journey:start", target: goal, url: page.url() });
-    return `JOURNEY STARTED — "${goal}"\nFrom: ${page.url()}\nNow perform the task the way a first-time user would (click through the UI; don't jump straight to a known deep URL, or the measurement is meaningless). Call ft_journey {action:"end"} when the task is complete or you conclude it can't be.`;
+    return `JOURNEY STARTED — "${goal}"\nFrom: ${page.url()}\nNow perform the task the way a first-time user would (click through the UI; don't jump straight to a known deep URL, or the measurement is meaningless). Call scout_journey {action:"end"} when the task is complete or you conclude it can't be.`;
   }
 
   /** Close the journey and report its interaction cost + friction signals. */
   endJourney(completed: boolean, note?: string): string {
     const j = this.journey;
-    if (!j) return `No journey in progress — start one with ft_journey {action:"start", goal:"…"}.`;
+    if (!j) return `No journey in progress — start one with scout_journey {action:"start", goal:"…"}.`;
     const page = this.requirePage();
     this.journey = null;
     // Filter to THIS session's actions: the action log is shared across every
@@ -376,7 +376,7 @@ export class BrowserEngine {
     this.designAuditCount = 0;
 
     // The engine learns the route list itself so completion is an objective,
-    // enforceable contract (ft_report refuses while known routes are unvisited)
+    // enforceable contract (scout_report refuses while known routes are unvisited)
     // rather than a prompt suggestion the driver may ignore.
     try {
       this.knownRoutes = scanProject(opts.projectDir)
@@ -540,7 +540,7 @@ export class BrowserEngine {
       `${opts.storageStatePath ? `, auth=${opts.storageStatePath}` : ""}). ` +
       `Memory: ${this.memory.dir}.${this.memory.loadWarning ? ` WARNING: ${this.memory.loadWarning}` : ""}` +
       `${this.memory.legacyDirNote ? ` ${this.memory.legacyDirNote}` : ""}` +
-      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""} Call ft_snapshot to see the current state.` +
+      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""} Call scout_snapshot to see the current state.` +
       authWarning
     );
   }
@@ -560,7 +560,7 @@ export class BrowserEngine {
 
   private requirePage(): Page {
     if (!this.page || !this.memory) {
-      throw new Error("Not attached. Call ft_attach first with the app URL and project path.");
+      throw new Error("Not attached. Call scout_attach first with the app URL and project path.");
     }
     return this.page;
   }
@@ -803,7 +803,7 @@ export class BrowserEngine {
       (geometry.length > 0 ? `\nGEOMETRY issues:\n` + geometry.map((g) => `  ⚠ ${g}`).join("\n") : "") +
       (hiddenFileInputs.length > 0
         ? `\nFILE INPUTS not listed above (hidden behind a styled control — a user never sees the input itself): ${hiddenFileInputs.join("; ")}. ` +
-          `ft_upload {ref} on the control that opens one, or ft_upload {} when it is the page's only file input.`
+          `scout_upload {ref} on the control that opens one, or scout_upload {} when it is the page's only file input.`
         : "") +
       formatViolations(this.oracles.drain()) +
       (elements.length === 0 ? "\n⚠ DEAD END: no interactable elements found on this page." : "")
@@ -822,11 +822,11 @@ export class BrowserEngine {
     const page = this.requirePage();
     const el = this.refs.get(ref);
     if (!el) {
-      throw new Error(`Unknown ref "${ref}". Refs are only valid from the latest ft_snapshot — take a new snapshot.`);
+      throw new Error(`Unknown ref "${ref}". Refs are only valid from the latest scout_snapshot — take a new snapshot.`);
     }
     if (page.url() !== this.snapshotUrl) {
       this.refs.clear();
-      throw new Error(`Page URL changed since the last snapshot (now ${page.url()}). Take a new ft_snapshot.`);
+      throw new Error(`Page URL changed since the last snapshot (now ${page.url()}). Take a new scout_snapshot.`);
     }
     // String EXPRESSION via page.evaluate (locator.evaluate treats a string as
     // an expression, not a function — the element arg never binds).
@@ -837,11 +837,13 @@ export class BrowserEngine {
       )
       .catch(() => null)) as { testid: string | null; label: string } | null;
     if (!live) {
-      throw new Error(`Element ${ref} no longer exists in the DOM — take a new ft_snapshot.`);
+      throw new Error(`Element ${ref} no longer exists in the DOM — take a new scout_snapshot.`);
     }
     if (el.testid && live.testid !== el.testid) {
       this.refs.clear();
-      throw new Error(`Element under ${ref} changed (expected testid=${el.testid}, found ${live.testid ?? "none"}) — the DOM shifted; take a new ft_snapshot.`);
+      throw new Error(
+        `Element under ${ref} changed (expected testid=${el.testid}, found ${live.testid ?? "none"}) — the DOM shifted; take a new scout_snapshot.`,
+      );
     }
     return { el, liveLabel: live.label };
   }
@@ -1106,7 +1108,7 @@ export class BrowserEngine {
       )) as { existing: string; caretAppendable: boolean };
     } catch (err) {
       throw new Error(
-        `Could not read the field's existing content before typing — aborting rather than risk overwriting it (${err instanceof Error ? err.message.split("\n")[0] : err}). Take a new ft_snapshot and retry.`,
+        `Could not read the field's existing content before typing — aborting rather than risk overwriting it (${err instanceof Error ? err.message.split("\n")[0] : err}). Take a new scout_snapshot and retry.`,
       );
     }
     const { existing, caretAppendable } = state;
@@ -1158,7 +1160,7 @@ export class BrowserEngine {
       // trace, leaving every upload form stranded. Point at the tool that can.
       return (
         `${ref} is a file input ("${el.name || el.testid || "unnamed"}") — text cannot be typed into it. ` +
-        `Use ft_upload {ref:"${ref}"}: a small valid fixture is generated and matched to the input's accept attribute, or pass fixture / filePath.`
+        `Use scout_upload {ref:"${ref}"}: a small valid fixture is generated and matched to the input's accept attribute, or pass fixture / filePath.`
       );
     }
     const refusal = this.actionPolicyCheck(el, liveLabel);
@@ -1229,7 +1231,7 @@ export class BrowserEngine {
   }
 
   /**
-   * Shared by ft_upload and plan `upload` steps: pick where the file goes,
+   * Shared by scout_upload and plan `upload` steps: pick where the file goes,
    * resolve what to send, set it, and describe what happened. Refusals come
    * back as text, not throws — a path outside the fence or an ambiguous page
    * is an answer the driver acts on, not an engine failure.
@@ -1356,7 +1358,7 @@ export class BrowserEngine {
   }
 
   /**
-   * Shared reveal detection used by ft_hover and plan hover steps. Takes the
+   * Shared reveal detection used by scout_hover and plan hover steps. Takes the
    * pre-hover baselines, polls the overlay selector across the reveal window
    * (tooltips are delay-gated — component libraries commonly warm up for as
    * long as 1500ms), and falls back to a visible-text diff for tooltips built
@@ -1482,7 +1484,7 @@ export class BrowserEngine {
   /**
    * Enter/Space activate the focused element — apply the same destructive
    * policy as click, or the keyboard becomes a read-only bypass. Shared by
-   * ft_press and plan press steps; returns a refusal message or null.
+   * scout_press and plan press steps; returns a refusal message or null.
    */
   private async vetFocusedActivation(key: string): Promise<string | null> {
     if (!(this.readOnly && /^(Enter|NumpadEnter|Space| )$/i.test(key))) return null;
@@ -1683,7 +1685,7 @@ export class BrowserEngine {
     const targets = (paths && paths.length > 0 ? paths : this.unvisitedKnownRoutes().map((r) => this.navigablePath(r))).slice(0, 150);
     if (targets.length === 0) {
       return this.allKnownRoutes().length > 0
-        ? "Nothing to crawl: every known route has been visited. Use ft_coverage for remaining unexercised elements."
+        ? "Nothing to crawl: every known route has been visited. Use scout_coverage for remaining unexercised elements."
         : "No routes to crawl yet: no scanned or link-discovered routes. Take a snapshot first (links harvest routes) or pass explicit paths.";
     }
 
@@ -1773,7 +1775,7 @@ export class BrowserEngine {
       // Crawl is the bulk navigator and the place a mid-run token death shows
       // up first — a 150-route sweep against dead credentials. Emitting the
       // banner only from navigate() left exactly that case silent until someone
-      // happened to call ft_navigate afterwards.
+      // happened to call scout_navigate afterwards.
       this.authLoss.batchVerdict() +
       `CRAWL of ${targets.length} route(s):\n` +
       summary.join("\n") +
@@ -1781,7 +1783,7 @@ export class BrowserEngine {
       (this.allKnownRoutes().length > 0
         ? `\n\nRoutes visited: ${this.allKnownRoutes().length - unvisited.length}/${this.allKnownRoutes().length}${unvisited.length > 0 ? ` — still unvisited: ${unvisited.slice(0, 20).join(", ")}${unvisited.length > 20 ? " …" : ""}` : ""}`
         : "") +
-      `\nTake ft_snapshot to inspect the current page, or navigate into a problem route.`
+      `\nTake scout_snapshot to inspect the current page, or navigate into a problem route.`
     );
   }
 
@@ -1920,7 +1922,7 @@ export class BrowserEngine {
         // state and mark the acted-on element class as exercised.
         // Hover is deliberately excluded: a hover is a look, not an
         // interaction — marking it exercised would hide the element from
-        // ft_coverage before it was ever clicked.
+        // scout_coverage before it was ever clicked.
         if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "upload") {
           try {
             // Record the state the action LANDED on (it may be a new screen
@@ -1987,7 +1989,7 @@ export class BrowserEngine {
         if (/Timeout/i.test(firstLine)) {
           hint = ` (timeout${diagnosticLine ? ` — ${diagnosticLine}` : ""} — the target may no longer match: element relabeled, removed, or genuinely covered by an overlay; re-snapshot to see current state)`;
         } else if (/Input of type "file" cannot be filled/i.test(firstLine)) {
-          hint = ` (this is a file input — use an {action:"upload"} step, or ft_upload)`;
+          hint = ` (this is a file input — use an {action:"upload"} step, or scout_upload)`;
         }
         transcript.push(`${desc} → FAILED: ${firstLine}${hint}`);
         break;
@@ -1999,7 +2001,7 @@ export class BrowserEngine {
     // Count step lines, not transcript lines — hover reveals and scroll
     // positions push informational entries that are not steps.
     const ran = transcript.filter((l) => /^\d+\. /.test(l)).length;
-    return `PLAN (${ran}/${Math.min(steps.length, 20)} steps ran):\n${transcript.join("\n")}\nTake ft_snapshot to see the resulting state.`;
+    return `PLAN (${ran}/${Math.min(steps.length, 20)} steps ran):\n${transcript.join("\n")}\nTake scout_snapshot to see the resulting state.`;
   }
 
   /** Computed-style design audit of the current page — visual judgment material without pixels. */
@@ -2070,7 +2072,7 @@ export class BrowserEngine {
   /**
    * Launch the browser with a hard timeout and one self-healing retry: a
    * leftover browser from a crashed previous run has been observed to wedge
-   * fresh launches indefinitely (the failure surfaces as ft_attach hanging).
+   * fresh launches indefinitely (the failure surfaces as scout_attach hanging).
    * On the first failure or timeout, reap orphaned Playwright processes and
    * try once more before giving up with a diagnosable error.
    */
@@ -2122,11 +2124,11 @@ export class BrowserEngine {
       this.memory?.flush();
     } catch (err) {
       // A failed final flush must not block browser teardown, but it must
-      // not vanish either — record it so ft_close can tell the caller the
+      // not vanish either — record it so scout_close can tell the caller the
       // very last save may not have landed.
       if (this.memory) this.memory.lastSaveError = err instanceof Error ? err.message : String(err);
     }
-    // Bounded teardown: a wedged renderer must not hang ft_close forever.
+    // Bounded teardown: a wedged renderer must not hang scout_close forever.
     // If teardown overruns the cap, the leftover process is reaped by the
     // orphan cleaner on the next attach (or server start).
     await BrowserEngine.settleWithin(

@@ -144,7 +144,7 @@ routes   browser   every route  reproduce &   journeys +   gap-checked
 2. **Attach** a browser (read-only unless you said otherwise).
 3. **Crawl** every known route in a *single* call — per-route HTTP status, element counts, oracle violations, dead ends.
 4. **Investigate** what the crawl flagged: navigate, snapshot, reproduce, file a structured finding.
-5. **Measure** task ease (`ft_journey`) and design quality (`ft_design_audit`) on representative pages.
+5. **Measure** task ease (`scout_journey`) and design quality (`scout_design_audit`) on representative pages.
 6. **Report** — the engine checks the gap ledger and writes `.scenescout/report.md`.
 
 Snapshots are cheap: re-snapshotting a route returns only *what changed*, with stable refs (measured on a 130-element page: 10.7 kB → 0.7 kB).
@@ -157,27 +157,27 @@ Snapshots are cheap: re-snapshotting a route returns only *what changed*, with s
 
 | Phase | Tools | What they do |
 |---|---|---|
-| **Set up** | `ft_scan` `ft_attach` `ft_session` | Discover routes; launch a browser in a write-mode; keep several authenticated roles alive at once |
-| **Explore** | `ft_crawl` `ft_coverage` | Sweep every route in one call; ask what's still untested |
-| **Look** | `ft_snapshot` `ft_hover` `ft_screenshot` | Read the structured scene (diffed); reveal tooltips/hover cards; capture pixels only when needed |
-| **Act** | `ft_click` `ft_type` `ft_select` `ft_upload` `ft_press` `ft_scroll` `ft_navigate` `ft_back` `ft_run_plan` | Drive the UI like a user; `ft_run_plan` batches a whole mechanical sequence into one call |
-| **Assess** | `ft_design_audit` `ft_journey` | Score a page's craft/a11y/consistency; measure how hard a task is to complete |
-| **Record** | `ft_note` `ft_finding` `ft_resolve` `ft_report` | Curate durable notes; file deduped findings; mark fixes; generate the report |
-| **Close** | `ft_close` | Tear down one session or all |
+| **Set up** | `scout_scan` `scout_attach` `scout_session` | Discover routes; launch a browser in a write-mode; keep several authenticated roles alive at once |
+| **Explore** | `scout_crawl` `scout_coverage` | Sweep every route in one call; ask what's still untested |
+| **Look** | `scout_snapshot` `scout_hover` `scout_screenshot` | Read the structured scene (diffed); reveal tooltips/hover cards; capture pixels only when needed |
+| **Act** | `scout_click` `scout_type` `scout_select` `scout_upload` `scout_press` `scout_scroll` `scout_navigate` `scout_back` `scout_run_plan` | Drive the UI like a user; `scout_run_plan` batches a whole mechanical sequence into one call |
+| **Assess** | `scout_design_audit` `scout_journey` | Score a page's craft/a11y/consistency; measure how hard a task is to complete |
+| **Record** | `scout_note` `scout_finding` `scout_resolve` `scout_report` | Curate durable notes; file deduped findings; mark fixes; generate the report |
+| **Close** | `scout_close` | Tear down one session or all |
 
 A few that punch above their weight:
 
-- **`ft_crawl`** — the entire breadth pass in one tool call. No visiting routes one-by-one.
-- **`ft_run_plan`** — up to 20 actions (fill form → submit → check) with semantic targets (`testid=…`, `text=…`), aborting at the first anomaly.
-- **`ft_journey`** — wraps one goal and reports interaction count, screens seen, and **backtracks**; an abandoned journey is a finding no passing E2E suite can produce.
-- **`ft_upload`** — generates a *valid* in-memory fixture (real PDF/PNG, kind inferred from `accept`) so file-upload flows stop being a blind spot.
-- **`ft_click {clicks: 2}`** — the impatient-user probe: states whether a double-click fired the same state-changing request twice (the classic double-submit bug).
+- **`scout_crawl`** — the entire breadth pass in one tool call. No visiting routes one-by-one.
+- **`scout_run_plan`** — up to 20 actions (fill form → submit → check) with semantic targets (`testid=…`, `text=…`), aborting at the first anomaly.
+- **`scout_journey`** — wraps one goal and reports interaction count, screens seen, and **backtracks**; an abandoned journey is a finding no passing E2E suite can produce.
+- **`scout_upload`** — generates a *valid* in-memory fixture (real PDF/PNG, kind inferred from `accept`) so file-upload flows stop being a blind spot.
+- **`scout_click {clicks: 2}`** — the impatient-user probe: states whether a double-click fired the same state-changing request twice (the classic double-submit bug).
 
 ---
 
 ## 📊 Test levels
 
-Each level is an **enforced contract** — `ft_report` checks it before finalizing.
+Each level is an **enforced contract** — `scout_report` checks it before finalizing.
 
 | Level | What it guarantees | Rough size |
 |---|---|---|
@@ -220,16 +220,17 @@ Run `npm run doctor` first — it checks every setup item below (everything but 
 | Symptom | Cause and fix |
 |---|---|
 | `/scenescout` isn't a known command | The skill isn't linked, or the session predates it. `npm run setup`, then start a **fresh** Claude Code session. |
-| The `ft_*` tools don't appear | The MCP server isn't registered, or points at an old path. `npm run setup` re-registers it; `claude mcp list` should show `scenescout` as connected. |
+| The `scout_*` tools don't appear | The MCP server isn't registered, or points at an old path. `npm run setup` re-registers it; `claude mcp list` should show `scenescout` as connected. |
 | `npm install` fails at the build step | The build needs the dev dependencies (TypeScript). Don't pass `--omit=dev` or set `NODE_ENV=production` when installing from a clone. |
 | *"Executable not found in $PATH"* | The server was registered with a bare `node`. `npm run setup` registers the absolute path. |
 | *"Executable doesn't exist … chromium"* | The browser download was skipped or failed. `npx playwright install chromium` (on Linux add `--with-deps`). |
 | Tools broke after moving the folder or changing node version | The registration stores absolute paths. `npm run setup` refreshes them. |
 | Attach fails or every route lands on the login page | Your app isn't running at `--url`, or the `--role` storage state has expired — regenerate it the way your project's Playwright setup does. |
 
-### ⬆️ Upgrading from an older name
+### ⬆️ Upgrading from an older version
 
-This tool was previously called SceneCraft (and, before that, frontend-tester). `npm run setup` cleans up after both: it removes the old skill link and the old `scenecraft` MCP registration when they point at this install, and the first attach in a project moves its `.scenecraft/` memory folder to `.scenescout/` so earlier coverage and findings carry over.
+- **Tools are now `scout_*`.** Up to v0.23 they were prefixed `ft_`. The rename happened before the first npm release, with no aliases, so an agent's context carries one tool list rather than two. Re-run `npm run setup` so the installed skill matches the server.
+- **Earlier names.** This tool was previously called SceneCraft (and, before that, frontend-tester). `npm run setup` cleans up after both: it removes the old skill link and the old `scenecraft` MCP registration when they point at this install, and the first attach in a project moves its `.scenecraft/` memory folder to `.scenescout/` so earlier coverage and findings carry over.
 
 ### 🧹 Uninstall
 
@@ -321,14 +322,14 @@ Found a way past the write policy, or another security problem? Please report it
 - **Geometry oracles.** Overlap and off-screen defects computed from layout boxes.
 - **Oracles after every action.** Console errors, page errors, failed requests, HTTP 4xx/5xx drained into every tool result.
 - **Multi-role, genuinely concurrent.** Commands to *different* sessions run in parallel; safe-write ownership is shared, so role A can create what role B approves. The report renders a role capability matrix.
-- **Task ease, not just correctness.** `ft_journey` measures interaction cost, distinct screens, path, and backtracks.
+- **Task ease, not just correctness.** `scout_journey` measures interaction cost, distinct screens, path, and backtracks.
 - **Design audit with page scores.** Two tiers (⚠ measurable defects / → craft suggestions incl. AI-slop tells), per-page 0–100 score persisted per route, plus an automatic overlay/modal probe on every snapshot. Shared shell scored once, separately.
 - **Scrolls like a user — and notices when it can't.** Reports `SCROLL LOCKED` for a leaked modal scroll-lock, finds the real inner scroll pane on app-shell layouts, and flags `UNREACHABLE` controls clipped inside `overflow:hidden`.
 - **Uploads like a user.** Answers a styled file-chooser or sets a hidden input directly, with a valid in-memory fixture; `filePath` is fenced to the project under test; files violating `accept` are flagged at selection.
 - **Auth via Playwright storage states.** Expired tokens caught at attach; repeated login-bounces raise `SESSION AUTH LOST`; a bounced route is recorded as *not* covered — a dead session can't certify routes it never reached.
 - **A trustworthy gap ledger.** Entries must be actionable (a search box or wizard sub-step isn't "form filled but never submitted"); API/download URLs never enter the route contract.
 - **Honest reporting.** Shared chrome counted once, stale scores marked, role matrix compares only roles that actually attempted a route.
-- **Cross-run written knowledge.** `ft_note` curates `.scenescout/ASSUMPTIONS.md` — app model, personas, constraints, risks — in prose.
+- **Cross-run written knowledge.** `scout_note` curates `.scenescout/ASSUMPTIONS.md` — app model, personas, constraints, risks — in prose.
 - **Daemon-grade robustness.** Per-tool watchdogs, orphaned-browser reaping, bounded teardown, live status via `scenescout status <project>`.
 
 </details>

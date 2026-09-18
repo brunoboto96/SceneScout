@@ -28,7 +28,7 @@ taken seriously:
   did not.
 - **Ownership confusion in `safe-write`** — the engine editing or deleting a
   record it did not create in that run.
-- **Path escape** — `ft_upload` reading a file outside the project under test,
+- **Path escape** — `scout_upload` reading a file outside the project under test,
   or a tool writing outside the attached project directory (the installer's own
   entries under `~/.claude/` excepted).
 - **Secret leakage** — credentials, tokens or cookies written unredacted into

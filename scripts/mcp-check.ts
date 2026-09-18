@@ -1,6 +1,6 @@
 /**
  * MCP wire-up check: spawns the built server over stdio, lists tools, calls
- * ft_scan to prove the protocol layer works end to end, and asserts the SKILL
+ * scout_scan to prove the protocol layer works end to end, and asserts the SKILL
  * documents every tool the server exposes.
  */
 import fs from "node:fs";
@@ -14,30 +14,30 @@ const serverPath = path.join(here, "..", "dist", "mcp-server.js");
 const packageRoot = path.join(here, "..");
 
 const EXPECTED_TOOLS = [
-  "ft_scan",
-  "ft_attach",
-  "ft_session",
-  "ft_journey",
-  "ft_note",
-  "ft_snapshot",
-  "ft_click",
-  "ft_type",
-  "ft_upload",
-  "ft_hover",
-  "ft_select",
-  "ft_navigate",
-  "ft_back",
-  "ft_press",
-  "ft_scroll",
-  "ft_screenshot",
-  "ft_finding",
-  "ft_crawl",
-  "ft_run_plan",
-  "ft_design_audit",
-  "ft_resolve",
-  "ft_coverage",
-  "ft_report",
-  "ft_close",
+  "scout_scan",
+  "scout_attach",
+  "scout_session",
+  "scout_journey",
+  "scout_note",
+  "scout_snapshot",
+  "scout_click",
+  "scout_type",
+  "scout_upload",
+  "scout_hover",
+  "scout_select",
+  "scout_navigate",
+  "scout_back",
+  "scout_press",
+  "scout_scroll",
+  "scout_screenshot",
+  "scout_finding",
+  "scout_crawl",
+  "scout_run_plan",
+  "scout_design_audit",
+  "scout_resolve",
+  "scout_coverage",
+  "scout_report",
+  "scout_close",
 ];
 
 async function main(): Promise<void> {
@@ -55,7 +55,7 @@ async function main(): Promise<void> {
   console.log(`✓ server exposes ${names.length} tools`);
 
   // The SKILL is the agent's entire methodology — a tool it never mentions is
-  // effectively unshipped, however well the engine implements it. ft_scroll
+  // effectively unshipped, however well the engine implements it. scout_scroll
   // shipped a whole version before the skill described it, and nothing caught
   // that but a human noticing.
   const skillPath = path.join(packageRoot, "skill", "scenescout", "SKILL.md");
@@ -73,7 +73,7 @@ async function main(): Promise<void> {
   // Tool-NAME coverage is the floor, not the ceiling. A parameter added to an
   // already-documented tool leaves the name present, so the check above stays
   // green while the agent has no idea the parameter exists — which is exactly
-  // how ft_type's `value` alias shipped undocumented. Check the parameters too.
+  // how scout_type's `value` alias shipped undocumented. Check the parameters too.
   //
   // Deliberately advisory-by-exception: `session` is on nearly every tool and
   // explaining it once is correct, and a handful of params are genuinely
@@ -97,13 +97,13 @@ async function main(): Promise<void> {
   }
   console.log(`✓ skill documents every non-exempt tool parameter`);
 
-  const result = await client.callTool({ name: "ft_scan", arguments: { projectPath: packageRoot } });
+  const result = await client.callTool({ name: "scout_scan", arguments: { projectPath: packageRoot } });
   const text = (result.content as Array<{ type: string; text?: string }>).map((c) => c.text ?? "").join("");
   if (!text.includes("Project:")) {
-    console.error(`MCP CHECK FAILED — ft_scan returned unexpected output:\n${text}`);
+    console.error(`MCP CHECK FAILED — scout_scan returned unexpected output:\n${text}`);
     process.exit(1);
   }
-  console.log("✓ ft_scan round-trip works");
+  console.log("✓ scout_scan round-trip works");
 
   await client.close();
   console.log("\nMCP CHECK PASSED");
