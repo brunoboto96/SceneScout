@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { geometryIssues } from "../src/engine/collector.ts";
+import { brokenImageIssues, geometryIssues } from "../src/engine/collector.ts";
 import { POLICY_BLOCK_WINDOW_MS, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
 
 const VIEWPORT = { width: 1280, height: 900 };
@@ -207,4 +207,24 @@ test("a pinned control covered by other pinned chrome is reported, ahead of box 
   const summarised = geometryIssues(many, VIEWPORT);
   assert.equal(summarised.filter((l) => /is COVERED/.test(l)).length, 3);
   assert.ok(summarised.some((l) => /and 3 more pinned controls covered/.test(l)));
+});
+
+test("images that failed to load are named by their alt text and their source", () => {
+  const lines = brokenImageIssues(
+    [
+      { alt: "Weekly chart", src: "http://x/img/chart.png", testid: "dash-chart", width: 640, height: 180 },
+      { alt: "", src: "https://cdn.example.com/a.jpg", testid: null, width: 120, height: 60 },
+    ],
+    "http://x/dashboard",
+  );
+  assert.deepEqual(lines, [
+    'image "Weekly chart" [testid=dash-chart] FAILED TO LOAD — /img/chart.png',
+    "image (no alt text) FAILED TO LOAD — https://cdn.example.com/a.jpg",
+  ]);
+  // A page full of them is summarised.
+  const many = Array.from({ length: 8 }, (_, i) => ({ alt: `Photo ${i}`, src: `http://x/p${i}.png`, testid: null, width: 10, height: 10 }));
+  const summarised = brokenImageIssues(many, "http://x/");
+  assert.equal(summarised.length, 6);
+  assert.match(summarised[5], /and 3 more images that failed to load/);
+  assert.deepEqual(brokenImageIssues([], "http://x/"), []);
 });

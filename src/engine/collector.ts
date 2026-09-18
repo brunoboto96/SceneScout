@@ -72,6 +72,10 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
       if (named) return named.replace(/\\s+/g, " ").slice(0, 80);
     }
     const tag = el.tagName.toLowerCase();
+    // An image's name is its alt text. Without this an <img> read as
+    // "(unnamed)" even when it was labelled, and a missing alt looked the same
+    // as a present one.
+    if (tag === "img") return (el.getAttribute("alt") || "").trim().slice(0, 80);
     if (tag === "input" || tag === "textarea") {
       const id = el.getAttribute("id");
       if (id) {
@@ -216,6 +220,7 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
           // Its own role routes it to scout_upload instead.
           : inputType === "file" ? "file"
           : "textbox")
+        : tag === "img" ? "image"
         : "generic");
     const rect = el.getBoundingClientRect();
     // Below-the-fold is reachable (scroll); clipped INSIDE an overflow-hidden
@@ -370,4 +375,55 @@ export function geometryIssues(
     }
   }
   return issues;
+}
+
+/**
+ * Images that failed to load, read from the DOM rather than from the network.
+ *
+ * A 404 on an image already shows up as an HTTP violation, but a broken image
+ * is not always a failed request: a 200 that returns an HTML error page, a
+ * truncated upload, a wrong content type or a blocked cross-origin file all
+ * respond successfully and still render as the browser's broken-image icon.
+ * `complete` with no intrinsic size is what "the browser gave up" looks like.
+ * SVGs are skipped: one without intrinsic dimensions reports 0×0 while
+ * rendering correctly.
+ */
+export const BROKEN_IMAGES_SCRIPT = `(() => {
+  const out = [];
+  for (const img of Array.from(document.images)) {
+    const src = img.currentSrc || img.getAttribute("src") || "";
+    if (!src || src.indexOf("data:") === 0 || /\\.svg(\\?|#|$)/i.test(src)) continue;
+    if (!img.complete || img.naturalWidth > 0 || img.naturalHeight > 0) continue;
+    const r = img.getBoundingClientRect();
+    const cs = window.getComputedStyle(img);
+    if (cs.display === "none" || cs.visibility === "hidden") continue;
+    out.push({ alt: (img.getAttribute("alt") || "").trim().slice(0, 80), src: src.slice(0, 160), testid: img.getAttribute("data-testid"), width: Math.round(r.width), height: Math.round(r.height) });
+    if (out.length >= 20) break;
+  }
+  return out;
+})()`;
+
+export interface BrokenImage {
+  alt: string;
+  src: string;
+  testid: string | null;
+  width: number;
+  height: number;
+}
+
+/** Snapshot lines for images that failed to load. The origin is dropped when it is the page's own, to keep the line short. */
+export function brokenImageIssues(images: BrokenImage[], pageUrl: string): string[] {
+  let origin = "";
+  try {
+    origin = new URL(pageUrl).origin;
+  } catch {
+    /* an unparseable page URL just means the full src is shown */
+  }
+  const lines = images.slice(0, 5).map((img) => {
+    const src = origin && img.src.startsWith(origin) ? img.src.slice(origin.length) : img.src;
+    const name = img.alt ? `"${img.alt}"` : "(no alt text)";
+    return `image ${name}${img.testid ? ` [testid=${img.testid}]` : ""} FAILED TO LOAD — ${src}`;
+  });
+  if (images.length > 5) lines.push(`…and ${images.length - 5} more images that failed to load`);
+  return lines;
 }
