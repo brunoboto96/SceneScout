@@ -9,17 +9,19 @@ edit the version or `CHANGELOG.md` (see [.changeset/README.md](../.changeset/REA
 2. On each push to `main`, the `release` workflow collects pending changesets
    into a pull request titled **Version Packages**: version bump,
    `CHANGELOG.md`, and the matching version in `.claude-plugin/plugin.json`.
-3. Merge that pull request. It is opened by the Actions token, and GitHub does
-   not run other workflows for pull requests opened that way, so the required
-   `test` check never reports on it. Merge it with the admin bypass:
-   `gh pr merge <number> --squash --admin`. Its diff is generated and limited
-   to the version, the changelog and the deleted changeset files.
+3. Approve and merge that pull request. It is opened with the Actions token,
+   and GitHub does not run `pull_request` workflows for pull requests opened
+   that way, so the release workflow starts the `test` workflow on the version
+   branch itself. The checks appear on the pull request a few minutes after it
+   is opened or updated. Its author is the Actions bot, so the maintainer's
+   approval counts as the code-owner review. Its diff is generated and limited
+   to the version, the changelog, `plugin.json` and the deleted changeset files.
 4. The workflow runs again on that merge, finds no pending changesets, and
    publishes to npm, pushes the `vX.Y.Z` tag and creates the GitHub Release.
 
-Nothing is published while the repository variable `NPM_PUBLISH` is unset.
-With it unset the workflow does not run at all, so changesets accumulate and no
-version pull request appears.
+Nothing is published while the repository variable `NPM_PUBLISH` is anything
+other than `enabled`. The version pull request is still opened and kept up to
+date, so merged changesets stay visible; only the publish step is skipped.
 
 ## One-time setup
 

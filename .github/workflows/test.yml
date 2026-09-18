@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow starts this on the "Version Packages" branch. GitHub
+  # does not run pull_request workflows for a pull request opened with the
+  # Actions token, so without this that pull request would never get the
+  # required `test` check. Checks attach to the commit, so a run started this
+  # way shows up on the pull request like any other.
+  workflow_dispatch:
 
 # Least privilege: the suite only needs to read the code. A pull request from a
 # fork must not be handed a token that can write to the repository.

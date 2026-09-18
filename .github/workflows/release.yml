@@ -3,15 +3,19 @@ name: release
 # How a release happens:
 #   1. Pull requests carry changesets (see .changeset/README.md).
 #   2. On every push to main this workflow collects them into a "Version
-#      Packages" pull request: version bump, CHANGELOG.md, plugin.json.
-#   3. The maintainer merges that pull request. This workflow runs again, finds
-#      no pending changesets, and publishes to npm, tags vX.Y.Z and creates the
-#      GitHub Release.
+#      Packages" pull request: version bump, CHANGELOG.md, plugin.json. It then
+#      starts the test workflow on that branch, because GitHub does not run
+#      pull_request workflows for a pull request opened with the Actions token.
+#   3. The maintainer approves and merges that pull request. This workflow runs
+#      again, finds no pending changesets, and publishes to npm, tags vX.Y.Z
+#      and creates the GitHub Release.
 #
 # Publishing uses npm trusted publishing (OIDC): npm verifies that the request
 # comes from THIS workflow in THIS repository, so no npm token is stored
-# anywhere. It is switched on by the repository variable NPM_PUBLISH=enabled,
-# set once the package exists on npm and the trusted publisher is configured.
+# anywhere. Only the PUBLISH step is switched on by the repository variable
+# NPM_PUBLISH=enabled, set once the package exists on npm and the trusted
+# publisher is configured. The version pull request is opened either way, so
+# merged changesets never pile up unseen.
 
 on:
   push:
@@ -26,13 +30,14 @@ permissions:
 
 jobs:
   release:
-    if: github.repository == 'brunoboto96/SceneScout' && vars.NPM_PUBLISH == 'enabled'
+    if: github.repository == 'brunoboto96/SceneScout'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write # push the version branch, tags and the GitHub Release
       pull-requests: write # open the "Version Packages" pull request
       id-token: write # npm trusted publishing + provenance
+      actions: write # start the test workflow on the version branch
     steps:
       - uses: actions/checkout@v7
         with:
@@ -53,10 +58,18 @@ jobs:
       # `npm run release`.
       - run: npm ci --ignore-scripts
       - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        id: changesets
         with:
           version-script: npm run version-packages
-          publish-script: npm run release
+          # Empty while publishing is off: the action then opens or updates the
+          # version pull request and publishes nothing.
+          publish-script: ${{ vars.NPM_PUBLISH == 'enabled' && 'npm run release' || '' }}
           pr-title: Version Packages
           commit-message: Version Packages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run the test suite on the version pull request
+        if: steps.changesets.outputs.has-changesets == 'true'
+        run: gh workflow run test.yml --ref changeset-release/main
+        env:
+          GH_TOKEN: ${{ github.token }}
