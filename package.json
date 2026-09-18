@@ -47,7 +47,7 @@
     "setup": "node dist/cli.js install",
     "doctor": "node dist/cli.js doctor",
     "changeset": "changeset",
-    "version-packages": "changeset version && node scripts/sync-plugin-version.mjs && npm install --package-lock-only && prettier --write package.json .claude-plugin/plugin.json",
+    "version-packages": "changeset version && node scripts/sync-plugin-version.mjs && npm install --package-lock-only",
     "release": "npm run build && changeset publish",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

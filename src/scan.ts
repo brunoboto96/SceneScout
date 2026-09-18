@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { codeRoutes } from "./code-routes.js";
 
 export interface ScanResult {
   projectDir: string;
@@ -25,6 +26,8 @@ export interface ScanResult {
  * "No frontend workspace found" for a perfectly ordinary project.
  */
 const FRONTEND_DEPS = ["next", "nuxt", "@sveltejs/kit", "@remix-run/react", "@remix-run/node", "react", "vue", "svelte", "@angular/core", "vite"];
+/** Frameworks whose routes live in code rather than in the filesystem. */
+const CODE_ROUTED = new Set(["vite+react", "react", "create-react-app", "vue", "vite", "angular"]);
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "coverage", "out", "docs", "examples", "e2e-tests"]);
 
 function readJson(file: string): Record<string, unknown> | null {
@@ -278,14 +281,30 @@ export function scanProject(projectDir: string): ScanResult {
         : framework === "nuxt"
           ? fileRoutes(frontendDir, "nuxt")
           : [];
+  // Routers configured in code (React Router, Vue Router, Angular): read the
+  // route records statically. Remix is file-routed in its own way and is not
+  // covered here.
+  let codeRouteFiles: string[] = [];
+  if (routes.length === 0 && framework !== null && CODE_ROUTED.has(framework)) {
+    const found = codeRoutes(frontendDir);
+    routes.push(...found.routes);
+    codeRouteFiles = found.files;
+  }
   // Say so when filesystem discovery cannot help. Returning [] silently left
   // the agent to assume the app genuinely had no routes, when in fact nothing
   // had looked — the completion contract then rested entirely on link
   // harvesting without ever admitting it.
+  if (codeRouteFiles.length > 0) {
+    notes.push(
+      `${routes.length} route(s) read statically from the router configuration in ${codeRouteFiles.slice(0, 3).join(", ")}${codeRouteFiles.length > 3 ? ", …" : ""}. ` +
+        `Routes built at runtime (from data, a loop, or an identifier this reader could not follow) are not in this list; links found while exploring add to it.`,
+    );
+  }
   if (routes.length === 0 && framework !== null && !["next", "sveltekit", "nuxt"].includes(framework)) {
     notes.push(
-      `No filesystem route discovery for "${framework}" (routes are defined in code, not files) — ` +
-        `the route contract will be built from links harvested during exploration. Crawl breadth depends on what the UI links to.`,
+      `No routes could be read from source for "${framework}": it is not file-routed, and no router configuration this reader can follow was found ` +
+        `(routes built at runtime, or a router it does not know). The route contract will be built from links harvested during exploration, ` +
+        `so crawl breadth depends on what the UI links to.`,
     );
   }
   const authStates = findAuthStates(frontendDir);

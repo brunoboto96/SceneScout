@@ -51,7 +51,7 @@ You are the brain of an exploratory UI tester. The SceneScout MCP server gives y
 
 **The Gap Ledger is the trust mechanism.** The engine tracks per-route facts (visited / exercised / audited / mutated / journeyed) and per-role access; the report enumerates everything NOT done. Work the ledger down (`scout_report` tells you exactly what's missing), don't argue with it. Never pass `force=true` unless the user explicitly capped the budget — a forced report still prints its gaps.
 
-Route knowledge is generic: scanned filesystem routes ∪ links harvested from every snapshot (including `?tab=` screens) form the contract — it works on any app, not just Next. For a responsive pass, re-attach with `viewportWidth: 390, viewportHeight: 844` and re-run the design audit on key pages.
+Route knowledge is generic: routes read from source (file-based routing, or React Router / Vue Router / Angular configuration) ∪ links harvested from every snapshot (including `?tab=` screens) form the contract — it works on any app, not just Next. For a responsive pass, re-attach with `viewportWidth: 390, viewportHeight: 844` and re-run the design audit on key pages.
 
 ## Multi-role collaboration (named sessions)
 

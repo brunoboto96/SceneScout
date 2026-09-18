@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { readRouteElements, readRouteObjects, resolveRoutes } from "../src/code-routes.ts";
 import { scanProject } from "../src/scan.ts";
 import { normalizePath, fingerprintState } from "../src/engine/fingerprint.ts";
 
@@ -249,10 +250,178 @@ console.log("a framework with no filesystem routes says so instead of reporting 
   check("no routes found for a code-routed app", scan.routes.length === 0);
   check(
     "and the scan discloses that nothing looked, rather than implying none exist",
-    scan.notes.some((n: string) => n.includes("No filesystem route discovery")),
+    scan.notes.some((n: string) => n.includes("No routes could be read from source")),
     JSON.stringify(scan.notes),
   );
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// Routes defined in code: React Router, Vue Router, Angular.
+// The reader prefers missing a route to inventing one — an invented route is a
+// page the completion contract demands and the app does not have.
+// ---------------------------------------------------------------------------
+
+const sorted = (routes: string[]): string => JSON.stringify([...routes].sort());
+
+console.log("code routes: object-literal route records");
+{
+  const dataRouter = `
+    export const router = createBrowserRouter([
+      { path: "/", element: <Layout />, children: [
+          { index: true, element: <Home /> },
+          { path: "orders", element: <Orders />, children: [
+              { path: "new", element: <NewOrder /> },
+              { path: ":orderId", element: <Order /> },
+          ] },
+          { path: "settings", lazy: () => import("./settings") },
+          { path: "*", element: <NotFound /> },
+      ] },
+      { path: "/login", element: <Login /> },
+    ]);`;
+  check(
+    "nested children join onto their parent; index and wildcard are not pages of their own",
+    sorted(resolveRoutes(readRouteObjects(dataRouter))) === sorted(["/", "/login", "/orders", "/orders/:orderId", "/orders/new", "/settings"]),
+    sorted(resolveRoutes(readRouteObjects(dataRouter))),
+  );
+
+  const vue = `
+    const routes = [
+      { path: '/', name: 'home', component: Home },
+      { path: '/orders', component: Orders, children: [ { path: 'new', component: NewOrder }, { path: '/orders-archive', component: Archive } ] },
+      { path: '/old', redirect: '/orders' },
+      { path: '/:pathMatch(.*)*', component: NotFound },
+    ]
+    export default createRouter({ history: createWebHistory(), routes })`;
+  check(
+    "a redirect and a catch-all are not pages; an absolute child path stays absolute",
+    sorted(resolveRoutes(readRouteObjects(vue))) === sorted(["/", "/orders", "/orders/new", "/orders-archive"]),
+    sorted(resolveRoutes(readRouteObjects(vue))),
+  );
+
+  const notRoutes = `
+    const build = { path: "./dist", filename: "app.js" };
+    const field = { path: "customer.name", label: "Customer" };
+    const crumb = cond ? { a: 1 } : { path: "/ternary", component: X };
+    // { path: "/commented-out", component: Gone }
+    const text = "{ path: '/in-a-string', component: Y }";`;
+  check(
+    "an object with a path key that is not a route record is ignored; comments and strings are not code",
+    sorted(resolveRoutes(readRouteObjects(notRoutes))) === sorted(["/ternary"]),
+    sorted(resolveRoutes(readRouteObjects(notRoutes))),
+  );
+
+  const dynamic = "const routes = [{ path: `/t/${tenant}`, component: T }, { path: base + '/x', component: X }, ...moreRoutes];";
+  check(
+    "a path that is not a plain string literal is skipped, never guessed",
+    resolveRoutes(readRouteObjects(dynamic)).length === 0,
+    sorted(resolveRoutes(readRouteObjects(dynamic))),
+  );
+}
+
+console.log("code routes: <Route> elements");
+{
+  const jsx = `
+    <Routes>
+      <Route path="/" element={<Layout />}>
+        <Route index element={<Home />} />
+        <Route path="orders" element={<Orders />}>
+          <Route path="new" element={<NewOrder big={a > b ? 1 : 2} />} />
+        </Route>
+        <Route element={<RequireAuth />}>
+          <Route path={"settings"} element={<Settings />} />
+        </Route>
+      </Route>
+      <Route path="/login" element={<Login />} />
+      <Route path="*" element={<NotFound />} />
+    </Routes>`;
+  check(
+    "nesting follows the tags; a pathless layout route passes its parent through; a > inside an attribute does not end the tag",
+    sorted(resolveRoutes(readRouteElements(jsx))) === sorted(["/", "/login", "/orders", "/orders/new", "/settings"]),
+    sorted(resolveRoutes(readRouteElements(jsx))),
+  );
+}
+
+console.log("code routes: through scanProject");
+{
+  const mk = (deps: Record<string, string>, files: Record<string, string>): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-coderoutes-"));
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "app", dependencies: deps }));
+    for (const [rel, body] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+      fs.writeFileSync(path.join(dir, rel), body);
+    }
+    return dir;
+  };
+
+  const angular = mk(
+    { "@angular/core": "^18.0.0", "@angular/router": "^18.0.0" },
+    {
+      "src/app/app.routes.ts": `import { Routes } from '@angular/router';
+        export const routes: Routes = [
+          { path: '', component: HomeComponent },
+          { path: 'orders', component: OrdersComponent, children: [{ path: 'new', component: NewOrderComponent }] },
+          { path: 'admin', loadChildren: () => import('./admin/admin.routes').then((m) => m.ADMIN_ROUTES) },
+          { path: 'legacy', redirectTo: 'orders', pathMatch: 'full' },
+          { path: '**', component: NotFoundComponent },
+        ];`,
+      // A lazily loaded child file. Read on its own it would yield "/users" —
+      // a page that does not exist. It must only ever appear under /admin.
+      "src/app/admin/admin.routes.ts": `import { Routes } from '@angular/router';
+        export const ADMIN_ROUTES: Routes = [{ path: '', component: AdminHome }, { path: 'users', component: AdminUsers }];`,
+      "src/app/orders/orders.component.spec.ts": `const routes = [{ path: 'from-a-test', component: X }]; RouterModule.forRoot(routes);`,
+    },
+  );
+  const a = scanProject(angular);
+  check(
+    "Angular: root routes, nested children, and a lazily loaded file prefixed by the route that loads it",
+    sorted(a.routes) === sorted(["/", "/orders", "/orders/new", "/admin", "/admin/users"]),
+    sorted(a.routes),
+  );
+  check(
+    "the child file's routes never appear unprefixed, and a spec file is not router configuration",
+    !a.routes.includes("/users") && !a.routes.includes("/from-a-test"),
+    sorted(a.routes),
+  );
+  check(
+    "the scan says where the routes came from and what it cannot see",
+    a.notes.some((n: string) => /read statically from the router configuration in .*app\.routes\.ts/.test(n) && /Routes built at runtime/.test(n)),
+    JSON.stringify(a.notes),
+  );
+  fs.rmSync(angular, { recursive: true, force: true });
+
+  const react = mk(
+    { react: "^18.0.0", "react-router-dom": "^6.0.0", vite: "^5.0.0" },
+    {
+      "src/App.tsx": `import { Routes, Route } from "react-router-dom";
+        export default function App() { return (<Routes><Route path="/" element={<Home />} /><Route path="/reports" element={<Reports />} /></Routes>); }`,
+      // Named like a router file, but it mounts nothing: its relative path has no
+      // known parent ("/detail" would be an invented page). Its absolute path is fine.
+      "src/features/billing/routes.tsx": `import { RouteObject } from "react-router-dom";
+        export const billingRoutes: RouteObject[] = [{ path: "detail", element: <Detail /> }, { path: "/billing", element: <Billing /> }];`,
+      // Mentions a router but is not a root: a bare relative path here has no known parent.
+      "src/features/orders/routes.fragment.tsx": `import { Route } from "react-router-dom"; export const orderRoutes = <Route path="detail" element={<Detail />} />;`,
+    },
+  );
+  const r = scanProject(react);
+  check(
+    "React: routes come from the file that mounts the router; elsewhere only absolute paths are trusted",
+    sorted(r.routes) === sorted(["/", "/billing", "/reports"]),
+    sorted(r.routes),
+  );
+  check("a relative path whose parent is unknown is never promoted to a top-level page", !r.routes.includes("/detail"), sorted(r.routes));
+  fs.rmSync(react, { recursive: true, force: true });
+
+  const vueApp = mk(
+    { vue: "^3.0.0", "vue-router": "^4.0.0", vite: "^5.0.0" },
+    {
+      "src/router/index.ts": `import { createRouter, createWebHistory } from 'vue-router'
+        export default createRouter({ history: createWebHistory(), routes: [{ path: '/', component: Home }, { path: '/about', component: () => import('../views/About.vue') }] })`,
+    },
+  );
+  const v = scanProject(vueApp);
+  check("Vue: routes passed inline to createRouter", sorted(v.routes) === sorted(["/", "/about"]), sorted(v.routes));
+  fs.rmSync(vueApp, { recursive: true, force: true });
 }
 
 if (failures > 0) {
