@@ -29,24 +29,37 @@ so no npm token is stored in GitHub. npm only lets a trusted publisher be
 configured on a package that already exists, so the first version is published
 by hand.
 
-1. **First publish**, from a clean checkout of `main`, logged in to npm:
+1. **First publish**, from a clean checkout of `main`, logged in to npm
+   (`npm login`):
    ```bash
    npm ci && npm run build
-   npm publish --access public --provenance=false
+   npm publish --access public --provenance=false --otp=<code from your authenticator>
    ```
    `--provenance=false` is needed because `package.json` asks for provenance,
-   which can only be generated inside a supported CI system.
+   which can only be generated inside a supported CI system. `--otp` is needed
+   when the npm account has two-factor authentication for publishing, which a
+   classic or short-lived access token does not bypass.
 2. **Trusted publisher.** On npmjs.com open the package, then Settings →
    Trusted Publisher → GitHub Actions, and enter organization or user
    `brunoboto96`, repository `SceneScout`, workflow filename `release.yml`.
    Leave the environment empty.
-3. **Repository settings on GitHub:**
-   - Settings → Actions → General → Workflow permissions: allow GitHub Actions
-     to create pull requests.
-   - Settings → Rules → the tag ruleset: add the GitHub Actions app as a bypass
-     actor, so the workflow can push `vX.Y.Z` tags.
-   - Settings → Secrets and variables → Actions → Variables: `NPM_PUBLISH` =
-     `enabled`.
+3. **Switch it on.** Settings → Secrets and variables → Actions → Variables:
+   `NPM_PUBLISH` = `enabled`. Or: `gh variable set NPM_PUBLISH --body enabled`.
+4. **Tag the first release**, since it was published by hand:
+   ```bash
+   git tag v1.0.0 && git push origin v1.0.0
+   gh release create v1.0.0 --title v1.0.0 --notes-file CHANGELOG.md
+   ```
+
+Two repository settings the workflow depends on are already in place:
+
+- GitHub Actions is allowed to create pull requests (Settings → Actions →
+  General → Workflow permissions), so it can open the version pull request.
+- The tag ruleset protects `v*` tags from being **moved or deleted** by anyone
+  but the maintainer, and allows creating them. GitHub does not accept the
+  Actions app as a bypass actor on a repository owned by a user account, so a
+  ruleset that also restricted creation would stop the workflow from tagging a
+  release after it had already published to npm.
 
 ## If a publish fails half-way
 
