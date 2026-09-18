@@ -1,3 +1,25 @@
+/* A bundled font, so layout — and with it the overlap percentages and page
+   scores in examples/report.md — is the same on every platform. The system
+   font stack resolved to a different face on each OS. Inter is licensed under
+   the SIL Open Font License; see fonts/OFL.txt. */
+@font-face {
+  font-family: "Inter";
+  font-weight: 400;
+  font-display: block;
+  src: url("/fonts/inter-latin-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-weight: 600;
+  font-display: block;
+  src: url("/fonts/inter-latin-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-weight: 700;
+  font-display: block;
+  src: url("/fonts/inter-latin-700.woff2") format("woff2");
+}
 :root {
   --ink: #1c2430;
   --muted: #5b6675;
@@ -12,9 +34,7 @@
 body {
   margin: 0;
   font:
-    15px/1.5 system-ui,
-    -apple-system,
-    "Segoe UI",
+    15px/1.5 "Inter",
     sans-serif;
   color: var(--ink);
   background: var(--bg);

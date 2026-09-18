@@ -52,6 +52,14 @@ jobs:
       - name: All suites
         if: ${{ !matrix.unit-only }}
         run: npm test
+      # The committed sample report must be what the engine produces today. The
+      # demo app bundles its font, so this holds across platforms; a difference
+      # here means the engine's output changed and examples/ was not regenerated.
+      - name: Sample report is up to date
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        run: |
+          npx tsx scripts/demo.ts
+          git diff --exit-code -- examples/report.md
 
   # The branch ruleset requires ONE check, named "test". A matrix reports one
   # check per cell under changing names, so this job is the stable name that
