@@ -287,7 +287,9 @@ test("ownership: an id the client already sent is an echo, not a creation", () =
   // ...but a 201 excuses a BARE id the client supplied (client-generated ids).
   assert.deepEqual(extractCreatedIds(created({ status: 201, body: { id: "555" }, requestBody: '{"id":"555"}' })).ids, ["555"]);
   // A PREFIXED key is never excused: it is exactly what an echoed foreign key looks like.
-  const fromTemplate = extractCreatedIds(created({ pathname: "/api/widgets/from-template/5", status: 201, body: { widget_id: 88, template_id: 5 }, requestBody: '{"template_id":5}' }));
+  const fromTemplate = extractCreatedIds(
+    created({ pathname: "/api/widgets/from-template/5", status: 201, body: { widget_id: 88, template_id: 5 }, requestBody: '{"template_id":5}' }),
+  );
   assert.deepEqual(fromTemplate.ids, ["88"], "the template that was copied FROM is not ours");
   // An id in the request PATH addresses an existing record, whatever comes back.
   assert.deepEqual(extractCreatedIds(created({ pathname: "/api/widgets/123/publish", body: { id: 123 } })).ids, []);

@@ -13,6 +13,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
+import { orphanPids } from "../src/engine/reaper.ts";
 
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -181,4 +182,22 @@ test("a call that rejects before the timeout still rejects to its caller", async
     withWatchdog("ft_click", Promise.reject(new Error("real failure")), 1000, () => "timeout"),
     /real failure/,
   );
+});
+
+test("the orphan reaper only ever selects browsers this tool launched and abandoned", () => {
+  // The cost of a wrong answer is SIGKILLing somebody else's browser, so every
+  // one of the three conditions has a row that fails on it alone.
+  const cache = "/home/u/.cache/ms-playwright/chromium-1200/chrome-linux/chrome";
+  const ps = [
+    `  101     1 ${cache} --enable-features=scenescout-session --headless`, // ours, orphaned
+    `  102     1 ${cache} --enable-features=scenecraft-session --headless`, // ours under the previous name, orphaned
+    `  103  4242 ${cache} --enable-features=scenescout-session --headless`, // ours, but its parent is alive
+    `  104     1 ${cache} --headless`, // an orphaned Playwright browser that is NOT ours
+    `  105     1 /usr/bin/chromium --enable-features=scenescout-session`, // marker, but not a Playwright-cache browser
+    `  106     1 /home/u/.cache/ms-playwright/ffmpeg-1011/ffmpeg --enable-features=scenescout-session`, // cache, marker, not a browser
+    `garbage line`,
+    ``,
+  ].join("\n");
+  assert.deepEqual(orphanPids(ps), [101, 102]);
+  assert.deepEqual(orphanPids(""), []);
 });
