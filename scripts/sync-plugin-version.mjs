@@ -6,10 +6,6 @@
  * changes, so the two must move together. Runs as part of
  * `npm run version-packages`, right after Changesets has bumped package.json.
  * install-test asserts the two versions are equal.
- *
- * The file is rewritten with JSON.stringify, which lays arrays out differently
- * from Prettier, so `version-packages` runs Prettier over it afterwards. Without
- * that the generated version pull request fails the format check.
  */
 import fs from "node:fs";
 import path from "node:path";
