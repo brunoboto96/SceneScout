@@ -53,8 +53,7 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
  */
 
 /** A destructive verb occupying a URL PATH segment. Bare keywords are meaningful here — a path is not prose. */
-const DESTRUCTIVE_URL_RE =
-  /(\/|\b|_)(delete|remove|purge|destroy|archive|revoke|deactivate|wipe|bulk[-_]?delete|force[-_]?delete)(\/|\b|_)/i;
+const DESTRUCTIVE_URL_RE = /(\/|\b|_)(delete|remove|purge|destroy|archive|revoke|deactivate|wipe|bulk[-_]?delete|force[-_]?delete)(\/|\b|_)/i;
 
 /**
  * Structured destructive intent inside a body — never a bare keyword.
@@ -83,9 +82,7 @@ export function isDestructiveWire(url: string, body?: string | null): boolean {
 export const AUTH_FLOW_RE = /\/(auth|login|logout|signin|sign-in|signup|sign-up|session|token|verify|oauth|sso|password)\b/i;
 
 export function isDestructive(...labels: Array<string | null | undefined>): boolean {
-  return labels.some(
-    (label) => typeof label === "string" && label.length > 0 && DESTRUCTIVE_PATTERNS.some((re) => re.test(label)),
-  );
+  return labels.some((label) => typeof label === "string" && label.length > 0 && DESTRUCTIVE_PATTERNS.some((re) => re.test(label)));
 }
 
 export function destructiveRefusal(label: string): string {
@@ -94,4 +91,21 @@ export function destructiveRefusal(label: string): string {
     `This run is read-only; do not attempt this element again. If destructive flows must be tested, ` +
     `the user has to re-attach with mode="destructive" against a disposable/seeded environment.`
   );
+}
+
+/**
+ * Mutation notices must not include requests the policy aborted.
+ *
+ * The request event fires for every non-GET the page attempts, before the
+ * route handler decides its fate. Reporting all of them told the agent, about
+ * one and the same DELETE, both "server state may have mutated despite
+ * read-only mode" and "WRITE-POLICY blocked" — two opposite facts, and an
+ * invitation to file a false finding against the app under test.
+ *
+ * Signatures are `METHOD url` truncated to different lengths by the two
+ * recorders, so a blocked signature is matched by prefix.
+ */
+export function withoutBlocked<T extends { sig: string }>(mutations: T[], blocked: Array<{ sig: string }>): T[] {
+  if (blocked.length === 0) return mutations;
+  return mutations.filter((m) => !blocked.some((b) => b.sig.startsWith(m.sig) || m.sig.startsWith(b.sig)));
 }

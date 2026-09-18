@@ -19,11 +19,11 @@ SceneScout is a **generic** exploratory-testing engine used against arbitrary we
 
 ## Before committing
 
-- `npm run build && npm test` must pass. `test` chains eleven suites: scan-test, oracle-test, policy-test, fixture-test, dispatch-test, design-test, contract-test, memory-test, install-test, smoke, mcp-check.
+- `npm run format && npm test` must pass (`test` builds first). The pure-logic suites import `src/` directly, so `npm run <suite>` tests your edit with no build; `smoke` and `mcp-check` need the compiled engine and rebuild on their own. `test` chains eleven suites: scan-test, oracle-test, policy-test, fixture-test, dispatch-test, design-test, contract-test, memory-test, install-test, smoke, mcp-check.
 - Bug fixes need a regression test. Prefer the cheapest layer that can actually fail: pure logic goes in the matching `*-test.ts` (`policy-test` for the write policy and auth-loss tracker, `fixture-test` for synthetic upload files and accept-attribute logic, `dispatch-test` for the per-session queue and watchdog, `contract-test` for route identity and the gap ledger, `design-test` for the audit, `memory-test` for storage and finding dedup, `install-test` for the setup/doctor logic in `installer.ts`), and anything needing a real browser goes in `scripts/smoke.ts` backed by a fixture in `test-app/`.
 - Keep logic that does not need Playwright OUT of `browser.ts` — it is the one file a test cannot reach without launching a browser. `fingerprint.ts` (route/element identity), `policy.ts`, `dispatch.ts`, `fixtures.ts`, `authloss.ts` and `collector.ts` all exist because a rule living there can be table-tested; a rule living in `browser.ts` can only be smoke-tested.
 - Write the test so it FAILS against the old behaviour — revert the fix, watch it go red, put the fix back. A test that passes either way documents nothing.
-- Bump the version in `package.json` (and run `npm install --package-lock-only` so the lockfile follows) and match the existing commit style: `vX.Y.Z: <summary>`.
+- **Maintainer only:** when cutting a release, bump the version in `package.json` (and run `npm install --package-lock-only` so the lockfile follows), add the `CHANGELOG.md` entry, and use the commit style `vX.Y.Z: <summary>`. Contributors leave the version and changelog alone — see CONTRIBUTING.md — so outside pull requests never conflict on them.
 
 ## Pinned dependencies
 

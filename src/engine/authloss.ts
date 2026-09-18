@@ -88,9 +88,7 @@ export class AuthLossTracker {
       `⚠ SESSION AUTH LOST — ${this.streak} consecutive navigations were redirected to a login page. ` +
       `The credentials this session attached with have almost certainly expired. ` +
       `Nothing tested past this point is meaningful: re-attach with a fresh storage state before continuing.` +
-      (first
-        ? ` Routes bounced this way are recorded as NOT covered, so the completion contract still sees them as gaps.`
-        : "") +
+      (first ? ` Routes bounced this way are recorded as NOT covered, so the completion contract still sees them as gaps.` : "") +
       `\n`
     );
   }

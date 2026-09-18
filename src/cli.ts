@@ -20,7 +20,7 @@ import { formatScan, scanProject } from "./scan.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(here, "..");
 
-function usage(): never {
+function usage(exitCode = 1): never {
   console.log(`SceneScout — AI exploratory UI testing engine (MCP)
 
 Usage:
@@ -31,24 +31,31 @@ Usage:
   scenescout doctor                 Check the setup and print the fix for anything missing
   scenescout status [projectPath]   What is the engine doing right now? (live status + recent actions)
 `);
-  process.exit(1);
+  process.exit(exitCode);
 }
 
 /** Realtime observability: read the status file + recent action log the running engine maintains. */
 function status(projectPath: string): void {
   // A project last touched before the rename (or one a pre-rename engine is
   // using right now) still keeps its status under the legacy directory.
-  const dir = [MEMORY_DIRNAME, LEGACY_MEMORY_DIRNAME]
-    .map((name) => path.join(projectPath, name))
-    .find((candidate) => fs.existsSync(path.join(candidate, "status.json"))) ?? path.join(projectPath, MEMORY_DIRNAME);
+  const dir =
+    [MEMORY_DIRNAME, LEGACY_MEMORY_DIRNAME]
+      .map((name) => path.join(projectPath, name))
+      .find((candidate) => fs.existsSync(path.join(candidate, "status.json"))) ?? path.join(projectPath, MEMORY_DIRNAME);
   const statusPath = path.join(dir, "status.json");
   if (!fs.existsSync(statusPath)) {
     console.log(`No status file at ${statusPath} — no SceneScout engine has attached to this project (or it predates v0.8).`);
     return;
   }
   type Status = {
-    pid?: number; phase?: string; tool?: string; session?: string; role?: string;
-    sessions?: string[]; url?: string; at?: string;
+    pid?: number;
+    phase?: string;
+    tool?: string;
+    session?: string;
+    role?: string;
+    sessions?: string[];
+    url?: string;
+    at?: string;
   };
   let st: Status;
   try {
@@ -79,7 +86,10 @@ function status(projectPath: string): void {
   if (st.url) console.log(`URL: ${st.url}`);
   // Recent actions from the newest session log — the "what has it been doing" trail.
   const logs = fs.existsSync(dir)
-    ? fs.readdirSync(dir).filter((f) => f.startsWith("session-") && f.endsWith(".jsonl")).sort()
+    ? fs
+        .readdirSync(dir)
+        .filter((f) => f.startsWith("session-") && f.endsWith(".jsonl"))
+        .sort()
     : [];
   const newest = logs[logs.length - 1];
   if (newest) {
@@ -211,6 +221,18 @@ const [, , command, ...args] = process.argv;
 // to the MCP server, whose own transport owns error reporting from then on.
 try {
   switch (command) {
+    // Asking for help is not an error; scripts and shells treat a non-zero
+    // exit as one.
+    case "--help":
+    case "-h":
+    case "help":
+      usage(0);
+    case "--version":
+    case "-v": {
+      const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version: string };
+      console.log(pkg.version);
+      break;
+    }
     case "scan": {
       const target = args[0];
       if (!target) usage();

@@ -11,9 +11,9 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire } from "../dist/engine/policy.js";
-import { AUTH_LOSS_STREAK, AuthLossTracker, LOGIN_ROUTE_RE } from "../dist/engine/authloss.js";
-import { LOGIN_ROUTE_RE_STORAGE } from "../dist/engine/memory.js";
+import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire, withoutBlocked } from "../src/engine/policy.ts";
+import { AUTH_LOSS_STREAK, AuthLossTracker, LOGIN_ROUTE_RE } from "../src/engine/authloss.ts";
+import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
 
 // ---------------------------------------------------------------------------
 // isDestructiveWire — argument order is load-bearing
@@ -24,7 +24,7 @@ test("a destructive intent living only in the POST body is caught", () => {
   // (pathname, body). For a POST to a generic endpoint the method never
   // matches, so the check fell through to testing the URL as if it were the
   // body — and the real payload was never inspected at all.
-  const body = JSON.stringify({ query: "mutation { deleteUser(id: \"7\") { ok } }" });
+  const body = JSON.stringify({ query: 'mutation { deleteUser(id: "7") { ok } }' });
   assert.equal(isDestructiveWire("/graphql", body), true, "a delete mutation in the body is destructive");
   assert.equal(isDestructiveWire("/graphql", null), false, "the same endpoint with no such body is not");
 });
@@ -66,7 +66,10 @@ test("a destructive word in ordinary CONTENT does not block a create/submit POST
     "prose mentioning remove/archive is not a destructive request",
   );
   assert.equal(
-    isDestructiveWire("/api/tickets", JSON.stringify({ title: "Old request", description: "The customer asked us to delete their data and purge the archive." })),
+    isDestructiveWire(
+      "/api/tickets",
+      JSON.stringify({ title: "Old request", description: "The customer asked us to delete their data and purge the archive." }),
+    ),
     false,
     "destructive words as ordinary field values are content, not commands",
   );
@@ -249,10 +252,18 @@ test("the two copies of the login pattern have not drifted apart", () => {
   // migration test" — no test compared them, so editing one (adding `sso`, say)
   // would silently leave the storage layer classifying bounces differently from
   // the engine that detects them. This is that test.
-  assert.equal(
-    LOGIN_ROUTE_RE_STORAGE.source,
-    LOGIN_ROUTE_RE.source,
-    "storage-layer and engine-layer login patterns must stay identical",
-  );
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.source, LOGIN_ROUTE_RE.source, "storage-layer and engine-layer login patterns must stay identical");
   assert.equal(LOGIN_ROUTE_RE_STORAGE.flags, LOGIN_ROUTE_RE.flags);
+});
+
+test("a request the policy blocked is not also reported as a possible mutation", () => {
+  // The two recorders truncate the URL to different lengths, so the match is
+  // by prefix — in either direction.
+  const long = "http://x/api/items/" + "9".repeat(130);
+  const mutations = [{ sig: "DELETE http://x/api/items/999" }, { sig: "POST http://x/api/items" }, { sig: `PUT ${long}`.slice(0, 124) }];
+  const blocked = [{ sig: "DELETE http://x/api/items/999" }, { sig: `PUT ${long}`.slice(0, 144) }];
+  assert.deepEqual(withoutBlocked(mutations, blocked), [{ sig: "POST http://x/api/items" }], "only the request that went through is a possible mutation");
+  assert.equal(withoutBlocked(mutations, []).length, 3, "nothing blocked, nothing dropped");
+  // A different method on the same URL did go through and must still be reported.
+  assert.deepEqual(withoutBlocked([{ sig: "POST http://x/api/items/999" }], blocked), [{ sig: "POST http://x/api/items/999" }]);
 });

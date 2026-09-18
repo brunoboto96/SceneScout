@@ -19,7 +19,12 @@ scope, and it will save you from building something that cannot be merged.
 - **A bug fix needs a regression test** at the cheapest layer that can fail,
   and the test must fail without the fix. Which suite covers what is listed in
   [CLAUDE.md](CLAUDE.md).
-- **`npm run build && npm test` must pass.** CI runs the same thing.
+- **`npm test` must pass.** CI runs it on Linux and macOS, and the unit suites
+  on Windows. While iterating, run one suite: `npm run policy-test` tests your
+  edit directly from `src/`, no build step. The two real-browser suites
+  (`npm run smoke`, `npm run mcp-check`) rebuild first on their own.
+- **`npm run format`** before you push. CI checks it, so style never has to be
+  discussed in review.
 - **Stay project-agnostic.** No real application, company, or product names in
   code, tests, fixtures, comments or commit messages — use invented
   placeholders (`/orders`, `widget_id`). Grep before you push; this drift is

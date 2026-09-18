@@ -182,7 +182,10 @@ function removeLegacyRegistrations(opts: { serverPath: string; run: Runner }): {
     const scope = /^[ \t]*Scope:[ \t]*(User|Local|Project)\b/im.exec(listing)?.[1].toLowerCase();
     const removed = opts.run("claude", ["mcp", "remove", ...(scope ? ["--scope", scope] : []), name]);
     if (removed.status === 0) removedLegacy.push(name);
-    else notes.push(`the pre-rename MCP registration "${name}" points at this same server and could not be removed — every tool will appear twice until you run: claude mcp remove ${name}`);
+    else
+      notes.push(
+        `the pre-rename MCP registration "${name}" points at this same server and could not be removed — every tool will appear twice until you run: claude mcp remove ${name}`,
+      );
   }
   return { removedLegacy, notes };
 }
@@ -213,13 +216,7 @@ export function parseRegistration(listing: string): { command: string | null; se
 export type Check = { name: string; ok: boolean; detail: string; fix?: string };
 
 /** Everything a working setup needs, each with the command that repairs it. */
-export function diagnose(opts: {
-  packageRoot: string;
-  claudeDir: string;
-  nodeVersion: string;
-  chromiumPath: string | null;
-  run: Runner;
-}): Check[] {
+export function diagnose(opts: { packageRoot: string; claudeDir: string; nodeVersion: string; chromiumPath: string | null; run: Runner }): Check[] {
   const checks: Check[] = [];
   const major = Number(opts.nodeVersion.replace(/^v/, "").split(".")[0]);
   checks.push({ name: "node >= 20", ok: major >= 20, detail: opts.nodeVersion, fix: "install Node 20 or newer" });
@@ -240,7 +237,12 @@ export function diagnose(opts: {
 
   const got = opts.run("claude", ["mcp", "get", MCP_NAME]);
   if (got.missing) {
-    checks.push({ name: "claude CLI on PATH", ok: false, detail: "`claude` not found", fix: "install Claude Code, or register the server by hand (see README)" });
+    checks.push({
+      name: "claude CLI on PATH",
+      ok: false,
+      detail: "`claude` not found",
+      fix: "install Claude Code, or register the server by hand (see README)",
+    });
   } else {
     const listing = got.stdout + got.stderr;
     if (got.status !== 0) {
@@ -257,7 +259,12 @@ export function diagnose(opts: {
       } else if (command !== null && !path.isAbsolute(command)) {
         // A bare "node" resolves in your shell and then fails inside Claude
         // Code, whose launch environment often lacks the nvm/fnm PATH.
-        checks.push({ name: "MCP server registered", ok: false, detail: `registered with a bare \`${command}\` command, which Claude Code may not find on its PATH`, fix: "npm run setup" });
+        checks.push({
+          name: "MCP server registered",
+          ok: false,
+          detail: `registered with a bare \`${command}\` command, which Claude Code may not find on its PATH`,
+          fix: "npm run setup",
+        });
       } else {
         checks.push({ name: "MCP server registered", ok: true, detail: server });
       }

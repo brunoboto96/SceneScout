@@ -35,7 +35,10 @@ function violationRollup(oracleLog: OracleViolation[]): string[] {
   for (const v of oracleLog) {
     // Signature: kind + detail with ids/hashes collapsed so the same failing
     // endpoint groups across records.
-    const sig = `${v.kind}: ${v.detail.replace(/\b\d+\b/g, ":n").replace(/[0-9a-f]{8,}/gi, ":h").slice(0, 140)}`;
+    const sig = `${v.kind}: ${v.detail
+      .replace(/\b\d+\b/g, ":n")
+      .replace(/[0-9a-f]{8,}/gi, ":h")
+      .slice(0, 140)}`;
     const g = groups.get(sig);
     if (g) g.count += 1;
     else groups.set(sig, { count: 1, sample: v.detail.slice(0, 160) });
@@ -95,9 +98,41 @@ const FILTER_TOKENS = new Set(["search", "filter", "filters", "query", "lookup",
  * difference between reporting a real gap and silently dropping it.
  */
 const SUBMIT_TOKENS = new Set([
-  "submit", "save", "create", "send", "apply", "register", "post", "upload", "add", "confirm", "continue", "next",
-  "finish", "generate", "assign", "approve", "report", "request", "update", "publish", "login", "signin", "signup",
-  "proceed", "done", "ok", "go", "pay", "checkout", "subscribe", "place", "sign", "start", "invite", "import",
+  "submit",
+  "save",
+  "create",
+  "send",
+  "apply",
+  "register",
+  "post",
+  "upload",
+  "add",
+  "confirm",
+  "continue",
+  "next",
+  "finish",
+  "generate",
+  "assign",
+  "approve",
+  "report",
+  "request",
+  "update",
+  "publish",
+  "login",
+  "signin",
+  "signup",
+  "proceed",
+  "done",
+  "ok",
+  "go",
+  "pay",
+  "checkout",
+  "subscribe",
+  "place",
+  "sign",
+  "start",
+  "invite",
+  "import",
 ]);
 
 /** An element key naming a filter control (a search box, a facet, a sort). */
@@ -149,19 +184,13 @@ export function escapeTableCell(text: string): string {
  * nearly every app, and gating on it would make the contract unsatisfiable —
  * which is what the original false positive did.
  */
-export function classifyFilledStates(
-  memory: MemoryStore,
-  facts: Record<string, { mutated?: boolean }>,
-): { unsubmitted: string[]; noSubmitControl: string[] } {
+export function classifyFilledStates(memory: MemoryStore, facts: Record<string, { mutated?: boolean }>): { unsubmitted: string[]; noSubmitControl: string[] } {
   const unsubmitted = new Set<string>();
   const noSubmitControl = new Set<string>();
   for (const st of Object.values(memory.states)) {
     const keys = Object.keys(st.elements);
     const filledForReal = keys.some(
-      (key) =>
-        st.elements[key].exercised &&
-        /^(type|select|upload|plan:(type|select|upload))/.test(st.elements[key].lastAction ?? "") &&
-        !isFilterKey(key),
+      (key) => st.elements[key].exercised && /^(type|select|upload|plan:(type|select|upload))/.test(st.elements[key].lastAction ?? "") && !isFilterKey(key),
     );
     if (!filledForReal) continue;
     if (facts[st.route]?.mutated || mutatedSiblingStep(st.route, facts)) continue;
@@ -219,9 +248,7 @@ export function formatRouteCoverage(allRoutes: string[], unvisited: string[]): s
   const visited = allRoutes.length - unvisited.length;
   return (
     `Routes visited: ${visited}/${allRoutes.length}` +
-    (unvisited.length > 0
-      ? ` — UNVISITED: ${unvisited.slice(0, 25).join(", ")}${unvisited.length > 25 ? " …" : ""} (ft_crawl covers these in one call)`
-      : " ✓")
+    (unvisited.length > 0 ? ` — UNVISITED: ${unvisited.slice(0, 25).join(", ")}${unvisited.length > 25 ? " …" : ""} (ft_crawl covers these in one call)` : " ✓")
   );
 }
 
@@ -237,7 +264,9 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
   const facts = memory.routeFacts;
   const visitedRoutes = [...new Set(Object.values(memory.states).map((st) => st.route))];
   if (extras?.unvisitedRoutes?.length) {
-    gaps.push(`${extras.unvisitedRoutes.length} route(s) never visited: ${extras.unvisitedRoutes.slice(0, 10).join(", ")}${extras.unvisitedRoutes.length > 10 ? " …" : ""}`);
+    gaps.push(
+      `${extras.unvisitedRoutes.length} route(s) never visited: ${extras.unvisitedRoutes.slice(0, 10).join(", ")}${extras.unvisitedRoutes.length > 10 ? " …" : ""}`,
+    );
   }
   // `total` comes from coverage() so it is the SAME deduped, chrome-stripped
   // denominator that `keys` is a subset of. Recomputing it from raw state
@@ -249,15 +278,20 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
   // coverage() reported a total for it, it fell out of this filter by accident
   // (total === 0); excluding it explicitly keeps the ledger to entries a tester
   // can actually act on.
-  const untouched = cov.unexercised.filter(
-    (u) => u.state !== SHARED_CHROME_ROUTE && u.total > 0 && u.keys.length === u.total,
-  );
+  const untouched = cov.unexercised.filter((u) => u.state !== SHARED_CHROME_ROUTE && u.total > 0 && u.keys.length === u.total);
   if (untouched.length > 0) {
-    gaps.push(`${untouched.length} route(s) visited but NOTHING exercised (looked at, never touched): ${untouched.slice(0, 8).map((u) => u.state).join(", ")}${untouched.length > 8 ? " …" : ""}`);
+    gaps.push(
+      `${untouched.length} route(s) visited but NOTHING exercised (looked at, never touched): ${untouched
+        .slice(0, 8)
+        .map((u) => u.state)
+        .join(", ")}${untouched.length > 8 ? " …" : ""}`,
+    );
   }
   const unaudited = visitedRoutes.filter((r) => !facts[r]?.audited);
   if (unaudited.length > 0) {
-    gaps.push(`${unaudited.length}/${visitedRoutes.length} visited route(s) never design-audited: ${unaudited.slice(0, 8).join(", ")}${unaudited.length > 8 ? " …" : ""}`);
+    gaps.push(
+      `${unaudited.length}/${visitedRoutes.length} visited route(s) never design-audited: ${unaudited.slice(0, 8).join(", ")}${unaudited.length > 8 ? " …" : ""}`,
+    );
   }
   // Filled in, never committed. `mutated` records that a state-changing request
   // actually left the page; a route where someone typed, picked an option or
@@ -293,11 +327,7 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
   return gaps;
 }
 
-export function generateReport(
-  memory: MemoryStore,
-  oracleLog: OracleViolation[],
-  extras?: ReportExtras,
-): { markdown: string; path: string; summary: string } {
+export function generateReport(memory: MemoryStore, oracleLog: OracleViolation[], extras?: ReportExtras): { markdown: string; path: string; summary: string } {
   const cov = memory.coverage();
   const findings = [...memory.findings].sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 
@@ -315,7 +345,9 @@ export function generateReport(
   lines.push(``);
   lines.push(`| Metric | Value |`);
   lines.push(`|---|---|`);
-  lines.push(`| Open findings | ${open.length} (${open.filter((f) => f.severity === "high").length} high) — ${current.length} seen this session, ${historical.length} historical${resolved.length ? `, ${resolved.length} resolved (listed at the bottom)` : ""} |`);
+  lines.push(
+    `| Open findings | ${open.length} (${open.filter((f) => f.severity === "high").length} high) — ${current.length} seen this session, ${historical.length} historical${resolved.length ? `, ${resolved.length} resolved (listed at the bottom)` : ""} |`,
+  );
   if (extras && extras.routesTotal > 0) lines.push(`| Route coverage | ${extras.routesVisited}/${extras.routesTotal} |`);
   lines.push(`| States explored | ${cov.states} |`);
   if (extras) lines.push(`| Design audits this session | ${extras.designAudits} |`);
@@ -335,7 +367,9 @@ export function generateReport(
     lines.push(`## Page quality scores (worst first)`);
     lines.push(``);
     if (staleCount > 0) {
-      lines.push(`⏳ ${staleCount} of ${scores.length} scores are from an EARLIER run (marked stale). They rank against this run's numbers but were not re-measured — re-audit before treating a stale row as the worst page.`);
+      lines.push(
+        `⏳ ${staleCount} of ${scores.length} scores are from an EARLIER run (marked stale). They rank against this run's numbers but were not re-measured — re-audit before treating a stale row as the worst page.`,
+      );
       lines.push(``);
     }
     lines.push(`| Route | Overall | A11y | Craft | Consistency | Task clarity | Audited |`);
@@ -366,19 +400,27 @@ export function generateReport(
     const oneRoleOnly = allRoutes.filter((rt) => attemptedBy(rt).length === 1).length;
     lines.push(`## Role capability matrix (${roles.length} roles)`);
     lines.push(``);
-    lines.push(`Routes where roles that BOTH tried it diverged — each row is either a correct permission boundary or a gap ("should this role be able to do this?"). ✓ reached · ✗ redirected/denied · — not attempted by that role.`);
+    lines.push(
+      `Routes where roles that BOTH tried it diverged — each row is either a correct permission boundary or a gap ("should this role be able to do this?"). ✓ reached · ✗ redirected/denied · — not attempted by that role.`,
+    );
     lines.push(``);
     if (oneRoleOnly > 0) {
-      lines.push(`${oneRoleOnly} route(s) were visited by only ONE role and are omitted — with nothing to compare against they say nothing about permissions, only about coverage.`);
+      lines.push(
+        `${oneRoleOnly} route(s) were visited by only ONE role and are omitted — with nothing to compare against they say nothing about permissions, only about coverage.`,
+      );
       lines.push(``);
     }
     lines.push(`| Route | ${roles.join(" | ")} |`);
     lines.push(`|---|${roles.map(() => "---").join("|")}|`);
     for (const rt of differing.slice(0, 25)) {
-      lines.push(`| \`${rt}\` | ${roles.map((r) => {
-        const o = roleAccess[r][rt];
-        return o === "reached" ? "✓" : o ? `✗ ${o.replace(/\|/g, "/")}` : "—";
-      }).join(" | ")} |`);
+      lines.push(
+        `| \`${rt}\` | ${roles
+          .map((r) => {
+            const o = roleAccess[r][rt];
+            return o === "reached" ? "✓" : o ? `✗ ${o.replace(/\|/g, "/")}` : "—";
+          })
+          .join(" | ")} |`,
+      );
     }
     if (differing.length === 0) lines.push(`(no divergence recorded — all roles saw the same surface)`);
     lines.push(``);
@@ -389,7 +431,9 @@ export function generateReport(
   lines.push(`## Gap ledger — what was NOT tested`);
   lines.push(``);
   if (gaps.length === 0) {
-    lines.push(`Empty — every known route visited, exercised, audited; journeys measured; multi-role compared. This is what a complete extensive run looks like.`);
+    lines.push(
+      `Empty — every known route visited, exercised, audited; journeys measured; multi-role compared. This is what a complete extensive run looks like.`,
+    );
   } else {
     for (const g of gaps) lines.push(`- ⚠ ${g}`);
   }
@@ -449,7 +493,9 @@ export function generateReport(
   if (resolved.length > 0) {
     lines.push(`## ✅ Resolved (${resolved.length})`);
     lines.push(``);
-    lines.push(`Fixed and verified (or confirmed no longer reproducing). A resolved finding that is re-found reopens automatically and is flagged as a regression above.`);
+    lines.push(
+      `Fixed and verified (or confirmed no longer reproducing). A resolved finding that is re-found reopens automatically and is flagged as a regression above.`,
+    );
     lines.push(``);
     for (const f of resolved) renderFinding(f, true);
   }
@@ -485,9 +531,18 @@ export function generateReport(
     `Report written to ${outPath}`,
     ``,
     `OPEN FINDINGS: ${open.length} (${open.filter((f) => f.severity === "high").length} high) — ${current.length} this session, ${historical.length} historical${resolved.length ? `, ${resolved.length} resolved` : ""}`,
-    ...(extras && extras.routesTotal > 0 ? [`COVERAGE: routes ${extras.routesVisited}/${extras.routesTotal} · ${cov.states} states · ${cov.elementsExercised}/${cov.elementsTotal} elements exercised`] : []),
+    ...(extras && extras.routesTotal > 0
+      ? [
+          `COVERAGE: routes ${extras.routesVisited}/${extras.routesTotal} · ${cov.states} states · ${cov.elementsExercised}/${cov.elementsTotal} elements exercised`,
+        ]
+      : []),
     ...(scores.length > 0
-      ? [`WORST PAGES: ${scores.slice(0, 3).map(([r, sc]) => `${r} ${sc.overall}/100`).join(" · ")}`]
+      ? [
+          `WORST PAGES: ${scores
+            .slice(0, 3)
+            .map(([r, sc]) => `${r} ${sc.overall}/100`)
+            .join(" · ")}`,
+        ]
       : []),
     ``,
     `Top open findings:`,

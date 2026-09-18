@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SessionQueue, withWatchdog } from "../dist/engine/dispatch.js";
+import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
 
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -51,7 +51,12 @@ test("calls on DIFFERENT sessions overlap in wall-clock", async () => {
 
 test("a REJECTED call does not wedge its session's queue", async () => {
   const q = new SessionQueue();
-  await assert.rejects(q.run("admin", async () => { throw new Error("boom"); }), /boom/);
+  await assert.rejects(
+    q.run("admin", async () => {
+      throw new Error("boom");
+    }),
+    /boom/,
+  );
   // Without the (fn, fn) two-armed then, the chain stays rejected and every
   // later call on that session inherits the failure forever.
   assert.equal(await q.run("admin", async () => "ok"), "ok");
@@ -59,7 +64,9 @@ test("a REJECTED call does not wedge its session's queue", async () => {
 
 test("a rejection is delivered to its own caller, not to the next one", async () => {
   const q = new SessionQueue();
-  const failing = q.run("admin", async () => { throw new Error("first"); });
+  const failing = q.run("admin", async () => {
+    throw new Error("first");
+  });
   const following = q.run("admin", async () => "second");
   await assert.rejects(failing, /first/);
   assert.equal(await following, "second", "the next call gets its own result");

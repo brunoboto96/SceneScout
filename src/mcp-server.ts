@@ -185,7 +185,10 @@ function serializedPerSession<A>(
 let controlChain: Promise<unknown> = Promise.resolve();
 function serializedControl<A extends unknown[]>(fn: (...args: A) => Promise<ToolResult>): (...args: A) => Promise<ToolResult> {
   return (...args: A) => {
-    const run = controlChain.then(() => fn(...args), () => fn(...args));
+    const run = controlChain.then(
+      () => fn(...args),
+      () => fn(...args),
+    );
     controlChain = run.catch(() => {});
     return run;
   };
@@ -224,7 +227,10 @@ server.registerTool(
       url: z.string().describe("Base URL of the running app, e.g. http://localhost:3000"),
       projectPath: z.string().describe("Absolute path to the project (memory + report live in .scenescout/ here)"),
       storageStatePath: z.string().optional().describe("Optional Playwright storage-state JSON path for authenticated exploration"),
-      mode: z.enum(["read-only", "safe-write", "destructive"]).default("read-only").describe("Write policy (see tool description). Never choose 'destructive' yourself — user opt-in only."),
+      mode: z
+        .enum(["read-only", "safe-write", "destructive"])
+        .default("read-only")
+        .describe("Write policy (see tool description). Never choose 'destructive' yourself — user opt-in only."),
       headed: z.boolean().default(false).describe("Show the browser window"),
       viewportWidth: z.number().int().min(320).max(3840).optional().describe("Viewport width (default 1280); use e.g. 390 for a mobile pass"),
       viewportHeight: z.number().int().min(480).max(2400).optional().describe("Viewport height (default 900)"),
@@ -232,7 +238,9 @@ server.registerTool(
         .string()
         .max(40)
         .optional()
-        .describe("Session name for multi-role runs (e.g. 'admin', 'qa'). Creates/replaces that session's browser and makes it the default. Default: 'default'."),
+        .describe(
+          "Session name for multi-role runs (e.g. 'admin', 'qa'). Creates/replaces that session's browser and makes it the default. Default: 'default'.",
+        ),
     },
   },
   serializedControl(
@@ -417,8 +425,18 @@ server.registerTool(
         .array(
           z.object({
             action: z.enum(["navigate", "click", "type", "select", "press", "hover", "scroll", "upload"]),
-            target: z.string().optional().describe("testid=…, text=…, label=… (or a path for navigate; 'top'/'bottom'/±px for scroll; for upload: the file input or the control that opens its chooser)"),
-            value: z.string().optional().describe("Text to type / option to select / key to press / for upload: a fixture kind (pdf, png, txt, csv, json — blank infers from accept) or a project-relative file path"),
+            target: z
+              .string()
+              .optional()
+              .describe(
+                "testid=…, text=…, label=… (or a path for navigate; 'top'/'bottom'/±px for scroll; for upload: the file input or the control that opens its chooser)",
+              ),
+            value: z
+              .string()
+              .optional()
+              .describe(
+                "Text to type / option to select / key to press / for upload: a fixture kind (pdf, png, txt, csv, json — blank infers from accept) or a project-relative file path",
+              ),
             pressEnter: z.boolean().optional().describe("For type: press Enter after filling"),
             replace: z.boolean().optional().describe("For type: clear the field first instead of appending to existing content"),
           }),
@@ -444,8 +462,13 @@ server.registerTool(
 server.registerTool(
   "ft_click",
   {
-    description: "Click an element by its ref from the latest ft_snapshot. Returns the outcome plus any oracle violations triggered. clicks=2 (or 3) probes IMPATIENT-USER behaviour: a rapid multi-click that fires the same state-changing request twice means the control is not guarded against double submission (button stays enabled, endpoint not idempotent) — use it on every important submit/create button once; the result says explicitly whether duplicates fired.",
-    inputSchema: { ref: z.string().describe("Element ref, e.g. e12"), clicks: z.number().int().min(1).max(3).default(1).describe("1 = normal; 2-3 = rapid repeated clicks (double-submit probe)"), session: sessionParam },
+    description:
+      "Click an element by its ref from the latest ft_snapshot. Returns the outcome plus any oracle violations triggered. clicks=2 (or 3) probes IMPATIENT-USER behaviour: a rapid multi-click that fires the same state-changing request twice means the control is not guarded against double submission (button stays enabled, endpoint not idempotent) — use it on every important submit/create button once; the result says explicitly whether duplicates fired.",
+    inputSchema: {
+      ref: z.string().describe("Element ref, e.g. e12"),
+      clicks: z.number().int().min(1).max(3).default(1).describe("1 = normal; 2-3 = rapid repeated clicks (double-submit probe)"),
+      session: sessionParam,
+    },
   },
   serializedPerSession("ft_click", async ({ ref, clicks }: { ref: string; clicks?: number }, session) => {
     try {
@@ -501,9 +524,18 @@ server.registerTool(
     description:
       "Attach a file to an upload control the way a user does. `ref` is either a visible <input type=file> (snapshots list these with role `file`) or the button/label/dropzone that opens the file chooser — the chooser is intercepted and answered, which is how the hidden input behind a styled 'Choose file' control is reached. Omit `ref` to target the page's only file input, hidden or not (snapshots disclose hidden ones on a FILE INPUTS line). Nothing needs to exist on disk: a small VALID fixture (real PDF/PNG structure) is generated in memory, its kind inferred from the input's accept attribute or chosen with `fixture`; `filePath` uploads a real file but must live inside the attached project (fenced like navigation is fenced to the origin); `name` overrides the filename for boundary tests (wrong extension vs accept, very long, unicode). The result names the input, how the file reached it, flags a file that violates accept (a mismatch the app then accepts is a validation finding), warns if the app cleared the input after selection, and says whether a state-changing request fired on selection — if none did, click the form's submit, or check the next snapshot for a client-side rejection.",
     inputSchema: {
-      ref: z.string().optional().describe("Element ref of the file input OR of the control that opens the file chooser; omit when the page has exactly one file input"),
-      filePath: z.string().optional().describe("A real file to upload — absolute or relative to the project; must be inside the attached project. Exclusive with fixture."),
-      fixture: z.enum(FIXTURE_KINDS).optional().describe("Generated fixture kind; default: inferred from the input's accept attribute (pdf when there is none, or none we can generate)"),
+      ref: z
+        .string()
+        .optional()
+        .describe("Element ref of the file input OR of the control that opens the file chooser; omit when the page has exactly one file input"),
+      filePath: z
+        .string()
+        .optional()
+        .describe("A real file to upload — absolute or relative to the project; must be inside the attached project. Exclusive with fixture."),
+      fixture: z
+        .enum(FIXTURE_KINDS)
+        .optional()
+        .describe("Generated fixture kind; default: inferred from the input's accept attribute (pdf when there is none, or none we can generate)"),
       name: z.string().min(1).max(512).optional().describe("Filename override (default scenescout-fixture.<kind>, or the disk file's own name)"),
       session: sessionParam,
     },
@@ -673,7 +705,10 @@ server.registerTool(
       "Cumulative WRITTEN knowledge about the tested app — .scenescout/ASSUMPTIONS.md, in prose a human can read and correct. memory.json stores coverage; this stores UNDERSTANDING, so every run starts smarter than the last. READ it at the start of every session ({action:'read'}). ADD durable learnings as you go ({action:'add', section, note}): what the app is for (app-model), who each role is and what they're FOR — infer the persona from what the role can see and do, e.g. 'qa-role = reviewer: approves orders, cannot administer' (roles), UI patterns the app follows (conventions), rules discovered the hard way like 'an order can only ship once approved' (constraints), fragile areas worth re-testing every run (risks), domain terms (glossary). Notes are dated, attributed to the acting role, and deduplicated. Do NOT record session-specific facts (ids, counts) — only durable knowledge.",
     inputSchema: {
       action: z.enum(["read", "add"]).describe("'read' the accumulated knowledge, or 'add' one durable learning"),
-      section: z.enum(["app-model", "roles", "conventions", "constraints", "risks", "glossary"]).optional().describe("For add: which knowledge section this belongs to"),
+      section: z
+        .enum(["app-model", "roles", "conventions", "constraints", "risks", "glossary"])
+        .optional()
+        .describe("For add: which knowledge section this belongs to"),
       note: z.string().max(500).optional().describe("For add: the learning, one or two sentences, written for a future reader with no context"),
       session: sessionParam,
     },
@@ -685,7 +720,12 @@ server.registerTool(
       if (action === "read") return text(eng.memory.readAssumptions(), session);
       if (!section || !note) throw new Error("ft_note {action:'add'} needs section and note.");
       const added = eng.memory.addAssumption(section, note, eng.role);
-      return text(added ? `Noted under "${section}". ASSUMPTIONS.md grows with every run — future sessions will start knowing this.` : `Already known (duplicate note) — not added.`, session);
+      return text(
+        added
+          ? `Noted under "${section}". ASSUMPTIONS.md grows with every run — future sessions will start knowing this.`
+          : `Already known (duplicate note) — not added.`,
+        session,
+      );
     } catch (err) {
       return errorText(err);
     }
@@ -718,9 +758,23 @@ server.registerTool(
       severity: z.enum(["high", "medium", "low"]),
       category: z
         .enum([
-          "console-error", "page-error", "http-error", "network", "dead-end", "ux-confusing", "ux-polish",
-          "visual", "a11y", "permission-leak", "data-inconsistency", "stale-state", "data-loss",
-          "performance", "security", "missing-testid", "other",
+          "console-error",
+          "page-error",
+          "http-error",
+          "network",
+          "dead-end",
+          "ux-confusing",
+          "ux-polish",
+          "visual",
+          "a11y",
+          "permission-leak",
+          "data-inconsistency",
+          "stale-state",
+          "data-loss",
+          "performance",
+          "security",
+          "missing-testid",
+          "other",
         ])
         .describe("Pick the closest — use 'other' only when nothing fits"),
       title: z.string().describe("One-line summary of the defect"),
@@ -737,7 +791,13 @@ server.registerTool(
   serializedPerSession(
     "ft_finding",
     async (
-      { severity, category, title, detail, evidence }: {
+      {
+        severity,
+        category,
+        title,
+        detail,
+        evidence,
+      }: {
         severity: "high" | "medium" | "low";
         category: string;
         title: string;
@@ -776,7 +836,8 @@ server.registerTool(
 server.registerTool(
   "ft_coverage",
   {
-    description: "Show exploration coverage: states visited across all runs and which elements remain unexercised. Use to decide where to explore next and when the level's budget is satisfied.",
+    description:
+      "Show exploration coverage: states visited across all runs and which elements remain unexercised. Use to decide where to explore next and when the level's budget is satisfied.",
     inputSchema: { session: sessionParam },
   },
   serializedPerSession("ft_coverage", async (_args: { session?: string }, session) => {
@@ -787,7 +848,9 @@ server.registerTool(
       const unvisited = eng.unvisitedKnownRoutes();
       const lines = [
         ...(eng.memory.lastSaveError
-          ? [`⚠ MEMORY WRITE FAILING: ${eng.memory.lastSaveError} — coverage/findings since the last successful write are NOT persisted to disk. If this doesn't clear on its own, check the project directory still exists and is writable.`]
+          ? [
+              `⚠ MEMORY WRITE FAILING: ${eng.memory.lastSaveError} — coverage/findings since the last successful write are NOT persisted to disk. If this doesn't clear on its own, check the project directory still exists and is writable.`,
+            ]
           : []),
         `States known: ${cov.states} · Elements exercised: ${cov.elementsExercised}/${cov.elementsTotal}`,
         formatRouteCoverage(eng.allKnownRoutes(), unvisited),
@@ -808,7 +871,10 @@ server.registerTool(
       "Generate the final markdown report — findings, page quality scores (worst first), role capability matrix, oracle rollup, and the GAP LEDGER (an explicit list of what was NOT tested). Writes the full document to .scenescout/report.md and returns a bounded SUMMARY (full reports exceed client token limits). Gates by level: 'minimal' needs all routes visited + ≥1 design audit; 'medium' additionally needs several routes audited; 'extensive' REFUSES while the gap ledger is non-empty — that refusal is the completeness guarantee: an extensive report only generates when nothing known is left untested. force=true overrides (only when the user capped the budget).",
     inputSchema: {
       force: z.boolean().default(false).describe("Generate even though gates are unmet (only when the user capped the budget)"),
-      level: z.enum(["minimal", "medium", "extensive"]).default("medium").describe("Which completion contract to enforce — match the level the run was asked for"),
+      level: z
+        .enum(["minimal", "medium", "extensive"])
+        .default("medium")
+        .describe("Which completion contract to enforce — match the level the run was asked for"),
       session: sessionParam,
     },
   },
@@ -821,7 +887,10 @@ server.registerTool(
       if (unvisited.length > 0) {
         gates.push(
           `${unvisited.length} known route(s) never visited:\n` +
-            unvisited.slice(0, 30).map((r) => `  ${r}`).join("\n") +
+            unvisited
+              .slice(0, 30)
+              .map((r) => `  ${r}`)
+              .join("\n") +
             (unvisited.length > 30 ? `\n  … +${unvisited.length - 30} more` : "") +
             `\n→ Run ft_crawl (no args) to cover them in one call.`,
         );
@@ -835,13 +904,24 @@ server.registerTool(
       if (lvl !== "minimal") {
         const needed = Math.min(3, Math.max(1, Math.ceil(visitedCount / 10)));
         if (auditedRoutes < needed) {
-          gates.push(`Level '${lvl}' needs design audits on ≥${needed} distinct routes (have ${auditedRoutes}) — audit the representative pages (dashboard, a form, a detail view, a table).`);
+          gates.push(
+            `Level '${lvl}' needs design audits on ≥${needed} distinct routes (have ${auditedRoutes}) — audit the representative pages (dashboard, a form, a detail view, a table).`,
+          );
         }
       }
       const all = eng.allKnownRoutes();
-      const gapList = computeGaps(eng.memory, { routesVisited: all.length - unvisited.length, routesTotal: all.length, designAudits: eng.designAuditCount, unvisitedRoutes: unvisited });
+      const gapList = computeGaps(eng.memory, {
+        routesVisited: all.length - unvisited.length,
+        routesTotal: all.length,
+        designAudits: eng.designAuditCount,
+        unvisitedRoutes: unvisited,
+      });
       if (lvl === "extensive" && gapList.length > 0) {
-        gates.push(`Level 'extensive' claims completeness, so it refuses while the GAP LEDGER is non-empty:\n` + gapList.map((g) => `  ⚠ ${g}`).join("\n") + `\nClose the gaps (or report at level 'medium', which discloses them instead).`);
+        gates.push(
+          `Level 'extensive' claims completeness, so it refuses while the GAP LEDGER is non-empty:\n` +
+            gapList.map((g) => `  ⚠ ${g}`).join("\n") +
+            `\nClose the gaps (or report at level 'medium', which discloses them instead).`,
+        );
       }
       if (gates.length > 0 && !force) {
         return text(
@@ -925,9 +1005,7 @@ server.registerTool(
       return text(
         `Session "${name}" closed. Memory and report remain in .scenescout/.` +
           (engines.size > 0 ? ` Default session → ${activeName}.` : "") +
-          (saveError
-            ? `\n⚠ The final memory write failed (${saveError}) — some coverage/findings from this session may not have been persisted to disk.`
-            : ""),
+          (saveError ? `\n⚠ The final memory write failed (${saveError}) — some coverage/findings from this session may not have been persisted to disk.` : ""),
         activeName,
       );
     } catch (err) {

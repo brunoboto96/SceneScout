@@ -117,7 +117,10 @@ export class OracleMonitor {
     for (const v of out) {
       // Same normalization as the report rollup, so "the same violation"
       // means the same thing in tool output and in the final report.
-      const sig = `${v.kind}: ${v.detail.replace(/\b\d+\b/g, ":n").replace(/[0-9a-f]{8,}/gi, ":h").slice(0, 140)}`;
+      const sig = `${v.kind}: ${v.detail
+        .replace(/\b\d+\b/g, ":n")
+        .replace(/[0-9a-f]{8,}/gi, ":h")
+        .slice(0, 140)}`;
       v.repeat = this.reportedSigs.has(sig);
       if (register) {
         if (this.reportedSigs.size >= OracleMonitor.MAX_REPORTED_SIGS) {
@@ -140,9 +143,7 @@ export function formatViolations(violations: OracleViolation[]): string {
   if (fresh.length === 0) {
     return `\nORACLE: ${repeats} repeat violation(s) of previously reported signatures — nothing new.`;
   }
-  const lines = fresh
-    .slice(0, 10)
-    .map((v) => `  ⚠ [${v.severity}] ${v.kind}: ${v.detail}`);
+  const lines = fresh.slice(0, 10).map((v) => `  ⚠ [${v.severity}] ${v.kind}: ${v.detail}`);
   const more = fresh.length > 10 ? `\n  … and ${fresh.length - 10} more` : "";
   return `\nORACLE VIOLATIONS since last action (${fresh.length} new):\n${lines.join("\n")}${more}${repeatLine}`;
 }

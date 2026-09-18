@@ -24,18 +24,7 @@ export interface ScanResult {
  * therefore not recognised as a frontend at all, making the whole scan report
  * "No frontend workspace found" for a perfectly ordinary project.
  */
-const FRONTEND_DEPS = [
-  "next",
-  "nuxt",
-  "@sveltejs/kit",
-  "@remix-run/react",
-  "@remix-run/node",
-  "react",
-  "vue",
-  "svelte",
-  "@angular/core",
-  "vite",
-];
+const FRONTEND_DEPS = ["next", "nuxt", "@sveltejs/kit", "@remix-run/react", "@remix-run/node", "react", "vue", "svelte", "@angular/core", "vite"];
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "coverage", "out", "docs", "examples", "e2e-tests"]);
 
 function readJson(file: string): Record<string, unknown> | null {
@@ -123,9 +112,8 @@ function detectFramework(pkg: Record<string, unknown>): { framework: string | nu
  * every `.vue` file as a page, with `index.vue` as the directory root.
  */
 function fileRoutes(frontendDir: string, kind: "sveltekit" | "nuxt"): string[] {
-  const root = kind === "sveltekit"
-    ? path.join(frontendDir, "src", "routes")
-    : firstExisting([path.join(frontendDir, "pages"), path.join(frontendDir, "app", "pages")]);
+  const root =
+    kind === "sveltekit" ? path.join(frontendDir, "src", "routes") : firstExisting([path.join(frontendDir, "pages"), path.join(frontendDir, "app", "pages")]);
   if (!root || !fs.existsSync(root)) return [];
 
   const routes: string[] = [];
@@ -204,9 +192,7 @@ function nextRoutes(frontendDir: string): string[] {
 
   if (fs.existsSync(pagesDir)) walk(pagesDir, "", "pages");
   else if (fs.existsSync(appDir)) walk(appDir, "", "app");
-  return routes
-    .map((r) => r.replace(/\[([^\]]+)\]/g, ":$1"))
-    .sort();
+  return routes.map((r) => r.replace(/\[([^\]]+)\]/g, ":$1")).sort();
 }
 
 function findAuthStates(frontendDir: string): string[] {
@@ -264,8 +250,16 @@ export function scanProject(projectDir: string): ScanResult {
   }
   if (!frontendDir) {
     return {
-      projectDir: resolved, frontendDir: null, framework: null, devCommand: null, portGuess: null,
-      routes: [], authStates: [], hasPlaywright: false, usesTestids: false, readmeExcerpt: null,
+      projectDir: resolved,
+      frontendDir: null,
+      framework: null,
+      devCommand: null,
+      portGuess: null,
+      routes: [],
+      authStates: [],
+      hasPlaywright: false,
+      usesTestids: false,
+      readmeExcerpt: null,
       notes: ["No frontend workspace found (no package.json with a known frontend dependency at depth ≤ 2)."],
     };
   }
@@ -295,8 +289,7 @@ export function scanProject(projectDir: string): ScanResult {
     );
   }
   const authStates = findAuthStates(frontendDir);
-  const hasPlaywright = fs.existsSync(path.join(frontendDir, "playwright.config.ts")) ||
-    fs.existsSync(path.join(frontendDir, "playwright.config.js"));
+  const hasPlaywright = fs.existsSync(path.join(frontendDir, "playwright.config.ts")) || fs.existsSync(path.join(frontendDir, "playwright.config.js"));
 
   // Full-stack heuristics: launching the frontend alone probably isn't enough.
   for (const marker of ["docker-compose.yml", "docker", "Makefile", "backend"]) {
@@ -340,7 +333,12 @@ export function formatScan(result: ScanResult): string {
     `Frontend: ${result.frontendDir ?? "NOT FOUND"}`,
     `Framework: ${result.framework ?? "unknown"}${result.devCommand ? ` · dev script: "${result.devCommand}"` : ""}${result.portGuess ? ` · likely port ${result.portGuess}` : ""}`,
     `Playwright config: ${result.hasPlaywright ? "yes" : "no"} · data-testid convention: ${result.usesTestids ? "yes" : "not detected"}`,
-    `Auth storage states (${result.authStates.length}): ${result.authStates.slice(0, 8).map((p) => path.basename(p)).join(", ") || "none"}`,
+    `Auth storage states (${result.authStates.length}): ${
+      result.authStates
+        .slice(0, 8)
+        .map((p) => path.basename(p))
+        .join(", ") || "none"
+    }`,
     `Routes (${result.routes.length}):`,
     ...result.routes.slice(0, 60).map((r) => `  ${r}`),
     ...(result.routes.length > 60 ? [`  … and ${result.routes.length - 60} more`] : []),

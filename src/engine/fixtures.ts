@@ -132,8 +132,7 @@ export function generatedUpload(accept: string | null | undefined, fixture?: Fix
 const BUILDERS: Record<FixtureKind, () => Buffer> = {
   txt: () => Buffer.from("SceneScout synthetic upload fixture.\nGenerated for exploratory testing; contains no real data.\n", "utf8"),
   csv: () => Buffer.from("id,name,status\n1,Alpha widget,active\n2,Beta widget,inactive\n3,Gamma widget,active\n", "utf8"),
-  json: () =>
-    Buffer.from(`${JSON.stringify({ fixture: "scenescout", generated: true, items: [{ id: 1, name: "Alpha widget" }] }, null, 2)}\n`, "utf8"),
+  json: () => Buffer.from(`${JSON.stringify({ fixture: "scenescout", generated: true, items: [{ id: 1, name: "Alpha widget" }] }, null, 2)}\n`, "utf8"),
   // A tiny well-formed PNG: 1×1 RGBA, one half-transparent pixel, CRCs intact.
   png: () => Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"),
   pdf: minimalPdf,
