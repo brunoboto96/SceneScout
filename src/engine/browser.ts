@@ -101,6 +101,8 @@ interface SnapshotElement extends InteractableInfo {
   /** Inside position:fixed/sticky chrome — overlaps between chrome are intended layering. */
   chrome?: boolean;
   rect: Rect;
+  /** Set when the control is pinned chrome whose centre is owned by other pinned chrome (hit-tested in the page). */
+  coveredBy?: string | null;
 }
 
 const SETTLE_MS = 400;

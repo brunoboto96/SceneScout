@@ -21,6 +21,15 @@ export const VISIBLE_SRC = `(el) => {
   }`;
 
 /**
+ * Anything that plausibly presents as a modal/dialog panel. Deliberately wider
+ * than the ARIA set: a hand-rolled role-less modal must still count as "an
+ * overlay is up", or the scroll-lock oracle files a false leaked-lock finding
+ * against every healthy modal that locks the page behind it.
+ */
+export const DIALOG_LIKE_SEL = '[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"], [class*="modal" i], [class*="dialog" i]';
+// Declared above the collector script because that script interpolates it.
+
+/**
  * Page-side interactable collector. Shipped as a STRING, not a function:
  * loader transforms (tsx/vitest esbuild hooks inject a `__name` helper) break
  * serialized functions inside the browser, where the helper doesn't exist.
@@ -121,6 +130,51 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
     }
     return { layer, chrome };
   };
+  // A pinned control (inside position:fixed/sticky chrome) whose centre is
+  // owned by ANOTHER piece of pinned chrome. Two pieces of chrome overlapping
+  // is usually intended layering, which is why the box-overlap oracle skips
+  // that pair — but boxes cannot tell which one is on top. A hit test can: if
+  // the point at the control's centre belongs to a different pinned element,
+  // a click aimed at the control lands on that element instead.
+  // Deliberately narrow, to stay quiet on intended layering:
+  //  - only interactive controls, and only while their centre is in the viewport;
+  //  - the control must be pinned with NO scrollable ancestor in between, or
+  //    scrolling that pane would simply bring it out from under;
+  //  - dialogs and anything covering half the viewport are overlays, not
+  //    chrome (the overlay oracle owns those).
+  const INTERACTIVE_ROLES = ["button", "link", "textbox", "combobox", "checkbox", "radio", "switch", "tab", "menuitem", "file"];
+  const pinnedRootOf = (node, stopAtScroller) => {
+    for (let n = node; n && n !== document.documentElement; n = n.parentElement) {
+      const cs = window.getComputedStyle(n);
+      // The scroller test comes FIRST: a pane that is both sticky and
+      // scrollable pins itself, not its rows — they scroll inside it.
+      if (stopAtScroller && n !== node && /(auto|scroll)/.test(cs.overflowY + cs.overflowX) && (n.scrollHeight > n.clientHeight + 1 || n.scrollWidth > n.clientWidth + 1)) return null;
+      if (cs.position === "fixed" || cs.position === "sticky") return n;
+    }
+    return null;
+  };
+  const describe = (node) => {
+    const tid = node.getAttribute("data-testid");
+    if (tid) return "[" + tid + "]";
+    const text = (node.innerText || node.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40);
+    return "<" + node.tagName.toLowerCase() + ">" + (text ? ' "' + text + '"' : "");
+  };
+  const coveredByPinnedChrome = (el, rect, role) => {
+    if (INTERACTIVE_ROLES.indexOf(role) === -1) return null;
+    const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+    if (cx < 0 || cy < 0 || cx >= window.innerWidth || cy >= window.innerHeight) return null;
+    const ownRoot = pinnedRootOf(el, true);
+    if (!ownRoot) return null;
+    const top = document.elementFromPoint(cx, cy);
+    if (!top || top === el || el.contains(top) || top.contains(el)) return null;
+    const coverRoot = pinnedRootOf(top, false);
+    if (!coverRoot || coverRoot === ownRoot || coverRoot.contains(ownRoot) || ownRoot.contains(coverRoot)) return null;
+    if (coverRoot.closest('${DIALOG_LIKE_SEL}')) return null;
+    const cr = coverRoot.getBoundingClientRect();
+    if (cr.width * cr.height > window.innerWidth * window.innerHeight * 0.5) return null;
+    return describe(coverRoot);
+  };
+
   for (const el of Array.from(document.querySelectorAll(selector))) {
     if (seen.has(el) || !visible(el)) continue;
     seen.add(el);
@@ -173,6 +227,7 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
       }
     }
     out.push({
+      coveredBy: coveredByPinnedChrome(el, rect, role),
       tag,
       role,
       name: accessibleName(el),
@@ -204,20 +259,22 @@ export interface Rect {
 }
 
 /**
- * Anything that plausibly presents as a modal/dialog panel. Deliberately wider
- * than the ARIA set: a hand-rolled role-less modal must still count as "an
- * overlay is up", or the scroll-lock oracle files a false leaked-lock finding
- * against every healthy modal that locks the page behind it.
- */
-export const DIALOG_LIKE_SEL = '[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"], [class*="modal" i], [class*="dialog" i]';
-
-/**
  * Deterministic geometry oracles — the checks people reach for screenshots to
  * do, computed from layout boxes instead: interactables rendered fully outside
  * the viewport, and heavy overlap between non-nested interactables.
  */
 export function geometryIssues(
-  elements: Array<{ ref: string; name: string; role: string; xpath: string; rect: Rect; clipped?: boolean; layer?: number; chrome?: boolean }>,
+  elements: Array<{
+    ref: string;
+    name: string;
+    role: string;
+    xpath: string;
+    rect: Rect;
+    clipped?: boolean;
+    layer?: number;
+    chrome?: boolean;
+    coveredBy?: string | null;
+  }>,
   viewport: { width: number; height: number },
 ): string[] {
   const issues: string[] = [];
@@ -247,6 +304,20 @@ export function geometryIssues(
   if (clippedTotal > 3) {
     issues.push(`…and ${clippedTotal - 3} more controls clipped inside overflow-hidden ancestors`);
   }
+  // Pinned controls sitting underneath other pinned chrome (hit-tested in the
+  // page; see coveredByPinnedChrome). Reported before the box overlaps because
+  // an unclickable Save button outranks two badges touching.
+  let coveredTotal = 0;
+  for (const el of elements) {
+    if (!el.coveredBy) continue;
+    coveredTotal += 1;
+    if (coveredTotal <= 3) {
+      issues.push(
+        `${el.ref} ${el.role} "${el.name}" is COVERED by pinned chrome ${el.coveredBy} at this scroll position — a click aimed at it lands on that element instead`,
+      );
+    }
+  }
+  if (coveredTotal > 3) issues.push(`…and ${coveredTotal - 3} more pinned controls covered by other pinned chrome`);
   const overlapArea = (a: Rect, b: Rect): number => {
     const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
     const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);

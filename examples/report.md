@@ -6,7 +6,7 @@ Generated: (by `npm run demo`)
 
 | Metric | Value |
 |---|---|
-| Open findings | 9 (3 high) — 9 seen this session, 0 historical |
+| Open findings | 10 (4 high) — 10 seen this session, 0 historical |
 | Route coverage | 7/7 |
 | States explored | 7 |
 | Design audits this session | 3 |
@@ -28,7 +28,7 @@ Generated: (by `npm run demo`)
 - ⚠ 4/7 visited route(s) never design-audited: /orders.html, /reports.html, /settings.html, /reports-scheduled.html
 - ⚠ single-role run (anonymous) — permission boundaries and role capability gaps are untested
 
-## Findings — seen this session (9)
+## Findings — seen this session (10)
 
 ### 🔴 [HIGH] Filtering orders by Archived fails, and the page shows an empty table instead of an error
 
@@ -127,6 +127,36 @@ test("regression: A double-click on Create order creates two orders", async ({ p
   // snapshot @ http://127.0.0.1:4173/orders-new.html
   // click×2 button "Create order" @ http://127.0.0.1:4173/orders-new.html
   // screenshot @ http://127.0.0.1:4173/orders-new.html
+  // TODO: replay the steps above with page.getByTestId()/getByRole(), then assert the fix:
+  // expect(consoleErrors).toHaveLength(0);
+});
+```
+
+### 🔴 [HIGH] The Save notes button is covered by the bar at the bottom of the order page
+
+- **Id:** `367f382861` · **Category:** visual
+- **Evidence:** `"Save notes" is COVERED by pinned chrome [order-stickybar]`
+- **Where:** `/order.html#1d31ec04` (http://127.0.0.1:4173/order.html?id=1042)
+- **Seen in runs:** 1
+
+The save row is sticky at the bottom of the viewport, and a fixed bar added later sits on top of it. The button is present, labelled and enabled, but it cannot be seen, and a click aimed at it lands on the bar. It only becomes reachable after scrolling to the very end of the page. Found by hit-testing the button's centre, since box overlap cannot tell which of two pinned elements is on top.
+
+<details><summary>Repro trace (last actions before finding)</summary>
+
+1. design-audit @ http://127.0.0.1:4173/orders-new.html
+2. navigate http://127.0.0.1:4173/order.html?id=1042 @ http://127.0.0.1:4173/order.html?id=1042
+3. snapshot @ http://127.0.0.1:4173/order.html?id=1042
+4. screenshot @ http://127.0.0.1:4173/order.html?id=1042
+
+</details>
+
+```ts
+test("regression: The Save notes button is covered by the bar at the bottom of the order page", async ({ page }) => {
+  await page.goto("/order.html?id=1042");
+  // design-audit @ http://127.0.0.1:4173/orders-new.html
+  // navigate http://127.0.0.1:4173/order.html?id=1042 @ http://127.0.0.1:4173/order.html?id=1042
+  // snapshot @ http://127.0.0.1:4173/order.html?id=1042
+  // screenshot @ http://127.0.0.1:4173/order.html?id=1042
   // TODO: replay the steps above with page.getByTestId()/getByRole(), then assert the fix:
   // expect(consoleErrors).toHaveLength(0);
 });

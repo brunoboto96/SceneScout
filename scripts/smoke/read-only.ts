@@ -586,6 +586,25 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     );
     check("read-only: the worker-issued DELETE never reaches the server", stats.workerDeletes === 0, `server received ${stats.workerDeletes} DELETE(s)`);
 
+    console.log("geometry: a pinned control under other pinned chrome is caught by hit test, intended layering is not");
+    // Boxes cannot say which of two overlapping pinned elements is on top, so
+    // the box oracle skips chrome/chrome pairs. A sticky action row under a
+    // fixed bar added later is the case that skip misses: the button is there,
+    // labelled, enabled — and every click lands on the bar.
+    await engine.navigate("/covered.html");
+    const coveredSnap = await engine.snapshot(true);
+    check(
+      "a sticky Save button under a fixed bar is reported as covered",
+      /"Save changes" is COVERED by pinned chrome \[promo-bar\]/.test(coveredSnap),
+      coveredSnap.match(/GEOMETRY[\s\S]{0,400}/)?.[0] ?? coveredSnap.slice(0, 400),
+    );
+    check(
+      "links under a sticky header inside a scrollable panel are NOT reported (they scroll out from under it)",
+      !/Item [A-F]" is COVERED/.test(coveredSnap),
+      coveredSnap.match(/GEOMETRY[\s\S]{0,400}/)?.[0] ?? "",
+    );
+    check("a fixed button that covers nothing is NOT reported", !/"Help" is COVERED/.test(coveredSnap));
+
     await engine.navigate("/");
     const roSnap = await engine.snapshot(true);
     const roRefOf = (label: string): string => {

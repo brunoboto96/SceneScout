@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Pinned chrome fixtures</title>
+    <style>
+      body { margin: 0; font: 15px/1.4 system-ui, sans-serif; }
+      main { padding: 16px 24px 80px; }
+      .filler { height: 1600px; }
+      /* A sticky action row... */
+      .actions { position: sticky; bottom: 0; padding: 10px 0; background: #fff; }
+      /* ...and a fixed bar added later that lands on top of it. */
+      .promo { position: fixed; left: 0; right: 0; bottom: 0; height: 56px; background: #222; color: #fff; padding: 0 24px; line-height: 56px; }
+      /* Intended layering: a sticky header over a SCROLLABLE list. The rows
+         under the header scroll out from under it, so none of them is stuck. */
+      .panel { position: sticky; top: 0; width: 320px; height: 160px; overflow-y: auto; border: 1px solid #ccc; margin-top: 16px; }
+      .panel header { position: sticky; top: 0; background: #eee; padding: 8px; height: 40px; box-sizing: border-box; }
+      .panel a { display: block; padding: 8px; }
+      /* Intended layering: a fixed help button that covers nothing interactive. */
+      .help { position: fixed; right: 16px; top: 16px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Pinned chrome fixtures</h1>
+      <button class="help" data-testid="help-btn" type="button">Help</button>
+      <div class="panel" data-testid="side-panel">
+        <header data-testid="panel-header">Recent items</header>
+        <a href="#a" data-testid="panel-link-a">Item A</a>
+        <a href="#b" data-testid="panel-link-b">Item B</a>
+        <a href="#c" data-testid="panel-link-c">Item C</a>
+        <a href="#d" data-testid="panel-link-d">Item D</a>
+        <a href="#e" data-testid="panel-link-e">Item E</a>
+        <a href="#f" data-testid="panel-link-f">Item F</a>
+      </div>
+      <p>Long content comes BEFORE the action row, so the row is stuck to the bottom of the viewport.</p>
+      <div class="filler" aria-hidden="true"></div>
+      <div class="actions"><button data-testid="save-btn" type="button">Save changes</button></div>
+    </main>
+    <div class="promo" data-testid="promo-bar">Try the new importer</div>
+  </body>
+</html>

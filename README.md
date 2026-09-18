@@ -28,7 +28,7 @@ Scripted E2E suites answer one question — *"does this exact flow still work?"*
 
 ## 👀 See it work
 
-This is a real run against the small demo app bundled in this repository. The screenshot was taken by SceneScout; the badge sitting on top of a button and the missing chart are two of the nine findings it filed.
+This is a real run against the small demo app bundled in this repository. The screenshot was taken by SceneScout; the badge sitting on top of a button and the missing chart are two of the ten findings it filed.
 
 <p align="center"><img src="examples/screenshots/dashboard.png" alt="The demo app's dashboard: a yellow badge covers the All orders button, and the weekly chart image is broken" width="720" /></p>
 
@@ -46,7 +46,7 @@ An excerpt of the report it wrote — [read the whole thing](examples/report.md)
 >
 > **Gap ledger — what was NOT tested:** 4/7 visited routes never design-audited · single-role run, so permission boundaries are untested
 
-Every finding comes with a repro trace and a Playwright regression-test skeleton. Try it yourself in two minutes: `npm run demo:serve`, then `/scenescout --url http://127.0.0.1:4173` — see [demo-app/](demo-app/). It also documents [one defect the tool deliberately does not flag](demo-app/README.md#what-it-deliberately-does-not-catch).
+Every finding comes with a repro trace and a Playwright regression-test skeleton. Try it yourself in two minutes: `npm run demo:serve`, then `/scenescout --url http://127.0.0.1:4173` — see [demo-app/](demo-app/). Its README lists every seeded defect and which oracle catches it.
 
 ---
 
