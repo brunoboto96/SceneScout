@@ -122,7 +122,7 @@ npx -y scenescout install      # skill + Chromium (~150 MB, one-time) + register
 /plugin install scenescout@scenescout-marketplace
 ```
 
-Then download the browser once with `npx -y scenescout install --browser-only`. The command becomes `/scenescout:scenescout`.
+Then download the browser once with `npx -y scenescout install --browser-only`. The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release lands here the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
 
 **Another MCP client?** Run `npx -y scenescout install --browser-only` and [add the server to its config](#-other-mcp-clients).
 
@@ -262,6 +262,7 @@ Run `npx -y scenescout doctor` first — it checks every setup item below (every
 | `/scenescout` isn't a known command | The skill isn't linked, or the session predates it. `npx -y scenescout install`, then start a **fresh** Claude Code session. |
 | The `scout_*` tools don't appear | The MCP server isn't registered, or points at an old path. `npx -y scenescout install` re-registers it; `claude mcp list` should show `scenescout` as connected. |
 | *"Executable not found in $PATH"* | The server was registered with a bare `node`. `npx -y scenescout install` registers an absolute path. |
+| Installed as a plugin, and the tools fail with *"Executable not found in $PATH: npx"* | A plugin starts the server with a bare `npx`, which Claude Code can only find if it was launched from an environment that has Node on its `PATH`. Under nvm or fnm that means starting Claude Code from a terminal, not from a dock or launcher. Or use `npx -y scenescout install` instead, which registers the absolute path of `npx`. |
 | *"Executable doesn't exist … chromium"* | The browser download was skipped or failed. `npx playwright install chromium` (on Linux add `--with-deps`). |
 | Tools broke after moving the folder or changing node version | The registration stores absolute paths. `npx -y scenescout install` refreshes them. |
 | Attach fails or every route lands on the login page | Your app isn't running at `--url`, or the `--role` storage state has expired — regenerate it the way your project's Playwright setup does. |
