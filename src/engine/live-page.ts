@@ -31,12 +31,16 @@ export const LIVE_PAGE = `<!doctype html>
     }
   }
   * { box-sizing: border-box; }
+  ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  .feed, .brief, #report { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+  .badge, .meta, .feed .t, .since, #focus .bar .line { font-variant-numeric: tabular-nums; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   header { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
     padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
   h1 { margin: 0; font-size: 16px; font-weight: 650; }
   .meta { color: var(--muted); font-size: 13px; }
   .spacer { flex: 1 1 auto; }
+  .actions { display: flex; gap: 8px; flex: 0 0 auto; }
   button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
     padding: 5px 10px; cursor: pointer; }
   button:hover { border-color: var(--accent); }
@@ -71,7 +75,7 @@ export const LIVE_PAGE = `<!doctype html>
     font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-height: 108px; overflow-y: auto; overscroll-behavior: contain; }
   .feed .row { display: flex; gap: 6px; white-space: nowrap; }
   /* Consecutive actions of one journey share a tint, so where one goal ends and the next begins is visible in the log. */
-  .feed .group { border-left: 3px solid transparent; padding-left: 4px; margin-left: -4px; border-radius: 3px; }
+  .feed .group { border-left: 1px solid transparent; padding-left: 5px; margin-left: -6px; border-radius: 3px; }
   .feed .g0 { background: rgba(96, 165, 250, .13); border-color: rgba(96, 165, 250, .7); }
   .feed .g1 { background: rgba(52, 211, 153, .13); border-color: rgba(52, 211, 153, .7); }
   .feed .g2 { background: rgba(251, 191, 36, .13); border-color: rgba(251, 191, 36, .7); }
@@ -83,9 +87,9 @@ export const LIVE_PAGE = `<!doctype html>
   .feed .bad { color: var(--stuck); }
   .feed .none { color: var(--muted); }
   #focus .lower { display: flex; gap: 10px; flex: 0 0 auto; height: 30vh; min-height: 140px; }
-  #focus .feed { margin: 0; max-height: none; flex: 2 1 0; min-width: 0; background: #11151b; border-color: #2a303a; }
+  #focus .feed { margin: 0; max-height: none; flex: 2 1 0; min-width: 0; background: #11151b; border-color: #2a303a; scrollbar-color: #2a303a transparent; }
   #focus .brief { flex: 1 1 0; min-width: 0; overflow-y: auto; padding: 10px 14px; background: #11151b; border: 1px solid #2a303a;
-    border-radius: 6px; color: #e6e9ee; }
+    border-radius: 6px; color: #e6e9ee; scrollbar-color: #2a303a transparent; }
   #focus .brief h3 { margin: 0 0 4px; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: #98a2b3; }
   #focus .brief p { margin: 0 0 14px; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
   #focus .brief p.unset { color: #98a2b3; font-style: italic; }
@@ -132,8 +136,10 @@ export const LIVE_PAGE = `<!doctype html>
   <span class="meta" id="engine" data-testid="live-engine-summary"></span>
   <span class="spacer"></span>
   <span class="meta" id="counts" data-testid="live-session-counts"></span>
-  <button type="button" id="report-open" data-testid="live-report-toggle">Report</button>
-  <button type="button" id="all" aria-pressed="false" data-testid="live-all-toggle">Stream all</button>
+  <span class="actions">
+    <button type="button" id="report-open" data-testid="live-report-toggle">Report</button>
+    <button type="button" id="all" aria-pressed="false" data-testid="live-all-toggle">Stream all</button>
+  </span>
 </header>
 <div id="banner" role="alert" data-testid="live-unreachable-banner">The engine is not answering. It may have exited; this page will pick up again if it comes back.</div>
 <div id="empty" data-testid="live-empty-state">No session is attached yet. Cards appear here as soon as one attaches.</div>
