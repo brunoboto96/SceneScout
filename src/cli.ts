@@ -351,7 +351,11 @@ async function doctor(flags: string[]): Promise<void> {
     if (!c.ok && c.fix) console.log(`    fix: ${c.fix}`);
   }
   if (checks.some((c) => !c.ok)) process.exit(1);
-  console.log("\nAll good. In any project, run:  /scenescout");
+  console.log(
+    flags.includes("--engine")
+      ? "\nAll good. Ask your agent:  Use SceneScout to test http://localhost:3000"
+      : "\nAll good. In any project, run:  /scenescout   (or ask: Use SceneScout to test http://localhost:3000)",
+  );
 }
 
 const [, , command, ...args] = process.argv;
