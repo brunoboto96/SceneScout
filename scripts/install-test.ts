@@ -16,12 +16,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   diagnose,
+  ensureCommand,
+  findOnUserPath,
   installSkill,
   isEphemeralRoot,
   launchCommand,
   manualRegisterCommand,
   NPX_SERVE_ARGS,
   parseRegistration,
+  planCommand,
   registerMcp,
   repairCommands,
   resolveClaudeDir,
@@ -931,4 +934,133 @@ test("the by-hand text exists for every client, for when nothing is run", () => 
   assert.match(manualFor("gemini", LAUNCH, "/home/u"), /^gemini mcp add --scope user scenescout /);
   assert.match(manualFor("vscode", LAUNCH, "/home/u"), /^code --add-mcp /);
   assert.match(manualFor("cursor", LAUNCH, "/home/u"), /"mcpServers".*\.cursor.*mcp\.json.*"scenescout"/);
+});
+
+// ---- the `scenescout` command on PATH --------------------------------------
+
+/** A checkout is what repairCommands calls one: it has a tsconfig and a src folder. */
+function fakeCheckout(): string {
+  const root = fakePackage();
+  fs.writeFileSync(path.join(root, "tsconfig.json"), "{}");
+  fs.mkdirSync(path.join(root, "src"));
+  fs.writeFileSync(path.join(root, "dist", "cli.js"), "");
+  return root;
+}
+
+test("a command npm put on PATH for the length of a run does not count as installed", () => {
+  // Under `npx scenescout install`, npx prepends its cache's node_modules/.bin,
+  // and the command found there is gone when the run ends. Reading it as
+  // "already on PATH" would skip the install for exactly the people who need it.
+  const onDisk = new Set(["/cache/_npx/abc/node_modules/.bin/scenescout", "/work/app/node_modules/.bin/scenescout", "/usr/local/bin/scenescout"]);
+  const find = (pathValue: string) => findOnUserPath({ names: ["scenescout"], pathValue, delimiter: ":", exists: (p) => onDisk.has(p) });
+  assert.equal(find("/cache/_npx/abc/node_modules/.bin:/work/app/node_modules/.bin/:/usr/bin"), null);
+  assert.equal(find("/cache/_npx/abc/node_modules/.bin:/usr/bin:/usr/local/bin"), "/usr/local/bin/scenescout");
+  assert.equal(find(""), null);
+});
+
+test("a checkout links the command, so it runs whatever was last built", () => {
+  const root = fakeCheckout();
+  const plan = planCommand({ packageRoot: root, nodePath: "/opt/node/bin/node", version: "9.9.9", resolved: null, platform: "darwin" });
+  assert.equal(plan.action, "run");
+  if (plan.action !== "run") return;
+  assert.equal(plan.how, "link");
+  assert.deepEqual(plan.args, ["link"]);
+  assert.equal(plan.cwd, root, "npm link acts on the package in the working directory");
+  assert.match(plan.manual, /npm link/);
+});
+
+test("a checkout that already owns the command is left alone, through a symlink too", () => {
+  const root = fakeCheckout();
+  const bin = path.join(tmp("sc-bin-"), "scenescout");
+  fs.symlinkSync(path.join(root, "dist", "cli.js"), bin);
+  assert.deepEqual(planCommand({ packageRoot: root, nodePath: process.execPath, version: "9.9.9", resolved: bin, platform: "darwin" }), {
+    action: "present",
+    at: bin,
+  });
+});
+
+test("a checkout takes the command over from another copy, and says which", () => {
+  // The same rule as the MCP registration: running install from a checkout
+  // means this checkout is the one to use. A stale global copy answering
+  // `scenescout watch` would run code without the command at all.
+  const other = path.join(tmp("sc-other-"), "scenescout");
+  fs.writeFileSync(other, "");
+  const plan = planCommand({ packageRoot: fakeCheckout(), nodePath: process.execPath, version: "9.9.9", resolved: other, platform: "linux" });
+  assert.equal(plan.action, "run");
+  if (plan.action === "run") assert.equal(plan.replaces, other);
+});
+
+test("a packaged install gets the same version installed globally, and leaves an existing command alone", () => {
+  const root = fakePackage(); // no tsconfig, no src: what npm or npx unpacks
+  const plan = planCommand({ packageRoot: root, nodePath: "/opt/node/bin/node", version: "1.4.2", resolved: null, platform: "linux" });
+  assert.equal(plan.action, "run");
+  if (plan.action === "run") {
+    assert.equal(plan.how, "global");
+    assert.deepEqual(plan.args, ["install", "-g", "scenescout@1.4.2"], "the version that is running, not whatever is latest");
+    assert.equal(plan.cwd, undefined);
+  }
+  const taken = planCommand({ packageRoot: root, nodePath: "/opt/node/bin/node", version: "1.4.2", resolved: "/usr/local/bin/scenescout", platform: "linux" });
+  assert.deepEqual(taken, { action: "present", at: "/usr/local/bin/scenescout" });
+});
+
+test("the npm beside the running node is preferred: it installs where this shell already looks", () => {
+  const nodeDir = tmp("sc-node-");
+  fs.writeFileSync(path.join(nodeDir, "npm"), "");
+  const beside = planCommand({ packageRoot: fakeCheckout(), nodePath: path.join(nodeDir, "node"), version: "1.0.0", resolved: null, platform: "darwin" });
+  assert.equal(beside.action === "run" && beside.command, path.join(nodeDir, "npm"));
+  const bare = planCommand({ packageRoot: fakeCheckout(), nodePath: "/nowhere/bin/node", version: "1.0.0", resolved: null, platform: "darwin" });
+  assert.equal(bare.action === "run" && bare.command, "npm");
+});
+
+test("on Windows the step hands over the command instead of failing to start npm", () => {
+  const plan = planCommand({ packageRoot: fakePackage(), nodePath: "C:\\node\\node.exe", version: "1.0.0", resolved: null, platform: "win32" });
+  assert.equal(plan.action, "manual");
+  if (plan.action === "manual") assert.match(plan.manual, /npm install -g scenescout@1\.0\.0/);
+  const { run, calls } = scripted([]);
+  assert.equal(ensureCommand(plan, run).status, "failed");
+  assert.equal(calls.length, 0);
+});
+
+test("running the plan: npm link runs in the checkout, and a refusal comes back with the line that explains it", () => {
+  const root = fakeCheckout();
+  const plan = planCommand({ packageRoot: root, nodePath: "/nowhere/bin/node", version: "1.0.0", resolved: null, platform: "darwin" });
+  const seen: Array<{ cwd?: string }> = [];
+  const linked = ensureCommand(plan, (command, args, opts) => {
+    seen.push({ cwd: opts?.cwd });
+    assert.deepEqual([command, ...args], ["npm", "link"]);
+    return ok();
+  });
+  assert.deepEqual(linked, { status: "installed", how: "link", replaced: null });
+  assert.equal(seen[0]?.cwd, root);
+
+  const refused = ensureCommand(plan, () => fail("npm warn something\nnpm ERR! code EACCES\nnpm ERR! path /usr/local/lib/node_modules"));
+  assert.equal(refused.status, "failed");
+  if (refused.status === "failed") {
+    assert.match(refused.detail, /EACCES/, "a root-owned prefix is the usual cause, and the detail has to name it");
+    assert.match(refused.manual, /npm link/);
+  }
+  const noNpm = ensureCommand(plan, () => absent);
+  assert.equal(noNpm.status === "failed" && noNpm.detail, "npm was not found");
+
+  const { run, calls } = scripted([]);
+  assert.deepEqual(ensureCommand({ action: "present", at: "/usr/local/bin/scenescout" }, run), { status: "present", at: "/usr/local/bin/scenescout" });
+  assert.equal(calls.length, 0, "a command that is already there costs no npm run");
+});
+
+test("npm failing with nothing on stderr is still given a reason", () => {
+  // A timed-out npm yields "" for both streams; "".split("\n") is [""], so the
+  // reason read as `was not put on PATH ()`.
+  const plan = {
+    action: "run" as const,
+    how: "global" as const,
+    command: "npm",
+    args: ["install", "-g", "scenescout@1.0.0"],
+    manual: "npm install -g scenescout@1.0.0",
+    replaces: null,
+  };
+  const silent = ensureCommand(plan, () => ({ status: 1, stdout: "", stderr: "", missing: false }));
+  assert.equal(silent.status, "failed");
+  assert.equal(silent.status === "failed" ? silent.detail : "", "npm exited 1");
+  const killed = ensureCommand(plan, () => ({ status: null, stdout: "", stderr: "", missing: false }));
+  assert.equal(killed.status === "failed" ? killed.detail : "", "npm exited without finishing");
 });

@@ -27,7 +27,20 @@ import {
   type InstallTarget,
 } from "./browsers.js";
 import { CLIENT_LABELS, firstMessageHint, manualFor, parseClients, registerWithClient, vscodeBinary, type CodeOnPath, type OtherClient } from "./clients.js";
-import { diagnose, installSkill, launchCommand, manualRegisterCommand, registerMcp, resolveClaudeDir, spawnRunner } from "./installer.js";
+import {
+  CLI_NAME,
+  diagnose,
+  ensureCommand,
+  findOnUserPath,
+  installSkill,
+  isEphemeralRoot,
+  launchCommand,
+  manualRegisterCommand,
+  planCommand,
+  registerMcp,
+  resolveClaudeDir,
+  spawnRunner,
+} from "./installer.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME } from "./engine/memory.js";
 import { formatScan, scanProject } from "./scan.js";
 
@@ -41,7 +54,8 @@ Usage:
   scenescout scan <projectPath>     Discover framework, routes, auth states
   scenescout serve                  Run the MCP server (stdio)
   scenescout install                One-step setup: skill + Chromium + MCP registration
-                                    (--skip-browser, --no-register to opt out of a step;
+                                    It also puts the \`scenescout\` command on your PATH.
+                                    (--skip-browser, --no-register, --no-command to opt out of a step;
                                      --browser-only when the skill and server came from a plugin;
                                      --browsers <list> to choose what to download: chromium (default),
                                      chromium-headless-shell, firefox, webkit, all — comma-separated)
@@ -317,8 +331,41 @@ async function install(flags: string[]): Promise<void> {
     }
   }
 
+  // `scenescout status`, `watch` and `doctor` are typed by a person, and neither
+  // a checkout nor an npx run leaves the command on PATH. Not having it costs
+  // convenience, never a working setup, so this step reports and does not fail.
+  let cli = isEphemeralRoot(packageRoot) ? `npx -y ${CLI_NAME}` : `node ${path.join(packageRoot, "dist", "cli.js")}`;
+  if (browserOnly) {
+    // a plugin install has no package of its own to put on PATH
+  } else if (flags.includes("--no-command")) {
+    console.log(`· Putting \`${CLI_NAME}\` on PATH skipped (--no-command). Until then the command is:  ${cli}`);
+  } else {
+    const onPath = (): string | null =>
+      findOnUserPath({ names: process.platform === "win32" ? [`${CLI_NAME}.cmd`] : [CLI_NAME], pathValue: process.env.PATH ?? "" });
+    const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version: string };
+    const done = ensureCommand(
+      planCommand({ packageRoot, nodePath: process.execPath, version: pkg.version, resolved: onPath(), platform: process.platform }),
+      spawnRunner,
+    );
+    if (done.status === "present") {
+      cli = CLI_NAME;
+      console.log(`✓ \`${CLI_NAME}\` command already on PATH: ${done.at}`);
+    } else if (done.status === "installed") {
+      const at = onPath();
+      if (at) cli = CLI_NAME;
+      const what = done.how === "link" ? "linked to this checkout, so it runs whatever was last built" : "installed globally";
+      console.log(
+        at
+          ? `✓ \`${CLI_NAME}\` command ${what}: ${at}${done.replaced ? `   (it replaces ${done.replaced})` : ""}`
+          : `· \`${CLI_NAME}\` was ${what}, but npm's global bin directory is not on this shell's PATH. Add it (\`npm prefix -g\` names it; the commands are in its bin folder), or use:  ${cli}`,
+      );
+    } else {
+      console.log(`· \`${CLI_NAME}\` was not put on PATH (${done.detail}). To do it by hand:  ${done.manual}\n  Until then the command is:  ${cli}`);
+    }
+  }
+
   if (failed) {
-    console.log(`\nSetup is incomplete — fix the lines marked ✗ or · above, then run:  scenescout doctor${forClaude ? "" : " --engine"}`);
+    console.log(`\nSetup is incomplete — fix the lines marked ✗ or · above, then run:  ${cli} doctor${forClaude ? "" : " --engine"}`);
     process.exitCode = 1;
     return;
   }
@@ -329,7 +376,7 @@ async function install(flags: string[]): Promise<void> {
   if (forClaude) console.log("\nStart a FRESH Claude Code session, then in any project run:  /scenescout");
   // Telling someone to restart a client nothing was registered with sends them looking for a server that is not there.
   if (others.length > 0 && !flags.includes("--no-register")) console.log(`\n${firstMessageHint(others)}`);
-  console.log(`Something off? Run:  scenescout doctor${forClaude ? "" : " --engine"}`);
+  console.log(`Something off? Run:  ${cli} doctor${forClaude ? "" : " --engine"}`);
 }
 
 async function doctor(flags: string[]): Promise<void> {

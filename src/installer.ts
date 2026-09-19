@@ -18,17 +18,19 @@ const LEGACY_SKILL_NAMES = ["frontend-tester", "scenecraft"];
 const LEGACY_MCP_NAMES = ["scenecraft"];
 
 export type RunResult = { status: number | null; stdout: string; stderr: string; missing: boolean };
-export type Runner = (command: string, args: string[]) => RunResult;
+export type Runner = (command: string, args: string[], opts?: { cwd?: string }) => RunResult;
 
 /** Real runner. `missing` separates "the binary is not installed" from "it ran and failed". */
-export const spawnRunner: Runner = (command, args) => {
-  const r = spawnSync(command, args, { encoding: "utf8", timeout: 60_000 });
+export const spawnRunner: Runner = (command, args, opts) => {
+  const r = spawnSync(command, args, { encoding: "utf8", timeout: 60_000, cwd: opts?.cwd });
   const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
   // On Windows node refuses to start a .cmd or .bat file directly (EINVAL). For
   // the caller that is the same situation as a missing binary: nothing ran, and
   // the command has to be handed to the person instead.
   const missing = code === "ENOENT" || (process.platform === "win32" && code === "EINVAL");
-  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? (r.error ? String(r.error.message) : ""), missing };
+  // With `encoding` set, a command that never ran still yields "" for stderr: the error is the only account of it.
+  const stderr = r.stderr || (code === "ETIMEDOUT" ? "npm did not finish within 60 s" : r.error ? String(r.error.message) : "");
+  return { status: r.status, stdout: r.stdout ?? "", stderr, missing };
 };
 
 export type SkillInstall = { mode: "symlink" | "copy"; dest: string; src: string; notes: string[] };
@@ -265,13 +267,97 @@ export function parseRegistration(listing: string): { command: string | null; se
   return { command: field("Command"), serverPath: field("Args") };
 }
 
+/** The command the package's `bin` entry provides. */
+export const CLI_NAME = "scenescout";
+
+const isCheckoutRoot = (packageRoot: string): boolean => fs.existsSync(path.join(packageRoot, "tsconfig.json")) && fs.existsSync(path.join(packageRoot, "src"));
+
+/**
+ * Where a command resolves in the user's own shell, or null.
+ *
+ * npm and npx put `node_modules/.bin` directories on PATH for the length of a
+ * run. Under `npx scenescout install` that makes the command appear installed
+ * when it will be gone the moment the run ends, so those entries are skipped.
+ */
+export function findOnUserPath(opts: { names: readonly string[]; pathValue: string; delimiter?: string; exists?: (p: string) => boolean }): string | null {
+  const exists = opts.exists ?? fs.existsSync;
+  for (const dir of opts.pathValue.split(opts.delimiter ?? path.delimiter).filter(Boolean)) {
+    if (/[\\/]node_modules[\\/]\.bin[\\/]?$/.test(dir)) continue;
+    for (const name of opts.names) {
+      const candidate = path.join(dir, name);
+      if (exists(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+export type CommandPlan =
+  | { action: "present"; at: string }
+  | { action: "run"; how: "link" | "global"; command: string; args: string[]; cwd?: string; manual: string; replaces: string | null }
+  | { action: "manual"; manual: string; why: string };
+
+/**
+ * What it takes for `scenescout` to work as a command in a terminal.
+ *
+ * The MCP registration never needed that: it stores an absolute launcher. But
+ * `scenescout status` and `scenescout watch` are typed by a person, and both a
+ * source checkout and an npx run leave nothing on PATH, so the commands the
+ * tool itself recommends answered "command not found".
+ *
+ * A checkout is linked, so the command always runs what was last built. Any
+ * other install gets the same version installed globally. A checkout takes the
+ * name over from another copy, the way it takes over the MCP registration; a
+ * packaged install leaves an existing command alone.
+ */
+export function planCommand(opts: { packageRoot: string; nodePath: string; version: string; resolved: string | null; platform: NodeJS.Platform }): CommandPlan {
+  const checkout = isCheckoutRoot(opts.packageRoot);
+  const manual = checkout ? `npm link   (run in ${opts.packageRoot})` : `npm install -g ${CLI_NAME}@${opts.version}`;
+  if (opts.resolved !== null) {
+    const mine = samePath(opts.resolved, path.join(opts.packageRoot, "dist", "cli.js"));
+    if (mine || !checkout) return { action: "present", at: opts.resolved };
+  }
+  // npm on Windows is a .cmd shim, which node cannot start directly.
+  if (opts.platform === "win32") return { action: "manual", manual, why: "this step cannot start npm on Windows" };
+  const beside = path.join(path.dirname(opts.nodePath), "npm");
+  // The npm beside the running node installs into that node's prefix, which is
+  // the one whose bin directory the shell that started us already has on PATH.
+  const npm = fs.existsSync(beside) ? beside : "npm";
+  return checkout
+    ? { action: "run", how: "link", command: npm, args: ["link"], cwd: opts.packageRoot, manual, replaces: opts.resolved }
+    : { action: "run", how: "global", command: npm, args: ["install", "-g", `${CLI_NAME}@${opts.version}`], manual, replaces: null };
+}
+
+export type CommandResult =
+  | { status: "present"; at: string }
+  | { status: "installed"; how: "link" | "global"; replaced: string | null }
+  | { status: "failed"; manual: string; detail: string };
+
+export function ensureCommand(plan: CommandPlan, run: Runner): CommandResult {
+  if (plan.action === "present") return { status: "present", at: plan.at };
+  if (plan.action === "manual") return { status: "failed", manual: plan.manual, detail: plan.why };
+  const r = run(plan.command, plan.args, { cwd: plan.cwd });
+  if (r.missing) return { status: "failed", manual: plan.manual, detail: "npm was not found" };
+  if (r.status !== 0) {
+    // A system-wide node owns its prefix as root; that is the usual reason, and
+    // the last line of npm's output names it. With no output at all (a timeout,
+    // a kill) the exit is all there is to say.
+    const lines = (r.stderr || r.stdout).trim().split("\n");
+    return {
+      status: "failed",
+      manual: plan.manual,
+      detail: lines.find((l) => /EACCES|EPERM|ERR!/.test(l))?.trim() || lines[lines.length - 1] || `npm exited ${r.status ?? "without finishing"}`,
+    };
+  }
+  return { status: "installed", how: plan.how, replaced: plan.replaces };
+}
+
 /**
  * The command that repairs a setup, for THIS kind of install. A source checkout
  * has `npm run setup`; someone who installed from npm has no such script, and
  * telling them to run it sends them looking for a package.json they never had.
  */
 export function repairCommands(packageRoot: string): { setup: string; build: string; browser: (target: InstallTarget) => string } {
-  const isCheckout = fs.existsSync(path.join(packageRoot, "tsconfig.json")) && fs.existsSync(path.join(packageRoot, "src"));
+  const isCheckout = isCheckoutRoot(packageRoot);
   // Installing "chromium" brings the headless shell with it, so the plain
   // setup command already repairs either Chromium build.
   const browserFlags = (target: InstallTarget) => (engineOf(target) === "chromium" ? "" : ` --browser-only --browsers ${target}`);
