@@ -15,6 +15,7 @@ and which failure direction was chosen deliberately.
 | [0004](0004-dedup-on-machine-signals-not-prose.md) | Findings dedup on machine signals; a merge must never lose a finding |
 | [0005](0005-keep-testable-logic-out-of-the-browser-module.md) | Logic that does not need Playwright lives outside `browser.ts` |
 | [0006](0006-stay-project-agnostic.md) | Nothing in this repo names or is tuned for a tested app |
+| [0007](0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md) | The live view is local, read-only, and leaves nothing behind |
 
 ## Writing a new one
 
