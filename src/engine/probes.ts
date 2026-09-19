@@ -9,6 +9,7 @@
  */
 import type { Page } from "playwright";
 import { DIALOG_LIKE_SEL } from "./collector.js";
+import { focusAdvanceKey, isBrowserEngine } from "../browsers.js";
 import type { FocusSample } from "./design.js";
 
 /** Per-action Playwright timeout, shared with the engine so a scroll into view fails as fast as a click would. */
@@ -260,11 +261,13 @@ export async function probeOverlays(page: Page): Promise<string[]> {
  * than failing the audit.
  */
 export async function probeFocusIndicators(page: Page): Promise<FocusSample[]> {
+  const name = page.context().browser()?.browserType().name();
+  const advanceKey = focusAdvanceKey(name && isBrowserEngine(name) ? name : "chromium", process.platform);
   const styleSig = "s.outlineStyle + '|' + s.outlineWidth + '|' + s.outlineColor + '|' + s.boxShadow + '|' + s.borderColor + '|' + s.backgroundColor";
   const stops: Array<{ i: number; label: string; focused: string }> = [];
   try {
     for (let i = 0; i < 15; i++) {
-      await page.keyboard.press("Tab");
+      await page.keyboard.press(advanceKey);
       const info = (await page.evaluate(`(() => {
         const el = document.activeElement;
         if (!el || el === document.body || el === document.documentElement) return null;

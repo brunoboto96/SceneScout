@@ -233,6 +233,12 @@ server.registerTool(
         .default("read-only")
         .describe("Write policy (see tool description). Never choose 'destructive' yourself — user opt-in only."),
       headed: z.boolean().default(false).describe("Show the browser window"),
+      browser: z
+        .enum(["chromium", "firefox", "webkit"])
+        .optional()
+        .describe(
+          "Browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else chromium. firefox and webkit must be downloaded first (scenescout install --browser-only --browsers firefox). Use them for a cross-browser pass; stay on chromium otherwise.",
+        ),
       viewportWidth: z.number().int().min(320).max(3840).optional().describe("Viewport width (default 1280); use e.g. 390 for a mobile pass"),
       viewportHeight: z.number().int().min(480).max(2400).optional().describe("Viewport height (default 900)"),
       session: z
@@ -251,6 +257,7 @@ server.registerTool(
       storageStatePath,
       mode,
       headed,
+      browser,
       viewportWidth,
       viewportHeight,
       session,
@@ -260,6 +267,7 @@ server.registerTool(
       storageStatePath?: string;
       mode?: "observe" | "read-only" | "safe-write" | "destructive";
       headed?: boolean;
+      browser?: "chromium" | "firefox" | "webkit";
       viewportWidth?: number;
       viewportHeight?: number;
       session?: string;
@@ -321,7 +329,7 @@ server.registerTool(
           /* conflict detection is best-effort */
         }
         const viewport = viewportWidth && viewportHeight ? { width: viewportWidth, height: viewportHeight } : undefined;
-        const out = await eng.attach({ url, projectDir: projectPath, storageStatePath, mode, headed, viewport, memoryStore: store });
+        const out = await eng.attach({ url, projectDir: projectPath, storageStatePath, mode, headed, browser, viewport, memoryStore: store });
         eng.role = storageStatePath ? path.basename(storageStatePath).replace(/\.json$/i, "") : "anonymous";
         return text(out + conflictNote + (engines.size > 1 ? `\n${sessionLines()}` : ""), target);
       } catch (err) {

@@ -4,7 +4,8 @@
 import fs from "node:fs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { generateReport } from "../../dist/engine/report.js";
-import { check, settle, type SmokeContext } from "./harness.ts";
+import { focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
+import { BROWSER, check, settle, type SmokeContext } from "./harness.ts";
 
 export const title = "read-only exploration";
 
@@ -427,7 +428,8 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     check("plan type appends and threads replace through", plan3.includes("APPENDED") && plan3.includes('replaced existing content "Draft note plus"'), plan3);
     const plan4 = await engine.runPlan([
       { action: "click", target: "testid=danger-confirm-input" },
-      { action: "press", value: "Tab" },
+      // The key that reaches a button from the field before it; not plain Tab in every browser.
+      { action: "press", value: focusAdvanceKey(BROWSER, process.platform) },
       { action: "press", value: "Enter" },
       { action: "navigate", target: "/page2.html" },
     ]);
@@ -574,17 +576,43 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       await settle(100);
       workerSnap = await engine.snapshot(true);
     }
-    check("the fixture's service worker is active (otherwise this proves nothing)", workerSnap.includes("worker: active"), workerSnap.slice(0, 300));
     const syncRef = workerSnap.match(/(e\d+) button "Sync now"/)?.[1];
     if (!syncRef) throw new Error("Sync now button not found");
-    const syncResult = await engine.click(syncRef);
+    if (serviceWorkerPolicy(BROWSER) === "allow") {
+      check("the fixture's service worker is active (otherwise this proves nothing)", workerSnap.includes("worker: active"), workerSnap.slice(0, 300));
+      const syncResult = await engine.click(syncRef);
+      await settle(600);
+      check(
+        "read-only: the worker-issued DELETE is reported as blocked",
+        syncResult.includes("WRITE-POLICY blocked") && syncResult.includes("/api/items/999"),
+        syncResult,
+      );
+    } else {
+      // The driver cannot intercept worker traffic in this browser, so the
+      // engine does not let the worker register. Without that, this DELETE
+      // reached the server in read-only mode.
+      check(`${BROWSER}: the service worker is kept from registering`, !workerSnap.includes("worker: active"), workerSnap.slice(0, 300));
+      await engine.click(syncRef);
+      await settle(600);
+    }
+    check("read-only: the worker-issued DELETE never reaches the server", stats.workerDeletes === 0, `server received ${stats.workerDeletes} DELETE(s)`);
+
+    console.log("write policy: a shared worker cannot send a write the policy never sees");
+    // No browser lets the driver intercept a request a shared worker issues, so
+    // the page is not given shared workers at all. A DELETE sent from one used
+    // to reach the server in read-only mode, in every browser, with nothing logged.
+    await engine.navigate("/shared-worker.html");
+    const sharedSnap = await engine.snapshot(true);
+    check("the page sees no SharedWorker to construct", sharedSnap.includes("shared worker: unavailable"), sharedSnap.slice(0, 300));
+    const sharedRef = sharedSnap.match(/(e\d+) button "Sync through shared worker"/)?.[1];
+    if (!sharedRef) throw new Error("shared worker sync button not found");
+    await engine.click(sharedRef);
     await settle(600);
     check(
-      "read-only: the worker-issued DELETE is reported as blocked",
-      syncResult.includes("WRITE-POLICY blocked") && syncResult.includes("/api/items/999"),
-      syncResult,
+      "read-only: no DELETE from a shared worker reaches the server",
+      stats.sharedWorkerDeletes === 0,
+      `server received ${stats.sharedWorkerDeletes} DELETE(s)`,
     );
-    check("read-only: the worker-issued DELETE never reaches the server", stats.workerDeletes === 0, `server received ${stats.workerDeletes} DELETE(s)`);
 
     console.log("images: one that failed to load is reported from the DOM, even when no request failed");
     // The HTTP oracle catches a 404. It cannot catch an image URL that answers

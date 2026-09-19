@@ -4,7 +4,7 @@
  *
  *   scenescout scan <projectPath>   Print project discovery results
  *   scenescout serve                Run the MCP server on stdio
- *   scenescout install              Install the skill, download Chromium, register the MCP server
+ *   scenescout install              Install the skill, download the browser, register the MCP server
  *   scenescout doctor               Check every piece of the setup and say how to fix what is missing
  */
 import { spawnSync } from "node:child_process";
@@ -13,6 +13,19 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  APPROX_DISK_MB,
+  BROWSER_ENGINES,
+  browserPresence,
+  defaultAttachNote,
+  defaultEngine,
+  launchTarget,
+  parseBrowserSelection,
+  playwrightInstallArgs,
+  type BrowserEngineName,
+  type BrowserPresence,
+  type InstallTarget,
+} from "./browsers.js";
 import { diagnose, installSkill, launchCommand, manualRegisterCommand, registerMcp, resolveClaudeDir, spawnRunner } from "./installer.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME } from "./engine/memory.js";
 import { formatScan, scanProject } from "./scan.js";
@@ -28,7 +41,9 @@ Usage:
   scenescout serve                  Run the MCP server (stdio)
   scenescout install                One-step setup: skill + Chromium + MCP registration
                                     (--skip-browser, --no-register to opt out of a step;
-                                     --browser-only when the skill and server came from a plugin)
+                                     --browser-only when the skill and server came from a plugin;
+                                     --browsers <list> to choose what to download: chromium (default),
+                                     chromium-headless-shell, firefox, webkit, all — comma-separated)
   scenescout doctor                 Check the setup and print the fix for anything missing
                                     (--engine: only node, the build and the browser — for plugin
                                      installs and other MCP clients)
@@ -120,22 +135,41 @@ function status(projectPath: string): void {
   }
 }
 
-/** Where Playwright expects its Chromium build; null when playwright cannot say. */
-async function chromiumPath(): Promise<string | null> {
+/** Which browser builds are on disk, going by the paths Playwright reports for the version we depend on. */
+async function presentBrowsers(): Promise<BrowserPresence> {
+  const executables: Record<BrowserEngineName, string | null> = { chromium: null, firefox: null, webkit: null };
   try {
-    const { chromium } = await import("playwright");
-    return chromium.executablePath() || null;
+    const playwright = await import("playwright");
+    for (const name of BROWSER_ENGINES) executables[name] = playwright[name].executablePath() || null;
   } catch {
-    return null;
+    // Playwright cannot be loaded: every build reads as absent, which is what doctor should say.
   }
+  return browserPresence(executables);
 }
 
-/** Download Chromium through the playwright CLI that ships with our own dependency. */
-function downloadChromium(): boolean {
+/** Download browser builds through the playwright CLI that ships with our own dependency. */
+function downloadBrowsers(targets: readonly InstallTarget[]): boolean {
   const require = createRequire(import.meta.url);
   const cli = path.join(path.dirname(require.resolve("playwright/package.json")), "cli.js");
-  const r = spawnSync(process.execPath, [cli, "install", "chromium"], { stdio: "inherit" });
+  const r = spawnSync(process.execPath, [cli, ...playwrightInstallArgs(targets)], { stdio: "inherit" });
   return r.status === 0;
+}
+
+/**
+ * The value of `--browsers`, written as `--browsers x` or `--browsers=x`.
+ * Undefined when the flag is absent; empty when it was given no value, which
+ * includes being followed by another flag.
+ */
+function browsersFlag(flags: string[]): string | undefined {
+  // `--browser-only` is a different flag; a bare `--browser` is a slip that would otherwise be ignored and download Chromium.
+  const slip = flags.find((f) => f === "--browser" || f.startsWith("--browser="));
+  if (slip) throw new Error(`unknown flag ${slip.split("=")[0]} — did you mean --browsers?`);
+  const inline = flags.find((f) => f.startsWith("--browsers="));
+  if (inline) return inline.slice("--browsers=".length);
+  const at = flags.indexOf("--browsers");
+  if (at < 0) return undefined;
+  const next = flags[at + 1];
+  return next === undefined || next.startsWith("--") ? "" : next;
 }
 
 async function install(flags: string[]): Promise<void> {
@@ -150,6 +184,9 @@ async function install(flags: string[]): Promise<void> {
   // A plugin install already brings the skill and the server registration; the
   // only thing it cannot bring is the browser download.
   const browserOnly = flags.includes("--browser-only");
+  // Read the choice before doing anything, so a typo costs nothing.
+  const selection = parseBrowserSelection(browsersFlag(flags));
+  if ("error" in selection) throw new Error(selection.error);
   if (!browserOnly) {
     const skill = installSkill({ packageRoot, claudeDir: resolveClaudeDir(process.env, os.homedir()) });
     for (const note of skill.notes) console.log(`· ${note}`);
@@ -163,18 +200,28 @@ async function install(flags: string[]): Promise<void> {
   if (flags.includes("--skip-browser")) {
     console.log("· Browser download skipped (--skip-browser).");
   } else {
-    const existing = await chromiumPath();
-    if (existing && fs.existsSync(existing)) {
-      console.log(`✓ Chromium already present: ${existing}`);
-    } else {
-      console.log("· Downloading Chromium (one-time, ~150 MB)…");
-      if (downloadChromium()) console.log("✓ Chromium downloaded.");
+    const present = await presentBrowsers();
+    const missing = selection.targets.filter((t) => !present[t].installed);
+    for (const t of selection.targets) if (present[t].installed) console.log(`✓ ${t} already present: ${present[t].path}`);
+    if (missing.length > 0) {
+      const size = missing.reduce((sum, t) => sum + APPROX_DISK_MB[t], 0);
+      console.log(`· Downloading ${missing.join(", ")} (one-time, about ${size} MB on disk)…`);
+      if (downloadBrowsers(missing)) console.log(`✓ Downloaded: ${missing.join(", ")}.`);
       else {
         failed = true;
-        console.log("✗ Chromium download failed — run `npx playwright install chromium` and check your network/proxy.");
+        console.log(`✗ Browser download failed — run \`npx playwright install ${missing.join(" ")}\` and check your network/proxy.`);
       }
     }
   }
+
+  // Downloading a browser the server will not launch leaves the first attach failing with no hint why.
+  const engine = defaultEngine(process.env);
+  const note = defaultAttachNote({
+    selected: flags.includes("--skip-browser") ? [] : selection.targets,
+    defaultEngine: engine,
+    defaultInstalled: (await presentBrowsers())[launchTarget(engine, false)].installed,
+  });
+  if (note) console.log(`· Note: ${note}`);
 
   if (browserOnly) {
     // nothing to register
@@ -218,7 +265,12 @@ async function doctor(flags: string[]): Promise<void> {
     packageRoot,
     claudeDir: resolveClaudeDir(process.env, os.homedir()),
     nodeVersion: process.version,
-    chromiumPath: await chromiumPath(),
+    // What a default attach launches: the headless build of the default browser.
+    defaultBrowser: await (async () => {
+      const target = launchTarget(defaultEngine(process.env), false);
+      const found = (await presentBrowsers())[target];
+      return { target, path: found.installed ? found.path : null, expected: found.path };
+    })(),
     run: spawnRunner,
   });
   for (const c of checks) {

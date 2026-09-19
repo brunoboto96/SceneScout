@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Shared worker sync</title>
+  </head>
+  <body>
+    <h1>Shared worker sync</h1>
+    <p id="shared-state" data-testid="shared-worker-state">shared worker: starting</p>
+    <button id="shared-sync" data-testid="shared-worker-sync">Sync through shared worker</button>
+    <script>
+      const state = document.getElementById("shared-state");
+      let port = null;
+      // A careful app checks before it constructs; one that does not would throw here.
+      if ("SharedWorker" in window) {
+        try {
+          port = new SharedWorker("/shared-worker.js").port;
+          port.addEventListener("message", (m) => (state.textContent = "shared worker: " + m.data));
+          port.start();
+          state.textContent = "shared worker: connected";
+        } catch (err) {
+          state.textContent = "shared worker: unavailable";
+        }
+      } else {
+        state.textContent = "shared worker: unavailable";
+      }
+      document.getElementById("shared-sync").addEventListener("click", () => {
+        if (port) port.postMessage("sync");
+      });
+    </script>
+  </body>
+</html>
