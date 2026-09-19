@@ -42,7 +42,7 @@ import {
   spawnRunner,
 } from "./installer.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME } from "./engine/memory.js";
-import { localClock, formatSessionLine, LIVE_TOKEN_FILE, watchTarget, wholeSessions, type StatusFile } from "./engine/live.js";
+import { formatStatus, localClock, LIVE_TOKEN_FILE, watchTarget, type StatusFile } from "./engine/live.js";
 import { formatScan, scanProject } from "./scan.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -127,25 +127,7 @@ function status(projectPath: string): void {
     return;
   }
   const alive = pidAlive(st.pid);
-  const age = st.at ? Math.round((Date.now() - new Date(st.at).getTime()) / 1000) : null;
-  console.log(`Engine pid ${st.pid ?? "?"} — ${alive ? "ALIVE" : "not running (stale status)"}`);
-  console.log(`${st.phase === "running" ? "⏳ running" : "· idle after"}: ${st.tool ?? "?"}${age !== null ? ` (as of ${age}s ago)` : ""}`);
-  // The file is written by another process and can be caught mid-write, so
-  // only entries whole enough to describe are described.
-  const sessions = wholeSessions(st.detail);
-  if (sessions.length > 0) {
-    // One line per session. The single "Session:" line below it is all an
-    // engine from before the live view can offer.
-    console.log(`Sessions (${sessions.length}):`);
-    for (const entry of sessions) console.log(`  ${formatSessionLine(entry, Date.now())}`);
-    if (alive && st.live?.port) console.log("Live view: scenescout watch");
-    if (alive && st.live?.error) console.log(`Live view unavailable: ${st.live.error}`);
-  } else {
-    console.log(
-      `Session: ${st.session ?? "?"} (${st.role ?? "?"})${st.sessions && st.sessions.length > 1 ? ` · all sessions: ${st.sessions.join(", ")}` : ""}`,
-    );
-    if (st.url) console.log(`URL: ${st.url}`);
-  }
+  for (const line of formatStatus(st, alive, Date.now())) console.log(line);
   // Recent actions from the newest session log — the "what has it been doing" trail.
   const logs = fs.existsSync(dir)
     ? fs

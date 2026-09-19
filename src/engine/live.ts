@@ -235,6 +235,32 @@ export function writeStatusFile(dir: string, body: string): Promise<void> {
   return next;
 }
 
+/**
+ * The lines `scenescout status` prints for a status file it could read: the
+ * engine, what it is doing, and one line per session (or the single legacy
+ * line an engine from before the live view wrote). The recent-actions tail
+ * comes from the session log and is printed by the CLI.
+ */
+export function formatStatus(st: StatusFile, alive: boolean, nowMs: number): string[] {
+  const lines: string[] = [];
+  const age = st.at ? Math.round((nowMs - new Date(st.at).getTime()) / 1000) : null;
+  lines.push(`Engine pid ${st.pid ?? "?"} — ${alive ? "ALIVE" : "not running (stale status)"}`);
+  lines.push(`${st.phase === "running" ? "⏳ running" : "· idle after"}: ${st.tool ?? "?"}${age !== null ? ` (as of ${age}s ago)` : ""}`);
+  // The file is written by another process and can be caught mid-write, so
+  // only entries whole enough to describe are described.
+  const sessions = wholeSessions(st.detail);
+  if (sessions.length > 0) {
+    lines.push(`Sessions (${sessions.length}):`);
+    for (const entry of sessions) lines.push(`  ${formatSessionLine(entry, nowMs)}`);
+    if (alive && st.live?.port) lines.push("Live view: scenescout watch");
+    if (alive && st.live?.error) lines.push(`Live view unavailable: ${st.live.error}`);
+  } else {
+    lines.push(`Session: ${st.session ?? "?"} (${st.role ?? "?"})${st.sessions && st.sessions.length > 1 ? ` · all sessions: ${st.sessions.join(", ")}` : ""}`);
+    if (st.url) lines.push(`URL: ${st.url}`);
+  }
+  return lines;
+}
+
 /** status.json as a reader finds it. Every field is optional: an older engine wrote fewer, and a killed one may have written none. */
 export interface StatusFile {
   pid?: number;

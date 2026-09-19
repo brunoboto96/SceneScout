@@ -13,6 +13,7 @@ import {
   classify,
   feedForSession,
   formatDuration,
+  formatStatus,
   localClock,
   formatSessionLine,
   FEED_LINES,
@@ -901,4 +902,27 @@ test("overlapping status writes never leave a torn file, and the last one wins",
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("scenescout status describes an engine, its sessions and where to watch, and copes with an older or torn file", () => {
+  const at = new Date(T0 - 5000).toISOString();
+  const live = { pid: 7, phase: "idle", tool: "scout_snapshot", at, detail: [entry("admin"), { session: "half" }], live: { port: 5555 } };
+  const lines = formatStatus(live, true, T0);
+  assert.equal(lines[0], "Engine pid 7 — ALIVE");
+  assert.equal(lines[1], "· idle after: scout_snapshot (as of 5s ago)");
+  assert.equal(lines[2], "Sessions (1):", "a torn entry is left out, not printed as NaN");
+  assert.match(lines[3] ?? "", /^  admin \(viewer\)/);
+  assert.equal(lines[4], "Live view: scenescout watch");
+  assert.doesNotMatch(lines.join("\n"), /NaN/);
+
+  assert.deepEqual(formatStatus({ ...live, live: { error: "listen EACCES" } }, true, T0).slice(-1), ["Live view unavailable: listen EACCES"]);
+  assert.ok(!formatStatus(live, false, T0).some((l) => l.startsWith("Live view")), "a dead engine has no live view to open");
+
+  // An engine from before the live view wrote one line for the whole project.
+  const legacy = formatStatus(
+    { pid: 8, phase: "running", tool: "scout_crawl", session: "qa", role: "qa", sessions: ["qa", "admin"], url: "http://app.test/x" },
+    true,
+    T0,
+  );
+  assert.deepEqual(legacy.slice(1), ["⏳ running: scout_crawl", "Session: qa (qa) · all sessions: qa, admin", "URL: http://app.test/x"]);
 });
