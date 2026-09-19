@@ -597,6 +597,23 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     }
     check("read-only: the worker-issued DELETE never reaches the server", stats.workerDeletes === 0, `server received ${stats.workerDeletes} DELETE(s)`);
 
+    console.log("write policy: a shared worker cannot send a write the policy never sees");
+    // No browser lets the driver intercept a request a shared worker issues, so
+    // the page is not given shared workers at all. A DELETE sent from one used
+    // to reach the server in read-only mode, in every browser, with nothing logged.
+    await engine.navigate("/shared-worker.html");
+    const sharedSnap = await engine.snapshot(true);
+    check("the page sees no SharedWorker to construct", sharedSnap.includes("shared worker: unavailable"), sharedSnap.slice(0, 300));
+    const sharedRef = sharedSnap.match(/(e\d+) button "Sync through shared worker"/)?.[1];
+    if (!sharedRef) throw new Error("shared worker sync button not found");
+    await engine.click(sharedRef);
+    await settle(600);
+    check(
+      "read-only: no DELETE from a shared worker reaches the server",
+      stats.sharedWorkerDeletes === 0,
+      `server received ${stats.sharedWorkerDeletes} DELETE(s)`,
+    );
+
     console.log("images: one that failed to load is reported from the DOM, even when no request failed");
     // The HTTP oracle catches a 404. It cannot catch an image URL that answers
     // 200 with something that is not an image — an HTML error page, a wrong

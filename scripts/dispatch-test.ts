@@ -240,6 +240,9 @@ test("hover reports text that appeared, not text that only moved to a new line",
   // browser the badges then sit on a line of their own; every word was already
   // showing, so nothing was revealed.
   assert.deepEqual(revealedLines("1 error 3 notices 2 warnings Missing connector between nodes\nNext", "1 error  3 notices  2 warnings\nNext"), []);
+  // A short tooltip whose word already appears inside a longer line is still a reveal:
+  // it is on the page once more than it was.
+  assert.deepEqual(revealedLines("Delete account permanently\nSave", "Delete account permanently\nSave\nDelete"), ["Delete"]);
   // Spacing differences between the two readings are not new text either.
   assert.deepEqual(revealedLines("Total:   12", "Total: 12"), []);
   // The list is capped, and each line is trimmed to a readable length.

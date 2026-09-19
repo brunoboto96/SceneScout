@@ -98,7 +98,10 @@ export function engineOf(target: InstallTarget): BrowserEngineName {
 export function headlessShellDir(chromiumExecutable: string | null): string | null {
   if (!chromiumExecutable) return null;
   const parts = chromiumExecutable.split(/[\\/]/);
-  const at = parts.findIndex((p) => /^chromium-\d+$/.test(p));
+  // The LAST such segment: a cache kept under a directory that happens to be
+  // named the same way must not be mistaken for the build directory.
+  let at = -1;
+  for (let i = parts.length - 1; i >= 0 && at < 0; i--) if (/^chromium-\d+$/.test(parts[i])) at = i;
   if (at < 0) return null;
   const sep = chromiumExecutable.includes("\\") && !chromiumExecutable.includes("/") ? "\\" : "/";
   return [...parts.slice(0, at), parts[at].replace(/^chromium-/, "chromium_headless_shell-")].join(sep);
@@ -152,4 +155,41 @@ export function serviceWorkerPolicy(engine: BrowserEngineName): "allow" | "block
  */
 export function focusAdvanceKey(engine: BrowserEngineName, platform: NodeJS.Platform): "Tab" | "Alt+Tab" {
   return engine === "webkit" && platform === "darwin" ? "Alt+Tab" : "Tab";
+}
+
+/**
+ * Run in every page before its own scripts: takes shared workers away.
+ *
+ * A request issued by a shared worker cannot be intercepted in any browser, so
+ * a write sent from one passes the policy unseen and unlogged. Removing the
+ * constructor makes feature detection fail, and an app then does that work on
+ * the page, where the policy sees it. Not applied in `destructive` mode, where
+ * the policy blocks nothing and the person has opted in to everything.
+ */
+export const REMOVE_SHARED_WORKER_SCRIPT = `(() => {
+  try { delete globalThis.SharedWorker; } catch {}
+  if ("SharedWorker" in globalThis) {
+    try { Object.defineProperty(globalThis, "SharedWorker", { value: undefined, configurable: true, writable: true }); } catch {}
+  }
+})()`;
+
+/** Whether pages may use shared workers in this write mode. */
+export function sharedWorkersAllowed(mode: "observe" | "read-only" | "safe-write" | "destructive"): boolean {
+  return mode === "destructive";
+}
+
+/**
+ * What install says when the browsers it was asked for do not include the one
+ * a default attach launches, and that one is not on disk either. Without it,
+ * `install --browsers firefox` on a fresh machine ends in "ready" and the first
+ * attach fails. Null when there is nothing to say.
+ */
+export function defaultAttachNote(opts: { selected: readonly InstallTarget[]; defaultEngine: BrowserEngineName; defaultInstalled: boolean }): string | null {
+  if (opts.defaultInstalled || opts.selected.length === 0) return null;
+  if (opts.selected.some((t) => engineOf(t) === opts.defaultEngine)) return null;
+  const engine = engineOf(opts.selected[0]);
+  return (
+    `an attach drives ${opts.defaultEngine} unless told otherwise, and that build is not installed. ` +
+    `Pass browser: "${engine}" when attaching, or set ${DEFAULT_ENGINE_ENV}=${engine} in the MCP server's environment.`
+  );
 }

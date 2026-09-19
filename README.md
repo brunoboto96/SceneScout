@@ -302,10 +302,12 @@ npx -y scenescout install --browser-only --browsers firefox,webkit   # add two m
 
 Sizes vary by platform. The builds go to Playwright's shared cache, so a build another tool already fetched is not downloaded again.
 
-To drive another browser, pass `browser` when attaching (`scout_attach { browser: "firefox" }`), or set `SCENESCOUT_BROWSER=webkit` in the server's environment to change the default. `scenescout doctor` checks the default browser. Two things differ outside Chromium:
+To drive another browser, pass `browser` when attaching (`scout_attach { browser: "firefox" }`), or set `SCENESCOUT_BROWSER=webkit` in the server's environment to change the default. `scenescout doctor` checks the browser named by that variable in the shell it runs from, so check another one with `SCENESCOUT_BROWSER=webkit scenescout doctor`. Two things differ outside Chromium:
 
 - **Service workers are not allowed to register** in Firefox and WebKit. The write policy works by intercepting requests, and only Chromium lets a request issued by a service worker be intercepted. An app that depends on its worker may behave differently there.
 - **A Firefox or WebKit left behind by a crash is not cleaned up** on the next start the way a leftover Chromium is.
+
+In every browser, pages are not given shared workers unless the mode is `destructive`: a request a shared worker sends cannot be intercepted anywhere, so the app is made to do that work on the page, where the policy sees it.
 
 ## 🔌 Other MCP clients
 

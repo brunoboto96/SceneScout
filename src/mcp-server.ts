@@ -237,7 +237,7 @@ server.registerTool(
         .enum(["chromium", "firefox", "webkit"])
         .optional()
         .describe(
-          "Browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else chromium. firefox and webkit must be installed first (scenescout install --browsers firefox). Use them for a cross-browser pass; stay on chromium otherwise.",
+          "Browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else chromium. firefox and webkit must be downloaded first (scenescout install --browser-only --browsers firefox). Use them for a cross-browser pass; stay on chromium otherwise.",
         ),
       viewportWidth: z.number().int().min(320).max(3840).optional().describe("Viewport width (default 1280); use e.g. 390 for a mobile pass"),
       viewportHeight: z.number().int().min(480).max(2400).optional().describe("Viewport height (default 900)"),

@@ -7,6 +7,13 @@
 
 const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
 
+/** How many times `needle` occurs in `haystack`, overlaps not counted. */
+function occurrences(haystack: string, needle: string): number {
+  let n = 0;
+  for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + needle.length)) n++;
+  return n;
+}
+
 /**
  * Lines present after the hover whose text was not on the page before it.
  *
@@ -14,16 +21,23 @@ const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
  * away — the previous hover's tooltip closing as the pointer leaves it — the
  * text around it can re-flow onto a line of its own, and that line is "new"
  * only as a line: every word of it was already visible. How text re-flows
- * differs between browsers, so a line counts as revealed only when its text
- * appears nowhere in the earlier reading.
+ * differs between browsers. So a line counts as revealed when its text occurs
+ * MORE often after the hover than before: text that only moved occurs as often
+ * as it did, while a tooltip reading "Delete" on a page that already says
+ * "Delete account" occurs once more and is still reported.
  */
 export function revealedLines(bodyBefore: string, bodyAfter: string, limit = 5): string[] {
-  const beforeLines = new Set(bodyBefore.split("\n").map(squash).filter(Boolean));
   const beforeText = squash(bodyBefore);
+  const afterText = squash(bodyAfter);
+  const seen = new Set<string>();
   return bodyAfter
     .split("\n")
     .map(squash)
-    .filter((l) => l && !beforeLines.has(l) && !beforeText.includes(l))
+    .filter((l) => {
+      if (!l || seen.has(l)) return false;
+      seen.add(l);
+      return occurrences(afterText, l) > occurrences(beforeText, l);
+    })
     .slice(0, limit)
     .map((l) => l.slice(0, 300));
 }

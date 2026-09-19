@@ -17,6 +17,7 @@ import {
   APPROX_DISK_MB,
   BROWSER_ENGINES,
   browserPresence,
+  defaultAttachNote,
   defaultEngine,
   launchTarget,
   parseBrowserSelection,
@@ -154,12 +155,21 @@ function downloadBrowsers(targets: readonly InstallTarget[]): boolean {
   return r.status === 0;
 }
 
-/** The value of `--browsers`, written as `--browsers x` or `--browsers=x`. Undefined when the flag is absent. */
+/**
+ * The value of `--browsers`, written as `--browsers x` or `--browsers=x`.
+ * Undefined when the flag is absent; empty when it was given no value, which
+ * includes being followed by another flag.
+ */
 function browsersFlag(flags: string[]): string | undefined {
+  // `--browser-only` is a different flag; a bare `--browser` is a slip that would otherwise be ignored and download Chromium.
+  const slip = flags.find((f) => f === "--browser" || f.startsWith("--browser="));
+  if (slip) throw new Error(`unknown flag ${slip.split("=")[0]} — did you mean --browsers?`);
   const inline = flags.find((f) => f.startsWith("--browsers="));
   if (inline) return inline.slice("--browsers=".length);
   const at = flags.indexOf("--browsers");
-  return at < 0 ? undefined : (flags[at + 1] ?? "");
+  if (at < 0) return undefined;
+  const next = flags[at + 1];
+  return next === undefined || next.startsWith("--") ? "" : next;
 }
 
 async function install(flags: string[]): Promise<void> {
@@ -203,6 +213,15 @@ async function install(flags: string[]): Promise<void> {
       }
     }
   }
+
+  // Downloading a browser the server will not launch leaves the first attach failing with no hint why.
+  const engine = defaultEngine(process.env);
+  const note = defaultAttachNote({
+    selected: flags.includes("--skip-browser") ? [] : selection.targets,
+    defaultEngine: engine,
+    defaultInstalled: (await presentBrowsers())[launchTarget(engine, false)].installed,
+  });
+  if (note) console.log(`· Note: ${note}`);
 
   if (browserOnly) {
     // nothing to register

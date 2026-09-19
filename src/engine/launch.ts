@@ -22,11 +22,10 @@ export type LaunchNeed = { engine: BrowserEngineName; headed: boolean };
 export function explainLaunchFailure(message: string, reaped: number, need: LaunchNeed = { engine: "chromium", headed: false }): string {
   if (isMissingBrowser(message)) {
     const target = launchTarget(need.engine, need.headed);
-    // The headless shell alone cannot open a window, which is the one case
-    // where a browser is "missing" for someone who did run install.
+    // Someone who installed only the headless shell did run install, so say what is different about a headed run.
     const why =
       target === "chromium" && need.headed
-        ? "A headed run needs the full Chromium browser, and only the headless shell is installed"
+        ? "A headed run needs the full Chromium browser, which has not been downloaded (the headless shell alone cannot open a window)"
         : `The ${target} build has not been downloaded yet`;
     return (
       `${why} (one-time, about ${APPROX_DISK_MB[target]} MB on disk). Run this once, then attach again:\n` +

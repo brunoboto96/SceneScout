@@ -16,7 +16,7 @@ import {
 import { OracleMonitor, formatViolations } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
-import { defaultEngine, focusAdvanceKey, serviceWorkerPolicy, type BrowserEngineName } from "../browsers.js";
+import { defaultEngine, focusAdvanceKey, REMOVE_SHARED_WORKER_SCRIPT, serviceWorkerPolicy, sharedWorkersAllowed, type BrowserEngineName } from "../browsers.js";
 import { revealedLines } from "./hover.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
@@ -409,6 +409,7 @@ export class BrowserEngine {
         viewport: opts.viewport ?? { width: 1280, height: 900 },
         serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
+      if (!sharedWorkersAllowed(this.mode)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
       this.page = await this.context.newPage();
     } catch (err) {
       await this.close();
@@ -564,7 +565,7 @@ export class BrowserEngine {
       : "";
     return (
       `Attached to ${this.page.url()} (mode=${this.mode}` +
-      `${this.engineName === "chromium" ? "" : `, browser=${this.engineName}, service workers blocked so the write policy sees every request`}` +
+      `${this.engineName === "chromium" ? "" : `, browser=${this.engineName}, service workers blocked because their requests cannot be intercepted here`}` +
       `${focusAdvanceKey(this.engineName, process.platform) === "Tab" ? "" : `, keyboard: Tab stops only at text fields in this browser — press Alt+Tab to reach buttons and links`}` +
       `${opts.storageStatePath ? `, auth=${opts.storageStatePath}` : ""}). ` +
       `Memory: ${this.memory.dir}.${this.memory.loadWarning ? ` WARNING: ${this.memory.loadWarning}` : ""}` +

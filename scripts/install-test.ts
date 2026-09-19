@@ -30,6 +30,7 @@ import {
 } from "../src/installer.ts";
 import {
   browserPresence,
+  defaultAttachNote,
   defaultEngine,
   focusAdvanceKey,
   headlessShellDir,
@@ -37,6 +38,7 @@ import {
   parseBrowserSelection,
   playwrightInstallArgs,
   serviceWorkerPolicy,
+  sharedWorkersAllowed,
 } from "../src/browsers.ts";
 
 function tmp(prefix: string): string {
@@ -625,6 +627,8 @@ test("the headless shell is found next to the full browser, on either path style
     headlessShellDir("C:\\Users\\u\\AppData\\Local\\ms-playwright\\chromium-1243\\chrome-win\\chrome.exe"),
     "C:\\Users\\u\\AppData\\Local\\ms-playwright\\chromium_headless_shell-1243",
   );
+  // A cache kept under a directory with the same kind of name: the build directory is the last one.
+  assert.equal(headlessShellDir("/opt/chromium-1/cache/chromium-1243/chrome-linux/chrome"), "/opt/chromium-1/cache/chromium_headless_shell-1243");
   // A path that is not Playwright's layout (a system browser, say) names no shell.
   assert.equal(headlessShellDir("/usr/bin/chromium"), null);
   assert.equal(headlessShellDir(null), null);
@@ -680,4 +684,22 @@ test("the focus audit presses the key that reaches buttons and links in that bro
   assert.equal(focusAdvanceKey("webkit", "linux"), "Tab");
   assert.equal(focusAdvanceKey("chromium", "darwin"), "Tab");
   assert.equal(focusAdvanceKey("firefox", "darwin"), "Tab");
+});
+
+test("shared workers are taken from the page in every mode that blocks anything", () => {
+  // Their requests cannot be intercepted in any browser; the smoke suite proves the DELETE no longer arrives.
+  assert.equal(sharedWorkersAllowed("observe"), false);
+  assert.equal(sharedWorkersAllowed("read-only"), false);
+  assert.equal(sharedWorkersAllowed("safe-write"), false);
+  assert.equal(sharedWorkersAllowed("destructive"), true);
+});
+
+test("installing only a browser the default attach does not launch says so", () => {
+  const note = defaultAttachNote({ selected: ["firefox"], defaultEngine: "chromium", defaultInstalled: false });
+  assert.match(note ?? "", /drives chromium.*browser: "firefox".*SCENESCOUT_BROWSER=firefox/);
+  // Nothing to say when the default is already there, when it is among what was asked for, or when nothing was downloaded.
+  assert.equal(defaultAttachNote({ selected: ["firefox"], defaultEngine: "chromium", defaultInstalled: true }), null);
+  assert.equal(defaultAttachNote({ selected: ["chromium-headless-shell", "webkit"], defaultEngine: "chromium", defaultInstalled: false }), null);
+  assert.equal(defaultAttachNote({ selected: ["firefox"], defaultEngine: "firefox", defaultInstalled: false }), null);
+  assert.equal(defaultAttachNote({ selected: [], defaultEngine: "chromium", defaultInstalled: false }), null);
 });
