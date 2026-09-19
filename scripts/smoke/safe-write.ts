@@ -91,6 +91,16 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     );
     const ownResult = await engine2.click(swRefOf("Sync own item"));
     check("PUT on own resource allowed", !ownResult.includes("WRITE-POLICY blocked"), ownResult);
+    // Every creation is named in a result, not only the first on an endpoint:
+    // the once-per-session mutation notice hid the second one entirely.
+    const secondCreate = await engine2.click(swRefOf("Create another item"));
+    await until("the second creation to register", () => engine2.createdResources.filter((r) => r.includes("/api/items")).length >= 2);
+    const afterSecond = await engine2.click(swRefOf("Sync own item"));
+    check(
+      "a second creation on the same endpoint is named in the result",
+      /created: \/api\/items id=1\d\d/.test(secondCreate + afterSecond),
+      (secondCreate + afterSecond).slice(0, 600),
+    );
     await engine2.click(swRefOf("Create document"));
     await until("document creation to register", () => engine2.createdResources.some((r) => r.includes("/api/documents") && r.includes("id=99")));
     check(
