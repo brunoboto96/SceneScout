@@ -519,7 +519,7 @@ npm test           # build + 12 suites: scan, oracle, policy, fixture, dispatch,
 npm run demo       # regenerate examples/ from the demo app
 ```
 
-Contributing? Start with [VISION.md](VISION.md) (what is in scope) and [CONTRIBUTING.md](CONTRIBUTING.md) (how changes land), then see [CLAUDE.md](CLAUDE.md) for the house rules — chiefly: bug fixes need a regression test at the cheapest layer that can fail, keep the repo project-agnostic (ADR 6), and `npm test` must pass.
+Contributing? Start with [VISION.md](VISION.md) (what is in scope) and [CONTRIBUTING.md](CONTRIBUTING.md) (how changes land), then see [AGENTS.md](AGENTS.md) for the house rules — chiefly: bug fixes need a regression test at the cheapest layer that can fail, keep the repo project-agnostic (ADR 6), and `npm test` must pass.
 
 ## 🔐 Security
 

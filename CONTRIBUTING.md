@@ -61,7 +61,7 @@ network.
   asked to split.
 - **A bug fix needs a regression test** at the cheapest layer that can fail,
   and the test must fail without the fix. Which suite covers what is listed in
-  [CLAUDE.md](CLAUDE.md).
+  [AGENTS.md](AGENTS.md).
 - **`npm test` must pass.** CI runs it on Linux and macOS, and the unit suites
   on Windows. While iterating, run one suite: `npm run policy-test` tests your
   edit directly from `src/`, no build step. The two real-browser suites
