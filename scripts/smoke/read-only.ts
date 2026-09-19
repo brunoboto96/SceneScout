@@ -416,6 +416,21 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     check("plan continues past REPEAT violations (crash already reported this session)", plan1.includes("2. click") && plan1.includes("3. click"), plan1);
     check("plan aborts on a FRESH oracle violation", plan1.includes("PLAN ABORTED") && plan1.includes("ForecastError"), plan1);
     check("plan did not run past the abort", !plan1.includes("4. click"), plan1);
+    // A note about a field belongs on the line of the step that typed into it.
+    // It used to be pushed before that step's own line, so it sat under the previous step's.
+    const planNotes = await engine.runPlan([
+      { action: "navigate", target: "/" },
+      { action: "type", target: "testid=feedback-email-input", value: "qa@example.com" },
+      { action: "type", target: "testid=native-composer-input", value: "fresh", replace: true },
+    ]);
+    const noteLines = planNotes.split("\n");
+    check(
+      "a prefill note sits on the line of the step that typed over the value",
+      /replaced existing content/.test(noteLines.find((l) => l.startsWith("3. type")) ?? "") &&
+        !/replaced existing content/.test(noteLines.find((l) => l.startsWith("2. type")) ?? "") &&
+        !noteLines.some((l) => /^\s+\(replaced/.test(l)),
+      planNotes,
+    );
     const plan2 = await engine.runPlan([{ action: "click", target: "testid=widgets-delete-action" }]);
     check("plan refuses destructive targets", plan2.includes("REFUSED"), plan2);
     const plan3 = await engine.runPlan([
