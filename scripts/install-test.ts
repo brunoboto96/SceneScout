@@ -951,10 +951,11 @@ test("a command npm put on PATH for the length of a run does not count as instal
   // Under `npx scenescout install`, npx prepends its cache's node_modules/.bin,
   // and the command found there is gone when the run ends. Reading it as
   // "already on PATH" would skip the install for exactly the people who need it.
-  const onDisk = new Set(["/cache/_npx/abc/node_modules/.bin/scenescout", "/work/app/node_modules/.bin/scenescout", "/usr/local/bin/scenescout"]);
+  // Candidates are joined with the platform's separator, so the fake disk is too: on Windows the join yields backslashes.
+  const onDisk = new Set(["/cache/_npx/abc/node_modules/.bin", "/work/app/node_modules/.bin", "/usr/local/bin"].map((dir) => path.join(dir, "scenescout")));
   const find = (pathValue: string) => findOnUserPath({ names: ["scenescout"], pathValue, delimiter: ":", exists: (p) => onDisk.has(p) });
   assert.equal(find("/cache/_npx/abc/node_modules/.bin:/work/app/node_modules/.bin/:/usr/bin"), null);
-  assert.equal(find("/cache/_npx/abc/node_modules/.bin:/usr/bin:/usr/local/bin"), "/usr/local/bin/scenescout");
+  assert.equal(find("/cache/_npx/abc/node_modules/.bin:/usr/bin:/usr/local/bin"), path.join("/usr/local/bin", "scenescout"));
   assert.equal(find(""), null);
 });
 
