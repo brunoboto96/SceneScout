@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Inventory · Harbor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-dashboard">Dashboard</a><a href="/orders.html" data-testid="nav-orders">Orders</a
+        ><a href="/approvals.html" data-testid="nav-approvals">Approvals</a
+        ><a href="/inventory.html" data-testid="nav-inventory" aria-current="page">Inventory</a
+        ><a href="/customers.html" data-testid="nav-customers">Customers</a><a href="/reports.html" data-testid="nav-reports">Reports</a
+        ><a href="/audit.html" data-testid="nav-audit">Audit log</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
+      </nav>
+      <a class="whoami" href="/signin.html" data-testid="nav-whoami"><span id="role">clerk</span> · switch role</a>
+    </header>
+    <main>
+      <h1>Inventory</h1>
+      <p class="lede">Packing stock on hand. Anything under ten is flagged for reorder.</p>
+      <div class="row">
+        <span class="muted">Sort by</span>
+        <button data-sort="name" data-testid="inventory-sort-name">Name</button>
+        <button data-sort="qty" data-testid="inventory-sort-qty">Quantity</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>SKU</th>
+            <th>Item</th>
+            <th>On hand</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="rows" data-testid="inventory-rows"></tbody>
+      </table>
+    </main>
+    <footer>Harbor order desk · demo data only</footer>
+    <script src="/app.js"></script>
+    <script>
+      const cell = (tr, text) => {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+        return td;
+      };
+      const rows = document.getElementById("rows");
+      async function load(sort) {
+        const list = await fetch("/api/inventory" + (sort ? "?sort=" + sort : "")).then((r) => r.json());
+        rows.replaceChildren();
+        for (const it of list) {
+          const tr = document.createElement("tr");
+          tr.setAttribute("data-testid", "inventory-row-" + it.sku);
+          cell(tr, it.sku);
+          cell(tr, it.name);
+          cell(tr, String(it.qty));
+          const flag = cell(tr, it.qty < 10 ? "Reorder" : "");
+          if (it.qty < 10) flag.className = "low";
+          rows.appendChild(tr);
+        }
+      }
+      for (const b of document.querySelectorAll("button[data-sort]")) b.addEventListener("click", () => load(b.dataset.sort));
+      load();
+    </script>
+  </body>
+</html>
