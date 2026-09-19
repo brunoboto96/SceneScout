@@ -183,6 +183,32 @@ The agent scans the project (if there is one), attaches read-only, explores, and
 
 ---
 
+## 📺 Watching a run live
+
+When a session attaches, the engine starts a small live view and hands the agent its address on a `Live view:` line, which the agent passes on to you. From a terminal, `scenescout watch` opens the same page. There is one card per session:
+
+<p align="center"><img src="examples/screenshots/live-view.png" alt="The live view during a run of six parallel agents against the demo app: one card per session, each with its role, the tool it is running and for how long, the page it is on, a thumbnail, and a feed of the actions it just took" width="880" /></p>
+
+- **What it is doing:** the tool it is running and for how long, the page it is on, and a thumbnail of that page. This works for headless runs too, which have no window to look at.
+- **What it just did:** a rolling feed of its actions, each with its target and how it turned out, with failures in red. It is the same trail a finding's repro trace uses. The engine never sees the agent's reasoning, so this is what the session *did*, not what it thought.
+- **Stuck, not slow:** a call still running past its own tool's watchdog budget turns the card red, so a wedged session is visible without asking. A crawl legitimately runs for minutes; it is judged against the crawl's budget, not a click's.
+- **Live stream:** switch it on for one card, or for all of them. Click a thumbnail for a close-up.
+- **The report, as it stands:** the Report button in the top bar shows the same document `scout_report` writes at the end, rendered from the run's current state, so findings can be read while the agents are still working.
+- **What it is for:** the close-up puts the feed beside the session's brief: the task the agent gave it when it attached (`scout_attach {task}`), and the goal of the journey it is on right now (`scout_journey`). Actions of one journey share a tint in the feed; point at a group and the brief shows the goal those actions served.
+
+<p align="center"><img src="examples/screenshots/live-view-closeup.png" alt="A close-up of one session: its page streaming live, the feed of its recent actions grouped by journey, and beside it the task and current objective" width="880" /></p>
+
+<p align="center"><img src="examples/screenshots/live-view-report.png" alt="The report opened from the live view's top bar while the run is still going: summary table, gap ledger and the findings filed so far" width="880" /></p>
+
+The view is served on `127.0.0.1` only, behind a token that changes every time the engine starts. It answers `GET` and nothing else, so a viewer can watch a run but not act in it, and no frame is ever written to disk ([ADR 7](docs/adr/0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md)). A stream runs only while someone is watching it. `SCENESCOUT_LIVE=off` keeps the port closed.
+
+**Try it with parallel agents.** The demo app has three roles and several separate areas, so a run can be split between agents. Start it with `npm run demo:serve`, then ask your agent to explore it with several agents in parallel, one role and one area each. The pictures above come from a run of six. Two things keep a parallel run efficient:
+
+- **Each agent opens its own session when it starts and closes it when it is done.** An agent waiting for its turn then holds no browser. Opening every session up front leaves browsers idling while the machine runs out of memory for the agents that are working.
+- **Run about as many agents at once as your machine has cores, less two.** Each one drives a real browser.
+
+---
+
 ## 🔄 How a run works
 
 One curiosity loop, repeated — breadth first, then judgment where it matters:
@@ -461,7 +487,8 @@ The CLI is also useful on its own:
 
 ```bash
 npx -y scenescout scan <path>       # project discovery: framework, routes, saved logins
-npx -y scenescout status <path>     # what a running engine is doing right now
+npx -y scenescout status <path>     # what every session of a running engine is doing right now
+npx -y scenescout watch <path>      # the same, live in your browser, with each session's page
 ```
 
 ---
@@ -549,6 +576,6 @@ Found a way past the write policy, or another security problem? Please report it
 - **A trustworthy gap ledger.** Entries must be actionable (a search box or wizard sub-step isn't "form filled but never submitted"); API/download URLs never enter the route contract.
 - **Honest reporting.** Shared chrome counted once, stale scores marked, role matrix compares only roles that actually attempted a route.
 - **Cross-run written knowledge.** `scout_note` curates `.scenescout/ASSUMPTIONS.md` — app model, personas, constraints, risks — in prose.
-- **Daemon-grade robustness.** Per-tool watchdogs, orphaned-browser reaping, bounded teardown, live status via `scenescout status <project>`.
+- **Daemon-grade robustness.** Per-tool watchdogs, orphaned-browser reaping, bounded teardown, live status via `scenescout status <project>`, and a live view of every session's page: the agent gives you its address when it attaches, or run `scenescout watch <project>` (loopback only, read-only, nothing written to disk: [ADR 7](docs/adr/0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md)).
 
 </details>

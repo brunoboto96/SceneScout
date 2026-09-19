@@ -2,7 +2,8 @@ import { chromium, firefox, webkit, type Browser, type BrowserType, type Browser
 import fs from "node:fs";
 import path from "node:path";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
-import { AUTH_LOSS_PREFIX, MemoryStore, type ActionLogEntry } from "./memory.js";
+import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, type ActionLogEntry } from "./memory.js";
+import type { SessionDescription } from "./live.js";
 import { AuthLossTracker } from "./authloss.js";
 import {
   COLLECT_INTERACTABLES_SCRIPT,
@@ -16,7 +17,15 @@ import {
 import { OracleMonitor, formatViolations } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
-import { defaultEngine, focusAdvanceKey, REMOVE_SHARED_WORKER_SCRIPT, serviceWorkerPolicy, sharedWorkersAllowed, type BrowserEngineName } from "../browsers.js";
+import {
+  defaultEngine,
+  focusAdvanceKey,
+  REMOVE_SHARED_WORKER_SCRIPT,
+  screencastSupport,
+  serviceWorkerPolicy,
+  sharedWorkersAllowed,
+  type BrowserEngineName,
+} from "../browsers.js";
 import { revealedLines } from "./hover.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
@@ -38,6 +47,11 @@ export interface AttachOptions {
   /** Which browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else Chromium. */
   browser?: BrowserEngineName;
   viewport?: { width: number; height: number };
+  /**
+   * What this session is for, in one sentence, as the agent driving it put it.
+   * Shown in the live view; the engine never reads meaning into it.
+   */
+  task?: string;
   /**
    * Share one MemoryStore across engines attached to the same project
    * (multi-session/multi-role runs): coverage and findings from every role
@@ -196,6 +210,9 @@ function actionabilityDiagnostic(message: string): string | null {
  * actions by ref, runs oracles after every action, and records everything in
  * the persistent memory store. Contains no LLM calls — the MCP client is the brain.
  */
+/** A screencast whose page has been gone for this many 500 ms ticks ends and says so; a re-attach takes fewer. */
+const SCREENCAST_PAGELESS_TICKS = 20;
+
 export class BrowserEngine {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
@@ -287,6 +304,8 @@ export class BrowserEngine {
   designAuditCount = 0;
   /** Active task-efficiency measurement (scout_journey), if any. */
   private journey: { goal: string; startedAt: number; fromLog: number; startUrl: string } | null = null;
+  /** The session's task, from scout_attach. Empty when the agent gave none. */
+  private task = "";
 
   /**
    * Begin measuring a user JOURNEY — the interaction cost of completing one
@@ -302,7 +321,7 @@ export class BrowserEngine {
       fromLog: this.memory?.actionLog.length ?? 0,
       startUrl: page.url(),
     };
-    this.logAction({ action: "journey:start", target: goal, url: page.url() });
+    this.logAction({ action: JOURNEY_START, target: goal, url: page.url() });
     return `JOURNEY STARTED — "${goal}"\nFrom: ${page.url()}\nNow perform the task the way a first-time user would (click through the UI; don't jump straight to a known deep URL, or the measurement is meaningless). Call scout_journey {action:"end"} when the task is complete or you conclude it can't be.`;
   }
 
@@ -328,7 +347,7 @@ export class BrowserEngine {
     } catch {
       /* fact recording is best-effort */
     }
-    this.logAction({ action: "journey:end", target: j.goal, url: page.url(), result: completed ? "completed" : "abandoned" });
+    this.logAction({ action: JOURNEY_END, target: j.goal, url: page.url(), result: completed ? "completed" : "abandoned" });
     return formatJourney({ goal: j.goal, completed, seconds, note }, measured);
   }
   /** Whether the browser window is visible — headed hover results carry a physical-cursor caveat. */
@@ -363,6 +382,7 @@ export class BrowserEngine {
       throw new Error(`storageStatePath does not exist: ${opts.storageStatePath}`);
     }
     this.mode = opts.mode ?? "read-only";
+    this.task = (opts.task ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
     this.headed = opts.headed ?? false;
     this.blockedRequests = [];
     this.pendingCreations = new Set();
@@ -2107,6 +2127,130 @@ export class BrowserEngine {
     const buf = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false });
     this.logAction({ action: "screenshot", url: page.url() });
     return { base64: buf.toString("base64"), mimeType: "image/jpeg" };
+  }
+
+  /**
+   * What the live view shows next to a session's name. The task is what the
+   * agent said the session is for; the objective is the goal of the journey it
+   * is on right now (scout_journey). Both are the agent's own words — the
+   * engine sees tool calls, never the reasoning behind them. Neither is
+   * redacted here: the caller that writes them anywhere does that.
+   */
+  get liveDescription(): SessionDescription & {
+    mode: WriteMode;
+    browser: BrowserEngineName;
+    headed: boolean;
+    task?: string;
+    objective?: string;
+    objectiveSince?: string;
+  } {
+    return {
+      mode: this.mode,
+      browser: this.engineName,
+      headed: this.headed,
+      ...(this.task ? { task: this.task } : {}),
+      ...(this.journey ? { objective: this.journey.goal, objectiveSince: new Date(this.journey.startedAt).toISOString() } : {}),
+    };
+  }
+
+  /**
+   * A frame for somebody WATCHING the run, as opposed to scout_screenshot,
+   * which is the agent looking. It is not logged: the action log is the repro
+   * trace attached to findings, and a person glancing at the dashboard is not
+   * a step anyone should replay. It is also bounded, because the moment a
+   * viewer most wants a picture is when the renderer has wedged.
+   */
+  async liveShot(timeoutMs = 3000): Promise<Buffer | null> {
+    const page = this.page;
+    if (!page || page.isClosed()) return null;
+    let timer: NodeJS.Timeout | undefined;
+    // The driver's own timeout covers a slow capture; the race covers a
+    // renderer that never answers the protocol at all.
+    return Promise.race([
+      page.screenshot({ type: "jpeg", quality: 55, fullPage: false, timeout: timeoutMs }).catch(() => null),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), timeoutMs + 500);
+      }),
+    ]).finally(() => clearTimeout(timer));
+  }
+
+  /**
+   * Push frames of this session's page until the returned function is called.
+   * The stream follows the session rather than one tab: adopting a popup
+   * replaces `this.page`, and a stream left on the old tab would show a page
+   * the session is no longer driving.
+   */
+  async startScreencast(onFrame: (jpeg: Buffer) => void, onEnd: () => void = () => {}): Promise<(() => Promise<void>) | null> {
+    if (!this.page || this.page.isClosed()) return null;
+    let stopped = false;
+    let bound: Page | null = null;
+    let release: (() => Promise<void>) | null = null;
+    // Ticks in a row with no page to take frames from: a re-attach passes
+    // through a few, a closed session never comes back.
+    let pageless = 0;
+
+    const bind = async (page: Page): Promise<void> => {
+      if (screencastSupport(this.engineName) === "cdp") {
+        const cdp = await page.context().newCDPSession(page);
+        try {
+          cdp.on("Page.screencastFrame", (frame: { data: string; sessionId: number }) => {
+            if (!stopped) onFrame(Buffer.from(frame.data, "base64"));
+            void cdp.send("Page.screencastFrameAck", { sessionId: frame.sessionId }).catch(() => {});
+          });
+          await cdp.send("Page.startScreencast", { format: "jpeg", quality: 55, maxWidth: 1280, maxHeight: 900, everyNthFrame: 2 });
+        } catch (err) {
+          // Not bound: the timer tries this page again on its next tick.
+          await cdp.detach().catch(() => {});
+          throw err;
+        }
+        release = async () => {
+          await cdp.send("Page.stopScreencast").catch(() => {});
+          await cdp.detach().catch(() => {});
+        };
+      } else {
+        release = null;
+      }
+      bound = page;
+    };
+
+    const stop = async (): Promise<void> => {
+      stopped = true;
+      clearInterval(timer);
+      const current = release;
+      release = null;
+      await current?.();
+    };
+
+    await bind(this.page).catch(() => {});
+    // One timer does both jobs: it notices a replaced tab, and where the
+    // browser cannot push frames it is also what takes them.
+    const timer = setInterval(() => {
+      if (stopped) return;
+      const page = this.page;
+      if (!page || page.isClosed()) {
+        pageless += 1;
+        if (pageless >= SCREENCAST_PAGELESS_TICKS) void stop().finally(onEnd);
+        return;
+      }
+      pageless = 0;
+      if (page !== bound) {
+        const previous = release;
+        release = null;
+        void (async () => {
+          await previous?.();
+          if (!stopped) await bind(page).catch(() => {});
+        })();
+        return;
+      }
+      if (screencastSupport(this.engineName) === "poll") {
+        void this.liveShot(1500).then((jpeg) => {
+          if (jpeg && !stopped) onFrame(jpeg);
+        });
+      }
+    }, 500);
+    timer.unref();
+
+    return stop;
   }
 
   get currentState(): string {

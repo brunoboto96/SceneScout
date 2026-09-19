@@ -40,6 +40,7 @@ import {
   launchTarget,
   parseBrowserSelection,
   playwrightInstallArgs,
+  screencastSupport,
   serviceWorkerPolicy,
   sharedWorkersAllowed,
 } from "../src/browsers.ts";
@@ -683,6 +684,15 @@ test("service workers are allowed only where the write policy can see what they 
   assert.equal(serviceWorkerPolicy("chromium"), "allow");
   assert.equal(serviceWorkerPolicy("firefox"), "block");
   assert.equal(serviceWorkerPolicy("webkit"), "block");
+});
+
+test("the live view streams by push where the browser can, and by polling where it cannot", () => {
+  // Only Chromium's driver exposes the DevTools screencast. Asking Firefox or
+  // WebKit for it throws, which would turn every stream there into an error
+  // instead of a slower picture.
+  assert.equal(screencastSupport("chromium"), "cdp");
+  assert.equal(screencastSupport("firefox"), "poll");
+  assert.equal(screencastSupport("webkit"), "poll");
 });
 
 test("the focus audit presses the key that reaches buttons and links in that browser", () => {

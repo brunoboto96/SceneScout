@@ -339,7 +339,17 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
   return gaps;
 }
 
-export function generateReport(memory: MemoryStore, oracleLog: OracleViolation[], extras?: ReportExtras): { markdown: string; path: string; summary: string } {
+/**
+ * The report as the run stands now. `write` is what scout_report does at the
+ * end; the live view renders the same document on request without touching
+ * the disk, so someone can read it while the run is still going.
+ */
+export function generateReport(
+  memory: MemoryStore,
+  oracleLog: OracleViolation[],
+  extras?: ReportExtras,
+  opts: { write?: boolean } = {},
+): { markdown: string; path: string; summary: string } {
   const cov = memory.coverage();
   const findings = [...memory.findings].sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 
@@ -537,7 +547,7 @@ export function generateReport(memory: MemoryStore, oracleLog: OracleViolation[]
 
   const markdown = lines.join("\n");
   const outPath = path.join(memory.dir, "report.md");
-  fs.writeFileSync(outPath, markdown);
+  if (opts.write !== false) fs.writeFileSync(outPath, markdown);
 
   // Bounded summary for the tool result: full reports have exceeded client
   // token limits in real runs (66–72KB observed) — the wire gets the digest,

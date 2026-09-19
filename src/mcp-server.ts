@@ -21,7 +21,9 @@
  * - Self-healing: orphaned browser processes from crashed runs are reaped at
  *   startup and on launch failure; attach retries once after reaping.
  * - Observable: .scenescout/status.json in the tested project always shows
- *   what each session is doing right now (`scenescout status <project>`).
+ *   what EVERY session is doing right now (`scenescout status <project>`), and
+ *   a loopback-only live view shows what each one is looking at
+ *   (`scenescout watch <project>`, engine/live.ts, ADR 7).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -35,7 +37,8 @@ import { reapOrphanBrowsers } from "./engine/reaper.js";
 import { MemoryStore, redactSecrets } from "./engine/memory.js";
 import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
 import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
-import { computeGaps, formatRouteCoverage, generateReport } from "./engine/report.js";
+import { feedForSession, LIVE_ENV, writeStatusFile, LIVE_TOKEN_FILE, LiveServer, StatusBoard, type LiveProvider, type SessionStatus } from "./engine/live.js";
+import { computeGaps, formatRouteCoverage, generateReport, type ReportExtras } from "./engine/report.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { formatScan, scanProject } from "./scan.js";
 
@@ -98,38 +101,179 @@ function errorText(err: unknown): ToolResult {
   };
 }
 
+/** One entry per live session: what status.json and the live view both read. */
+const board = new StatusBoard();
+/** The session whose call wrote status last. The top-level fields of status.json describe it, as they always have. */
+let lastWriter: SessionStatus | null = null;
+let live: LiveServer | null = null;
+let liveAddress: { port: number; token: string } | null = null;
+/** Set while the server is starting and kept afterwards, so every caller awaits the same start. */
+let liveStart: Promise<void> | null = null;
+/** Project directories holding this process's token file, so shutdown can take it back. */
+const liveDirs = new Set<string>();
+/** Token writes in flight, so shutdown waits for them instead of racing a file that appears after the rm. */
+const liveTokenWrites = new Map<string, Promise<void>>();
+let liveTokenWarned = false;
+/** Why the live view could not start, when it could not: told to the agent and written to status.json. */
+let liveError: string | null = null;
+
+const liveProvider: LiveProvider = {
+  snapshot: () => ({ pid: process.pid, version: PKG_VERSION, at: new Date().toISOString(), sessions: board.list() }),
+  // The engine holds no reasoning — it never sees one — so the feed is what the
+  // session DID: the action log, which is the same trail a finding's repro uses.
+  activity: (session, limit) => feedForSession(engines.get(session)?.memory?.actionLog ?? [], session, limit, redactSecrets),
+  // The same document scout_report writes at the end, rendered now and not
+  // written: what the run has found so far, its scores and its gap ledger.
+  // Findings and coverage are project-wide; the route, audit and mode figures
+  // are the session's that wrote status last, so in a multi-session run they
+  // can shift between polls.
+  report: () => {
+    const eng = (lastWriter && engines.get(lastWriter.session)) ?? engines.values().next().value;
+    if (!eng?.memory) return null;
+    const { markdown } = generateReport(eng.memory, eng.oracleLog.all, reportExtras(eng), { write: false });
+    return { markdown: redactSecrets(markdown), at: new Date().toISOString() };
+  },
+  // Both go around the session queue on purpose: a viewer must never wait
+  // behind the agent's calls, and a session that is stuck is the one most
+  // worth looking at.
+  screenshot: async (session) => (await engines.get(session)?.liveShot()) ?? null,
+  startStream: async (session, onFrame, onEnd) => (await engines.get(session)?.startScreencast(onFrame, onEnd)) ?? null,
+};
+
+/** What the report needs to know beyond memory: the one place it is built, so the live view and scout_report cannot drift apart. */
+function reportExtras(eng: BrowserEngine): ReportExtras {
+  const unvisited = eng.unvisitedKnownRoutes();
+  const all = eng.allKnownRoutes();
+  return {
+    routesVisited: all.length - unvisited.length,
+    routesTotal: all.length,
+    designAudits: eng.designAuditCount,
+    createdResources: eng.createdResources,
+    unvisitedRoutes: unvisited,
+    mode: eng.mode,
+    policyAttributed: eng.oracleLog.policyAttributed,
+  };
+}
+
+/** Hand the live view's token to `scenescout watch` through a file only the owner can read. */
+function publishLiveToken(dir: string): void {
+  if (!liveAddress || liveDirs.has(dir) || liveTokenWrites.has(dir)) return;
+  const file = path.join(dir, LIVE_TOKEN_FILE);
+  const write = fs.promises
+    .writeFile(file, liveAddress.token, { mode: 0o600 })
+    // `mode` applies only when the file is created; a leftover one keeps its old bits.
+    .then(() => fs.promises.chmod(file, 0o600))
+    .then(() => {
+      liveDirs.add(dir);
+    })
+    .catch((err: unknown) => {
+      // A file with the wrong bits, or none: either way nothing to take back later.
+      void fs.promises.rm(file, { force: true }).catch(() => {});
+      if (!liveTokenWarned)
+        console.error(`[scenescout] could not write the live view's token file in ${dir}: ${err instanceof Error ? err.message : String(err)}`);
+      liveTokenWarned = true;
+    })
+    .finally(() => liveTokenWrites.delete(dir));
+  liveTokenWrites.set(dir, write);
+}
+
+/**
+ * Started with the first attach rather than at boot: a server nobody attaches
+ * to should not open a port. Never rejects — observability is best-effort, and
+ * a port that will not open must not cost the run anything.
+ */
+async function ensureLive(dir: string): Promise<void> {
+  if (process.env[LIVE_ENV] === "off") return;
+  if (liveAddress) return publishLiveToken(dir);
+  liveStart ??= startLiveServer();
+  await liveStart;
+  if (!liveAddress) return;
+  publishLiveToken(dir);
+  // The port is new, so a reader polling status.json needs it rewritten.
+  flushStatus(dir);
+}
+
+function startLiveServer(): Promise<void> {
+  const starting = new LiveServer(liveProvider);
+  return starting
+    .start()
+    .then((address) => {
+      live = starting;
+      liveAddress = address;
+      liveError = null;
+    })
+    .catch((err: unknown) => {
+      // Say why, once, and let a later attach try again.
+      const reason = err instanceof Error ? err.message : String(err);
+      if (liveError !== reason) console.error(`[scenescout] the live view could not start: ${reason}`);
+      liveError = reason;
+      liveStart = null;
+    });
+}
+
+/**
+ * The line that hands the live view to the person running the agent. The
+ * address holds the token, and a tool result lands in the client's transcript;
+ * that is accepted (ADR 7) because the address answers on this machine only.
+ */
+function liveLine(): string {
+  if (!liveAddress) return liveError ? `\nLive view unavailable: ${liveError}` : "";
+  return (
+    `\nLive view: http://127.0.0.1:${liveAddress.port}/${liveAddress.token}/ — give this address to the user so they can watch every session ` +
+    `(current tool, page thumbnail, optional live stream). It opens on this machine only and cannot act on the run.`
+  );
+}
+
+function flushStatus(dir: string): void {
+  // Fire-and-forget: status is best-effort observability on every tool call's
+  // hot path and must never add blocking filesystem latency. The writer
+  // queues writes per directory and lands each by rename, so a reader never
+  // sees a torn file.
+  void writeStatusFile(
+    dir,
+    JSON.stringify(
+      {
+        pid: process.pid,
+        phase: lastWriter?.phase ?? "idle",
+        tool: lastWriter?.tool ?? "",
+        session: lastWriter?.session ?? "",
+        role: lastWriter?.role ?? "anonymous",
+        sessions: [...engines.keys()],
+        url: lastWriter?.url ?? "",
+        at: new Date().toISOString(),
+        // Everything above describes one session. This is all of them.
+        detail: board.list(),
+        ...(liveAddress ? { live: { port: liveAddress.port } } : liveError ? { live: { error: liveError } } : {}),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 /**
  * Live status for the tested project (`scenescout status <project>` or any
- * supervising layer reads this): which session/tool is running right now.
+ * supervising layer reads this): what every session is doing right now.
  * Best-effort — observability must never break the tool call itself.
  */
-function writeStatus(session: string, phase: "running" | "idle", tool: string): void {
-  const dir = engines.get(session)?.memory?.dir;
-  if (!dir) return;
-  // Fire-and-forget async write: status is best-effort observability and runs
-  // on every tool call's hot path — it must never add blocking filesystem
-  // latency. Two sessions writing concurrently is a benign last-write-wins on
-  // this one project-level file; each session's OWN status still reaches disk.
-  void fs.promises
-    .writeFile(
-      path.join(dir, "status.json"),
-      JSON.stringify(
-        {
-          pid: process.pid,
-          phase,
-          tool,
-          session,
-          role: engines.get(session)?.role ?? "anonymous",
-          sessions: [...engines.keys()],
-          // status.json is a poll target that gets pasted into bug reports.
-          url: redactSecrets(engines.get(session)?.currentUrl ?? ""),
-          at: new Date().toISOString(),
-        },
-        null,
-        2,
-      ),
-    )
-    .catch(() => {});
+function writeStatus(session: string, phase: "running" | "idle", tool: string, budgetMs?: number): void {
+  const eng = engines.get(session);
+  const dir = eng?.memory?.dir;
+  if (!eng || !dir) return;
+  // status.json is a poll target that gets pasted into bug reports.
+  const { task, objective, ...described } = eng.liveDescription;
+  lastWriter = board.update(session, {
+    role: eng.role,
+    phase,
+    tool,
+    url: redactSecrets(eng.currentUrl),
+    ...(budgetMs ? { budgetMs } : {}),
+    ...described,
+    ...(task ? { task: redactSecrets(task) } : {}),
+    ...(objective ? { objective: redactSecrets(objective) } : {}),
+  });
+  void ensureLive(dir);
+  flushStatus(dir);
 }
 
 /** The watchdog's timeout answer — a diagnosable result, not a hang. */
@@ -161,7 +305,7 @@ function serializedPerSession<A>(
   return (args: A & { session?: string }) => {
     const session = args.session ?? activeName;
     const exec = async (): Promise<ToolResult> => {
-      writeStatus(session, "running", label);
+      writeStatus(session, "running", label, timeoutMs);
       try {
         const out = await withWatchdog(label, fn(args, session), timeoutMs, watchdogTimeout);
         // `activeName` is process-global and every scout_attach moves it. With
@@ -291,6 +435,13 @@ server.registerTool(
         ),
       viewportWidth: z.number().int().min(320).max(3840).optional().describe("Viewport width (default 1280); use e.g. 390 for a mobile pass"),
       viewportHeight: z.number().int().min(480).max(2400).optional().describe("Viewport height (default 900)"),
+      task: z
+        .string()
+        .max(300)
+        .optional()
+        .describe(
+          "What this session is for, in one sentence (e.g. 'Approve and reject orders as a manager'). Shown to the person watching the live view, next to the goal of whatever scout_journey is active. Worth setting whenever more than one session is running.",
+        ),
       session: z
         .string()
         .max(40)
@@ -310,6 +461,7 @@ server.registerTool(
       browser,
       viewportWidth,
       viewportHeight,
+      task,
       session,
     }: {
       url: string;
@@ -320,6 +472,7 @@ server.registerTool(
       browser?: "chromium" | "firefox" | "webkit";
       viewportWidth?: number;
       viewportHeight?: number;
+      task?: string;
       session?: string;
     }) => {
       try {
@@ -379,9 +532,16 @@ server.registerTool(
           /* conflict detection is best-effort */
         }
         const viewport = viewportWidth && viewportHeight ? { width: viewportWidth, height: viewportHeight } : undefined;
-        const out = await eng.attach({ url, projectDir: projectPath, storageStatePath, mode, headed, browser, viewport, memoryStore: store });
+        const out = await eng.attach({ url, projectDir: projectPath, storageStatePath, mode, headed, browser, viewport, task, memoryStore: store });
         eng.role = storageStatePath ? path.basename(storageStatePath).replace(/\.json$/i, "") : "anonymous";
-        return text(out + conflictNote + (engines.size > 1 ? `\n${sessionLines()}` : ""), target);
+        // Put the session on the board now, so the live view shows it before its
+        // first tool call. liveLine() needs the port, so the server is awaited
+        // here rather than started in the background by writeStatus.
+        if (eng.memory?.dir) {
+          await ensureLive(eng.memory.dir);
+          writeStatus(target, "idle", "scout_attach");
+        }
+        return text(out + conflictNote + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine(), target);
       } catch (err) {
         return errorText(err);
       }
@@ -415,7 +575,7 @@ server.registerTool(
   serializedControl(async ({ name, session }: { name?: string; session?: string }) => {
     try {
       name = name ?? session;
-      if (!name) return text(sessionLines(), activeName);
+      if (!name) return text(sessionLines() + liveLine(), activeName);
       if (!engines.has(name)) {
         return text(`No session named "${name}" yet — create it with scout_attach { session: "${name}", … }.\n${sessionLines()}`, activeName);
       }
@@ -1054,18 +1214,28 @@ server.registerTool(
         const names = [...engines.keys()];
         // Closes are independent per-browser — run them in parallel so N wedged
         // sessions cost one 8s teardown cap total, not N of them.
+        const dirs = new Set<string>();
+        for (const e of engines.values()) if (e.memory?.dir) dirs.add(e.memory.dir);
+        for (const name of engines.keys()) live?.dropSession(name);
         await Promise.allSettled([...engines.values()].map((e) => e.close()));
         engines.clear();
         sessionQueue.clear();
+        board.clear();
+        lastWriter = null;
+        for (const dir of dirs) flushStatus(dir);
         return text(`All sessions closed (${names.join(", ") || "none were live"}). Memory and reports remain in .scenescout/.`, activeName);
       }
       const name = session ?? activeName;
       const eng = engines.get(name);
       if (!eng) return text(`No live session "${name}".`, name);
+      live?.dropSession(name);
       await eng.close();
       const saveError = eng.memory?.lastSaveError;
       engines.delete(name);
       sessionQueue.forget(name);
+      board.remove(name);
+      if (lastWriter?.session === name) lastWriter = null;
+      if (eng.memory?.dir) flushStatus(eng.memory.dir);
       if (activeName === name) activeName = engines.keys().next().value ?? "default";
       return text(
         `Session "${name}" closed. Memory and report remain in .scenescout/.` +
@@ -1082,6 +1252,17 @@ server.registerTool(
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // A client that exits by closing the pipe sends no signal. Without this the
+  // process, its port, its browsers and its token file all outlived the run.
+  const clientGone = (): void => {
+    void shutdown().finally(() => process.exit(0));
+  };
+  transport.onclose = clientGone;
+  // The transport reports a closed pipe on some platforms and not others, and
+  // on Windows the SIGTERM a client sends next is a plain kill that runs no
+  // handler. stdin ending is the one signal every platform gives.
+  process.stdin.once("end", clientGone);
+  process.stdin.once("close", clientGone);
   // Self-heal across restarts: browsers whose parent crashed/was killed can
   // linger and have been observed to wedge fresh launches. After connect —
   // the stdio handshake must not wait on a full process-table scan.
@@ -1089,7 +1270,16 @@ async function main(): Promise<void> {
 }
 
 async function shutdown(): Promise<void> {
-  await Promise.allSettled([...engines.values()].map((e) => e.close()));
+  // The token outlives nothing: a file left behind would name a port some other process may get next.
+  await Promise.allSettled(liveTokenWrites.values());
+  for (const dir of liveDirs) {
+    try {
+      fs.rmSync(path.join(dir, LIVE_TOKEN_FILE), { force: true });
+    } catch (err) {
+      console.error(`[scenescout] could not remove the live view's token file in ${dir}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  await Promise.allSettled([live?.stop(), ...[...engines.values()].map((e) => e.close())]);
 }
 
 process.on("SIGINT", () => {

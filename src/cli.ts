@@ -42,6 +42,7 @@ import {
   spawnRunner,
 } from "./installer.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME } from "./engine/memory.js";
+import { localClock, formatSessionLine, LIVE_TOKEN_FILE, watchTarget, wholeSessions, type StatusFile } from "./engine/live.js";
 import { formatScan, scanProject } from "./scan.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -65,61 +66,86 @@ Usage:
   scenescout doctor                 Check the setup and print the fix for anything missing
                                     (--engine: only node, the build and the browser — for plugin
                                      installs and other MCP clients)
-  scenescout status [projectPath]   What is the engine doing right now? (live status + recent actions)
+  scenescout status [projectPath]   What is the engine doing right now? (every session + recent actions)
+  scenescout watch [projectPath]    Open the live view in a browser: what each session is doing, a thumbnail
+                                    of its page, and a live stream you can switch on per session
+                                    (--no-open to print the address only)
 `);
   process.exit(exitCode);
 }
 
-/** Realtime observability: read the status file + recent action log the running engine maintains. */
-function status(projectPath: string): void {
-  // A project last touched before the rename (or one a pre-rename engine is
-  // using right now) still keeps its status under the legacy directory.
-  const dir =
+/**
+ * A project last touched before the rename (or one a pre-rename engine is using
+ * right now) still keeps its status under the legacy directory.
+ */
+function statusDir(projectPath: string): string {
+  return (
     [MEMORY_DIRNAME, LEGACY_MEMORY_DIRNAME]
       .map((name) => path.join(projectPath, name))
-      .find((candidate) => fs.existsSync(path.join(candidate, "status.json"))) ?? path.join(projectPath, MEMORY_DIRNAME);
+      .find((candidate) => fs.existsSync(path.join(candidate, "status.json"))) ?? path.join(projectPath, MEMORY_DIRNAME)
+  );
+}
+
+/** null when there is no file; "unreadable" when there is one and it does not parse. */
+function readStatusFile(dir: string): StatusFile | "unreadable" | null {
   const statusPath = path.join(dir, "status.json");
-  if (!fs.existsSync(statusPath)) {
-    console.log(`No status file at ${statusPath} — no SceneScout engine has attached to this project (or it predates v0.8).`);
-    return;
-  }
-  type Status = {
-    pid?: number;
-    phase?: string;
-    tool?: string;
-    session?: string;
-    role?: string;
-    sessions?: string[];
-    url?: string;
-    at?: string;
-  };
-  let st: Status;
+  if (!fs.existsSync(statusPath)) return null;
   try {
-    st = JSON.parse(fs.readFileSync(statusPath, "utf8")) as Status;
+    return JSON.parse(fs.readFileSync(statusPath, "utf8")) as StatusFile;
   } catch {
     // status.json is written fire-and-forget on every tool call, so a process
     // killed mid-write leaves a truncated file. That is a diagnosable state,
     // not a reason for the diagnostic tool itself to crash.
+    return "unreadable";
+  }
+}
+
+function pidAlive(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means the process EXISTS but belongs to another user — only
+    // ESRCH actually means "no such process". Treating both as dead reported
+    // a live engine as stale.
+    return (err as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+/** Realtime observability: read the status file + recent action log the running engine maintains. */
+function status(projectPath: string): void {
+  const dir = statusDir(projectPath);
+  const statusPath = path.join(dir, "status.json");
+  const st = readStatusFile(dir);
+  if (st === null) {
+    console.log(`No status file at ${statusPath} — no SceneScout engine has attached to this project (or it predates v0.8).`);
+    return;
+  }
+  if (st === "unreadable") {
     console.log(`Status file at ${statusPath} is unreadable or truncated — the engine was probably killed mid-write. Re-attach to refresh it.`);
     return;
   }
-  let alive = false;
-  if (st.pid) {
-    try {
-      process.kill(st.pid, 0);
-      alive = true;
-    } catch (err) {
-      // EPERM means the process EXISTS but belongs to another user — only
-      // ESRCH actually means "no such process". Treating both as dead reported
-      // a live engine as stale.
-      alive = (err as NodeJS.ErrnoException)?.code === "EPERM";
-    }
-  }
+  const alive = pidAlive(st.pid);
   const age = st.at ? Math.round((Date.now() - new Date(st.at).getTime()) / 1000) : null;
   console.log(`Engine pid ${st.pid ?? "?"} — ${alive ? "ALIVE" : "not running (stale status)"}`);
   console.log(`${st.phase === "running" ? "⏳ running" : "· idle after"}: ${st.tool ?? "?"}${age !== null ? ` (as of ${age}s ago)` : ""}`);
-  console.log(`Session: ${st.session ?? "?"} (${st.role ?? "?"})${st.sessions && st.sessions.length > 1 ? ` · all sessions: ${st.sessions.join(", ")}` : ""}`);
-  if (st.url) console.log(`URL: ${st.url}`);
+  // The file is written by another process and can be caught mid-write, so
+  // only entries whole enough to describe are described.
+  const sessions = wholeSessions(st.detail);
+  if (sessions.length > 0) {
+    // One line per session. The single "Session:" line below it is all an
+    // engine from before the live view can offer.
+    console.log(`Sessions (${sessions.length}):`);
+    for (const entry of sessions) console.log(`  ${formatSessionLine(entry, Date.now())}`);
+    if (alive && st.live?.port) console.log("Live view: scenescout watch");
+    if (alive && st.live?.error) console.log(`Live view unavailable: ${st.live.error}`);
+  } else {
+    console.log(
+      `Session: ${st.session ?? "?"} (${st.role ?? "?"})${st.sessions && st.sessions.length > 1 ? ` · all sessions: ${st.sessions.join(", ")}` : ""}`,
+    );
+    if (st.url) console.log(`URL: ${st.url}`);
+  }
   // Recent actions from the newest session log — the "what has it been doing" trail.
   const logs = fs.existsSync(dir)
     ? fs
@@ -145,11 +171,47 @@ function status(projectPath: string): void {
     for (const line of lines) {
       try {
         const e = JSON.parse(line) as { at: string; action: string; target?: string; url: string };
-        console.log(`  ${e.at.slice(11, 19)} ${e.action}${e.target ? ` ${e.target}` : ""} @ ${e.url}`);
+        console.log(`  ${localClock(e.at)} ${e.action}${e.target ? ` ${e.target}` : ""} @ ${e.url}`);
       } catch {
         /* skip malformed line */
       }
     }
+  }
+}
+
+/** Open the engine's live view. The engine serves it; this only finds the address and hands it to a browser. */
+function watch(projectPath: string, open: boolean): void {
+  const dir = statusDir(projectPath);
+  const st = readStatusFile(dir);
+  let token: string | null = null;
+  try {
+    token = fs.readFileSync(path.join(dir, LIVE_TOKEN_FILE), "utf8");
+  } catch {
+    // watchTarget explains a missing token in context.
+  }
+  const target = watchTarget({ status: st, alive: st !== null && st !== "unreadable" && pidAlive(st.pid), token });
+  if ("problem" in target) {
+    console.log(target.problem);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`Live view: ${target.url}`);
+  console.log("It is served on this machine only, and the address holds its access token: treat it like a password.");
+  if (!open) return;
+  const { command, args } = browserOpener(target.url);
+  const result = spawnSync(command, args, { stdio: "ignore" });
+  if (result.error || result.status !== 0) console.log("Could not open a browser from here. Open the address above yourself.");
+}
+
+/** The platform's own "open this URL" command. */
+function browserOpener(url: string): { command: string; args: string[] } {
+  switch (process.platform) {
+    case "darwin":
+      return { command: "open", args: [url] };
+    case "win32":
+      return { command: "cmd", args: ["/c", "start", "", url] };
+    default:
+      return { command: "xdg-open", args: [url] };
   }
 }
 
@@ -446,6 +508,11 @@ try {
     }
     case "status": {
       status(path.resolve(args[0] ?? process.cwd()));
+      break;
+    }
+    case "watch": {
+      const positional = args.filter((a) => !a.startsWith("--"));
+      watch(path.resolve(positional[0] ?? process.cwd()), !args.includes("--no-open"));
       break;
     }
     default:

@@ -123,6 +123,10 @@ export function redactSecrets(text: string): string {
   return hits > 0 ? `${out} [${hits} secret${hits === 1 ? "" : "s"} redacted]` : out;
 }
 
+/** The action-log lines that open and close a journey (scout_journey). The feed reads them to tell which goal an action served. */
+export const JOURNEY_START = "journey:start";
+export const JOURNEY_END = "journey:end";
+
 export interface ActionLogEntry {
   at: string;
   action: string;

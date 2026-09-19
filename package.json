@@ -71,7 +71,7 @@
     "mcp-check": "npm run build && npm run mcp-check:run",
     "mcp-check:run": "tsx scripts/mcp-check.ts",
     "test": "npm run build && npm run test:unit && npm run smoke:run && npm run mcp-check:run",
-    "test:unit": "npm run scan-test && npm run oracle-test && npm run policy-test && npm run fixture-test && npm run dispatch-test && npm run design-test && npm run contract-test && npm run memory-test && npm run install-test && npm run hygiene-test",
+    "test:unit": "npm run scan-test && npm run oracle-test && npm run policy-test && npm run fixture-test && npm run dispatch-test && npm run design-test && npm run contract-test && npm run memory-test && npm run install-test && npm run live-test && npm run hygiene-test",
     "scan-test": "tsx scripts/scan-test.ts",
     "oracle-test": "tsx --test scripts/oracle-test.ts",
     "policy-test": "tsx --test scripts/policy-test.ts",
@@ -81,6 +81,7 @@
     "contract-test": "tsx --test scripts/contract-test.ts",
     "memory-test": "tsx --test scripts/memory-test.ts",
     "install-test": "tsx --test scripts/install-test.ts",
+    "live-test": "tsx --test scripts/live-test.ts",
     "hygiene-test": "tsx --test scripts/hygiene-test.ts"
   },
   "dependencies": {
