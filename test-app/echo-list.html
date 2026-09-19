@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Notes</title></head>
+<body>
+  <h1>Notes</h1>
+  <!-- Fixture defect: the saved note is rendered as HTML, so a note holding markup becomes an element (stored injection). -->
+  <div id="note" data-testid="echo-rendered"></div>
+  <a href="/echo.html" data-testid="echo-back">Back</a>
+  <script>
+    document.getElementById("note").innerHTML = localStorage.getItem("echo-note") || "(no note yet)";
+  </script>
+</body>
+</html>

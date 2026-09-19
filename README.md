@@ -506,6 +506,7 @@ src/
     probes.ts       in-page scroll + overlay + focus probes (needs a browser too)
     fingerprint.ts  route + element-set identity (state hashing)
     oracles.ts      console/page/network/HTTP error detection
+    injection.ts    the DOM-injection oracle's rules (what to watch for, how to find it)
     policy.ts       the write-policy safety net
     ownership.ts    safe-write: which records did this run create?
     uploads.ts      disk uploads, fenced to the project by real path
@@ -566,7 +567,7 @@ Found a way past the write policy, or another security problem? Please report it
 - **Structured render-state, not pixels.** Element lists with geometry; screenshots reserved for pixel-native residue (canvas, rendering glitches). Images that failed to load are reported from the DOM, including ones whose URL answered 200 with something that is not an image.
 - **Diff snapshots with stable refs.** Re-snapshots return only what changed (10.7 kB → 0.7 kB on a 130-element page); old refs stay valid.
 - **Geometry oracles.** Overlap and off-screen defects computed from layout boxes.
-- **Oracles after every action.** Console errors, page errors, failed requests, HTTP 4xx/5xx drained into every tool result.
+- **Oracles after every action.** Console errors, page errors, failed requests, HTTP 4xx/5xx drained into every tool result — and DOM injection: a markup-shaped value the agent typed that later renders as an element on any page (stored or reflected XSS).
 - **Multi-role, genuinely concurrent.** Commands to *different* sessions run in parallel; safe-write ownership is shared, so role A can create what role B approves. The report renders a role capability matrix.
 - **Task ease, not just correctness.** `scout_journey` measures interaction cost, distinct screens, path, and backtracks.
 - **Design audit with page scores.** Two tiers (⚠ measurable defects / → craft suggestions incl. AI-slop tells), per-page 0–100 score persisted per route, plus an automatic overlay/modal probe on every snapshot. Shared shell scored once, separately.

@@ -4,6 +4,7 @@ import path from "node:path";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
 import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
+import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
 import {
   COLLECT_INTERACTABLES_SCRIPT,
@@ -380,6 +381,53 @@ export class BrowserEngine {
    * allowed POST /items that shares its prefix.
    */
   private readonly abortedByPolicy = new WeakSet<import("playwright").Request>();
+  /** Markup-shaped values this session typed, so every later page can be checked for them rendering as elements. */
+  private probes: InjectionProbe[] = [];
+  /** Injections already reported, by payload and route, so a page is not reported on every snapshot. */
+  private injectionsReported = new Set<string>();
+
+  /**
+   * Remember a typed value when it holds an element worth watching for. What
+   * to type is the agent's choice; this only watches for the outcome. The
+   * page's current count of such elements is the baseline: shared chrome that
+   * happens to look like the payload is not an injection.
+   */
+  private async noteProbe(value: string, field: string): Promise<void> {
+    const shape = probeShape(value);
+    if (!shape || this.probes.some((p) => p.payload === shape.payload)) return;
+    const page = this.page;
+    let baseline = 0;
+    if (page && !page.isClosed()) {
+      try {
+        baseline = ((await page.evaluate(probeScript([shape]))) as RawHit[]).length;
+      } catch {
+        // A page mid-navigation: no baseline, so a coincidence on this page would be reported. Rare, and visible.
+      }
+    }
+    this.probes = rememberProbe(this.probes, { ...shape, field, typedOn: page?.url() ?? "", baseline });
+  }
+
+  /**
+   * The DOM-injection oracle: has anything this session typed come back as an
+   * element on the current page? Runs wherever violations are drained, so the
+   * finding reaches the agent in the result of the action that revealed it.
+   */
+  private async scanForInjections(): Promise<void> {
+    const page = this.page;
+    if (!page || page.isClosed() || this.probes.length === 0) return;
+    const url = page.url();
+    let hits: RawHit[];
+    try {
+      hits = (await page.evaluate(probeScript(probeQueries(this.probes)))) as RawHit[];
+    } catch {
+      // A page mid-navigation has no DOM to ask; the next drain looks again.
+      return;
+    }
+    for (const found of newInjections(this.probes, hits, url, this.injectionsReported)) {
+      this.oracles.noteInjection(describeInjection(found.probe, url, found.outer), url);
+    }
+  }
+
   /** Raw mutation sigs of the most recent action (pre-dedup) — double-submit detection. */
   private lastActionMutationSigs: string[] = [];
   /** Write-policy blocks drained by the last action — counted, so an action can know a request fired even when the policy stopped it. */
@@ -792,6 +840,7 @@ export class BrowserEngine {
     );
     memory.recordRoleAccess(this.role, route, "reached");
     this.logAction({ action: "snapshot", url, result: fp });
+    await this.scanForInjections();
 
     const line = (el: SnapshotElement): string => {
       const dup = el.key.match(/~(\d+)$/);
@@ -962,6 +1011,7 @@ export class BrowserEngine {
       );
     }
     this.logAction({ action, target, url });
+    await this.scanForInjections();
     const violations = this.oracles.drain();
     const mutations = this.drainMutations() + this.drainBlocked() + this.drainCreated();
     const navigated = this.snapshotUrl !== "" && url !== this.snapshotUrl;
@@ -1264,6 +1314,8 @@ export class BrowserEngine {
     const refusal = this.actionPolicyCheck(el, liveLabel);
     if (refusal) return refusal;
     const locator = page.locator(`xpath=${el.xpath}`);
+    // Before the fill: a page that reflects input as it is typed already holds the element afterwards.
+    await this.noteProbe(text, `${el.role} "${el.name}"`);
     const fillNote = await this.fillOrAppend(locator, text, replace);
     if (pressEnter) {
       // Enter inside a form submits it — check the form's submit target, or
@@ -1828,6 +1880,7 @@ export class BrowserEngine {
       if (typeof status === "number" && status >= 400) memory.markAttempted(requestedRoute, `status:${status}`, this.role);
       this.logAction({ action: "crawl", target: path, url: finalUrl });
 
+      await this.scanForInjections();
       const violations = this.oracles.drain();
       const deadEnd = elements.length === 0;
       const unnamed = elements.filter((el) => !el.name).length;
@@ -1983,6 +2036,7 @@ export class BrowserEngine {
                 : `   hover revealed nothing within ${HOVER_REVEAL_WINDOW_MS / 1000}s`,
             );
           } else if (step.action === "type") {
+            await this.noteProbe(step.value ?? "", step.target ?? "the field");
             const fillNote = await this.fillOrAppend(loc, step.value ?? "", step.replace ?? false);
             note = fillNote;
             if (step.pressEnter) {
@@ -2054,6 +2108,7 @@ export class BrowserEngine {
             /* coverage bookkeeping must never fail the plan */
           }
         }
+        await this.scanForInjections();
         const violations = this.oracles.drain();
         const mutations = this.drainMutations() + this.drainBlocked() + this.drainCreated();
         // Abort only on NEW violations: a known-failing endpoint repeating on

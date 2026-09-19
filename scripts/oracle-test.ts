@@ -11,6 +11,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { brokenImageIssues, geometryIssues } from "../src/engine/collector.ts";
 import { POLICY_BLOCK_WINDOW_MS, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
+import {
+  describeInjection,
+  injectionProbe,
+  INJECTION_TEXT_MAX,
+  matchesElement,
+  MAX_PROBES,
+  newInjections,
+  probeScript,
+  rememberProbe,
+  type InjectionProbe,
+} from "../src/engine/injection.ts";
 
 const VIEWPORT = { width: 1280, height: 900 };
 
@@ -242,4 +253,141 @@ test("a page full of broken images reports the real total, not the sample size",
   const lines = brokenImageIssues({ images: sample, total: 95 }, "http://x/");
   assert.equal(lines.length, 6);
   assert.match(lines[5], /and 90 more images that failed to load/);
+});
+
+// ---- the DOM-injection oracle's rules ---------------------------------------
+
+test("a typed value is watched only when it holds an element with something to tell it apart by", () => {
+  // The agent chooses what to type; the oracle only notices markup-shaped
+  // values. Plain text, an email, a URL and a stray "<" are none of its
+  // business, and neither is a bare <script> or <br>: they would match any page.
+  for (const plain of ["hello", "a <b", "x < y > z", "user@example.com", "https://example.test/?q=1", "1 << 3", "", "<script>", "<br/>", "<b></b>"]) {
+    assert.equal(injectionProbe(plain, "f", "http://app.test/"), null, JSON.stringify(plain));
+  }
+  const img = injectionProbe('<img src=x onerror="alert(1)">', 'textbox "Customer"', "http://app.test/new");
+  assert.ok(img);
+  assert.equal(img.tag, "img");
+  assert.deepEqual(img.attrs, [
+    ["src", "x"],
+    ["onerror", "alert(1)"],
+  ]);
+  assert.equal(img.selector, 'img[src="x"][onerror="alert(1)"]');
+  assert.equal(img.text, null);
+  assert.equal(img.baseline, 0);
+});
+
+test("payload shapes a fuzzing pass really types are recognised", () => {
+  // A slash between attributes is whitespace to a browser, and the usual way
+  // a payload avoids a naive filter.
+  assert.equal(injectionProbe("<svg/onload=alert(1)>", "f", "u")?.selector, 'svg[onload="alert(1)"]');
+  assert.equal(injectionProbe("<img/src=x onerror=alert(1)>", "f", "u")?.selector, 'img[src="x"][onerror="alert(1)"]');
+  assert.equal(injectionProbe('"><script>alert(1)</script>', "f", "u")?.text, "alert(1)");
+  const bold = injectionProbe("note <b>loud</b> end", "f", "u");
+  assert.equal(bold?.selector, "b");
+  assert.equal(bold?.text, "loud");
+  // An attribute name that cannot go into a selector is dropped, never interpolated.
+  const odd = injectionProbe("<b a],*,[c=x>x</b>", "f", "u");
+  assert.deepEqual(odd?.attrs, [], "a name holding selector syntax is not an attribute");
+  assert.equal(odd?.selector, "b");
+  assert.equal(injectionProbe('<a data-x:y="1" href="/z">go</a>', "f", "u")?.selector, 'a[href="/z"]');
+  const quoted = injectionProbe("<a href='/x' title=\"a title\" data-x=plain>go</a>", "f", "u");
+  assert.deepEqual(quoted?.attrs, [
+    ["href", "/x"],
+    ["title", "a title"],
+    ["data-x", "plain"],
+  ]);
+  assert.equal(quoted?.text, "go", "text is kept alongside attributes: both have to match");
+  const inner = injectionProbe("<a title='say \"hi\"'>x</a>", "f", "u");
+  assert.equal(inner?.selector, 'a[title="say \\"hi\\""]', "a double quote inside a value is escaped for the selector");
+  assert.equal(injectionProbe(`<i>${"x".repeat(500)}</i>`, "f", "u")?.text?.length, INJECTION_TEXT_MAX, "long text is compared on its first characters");
+});
+
+test("an element is the typed one only with exactly its attributes and its text", () => {
+  const link = { selector: 'a[href="/"]', attrs: [["href", "/"]] as Array<[string, string]>, text: "home" };
+  assert.equal(matchesElement(link, { attrs: { href: "/" }, text: " home " }), true);
+  assert.equal(
+    matchesElement(link, { attrs: { href: "/", "data-testid": "nav-home" }, text: "home" }),
+    false,
+    "the app's own link carries more attributes than were typed",
+  );
+  assert.equal(matchesElement(link, { attrs: { href: "/" }, text: "Home page" }), false);
+  const script = { selector: "script", attrs: [] as Array<[string, string]>, text: "alert(1)" };
+  assert.equal(matchesElement(script, { attrs: {}, text: "alert(1)" }), true);
+  assert.equal(matchesElement(script, { attrs: {}, text: "window.app = {}" }), false, "the page's own scripts are not the typed one");
+  assert.match(probeScript([link]), /attributes\.length !== q\.attrs\.length/, "the page applies the same rule before capping");
+});
+
+test("a hit is an injection only beyond the typing page's baseline, and is reported once per route", () => {
+  const probe = injectionProbe('<a href="/">home</a>', "f", "http://app.test/new", 1);
+  assert.ok(probe);
+  const reported = new Set<string>();
+  assert.deepEqual(
+    newInjections([probe], [{ index: 0, outer: "<a>" }], "http://app.test/list", reported),
+    [],
+    "one such link is the shared chrome the typing page already had",
+  );
+  const found = newInjections(
+    [probe],
+    [
+      { index: 0, outer: '<a href="/">home</a>' },
+      { index: 0, outer: '<a href="/">home</a>' },
+    ],
+    "http://app.test/list?page=2",
+    reported,
+  );
+  assert.equal(found.length, 1);
+  assert.equal(found[0]?.key, '<a href="/">home</a>|/list');
+  assert.deepEqual(
+    newInjections(
+      [probe],
+      [
+        { index: 0, outer: "" },
+        { index: 0, outer: "" },
+      ],
+      "http://app.test/list",
+      reported,
+    ),
+    [],
+    "the same route is not reported again",
+  );
+});
+
+test("a hostile value cannot make the parse backtrack, and an unclosed tag is not an element", () => {
+  // The first version used one regex with a nested quantifier over the
+  // attribute list, which CodeQL flagged: a value starting "<A\t!=" and
+  // repeating could take exponential time. The tokenizer consumes at least
+  // one character per step.
+  const hostile = "<a\t!=" + "\t!=".repeat(20000) + "x";
+  const started = Date.now();
+  const shape = injectionProbe(hostile, "f", "u");
+  assert.ok(Date.now() - started < 200, `took ${Date.now() - started}ms`);
+  assert.equal(shape, null, "the tag never closes");
+  assert.equal(injectionProbe("<a href='/x'", "f", "u"), null);
+  assert.equal(injectionProbe("<a href='/x'>go", "f", "u")?.text, "go", "a closed tag with no closing tag still has its text");
+});
+
+test("the violation says where it was typed, where it fired, and what it became", () => {
+  const probe = injectionProbe('<img src=x onerror="alert(1)">', 'textbox "Customer"', "http://app.test/orders/new?draft=1");
+  assert.ok(probe);
+  const detail = describeInjection(probe, "http://app.test/orders?status=open", '<img src="x" onerror="alert(1)">');
+  assert.match(detail, /typed into textbox "Customer" on \/orders\/new/);
+  assert.match(
+    detail,
+    /^<img src="x" onerror="alert\(1\)"> on \/orders is/,
+    "the element leads, so two payloads on one page never share the log's signature prefix",
+  );
+  assert.match(detail, /XSS/);
+});
+
+test("the probe list keeps the first sighting of a payload and drops the oldest past the cap", () => {
+  const make = (n: number) => injectionProbe(`<em data-k="${n}">x</em>`, "f", "u", n)!;
+  let probes: InjectionProbe[] = [];
+  for (let i = 0; i < MAX_PROBES + 5; i += 1) probes = rememberProbe(probes, make(i));
+  assert.equal(probes.length, MAX_PROBES);
+  assert.equal(probes[0]?.baseline, 5, "the five oldest went");
+  assert.equal(probes.at(-1)?.baseline, MAX_PROBES + 4);
+  const again = rememberProbe(probes, { ...make(7), baseline: 99 });
+  assert.equal(again.length, MAX_PROBES);
+  assert.equal(again.find((p) => p.payload.includes('"7"'))?.baseline, 7, "a payload typed again keeps its first baseline");
+  assert.equal(injectionProbe('<b title="a\nb">x</b>', "f", "u")?.selector, 'b[title="a\\a b"]', "a newline in a value is escaped for the selector");
 });
