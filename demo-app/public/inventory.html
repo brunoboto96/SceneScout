@@ -26,6 +26,7 @@
         <button data-sort="name" data-testid="inventory-sort-name">Name</button>
         <button data-sort="qty" data-testid="inventory-sort-qty">Quantity</button>
       </div>
+      <p id="err" class="error" hidden data-testid="page-error"></p>
       <table>
         <thead>
           <tr>
@@ -48,8 +49,19 @@
         return td;
       };
       const rows = document.getElementById("rows");
+      const err = document.getElementById("err");
       async function load(sort) {
-        const list = await fetch("/api/inventory" + (sort ? "?sort=" + sort : "")).then((r) => r.json());
+        let list;
+        try {
+          const res = await fetch("/api/inventory" + (sort ? "?sort=" + sort : ""));
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          list = await res.json();
+          err.hidden = true;
+        } catch (e) {
+          err.textContent = "Could not load inventory (" + e.message + ").";
+          err.hidden = false;
+          return;
+        }
         rows.replaceChildren();
         for (const it of list) {
           const tr = document.createElement("tr");
