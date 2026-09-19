@@ -23,7 +23,11 @@ export type Runner = (command: string, args: string[]) => RunResult;
 /** Real runner. `missing` separates "the binary is not installed" from "it ran and failed". */
 export const spawnRunner: Runner = (command, args) => {
   const r = spawnSync(command, args, { encoding: "utf8", timeout: 60_000 });
-  const missing = (r.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+  const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
+  // On Windows node refuses to start a .cmd or .bat file directly (EINVAL). For
+  // the caller that is the same situation as a missing binary: nothing ran, and
+  // the command has to be handed to the person instead.
+  const missing = code === "ENOENT" || (process.platform === "win32" && code === "EINVAL");
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? (r.error ? String(r.error.message) : ""), missing };
 };
 

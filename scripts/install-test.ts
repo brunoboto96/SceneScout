@@ -43,6 +43,8 @@ import {
 
 import { explorePrompt, loadPlaybook, PLAYBOOK_RELATIVE_PATH, SERVER_INSTRUCTIONS, stripFrontMatter } from "../src/playbook.ts";
 
+import { firstMessageHint, manualFor, parseClients, registerInFile, registerWithClient, vscodeAddArgs, vscodeBinary } from "../src/clients.ts";
+
 function tmp(prefix: string): string {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
 }
@@ -752,4 +754,181 @@ test("the server instructions stay short and the explore prompt states what was 
   assert.throws(() => explorePrompt("# Method", { level: "deep" }), /"deep" is not one the method knows.*minimal, medium, extensive/);
   // With no URL the agent is told to find one, not left with a blank target.
   assert.match(explorePrompt("# Method", {}), /Target: ask me for the URL/);
+});
+
+const LAUNCH = ["/opt/node/bin/npx", "-y", "scenescout", "serve"];
+
+test("--client picks who gets the server, and absent means Claude Code", () => {
+  assert.deepEqual(parseClients(undefined), { clients: ["claude-code"] });
+  assert.deepEqual(parseClients("cursor"), { clients: ["cursor"] });
+  assert.deepEqual(parseClients(" VSCode , claude-code,cursor "), { clients: ["claude-code", "cursor", "vscode"] });
+  const typo = parseClients("vs-code");
+  assert.ok("error" in typo);
+  assert.match(typo.error, /"vs-code" is not a client.*claude-code, cursor, vscode, codex, gemini, copilot, windsurf/);
+  assert.ok("error" in parseClients(""));
+});
+
+test("a client's JSON server list gains the entry and keeps everything else", () => {
+  const file = path.join(tmp("sc-home-"), ".cursor", "mcp.json");
+  // No file yet: it is created, along with its directory.
+  const created = registerInFile(file, "mcpServers", LAUNCH);
+  assert.deepEqual(created, { status: "registered", where: file, replaced: false, notes: [] });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { mcpServers: { scenescout: { command: LAUNCH[0], args: LAUNCH.slice(1) } } });
+
+  // Someone's existing servers and unrelated keys survive, untouched and in place.
+  const theirs = {
+    theme: "dark",
+    mcpServers: { other: { command: "node", args: ["x.js"], env: { KEY: "v" } }, scenescout: { command: "node", args: ["/old/mcp-server.js"] } },
+  };
+  fs.writeFileSync(file, JSON.stringify(theirs));
+  const replaced = registerInFile(file, "mcpServers", LAUNCH);
+  assert.equal(replaced.status, "registered");
+  assert.ok(replaced.status === "registered" && replaced.replaced);
+  assert.match(replaced.status === "registered" ? replaced.notes.join(" ") : "", /previous "scenescout" entry was replaced; it ran: .*old\/mcp-server\.js/);
+  const after = JSON.parse(fs.readFileSync(file, "utf8")) as typeof theirs;
+  assert.equal(after.theme, "dark");
+  assert.deepEqual(after.mcpServers.other, theirs.mcpServers.other);
+  assert.deepEqual(after.mcpServers.scenescout, { command: LAUNCH[0], args: LAUNCH.slice(1) });
+
+  // Running it again changes nothing and says nothing was replaced with something different.
+  const again = registerInFile(file, "mcpServers", LAUNCH);
+  assert.deepEqual(again.status === "registered" ? again.notes : ["x"], []);
+  // No temporary file is left beside it.
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ["mcp.json"]);
+});
+
+test("a server list that cannot be read as JSON is left exactly as it was", () => {
+  const file = path.join(tmp("sc-home-"), "mcp.json");
+  // Comments are common in hand-edited config; rewriting the file would throw their content away.
+  const handEdited = '{\n  // my servers\n  "mcpServers": {}\n}\n';
+  fs.writeFileSync(file, handEdited);
+  const result = registerInFile(file, "mcpServers", LAUNCH);
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /not valid JSON.*left untouched/);
+  assert.match(result.status === "failed" ? result.manual : "", /"scenescout"/);
+  assert.equal(fs.readFileSync(file, "utf8"), handEdited);
+
+  for (const wrongShape of ["[]", '{"mcpServers": []}', '{"mcpServers": "x"}']) {
+    fs.writeFileSync(file, wrongShape);
+    assert.equal(registerInFile(file, "mcpServers", LAUNCH).status, "failed", wrongShape);
+    assert.equal(fs.readFileSync(file, "utf8"), wrongShape);
+  }
+  // A byte-order mark in front of valid JSON is not a reason to refuse it.
+  fs.writeFileSync(file, '\uFEFF{"mcpServers":{}}');
+  assert.equal(registerInFile(file, "mcpServers", LAUNCH).status, "registered");
+  // An empty file is a server list with nothing in it yet.
+  fs.writeFileSync(file, "");
+  assert.equal(registerInFile(file, "mcpServers", LAUNCH).status, "registered");
+});
+
+test("clients with their own add command are registered through it", () => {
+  const home = tmp("sc-home-");
+  const codex = scripted([ok("Added global MCP server 'scenescout'.")]);
+  assert.equal(registerWithClient("codex", { launch: LAUNCH, home, run: codex.run, vscode: null }).status, "registered");
+  assert.deepEqual(codex.calls, [["codex", "mcp", "add", "scenescout", "--", ...LAUNCH]]);
+
+  // The default scope there is the project; this belongs to the user.
+  const gemini = scripted([ok('MCP server "scenescout" added to user settings. (stdio)')]);
+  registerWithClient("gemini", { launch: LAUNCH, home, run: gemini.run, vscode: null });
+  assert.deepEqual(gemini.calls, [["gemini", "mcp", "add", "--scope", "user", "scenescout", ...LAUNCH]]);
+
+  // This one refuses a name that exists, so the old entry is removed first.
+  const copilot = scripted([ok("Removed"), ok("Added")]);
+  const added = registerWithClient("copilot", { launch: LAUNCH, home, run: copilot.run, vscode: null });
+  assert.deepEqual(copilot.calls, [
+    ["copilot", "mcp", "remove", "scenescout"],
+    ["copilot", "mcp", "add", "scenescout", "--", ...LAUNCH],
+  ]);
+  assert.ok(added.status === "registered" && added.replaced);
+  // Nothing of that name to remove is not a failure, and nothing was replaced.
+  const fresh = registerWithClient("copilot", {
+    launch: LAUNCH,
+    home,
+    run: scripted([fail('Error: Server "scenescout" not found'), ok("Added")]).run,
+    vscode: null,
+  });
+  assert.ok(fresh.status === "registered" && !fresh.replaced);
+  // Removed the old entry and then could not add the new one: the person has no registration left, and is told.
+  const lost = registerWithClient("copilot", { launch: LAUNCH, home, run: scripted([ok("Removed"), fail("Error: could not write config")]).run, vscode: null });
+  assert.equal(lost.status, "failed");
+  assert.match(lost.status === "failed" ? lost.detail : "", /could not write config.*previous "scenescout" entry had already been removed/);
+
+  // Not installed: say so, with the command to run once it is.
+  const none = registerWithClient("codex", { launch: LAUNCH, home, run: scripted([absent]).run, vscode: null });
+  assert.equal(none.status, "client-missing");
+  assert.match(none.status === "client-missing" ? none.manual : "", /^codex mcp add scenescout -- /);
+});
+
+test("VS Code is registered through VS Code's own command, never a fork's", () => {
+  const bundled = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
+  // Another editor installs a `code` command too. Running that one reports
+  // success and VS Code never sees the entry.
+  const forkOnPath = { command: "/usr/local/bin/code", realPath: "/Applications/Cursor.app/Contents/Resources/app/bin/code" };
+  assert.equal(vscodeBinary({ platform: "darwin", home: "/Users/u", exists: (p) => p === bundled, codeOnPath: forkOnPath }), bundled);
+  assert.equal(vscodeBinary({ platform: "darwin", home: "/Users/u", exists: () => false, codeOnPath: forkOnPath }), null);
+  assert.equal(vscodeBinary({ platform: "linux", home: "/home/u", exists: () => false, codeOnPath: null }), null);
+  // What runs is the command as found, not where it points: a snap install links
+  // `code` to a launcher that goes by the name it was called with.
+  const snap = { command: "/snap/bin/code", realPath: "/usr/bin/snap" };
+  assert.equal(vscodeBinary({ platform: "linux", home: "/home/u", exists: () => false, codeOnPath: snap }), "/snap/bin/code");
+  // An account that happens to be called like another editor does not disqualify the VS Code under it.
+  const underHome = { command: "/srv/accounts/cursor/bin/code", realPath: "/srv/accounts/cursor/apps/vscode/bin/code" };
+  assert.equal(vscodeBinary({ platform: "linux", home: "/srv/accounts/cursor", exists: () => false, codeOnPath: underHome }), "/srv/accounts/cursor/bin/code");
+
+  assert.deepEqual(vscodeAddArgs(LAUNCH), ["--add-mcp", JSON.stringify({ name: "scenescout", command: LAUNCH[0], args: LAUNCH.slice(1) })]);
+  const run = scripted([ok("Added MCP servers: scenescout")]);
+  assert.equal(registerWithClient("vscode", { launch: LAUNCH, home: "/Users/u", run: run.run, vscode: bundled }).status, "registered");
+  assert.equal(run.calls[0][0], bundled);
+  const missing = registerWithClient("vscode", { launch: LAUNCH, home: "/Users/u", run: scripted([]).run, vscode: null });
+  assert.equal(missing.status, "client-missing");
+  assert.match(missing.status === "client-missing" ? missing.manual : "", /MCP: Add Server/);
+});
+
+test("the closing hint names every client once and says what to ask the agent", () => {
+  assert.match(firstMessageHint(["cursor"]), /^Restart Cursor \(/);
+  assert.match(firstMessageHint(["cursor", "codex", "gemini"]), /^Restart Cursor, Codex CLI and Gemini CLI \(/);
+  assert.match(firstMessageHint(["vscode"]), /Use SceneScout to test http:\/\/localhost:3000[\s\S]*scout_playbook/);
+});
+
+test(
+  "a linked config is written through the link, keeps its permissions, and a failed write leaves nothing behind",
+  { skip: process.platform === "win32" },
+  () => {
+    const home = tmp("sc-home-");
+    const real = path.join(home, "dotfiles", "cursor-mcp.json");
+    const link = path.join(home, ".cursor", "mcp.json");
+    fs.mkdirSync(path.dirname(real), { recursive: true });
+    fs.mkdirSync(path.dirname(link), { recursive: true });
+    fs.writeFileSync(real, '{"mcpServers":{}}', { mode: 0o644 });
+    fs.symlinkSync(real, link);
+
+    assert.equal(registerInFile(link, "mcpServers", LAUNCH).status, "registered");
+    // Renaming over the link would have turned it into a plain file and left the real one unchanged.
+    assert.ok(fs.lstatSync(link).isSymbolicLink());
+    assert.ok("scenescout" in (JSON.parse(fs.readFileSync(real, "utf8")) as { mcpServers: object }).mcpServers);
+    assert.equal(fs.statSync(real).mode & 0o777, 0o644);
+
+    // A directory that cannot be written to: a failure with the entry to add by hand, not a thrown error,
+    // and no temporary copy of the config left lying around.
+    const locked = path.join(home, "locked");
+    fs.mkdirSync(locked);
+    const lockedFile = path.join(locked, "mcp.json");
+    fs.writeFileSync(lockedFile, '{"mcpServers":{"other":{"command":"x"}}}');
+    fs.chmodSync(locked, 0o555);
+    try {
+      const result = registerInFile(lockedFile, "mcpServers", LAUNCH);
+      assert.equal(result.status, "failed");
+      assert.match(result.status === "failed" ? result.detail : "", /could not be written/);
+      assert.deepEqual(fs.readdirSync(locked), ["mcp.json"]);
+    } finally {
+      fs.chmodSync(locked, 0o755);
+    }
+  },
+);
+
+test("the by-hand text exists for every client, for when nothing is run", () => {
+  assert.match(manualFor("codex", LAUNCH, "/home/u"), /^codex mcp add scenescout -- /);
+  assert.match(manualFor("gemini", LAUNCH, "/home/u"), /^gemini mcp add --scope user scenescout /);
+  assert.match(manualFor("vscode", LAUNCH, "/home/u"), /^code --add-mcp /);
+  assert.match(manualFor("cursor", LAUNCH, "/home/u"), /"mcpServers".*\.cursor.*mcp\.json.*"scenescout"/);
 });
