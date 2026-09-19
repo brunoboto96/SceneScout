@@ -11,8 +11,11 @@
       <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
       <nav aria-label="Main">
         <a href="/" data-testid="nav-dashboard">Dashboard</a><a href="/orders.html" data-testid="nav-orders" aria-current="page">Orders</a
-        ><a href="/reports.html" data-testid="nav-reports">Reports</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
+        ><a href="/approvals.html" data-testid="nav-approvals">Approvals</a><a href="/inventory.html" data-testid="nav-inventory">Inventory</a
+        ><a href="/customers.html" data-testid="nav-customers">Customers</a><a href="/reports.html" data-testid="nav-reports">Reports</a
+        ><a href="/audit.html" data-testid="nav-audit">Audit log</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
       </nav>
+      <a class="whoami" href="/signin.html" data-testid="nav-whoami"><span id="role">clerk</span> · switch role</a>
     </header>
     <main>
       <h1>Orders</h1>
@@ -23,6 +26,9 @@
           <option value="">All</option>
           <option value="open">Open</option>
           <option value="shipped">Shipped</option>
+          <option value="pending">Awaiting approval</option>
+          <option value="approved">Approved</option>
+          <option value="rejected">Rejected</option>
           <option value="archived">Archived</option>
         </select>
         <a class="btn primary" href="/orders-new.html" data-testid="orders-new-btn">New order</a>
@@ -48,6 +54,8 @@
         const res = await fetch("/api/orders" + (status ? "?status=" + status : ""));
         // SEEDED DEFECT: a failed response is rendered as an empty table, with no message.
         const orders = res.ok ? await res.json() : [];
+        // SEEDED DEFECT: the customer name is rendered as HTML, so a name that
+        // holds markup runs as script for everyone who opens the list (stored XSS).
         rows.innerHTML = orders
           .map(
             (o) =>
@@ -58,5 +66,6 @@
       document.getElementById("status").addEventListener("change", load);
       load();
     </script>
+    <script src="/app.js"></script>
   </body>
 </html>

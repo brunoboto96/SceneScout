@@ -187,14 +187,66 @@ async function main(): Promise<void> {
     snap = await engine.snapshot(true);
     show("click Delete workspace (read-only)", await engine.click(refOf(snap, "settings-delete-workspace")));
 
+    // Roles. As a clerk the Approvals page lists the queue with no Approve
+    // button. An agent does not take a hidden button as a refusal: it calls the
+    // endpoints directly, the way it would with curl, and compares the answers.
+    await engine.navigate("/approvals.html");
+    show("snapshot /approvals as a clerk", await engine.snapshot(true));
+    const asClerk = async (p: string): Promise<number> => (await fetch(`${baseUrl}${p}`, { method: "POST" })).status;
+    const rejected = await asClerk("/api/orders/1038/reject");
+    const approved = await asClerk("/api/orders/1037/approve");
+    show("a clerk calls reject, then approve, directly", `reject → ${rejected} · approve → ${approved}`);
+    finding({
+      severity: "high",
+      category: "permission-leak",
+      title: "A clerk can approve an order by calling the endpoint the page hides from them",
+      detail:
+        "The Approvals page shows Approve and Reject only to a manager. Reject is also refused by the server for anyone else, but Approve is not: a clerk who posts to it directly gets the order approved, and the audit log records a clerk approving. Hiding the button was the only control. The two sibling endpoints disagree, which is also the fix: give approve the check reject already has.",
+      evidence: `POST /api/orders/1037/approve ${approved} as clerk; POST /api/orders/1038/reject ${rejected} as clerk`,
+    });
+
+    // Inventory: a numeric column sorted as text.
+    await engine.navigate("/inventory.html");
+    snap = await engine.snapshot(true);
+    show("sort inventory by quantity", await engine.click(refOf(snap, "inventory-sort-qty")));
+    const quantities = ((await (await fetch(`${baseUrl}/api/inventory?sort=qty`)).json()) as Array<{ qty: number }>).map((i) => i.qty);
+    finding({
+      severity: "medium",
+      category: "data-inconsistency",
+      title: "Sorting inventory by quantity puts 10 before 9",
+      detail:
+        "Quantity is compared as text, so the column orders by first digit. Pallet wrap (3 on hand) and Shipping labels (9) land at the bottom of an ascending sort, which is exactly where someone scanning for low stock does not look.",
+      evidence: `sorted by quantity: ${quantities.join(", ")}`,
+    });
+
+    // The remaining areas, so the sample report covers every page.
+    for (const route of ["/customers.html", "/audit.html", "/signin.html"]) {
+      await engine.navigate(route);
+      await engine.snapshot(true);
+    }
+
     // Craft and accessibility, on three representative pages.
     for (const route of ["/", "/order.html?id=1042"]) {
       await engine.navigate(route);
       show(`design audit ${route}`, await engine.designAudit());
     }
 
-    engine.memory!.addAssumption("app", "Harbor is a single-role order desk: no login, every visitor can create, edit and delete orders.", "demo");
+    engine.memory!.addAssumption(
+      "app-model",
+      "Harbor is an order desk with three roles chosen on /signin.html: clerk, manager, auditor. A visitor who has not chosen is a clerk. Orders over a clerk's limit wait in Approvals for a manager.",
+      "demo",
+    );
+    engine.memory!.addAssumption(
+      "roles",
+      "clerk = takes orders, asks for approval · manager = approves or rejects · auditor = reads everything, changes nothing.",
+      "demo",
+    );
     engine.memory!.addAssumption("risks", "Forms do not guard against repeat submission; check every new create flow with a double-click.", "demo");
+    engine.memory!.addAssumption(
+      "risks",
+      "Pages hide what a role may not do. Check each hidden action against its endpoint: Approve was found trusting the page.",
+      "demo",
+    );
 
     const all = engine.allKnownRoutes();
     const unvisited = engine.unvisitedKnownRoutes();

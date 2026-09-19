@@ -35,7 +35,7 @@ This is a real run against the small demo app bundled in this repository. The ap
 
 <p align="center"><img src="examples/screenshots/dashboard-annotated.png" alt="The demo app's dashboard with two defects outlined in red: 1, a yellow badge covering the All orders button; 2, the weekly chart image failing to load" width="760" /></p>
 
-**The broken chart is the demo app's bug, not this page's** — it is one of the ten findings SceneScout filed, next to the badge sitting on a button. The red callouts were added for this README; the [unmarked screenshots](examples/screenshots/) are the ones the engine took.
+**The broken chart is the demo app's bug, not this page's** — it is one of the twelve findings SceneScout filed, next to the badge sitting on a button. The red callouts were added for this README; the [unmarked screenshots](examples/screenshots/) are the ones the engine took.
 
 An excerpt of the report it wrote — [read the whole thing](examples/report.md):
 
@@ -46,13 +46,16 @@ An excerpt of the report it wrote — [read the whole thing](examples/report.md)
 > **🔴 [HIGH] Filtering orders by Archived fails, and the page shows an empty table instead of an error**
 > Evidence: `GET /api/orders?status=archived → HTTP 500`
 >
+> **🔴 [HIGH] A clerk can approve an order by calling the endpoint the page hides from them**
+> Evidence: `POST /api/orders/1037/approve 200 as clerk; POST /api/orders/1038/reject 403 as clerk` — the button was hidden, the server did not agree.
+>
 > **🟠 [MEDIUM] The "New: bulk import" badge sits on top of the All orders button** *(callout 1)*
 > Evidence: `"All orders" overlaps "New: bulk import" (81%)` — measured from layout boxes, no screenshot needed.
 >
 > **🟡 [LOW] The dashboard chart image is missing** *(callout 2)*
 > Evidence: `GET /img/weekly-chart.png → HTTP 404`
 >
-> **Gap ledger — what was NOT tested:** 4/7 visited routes never design-audited · single-role run, so permission boundaries are untested
+> **Gap ledger — what was NOT tested:** 9/12 visited routes never design-audited · single-role run, so permission boundaries are untested
 
 Every finding comes with a repro trace and a Playwright regression-test skeleton. To try it yourself, clone this repository, run `npm run demo:serve`, then `/scenescout --url http://127.0.0.1:4173` — see [demo-app/](demo-app/). Its README lists every seeded defect and which oracle catches it.
 

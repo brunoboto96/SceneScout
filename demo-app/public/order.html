@@ -11,13 +11,20 @@
       <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
       <nav aria-label="Main">
         <a href="/" data-testid="nav-dashboard">Dashboard</a><a href="/orders.html" data-testid="nav-orders" aria-current="page">Orders</a
-        ><a href="/reports.html" data-testid="nav-reports">Reports</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
+        ><a href="/approvals.html" data-testid="nav-approvals">Approvals</a><a href="/inventory.html" data-testid="nav-inventory">Inventory</a
+        ><a href="/customers.html" data-testid="nav-customers">Customers</a><a href="/reports.html" data-testid="nav-reports">Reports</a
+        ><a href="/audit.html" data-testid="nav-audit">Audit log</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
       </nav>
+      <a class="whoami" href="/signin.html" data-testid="nav-whoami"><span id="role">clerk</span> · switch role</a>
     </header>
     <main>
       <p><a href="/orders.html" data-testid="order-back">‹ All orders</a></p>
       <h1 id="title">Order</h1>
       <p class="lede" id="meta"></p>
+      <div class="row" id="approval-row" hidden>
+        <button id="request" data-testid="order-request-approval">Request manager approval</button>
+        <span id="request-status" class="muted" role="status" data-testid="order-request-status"></span>
+      </div>
       <label for="notes">Notes for the warehouse</label>
       <textarea id="notes" rows="26" data-testid="order-notes"></textarea>
       <div class="row savebar">
@@ -43,6 +50,15 @@
         document.getElementById("title").textContent = "Order #" + o.id;
         document.getElementById("meta").textContent = `${o.customer} · ${o.items} item(s) · ${o.status}`;
         document.getElementById("notes").value = o.notes;
+        document.getElementById("approval-row").hidden = o.status !== "open";
+      });
+      document.getElementById("request").addEventListener("click", async (e) => {
+        const button = e.currentTarget;
+        button.disabled = true;
+        const res = await fetch("/api/orders/" + id + "/request-approval", { method: "POST" });
+        const out = document.getElementById("request-status");
+        out.textContent = res.ok ? "Sent to a manager. It is in the Approvals queue." : (await res.json()).error;
+        if (!res.ok) button.disabled = false;
       });
       document.getElementById("save").addEventListener("click", async () => {
         await fetch("/api/orders/" + id, {
@@ -57,5 +73,6 @@
         location.href = "/orders.html";
       });
     </script>
+    <script src="/app.js"></script>
   </body>
 </html>

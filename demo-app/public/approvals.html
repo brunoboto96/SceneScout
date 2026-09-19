@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Approvals · Harbor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-dashboard">Dashboard</a><a href="/orders.html" data-testid="nav-orders">Orders</a
+        ><a href="/approvals.html" data-testid="nav-approvals" aria-current="page">Approvals</a
+        ><a href="/inventory.html" data-testid="nav-inventory">Inventory</a><a href="/customers.html" data-testid="nav-customers">Customers</a
+        ><a href="/reports.html" data-testid="nav-reports">Reports</a><a href="/audit.html" data-testid="nav-audit">Audit log</a
+        ><a href="/settings.html" data-testid="nav-settings">Settings</a>
+      </nav>
+      <a class="whoami" href="/signin.html" data-testid="nav-whoami"><span id="role">clerk</span> · switch role</a>
+    </header>
+    <main>
+      <h1>Approvals</h1>
+      <p class="lede">Orders over a clerk's limit wait here until a manager signs them off.</p>
+      <p class="notice" id="who" data-testid="approvals-who"></p>
+      <table>
+        <thead>
+          <tr>
+            <th>Order</th>
+            <th>Customer</th>
+            <th>Total</th>
+            <th>Requested</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="rows" data-testid="approvals-rows"></tbody>
+      </table>
+      <p class="muted" id="empty" data-testid="approvals-empty" hidden>Nothing is waiting for approval.</p>
+      <p class="error" id="err" role="alert" data-testid="approvals-error" hidden></p>
+    </main>
+    <footer>Harbor order desk · demo data only</footer>
+    <script src="/app.js"></script>
+    <script>
+      const cell = (tr, text) => {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+        return td;
+      };
+      const rows = document.getElementById("rows");
+      async function act(id, action) {
+        const res = await fetch("/api/orders/" + id + "/" + action, { method: "POST" });
+        const err = document.getElementById("err");
+        if (!res.ok) {
+          err.textContent = (await res.json()).error;
+          err.hidden = false;
+          return;
+        }
+        err.hidden = true;
+        load();
+      }
+      async function load() {
+        const [me, list] = await Promise.all([fetch("/api/me").then((r) => r.json()), fetch("/api/approvals").then((r) => r.json())]);
+        const manager = me.role === "manager";
+        document.getElementById("who").textContent = manager
+          ? "You can approve or reject these."
+          : "Only a manager can approve or reject. You can see the queue.";
+        rows.replaceChildren();
+        for (const o of list) {
+          const tr = document.createElement("tr");
+          tr.setAttribute("data-testid", "approvals-row-" + o.id);
+          const a = document.createElement("a");
+          a.href = "/order.html?id=" + o.id;
+          a.textContent = "#" + o.id;
+          const first = document.createElement("td");
+          first.appendChild(a);
+          tr.appendChild(first);
+          cell(tr, o.customer);
+          cell(tr, "$" + o.total.toFixed(2));
+          cell(tr, o.notes || "—");
+          const actions = cell(tr, "");
+          if (manager) {
+            for (const [label, action, cls] of [
+              ["Approve", "approve", "primary"],
+              ["Reject", "reject", ""],
+            ]) {
+              const b = document.createElement("button");
+              b.textContent = label;
+              b.className = cls;
+              b.setAttribute("data-testid", "approvals-" + action + "-" + o.id);
+              b.addEventListener("click", () => act(o.id, action));
+              actions.appendChild(b);
+            }
+          }
+          rows.appendChild(tr);
+        }
+        document.getElementById("empty").hidden = list.length > 0;
+      }
+      load();
+    </script>
+  </body>
+</html>

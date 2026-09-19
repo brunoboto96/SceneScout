@@ -11,8 +11,11 @@
       <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
       <nav aria-label="Main">
         <a href="/" data-testid="nav-dashboard">Dashboard</a><a href="/orders.html" data-testid="nav-orders">Orders</a
-        ><a href="/reports.html" data-testid="nav-reports" aria-current="page">Reports</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
+        ><a href="/approvals.html" data-testid="nav-approvals">Approvals</a><a href="/inventory.html" data-testid="nav-inventory">Inventory</a
+        ><a href="/customers.html" data-testid="nav-customers">Customers</a><a href="/reports.html" data-testid="nav-reports" aria-current="page">Reports</a
+        ><a href="/audit.html" data-testid="nav-audit">Audit log</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
       </nav>
+      <a class="whoami" href="/signin.html" data-testid="nav-whoami"><span id="role">clerk</span> · switch role</a>
     </header>
     <main>
       <h1>Reports</h1>
@@ -48,5 +51,6 @@
         a.click();
       });
     </script>
+    <script src="/app.js"></script>
   </body>
 </html>

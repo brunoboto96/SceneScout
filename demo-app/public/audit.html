@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Audit log · Harbor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-dashboard">Dashboard</a><a href="/orders.html" data-testid="nav-orders">Orders</a
+        ><a href="/approvals.html" data-testid="nav-approvals">Approvals</a><a href="/inventory.html" data-testid="nav-inventory">Inventory</a
+        ><a href="/customers.html" data-testid="nav-customers">Customers</a><a href="/reports.html" data-testid="nav-reports">Reports</a
+        ><a href="/audit.html" data-testid="nav-audit" aria-current="page">Audit log</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
+      </nav>
+      <a class="whoami" href="/signin.html" data-testid="nav-whoami"><span id="role">clerk</span> · switch role</a>
+    </header>
+    <main>
+      <h1>Audit log</h1>
+      <p class="lede">Who did what to which order. Managers and auditors can read it.</p>
+      <p class="error" id="denied" role="alert" data-testid="audit-denied" hidden></p>
+      <table id="table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Role</th>
+            <th>Action</th>
+            <th>Order</th>
+          </tr>
+        </thead>
+        <tbody id="rows" data-testid="audit-rows"></tbody>
+      </table>
+    </main>
+    <footer>Harbor order desk · demo data only</footer>
+    <script src="/app.js"></script>
+    <script>
+      const cell = (tr, text) => {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+        return td;
+      };
+      const rows = document.getElementById("rows");
+      const deny = (text) => {
+        const d = document.getElementById("denied");
+        d.textContent = text;
+        d.hidden = false;
+        document.getElementById("table").hidden = true;
+      };
+      // Ask who is here first: a clerk is never sent to the endpoint that would refuse them.
+      // The server refuses a clerk anyway; this only keeps the page from asking a question it knows the answer to.
+      fetch("/api/me")
+        .then((r) => r.json())
+        .then(({ role }) => {
+          if (role === "clerk") return deny("The audit log is for managers and auditors. Switch role to read it.");
+          return fetch("/api/audit").then(async (res) => {
+            if (!res.ok) {
+              const d = document.getElementById("denied");
+              d.textContent = (await res.json()).error + ". Switch role to read it.";
+              d.hidden = false;
+              document.getElementById("table").hidden = true;
+              return;
+            }
+            for (const e of await res.json()) {
+              const tr = document.createElement("tr");
+              cell(tr, e.at);
+              cell(tr, e.role);
+              cell(tr, e.action);
+              cell(tr, "#" + e.order);
+              rows.appendChild(tr);
+            }
+          });
+        });
+    </script>
+  </body>
+</html>
