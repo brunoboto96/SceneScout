@@ -26,7 +26,7 @@ import {
   type BrowserPresence,
   type InstallTarget,
 } from "./browsers.js";
-import { CLIENT_LABELS, firstMessageHint, parseClients, registerWithClient, vscodeBinary, type OtherClient } from "./clients.js";
+import { CLIENT_LABELS, firstMessageHint, manualFor, parseClients, registerWithClient, vscodeBinary, type CodeOnPath, type OtherClient } from "./clients.js";
 import { diagnose, installSkill, launchCommand, manualRegisterCommand, registerMcp, resolveClaudeDir, spawnRunner } from "./installer.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME } from "./engine/memory.js";
 import { formatScan, scanProject } from "./scan.js";
@@ -180,20 +180,37 @@ function browsersFlag(flags: string[]): string | undefined {
   return flagValue(flags, "--browsers");
 }
 
-/** The real path of the `code` command on PATH, or null. Its real path is what tells VS Code from a fork. */
-function codeOnPath(): string | null {
+/** The `code` command on PATH, with its real path: the real path is what tells VS Code from a fork. */
+function codeOnPath(): CodeOnPath | null {
   const names = process.platform === "win32" ? ["code.cmd", "code.exe"] : ["code"];
   for (const dir of (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
     for (const name of names) {
       const candidate = path.join(dir, name);
       try {
-        if (fs.existsSync(candidate)) return fs.realpathSync(candidate);
+        if (fs.existsSync(candidate)) return { command: candidate, realPath: fs.realpathSync(candidate) };
       } catch {
         // An unreadable PATH entry is not a VS Code install.
       }
     }
   }
   return null;
+}
+
+/** Every value given for a flag, across repeats and both spellings, joined the way one comma-separated value would be. */
+function flagValues(flags: string[], names: string[]): string | undefined {
+  const values: string[] = [];
+  flags.forEach((f, i) => {
+    for (const name of names) {
+      if (f.startsWith(`${name}=`)) values.push(f.slice(name.length + 1));
+      else if (f === name) {
+        const next = flags[i + 1];
+        values.push(next === undefined || next.startsWith("--") ? "" : next);
+      }
+    }
+  });
+  if (values.length === 0) return undefined;
+  // One occurrence without a value is a mistake even when another has one.
+  return values.some((v) => v.trim() === "") ? "" : values.join(",");
 }
 
 async function install(flags: string[]): Promise<void> {
@@ -211,7 +228,7 @@ async function install(flags: string[]): Promise<void> {
   // Read the choice before doing anything, so a typo costs nothing.
   const selection = parseBrowserSelection(browsersFlag(flags));
   if ("error" in selection) throw new Error(selection.error);
-  const chosen = parseClients(flagValue(flags, "--client") ?? flagValue(flags, "--clients"));
+  const chosen = parseClients(flagValues(flags, ["--client", "--clients"]));
   if ("error" in chosen) throw new Error(chosen.error);
   const forClaude = chosen.clients.includes("claude-code");
   const others = chosen.clients.filter((c): c is OtherClient => c !== "claude-code");
@@ -256,7 +273,10 @@ async function install(flags: string[]): Promise<void> {
   if (browserOnly) {
     // nothing to register
   } else if (flags.includes("--no-register")) {
-    console.log(`· MCP registration skipped (--no-register). To do it by hand for Claude Code:\n\n  ${manualRegisterCommand(launch)}\n`);
+    console.log("· MCP registration skipped (--no-register). To do it by hand:\n");
+    if (forClaude) console.log(`  ${manualRegisterCommand(launch)}`);
+    for (const client of others) console.log(`  ${CLIENT_LABELS[client]}: ${manualFor(client, launch, os.homedir())}`);
+    console.log("");
   } else {
     if (forClaude) {
       const reg = registerMcp({ launch, serverPath, run: spawnRunner });
@@ -285,9 +305,11 @@ async function install(flags: string[]): Promise<void> {
         for (const note of reg.notes) console.log(`· ${note}`);
       } else {
         failed = true;
+        // On Windows a client installed through npm is a .cmd shim, which node cannot start directly.
+        const windowsNote = process.platform === "win32" ? " (or it is installed as a .cmd shim, which cannot be started from here)" : "";
         console.log(
           reg.status === "client-missing"
-            ? `· ${label} was not found on this machine, so nothing was registered with it.`
+            ? `· ${label} was not found on this machine${windowsNote}, so nothing was registered with it.`
             : `✗ Registering with ${label} failed: ${reg.detail}`,
         );
         console.log(`  To do it by hand, ${reg.manual}\n`);
@@ -296,7 +318,7 @@ async function install(flags: string[]): Promise<void> {
   }
 
   if (failed) {
-    console.log("\nSetup is incomplete — fix the lines marked ✗ or · above, then run:  scenescout doctor");
+    console.log(`\nSetup is incomplete — fix the lines marked ✗ or · above, then run:  scenescout doctor${forClaude ? "" : " --engine"}`);
     process.exitCode = 1;
     return;
   }
@@ -305,7 +327,8 @@ async function install(flags: string[]): Promise<void> {
     return;
   }
   if (forClaude) console.log("\nStart a FRESH Claude Code session, then in any project run:  /scenescout");
-  if (others.length > 0) console.log(`\n${firstMessageHint(others)}`);
+  // Telling someone to restart a client nothing was registered with sends them looking for a server that is not there.
+  if (others.length > 0 && !flags.includes("--no-register")) console.log(`\n${firstMessageHint(others)}`);
   console.log(`Something off? Run:  scenescout doctor${forClaude ? "" : " --engine"}`);
 }
 

@@ -328,7 +328,7 @@ npx -y scenescout install --client vscode,codex      # several; add claude-code 
 | `copilot` | `copilot mcp add` (GitHub Copilot CLI) |
 | `windsurf` | adds an entry to `~/.codeium/windsurf/mcp_config.json`, keeping the others |
 
-A config file that is not valid JSON is left untouched, and the entry to add by hand is printed instead. When a client is not installed, `install` says so and prints the command to run later. Then restart the client and ask its agent: *"Use SceneScout to test http://localhost:3000"*.
+A config file that is not valid JSON is left untouched, and the entry to add by hand is printed instead; a config that is a link into a dotfiles repository is written through the link. When a client that is registered through its own command is not installed, `install` says so and prints the command to run later. Cursor and Windsurf are files, so their entry is written whether or not the editor is installed yet. On Windows, a client installed through npm is a `.cmd` shim that `install` cannot start; it prints the command for you to run instead. Then restart the client and ask its agent: *"Use SceneScout to test http://localhost:3000"*.
 
 What has been checked: registering through each command above was run against Codex CLI, Gemini CLI, GitHub Copilot CLI and VS Code, and Cursor's command line agent read the entry `install` wrote, connected and listed the tools. The Windsurf path follows its documentation. A full test session has been run in Claude Code, with and without the skill. If a client behaves differently for you, a correction is welcome (say which client version you checked).
 
