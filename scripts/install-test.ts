@@ -704,10 +704,18 @@ test("installing only a browser the default attach does not launch says so", () 
   assert.equal(defaultAttachNote({ selected: ["chromium-headless-shell", "webkit"], defaultEngine: "chromium", defaultInstalled: false }), null);
   assert.equal(defaultAttachNote({ selected: ["firefox"], defaultEngine: "firefox", defaultInstalled: false }), null);
   assert.equal(defaultAttachNote({ selected: [], defaultEngine: "chromium", defaultInstalled: false }), null);
+});
 
 test("the playbook served to other clients is the skill's body, and a missing one is an error", () => {
   assert.equal(stripFrontMatter("---\nname: x\ndescription: y\n---\n\n# Title\nbody\n"), "# Title\nbody\n");
   assert.equal(stripFrontMatter("---\r\nname: x\r\n---\r\n# Title\r\n"), "# Title\r\n");
+  // A byte-order mark must not hide the opening fence, or the front matter is served as the method.
+  assert.equal(stripFrontMatter("\uFEFF---\nname: x\n---\n# Title\n"), "# Title\n");
+  // Front matter and nothing else, with or without a final newline, leaves an empty body for loadPlaybook to refuse.
+  assert.equal(stripFrontMatter("---\nname: x\n---"), "");
+  assert.equal(stripFrontMatter("---\n---\n"), "");
+  // Only blank lines are dropped from the top; an indented first line keeps its indent.
+  assert.equal(stripFrontMatter("---\nname: x\n---\n\n    code\n"), "    code\n");
   // No front matter: nothing is cut, and a horizontal rule further down is not mistaken for one.
   assert.equal(stripFrontMatter("# Title\n\n---\n\nmore\n"), "# Title\n\n---\n\nmore\n");
 
@@ -735,9 +743,13 @@ test("the server instructions stay short and the explore prompt states what was 
   assert.match(SERVER_INSTRUCTIONS, /scout_playbook/);
   assert.match(SERVER_INSTRUCTIONS, /destructive/);
 
-  const asked = explorePrompt("# Method", { url: "http://localhost:3000", depth: "minimal" });
+  const asked = explorePrompt("# Method", { url: "http://localhost:3000", level: "minimal" });
   assert.ok(asked.startsWith("# Method"));
-  assert.match(asked, /Target: http:\/\/localhost:3000\nDepth: minimal$/);
+  assert.match(asked, /Target: http:\/\/localhost:3000\nLevel: minimal$/);
+  // A client may send no arguments object at all.
+  assert.match(explorePrompt("# Method", undefined), /Target: ask me for the URL/);
+  // A level the method does not know would leave the agent guessing.
+  assert.throws(() => explorePrompt("# Method", { level: "deep" }), /"deep" is not one the method knows.*minimal, medium, extensive/);
   // With no URL the agent is told to find one, not left with a blank target.
   assert.match(explorePrompt("# Method", {}), /Target: ask me for the URL/);
 });

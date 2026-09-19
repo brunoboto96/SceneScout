@@ -63,9 +63,10 @@ async function main(): Promise<void> {
     console.error(`MCP CHECK FAILED — the server instructions do not point at scout_playbook. Got: ${JSON.stringify(instructions.slice(0, 200))}`);
     process.exit(1);
   }
-  const played = (await client.callTool({ name: "scout_playbook", arguments: {} })) as { content: Array<{ type: string; text?: string }>; isError?: boolean };
+  // Called with no `arguments` field at all: "takes no input" invites exactly that call.
+  const played = (await client.callTool({ name: "scout_playbook" })) as { content: Array<{ type: string; text?: string }>; isError?: boolean };
   const playbook = played.content.find((c) => c.type === "text")?.text ?? "";
-  if (played.isError || !playbook.includes("## Setup (in order)") || playbook.startsWith("---")) {
+  if (played.isError || !playbook.includes("## Setup (in order)") || !playbook.startsWith("# SceneScout")) {
     console.error(`MCP CHECK FAILED — scout_playbook did not return the method (without front matter). Got: ${JSON.stringify(playbook.slice(0, 200))}`);
     process.exit(1);
   }
@@ -74,10 +75,30 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const { prompts } = await client.listPrompts();
-  const prompt = await client.getPrompt({ name: "explore", arguments: { url: "http://localhost:3000" } });
+  const prompt = await client.getPrompt({ name: "explore", arguments: { url: "http://localhost:3000", level: "minimal" } });
   const promptText = prompt.messages.map((m) => (m.content.type === "text" ? m.content.text : "")).join("\n");
-  if (!prompts.some((p) => p.name === "explore") || !promptText.includes("## Setup (in order)") || !promptText.includes("Target: http://localhost:3000")) {
-    console.error(`MCP CHECK FAILED — the explore prompt is missing, or lacks the method or the target. Got: ${JSON.stringify(promptText.slice(-200))}`);
+  if (
+    !prompts.some((p) => p.name === "explore") ||
+    !promptText.startsWith("# SceneScout") ||
+    !/Target: http:\/\/localhost:3000\nLevel: minimal$/.test(promptText)
+  ) {
+    console.error(`MCP CHECK FAILED — the explore prompt is missing, or lacks the method or what was asked. Got: ${JSON.stringify(promptText.slice(-200))}`);
+    process.exit(1);
+  }
+  // A client sends no `arguments` object when the person typed none; every argument is optional.
+  const bare = await client.getPrompt({ name: "explore" });
+  const bareText = bare.messages.map((m) => (m.content.type === "text" ? m.content.text : "")).join("\n");
+  if (!bareText.includes("Target: ask me for the URL")) {
+    console.error(`MCP CHECK FAILED — the explore prompt without arguments did not ask for a target. Got: ${JSON.stringify(bareText.slice(-200))}`);
+    process.exit(1);
+  }
+  // A level the method does not know is refused, and the server survives refusing it.
+  const refused = await client.getPrompt({ name: "explore", arguments: { level: "deep" } }).then(
+    () => "",
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  );
+  if (!/minimal, medium, extensive/.test(refused)) {
+    console.error(`MCP CHECK FAILED — an unknown level was not refused with the choices. Got: ${JSON.stringify(refused)}`);
     process.exit(1);
   }
   console.log("✓ the method reaches a client through instructions, scout_playbook and the explore prompt");

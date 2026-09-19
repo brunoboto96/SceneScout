@@ -412,7 +412,7 @@ Most clients accept the same `mcpServers` JSON shape shown for Cursor.
 **The method travels with the server.** The tools are only hands and eyes; [`skills/scenescout/SKILL.md`](skills/scenescout/SKILL.md) is the method: what to look at first, when to stop, what counts as a finding. Claude Code loads it as a skill. Every other client gets the same text from the server, with nothing to copy:
 
 - the server's instructions tell the agent to call `scout_playbook` before its first attach, and that tool returns the method,
-- clients that list server prompts as commands also get an `explore` prompt, which loads the method and takes the URL.
+- clients that list server prompts as commands also get an `explore` prompt, which loads the method and takes an optional URL, level and focus.
 
 So in any client, a first message like *"Use SceneScout to test http://localhost:3000"* is enough. If an agent starts clicking without having called `scout_playbook`, tell it to call that first; how closely a model follows server instructions varies by client.
 

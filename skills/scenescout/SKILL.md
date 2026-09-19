@@ -11,7 +11,7 @@ You are the brain of an exploratory UI tester. The SceneScout MCP server gives y
 
 ## Setup (in order)
 
-1. **Check the tools exist.** Reading this as the result of `scout_playbook`? Then they do: go to step 2. Otherwise look for a `scout_scan` tool under either prefix above. If there is none, stop and tell the user how to get it, then to start a fresh session (these are Claude Code's commands; the README has the config for other clients):
+1. **Check the tools exist.** Reading this as the result of `scout_playbook` or of the `explore` prompt? Then they do: go to step 2. Otherwise look for a `scout_scan` tool under either prefix above. If there is none, stop and tell the user how to get it, then to start a fresh session (these are Claude Code's commands; the README has the config for other clients):
    - as a plugin: `/plugin marketplace add brunoboto96/SceneScout` then `/plugin install scenescout@scenescout-marketplace`
    - or by hand: `claude mcp add --scope user scenescout -- npx -y scenescout serve` (from a source checkout, register with an **absolute node path** instead — a bare `node` fails with "Executable not found in $PATH" under nvm/fnm: `claude mcp add --scope user scenescout -- "$(which node)" <checkout>/dist/mcp-server.js`)
    If attach later reports that a browser build has not been downloaded, relay the one-time command it names. Attach drives Chromium unless you pass `browser: "firefox"` or `"webkit"`; do that only when the user asks for a cross-browser pass, and say in each finding which browser showed it.

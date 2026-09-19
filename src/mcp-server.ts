@@ -28,6 +28,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { BrowserEngine } from "./engine/browser.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
@@ -35,7 +36,7 @@ import { MemoryStore, redactSecrets } from "./engine/memory.js";
 import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
 import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
 import { computeGaps, formatRouteCoverage, generateReport } from "./engine/report.js";
-import { explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
+import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { formatScan, scanProject } from "./scan.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
@@ -214,8 +215,8 @@ server.registerTool(
     description:
       "Return the SceneScout testing method: setup order, write modes, how to explore, what counts as done, how to report. " +
       "Call this ONCE before the first scout_attach in a conversation, then follow it. " +
-      "Skip it only if a SceneScout skill is already loaded in this conversation — that is the same text. Takes no input and touches no browser.",
-    inputSchema: {},
+      "If this client offers a SceneScout skill, load that instead — it is the same text, so never read both. Takes no input and touches no browser.",
+    // No inputSchema on purpose: with one, a call that carries no `arguments` field is rejected as invalid.
   },
   async () => {
     try {
@@ -227,21 +228,30 @@ server.registerTool(
 );
 
 // The same method as a prompt, for clients that list server prompts as commands.
-server.registerPrompt(
-  PLAYBOOK_PROMPT,
-  {
-    title: "Explore a web app with SceneScout",
-    description: "Start an exploratory test session: loads the SceneScout method and states the target.",
-    argsSchema: {
-      url: z.string().optional().describe("URL of the running app, e.g. http://localhost:3000"),
-      depth: z.string().optional().describe("minimal, medium or deep"),
-      focus: z.string().optional().describe("An area or flow to concentrate on"),
+// Registered on the protocol server directly: the SDK's prompt helper rejects a
+// request that carries no `arguments` object, which is exactly what a client
+// sends when the person typed none, and every argument here is optional.
+server.server.registerCapabilities({ prompts: {} });
+server.server.setRequestHandler(ListPromptsRequestSchema, () => ({
+  prompts: [
+    {
+      name: PLAYBOOK_PROMPT,
+      title: "Explore a web app with SceneScout",
+      description: "Start an exploratory test session: loads the SceneScout method and states the target.",
+      arguments: EXPLORE_PROMPT_ARGUMENTS,
     },
-  },
-  ({ url, depth, focus }) => ({
-    messages: [{ role: "user" as const, content: { type: "text" as const, text: explorePrompt(loadPlaybook(PACKAGE_ROOT), { url, depth, focus }) } }],
-  }),
-);
+  ],
+}));
+server.server.setRequestHandler(GetPromptRequestSchema, (request) => {
+  if (request.params.name !== PLAYBOOK_PROMPT) throw new McpError(ErrorCode.InvalidParams, `Unknown prompt: ${request.params.name}`);
+  let message: string;
+  try {
+    message = explorePrompt(loadPlaybook(PACKAGE_ROOT), request.params.arguments);
+  } catch (err) {
+    throw new McpError(ErrorCode.InvalidParams, err instanceof Error ? err.message : String(err));
+  }
+  return { messages: [{ role: "user" as const, content: { type: "text" as const, text: message } }] };
+});
 
 server.registerTool(
   "scout_scan",
@@ -263,7 +273,7 @@ server.registerTool(
   "scout_attach",
   {
     description:
-      "Launch a browser and attach to a running web app. First attach in this conversation and no SceneScout skill loaded? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass a Playwright storage-state JSON to explore as an authenticated role. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
+      "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass a Playwright storage-state JSON to explore as an authenticated role. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
     inputSchema: {
       url: z.string().describe("Base URL of the running app, e.g. http://localhost:3000"),
       projectPath: z.string().describe("Absolute path to the project (memory + report live in .scenescout/ here)"),
