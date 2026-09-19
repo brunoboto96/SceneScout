@@ -166,7 +166,7 @@ test("regression: The Save notes button is covered by the bar at the bottom of t
 
 - **Id:** `176f4c472b` · **Category:** permission-leak
 - **Evidence:** `POST /api/orders/1037/approve 200 as clerk; POST /api/orders/1038/reject 403 as clerk`
-- **Where:** `/approvals.html#e68edc75` (http://127.0.0.1:4173/approvals.html)
+- **Where:** `/approvals.html#b0b57d70` (http://127.0.0.1:4173/approvals.html)
 - **Seen in runs:** 1
 
 The Approvals page shows Approve and Reject only to a manager. Reject is also refused by the server for anyone else, but Approve is not: a clerk who posts to it directly gets the order approved, and the audit log records a clerk approving. Hiding the button was the only control. The two sibling endpoints disagree, which is also the fix: give approve the check reject already has.
@@ -440,7 +440,7 @@ test("regression: The confirmation email field has no label, only a placeholder"
 
 - `/`: tid:stat-open, tid:stat-shipped, tid:stat-revenue, tid:stat-pending, tid:dash-all-orders, tid:dash-new-badge, tid:dash-chart
 - `/orders.html`: tid:orders-new-btn, tid:orders-rows, tid:order-link-1042, tid:order-link-1041, tid:order-link-1040, tid:order-link-1039, tid:order-link-1038, tid:order-link-1037
-- `/approvals.html`: tid:approvals-who, tid:approvals-rows, tid:approvals-row-1038, link:#1038, tid:approvals-row-1037, link:#1037
+- `/approvals.html`: tid:approvals-who, tid:approvals-rows, tid:approvals-row-1038, tid:approvals-order-link-1038, tid:approvals-row-1037, tid:approvals-order-link-1037
 - `/inventory.html`: tid:inventory-sort-name, tid:inventory-rows, tid:inventory-row-HB-101, tid:inventory-row-HB-102, tid:inventory-row-HB-103, tid:inventory-row-HB-104, tid:inventory-row-HB-105, tid:inventory-row-HB-106
 - `/customers.html`: tid:customers-rows, tid:customers-row-1, tid:customers-row-2, tid:customers-row-3, tid:customers-row-4, tid:customers-row-5, tid:customers-row-6
 - `/reports.html`: tid:reports-scheduled-link

@@ -20,6 +20,7 @@
     <main>
       <h1>Customers</h1>
       <p class="lede">Everyone Harbor ships to.</p>
+      <p id="err" class="error" hidden data-testid="page-error"></p>
       <table>
         <thead>
           <tr>
@@ -41,8 +42,9 @@
         return td;
       };
       const rows = document.getElementById("rows");
+      const err = document.getElementById("err");
       fetch("/api/customers")
-        .then((r) => r.json())
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
         .then((list) => {
           for (const c of list) {
             const tr = document.createElement("tr");
@@ -52,6 +54,10 @@
             cell(tr, String(c.since));
             rows.appendChild(tr);
           }
+        })
+        .catch((e) => {
+          err.textContent = "Could not load customers (" + e.message + ").";
+          err.hidden = false;
         });
     </script>
   </body>

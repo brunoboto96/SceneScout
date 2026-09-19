@@ -6,4 +6,8 @@ fetch("/api/me")
     if (el) el.textContent = role;
     document.body.dataset.role = role;
   })
-  .catch(() => {});
+  .catch(() => {
+    // Say so rather than leave the header's default: a page that cannot tell who is signed in should not pretend.
+    const el = document.getElementById("role");
+    if (el) el.textContent = "(role unknown)";
+  });
