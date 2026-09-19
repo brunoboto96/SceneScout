@@ -14,6 +14,7 @@ const serverPath = path.join(here, "..", "dist", "mcp-server.js");
 const packageRoot = path.join(here, "..");
 
 const EXPECTED_TOOLS = [
+  "scout_playbook",
   "scout_scan",
   "scout_attach",
   "scout_session",
@@ -53,6 +54,54 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log(`✓ server exposes ${names.length} tools`);
+
+  // A client with no skill loader gets the method from the server, three ways.
+  // Each is checked over the wire, because each is a different client's only route to it.
+  const skillBody = fs.readFileSync(path.join(packageRoot, "skills", "scenescout", "SKILL.md"), "utf8");
+  const instructions = client.getInstructions() ?? "";
+  if (!instructions.includes("scout_playbook")) {
+    console.error(`MCP CHECK FAILED — the server instructions do not point at scout_playbook. Got: ${JSON.stringify(instructions.slice(0, 200))}`);
+    process.exit(1);
+  }
+  // Called with no `arguments` field at all: "takes no input" invites exactly that call.
+  const played = (await client.callTool({ name: "scout_playbook" })) as { content: Array<{ type: string; text?: string }>; isError?: boolean };
+  const playbook = played.content.find((c) => c.type === "text")?.text ?? "";
+  if (played.isError || !playbook.includes("## Setup (in order)") || !playbook.startsWith("# SceneScout")) {
+    console.error(`MCP CHECK FAILED — scout_playbook did not return the method (without front matter). Got: ${JSON.stringify(playbook.slice(0, 200))}`);
+    process.exit(1);
+  }
+  if (!skillBody.endsWith(playbook)) {
+    console.error("MCP CHECK FAILED — scout_playbook returned text that is not the skill file's body; the two must be one text.");
+    process.exit(1);
+  }
+  const { prompts } = await client.listPrompts();
+  const prompt = await client.getPrompt({ name: "explore", arguments: { url: "http://localhost:3000", level: "minimal" } });
+  const promptText = prompt.messages.map((m) => (m.content.type === "text" ? m.content.text : "")).join("\n");
+  if (
+    !prompts.some((p) => p.name === "explore") ||
+    !promptText.startsWith("# SceneScout") ||
+    !/Target: http:\/\/localhost:3000\nLevel: minimal$/.test(promptText)
+  ) {
+    console.error(`MCP CHECK FAILED — the explore prompt is missing, or lacks the method or what was asked. Got: ${JSON.stringify(promptText.slice(-200))}`);
+    process.exit(1);
+  }
+  // A client sends no `arguments` object when the person typed none; every argument is optional.
+  const bare = await client.getPrompt({ name: "explore" });
+  const bareText = bare.messages.map((m) => (m.content.type === "text" ? m.content.text : "")).join("\n");
+  if (!bareText.includes("Target: ask me for the URL")) {
+    console.error(`MCP CHECK FAILED — the explore prompt without arguments did not ask for a target. Got: ${JSON.stringify(bareText.slice(-200))}`);
+    process.exit(1);
+  }
+  // A level the method does not know is refused, and the server survives refusing it.
+  const refused = await client.getPrompt({ name: "explore", arguments: { level: "deep" } }).then(
+    () => "",
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  );
+  if (!/minimal, medium, extensive/.test(refused)) {
+    console.error(`MCP CHECK FAILED — an unknown level was not refused with the choices. Got: ${JSON.stringify(refused)}`);
+    process.exit(1);
+  }
+  console.log("✓ the method reaches a client through instructions, scout_playbook and the explore prompt");
 
   // The SKILL is the agent's entire methodology — a tool it never mentions is
   // effectively unshipped, however well the engine implements it. scout_scroll
