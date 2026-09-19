@@ -48,10 +48,17 @@
       };
       const rows = document.getElementById("rows");
       async function act(id, action) {
-        const res = await fetch("/api/orders/" + id + "/" + action, { method: "POST" });
         const err = document.getElementById("err");
+        let res;
+        try {
+          res = await fetch("/api/orders/" + id + "/" + action, { method: "POST" });
+        } catch (e) {
+          err.textContent = "Could not reach the server (" + e.message + ").";
+          err.hidden = false;
+          return;
+        }
         if (!res.ok) {
-          err.textContent = (await res.json()).error;
+          err.textContent = (await res.json().catch(() => ({ error: "HTTP " + res.status }))).error;
           err.hidden = false;
           return;
         }
@@ -59,7 +66,19 @@
         load();
       }
       async function load() {
-        const [me, list] = await Promise.all([fetch("/api/me").then((r) => r.json()), fetch("/api/approvals").then((r) => r.json())]);
+        let me;
+        let list;
+        try {
+          [me, list] = await Promise.all([
+            fetch("/api/me").then((r) => r.json()),
+            fetch("/api/approvals").then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)))),
+          ]);
+        } catch (e) {
+          const err = document.getElementById("err");
+          err.textContent = "Could not load the queue (" + e.message + ").";
+          err.hidden = false;
+          return;
+        }
         const manager = me.role === "manager";
         document.getElementById("who").textContent = manager
           ? "You can approve or reject these."
@@ -70,6 +89,7 @@
           tr.setAttribute("data-testid", "approvals-row-" + o.id);
           const a = document.createElement("a");
           a.href = "/order.html?id=" + o.id;
+          a.setAttribute("data-testid", "approvals-order-link-" + o.id);
           a.textContent = "#" + o.id;
           const first = document.createElement("td");
           first.appendChild(a);
