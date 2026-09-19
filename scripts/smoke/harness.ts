@@ -119,9 +119,16 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; stats: Se
       return;
     }
     if (urlPath === "/api/items" && req.method === "POST") {
-      stats.itemPosts += 1;
-      res.writeHead(201, { "content-type": "application/json" });
-      res.end(JSON.stringify({ id: "42", name: "smoke item" }));
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        stats.itemPosts += 1;
+        // The fixtures' own-resource buttons are built around id 42; a create
+        // that asks for a fresh id gets a distinct one, as a real store would.
+        const fresh = Buffer.concat(chunks).toString("utf8").includes("fresh");
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: fresh ? String(100 + stats.itemPosts) : "42", name: "smoke item" }));
+      });
       return;
     }
     if (urlPath === "/api/items/upsert" && req.method === "POST") {

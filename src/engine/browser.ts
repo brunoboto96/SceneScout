@@ -300,6 +300,20 @@ export class BrowserEngine {
     return this.memory?.createdResources ?? this.localCreatedResources;
   }
   private readonly localCreatedResources: string[] = [];
+  /** Creations not yet named in a tool result. Unlike the once-per-session mutation notice, every one is reported. */
+  private newlyCreated: string[] = [];
+
+  /**
+   * Name every record created since the last result. The mutation notice
+   * reports each endpoint once per session so a read-only run is not flooded;
+   * in safe-write that hid every creation after the first on an endpoint,
+   * so the agent could not tell from the result that it had just made one.
+   */
+  private drainCreated(): string {
+    if (this.newlyCreated.length === 0) return "";
+    const list = this.newlyCreated.splice(0);
+    return `\n(created: ${list.join(", ")} — this session may edit or delete ${list.length === 1 ? "it" : "them"})`;
+  }
   /** Design audits run this session — the report gate requires at least one. */
   designAuditCount = 0;
   /** Active task-efficiency measurement (scout_journey), if any. */
@@ -949,7 +963,7 @@ export class BrowserEngine {
     }
     this.logAction({ action, target, url });
     const violations = this.oracles.drain();
-    const mutations = this.drainMutations() + this.drainBlocked();
+    const mutations = this.drainMutations() + this.drainBlocked() + this.drainCreated();
     const navigated = this.snapshotUrl !== "" && url !== this.snapshotUrl;
     if (navigated) {
       // Refs point into the previous page's DOM; invalidate so a stale ref
@@ -997,6 +1011,7 @@ export class BrowserEngine {
       const desc = `${verdict.collection} id=${id}`;
       if (!this.createdResources.includes(desc)) {
         this.createdResources.push(desc);
+        this.newlyCreated.push(desc);
         this.logAction({ action: "created-resource", target: desc, url: this.page?.url() ?? "" });
       }
     }
@@ -2037,7 +2052,7 @@ export class BrowserEngine {
           }
         }
         const violations = this.oracles.drain();
-        const mutations = this.drainMutations() + this.drainBlocked();
+        const mutations = this.drainMutations() + this.drainBlocked() + this.drainCreated();
         // Abort only on NEW violations: a known-failing endpoint repeating on
         // every navigation must not make every plan abort at step 1.
         if (violations.some((v) => !v.repeat)) {
