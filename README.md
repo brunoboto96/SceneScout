@@ -545,7 +545,7 @@ Working on SceneScout itself is the only reason to clone it:
 git clone https://github.com/brunoboto96/SceneScout.git scenescout && cd scenescout
 npm install        # installs dependencies and builds
 npm run setup      # same as `scenescout install`, but registers THIS checkout (the skill is linked, so edits are live)
-npm test           # build + 12 suites: scan, oracle, policy, fixture, dispatch, design,
+npm test           # build + 14 suites: scan, oracle, policy, fixture, dispatch, design,
                    #                     contract, memory, install, hygiene, smoke, mcp-check
 npm run demo       # regenerate examples/ from the demo app
 ```
