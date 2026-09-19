@@ -369,9 +369,14 @@ function endpointSignatures(evidence: string | undefined): Set<string> {
  */
 function sharesEndpointSignature(a: { evidence?: string }, b: { evidence?: string }): boolean {
   if (!a.evidence || !b.evidence) return false;
-  const aSigs = endpointSignatures(a.evidence);
+  // Only a triple with a failure status is a signature of a bug. A bare
+  // `POST /api/orders` (the endpoint answered 2xx, or no status was named)
+  // says which endpoint was involved, not what went wrong: a double submit
+  // and an accepted negative quantity both name it, and are two bugs.
+  const failing = (evidence: string): Set<string> => new Set([...endpointSignatures(evidence)].filter((sig) => /\s[45]\d{2}$/.test(sig)));
+  const aSigs = failing(a.evidence);
   if (aSigs.size === 0) return false;
-  for (const sig of endpointSignatures(b.evidence)) if (aSigs.has(sig)) return true;
+  for (const sig of failing(b.evidence)) if (aSigs.has(sig)) return true;
   return false;
 }
 
