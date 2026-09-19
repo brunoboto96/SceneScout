@@ -44,6 +44,12 @@ refresh. Frames sent over a WebSocket are outside the policy in every mode; the
 engine warns about an open socket in `observe` mode, and that limit is documented
 rather than a vulnerability.
 
+The policy holds in every browser the engine can drive. Firefox and WebKit do not
+let a request issued by a service worker be intercepted, so the engine keeps
+service workers from registering there. A service worker that does register in
+one of those browsers, or any non-GET request from one that reaches the network
+past the policy, is a bypass.
+
 ## Using it safely
 
 Only test applications you own or are authorized to test, and prefer a

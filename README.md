@@ -112,7 +112,7 @@ SceneScout needs only a URL. Give it the source code as well and it gets noticea
 It is on npm. Nothing to clone:
 
 ```bash
-npx -y scenescout install      # skill + Chromium (~150 MB, one-time) + registers the server with Claude Code
+npx -y scenescout install      # skill + Chromium (one-time download) + registers the server with Claude Code
 ```
 
 **Prefer a Claude Code plugin?** The skill and the server arrive together:
@@ -130,7 +130,7 @@ Then download the browser once with `npx -y scenescout install --browser-only`. 
 <summary>What <code>install</code> actually does</summary>
 
 1. puts the `/scenescout` skill into `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`) — a `scenescout` folder it didn't create is moved aside to a `.backup-…` copy, never deleted,
-2. downloads the Chromium build SceneScout drives (skipped if you already have it),
+2. downloads the browser SceneScout drives (skipped if you already have it). By default that is Chromium, as two builds: the full browser for headed runs and the headless shell every other run uses. [Choose something else](#-choosing-browsers) with `--browsers`,
 3. registers the MCP server with Claude Code at user scope. Run through `npx`, the launcher is `npx -y scenescout serve`, with the absolute path of `npx` where one sits beside node, so it works under nvm/fnm. From a clone or a global install it is the absolute node path plus that install's `dist/mcp-server.js`.
 
 Re-run it any time: after moving the folder or switching node versions it refreshes the stored paths. It exits non-zero if any step failed, so it is safe to chain. Opt out of a step with `--no-register` or `--skip-browser`.
@@ -263,7 +263,7 @@ Run `npx -y scenescout doctor` first — it checks every setup item below (every
 | The `scout_*` tools don't appear | The MCP server isn't registered, or points at an old path. `npx -y scenescout install` re-registers it; `claude mcp list` should show `scenescout` as connected. |
 | *"Executable not found in $PATH"* | The server was registered with a bare `node`. `npx -y scenescout install` registers an absolute path. |
 | Installed as a plugin, and the tools fail with *"Executable not found in $PATH: npx"* | A plugin starts the server with a bare `npx`, which Claude Code can only find if it was launched from an environment that has Node on its `PATH`. Under nvm or fnm that means starting Claude Code from a terminal, not from a dock or launcher. Or use `npx -y scenescout install` instead, which registers the absolute path of `npx`. |
-| *"Executable doesn't exist … chromium"* | The browser download was skipped or failed. `npx playwright install chromium` (on Linux add `--with-deps`). |
+| *"… build has not been downloaded yet"* on attach | The browser download was skipped or failed, or the run asked for a browser you did not install. Run the command the message names, for example `npx -y scenescout install --browser-only --browsers firefox`. On Linux, system libraries may be missing too: `npx playwright install --with-deps chromium`. |
 | Tools broke after moving the folder or changing node version | The registration stores absolute paths. `npx -y scenescout install` refreshes them. |
 | Attach fails or every route lands on the login page | Your app isn't running at `--url`, or the `--role` storage state has expired — regenerate it the way your project's Playwright setup does. |
 
@@ -282,6 +282,30 @@ rm -rf ~/.claude/skills/scenescout
 Nothing else is installed: `npx` runs the package from npm's cache. Per-project memory lives in each tested project's `.scenescout/` folder; delete it there if you want it gone.
 
 ---
+
+## 🌐 Choosing browsers
+
+`install` downloads Chromium and nothing else unless you ask. `--browsers` takes one name, a comma-separated list, or `all`:
+
+| `--browsers` | What is downloaded | About, on disk |
+|---|---|---|
+| `chromium` *(default)* | the full browser and the headless shell | 550 MB |
+| `chromium-headless-shell` | the headless shell only: every run works except `headed` | 200 MB |
+| `firefox` | Firefox | 270 MB |
+| `webkit` | WebKit, the engine behind Safari | 290 MB |
+| `all` | Chromium, Firefox and WebKit | 1.1 GB |
+
+```bash
+npx -y scenescout install --browsers chromium-headless-shell   # the smallest working setup
+npx -y scenescout install --browser-only --browsers firefox,webkit   # add two more later
+```
+
+Sizes vary by platform. The builds go to Playwright's shared cache, so a build another tool already fetched is not downloaded again.
+
+To drive another browser, pass `browser` when attaching (`scout_attach { browser: "firefox" }`), or set `SCENESCOUT_BROWSER=webkit` in the server's environment to change the default. `scenescout doctor` checks the default browser. Two things differ outside Chromium:
+
+- **Service workers are not allowed to register** in Firefox and WebKit. The write policy works by intercepting requests, and only Chromium lets a request issued by a service worker be intercepted. An app that depends on its worker may behave differently there.
+- **A Firefox or WebKit left behind by a crash is not cleaned up** on the next start the way a leftover Chromium is.
 
 ## 🔌 Other MCP clients
 

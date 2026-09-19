@@ -9,6 +9,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { engineOf, type InstallTarget } from "./browsers.js";
 
 export const SKILL_NAME = "scenescout";
 export const MCP_NAME = "scenescout";
@@ -265,11 +266,22 @@ export function parseRegistration(listing: string): { command: string | null; se
  * has `npm run setup`; someone who installed from npm has no such script, and
  * telling them to run it sends them looking for a package.json they never had.
  */
-export function repairCommands(packageRoot: string): { setup: string; build: string } {
+export function repairCommands(packageRoot: string): { setup: string; build: string; browser: (target: InstallTarget) => string } {
   const isCheckout = fs.existsSync(path.join(packageRoot, "tsconfig.json")) && fs.existsSync(path.join(packageRoot, "src"));
+  // Installing "chromium" brings the headless shell with it, so the plain
+  // setup command already repairs either Chromium build.
+  const browserFlags = (target: InstallTarget) => (engineOf(target) === "chromium" ? "" : ` --browser-only --browsers ${target}`);
   return isCheckout
-    ? { setup: "npm run setup", build: "npm run build" }
-    : { setup: "npx -y scenescout install", build: "npx -y scenescout@latest install   (the installed package is incomplete; fetch it again)" };
+    ? {
+        setup: "npm run setup",
+        build: "npm run build",
+        browser: (target) => (browserFlags(target) ? `node dist/cli.js install${browserFlags(target)}` : "npm run setup"),
+      }
+    : {
+        setup: "npx -y scenescout install",
+        build: "npx -y scenescout@latest install   (the installed package is incomplete; fetch it again)",
+        browser: (target) => `npx -y scenescout install${browserFlags(target)}`,
+      };
 }
 
 export type Check = { name: string; ok: boolean; detail: string; fix?: string };
@@ -287,7 +299,11 @@ export function diagnose(opts: {
   packageRoot: string;
   claudeDir: string;
   nodeVersion: string;
-  chromiumPath: string | null;
+  /**
+   * The build a default attach launches, and where it was found. `path` is null
+   * when it is not on disk; `expected` is where Playwright looks for it.
+   */
+  defaultBrowser: { target: InstallTarget; path: string | null; expected?: string | null };
   run: Runner;
 }): Check[] {
   const checks: Check[] = [];
@@ -298,12 +314,12 @@ export function diagnose(opts: {
   const server = path.join(opts.packageRoot, "dist", "mcp-server.js");
   checks.push({ name: "engine built", ok: fs.existsSync(server), detail: server, fix: repair.build });
 
-  const chromiumOk = !!opts.chromiumPath && fs.existsSync(opts.chromiumPath);
+  const browser = opts.defaultBrowser;
   checks.push({
-    name: "chromium downloaded",
-    ok: chromiumOk,
-    detail: opts.chromiumPath ?? "playwright could not name a browser path",
-    fix: `${repair.setup}   (or: npx playwright install chromium)`,
+    name: `browser downloaded (${browser.target})`,
+    ok: browser.path !== null,
+    detail: browser.path ?? (browser.expected ? `not found at ${browser.expected}` : "playwright could not name a browser path"),
+    fix: `${repair.browser(browser.target)}   (or: npx playwright install ${browser.target})`,
   });
 
   if (opts.scope === "engine") return checks;

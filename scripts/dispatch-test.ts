@@ -13,6 +13,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
+import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser } from "../src/engine/launch.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
 
@@ -218,9 +219,30 @@ test("a browser that was never downloaded gets one instruction, not a stack of t
   assert.match(advice, /npx -y scenescout install --browser-only/);
   assert.doesNotMatch(advice, /╔|ms-playwright/, "the box and the cache path are noise to the reader");
 
+  // The instruction names the build that launch needed, not always Chromium.
+  assert.match(advice, /--browsers chromium-headless-shell/);
+  assert.match(explainLaunchFailure(playwright, 0, { engine: "firefox", headed: false }), /The firefox build has not been downloaded.*--browsers firefox/s);
+  // Someone who installed only the headless shell and asks for a window did run install; say what is different.
+  const headed = explainLaunchFailure(playwright, 0, { engine: "chromium", headed: true });
+  assert.match(headed, /headed run needs the full Chromium browser.*--browsers chromium\n/s);
+
   // Any other failure keeps its reason, on one line, and says what was cleaned up.
   const other = explainLaunchFailure("browser launch timed out after 30s\n    at attempt (browser.js:1)", 2);
   assert.equal(isMissingBrowser("browser launch timed out after 30s"), false);
   assert.match(other, /launch failed twice \(browser launch timed out after 30s\) — 2 orphaned browser/);
   assert.doesNotMatch(other, /at attempt/);
+});
+
+test("hover reports text that appeared, not text that only moved to a new line", () => {
+  // A tooltip with no tooltip markup is found by diffing the page text.
+  assert.deepEqual(revealedLines("Status\n2 warnings", "Status\n2 warnings\nMissing connector between nodes"), ["Missing connector between nodes"]);
+  // The previous hover's tooltip closing re-flows the text next to it. In one
+  // browser the badges then sit on a line of their own; every word was already
+  // showing, so nothing was revealed.
+  assert.deepEqual(revealedLines("1 error 3 notices 2 warnings Missing connector between nodes\nNext", "1 error  3 notices  2 warnings\nNext"), []);
+  // Spacing differences between the two readings are not new text either.
+  assert.deepEqual(revealedLines("Total:   12", "Total: 12"), []);
+  // The list is capped, and each line is trimmed to a readable length.
+  assert.equal(revealedLines("", Array.from({ length: 9 }, (_, i) => `line ${i}`).join("\n")).length, 5);
+  assert.equal(revealedLines("", "x".repeat(900))[0].length, 300);
 });

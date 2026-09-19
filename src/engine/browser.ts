@@ -1,4 +1,4 @@
-import { chromium, type Browser, type BrowserContext, type FileChooser, type Locator, type Page } from "playwright";
+import { chromium, firefox, webkit, type Browser, type BrowserType, type BrowserContext, type FileChooser, type Locator, type Page } from "playwright";
 import fs from "node:fs";
 import path from "node:path";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
@@ -16,6 +16,8 @@ import {
 import { OracleMonitor, formatViolations } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
+import { defaultEngine, focusAdvanceKey, serviceWorkerPolicy, type BrowserEngineName } from "../browsers.js";
+import { revealedLines } from "./hover.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
@@ -33,6 +35,8 @@ export interface AttachOptions {
   storageStatePath?: string;
   mode?: WriteMode;
   headed?: boolean;
+  /** Which browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else Chromium. */
+  browser?: BrowserEngineName;
   viewport?: { width: number; height: number };
   /**
    * Share one MemoryStore across engines attached to the same project
@@ -329,6 +333,8 @@ export class BrowserEngine {
   }
   /** Whether the browser window is visible — headed hover results carry a physical-cursor caveat. */
   private headed = false;
+  /** The browser this engine launched; reported by attach so a finding can say where it was seen. */
+  private engineName: BrowserEngineName = "chromium";
   /** Non-GET requests fired since the last action — surfaces silent state mutation in read-only runs (timestamped for attribution). */
   private mutationRequests: Array<{ at: number; sig: string; req: import("playwright").Request }> = [];
   /**
@@ -396,10 +402,12 @@ export class BrowserEngine {
     }
 
     try {
-      this.browser = await this.launchWithRecovery(opts.headed ?? false);
+      this.engineName = opts.browser ?? defaultEngine(process.env);
+      this.browser = await this.launchWithRecovery(this.engineName, opts.headed ?? false);
       this.context = await this.browser.newContext({
         storageState: opts.storageStatePath,
         viewport: opts.viewport ?? { width: 1280, height: 900 },
+        serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
       this.page = await this.context.newPage();
     } catch (err) {
@@ -556,6 +564,8 @@ export class BrowserEngine {
       : "";
     return (
       `Attached to ${this.page.url()} (mode=${this.mode}` +
+      `${this.engineName === "chromium" ? "" : `, browser=${this.engineName}, service workers blocked so the write policy sees every request`}` +
+      `${focusAdvanceKey(this.engineName, process.platform) === "Tab" ? "" : `, keyboard: Tab stops only at text fields in this browser — press Alt+Tab to reach buttons and links`}` +
       `${opts.storageStatePath ? `, auth=${opts.storageStatePath}` : ""}). ` +
       `Memory: ${this.memory.dir}.${this.memory.loadWarning ? ` WARNING: ${this.memory.loadWarning}` : ""}` +
       `${this.memory.legacyDirNote ? ` ${this.memory.legacyDirNote}` : ""}` +
@@ -1440,18 +1450,7 @@ export class BrowserEngine {
     if (bodyBefore === null || churning) return { revealed: [], fallbackUsed: false };
     const bodyAfter = (await page.evaluate(`document.body ? document.body.innerText : ""`).catch(() => null)) as string | null;
     if (bodyAfter === null) return { revealed: [], fallbackUsed: false };
-    const beforeLines = new Set(
-      bodyBefore
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean),
-    );
-    revealed = bodyAfter
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l && !beforeLines.has(l))
-      .slice(0, 5)
-      .map((l) => l.slice(0, 300));
+    revealed = revealedLines(bodyBefore, bodyAfter);
     return { revealed, fallbackUsed: revealed.length > 0 };
   }
 
@@ -2128,15 +2127,18 @@ export class BrowserEngine {
    * On the first failure or timeout, reap orphaned Playwright processes and
    * try once more before giving up with a diagnosable error.
    */
-  private async launchWithRecovery(headed: boolean): Promise<Browser> {
+  private async launchWithRecovery(engine: BrowserEngineName, headed: boolean): Promise<Browser> {
+    const types: Record<BrowserEngineName, BrowserType> = { chromium, firefox, webkit };
     const attempt = async (): Promise<Browser> => {
       // The marker is what makes reapOrphanBrowsers safe to run at startup:
       // it appears in the child's command line, so the sweep can tell a browser
       // WE leaked from one belonging to somebody else's Playwright run.
       // `--enable-features` takes arbitrary names and ignores unknown ones.
-      const launch = chromium.launch({
+      // It is a Chromium switch: Firefox and WebKit are launched without it,
+      // so a leaked one of those is not reaped and has to be closed by hand.
+      const launch = types[engine].launch({
         headless: !headed,
-        args: [`--enable-features=${BROWSER_MARKER}`],
+        args: engine === "chromium" ? [`--enable-features=${BROWSER_MARKER}`] : [],
       });
       let timer: NodeJS.Timeout | undefined;
       try {
@@ -2159,12 +2161,12 @@ export class BrowserEngine {
     } catch (firstErr) {
       const firstMessage = firstErr instanceof Error ? firstErr.message : String(firstErr);
       // A browser that was never downloaded will not appear on a second try.
-      if (isMissingBrowser(firstMessage)) throw new Error(explainLaunchFailure(firstMessage, 0));
+      if (isMissingBrowser(firstMessage)) throw new Error(explainLaunchFailure(firstMessage, 0, { engine, headed }));
       const reaped = reapOrphanBrowsers();
       try {
         return await attempt();
       } catch {
-        throw new Error(explainLaunchFailure(firstMessage, reaped));
+        throw new Error(explainLaunchFailure(firstMessage, reaped, { engine, headed }));
       }
     }
   }
