@@ -136,9 +136,10 @@ Then download the browser once with `npx -y scenescout install --browser-only`. 
 
 1. puts the `/scenescout` skill into `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`) — a `scenescout` folder it didn't create is moved aside to a `.backup-…` copy, never deleted,
 2. downloads the browser SceneScout drives (skipped if you already have it). By default that is Chromium, as two builds: the full browser for headed runs and the headless shell every other run uses. [Choose something else](#-choosing-browsers) with `--browsers`,
-3. registers the MCP server with Claude Code at user scope. Run through `npx`, the launcher is `npx -y scenescout serve`, with the absolute path of `npx` where one sits beside node, so it works under nvm/fnm. From a clone or a global install it is the absolute node path plus that install's `dist/mcp-server.js`.
+3. registers the MCP server with Claude Code at user scope. Run through `npx`, the launcher is `npx -y scenescout serve`, with the absolute path of `npx` where one sits beside node, so it works under nvm/fnm. From a clone or a global install it is the absolute node path plus that install's `dist/mcp-server.js`,
+4. puts the `scenescout` command on your PATH, so `scenescout status`, `scenescout watch` and `scenescout doctor` work from any terminal. Run through `npx`, that is `npm install -g` of the version you just ran; from a clone it is `npm link`, so the command always runs what you last built. If npm refuses (a system-wide node usually needs `sudo` for this), the step prints the command to run by hand and the rest of the setup still counts as done: `npx -y scenescout <command>` works without it.
 
-Re-run it any time: after moving the folder or switching node versions it refreshes the stored paths. It exits non-zero if any step failed, so it is safe to chain. Opt out of a step with `--no-register` or `--skip-browser`.
+Re-run it any time: after moving the folder or switching node versions it refreshes the stored paths. It exits non-zero if a step the tool depends on failed, so it is safe to chain. Opt out of a step with `--no-register`, `--skip-browser` or `--no-command`.
 
 If `claude` isn't on the PATH of the shell you ran it from, it prints the registration command instead of running it:
 
