@@ -120,6 +120,18 @@ export interface LiveSnapshot {
   version: string;
   at: string;
   sessions: SessionStatus[];
+  /** Where the run's report belongs on disk, and whether it is there yet. Absent until a session has attached. */
+  report?: ReportFile;
+}
+
+/**
+ * The report's file, as the viewer needs to know about it: a run whose agent
+ * never called scout_report has written nothing, so the copy in this page is
+ * the only one there is.
+ */
+export interface ReportFile {
+  path: string;
+  written: boolean;
 }
 
 /** One session as `api/status` sends it: its board entry, the state worked out on the server, and a short feed. */
@@ -322,7 +334,11 @@ export interface LiveProvider {
   snapshot(): LiveSnapshot;
   /** The most recent actions of one session, oldest first. */
   activity(session: string, limit: number): ActivityLine[];
-  /** The run's report as it stands now, rendered without being written, or null when no run is attached. */
+  /**
+   * The run's report as it stands now, rendered without being written — and
+   * once the run's sessions have closed, the last rendering of it, because a
+   * finished run is exactly when someone wants to read it.
+   */
   report(): { markdown: string; at: string } | null;
   /** A JPEG of the session's page, or null when there is no such session or no frame could be taken. */
   screenshot(session: string): Promise<Buffer | null>;

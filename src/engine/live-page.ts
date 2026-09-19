@@ -48,6 +48,13 @@ export const LIVE_PAGE = `<!doctype html>
   button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
   #banner { display: none; margin: 12px 16px 0; padding: 8px 12px; border-radius: 6px; background: var(--stuck-bg); color: var(--stuck); }
   #empty { display: none; padding: 48px 16px; text-align: center; color: var(--muted); }
+  #finished { display: none; max-width: 640px; margin: 48px auto; padding: 24px; text-align: center;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  #finished.open { display: block; }
+  #finished h2 { margin: 0 0 8px; font-size: 18px; }
+  #finished p { margin: 0 0 8px; color: var(--muted); }
+  #finished .where { font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  #finished button { margin-top: 8px; padding: 7px 14px; font-weight: 600; }
   main { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px; padding: 16px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
   .card.stuck { border-color: var(--stuck); }
@@ -143,12 +150,19 @@ export const LIVE_PAGE = `<!doctype html>
 </header>
 <div id="banner" role="alert" data-testid="live-unreachable-banner">The engine is not answering. It may have exited; this page will pick up again if it comes back.</div>
 <div id="empty" data-testid="live-empty-state">No session is attached yet. Cards appear here as soon as one attaches.</div>
+<div id="finished" data-testid="live-finished-state">
+  <h2>The run has finished</h2>
+  <p>Its browsers are closed, so there is nothing left to watch. What it found is in the report.</p>
+  <p class="where" id="finished-where" data-testid="live-finished-where"></p>
+  <button type="button" id="finished-report" data-testid="live-finished-report">Read the report</button>
+</div>
 <main id="grid"></main>
 <div id="report" role="dialog" aria-modal="true" aria-label="The run's report" data-testid="live-report-dialog">
   <div class="bar">
     <strong>Report</strong>
     <span class="meta" id="report-meta" data-testid="live-report-meta"></span>
     <span class="spacer"></span>
+    <button type="button" id="report-save" data-testid="live-report-save">Save a copy</button>
     <button type="button" id="report-close" data-testid="live-report-close">Close</button>
   </div>
   <div class="doc" id="report-doc" data-testid="live-report-doc"></div>
@@ -187,6 +201,14 @@ export const LIVE_PAGE = `<!doctype html>
   var reportOpen = false;
   var reportTimer = null;
   var reportProblem = null;
+  // The run had sessions and has none now: its browsers are gone, and this
+  // page holds the only rendering of the report unless it was written to disk.
+  var sawRun = false;
+  var finished = false;
+  var reportShown = false;
+  var reportFile = null;
+  var reportMarkdown = null;
+  var savedACopy = false;
   // A result that reads as a failure is shown in red.
   var BAD_RESULT = /error|fail|refus|block|violation|abandoned/i;
 
@@ -435,7 +457,8 @@ export const LIVE_PAGE = `<!doctype html>
           meta.textContent = '';
           return;
         }
-        meta.textContent = 'as the run stands at ' + clock(d.at) + ' · scout_report writes this document to .scenescout/report.md at the end';
+        reportMarkdown = d.markdown;
+        meta.textContent = (finished ? 'as the run left it at ' : 'as the run stands at ') + clock(d.at) + ' · ' + whereItIs();
         renderMarkdown(doc, d.markdown);
       })
       .catch(function (err) {
@@ -448,6 +471,28 @@ export const LIVE_PAGE = `<!doctype html>
         }
       });
   }
+  /** Where the report's file is, and whether the agent has written it there. */
+  function whereItIs() {
+    if (!reportFile) return 'scout_report writes this document to .scenescout/report.md at the end';
+    if (reportFile.written) return 'saved at ' + reportFile.path;
+    return 'NOT saved: ' + reportFile.path + ' does not exist — the agent has not run scout_report, so this page holds the only copy';
+  }
+
+  // Saving is the viewer's own browser writing a file the page already has;
+  // nothing is sent to the engine, which only ever answers GET (ADR 7).
+  function saveACopy() {
+    if (!reportMarkdown) return;
+    var url = URL.createObjectURL(new Blob([reportMarkdown], { type: 'text/markdown' }));
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'scenescout-report.md';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+    savedACopy = true;
+  }
+
   function openReport() {
     reportOpen = true;
     document.getElementById('report').classList.add('open');
@@ -608,7 +653,21 @@ export const LIVE_PAGE = `<!doctype html>
       delete frames[name];
     });
     syncEvents();
-    document.getElementById('empty').style.display = snap.sessions.length ? 'none' : 'block';
+    reportFile = snap.report || reportFile;
+    if (snap.sessions.length > 0) sawRun = true;
+    finished = sawRun && snap.sessions.length === 0;
+    document.getElementById('empty').style.display = snap.sessions.length || finished ? 'none' : 'block';
+    document.getElementById('finished').classList.toggle('open', finished);
+    if (finished) {
+      var where = document.getElementById('finished-where');
+      where.textContent = whereItIs();
+      where.className = 'where' + (reportFile && reportFile.written ? '' : ' unset');
+      // The moment somebody wants the report is the moment the run ends: show it.
+      if (!reportShown) {
+        reportShown = true;
+        if (!reportOpen) openReport();
+      }
+    }
     document.getElementById('engine').textContent = 'engine pid ' + snap.pid + ' · v' + snap.version;
     document.getElementById('counts').textContent = snap.sessions.length + ' session' + (snap.sessions.length === 1 ? '' : 's') +
       ' · ' + counts.running + ' running · ' + counts.idle + ' idle' + (counts.stuck ? ' · ' + counts.stuck + ' stuck' : '');
@@ -633,6 +692,16 @@ export const LIVE_PAGE = `<!doctype html>
   document.getElementById('focus-feed').addEventListener('mouseleave', function () { showObjective(null); });
   document.getElementById('focus').addEventListener('click', function (e) { if (e.target === this) closeFocus(); });
   document.getElementById('report-open').addEventListener('click', openReport);
+  document.getElementById('finished-report').addEventListener('click', openReport);
+  document.getElementById('report-save').addEventListener('click', saveACopy);
+  // Closing the tab on a finished run whose report was never written to disk
+  // throws the only copy away. The browser shows its own confirm/dismiss, and
+  // only when the person has interacted with the page at least once.
+  window.addEventListener('beforeunload', function (e) {
+    if (!finished || savedACopy || (reportFile && reportFile.written)) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
   document.getElementById('report-close').addEventListener('click', closeReport);
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;

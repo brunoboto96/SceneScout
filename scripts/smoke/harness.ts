@@ -72,9 +72,16 @@ export function check(name: string, cond: boolean, context?: string): void {
  * explained. Polling turns "slow" into "still correct, just later", and only a
  * genuine hang reaches the timeout.
  */
-export async function until(label: string, cond: () => boolean, timeoutMs = 5000): Promise<void> {
+/**
+ * Poll until the condition holds. The condition may be async: an awaited
+ * promise is the whole point, because `while (!cond())` on a promise-returning
+ * check is always false on the first turn — a Promise is truthy — so the wait
+ * silently did nothing and the assertion after it ran against the state
+ * before the thing it was waiting for.
+ */
+export async function until(label: string, cond: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!cond()) {
+  while (!(await cond())) {
     if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for: ${label}`);
     await new Promise((r) => setTimeout(r, 25));
   }

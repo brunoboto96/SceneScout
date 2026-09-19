@@ -926,3 +926,49 @@ test("scenescout status describes an engine, its sessions and where to watch, an
   );
   assert.deepEqual(legacy.slice(1), ["⏳ running: scout_crawl", "Session: qa (qa) · all sessions: qa, admin", "URL: http://app.test/x"]);
 });
+
+// ---- the report after the run ----------------------------------------------
+
+test("the status poll carries the report's file, so the page can say whether it exists", async () => {
+  const provider: LiveProvider = {
+    ...fakeProvider(["admin"]).provider,
+    snapshot: () => ({ pid: 1, version: "t", at: new Date(T0).toISOString(), sessions: [], report: { path: "/p/.scenescout/report.md", written: false } }),
+  };
+  const live = new LiveServer(provider);
+  try {
+    const { port, token } = await live.start();
+    const body = JSON.parse((await request(port, `/${token}/api/status`)).body.toString()) as StatusResponse;
+    assert.deepEqual(body.report, { path: "/p/.scenescout/report.md", written: false });
+  } finally {
+    await live.stop();
+  }
+});
+
+test("the page shows the report when the run ends, and warns before the only copy is closed away", () => {
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
+  // A run that had sessions and has none is finished: its browsers are gone,
+  // and until scout_report has written the file this page is the only copy.
+  assert.match(script, /if \(snap\.sessions\.length > 0\) sawRun = true;/);
+  assert.match(script, /finished = sawRun && snap\.sessions\.length === 0;/);
+  assert.match(script, /if \(!reportShown\)/, "the report opens once when the run ends");
+  assert.match(LIVE_PAGE, /data-testid="live-finished-state"/);
+  assert.match(LIVE_PAGE, /data-testid="live-finished-where"/);
+
+  const guard = script.slice(script.indexOf("window.addEventListener('beforeunload'"), script.indexOf("window.addEventListener('beforeunload'") + 300);
+  assert.match(
+    guard,
+    /if \(!finished \|\| savedACopy \|\| \(reportFile && reportFile\.written\)\) return;/,
+    "no warning while the run is live, or once the report is on disk or saved",
+  );
+  assert.match(guard, /e\.preventDefault\(\)/);
+
+  // The file line is the honest one: saved where, or not saved at all.
+  const where = script.slice(script.indexOf("function whereItIs"), script.indexOf("function saveACopy"));
+  assert.match(where, /'saved at ' \+ reportFile\.path/);
+  assert.match(where, /NOT saved/);
+  // Saving is the viewer's own browser, not a request to the engine.
+  const save = script.slice(script.indexOf("function saveACopy"), script.indexOf("function openReport"));
+  assert.match(save, /new Blob\(\[reportMarkdown\]/);
+  assert.match(save, /a\.download = /);
+  assert.doesNotMatch(save, /fetch\(/);
+});
