@@ -96,6 +96,7 @@
   <section>
     <h2>Write policy (seeded)</h2>
     <button data-testid="wp-create-item" id="wp-create">Create item</button>
+    <button data-testid="wp-create-another" id="wp-create-another">Create another item</button>
     <!-- Inverse double-submit fixture: disables itself on first click, so a
          rapid double-click fires exactly one request. -->
     <button data-testid="wp-guarded-create" id="wp-guarded">Guarded create</button>
@@ -312,6 +313,12 @@
       fetch('/api/items', { method: 'POST' })
         .then((r) => r.json())
         .then((j) => { window.__createdId = j.id; wpResult('created ' + j.id); })
+        .catch(() => wpResult('create failed'));
+    });
+    document.getElementById('wp-create-another').addEventListener('click', () => {
+      fetch('/api/items', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"fresh":true}' })
+        .then((r) => r.json())
+        .then((j) => wpResult('created ' + j.id))
         .catch(() => wpResult('create failed'));
     });
     document.getElementById('wp-own').addEventListener('click', () => {
