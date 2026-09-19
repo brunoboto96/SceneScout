@@ -14,7 +14,7 @@ updates:
       minor-and-patch:
         update-types: [minor, patch]
     ignore:
-      # Pinned on purpose — see "Pinned dependencies" in CLAUDE.md.
+      # Pinned on purpose — see "Pinned dependencies" in AGENTS.md.
       # TypeScript 7 breaks this project's module resolution.
       - dependency-name: typescript
         update-types: ["version-update:semver-major"]
