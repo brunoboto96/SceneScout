@@ -2,7 +2,9 @@
 
 # 🔭 SceneScout
 
-**Exploratory UI testing, driven by an AI agent.**
+**Exploratory UI testing, driven by the AI agent you already use.**
+
+Works with Claude Code · Cursor · VS Code (Copilot) · Codex CLI · Gemini CLI · Copilot CLI · Windsurf · any [MCP](https://modelcontextprotocol.io) client
 
 [![test](https://github.com/brunoboto96/SceneScout/actions/workflows/test.yml/badge.svg)](https://github.com/brunoboto96/SceneScout/actions/workflows/test.yml)
 [![npm](https://img.shields.io/npm/v/scenescout.svg)](https://www.npmjs.com/package/scenescout)
@@ -14,11 +16,11 @@
 
 </div>
 
-SceneScout is an [MCP](https://modelcontextprotocol.io) server that hands an agent a *structured view* of a running web app — every element, its geometry, and a set of always-on correctness oracles — and lets the agent explore it like a curious user. Claude Code is the brain; SceneScout is the hands, eyes, and memory.
+SceneScout is an [MCP](https://modelcontextprotocol.io) server that hands an agent a *structured view* of a running web app — every element, its geometry, and a set of always-on correctness oracles — and lets the agent explore it like a curious user. Your coding agent is the brain; SceneScout is the hands, eyes, and memory. Any MCP client can drive it, and the testing method comes with the server, so the agent knows how to use the tools wherever it runs.
 
 ```
 ┌─────────────────────┐   MCP (stdio)   ┌───────────────────────────────┐
-│ Claude Code + skill │ ──────────────▶ │ SceneScout engine             │
+│ Your coding agent   │ ──────────────▶ │ SceneScout engine             │
 │ (intent, judgment,  │ ◀────────────── │ Playwright · oracles · memory │
 │  your subscription) │  tool results   │ findings · report — no LLM    │
 └─────────────────────┘                 └───────────────────────────────┘
@@ -58,7 +60,7 @@ Every finding comes with a repro trace and a Playwright regression-test skeleton
 
 ## ✨ Why it's different
 
-- 🧠 **Claude is the brain — no API key.** The engine contains no LLM. Exploration runs on your Claude Code subscription; SceneScout just gives it deterministic tools.
+- 🧠 **Your agent is the brain — no API key.** The engine contains no LLM. Exploration runs on the agent and subscription you already have (Claude Code, Cursor, Copilot, Codex, Gemini CLI and others); SceneScout just gives it deterministic tools and the method for using them.
 - 📐 **Structured scene, not pixels.** The agent reads element lists *with layout geometry*, not screenshots. Overlap and off-screen bugs are computed from boxes — deterministic, no vision guessing. Images that failed to load are read from the DOM too. (Screenshots exist only for pixel-native residue like a canvas or a rendering glitch.)
 - 🛡️ **Read-only by default, enforced on the wire.** Destructive actions are blocked at the network layer, not by asking the model nicely. Opt into writes only against disposable data.
 - ✅ **Completion is a contract, not a vibe.** The engine knows the app's routes and *refuses* to file an "extensive" report while any known route is unvisited, unexercised, or un-audited. "Explored a bit and stopped" is structurally impossible.
@@ -80,7 +82,7 @@ SceneScout needs only a URL. Give it the source code as well and it gets noticea
 | **What a finding looks like** | the symptom, **plus** the file behind it and a suggested fix | the symptom, a repro trace, and a regression-test skeleton |
 | **Typical target** | `localhost` while you build | staging, a preview deploy, a client's site |
 
-**Why the codebase helps.** The agent driving SceneScout is Claude Code, which can already read your repository. With the source at hand it knows the app's static routes before opening the browser, so coverage is measured against the real app instead of whatever happened to be linked. It can also check a suspicion against the code before reporting it: "there is no way to export this table" is a much stronger finding once the agent has confirmed no export handler exists. And when something breaks it can open the component or handler responsible and tell you *where* and *how* to fix it — "the save button does nothing" becomes "`OrderForm` swallows the rejected promise in `onSubmit`; surface the error and re-enable the button".
+**Why the codebase helps.** The agent driving SceneScout is a coding agent, which can already read your repository. With the source at hand it knows the app's static routes before opening the browser, so coverage is measured against the real app instead of whatever happened to be linked. It can also check a suspicion against the code before reporting it: "there is no way to export this table" is a much stronger finding once the agent has confirmed no export handler exists. And when something breaks it can open the component or handler responsible and tell you *where* and *how* to fix it — "the save button does nothing" becomes "`OrderForm` swallows the rejected promise in `onSubmit`; surface the error and re-enable the button".
 
 **Why it still works without it.** Everything SceneScout *observes* comes from the running page — elements, layout geometry, console and network errors, design-audit scores, task-ease measurements — and none of that needs source code. Point it at a URL you are allowed to test and it behaves like a thorough QA tester: it explores, reproduces, and files findings with evidence.
 
@@ -104,7 +106,7 @@ SceneScout needs only a URL. Give it the source code as well and it gets noticea
 | | |
 |---|---|
 | **Node** | ≥ 20 |
-| **An MCP client** | [Claude Code](https://claude.ai/code) is the first-class one (it loads the skill); [others work too](#-other-mcp-clients) |
+| **An MCP client** | Claude Code, Cursor, VS Code with Copilot, Codex CLI, Gemini CLI, GitHub Copilot CLI, Windsurf, or [any other](#-other-mcp-clients) |
 | **A web app to test** | SceneScout tests a *live* app: start yours locally first (e.g. `npm run dev`, `make dev-up`), or have the URL of a deployed one you're allowed to test |
 
 ### 1️⃣ Install
@@ -112,8 +114,11 @@ SceneScout needs only a URL. Give it the source code as well and it gets noticea
 It is on npm. Nothing to clone:
 
 ```bash
-npx -y scenescout install      # skill + Chromium (one-time download) + registers the server with Claude Code
+npx -y scenescout install                      # Claude Code: skill + server + Chromium (one-time download)
+npx -y scenescout install --client cursor      # or: vscode, codex, gemini, copilot, windsurf (comma-separated for several)
 ```
+
+Either way it downloads the browser and registers the server with the client you named. Claude Code also gets the method as a skill; every other client receives the same method from the server. [What each client gets](#-other-mcp-clients).
 
 **Prefer a Claude Code plugin?** The skill and the server arrive together:
 
@@ -124,7 +129,7 @@ npx -y scenescout install      # skill + Chromium (one-time download) + register
 
 Then download the browser once with `npx -y scenescout install --browser-only`. The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release lands here the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
 
-**Another MCP client?** Run `npx -y scenescout install --browser-only` and [add the server to its config](#-other-mcp-clients).
+**A client that is not in that list?** Run `npx -y scenescout install --browser-only` and [add the server to its config by hand](#-other-mcp-clients).
 
 <details>
 <summary>What <code>install</code> actually does</summary>
@@ -146,8 +151,8 @@ claude mcp add --scope user scenescout -- npx -y scenescout serve
 ### 2️⃣ Check it
 
 ```bash
-npx -y scenescout doctor            # everything, for the default install
-npx -y scenescout doctor --engine   # plugin install or another MCP client: node + build + browser only
+npx -y scenescout doctor --engine   # any client: node + build + browser
+npx -y scenescout doctor            # Claude Code: the above, plus the skill and the registration
 ```
 
 Every line should be a ✓. Anything that isn't prints the exact command that fixes it. Then **start a fresh session** in your client so it picks up the new tools.
@@ -156,13 +161,19 @@ Every line should be a ✓. Anything that isn't prints the exact command that fi
 
 No app handy? Clone this repository and run `npm run demo:serve`: the [demo app](demo-app/) starts on `http://127.0.0.1:4173`.
 
-From Claude Code, inside the project you want to test (or, for a [remote URL](#-two-ways-to-use-it), any folder):
+Open your agent inside the project you want to test (or, for a [remote URL](#-two-ways-to-use-it), any folder) and ask:
+
+```
+Use SceneScout to test http://localhost:3000 at medium level
+```
+
+In Claude Code the skill gives you a command with flags for the same thing:
 
 ```
 /scenescout --level medium --url http://localhost:3000 --role qa
 ```
 
-The skill scans the project (if there is one), attaches read-only, explores, and writes findings to `.scenescout/report.md`. That's it.
+The agent scans the project (if there is one), attaches read-only, explores, and writes findings to `.scenescout/report.md`. That's it.
 
 **Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (a Playwright storage-state to explore as: a name found by the scan, or a path to the JSON file) · `--observe` / `--safe-write` / `--allow-destructive`.
 
@@ -275,9 +286,14 @@ Run `npx -y scenescout doctor` first — it checks every setup item below (every
 ### 🧹 Uninstall
 
 ```bash
+# Claude Code
 claude mcp remove --scope user scenescout
 rm -rf ~/.claude/skills/scenescout
+# Codex / Gemini / Copilot CLI
+codex mcp remove scenescout        # likewise: gemini mcp remove …, copilot mcp remove …
 ```
+
+For Cursor, Windsurf and VS Code, delete the `scenescout` entry from the client's MCP server list.
 
 Nothing else is installed: `npx` runs the package from npm's cache. Per-project memory lives in each tested project's `.scenescout/` folder; delete it there if you want it gone.
 
@@ -469,7 +485,7 @@ src/
     …               collector · dispatch · fixtures · authloss · reaper
 scripts/            the 12 test suites (smoke/ holds the real-browser ones)
 test-app/           fixtures for the real-browser smoke tests
-skills/scenescout/   the Claude Code skill (SKILL.md)
+skills/scenescout/   the testing method (SKILL.md): a skill in Claude Code, served by the server everywhere else
 docs/adr/           why it's built this way
 ```
 
