@@ -192,11 +192,11 @@ Snapshots are cheap: re-snapshotting a route returns only *what changed*, with s
 
 ## 🧰 The toolbox
 
-24 deterministic tools. The agent picks; you rarely call these by hand.
+25 deterministic tools. The agent picks; you rarely call these by hand.
 
 | Phase | Tools | What they do |
 |---|---|---|
-| **Set up** | `scout_scan` `scout_attach` `scout_session` | Discover routes; launch a browser in a write-mode; keep several authenticated roles alive at once |
+| **Set up** | `scout_playbook` `scout_scan` `scout_attach` `scout_session` | Hand the testing method to an agent that has no skill loaded; discover routes; launch a browser in a write-mode; keep several authenticated roles alive at once |
 | **Explore** | `scout_crawl` `scout_coverage` | Sweep every route in one call; ask what's still untested |
 | **Look** | `scout_snapshot` `scout_hover` `scout_screenshot` | Read the structured scene (diffed); reveal tooltips/hover cards; capture pixels only when needed |
 | **Act** | `scout_click` `scout_type` `scout_select` `scout_upload` `scout_press` `scout_scroll` `scout_navigate` `scout_back` `scout_run_plan` | Drive the UI like a user; `scout_run_plan` batches a whole mechanical sequence into one call |
@@ -409,7 +409,12 @@ Most clients accept the same `mcpServers` JSON shape shown for Cursor.
 
 </details>
 
-**The skill is what makes it good.** The tools are only hands and eyes; [`skills/scenescout/SKILL.md`](skills/scenescout/SKILL.md) is the method — what to look at first, when to stop, what counts as a finding. Claude Code loads it as a skill. In another client, give the agent that file as its instructions (a rule, a custom mode, or pasted into the first message).
+**The method travels with the server.** The tools are only hands and eyes; [`skills/scenescout/SKILL.md`](skills/scenescout/SKILL.md) is the method: what to look at first, when to stop, what counts as a finding. Claude Code loads it as a skill. Every other client gets the same text from the server, with nothing to copy:
+
+- the server's instructions tell the agent to call `scout_playbook` before its first attach, and that tool returns the method,
+- clients that list server prompts as commands also get an `explore` prompt, which loads the method and takes the URL.
+
+So in any client, a first message like *"Use SceneScout to test http://localhost:3000"* is enough. If an agent starts clicking without having called `scout_playbook`, tell it to call that first; how closely a model follows server instructions varies by client.
 
 The CLI is also useful on its own:
 
@@ -424,7 +429,7 @@ npx -y scenescout status <path>     # what a running engine is doing right now
 
 ```
 src/
-  mcp-server.ts     the 24 tools + per-session dispatch
+  mcp-server.ts     the 25 tools + per-session dispatch
   scan.ts           project discovery (framework, routes, auth)
   cli.ts            scan · serve · install · doctor · status
   installer.ts      setup logic (skill link, MCP registration, diagnostics)

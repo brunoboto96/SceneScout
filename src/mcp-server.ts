@@ -25,6 +25,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -34,6 +35,7 @@ import { MemoryStore, redactSecrets } from "./engine/memory.js";
 import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
 import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
 import { computeGaps, formatRouteCoverage, generateReport } from "./engine/report.js";
+import { explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { formatScan, scanProject } from "./scan.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
@@ -73,7 +75,8 @@ const PKG_VERSION = ((): string => {
     return "0.0.0";
   }
 })();
-const server = new McpServer({ name: "scenescout", version: PKG_VERSION });
+const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const server = new McpServer({ name: "scenescout", version: PKG_VERSION }, { instructions: SERVER_INSTRUCTIONS });
 
 /** Wide enough for text AND image results, so no handler needs a cast. */
 type ToolResult = {
@@ -203,6 +206,43 @@ const sessionParam = z
     "Target this session directly instead of the active one — pass it explicitly when dispatching to MULTIPLE sessions in one turn (e.g. two scout_click calls with different `session`), which then run CONCURRENTLY rather than queueing. Omit for single-session sequential use.",
   );
 
+// The method, for every client that has no skill loader. It is read per call,
+// not cached: a source checkout's skill file can change under a running server.
+server.registerTool(
+  PLAYBOOK_TOOL,
+  {
+    description:
+      "Return the SceneScout testing method: setup order, write modes, how to explore, what counts as done, how to report. " +
+      "Call this ONCE before the first scout_attach in a conversation, then follow it. " +
+      "Skip it only if a SceneScout skill is already loaded in this conversation — that is the same text. Takes no input and touches no browser.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      return { content: [{ type: "text" as const, text: loadPlaybook(PACKAGE_ROOT) }] };
+    } catch (err) {
+      return errorText(err);
+    }
+  },
+);
+
+// The same method as a prompt, for clients that list server prompts as commands.
+server.registerPrompt(
+  PLAYBOOK_PROMPT,
+  {
+    title: "Explore a web app with SceneScout",
+    description: "Start an exploratory test session: loads the SceneScout method and states the target.",
+    argsSchema: {
+      url: z.string().optional().describe("URL of the running app, e.g. http://localhost:3000"),
+      depth: z.string().optional().describe("minimal, medium or deep"),
+      focus: z.string().optional().describe("An area or flow to concentrate on"),
+    },
+  },
+  ({ url, depth, focus }) => ({
+    messages: [{ role: "user" as const, content: { type: "text" as const, text: explorePrompt(loadPlaybook(PACKAGE_ROOT), { url, depth, focus }) } }],
+  }),
+);
+
 server.registerTool(
   "scout_scan",
   {
@@ -223,7 +263,7 @@ server.registerTool(
   "scout_attach",
   {
     description:
-      "Launch a browser and attach to a running web app. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass a Playwright storage-state JSON to explore as an authenticated role. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
+      "Launch a browser and attach to a running web app. First attach in this conversation and no SceneScout skill loaded? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass a Playwright storage-state JSON to explore as an authenticated role. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
     inputSchema: {
       url: z.string().describe("Base URL of the running app, e.g. http://localhost:3000"),
       projectPath: z.string().describe("Absolute path to the project (memory + report live in .scenescout/ here)"),
