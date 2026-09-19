@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Preview a note</title></head>
+<body>
+  <h1>Preview a note</h1>
+  <!-- Fixture defect: the preview renders what is typed as HTML on the same page (reflected injection). -->
+  <label for="draft">Draft</label>
+  <input id="draft" data-testid="reflect-draft">
+  <div id="preview" data-testid="reflect-preview"></div>
+  <a href="/echo.html" data-testid="echo-back">Back</a>
+  <script>
+    document.getElementById("draft").addEventListener("input", (e) => {
+      document.getElementById("preview").innerHTML = e.target.value;
+    });
+  </script>
+</body>
+</html>

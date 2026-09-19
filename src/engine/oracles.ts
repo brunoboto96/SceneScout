@@ -2,7 +2,7 @@ import type { Page, Request } from "playwright";
 import { redactSecrets } from "./memory.js";
 
 export interface OracleViolation {
-  kind: "console_error" | "page_error" | "request_failed" | "http_error";
+  kind: "console_error" | "page_error" | "request_failed" | "http_error" | "dom_injection";
   severity: "high" | "medium";
   detail: string;
   url: string;
@@ -145,6 +145,15 @@ export class OracleMonitor {
   /** Called by the engine when the write policy aborts a request, so the errors that abort causes are not held against the app. */
   notePolicyBlock(): void {
     this.lastPolicyBlockAt = Date.now();
+  }
+
+  /**
+   * A markup-shaped value the session typed has come back as an element on
+   * this page: whoever opens it runs the input. Found by the engine's DOM scan
+   * (injection.ts), not by a page event, so it is reported through here.
+   */
+  noteInjection(detail: string, url: string): void {
+    this.record({ kind: "dom_injection", severity: "high", detail, url });
   }
 
   private record(v: Omit<OracleViolation, "at" | "repeat">): void {

@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Notes (plain text)</title></head>
+<body>
+  <h1>Notes (plain text)</h1>
+  <!-- The same note rendered as text: markup in it stays visible as characters and never becomes an element. -->
+  <div id="note" data-testid="echo-rendered-safe"></div>
+  <a href="/echo.html" data-testid="echo-back">Back</a>
+  <script>
+    document.getElementById("note").textContent = localStorage.getItem("echo-note") || "(no note yet)";
+  </script>
+</body>
+</html>

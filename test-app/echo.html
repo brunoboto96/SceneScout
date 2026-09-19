@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Leave a note</title></head>
+<body>
+  <h1>Leave a note</h1>
+  <p>Whatever is saved here is shown on the notes pages.</p>
+  <form id="note-form">
+    <label for="note">Note</label>
+    <input id="note" name="note" data-testid="echo-note">
+    <button type="submit" data-testid="echo-save">Save note</button>
+  </form>
+  <p id="msg" data-testid="echo-msg"></p>
+  <nav>
+    <a href="/echo-list.html" data-testid="echo-list-link">Notes</a>
+    <a href="/echo-safe.html" data-testid="echo-safe-link">Notes (plain text)</a>
+  </nav>
+  <script>
+    document.getElementById("note-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      localStorage.setItem("echo-note", document.getElementById("note").value);
+      document.getElementById("msg").textContent = "Saved.";
+    });
+  </script>
+</body>
+</html>

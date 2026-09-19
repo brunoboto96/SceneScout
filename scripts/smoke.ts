@@ -22,8 +22,9 @@ import * as safeWrite from "./smoke/safe-write.ts";
 import * as multiSession from "./smoke/multi-session.ts";
 import * as authLoss from "./smoke/auth-loss.ts";
 import * as liveView from "./smoke/live-view.ts";
+import * as injection from "./smoke/injection.ts";
 
-const suites = [readOnly, safeWrite, multiSession, authLoss, liveView];
+const suites = [readOnly, safeWrite, multiSession, authLoss, liveView, injection];
 
 async function main(): Promise<void> {
   const server = await startFixtureServer();
