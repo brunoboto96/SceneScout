@@ -1901,6 +1901,9 @@ export class BrowserEngine {
       let preTestid: string | null = null;
       let preLabel = "";
       let forcedClick = false;
+      // What a type step has to say about the field it typed into; it goes on
+      // the step's own line, so it cannot read as the previous step's.
+      let note = "";
       let preState: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
       try {
         if (step.action === "navigate") {
@@ -1966,7 +1969,7 @@ export class BrowserEngine {
             );
           } else if (step.action === "type") {
             const fillNote = await this.fillOrAppend(loc, step.value ?? "", step.replace ?? false);
-            if (fillNote) transcript.push(`  ${fillNote.trim()}`);
+            note = fillNote;
             if (step.pressEnter) {
               if (this.readOnly) {
                 const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
@@ -2041,14 +2044,14 @@ export class BrowserEngine {
         // Abort only on NEW violations: a known-failing endpoint repeating on
         // every navigation must not make every plan abort at step 1.
         if (violations.some((v) => !v.repeat)) {
-          transcript.push(`${desc} → OK, but oracle fired:${formatViolations(violations)}${mutations}`);
+          transcript.push(`${desc} → OK${note}, but oracle fired:${formatViolations(violations)}${mutations}`);
           transcript.push(`PLAN ABORTED at step ${i + 1} — investigate before continuing.`);
           break;
         }
         const forcedNote = forcedClick
           ? " (forced — the strict click timed out on this element's hit-test/stability check but a forced click still landed; something may render on top of it or delegate via a label, cross-check GEOMETRY overlaps before calling it a bug)"
           : "";
-        transcript.push(`${desc} → OK (${page.url()})${mutations}${forcedNote}`);
+        transcript.push(`${desc} → OK (${page.url()})${note}${mutations}${forcedNote}`);
       } catch (err) {
         const fullMsg = err instanceof Error ? err.message : String(err);
         const firstLine = fullMsg.split("\n")[0];
