@@ -1,5 +1,18 @@
 # scenescout
 
+## 1.4.0
+
+### Minor Changes
+
+- 01fe452: The engine now notices when a value it typed comes back as markup. Any markup-shaped value the agent types — `<script>…</script>`, `<img src=x onerror=…>`, a `<b>` — is remembered by shape, and every page seen afterwards is checked for an element of that shape. When one is found, a `dom_injection` violation (severity high) names the field it was typed into, the page it was typed on, the page it rendered on and the element it became: whoever opens that page runs the input, which is a stored or reflected XSS. The oracle never chooses what to type; the method asks for markup in the fuzzing pass, and the rest is the agent's judgment.
+
+### Patch Changes
+
+- 2deca2a: Two findings that name the same endpoint no longer merge unless both name a failure status for it. A double submit and an accepted bad value can both mention `POST /api/orders` and are two bugs; the second one filed used to be absorbed into the first without a trace.
+- 4e10197: The live view's header keeps its two buttons together when it wraps on a narrow screen, numbers that tick every second (badges, feed times, the session counts) use tabular numerals so they no longer jitter, the feed's journey groups are marked by their tint with a hairline rather than a stripe, and the scrolling panels and text selection take the page's own palette.
+- 978022a: Every record a session creates is now named in the result of the action that created it (`created: /api/things id=44`), including the second and later ones on an endpoint. The state-changing-request notice reports each endpoint once per session, which in safe-write mode hid every creation after the first, so the agent could not tell from the result that it had just made one.
+- dd8927a: `scout_run_plan` now prints a type step's note about the field (such as "replaced existing content") on that step's own line. It used to appear under the previous step, so a reader concluded the wrong field was prefilled.
+
 ## 1.3.0
 
 ### Minor Changes
