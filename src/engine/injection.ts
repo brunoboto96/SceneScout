@@ -43,9 +43,16 @@ export const INJECTION_TEXT_MAX = 200;
 /** Most matching elements reported per probe per page. */
 export const MAX_HITS = 20;
 
-// A slash between attributes is the same as a space to a browser (`<svg/onload=…>`).
-const TAG_RE = /<([a-zA-Z][a-zA-Z0-9-]*)((?:[\s/]+[^\s=>/]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)*)[\s/]*>/;
-const ATTR_RE = /([^\s=>/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
+const OPEN_RE = /<([a-zA-Z][a-zA-Z0-9-]*)/;
+// One attribute at a time, anchored where the last one ended: a slash between
+// attributes is the same as a space to a browser (`<svg/onload=…>`). Each
+// match consumes at least one character, so a hostile value cannot make the
+// parse backtrack.
+const ATTR_RE = /[\s/]*([^\s=>/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/y;
+const CLOSE_RE = /[\s/]*>/y;
+/** Values longer than this are cut before parsing; no payload needs more. */
+const MAX_VALUE_LENGTH = 2000;
+
 /** Attribute names that can go into a selector as they are. Anything else is dropped rather than escaped. */
 const ATTR_NAME_RE = /^[A-Za-z_][-A-Za-z0-9_]*$/;
 
@@ -70,17 +77,30 @@ export type ProbeShape = Omit<InjectionProbe, "field" | "typedOn" | "baseline">;
  * nothing to tell it apart by (`<script>`, `<br>`) are none of the oracle's
  * business.
  */
-export function probeShape(value: string): ProbeShape | null {
-  const m = TAG_RE.exec(value);
-  if (!m) return null;
-  const tag = m[1].toLowerCase();
+export function probeShape(raw: string): ProbeShape | null {
+  const value = raw.slice(0, MAX_VALUE_LENGTH);
+  const open = OPEN_RE.exec(value);
+  if (!open) return null;
+  const tag = open[1].toLowerCase();
   const attrs: Array<[string, string]> = [];
-  for (const a of m[2].matchAll(ATTR_RE)) {
+  let pos = open.index + open[0].length;
+  for (;;) {
+    CLOSE_RE.lastIndex = pos;
+    const close = CLOSE_RE.exec(value);
+    if (close) {
+      pos += close[0].length;
+      break;
+    }
+    ATTR_RE.lastIndex = pos;
+    const a = ATTR_RE.exec(value);
+    // Neither an attribute nor the end of the tag: not an element, just a "<".
+    if (!a) return null;
+    pos += a[0].length;
     const name = a[1].toLowerCase();
     if (!ATTR_NAME_RE.test(name)) continue;
     attrs.push([name, a[2] ?? a[3] ?? a[4] ?? ""]);
   }
-  const rest = value.slice((m.index ?? 0) + m[0].length);
+  const rest = value.slice(pos);
   const close = rest.toLowerCase().indexOf(`</${tag}`);
   const inner = (close >= 0 ? rest.slice(0, close) : rest).trim();
   const text = inner ? inner.slice(0, INJECTION_TEXT_MAX) : null;

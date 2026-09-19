@@ -352,6 +352,20 @@ test("a hit is an injection only beyond the typing page's baseline, and is repor
   );
 });
 
+test("a hostile value cannot make the parse backtrack, and an unclosed tag is not an element", () => {
+  // The first version used one regex with a nested quantifier over the
+  // attribute list, which CodeQL flagged: a value starting "<A\t!=" and
+  // repeating could take exponential time. The tokenizer consumes at least
+  // one character per step.
+  const hostile = "<a\t!=" + "\t!=".repeat(20000) + "x";
+  const started = Date.now();
+  const shape = injectionProbe(hostile, "f", "u");
+  assert.ok(Date.now() - started < 200, `took ${Date.now() - started}ms`);
+  assert.equal(shape, null, "the tag never closes");
+  assert.equal(injectionProbe("<a href='/x'", "f", "u"), null);
+  assert.equal(injectionProbe("<a href='/x'>go", "f", "u")?.text, "go", "a closed tag with no closing tag still has its text");
+});
+
 test("the violation says where it was typed, where it fired, and what it became", () => {
   const probe = injectionProbe('<img src=x onerror="alert(1)">', 'textbox "Customer"', "http://app.test/orders/new?draft=1");
   assert.ok(probe);
