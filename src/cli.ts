@@ -26,6 +26,7 @@ import {
   type BrowserPresence,
   type InstallTarget,
 } from "./browsers.js";
+import { CLIENT_LABELS, firstMessageHint, parseClients, registerWithClient, vscodeBinary, type OtherClient } from "./clients.js";
 import { diagnose, installSkill, launchCommand, manualRegisterCommand, registerMcp, resolveClaudeDir, spawnRunner } from "./installer.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME } from "./engine/memory.js";
 import { formatScan, scanProject } from "./scan.js";
@@ -44,6 +45,9 @@ Usage:
                                      --browser-only when the skill and server came from a plugin;
                                      --browsers <list> to choose what to download: chromium (default),
                                      chromium-headless-shell, firefox, webkit, all — comma-separated)
+                                    (--client <list> to set up another MCP client instead of, or as well as,
+                                     Claude Code: claude-code (default), cursor, vscode, codex, gemini,
+                                     copilot, windsurf — comma-separated)
   scenescout doctor                 Check the setup and print the fix for anything missing
                                     (--engine: only node, the build and the browser — for plugin
                                      installs and other MCP clients)
@@ -156,20 +160,40 @@ function downloadBrowsers(targets: readonly InstallTarget[]): boolean {
 }
 
 /**
- * The value of `--browsers`, written as `--browsers x` or `--browsers=x`.
- * Undefined when the flag is absent; empty when it was given no value, which
- * includes being followed by another flag.
+ * The value of a flag written as `--name x` or `--name=x`. Undefined when the
+ * flag is absent; empty when it was given no value, which includes being
+ * followed by another flag.
  */
+function flagValue(flags: string[], name: string): string | undefined {
+  const inline = flags.find((f) => f.startsWith(`${name}=`));
+  if (inline) return inline.slice(name.length + 1);
+  const at = flags.indexOf(name);
+  if (at < 0) return undefined;
+  const next = flags[at + 1];
+  return next === undefined || next.startsWith("--") ? "" : next;
+}
+
 function browsersFlag(flags: string[]): string | undefined {
   // `--browser-only` is a different flag; a bare `--browser` is a slip that would otherwise be ignored and download Chromium.
   const slip = flags.find((f) => f === "--browser" || f.startsWith("--browser="));
   if (slip) throw new Error(`unknown flag ${slip.split("=")[0]} — did you mean --browsers?`);
-  const inline = flags.find((f) => f.startsWith("--browsers="));
-  if (inline) return inline.slice("--browsers=".length);
-  const at = flags.indexOf("--browsers");
-  if (at < 0) return undefined;
-  const next = flags[at + 1];
-  return next === undefined || next.startsWith("--") ? "" : next;
+  return flagValue(flags, "--browsers");
+}
+
+/** The real path of the `code` command on PATH, or null. Its real path is what tells VS Code from a fork. */
+function codeOnPath(): string | null {
+  const names = process.platform === "win32" ? ["code.cmd", "code.exe"] : ["code"];
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      try {
+        if (fs.existsSync(candidate)) return fs.realpathSync(candidate);
+      } catch {
+        // An unreadable PATH entry is not a VS Code install.
+      }
+    }
+  }
+  return null;
 }
 
 async function install(flags: string[]): Promise<void> {
@@ -187,7 +211,12 @@ async function install(flags: string[]): Promise<void> {
   // Read the choice before doing anything, so a typo costs nothing.
   const selection = parseBrowserSelection(browsersFlag(flags));
   if ("error" in selection) throw new Error(selection.error);
-  if (!browserOnly) {
+  const chosen = parseClients(flagValue(flags, "--client") ?? flagValue(flags, "--clients"));
+  if ("error" in chosen) throw new Error(chosen.error);
+  const forClaude = chosen.clients.includes("claude-code");
+  const others = chosen.clients.filter((c): c is OtherClient => c !== "claude-code");
+  // The skill is Claude Code's way of receiving the method; every other client gets it from the server.
+  if (!browserOnly && forClaude) {
     const skill = installSkill({ packageRoot, claudeDir: resolveClaudeDir(process.env, os.homedir()) });
     for (const note of skill.notes) console.log(`· ${note}`);
     console.log(
@@ -223,26 +252,46 @@ async function install(flags: string[]): Promise<void> {
   });
   if (note) console.log(`· Note: ${note}`);
 
+  const launch = launchCommand({ packageRoot, nodePath: process.execPath, serverPath });
   if (browserOnly) {
     // nothing to register
   } else if (flags.includes("--no-register")) {
-    console.log(
-      `· MCP registration skipped (--no-register). To do it by hand:\n\n  ${manualRegisterCommand(launchCommand({ packageRoot, nodePath: process.execPath, serverPath }))}\n`,
-    );
+    console.log(`· MCP registration skipped (--no-register). To do it by hand for Claude Code:\n\n  ${manualRegisterCommand(launch)}\n`);
   } else {
-    const reg = registerMcp({ launch: launchCommand({ packageRoot, nodePath: process.execPath, serverPath }), serverPath, run: spawnRunner });
-    if (reg.status === "registered") {
-      console.log(`✓ MCP server ${reg.replaced ? "re-registered (paths refreshed)" : "registered"} with Claude Code at user scope.`);
-      for (const name of reg.removedLegacy) console.log(`· removed the pre-rename MCP registration "${name}" (it pointed at this same server).`);
-      for (const note of reg.notes) console.log(`· ${note}`);
-    } else {
-      failed = true;
-      console.log(
-        reg.status === "claude-missing"
-          ? "· `claude` is not on this shell's PATH, so the MCP server was not registered."
-          : `✗ \`claude mcp add\` failed: ${reg.detail}`,
-      );
-      console.log(`  Run this once from a terminal where \`claude\` works:\n\n  ${reg.manual}\n`);
+    if (forClaude) {
+      const reg = registerMcp({ launch, serverPath, run: spawnRunner });
+      if (reg.status === "registered") {
+        console.log(`✓ MCP server ${reg.replaced ? "re-registered (paths refreshed)" : "registered"} with Claude Code at user scope.`);
+        for (const name of reg.removedLegacy) console.log(`· removed the pre-rename MCP registration "${name}" (it pointed at this same server).`);
+        for (const note of reg.notes) console.log(`· ${note}`);
+      } else {
+        failed = true;
+        console.log(
+          reg.status === "claude-missing"
+            ? "· `claude` is not on this shell's PATH, so the MCP server was not registered."
+            : `✗ \`claude mcp add\` failed: ${reg.detail}`,
+        );
+        console.log(`  Run this once from a terminal where \`claude\` works:\n\n  ${reg.manual}\n`);
+      }
+    }
+    const vscode = others.includes("vscode")
+      ? vscodeBinary({ platform: process.platform, home: os.homedir(), exists: fs.existsSync, codeOnPath: codeOnPath() })
+      : null;
+    for (const client of others) {
+      const reg = registerWithClient(client, { launch, home: os.homedir(), run: spawnRunner, vscode });
+      const label = CLIENT_LABELS[client];
+      if (reg.status === "registered") {
+        console.log(`✓ MCP server ${reg.replaced ? "re-registered" : "registered"} with ${label} (${reg.where}).`);
+        for (const note of reg.notes) console.log(`· ${note}`);
+      } else {
+        failed = true;
+        console.log(
+          reg.status === "client-missing"
+            ? `· ${label} was not found on this machine, so nothing was registered with it.`
+            : `✗ Registering with ${label} failed: ${reg.detail}`,
+        );
+        console.log(`  To do it by hand, ${reg.manual}\n`);
+      }
     }
   }
 
@@ -255,8 +304,9 @@ async function install(flags: string[]): Promise<void> {
     console.log("\nThe browser is ready — attach again.");
     return;
   }
-  console.log("\nStart a FRESH Claude Code session, then in any project run:  /scenescout");
-  console.log("Something off? Run:  scenescout doctor");
+  if (forClaude) console.log("\nStart a FRESH Claude Code session, then in any project run:  /scenescout");
+  if (others.length > 0) console.log(`\n${firstMessageHint(others)}`);
+  console.log(`Something off? Run:  scenescout doctor${forClaude ? "" : " --engine"}`);
 }
 
 async function doctor(flags: string[]): Promise<void> {

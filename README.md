@@ -311,7 +311,28 @@ In every browser, pages are not given shared workers unless the mode is `destruc
 
 ## 🔌 Other MCP clients
 
-The engine is a plain MCP server over stdio, so any client can drive it. The Claude Code route is the one this project tests. The entries below follow each client's own documentation for a local stdio server and have not been run by the maintainer; if one is out of date, a correction is welcome (say which client version you checked). The server entry is always the same command — `npx -y scenescout serve` — only the config file differs. Download the browser once with `npx -y scenescout install --browser-only`.
+The engine is a plain MCP server over stdio, so any client can drive it, and the testing method reaches the agent through the server itself (see the end of this section). `install` can register it for you:
+
+```bash
+npx -y scenescout install --client cursor            # one client
+npx -y scenescout install --client vscode,codex      # several; add claude-code to keep that one too
+```
+
+| `--client` | How it is registered |
+|---|---|
+| `claude-code` *(default)* | `claude mcp add`, plus the skill |
+| `cursor` | adds an entry to `~/.cursor/mcp.json`, keeping the others |
+| `vscode` | VS Code's own `code --add-mcp`. A `code` command that belongs to another editor is not used |
+| `codex` | `codex mcp add` |
+| `gemini` | `gemini mcp add --scope user` |
+| `copilot` | `copilot mcp add` (GitHub Copilot CLI) |
+| `windsurf` | adds an entry to `~/.codeium/windsurf/mcp_config.json`, keeping the others |
+
+A config file that is not valid JSON is left untouched, and the entry to add by hand is printed instead. When a client is not installed, `install` says so and prints the command to run later. Then restart the client and ask its agent: *"Use SceneScout to test http://localhost:3000"*.
+
+What has been checked: registering through each command above was run against Codex CLI, Gemini CLI, GitHub Copilot CLI and VS Code, and Cursor's command line agent read the entry `install` wrote, connected and listed the tools. The Windsurf path follows its documentation. A full test session has been run in Claude Code, with and without the skill. If a client behaves differently for you, a correction is welcome (say which client version you checked).
+
+To register by hand instead, the server entry is always the same command, `npx -y scenescout serve`:
 
 <details>
 <summary><strong>Cursor</strong> — <code>~/.cursor/mcp.json</code> (or <code>.cursor/mcp.json</code> in a project)</summary>
