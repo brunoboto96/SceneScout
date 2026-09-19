@@ -148,6 +148,18 @@ export function serviceWorkerPolicy(engine: BrowserEngineName): "allow" | "block
 }
 
 /**
+ * How the live view gets frames of a page.
+ *
+ * Chromium can push a frame on every repaint through the DevTools protocol,
+ * which costs nothing while the page sits still. Firefox and WebKit have no
+ * such channel in the driver, so a stream there is a screenshot taken on a
+ * timer for as long as somebody is watching.
+ */
+export function screencastSupport(engine: BrowserEngineName): "cdp" | "poll" {
+  return engine === "chromium" ? "cdp" : "poll";
+}
+
+/**
  * The key that moves keyboard focus to the next control, links and buttons
  * included. WebKit on macOS follows Safari: plain Tab stops only at text
  * fields, and Option+Tab stops everywhere. A focus audit that pressed Tab

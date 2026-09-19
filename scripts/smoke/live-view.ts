@@ -1,0 +1,293 @@
+/**
+ * The live view against a real browser: a frame of a real page, served over
+ * real HTTP, without the viewer leaving a trace in the run it is watching.
+ */
+import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import { BrowserEngine } from "../../dist/engine/browser.js";
+import { feedForSession, FEED_LINES, LiveServer, StatusBoard, type LiveProvider } from "../../dist/engine/live.js";
+import { chromium, firefox, webkit } from "playwright";
+import { BROWSER, check, until, type SmokeContext } from "./harness.ts";
+
+export const title = "live view";
+
+const isJpeg = (buf: Buffer | null | undefined): boolean => !!buf && buf.length > 100 && buf[0] === 0xff && buf[1] === 0xd8;
+
+function get(port: number, urlPath: string): Promise<{ status: number; body: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, path: urlPath, headers: { Host: `127.0.0.1:${port}` } }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer) => chunks.push(c));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks) }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+export async function run({ baseUrl }: SmokeContext): Promise<void> {
+  console.log("live view: frames of a real page, and a viewer that leaves no trace");
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-live-"));
+  const engine = new BrowserEngine();
+  engine.sessionKey = "watched";
+  const board = new StatusBoard();
+  const provider: LiveProvider = {
+    snapshot: () => ({ pid: process.pid, version: "smoke", at: new Date().toISOString(), sessions: board.list() }),
+    activity: (session, limit) => feedForSession(engine.memory?.actionLog ?? [], session, limit),
+    report: () => null,
+    screenshot: (session) => (session === "watched" ? engine.liveShot() : Promise.resolve(null)),
+    startStream: (session, onFrame) => (session === "watched" ? engine.startScreencast(onFrame) : Promise.resolve(null)),
+  };
+  const live = new LiveServer(provider);
+  try {
+    await engine.attach({ url: baseUrl, projectDir, mode: "read-only", task: "Watch the  demo  app" });
+    check(
+      "the task given at attach reaches the live view, whitespace collapsed",
+      engine.liveDescription.task === "Watch the demo app",
+      JSON.stringify(engine.liveDescription),
+    );
+    check("...and with no journey running there is no objective", engine.liveDescription.objective === undefined);
+    await engine.navigate("/");
+    await engine.startJourney("Find the dashboard's broken chart");
+    check(
+      "the active journey's goal is the current objective",
+      engine.liveDescription.objective === "Find the dashboard's broken chart",
+      JSON.stringify(engine.liveDescription),
+    );
+    await engine.navigate("/page2.html");
+    engine.endJourney(true);
+    check("...and it clears when the journey ends", engine.liveDescription.objective === undefined);
+    await engine.navigate("/");
+    const tagged = feedForSession(engine.memory?.actionLog ?? [], "watched", 60);
+    check(
+      "a feed line taken during the journey carries its goal, and one taken after it does not",
+      tagged.some((l) => l.action === "navigate" && l.target?.endsWith("/page2.html") && l.objective === "Find the dashboard's broken chart") &&
+        tagged.at(-1)?.action === "navigate" &&
+        tagged.at(-1)?.objective === undefined,
+      JSON.stringify(tagged.slice(-4)),
+    );
+    board.update("watched", { role: engine.role, phase: "idle", tool: "scout_navigate", url: engine.currentUrl, ...engine.liveDescription });
+
+    // The action log is the repro trace attached to findings. Somebody
+    // glancing at the dashboard is not a step anyone should replay.
+    const logged = (): number => (engine.memory?.actionLog ?? []).length;
+    const before = logged();
+    const shot = await engine.liveShot();
+    check("a watcher's frame is a JPEG of the page", isJpeg(shot), `length ${shot?.length ?? 0}`);
+    check("...and taking it logs no action", logged() === before, `${before} -> ${logged()}`);
+    await engine.screenshot();
+    check("...while the agent's own screenshot still does", logged() === before + 1, `${before} -> ${logged()}`);
+
+    const frames: Buffer[] = [];
+    const stop = await engine.startScreencast((jpeg) => frames.push(jpeg));
+    // A screencast emits on REPAINT, so the page needs something to repaint and
+    // the wait has to survive a loaded machine: this failed once at 8s with one
+    // navigation while two dozen other browsers were running. Keep repainting
+    // until a frame arrives rather than waiting longer on a single one.
+    for (let i = 0; i < 6 && frames.length === 0; i += 1) {
+      await engine.navigate(i % 2 === 0 ? "/page2.html" : "/");
+      await until("a streamed frame", () => frames.length > 0, 5000).catch(() => {});
+    }
+    check("a stream delivers frames while it is open", frames.length > 0 && isJpeg(frames[0]), `${frames.length} frame(s)`);
+    await stop();
+    const atStop = frames.length;
+    await engine.navigate("/");
+    await new Promise((r) => setTimeout(r, 1200));
+    check("...and none after it is stopped", frames.length === atStop, `${atStop} -> ${frames.length}`);
+    check("stopping a stream logs no action either", !(engine.memory?.actionLog ?? []).some((e) => /screencast|liveShot/i.test(e.action)));
+
+    const { port, token } = await live.start();
+    const status = await get(port, `/${token}/api/status`);
+    const sessions = (JSON.parse(status.body.toString()) as { sessions: Array<{ session: string; browser?: string; mode?: string }> }).sessions;
+    check(
+      "the status API describes the real session",
+      sessions.length === 1 && sessions[0]?.session === "watched" && sessions[0]?.mode === "read-only",
+      status.body.toString().slice(0, 300),
+    );
+    const feed = (JSON.parse((await get(port, `/${token}/api/activity?session=watched`)).body.toString()) as { feed: Array<{ action: string }> }).feed;
+    check(
+      "the activity feed reports what this session really did",
+      feed.some((l) => l.action === "navigate") && feed.some((l) => l.action === "attach"),
+      JSON.stringify(feed.slice(0, 4)),
+    );
+
+    const thumb = await get(port, `/${token}/shot/watched.jpg`);
+    check(
+      "a thumbnail of the real page comes back over HTTP",
+      thumb.status === 200 && isJpeg(thumb.body),
+      `status ${thumb.status}, ${thumb.body.length} bytes`,
+    );
+    check("...and a stranger to the token gets nothing", (await get(port, `/not-the-token/shot/watched.jpg`)).status === 404);
+
+    await engine.close();
+    check("a closed session says it cannot stream, instead of streaming nothing under a LIVE tag", (await engine.startScreencast(() => {})) === null);
+
+    await viewerKeepsUp(shot);
+  } finally {
+    await live.stop();
+    await engine.close();
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The page itself, in a real browser, with more sessions streaming than a
+ * browser allows connections to one host. With a stream per <img> the status
+ * poll queued behind the streams and the page froze; over one shared
+ * connection it keeps polling, and the close-up's feed links each group of
+ * actions to the journey it served.
+ */
+async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
+  console.log("live view: the page keeps up with every session streaming");
+  const names = Array.from({ length: 8 }, (_, i) => `agent-${i}`);
+  const at = new Date().toISOString();
+  const pushes = new Map<string, (frame: Buffer) => void>();
+  let polls = 0;
+  const provider: LiveProvider = {
+    snapshot: () => {
+      return {
+        pid: process.pid,
+        version: "smoke",
+        at: new Date().toISOString(),
+        sessions: names.map((session) => ({
+          session,
+          role: "clerk",
+          phase: "idle",
+          tool: "scout_snapshot",
+          url: "http://app.test/",
+          since: at,
+          at,
+          task: `Task of ${session}`,
+        })),
+      };
+    },
+    // Only the status poll asks for the short feed, so this counts status polls and nothing else.
+    activity: (session, limit) => {
+      if (limit === FEED_LINES) polls += 1;
+      return [
+        { at, action: "journey:start", target: `Goal of ${session}`, url: "http://app.test/", objective: `Goal of ${session}` },
+        { at, action: "click", target: "Save", url: "http://app.test/", objective: `Goal of ${session}` },
+        { at, action: "journey:end", target: `Goal of ${session}`, url: "http://app.test/", result: "completed", objective: `Goal of ${session}` },
+        { at, action: "snapshot", url: "http://app.test/" },
+      ];
+    },
+    report: () => ({
+      at,
+      markdown: [
+        "# SceneScout Report",
+        "",
+        "| Metric | Value |",
+        "|---|---|",
+        "| Open findings | 1 (1 high) |",
+        "",
+        "### 🔴 [HIGH] A title from the tested app: <script>alert(1)</script>",
+        "",
+        "- **Evidence:** `GET /api/things → HTTP 500`",
+        "",
+        "<details><summary>Repro trace (last actions before finding)</summary>",
+        "",
+        '1. click button "Save" @ http://app.test/',
+        "2. snapshot @ http://app.test/ <img src=x onerror=alert(1)>",
+        "",
+        "</details>",
+        "",
+        "```ts",
+        'test("regression", async ({ page }) => {',
+        '  await page.goto("/");',
+        "});",
+        "```",
+      ].join("\n"),
+    }),
+    screenshot: async () => jpeg,
+    startStream: async (session, onFrame) => {
+      pushes.set(session, onFrame);
+      return async () => {
+        pushes.delete(session);
+      };
+    },
+  };
+  const live = new LiveServer(provider);
+  const { port, token } = await live.start();
+  const browser = await { chromium, firefox, webkit }[BROWSER].launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`http://127.0.0.1:${port}/${token}/`);
+    await page.getByTestId("live-all-toggle").click();
+    await until("every session's stream to open", () => pushes.size === names.length, 8000);
+    const pollsBefore = polls;
+    const ticker = setInterval(() => {
+      for (const push of pushes.values()) if (jpeg) push(jpeg);
+    }, 100);
+    try {
+      await new Promise((r) => setTimeout(r, 2500));
+    } finally {
+      clearInterval(ticker);
+    }
+    check(`with ${names.length} streams open the status poll keeps arriving`, polls - pollsBefore >= 2, `${polls - pollsBefore} poll(s) in 2.5s`);
+    const src = await page.getByTestId("live-card-image-agent-7").locator("img").getAttribute("src");
+    check("a streamed frame is shown from the shared connection", !!src && src.startsWith("data:image/jpeg;base64,"), String(src).slice(0, 40));
+    check("one connection carries them all: no stream per image", (await page.locator("img[src*='.mjpg']").count()) === 0);
+
+    await page.getByTestId("live-card-image-agent-0").click();
+    const focusFeed = page.getByTestId("live-focus-feed");
+    await until(
+      "the close-up's feed to render",
+      () =>
+        focusFeed
+          .locator(".group")
+          .count()
+          .then((n) => n >= 2),
+      5000,
+    );
+    const groups = await focusFeed.locator(".group").count();
+    check("the close-up's feed is grouped by journey", groups === 2, `${groups} group(s)`);
+    await focusFeed.locator(".group").first().hover();
+    const hovered = await page.getByTestId("live-focus-objective").textContent();
+    const head = await page.locator("#focus-objective-head").textContent();
+    check(
+      "pointing at a group shows the goal those actions served",
+      hovered === "Goal of agent-0" && head === "Objective for these actions",
+      `${head}: ${hovered}`,
+    );
+    await page.locator("#focus-name").hover();
+    check("...and leaving it goes back to the current objective", (await page.locator("#focus-objective-head").textContent()) === "Current objective");
+    await page.getByTestId("live-focus-close").click();
+
+    await page.getByTestId("live-report-toggle").click();
+    const doc = page.getByTestId("live-report-doc");
+    await until(
+      "the report to render",
+      () =>
+        doc
+          .locator("h4")
+          .count()
+          .then((n) => n > 0),
+      5000,
+    );
+    const title = await doc.locator("h4").first().textContent();
+    check(
+      "the report's markdown is rendered as elements",
+      (await doc.locator("table td").count()) === 2 && (await doc.locator("li strong").count()) === 1,
+      `${await doc.locator("table td").count()} cell(s)`,
+    );
+    check(
+      "...and a finding's title from the tested app is text, never markup",
+      title === "🔴 [HIGH] A title from the tested app: <script>alert(1)</script>" && (await doc.locator("script").count()) === 0,
+      String(title),
+    );
+    const fence = await doc.locator("pre code").first().textContent();
+    check(
+      "the repro trace folds under its summary and the test skeleton keeps its lines verbatim",
+      (await doc.locator("details > summary").count()) === 1 &&
+        (await doc.locator("details ol li").count()) === 2 &&
+        fence === 'test("regression", async ({ page }) => {\n  await page.goto("/");\n});' &&
+        (await doc.locator("img").count()) === 0,
+      `summary ${await doc.locator("details > summary").count()}, items ${await doc.locator("details ol li").count()}, fence ${JSON.stringify(fence)}`,
+    );
+  } finally {
+    await browser.close();
+    await live.stop();
+  }
+}

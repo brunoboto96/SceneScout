@@ -4,10 +4,13 @@
  * documents every tool the server exposes.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { spawnSync } from "node:child_process";
+import { startFixtureServer } from "./smoke/harness.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverPath = path.join(here, "..", "dist", "mcp-server.js");
@@ -40,6 +43,121 @@ const EXPECTED_TOOLS = [
   "scout_report",
   "scout_close",
 ];
+
+type ToolText = { content: Array<{ type: string; text?: string }> };
+const textOf = (result: unknown): string => (result as ToolText).content.map((c) => c.text ?? "").join("");
+const LIVE_LINE = /Live view: (http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]{16,}\/)/;
+
+function fail(message: string): never {
+  console.error(`MCP CHECK FAILED — ${message}`);
+  process.exit(1);
+}
+
+/**
+ * The person running the agent gets the live view's address from the agent:
+ * attach has to carry it, and it has to work. Checked over the wire because
+ * the hand-off lives in the server, not in the engine the smoke suite drives.
+ */
+/** Resolves to the project directory, whose token file main() checks is gone once the client has closed the connection. */
+async function liveViewCheck(client: Client): Promise<string> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-live-"));
+  try {
+    const attached = textOf(await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir, session: "watched" } }));
+    const url = LIVE_LINE.exec(attached)?.[1];
+    if (!url) fail(`scout_attach did not hand over a live view address:\n${attached}`);
+
+    const status = (await (await fetch(`${url}api/status`)).json()) as { sessions: Array<{ session: string }> };
+    if (!status.sessions.some((s) => s.session === "watched"))
+      fail(`the address from scout_attach does not show the attached session: ${JSON.stringify(status)}`);
+
+    const report = (await (await fetch(`${url}api/report`)).json()) as { markdown?: string };
+    if (!report.markdown?.startsWith("# SceneScout Report")) fail(`the live view does not render the run's report: ${JSON.stringify(report).slice(0, 200)}`);
+    if (fs.existsSync(path.join(projectDir, ".scenescout", "report.md"))) fail("reading the report from the live view wrote it to disk");
+
+    const listed = textOf(await client.callTool({ name: "scout_session", arguments: {} }));
+    if (LIVE_LINE.exec(listed)?.[1] !== url) fail(`scout_session does not repeat the same address:\n${listed}`);
+
+    const tokenFile = path.join(projectDir, ".scenescout", "live-token");
+    const mode = fs.statSync(tokenFile).mode & 0o777;
+    if (process.platform !== "win32" && mode !== 0o600) fail(`the token file is readable beyond its owner (mode ${mode.toString(8)})`);
+    if (!url.includes(fs.readFileSync(tokenFile, "utf8").trim())) fail("the token file and the address disagree");
+
+    // What `scenescout watch` builds its address from: the port in status.json plus the token file.
+    const written = await readStatusWhenWhole<{ live?: { port?: number } }>(projectDir);
+    if (written.live?.port !== Number(new URL(url).port)) fail(`status.json does not carry the live view's port: ${JSON.stringify(written.live)}`);
+    const cli = path.join(packageRoot, "dist", "cli.js");
+    const watched = spawnSync(process.execPath, [cli, "watch", "--no-open", projectDir], { encoding: "utf8" });
+    if (!watched.stdout.includes(url)) fail(`scenescout watch does not print the address scout_attach handed over:\n${watched.stdout}${watched.stderr}`);
+    const printed = spawnSync(process.execPath, [cli, "status", projectDir], { encoding: "utf8" }).stdout;
+    if (!/^\s+watched \(/m.test(printed) || !printed.includes("Live view: scenescout watch"))
+      fail(`scenescout status does not describe the session and point at watch:\n${printed}`);
+
+    await client.callTool({ name: "scout_close", arguments: { all: true } });
+    const after = (await (await fetch(`${url}api/status`)).json()) as { sessions: unknown[] };
+    if (after.sessions.length !== 0) fail(`a closed session is still on the board: ${JSON.stringify(after)}`);
+    console.log("✓ scout_attach hands over a working live view address, and status/watch read it back");
+  } finally {
+    fixture.close();
+  }
+  return projectDir;
+}
+
+/**
+ * status.json is written asynchronously and can be caught mid-write, which is
+ * what `scenescout status` reports as truncated. A check reads it the way a
+ * patient reader does: until it parses.
+ */
+async function readStatusWhenWhole<T>(projectDir: string): Promise<T> {
+  const file = path.join(projectDir, ".scenescout", "status.json");
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    try {
+      return JSON.parse(fs.readFileSync(file, "utf8")) as T;
+    } catch (err) {
+      if (Date.now() > deadline) throw err;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+}
+
+/** ADR 7: the token outlives nothing. Checked after the client has closed the connection, which is how most clients leave. */
+async function tokenGoneCheck(projectDir: string): Promise<void> {
+  const tokenFile = path.join(projectDir, ".scenescout", "live-token");
+  try {
+    const deadline = Date.now() + 8000;
+    while (fs.existsSync(tokenFile)) {
+      if (Date.now() > deadline) fail("the live view's token file is still there after the client closed the connection");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    console.log("✓ the token file is removed once the client has gone");
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/** SCENESCOUT_LIVE=off is a promise that no port opens. A switch that only hides the address would break it quietly. */
+async function liveViewOffCheck(): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-liveoff-"));
+  const env = Object.fromEntries(Object.entries({ ...process.env, SCENESCOUT_LIVE: "off" }).filter((e): e is [string, string] => typeof e[1] === "string"));
+  const client = new Client({ name: "ft-check-off", version: "0.0.1" });
+  await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env }));
+  try {
+    const attached = textOf(await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir } }));
+    if (attached.includes("Live view")) fail(`SCENESCOUT_LIVE=off still handed over an address:\n${attached}`);
+    const status = await readStatusWhenWhole<{ live?: unknown; detail?: unknown[] }>(projectDir);
+    if (status.live) fail(`SCENESCOUT_LIVE=off still advertises a port: ${JSON.stringify(status.live)}`);
+    if (fs.existsSync(path.join(projectDir, ".scenescout", "live-token"))) fail("SCENESCOUT_LIVE=off still wrote a token file");
+    if (!Array.isArray(status.detail) || status.detail.length !== 1) fail("status.json lost its per-session entries when the live view is off");
+    await client.callTool({ name: "scout_close", arguments: { all: true } });
+    console.log("✓ SCENESCOUT_LIVE=off opens no port and still writes per-session status");
+  } finally {
+    await client.close();
+    fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
 
 async function main(): Promise<void> {
   const transport = new StdioClientTransport({ command: "node", args: [serverPath] });
@@ -165,7 +283,10 @@ async function main(): Promise<void> {
   }
   console.log("✓ scout_scan round-trip works");
 
+  const liveProject = await liveViewCheck(client);
   await client.close();
+  await tokenGoneCheck(liveProject);
+  await liveViewOffCheck();
   console.log("\nMCP CHECK PASSED");
 }
 
