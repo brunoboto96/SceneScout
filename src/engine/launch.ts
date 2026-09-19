@@ -2,10 +2,11 @@
  * Turning a failed browser launch into something the person can act on.
  *
  * For anyone who installed from npm and never ran the setup step, the first
- * attach fails because Chromium was never downloaded — and Playwright reports
+ * attach fails because the browser was never downloaded — and Playwright reports
  * that as a multi-line box of text with a path in it. That is the single most
  * likely first-run failure, so it gets one plain instruction instead.
  */
+import { APPROX_DISK_MB, launchTarget, type BrowserEngineName } from "../browsers.js";
 
 /** Playwright's wording when the browser binary is not on disk. */
 const MISSING_BROWSER_RE = /Executable doesn't exist|playwright install|browserType\.launch:.*(not found|ENOENT)/i;
@@ -14,13 +15,23 @@ export function isMissingBrowser(message: string): boolean {
   return MISSING_BROWSER_RE.test(message);
 }
 
+/** What the failed launch was trying to open. Defaults describe what every run did before browsers became a choice. */
+export type LaunchNeed = { engine: BrowserEngineName; headed: boolean };
+
 /** The error text for a launch that failed. `reaped` is how many orphaned browsers were cleaned up between attempts. */
-export function explainLaunchFailure(message: string, reaped: number): string {
+export function explainLaunchFailure(message: string, reaped: number, need: LaunchNeed = { engine: "chromium", headed: false }): string {
   if (isMissingBrowser(message)) {
+    const target = launchTarget(need.engine, need.headed);
+    // Someone who installed only the headless shell did run install, so say what is different about a headed run.
+    const why =
+      target === "chromium" && need.headed
+        ? "A headed run needs the full Chromium browser, which has not been downloaded (the headless shell alone cannot open a window)"
+        : `The ${target} build has not been downloaded yet`;
     return (
-      `Chromium has not been downloaded yet (one-time, ~150 MB). Run this once, then attach again:\n` +
-      `  npx -y scenescout install --browser-only\n` +
-      `(from a clone: npm run setup). On Linux, if system libraries are missing: npx playwright install --with-deps chromium`
+      `${why} (one-time, about ${APPROX_DISK_MB[target]} MB on disk). Run this once, then attach again:\n` +
+      `  npx -y scenescout install --browser-only --browsers ${target}\n` +
+      `(from a clone: node dist/cli.js install --browser-only --browsers ${target}). ` +
+      `On Linux, if system libraries are missing: npx playwright install --with-deps ${target}`
     );
   }
   const firstLine = message.split("\n")[0];

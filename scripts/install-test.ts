@@ -28,6 +28,18 @@ import {
   type Runner,
   type RunResult,
 } from "../src/installer.ts";
+import {
+  browserPresence,
+  defaultAttachNote,
+  defaultEngine,
+  focusAdvanceKey,
+  headlessShellDir,
+  launchTarget,
+  parseBrowserSelection,
+  playwrightInstallArgs,
+  serviceWorkerPolicy,
+  sharedWorkersAllowed,
+} from "../src/browsers.ts";
 
 function tmp(prefix: string): string {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
@@ -280,11 +292,11 @@ test("diagnose names each broken piece and its fix", () => {
     packageRoot,
     claudeDir,
     nodeVersion: "v18.19.0",
-    chromiumPath: path.join(packageRoot, "no-such-chromium"),
+    defaultBrowser: { target: "chromium-headless-shell", path: null, expected: path.join(packageRoot, "no-such-chromium") },
     run: scripted([absent]).run,
   });
   const failing = checks.filter((c) => !c.ok).map((c) => c.name);
-  assert.deepEqual(failing, ["node >= 20", "engine built", "chromium downloaded", "skill installed", "claude CLI on PATH"]);
+  assert.deepEqual(failing, ["node >= 20", "engine built", "browser downloaded (chromium-headless-shell)", "skill installed", "claude CLI on PATH"]);
   assert.ok(
     checks.every((c) => c.ok || c.fix),
     "every failure says how to fix it",
@@ -303,7 +315,7 @@ test("diagnose passes a complete setup and flags a registration pointing elsewhe
     packageRoot,
     claudeDir,
     nodeVersion: "v22.1.0",
-    chromiumPath,
+    defaultBrowser: { target: "chromium-headless-shell", path: chromiumPath },
     run: scripted([ok(`scenescout:\n  Command: ${process.execPath}\n  Args: ${server}`)]).run,
   });
   assert.deepEqual(
@@ -315,7 +327,7 @@ test("diagnose passes a complete setup and flags a registration pointing elsewhe
     packageRoot,
     claudeDir,
     nodeVersion: "v22.1.0",
-    chromiumPath,
+    defaultBrowser: { target: "chromium-headless-shell", path: chromiumPath },
     run: scripted([ok(`scenescout:\n  Command: ${process.execPath}\n  Args: /old/place/dist/mcp-server.js`)]).run,
   });
   const bad = moved.filter((c) => !c.ok);
@@ -334,7 +346,7 @@ test("diagnose fails a registration that names a bare `node`, which Claude Code 
     packageRoot,
     claudeDir,
     nodeVersion: "v22.1.0",
-    chromiumPath,
+    defaultBrowser: { target: "chromium-headless-shell", path: chromiumPath },
     run: scripted([ok(`scenescout:\n  Command: node\n  Args: ${server}\n`)]).run,
   });
   const bad = checks.filter((c) => !c.ok);
@@ -348,7 +360,7 @@ test("diagnose separates 'not registered' from 'registered but unreadable'", () 
   installSkill({ packageRoot, claudeDir });
   const chromiumPath = path.join(packageRoot, "chromium");
   fs.writeFileSync(chromiumPath, "");
-  const base = { packageRoot, claudeDir, nodeVersion: "v22.1.0", chromiumPath };
+  const base = { packageRoot, claudeDir, nodeVersion: "v22.1.0", defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath } };
 
   const unregistered = diagnose({ ...base, run: scripted([fail('No MCP server named "scenescout".')]).run }).filter((c) => !c.ok);
   assert.equal(unregistered.length, 1);
@@ -382,7 +394,13 @@ test("diagnose compares the registration by real path, not by spelling", () => {
   const alias = path.join(tmp("sc-alias-"), "link");
   fs.symlinkSync(packageRoot, alias, "dir");
   const listing = `scenescout:\n  Scope: User config\n  Command: ${process.execPath}\n  Args: ${path.join(alias, "dist", "mcp-server.js")}\n  Environment:\n`;
-  const checks = diagnose({ packageRoot, claudeDir, nodeVersion: "v22.1.0", chromiumPath, run: scripted([ok(listing)]).run });
+  const checks = diagnose({
+    packageRoot,
+    claudeDir,
+    nodeVersion: "v22.1.0",
+    defaultBrowser: { target: "chromium-headless-shell", path: chromiumPath },
+    run: scripted([ok(listing)]).run,
+  });
   assert.deepEqual(
     checks.filter((c) => !c.ok),
     [],
@@ -462,7 +480,7 @@ test("diagnose accepts an npx registration and vets its launcher", () => {
   installSkill({ packageRoot, claudeDir });
   const chromiumPath = path.join(packageRoot, "chromium");
   fs.writeFileSync(chromiumPath, "");
-  const base = { packageRoot, claudeDir, nodeVersion: "v22.1.0", chromiumPath };
+  const base = { packageRoot, claudeDir, nodeVersion: "v22.1.0", defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath } };
   const good = diagnose({ ...base, run: scripted([ok("scenescout:\n  Command: /opt/node/bin/npx\n  Args: -y scenescout serve\n")]).run });
   assert.deepEqual(
     good.filter((c) => !c.ok),
@@ -480,11 +498,16 @@ test("the engine-only doctor does not fail a plugin install for lacking a skill 
   const packageRoot = fakePackage();
   const chromiumPath = path.join(packageRoot, "chromium");
   fs.writeFileSync(chromiumPath, "");
-  const base = { packageRoot, claudeDir: tmp("sc-claude-"), nodeVersion: "v22.1.0", chromiumPath };
+  const base = {
+    packageRoot,
+    claudeDir: tmp("sc-claude-"),
+    nodeVersion: "v22.1.0",
+    defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath },
+  };
   const engine = diagnose({ ...base, scope: "engine", run: scripted([]).run });
   assert.deepEqual(
     engine.map((c) => c.name),
-    ["node >= 20", "engine built", "chromium downloaded"],
+    ["node >= 20", "engine built", "browser downloaded (chromium-headless-shell)"],
   );
   assert.deepEqual(
     engine.filter((c) => !c.ok),
@@ -540,13 +563,17 @@ test("doctor names a repair command that exists for the way the tool was install
   const checkout = fakePackage();
   fs.writeFileSync(path.join(checkout, "tsconfig.json"), "{}");
   fs.mkdirSync(path.join(checkout, "src"));
-  assert.deepEqual(repairCommands(checkout), { setup: "npm run setup", build: "npm run build" });
+  const fromCheckout = repairCommands(checkout);
+  assert.deepEqual([fromCheckout.setup, fromCheckout.build], ["npm run setup", "npm run build"]);
+  // `npm run setup --browsers x` would hand the flag to npm, not to install.
+  assert.equal(fromCheckout.browser("webkit"), "node dist/cli.js install --browser-only --browsers webkit");
+  assert.equal(fromCheckout.browser("chromium"), "npm run setup");
 
   const fixes = diagnose({
     packageRoot: fromNpm,
     claudeDir: tmp("sc-claude-"),
     nodeVersion: "v22.1.0",
-    chromiumPath: null,
+    defaultBrowser: { target: "chromium-headless-shell", path: null },
     run: scripted([fail('No MCP server named "scenescout".')]).run,
   })
     .filter((c) => !c.ok)
@@ -556,4 +583,123 @@ test("doctor names a repair command that exists for the way the tool was install
     fixes.every((f) => !/npm run/.test(f)),
     `an npm install was told to run a checkout script: ${fixes.join(" | ")}`,
   );
+});
+
+test("--browsers picks what install downloads, and absent means what it always did", () => {
+  assert.deepEqual(parseBrowserSelection(undefined), { targets: ["chromium"] });
+  assert.deepEqual(parseBrowserSelection("chromium-headless-shell"), { targets: ["chromium-headless-shell"] });
+  assert.deepEqual(parseBrowserSelection("firefox"), { targets: ["firefox"] });
+  assert.deepEqual(parseBrowserSelection("all"), { targets: ["chromium", "firefox", "webkit"] });
+  // Order and case do not matter, and the result is always in one order.
+  assert.deepEqual(parseBrowserSelection(" WebKit, firefox "), { targets: ["firefox", "webkit"] });
+  // "chromium" already brings the shell, so asking for both is not two downloads.
+  assert.deepEqual(parseBrowserSelection("chromium-headless-shell,chromium"), { targets: ["chromium"] });
+
+  // A typo is refused with the choices, before anything is downloaded.
+  const typo = parseBrowserSelection("chrome");
+  assert.ok("error" in typo);
+  assert.match(typo.error, /"chrome" is not a browser.*chromium, chromium-headless-shell, firefox, webkit, all/);
+  // `--browsers` as the last flag has no value; an empty list is not "install nothing".
+  assert.ok("error" in parseBrowserSelection(""));
+  assert.ok("error" in parseBrowserSelection(" , "));
+
+  assert.deepEqual(playwrightInstallArgs(["chromium-headless-shell", "webkit"]), ["install", "chromium-headless-shell", "webkit"]);
+});
+
+test("a launch needs the headless shell unless it opens a window", () => {
+  assert.equal(launchTarget("chromium", false), "chromium-headless-shell");
+  assert.equal(launchTarget("chromium", true), "chromium");
+  assert.equal(launchTarget("firefox", false), "firefox");
+  assert.equal(launchTarget("webkit", true), "webkit");
+});
+
+test("the default browser comes from the environment, and a value that is not a browser is refused", () => {
+  assert.equal(defaultEngine({}), "chromium");
+  assert.equal(defaultEngine({ SCENESCOUT_BROWSER: "" }), "chromium");
+  assert.equal(defaultEngine({ SCENESCOUT_BROWSER: " Firefox " }), "firefox");
+  // Falling back to Chromium here would run the whole session in the wrong browser without a word.
+  assert.throws(() => defaultEngine({ SCENESCOUT_BROWSER: "safari" }), /SCENESCOUT_BROWSER="safari".*chromium, firefox, webkit/);
+});
+
+test("the headless shell is found next to the full browser, on either path style", () => {
+  assert.equal(headlessShellDir("/home/u/.cache/ms-playwright/chromium-1243/chrome-linux/chrome"), "/home/u/.cache/ms-playwright/chromium_headless_shell-1243");
+  assert.equal(
+    headlessShellDir("C:\\Users\\u\\AppData\\Local\\ms-playwright\\chromium-1243\\chrome-win\\chrome.exe"),
+    "C:\\Users\\u\\AppData\\Local\\ms-playwright\\chromium_headless_shell-1243",
+  );
+  // A cache kept under a directory with the same kind of name: the build directory is the last one.
+  assert.equal(headlessShellDir("/opt/chromium-1/cache/chromium-1243/chrome-linux/chrome"), "/opt/chromium-1/cache/chromium_headless_shell-1243");
+  // A path that is not Playwright's layout (a system browser, say) names no shell.
+  assert.equal(headlessShellDir("/usr/bin/chromium"), null);
+  assert.equal(headlessShellDir(null), null);
+});
+
+test("a build counts as installed only when its files are there", () => {
+  const exe = {
+    chromium: "/c/ms-playwright/chromium-9/chrome",
+    firefox: "/c/ms-playwright/firefox-7/firefox",
+    webkit: null,
+  };
+  const shellMarker = path.join("/c/ms-playwright/chromium_headless_shell-9", "INSTALLATION_COMPLETE");
+  const on = (...present: string[]) => browserPresence(exe, (p) => present.includes(p));
+
+  // The shell alone: headless runs work, the full browser is still to download.
+  const shellOnly = on(shellMarker);
+  assert.equal(shellOnly["chromium-headless-shell"].installed, true);
+  assert.equal(shellOnly.chromium.installed, false);
+
+  // "chromium" means both builds, because that is what installing it brings.
+  assert.equal(on(exe.chromium).chromium.installed, false);
+  assert.equal(on(exe.chromium, shellMarker).chromium.installed, true);
+
+  // Playwright naming a path is not the file being there.
+  assert.equal(on().firefox.installed, false);
+  assert.equal(on(exe.firefox).firefox.installed, true);
+  assert.equal(on(exe.firefox).webkit.installed, false);
+});
+
+test("doctor names the download command for the browser that is actually missing", () => {
+  const packageRoot = tmp("sc-pkg-");
+  const base = { scope: "engine" as const, packageRoot, claudeDir: tmp("sc-claude-"), nodeVersion: "v22.1.0", run: scripted([]).run };
+  const fixFor = (target: "chromium-headless-shell" | "firefox") =>
+    diagnose({ ...base, defaultBrowser: { target, path: null } }).find((c) => c.name.startsWith("browser downloaded"))?.fix ?? "";
+  // The plain install already brings the headless shell.
+  assert.match(fixFor("chromium-headless-shell"), /^npx -y scenescout install {3}\(or: npx playwright install chromium-headless-shell\)$/);
+  // Firefox as the default browser needs to be asked for by name.
+  assert.match(fixFor("firefox"), /^npx -y scenescout install --browser-only --browsers firefox /);
+});
+
+test("service workers are allowed only where the write policy can see what they send", () => {
+  // Request interception reaches worker-issued requests in Chromium alone. In
+  // the other two a worker's DELETE went past read-only mode and reached the
+  // server; the browser smoke suite holds the end-to-end proof for each browser.
+  assert.equal(serviceWorkerPolicy("chromium"), "allow");
+  assert.equal(serviceWorkerPolicy("firefox"), "block");
+  assert.equal(serviceWorkerPolicy("webkit"), "block");
+});
+
+test("the focus audit presses the key that reaches buttons and links in that browser", () => {
+  // Safari's rule, which WebKit on macOS follows: plain Tab stops only at text fields.
+  assert.equal(focusAdvanceKey("webkit", "darwin"), "Alt+Tab");
+  assert.equal(focusAdvanceKey("webkit", "linux"), "Tab");
+  assert.equal(focusAdvanceKey("chromium", "darwin"), "Tab");
+  assert.equal(focusAdvanceKey("firefox", "darwin"), "Tab");
+});
+
+test("shared workers are taken from the page in every mode that blocks anything", () => {
+  // Their requests cannot be intercepted in any browser; the smoke suite proves the DELETE no longer arrives.
+  assert.equal(sharedWorkersAllowed("observe"), false);
+  assert.equal(sharedWorkersAllowed("read-only"), false);
+  assert.equal(sharedWorkersAllowed("safe-write"), false);
+  assert.equal(sharedWorkersAllowed("destructive"), true);
+});
+
+test("installing only a browser the default attach does not launch says so", () => {
+  const note = defaultAttachNote({ selected: ["firefox"], defaultEngine: "chromium", defaultInstalled: false });
+  assert.match(note ?? "", /drives chromium.*browser: "firefox".*SCENESCOUT_BROWSER=firefox/);
+  // Nothing to say when the default is already there, when it is among what was asked for, or when nothing was downloaded.
+  assert.equal(defaultAttachNote({ selected: ["firefox"], defaultEngine: "chromium", defaultInstalled: true }), null);
+  assert.equal(defaultAttachNote({ selected: ["chromium-headless-shell", "webkit"], defaultEngine: "chromium", defaultInstalled: false }), null);
+  assert.equal(defaultAttachNote({ selected: ["firefox"], defaultEngine: "firefox", defaultInstalled: false }), null);
+  assert.equal(defaultAttachNote({ selected: [], defaultEngine: "chromium", defaultInstalled: false }), null);
 });

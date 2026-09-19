@@ -44,6 +44,15 @@ refresh. Frames sent over a WebSocket are outside the policy in every mode; the
 engine warns about an open socket in `observe` mode, and that limit is documented
 rather than a vulnerability.
 
+The policy works by intercepting requests, so it covers what the driver can
+intercept: requests from pages, popups and dedicated workers in every browser,
+and from service workers in Chromium. Two kinds of worker are outside that, and
+the engine keeps pages from using them instead: service workers cannot register
+in Firefox and WebKit, and shared workers are unavailable in every browser unless
+the mode is `destructive`. A service worker registering in one of those browsers,
+a shared worker being constructed in a blocking mode, or any non-GET request
+reaching the network past the policy, is a bypass.
+
 ## Using it safely
 
 Only test applications you own or are authorized to test, and prefer a

@@ -56,15 +56,42 @@ jobs:
           npx tsx scripts/demo.ts
           git diff --exit-code -- examples/report.md
 
+  # The write policy is a promise about every browser the engine can drive, and
+  # the browsers differ exactly where it matters: what the driver can intercept.
+  # The browser suite therefore runs against the other two as well.
+  cross-browser:
+    name: ubuntu-latest · ${{ matrix.browser }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [firefox, webkit]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install browser
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+      - name: Browser suite
+        env:
+          SCENESCOUT_BROWSER: ${{ matrix.browser }}
+        run: npm run smoke
+
   # The branch ruleset requires ONE check, named "test". A matrix reports one
   # check per cell under changing names, so this job is the stable name that
   # summarises them: green only when every cell is.
   test:
-    needs: suite
+    needs: [suite, cross-browser]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Every matrix cell passed
         run: |
           echo "suite result: ${{ needs.suite.result }}"
+          echo "cross-browser result: ${{ needs.cross-browser.result }}"
           test "${{ needs.suite.result }}" = "success"
+          test "${{ needs.cross-browser.result }}" = "success"

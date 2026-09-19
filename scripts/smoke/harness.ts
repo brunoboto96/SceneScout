@@ -13,6 +13,10 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { defaultEngine } from "../../dist/browsers.js";
+
+/** The browser this run drives: SCENESCOUT_BROWSER, else Chromium. Checks that depend on the browser read it. */
+export const BROWSER = defaultEngine(process.env);
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appDir = path.join(here, "..", "..", "test-app");
@@ -25,6 +29,8 @@ export interface ServerStats {
   itemPosts: number;
   /** DELETEs that reached the server for the worker-sync fixture's record — must stay 0 in read-only mode. */
   workerDeletes: number;
+  /** DELETEs issued by the shared-worker fixture. */
+  sharedWorkerDeletes: number;
   /** Every non-GET request that reached the server, as "METHOD /path" → count. What the write policy let through, seen from the other side. */
   writes: Record<string, number>;
 }
@@ -86,7 +92,7 @@ export function settle(ms: number): Promise<void> {
 
 /** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
 export async function startFixtureServer(): Promise<{ baseUrl: string; stats: ServerStats; close: () => void }> {
-  const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, writes: {} };
+  const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {} };
   // Tiny server for the test app: static pages + a minimal items API for
   // write-policy testing.
   const server = http.createServer((req, res) => {
@@ -131,6 +137,7 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; stats: Se
       return;
     }
     if (urlPath === "/api/items/999" && req.method === "DELETE") stats.workerDeletes += 1;
+    if (urlPath === "/api/items/998" && req.method === "DELETE") stats.sharedWorkerDeletes += 1;
     if (urlPath.startsWith("/api/items/") && (req.method === "PUT" || req.method === "DELETE")) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
