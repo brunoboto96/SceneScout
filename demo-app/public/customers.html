@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Customers · Harbor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-dashboard">Dashboard</a><a href="/orders.html" data-testid="nav-orders">Orders</a
+        ><a href="/approvals.html" data-testid="nav-approvals">Approvals</a><a href="/inventory.html" data-testid="nav-inventory">Inventory</a
+        ><a href="/customers.html" data-testid="nav-customers" aria-current="page">Customers</a><a href="/reports.html" data-testid="nav-reports">Reports</a
+        ><a href="/audit.html" data-testid="nav-audit">Audit log</a><a href="/settings.html" data-testid="nav-settings">Settings</a>
+      </nav>
+      <a class="whoami" href="/signin.html" data-testid="nav-whoami"><span id="role">clerk</span> · switch role</a>
+    </header>
+    <main>
+      <h1>Customers</h1>
+      <p class="lede">Everyone Harbor ships to.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Customer</th>
+            <th>City</th>
+            <th>Customer since</th>
+          </tr>
+        </thead>
+        <tbody id="rows" data-testid="customers-rows"></tbody>
+      </table>
+    </main>
+    <footer>Harbor order desk · demo data only</footer>
+    <script src="/app.js"></script>
+    <script>
+      const cell = (tr, text) => {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+        return td;
+      };
+      const rows = document.getElementById("rows");
+      fetch("/api/customers")
+        .then((r) => r.json())
+        .then((list) => {
+          for (const c of list) {
+            const tr = document.createElement("tr");
+            tr.setAttribute("data-testid", "customers-row-" + c.id);
+            cell(tr, c.name);
+            cell(tr, c.city);
+            cell(tr, String(c.since));
+            rows.appendChild(tr);
+          }
+        });
+    </script>
+  </body>
+</html>

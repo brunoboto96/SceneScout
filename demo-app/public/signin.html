@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Switch role · Harbor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="logo" href="/" data-testid="nav-logo">Harbor</a>
+    </header>
+    <main>
+      <h1>Who is at the desk?</h1>
+      <p class="lede">Harbor has three roles. Pick one to see the desk the way that person does.</p>
+      <div class="cards">
+        <button class="card pick" data-role="clerk" data-testid="signin-role-clerk">
+          <span class="n">Clerk</span><span class="l">Takes orders and asks a manager to approve large ones.</span>
+        </button>
+        <button class="card pick" data-role="manager" data-testid="signin-role-manager">
+          <span class="n">Manager</span><span class="l">Approves or rejects orders that need sign-off.</span>
+        </button>
+        <button class="card pick" data-role="auditor" data-testid="signin-role-auditor">
+          <span class="n">Auditor</span><span class="l">Reads everything, including the audit log. Changes nothing.</span>
+        </button>
+      </div>
+      <p class="muted" id="signin-status" role="status" data-testid="signin-status"></p>
+    </main>
+    <footer>Harbor order desk · demo data only</footer>
+    <script src="/app.js"></script>
+    <script>
+      for (const b of document.querySelectorAll("button.pick")) {
+        b.addEventListener("click", async () => {
+          const res = await fetch("/api/signin", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ role: b.dataset.role }),
+          });
+          if (!res.ok) {
+            document.getElementById("signin-status").textContent = "Could not switch role.";
+            return;
+          }
+          location.href = "/";
+        });
+      }
+    </script>
+  </body>
+</html>
