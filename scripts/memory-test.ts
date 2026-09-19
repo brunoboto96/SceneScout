@@ -112,6 +112,29 @@ test("dedup: the same endpoint failure found from TWO DIFFERENT pages is one bug
   assert.equal(new2, false, "same METHOD+path+status is the same bug, whichever page it was filed from");
 });
 
+test("dedup: two bugs on one endpoint that answered 2xx stay two findings", () => {
+  // Seen in two real runs, in both directions: a double submit and an
+  // accepted negative quantity both had evidence naming `POST /api/orders`
+  // with no failure status, and the second one filed was silently absorbed
+  // into the first. Without a 4xx/5xx the endpoint is not the bug.
+  const store = freshStore();
+  const create = { ...base, category: "data-inconsistency", state: "/orders/new#1" };
+  const [, new1] = store.addFinding({
+    ...create,
+    title: "Double-click on Create order creates two orders",
+    detail: "x",
+    evidence: "Double-click on testid=new-order-submit fired POST /api/orders twice",
+  });
+  const [, new2] = store.addFinding({
+    ...create,
+    title: "New order accepts a negative item count",
+    detail: "y",
+    evidence: "POST /api/orders with items=-5 → 201, order stored with -5 items",
+  });
+  assert.ok(new1 && new2, "a 2xx endpoint is where both were seen, not what is wrong with either");
+  assert.equal(store.findings.length, 2);
+});
+
 test("dedup: an endpoint signature match needs the SAME status, not just the same path", () => {
   const store = freshStore();
   const [, new1] = store.addFinding({ ...base, state: "/a#1", title: "Create fails", detail: "x", evidence: "POST /api/things 500" });
