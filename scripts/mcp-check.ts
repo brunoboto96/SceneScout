@@ -75,6 +75,11 @@ async function liveViewCheck(client: Client): Promise<string> {
     if (!report.markdown?.startsWith("# SceneScout Report")) fail(`the live view does not render the run's report: ${JSON.stringify(report).slice(0, 200)}`);
     if (fs.existsSync(path.join(projectDir, ".scenescout", "report.md"))) fail("reading the report from the live view wrote it to disk");
 
+    const facts = (await (await fetch(`${url}api/status`)).json()) as { report?: { path: string; written: boolean } };
+    if (facts.report?.path !== path.join(projectDir, ".scenescout", "report.md"))
+      fail(`the live view does not name the report's file: ${JSON.stringify(facts.report)}`);
+    if (facts.report.written) fail("the report is reported as written although scout_report was never called");
+
     const listed = textOf(await client.callTool({ name: "scout_session", arguments: {} }));
     if (LIVE_LINE.exec(listed)?.[1] !== url) fail(`scout_session does not repeat the same address:\n${listed}`);
 
@@ -93,10 +98,18 @@ async function liveViewCheck(client: Client): Promise<string> {
     if (!/^\s+watched \(/m.test(printed) || !printed.includes("Live view: scenescout watch"))
       fail(`scenescout status does not describe the session and point at watch:\n${printed}`);
 
+    // The run's end is when somebody wants the report, and the engines are
+    // gone by then: the view has to keep serving what the run found.
     await client.callTool({ name: "scout_close", arguments: { all: true } });
-    const after = (await (await fetch(`${url}api/status`)).json()) as { sessions: unknown[] };
-    if (after.sessions.length !== 0) fail(`a closed session is still on the board: ${JSON.stringify(after)}`);
+    const afterClose = (await (await fetch(`${url}api/report`)).json()) as { markdown?: string };
+    if (!afterClose.markdown?.startsWith("# SceneScout Report"))
+      fail(`the report is gone once the run's sessions closed: ${JSON.stringify(afterClose).slice(0, 200)}`);
+    const emptied = (await (await fetch(`${url}api/status`)).json()) as { sessions: unknown[]; report?: { path: string } };
+    if (emptied.sessions.length !== 0) fail("a closed session is still on the board");
+    if (!emptied.report?.path) fail("the report's file is no longer named once the run has finished");
+
     console.log("✓ scout_attach hands over a working live view address, and status/watch read it back");
+    console.log("✓ the report outlives the run's sessions, with the path it belongs at");
   } finally {
     fixture.close();
   }
