@@ -141,7 +141,8 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
  */
 async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
   console.log("live view: the page keeps up with every session streaming");
-  const names = Array.from({ length: 8 }, (_, i) => `agent-${i}`);
+  let names = Array.from({ length: 8 }, (_, i) => `agent-${i}`);
+  let written = false;
   const at = new Date().toISOString();
   const pushes = new Map<string, (frame: Buffer) => void>();
   let polls = 0;
@@ -151,6 +152,7 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
         pid: process.pid,
         version: "smoke",
         at: new Date().toISOString(),
+        report: { path: "/tmp/demo/.scenescout/report.md", written },
         sessions: names.map((session) => ({
           session,
           role: "clerk",
@@ -254,6 +256,30 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     await page.locator("#focus-name").hover();
     check("...and leaving it goes back to the current objective", (await page.locator("#focus-objective-head").textContent()) === "Current objective");
     await page.getByTestId("live-focus-close").click();
+
+    // The run ends: the browsers are gone, so the page must hand over the report itself.
+    names = [];
+    await until("the finished panel", () => page.getByTestId("live-finished-state").isVisible(), 8000);
+    check("the report opens by itself when the run finishes", await page.getByTestId("live-report-dialog").isVisible());
+    check(
+      "...and says the report is not on disk, naming where it belongs",
+      /NOT saved: \/tmp\/demo\/\.scenescout\/report\.md/.test((await page.getByTestId("live-report-meta").textContent()) ?? ""),
+      (await page.getByTestId("live-report-meta").textContent()) ?? "",
+    );
+    const download = await Promise.all([page.waitForEvent("download", { timeout: 8000 }), page.getByTestId("live-report-save").click()]).then((r) => r[0]);
+    check("a viewer can keep a copy: the browser saves it, nothing is asked of the engine", download.suggestedFilename() === "scenescout-report.md");
+    written = true;
+    await until(
+      "the file line to follow scout_report writing it",
+      () =>
+        page
+          .getByTestId("live-finished-where")
+          .textContent()
+          .then((t) => /^saved at \/tmp\/demo/.test(t ?? "")),
+      8000,
+    );
+    check("...and once the agent has written it, the page says where it is instead", true);
+    await page.getByTestId("live-report-close").click();
 
     await page.getByTestId("live-report-toggle").click();
     const doc = page.getByTestId("live-report-doc");

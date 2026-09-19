@@ -37,7 +37,17 @@ import { reapOrphanBrowsers } from "./engine/reaper.js";
 import { MemoryStore, redactSecrets } from "./engine/memory.js";
 import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
 import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
-import { feedForSession, LIVE_ENV, writeStatusFile, LIVE_TOKEN_FILE, LiveServer, StatusBoard, type LiveProvider, type SessionStatus } from "./engine/live.js";
+import {
+  feedForSession,
+  LIVE_ENV,
+  writeStatusFile,
+  type ReportFile,
+  LIVE_TOKEN_FILE,
+  LiveServer,
+  StatusBoard,
+  type LiveProvider,
+  type SessionStatus,
+} from "./engine/live.js";
 import { computeGaps, formatRouteCoverage, generateReport, type ReportExtras } from "./engine/report.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { formatScan, scanProject } from "./scan.js";
@@ -117,8 +127,43 @@ let liveTokenWarned = false;
 /** Why the live view could not start, when it could not: told to the agent and written to status.json. */
 let liveError: string | null = null;
 
+/**
+ * The last run's report, kept after its sessions close. The engines are gone
+ * by then, so this is the only way the live view can still show what the run
+ * found — which is the moment somebody most wants to read it.
+ */
+let lastRun: { markdown: string; at: string; dir: string } | null = null;
+
+/** Render the report for a session that is about to close, so the live view keeps it. */
+function keepReport(eng: BrowserEngine): void {
+  if (!eng.memory) return;
+  try {
+    const { markdown } = generateReport(eng.memory, eng.oracleLog.all, reportExtras(eng), { write: false });
+    lastRun = { markdown: redactSecrets(markdown), at: new Date().toISOString(), dir: eng.memory.dir };
+  } catch {
+    // Best-effort: a report that cannot be rendered must not fail a close.
+  }
+}
+
+/** Where this run's report belongs, and whether the agent has written it there yet. */
+function reportFile(dir: string | undefined): ReportFile | undefined {
+  if (!dir) return undefined;
+  const file = path.join(dir, "report.md");
+  try {
+    return { path: file, written: fs.existsSync(file) };
+  } catch {
+    return { path: file, written: false };
+  }
+}
+
 const liveProvider: LiveProvider = {
-  snapshot: () => ({ pid: process.pid, version: PKG_VERSION, at: new Date().toISOString(), sessions: board.list() }),
+  snapshot: () => ({
+    pid: process.pid,
+    version: PKG_VERSION,
+    at: new Date().toISOString(),
+    sessions: board.list(),
+    report: reportFile(engines.values().next().value?.memory?.dir ?? lastRun?.dir),
+  }),
   // The engine holds no reasoning — it never sees one — so the feed is what the
   // session DID: the action log, which is the same trail a finding's repro uses.
   activity: (session, limit) => feedForSession(engines.get(session)?.memory?.actionLog ?? [], session, limit, redactSecrets),
@@ -129,7 +174,7 @@ const liveProvider: LiveProvider = {
   // can shift between polls.
   report: () => {
     const eng = (lastWriter && engines.get(lastWriter.session)) ?? engines.values().next().value;
-    if (!eng?.memory) return null;
+    if (!eng?.memory) return lastRun ? { markdown: lastRun.markdown, at: lastRun.at } : null;
     const { markdown } = generateReport(eng.memory, eng.oracleLog.all, reportExtras(eng), { write: false });
     return { markdown: redactSecrets(markdown), at: new Date().toISOString() };
   },
@@ -1216,6 +1261,7 @@ server.registerTool(
         // sessions cost one 8s teardown cap total, not N of them.
         const dirs = new Set<string>();
         for (const e of engines.values()) if (e.memory?.dir) dirs.add(e.memory.dir);
+        for (const e of engines.values()) keepReport(e);
         for (const name of engines.keys()) live?.dropSession(name);
         await Promise.allSettled([...engines.values()].map((e) => e.close()));
         engines.clear();
@@ -1228,6 +1274,7 @@ server.registerTool(
       const name = session ?? activeName;
       const eng = engines.get(name);
       if (!eng) return text(`No live session "${name}".`, name);
+      keepReport(eng);
       live?.dropSession(name);
       await eng.close();
       const saveError = eng.memory?.lastSaveError;
