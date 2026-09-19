@@ -872,8 +872,8 @@ test("VS Code is registered through VS Code's own command, never a fork's", () =
   const snap = { command: "/snap/bin/code", realPath: "/usr/bin/snap" };
   assert.equal(vscodeBinary({ platform: "linux", home: "/home/u", exists: () => false, codeOnPath: snap }), "/snap/bin/code");
   // An account that happens to be called like another editor does not disqualify the VS Code under it.
-  const underHome = { command: "/home/cursor/bin/code", realPath: "/home/cursor/apps/vscode/bin/code" };
-  assert.equal(vscodeBinary({ platform: "linux", home: "/home/cursor", exists: () => false, codeOnPath: underHome }), "/home/cursor/bin/code");
+  const underHome = { command: "/srv/accounts/cursor/bin/code", realPath: "/srv/accounts/cursor/apps/vscode/bin/code" };
+  assert.equal(vscodeBinary({ platform: "linux", home: "/srv/accounts/cursor", exists: () => false, codeOnPath: underHome }), "/srv/accounts/cursor/bin/code");
 
   assert.deepEqual(vscodeAddArgs(LAUNCH), ["--add-mcp", JSON.stringify({ name: "scenescout", command: LAUNCH[0], args: LAUNCH.slice(1) })]);
   const run = scripted([ok("Added MCP servers: scenescout")]);
