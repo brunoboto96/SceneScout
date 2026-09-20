@@ -344,12 +344,21 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     // The run ends: the browsers are gone, so the page must hand over the report itself.
     names = [];
     await until("the finished panel", () => page.getByTestId("live-finished-state").isVisible(), 8000);
-    check("the report opens by itself when the run finishes", await page.getByTestId("live-report-dialog").isVisible());
-    check(
-      "...and says the report is not on disk, naming where it belongs",
-      /NOT saved: \/tmp\/demo\/\.scenescout\/report\.md/.test((await page.getByTestId("live-report-meta").textContent()) ?? ""),
-      (await page.getByTestId("live-report-meta").textContent()) ?? "",
+    // The panel now asks whether the run has a page of its own before falling
+    // back to the report, so the report follows it by a round trip rather than
+    // arriving in the same tick.
+    await until("the report to open itself", () => page.getByTestId("live-report-dialog").isVisible(), 8000);
+    check("the report opens by itself when the run finishes", true);
+    await until(
+      "the report's file line",
+      () =>
+        page
+          .getByTestId("live-report-meta")
+          .textContent()
+          .then((t) => /NOT saved: \/tmp\/demo\/\.scenescout\/report\.md/.test(t ?? "")),
+      8000,
     );
+    check("...and says the report is not on disk, naming where it belongs", true, (await page.getByTestId("live-report-meta").textContent()) ?? "");
     const download = await Promise.all([page.waitForEvent("download", { timeout: 8000 }), page.getByTestId("live-report-save").click()]).then((r) => r[0]);
     check("a viewer can keep a copy: the browser saves it, nothing is asked of the engine", download.suggestedFilename() === "scenescout-report.md");
     written = true;
