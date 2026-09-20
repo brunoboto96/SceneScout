@@ -1,6 +1,6 @@
 {
   "name": "scenescout",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "SceneScout — exploratory UI testing for AI coding agents. An MCP server that gives any agent (Claude Code, Cursor, VS Code Copilot, Codex, Gemini CLI and others) a structured view of a running web app, always-on oracles, a network-level write policy, memory across runs and a gap-checked report.",
   "license": "MIT",
   "author": "brunoboto96",
