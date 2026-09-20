@@ -82,12 +82,23 @@ export const LIVE_PAGE = `<!doctype html>
     font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-height: 108px; overflow-y: auto; overscroll-behavior: contain; }
   .feed .row { display: flex; gap: 6px; white-space: nowrap; }
   /* Consecutive actions of one journey share a tint, so where one goal ends and the next begins is visible in the log. */
-  .feed .group { border-left: 1px solid transparent; padding-left: 5px; margin-left: -6px; border-radius: 3px; }
-  .feed .g0 { background: rgba(96, 165, 250, .13); border-color: rgba(96, 165, 250, .7); }
-  .feed .g1 { background: rgba(52, 211, 153, .13); border-color: rgba(52, 211, 153, .7); }
-  .feed .g2 { background: rgba(251, 191, 36, .13); border-color: rgba(251, 191, 36, .7); }
-  .feed .g3 { background: rgba(244, 114, 182, .13); border-color: rgba(244, 114, 182, .7); }
-  #focus .feed .group:hover { outline: 1px solid rgba(230, 233, 238, .35); }
+  /* One tint per task, so a change of task is a change of colour: the block of
+     actions a task covers is legible at a glance, and hovering it names the task. */
+  .feed .group { border-left: 2px solid transparent; padding-left: 6px; margin-left: -8px; border-radius: 4px; margin-bottom: 2px; }
+  .feed .g0 { background: rgba(96, 165, 250, .22); border-color: rgba(96, 165, 250, .85); }
+  .feed .g1 { background: rgba(52, 211, 153, .22); border-color: rgba(52, 211, 153, .85); }
+  .feed .g2 { background: rgba(251, 191, 36, .24); border-color: rgba(251, 191, 36, .9); }
+  .feed .g3 { background: rgba(244, 114, 182, .22); border-color: rgba(244, 114, 182, .85); }
+  .feed .group:hover { cursor: default; }
+  #focus .feed .group:hover { outline: 1px solid rgba(230, 233, 238, .45); }
+  /* The tints sit on a dark panel in the close-up and on a light one in a card;
+     lift them there so they read as the same pastel either way. */
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) .feed .g0 { background: rgba(37, 99, 235, .14); }
+    :root:not([data-theme="dark"]) .feed .g1 { background: rgba(5, 150, 105, .14); }
+    :root:not([data-theme="dark"]) .feed .g2 { background: rgba(217, 119, 6, .16); }
+    :root:not([data-theme="dark"]) .feed .g3 { background: rgba(219, 39, 119, .13); }
+  }
   .feed .t { color: var(--muted); flex: 0 0 auto; }
   .feed .a { color: var(--text); font-weight: 600; flex: 0 0 auto; }
   .feed .d { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
@@ -116,7 +127,12 @@ export const LIVE_PAGE = `<!doctype html>
   #focus .bar { display: flex; align-items: center; gap: 12px; color: #fff; }
   #focus .bar .line { color: #cbd5e1; padding: 0; flex: 1 1 auto; }
   #focus .bar .line b { color: #fff; }
-  #focus img { flex: 1 1 auto; min-height: 0; width: 100%; object-fit: contain; background: #000; border-radius: 6px; }
+  #focus .stage { flex: 1 1 auto; min-height: 0; position: relative; }
+  #focus img { width: 100%; height: 100%; object-fit: contain; background: #000; border-radius: 6px; display: block; }
+  #focus .none { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; padding: 16px;
+    color: #98a2b3; font-size: 13px; text-align: center; }
+  #focus .stage.empty .none { display: flex; }
+  #focus .stage.empty img { visibility: hidden; }
   #report { display: none; position: fixed; inset: 0; z-index: 6; background: var(--bg); overflow-y: auto; padding: 0 16px 32px; }
   #report.open { display: block; }
   #report .bar { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
@@ -176,7 +192,10 @@ export const LIVE_PAGE = `<!doctype html>
     <span class="line" id="focus-line"></span>
     <button type="button" id="focus-close" data-testid="live-focus-close">Close</button>
   </div>
-  <img id="focus-img" alt="">
+  <div class="stage" id="focus-stage">
+    <img id="focus-img" alt="">
+    <span class="none">No frame available. The session's page may be closed, or not answering.</span>
+  </div>
   <div class="lower">
     <div class="feed" id="focus-feed" data-testid="live-focus-feed"></div>
     <aside class="brief" aria-label="What this session is doing" data-testid="live-focus-brief">
@@ -570,6 +589,7 @@ export const LIVE_PAGE = `<!doctype html>
 
   function openFocus(name) {
     focused = name;
+    document.getElementById('focus-stage').classList.remove('empty');
     document.getElementById('focus-name').textContent = name;
     document.getElementById('focus-img').alt = 'Live view of ' + name;
     document.getElementById('focus-img').src = frames[name] || shotUrl(name);
@@ -698,6 +718,9 @@ export const LIVE_PAGE = `<!doctype html>
     this.textContent = streamAll ? 'Streaming all' : 'Stream all';
     Object.keys(cards).forEach(function (name) { setLive(cards[name], streamAll); });
   });
+  // A session with nothing to show answers 503; say so rather than leaving a broken-image icon.
+  document.getElementById('focus-img').addEventListener('error', function () { document.getElementById('focus-stage').classList.add('empty'); });
+  document.getElementById('focus-img').addEventListener('load', function () { document.getElementById('focus-stage').classList.remove('empty'); });
   document.getElementById('focus-close').addEventListener('click', closeFocus);
   // A re-rendered feed replaces the group under the pointer without a mouseleave; leaving the feed itself still resets.
   document.getElementById('focus-feed').addEventListener('mouseleave', function () { showTask(null); });
