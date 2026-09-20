@@ -406,6 +406,27 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     check("crawl summarizes each route", crawlOut.includes("CRAWL of 2") && /page2\.html — 200/.test(crawlOut), crawlOut);
     check("crawl flags problem routes", crawlOut.includes("PROBLEM ROUTES") && crawlOut.includes("/broken.html"), crawlOut);
 
+    console.log("the objective a watcher sees");
+    // The engine keeps what the agent said the current batch is for; the MCP
+    // layer is what requires it before a tool acts (checked in mcp-check).
+    check("a fresh session has nothing to show", !engine.hasObjective && engine.liveDescription.objective === undefined);
+    engine.setObjective("  Walk the two static\n  pages and back  ");
+    check(
+      "stating one collapses it to a line and shows it",
+      engine.liveDescription.objective === "Walk the two static pages and back",
+      JSON.stringify(engine.liveDescription),
+    );
+    const since = engine.liveDescription.objectiveSince;
+    engine.setObjective("Walk the two static pages and back");
+    check("...restating the same one does not restart its clock", engine.liveDescription.objectiveSince === since);
+    await engine.startJourney("Measure the whole task");
+    check("a journey outranks it while it runs", engine.liveDescription.objective === "Measure the whole task");
+    engine.endJourney(true);
+    check("...and the batch objective is back when the journey ends", engine.liveDescription.objective === "Walk the two static pages and back");
+    engine.setObjective("");
+    check("an empty one clears it", !engine.hasObjective && engine.liveDescription.objective === undefined);
+    engine.setObjective("Exercise the rest of the read-only surface");
+
     console.log("run_plan (batched actions, semantic targets)");
     const plan1 = await engine.runPlan([
       { action: "navigate", target: "/" },

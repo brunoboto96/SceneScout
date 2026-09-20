@@ -75,6 +75,24 @@ async function liveViewCheck(client: Client): Promise<string> {
     if (!report.markdown?.startsWith("# SceneScout Report")) fail(`the live view does not render the run's report: ${JSON.stringify(report).slice(0, 200)}`);
     if (fs.existsSync(path.join(projectDir, ".scenescout", "report.md"))) fail("reading the report from the live view wrote it to disk");
 
+    // A tool that acts is refused until the session has said what it is for,
+    // because the live view can only show what the agent states.
+    const refused = textOf(await client.callTool({ name: "scout_navigate", arguments: { target: "/page2.html", session: "watched" } }));
+    if (!/needs an objective/.test(refused)) fail(`scout_navigate acted with no objective standing:\n${refused}`);
+    const stated = textOf(
+      await client.callTool({ name: "scout_navigate", arguments: { target: "/page2.html", session: "watched", objective: "Walk the two static pages" } }),
+    );
+    if (/needs an objective/.test(stated)) fail(`scout_navigate refused an objective it was given:\n${stated}`);
+    const kept = textOf(await client.callTool({ name: "scout_navigate", arguments: { target: "/", session: "watched" } }));
+    if (/needs an objective/.test(kept)) fail("the objective did not stay set for the rest of the batch");
+    const showing = (await (await fetch(`${url}api/status`)).json()) as { sessions: Array<{ objective?: string }> };
+    if (showing.sessions[0]?.objective !== "Walk the two static pages")
+      fail(`the live view does not show the objective: ${JSON.stringify(showing.sessions[0])}`);
+    // Reading the page needs none: orienting is what comes before saying.
+    const snapped = textOf(await client.callTool({ name: "scout_snapshot", arguments: { session: "watched" } }));
+    if (/needs an objective/.test(snapped)) fail("scout_snapshot should not need an objective");
+    console.log("✓ a tool that acts needs an objective, and it reaches the live view");
+
     const facts = (await (await fetch(`${url}api/status`)).json()) as { report?: { path: string; written: boolean } };
     if (facts.report?.path !== path.join(projectDir, ".scenescout", "report.md"))
       fail(`the live view does not name the report's file: ${JSON.stringify(facts.report)}`);
