@@ -11,7 +11,16 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { allowsWrite, AUTH_FLOW_RE, destructiveRefusal, isAuthExempt, isDestructive, isDestructiveWire, WRITE_MODES } from "../src/engine/policy.ts";
+import {
+  allowsWrite,
+  AUTH_FLOW_RE,
+  destructiveRefusal,
+  isAuthExempt,
+  isDestructive,
+  isDestructiveWire,
+  LABEL_HEAD_WORDS,
+  WRITE_MODES,
+} from "../src/engine/policy.ts";
 import {
   deriveCollection,
   extractCreatedIds,
@@ -145,6 +154,55 @@ test("a non-destructive 'reset' is not refused", () => {
   assert.equal(isDestructive("Reset workspace"), true);
   assert.equal(isDestructive("Factory reset"), true);
   assert.equal(isDestructive("Reset all data"), true);
+});
+
+test("a description inside a control is not its command", () => {
+  // A role card on a sign-in page is one button whose accessible name is the
+  // role's name plus a sentence about it. "sign-off" in that sentence refused
+  // the click in read-only mode, so the manager role was unreachable and a
+  // whole lane came back partial. The verb the click sends is at the head of
+  // a label; a paragraph after it is content.
+  assert.equal(isDestructive("Manager Approves or rejects orders that need sign-off."), false);
+  assert.equal(isDestructive("Operator Runs the nightly jobs and may archive old reports."), false, "a Latin verb deep in the sentence");
+  assert.equal(isDestructive("Reviewer\nApproves or rejects\nrequests that can archive old ones."), false, "newlines between the card's spans");
+  // ...while a long label that LEADS with the verb is still the command.
+  assert.equal(isDestructive("Delete this project and everything in it, permanently"), true);
+  assert.equal(isDestructive("Remove all 14 selected users from the workspace now"), true);
+  // The boundary, built from the constant so the test moves with it. The
+  // trailing sentence is what makes the label prose.
+  const filler = (n: number) => Array.from({ length: n }, (_, i) => `w${i}`).join(" ");
+  assert.equal(isDestructive(`${filler(LABEL_HEAD_WORDS - 1)} delete it. Then go home.`), true, "the verb as the head's last word");
+  assert.equal(isDestructive(`${filler(LABEL_HEAD_WORDS)} delete it. Then go home.`), false, "the verb just past the head");
+  // The pattern sees the whole label: an exemption that looks past the
+  // boundary still applies, and a two-word pattern straddling it still matches.
+  assert.equal(isDestructive("Use this control to quickly reset filters. Handy."), false, "'filters' is past the head, 'reset' is not");
+  assert.equal(isDestructive("Yes I want to really cancel subscription. Now."), true, "'cancel' is in the head");
+  // Only prose is judged by its head. A long label with no sentence in it is
+  // a command however it is worded, so a confirm button stays refused.
+  assert.equal(isDestructive("Yes, I am sure I want to delete this"), true);
+  assert.equal(isDestructive("I understand this cannot be undone, delete everything"), true);
+  assert.equal(isDestructive("Danger zone This cannot be undone. Permanently delete the repository."), false, "a heading plus a sentence is a description");
+});
+
+test("'sign off' is destructive as a verb, not as the noun approval apps use", () => {
+  for (const label of [
+    "Sign off",
+    "Sign-off",
+    "Sign off now",
+    "(Sign off)",
+    "\n  Sign off",
+    "Confirm sign off",
+    "Save and sign off now",
+    "Approve and sign off",
+  ]) {
+    assert.equal(isDestructive(label), true, `expected destructive: ${label}`);
+  }
+  // The noun is told by the word before it, the way the reset rule is told by
+  // the word after. A label that leads with the noun ("Sign-off required")
+  // still matches, and a status chip worded that way pays for it.
+  for (const label of ["Needs sign-off", "Awaiting sign off", "Send for sign-off", "2 orders pending sign-off", "Requires sign-off from a manager"]) {
+    assert.equal(isDestructive(label), false, `expected safe: ${label}`);
+  }
 });
 
 test("isDestructive ignores empty and absent labels", () => {
