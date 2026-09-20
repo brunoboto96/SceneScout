@@ -16,7 +16,17 @@ import path from "node:path";
 import test, { afterEach } from "node:test";
 import { isNonPageRoute, normalizePath } from "../src/engine/fingerprint.ts";
 import { MemoryStore } from "../src/engine/memory.ts";
-import { classifyFilledStates, computeGaps, escapeTableCell, formatRouteCoverage } from "../src/engine/report.ts";
+import {
+  classifyFilledStates,
+  computeGaps,
+  escapeTableCell,
+  formatRouteCoverage,
+  generateReport,
+  replayDocument,
+  reportEvidence,
+} from "../src/engine/report.ts";
+import { buildReplayHtml, escapeHtml, evidenceFor, framePath, RECORD_MAX_FRAMES, renderMarkdown, resolveFrame, taskBlocks } from "../src/engine/replay.ts";
+import type { ActivityLine } from "../src/engine/live.ts";
 
 let dirs: string[] = [];
 /**
@@ -379,4 +389,258 @@ test("ledger: in observe mode an unsubmitted form is explained, not dropped", ()
   assert.match(observed, /expected in observe mode.*untested.*read-only mode/);
   const normal = computeGaps(store, { routesVisited: 1, routesTotal: 1, designAudits: 1, mode: "read-only" }).find((g) => g.includes("NEVER submitted"));
   assert.ok(normal && !/observe/.test(normal), "other modes get the plain wording");
+});
+
+// ---- the run as one page -------------------------------------------------
+//
+// The report dies with the process that rendered it: a viewer who refreshes
+// the live board after the run ends has nothing. buildReplayHtml is the same
+// run as one file — readable offline, with the trail that produced it.
+
+const step = (over: Partial<ActivityLine> = {}): ActivityLine => ({
+  at: "2026-09-20T14:44:23.740Z",
+  action: "click",
+  target: 'button "Create order"',
+  result: "ok",
+  url: "http://app.test/orders.html",
+  ...over,
+});
+
+test("replay: a session's steps are grouped into the blocks its tasks made", () => {
+  const blocks = taskBlocks([
+    step({ task: "Filing an order" }),
+    step({ task: "Filing an order", action: "type" }),
+    step({ task: "Checking the register", action: "navigate" }),
+    step({ task: "Filing an order", action: "click" }),
+  ]);
+  assert.deepEqual(
+    blocks.map((b) => [b.task, b.steps.length]),
+    [
+      ["Filing an order", 2],
+      ["Checking the register", 1],
+      // A task that comes back after another starts a new block: the document
+      // shows the order things happened in, not a per-task total.
+      ["Filing an order", 1],
+    ],
+  );
+  assert.deepEqual(
+    taskBlocks([step({ task: undefined })]).map((b) => b.task),
+    [null],
+  );
+  assert.deepEqual(taskBlocks([]), []);
+});
+
+test("replay: everything the app under test supplies is escaped", () => {
+  const html = buildReplayHtml({
+    markdown: "## <img src=x onerror=alert(1)>\n\n- **Id:** `<b>no</b>`\n",
+    project: "/p/<script>",
+    at: "2026-09-20T14:44:23.740Z",
+    version: "9.9.9",
+    sessions: [{ session: "<svg onload=1>", role: "clerk", objective: "</style><b>", steps: [step({ target: '<iframe src="evil">' })] }],
+  });
+  assert.ok(!/<script>/.test(html), "no markup from the app under test survives into the document");
+  assert.ok(!/<iframe/.test(html));
+  // The payload is still READ in full — a finding whose title is a payload has
+  // to show it — but as text: the angle brackets never reach the parser.
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.ok(!/<img src=x/.test(html));
+  assert.match(html, /&lt;svg onload=1&gt;/);
+  assert.equal(escapeHtml(`&<>"'`), "&amp;&lt;&gt;&quot;&#39;");
+});
+
+test("replay: a finding's frames are the recorded steps that ran before it was filed", () => {
+  const steps = [
+    step({ at: "2026-09-20T14:00:00.000Z", frame: "recordings/clerk/0001-click.jpg" }),
+    step({ at: "2026-09-20T14:00:01.000Z", frame: "recordings/clerk/0002-type.jpg" }),
+    step({ at: "2026-09-20T14:00:02.000Z" }),
+    step({ at: "2026-09-20T14:00:03.000Z", frame: "recordings/clerk/0003-click.jpg" }),
+    // After the finding was filed: not evidence for it.
+    step({ at: "2026-09-20T14:00:09.000Z", frame: "recordings/clerk/0004-click.jpg" }),
+  ];
+  const frames = evidenceFor(steps, "2026-09-20T14:00:05.000Z", 2);
+  assert.deepEqual(
+    frames.map((f) => f.frame),
+    ["recordings/clerk/0002-type.jpg", "recordings/clerk/0003-click.jpg"],
+    "the last two recorded steps before it, and a step with no frame is not one",
+  );
+  assert.deepEqual(
+    evidenceFor(
+      steps.map((s) => ({ ...s, frame: undefined })),
+      "2026-09-20T14:00:05.000Z",
+    ),
+    [],
+    "an unrecorded run has no evidence",
+  );
+});
+
+test("replay: frames hang under the finding they belong to, at the prefix the reader will fetch them from", () => {
+  const evidence = [
+    { id: "e3aad70ee8", frames: [{ at: "2026-09-20T14:00:01.000Z", action: "click", detail: "Create order", frame: "recordings/clerk/0002.jpg" }] },
+  ];
+  const md = "### A finding\n\n- **Id:** `e3aad70ee8` · **Category:** http-error\n- **Where:** `/orders.html`\n";
+  const file = renderMarkdown(md, evidence);
+  assert.match(file, /<details class="evidence">/);
+  assert.match(file, /src="recordings\/clerk\/0002\.jpg"/, "beside the file, the stored path is the path");
+  const served = renderMarkdown(md, evidence, "record/");
+  assert.match(served, /src="record\/recordings\/clerk\/0002\.jpg"/, "over HTTP, the live view's own route");
+  // The accordion follows the finding's own list, not the next one's.
+  assert.ok(served.indexOf("e3aad70ee8") < served.indexOf('<details class="evidence">'));
+  // A finding with no frames reads exactly as it did before recording existed.
+  assert.ok(!renderMarkdown(md, [{ id: "e3aad70ee8", frames: [] }]).includes('class="evidence"'));
+  assert.ok(!renderMarkdown(md).includes('class="evidence"'));
+});
+
+test("replay: a run with no frames says so rather than showing empty boxes", () => {
+  const dry = buildReplayHtml({
+    markdown: "## Findings\n",
+    project: "/p",
+    at: "2026-09-20T14:44:23.740Z",
+    version: "9.9.9",
+    sessions: [{ session: "clerk", role: "clerk", steps: [step()] }],
+  });
+  assert.match(dry, /attach with record:true/);
+  assert.ok(!dry.includes("<img"), "nothing to show, so nothing that could break");
+
+  const wet = buildReplayHtml({
+    markdown: "## Findings\n",
+    project: "/p",
+    at: "2026-09-20T14:44:23.740Z",
+    version: "9.9.9",
+    sessions: [{ session: "clerk", role: "clerk", steps: [step({ frame: "recordings/clerk/0001.jpg" })] }],
+  });
+  assert.match(wet, /click a frame to open it full size/);
+  assert.match(wet, /1 steps · 1 task · 1 frames/);
+  // One file: it has to open from a filesystem with nothing else around it.
+  assert.ok(!/<link |<script src=/.test(wet), "no external asset");
+});
+
+test("replay: a frame's path is a plain file name, whoever named the session", () => {
+  assert.equal(framePath("clerk", 7, "click"), "recordings/clerk/0007-click.jpg");
+  // The live view fetches frames by this path, so it is a URL as much as a
+  // file: always forward slashes, never a Windows separator.
+  assert.ok(!framePath("clerk", 1, "click").includes("\\"));
+  // The session name comes from the agent and the action from the tool.
+  assert.equal(framePath("../../etc", 1, "click"), "recordings/etc/0001-click.jpg");
+  assert.equal(framePath("a/b", 1, "run_plan step 2"), "recordings/a-b/0001-run_plan-step-2.jpg");
+  assert.equal(framePath("...", 1, "..."), "recordings/session/0001-step.jpg");
+  assert.equal(framePath("x".repeat(200), 12345, "click").split("/")[1].length, 60);
+  assert.equal(RECORD_MAX_FRAMES, 600);
+});
+
+test("replay: the header says when, on a clock it names, and says nothing about a version it was not given", () => {
+  const base = { markdown: "## Findings\n", project: "/p", sessions: [], at: "2026-09-20T15:19:34.041Z" };
+  const named = buildReplayHtml({ ...base, version: "3.1.0" });
+  assert.match(named, /written 2026-09-20 15:19 UTC · v3\.1\.0/);
+  // The live view renders the same document without one; "· v" alone is noise.
+  const bare = buildReplayHtml({ ...base, version: "" });
+  assert.match(bare, /written 2026-09-20 15:19 UTC<\/span>/);
+  assert.ok(!bare.includes("· v<"));
+});
+
+test("the report's summary names the one-page version only when it is really there", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-report-"));
+  const store = new MemoryStore(dir);
+  store.addFinding({ severity: "low", category: "ux-polish", title: "A label reads oddly", detail: "…", url: "http://app.test/x", state: "/x#abc" });
+
+  const ok = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 1 });
+  assert.match(ok.summary, /The same run as one page/);
+  assert.ok(fs.existsSync(path.join(store.dir, "report.html")), "…and it is on disk");
+
+  // A directory where report.html cannot be written: the Markdown is the
+  // record and still lands, and the summary says so instead of naming a file
+  // the reader would go looking for.
+  fs.rmSync(path.join(store.dir, "report.html"));
+  fs.mkdirSync(path.join(store.dir, "report.html"));
+  const blocked = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 1 });
+  assert.ok(!/The same run as one page/.test(blocked.summary), blocked.summary.slice(0, 200));
+  assert.match(blocked.summary, /could NOT be written/);
+  assert.match(blocked.summary, /^Report written to /);
+  assert.ok(fs.readFileSync(path.join(store.dir, "report.md"), "utf8").length > 0, "the report of record is unaffected");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("replay: a finding's evidence comes from the session that filed it, not from whoever acted last", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-ev-"));
+  const store = new MemoryStore(dir);
+  // Two browsers working at once: their steps interleave in one log.
+  const at = (n: number): string => new Date(Date.parse("2026-09-20T14:00:00.000Z") + n * 1000).toISOString();
+  store.logAction({ at: at(1), session: "clerk", action: "click", target: "Save", url: "http://app.test/orders", frame: "recordings/clerk/0001-click.jpg" });
+  store.logAction({ at: at(2), session: "admin", action: "click", target: "Approve", url: "http://app.test/admin", frame: "recordings/admin/0001-click.jpg" });
+  store.logAction({ at: at(3), session: "clerk", action: "navigate", target: "", url: "http://app.test/orders", frame: "recordings/clerk/0002-navigate.jpg" });
+  store.logAction({ at: at(4), session: "admin", action: "navigate", target: "", url: "http://app.test/admin", frame: "recordings/admin/0002-navigate.jpg" });
+  const [finding] = store.addFinding({
+    severity: "high",
+    category: "http-error",
+    title: "The archived filter answers 500",
+    detail: "…",
+    url: "http://app.test/orders",
+    state: "/orders#abc",
+    session: "clerk",
+  });
+
+  const mine = reportEvidence(store).find((e) => e.id === finding.id);
+  assert.ok(mine, "the finding has evidence");
+  assert.deepEqual(
+    mine.frames.map((f) => f.frame),
+    ["recordings/clerk/0001-click.jpg", "recordings/clerk/0002-navigate.jpg"],
+    "the admin lane's frames are not this finding's evidence, however close in time",
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("replay: a finding from before sessions were recorded still gets the frames around it", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-ev-old-"));
+  const store = new MemoryStore(dir);
+  store.logAction({
+    at: "2026-09-20T14:00:01.000Z",
+    session: "clerk",
+    action: "click",
+    target: "Save",
+    url: "http://app.test/x",
+    frame: "recordings/clerk/0001-click.jpg",
+  });
+  const [old] = store.addFinding({
+    severity: "low",
+    category: "ux-polish",
+    title: "A label reads oddly",
+    detail: "…",
+    url: "http://app.test/x",
+    state: "/x#abc",
+  });
+  assert.equal(old.session, undefined, "a finding filed before this change names no session");
+  // Better a frame from the wrong lane than a finding that loses its evidence
+  // when memory from an older run is read back.
+  const frames = reportEvidence(store).find((e) => e.id === old.id)?.frames ?? [];
+  assert.deepEqual(
+    frames.map((f) => f.frame),
+    ["recordings/clerk/0001-click.jpg"],
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("replay-redaction: a token in a step's URL never reaches the document that gets handed on", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-redact-"));
+  const store = new MemoryStore(dir);
+  const secret = "http://app.test/reset?access_token=sk-live-abcdefghijklmnopqrstuvwxyz0123456789";
+  store.logAction({ at: "2026-09-20T14:00:01.000Z", session: "clerk", action: "navigate", target: "", url: secret });
+  // The log is redacted as it is written, so the trail is clean before any
+  // document is built from it. This pins that end to end: the page is the one
+  // artifact that leaves the machine, and nothing downstream filters again.
+  assert.ok(!JSON.stringify(store.actionLog).includes("sk-live-abcdefghijklmnopqrstuvwxyz0123456789"), "the log itself");
+  const html = replayDocument(store, "## Findings\n");
+  assert.ok(!html.includes("sk-live-abcdefghijklmnopqrstuvwxyz0123456789"), "and the document built from it");
+  assert.match(html, /app\.test\/reset/, "…while still saying which page it was");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("replay: a frame request can only name a file inside the run's own recordings", () => {
+  const root = path.join(path.sep, "p", ".scenescout", "recordings");
+  assert.equal(resolveFrame(root, "recordings/clerk/0001-click.jpg"), path.join(root, "clerk", "0001-click.jpg"));
+  assert.equal(resolveFrame(root, "clerk/0001-click.jpg"), path.join(root, "clerk", "0001-click.jpg"));
+  // A viewer types the address, so every one of these arrives eventually.
+  for (const asked of ["../../etc/passwd", "recordings/../../../etc/passwd", path.join(path.sep, "etc", "passwd"), "", "..", "recordings/", "a\0b"]) {
+    assert.equal(resolveFrame(root, asked), null, JSON.stringify(asked));
+  }
+  // A sibling directory whose name merely starts the same way is not inside it.
+  assert.equal(resolveFrame(path.join(path.sep, "p", "rec"), "../recordings-evil/x.jpg"), null);
 });

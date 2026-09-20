@@ -187,25 +187,64 @@ The agent scans the project (if there is one), attaches read-only, explores, and
 
 When a session attaches, the engine starts a small live view and hands the agent its address on a `Live view:` line, which the agent passes on to you. From a terminal, `scenescout watch` opens the same page. There is one card per session:
 
-<p align="center"><img src="examples/screenshots/live-view.png" alt="The live view during a run of six parallel agents against the demo app: one card per session, each with its role, the tool it is running and for how long, the page it is on, a thumbnail, and a feed of the actions it just took" width="880" /></p>
+<p align="center"><img src="examples/screenshots/live-view.png" alt="The live view during a run of three parallel agents against the demo app: one card per session, each with its role and objective, the task it is on, the tool it is running, the page it is on, a live thumbnail, and a feed of the actions it just took, tinted one colour per task" width="880" /></p>
 
 - **What it is doing:** the tool it is running and for how long, the page it is on, and a thumbnail of that page. This works for headless runs too, which have no window to look at.
 - **What it just did:** a rolling feed of its actions, each with its target and how it turned out, with failures in red. It is the same trail a finding's repro trace uses. The engine never sees the agent's reasoning, so this is what the session *did*, not what it thought.
 - **Stuck, not slow:** a call still running past its own tool's watchdog budget turns the card red, so a wedged session is visible without asking. A crawl legitimately runs for minutes; it is judged against the crawl's budget, not a click's.
 - **Live stream:** switch it on for one card, or for all of them. Click a thumbnail for a close-up.
 - **The report, as it stands:** the Report button in the top bar shows the same document `scout_report` writes at the end, rendered from the run's current state, so findings can be read while the agents are still working.
-- **What it is for:** the close-up puts the feed beside the session's brief: the task the agent gave it when it attached (`scout_attach {task}`), and the goal of the journey it is on right now (`scout_journey`). Actions of one journey share a tint in the feed; point at a group and the brief shows the goal those actions served.
+- **What it is for:** the close-up puts the feed beside the session's brief — the objective it was given when it attached (`scout_attach {objective}`), and underneath it the task it is on right now (`scout_task`), which the engine requires before any tool will act. Each task tints its own block of actions, so a change of task is a change of colour; point at a block and the brief names the task those actions served.
+- **Scrub it back:** under the page is a tick per action, coloured by task. Click one to see the frame from that moment, and `Back to live` to return. On a run that was not recorded the ticks still read the trail; they just have no picture behind them.
 
-<p align="center"><img src="examples/screenshots/live-view-closeup.png" alt="A close-up of one session: its page streaming live, the feed of its recent actions grouped by journey, and beside it the task and current objective" width="880" /></p>
+<p align="center"><img src="examples/screenshots/live-view-closeup.png" alt="A close-up of one session: a frame from a step picked out of the timeline, the timeline itself as a tick per action coloured by task, the feed of the session's actions in the same colours, and beside it the objective and the task it is on" width="880" /></p>
 
-<p align="center"><img src="examples/screenshots/live-view-report.png" alt="The report opened from the live view's top bar while the run is still going: summary table, gap ledger and the findings filed so far" width="880" /></p>
+<p align="center"><img src="examples/screenshots/live-view-report.png" alt="The report opened from the live view's top bar while the run is still going: summary table, gap ledger, and the findings filed so far, each with an accordion of the screenshots taken around it" width="880" /></p>
 
-The view is served on `127.0.0.1` only, behind a token that changes every time the engine starts. It answers `GET` and nothing else, so a viewer can watch a run but not act in it, and no frame is ever written to disk ([ADR 7](docs/adr/0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md)). A stream runs only while someone is watching it. `SCENESCOUT_LIVE=off` keeps the port closed.
+The view is served on `127.0.0.1` only, behind a token that changes every time the engine starts. It answers `GET` and nothing else, so a viewer can watch a run but not act in it, and no frame it shows is written to disk ([ADR 7](docs/adr/0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md)) unless the run was recorded, which is asked for and off by default ([ADR 8](docs/adr/0008-a-recorded-run-is-evidence-and-must-be-asked-for.md)). A stream runs only while someone is watching it. `SCENESCOUT_LIVE=off` keeps the port closed.
 
-**Try it with parallel agents.** The demo app has three roles and several separate areas, so a run can be split between agents. Start it with `npm run demo:serve`, then ask your agent to explore it with several agents in parallel, one role and one area each. The pictures above come from a run of six. Two things keep a parallel run efficient:
+**Try it with parallel agents.** The demo app has three roles and several separate areas, so a run can be split between agents. Start it with `npm run demo:serve`, then ask your agent to explore it with several agents in parallel, one role and one area each. The pictures above come from a run of three. Two things keep a parallel run efficient:
 
 - **Each agent opens its own session when it starts and closes it when it is done.** An agent waiting for its turn then holds no browser. Opening every session up front leaves browsers idling while the machine runs out of memory for the agents that are working.
 - **Run about as many agents at once as your machine has cores, less two.** Each one drives a real browser.
+
+---
+
+## 🎬 Recording a run, and reading it back
+
+A report says what happened. For QA work that is not always enough — the point
+is often to *show* what was checked, not to assert it. Ask for a recorded run
+and the engine keeps a frame of the page after every action:
+
+```
+Use SceneScout to test http://localhost:3000, record the run
+```
+
+or, on the tool directly, `scout_attach {record: true}`.
+
+Then `scout_report` writes two files side by side in `.scenescout/`:
+`report.md` as always, and `report.html` — the whole run as one self-contained
+page. It opens from the file system with nothing running, needs no network, and
+holds:
+
+- **The report**, rendered from the same Markdown.
+- **The screenshots around each finding**, in an accordion under it, from the
+  session that filed it.
+- **Every session's trail**, in the blocks its tasks made, each step with the
+  page as it was at that moment.
+
+<p align="center"><img src="examples/screenshots/run-page.png" alt="The saved copy of a run, opened from the file system with nothing running: a finding with its evidence accordion open, showing the four screenshots taken around it with the action and time under each" width="880" /></p>
+
+The live view serves the same document at `run` while the engine is still up,
+and sends you there when the run ends — so the address survives a refresh
+instead of a panel over a dead board.
+
+**What it costs.** Frames are pictures of the app under test, inside the tested
+project's folder, and the secret redaction that protects everything else the
+engine writes cannot read a picture. That is why it is off unless asked for,
+capped per session, and written only under `.scenescout/`, which ignores itself
+so `git add -A` in the tested project cannot pick the frames up. The reasoning is in
+[ADR 8](docs/adr/0008-a-recorded-run-is-evidence-and-must-be-asked-for.md).
 
 ---
 
@@ -242,7 +281,7 @@ Snapshots are cheap: re-snapshotting a route returns only *what changed*, with s
 | **Look** | `scout_snapshot` `scout_hover` `scout_screenshot` | Read the structured scene (diffed); reveal tooltips/hover cards; capture pixels only when needed |
 | **Act** | `scout_click` `scout_type` `scout_select` `scout_upload` `scout_press` `scout_scroll` `scout_navigate` `scout_back` `scout_run_plan` | Drive the UI like a user; `scout_run_plan` batches a whole mechanical sequence into one call |
 | **Assess** | `scout_design_audit` `scout_journey` | Score a page's craft/a11y/consistency; measure how hard a task is to complete |
-| **Record** | `scout_note` `scout_finding` `scout_resolve` `scout_report` | Curate durable notes; file deduped findings; mark fixes; generate the report |
+| **Record** | `scout_note` `scout_finding` `scout_resolve` `scout_report` | Curate durable notes; file deduped findings; mark fixes; write the report, and on a recorded run the whole run as one page |
 | **Close** | `scout_close` | Tear down one session or all |
 
 A few that punch above their weight:
@@ -289,6 +328,8 @@ A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app
 - 💯 **Page scores** (0–100: a11y · craft · consistency · task-clarity), ranked worst-first, with stale scores from old runs marked as such.
 - 👥 **A role capability matrix** — what each role could and couldn't reach.
 - 🧾 **A gap ledger** — everything *not* done, so the report is honest about its own coverage.
+
+`.scenescout/report.html` — the same report as one self-contained page, with every session's trail beside it, and on a [recorded run](#-recording-a-run-and-reading-it-back) the screenshots under each finding.
 
 👀 Watch a run live: `node dist/cli.js status <project-path>`.
 
@@ -514,8 +555,9 @@ src/
     design.ts       the design audit + page scoring
     memory.ts       cross-run storage + finding dedup
     report.ts       the gap ledger + report generation
+    replay.ts       the run as one page: steps, tasks, frames under each finding
     …               collector · dispatch · fixtures · authloss · reaper
-scripts/            the 12 test suites (smoke/ holds the real-browser ones)
+scripts/            the 14 test suites (smoke/ holds the real-browser ones)
 test-app/           fixtures for the real-browser smoke tests
 skills/scenescout/   the testing method (SKILL.md): a skill in Claude Code, served by the server everywhere else
 docs/adr/           why it's built this way

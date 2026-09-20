@@ -41,6 +41,7 @@ import {
   feedForSession,
   LIVE_ENV,
   writeStatusFile,
+  type FindingFrames as FindingEvidence,
   type ReportFile,
   LIVE_TOKEN_FILE,
   LiveServer,
@@ -48,7 +49,8 @@ import {
   type LiveProvider,
   type SessionStatus,
 } from "./engine/live.js";
-import { computeGaps, formatRouteCoverage, generateReport, type ReportExtras } from "./engine/report.js";
+import { computeGaps, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
+import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { formatScan, scanProject } from "./scan.js";
@@ -133,16 +135,29 @@ let liveError: string | null = null;
  * by then, so this is the only way the live view can still show what the run
  * found — which is the moment somebody most wants to read it.
  */
-let lastRun: { markdown: string; at: string; dir: string } | null = null;
+let lastRun: { markdown: string; at: string; dir: string; evidence: FindingEvidence[]; replay: string } | null = null;
 
 /** Render the report for a session that is about to close, so the live view keeps it. */
 function keepReport(eng: BrowserEngine): void {
   if (!eng.memory) return;
+  // The markdown is the record and is kept first. The frames and the one-page
+  // version are extras, and building them in the same attempt meant a failure
+  // in either threw the report away with them — leaving a finished run with
+  // findings in it telling the viewer there was nothing to report.
   try {
     const { markdown } = generateReport(eng.memory, eng.oracleLog.all, reportExtras(eng), { write: false });
-    lastRun = { markdown: redactSecrets(markdown), at: new Date().toISOString(), dir: eng.memory.dir };
-  } catch {
-    // Best-effort: a report that cannot be rendered must not fail a close.
+    lastRun = { markdown: redactSecrets(markdown), at: new Date().toISOString(), dir: eng.memory.dir, evidence: [], replay: "" };
+  } catch (err) {
+    console.error(`[scenescout] the report for ${eng.sessionKey} could not be kept: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  try {
+    lastRun.evidence = reportEvidence(eng.memory);
+    lastRun.replay = replayDocument(eng.memory, lastRun.markdown, PKG_VERSION);
+  } catch (err) {
+    console.error(
+      `[scenescout] the one-page version of this run could not be built: ${err instanceof Error ? err.message : String(err)}; the report itself is unaffected`,
+    );
   }
 }
 
@@ -175,9 +190,53 @@ const liveProvider: LiveProvider = {
   // can shift between polls.
   report: () => {
     const eng = (lastWriter && engines.get(lastWriter.session)) ?? engines.values().next().value;
-    if (!eng?.memory) return lastRun ? { markdown: lastRun.markdown, at: lastRun.at } : null;
+    if (!eng?.memory) return lastRun ? { markdown: lastRun.markdown, at: lastRun.at, evidence: lastRun.evidence } : null;
     const { markdown } = generateReport(eng.memory, eng.oracleLog.all, reportExtras(eng), { write: false });
-    return { markdown: redactSecrets(markdown), at: new Date().toISOString() };
+    return { markdown: redactSecrets(markdown), at: new Date().toISOString(), evidence: reportEvidence(eng.memory) };
+  },
+  /**
+   * The whole run as one page, served at its own address. The live view sends
+   * a finished run here: the address then IS the report, so refreshing works
+   * and there is nothing to lose by closing a panel.
+   */
+  replay: () => {
+    const eng = (lastWriter && engines.get(lastWriter.session)) ?? engines.values().next().value;
+    if (!eng?.memory) return lastRun?.replay || null;
+    try {
+      const { markdown } = generateReport(eng.memory, eng.oracleLog.all, reportExtras(eng), { write: false });
+      return replayDocument(eng.memory, redactSecrets(markdown), PKG_VERSION);
+    } catch (err) {
+      // This address is one people refresh and bookmark, so a throw here would
+      // hand them a blank page. Say so, and fall back to the last rendering.
+      console.error(`[scenescout] the run's page could not be rendered: ${err instanceof Error ? err.message : String(err)}`);
+      return lastRun?.replay || null;
+    }
+  },
+  /**
+   * A recorded frame, read from the run's own recordings directory. The path
+   * comes from a viewer, so it is resolved and then required to still be
+   * inside that directory: nothing else in the project is reachable this way.
+   */
+  frame: async (relPath) => {
+    // Sessions may hold different project directories, so the frame belongs to
+    // the session its own path names — not to whichever engine happens to be
+    // first. Falling back keeps a finished run's frames reachable.
+    const named = relPath.replace(/^recordings[\\/]/, "").split("/")[0];
+    const dir = engines.get(named)?.memory?.dir ?? engines.values().next().value?.memory?.dir ?? lastRun?.dir;
+    if (!dir) return null;
+    const file = resolveFrame(path.join(dir, "recordings"), relPath);
+    if (!file) return null;
+    try {
+      return await fs.promises.readFile(file);
+    } catch (err) {
+      // A viewer can ask for anything, so a missing file is ordinary. A frame
+      // that exists and cannot be read is not, and would otherwise present as
+      // "that frame does not exist".
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`[scenescout] a recorded frame could not be read (${file}): ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return null;
+    }
   },
   // Both go around the session queue on purpose: a viewer must never wait
   // behind the agent's calls, and a session that is stuck is the one most
@@ -198,6 +257,7 @@ function reportExtras(eng: BrowserEngine): ReportExtras {
     unvisitedRoutes: unvisited,
     mode: eng.mode,
     policyAttributed: eng.oracleLog.policyAttributed,
+    version: PKG_VERSION,
   };
 }
 
@@ -522,6 +582,13 @@ server.registerTool(
             "Shown to whoever is watching the run; worth setting whenever more than one session is live.",
         ),
       task: z.string().max(300).optional().describe("Old name for `objective` (2.0). Prefer `objective`."),
+      record: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Keep a frame of the page after every action, under .scenescout/recordings/, and show it beside that step in report.html. " +
+            "Off by default: a recording is pictures of the app under test sitting in the project folder. Turn it on for QA work, where the run is evidence and not only a report.",
+        ),
       session: z
         .string()
         .max(40)
@@ -543,6 +610,7 @@ server.registerTool(
       viewportHeight,
       objective,
       task,
+      record,
       session,
     }: {
       url: string;
@@ -555,6 +623,7 @@ server.registerTool(
       viewportHeight?: number;
       objective?: string;
       task?: string;
+      record?: boolean;
       session?: string;
     }) => {
       try {
@@ -624,6 +693,7 @@ server.registerTool(
           viewport,
           // `task` is what this was called in 2.0; it named the session's whole remit, which is the objective.
           objective: objective ?? task,
+          record,
           memoryStore: store,
         });
         eng.role = storageStatePath ? path.basename(storageStatePath).replace(/\.json$/i, "") : "anonymous";
@@ -634,7 +704,14 @@ server.registerTool(
           await ensureLive(eng.memory.dir);
           writeStatus(target, "idle", "scout_attach");
         }
-        return text(out + conflictNote + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine(), target);
+        // Recording writes pictures of the app under test into the project, so
+        // a run doing it says where they go rather than leaving the person to
+        // find a folder of screenshots later.
+        const recordNote =
+          record && eng.memory?.dir
+            ? `\n\n📸 RECORDING: a frame of the page after each action, under ${path.join(eng.memory.dir, "recordings", target)}/ (at most ${RECORD_MAX_FRAMES}). scout_report writes them into report.html beside report.md.`
+            : "";
+        return text(out + conflictNote + recordNote + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine(), target);
       } catch (err) {
         return errorText(err);
       }
@@ -1148,6 +1225,7 @@ server.registerTool(
           evidence,
           url: eng.currentUrl,
           state: eng.currentState || "(unknown)",
+          session: eng.sessionKey,
         });
         return text(
           isNew
