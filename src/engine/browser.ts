@@ -4,6 +4,7 @@ import path from "node:path";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
 import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
+import { normalizeObjective } from "./objective.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
 import {
@@ -321,6 +322,28 @@ export class BrowserEngine {
   private journey: { goal: string; startedAt: number; fromLog: number; startUrl: string } | null = null;
   /** The session's task, from scout_attach. Empty when the agent gave none. */
   private task = "";
+  /**
+   * What the batch of actions running right now is for. Required before a
+   * tool may act (objective.ts), stated by the agent on the call or by a
+   * journey, and kept until it is replaced — a batch costs one sentence.
+   */
+  private objective: { text: string; since: number } | null = null;
+
+  /** Set what this session is doing now. An empty value clears it. */
+  setObjective(text: string): void {
+    const clean = normalizeObjective(text);
+    if (!clean) {
+      this.objective = null;
+      return;
+    }
+    if (this.objective?.text === clean) return;
+    this.objective = { text: clean, since: Date.now() };
+  }
+
+  /** Whether anything is standing that the live view could show as the objective. */
+  get hasObjective(): boolean {
+    return this.journey !== null || this.objective !== null;
+  }
 
   /**
    * Begin measuring a user JOURNEY — the interaction cost of completing one
@@ -2222,7 +2245,13 @@ export class BrowserEngine {
       browser: this.engineName,
       headed: this.headed,
       ...(this.task ? { task: this.task } : {}),
-      ...(this.journey ? { objective: this.journey.goal, objectiveSince: new Date(this.journey.startedAt).toISOString() } : {}),
+      // A journey is a whole user task being measured, so its goal outranks
+      // the batch objective while it runs.
+      ...(this.journey
+        ? { objective: this.journey.goal, objectiveSince: new Date(this.journey.startedAt).toISOString() }
+        : this.objective
+          ? { objective: this.objective.text, objectiveSince: new Date(this.objective.since).toISOString() }
+          : {}),
     };
   }
 

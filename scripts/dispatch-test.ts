@@ -11,6 +11,7 @@
  *   npx tsx --test scripts/dispatch-test.ts
  */
 import assert from "node:assert/strict";
+import { needsObjective, normalizeObjective, objectiveRefusal, OBJECTIVE_MAX } from "../src/engine/objective.ts";
 import test from "node:test";
 import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
 import { revealedLines } from "../src/engine/hover.ts";
@@ -248,4 +249,47 @@ test("hover reports text that appeared, not text that only moved to a new line",
   // The list is capped, and each line is trimmed to a readable length.
   assert.equal(revealedLines("", Array.from({ length: 9 }, (_, i) => `line ${i}`).join("\n")).length, 5);
   assert.equal(revealedLines("", "x".repeat(900))[0].length, 300);
+});
+
+// ---- the objective every acting tool needs ---------------------------------
+
+test("a tool that changes the app needs an objective; reading the page does not", () => {
+  // The live view can only show what the agent states. Left optional it was
+  // usually blank, so a watcher saw a session clicking through their app with
+  // nothing to say why.
+  for (const acting of ["scout_navigate", "scout_back", "scout_click", "scout_type", "scout_select", "scout_press", "scout_upload", "scout_run_plan"]) {
+    assert.equal(needsObjective(acting), true, acting);
+  }
+  // Orienting is what an agent does before it can say what it is about to do.
+  for (const reading of [
+    "scout_snapshot",
+    "scout_hover",
+    "scout_scroll",
+    "scout_coverage",
+    "scout_design_audit",
+    "scout_screenshot",
+    "scout_crawl",
+    "scout_journey",
+    "scout_finding",
+    "scout_note",
+    "scout_report",
+  ]) {
+    assert.equal(needsObjective(reading), false, reading);
+  }
+});
+
+test("an objective is one bounded line, and an empty one clears it", () => {
+  assert.equal(normalizeObjective("  Sign in as QA_Team\n  and check where it lands  "), "Sign in as QA_Team and check where it lands");
+  assert.equal(normalizeObjective("x".repeat(400)).length, OBJECTIVE_MAX);
+  assert.equal(normalizeObjective("   "), "");
+  assert.equal(normalizeObjective(undefined), "");
+});
+
+test("the refusal names the parameter, the shape of a good objective, and how long it lasts", () => {
+  // An agent that reads this once should not need it a second time.
+  const refusal = objectiveRefusal("scout_click");
+  assert.match(refusal, /^scout_click needs an objective/);
+  assert.match(refusal, /objective:"…"/);
+  assert.match(refusal, /stays set until you pass a different one/);
+  assert.match(refusal, /scout_journey/);
 });
