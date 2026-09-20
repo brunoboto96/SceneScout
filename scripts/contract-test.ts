@@ -650,3 +650,21 @@ test("replay: a frame request can only name a file inside the run's own recordin
   // A sibling directory whose name merely starts the same way is not inside it.
   assert.equal(resolveFrame(path.join(path.sep, "p", "rec"), "../recordings-evil/x.jpg"), null);
 });
+
+test("replay: only the served copy watches for the engine going away", () => {
+  const base = { markdown: "## Findings\n", sessions: [], project: "demo-app", at: "2026-09-20T16:21:00.000Z", version: "3.1.0" };
+  const served = buildReplayHtml({ ...base, framePrefix: "record/", savedAt: "/p/.scenescout" });
+  const saved = buildReplayHtml(base);
+
+  // Served from a port in a process: once that process is gone, reloading this
+  // address gets the browser's own error page and the tab is lost for nothing.
+  assert.match(served, /data-testid="run-engine-gone"/);
+  assert.match(served, /\/p\/\.scenescout\/report\.html/, "it names the copy that survives");
+  assert.match(served, /window\.addEventListener\('beforeunload'/, "leaving asks first, once the engine has gone");
+  assert.match(served, /if \(!gone\) return;/, "…and never before that");
+
+  // The copy on disk has no server to lose, so it carries none of it — and no
+  // script at all, which is what lets it open from a file with nothing running.
+  assert.ok(!saved.includes("run-engine-gone"));
+  assert.ok(!saved.includes("<script>"), "the saved copy stays a document");
+});

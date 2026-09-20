@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { feedForSession, FEED_LINES, LiveServer, StatusBoard, type LiveProvider } from "../../dist/engine/live.js";
-import { resolveFrame } from "../../dist/engine/replay.js";
+import { buildReplayHtml, resolveFrame } from "../../dist/engine/replay.js";
 import { chromium, firefox, webkit } from "playwright";
 import { BROWSER, check, until, type SmokeContext } from "./harness.ts";
 
@@ -180,11 +180,15 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
   let written = false;
   // Flipped on once the unrecorded path has been checked, so both are.
   let recorded = false;
+  let stopped = false;
   const at = new Date().toISOString();
   const pushes = new Map<string, (frame: Buffer) => void>();
   let polls = 0;
   const provider: LiveProvider = {
     snapshot: () => {
+      // Standing in for an engine that has exited: the page's watch sees the
+      // request fail, which is what a stopped server gives it.
+      if (stopped) throw new Error("the engine has gone");
       return {
         pid: process.pid,
         version: "smoke",
@@ -252,7 +256,18 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
         "```",
       ].join("\n"),
     }),
-    replay: () => (recorded ? "<!doctype html><html><head><title>Run</title></head><body><h1>The whole run</h1></body></html>" : null),
+    replay: () =>
+      recorded
+        ? buildReplayHtml({
+            markdown: "## Findings\n",
+            sessions: [],
+            project: "demo",
+            at: new Date().toISOString(),
+            version: "smoke",
+            framePrefix: "record/",
+            savedAt: "/p/demo/.scenescout",
+          })
+        : null,
     frame: async (rel) => (recorded && rel === "recordings/agent-0/0001-click.jpg" ? jpeg : null),
     screenshot: async () => jpeg,
     startStream: async (session, onFrame) => {
@@ -407,11 +422,35 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
 
     const fresh = await browser.newPage();
     await fresh.goto(`http://127.0.0.1:${port}/${token}/`);
-    await until("the viewer to land on the run's own page", () => fresh.title().then((t) => t === "Run"), 8000);
+    await until("the viewer to land on the run's own page", () => fresh.title().then((t) => /^SceneScout run/.test(t)), 8000);
     check("a viewer arriving after the run ended is sent to the run's own page", fresh.url().endsWith("/run"), fresh.url());
     await fresh.reload();
-    check("...and unlike a panel over a dead board, it is still there after a refresh", (await fresh.title()) === "Run");
+    check("...and unlike a panel over a dead board, it is still there after a refresh", /^SceneScout run/.test(await fresh.title()), await fresh.title());
     await fresh.close();
+
+    // The run's own page, once the engine behind it has exited: reloading the
+    // address would get the browser's own error page and lose the tab.
+    const run = await browser.newPage();
+    await run.goto(`http://127.0.0.1:${port}/${token}/run`);
+    await run.waitForTimeout(1200);
+    check("the run's page says nothing about an exit while the engine is up", !(await run.getByTestId("run-engine-gone").isVisible()));
+    let asked = false;
+    run.on("dialog", async (d) => {
+      asked = d.type() === "beforeunload";
+      await d.dismiss();
+    });
+    stopped = true;
+    await until("the page to notice the engine has gone", () => run.getByTestId("run-engine-gone").isVisible(), 20000);
+    check(
+      "...and once it has, says so and names the copy that survives",
+      /report\.html/.test((await run.getByTestId("run-engine-gone").innerText()) ?? ""),
+      (await run.getByTestId("run-engine-gone").innerText()) ?? "",
+    );
+    await run.getByTestId("run-copy-path").click();
+    await run.reload({ timeout: 5000 }).catch(() => {});
+    await run.waitForTimeout(800);
+    check("a refresh from there asks before throwing the page away", asked);
+    await run.close();
   } finally {
     await browser.close();
     await live.stop();
