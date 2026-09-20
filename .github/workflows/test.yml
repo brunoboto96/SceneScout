@@ -11,6 +11,25 @@ on:
   # way shows up on the pull request like any other.
   workflow_dispatch:
 
+# Pushing again to a pull request makes the run already in flight pointless: it
+# is testing a commit nobody will merge. Cancelling it frees the six matrix
+# cells for the commit that replaced it.
+#
+# Only pull requests share a group. Every other run gets a group of its own,
+# because a group does two things and only one of them is wanted here:
+# `cancel-in-progress` governs the run already going, but a newly queued run
+# ALSO cancels any run still pending in the group, whatever that setting says.
+# Grouping pushes to main by ref would therefore serialise them, and a third
+# merge arriving inside the suite's 20 minutes would cancel the second one's
+# pending run. `test` is the required check and its job is `if: always()`, so it
+# would report that cancellation as a failure on a main commit that was never
+# actually tested. Keying on run_id instead leaves those runs alone. The same
+# reasoning covers the dispatched run on the version branch, and a merge-queue
+# run later on: a queue entry must always be allowed to report.
+concurrency:
+  group: test-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Least privilege: the suite only needs to read the code. A pull request from a
 # fork must not be handed a token that can write to the repository.
 permissions:
