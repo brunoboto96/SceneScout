@@ -1,13 +1,15 @@
 node_modules
 dist/
 .scenescout/
+# Run output under the tool's former names. The engine still migrates a
+# pre-rename .scenecraft/ (memory.ts), and hygiene-test names both of these
+# as directories that may never be tracked — this keeps them from ever
+# being staged in the first place.
 .scenecraft/
 .frontend-tester/
-.qa-v*/
 
 # local scratch written by test runs
 .scenescout-fixtures/
-.scenecraft-fixtures/
 .tmp-fixtures/
 *.tgz
 

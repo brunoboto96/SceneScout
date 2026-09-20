@@ -188,6 +188,21 @@ test("no run output, saved login, env file or key is tracked", () => {
   );
 });
 
+test("every run-output directory the hygiene rule refuses is also ignored by git", () => {
+  // The rule above catches these once they are tracked; .gitignore is what
+  // stops them being staged at all. The two drifted apart when the tool was
+  // renamed, leaving the former names refused here and stageable there.
+  const ignore = fs.readFileSync(path.join(root, ".gitignore"), "utf8");
+  const entries = new Set(
+    ignore
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#")),
+  );
+  const missing = [".scenescout", ".scenecraft", ".frontend-tester"].filter((dir) => !entries.has(`${dir}/`) && !entries.has(dir));
+  assert.deepEqual(missing, [], "a directory the hygiene rule refuses must not be stageable in the first place");
+});
+
 test("every email address in the repository is on a reserved example domain", () => {
   // This file is excluded from all three content scans: its own test strings are, by design, the shapes the rules reject.
   const found = hits(EMAIL_RE, SELF).filter((h) => !isAllowedEmail(h.slice(h.lastIndexOf(" ") + 1)));

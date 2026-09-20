@@ -310,8 +310,8 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
 }
 
 const STYLE = `
-:root { color-scheme: light dark; --bg:#f6f7f9; --panel:#fff; --line:#d9dde3; --text:#15181d; --muted:#5d6673; --accent:#2563eb; --bad:#b91c1c; }
-@media (prefers-color-scheme: dark) { :root { --bg:#0e1116; --panel:#161a21; --line:#2a303a; --text:#e6e9ee; --muted:#98a2b3; --accent:#7aa2ff; --bad:#fca5a5; } }
+:root { color-scheme: light dark; --bg:#f6f7f9; --panel:#fff; --line:#d9dde3; --text:#15181d; --muted:#5d6673; --accent:#2563eb; --bad:#b91c1c; --warn:#7c4a03; --warn-bg:#fef3c7; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0e1116; --panel:#161a21; --line:#2a303a; --text:#e6e9ee; --muted:#98a2b3; --accent:#7aa2ff; --bad:#fca5a5; --warn:#fbbf24; --warn-bg:#3a2a08; } }
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
 header { position:sticky; top:0; z-index:2; display:flex; flex-wrap:wrap; gap:8px 16px; align-items:baseline; padding:14px 20px; background:var(--panel); border-bottom:1px solid var(--line); }
@@ -359,6 +359,13 @@ details.evidence > summary { cursor:pointer; color:var(--muted); font-size:13px;
 details.evidence .shots { display:flex; flex-wrap:wrap; gap:14px; margin-top:12px; }
 details.evidence figure { margin:0; max-width:min(100%,460px); }
 details.evidence img { width:100%; max-height:300px; object-fit:cover; object-position:top; border:1px solid var(--line); border-radius:6px; display:block; background:var(--panel); }
+#gone-bar { position:sticky; top:0; z-index:3; margin:0; padding:14px 22px; background:var(--warn-bg); color:var(--warn);
+  border-bottom:1px solid var(--line); }
+#gone-bar p { margin:0 0 6px; max-width:68ch; }
+#gone-bar .path { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+#gone-bar code { font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; user-select:all; }
+#gone-bar button { font:inherit; padding:4px 10px; border:1px solid currentColor; border-radius:6px; background:transparent; color:inherit; cursor:pointer; }
+#gone-bar .why { margin:0; font-size:12px; opacity:.8; }
 .onDisk { display:block; margin-top:4px; color:var(--muted); font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
 header .served { flex:1 1 100%; margin:6px 0 0; color:var(--muted); font-size:12px; }
 header .served code { font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
@@ -368,6 +375,56 @@ figure.gone img, a.gone img { display:none; }
 a.frame.gone { display:block; max-width:min(100%,720px); }
 details.evidence figcaption { margin-top:4px; color:var(--muted); font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
 `;
+
+/**
+ * Only the SERVED copy carries this. It watches the engine, and the moment the
+ * engine is gone it says so, because from then on a refresh gets the browser's
+ * "site can't be reached" and the tab is lost for nothing — this page is still
+ * perfectly readable, and the copy on disk is the one that survives.
+ *
+ * A browser refuses to follow a `file://` link from an `http://` page, so the
+ * saved copy cannot be opened from here. The path is offered to copy instead.
+ *
+ * No template literals and no backticks: this whole module is one.
+ */
+function exitWatch(savedFile: string): string {
+  return (
+    "<script>(function () {\n" +
+    "  var saved = " +
+    JSON.stringify(savedFile) +
+    ";\n" +
+    "  var gone = false;\n" +
+    "  var bar = document.getElementById('gone-bar');\n" +
+    "  function ended() {\n" +
+    "    if (gone) return;\n" +
+    "    gone = true;\n" +
+    "    bar.hidden = false;\n" +
+    "    document.body.classList.add('engine-gone');\n" +
+    "  }\n" +
+    "  function check() {\n" +
+    "    fetch('api/status', { cache: 'no-store' })\n" +
+    "      .then(function (r) { if (!r.ok && r.status >= 500) ended(); })\n" +
+    "      .catch(ended);\n" +
+    "  }\n" +
+    "  setInterval(check, 5000);\n" +
+    "  check();\n" +
+    "  document.getElementById('gone-copy').addEventListener('click', function () {\n" +
+    "    var self = this;\n" +
+    "    function said(text) { self.textContent = text; setTimeout(function () { self.textContent = 'Copy the path'; }, 2000); }\n" +
+    "    if (navigator.clipboard && navigator.clipboard.writeText) {\n" +
+    "      navigator.clipboard.writeText(saved).then(function () { said('Copied'); }, function () { said('Select it and copy'); });\n" +
+    "    } else { said('Select it and copy'); }\n" +
+    "  });\n" +
+    "  // Refresh, close, back — all of them lose this page once the engine has\n" +
+    "  // exited, and none of them can be told apart here. Ask first.\n" +
+    "  window.addEventListener('beforeunload', function (e) {\n" +
+    "    if (!gone) return;\n" +
+    "    e.preventDefault();\n" +
+    "    e.returnValue = '';\n" +
+    "  });\n" +
+    "})();</script>"
+  );
+}
 
 /** The whole document: one file, no external assets, opens from the file system. */
 export function buildReplayHtml(input: ReplayInput): string {
@@ -390,6 +447,15 @@ export function buildReplayHtml(input: ReplayInput): string {
   ${savedAt ? `<p class="served">This page is served by the engine and goes when it does. The copy that stays is <code>${escapeHtml(savedAt)}/report.html</code>, beside the frames it shows.</p>` : ""}
   <nav><a href="#report">Report</a><a href="#steps">Steps</a></nav>
 </header>
+${
+  savedAt
+    ? `<div id="gone-bar" role="alert" data-testid="run-engine-gone" hidden>
+  <p><b>The engine has exited.</b> Everything here is still readable, but reloading this address will not reach anything. The copy that survives, with its frames, is on disk:</p>
+  <p class="path"><code>${escapeHtml(savedAt)}/report.html</code> <button type="button" id="gone-copy" data-testid="run-copy-path">Copy the path</button></p>
+  <p class="why">A browser will not open a file from a served page, so it has to be opened from there.</p>
+</div>`
+    : ""
+}
 <main>
 <h2 id="report">Report</h2>
 ${renderMarkdown(input.markdown, input.evidence ?? [], prefix, savedAt)}
@@ -401,6 +467,7 @@ ${renderMarkdown(input.markdown, input.evidence ?? [], prefix, savedAt)}
   }</p>
 ${sessions || "<p>No session recorded any action.</p>"}
 </main>
+${savedAt ? exitWatch(`${savedAt}/report.html`) : ""}
 </body>
 </html>
 `;
