@@ -28,7 +28,7 @@ import http from "node:http";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { LIVE_PAGE } from "./live-page.js";
-import { JOURNEY_END, JOURNEY_START, type ActionLogEntry } from "./memory.js";
+import { JOURNEY_END, JOURNEY_START, TASK_SET, type ActionLogEntry } from "./memory.js";
 
 /** Holds the live view's token, next to status.json. Written owner-only; removed when the engine shuts down. */
 export const LIVE_TOKEN_FILE = "live-token";
@@ -53,16 +53,16 @@ export interface SessionStatus {
   mode?: string;
   browser?: string;
   headed?: boolean;
-  /** What the agent said this session is for, at attach. */
-  task?: string;
-  /** The goal of the journey the session is on right now, if any. */
+  /** The session's objective: the whole remit the agent was given at attach. */
   objective?: string;
-  /** Present exactly when `objective` is. */
-  objectiveSince?: string;
+  /** What the session is DOING right now — the batch of actions in front of it, or the goal of a running journey. */
+  task?: string;
+  /** Present exactly when `task` is. */
+  taskSince?: string;
 }
 
 /** What the engine says about a session, spread onto its board entry. Text in it is the agent's own and is redacted by the caller. */
-export type SessionDescription = Pick<SessionStatus, "mode" | "browser" | "headed" | "task" | "objective" | "objectiveSince">;
+export type SessionDescription = Pick<SessionStatus, "mode" | "browser" | "headed" | "objective" | "task" | "taskSince">;
 
 /** One line of a session's activity feed: what it did, and how that turned out. */
 export interface ActivityLine {
@@ -71,8 +71,8 @@ export interface ActivityLine {
   target?: string;
   url: string;
   result?: string;
-  /** The goal of the journey this action was part of, when it was part of one. */
-  objective?: string;
+  /** The task these actions were part of, so the feed can group them under it. */
+  task?: string;
 }
 
 /** What the feed reads from an action-log entry. */
@@ -92,25 +92,36 @@ export function feedForSession(log: readonly LoggedAction[], session: string, li
     const e = log[i];
     if (e && (e.session ?? session) === session) mine.push(e);
   }
-  let objective: string | undefined;
-  for (; i >= 0; i -= 1) {
+  // Two things can be standing when the window opens: a journey, and the
+  // stated task. Walk back until both are known — a journey is what the
+  // session is doing while it runs, exactly as the live view shows it.
+  let goal: string | undefined;
+  let batch: string | undefined;
+  let knowJourney = false;
+  let knowBatch = false;
+  for (; i >= 0 && !(knowJourney && knowBatch); i -= 1) {
     const e = log[i];
     if (!e || (e.session ?? session) !== session) continue;
-    if (e.action === JOURNEY_END) break;
-    if (e.action === JOURNEY_START) {
-      objective = e.target;
-      break;
+    if (!knowJourney && (e.action === JOURNEY_END || e.action === JOURNEY_START)) {
+      if (e.action === JOURNEY_START) goal = e.target;
+      knowJourney = true;
+    }
+    if (!knowBatch && e.action === TASK_SET) {
+      batch = e.target;
+      knowBatch = true;
     }
   }
   const lines: ActivityLine[] = [];
   for (const e of mine.reverse()) {
-    if (e.action === JOURNEY_START) objective = e.target;
+    if (e.action === JOURNEY_START) goal = e.target;
+    if (e.action === TASK_SET) batch = e.target;
+    const task = goal ?? batch;
     const line: ActivityLine = { at: e.at, action: e.action, url: redact(e.url) };
     if (e.target !== undefined) line.target = e.target;
     if (e.result !== undefined) line.result = e.result;
-    if (objective !== undefined) line.objective = objective;
+    if (task !== undefined) line.task = task;
     lines.push(line);
-    if (e.action === JOURNEY_END) objective = undefined;
+    if (e.action === JOURNEY_END) goal = undefined;
   }
   return lines;
 }

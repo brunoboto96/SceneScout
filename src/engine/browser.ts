@@ -2,9 +2,9 @@ import { chromium, firefox, webkit, type Browser, type BrowserType, type Browser
 import fs from "node:fs";
 import path from "node:path";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
-import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, type ActionLogEntry } from "./memory.js";
+import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, TASK_SET, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
-import { normalizeObjective } from "./objective.js";
+import { normalizeTask } from "./task.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
 import {
@@ -49,11 +49,8 @@ export interface AttachOptions {
   /** Which browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else Chromium. */
   browser?: BrowserEngineName;
   viewport?: { width: number; height: number };
-  /**
-   * What this session is for, in one sentence, as the agent driving it put it.
-   * Shown in the live view; the engine never reads meaning into it.
-   */
-  task?: string;
+  /** The session's objective: the whole remit this session was given, shown to whoever is watching the run. */
+  objective?: string;
   /**
    * Share one MemoryStore across engines attached to the same project
    * (multi-session/multi-role runs): coverage and findings from every role
@@ -320,29 +317,33 @@ export class BrowserEngine {
   designAuditCount = 0;
   /** Active task-efficiency measurement (scout_journey), if any. */
   private journey: { goal: string; startedAt: number; fromLog: number; startUrl: string } | null = null;
-  /** The session's task, from scout_attach. Empty when the agent gave none. */
-  private task = "";
+  /** The session's objective: the whole remit the agent was given at scout_attach. Empty when none was given. */
+  private sessionObjective = "";
   /**
-   * What the batch of actions running right now is for. Required before a
-   * tool may act (objective.ts), stated by the agent on the call or by a
-   * journey, and kept until it is replaced — a batch costs one sentence.
+   * The batch of actions running right now. Required before a tool may act
+   * (task.ts), stated by the agent on the call or by a journey, and kept
+   * until it is replaced — a batch costs a few words, not one per click.
    */
-  private objective: { text: string; since: number } | null = null;
+  private currentTask: { text: string; since: number } | null = null;
 
   /** Set what this session is doing now. An empty value clears it. */
-  setObjective(text: string): void {
-    const clean = normalizeObjective(text);
+  setTask(text: string): void {
+    const clean = normalizeTask(text);
     if (!clean) {
-      this.objective = null;
+      this.currentTask = null;
       return;
     }
-    if (this.objective?.text === clean) return;
-    this.objective = { text: clean, since: Date.now() };
+    if (this.currentTask?.text === clean) return;
+    this.currentTask = { text: clean, since: Date.now() };
+    // Logged so the feed can group the actions that follow under it, the way
+    // it groups a journey's — the trail is where a watcher reads what
+    // happened, and an ungrouped one says nothing about why.
+    this.logAction({ action: TASK_SET, target: clean, url: this.page?.url() ?? "" });
   }
 
-  /** Whether anything is standing that the live view could show as the objective. */
-  get hasObjective(): boolean {
-    return this.journey !== null || this.objective !== null;
+  /** Whether anything is standing that the live view could show as the task. */
+  get hasTask(): boolean {
+    return this.journey !== null || this.currentTask !== null;
   }
 
   /**
@@ -467,7 +468,7 @@ export class BrowserEngine {
       throw new Error(`storageStatePath does not exist: ${opts.storageStatePath}`);
     }
     this.mode = opts.mode ?? "read-only";
-    this.task = (opts.task ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
+    this.sessionObjective = (opts.objective ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
     this.headed = opts.headed ?? false;
     this.blockedRequests = [];
     this.pendingCreations = new Set();
@@ -2244,13 +2245,13 @@ export class BrowserEngine {
       mode: this.mode,
       browser: this.engineName,
       headed: this.headed,
-      ...(this.task ? { task: this.task } : {}),
-      // A journey is a whole user task being measured, so its goal outranks
-      // the batch objective while it runs.
+      ...(this.sessionObjective ? { objective: this.sessionObjective } : {}),
+      // A journey is a whole user task being measured, so its goal is what the
+      // session is doing while it runs.
       ...(this.journey
-        ? { objective: this.journey.goal, objectiveSince: new Date(this.journey.startedAt).toISOString() }
-        : this.objective
-          ? { objective: this.objective.text, objectiveSince: new Date(this.objective.since).toISOString() }
+        ? { task: this.journey.goal, taskSince: new Date(this.journey.startedAt).toISOString() }
+        : this.currentTask
+          ? { task: this.currentTask.text, taskSince: new Date(this.currentTask.since).toISOString() }
           : {}),
     };
   }

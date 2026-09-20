@@ -126,6 +126,8 @@ export function redactSecrets(text: string): string {
 /** The action-log lines that open and close a journey (scout_journey). The feed reads them to tell which goal an action served. */
 export const JOURNEY_START = "journey:start";
 export const JOURNEY_END = "journey:end";
+/** Logged when a session states the task it is starting, so the feed can group the actions that follow under it. */
+export const TASK_SET = "task";
 
 export interface ActionLogEntry {
   at: string;

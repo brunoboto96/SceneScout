@@ -3,6 +3,7 @@
  */
 import fs from "node:fs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
+import { feedForSession } from "../../dist/engine/live.js";
 import { generateReport } from "../../dist/engine/report.js";
 import { focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
 import { BROWSER, check, settle, type SmokeContext } from "./harness.ts";
@@ -406,26 +407,34 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     check("crawl summarizes each route", crawlOut.includes("CRAWL of 2") && /page2\.html — 200/.test(crawlOut), crawlOut);
     check("crawl flags problem routes", crawlOut.includes("PROBLEM ROUTES") && crawlOut.includes("/broken.html"), crawlOut);
 
-    console.log("the objective a watcher sees");
+    console.log("the task a watcher sees");
     // The engine keeps what the agent said the current batch is for; the MCP
     // layer is what requires it before a tool acts (checked in mcp-check).
-    check("a fresh session has nothing to show", !engine.hasObjective && engine.liveDescription.objective === undefined);
-    engine.setObjective("  Walk the two static\n  pages and back  ");
+    check("a fresh session has nothing to show", !engine.hasTask && engine.liveDescription.task === undefined);
+    engine.setTask("  Walk the two static\n  pages and back  ");
     check(
       "stating one collapses it to a line and shows it",
-      engine.liveDescription.objective === "Walk the two static pages and back",
+      engine.liveDescription.task === "Walk the two static pages and back",
       JSON.stringify(engine.liveDescription),
     );
-    const since = engine.liveDescription.objectiveSince;
-    engine.setObjective("Walk the two static pages and back");
-    check("...restating the same one does not restart its clock", engine.liveDescription.objectiveSince === since);
+    const since = engine.liveDescription.taskSince;
+    engine.setTask("Walk the two static pages and back");
+    check("...restating the same one does not restart its clock", engine.liveDescription.taskSince === since);
     await engine.startJourney("Measure the whole task");
-    check("a journey outranks it while it runs", engine.liveDescription.objective === "Measure the whole task");
+    check("a journey is what it is doing while it runs", engine.liveDescription.task === "Measure the whole task");
     engine.endJourney(true);
-    check("...and the batch objective is back when the journey ends", engine.liveDescription.objective === "Walk the two static pages and back");
-    engine.setObjective("");
-    check("an empty one clears it", !engine.hasObjective && engine.liveDescription.objective === undefined);
-    engine.setObjective("Exercise the rest of the read-only surface");
+    check("...and the stated task is back when the journey ends", engine.liveDescription.task === "Walk the two static pages and back");
+    engine.setTask("");
+    check("an empty one clears it", !engine.hasTask && engine.liveDescription.task === undefined);
+    // The close-up tints the feed by objective, so stating one has to leave a
+    // mark in the trail — otherwise the actions that follow read as unexplained.
+    engine.setTask("Exercise the rest of the read-only surface");
+    const tagged = feedForSession(engine.memory?.actionLog ?? [], engine.sessionKey, 60);
+    check(
+      "stating a task marks the trail, so the feed can group what follows under it",
+      tagged.at(-1)?.action === "task" && tagged.at(-1)?.task === "Exercise the rest of the read-only surface",
+      JSON.stringify(tagged.slice(-3)),
+    );
 
     console.log("run_plan (batched actions, semantic targets)");
     const plan1 = await engine.runPlan([
