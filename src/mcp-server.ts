@@ -49,7 +49,7 @@ import {
   type SessionStatus,
 } from "./engine/live.js";
 import { computeGaps, formatRouteCoverage, generateReport, type ReportExtras } from "./engine/report.js";
-import { needsObjective, objectiveRefusal, OBJECTIVE_MAX } from "./engine/objective.js";
+import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { formatScan, scanProject } from "./scan.js";
 
@@ -307,7 +307,7 @@ function writeStatus(session: string, phase: "running" | "idle", tool: string, b
   const dir = eng?.memory?.dir;
   if (!eng || !dir) return;
   // status.json is a poll target that gets pasted into bug reports.
-  const { task, objective, ...described } = eng.liveDescription;
+  const { objective, task, ...described } = eng.liveDescription;
   lastWriter = board.update(session, {
     role: eng.role,
     phase,
@@ -315,8 +315,8 @@ function writeStatus(session: string, phase: "running" | "idle", tool: string, b
     url: redactSecrets(eng.currentUrl),
     ...(budgetMs ? { budgetMs } : {}),
     ...described,
-    ...(task ? { task: redactSecrets(task) } : {}),
     ...(objective ? { objective: redactSecrets(objective) } : {}),
+    ...(task ? { task: redactSecrets(task) } : {}),
   });
   void ensureLive(dir);
   flushStatus(dir);
@@ -347,16 +347,18 @@ function serializedPerSession<A>(
   label: string,
   fn: (args: A, session: string) => Promise<ToolResult>,
   timeoutMs = 60_000,
-): (args: A & { session?: string; objective?: string }) => Promise<ToolResult> {
-  return (args: A & { session?: string; objective?: string }) => {
+): (args: A & { session?: string; task?: string; objective?: string }) => Promise<ToolResult> {
+  return (args: A & { session?: string; task?: string; objective?: string }) => {
     const session = args.session ?? activeName;
-    // Every acting tool passes through here, so the objective is required in
-    // one place rather than eight. A call that states one sets it for the
-    // batch; a call that acts with none standing is told what to pass.
+    // Every acting tool passes through here, so the task is required in one
+    // place rather than eight. A call that states one sets it for the batch;
+    // a call that acts with none standing is told what to pass. `objective`
+    // is the name this parameter had in 2.0 and still works.
     const eng = engines.get(session);
     if (eng) {
-      if (args.objective !== undefined) eng.setObjective(args.objective);
-      if (needsObjective(label) && !eng.hasObjective) return Promise.resolve(text(objectiveRefusal(label), session));
+      const stated = args.task ?? args.objective;
+      if (stated !== undefined) eng.setTask(stated);
+      if (needsTask(label) && !eng.hasTask) return Promise.resolve(text(taskRefusal(label), session));
     }
     const exec = async (): Promise<ToolResult> => {
       writeStatus(session, "running", label, timeoutMs);
@@ -406,19 +408,25 @@ const sessionParam = z
   );
 
 /**
- * What the batch of actions this call belongs to is for. Required by the tools
- * that act (objective.ts) unless one is already standing; shown to whoever is
- * watching the run, beside the session's task.
+ * What the session is DOING right now. Required by the tools that act
+ * (task.ts) unless one is already standing; shown to whoever is watching the
+ * run, under the session's objective.
  */
-const objectiveParam = z
+const taskParam = z
   .string()
-  .max(OBJECTIVE_MAX)
+  .max(TASK_MAX)
   .optional()
   .describe(
-    "One short sentence naming what this batch of actions is for, in the words you would use to tell a colleague " +
-      '("Sign in as QA_Team and check where it lands"). It stays set until you pass a different one, and is shown live to the person watching. ' +
+    "What you are DOING right now, in a few words: the action, not the acceptance criteria. " +
+      '"Filtering the documents register by status", "Filling the deviation form with invalid dates", "Signing in as QA_Team" — ' +
+      'NOT "§2.4 filtering narrows the set and the filter is reflected in the URL", which is what you are CHECKING, not what you are doing. ' +
+      'Naming the item you are on is fine ("§2.4: filtering the documents register"); keep the rest to what a colleague would see over your shoulder. ' +
+      "It stays set until you pass a different one, so a batch costs a few words, not one per call. " +
       "Required on the tools that act unless a journey or an earlier call already set one.",
   );
+
+/** The name `task` had in 2.0. Still accepted, so a caller written against that release keeps working. */
+const legacyObjectiveParam = z.string().max(TASK_MAX).optional().describe("Old name for `task` (2.0). Prefer `task`.");
 
 // The method, for every client that has no skill loader. It is read per call,
 // not cached: a source checkout's skill file can change under a running server.
@@ -504,13 +512,16 @@ server.registerTool(
         ),
       viewportWidth: z.number().int().min(320).max(3840).optional().describe("Viewport width (default 1280); use e.g. 390 for a mobile pass"),
       viewportHeight: z.number().int().min(480).max(2400).optional().describe("Viewport height (default 900)"),
-      task: z
+      objective: z
         .string()
         .max(300)
         .optional()
         .describe(
-          "What this session is for, in one sentence (e.g. 'Approve and reject orders as a manager'). Shown to the person watching the live view, next to the goal of whatever scout_journey is active. Worth setting whenever more than one session is running.",
+          'This session\'s objective: the whole remit you were given, in one sentence ("Admin lane: §2 registers, §7 plan gating", ' +
+            '"Approve and reject orders as a manager"). It sits above the task, which is what the session is doing at any moment. ' +
+            "Shown to whoever is watching the run; worth setting whenever more than one session is live.",
         ),
+      task: z.string().max(300).optional().describe("Old name for `objective` (2.0). Prefer `objective`."),
       session: z
         .string()
         .max(40)
@@ -530,6 +541,7 @@ server.registerTool(
       browser,
       viewportWidth,
       viewportHeight,
+      objective,
       task,
       session,
     }: {
@@ -541,6 +553,7 @@ server.registerTool(
       browser?: "chromium" | "firefox" | "webkit";
       viewportWidth?: number;
       viewportHeight?: number;
+      objective?: string;
       task?: string;
       session?: string;
     }) => {
@@ -601,7 +614,18 @@ server.registerTool(
           /* conflict detection is best-effort */
         }
         const viewport = viewportWidth && viewportHeight ? { width: viewportWidth, height: viewportHeight } : undefined;
-        const out = await eng.attach({ url, projectDir: projectPath, storageStatePath, mode, headed, browser, viewport, task, memoryStore: store });
+        const out = await eng.attach({
+          url,
+          projectDir: projectPath,
+          storageStatePath,
+          mode,
+          headed,
+          browser,
+          viewport,
+          // `task` is what this was called in 2.0; it named the session's whole remit, which is the objective.
+          objective: objective ?? task,
+          memoryStore: store,
+        });
         eng.role = storageStatePath ? path.basename(storageStatePath).replace(/\.json$/i, "") : "anonymous";
         // Put the session on the board now, so the live view shows it before its
         // first tool call. liveLine() needs the port, so the server is awaited
@@ -731,7 +755,8 @@ server.registerTool(
         )
         .min(1)
         .max(20),
-      objective: objectiveParam,
+      task: taskParam,
+      objective: legacyObjectiveParam,
       session: sessionParam,
     },
   },
@@ -756,7 +781,8 @@ server.registerTool(
     inputSchema: {
       ref: z.string().describe("Element ref, e.g. e12"),
       clicks: z.number().int().min(1).max(3).default(1).describe("1 = normal; 2-3 = rapid repeated clicks (double-submit probe)"),
-      objective: objectiveParam,
+      task: taskParam,
+      objective: legacyObjectiveParam,
       session: sessionParam,
     },
   },
@@ -782,7 +808,8 @@ server.registerTool(
       value: z.string().optional().describe("Alias for `textValue`."),
       pressEnter: z.boolean().default(false).describe("Press Enter after typing"),
       replace: z.boolean().default(false).describe("Clear the field before typing instead of appending to existing content"),
-      objective: objectiveParam,
+      task: taskParam,
+      objective: legacyObjectiveParam,
       session: sessionParam,
     },
   },
@@ -828,7 +855,8 @@ server.registerTool(
         .optional()
         .describe("Generated fixture kind; default: inferred from the input's accept attribute (pdf when there is none, or none we can generate)"),
       name: z.string().min(1).max(512).optional().describe("Filename override (default scenescout-fixture.<kind>, or the disk file's own name)"),
-      objective: objectiveParam,
+      task: taskParam,
+      objective: legacyObjectiveParam,
       session: sessionParam,
     },
   },
@@ -864,7 +892,13 @@ server.registerTool(
   "scout_select",
   {
     description: "Select an option in a <select> by ref.",
-    inputSchema: { ref: z.string(), value: z.string().describe("Option value or label"), objective: objectiveParam, session: sessionParam },
+    inputSchema: {
+      ref: z.string(),
+      value: z.string().describe("Option value or label"),
+      task: taskParam,
+      objective: legacyObjectiveParam,
+      session: sessionParam,
+    },
   },
   serializedPerSession("scout_select", async ({ ref, value }: { ref: string; value: string }, session) => {
     try {
@@ -879,7 +913,12 @@ server.registerTool(
   "scout_navigate",
   {
     description: "Navigate to a URL or a path relative to the attached base URL (e.g. '/orders'). Also supports 'back' via scout_back.",
-    inputSchema: { target: z.string().describe("Absolute URL or path like /settings"), objective: objectiveParam, session: sessionParam },
+    inputSchema: {
+      target: z.string().describe("Absolute URL or path like /settings"),
+      task: taskParam,
+      objective: legacyObjectiveParam,
+      session: sessionParam,
+    },
   },
   serializedPerSession("scout_navigate", async ({ target }: { target: string }, session) => {
     try {
@@ -894,7 +933,7 @@ server.registerTool(
   "scout_back",
   {
     description: "Go back in browser history (tests back-button resilience).",
-    inputSchema: { objective: objectiveParam, session: sessionParam },
+    inputSchema: { task: taskParam, objective: legacyObjectiveParam, session: sessionParam },
   },
   serializedPerSession("scout_back", async (_args: { session?: string }, session) => {
     try {
@@ -933,7 +972,7 @@ server.registerTool(
   "scout_press",
   {
     description: "Press a keyboard key (e.g. Escape, Tab, Enter) — useful for closing modals and testing keyboard navigation.",
-    inputSchema: { key: z.string(), objective: objectiveParam, session: sessionParam },
+    inputSchema: { key: z.string(), task: taskParam, objective: legacyObjectiveParam, session: sessionParam },
   },
   serializedPerSession("scout_press", async ({ key }: { key: string }, session) => {
     try {

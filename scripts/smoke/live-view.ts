@@ -42,30 +42,30 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
   };
   const live = new LiveServer(provider);
   try {
-    await engine.attach({ url: baseUrl, projectDir, mode: "read-only", task: "Watch the  demo  app" });
+    await engine.attach({ url: baseUrl, projectDir, mode: "read-only", objective: "Watch the  demo  app" });
     check(
-      "the task given at attach reaches the live view, whitespace collapsed",
-      engine.liveDescription.task === "Watch the demo app",
+      "the objective given at attach reaches the live view, whitespace collapsed",
+      engine.liveDescription.objective === "Watch the demo app",
       JSON.stringify(engine.liveDescription),
     );
-    check("...and with no journey running there is no objective", engine.liveDescription.objective === undefined);
+    check("...and with nothing stated there is no task", engine.liveDescription.task === undefined);
     await engine.navigate("/");
     await engine.startJourney("Find the dashboard's broken chart");
     check(
-      "the active journey's goal is the current objective",
-      engine.liveDescription.objective === "Find the dashboard's broken chart",
+      "the active journey's goal is what the session is doing",
+      engine.liveDescription.task === "Find the dashboard's broken chart",
       JSON.stringify(engine.liveDescription),
     );
     await engine.navigate("/page2.html");
     engine.endJourney(true);
-    check("...and it clears when the journey ends", engine.liveDescription.objective === undefined);
+    check("...and it clears when the journey ends", engine.liveDescription.task === undefined);
     await engine.navigate("/");
     const tagged = feedForSession(engine.memory?.actionLog ?? [], "watched", 60);
     check(
       "a feed line taken during the journey carries its goal, and one taken after it does not",
-      tagged.some((l) => l.action === "navigate" && l.target?.endsWith("/page2.html") && l.objective === "Find the dashboard's broken chart") &&
+      tagged.some((l) => l.action === "navigate" && l.target?.endsWith("/page2.html") && l.task === "Find the dashboard's broken chart") &&
         tagged.at(-1)?.action === "navigate" &&
-        tagged.at(-1)?.objective === undefined,
+        tagged.at(-1)?.task === undefined,
       JSON.stringify(tagged.slice(-4)),
     );
     board.update("watched", { role: engine.role, phase: "idle", tool: "scout_navigate", url: engine.currentUrl, ...engine.liveDescription });
@@ -161,7 +161,7 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
           url: "http://app.test/",
           since: at,
           at,
-          task: `Task of ${session}`,
+          objective: `Task of ${session}`,
         })),
       };
     },
@@ -169,9 +169,9 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     activity: (session, limit) => {
       if (limit === FEED_LINES) polls += 1;
       return [
-        { at, action: "journey:start", target: `Goal of ${session}`, url: "http://app.test/", objective: `Goal of ${session}` },
-        { at, action: "click", target: "Save", url: "http://app.test/", objective: `Goal of ${session}` },
-        { at, action: "journey:end", target: `Goal of ${session}`, url: "http://app.test/", result: "completed", objective: `Goal of ${session}` },
+        { at, action: "journey:start", target: `Goal of ${session}`, url: "http://app.test/", task: `Goal of ${session}` },
+        { at, action: "click", target: "Save", url: "http://app.test/", task: `Goal of ${session}` },
+        { at, action: "journey:end", target: `Goal of ${session}`, url: "http://app.test/", result: "completed", task: `Goal of ${session}` },
         { at, action: "snapshot", url: "http://app.test/" },
       ];
     },
@@ -246,15 +246,15 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     const groups = await focusFeed.locator(".group").count();
     check("the close-up's feed is grouped by journey", groups === 2, `${groups} group(s)`);
     await focusFeed.locator(".group").first().hover();
-    const hovered = await page.getByTestId("live-focus-objective").textContent();
-    const head = await page.locator("#focus-objective-head").textContent();
+    const hovered = await page.getByTestId("live-focus-task").textContent();
+    const head = await page.locator("#focus-task-head").textContent();
     check(
       "pointing at a group shows the goal those actions served",
-      hovered === "Goal of agent-0" && head === "Objective for these actions",
+      hovered === "Goal of agent-0" && head === "Doing, for these actions",
       `${head}: ${hovered}`,
     );
     await page.locator("#focus-name").hover();
-    check("...and leaving it goes back to the current objective", (await page.locator("#focus-objective-head").textContent()) === "Current objective");
+    check("...and leaving it goes back to what it is doing now", (await page.locator("#focus-task-head").textContent()) === "Doing now");
     await page.getByTestId("live-focus-close").click();
 
     // The run ends: the browsers are gone, so the page must hand over the report itself.
