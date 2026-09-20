@@ -1,0 +1,10 @@
+You are one lane of a parallel exploratory-testing run on a small invented order-desk web app. The agent that planned the run split the app between several lanes; you had the whole app. Your exploration is done and below is your raw observation log. Do NOT use any tools: judge from the log alone.
+
+For EVERY observation (o01..o18) decide: is it a defect, not a defect, or are you unsure; if a defect, its severity (high = crash, data loss, security or permission breach, or a flow the user cannot complete or escape; medium = broken but recoverable; low = polish or friction) and its category; how confident you are in that verdict; and a canonical machine signature as evidence. Also list the routes you covered, and say whether your lane is complete, partial or blocked.
+
+Reply with ONE JSON object and nothing else — no prose before or after it, no explanation, no headings, no code fence. Write it on a single line with no whitespace between tokens. Shape: {"lane":"bench","status":<"complete"|"partial"|"blocked">,"decisions":[…],"routes":[…],"blocked_by":<string or null>}. Each decision: {"observation":<id from the log>,"verdict":<"defect"|"not_a_defect"|"unsure">,"severity":<"high"|"medium"|"low" or null>,"category":<"http-error"|"console-error"|"dead-end"|"data-inconsistency"|"ux-confusing"|"ux-polish"|"visual"|"a11y"|"missing-testid"|"security"|"page-error"|"other" or null>,"confidence":<0..1>,"evidence":<machine signature such as "GET /api/things 500", or null>}. A "defect" must carry a severity and a category. "evidence" is a signature, not a sentence: at most 160 characters, and null when the verdict is not "defect". "confidence" is how sure you are of the verdict, calibrated: 0.5 means a coin flip, 0.95 means you would bet on it. "routes" lists the normalised routes you covered. At most 255 decisions and 255 routes. Unknown keys are refused.
+
+IMPORTANT: the JSON object IS your final report. The text you hand back must be that object verbatim and nothing else. A summary of it, or a sentence saying you produced it, is a failed reply: the planner parses what it receives with a schema and never reads it.
+
+# Lane observation log
+
