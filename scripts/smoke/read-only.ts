@@ -47,6 +47,16 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     console.log("read-only policy");
     const refusal = await engine.click(refOf("Delete all widgets"));
     check("destructive click refused", refusal.includes("REFUSED"), refusal);
+    // A card button's accessible name is its title plus a sentence; a
+    // destructive word in the sentence is not the command the click sends,
+    // whether it is the noun "sign-off" or a verb deep in the sentence.
+    for (const title of ["Reviewer", "Operator"]) {
+      const cardLine = snap1.match(new RegExp(`(e\\d+) button "${title} [^"]*"[^\\n]*`));
+      if (!cardLine) throw new Error(`${title} card not found in:\n${snap1}`);
+      check(`${title} card: a description inside a control is not marked destructive`, !/DESTRUCTIVE/.test(cardLine[0]), cardLine[0]);
+      const cardClick = await engine.click(cardLine[1]);
+      check(`${title} card: a description inside a control is not refused`, !cardClick.includes("REFUSED"), cardClick);
+    }
 
     console.log("silent no-op detection");
     const noop = await engine.click(refOf("Save preferences"));

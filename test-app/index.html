@@ -61,6 +61,9 @@
     <button id="untagged-button">Untagged button</button>
     <button data-testid="widgets-save-noop" id="save-noop">Save preferences</button>
     <button data-testid="widgets-delete-action" onclick="return confirm('Delete everything?')">Delete all widgets</button>
+    <!-- A role card: one button whose accessible name is a name plus a sentence about it. The sentence is content, not the command. -->
+    <button data-testid="widgets-pick-reviewer"><span>Reviewer</span> <span>Approves or rejects requests that need sign-off.</span></button>
+    <button data-testid="widgets-pick-operator"><span>Operator</span> <span>Runs the nightly jobs and may archive old reports.</span></button>
   </section>
 
   <section>
