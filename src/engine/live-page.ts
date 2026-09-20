@@ -180,11 +180,11 @@ export const LIVE_PAGE = `<!doctype html>
   <div class="lower">
     <div class="feed" id="focus-feed" data-testid="live-focus-feed"></div>
     <aside class="brief" aria-label="What this session is doing" data-testid="live-focus-brief">
-      <h3>Task</h3>
-      <p id="focus-task" data-testid="live-focus-task"></p>
-      <h3 id="focus-objective-head">Current objective</h3>
+      <h3>Objective</h3>
       <p id="focus-objective" data-testid="live-focus-objective"></p>
-      <p class="since" id="focus-objective-since"></p>
+      <h3 id="focus-task-head">Doing now</h3>
+      <p id="focus-task" data-testid="live-focus-task"></p>
+      <p class="since" id="focus-task-since"></p>
     </aside>
   </div>
 </div>
@@ -200,7 +200,7 @@ export const LIVE_PAGE = `<!doctype html>
   var events = null;
   var eventsKey = '';
   var frames = {};
-  var hoverObjective = null;
+  var hoverTask = null;
   var reportOpen = false;
   var reportTimer = null;
   var reportProblem = null;
@@ -306,9 +306,9 @@ export const LIVE_PAGE = `<!doctype html>
     var badge = el('span', 'badge idle');
     top.appendChild(nameEl); top.appendChild(role); top.appendChild(badge);
     var task = el('div', 'task');
-    task.setAttribute('data-testid', 'live-card-task-' + name);
+    task.setAttribute('data-testid', 'live-card-objective-' + name);
     var doing = el('div', 'doing');
-    doing.setAttribute('data-testid', 'live-card-objective-' + name);
+    doing.setAttribute('data-testid', 'live-card-task-' + name);
     var tool = el('div', 'line');
     var url = el('div', 'line');
     var shot = el('button', 'shot');
@@ -519,18 +519,18 @@ export const LIVE_PAGE = `<!doctype html>
     node.textContent = '';
     if (!lines || !lines.length) { node.appendChild(el('div', 'none', 'nothing recorded yet')); return; }
     var group = null;
-    var groupObjective = null;
+    var groupTask = null;
     var groups = 0;
     lines.forEach(function (line) {
-      var objective = line.objective || '';
-      if (!group || objective !== groupObjective) {
-        group = el('div', 'group' + (objective ? ' g' + (groups % 4) : ''));
-        if (objective) { groups += 1; group.title = objective; }
+      var task = line.task || '';
+      if (!group || task !== groupTask) {
+        group = el('div', 'group' + (task ? ' g' + (groups % 4) : ''));
+        if (task) { groups += 1; group.title = task; }
         if (onGroup) {
-          group.addEventListener('mouseenter', function () { onGroup(objective); });
+          group.addEventListener('mouseenter', function () { onGroup(task); });
           group.addEventListener('mouseleave', function () { onGroup(null); });
         }
-        groupObjective = objective;
+        groupTask = task;
         node.appendChild(group);
       }
       var row = el('div', 'row');
@@ -550,15 +550,15 @@ export const LIVE_PAGE = `<!doctype html>
     var d = describe(s);
     card.root.className = 'card' + (s.state === 'stuck' ? ' stuck' : '');
     card.role.textContent = s.role === 'anonymous' ? '' : s.role;
-    card.task.textContent = s.task || '';
-    card.task.title = s.task || '';
-    card.task.hidden = !s.task;
+    card.task.textContent = s.objective || '';
+    card.task.title = s.objective || '';
+    card.task.hidden = !s.objective;
     // What it is doing right now, in the agent's words. A session that acts
     // without saying is refused by the engine, so a blank one here is a
     // session that has not acted yet — say that rather than showing nothing.
-    card.doing.textContent = s.objective || 'not said yet';
-    card.doing.title = s.objective || '';
-    card.doing.className = 'doing' + (s.objective ? '' : ' unset');
+    card.doing.textContent = s.task || 'not said yet';
+    card.doing.title = s.task || '';
+    card.doing.className = 'doing' + (s.task ? '' : ' unset');
     card.badge.className = 'badge ' + s.state;
     card.badge.textContent = d.badge;
     card.tool.textContent = d.tool;
@@ -574,8 +574,8 @@ export const LIVE_PAGE = `<!doctype html>
     document.getElementById('focus-img').alt = 'Live view of ' + name;
     document.getElementById('focus-img').src = frames[name] || shotUrl(name);
     document.getElementById('focus').classList.add('open');
-    hoverObjective = null;
-    renderFeed(document.getElementById('focus-feed'), (latest[name] || {}).feed, showObjective);
+    hoverTask = null;
+    renderFeed(document.getElementById('focus-feed'), (latest[name] || {}).feed, showTask);
     syncEvents();
     loadFullFeed(name);
     paintFocus();
@@ -592,7 +592,7 @@ export const LIVE_PAGE = `<!doctype html>
   function loadFullFeed(name) {
     fetch('api/activity?session=' + encodeURIComponent(name), { cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (d) { if (d && focused === d.session) renderFeed(document.getElementById('focus-feed'), d.feed, showObjective); })
+      .then(function (d) { if (d && focused === d.session) renderFeed(document.getElementById('focus-feed'), d.feed, showTask); })
       .catch(function () { /* the short feed from the last poll stays on screen */ });
   }
 
@@ -604,24 +604,24 @@ export const LIVE_PAGE = `<!doctype html>
 
   // The pointer is over a group of the close-up's feed: the brief shows the
   // objective those actions served. It goes back to the current one on leaving.
-  function showObjective(objective) {
-    hoverObjective = objective;
+  function showTask(task) {
+    hoverTask = task;
     paintBrief();
   }
   function paintBrief() {
     var s = focused && latest[focused];
     // The engine sees tool calls, not reasoning: both of these are the agent's own words, or nothing.
-    setBrief('focus-task', s && s.task, 'Not given. An agent sets it when it attaches the session.');
-    var head = document.getElementById('focus-objective-head');
-    if (hoverObjective !== null) {
-      head.textContent = 'Objective for these actions';
-      setBrief('focus-objective', hoverObjective, 'No journey was running.');
-      document.getElementById('focus-objective-since').textContent = '';
+    setBrief('focus-objective', s && s.objective, 'Not given. An agent sets it when it attaches the session.');
+    var head = document.getElementById('focus-task-head');
+    if (hoverTask !== null) {
+      head.textContent = 'Doing, for these actions';
+      setBrief('focus-task', hoverTask, 'Nothing was stated for these.');
+      document.getElementById('focus-task-since').textContent = '';
     } else {
-      head.textContent = 'Current objective';
-      setBrief('focus-objective', s && s.objective, 'No journey running. An agent starts one with scout_journey.');
-      document.getElementById('focus-objective-since').textContent =
-        s && s.objective && s.objectiveSince ? 'for ' + held(Date.now() + skew - Date.parse(s.objectiveSince)) : '';
+      head.textContent = 'Doing now';
+      setBrief('focus-task', s && s.task, 'Nothing stated yet.');
+      document.getElementById('focus-task-since').textContent =
+        s && s.task && s.taskSince ? 'for ' + held(Date.now() + skew - Date.parse(s.taskSince)) : '';
     }
   }
   // Once a second, from the status poll: the bar, the brief, and every third time the long feed.
@@ -700,7 +700,7 @@ export const LIVE_PAGE = `<!doctype html>
   });
   document.getElementById('focus-close').addEventListener('click', closeFocus);
   // A re-rendered feed replaces the group under the pointer without a mouseleave; leaving the feed itself still resets.
-  document.getElementById('focus-feed').addEventListener('mouseleave', function () { showObjective(null); });
+  document.getElementById('focus-feed').addEventListener('mouseleave', function () { showTask(null); });
   document.getElementById('focus').addEventListener('click', function (e) { if (e.target === this) closeFocus(); });
   document.getElementById('report-open').addEventListener('click', openReport);
   document.getElementById('finished-report').addEventListener('click', openReport);

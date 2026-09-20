@@ -11,7 +11,7 @@
  *   npx tsx --test scripts/dispatch-test.ts
  */
 import assert from "node:assert/strict";
-import { needsObjective, normalizeObjective, objectiveRefusal, OBJECTIVE_MAX } from "../src/engine/objective.ts";
+import { needsTask, normalizeTask, taskRefusal, TASK_MAX } from "../src/engine/task.ts";
 import test from "node:test";
 import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
 import { revealedLines } from "../src/engine/hover.ts";
@@ -253,12 +253,12 @@ test("hover reports text that appeared, not text that only moved to a new line",
 
 // ---- the objective every acting tool needs ---------------------------------
 
-test("a tool that changes the app needs an objective; reading the page does not", () => {
+test("a tool that changes the app needs a task; reading the page does not", () => {
   // The live view can only show what the agent states. Left optional it was
   // usually blank, so a watcher saw a session clicking through their app with
   // nothing to say why.
   for (const acting of ["scout_navigate", "scout_back", "scout_click", "scout_type", "scout_select", "scout_press", "scout_upload", "scout_run_plan"]) {
-    assert.equal(needsObjective(acting), true, acting);
+    assert.equal(needsTask(acting), true, acting);
   }
   // Orienting is what an agent does before it can say what it is about to do.
   for (const reading of [
@@ -274,22 +274,30 @@ test("a tool that changes the app needs an objective; reading the page does not"
     "scout_note",
     "scout_report",
   ]) {
-    assert.equal(needsObjective(reading), false, reading);
+    assert.equal(needsTask(reading), false, reading);
   }
 });
 
-test("an objective is one bounded line, and an empty one clears it", () => {
-  assert.equal(normalizeObjective("  Sign in as QA_Team\n  and check where it lands  "), "Sign in as QA_Team and check where it lands");
-  assert.equal(normalizeObjective("x".repeat(400)).length, OBJECTIVE_MAX);
-  assert.equal(normalizeObjective("   "), "");
-  assert.equal(normalizeObjective(undefined), "");
+test("a task is one bounded line, and an empty one clears it", () => {
+  assert.equal(normalizeTask("  Sign in as QA_Team\n  and check where it lands  "), "Sign in as QA_Team and check where it lands");
+  // Longer than the bound is cut at a word, and says it was cut.
+  const passed = "Filtering the documents register by status, then checking that the URL keeps the filter after a reload and through a shared link";
+  const long = normalizeTask(passed);
+  assert.ok(long.length <= TASK_MAX, String(long.length));
+  assert.ok(long.endsWith("…"), long);
+  const body = long.slice(0, -1);
+  assert.ok(passed.startsWith(body), "what is kept is a prefix of what was passed");
+  assert.equal(passed[body.length], " ", "cut at a word boundary, not mid-word");
+  assert.equal(normalizeTask("x".repeat(400)).length, TASK_MAX, "a single long token is still cut to the bound");
+  assert.equal(normalizeTask("   "), "");
+  assert.equal(normalizeTask(undefined), "");
 });
 
-test("the refusal names the parameter, the shape of a good objective, and how long it lasts", () => {
+test("the refusal names the parameter, the shape of a good task, and how long it lasts", () => {
   // An agent that reads this once should not need it a second time.
-  const refusal = objectiveRefusal("scout_click");
-  assert.match(refusal, /^scout_click needs an objective/);
-  assert.match(refusal, /objective:"…"/);
+  const refusal = taskRefusal("scout_click");
+  assert.match(refusal, /^scout_click needs a task/);
+  assert.match(refusal, /task:"…"/);
   assert.match(refusal, /stays set until you pass a different one/);
   assert.match(refusal, /scout_journey/);
 });

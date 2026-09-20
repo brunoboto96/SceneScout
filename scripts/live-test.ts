@@ -503,7 +503,7 @@ test("a card does not label a session anonymous", () => {
   assert.match(LIVE_PAGE, /s\.role === 'anonymous' \? '' : s\.role/);
 });
 
-test("the close-up puts the log beside the session's task and current objective", () => {
+test("the close-up puts the log beside the session's objective and what it is doing now", () => {
   // Log two thirds, brief one third. Both brief fields are the agent's own
   // words — the task from scout_attach, the objective from the active journey —
   // and each says plainly when it was not given, rather than showing nothing.
@@ -513,10 +513,10 @@ test("the close-up puts the log beside the session's task and current objective"
   assert.match(LIVE_PAGE, /data-testid="live-focus-task"/);
   assert.match(LIVE_PAGE, /data-testid="live-focus-objective"/);
   assert.match(LIVE_PAGE, /An agent sets it when it attaches the session/);
-  assert.match(LIVE_PAGE, /No journey running/);
+  assert.match(LIVE_PAGE, /Nothing stated yet/);
 });
 
-test("the status poll carries each session's task and objective", async () => {
+test("the status poll carries each session's objective and current task", async () => {
   const at = new Date(T0).toISOString();
   const provider: LiveProvider = {
     ...fakeProvider([]).provider,
@@ -525,15 +525,15 @@ test("the status poll carries each session's task and objective", async () => {
       pid: 1,
       version: "t",
       at,
-      sessions: [entry("admin", { task: "Approve and reject orders as a manager", objective: "Clear the approvals queue", objectiveSince: at })],
+      sessions: [entry("admin", { objective: "Approve and reject orders as a manager", task: "Clear the approvals queue", taskSince: at })],
     }),
   };
   const live = new LiveServer(provider);
   try {
     const { port, token } = await live.start();
     const s = (JSON.parse((await request(port, `/${token}/api/status`)).body.toString()) as { sessions: SessionStatus[] }).sessions[0];
-    assert.equal(s?.task, "Approve and reject orders as a manager");
-    assert.equal(s?.objective, "Clear the approvals queue");
+    assert.equal(s?.objective, "Approve and reject orders as a manager");
+    assert.equal(s?.task, "Clear the approvals queue");
   } finally {
     await live.stop();
   }
@@ -563,7 +563,7 @@ test("each feed line carries the goal of the journey it was part of, and only th
   ];
   const feed = feedForSession(log, "admin", 60, (u) => u.replace("s3cret", "[redacted]"));
   assert.deepEqual(
-    feed.map((l) => [l.action, l.objective]),
+    feed.map((l) => [l.action, l.task]),
     [
       ["attach", undefined],
       ["journey:start", "Approve an order"],
@@ -582,7 +582,7 @@ test("a window that opens in the middle of a journey still knows which journey",
   const log = [logged("admin", "journey:start", { target: "Find the broken chart" }), ...Array.from({ length: 10 }, (_, i) => logged("admin", `step-${i}`))];
   const feed = feedForSession(log, "admin", 3);
   assert.deepEqual(
-    feed.map((l) => [l.action, l.objective]),
+    feed.map((l) => [l.action, l.task]),
     [
       ["step-7", "Find the broken chart"],
       ["step-8", "Find the broken chart"],
@@ -591,24 +591,24 @@ test("a window that opens in the middle of a journey still knows which journey",
   );
   const ended = [...log, logged("admin", "journey:end", { target: "Find the broken chart" }), logged("admin", "snapshot"), logged("admin", "click")];
   assert.deepEqual(
-    feedForSession(ended, "admin", 2).map((l) => l.objective),
+    feedForSession(ended, "admin", 2).map((l) => l.task),
     [undefined, undefined],
     "after the end marker the lines belong to no journey",
   );
 });
 
-test("the close-up groups the feed by journey and shows a hovered group's objective in the brief", () => {
+test("the close-up groups the feed by task and shows a hovered group's task in the brief", () => {
   const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
   const renderer = script.slice(script.indexOf("function renderFeed"), script.indexOf("function paint("));
-  assert.match(renderer, /line\.objective/);
+  assert.match(renderer, /line\.task/);
   assert.match(renderer, /'group'/);
   assert.match(renderer, /mouseenter/);
   assert.match(renderer, /mouseleave/);
-  assert.match(LIVE_PAGE, /id="focus-objective-head"/);
-  assert.match(script, /Objective for these actions/);
-  assert.match(script, /No journey was running\./);
+  assert.match(LIVE_PAGE, /id="focus-task-head"/);
+  assert.match(script, /Doing, for these actions/);
+  assert.match(script, /Nothing was stated for these\./);
   const css = LIVE_PAGE.slice(0, LIVE_PAGE.indexOf("</style>"));
-  assert.match(css, /\.feed \.g3 \{ background: rgba\(/, "four tints, so consecutive journeys never share one");
+  assert.match(css, /\.feed \.g3 \{ background: rgba\(/, "four tints, so consecutive tasks never share one");
 });
 
 // ---- frames for every watched session over one connection ----------------
@@ -871,7 +871,7 @@ test("pointing at a feed group repaints the brief without refetching the feed", 
   // Every third repaint refetched the long feed, which replaced the very
   // group under the pointer.
   const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
-  const show = script.slice(script.indexOf("function showObjective"), script.indexOf("function paintBrief"));
+  const show = script.slice(script.indexOf("function showTask"), script.indexOf("function paintBrief"));
   assert.match(show, /paintBrief\(\)/);
   assert.doesNotMatch(show, /paintFocus|loadFullFeed/);
 });
@@ -976,10 +976,61 @@ test("the page shows the report when the run ends, and warns before the only cop
 test("a card says what its session is doing, and says so plainly when it has not said", () => {
   // The objective was only in the close-up, so the grid — the thing a watcher
   // scans — showed six sessions with no hint of what any of them was for.
-  assert.match(LIVE_PAGE, /'live-card-objective-' \+ name/);
+  assert.match(LIVE_PAGE, /'live-card-task-' \+ name/);
   const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
-  assert.match(script, /card\.doing\.textContent = s\.objective \|\| 'not said yet';/);
-  assert.match(script, /card\.doing\.className = 'doing' \+ \(s\.objective \? '' : ' unset'\);/);
+  assert.match(script, /card\.doing\.textContent = s\.task \|\| 'not said yet';/);
+  assert.match(script, /card\.doing\.className = 'doing' \+ \(s\.task \? '' : ' unset'\);/);
   const css = LIVE_PAGE.slice(0, LIVE_PAGE.indexOf("</style>"));
   assert.match(css, /\.doing\.unset \{ color: var\(--stuck\); \}/, "a session that has not said reads as a problem, not as blank space");
+});
+
+test("the feed groups by the batch objective too, not only by journeys", () => {
+  // The pastel groups in the close-up are built from each line's objective.
+  // Only journeys wrote a marker, so a session that states objectives the
+  // ordinary way — which is now every session — had an untinted feed saying
+  // nothing about why any of it happened.
+  const log = [
+    logged("admin", "attach"),
+    logged("admin", "task", { target: "Sign in as QA_Team and check where it lands" }),
+    logged("admin", "click", { target: "Sign in" }),
+    logged("admin", "task", { target: "Fill the deviation form to check submit works" }),
+    logged("admin", "type", { target: "Title" }),
+    logged("admin", "journey:start", { target: "Raise a deviation end to end" }),
+    logged("admin", "click", { target: "Submit" }),
+    logged("admin", "journey:end", { target: "Raise a deviation end to end", result: "completed" }),
+    logged("admin", "snapshot"),
+  ];
+  assert.deepEqual(
+    feedForSession(log, "admin", 60).map((l) => [l.action, l.task]),
+    [
+      ["attach", undefined],
+      ["task", "Sign in as QA_Team and check where it lands"],
+      ["click", "Sign in as QA_Team and check where it lands"],
+      ["task", "Fill the deviation form to check submit works"],
+      ["type", "Fill the deviation form to check submit works"],
+      ["journey:start", "Raise a deviation end to end"],
+      ["click", "Raise a deviation end to end"],
+      ["journey:end", "Raise a deviation end to end"],
+      // The journey is over; the batch objective is standing again.
+      ["snapshot", "Fill the deviation form to check submit works"],
+    ],
+  );
+});
+
+test("a window that opens mid-batch still knows the objective, and a journey still outranks it", () => {
+  const before = [logged("admin", "task", { target: "Walk the approvals queue" }), ...Array.from({ length: 10 }, (_, i) => logged("admin", `step-${i}`))];
+  assert.deepEqual(
+    feedForSession(before, "admin", 2).map((l) => l.task),
+    ["Walk the approvals queue", "Walk the approvals queue"],
+  );
+  const inJourney = [
+    logged("admin", "task", { target: "Walk the approvals queue" }),
+    logged("admin", "journey:start", { target: "Approve one order" }),
+    ...Array.from({ length: 10 }, (_, i) => logged("admin", `step-${i}`)),
+  ];
+  assert.deepEqual(
+    feedForSession(inJourney, "admin", 2).map((l) => l.task),
+    ["Approve one order", "Approve one order"],
+    "the journey is what is running, so it is what the group says",
+  );
 });
