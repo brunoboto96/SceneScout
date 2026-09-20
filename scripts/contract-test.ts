@@ -433,17 +433,20 @@ test("replay: a session's steps are grouped into the blocks its tasks made", () 
 test("replay: everything the app under test supplies is escaped", () => {
   const html = buildReplayHtml({
     markdown: "## <img src=x onerror=alert(1)>\n\n- **Id:** `<b>no</b>`\n",
-    project: "/p/<script>",
+    project: "/p/<SCRIPT>",
     at: "2026-09-20T14:44:23.740Z",
     version: "9.9.9",
-    sessions: [{ session: "<svg onload=1>", role: "clerk", objective: "</style><b>", steps: [step({ target: '<iframe src="evil">' })] }],
+    sessions: [{ session: "<svg onload=1>", role: "clerk", objective: "</style><b>", steps: [step({ target: '<IFRAME src="evil">' })] }],
   });
-  assert.ok(!/<script>/.test(html), "no markup from the app under test survives into the document");
-  assert.ok(!/<iframe/.test(html));
+  // Case-insensitive on purpose: a browser reads <SCRIPT> as a script tag, so
+  // an assertion that only looks for the lower-case spelling would pass on an
+  // escaper that let the upper-case one through.
+  assert.ok(!/<script/i.test(html), "no markup from the app under test survives into the document");
+  assert.ok(!/<iframe/i.test(html));
   // The payload is still READ in full — a finding whose title is a payload has
   // to show it — but as text: the angle brackets never reach the parser.
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
-  assert.ok(!/<img src=x/.test(html));
+  assert.ok(!/<img src=x/i.test(html));
   assert.match(html, /&lt;svg onload=1&gt;/);
   assert.equal(escapeHtml(`&<>"'`), "&amp;&lt;&gt;&quot;&#39;");
 });
@@ -635,8 +638,11 @@ test("replay-redaction: a token in a step's URL never reaches the document that 
 
 test("replay: a frame request can only name a file inside the run's own recordings", () => {
   const root = path.join(path.sep, "p", ".scenescout", "recordings");
-  assert.equal(resolveFrame(root, "recordings/clerk/0001-click.jpg"), path.join(root, "clerk", "0001-click.jpg"));
-  assert.equal(resolveFrame(root, "clerk/0001-click.jpg"), path.join(root, "clerk", "0001-click.jpg"));
+  // Resolved on both sides: Windows adds the drive letter, so a literal join
+  // is not what the function returns there.
+  const want = path.resolve(root, "clerk", "0001-click.jpg");
+  assert.equal(resolveFrame(root, "recordings/clerk/0001-click.jpg"), want);
+  assert.equal(resolveFrame(root, "clerk/0001-click.jpg"), want);
   // A viewer types the address, so every one of these arrives eventually.
   for (const asked of ["../../etc/passwd", "recordings/../../../etc/passwd", path.join(path.sep, "etc", "passwd"), "", "..", "recordings/", "a\0b"]) {
     assert.equal(resolveFrame(root, asked), null, JSON.stringify(asked));

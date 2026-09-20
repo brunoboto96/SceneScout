@@ -94,8 +94,11 @@ export function resolveFrame(root: string, relPath: string): string | null {
   if (!relPath) return null;
   const inside = relPath.replace(/^recordings[\\/]/, "");
   if (!inside || inside.includes("\0")) return null;
-  const file = path.resolve(root, inside);
-  return file.startsWith(root + path.sep) ? file : null;
+  // Both sides resolved: on Windows `path.resolve` prefixes the drive, so
+  // comparing its output against a root that has none rejects every frame.
+  const base = path.resolve(root);
+  const file = path.resolve(base, inside);
+  return file.startsWith(base + path.sep) ? file : null;
 }
 
 /** Text from the app under test reaches this document, so nothing is interpolated unescaped. */
@@ -140,6 +143,13 @@ function stamp(iso: string): string {
   return iso.length >= 16 ? `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC` : iso;
 }
 
+/**
+ * What an image that will not load does. This page is meant to be handed on,
+ * and a copy sent without its `recordings/` folder would otherwise show a row
+ * of broken icons under a finding that still counts them as evidence.
+ */
+const GONE = `onerror="this.parentNode.classList.add('gone')"`;
+
 /** A result that reads as a failure, so a step that went wrong is visible without reading every line. */
 const BAD_RESULT = /error|fail|refus|block|violation|abandoned/i;
 
@@ -147,7 +157,7 @@ function renderStep(step: ActivityLine, framePrefix = "", savedAt = ""): string 
   const detail = [step.target, step.result ? `→ ${step.result}` : ""].filter(Boolean).join(" ") || step.url || "";
   const bad = BAD_RESULT.test(step.result ?? "") ? " bad" : "";
   const frame = step.frame
-    ? `<a class="frame" href="${escapeHtml(framePrefix + step.frame)}" target="_blank" rel="noreferrer"><img loading="lazy" src="${escapeHtml(framePrefix + step.frame)}" alt="What the page showed at this step"></a>`
+    ? `<a class="frame" href="${escapeHtml(framePrefix + step.frame)}" target="_blank" rel="noreferrer"><img loading="lazy" ${GONE} src="${escapeHtml(framePrefix + step.frame)}" alt="What the page showed at this step"></a>`
     : "";
   const where = savedAt && step.frame ? `<p class="onDisk">${escapeHtml(savedAt + "/" + step.frame)}</p>` : "";
   return (
@@ -194,7 +204,8 @@ function renderEvidence(e: FindingEvidence, framePrefix = "", savedAt = ""): str
   const shots = e.frames
     .map(
       (f) =>
-        `<figure><img loading="lazy" src="${escapeHtml(framePrefix + f.frame)}" alt="The page when this step ran">` +
+        `<figure><img loading="lazy" ${GONE} src="${escapeHtml(framePrefix + f.frame)}" alt="The page when this step ran">` +
+        `<p class="gone-note">This frame is not beside this file. Frames live in the run's <code>recordings/</code> folder, which travels with it.</p>` +
         `<figcaption>${escapeHtml(clock(f.at))} <b>${escapeHtml(f.action)}</b> ${escapeHtml(f.detail)}` +
         (savedAt ? `<span class="onDisk">${escapeHtml(savedAt + "/" + f.frame)}</span>` : "") +
         `</figcaption></figure>`,
@@ -351,6 +362,10 @@ details.evidence img { width:100%; max-height:300px; object-fit:cover; object-po
 .onDisk { display:block; margin-top:4px; color:var(--muted); font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
 header .served { flex:1 1 100%; margin:6px 0 0; color:var(--muted); font-size:12px; }
 header .served code { font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
+.gone-note { display:none; margin:0; padding:14px; border:1px dashed var(--line); border-radius:6px; color:var(--muted); font-size:12px; }
+figure.gone .gone-note, a.gone .gone-note { display:block; }
+figure.gone img, a.gone img { display:none; }
+a.frame.gone { display:block; max-width:min(100%,720px); }
 details.evidence figcaption { margin-top:4px; color:var(--muted); font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
 `;
 
