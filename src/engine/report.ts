@@ -3,6 +3,8 @@ import path from "node:path";
 import { SHARED_CHROME_ROUTE, type Finding, type MemoryStore, type PageScore } from "./memory.js";
 import type { OracleViolation } from "./oracles.js";
 import type { WriteMode } from "./policy.js";
+import { feedForSession } from "./live.js";
+import { buildReplayHtml, evidenceFor, type FindingEvidence, type ReplaySession } from "./replay.js";
 
 function playwrightSkeleton(f: Finding): string {
   const routeClass = f.state.split("#")[0].split("?")[0];
@@ -58,6 +60,71 @@ function violationRollup(oracleLog: OracleViolation[]): string[] {
 const SEVERITY_ORDER: Record<Finding["severity"], number> = { high: 0, medium: 1, low: 2 };
 const SEVERITY_ICON: Record<Finding["severity"], string> = { high: "🔴", medium: "🟠", low: "🟡" };
 
+/**
+ * What to call the project in a document meant to be handed on. The memory
+ * directory's absolute path names a person's home directory and often the
+ * machine it ran on; the project's own folder name says which project it was
+ * without any of that.
+ */
+function projectName(dir: string): string {
+  const parent = path.dirname(dir);
+  return path.basename(parent) || path.basename(dir) || "project";
+}
+
+/** Every session that did anything, with its steps in order — what the HTML replays. */
+function replaySessions(memory: MemoryStore): ReplaySession[] {
+  const names = [...new Set(memory.actionLog.map((e) => e.session ?? "default"))];
+  return names.map((session) => ({
+    session,
+    // The role a session ran as is not on the log's entries; until it is, the
+    // session's own name is the honest label rather than a guess from coverage.
+    role: "",
+    // No redactor: the log is redacted as it is WRITTEN (memory.logAction
+    // covers url, target and result), so what is stored is already clean.
+    // Filtering again here would run a regex over every step of a long run to
+    // find what cannot be there. `replay-redaction` in contract-test pins it.
+    steps: feedForSession(memory.actionLog, session, Number.MAX_SAFE_INTEGER),
+  }));
+}
+
+/** The frames that were on screen while each finding was being found. */
+export function findingEvidence(memory: MemoryStore, sessions: readonly ReplaySession[]): FindingEvidence[] {
+  const all = sessions.flatMap((s) => s.steps).sort((a, b) => a.at.localeCompare(b.at));
+  return memory.findings
+    .map((f) => {
+      // The session that filed it, where it said so: with three browsers
+      // running at once, the run's whole log interleaves them, and the steps
+      // before a finding would come from whichever lane acted last.
+      const own = f.session ? sessions.find((s) => s.session === f.session) : undefined;
+      return { id: f.id, frames: evidenceFor(own ? own.steps : all, f.foundAt) };
+    })
+    .filter((e) => e.frames.length > 0);
+}
+
+/**
+ * The whole run as one page, for the live view to serve at its own address.
+ * Frames go through the view's own route, since the browser is reading this
+ * over HTTP rather than from the folder the frames live in.
+ */
+export function replayDocument(memory: MemoryStore, markdown: string, version = ""): string {
+  const sessions = replaySessions(memory);
+  return buildReplayHtml({
+    markdown,
+    sessions,
+    evidence: findingEvidence(memory, sessions),
+    project: projectName(memory.dir),
+    at: new Date().toISOString(),
+    version,
+    framePrefix: "record/",
+    savedAt: memory.dir,
+  });
+}
+
+/** What the live view shows under each finding on a recorded run: the frames it was found on. */
+export function reportEvidence(memory: MemoryStore): FindingEvidence[] {
+  return findingEvidence(memory, replaySessions(memory));
+}
+
 export interface ReportExtras {
   routesVisited: number;
   routesTotal: number;
@@ -70,6 +137,8 @@ export interface ReportExtras {
   policyAttributed?: number;
   /** The write mode the run used. In "observe" no form can be submitted, which the ledger must say rather than blame the run. */
   mode?: WriteMode;
+  /** The engine's version, for the HTML's header. */
+  version?: string;
 }
 
 /**
@@ -547,13 +616,53 @@ export function generateReport(
 
   const markdown = lines.join("\n");
   const outPath = path.join(memory.dir, "report.md");
-  if (opts.write !== false) fs.writeFileSync(outPath, markdown);
+  const htmlPath = path.join(memory.dir, "report.html");
+  let htmlWritten = false;
+  let htmlProblem = "";
+  if (opts.write !== false) {
+    fs.writeFileSync(outPath, markdown);
+    // The same run as one file that outlives the engine: the live view's
+    // address is a port in a process, and refreshing after the run is over
+    // gets nothing. This opens from the file system, offline, forever.
+    try {
+      const sessions = replaySessions(memory);
+      fs.writeFileSync(
+        htmlPath,
+        buildReplayHtml({
+          markdown,
+          sessions,
+          evidence: findingEvidence(memory, sessions),
+          project: projectName(memory.dir),
+          at: new Date().toISOString(),
+          version: extras?.version ?? "",
+        }),
+      );
+      htmlWritten = true;
+    } catch (err) {
+      // The markdown is the report of record and is already on disk, so this
+      // must not fail the report — but the summary then says what went wrong
+      // rather than naming a file that is not there.
+      htmlProblem = err instanceof Error ? err.message : String(err);
+      // An earlier run's page would otherwise sit beside a fresh report.md,
+      // carrying its own timestamp, looking like this run.
+      try {
+        fs.rmSync(htmlPath, { force: true });
+      } catch {
+        htmlProblem += "; an older one may still be beside it";
+      }
+    }
+  }
 
   // Bounded summary for the tool result: full reports have exceeded client
   // token limits in real runs (66–72KB observed) — the wire gets the digest,
   // the disk gets the document.
   const summaryLines: string[] = [
     `Report written to ${outPath}`,
+    ...(htmlWritten
+      ? [`The same run as one page, with every session's steps: ${htmlPath}`]
+      : htmlProblem
+        ? [`The one-page version of this run could NOT be written (${htmlProblem}); ${outPath} is unaffected.`]
+        : []),
     ``,
     `OPEN FINDINGS: ${open.length} (${open.filter((f) => f.severity === "high").length} high) — ${current.length} this session, ${historical.length} historical${resolved.length ? `, ${resolved.length} resolved` : ""}`,
     ...(extras && extras.routesTotal > 0

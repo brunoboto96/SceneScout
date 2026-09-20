@@ -73,10 +73,12 @@ export interface ActivityLine {
   result?: string;
   /** The task these actions were part of, so the feed can group them under it. */
   task?: string;
+  /** The frame kept for this step, on a recorded run. */
+  frame?: string;
 }
 
 /** What the feed reads from an action-log entry. */
-export type LoggedAction = Pick<ActionLogEntry, "at" | "action" | "target" | "url" | "result" | "session">;
+export type LoggedAction = Pick<ActionLogEntry, "at" | "action" | "target" | "url" | "result" | "session" | "frame">;
 
 /**
  * One session's most recent actions, oldest first, each tagged with the
@@ -119,6 +121,7 @@ export function feedForSession(log: readonly LoggedAction[], session: string, li
     const line: ActivityLine = { at: e.at, action: e.action, url: redact(e.url) };
     if (e.target !== undefined) line.target = e.target;
     if (e.result !== undefined) line.result = e.result;
+    if (e.frame !== undefined) line.frame = e.frame;
     if (task !== undefined) line.task = task;
     lines.push(line);
     if (e.action === JOURNEY_END) goal = undefined;
@@ -145,6 +148,12 @@ export interface ReportFile {
   written: boolean;
 }
 
+/** The frames a finding was found on, for the evidence under it. */
+export interface FindingFrames {
+  id: string;
+  frames: Array<{ at: string; action: string; detail: string; frame: string }>;
+}
+
 /** One session as `api/status` sends it: its board entry, the state worked out on the server, and a short feed. */
 export interface LiveSessionView extends SessionStatus {
   state: SessionState;
@@ -157,8 +166,13 @@ export interface StatusResponse extends Omit<LiveSnapshot, "sessions"> {
 
 /** How many feed lines a status poll carries per session. Enough to read the last move at a glance; the close-up asks for more. */
 export const FEED_LINES = 6;
-/** The cap the close-up gets. A long run's log is thousands of lines and none of it needs to reach the page. */
-export const FEED_LINES_MAX = 60;
+/**
+ * The cap the close-up gets. A long run's log is thousands of lines and none
+ * of it needs to reach the page — but this is also what the timeline is drawn
+ * from, and a timeline that only reaches back a minute cannot be scrubbed.
+ * The whole run, every step of it, is the page at `run`.
+ */
+export const FEED_LINES_MAX = 300;
 
 export type StatusFields = Pick<SessionStatus, "role" | "phase" | "tool" | "url"> & Partial<Pick<SessionStatus, "budgetMs">> & Partial<SessionDescription>;
 
@@ -340,6 +354,15 @@ export function watchTarget(input: { status: StatusFile | "unreadable" | null; a
   return { url: `http://127.0.0.1:${port}/${clean}/` };
 }
 
+/** What `run` says when there is no run to show: a page, because a person navigated here. */
+export const NO_RUN_PAGE =
+  '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>No run to show</title>' +
+  "<style>body{margin:0;display:grid;place-items:center;min-height:100vh;background:#0e1116;color:#e6e9ee;" +
+  'font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:34rem;padding:2rem;text-align:center}' +
+  "a{color:#7aa2ff}</style></head><body><main><h1>Nothing to show yet</h1>" +
+  "<p>This run has not produced a report. It may not have started, or its engine may have exited since you opened this page.</p>" +
+  '<p><a href="./">Back to the live board</a></p></main></body></html>';
+
 export interface LiveProvider {
   /** Synchronous and cheap: called on every request, sometimes twice. */
   snapshot(): LiveSnapshot;
@@ -348,9 +371,18 @@ export interface LiveProvider {
   /**
    * The run's report as it stands now, rendered without being written — and
    * once the run's sessions have closed, the last rendering of it, because a
-   * finished run is exactly when someone wants to read it.
+   * finished run is exactly when someone wants to read it. On a recorded run
+   * it carries the frames each finding was found on.
    */
-  report(): { markdown: string; at: string } | null;
+  report(): { markdown: string; at: string; evidence?: FindingFrames[] } | null;
+  /** The whole run as one page, to serve at its own address, or null when there is no run to show. */
+  replay(): string | null;
+  /**
+   * One recorded frame, by the path the feed gave for it. Null when the run
+   * was not recorded, or the path is not one of its frames — a viewer may ask
+   * for anything, so the provider decides what exists.
+   */
+  frame(relPath: string): Promise<Buffer | null>;
   /** A JPEG of the session's page, or null when there is no such session or no frame could be taken. */
   screenshot(session: string): Promise<Buffer | null>;
   /**
@@ -508,6 +540,27 @@ export class LiveServer {
       const report = this.provider.report();
       if (!report) return this.send(res, 404, "no run attached");
       return this.send(res, 200, JSON.stringify(report), "application/json; charset=utf-8");
+    }
+    if (route === "run" && !name) {
+      const doc = this.provider.replay();
+      // Somebody clicked a button or refreshed a bookmark to get here, so an
+      // answer they cannot read is worse than no link at all.
+      if (!doc) return this.send(res, 404, NO_RUN_PAGE, "text/html; charset=utf-8", { "Content-Security-Policy": LIVE_CSP });
+      return this.send(res, 200, doc, "text/html; charset=utf-8", { "Content-Security-Policy": LIVE_CSP });
+    }
+    if (route === "record" && name) {
+      // A recorded frame, by the path the feed gave. The provider decides what
+      // exists; nothing here builds a filesystem path from the request.
+      const rel = parts.slice(2).join("/");
+      let asked: string;
+      try {
+        asked = decodeURIComponent(rel);
+      } catch {
+        return this.send(res, 404, "not found");
+      }
+      const jpeg = await this.provider.frame(asked);
+      if (!jpeg) return this.send(res, 404, "no such frame");
+      return this.send(res, 200, jpeg, "image/jpeg", { "Content-Length": jpeg.length, "Cache-Control": "private, max-age=3600" });
     }
     if (route === "events" && !name) {
       const wanted = this.param(req, "sessions");

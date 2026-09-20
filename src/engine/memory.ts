@@ -27,6 +27,12 @@ export interface Finding {
   status?: "open" | "resolved";
   /** Set when a previously resolved finding was re-found — a regression. */
   regressedAt?: string;
+  /**
+   * The session that filed it. Several browsers run at once, so the frames
+   * that were on screen while it was found are that session's, not whichever
+   * lane happened to act in the same second.
+   */
+  session?: string;
 }
 
 /** An element class must appear on this many routes at minimum before it can count as shared chrome. */
@@ -138,6 +144,8 @@ export interface ActionLogEntry {
   /** Which named session wrote this — the shared log interleaves every role in a
    *  multi-role run, so per-session reads (e.g. journey paths) must filter by it. */
   session?: string;
+  /** The frame kept for this step, relative to the memory directory. Present only on a recorded run. */
+  frame?: string;
 }
 
 /** Latest quality score for one route, produced by the design audit. */

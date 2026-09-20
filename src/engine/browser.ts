@@ -19,6 +19,7 @@ import {
 import { OracleMonitor, formatViolations } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
+import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import {
   defaultEngine,
   focusAdvanceKey,
@@ -51,6 +52,8 @@ export interface AttachOptions {
   viewport?: { width: number; height: number };
   /** The session's objective: the whole remit this session was given, shown to whoever is watching the run. */
   objective?: string;
+  /** Keep a frame of the page after each action, under .scenescout/recordings/. Off by default; evidence for QA work. */
+  record?: boolean;
   /**
    * Share one MemoryStore across engines attached to the same project
    * (multi-session/multi-role runs): coverage and findings from every role
@@ -211,6 +214,8 @@ function actionabilityDiagnostic(message: string): string | null {
  */
 /** A screencast whose page has been gone for this many 500 ms ticks ends and says so; a re-attach takes fewer. */
 const SCREENCAST_PAGELESS_TICKS = 20;
+/** A frame for the record is worth a moment, not a stall: the action has already happened. */
+const RECORD_SHOT_TIMEOUT_MS = 2500;
 
 export class BrowserEngine {
   private browser: Browser | null = null;
@@ -319,6 +324,56 @@ export class BrowserEngine {
   private journey: { goal: string; startedAt: number; fromLog: number; startUrl: string } | null = null;
   /** The session's objective: the whole remit the agent was given at scout_attach. Empty when none was given. */
   private sessionObjective = "";
+
+  /**
+   * Keep a frame of the page after each action, as evidence. Off by default:
+   * a recording is pictures of somebody's app sitting in their project
+   * folder, which is the rule ADR 7 otherwise holds ("no frame touches the
+   * disk"). QA work is what earns the exception — a report says what was
+   * checked, a recording shows it.
+   */
+  private recording = false;
+  private framesKept = 0;
+  /** How many frames could not be written. The first one says so in the log; the rest are counted. */
+  private framesFailed = 0;
+
+  /**
+   * The frame for the step just taken, as a path relative to the memory
+   * directory, or undefined when this run is not recorded. Failing to write
+   * one must never fail the action: evidence is worth having, not worth
+   * losing a run over.
+   */
+  private async recordFrame(action: string): Promise<string | undefined> {
+    const dir = this.memory?.dir;
+    if (!this.recording || !dir || this.framesKept >= RECORD_MAX_FRAMES) return undefined;
+    const jpeg = await this.liveShot(RECORD_SHOT_TIMEOUT_MS);
+    if (!jpeg) return undefined;
+    const rel = framePath(this.sessionKey, this.framesKept + 1, action);
+    try {
+      await fs.promises.mkdir(path.dirname(path.join(dir, rel)), { recursive: true });
+      await fs.promises.writeFile(path.join(dir, rel), jpeg);
+    } catch (err) {
+      // A frame that cannot be written must not fail the action, but a run
+      // that keeps NOTHING — a read-only checkout, a full disk — would
+      // otherwise finish silently and produce a report with no evidence in
+      // it, which is the one thing recording exists to prevent. Said once,
+      // through the action log, so it reaches the live feed and the report.
+      this.framesFailed += 1;
+      if (this.framesFailed === 1) {
+        this.logAction({
+          action: "record:failed",
+          target: `no frame could be written under ${dir} (${err instanceof Error ? err.message : String(err)}); later failures are not repeated here`,
+          url: this.page?.url() ?? "",
+        });
+      }
+      return undefined;
+    }
+    this.framesKept += 1;
+    if (this.framesKept === RECORD_MAX_FRAMES) {
+      this.logAction({ action: "record:full", target: `${RECORD_MAX_FRAMES} frames kept; later steps have none`, url: this.page?.url() ?? "" });
+    }
+    return rel;
+  }
   /**
    * The batch of actions running right now. Required before a tool may act
    * (task.ts), stated by the agent on the call or by a journey, and kept
@@ -469,6 +524,11 @@ export class BrowserEngine {
     }
     this.mode = opts.mode ?? "read-only";
     this.sessionObjective = (opts.objective ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
+    this.recording = opts.record === true;
+    // A re-attached engine starts a new recording: numbering from where the
+    // last one stopped would run into the cap with frames it never took.
+    this.framesKept = 0;
+    this.framesFailed = 0;
     this.headed = opts.headed ?? false;
     this.blockedRequests = [];
     this.pendingCreations = new Set();
@@ -1034,7 +1094,8 @@ export class BrowserEngine {
         formatViolations(this.oracles.drain())
       );
     }
-    this.logAction({ action, target, url });
+    const frame = await this.recordFrame(action);
+    this.logAction({ action, target, url, ...(frame ? { frame } : {}) });
     await this.scanForInjections();
     const violations = this.oracles.drain();
     const mutations = this.drainMutations() + this.drainBlocked() + this.drainCreated();

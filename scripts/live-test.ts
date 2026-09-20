@@ -199,6 +199,8 @@ function fakeProvider(sessions: string[], feed: ActivityLine[] = []) {
       return sessions.includes(session) ? feed.slice(-limit) : [];
     },
     report: () => null,
+    replay: () => null,
+    frame: async () => null,
     screenshot: async (session) => {
       calls.screenshot += 1;
       return sessions.includes(session) ? JPEG : null;
@@ -441,7 +443,7 @@ test("a status poll carries a short feed per session, and asks for no more than 
 });
 
 test("the close-up asks for a longer feed, and only for a session that exists", async () => {
-  const history = Array.from({ length: 200 }, (_, i) => line({ action: `step-${i}` }));
+  const history = Array.from({ length: FEED_LINES_MAX + 40 }, (_, i) => line({ action: `step-${i}` }));
   const { provider, calls } = fakeProvider(["admin"], history);
   const live = new LiveServer(provider);
   try {
@@ -451,6 +453,7 @@ test("the close-up asks for a longer feed, and only for a session that exists", 
     const body = JSON.parse(reply.body.toString()) as { session: string; feed: ActivityLine[] };
     assert.equal(body.session, "admin");
     assert.equal(body.feed.length, FEED_LINES_MAX, "a long run's log is thousands of lines; the page gets a bounded slice");
+    assert.equal(body.feed[body.feed.length - 1].action, `step-${FEED_LINES_MAX + 39}`, "the slice kept is the recent end of the log");
     assert.deepEqual(calls.activity, [FEED_LINES_MAX]);
 
     assert.equal((await request(port, `/${token}/api/activity?session=nobody`)).status, 404);
@@ -948,7 +951,9 @@ test("the page shows the report when the run ends, and warns before the only cop
   const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
   // A run that had sessions and has none is finished: its browsers are gone,
   // and until scout_report has written the file this page is the only copy.
-  assert.match(script, /if \(snap\.sessions\.length > 0\) sawRun = true;/);
+  // A viewer who arrives after the last browser closed sees no session at all,
+  // so a named report file counts as evidence the run happened.
+  assert.match(script, /if \(snap\.sessions\.length > 0 \|\| snap\.report\) sawRun = true;/);
   assert.match(script, /finished = sawRun && snap\.sessions\.length === 0;/);
   assert.match(script, /if \(!reportShown\)/, "the report opens once when the run ends");
   assert.match(LIVE_PAGE, /data-testid="live-finished-state"/);
@@ -1046,4 +1051,115 @@ test("one pastel tint per task, and a close-up with no frame says so", () => {
   // The card already said when it had no frame; the close-up showed a broken image.
   assert.match(LIVE_PAGE, /#focus \.stage\.empty \.none \{ display: flex; \}/);
   assert.match(LIVE_PAGE, /No frame available\. The session's page may be closed/);
+});
+
+// ---- the recorded run: its own address, and the frames under each finding ----
+
+test("a recorded run is a page at its own address, and its frames are served from there", async () => {
+  const asked: string[] = [];
+  const provider: LiveProvider = {
+    ...fakeProvider(["clerk"]).provider,
+    replay: () => "<!doctype html><title>Run</title><h1>clerk</h1>",
+    frame: async (rel) => {
+      asked.push(rel);
+      return rel === "recordings/clerk/0007-click.jpg" ? JPEG : null;
+    },
+  };
+  const live = new LiveServer(provider);
+  try {
+    const { port, token } = await live.start();
+    const page = await request(port, `/${token}/run`);
+    assert.equal(page.status, 200);
+    assert.match(String(page.headers["content-type"]), /text\/html/);
+    // The document is served under the same policy as the board: it is one
+    // file, and nothing in it may fetch anything from anywhere.
+    assert.match(String(page.headers["content-security-policy"]), /default-src/);
+    assert.match(page.body.toString(), /clerk/);
+
+    const shot = await request(port, `/${token}/record/recordings/clerk/0007-click.jpg`);
+    assert.equal(shot.status, 200);
+    assert.equal(String(shot.headers["content-type"]), "image/jpeg");
+    assert.deepEqual(shot.body, JPEG);
+
+    // A viewer may ask for anything. The server hands the path to the provider
+    // whole and builds no filesystem path of its own, so an escape is the
+    // provider's to refuse — and it is refused, as a plain 404.
+    const out = await request(port, `/${token}/record/..%2f..%2fetc%2fpasswd`);
+    assert.equal(out.status, 404);
+    assert.ok(asked.includes("../../etc/passwd"), `the provider decides: ${JSON.stringify(asked)}`);
+  } finally {
+    await live.stop();
+  }
+});
+
+test("a run with no recording has no page and no frames, rather than a broken one", async () => {
+  const live = new LiveServer(fakeProvider(["clerk"]).provider);
+  try {
+    const { port, token } = await live.start();
+    assert.equal((await request(port, `/${token}/run`)).status, 404);
+    assert.equal((await request(port, `/${token}/record/recordings/clerk/0001-click.jpg`)).status, 404);
+  } finally {
+    await live.stop();
+  }
+});
+
+test("the report carries the frames each finding was found on, and the page hangs them under it", async () => {
+  const evidence = [
+    {
+      id: "e3aad70ee8",
+      frames: [{ at: new Date(T0).toISOString(), action: "click", detail: 'button "Create order"', frame: "recordings/clerk/0006-click.jpg" }],
+    },
+  ];
+  const provider: LiveProvider = {
+    ...fakeProvider(["clerk"]).provider,
+    report: () => ({ markdown: "## Findings\n", at: new Date(T0).toISOString(), evidence }),
+  };
+  const live = new LiveServer(provider);
+  try {
+    const { port, token } = await live.start();
+    const body = JSON.parse((await request(port, `/${token}/api/report`)).body.toString()) as { evidence: unknown };
+    assert.deepEqual(body.evidence, evidence);
+  } finally {
+    await live.stop();
+  }
+
+  // The panel reads that payload: a finding's id line carries its frames, and
+  // each one is fetched from the run's own frame route.
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
+  assert.match(script, /reportEvidence = d\.evidence \|\| \[\];/);
+  const shots = script.slice(script.indexOf("function evidenceFor"), script.indexOf("function renderMarkdown"));
+  assert.match(shots, /img\.src = 'record\/' \+ f\.frame;/);
+  assert.match(shots, /data-testid', 'live-report-evidence-'/);
+  // Nothing is shown for a finding with no frames: an unrecorded run reads as it always did.
+  assert.match(shots, /if \(!found \|\| !found\.frames\.length\) return null;/);
+  assert.ok(script.includes("/^\\*\\*Id:\\*\\* `([^`]+)`/"), "the id line is what the frames hang from");
+});
+
+test("every element the script reaches for is in the page", () => {
+  // A listener left behind on a control that was replaced threw on load and
+  // took the whole script with it: no polling, no cards, no finished panel —
+  // a blank page, with the failure visible only in the browser's console.
+  const markup = LIVE_PAGE.slice(0, LIVE_PAGE.indexOf("<script>"));
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
+  const present = new Set([...markup.matchAll(/id="([^"]+)"/g)].map((m) => m[1]));
+  // Only the literal lookups; the one that takes a variable is checked by its caller's tests.
+  const asked = [...script.matchAll(/getElementById\('([^']+)'\)/g)].map((m) => m[1]);
+  assert.ok(asked.length > 10, "the scan found the lookups");
+  assert.deepEqual(
+    asked.filter((id) => !present.has(id)),
+    [],
+    "the script asks for an element the page has not got",
+  );
+});
+
+test("the timeline is drawn from the close-up's long feed, and a re-render keeps it", () => {
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
+  // The status poll carries FEED_LINES; the close-up asks for FEED_LINES_MAX.
+  // Re-rendering the timeline from whichever was nearest to hand shrank it to
+  // six ticks the moment a step was picked.
+  const draw = script.slice(script.indexOf("function renderTimeline"), script.indexOf("function showStep"));
+  assert.match(draw, /timelineLines = lines \|\| timelineLines;/);
+  const step = script.slice(script.indexOf("function showStep"), script.indexOf("function backToLive"));
+  assert.doesNotMatch(step, /latest\[focused\]/, "a step is picked from the run the timeline already holds");
+  assert.match(script, /renderTimeline\(d\.feed\);/, "the long feed is what fills it");
 });

@@ -16,6 +16,7 @@ and which failure direction was chosen deliberately.
 | [0005](0005-keep-testable-logic-out-of-the-browser-module.md) | Logic that does not need Playwright lives outside `browser.ts` |
 | [0006](0006-stay-project-agnostic.md) | Nothing in this repo names or is tuned for a tested app |
 | [0007](0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md) | The live view is local, read-only, and leaves nothing behind |
+| [0008](0008-a-recorded-run-is-evidence-and-must-be-asked-for.md) | Recording is opt-in, and a recorded run is one self-contained page |
 
 ## Writing a new one
 

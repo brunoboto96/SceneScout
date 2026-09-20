@@ -1,6 +1,6 @@
 # 7. The live view is local, read-only, and leaves nothing behind
 
-Status: accepted
+Status: accepted — the disk rule is amended by [ADR 8](0008-a-recorded-run-is-evidence-and-must-be-asked-for.md)
 
 ## Context
 
