@@ -18,6 +18,7 @@ const packageRoot = path.join(here, "..");
 
 const EXPECTED_TOOLS = [
   "scout_playbook",
+  "scout_lane_report",
   "scout_scan",
   "scout_attach",
   "scout_session",

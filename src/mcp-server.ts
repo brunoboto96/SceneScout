@@ -34,7 +34,8 @@ import { ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, McpError }
 import { z } from "zod";
 import { BrowserEngine } from "./engine/browser.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
-import { MemoryStore, redactSecrets } from "./engine/memory.js";
+import { FINDING_CATEGORIES, MemoryStore, redactSecrets } from "./engine/memory.js";
+import { LANE_NAME_MAX, laneReportInstruction, parseLaneReport, summarizeLaneReport } from "./engine/lane.js";
 import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
 import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
 import {
@@ -533,6 +534,34 @@ server.server.setRequestHandler(GetPromptRequestSchema, (request) => {
   }
   return { messages: [{ role: "user" as const, content: { type: "text" as const, text: message } }] };
 });
+
+// The lane report: how a parallel agent hands its results back to the planner
+// as typed decisions. One tool for both halves, so the instruction a lane is
+// given and the parser its reply meets are the same code.
+server.registerTool(
+  "scout_lane_report",
+  {
+    description:
+      "For a run split across parallel agents (lanes). Without `reply`: returns the paragraph to put in a lane's prompt, telling it to hand back ONE typed JSON object (verdicts, severities and categories from closed sets, a calibrated confidence per decision, routes covered, what blocked it). " +
+      "With `reply`: parses what the lane handed back and returns the one-line fold (defects, highs, unsure, mean confidence, routes) or the reason it was refused, to relay to the lane once. Touches no browser.",
+    inputSchema: {
+      lane: z.string().min(1).max(LANE_NAME_MAX).describe("The lane's name, as used in its session"),
+      reply: z.string().optional().describe("The text the lane handed back; omit to get the instruction instead"),
+    },
+  },
+  async ({ lane, reply }: { lane: string; reply?: string }) => {
+    try {
+      if (reply === undefined) return { content: [{ type: "text" as const, text: laneReportInstruction(lane) }] };
+      const parsed = parseLaneReport(reply, lane);
+      const out = parsed.ok
+        ? `Lane report accepted — ${summarizeLaneReport(parsed.report)}`
+        : `Lane report REFUSED: ${parsed.reason}. Ask the lane once for the corrected object; do not re-judge its prose.`;
+      return { content: [{ type: "text" as const, text: out }] };
+    } catch (err) {
+      return errorText(err);
+    }
+  },
+);
 
 server.registerTool(
   "scout_scan",
@@ -1164,27 +1193,7 @@ server.registerTool(
       "Record a structured finding (bug, UX issue, or improvement). Deduplicates across runs; automatically captures the recent action trace as the repro. Use for anything worth reporting: crashes, oracle violations you confirmed, dead ends, confusing UX, permission leaks, missing testids — and design-audit improvement opportunities (ux-polish) with their concrete measurements.",
     inputSchema: {
       severity: z.enum(["high", "medium", "low"]),
-      category: z
-        .enum([
-          "console-error",
-          "page-error",
-          "http-error",
-          "network",
-          "dead-end",
-          "ux-confusing",
-          "ux-polish",
-          "visual",
-          "a11y",
-          "permission-leak",
-          "data-inconsistency",
-          "stale-state",
-          "data-loss",
-          "performance",
-          "security",
-          "missing-testid",
-          "other",
-        ])
-        .describe("Pick the closest — use 'other' only when nothing fits"),
+      category: z.enum(FINDING_CATEGORIES).describe("Pick the closest — use 'other' only when nothing fits"),
       title: z.string().describe("One-line summary of the defect"),
       detail: z.string().describe("What happened, what was expected, and the evidence"),
       evidence: z
