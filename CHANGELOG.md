@@ -1,5 +1,15 @@
 # scenescout
 
+## 3.2.0
+
+### Minor Changes
+
+- a3c7ed4: Parallel lanes hand their results back as one typed lane report, not prose. A new `scout_lane_report` tool serves both halves: without a reply it returns the paragraph to put in a lane's prompt (verdict, severity and category from closed sets, a calibrated confidence per decision, a bounded evidence signature, routes covered, what blocked the lane), and with one it parses what the lane handed back and returns the one-line fold or the reason the reply was refused. The instruction is generated from the same constants the parser checks and states every limit the parser enforces. The finding categories now live in one list shared by `scout_finding`, the lane report and the skill text. The skill's parallel-agents section tells the planner to use the tool and to run lanes at medium effort, the pick from a benchmark under `scripts/bench/` that measured both reply shapes at every effort level the CLI accepts.
+
+### Patch Changes
+
+- 0b99401: The read-only write policy no longer refuses a control because of a destructive word in its description. A card or tile that is a button carries prose in its accessible name, a title then a sentence about it, and a word in that sentence describes what the thing is for rather than what the click does. A label that is prose, longer than six words and containing a sentence, is now judged by its first six words, where the verb lives; every other label is still judged whole, so a long confirm button stays refused. The pattern still sees the whole label, so exemptions that look ahead ("reset filters") keep working. This is what refused the manager card on a sign-in page whose sentence mentioned orders that need sign-off. Separately, "sign off" is now read as the noun when the word before it says so ("Needs sign-off", "Awaiting sign-off", "Send for sign-off"), so those short labels are no longer refused either.
+
 ## 3.1.1
 
 ### Patch Changes
