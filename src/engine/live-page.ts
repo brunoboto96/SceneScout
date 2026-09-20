@@ -54,7 +54,8 @@ export const LIVE_PAGE = `<!doctype html>
   #finished h2 { margin: 0 0 8px; font-size: 18px; }
   #finished p { margin: 0 0 8px; color: var(--muted); }
   #finished .where { font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
-  #finished button { margin-top: 8px; padding: 7px 14px; font-weight: 600; }
+  #finished .btn { display: inline-block; margin-top: 8px; padding: 8px 16px; font-weight: 600; text-decoration: none;
+    color: #fff; background: var(--accent); border-radius: 6px; }
   main { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px; padding: 16px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
   .card.stuck { border-color: var(--stuck); }
@@ -128,6 +129,18 @@ export const LIVE_PAGE = `<!doctype html>
   #focus .bar .line { color: #cbd5e1; padding: 0; flex: 1 1 auto; }
   #focus .bar .line b { color: #fff; }
   #focus .stage { flex: 1 1 auto; min-height: 0; position: relative; }
+  #timeline { flex: 0 0 auto; display: flex; gap: 2px; overflow-x: auto; padding: 6px 0 2px; scrollbar-width: thin; }
+  #timeline button { flex: 0 0 auto; width: 16px; height: 26px; padding: 0; border: 0; border-radius: 3px; cursor: pointer;
+    background: rgba(230,233,238,.18); }
+  #timeline button.g0 { background: rgba(96,165,250,.75); } #timeline button.g1 { background: rgba(52,211,153,.75); }
+  #timeline button.g2 { background: rgba(251,191,36,.8); }  #timeline button.g3 { background: rgba(244,114,182,.75); }
+  #timeline button.framed { height: 34px; }
+  #timeline .none { color: var(--muted); font-size: 12px; align-self: center; }
+  #timeline button.bad { outline: 2px solid var(--stuck); outline-offset: -2px; }
+  #timeline button[aria-pressed="true"] { outline: 2px solid #fff; outline-offset: -2px; }
+  #focus .scrub { display: flex; align-items: center; gap: 10px; color: #cbd5e1; font-size: 12px; }
+  #focus .scrub b { color: #fff; }
+  #focus .scrub button { padding: 3px 10px; }
   #focus img { width: 100%; height: 100%; object-fit: contain; background: #000; border-radius: 6px; display: block; }
   #focus .none { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; padding: 16px;
     color: #98a2b3; font-size: 13px; text-align: center; }
@@ -152,6 +165,18 @@ export const LIVE_PAGE = `<!doctype html>
   #report .doc details { margin: 8px 0; }
   #report .doc summary { cursor: pointer; color: var(--muted); }
   #report .doc .unset { color: var(--muted); font-style: italic; }
+  #report .doc details.evidence { margin: 10px 0 16px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  #report .doc details.evidence[open] summary { margin-bottom: 10px; }
+  #report .doc details.evidence figure { margin: 0 0 12px; }
+  #report .doc details.evidence .shots { display: flex; flex-wrap: wrap; gap: 14px; }
+  #report .doc details.evidence figure { flex: 1 1 320px; max-width: 440px; }
+  #report .doc details.evidence img { display: block; width: 100%; max-height: 280px; object-fit: cover; object-position: top;
+    border: 1px solid var(--line); border-radius: 4px; background: var(--shade); }
+  #report .doc details.evidence .gone img { display: none; }
+  #report .doc details.evidence .gone-note { display: none; margin: 0 0 4px; padding: 12px; border: 1px dashed var(--line);
+    border-radius: 4px; color: var(--muted); font-size: 12px; }
+  #report .doc details.evidence .gone .gone-note { display: block; }
+  #report .doc details.evidence figcaption { margin-top: 4px; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); }
   @media (prefers-reduced-motion: no-preference) { .badge.running { animation: pulse 1.6s ease-in-out infinite; } }
   @keyframes pulse { 50% { opacity: .55; } }
 </style>
@@ -173,7 +198,7 @@ export const LIVE_PAGE = `<!doctype html>
   <h2>The run has finished</h2>
   <p>Its browsers are closed, so there is nothing left to watch. What it found is in the report.</p>
   <p class="where" id="finished-where" data-testid="live-finished-where"></p>
-  <button type="button" id="finished-report" data-testid="live-finished-report">Read the report</button>
+  <p><a class="btn" href="run" id="finished-run" data-testid="live-finished-run">Open the whole run</a></p>
 </div>
 <main id="grid"></main>
 <div id="report" role="dialog" aria-modal="true" aria-label="The run's report" data-testid="live-report-dialog">
@@ -196,6 +221,9 @@ export const LIVE_PAGE = `<!doctype html>
     <img id="focus-img" alt="">
     <span class="none">No frame available. The session's page may be closed, or not answering.</span>
   </div>
+  <div class="scrub"><span id="scrub-where" data-testid="live-scrub-where">Live</span><span class="spacer"></span>
+    <button type="button" id="scrub-live" data-testid="live-scrub-live" hidden>Back to live</button></div>
+  <div id="timeline" data-testid="live-timeline" role="group" aria-label="The steps this session took"></div>
   <div class="lower">
     <div class="feed" id="focus-feed" data-testid="live-focus-feed"></div>
     <aside class="brief" aria-label="What this session is doing" data-testid="live-focus-brief">
@@ -220,6 +248,10 @@ export const LIVE_PAGE = `<!doctype html>
   var eventsKey = '';
   var frames = {};
   var hoverTask = null;
+  // A step the viewer picked from the timeline: the stage shows its frame
+  // instead of the live page, so a run can be watched back while it runs.
+  var scrubbed = null;
+  var timelineLines = [];
   var reportOpen = false;
   var reportTimer = null;
   var reportProblem = null;
@@ -230,6 +262,10 @@ export const LIVE_PAGE = `<!doctype html>
   var reportShown = false;
   var reportFile = null;
   var reportMarkdown = null;
+  // What the panel last rendered, so an unchanged report is left alone.
+  var reportKey = null;
+  // Per-finding frames from api/report: empty unless the run was recorded.
+  var reportEvidence = [];
   var savedACopy = false;
   // A result that reads as a failure is shown in red.
   var BAD_RESULT = /error|fail|refus|block|violation|abandoned/i;
@@ -276,7 +312,7 @@ export const LIVE_PAGE = `<!doctype html>
       frames[d.session] = src;
       var card = cards[d.session];
       if (card && card.live) card.img.src = src;
-      if (focused === d.session) document.getElementById('focus-img').src = src;
+      if (focused === d.session && !scrubbed) document.getElementById('focus-img').src = src;
     });
     events.addEventListener('unavailable', function (e) {
       var d;
@@ -375,6 +411,35 @@ export const LIVE_PAGE = `<!doctype html>
     }
     if (last < text.length) node.appendChild(document.createTextNode(text.slice(last)));
   }
+  /**
+   * The frames recorded around one finding, as a closed accordion. Nothing is
+   * shown when the run was not recorded: the report reads the same as before.
+   */
+  function evidenceFor(id) {
+    var found = null;
+    reportEvidence.forEach(function (e) { if (e.id === id) found = e; });
+    if (!found || !found.frames.length) return null;
+    var box = el('details', 'evidence');
+    box.setAttribute('data-testid', 'live-report-evidence-' + id);
+    box.appendChild(el('summary', '', found.frames.length + (found.frames.length === 1 ? ' screenshot' : ' screenshots') + ' from around this finding'));
+    var shots = el('div', 'shots');
+    box.appendChild(shots);
+    found.frames.forEach(function (f) {
+      var fig = el('figure');
+      var img = el('img');
+      img.loading = 'lazy';
+      img.src = 'record/' + f.frame;
+      img.alt = f.action + ' ' + f.detail;
+      // A recording deleted since the run leaves a broken icon under a finding
+      // that still counts it as evidence. Say which it is.
+      img.addEventListener('error', function () { fig.classList.add('gone'); });
+      fig.appendChild(img);
+      fig.appendChild(el('figcaption', '', clock(f.at) + ' · ' + f.action + ' · ' + f.detail));
+      fig.appendChild(el('p', 'gone-note', 'This frame is no longer in ' + f.frame.replace(/\\/[^/]*$/, '') + '.'));
+      shots.appendChild(fig);
+    });
+    return box;
+  }
   function renderMarkdown(root, md) {
     root.textContent = '';
     var lines = md.split('\\n');
@@ -390,14 +455,23 @@ export const LIVE_PAGE = `<!doctype html>
     }
     function list(tag, re) {
       var box = el(tag);
+      var ids = [];
       var m;
       while (i < lines.length && (m = re.exec(lines[i]))) {
         var li = el('li');
         inline(li, m[1]);
         box.appendChild(li);
+        // A finding names its id on its first bullet; the frames recorded
+        // around it hang under that list, so the proof sits with the claim.
+        var id = /^\\*\\*Id:\\*\\* \`([^\`]+)\`/.exec(m[1]);
+        if (id) ids.push(id[1]);
         i += 1;
       }
       container.appendChild(box);
+      ids.forEach(function (id) {
+        var shots = evidenceFor(id);
+        if (shots) container.appendChild(shots);
+      });
     }
     while (i < lines.length) {
       var line = lines[i];
@@ -482,8 +556,26 @@ export const LIVE_PAGE = `<!doctype html>
           return;
         }
         reportMarkdown = d.markdown;
+        reportEvidence = d.evidence || [];
         meta.textContent = (finished ? 'as the run left it at ' : 'as the run stands at ') + clock(d.at) + ' · ' + whereItIs();
+        // The report is re-read every few seconds while the run goes on.
+        // Re-rendering an unchanged document threw away what the reader was
+        // doing with it: an opened accordion shut itself, and the page jumped
+        // back to the top, every five seconds.
+        var key = d.markdown + '\\u0000' + JSON.stringify(reportEvidence);
+        if (key === reportKey) return;
+        var open = {};
+        var was = doc.querySelectorAll('details[open][data-testid]');
+        for (var k = 0; k < was.length; k += 1) open[was[k].getAttribute('data-testid')] = true;
+        var top = doc.parentNode ? doc.parentNode.scrollTop : 0;
+        reportKey = key;
         renderMarkdown(doc, d.markdown);
+        // A finding whose evidence the reader had open stays open through a change.
+        Object.keys(open).forEach(function (id) {
+          var node = doc.querySelector('details[data-testid="' + id + '"]');
+          if (node) node.open = true;
+        });
+        if (doc.parentNode) doc.parentNode.scrollTop = top;
       })
       .catch(function (err) {
         // The last rendering stays; with none, say why there is nothing to read.
@@ -529,6 +621,65 @@ export const LIVE_PAGE = `<!doctype html>
     clearInterval(reportTimer);
     document.getElementById('report').classList.remove('open');
     document.getElementById('report-open').focus();
+  }
+
+  // One tick per step, coloured by the task it served: a run can be scrolled
+  // back through while it is still going, and a step with a frame is taller.
+  function renderTimeline(lines) {
+    // Kept so a re-render (picking a step, say) draws the same run back. The
+    // status poll carries six lines and the close-up three hundred: redrawing
+    // from whichever was nearest to hand shrank the timeline to six ticks.
+    timelineLines = lines || timelineLines;
+    lines = timelineLines;
+    var node = document.getElementById('timeline');
+    var atEnd = node.scrollLeft + node.clientWidth >= node.scrollWidth - 8;
+    node.textContent = '';
+    var groups = 0;
+    var last = null;
+    (lines || []).forEach(function (line) {
+      var task = line.task || '';
+      if (task && task !== last) groups += 1;
+      last = task;
+      var tick = el('button');
+      tick.type = 'button';
+      tick.className = (task ? 'g' + ((groups - 1) % 4) : '') + (line.frame ? ' framed' : '') + (BAD_RESULT.test(line.result || '') ? ' bad' : '');
+      tick.title = clock(line.at) + '  ' + line.action + (line.target ? ' ' + line.target : '') + (task ? '\\n' + task : '');
+      tick.setAttribute('aria-label', tick.title);
+      tick.setAttribute('aria-pressed', scrubbed && scrubbed.at === line.at && scrubbed.action === line.action ? 'true' : 'false');
+      tick.addEventListener('click', function () { showStep(line); });
+      node.appendChild(tick);
+    });
+    if (atEnd) node.scrollLeft = node.scrollWidth;
+  }
+
+  // Show one step: its frame if the run was recorded, and what it was doing.
+  function showStep(line) {
+    var where = document.getElementById('scrub-where');
+    var back = document.getElementById('scrub-live');
+    scrubbed = line;
+    back.hidden = false;
+    if (!line.frame) {
+      where.textContent = clock(line.at) + ' ' + line.action + ' — this run kept no frame for that step';
+      // Leaving the live frame up under that caption is the most misleading
+      // state this page can reach: it reads as the page at that moment.
+      document.getElementById('focus-img').removeAttribute('src');
+      document.getElementById('focus-stage').classList.add('empty');
+      renderTimeline(null);
+      return;
+    }
+    document.getElementById('focus-stage').classList.remove('empty');
+    document.getElementById('focus-img').src = 'record/' + line.frame;
+    where.textContent = clock(line.at) + ' ' + line.action + (line.task ? ' · ' + line.task : '');
+    renderTimeline(null);
+  }
+
+  function backToLive() {
+    scrubbed = null;
+    document.getElementById('scrub-where').textContent = 'Live';
+    document.getElementById('scrub-live').hidden = true;
+    if (focused) document.getElementById('focus-img').src = frames[focused] || shotUrl(focused);
+    // Otherwise the step just left keeps its outline until the next full feed.
+    renderTimeline(null);
   }
 
   // Built with textContent only: an action's target is text from the app under test.
@@ -589,10 +740,17 @@ export const LIVE_PAGE = `<!doctype html>
 
   function openFocus(name) {
     focused = name;
+    scrubbed = null;
+    // The ticks belong to the session just left; showing them under this one's
+    // name, and playing its frames when one is clicked, is worse than none.
+    timelineLines = [];
+    renderTimeline([]);
     document.getElementById('focus-stage').classList.remove('empty');
     document.getElementById('focus-name').textContent = name;
     document.getElementById('focus-img').alt = 'Live view of ' + name;
     document.getElementById('focus-img').src = frames[name] || shotUrl(name);
+    document.getElementById('scrub-where').textContent = 'Live';
+    document.getElementById('scrub-live').hidden = true;
     document.getElementById('focus').classList.add('open');
     hoverTask = null;
     renderFeed(document.getElementById('focus-feed'), (latest[name] || {}).feed, showTask);
@@ -612,8 +770,21 @@ export const LIVE_PAGE = `<!doctype html>
   function loadFullFeed(name) {
     fetch('api/activity?session=' + encodeURIComponent(name), { cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (d) { if (d && focused === d.session) renderFeed(document.getElementById('focus-feed'), d.feed, showTask); })
-      .catch(function () { /* the short feed from the last poll stays on screen */ });
+      .then(function (d) {
+        if (!d || focused !== d.session) return;
+        renderFeed(document.getElementById('focus-feed'), d.feed, showTask);
+        renderTimeline(d.feed);
+      })
+      .catch(function () {
+        // The short feed from the last poll stays on screen, but the timeline
+        // is drawn from this call alone: an empty strip would read as a
+        // session that did nothing.
+        if (!timelineLines.length) {
+          var strip = document.getElementById('timeline');
+          strip.textContent = '';
+          strip.appendChild(el('span', 'none', 'The step list could not be loaded. Trying again.'));
+        }
+      });
   }
 
   function setBrief(id, text, unset) {
@@ -685,7 +856,10 @@ export const LIVE_PAGE = `<!doctype html>
     });
     syncEvents();
     reportFile = snap.report || reportFile;
-    if (snap.sessions.length > 0) sawRun = true;
+    // A viewer who opens the board after the last browser closed never sees a
+    // session, but the engine only names a report file once one has attached:
+    // that is a finished run, not a board waiting for its first attach.
+    if (snap.sessions.length > 0 || snap.report) sawRun = true;
     finished = sawRun && snap.sessions.length === 0;
     document.getElementById('empty').style.display = snap.sessions.length || finished ? 'none' : 'block';
     document.getElementById('finished').classList.toggle('open', finished);
@@ -693,10 +867,18 @@ export const LIVE_PAGE = `<!doctype html>
       var where = document.getElementById('finished-where');
       where.textContent = whereItIs();
       where.className = 'where' + (reportFile && reportFile.written ? '' : ' unset');
-      // The moment somebody wants the report is the moment the run ends: show it.
+      // The moment somebody wants the run is the moment it ends, and a panel
+      // over a dead board is lost on the next refresh. The run has its own
+      // address; go there, so the address IS the report from then on.
       if (!reportShown) {
         reportShown = true;
-        if (!reportOpen) openReport();
+        // The run has its own address, and going there means a refresh shows
+        // the report instead of a dead board. Ask whether it is there first:
+        // a run with no page to serve would otherwise land on a 404, and the
+        // panel below is the only other copy.
+        fetch('run', { cache: 'no-store' })
+          .then(function (r) { if (r.ok) location.href = 'run'; else openReport(); })
+          .catch(function () { openReport(); });
       }
     }
     document.getElementById('engine').textContent = 'engine pid ' + snap.pid + ' · v' + snap.version;
@@ -719,14 +901,22 @@ export const LIVE_PAGE = `<!doctype html>
     Object.keys(cards).forEach(function (name) { setLive(cards[name], streamAll); });
   });
   // A session with nothing to show answers 503; say so rather than leaving a broken-image icon.
-  document.getElementById('focus-img').addEventListener('error', function () { document.getElementById('focus-stage').classList.add('empty'); });
+  document.getElementById('focus-img').addEventListener('error', function () {
+    document.getElementById('focus-stage').classList.add('empty');
+    // A live session with nothing to show and a recorded frame that has since
+    // been deleted look identical here; only the second is worth explaining.
+    if (scrubbed) {
+      document.getElementById('scrub-where').textContent =
+        clock(scrubbed.at) + ' ' + scrubbed.action + ' — its frame could not be loaded; the recording may have been removed';
+    }
+  });
   document.getElementById('focus-img').addEventListener('load', function () { document.getElementById('focus-stage').classList.remove('empty'); });
   document.getElementById('focus-close').addEventListener('click', closeFocus);
   // A re-rendered feed replaces the group under the pointer without a mouseleave; leaving the feed itself still resets.
   document.getElementById('focus-feed').addEventListener('mouseleave', function () { showTask(null); });
   document.getElementById('focus').addEventListener('click', function (e) { if (e.target === this) closeFocus(); });
+  document.getElementById('scrub-live').addEventListener('click', backToLive);
   document.getElementById('report-open').addEventListener('click', openReport);
-  document.getElementById('finished-report').addEventListener('click', openReport);
   document.getElementById('report-save').addEventListener('click', saveACopy);
   // Closing the tab on a finished run whose report was never written to disk
   // throws the only copy away. The browser shows its own confirm/dismiss, and

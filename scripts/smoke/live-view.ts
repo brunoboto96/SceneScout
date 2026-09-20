@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { feedForSession, FEED_LINES, LiveServer, StatusBoard, type LiveProvider } from "../../dist/engine/live.js";
+import { resolveFrame } from "../../dist/engine/replay.js";
 import { chromium, firefox, webkit } from "playwright";
 import { BROWSER, check, until, type SmokeContext } from "./harness.ts";
 
@@ -37,12 +38,21 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     snapshot: () => ({ pid: process.pid, version: "smoke", at: new Date().toISOString(), sessions: board.list() }),
     activity: (session, limit) => feedForSession(engine.memory?.actionLog ?? [], session, limit),
     report: () => null,
+    replay: () => null,
+    frame: async (rel) => {
+      const file = resolveFrame(path.join(projectDir, ".scenescout", "recordings"), rel);
+      try {
+        return file ? await fs.promises.readFile(file) : null;
+      } catch {
+        return null;
+      }
+    },
     screenshot: (session) => (session === "watched" ? engine.liveShot() : Promise.resolve(null)),
     startStream: (session, onFrame) => (session === "watched" ? engine.startScreencast(onFrame) : Promise.resolve(null)),
   };
   const live = new LiveServer(provider);
   try {
-    await engine.attach({ url: baseUrl, projectDir, mode: "read-only", objective: "Watch the  demo  app" });
+    await engine.attach({ url: baseUrl, projectDir, mode: "read-only", record: true, objective: "Watch the  demo  app" });
     check(
       "the objective given at attach reaches the live view, whitespace collapsed",
       engine.liveDescription.objective === "Watch the demo app",
@@ -121,6 +131,31 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     );
     check("...and a stranger to the token gets nothing", (await get(port, `/not-the-token/shot/watched.jpg`)).status === 404);
 
+    // A recorded run really writes frames, and the steps really carry them.
+    const kept = fs.existsSync(path.join(projectDir, ".scenescout", "recordings", "watched"))
+      ? fs.readdirSync(path.join(projectDir, ".scenescout", "recordings", "watched"))
+      : [];
+    check("a recorded run writes a frame per action under its own session", kept.length >= 3, `${kept.length} frame(s): ${kept.slice(0, 3).join(", ")}`);
+    check("...named in the order they were taken, by the action that took them", /^0001-\w+\.jpg$/.test(kept.sort()[0] ?? ""), kept.sort()[0] ?? "(none)");
+    const trail = feedForSession(engine.memory?.actionLog ?? [], "watched", 50);
+    const framed = trail.filter((l) => l.frame);
+    check("...and each step carries the frame it kept, all the way to the page's feed", framed.length >= 3, `${framed.length} of ${trail.length} step(s)`);
+    check(
+      "...as a path under recordings/<session>/, which is what the frame route is asked for",
+      framed.every((l) => (l.frame ?? "").startsWith("recordings/watched/")),
+      JSON.stringify(framed.slice(0, 2).map((l) => l.frame)),
+    );
+    const onDisk = fs.statSync(path.join(projectDir, ".scenescout", framed[0]?.frame ?? "")).size;
+    check("...and the frame is a real image, not an empty file", onDisk > 1000, `${onDisk} bytes`);
+
+    const asked = await get(port, `/${token}/record/${framed[0]?.frame ?? "recordings/watched/0001-x.jpg"}`);
+    check(
+      "a frame the feed named is served back at the run's own route",
+      asked.status === 200 && isJpeg(asked.body),
+      `status ${asked.status}, ${asked.body.length} bytes`,
+    );
+    check("...while a path out of the recordings directory is not", (await get(port, `/${token}/record/..%2f..%2f..%2fetc%2fpasswd`)).status === 404);
+
     await engine.close();
     check("a closed session says it cannot stream, instead of streaming nothing under a LIVE tag", (await engine.startScreencast(() => {})) === null);
 
@@ -143,6 +178,8 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
   console.log("live view: the page keeps up with every session streaming");
   let names = Array.from({ length: 8 }, (_, i) => `agent-${i}`);
   let written = false;
+  // Flipped on once the unrecorded path has been checked, so both are.
+  let recorded = false;
   const at = new Date().toISOString();
   const pushes = new Map<string, (frame: Buffer) => void>();
   let polls = 0;
@@ -173,10 +210,22 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
         { at, action: "click", target: "Save", url: "http://app.test/", task: `Goal of ${session}` },
         { at, action: "journey:end", target: `Goal of ${session}`, url: "http://app.test/", result: "completed", task: `Goal of ${session}` },
         { at, action: "snapshot", url: "http://app.test/" },
+        // More than the status poll carries, so the close-up's timeline can be
+        // told apart from the six lines the board already has.
+        ...Array.from({ length: limit > FEED_LINES ? 12 : 0 }, (_, i) => ({
+          at,
+          action: "click",
+          target: `row ${i}`,
+          url: "http://app.test/",
+          ...(recorded ? { frame: "recordings/agent-0/0001-click.jpg" } : {}),
+        })),
       ];
     },
     report: () => ({
       at,
+      evidence: recorded
+        ? [{ id: "abc123", frames: [{ at, action: "click", detail: 'button "Save"', frame: "recordings/agent-0/0001-click.jpg" }] }]
+        : undefined,
       markdown: [
         "# SceneScout Report",
         "",
@@ -186,6 +235,7 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
         "",
         "### 🔴 [HIGH] A title from the tested app: <script>alert(1)</script>",
         "",
+        "- **Id:** `abc123` · **Category:** http-error",
         "- **Evidence:** `GET /api/things → HTTP 500`",
         "",
         "<details><summary>Repro trace (last actions before finding)</summary>",
@@ -202,6 +252,8 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
         "```",
       ].join("\n"),
     }),
+    replay: () => (recorded ? "<!doctype html><html><head><title>Run</title></head><body><h1>The whole run</h1></body></html>" : null),
+    frame: async (rel) => (recorded && rel === "recordings/agent-0/0001-click.jpg" ? jpeg : null),
     screenshot: async () => jpeg,
     startStream: async (session, onFrame) => {
       pushes.set(session, onFrame);
@@ -255,6 +307,23 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     );
     await page.locator("#focus-name").hover();
     check("...and leaving it goes back to what it is doing now", (await page.locator("#focus-task-head").textContent()) === "Doing now");
+    // The timeline is drawn from the close-up's long feed, not from the six
+    // lines the status poll carries — and picking a step must not shrink it.
+    const ticks = page.locator("#timeline button");
+    await until("the timeline to fill from the long feed", () => ticks.count().then((n) => n > FEED_LINES), 8000);
+    const drawn = await ticks.count();
+    await ticks.nth(drawn - 1).click();
+    await page.waitForTimeout(500);
+    check("picking a step leaves the whole run on the timeline", (await ticks.count()) === drawn, `${drawn} ticks, then ${await ticks.count()}`);
+    check(
+      "...and the step it picked is the one marked",
+      (await ticks.nth(drawn - 1).getAttribute("aria-pressed")) === "true",
+      String(await ticks.nth(drawn - 1).getAttribute("aria-pressed")),
+    );
+    await page.getByTestId("live-scrub-live").click();
+    await page.waitForTimeout(400);
+    check("going back to live leaves no step marked", (await page.locator('#timeline button[aria-pressed="true"]').count()) === 0);
+
     await page.getByTestId("live-focus-close").click();
 
     // The run ends: the browsers are gone, so the page must hand over the report itself.
@@ -295,8 +364,8 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     const title = await doc.locator("h4").first().textContent();
     check(
       "the report's markdown is rendered as elements",
-      (await doc.locator("table td").count()) === 2 && (await doc.locator("li strong").count()) === 1,
-      `${await doc.locator("table td").count()} cell(s)`,
+      (await doc.locator("table td").count()) === 2 && (await doc.locator("li strong").count()) === 3,
+      `${await doc.locator("table td").count()} cell(s), ${await doc.locator("li strong").count()} bold run(s)`,
     );
     check(
       "...and a finding's title from the tested app is text, never markup",
@@ -312,6 +381,37 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
         (await doc.locator("img").count()) === 0,
       `summary ${await doc.locator("details > summary").count()}, items ${await doc.locator("details ol li").count()}, fence ${JSON.stringify(fence)}`,
     );
+
+    // The same run, recorded. The finding now carries the frames it was found
+    // on, and the run has a page of its own that a refresh cannot kill.
+    recorded = true;
+    const shots = doc.getByTestId("live-report-evidence-abc123");
+    await until("the frames under the finding", () => shots.count().then((n) => n > 0), 8000);
+    await shots.locator("summary").click();
+    const shot = shots.locator("img").first();
+    await until("the frame to load", () => shot.evaluate((i: HTMLImageElement) => i.complete && i.naturalWidth > 0), 8000);
+    // The panel re-reads the report every few seconds. Re-rendering an
+    // unchanged document used to close whatever the reader had open.
+    const openBefore = await shots.evaluate((d: HTMLDetailsElement) => d.open);
+    await page.waitForTimeout(6000);
+    check(
+      "an accordion the reader opened is still open after the panel re-reads the report",
+      openBefore && (await shots.evaluate((d: HTMLDetailsElement) => d.open)),
+      `open before ${openBefore}, after ${await shots.evaluate((d: HTMLDetailsElement) => d.open)}`,
+    );
+    check(
+      "a finding's frames hang under it, fetched from the run's own route",
+      (await shot.getAttribute("src")) === "record/recordings/agent-0/0001-click.jpg",
+      String(await shot.getAttribute("src")),
+    );
+
+    const fresh = await browser.newPage();
+    await fresh.goto(`http://127.0.0.1:${port}/${token}/`);
+    await until("the viewer to land on the run's own page", () => fresh.title().then((t) => t === "Run"), 8000);
+    check("a viewer arriving after the run ended is sent to the run's own page", fresh.url().endsWith("/run"), fresh.url());
+    await fresh.reload();
+    check("...and unlike a panel over a dead board, it is still there after a refresh", (await fresh.title()) === "Run");
+    await fresh.close();
   } finally {
     await browser.close();
     await live.stop();
