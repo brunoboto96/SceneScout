@@ -58,7 +58,11 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       engine.liveDescription.objective === "Watch the demo app",
       JSON.stringify(engine.liveDescription),
     );
-    check("...and with nothing stated there is no task", engine.liveDescription.task === undefined);
+    check(
+      "...and the card says what it is doing from the moment it attaches",
+      engine.liveDescription.task === "Attaching and taking stock",
+      JSON.stringify(engine.liveDescription),
+    );
     await engine.navigate("/");
     await engine.startJourney("Find the dashboard's broken chart");
     check(
@@ -68,7 +72,11 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     );
     await engine.navigate("/page2.html");
     engine.endJourney(true);
-    check("...and it clears when the journey ends", engine.liveDescription.task === undefined);
+    check(
+      "...and the task underneath it comes back when the journey ends",
+      engine.liveDescription.task === "Attaching and taking stock",
+      JSON.stringify(engine.liveDescription),
+    );
     await engine.navigate("/");
     const tagged = feedForSession(engine.memory?.actionLog ?? [], "watched", 60);
     check(
@@ -132,11 +140,29 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     check("...and a stranger to the token gets nothing", (await get(port, `/not-the-token/shot/watched.jpg`)).status === 404);
 
     // A recorded run really writes frames, and the steps really carry them.
+    await engine.crawl(["/", "/covered.html"]);
+    await engine.snapshot();
     const kept = fs.existsSync(path.join(projectDir, ".scenescout", "recordings", "watched"))
       ? fs.readdirSync(path.join(projectDir, ".scenescout", "recordings", "watched"))
       : [];
     check("a recorded run writes a frame per action under its own session", kept.length >= 3, `${kept.length} frame(s): ${kept.slice(0, 3).join(", ")}`);
     check("...named in the order they were taken, by the action that took them", /^0001-\w+\.jpg$/.test(kept.sort()[0] ?? ""), kept.sort()[0] ?? "(none)");
+    // The breadth pass is where most routes are covered, and it used to leave
+    // no picture of any of them: a real run kept 9 frames out of 67 actions,
+    // none from a crawl.
+    const crawled = (engine.memory?.actionLog ?? []).filter((e) => e.action === "crawl");
+    check(
+      "every crawled route keeps a frame, not one for the whole sweep",
+      crawled.length >= 2 && crawled.every((e) => e.frame),
+      `${crawled.filter((e) => e.frame).length} of ${crawled.length} crawled route(s) framed`,
+    );
+    const shots = (engine.memory?.actionLog ?? []).filter((e) => e.action === "snapshot");
+    check(
+      "…and so does a snapshot, which is the action taken to look at something",
+      shots.length > 0 && shots.every((e) => e.frame),
+      `${shots.filter((e) => e.frame).length} of ${shots.length}`,
+    );
+
     const trail = feedForSession(engine.memory?.actionLog ?? [], "watched", 50);
     const framed = trail.filter((l) => l.frame);
     check("...and each step carries the frame it kept, all the way to the page's feed", framed.length >= 3, `${framed.length} of ${trail.length} step(s)`);

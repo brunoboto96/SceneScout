@@ -45,6 +45,10 @@ import {
   type FindingFrames as FindingEvidence,
   type ReportFile,
   LIVE_TOKEN_FILE,
+  liveEngines,
+  liveTokenFileName,
+  pidAlive,
+  statusFileName,
   LiveServer,
   StatusBoard,
   type LiveProvider,
@@ -265,9 +269,13 @@ function reportExtras(eng: BrowserEngine): ReportExtras {
 /** Hand the live view's token to `scenescout watch` through a file only the owner can read. */
 function publishLiveToken(dir: string): void {
   if (!liveAddress || liveDirs.has(dir) || liveTokenWrites.has(dir)) return;
-  const file = path.join(dir, LIVE_TOKEN_FILE);
+  // Named for this process: two engines on one project would otherwise hand
+  // `watch` one token for two ports, and whichever wrote last would win.
+  const file = path.join(dir, liveTokenFileName(process.pid));
   const write = fs.promises
     .writeFile(file, liveAddress.token, { mode: 0o600 })
+    // The shared name stays too, for a `watch` from before per-pid files.
+    .then(() => fs.promises.writeFile(path.join(dir, LIVE_TOKEN_FILE), liveAddress!.token, { mode: 0o600 }))
     // `mode` applies only when the file is created; a leftover one keeps its old bits.
     .then(() => fs.promises.chmod(file, 0o600))
     .then(() => {
@@ -610,7 +618,13 @@ server.registerTool(
             '"Approve and reject orders as a manager"). It sits above the task, which is what the session is doing at any moment. ' +
             "Shown to whoever is watching the run; worth setting whenever more than one session is live.",
         ),
-      task: z.string().max(300).optional().describe("Old name for `objective` (2.0). Prefer `objective`."),
+      task: z
+        .string()
+        .max(300)
+        .optional()
+        .describe(
+          "What this session is doing right now, shown under its objective from the moment it appears, e.g. Signing in and taking stock. Passed alone it is read as the 2.0 spelling of `objective`. Defaults to a placeholder so a fresh card never reads as idle.",
+        ),
       record: z
         .boolean()
         .default(false)
@@ -720,8 +734,12 @@ server.registerTool(
           headed,
           browser,
           viewport,
-          // `task` is what this was called in 2.0; it named the session's whole remit, which is the objective.
+          // `task` is what this was called in 2.0, where it named the session's
+          // whole remit. Alone it still means that. Given BESIDE an objective it
+          // means what it means everywhere else — what this session is doing
+          // right now — so the card says something from the moment it appears.
           objective: objective ?? task,
+          task: objective ? task : undefined,
           record,
           memoryStore: store,
         });
@@ -1475,7 +1493,13 @@ async function shutdown(): Promise<void> {
   await Promise.allSettled(liveTokenWrites.values());
   for (const dir of liveDirs) {
     try {
-      fs.rmSync(path.join(dir, LIVE_TOKEN_FILE), { force: true });
+      fs.rmSync(path.join(dir, liveTokenFileName(process.pid)), { force: true });
+      fs.rmSync(path.join(dir, statusFileName(process.pid)), { force: true });
+      // The shared names belong to whichever engine is still running, so they
+      // are only removed when this process is the last one holding them.
+      if (liveEngines(dir, pidAlive).filter((e) => e.pid !== process.pid).length === 0) {
+        fs.rmSync(path.join(dir, LIVE_TOKEN_FILE), { force: true });
+      }
     } catch (err) {
       console.error(`[scenescout] could not remove the live view's token file in ${dir}: ${err instanceof Error ? err.message : String(err)}`);
     }

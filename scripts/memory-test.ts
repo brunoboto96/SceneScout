@@ -16,7 +16,17 @@ import test, { afterEach } from "node:test";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME, MemoryStore, adoptLegacyMemoryDir, mergeMemory, redactSecrets } from "../src/engine/memory.ts";
+import {
+  LEGACY_MEMORY_DIRNAME,
+  MEMORY_DIRNAME,
+  MemoryStore,
+  adoptLegacyMemoryDir,
+  mergeMemory,
+  redactSecrets,
+  MAX_STATES_PER_ROUTE,
+  pruneStates,
+  type StateRecord,
+} from "../src/engine/memory.ts";
 
 /** Temp dirs created by the running test, cleaned up even when it fails. */
 let dirs: string[] = [];
@@ -816,4 +826,59 @@ test("a secret in the page URL or in a note is not persisted", () => {
   const notes = fs.readFileSync(path.join(store.dir, "ASSUMPTIONS.md"), "utf8");
   assert.doesNotMatch(notes, /sk9f8a7b6c5d4e3f2a1b/);
   assert.match(notes, /Integration page shows api_key=\[redacted\] in plain text/);
+});
+
+test("pruning keeps every route answerable while dropping the long tail of its states", () => {
+  // One route with far more states than the cap, and one with a handful.
+  const states: Record<string, StateRecord> = {};
+  for (let i = 0; i < MAX_STATES_PER_ROUTE + 25; i += 1) {
+    states[`/docs#${i}`] = {
+      url: `http://app.test/docs?p=${i}`,
+      route: "/docs",
+      firstSeen: "2026-01-01T00:00:00.000Z",
+      lastSeen: new Date(Date.parse("2026-09-01T00:00:00.000Z") + i * 60_000).toISOString(),
+      visits: 1,
+      elements: {},
+    };
+  }
+  for (let i = 0; i < 3; i += 1) {
+    states[`/admin#${i}`] = { url: "http://app.test/admin", route: "/admin", firstSeen: "2026-09-01T00:00:00.000Z", visits: 1, elements: {} };
+  }
+
+  const { kept, dropped } = pruneStates(states, []);
+  assert.equal(dropped, 25);
+  assert.equal(Object.keys(kept).filter((k) => kept[k].route === "/docs").length, MAX_STATES_PER_ROUTE);
+  assert.equal(Object.keys(kept).filter((k) => kept[k].route === "/admin").length, 3, "a route under the cap loses nothing");
+  // The survivors are the most recent, which are the ones a next run meets again.
+  assert.ok(kept[`/docs#${MAX_STATES_PER_ROUTE + 24}`], "the newest is kept");
+  assert.ok(!kept["/docs#0"], "the oldest is not");
+});
+
+test("pruning never drops a state a finding points at", () => {
+  const states: Record<string, StateRecord> = {};
+  for (let i = 0; i < 10; i += 1) {
+    states[`/docs#${i}`] = {
+      url: "http://app.test/docs",
+      route: "/docs",
+      firstSeen: "2026-01-01T00:00:00.000Z",
+      lastSeen: new Date(Date.parse("2026-09-01T00:00:00.000Z") + i * 60_000).toISOString(),
+      visits: 1,
+      elements: {},
+    };
+  }
+  // Cap of 2 would drop eight; the finding pins the oldest of them.
+  const { kept, dropped } = pruneStates(states, [{ state: "/docs#0" }], 2);
+  assert.ok(kept["/docs#0"], "a finding's own state survives whatever the cap says");
+  assert.equal(dropped, 7);
+  assert.ok(kept["/docs#9"], "and so does the newest");
+});
+
+test("pruning a history that is already small changes nothing", () => {
+  const states: Record<string, StateRecord> = {
+    "/a#1": { url: "http://app.test/a", route: "/a", firstSeen: "2026-09-01T00:00:00.000Z", visits: 1, elements: {} },
+  };
+  const { kept, dropped } = pruneStates(states, []);
+  assert.equal(dropped, 0);
+  assert.deepEqual(Object.keys(kept), ["/a#1"]);
+  assert.deepEqual(pruneStates({}, []), { kept: {}, dropped: 0 });
 });

@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { readRouteElements, readRouteObjects, resolveRoutes } from "../src/code-routes.ts";
-import { scanProject } from "../src/scan.ts";
+import { scanProject, describeAuthAge } from "../src/scan.ts";
 import { normalizePath, fingerprintState } from "../src/engine/fingerprint.ts";
 
 let failures = 0;
@@ -563,3 +563,29 @@ if (failures > 0) {
   process.exit(1);
 }
 console.log("\nSCAN TESTS PASSED");
+
+// ---- saved logins that have gone stale ------------------------------------
+
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-auth-"));
+  const now = Date.parse("2026-09-20T20:00:00.000Z");
+  const jwt = (expSecs: number): string => {
+    const body = Buffer.from(JSON.stringify({ sub: "someone@example.com", exp: expSecs })).toString("base64url");
+    return `eyJhbGciOiJIUzI1NiJ9.${body}.c2lnbmF0dXJl`;
+  };
+  const write = (name: string, token: string): string => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, JSON.stringify({ origins: [{ origin: "http://localhost:3000", localStorage: [{ name: "access_token", value: token }] }] }));
+    return file;
+  };
+
+  // Discovered only by attaching, before this: one project held 168 saved
+  // logins and every one of them had expired.
+  check("an expired saved login says so", describeAuthAge(write("old.json", jwt(now / 1000 - 60)), now) === " (EXPIRED)");
+  check("one about to expire says how long is left", describeAuthAge(write("soon.json", jwt(now / 1000 + 600)), now) === " (10m left)");
+  check("one with hours left says nothing", describeAuthAge(write("fresh.json", jwt(now / 1000 + 7200)), now) === "");
+  // Plenty of apps do not use JWTs; a state we cannot read is not a problem.
+  check("a state with no readable token is not reported as stale", describeAuthAge(write("cookie.json", "not-a-token"), now) === "");
+  check("a file that is not there is not reported as stale", describeAuthAge(path.join(dir, "missing.json"), now) === "");
+  fs.rmSync(dir, { recursive: true, force: true });
+}

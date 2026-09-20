@@ -5,6 +5,7 @@ import type { OracleViolation } from "./oracles.js";
 import type { WriteMode } from "./policy.js";
 import { feedForSession } from "./live.js";
 import { buildReplayHtml, evidenceFor, type FindingEvidence, type ReplaySession } from "./replay.js";
+import { formatPace, measurePace } from "./pace.js";
 
 function playwrightSkeleton(f: Finding): string {
   const routeClass = f.state.split("#")[0].split("?")[0];
@@ -613,6 +614,10 @@ export function generateReport(
     }
     lines.push(``);
   }
+
+  // How the run was paced. A reader who sees a session that did four actions
+  // in an hour learns more from that than from another coverage percentage.
+  lines.push(...formatPace(measurePace(memory.actionLog, Date.now())));
 
   const markdown = lines.join("\n");
   const outPath = path.join(memory.dir, "report.md");
