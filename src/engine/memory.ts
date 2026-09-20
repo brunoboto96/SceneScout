@@ -11,9 +11,36 @@ export interface StateRecord {
   elements: Record<string, { exercised: boolean; lastAction?: string; absentStreak?: number }>;
 }
 
+/**
+ * The kinds a finding can be. One list: scout_finding's input schema, the lane
+ * report a parallel agent hands back, and the skill text all read it from
+ * here, so a category cannot exist in one and be refused by another.
+ */
+export const FINDING_CATEGORIES = [
+  "console-error",
+  "page-error",
+  "http-error",
+  "network",
+  "dead-end",
+  "ux-confusing",
+  "ux-polish",
+  "visual",
+  "a11y",
+  "permission-leak",
+  "data-inconsistency",
+  "stale-state",
+  "data-loss",
+  "performance",
+  "security",
+  "missing-testid",
+  "other",
+] as const;
+export type FindingCategory = (typeof FINDING_CATEGORIES)[number];
+
 export interface Finding {
   id: string;
   severity: "high" | "medium" | "low";
+  /** One of FINDING_CATEGORIES; kept as a string because findings read back from disk predate the list. */
   category: string;
   title: string;
   detail: string;
