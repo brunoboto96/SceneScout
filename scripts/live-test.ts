@@ -972,3 +972,14 @@ test("the page shows the report when the run ends, and warns before the only cop
   assert.match(save, /a\.download = /);
   assert.doesNotMatch(save, /fetch\(/);
 });
+
+test("a card says what its session is doing, and says so plainly when it has not said", () => {
+  // The objective was only in the close-up, so the grid — the thing a watcher
+  // scans — showed six sessions with no hint of what any of them was for.
+  assert.match(LIVE_PAGE, /'live-card-objective-' \+ name/);
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
+  assert.match(script, /card\.doing\.textContent = s\.objective \|\| 'not said yet';/);
+  assert.match(script, /card\.doing\.className = 'doing' \+ \(s\.objective \? '' : ' unset'\);/);
+  const css = LIVE_PAGE.slice(0, LIVE_PAGE.indexOf("</style>"));
+  assert.match(css, /\.doing\.unset \{ color: var\(--stuck\); \}/, "a session that has not said reads as a problem, not as blank space");
+});

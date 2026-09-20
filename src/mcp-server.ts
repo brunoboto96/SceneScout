@@ -49,6 +49,7 @@ import {
   type SessionStatus,
 } from "./engine/live.js";
 import { computeGaps, formatRouteCoverage, generateReport, type ReportExtras } from "./engine/report.js";
+import { needsObjective, objectiveRefusal, OBJECTIVE_MAX } from "./engine/objective.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { formatScan, scanProject } from "./scan.js";
 
@@ -346,9 +347,17 @@ function serializedPerSession<A>(
   label: string,
   fn: (args: A, session: string) => Promise<ToolResult>,
   timeoutMs = 60_000,
-): (args: A & { session?: string }) => Promise<ToolResult> {
-  return (args: A & { session?: string }) => {
+): (args: A & { session?: string; objective?: string }) => Promise<ToolResult> {
+  return (args: A & { session?: string; objective?: string }) => {
     const session = args.session ?? activeName;
+    // Every acting tool passes through here, so the objective is required in
+    // one place rather than eight. A call that states one sets it for the
+    // batch; a call that acts with none standing is told what to pass.
+    const eng = engines.get(session);
+    if (eng) {
+      if (args.objective !== undefined) eng.setObjective(args.objective);
+      if (needsObjective(label) && !eng.hasObjective) return Promise.resolve(text(objectiveRefusal(label), session));
+    }
     const exec = async (): Promise<ToolResult> => {
       writeStatus(session, "running", label, timeoutMs);
       try {
@@ -394,6 +403,21 @@ const sessionParam = z
   .optional()
   .describe(
     "Target this session directly instead of the active one — pass it explicitly when dispatching to MULTIPLE sessions in one turn (e.g. two scout_click calls with different `session`), which then run CONCURRENTLY rather than queueing. Omit for single-session sequential use.",
+  );
+
+/**
+ * What the batch of actions this call belongs to is for. Required by the tools
+ * that act (objective.ts) unless one is already standing; shown to whoever is
+ * watching the run, beside the session's task.
+ */
+const objectiveParam = z
+  .string()
+  .max(OBJECTIVE_MAX)
+  .optional()
+  .describe(
+    "One short sentence naming what this batch of actions is for, in the words you would use to tell a colleague " +
+      '("Sign in as QA_Team and check where it lands"). It stays set until you pass a different one, and is shown live to the person watching. ' +
+      "Required on the tools that act unless a journey or an earlier call already set one.",
   );
 
 // The method, for every client that has no skill loader. It is read per call,
@@ -707,6 +731,7 @@ server.registerTool(
         )
         .min(1)
         .max(20),
+      objective: objectiveParam,
       session: sessionParam,
     },
   },
@@ -731,6 +756,7 @@ server.registerTool(
     inputSchema: {
       ref: z.string().describe("Element ref, e.g. e12"),
       clicks: z.number().int().min(1).max(3).default(1).describe("1 = normal; 2-3 = rapid repeated clicks (double-submit probe)"),
+      objective: objectiveParam,
       session: sessionParam,
     },
   },
@@ -756,6 +782,7 @@ server.registerTool(
       value: z.string().optional().describe("Alias for `textValue`."),
       pressEnter: z.boolean().default(false).describe("Press Enter after typing"),
       replace: z.boolean().default(false).describe("Clear the field before typing instead of appending to existing content"),
+      objective: objectiveParam,
       session: sessionParam,
     },
   },
@@ -801,6 +828,7 @@ server.registerTool(
         .optional()
         .describe("Generated fixture kind; default: inferred from the input's accept attribute (pdf when there is none, or none we can generate)"),
       name: z.string().min(1).max(512).optional().describe("Filename override (default scenescout-fixture.<kind>, or the disk file's own name)"),
+      objective: objectiveParam,
       session: sessionParam,
     },
   },
@@ -836,7 +864,7 @@ server.registerTool(
   "scout_select",
   {
     description: "Select an option in a <select> by ref.",
-    inputSchema: { ref: z.string(), value: z.string().describe("Option value or label"), session: sessionParam },
+    inputSchema: { ref: z.string(), value: z.string().describe("Option value or label"), objective: objectiveParam, session: sessionParam },
   },
   serializedPerSession("scout_select", async ({ ref, value }: { ref: string; value: string }, session) => {
     try {
@@ -851,7 +879,7 @@ server.registerTool(
   "scout_navigate",
   {
     description: "Navigate to a URL or a path relative to the attached base URL (e.g. '/orders'). Also supports 'back' via scout_back.",
-    inputSchema: { target: z.string().describe("Absolute URL or path like /settings"), session: sessionParam },
+    inputSchema: { target: z.string().describe("Absolute URL or path like /settings"), objective: objectiveParam, session: sessionParam },
   },
   serializedPerSession("scout_navigate", async ({ target }: { target: string }, session) => {
     try {
@@ -866,7 +894,7 @@ server.registerTool(
   "scout_back",
   {
     description: "Go back in browser history (tests back-button resilience).",
-    inputSchema: { session: sessionParam },
+    inputSchema: { objective: objectiveParam, session: sessionParam },
   },
   serializedPerSession("scout_back", async (_args: { session?: string }, session) => {
     try {
@@ -905,7 +933,7 @@ server.registerTool(
   "scout_press",
   {
     description: "Press a keyboard key (e.g. Escape, Tab, Enter) — useful for closing modals and testing keyboard navigation.",
-    inputSchema: { key: z.string(), session: sessionParam },
+    inputSchema: { key: z.string(), objective: objectiveParam, session: sessionParam },
   },
   serializedPerSession("scout_press", async ({ key }: { key: string }, session) => {
     try {

@@ -103,6 +103,9 @@ export const LIVE_PAGE = `<!doctype html>
   #focus .brief .since { margin-top: -10px; font-size: 12px; color: #98a2b3; }
   @media (max-width: 700px) { #focus .lower { flex-direction: column; height: 45vh; } }
   .task { padding: 0 12px 2px; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .doing { padding: 0 12px 4px; font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .doing::before { content: "▸ "; color: var(--accent); }
+  .doing.unset { color: var(--stuck); }
   #focus .feed .a { color: #e6e9ee; }
   #focus .feed .t, #focus .feed .d, #focus .feed .none { color: #98a2b3; }
   #focus .feed .bad { color: #fca5a5; }
@@ -304,6 +307,8 @@ export const LIVE_PAGE = `<!doctype html>
     top.appendChild(nameEl); top.appendChild(role); top.appendChild(badge);
     var task = el('div', 'task');
     task.setAttribute('data-testid', 'live-card-task-' + name);
+    var doing = el('div', 'doing');
+    doing.setAttribute('data-testid', 'live-card-objective-' + name);
     var tool = el('div', 'line');
     var url = el('div', 'line');
     var shot = el('button', 'shot');
@@ -326,9 +331,9 @@ export const LIVE_PAGE = `<!doctype html>
     toggle.setAttribute('data-testid', 'live-card-toggle-' + name);
     var spec = el('span', 'spec');
     foot.appendChild(toggle); foot.appendChild(spec);
-    root.appendChild(top); root.appendChild(task); root.appendChild(tool); root.appendChild(url); root.appendChild(shot); root.appendChild(feed); root.appendChild(foot);
+    root.appendChild(top); root.appendChild(task); root.appendChild(doing); root.appendChild(tool); root.appendChild(url); root.appendChild(shot); root.appendChild(feed); root.appendChild(foot);
 
-    var card = { name: name, root: root, role: role, badge: badge, task: task, tool: tool, url: url, shot: shot, img: img, feed: feed, toggle: toggle, spec: spec, live: false };
+    var card = { name: name, root: root, role: role, badge: badge, task: task, doing: doing, tool: tool, url: url, shot: shot, img: img, feed: feed, toggle: toggle, spec: spec, live: false };
     toggle.addEventListener('click', function () { setLive(card, !card.live); });
     shot.addEventListener('click', function () { openFocus(name); });
     img.src = shotUrl(name);
@@ -548,6 +553,12 @@ export const LIVE_PAGE = `<!doctype html>
     card.task.textContent = s.task || '';
     card.task.title = s.task || '';
     card.task.hidden = !s.task;
+    // What it is doing right now, in the agent's words. A session that acts
+    // without saying is refused by the engine, so a blank one here is a
+    // session that has not acted yet — say that rather than showing nothing.
+    card.doing.textContent = s.objective || 'not said yet';
+    card.doing.title = s.objective || '';
+    card.doing.className = 'doing' + (s.objective ? '' : ' unset');
     card.badge.className = 'badge ' + s.state;
     card.badge.textContent = d.badge;
     card.tool.textContent = d.tool;
