@@ -1,7 +1,7 @@
 {
   "name": "scenescout",
   "description": "Exploratory UI testing: browser tools that let Claude explore a running web app like a curious user, find what is broken or confusing, and write a coverage-checked report.",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "author": {
     "name": "brunoboto96",
     "url": "https://github.com/brunoboto96"
