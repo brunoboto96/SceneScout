@@ -2179,7 +2179,11 @@ export class BrowserEngine {
           }
         }
         await this.settle();
-        this.logAction({ action: `plan:${step.action}`, target: step.target ?? step.value, url: page.url() });
+        // A plan is the RECOMMENDED way to run a mechanical sequence, so its
+        // steps are where most of a recorded run actually happens. Leaving
+        // them unframed reproduced, inside run_plan, the same hole that crawl
+        // had: a form filled and submitted with no picture of any of it.
+        this.logAction({ action: `plan:${step.action}`, target: step.target ?? step.value, url: page.url(), ...(await this.frameFor(`plan-${step.action}`)) });
         // Plans must feed coverage like ref-based actions do: record the
         // state and mark the acted-on element class as exercised.
         // Hover is deliberately excluded: a hover is a look, not an

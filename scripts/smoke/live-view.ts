@@ -156,6 +156,16 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       crawled.length >= 2 && crawled.every((e) => e.frame),
       `${crawled.filter((e) => e.frame).length} of ${crawled.length} crawled route(s) framed`,
     );
+    // run_plan is the recommended way to run a sequence, so its steps are where
+    // most of a recorded run happens.
+    await engine.runPlan([{ action: "navigate", target: "/covered.html" }]);
+    const planned = (engine.memory?.actionLog ?? []).filter((e) => e.action.startsWith("plan:"));
+    check(
+      "every plan step keeps a frame too",
+      planned.length > 0 && planned.every((e) => e.frame),
+      `${planned.filter((e) => e.frame).length} of ${planned.length} plan step(s) framed`,
+    );
+
     const shots = (engine.memory?.actionLog ?? []).filter((e) => e.action === "snapshot");
     check(
       "…and so does a snapshot, which is the action taken to look at something",
