@@ -1034,3 +1034,16 @@ test("a window that opens mid-batch still knows the objective, and a journey sti
     "the journey is what is running, so it is what the group says",
   );
 });
+
+test("one pastel tint per task, and a close-up with no frame says so", () => {
+  // A change of task is a change of colour, so the block of actions a task
+  // covers is legible at a glance and hovering it names the task.
+  const css = LIVE_PAGE.slice(0, LIVE_PAGE.indexOf("</style>"));
+  for (const tint of ["g0", "g1", "g2", "g3"]) {
+    assert.match(css, new RegExp(`\\.feed \\.${tint} \\{ background: rgba\\([^)]+, \\.2[0-9]?\\);`), `${tint} reads as a highlight, not a wash`);
+  }
+  assert.match(css, /@media \(prefers-color-scheme: light\)[\s\S]*?\.feed \.g0 \{ background: rgba/, "the tints are lifted for a light card too");
+  // The card already said when it had no frame; the close-up showed a broken image.
+  assert.match(LIVE_PAGE, /#focus \.stage\.empty \.none \{ display: flex; \}/);
+  assert.match(LIVE_PAGE, /No frame available\. The session's page may be closed/);
+});
