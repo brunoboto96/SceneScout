@@ -38,6 +38,8 @@ playwright-report/
 Thumbs.db
 .idea/
 .vscode/
+# Agent scratch: worktrees and local settings an AI coding tool keeps beside the checkout.
+.claude/
 *.swp
 *.log
 npm-debug.log*
