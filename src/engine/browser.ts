@@ -890,10 +890,17 @@ export class BrowserEngine {
     this.watchesForBounce = Boolean(opts.storageStatePath);
     const landed = await this.stableUrl();
     const authFailed = Boolean(opts.storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), landed, this.baseUrl);
+    // An earlier run may have written down how this app's login state is
+    // regenerated. "Regenerate it" is advice the reader already had; the
+    // command that worked last time is the part worth keeping.
+    const recipe = authFailed ? this.memory.setupRecipe() : [];
     const authWarning = authFailed
       ? `\n⚠ AUTH FAILED — the storage state at ${opts.storageStatePath} did not produce a signed-in session: ` +
         `attaching landed on ${landed}, a login page. Regenerate it (its token has most likely expired) and re-attach. ` +
-        `Continuing now tests a logged-out app.`
+        `Continuing now tests a logged-out app.` +
+        (recipe.length > 0
+          ? `\n  Recorded by an earlier run under setup:\n${recipe.map((line) => `    · ${line}`).join("\n")}`
+          : `\n  Nothing is recorded about how this app's login state is made. Once the user tells you, write it down with scout_note { section: "setup" } so the next run is told instead of asking.`)
       : "";
     return (
       `Attached to ${this.page.url()} (mode=${this.mode}` +

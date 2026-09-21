@@ -54,6 +54,7 @@ import {
   type LiveProvider,
   type SessionStatus,
 } from "./engine/live.js";
+import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
 import { computeGaps, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
 import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
@@ -549,6 +550,32 @@ server.server.setRequestHandler(GetPromptRequestSchema, (request) => {
 // The lane report: how a parallel agent hands its results back to the planner
 // as typed decisions. One tool for both halves, so the instruction a lane is
 // given and the parser its reply meets are the same code.
+// Splitting the app between lanes: the other half of the parallel protocol.
+// scout_lane_report is how a lane hands its answers back; this is what the
+// planner hands it in the first place.
+server.registerTool(
+  "scout_lane_brief",
+  {
+    description:
+      "For a run split across parallel agents (lanes). Divides the app's known routes between N lanes and returns each lane's session name, the `objective` to attach it with, and the routes it owns — whole modules per lane, balanced by route count, so no two lanes audit the same area and none is left unopened. Call it after the first crawl, when route knowledge is complete. Touches no browser; pass the briefs to your lane agents, then use scout_lane_report for what they hand back.",
+    inputSchema: {
+      lanes: z.number().int().min(1).max(MAX_LANES).describe(`How many lanes to split across (1–${MAX_LANES})`),
+      goal: z.string().max(200).optional().describe("What the whole run is for; each lane's objective is written against it"),
+      routes: z.array(z.string()).max(500).optional().describe("Routes to split. Omit to split every route this project knows about."),
+      session: sessionParam,
+    },
+  },
+  serializedPerSession("scout_lane_brief", async ({ lanes, goal, routes }: { lanes: number; goal?: string; routes?: string[] }, session) => {
+    try {
+      const eng = engineFor(session);
+      const all = routes && routes.length > 0 ? routes : eng.allKnownRoutes();
+      return text(formatBriefs(planLanes(all, lanes, { goal, mode: eng.mode, role: eng.role }), { goal, mode: eng.mode, role: eng.role }), session);
+    } catch (err) {
+      return errorText(err);
+    }
+  }),
+);
+
 server.registerTool(
   "scout_lane_report",
   {
@@ -1229,11 +1256,11 @@ server.registerTool(
   "scout_note",
   {
     description:
-      "Cumulative WRITTEN knowledge about the tested app — .scenescout/ASSUMPTIONS.md, in prose a human can read and correct. memory.json stores coverage; this stores UNDERSTANDING, so every run starts smarter than the last. READ it at the start of every session ({action:'read'}). ADD durable learnings as you go ({action:'add', section, note}): what the app is for (app-model), who each role is and what they're FOR — infer the persona from what the role can see and do, e.g. 'qa-role = reviewer: approves orders, cannot administer' (roles), UI patterns the app follows (conventions), rules discovered the hard way like 'an order can only ship once approved' (constraints), fragile areas worth re-testing every run (risks), domain terms (glossary). Notes are dated, attributed to the acting role, and deduplicated. Do NOT record session-specific facts (ids, counts) — only durable knowledge.",
+      "Cumulative WRITTEN knowledge about the tested app — .scenescout/ASSUMPTIONS.md, in prose a human can read and correct. memory.json stores coverage; this stores UNDERSTANDING, so every run starts smarter than the last. READ it at the start of every session ({action:'read'}). ADD durable learnings as you go ({action:'add', section, note}): what the app is for (app-model), who each role is and what they're FOR — infer the persona from what the role can see and do, e.g. 'qa-role = reviewer: approves orders, cannot administer' (roles), UI patterns the app follows (conventions), rules discovered the hard way like 'an order can only ship once approved' (constraints), fragile areas worth re-testing every run (risks), domain terms (glossary), and how to get the app testable at all — the command that regenerates an expired login state, what has to be running (setup), which the engine reads back to you the next time a storage state has expired. Notes are dated, attributed to the acting role, and deduplicated. Do NOT record session-specific facts (ids, counts) — only durable knowledge.",
     inputSchema: {
       action: z.enum(["read", "add"]).describe("'read' the accumulated knowledge, or 'add' one durable learning"),
       section: z
-        .enum(["app-model", "roles", "conventions", "constraints", "risks", "glossary"])
+        .enum(["app-model", "roles", "conventions", "constraints", "risks", "glossary", "setup"])
         .optional()
         .describe("For add: which knowledge section this belongs to"),
       note: z.string().max(500).optional().describe("For add: the learning, one or two sentences, written for a future reader with no context"),
