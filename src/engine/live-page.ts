@@ -58,6 +58,10 @@ export const LIVE_PAGE = `<!doctype html>
     color: #fff; background: var(--accent); border-radius: 6px; }
   main { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px; padding: 16px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+  /* Every rule here that sets display beats the browser's own [hidden] rule,
+     so a hidden card stayed on screen with the "nothing matches" notice above
+     it. Say it once, for everything. */
+  [hidden] { display: none !important; }
   .card.stuck { border-color: var(--stuck); }
   .top { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; }
   .name { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -118,6 +122,10 @@ export const LIVE_PAGE = `<!doctype html>
   .doing { padding: 0 12px 4px; font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .doing::before { content: "▸ "; color: var(--accent); }
   .doing.unset { color: var(--stuck); }
+  .pace { padding: 0 12px 4px; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pace .bad { color: var(--stuck); }
+  header input#filter { font: inherit; font-size: 12px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); min-width: 150px; }
+  #no-match { padding: 16px; color: var(--muted); }
   #focus .feed .a { color: #e6e9ee; }
   #focus .feed .t, #focus .feed .d, #focus .feed .none { color: #98a2b3; }
   #focus .feed .bad { color: #fca5a5; }
@@ -188,12 +196,14 @@ export const LIVE_PAGE = `<!doctype html>
   <span class="spacer"></span>
   <span class="meta" id="counts" data-testid="live-session-counts"></span>
   <span class="actions">
+    <input type="search" id="filter" placeholder="Filter sessions" aria-label="Filter sessions by name, role, objective, task or page" data-testid="live-filter" />
     <button type="button" id="report-open" data-testid="live-report-toggle">Report</button>
     <button type="button" id="all" aria-pressed="false" data-testid="live-all-toggle">Stream all</button>
   </span>
 </header>
 <div id="banner" role="alert" data-testid="live-unreachable-banner">The engine is not answering. It may have exited; this page will pick up again if it comes back.</div>
 <div id="empty" data-testid="live-empty-state">No session is attached yet. Cards appear here as soon as one attaches.</div>
+<div id="no-match" data-testid="live-no-match" hidden></div>
 <div id="finished" data-testid="live-finished-state">
   <h2>The run has finished</h2>
   <p>Its browsers are closed, so there is nothing left to watch. What it found is in the report.</p>
@@ -240,6 +250,8 @@ export const LIVE_PAGE = `<!doctype html>
   var THUMB_EVERY_MS = 3000;
   var cards = {};
   var streamAll = false;
+  /** The header filter, lower-cased. Hides cards; never stops a session running. */
+  var filter = '';
   var focused = null;
   var skew = 0;
   var latest = {};
@@ -364,6 +376,14 @@ export const LIVE_PAGE = `<!doctype html>
     task.setAttribute('data-testid', 'live-card-objective-' + name);
     var doing = el('div', 'doing');
     doing.setAttribute('data-testid', 'live-card-task-' + name);
+    // How long it has been on this task, and how many of its recent steps went
+    // wrong. Both were already in the status payload and reached nobody: the
+    // first only inside the close-up, the second only as a red word in a feed
+    // somebody had to read. On a board of eleven cards, "which one is stuck on
+    // the same thing, and which one is having trouble" is the question being
+    // asked, and it was the one thing the board could not answer.
+    var pace = el('div', 'pace');
+    pace.setAttribute('data-testid', 'live-card-pace-' + name);
     var tool = el('div', 'line');
     var url = el('div', 'line');
     var shot = el('button', 'shot');
@@ -386,9 +406,9 @@ export const LIVE_PAGE = `<!doctype html>
     toggle.setAttribute('data-testid', 'live-card-toggle-' + name);
     var spec = el('span', 'spec');
     foot.appendChild(toggle); foot.appendChild(spec);
-    root.appendChild(top); root.appendChild(task); root.appendChild(doing); root.appendChild(tool); root.appendChild(url); root.appendChild(shot); root.appendChild(feed); root.appendChild(foot);
+    root.appendChild(top); root.appendChild(task); root.appendChild(doing); root.appendChild(pace); root.appendChild(tool); root.appendChild(url); root.appendChild(shot); root.appendChild(feed); root.appendChild(foot);
 
-    var card = { name: name, root: root, role: role, badge: badge, task: task, doing: doing, tool: tool, url: url, shot: shot, img: img, feed: feed, toggle: toggle, spec: spec, live: false };
+    var card = { name: name, root: root, role: role, badge: badge, task: task, doing: doing, pace: pace, tool: tool, url: url, shot: shot, img: img, feed: feed, toggle: toggle, spec: spec, live: false };
     toggle.addEventListener('click', function () { setLive(card, !card.live); });
     shot.addEventListener('click', function () { openFocus(name); });
     img.src = shotUrl(name);
@@ -735,7 +755,29 @@ export const LIVE_PAGE = `<!doctype html>
     card.url.textContent = s.url || '(no page yet)';
     card.url.title = s.url || '';
     card.spec.textContent = [s.mode, s.browser, s.headed ? 'headed' : 'headless'].filter(Boolean).join(' · ');
+    paintPace(card, s);
     renderFeed(card.feed, s.feed);
+  }
+
+  /** Steps in the visible feed whose result reads as trouble. */
+  function troubled(feed) {
+    var n = 0;
+    (feed || []).forEach(function (line) { if (BAD_RESULT.test(line.result || '')) n += 1; });
+    return n;
+  }
+
+  function paintPace(card, s) {
+    var on = s.task && s.taskSince ? 'on this for ' + held(Date.now() + skew - Date.parse(s.taskSince)) : '';
+    var bad = troubled(s.feed);
+    card.pace.textContent = '';
+    if (on) card.pace.appendChild(el('span', '', on));
+    if (bad > 0) {
+      if (on) card.pace.appendChild(el('span', '', ' · '));
+      // Only the trouble is red. Reddening the whole line made "on this for
+      // 9s" look like the complaint.
+      card.pace.appendChild(el('span', 'bad', bad + ' of the last ' + s.feed.length + ' steps went wrong'));
+    }
+    card.pace.hidden = !on && bad === 0;
   }
 
   function openFocus(name) {
@@ -827,6 +869,32 @@ export const LIVE_PAGE = `<!doctype html>
     focusTick += 1;
   }
 
+  /**
+   * Whether a session survives the header's filter. Matched against everything
+   * the card already shows, because on a board of eleven the reader is looking
+   * for "the one on the orders register" as often as for a session by name.
+   * Filtering hides cards; it never stops them being polled or streamed, so a
+   * hidden session is still running and still counted in the header.
+   */
+  function matches(s) {
+    if (!filter) return true;
+    var hay = [s.session, s.role, s.objective, s.task, s.url, s.tool].join(' ').toLowerCase();
+    return hay.indexOf(filter) !== -1;
+  }
+
+  function applyFilter() {
+    var shown = 0;
+    Object.keys(cards).forEach(function (name) {
+      var s = latest[name];
+      var keep = !s || matches(s);
+      cards[name].root.hidden = !keep;
+      if (keep) shown += 1;
+    });
+    var none = document.getElementById('no-match');
+    none.hidden = !filter || shown > 0 || Object.keys(cards).length === 0;
+    none.textContent = 'No session matches ' + JSON.stringify(filter) + '.';
+  }
+
   function apply(snap) {
     skew = Date.parse(snap.at) - Date.now();
     var grid = document.getElementById('grid');
@@ -884,6 +952,7 @@ export const LIVE_PAGE = `<!doctype html>
     document.getElementById('engine').textContent = 'engine pid ' + snap.pid + ' · v' + snap.version;
     document.getElementById('counts').textContent = snap.sessions.length + ' session' + (snap.sessions.length === 1 ? '' : 's') +
       ' · ' + counts.running + ' running · ' + counts.idle + ' idle' + (counts.stuck ? ' · ' + counts.stuck + ' stuck' : '');
+    applyFilter();
     paintFocus();
   }
 
@@ -927,7 +996,37 @@ export const LIVE_PAGE = `<!doctype html>
     e.returnValue = '';
   });
   document.getElementById('report-close').addEventListener('click', closeReport);
+  document.getElementById('filter').addEventListener('input', function (e) {
+    filter = String(e.target.value || '').trim().toLowerCase();
+    applyFilter();
+  });
+
+  /**
+   * Step through the timeline from the keyboard.
+   *
+   * Scrubbing a long run by clicking 16px ticks is the kind of thing a mouse
+   * is bad at, and the run being examined is usually the one with hundreds of
+   * steps. Arrow keys move one step, Home and End jump to the ends, and Space
+   * returns to the live picture — only while the close-up is open, and never
+   * while the reader is typing in the filter.
+   */
+  function stepBy(delta) {
+    if (timelineLines.length === 0) return;
+    var at = scrubbed
+      ? timelineLines.findIndex(function (l) { return l.at === scrubbed.at && l.action === scrubbed.action; })
+      : timelineLines.length - 1;
+    var next = Math.max(0, Math.min(timelineLines.length - 1, (at === -1 ? timelineLines.length - 1 : at) + delta));
+    showStep(timelineLines[next]);
+  }
+
   document.addEventListener('keydown', function (e) {
+    if (focused && !reportOpen && e.target !== document.getElementById('filter')) {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); stepBy(e.key === 'ArrowLeft' ? -1 : 1); return; }
+      if (e.key === 'Home' || e.key === 'End') { e.preventDefault(); stepBy(e.key === 'Home' ? -1e9 : 1e9); return; }
+      // Back to what the session is showing NOW, which is otherwise a click
+      // on a button the reader has to find.
+      if (e.key === ' ' && scrubbed) { e.preventDefault(); backToLive(); return; }
+    }
     if (e.key !== 'Escape') return;
     if (reportOpen) closeReport();
     else if (focused) closeFocus();
