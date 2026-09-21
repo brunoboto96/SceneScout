@@ -843,8 +843,32 @@ export class MemoryStore {
       constraints: "Constraints — rules discovered the hard way (gates, preconditions, limits)",
       risks: "Risks & watchpoints — fragile areas worth re-testing every run",
       glossary: "Glossary — domain terms and what they mean here",
+      setup: "Setup — how to get this app into a testable state (how a login state is regenerated, what has to be running)",
     };
     return `## ${titles[section] ?? section}`;
+  }
+
+  /**
+   * What earlier runs recorded about getting this app testable, if anything.
+   *
+   * Read back by the auth-failure message. A storage state expires on a timer
+   * nobody remembers, and "regenerate it" is advice the reader already had;
+   * the command that worked last time is the part worth keeping, and it is
+   * exactly the kind of thing a run pays to find out and then forgets.
+   */
+  setupRecipe(): string[] {
+    if (!fs.existsSync(this.assumptionsPath)) return [];
+    const text = fs.readFileSync(this.assumptionsPath, "utf8");
+    const heading = MemoryStore.sectionHeading("setup");
+    const start = text.indexOf(heading);
+    if (start === -1) return [];
+    const rest = text.slice(start + heading.length);
+    const end = rest.indexOf("\n## ");
+    return (end === -1 ? rest : rest.slice(0, end))
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("- "))
+      .map((l) => l.slice(2).trim());
   }
 
   readAssumptions(): string {
