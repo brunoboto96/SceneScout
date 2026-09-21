@@ -142,6 +142,12 @@ export interface ReportExtras {
   version?: string;
   /** Sessions attached right now. Only these can be holding a browser, so only these are warned about. */
   attachedSessions?: string[];
+  /**
+   * Include the pacing section. False for the sample report, which CI diffs
+   * byte for byte: pacing is wall-clock, so it differs between machines and
+   * between runs of the same machine, and a sample carrying it can never match.
+   */
+  pace?: boolean;
 }
 
 /**
@@ -619,10 +625,13 @@ export function generateReport(
 
   // How the run was paced. A reader who sees a session that did four actions
   // in an hour learns more from that than from another coverage percentage.
+  // Omitted where the report is compared byte for byte, since it is timing.
   // The sessions still attached, so the stale-browser warning names only the
   // ones that could act on it. A lane that finished and closed is quiet
   // because it is gone.
-  lines.push(...formatPace(measurePace(memory.actionLog, Date.now(), extras?.attachedSessions ?? [])));
+  if (extras?.pace !== false) {
+    lines.push(...formatPace(measurePace(memory.actionLog, Date.now(), extras?.attachedSessions ?? [])));
+  }
 
   const markdown = lines.join("\n");
   const outPath = path.join(memory.dir, "report.md");
