@@ -1243,3 +1243,74 @@ test("a live session states what it is doing before it has done anything", () =>
   // it is doing, or every run would proceed under it.
   assert.match(attach, /this\.journey !== null \|\| \(this\.currentTask\?\.stated \?\? false\)/);
 });
+
+// ── the board at a glance ───────────────────────────────────────────────────
+// Three things the status payload already carried and nobody could see: how
+// long a session has been on its current task, how many of its recent steps
+// went wrong, and which session is the one you are looking for. On a board of
+// eleven cards those are the questions actually being asked.
+
+test("a card says how long the session has been on this task, and how many recent steps went wrong", () => {
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
+  const paint = script.slice(script.indexOf("function paintPace"), script.indexOf("function openFocus"));
+  // taskSince reached only the close-up before this, and a bad result was only
+  // ever a red word in a feed somebody had to read line by line.
+  assert.match(paint, /on this for/);
+  assert.match(paint, /taskSince/);
+  assert.match(paint, /steps went wrong/);
+  // The line disappears rather than sitting there empty on a session that has
+  // stated no task and had no trouble.
+  assert.match(paint, /card\.pace\.hidden = !on && bad === 0;/);
+  // Only the trouble is red: reddening the whole line made "on this for 9s"
+  // read as the complaint.
+  assert.match(paint, /el\('span', 'bad',/);
+});
+
+test("regression: a hidden card is actually hidden", () => {
+  // Every card rule sets `display`, which beats the browser's own
+  // `[hidden] { display: none }`. Filtering therefore set the attribute,
+  // showed "No session matches", and left every card on screen underneath it.
+  // Found by rendering the page, which no string assertion here would have
+  // caught — so the rule is asserted rather than the symptom.
+  const style = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<style>"), LIVE_PAGE.indexOf("</style>"));
+  assert.match(style, /\[hidden\] \{ display: none !important; \}/);
+});
+
+test("trouble is counted with the same rule the feed colours red", () => {
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
+  const counter = script.slice(script.indexOf("function troubled"), script.indexOf("function paintPace"));
+  // Two rules for "this step went wrong" would drift, and the card and the
+  // feed beneath it would then disagree in front of the reader.
+  assert.match(counter, /BAD_RESULT\.test/);
+});
+
+test("the filter hides cards without stopping the sessions behind them", () => {
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
+  const match = script.slice(script.indexOf("function matches"), script.indexOf("function apply(snap)"));
+  // Everything the card shows is searchable: the reader looks for "the one on
+  // the orders register" as often as for a session by name.
+  for (const field of ["s.session", "s.role", "s.objective", "s.task", "s.url", "s.tool"]) {
+    assert.ok(match.includes(field), `${field} is not searchable`);
+  }
+  // Hidden, not unmounted and not unsubscribed: a filtered-out session is
+  // still running, still streaming and still counted in the header.
+  assert.match(match, /\.root\.hidden = !keep;/);
+  assert.ok(!/setLive\(|events\.close\(/.test(match), "filtering must not touch streaming");
+  // A filter that matches nothing says so, rather than showing a blank page
+  // that reads as "every session has gone".
+  assert.match(match, /No session matches/);
+});
+
+test("the timeline can be walked from the keyboard", () => {
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
+  const keys = script.slice(script.indexOf("function stepBy"), script.indexOf("if (e.key !== 'Escape') return;"));
+  assert.match(keys, /ArrowLeft/);
+  assert.match(keys, /ArrowRight/);
+  assert.match(keys, /Home/);
+  assert.match(keys, /End/);
+  assert.match(keys, /backToLive\(\)/, "space returns to what the session is showing now");
+  // Only in the close-up, and never while the reader is typing a filter —
+  // an arrow key in a text box belongs to the text box.
+  assert.match(keys, /if \(focused && !reportOpen && e\.target !== document\.getElementById\('filter'\)\)/);
+  assert.match(keys, /timelineLines\.length === 0/, "a run with no timeline is not walked");
+});
