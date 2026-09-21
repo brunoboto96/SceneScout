@@ -101,4 +101,6 @@ The engine is self-healing (orphaned browsers reaped, wedged calls time out with
 
 ## Finishing
 
+`scout_report` prints the findings THIS run made in full, and lists earlier ones — and resolved ones — as an index: a row each with id, severity, age and title. That is the default because a project with hundreds of remembered findings otherwise produces a document nobody opens, in which the handful the run actually made are buried; on one real project it was 1.75 MB against 113 KB, and nearly half of it was findings already fixed. Nothing is lost: the ids are there, and `scout_report {history:'full'}` prints every one as before — use it when handing the document to someone who cannot read the project's memory. Age is what decides whether an unverified old finding is worth re-testing, so it is on every row.
+
 `scout_report` (satisfy the contract first) → `scout_close` → summarize in chat: worst findings first, coverage numbers, report path (`.scenescout/report.md`), and suggest promoting high findings to real Playwright regression tests (skeletons are in the report).
