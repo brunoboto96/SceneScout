@@ -1055,6 +1055,36 @@ server.registerTool(
 );
 
 server.registerTool(
+  "scout_request",
+  {
+    description:
+      "Call the app's own API as this session, with the UI bypassed — the check that turns a hidden or disabled control into a proven refusal. A button that is not shown proves nothing; the same action refused by the server does. The fetch runs IN the page, so it carries the session's cookies and replays the Authorization header the app itself last sent, and it passes through the same interception the write policy is enforced on: in safe-write a mutation on a record this session did not create is refused here exactly as it would be for a click, and that refusal is the engine's safety net, not a finding. Returns the status line, the timing, the headers that decide whether two responses are truly identical (content-type, location, www-authenticate, retry-after, cache-control), and the body. Unlike a shell call, every request is recorded in the run's trail and its signature is what a finding should quote. Paths are fenced to the attached origin: use another session to reach another host.",
+    inputSchema: {
+      path: z.string().min(1).max(2000).describe("Path on the attached origin, e.g. /api/things/12, or a full URL on that same origin"),
+      method: z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]).optional().describe("Default GET"),
+      body: z.string().max(20000).optional().describe("Request body, sent as application/json unless a content-type header is given"),
+      headers: z
+        .record(z.string().max(2000))
+        .optional()
+        .describe("Extra headers. One given here wins over the app's own, which is how a session tests a different or absent credential."),
+      task: taskParam,
+      objective: legacyObjectiveParam,
+      session: sessionParam,
+    },
+  },
+  serializedPerSession(
+    "scout_request",
+    async (args: { path: string; method?: string; body?: string; headers?: Record<string, string>; session?: string }, session) => {
+      try {
+        return text(await engineFor(session).apiRequest({ method: args.method, path: args.path, body: args.body, headers: args.headers }), session);
+      } catch (err) {
+        return errorText(err);
+      }
+    },
+  ),
+);
+
+server.registerTool(
   "scout_back",
   {
     description: "Go back in browser history (tests back-button resilience).",

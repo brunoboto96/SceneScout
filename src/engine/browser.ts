@@ -20,6 +20,7 @@ import { OracleMonitor, formatViolations } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
+import { buildRequestScript, formatReplay, replaySignature, requestHeaders, resolveMethod, resolveRequestUrl, toReplayResult } from "./request.js";
 import {
   defaultEngine,
   focusAdvanceKey,
@@ -345,6 +346,60 @@ export class BrowserEngine {
   private framesFailed = 0;
 
   /**
+   * The Authorization header the app itself last sent, replayed by
+   * scout_request so a call with the UI bypassed carries the same credential
+   * as a click. Nothing here parses it: whatever scheme the app uses is
+   * whatever gets replayed.
+   */
+  private lastAuthHeader: string | null = null;
+
+  private rememberAuthHeader(headers: Record<string, string>): void {
+    const value = headers["authorization"] ?? headers["Authorization"];
+    if (value && value.trim()) this.lastAuthHeader = value;
+  }
+
+  /**
+   * Call the app's own API as this session, with the UI bypassed.
+   *
+   * The fetch runs IN the page, so it passes through the same interception the
+   * write policy is enforced on: a safe-write session cannot reach past the
+   * policy by calling an endpoint instead of clicking it. The refusal comes
+   * back as the policy's own error, exactly as it would for a click.
+   */
+  async apiRequest(input: { method?: string; path: string; body?: string; headers?: Record<string, string> }): Promise<string> {
+    const page = this.requirePage();
+    const method = resolveMethod(input.method);
+    if ("problem" in method) return `REFUSED: ${method.problem}`;
+    const target = resolveRequestUrl(this.baseUrl, input.path);
+    if ("problem" in target) return `REFUSED: ${target.problem}`;
+
+    const script = buildRequestScript({
+      url: target.url,
+      method: method.method,
+      body: input.body,
+      headers: requestHeaders({ given: input.headers, auth: this.lastAuthHeader, body: input.body }),
+    });
+    let raw: Parameters<typeof toReplayResult>[0];
+    try {
+      raw = (await page.evaluate(script)) as Parameters<typeof toReplayResult>[0];
+    } catch (err) {
+      // A blocked request rejects the fetch inside the page. That is the write
+      // policy doing its job, not an app fault, and it is reported as such.
+      const message = err instanceof Error ? err.message : String(err);
+      this.logAction({ action: "request", target: `${method.method} ${input.path}`, url: page.url(), result: `blocked: ${message.split("\n")[0]}` });
+      return `${method.method} ${input.path} — the request did not complete: ${message.split("\n")[0]}\nIn a write-limited mode this is usually the policy refusing it, which is the engine's safety net and not a finding about the app.`;
+    }
+    const result = toReplayResult(raw);
+    this.logAction({
+      action: "request",
+      target: `${method.method} ${input.path}`,
+      url: page.url(),
+      result: replaySignature(method.method, result.url, result.status),
+    });
+    return formatReplay(method.method, result);
+  }
+
+  /**
    * The frame field for a log entry, or nothing. Spread into logAction so a
    * caller that is not going through afterAction can still record what the
    * page looked like: `...(await this.frameFor("crawl"))`.
@@ -659,6 +714,7 @@ export class BrowserEngine {
         if (method === "GET" || method === "HEAD" || method === "OPTIONS") return route.continue();
         const url = req.url();
         const pathname = pathnameOf(url);
+        this.rememberAuthHeader(req.headers());
         const destructiveWire = isDestructiveWire(pathname, req.postData());
         // Auth/session flows must work in every mode — but never a destructive
         // one, and in observe only the requests a login itself needs.

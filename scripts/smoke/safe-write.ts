@@ -110,6 +110,29 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     );
     const ownDocResult = await engine2.click(swRefOf("Sync own document"));
     check("PUT on own document (owned via document_id) allowed", !ownDocResult.includes("WRITE-POLICY blocked"), ownDocResult);
+
+    // Calling the API directly must not be a way around the policy. The fetch
+    // runs in the page, so it meets the same interception a click does.
+    const ownPut = await engine2.apiRequest({ method: "PUT", path: "/api/documents/99", body: JSON.stringify({ title: "replayed" }) });
+    check("a replayed PUT on a record this session created is allowed", /PUT \/api\/documents\/99 [23]\d\d/.test(ownPut), ownPut.slice(0, 300));
+    const foreignPut = await engine2.apiRequest({ method: "DELETE", path: "/api/documents/1" });
+    check(
+      "…and a replayed DELETE on a record it did not create is refused, exactly as a click would be",
+      !/DELETE \/api\/documents\/1 [23]\d\d/.test(foreignPut),
+      foreignPut.slice(0, 300),
+    );
+    const offOrigin = await engine2.apiRequest({ path: "http://example.test/steal" });
+    check(
+      "…and a request off the attached origin never leaves the browser",
+      offOrigin.startsWith("REFUSED:") && /origin/.test(offOrigin),
+      offOrigin.slice(0, 200),
+    );
+    const replayed = (engine2.memory?.actionLog ?? []).filter((e) => e.action === "request");
+    check(
+      "every replayed call is in the run's trail with its signature",
+      replayed.length >= 2 && replayed.every((e) => typeof e.result === "string" && e.result.length > 0),
+      JSON.stringify(replayed.map((e) => e.result)).slice(0, 300),
+    );
     await engine2.click(swRefOf("Create quick document"));
     await until("quick-document creation to register", () => engine2.createdResources.some((r) => r.includes("/api/documents") && r.includes("id=250")));
     check(
