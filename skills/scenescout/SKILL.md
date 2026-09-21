@@ -58,6 +58,8 @@ You are the brain of an exploratory UI tester. The SceneScout MCP server gives y
 
 Route knowledge is generic: routes read from source (file-based routing, or React Router / Vue Router / Angular configuration) ∪ links harvested from every snapshot (including `?tab=` screens) form the contract — it works on any app, not just Next. For a responsive pass, re-attach with `viewportWidth: 390, viewportHeight: 844` and re-run the design audit on key pages.
 
+**Slowing a run down so a person can follow it.** By default every session runs as fast as its page allows: the engine waits on the requests the action actually fired, not on a fixed sleep. When the user is watching and wants to keep up — taking notes alongside the agent, demonstrating a flow to someone — `scout_attach {paceMs: 5000}` makes that session pause at least five seconds between actions, and `scout_session {paceMs: 5000}` changes it mid-run (with no `name`, it applies to every attached session at once). `paceMs: 0` puts it back to full speed. Set it only when the user asks to slow down; it is a floor on every action, so a run at 5000 takes as long as it sounds.
+
 ## Multi-role collaboration (named sessions)
 
 Some flows need a TEAM — a document one role submits and another approves, a review one role assigns and another completes, permission checks that only mean something side-by-side. `scout_attach {session: "admin", storageStatePath: …}` then `scout_attach {session: "qa", storageStatePath: …}` keeps BOTH browsers live and authenticated. Coverage and findings from all roles merge into one project memory.
