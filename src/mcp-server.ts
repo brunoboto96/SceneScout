@@ -1342,80 +1342,90 @@ server.registerTool(
         .enum(["minimal", "medium", "extensive"])
         .default("medium")
         .describe("Which completion contract to enforce — match the level the run was asked for"),
+      history: z
+        .enum(["index", "full"])
+        .default("index")
+        .describe(
+          "How much of the history to print. 'index' lists findings from earlier runs, and resolved ones, as a row each: id, severity, age, title. 'full' prints every one in full as before — on one project that was 1.75 MB against 113 KB, nearly half of it findings already fixed. Use 'full' when handing the document to someone who has no access to the memory.",
+        ),
       session: sessionParam,
     },
   },
-  serializedPerSession("scout_report", async ({ force, level }: { force?: boolean; level?: "minimal" | "medium" | "extensive" }, session) => {
-    try {
-      const eng = engineFor(session);
-      if (!eng.memory) throw new Error("Not attached.");
-      const unvisited = eng.unvisitedKnownRoutes();
-      const gates: string[] = [];
-      if (unvisited.length > 0) {
-        gates.push(
-          `${unvisited.length} known route(s) never visited:\n` +
-            unvisited
-              .slice(0, 30)
-              .map((r) => `  ${r}`)
-              .join("\n") +
-            (unvisited.length > 30 ? `\n  … +${unvisited.length - 30} more` : "") +
-            `\n→ Run scout_crawl (no args) to cover them in one call.`,
-        );
-      }
-      if (eng.designAuditCount === 0) {
-        gates.push(`No scout_design_audit was run this session — run it on at least one representative page (visual/a11y coverage is part of every level).`);
-      }
-      const lvl = level ?? "medium";
-      const auditedRoutes = Object.values(eng.memory.routeFacts).filter((f) => f.audited).length;
-      const visitedCount = new Set(Object.values(eng.memory.states).map((st) => st.route)).size;
-      if (lvl !== "minimal") {
-        const needed = Math.min(3, Math.max(1, Math.ceil(visitedCount / 10)));
-        if (auditedRoutes < needed) {
+  serializedPerSession(
+    "scout_report",
+    async ({ force, level, history }: { force?: boolean; level?: "minimal" | "medium" | "extensive"; history?: "index" | "full" }, session) => {
+      try {
+        const eng = engineFor(session);
+        if (!eng.memory) throw new Error("Not attached.");
+        const unvisited = eng.unvisitedKnownRoutes();
+        const gates: string[] = [];
+        if (unvisited.length > 0) {
           gates.push(
-            `Level '${lvl}' needs design audits on ≥${needed} distinct routes (have ${auditedRoutes}) — audit the representative pages (dashboard, a form, a detail view, a table).`,
+            `${unvisited.length} known route(s) never visited:\n` +
+              unvisited
+                .slice(0, 30)
+                .map((r) => `  ${r}`)
+                .join("\n") +
+              (unvisited.length > 30 ? `\n  … +${unvisited.length - 30} more` : "") +
+              `\n→ Run scout_crawl (no args) to cover them in one call.`,
           );
         }
+        if (eng.designAuditCount === 0) {
+          gates.push(`No scout_design_audit was run this session — run it on at least one representative page (visual/a11y coverage is part of every level).`);
+        }
+        const lvl = level ?? "medium";
+        const auditedRoutes = Object.values(eng.memory.routeFacts).filter((f) => f.audited).length;
+        const visitedCount = new Set(Object.values(eng.memory.states).map((st) => st.route)).size;
+        if (lvl !== "minimal") {
+          const needed = Math.min(3, Math.max(1, Math.ceil(visitedCount / 10)));
+          if (auditedRoutes < needed) {
+            gates.push(
+              `Level '${lvl}' needs design audits on ≥${needed} distinct routes (have ${auditedRoutes}) — audit the representative pages (dashboard, a form, a detail view, a table).`,
+            );
+          }
+        }
+        const all = eng.allKnownRoutes();
+        const gapList = computeGaps(eng.memory, {
+          routesVisited: all.length - unvisited.length,
+          routesTotal: all.length,
+          designAudits: eng.designAuditCount,
+          unvisitedRoutes: unvisited,
+          mode: eng.mode,
+        });
+        if (lvl === "extensive" && gapList.length > 0) {
+          gates.push(
+            `Level 'extensive' claims completeness, so it refuses while the GAP LEDGER is non-empty:\n` +
+              (eng.mode === "observe"
+                ? `(observe mode blocks every form submission, so the unsubmitted-forms gap cannot be closed in this mode: report at level 'medium', which discloses it.)\n`
+                : "") +
+              gapList.map((g) => `  ⚠ ${g}`).join("\n") +
+              `\nClose the gaps (or report at level 'medium', which discloses them instead).`,
+          );
+        }
+        if (gates.length > 0 && !force) {
+          return text(
+            `NOT GENERATED — the '${lvl}' completion contract is unmet:\n\n${gates.join("\n\n")}\n\n` +
+              `Then call scout_report again. Pass force=true ONLY if the user explicitly capped the budget.`,
+            session,
+          );
+        }
+        const { path: p, summary } = generateReport(eng.memory, eng.oracleLog.all, {
+          history,
+          routesVisited: all.length - unvisited.length,
+          routesTotal: all.length,
+          designAudits: eng.designAuditCount,
+          createdResources: eng.createdResources,
+          unvisitedRoutes: unvisited,
+          mode: eng.mode,
+          policyAttributed: eng.oracleLog.policyAttributed,
+        });
+        void p;
+        return text(summary, session);
+      } catch (err) {
+        return errorText(err);
       }
-      const all = eng.allKnownRoutes();
-      const gapList = computeGaps(eng.memory, {
-        routesVisited: all.length - unvisited.length,
-        routesTotal: all.length,
-        designAudits: eng.designAuditCount,
-        unvisitedRoutes: unvisited,
-        mode: eng.mode,
-      });
-      if (lvl === "extensive" && gapList.length > 0) {
-        gates.push(
-          `Level 'extensive' claims completeness, so it refuses while the GAP LEDGER is non-empty:\n` +
-            (eng.mode === "observe"
-              ? `(observe mode blocks every form submission, so the unsubmitted-forms gap cannot be closed in this mode: report at level 'medium', which discloses it.)\n`
-              : "") +
-            gapList.map((g) => `  ⚠ ${g}`).join("\n") +
-            `\nClose the gaps (or report at level 'medium', which discloses them instead).`,
-        );
-      }
-      if (gates.length > 0 && !force) {
-        return text(
-          `NOT GENERATED — the '${lvl}' completion contract is unmet:\n\n${gates.join("\n\n")}\n\n` +
-            `Then call scout_report again. Pass force=true ONLY if the user explicitly capped the budget.`,
-          session,
-        );
-      }
-      const { path: p, summary } = generateReport(eng.memory, eng.oracleLog.all, {
-        routesVisited: all.length - unvisited.length,
-        routesTotal: all.length,
-        designAudits: eng.designAuditCount,
-        createdResources: eng.createdResources,
-        unvisitedRoutes: unvisited,
-        mode: eng.mode,
-        policyAttributed: eng.oracleLog.policyAttributed,
-      });
-      void p;
-      return text(summary, session);
-    } catch (err) {
-      return errorText(err);
-    }
-  }),
+    },
+  ),
 );
 
 server.registerTool(
