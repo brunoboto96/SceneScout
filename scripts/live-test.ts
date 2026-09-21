@@ -1260,7 +1260,20 @@ test("a card says how long the session has been on this task, and how many recen
   assert.match(paint, /steps went wrong/);
   // The line disappears rather than sitting there empty on a session that has
   // stated no task and had no trouble.
-  assert.match(paint, /card\.pace\.hidden = parts\.length === 0;/);
+  assert.match(paint, /card\.pace\.hidden = !on && bad === 0;/);
+  // Only the trouble is red: reddening the whole line made "on this for 9s"
+  // read as the complaint.
+  assert.match(paint, /el\('span', 'bad',/);
+});
+
+test("regression: a hidden card is actually hidden", () => {
+  // Every card rule sets `display`, which beats the browser's own
+  // `[hidden] { display: none }`. Filtering therefore set the attribute,
+  // showed "No session matches", and left every card on screen underneath it.
+  // Found by rendering the page, which no string assertion here would have
+  // caught — so the rule is asserted rather than the symptom.
+  const style = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<style>"), LIVE_PAGE.indexOf("</style>"));
+  assert.match(style, /\[hidden\] \{ display: none !important; \}/);
 });
 
 test("trouble is counted with the same rule the feed colours red", () => {

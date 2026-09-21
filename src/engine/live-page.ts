@@ -58,6 +58,10 @@ export const LIVE_PAGE = `<!doctype html>
     color: #fff; background: var(--accent); border-radius: 6px; }
   main { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px; padding: 16px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+  /* Every rule here that sets display beats the browser's own [hidden] rule,
+     so a hidden card stayed on screen with the "nothing matches" notice above
+     it. Say it once, for everything. */
+  [hidden] { display: none !important; }
   .card.stuck { border-color: var(--stuck); }
   .top { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; }
   .name { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -119,7 +123,7 @@ export const LIVE_PAGE = `<!doctype html>
   .doing::before { content: "▸ "; color: var(--accent); }
   .doing.unset { color: var(--stuck); }
   .pace { padding: 0 12px 4px; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pace.bad { color: var(--stuck); }
+  .pace .bad { color: var(--stuck); }
   header input#filter { font: inherit; font-size: 12px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); min-width: 150px; }
   #no-match { padding: 16px; color: var(--muted); }
   #focus .feed .a { color: #e6e9ee; }
@@ -763,13 +767,17 @@ export const LIVE_PAGE = `<!doctype html>
   }
 
   function paintPace(card, s) {
-    var parts = [];
-    if (s.task && s.taskSince) parts.push('on this for ' + held(Date.now() + skew - Date.parse(s.taskSince)));
+    var on = s.task && s.taskSince ? 'on this for ' + held(Date.now() + skew - Date.parse(s.taskSince)) : '';
     var bad = troubled(s.feed);
-    if (bad > 0) parts.push(bad + ' of the last ' + s.feed.length + ' steps went wrong');
-    card.pace.textContent = parts.join(' · ');
-    card.pace.hidden = parts.length === 0;
-    card.pace.className = 'pace' + (bad > 0 ? ' bad' : '');
+    card.pace.textContent = '';
+    if (on) card.pace.appendChild(el('span', '', on));
+    if (bad > 0) {
+      if (on) card.pace.appendChild(el('span', '', ' · '));
+      // Only the trouble is red. Reddening the whole line made "on this for
+      // 9s" look like the complaint.
+      card.pace.appendChild(el('span', 'bad', bad + ' of the last ' + s.feed.length + ' steps went wrong'));
+    }
+    card.pace.hidden = !on && bad === 0;
   }
 
   function openFocus(name) {
