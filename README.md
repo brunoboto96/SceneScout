@@ -272,13 +272,14 @@ Snapshots are cheap: re-snapshotting a route returns only *what changed*, with s
 
 ## 🧰 The toolbox
 
-25 deterministic tools. The agent picks; you rarely call these by hand.
+26 deterministic tools. The agent picks; you rarely call these by hand.
 
 | Phase | Tools | What they do |
 |---|---|---|
 | **Set up** | `scout_playbook` `scout_scan` `scout_attach` `scout_session` | Hand the testing method to an agent that has no skill loaded; discover routes; launch a browser in a write-mode; keep several authenticated roles alive at once |
 | **Explore** | `scout_crawl` `scout_coverage` | Sweep every route in one call; ask what's still untested |
 | **Look** | `scout_snapshot` `scout_hover` `scout_screenshot` | Read the structured scene (diffed); reveal tooltips/hover cards; capture pixels only when needed |
+| **Ask the server** | `scout_request` | Call the app's own API as this session, with the UI bypassed — the check that turns a hidden button into a proven refusal |
 | **Act** | `scout_click` `scout_type` `scout_select` `scout_upload` `scout_press` `scout_scroll` `scout_navigate` `scout_back` `scout_run_plan` | Drive the UI like a user; `scout_run_plan` batches a whole mechanical sequence into one call |
 | **Assess** | `scout_design_audit` `scout_journey` | Score a page's craft/a11y/consistency; measure how hard a task is to complete |
 | **Record** | `scout_note` `scout_finding` `scout_resolve` `scout_report` | Curate durable notes; file deduped findings; mark fixes; write the report, and on a recorded run the whole run as one page |
@@ -557,7 +558,7 @@ src/
     report.ts       the gap ledger + report generation
     replay.ts       the run as one page: steps, tasks, frames under each finding
     …               collector · dispatch · fixtures · authloss · reaper
-scripts/            the 15 test suites (smoke/ holds the real-browser ones)
+scripts/            the 17 test suites (smoke/ holds the real-browser ones)
 test-app/           fixtures for the real-browser smoke tests
 skills/scenescout/   the testing method (SKILL.md): a skill in Claude Code, served by the server everywhere else
 docs/adr/           why it's built this way
