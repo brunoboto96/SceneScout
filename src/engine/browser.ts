@@ -2297,7 +2297,7 @@ export class BrowserEngine {
       this.memory?.setPageScore(route, { ...score, at: new Date().toISOString(), url: page.url() });
       this.memory?.markRouteFact(route, { audited: true });
     }
-    this.logAction({ action: "design-audit", url: page.url(), result: score ? `score:${score.overall}` : undefined });
+    this.logAction({ action: "design-audit", url: page.url(), result: score ? `score:${score.overall}` : undefined, ...(await this.frameFor("design-audit")) });
     return `URL: ${page.url()}\n` + report;
   }
 

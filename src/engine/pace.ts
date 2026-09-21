@@ -14,6 +14,19 @@
  */
 import type { ActionLogEntry } from "./memory.js";
 
+/**
+ * Log entries that are not actions: a stated task, an attach, the note that a
+ * resource was created. They carry no browser work and take no time, so
+ * counting them inflates the action count and drags the median gap toward
+ * zero. One real run logged 325 entries of which 107 were stated tasks.
+ */
+const MARKER_ACTIONS = new Set(["task", "attach", "created-resource", "journey:start", "journey:end", "record:full", "record:failed"]);
+
+/** Whether a log entry represents work the browser actually did. */
+export function isActing(action: string): boolean {
+  return !MARKER_ACTIONS.has(action);
+}
+
 /** A gap longer than this is the agent thinking, not the browser working. */
 export const IDLE_GAP_MS = 30_000;
 /** A session with no action for this long is probably forgotten, and is holding a browser for nothing. */
@@ -56,9 +69,11 @@ function median(sorted: readonly number[]): number {
  * passed rather than read so the numbers are the same every time they are
  * computed from the same log.
  */
-export function measurePace(log: readonly ActionLogEntry[], nowMs: number): RunPace {
+export function measurePace(log: readonly ActionLogEntry[], nowMs: number, attached: readonly string[] = []): RunPace {
+  const stillOpen = new Set(attached);
   const bySession = new Map<string, ActionLogEntry[]>();
   for (const entry of log) {
+    if (!isActing(entry.action)) continue;
     const name = entry.session ?? "default";
     const list = bySession.get(name);
     if (list) list.push(entry);
@@ -93,8 +108,12 @@ export function measurePace(log: readonly ActionLogEntry[], nowMs: number): RunP
   return {
     sessions,
     spanMs: sessions.length > 0 ? last - first : 0,
-    actions: log.length,
-    quiet: sessions.filter((s) => s.quietMs > STALE_SESSION_MS).map((s) => s.session),
+    actions: sessions.reduce((sum, x) => sum + x.actions, 0),
+    // Only a session that is STILL ATTACHED can be holding a browser. A lane
+    // that finished and closed is quiet because it is gone, and warning about
+    // it told the reader to close something that no longer exists — which is
+    // what the first run of this report did for six of its eleven sessions.
+    quiet: sessions.filter((s) => s.quietMs > STALE_SESSION_MS && stillOpen.has(s.session)).map((s) => s.session),
   };
 }
 
@@ -117,7 +136,7 @@ export function formatPace(pace: RunPace): string[] {
   const lines = [
     `## How the run was paced`,
     ``,
-    `${pace.actions} action(s) over ${sayDuration(pace.spanMs)}. Idle share is time the browser stood still waiting for the agent, not time the engine spent working.`,
+    `${pace.actions} action(s) over ${sayDuration(pace.spanMs)}. Stated tasks and attaches are not counted: they take no time. Idle share is time the browser stood still waiting for the agent, not time the engine spent working.`,
     ``,
     `| Session | Actions | Span | Median gap | Longest gap | Idle | Frames |`,
     `|---|---:|---:|---:|---:|---:|---:|`,

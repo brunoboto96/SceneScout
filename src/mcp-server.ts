@@ -263,6 +263,7 @@ function reportExtras(eng: BrowserEngine): ReportExtras {
     mode: eng.mode,
     policyAttributed: eng.oracleLog.policyAttributed,
     version: PKG_VERSION,
+    attachedSessions: [...engines.keys()],
   };
 }
 

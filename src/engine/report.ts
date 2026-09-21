@@ -140,6 +140,8 @@ export interface ReportExtras {
   mode?: WriteMode;
   /** The engine's version, for the HTML's header. */
   version?: string;
+  /** Sessions attached right now. Only these can be holding a browser, so only these are warned about. */
+  attachedSessions?: string[];
 }
 
 /**
@@ -617,7 +619,10 @@ export function generateReport(
 
   // How the run was paced. A reader who sees a session that did four actions
   // in an hour learns more from that than from another coverage percentage.
-  lines.push(...formatPace(measurePace(memory.actionLog, Date.now())));
+  // The sessions still attached, so the stale-browser warning names only the
+  // ones that could act on it. A lane that finished and closed is quiet
+  // because it is gone.
+  lines.push(...formatPace(measurePace(memory.actionLog, Date.now(), extras?.attachedSessions ?? [])));
 
   const markdown = lines.join("\n");
   const outPath = path.join(memory.dir, "report.md");
