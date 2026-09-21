@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Widgets</title>
+  </head>
+  <body>
+    <!--
+      Fixture defects: this page hides two refusals from the user.
+
+      "Load widgets" fetches a list, gets a 403, and renders the table's empty
+      state anyway — so the screen says the user has no widgets when the truth
+      is that the server would not say. "Save" posts, gets a 500, and puts up
+      an affirmation — so the user walks away believing their change was kept.
+
+      Neither is a crash, and both look correct on screen. That is the whole
+      point: they are exactly what a run that only watches for errors misses.
+      The page deliberately says nothing anywhere about anything going wrong.
+    -->
+    <h1>Widgets</h1>
+
+    <button data-testid="widgets-load-button" onclick="loadWidgets()">Load widgets</button>
+    <button data-testid="widgets-save-button" onclick="saveWidget()">Save</button>
+
+    <table data-testid="widgets-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Owner</th>
+        </tr>
+      </thead>
+      <tbody data-testid="widgets-rows"></tbody>
+    </table>
+    <p data-testid="widgets-status"></p>
+
+    <script>
+      async function loadWidgets() {
+        const res = await fetch("/api/refuse/403");
+        // The response is never looked at. This is the bug, and it is what the
+        // code in front of a great many real empty states actually does.
+        const rows = await res.json().catch(() => ({ items: [] }));
+        const body = document.querySelector("[data-testid=widgets-rows]");
+        body.innerHTML = "";
+        for (const row of rows.items ?? []) {
+          const tr = document.createElement("tr");
+          tr.textContent = row.name;
+          body.appendChild(tr);
+        }
+        document.querySelector("[data-testid=widgets-status]").textContent = "No widgets found";
+      }
+
+      async function saveWidget() {
+        await fetch("/api/refuse/500", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "w1" }),
+        }).catch(() => {});
+        document.querySelector("[data-testid=widgets-status]").textContent = "Saved successfully";
+      }
+    </script>
+  </body>
+</html>

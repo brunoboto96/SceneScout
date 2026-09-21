@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gadgets</title>
+  </head>
+  <body>
+    <!--
+      The correct counterpart to contradiction.html, and the more important
+      half of the fixture: an app that is refused and SAYS SO has behaved
+      properly, and the oracles must stay silent on it.
+
+      Every ingredient of a contradiction is here — a 403 on the list, a 500 on
+      the save, an empty table body, an affirmation-shaped word on screen — and
+      the only difference is that the page admits what happened. If the rules
+      ever fire on this page, they are unusable on real apps, most of which
+      handle refusals correctly most of the time.
+    -->
+    <h1>Gadgets</h1>
+
+    <button data-testid="gadgets-load-button" onclick="loadGadgets()">Load gadgets</button>
+    <button data-testid="gadgets-save-button" onclick="saveGadget()">Save</button>
+    <button data-testid="gadgets-ok-button" onclick="loadAllowed()">Load allowed list</button>
+
+    <table data-testid="gadgets-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Owner</th>
+        </tr>
+      </thead>
+      <tbody data-testid="gadgets-rows"></tbody>
+    </table>
+    <p data-testid="gadgets-status"></p>
+
+    <script>
+      const status = () => document.querySelector("[data-testid=gadgets-status]");
+
+      async function loadGadgets() {
+        const res = await fetch("/api/refuse/403");
+        if (!res.ok) {
+          status().textContent = "Could not load gadgets. Try again.";
+          return;
+        }
+        status().textContent = "No gadgets found";
+      }
+
+      async function saveGadget() {
+        const res = await fetch("/api/refuse/500", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "g1" }),
+        }).catch(() => null);
+        status().textContent = res && res.ok ? "Saved successfully" : "Save failed. Try again.";
+      }
+
+      // A list that is genuinely empty, answered with a 200. An empty state is
+      // not a defect; an empty state over a refusal is.
+      async function loadAllowed() {
+        const res = await fetch("/api/allow");
+        const body = await res.json();
+        status().textContent = body.items.length === 0 ? "No gadgets found" : `${body.items.length} gadgets`;
+      }
+    </script>
+  </body>
+</html>

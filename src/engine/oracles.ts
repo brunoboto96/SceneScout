@@ -1,8 +1,9 @@
 import type { Page, Request } from "playwright";
+import type { Contradiction } from "./claims.js";
 import { redactSecrets } from "./memory.js";
 
 export interface OracleViolation {
-  kind: "console_error" | "page_error" | "request_failed" | "http_error" | "dom_injection";
+  kind: "console_error" | "page_error" | "request_failed" | "http_error" | "dom_injection" | "refused_empty" | "false_success";
   severity: "high" | "medium";
   detail: string;
   url: string;
@@ -154,6 +155,16 @@ export class OracleMonitor {
    */
   noteInjection(detail: string, url: string): void {
     this.record({ kind: "dom_injection", severity: "high", detail, url });
+  }
+
+  /**
+   * The page contradicted a request that was refused during the same action:
+   * a refused list rendered as an empty state, or a refused save reported as a
+   * success. Found by the engine's DOM scan (claims.ts), like injections, so
+   * it is reported through here rather than by a page event.
+   */
+  noteContradiction(c: Contradiction, url: string): void {
+    this.record({ kind: c.kind, severity: "high", detail: c.detail, url });
   }
 
   private record(v: Omit<OracleViolation, "at" | "repeat">): void {
