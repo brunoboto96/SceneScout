@@ -557,7 +557,7 @@ src/
     report.ts       the gap ledger + report generation
     replay.ts       the run as one page: steps, tasks, frames under each finding
     …               collector · dispatch · fixtures · authloss · reaper
-scripts/            the 14 test suites (smoke/ holds the real-browser ones)
+scripts/            the 15 test suites (smoke/ holds the real-browser ones)
 test-app/           fixtures for the real-browser smoke tests
 skills/scenescout/   the testing method (SKILL.md): a skill in Claude Code, served by the server everywhere else
 docs/adr/           why it's built this way

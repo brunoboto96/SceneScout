@@ -52,6 +52,13 @@ export interface AttachOptions {
   viewport?: { width: number; height: number };
   /** The session's objective: the whole remit this session was given, shown to whoever is watching the run. */
   objective?: string;
+  /**
+   * What this session is doing right now, from the moment it appears. Without
+   * one a freshly attached card reads "Nothing stated yet" until the agent's
+   * first acting call, which is precisely when somebody opening the board
+   * most wants to know what the session is for.
+   */
+  task?: string;
   /** Keep a frame of the page after each action, under .scenescout/recordings/. Off by default; evidence for QA work. */
   record?: boolean;
   /**
@@ -338,6 +345,16 @@ export class BrowserEngine {
   private framesFailed = 0;
 
   /**
+   * The frame field for a log entry, or nothing. Spread into logAction so a
+   * caller that is not going through afterAction can still record what the
+   * page looked like: `...(await this.frameFor("crawl"))`.
+   */
+  private async frameFor(action: string): Promise<{ frame?: string }> {
+    const frame = await this.recordFrame(action);
+    return frame ? { frame } : {};
+  }
+
+  /**
    * The frame for the step just taken, as a path relative to the memory
    * directory, or undefined when this run is not recorded. Failing to write
    * one must never fail the action: evidence is worth having, not worth
@@ -379,17 +396,26 @@ export class BrowserEngine {
    * (task.ts), stated by the agent on the call or by a journey, and kept
    * until it is replaced — a batch costs a few words, not one per click.
    */
-  private currentTask: { text: string; since: number } | null = null;
+  private currentTask: { text: string; since: number; stated: boolean } | null = null;
 
-  /** Set what this session is doing now. An empty value clears it. */
-  setTask(text: string): void {
+  /**
+   * Set what this session is doing now. An empty value clears it.
+   *
+   * `stated` is false for the placeholder attach puts up so a fresh card is
+   * not blank. It shows on the board but does NOT satisfy the requirement that
+   * an agent say what it is doing before it acts — otherwise every session
+   * would run for an hour under "Attaching and taking stock", which is the
+   * guard's whole purpose defeated by its own convenience.
+   */
+  setTask(text: string, stated = true): void {
     const clean = normalizeTask(text);
     if (!clean) {
       this.currentTask = null;
       return;
     }
-    if (this.currentTask?.text === clean) return;
-    this.currentTask = { text: clean, since: Date.now() };
+    if (this.currentTask?.text === clean && this.currentTask.stated === stated) return;
+    this.currentTask = { text: clean, since: Date.now(), stated };
+    if (!stated) return;
     // Logged so the feed can group the actions that follow under it, the way
     // it groups a journey's — the trail is where a watcher reads what
     // happened, and an ungrouped one says nothing about why.
@@ -398,7 +424,7 @@ export class BrowserEngine {
 
   /** Whether anything is standing that the live view could show as the task. */
   get hasTask(): boolean {
-    return this.journey !== null || this.currentTask !== null;
+    return this.journey !== null || (this.currentTask?.stated ?? false);
   }
 
   /**
@@ -524,6 +550,8 @@ export class BrowserEngine {
     }
     this.mode = opts.mode ?? "read-only";
     this.sessionObjective = (opts.objective ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
+    // An agent-supplied task counts as stated; the placeholder does not.
+    this.setTask(opts.task ?? "Attaching and taking stock", opts.task !== undefined);
     this.recording = opts.record === true;
     // A re-attached engine starts a new recording: numbering from where the
     // last one stopped would run into the cap with frames it never took.
@@ -735,6 +763,7 @@ export class BrowserEngine {
       `${focusAdvanceKey(this.engineName, process.platform) === "Tab" ? "" : `, keyboard: Tab stops only at text fields in this browser — press Alt+Tab to reach buttons and links`}` +
       `${opts.storageStatePath ? `, auth=${opts.storageStatePath}` : ""}). ` +
       `Memory: ${this.memory.dir}.${this.memory.loadWarning ? ` WARNING: ${this.memory.loadWarning}` : ""}` +
+      (this.memory.prunedStates > 0 ? ` Trimmed ${this.memory.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
       `${this.memory.legacyDirNote ? ` ${this.memory.legacyDirNote}` : ""}` +
       `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""} Call scout_snapshot to see the current state.` +
       authWarning
@@ -923,7 +952,11 @@ export class BrowserEngine {
       elements.map((el) => el.key),
     );
     memory.recordRoleAccess(this.role, route, "reached");
-    this.logAction({ action: "snapshot", url, result: fp });
+    // A snapshot is what an agent takes when it wants to LOOK at something, so
+    // it is the frame a reader most wants beside the step. Recording only the
+    // actions that go through afterAction kept 9 frames out of 67 in a real
+    // run, and none of them from the routes a crawl had just swept.
+    this.logAction({ action: "snapshot", url, result: fp, ...(await this.frameFor("snapshot")) });
     await this.scanForInjections();
 
     const line = (el: SnapshotElement): string => {
@@ -1963,7 +1996,7 @@ export class BrowserEngine {
       // Error-status routes render but would otherwise be re-crawled forever —
       // an attempt with the status satisfies the contract.
       if (typeof status === "number" && status >= 400) memory.markAttempted(requestedRoute, `status:${status}`, this.role);
-      this.logAction({ action: "crawl", target: path, url: finalUrl });
+      this.logAction({ action: "crawl", target: path, url: finalUrl, ...(await this.frameFor("crawl")) });
 
       await this.scanForInjections();
       const violations = this.oracles.drain();
@@ -2146,7 +2179,11 @@ export class BrowserEngine {
           }
         }
         await this.settle();
-        this.logAction({ action: `plan:${step.action}`, target: step.target ?? step.value, url: page.url() });
+        // A plan is the RECOMMENDED way to run a mechanical sequence, so its
+        // steps are where most of a recorded run actually happens. Leaving
+        // them unframed reproduced, inside run_plan, the same hole that crawl
+        // had: a form filled and submitted with no picture of any of it.
+        this.logAction({ action: `plan:${step.action}`, target: step.target ?? step.value, url: page.url(), ...(await this.frameFor(`plan-${step.action}`)) });
         // Plans must feed coverage like ref-based actions do: record the
         // state and mark the acted-on element class as exercised.
         // Hover is deliberately excluded: a hover is a look, not an
@@ -2260,7 +2297,7 @@ export class BrowserEngine {
       this.memory?.setPageScore(route, { ...score, at: new Date().toISOString(), url: page.url() });
       this.memory?.markRouteFact(route, { audited: true });
     }
-    this.logAction({ action: "design-audit", url: page.url(), result: score ? `score:${score.overall}` : undefined });
+    this.logAction({ action: "design-audit", url: page.url(), result: score ? `score:${score.overall}` : undefined, ...(await this.frameFor("design-audit")) });
     return `URL: ${page.url()}\n` + report;
   }
 

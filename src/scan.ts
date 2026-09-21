@@ -357,6 +357,46 @@ export function scanProject(projectDir: string): ScanResult {
   };
 }
 
+/**
+ * Whether a saved login is still good, read from the expiry inside its own
+ * token. A stale storage state is otherwise discovered only by attaching and
+ * being told AUTH FAILED, after a role has been chosen and a browser started —
+ * and in one project every one of 168 saved logins had expired.
+ *
+ * Best-effort by design: a state whose token cannot be read is reported as
+ * nothing rather than as a problem, because plenty of apps do not use JWTs.
+ */
+export function describeAuthAge(file: string, nowMs = Date.now()): string {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+  } catch {
+    return "";
+  }
+  const exp = jwtExpiry(raw);
+  if (exp === null) return "";
+  const left = Math.round((exp - nowMs) / 60_000);
+  if (left <= 0) return " (EXPIRED)";
+  return left < 30 ? ` (${left}m left)` : "";
+}
+
+/** The soonest `exp` of any JWT-looking value in the file, as milliseconds. */
+function jwtExpiry(raw: string): number | null {
+  let soonest: number | null = null;
+  for (const match of raw.matchAll(/eyJ[A-Za-z0-9_-]{4,}\.([A-Za-z0-9_-]{4,})\.[A-Za-z0-9_-]{4,}/g)) {
+    try {
+      const body = Buffer.from(match[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+      const exp = (JSON.parse(body) as { exp?: unknown }).exp;
+      if (typeof exp !== "number") continue;
+      const ms = exp * 1000;
+      soonest = soonest === null ? ms : Math.min(soonest, ms);
+    } catch {
+      // Not a token we can read; the next match may be.
+    }
+  }
+  return soonest;
+}
+
 export function formatScan(result: ScanResult): string {
   const lines = [
     `Project: ${result.projectDir}`,
@@ -366,9 +406,12 @@ export function formatScan(result: ScanResult): string {
     `Auth storage states (${result.authStates.length}): ${
       result.authStates
         .slice(0, 8)
-        .map((p) => path.basename(p))
+        .map((p) => `${path.basename(p)}${describeAuthAge(p)}`)
         .join(", ") || "none"
     }`,
+    ...(result.authStates.length > 0 && result.authStates.every((p) => describeAuthAge(p) === " (EXPIRED)")
+      ? [`  ⚠ Every saved login listed here has expired. scout_attach would land on a login page; regenerate them before attaching.`]
+      : []),
     `Routes (${result.routes.length}):`,
     ...result.routes.slice(0, 60).map((r) => `  ${r}`),
     ...(result.routes.length > 60 ? [`  … and ${result.routes.length - 60} more`] : []),

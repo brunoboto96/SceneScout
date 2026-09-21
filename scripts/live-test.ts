@@ -30,6 +30,9 @@ import {
   type LoggedAction,
   type StatusResponse,
   type SessionStatus,
+  liveEngines,
+  liveTokenFileName,
+  statusFileName,
 } from "../src/engine/live.ts";
 import { LIVE_PAGE } from "../src/engine/live-page.ts";
 
@@ -901,7 +904,10 @@ test("overlapping status writes never leave a torn file, and the last one wins",
     await Promise.all(bodies.map((b) => writeStatusFile(dir, b)));
     const onDisk = fs.readFileSync(path.join(dir, "status.json"), "utf8");
     assert.equal(onDisk, bodies[bodies.length - 1]);
-    assert.deepEqual(fs.readdirSync(dir), ["status.json"], "no temp file is left behind");
+    // The shared file and this engine's own, and nothing else: a leaked .tmp
+    // is what this guards against.
+    assert.deepEqual(fs.readdirSync(dir).sort(), [statusFileName(process.pid), "status.json"].sort(), "no temp file is left behind");
+    assert.equal(fs.readFileSync(path.join(dir, statusFileName(process.pid)), "utf8"), bodies[bodies.length - 1], "both land the same body");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1162,4 +1168,78 @@ test("the timeline is drawn from the close-up's long feed, and a re-render keeps
   const step = script.slice(script.indexOf("function showStep"), script.indexOf("function backToLive"));
   assert.doesNotMatch(step, /latest\[focused\]/, "a step is picked from the run the timeline already holds");
   assert.match(script, /renderTimeline\(d\.feed\);/, "the long feed is what fills it");
+});
+
+// ---- several engines on one project -----------------------------------------
+
+test("each engine writes its own status file, so a second one does not erase the first", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-many-"));
+  const alive = new Set([111, 222]);
+  const isAlive = (pid: number): boolean => alive.has(pid);
+  const write = (pid: number, at: string): void =>
+    fs.writeFileSync(path.join(dir, statusFileName(pid)), JSON.stringify({ pid, at, live: { port: 5000 + pid }, detail: [] }));
+
+  write(111, "2026-09-20T20:00:00.000Z");
+  write(222, "2026-09-20T20:05:00.000Z");
+  const found = liveEngines(dir, isAlive);
+  assert.deepEqual(
+    found.map((e) => e.pid),
+    [222, 111],
+    "both engines, newest first — one per pid, not last-write-wins",
+  );
+
+  // An engine that has exited is not offered as something to watch.
+  alive.delete(111);
+  assert.deepEqual(
+    liveEngines(dir, isAlive).map((e) => e.pid),
+    [222],
+  );
+
+  // A file from an engine that never wrote a pid, and an unparseable one, are skipped rather than thrown on.
+  fs.writeFileSync(path.join(dir, statusFileName(333)), "{ truncated");
+  assert.deepEqual(
+    liveEngines(dir, isAlive).map((e) => e.pid),
+    [222],
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a project written by an engine from before per-pid files is still readable", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-legacy-"));
+  fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ pid: 444, at: "2026-09-20T20:00:00.000Z", live: { port: 5444 } }));
+  assert.deepEqual(
+    liveEngines(dir, () => true).map((e) => e.pid),
+    [444],
+    "the shared file is the fallback when no per-pid file exists",
+  );
+
+  // Once a per-pid file is there, the shared one is ignored: it is a copy of
+  // whichever engine wrote last and would double-count it.
+  fs.writeFileSync(path.join(dir, statusFileName(444)), JSON.stringify({ pid: 444, at: "2026-09-20T20:01:00.000Z", live: { port: 5444 } }));
+  assert.deepEqual(
+    liveEngines(dir, () => true).map((e) => e.pid),
+    [444],
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("writing status leaves both the shared file and this engine's own", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-write-"));
+  await writeStatusFile(dir, JSON.stringify({ pid: process.pid, at: new Date(T0).toISOString() }));
+  assert.ok(fs.existsSync(path.join(dir, "status.json")), "readers from before this still find what they expect");
+  assert.ok(fs.existsSync(path.join(dir, statusFileName(process.pid))), "and watch finds this engine by pid");
+  assert.match(liveTokenFileName(process.pid), new RegExp(`^live-token\\.${process.pid}$`));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a live session states what it is doing before it has done anything", () => {
+  // A card that reads "Nothing stated yet" is the first thing a watcher sees
+  // when a run starts, which is when they most want to know what it is for.
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
+  assert.match(script, /setBrief\('focus-task', s && s\.task, 'Nothing stated yet\.'\)/, "the page still has a fallback…");
+  const attach = fs.readFileSync(new URL("../src/engine/browser.ts", import.meta.url), "utf8");
+  assert.match(attach, /this\.setTask\(opts\.task \?\? "Attaching and taking stock", opts\.task !== undefined\)/, "…but attach no longer leaves it unset");
+  // And the placeholder must not satisfy the gate that makes an agent say what
+  // it is doing, or every run would proceed under it.
+  assert.match(attach, /this\.journey !== null \|\| \(this\.currentTask\?\.stated \?\? false\)/);
 });

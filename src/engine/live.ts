@@ -32,6 +32,11 @@ import { JOURNEY_END, JOURNEY_START, TASK_SET, type ActionLogEntry } from "./mem
 
 /** Holds the live view's token, next to status.json. Written owner-only; removed when the engine shuts down. */
 export const LIVE_TOKEN_FILE = "live-token";
+
+/** This engine's own token file. Shares the directory with other engines, so it carries the pid. */
+export function liveTokenFileName(pid: number): string {
+  return `${LIVE_TOKEN_FILE}.${pid}`;
+}
 /** `SCENESCOUT_LIVE=off` keeps the engine from opening the live view's port at all. */
 export const LIVE_ENV = "SCENESCOUT_LIVE";
 
@@ -261,12 +266,66 @@ const statusWrites = new Map<string, Promise<void>>();
  * longer one after it (which is what overlapping `writeFile`s produced).
  * Best-effort: a failed write is dropped and the next one lands.
  */
+/**
+ * Whether a process is still there. EPERM means it EXISTS but belongs to
+ * another user; only ESRCH means no such process, and treating both as dead
+ * reported a live engine as stale.
+ */
+export function pidAlive(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+export function statusFileName(pid: number): string {
+  return `status.${pid}.json`;
+}
+
+/**
+ * Every engine that has written a status file here, newest first, one entry
+ * per pid. Two engines on one project used to overwrite each other in a single
+ * status.json, so `watch` could only ever find whichever attached last and the
+ * other run was reachable only from the transcript that started it.
+ * status.json is still written for readers from before this, and is used only
+ * when no per-pid file exists.
+ */
+export function liveEngines(dir: string, isAlive: (pid: number) => boolean): Array<{ pid: number; status: StatusFile; file: string }> {
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const perPid = names.filter((n) => /^status\.\d+\.json$/.test(n));
+  const out: Array<{ pid: number; status: StatusFile; file: string }> = [];
+  for (const name of perPid.length > 0 ? perPid : names.filter((n) => n === "status.json")) {
+    let parsed: StatusFile;
+    try {
+      parsed = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as StatusFile;
+    } catch {
+      continue;
+    }
+    const pid = typeof parsed.pid === "number" ? parsed.pid : NaN;
+    if (!Number.isInteger(pid) || !isAlive(pid)) continue;
+    out.push({ pid, status: parsed, file: name });
+  }
+  return out.sort((a, b) => (b.status.at ?? "").localeCompare(a.status.at ?? ""));
+}
+
 export function writeStatusFile(dir: string, body: string): Promise<void> {
   const file = path.join(dir, "status.json");
   const tmp = `${file}.${process.pid}.tmp`;
+  // Both: status.json for readers from before per-pid files, and one named for
+  // this process so a second engine on the same project does not erase it.
+  const mine = path.join(dir, statusFileName(process.pid));
   const next = (statusWrites.get(dir) ?? Promise.resolve())
     .then(() => fs.promises.writeFile(tmp, body))
     .then(() => fs.promises.rename(tmp, file))
+    .then(() => fs.promises.writeFile(mine, body))
     .catch(() => fs.promises.rm(tmp, { force: true }).catch(() => {}));
   statusWrites.set(dir, next);
   return next;

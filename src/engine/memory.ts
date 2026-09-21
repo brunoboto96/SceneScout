@@ -6,6 +6,8 @@ export interface StateRecord {
   url: string;
   route: string;
   firstSeen: string;
+  /** When it was last reached. Absent on records written before pruning existed; they fall back to firstSeen. */
+  lastSeen?: string;
   visits: number;
   /** elementKey → exercised? absentStreak counts consecutive visits where the element was gone (pruned at 3). */
   elements: Record<string, { exercised: boolean; lastAction?: string; absentStreak?: number }>;
@@ -60,6 +62,49 @@ export interface Finding {
    * lane happened to act in the same second.
    */
   session?: string;
+}
+
+/**
+ * Most states a route may keep. A route accumulates one state per distinct
+ * element set, so a register with filters, tabs and paging produces dozens;
+ * one project reached 6,075 states across 48 routes, a 36 MB history parsed
+ * and re-serialised on every save. Coverage is asked per ROUTE, so keeping the
+ * most recent states of each route preserves every answer the gap ledger
+ * needs while dropping the long tail nothing will ask about again.
+ */
+export const MAX_STATES_PER_ROUTE = 40;
+
+/**
+ * The states to keep. Never drops one a finding points at — a finding's repro
+ * trace and its route identity are read back from it — and never drops the
+ * newest of a route, so a route that was visited stays visited.
+ *
+ * Returns the pruned map rather than mutating, so the rule can be table-tested.
+ */
+export function pruneStates(
+  states: Readonly<Record<string, StateRecord>>,
+  findings: ReadonlyArray<{ state: string }>,
+  perRoute = MAX_STATES_PER_ROUTE,
+): { kept: Record<string, StateRecord>; dropped: number } {
+  const pinned = new Set(findings.map((f) => f.state));
+  const byRoute = new Map<string, Array<[string, StateRecord]>>();
+  for (const entry of Object.entries(states)) {
+    const route = entry[1].route;
+    const list = byRoute.get(route);
+    if (list) list.push(entry);
+    else byRoute.set(route, [entry]);
+  }
+  const kept: Record<string, StateRecord> = {};
+  let dropped = 0;
+  for (const list of byRoute.values()) {
+    // Newest first, so the survivors are the ones a next run will meet again.
+    list.sort((a, b) => (b[1].lastSeen ?? b[1].firstSeen).localeCompare(a[1].lastSeen ?? a[1].firstSeen));
+    list.forEach(([fp, rec], index) => {
+      if (index < perRoute || pinned.has(fp)) kept[fp] = rec;
+      else dropped += 1;
+    });
+  }
+  return { kept, dropped };
 }
 
 /** An element class must appear on this many routes at minimum before it can count as shared chrome. */
@@ -836,7 +881,18 @@ export class MemoryStore {
     if (!fs.existsSync(this.memoryPath)) return structuredClone(EMPTY);
     try {
       const raw = JSON.parse(fs.readFileSync(this.memoryPath, "utf8")) as MemoryFile;
-      if (raw.version === 1) return raw;
+      if (raw.version === 1) {
+        // Prune once, on open: the long tail of per-route states is what makes
+        // an old history slow to parse and re-serialise, and it answers no
+        // question the gap ledger asks. Findings and the newest states of
+        // every route are kept, so coverage does not regress.
+        const { kept, dropped } = pruneStates(raw.states ?? {}, raw.findings ?? []);
+        if (dropped > 0) {
+          raw.states = kept;
+          this.prunedStates = dropped;
+        }
+        return raw;
+      }
       this.loadWarning = `memory.json has unknown version ${String((raw as { version?: unknown }).version)} — starting fresh.`;
     } catch (err) {
       // Never silently overwrite the (possibly recoverable) history — cross-run
@@ -886,6 +942,9 @@ export class MemoryStore {
     // Deliberately NOT unref'd: a pending coverage write briefly holds the
     // process open so an exit without scout_close still lands the last save.
   }
+
+  /** How many states the last open pruned. Reported once, so a shrinking history is never silent. */
+  prunedStates = 0;
 
   /** Set when a debounced background write failed — cleared on the next successful write. Surfaced by scout_coverage/scout_close so a broken persistence path is never silently invisible. */
   lastSaveError: string | null = null;
@@ -1013,6 +1072,7 @@ export class MemoryStore {
       this.data.states[fingerprint] = rec;
     }
     rec.visits += 1;
+    rec.lastSeen = new Date().toISOString();
     const present = new Set(elementKeys);
     for (const key of elementKeys) {
       if (!rec.elements[key]) rec.elements[key] = { exercised: false };

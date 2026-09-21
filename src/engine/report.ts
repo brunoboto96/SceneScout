@@ -5,6 +5,7 @@ import type { OracleViolation } from "./oracles.js";
 import type { WriteMode } from "./policy.js";
 import { feedForSession } from "./live.js";
 import { buildReplayHtml, evidenceFor, type FindingEvidence, type ReplaySession } from "./replay.js";
+import { formatPace, measurePace } from "./pace.js";
 
 function playwrightSkeleton(f: Finding): string {
   const routeClass = f.state.split("#")[0].split("?")[0];
@@ -139,6 +140,14 @@ export interface ReportExtras {
   mode?: WriteMode;
   /** The engine's version, for the HTML's header. */
   version?: string;
+  /** Sessions attached right now. Only these can be holding a browser, so only these are warned about. */
+  attachedSessions?: string[];
+  /**
+   * Include the pacing section. False for the sample report, which CI diffs
+   * byte for byte: pacing is wall-clock, so it differs between machines and
+   * between runs of the same machine, and a sample carrying it can never match.
+   */
+  pace?: boolean;
 }
 
 /**
@@ -612,6 +621,16 @@ export function generateReport(
       lines.push(`- \`${u.state}\`: ${u.keys.slice(0, 8).join(", ")}${u.keys.length > 8 ? ` … +${u.keys.length - 8}` : ""}`);
     }
     lines.push(``);
+  }
+
+  // How the run was paced. A reader who sees a session that did four actions
+  // in an hour learns more from that than from another coverage percentage.
+  // Omitted where the report is compared byte for byte, since it is timing.
+  // The sessions still attached, so the stale-browser warning names only the
+  // ones that could act on it. A lane that finished and closed is quiet
+  // because it is gone.
+  if (extras?.pace !== false) {
+    lines.push(...formatPace(measurePace(memory.actionLog, Date.now(), extras?.attachedSessions ?? [])));
   }
 
   const markdown = lines.join("\n");

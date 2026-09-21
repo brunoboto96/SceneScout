@@ -259,7 +259,10 @@ async function main(): Promise<void> {
       policyAttributed: engine.oracleLog.policyAttributed,
     };
     show("gap ledger", computeGaps(engine.memory!, extras).join("\n") || "(empty)");
-    const report = generateReport(engine.memory!, engine.oracleLog.all, extras);
+    // No pacing section: CI diffs this sample byte for byte, and pacing is
+    // wall-clock — it differs between machines and between runs of the same
+    // one, so a sample carrying it could never match.
+    const report = generateReport(engine.memory!, engine.oracleLog.all, { ...extras, pace: false });
     fs.writeFileSync(path.join(outDir, "report.md"), stabilise(report.markdown, projectDir));
     // After the report: the annotated picture is for the README only, and a
     // failure drawing it must not leave examples/ with a stale report.
