@@ -56,6 +56,7 @@ import {
 } from "./engine/live.js";
 import { computeGaps, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
 import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
+import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { formatScan, scanProject } from "./scan.js";
@@ -626,6 +627,15 @@ server.registerTool(
         .describe(
           "What this session is doing right now, shown under its objective from the moment it appears, e.g. Signing in and taking stock. Passed alone it is read as the 2.0 spelling of `objective`. Defaults to a placeholder so a fresh card never reads as idle.",
         ),
+      paceMs: z
+        .number()
+        .int()
+        .min(0)
+        .max(60000)
+        .optional()
+        .describe(
+          "A floor between actions, in milliseconds, for when a person is watching and needs to keep up — following a flow, taking notes, demonstrating. Default 0: as fast as the page allows, which is what a run wants otherwise. Changeable mid-run with scout_session {paceMs}.",
+        ),
       record: z
         .boolean()
         .default(false)
@@ -655,6 +665,7 @@ server.registerTool(
       objective,
       task,
       record,
+      paceMs,
       session,
     }: {
       url: string;
@@ -668,6 +679,7 @@ server.registerTool(
       objective?: string;
       task?: string;
       record?: boolean;
+      paceMs?: number;
       session?: string;
     }) => {
       try {
@@ -740,6 +752,7 @@ server.registerTool(
           // means what it means everywhere else — what this session is doing
           // right now — so the card says something from the moment it appears.
           objective: objective ?? task,
+          paceMs,
           task: objective ? task : undefined,
           record,
           memoryStore: store,
@@ -759,7 +772,7 @@ server.registerTool(
           record && eng.memory?.dir
             ? `\n\n📸 RECORDING: a frame of the page after each action, under ${path.join(eng.memory.dir, "recordings", target)}/ (at most ${RECORD_MAX_FRAMES}). scout_report writes them into report.html beside report.md.`
             : "";
-        return text(out + conflictNote + recordNote + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine(), target);
+        return text(out + conflictNote + recordNote + describePace(eng.pace) + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine(), target);
       } catch (err) {
         return errorText(err);
       }
@@ -788,11 +801,38 @@ server.registerTool(
       // costs nothing and removes a guaranteed first-try rejection, since all
       // schemas are additionalProperties:false and reject the near-miss hard.
       session: z.string().max(40).optional().describe("Alias for `name`."),
+      paceMs: z
+        .number()
+        .int()
+        .min(0)
+        .max(60000)
+        .optional()
+        .describe(
+          "Change how fast this session acts, mid-run: a floor between actions in milliseconds, for when a person is watching and needs to keep up. 0 restores full speed. With `name`, applies to that session; without, to every live session — which is what 'slow everything down so I can follow' means.",
+        ),
     },
   },
-  serializedControl(async ({ name, session }: { name?: string; session?: string }) => {
+  serializedControl(async ({ name, session, paceMs }: { name?: string; session?: string; paceMs?: number }) => {
     try {
       name = name ?? session;
+      // A pace with no session named is meant for the whole run: somebody is
+      // watching and wants to keep up with all of it, not one lane.
+      if (paceMs !== undefined && !name) {
+        const applied = [...engines.values()].map((e) => e.setPace(paceMs));
+        const at = applied[0] ?? normalizePace(paceMs);
+        return text(
+          (at > 0
+            ? `Every live session now waits at least ${at} ms between actions, so a person can follow along.`
+            : `Every live session is back to full speed: as fast as its page allows.`) + `\n${sessionLines()}`,
+          activeName,
+        );
+      }
+      if (paceMs !== undefined && name) {
+        if (!engines.has(name))
+          return text(`No session named "${name}" yet — create it with scout_attach { session: "${name}", … }.\n${sessionLines()}`, activeName);
+        const at = engines.get(name)!.setPace(paceMs);
+        return text((at > 0 ? `${name} now waits at least ${at} ms between actions.` : `${name} is back to full speed.`) + `\n${sessionLines()}`, activeName);
+      }
       if (!name) return text(sessionLines() + liveLine(), activeName);
       if (!engines.has(name)) {
         return text(`No session named "${name}" yet — create it with scout_attach { session: "${name}", … }.\n${sessionLines()}`, activeName);

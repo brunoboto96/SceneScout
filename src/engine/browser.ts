@@ -20,6 +20,7 @@ import { OracleMonitor, formatViolations } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
+import { describePace, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
 import { buildRequestScript, formatReplay, replaySignature, requestHeaders, resolveMethod, resolveRequestUrl, toReplayResult } from "./request.js";
 import {
   defaultEngine,
@@ -53,6 +54,13 @@ export interface AttachOptions {
   viewport?: { width: number; height: number };
   /** The session's objective: the whole remit this session was given, shown to whoever is watching the run. */
   objective?: string;
+  /**
+   * A floor between actions, in milliseconds, so a person watching can follow
+   * along — reading the feed, taking notes, or demonstrating a flow. Unset,
+   * the session goes as fast as its page allows, which is what a run wants
+   * unless somebody is watching it live.
+   */
+  paceMs?: number;
   /**
    * What this session is doing right now, from the moment it appears. Without
    * one a freshly attached card reads "Nothing stated yet" until the agent's
@@ -607,6 +615,7 @@ export class BrowserEngine {
     this.sessionObjective = (opts.objective ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
     // An agent-supplied task counts as stated; the placeholder does not.
     this.setTask(opts.task ?? "Attaching and taking stock", opts.task !== undefined);
+    this.setPace(opts.paceMs);
     this.recording = opts.record === true;
     // A re-attached engine starts a new recording: numbering from where the
     // last one stopped would run into the cap with frames it never took.
@@ -674,7 +683,15 @@ export class BrowserEngine {
     // The first page already exists by now; later ones (popups) arrive as events.
     if (this.page) watchSockets(this.page);
     this.context.on("page", watchSockets);
+    this.context.on("requestfinished", () => {
+      this.inFlight = Math.max(0, this.inFlight - 1);
+    });
+    this.context.on("requestfailed", () => {
+      this.inFlight = Math.max(0, this.inFlight - 1);
+    });
     this.context.on("request", (req) => {
+      this.inFlight += 1;
+      this.lastRequestStart = Date.now();
       const type = req.resourceType();
       if (type === "xhr" || type === "fetch") this.xhrCount += 1;
       const method = req.method();
@@ -849,11 +866,42 @@ export class BrowserEngine {
   private async settle(): Promise<void> {
     const page = this.requirePage();
     await page.waitForLoadState("domcontentloaded").catch(() => {});
-    // A fixed floor, deliberately: waitForLoadState("networkidle") is latched
-    // once reached and resolves instantly forever after, so it cannot be used
-    // to wait out in-flight requests here — and draining oracles before a
-    // just-fired request lands would misattribute its violations.
-    await page.waitForTimeout(SETTLE_MS);
+    // Wait on what is actually in flight rather than a flat sleep. The rule is
+    // in settle.ts so it can be table-tested; the reasoning for not using
+    // networkidle is there too.
+    const started = Date.now();
+    for (;;) {
+      const state = {
+        inFlight: this.inFlight,
+        sinceLastStartMs: Date.now() - this.lastRequestStart,
+        elapsedMs: Date.now() - started,
+        paceMs: this.paceMs,
+      };
+      if (!shouldKeepWaiting(state)) return;
+      await page.waitForTimeout(SETTLE_TICK_MS).catch(() => {});
+      if (this.page !== page) return;
+    }
+  }
+
+  /** Requests started and not yet finished or failed, from the context's own events. */
+  private inFlight = 0;
+  /** When the most recent request started, so a page that fires one late is not read too early. */
+  private lastRequestStart = 0;
+  /**
+   * A floor between actions this session was asked for, so a person watching
+   * can follow along. Zero means as fast as the page allows, which is the
+   * default and what every run wants unless somebody is reading it live.
+   */
+  private paceMs = 0;
+
+  /** Set the deliberate pace. Returns what it became, clamped. */
+  setPace(paceMs: number | undefined): number {
+    this.paceMs = normalizePace(paceMs);
+    return this.paceMs;
+  }
+
+  get pace(): number {
+    return this.paceMs;
   }
 
   /** Collect the current page's interactables into SnapshotElements with stable refs. */
