@@ -10,7 +10,7 @@ Generated: (by `npm run demo`)
 | Route coverage | 12/12 |
 | States explored | 12 |
 | Design audits this session | 3 |
-| Oracle violations this session | 9 |
+| Oracle violations this session | 10 |
 | Errors caused by the tester's own write-policy blocks (not counted above) | 3 |
 | Elements exercised (informational — denominator grows with every state) | 7/74 |
 
@@ -426,7 +426,7 @@ test("regression: The confirmation email field has no label, only a placeholder"
 });
 ```
 
-## Oracle violation rollup (9 events, 5 distinct signatures)
+## Oracle violation rollup (10 events, 6 distinct signatures)
 
 | Count | Signature |
 |---|---|
@@ -434,6 +434,7 @@ test("regression: The confirmation email field has no label, only a placeholder"
 | 3 | `console_error: Failed to load resource: the server responded with a status of :n (Not Found)` |
 | 1 | `http_error: GET http://:n.:n.:n.:n::n/api/orders?status=archived → HTTP :n` |
 | 1 | `console_error: Failed to load resource: the server responded with a status of :n (Internal Server Error)` |
+| 1 | `refused_empty: GET /api/orders?status=archived :n was refused, and the page shows an empty list (:n) with no error. The user is told there is nothing to se` |
 | 1 | `page_error: Cannot read properties of undefined (reading 'rows')` |
 
 ## Unexplored surface (for the next run)
