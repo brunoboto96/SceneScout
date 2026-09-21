@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { SHARED_CHROME_ROUTE, type Finding, type MemoryStore, type PageScore } from "./memory.js";
 import type { OracleViolation } from "./oracles.js";
+import { sayVerification } from "./verify.js";
 import type { WriteMode } from "./policy.js";
 import { feedForSession } from "./live.js";
 import { buildReplayHtml, evidenceFor, type FindingEvidence, type ReplaySession } from "./replay.js";
@@ -584,6 +585,11 @@ export function generateReport(
     if (f.evidence) lines.push(`- **Evidence:** \`${f.evidence}\``);
     lines.push(`- **Where:** \`${f.state}\` (${f.url})`);
     lines.push(`- **Seen in runs:** ${f.runs}`);
+    // Only printed once somebody has re-tested it. A finding nobody has looked
+    // at again says nothing here, which is the honest thing for it to say.
+    if (f.verdict && f.verifiedAt) {
+      lines.push(`- **Re-tested:**${sayVerification(f).replace(/^ · /, " ")}${f.verifyNote ? ` — ${f.verifyNote}` : ""}`);
+    }
     lines.push(``);
     lines.push(f.detail);
     lines.push(``);
@@ -610,7 +616,9 @@ export function generateReport(
     lines.push(`## Historical findings — not re-verified this session (${historical.length})`);
     lines.push(``);
     if (extras?.history === "full") {
-      lines.push(`Recorded in earlier runs and not re-confirmed. Re-test before acting; resolve fixed ones with \`scout_resolve <id>\`.`);
+      lines.push(
+        `Recorded in earlier runs and not re-confirmed. Re-test before acting; \`scout_verify\` hands them back in re-test order and records what each re-test found.`,
+      );
       lines.push(``);
       for (const f of historical) renderFinding(f);
     } else {
@@ -621,13 +629,15 @@ export function generateReport(
       // re-test it; the detail is one scout_report {history:"full"} away.
       lines.push(
         `Recorded in earlier runs and NOT re-confirmed by this one, so none of it is evidence about the build under test. Listed as an index: ` +
-          `re-test before acting, resolve fixed ones with \`scout_resolve <id>\`, and pass \`history: "full"\` to scout_report for the full text.`,
+          `work it down with \`scout_verify\`, which hands back these findings in re-test order and records what each re-test found, ` +
+          `and pass \`history: "full"\` to scout_report for the full text.`,
         ``,
-        `| Sev | Id | Age | Runs | Title |`,
-        `|---|---|---:|---:|---|`,
+        `| Sev | Id | Age | Runs | Re-tested | Title |`,
+        `|---|---|---:|---:|---|---|`,
       );
       for (const f of historical) {
-        lines.push(`| ${SEVERITY_ICON[f.severity]} | \`${f.id}\` | ${describeAge(f.foundAt, now)} | ${f.runs} | ${escapeTableCell(f.title)} |`);
+        const retested = f.verdict && f.verifiedAt ? `${f.verdict} ${f.verifiedAt.slice(0, 10)}` : "never";
+        lines.push(`| ${SEVERITY_ICON[f.severity]} | \`${f.id}\` | ${describeAge(f.foundAt, now)} | ${f.runs} | ${retested} | ${escapeTableCell(f.title)} |`);
       }
       lines.push(``);
     }

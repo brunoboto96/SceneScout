@@ -55,6 +55,7 @@ import {
   type SessionStatus,
 } from "./engine/live.js";
 import { computeGaps, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
+import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
 import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
@@ -1490,6 +1491,41 @@ server.registerTool(
       if (!wanted) return text(`Pass the finding id: scout_resolve { id: "a1b2c3d4e5" }.`, session);
       const f = eng.memory.resolveFinding(wanted);
       return text(f ? `Resolved: [${f.severity}] ${f.title}` : `No finding with id ${wanted}.`, session);
+    } catch (err) {
+      return errorText(err);
+    }
+  }),
+);
+
+server.registerTool(
+  "scout_verify",
+  {
+    description:
+      'Re-test findings earlier runs left open. With no arguments, returns the open findings in the order to re-test them — worst route first, grouped so a route is walked once — each with its evidence and repro steps. Pass ids to narrow it to specific findings. After re-testing one, call again with id and verdict to record what you saw: "gone" resolves it, "present" stamps it confirmed so the report stops calling it unverified, "changed" keeps it open and says the behaviour differs. Use after a fix wave, or at the start of a run against an app this project has tested before.',
+    inputSchema: {
+      id: z.string().optional().describe("The finding being verified. Omit to get the worklist."),
+      verdict: z.enum(VERDICTS).optional().describe('What the re-test found: "gone", "present" or "changed". Requires id.'),
+      note: z.string().max(500).optional().describe("What you saw, in a sentence. Shown in the report beside the verdict."),
+      ids: z.array(z.string()).max(50).optional().describe("Narrow the worklist to these finding ids."),
+      session: sessionParam,
+    },
+  },
+  serializedPerSession("scout_verify", async ({ id, verdict, note, ids }: { id?: string; verdict?: Verdict; note?: string; ids?: string[] }, session) => {
+    try {
+      const eng = engineFor(session);
+      if (!eng.memory) throw new Error("Not attached.");
+      if (verdict && !id) return text(`Pass the finding the verdict is about: scout_verify { id: "a1b2c3d4e5", verdict: "${verdict}" }.`, session);
+      if (id && !verdict) {
+        return text(`Pass what the re-test found: scout_verify { id: "${id}", verdict: "gone" | "present" | "changed" }.`, session);
+      }
+      if (id && verdict) {
+        const f = eng.memory.verifyFinding(id, verdict, note);
+        if (!f) return text(`No finding with id ${id}.`, session);
+        return text(describeVerdict(f, verdict, note), session);
+      }
+      const findings = eng.memory.findings;
+      const missing = ids && ids.length > 0 ? unknownIds(findings, ids) : [];
+      return text(formatWorklist(verifyWorklist(findings, ids), missing), session);
     } catch (err) {
       return errorText(err);
     }
