@@ -108,6 +108,20 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; stats: Se
       const key = `${req.method} ${urlPath}`;
       stats.writes[key] = (stats.writes[key] ?? 0) + 1;
     }
+    // Endpoints that refuse, for the contradiction oracles. The status is in
+    // the path so a fixture page can ask for the one it wants to be refused
+    // with, and the body is JSON because these stand in for an app's own API.
+    const refusal = /^\/api\/refuse\/(\d{3})$/.exec(urlPath);
+    if (refusal) {
+      res.writeHead(Number(refusal[1]), { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "refused" }));
+      return;
+    }
+    if (urlPath === "/api/allow") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ items: [] }));
+      return;
+    }
     if ((urlPath === "/api/upload" || urlPath === "/api/avatar") && req.method === "POST") {
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
