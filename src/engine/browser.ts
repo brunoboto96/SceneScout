@@ -958,7 +958,7 @@ export class BrowserEngine {
    */
   private async stableUrl(): Promise<string> {
     const page = this.page;
-    if (!page || page.isClosed()) return page?.url() ?? "";
+    if (!page || page.isClosed()) return page ? page.url() : "";
     const started = Date.now();
     let url = page.url();
     let changedAt = started;
@@ -974,9 +974,14 @@ export class BrowserEngine {
     }
   }
 
-  /** Where a navigation landed. Watched for a late client-side guard only when this session has credentials to lose. */
-  private async landedUrl(): Promise<string> {
-    return this.watchesForBounce ? await this.stableUrl() : (this.page?.url() ?? "");
+  /**
+   * Where a navigation landed. Watched for a late client-side guard only when
+   * this session has credentials to lose. The page is passed in rather than
+   * read off the engine so a session torn down mid-navigation still reports
+   * the last URL it was on, which is what the outcome is recorded against.
+   */
+  private async landedUrl(page: Page): Promise<string> {
+    return this.watchesForBounce ? await this.stableUrl() : page.url();
   }
 
   /** Set at attach: this session was given credentials, so a bounce to a login page is a verdict worth waiting for. */
@@ -2066,13 +2071,13 @@ export class BrowserEngine {
     try {
       settled = await this.afterAction("navigate", url);
     } catch (err) {
-      this.recordNavigationOutcome(url, await this.landedUrl());
+      this.recordNavigationOutcome(url, await this.landedUrl(page));
       const notice = this.authLoss.take();
       if (!notice) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`${notice}${msg}`);
     }
-    this.recordNavigationOutcome(url, await this.landedUrl());
+    this.recordNavigationOutcome(url, await this.landedUrl(page));
     return this.authLoss.take() + settled;
   }
 
