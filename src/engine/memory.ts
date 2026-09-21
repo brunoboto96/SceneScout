@@ -62,6 +62,12 @@ export interface Finding {
    * lane happened to act in the same second.
    */
   session?: string;
+  /** What the last re-test of this finding found. Absent means nobody has re-tested it. */
+  verdict?: "gone" | "present" | "changed";
+  /** When that re-test happened, so the report can date a confirmation rather than calling it unverified. */
+  verifiedAt?: string;
+  /** What the re-tester saw, in their words. */
+  verifyNote?: string;
 }
 
 /**
@@ -873,6 +879,23 @@ export class MemoryStore {
     const f = this.data.findings.find((x) => x.id === id);
     if (!f) return null;
     f.status = "resolved";
+    this.flush();
+    return f;
+  }
+
+  /**
+   * Record what a re-test of this finding found. "gone" resolves it; the other
+   * two leave it open and stamp the confirmation, which is what lets the report
+   * stop describing a finding somebody checked yesterday as unverified.
+   */
+  verifyFinding(id: string, verdict: "gone" | "present" | "changed", note?: string): Finding | null {
+    const f = this.data.findings.find((x) => x.id === id);
+    if (!f) return null;
+    f.verdict = verdict;
+    f.verifiedAt = new Date().toISOString();
+    if (note) f.verifyNote = redactSecrets(note).slice(0, 500);
+    else delete f.verifyNote;
+    if (verdict === "gone") f.status = "resolved";
     this.flush();
     return f;
   }
