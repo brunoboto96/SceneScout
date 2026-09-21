@@ -1,5 +1,84 @@
 # scenescout
 
+## 3.3.0
+
+### Minor Changes
+
+- 0778653: Report the page contradicting the server: a refused list shown as an empty state, and a refused save shown as a success.
+  
+  Two of the most expensive bugs a web app ships were invisible to every oracle that watches one side of the wire. A list request is refused with a 403 and the page renders its empty state, so the user is told they have nothing when the truth is that nothing could be loaded — which is how a permission regression reaches production without anyone noticing. A save is refused and the page says "Saved", so the user walks away believing their work is stored.
+  
+  Neither is a crash. The HTTP oracle already saw the refusal and reported it as a medium, indistinguishable from the dozens of expected 401s an auth probe produces; the defect is not the refusal but the page contradicting it. Both now raise a high-severity `refused_empty` or `false_success` violation on the action that caused them, naming the endpoint and quoting what the user was shown instead.
+  
+  The rules pair an exact half with a fuzzy one — a status code either is an error or is not, and the page half is never enough alone — so a page that is refused and says so raises nothing. Against the demo app, whose only 4xx is a missing image, they are silent.
+- 22cd8ca: Add `scout_lane_brief`, and remember how a login state is regenerated.
+  
+  Dividing an app between parallel lanes by hand fails in two ways a finished run cannot tell apart from success. Lanes overlap, so two browsers audit the same register while a third module is never opened — and route coverage reads complete either way, because both lanes visiting a route makes it covered. And lanes launch underspecified: in one real four-session run the first two sessions acted with no task set, so the person watching the live view saw browsers clicking through their app with nothing to say why.
+  
+  `scout_lane_brief {lanes, goal}` computes the split instead. Routes are grouped into whole modules by their first path segment, so a lane that owns everything under one module carries state between its own steps rather than re-learning the app on every route, and modules are dealt out so the lanes come out within a route or two of each other. It returns each lane's session name, the `objective` to attach with, the routes it owns, and the two rules a hand-written brief keeps dropping. The same routes always produce the same split, so a lane that has to be re-run is handed the same brief.
+  
+  Separately, `scout_note` gains a `setup` section for how to get an app testable at all, and the `⚠ AUTH FAILED` message now quotes back whatever an earlier run recorded there. A storage state expires on a timer nobody remembers, and "regenerate it" is advice the reader already had; the command that worked last time is the part worth keeping.
+- 8f06c37: The report is a worklist again.
+  
+  A project that has been tested for a while accumulates findings, and the report printed every one of them in full. On one real project that was 737 findings, 1.75 MB, of which 423 were open but unverified by that run and 314 were already fixed — and the eleven findings the run had actually just made were buried in the middle of it. A document nobody opens is not a report.
+  
+  Findings from this run still print in full. Findings from earlier runs, and resolved ones, are now an index: one row each with the id, severity, how long ago it was last seen, how many runs have seen it, and the title. The same project's report becomes 113 KB, 94% smaller, with nothing lost — every id is there, and `scout_report {history: "full"}` prints all of it exactly as before, which is what to use when handing the document to someone who cannot read the project's memory.
+  
+  Age is on every row because it is what decides whether an unverified finding is worth re-testing: one nobody has re-confirmed in four months is a different proposition from one seen last week.
+- 93f9937: Add `scout_verify`: re-test what earlier runs left open, and record what each re-test found.
+  
+  The report has always carried two kinds of finding and been honest that they are not the same thing — what this run saw, and what some earlier run saw. The second kind was labelled historical and unverified, which is accurate and almost useless: a reader cannot tell a bug fixed three weeks ago from one still costing users money today, and neither can the next run. Closing that by hand meant copying each finding's route and evidence out of the report, re-walking them one at a time, and calling `scout_resolve` on the ones that were gone. One project's history held over three hundred.
+  
+  `scout_verify` called bare returns the open findings in the order to re-test them — worst route first, grouped so a route is walked once rather than once per finding — each with the evidence that identifies it and the steps that produced it. `scout_verify {ids}` narrows it, and names any that are not open rather than quietly shortening the list.
+  
+  After re-testing one, `scout_verify {id, verdict, note}` records it: `gone` resolves it, `present` stamps it confirmed so the report dates the confirmation instead of calling it unverified, and `changed` keeps it open and says the behaviour differs. The history index gains a "Re-tested" column, so a reader can see at a glance which of it is still believed.
+- b706095: Make the live board answer, at a glance, which session is stuck and which is in trouble.
+  
+  On a board of eleven cards the questions actually being asked are "which one has been on the same thing for ten minutes", "which one is having trouble", and "where is the one on the orders register". The board could answer none of them, and two of the three answers were already in the status payload on every poll and reached nobody: `taskSince` was rendered only inside the close-up, and a step whose result went wrong was only ever a red word in a six-line feed somebody had to read.
+  
+  Each card now carries a line under its task: how long the session has been on it, and how many of its recent steps went wrong — counted with the same rule the feed colours red, so a card and the feed beneath it cannot disagree. The line is absent on a session that has stated no task and had no trouble.
+  
+  The header gains a filter over everything a card shows — name, role, objective, task, page, tool. It hides cards and nothing else: a filtered-out session is still running, still streaming and still counted in the header, and a filter that matches nothing says so rather than showing a blank page that reads as every session having gone.
+  
+  The close-up's timeline can be walked from the keyboard: arrows step, Home and End jump to the ends, and Space returns to what the session is showing now. Scrubbing a long run by clicking 16-pixel ticks was the thing a mouse was worst at, and the run worth examining is always the one with hundreds of steps.
+- 2e5a808: What a run shows about itself.
+  
+  A four-session validation pass exposed several things the engine knew but never said. All of them are fixed here.
+  
+  **Recording covers the breadth pass.** A crawl now keeps a frame per route it visits, and a snapshot keeps one too. The run that prompted this kept 9 frames out of 67 actions, none of them from the 30 routes a crawl had just swept — the evidence artifact was missing exactly where the coverage happened.
+  
+  **A session says what it is doing from the moment it appears.** `scout_attach` takes a `task`, and puts up a placeholder when none is given, so a fresh card no longer reads "Nothing stated yet" while the session works. The placeholder is display only: it does not satisfy the requirement that an agent state its task before a tool acts.
+  
+  **Several engines on one project no longer erase each other.** Each writes `status.<pid>.json` and its own token file, and `scenescout watch` lists every live engine with its address instead of finding only whichever attached last. The shared `status.json` is still written for older readers.
+  
+  **The report says how the run was paced** — actions, span, median gap, longest gap, idle share and frames per session — and warns about a session that has held a browser with nothing to do for over five minutes. Idle share is labelled as time the browser waited for the agent, because it is not a measure of the engine.
+  
+  **Memory stops growing without limit.** A route keeps its most recent states, capped, so a history that had reached 6,075 states and 36 MB — parsed and re-serialised on every save — is trimmed on open. States a finding points at are never dropped, and coverage is unchanged because it is asked per route.
+  
+  **`scout_scan` says which saved logins have expired**, rather than leaving it to be discovered by attaching and landing on a login page.
+- cfdc508: `scout_request` — call the app's own API as the session, with the UI bypassed.
+  
+  A refusal shown by hiding or disabling a button is not a refusal. Confirming that the server refuses the same action is the most valuable check a permission pass makes, and until now it could only be done outside the tool, in a shell with curl and a hand-extracted token. None of that evidence reached the report: a whole validation run's permission matrices lived in shell history and went with it.
+  
+  The request is made by the page, not beside it, which matters twice. It goes through the same interception the write policy is enforced on, so a safe-write session cannot reach past the policy by calling an endpoint instead of clicking it — the browser suite proves a replayed `DELETE` on a record the session did not create is refused exactly as a click would be. And it carries the session's own credentials, because it is the same origin with the same cookies. Bearer schemes work by replaying whatever `Authorization` header the app itself last sent, so nothing in the engine knows what a token looks like or where an app keeps one.
+  
+  The result leads with the signature a finding should quote (`GET /api/admin/users 403`), then the timing, then the headers that decide whether two responses are genuinely identical — content-type, location, www-authenticate, retry-after, cache-control — then the body. Every call is recorded in the run's trail.
+  
+  Paths are fenced to the attached origin, as navigation is: a session talks to its own app, and another host needs another session.
+- b0f75ec: Wait for the requests an action fired, rather than a fixed sleep, and let a session ask to be slowed down.
+  
+  Every action used to be followed by a flat 400 ms sleep. Measured against the demo app that was 54% of a snapshot's wall time, and a run of two hundred actions spent over a minute asleep — while any page slower than 400 ms was still read before it had finished changing. The engine already intercepts every request, so it now waits on what is actually in flight, with a quiet window after the last one starts and after the action itself, and the old constant survives as a ceiling instead of a floor. On the demo app a navigate costs 149 ms rather than 430, and a snapshot 446 rather than 740.
+  
+  The same rule carries the opposite need. `scout_attach {paceMs}` and `scout_session {paceMs}` set a floor between actions so a person watching can follow along — useful when taking notes beside a run or demonstrating a flow. Unset, a session runs as fast as its page allows; `scout_session {paceMs}` with no `name` changes every attached session at once.
+
+### Patch Changes
+
+- aa77244: Catch a client-side auth guard that redirects after the page has gone quiet.
+  
+  Settling on the requests an action fired is faster than a fixed sleep and more patient with a slow page, but it cannot wait for something that has not been scheduled. A client-side auth guard issues no request until its timer fires, so the page goes quiet, the URL is read, and the gated route is recorded as reached — the bounce invisible, and a dead session along with it. The removed 400 ms sleep had been covering this by accident, and this project's own CI began failing intermittently on a 40 ms guard that a loaded runner delayed past the quiet window.
+  
+  Where a bounce verdict is made — attach judging a storage state, navigate judging coverage — the URL is now watched until it has held still rather than read once. It is a window rather than a guarantee: a guard slower than it still lands after the verdict, and is caught on the next action. Only a session that was given credentials pays for it on every navigation, so an anonymous crawl keeps its full speed: navigate 179 ms and 470 ms per route, unchanged.
+
 ## 3.2.0
 
 ### Minor Changes
