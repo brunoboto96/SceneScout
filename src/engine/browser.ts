@@ -5,6 +5,7 @@ import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type Inter
 import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, TASK_SET, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
 import { normalizeTask } from "./task.js";
+import { CLAIM_SCAN_SCRIPT, findContradictions, type PageState, type WatchedRequest } from "./claims.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
 import {
@@ -540,6 +541,15 @@ export class BrowserEngine {
   /** Non-GET requests fired since the last action — surfaces silent state mutation in read-only runs (timestamped for attribution). */
   private mutationRequests: Array<{ at: number; sig: string; req: import("playwright").Request }> = [];
   /**
+   * Every request answered since the last action, with its status. The HTTP
+   * oracle sees each 4xx as it happens and reports it on its own; this ledger
+   * exists so the contradiction rules can ask the DIFFERENT question of whether
+   * the page then agreed with the refusal. Capped, because a page that polls
+   * would otherwise grow it without bound.
+   */
+  private watchedResponses: WatchedRequest[] = [];
+  private static readonly MAX_WATCHED_RESPONSES = 60;
+  /**
    * Requests the write policy aborted, by identity. The request event fires for
    * every non-GET the page ATTEMPTS, before the route handler decides its fate,
    * so without this the same DELETE was reported twice with opposite meanings:
@@ -580,6 +590,50 @@ export class BrowserEngine {
    * element on the current page? Runs wherever violations are drained, so the
    * finding reaches the agent in the result of the action that revealed it.
    */
+  /** Record one answered request for the contradiction rules. Policy-aborted ones are marked, never dropped: the rules need to know they were ours. */
+  private watchResponse(req: import("playwright").Request, status: number | null): void {
+    if (this.watchedResponses.length >= BrowserEngine.MAX_WATCHED_RESPONSES) return;
+    this.watchedResponses.push({
+      method: req.method(),
+      url: req.url(),
+      status,
+      resourceType: req.resourceType(),
+      blockedByPolicy: this.abortedByPolicy.has(req),
+    });
+  }
+
+  /**
+   * Did the page agree with what the network just did? Runs in the same slot
+   * as the injection scan, so it sees the DOM the action settled on.
+   *
+   * The ledger is cleared whether or not anything is found: these are facts
+   * about ONE action, and carrying a refusal forward would blame the next
+   * action's page for the previous action's request.
+   */
+  private async scanForContradictions(): Promise<void> {
+    const requests = this.watchedResponses;
+    this.watchedResponses = [];
+    const page = this.page;
+    if (!page || page.isClosed() || requests.length === 0) return;
+    if (!requests.some((r) => r.status === null || r.status >= 400)) return;
+    const url = page.url();
+    let state: PageState;
+    try {
+      state = (await page.evaluate(CLAIM_SCAN_SCRIPT)) as PageState;
+    } catch {
+      // A page mid-navigation has no DOM to ask.
+      return;
+    }
+    for (const found of findContradictions(requests, state)) {
+      if (this.contradictionsReported.has(found.evidence)) continue;
+      this.contradictionsReported.add(found.evidence);
+      this.oracles.noteContradiction(found, url);
+    }
+  }
+
+  /** Contradiction signatures already reported this session — the same refused endpoint on every page must not flood the run. */
+  private contradictionsReported = new Set<string>();
+
   private async scanForInjections(): Promise<void> {
     const page = this.page;
     if (!page || page.isClosed() || this.probes.length === 0) return;
@@ -623,6 +677,8 @@ export class BrowserEngine {
     this.framesFailed = 0;
     this.headed = opts.headed ?? false;
     this.blockedRequests = [];
+    this.watchedResponses = [];
+    this.contradictionsReported = new Set();
     this.pendingCreations = new Set();
     this.baseUrl = opts.url.replace(/\/$/, "");
     // Ownership (ownedIds/createdResources) deliberately NOT reset here: it
@@ -686,8 +742,12 @@ export class BrowserEngine {
     this.context.on("requestfinished", () => {
       this.inFlight = Math.max(0, this.inFlight - 1);
     });
-    this.context.on("requestfailed", () => {
+    this.context.on("requestfailed", (req) => {
       this.inFlight = Math.max(0, this.inFlight - 1);
+      this.watchResponse(req, null);
+    });
+    this.context.on("response", (res) => {
+      this.watchResponse(res.request(), res.status());
     });
     this.context.on("request", (req) => {
       this.inFlight += 1;
@@ -1062,6 +1122,7 @@ export class BrowserEngine {
     // run, and none of them from the routes a crawl had just swept.
     this.logAction({ action: "snapshot", url, result: fp, ...(await this.frameFor("snapshot")) });
     await this.scanForInjections();
+    await this.scanForContradictions();
 
     const line = (el: SnapshotElement): string => {
       const dup = el.key.match(/~(\d+)$/);
@@ -1234,6 +1295,7 @@ export class BrowserEngine {
     const frame = await this.recordFrame(action);
     this.logAction({ action, target, url, ...(frame ? { frame } : {}) });
     await this.scanForInjections();
+    await this.scanForContradictions();
     const violations = this.oracles.drain();
     const mutations = this.drainMutations() + this.drainBlocked() + this.drainCreated();
     const navigated = this.snapshotUrl !== "" && url !== this.snapshotUrl;
@@ -2103,6 +2165,7 @@ export class BrowserEngine {
       this.logAction({ action: "crawl", target: path, url: finalUrl, ...(await this.frameFor("crawl")) });
 
       await this.scanForInjections();
+      await this.scanForContradictions();
       const violations = this.oracles.drain();
       const deadEnd = elements.length === 0;
       const unnamed = elements.filter((el) => !el.name).length;
@@ -2335,6 +2398,7 @@ export class BrowserEngine {
           }
         }
         await this.scanForInjections();
+        await this.scanForContradictions();
         const violations = this.oracles.drain();
         const mutations = this.drainMutations() + this.drainBlocked() + this.drainCreated();
         // Abort only on NEW violations: a known-failing endpoint repeating on
