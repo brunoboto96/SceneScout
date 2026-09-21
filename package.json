@@ -71,7 +71,7 @@
     "mcp-check": "npm run build && npm run mcp-check:run",
     "mcp-check:run": "tsx scripts/mcp-check.ts",
     "test": "npm run build && npm run test:unit && npm run smoke:run && npm run mcp-check:run",
-    "test:unit": "npm run scan-test && npm run oracle-test && npm run policy-test && npm run fixture-test && npm run dispatch-test && npm run design-test && npm run contract-test && npm run pace-test && npm run request-test && npm run settle-test && npm run claims-test && npm run verify-test && npm run lane-test && npm run memory-test && npm run install-test && npm run live-test && npm run demo-test && npm run hygiene-test",
+    "test:unit": "npm run scan-test && npm run oracle-test && npm run policy-test && npm run fixture-test && npm run dispatch-test && npm run design-test && npm run contract-test && npm run pace-test && npm run request-test && npm run settle-test && npm run claims-test && npm run verify-test && npm run brief-test && npm run lane-test && npm run memory-test && npm run install-test && npm run live-test && npm run demo-test && npm run hygiene-test",
     "scan-test": "tsx scripts/scan-test.ts",
     "oracle-test": "tsx --test scripts/oracle-test.ts",
     "policy-test": "tsx --test scripts/policy-test.ts",
@@ -89,7 +89,8 @@
     "request-test": "tsx --test scripts/request-test.ts",
     "settle-test": "tsx --test scripts/settle-test.ts",
     "claims-test": "tsx --test scripts/claims-test.ts",
-    "verify-test": "tsx --test scripts/verify-test.ts"
+    "verify-test": "tsx --test scripts/verify-test.ts",
+    "brief-test": "tsx --test scripts/brief-test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
