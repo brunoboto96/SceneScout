@@ -420,7 +420,15 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     console.log("the task a watcher sees");
     // The engine keeps what the agent said the current batch is for; the MCP
     // layer is what requires it before a tool acts (checked in mcp-check).
-    check("a fresh session has nothing to show", !engine.hasTask && engine.liveDescription.task === undefined);
+    // A card that reads "Nothing stated yet" is what a watcher meets when a run
+    // starts, so attach states a placeholder rather than leaving it blank.
+    // The card is not blank when a run starts, but the placeholder does not
+    // count as the agent having said what it is doing: a tool still refuses.
+    check(
+      "a fresh session shows a placeholder without it counting as a stated task",
+      !engine.hasTask && engine.liveDescription.task === "Attaching and taking stock",
+      JSON.stringify(engine.liveDescription),
+    );
     engine.setTask("  Walk the two static\n  pages and back  ");
     check(
       "stating one collapses it to a line and shows it",
@@ -436,6 +444,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     check("...and the stated task is back when the journey ends", engine.liveDescription.task === "Walk the two static pages and back");
     engine.setTask("");
     check("an empty one clears it", !engine.hasTask && engine.liveDescription.task === undefined);
+    // Clearing is still possible, and is how a session says it has finished.
     // The close-up tints the feed by objective, so stating one has to leave a
     // mark in the trail — otherwise the actions that follow read as unexplained.
     engine.setTask("Exercise the rest of the read-only surface");

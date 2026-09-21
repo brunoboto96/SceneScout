@@ -42,7 +42,18 @@ import {
   spawnRunner,
 } from "./installer.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME } from "./engine/memory.js";
-import { formatStatus, localClock, LIVE_TOKEN_FILE, watchTarget, type StatusFile } from "./engine/live.js";
+import {
+  formatStatus,
+  liveEngines,
+  liveTokenFileName,
+  localClock,
+  LIVE_TOKEN_FILE,
+  pidAlive,
+  watchTarget,
+  wholeSessions,
+  type SessionStatus,
+  type StatusFile,
+} from "./engine/live.js";
 import { formatScan, scanProject } from "./scan.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -100,19 +111,6 @@ function readStatusFile(dir: string): StatusFile | "unreadable" | null {
   }
 }
 
-function pidAlive(pid: number | undefined): boolean {
-  if (!pid) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM means the process EXISTS but belongs to another user — only
-    // ESRCH actually means "no such process". Treating both as dead reported
-    // a live engine as stale.
-    return (err as NodeJS.ErrnoException)?.code === "EPERM";
-  }
-}
-
 /** Realtime observability: read the status file + recent action log the running engine maintains. */
 function status(projectPath: string): void {
   const dir = statusDir(projectPath);
@@ -164,14 +162,44 @@ function status(projectPath: string): void {
 /** Open the engine's live view. The engine serves it; this only finds the address and hands it to a browser. */
 function watch(projectPath: string, open: boolean): void {
   const dir = statusDir(projectPath);
-  const st = readStatusFile(dir);
-  let token: string | null = null;
-  try {
-    token = fs.readFileSync(path.join(dir, LIVE_TOKEN_FILE), "utf8");
-  } catch {
-    // watchTarget explains a missing token in context.
+  // Several engines can be attached to one project at once — one per client,
+  // say. Each writes its own status and token, so every live board is
+  // reachable instead of only whichever attached last.
+  const engines = liveEngines(dir, pidAlive);
+  const tokenFor = (pid: number): string | null => {
+    for (const name of [liveTokenFileName(pid), LIVE_TOKEN_FILE]) {
+      try {
+        return fs.readFileSync(path.join(dir, name), "utf8");
+      } catch {
+        // Try the shared name next; watchTarget explains a missing token.
+      }
+    }
+    return null;
+  };
+
+  if (engines.length > 1) {
+    console.log(`${engines.length} engines are attached to this project:`);
+    let shown = 0;
+    for (const { pid, status } of engines) {
+      const one = watchTarget({ status, alive: true, token: tokenFor(pid) });
+      const sessions = wholeSessions(status.detail);
+      const who = sessions.length > 0 ? sessions.map((x: SessionStatus) => x.session).join(", ") : (status.session ?? "no session");
+      console.log(`\n  pid ${pid} — ${who}`);
+      console.log("problem" in one ? `    ${one.problem}` : `    ${one.url}`);
+      if (!("problem" in one)) shown += 1;
+    }
+    console.log("\nEach address holds its own access token: treat them like passwords.");
+    if (shown === 0) process.exitCode = 1;
+    return;
   }
-  const target = watchTarget({ status: st, alive: st !== null && st !== "unreadable" && pidAlive(st.pid), token });
+
+  const only = engines[0];
+  const st = only ? only.status : readStatusFile(dir);
+  const target = watchTarget({
+    status: st,
+    alive: only ? true : st !== null && st !== "unreadable" && pidAlive(st.pid),
+    token: tokenFor(only?.pid ?? (typeof st === "object" && st !== null ? (st.pid ?? 0) : 0)),
+  });
   if ("problem" in target) {
     console.log(target.problem);
     process.exitCode = 1;
