@@ -53,6 +53,17 @@ export async function run({ baseUrl, projectDir }: SmokeContext): Promise<void> 
     // pass, not a symptom — it must neither warn nor feed the streak.
     const navLogin = await engDead.navigate(`${baseUrl}/login`);
     check("navigating to /login deliberately is not a bounce", !navLogin.includes("REDIRECTED"), navLogin);
+
+    // A guard that fires LATE. Nothing is in flight while it waits, so no
+    // amount of waiting on requests reaches it: the page goes quiet, the URL
+    // is read, and the gated route is recorded as reached. This is the same
+    // bug gated.html pins, with the timing a loaded machine produces — and it
+    // is why a bounce verdict watches the URL until it holds still instead of
+    // reading it once.
+    engDead.knownRoutes = ["/gated-slow.html"];
+    const slow = await engDead.navigate(`${baseUrl}/gated-slow.html`);
+    check("a guard that redirects long after the page goes quiet is still a bounce", slow.includes("REDIRECTED"), slow);
+    check("...and the route it asked for is not counted as covered", slow.includes("NOT counted as covered"), slow);
   } finally {
     await engDead.close().catch(() => {});
     fs.rmSync(deadAuthDir, { recursive: true, force: true });

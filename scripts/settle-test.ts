@@ -11,7 +11,17 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { describePace, normalizePace, PACE_MAX_MS, QUIET_MS, SETTLE_CAP_MS, shouldKeepWaiting } from "../src/engine/settle.ts";
+import {
+  describePace,
+  keepWatchingUrl,
+  normalizePace,
+  PACE_MAX_MS,
+  QUIET_MS,
+  SETTLE_CAP_MS,
+  shouldKeepWaiting,
+  URL_CAP_MS,
+  URL_QUIET_MS,
+} from "../src/engine/settle.ts";
 
 const state = (over: Partial<Parameters<typeof shouldKeepWaiting>[0]> = {}) => ({
   inFlight: 0,
@@ -82,4 +92,25 @@ test("the attach result says nothing about pace unless one was asked for", () =>
   assert.equal(describePace(0), "");
   assert.match(describePace(5000), /5000 ms/);
   assert.match(describePace(5000), /paceMs: 0/, "it says how to undo itself");
+});
+
+// ── waiting for a redirect that has not happened yet ────────────────────────
+
+test("a bounce verdict waits for the URL to hold still", () => {
+  // A client-side auth guard issues NO request until its timer fires, so the
+  // request-based rule above has nothing to wait on: the page goes quiet, the
+  // URL is read, and the gated route is recorded as reached. This project's
+  // own CI failed intermittently on exactly that, against a 40 ms timer that a
+  // loaded macOS runner delayed past the quiet window.
+  assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: 0 }), true);
+  assert.equal(keepWatchingUrl({ sinceChangeMs: URL_QUIET_MS - 1, elapsedMs: 500 }), true);
+  assert.equal(keepWatchingUrl({ sinceChangeMs: URL_QUIET_MS, elapsedMs: 500 }), false, "held still long enough to be believed");
+});
+
+test("a page redirecting in a loop does not hold up the run", () => {
+  // The window is a window, not a guarantee. A guard slower than the cap lands
+  // after the verdict, and a page that never stops moving must still return.
+  assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: URL_CAP_MS }), false);
+  assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: URL_CAP_MS - 1 }), true);
+  assert.ok(URL_QUIET_MS < URL_CAP_MS, "the cap must be reachable");
 });

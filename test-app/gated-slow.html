@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gated area (slow guard)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="gated-slow-heading">Gated area</h1>
+    </main>
+    <script>
+      // The same client-side auth guard as gated.html, but slower to fire.
+      //
+      // gated.html redirects after 40 ms, which any settle longer than that
+      // catches by accident. This one redirects after 250 ms, which no quiet
+      // window will ever wait out — because the guard issues NO REQUEST until
+      // it fires, so there is nothing in flight to wait on. Reading the URL
+      // when the page goes quiet reports the gated route as reached, and the
+      // bounce is invisible.
+      //
+      // A real app's guard is slow for ordinary reasons: it awaits a token
+      // refresh, a hydration pass, or a lazily-loaded router. On a loaded
+      // machine an ordinary 40 ms timer becomes this one.
+      setTimeout(function () {
+        try {
+          if (localStorage.getItem("smoke-auth") === "yes") return;
+        } catch (e) {
+          /* storage unavailable — treat as signed out */
+        }
+        location.replace("/login?redirectTo=" + encodeURIComponent(location.pathname));
+      }, 250);
+    </script>
+  </body>
+</html>

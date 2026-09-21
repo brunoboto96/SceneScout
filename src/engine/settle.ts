@@ -75,3 +75,43 @@ export function describePace(paceMs: number): string {
   if (paceMs <= 0) return "";
   return `\n⏱ PACE: at least ${paceMs} ms between actions, so a person can follow along. Unset it with paceMs: 0 to go as fast as the page allows.`;
 }
+
+/**
+ * Waiting for a client-side redirect that has not happened yet.
+ *
+ * A guard that redirects on a timer after hydration issues no request until it
+ * fires, so there is nothing for the request-based settle above to wait on:
+ * it goes quiet, the URL is read, and the page reports the route it was asked
+ * for rather than the login page it actually bounced to. The old flat 400 ms
+ * sleep covered this by accident, and removing it made the bounce invisible
+ * whenever a loaded machine delayed the timer past the quiet window.
+ *
+ * So where a BOUNCE VERDICT is about to be made — attach judging a storage
+ * state, navigate judging coverage — the URL is watched until it has held
+ * still, rather than read once. This is paid per navigation, not per action.
+ */
+
+/**
+ * How long the URL must hold still before a bounce verdict is believed.
+ *
+ * This is a window, not a guarantee: a guard slower than it still lands after
+ * the verdict. What it buys is the realistic case — a guard written to fire
+ * promptly, delayed by a loaded machine — which is the one that made this
+ * project's own CI fail intermittently on a 40 ms timer.
+ */
+export const URL_QUIET_MS = 400;
+/** Longest to watch. A page redirecting in a loop must not hold up the run. */
+export const URL_CAP_MS = 3000;
+
+export interface UrlWatch {
+  /** Since the URL last changed. */
+  sinceChangeMs: number;
+  /** Since the watch began. */
+  elapsedMs: number;
+}
+
+/** Whether to keep watching the URL before judging where the page landed. */
+export function keepWatchingUrl(w: UrlWatch): boolean {
+  if (w.elapsedMs >= URL_CAP_MS) return false;
+  return w.sinceChangeMs < URL_QUIET_MS;
+}
