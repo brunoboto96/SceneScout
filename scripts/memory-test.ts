@@ -882,3 +882,25 @@ test("pruning a history that is already small changes nothing", () => {
   assert.deepEqual(Object.keys(kept), ["/a#1"]);
   assert.deepEqual(pruneStates({}, []), { kept: {}, dropped: 0 });
 });
+
+test("a verdict is stamped on the finding and survives a reload", () => {
+  // The verdict is what lets the report date a confirmation rather than call
+  // the finding unverified, so it has to be on disk, not only in the process
+  // that recorded it.
+  const store = freshStore();
+  const [f] = store.addFinding({ ...base, title: "The register shows nothing for a manager", detail: "x", evidence: "GET /api/records 403" });
+
+  const confirmed = store.verifyFinding(f.id, "present", "still a 403, still an empty table");
+  assert.equal(confirmed?.verdict, "present");
+  assert.equal(confirmed?.status ?? "open", "open", "confirming a finding does not close it");
+  assert.ok(confirmed?.verifiedAt, "a verdict without a date is not a confirmation");
+  assert.equal(confirmed?.verifyNote, "still a 403, still an empty table");
+
+  const reloaded = openStore(path.dirname(store.dir)).findings.find((x) => x.id === f.id);
+  assert.equal(reloaded?.verdict, "present");
+  assert.equal(reloaded?.verifyNote, "still a 403, still an empty table");
+
+  // "gone" is the only verdict that closes it.
+  assert.equal(store.verifyFinding(f.id, "gone")?.status, "resolved");
+  assert.equal(store.verifyFinding("nosuchid", "gone"), null);
+});

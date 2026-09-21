@@ -705,9 +705,15 @@ test("history is indexed by default, so the findings this run made are not burie
 
   assert.ok(index.length < full.length / 2, `index ${index.length} should be far shorter than full ${full.length}`);
   // Nothing is lost: every historical finding keeps a row that says what it is.
-  assert.match(index, /\| Sev \| Id \| Age \| Runs \| Title \|/);
+  assert.match(index, /\| Sev \| Id \| Age \| Runs \| Re-tested \| Title \|/);
   assert.match(index, /An older finding number 0/);
   assert.match(index, /40 days/, "age is what decides whether an unverified finding is worth re-testing");
+  // Whether anyone has re-tested it decides the same thing, and says more:
+  // a finding confirmed yesterday is not the same as one nobody has looked at.
+  assert.match(index, /\| never \|/, "a finding nobody has re-tested says so");
+  store.verifyFinding(store.findings[0].id, "present", "still a 500");
+  const verified = generateReport(store, [], extras, { write: false }).markdown;
+  assert.match(verified, /\| present \d{4}-\d{2}-\d{2} \|/, "and one somebody has carries the verdict and the date");
   assert.ok(!index.includes("costs real bytes"), "the detail is not printed in the index");
   assert.ok(full.includes("costs real bytes"), "…and is still there in full");
   // This run's own finding is printed in full either way.
