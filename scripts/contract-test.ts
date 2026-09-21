@@ -21,6 +21,7 @@ import {
   computeGaps,
   escapeTableCell,
   formatRouteCoverage,
+  describeAge,
   generateReport,
   replayDocument,
   reportEvidence,
@@ -667,4 +668,84 @@ test("replay: only the served copy watches for the engine going away", () => {
   // script at all, which is what lets it open from a file with nothing running.
   assert.ok(!saved.includes("run-engine-gone"));
   assert.ok(!saved.includes("<script>"), "the saved copy stays a document");
+});
+
+// ---- the report as a worklist -------------------------------------------
+
+test("history is indexed by default, so the findings this run made are not buried", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-hist-"));
+  const store = new MemoryStore(dir);
+  const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
+
+  // Many findings from earlier runs, and one from this one.
+  for (let i = 0; i < 30; i += 1) {
+    const [f] = store.addFinding({
+      severity: "high",
+      category: "http-error",
+      title: `An older finding number ${i}`,
+      detail: "A long explanation that costs real bytes when it is printed for every finding in the history. ".repeat(6),
+      url: `http://app.test/x${i}`,
+      state: `/x${i}#${i}`,
+      evidence: `GET /api/x${i} 500`,
+    });
+    f.foundAt = old;
+  }
+  const [mine] = store.addFinding({
+    severity: "medium",
+    category: "ux-confusing",
+    title: "The finding this run actually made",
+    detail: "…",
+    url: "http://app.test/y",
+    state: "/y#now",
+  });
+
+  const extras = { routesVisited: 1, routesTotal: 1, designAudits: 1 };
+  const index = generateReport(store, [], extras, { write: false }).markdown;
+  const full = generateReport(store, [], { ...extras, history: "full" }, { write: false }).markdown;
+
+  assert.ok(index.length < full.length / 2, `index ${index.length} should be far shorter than full ${full.length}`);
+  // Nothing is lost: every historical finding keeps a row that says what it is.
+  assert.match(index, /\| Sev \| Id \| Age \| Runs \| Title \|/);
+  assert.match(index, /An older finding number 0/);
+  assert.match(index, /40 days/, "age is what decides whether an unverified finding is worth re-testing");
+  assert.ok(!index.includes("costs real bytes"), "the detail is not printed in the index");
+  assert.ok(full.includes("costs real bytes"), "…and is still there in full");
+  // This run's own finding is printed in full either way.
+  assert.match(index, new RegExp(`### .*The finding this run actually made`));
+  assert.match(index, new RegExp(`\\*\\*Id:\\*\\* \`${mine.id}\``));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("resolved findings are indexed too: they are the least actionable thing in the report", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-res-"));
+  const store = new MemoryStore(dir);
+  for (let i = 0; i < 20; i += 1) {
+    const [f] = store.addFinding({
+      severity: "low",
+      category: "ux-polish",
+      title: `Something already fixed ${i}`,
+      detail: "Detail nobody needs to re-read, because it is done. ".repeat(8),
+      url: `http://app.test/z${i}`,
+      state: `/z${i}#${i}`,
+      evidence: `widget z${i} shows 0`,
+    });
+    store.resolveFinding(f.id);
+  }
+  const extras = { routesVisited: 1, routesTotal: 1, designAudits: 1 };
+  const index = generateReport(store, [], extras, { write: false }).markdown;
+  assert.match(index, /## ✅ Resolved \(20\)/);
+  assert.match(index, /\| Sev \| Id \| Fixed \| Title \|/);
+  assert.match(index, /Something already fixed 0/);
+  assert.ok(!index.includes("nobody needs to re-read"), "a fixed finding's detail is not the report's job");
+});
+
+test("age reads the way a person would say it", () => {
+  const now = Date.parse("2026-09-21T12:00:00.000Z");
+  const ago = (days: number): string => describeAge(new Date(now - days * 86_400_000).toISOString(), now);
+  assert.equal(ago(0), "today");
+  assert.equal(ago(1), "1 day");
+  assert.equal(ago(15), "15 days");
+  assert.equal(ago(59), "59 days");
+  assert.equal(ago(120), "4 months");
+  assert.equal(describeAge("not a date", now), "?");
 });

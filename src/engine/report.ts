@@ -72,6 +72,21 @@ function projectName(dir: string): string {
   return path.basename(parent) || path.basename(dir) || "project";
 }
 
+/**
+ * How long ago a finding was last seen, for the historical index. A finding
+ * nobody has re-confirmed in four months is a different thing from one seen
+ * last week, and the report should not make a reader open both to find out.
+ */
+export function describeAge(foundAt: string, nowMs: number): string {
+  const seen = Date.parse(foundAt);
+  if (!Number.isFinite(seen)) return "?";
+  const days = Math.floor((nowMs - seen) / 86_400_000);
+  if (days <= 0) return "today";
+  if (days === 1) return "1 day";
+  if (days < 60) return `${days} days`;
+  return `${Math.floor(days / 30)} months`;
+}
+
 /** Every session that did anything, with its steps in order — what the HTML replays. */
 function replaySessions(memory: MemoryStore): ReplaySession[] {
   const names = [...new Set(memory.actionLog.map((e) => e.session ?? "default"))];
@@ -142,6 +157,11 @@ export interface ReportExtras {
   version?: string;
   /** Sessions attached right now. Only these can be holding a browser, so only these are warned about. */
   attachedSessions?: string[];
+  /**
+   * How much of the history to print. "index" (the default) lists findings
+   * from earlier runs as one row each; "full" prints them as it always did.
+   */
+  history?: "index" | "full";
   /**
    * Include the pacing section. False for the sample report, which CI diffs
    * byte for byte: pacing is wall-clock, so it differs between machines and
@@ -434,6 +454,7 @@ export function generateReport(
   const lines: string[] = [];
   const resolved = findings.filter((f) => f.status === "resolved");
   const open = findings.filter((f) => f.status !== "resolved");
+  const now = Date.now();
   const current = open.filter((f) => f.foundAt >= memory.sessionStart);
   const historical = open.filter((f) => f.foundAt < memory.sessionStart);
 
@@ -588,9 +609,28 @@ export function generateReport(
   if (historical.length > 0) {
     lines.push(`## Historical findings — not re-verified this session (${historical.length})`);
     lines.push(``);
-    lines.push(`Recorded in earlier runs and not re-confirmed. Re-test before acting; resolve fixed ones with \`scout_resolve <id>\`.`);
-    lines.push(``);
-    for (const f of historical) renderFinding(f);
+    if (extras?.history === "full") {
+      lines.push(`Recorded in earlier runs and not re-confirmed. Re-test before acting; resolve fixed ones with \`scout_resolve <id>\`.`);
+      lines.push(``);
+      for (const f of historical) renderFinding(f);
+    } else {
+      // An index, not the findings themselves. One project reached 412
+      // historical findings and printing each in full made the report 1.75 MB
+      // — a document nobody opens, in which the eleven findings the run
+      // actually made were buried. Each row carries what decides whether to
+      // re-test it; the detail is one scout_report {history:"full"} away.
+      lines.push(
+        `Recorded in earlier runs and NOT re-confirmed by this one, so none of it is evidence about the build under test. Listed as an index: ` +
+          `re-test before acting, resolve fixed ones with \`scout_resolve <id>\`, and pass \`history: "full"\` to scout_report for the full text.`,
+        ``,
+        `| Sev | Id | Age | Runs | Title |`,
+        `|---|---|---:|---:|---|`,
+      );
+      for (const f of historical) {
+        lines.push(`| ${SEVERITY_ICON[f.severity]} | \`${f.id}\` | ${describeAge(f.foundAt, now)} | ${f.runs} | ${escapeTableCell(f.title)} |`);
+      }
+      lines.push(``);
+    }
   }
 
   if (resolved.length > 0) {
@@ -600,7 +640,18 @@ export function generateReport(
       `Fixed and verified (or confirmed no longer reproducing). A resolved finding that is re-found reopens automatically and is flagged as a regression above.`,
     );
     lines.push(``);
-    for (const f of resolved) renderFinding(f, true);
+    if (extras?.history === "full") {
+      for (const f of resolved) renderFinding(f, true);
+    } else {
+      // The least actionable content in the document: these are fixed. On one
+      // project they were 314 findings and 783 KB — nearly half the report,
+      // none of it anything to do. The index keeps the record without the bulk.
+      lines.push(`| Sev | Id | Fixed | Title |`, `|---|---|---:|---|`);
+      for (const f of resolved) {
+        lines.push(`| ${SEVERITY_ICON[f.severity]} | \`${f.id}\` | ${describeAge(f.foundAt, now)} ago | ${escapeTableCell(f.title)} |`);
+      }
+      lines.push(``);
+    }
   }
 
   if (extras?.createdResources && extras.createdResources.length > 0) {
