@@ -21,7 +21,7 @@ import { OracleMonitor, formatViolations } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
-import { describePace, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
+import { describePace, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
 import { buildRequestScript, formatReplay, replaySignature, requestHeaders, resolveMethod, resolveRequestUrl, toReplayResult } from "./request.js";
 import {
   defaultEngine,
@@ -884,10 +884,15 @@ export class BrowserEngine {
     // is all this used to do — reads as success and names the very file that
     // just failed, so a run would proceed for hundreds of calls against a
     // logged-out browser. The file existing was the only thing ever checked.
-    const authFailed = Boolean(opts.storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), this.page.url(), this.baseUrl);
+    // Whether a bounce verdict can matter later: only a session carrying
+    // credentials has any to lose, and only it pays for watching the URL on
+    // every navigation. An anonymous crawl keeps its full speed.
+    this.watchesForBounce = Boolean(opts.storageStatePath);
+    const landed = await this.stableUrl();
+    const authFailed = Boolean(opts.storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), landed, this.baseUrl);
     const authWarning = authFailed
       ? `\n⚠ AUTH FAILED — the storage state at ${opts.storageStatePath} did not produce a signed-in session: ` +
-        `attaching landed on ${this.page.url()}, a login page. Regenerate it (its token has most likely expired) and re-attach. ` +
+        `attaching landed on ${landed}, a login page. Regenerate it (its token has most likely expired) and re-attach. ` +
         `Continuing now tests a logged-out app.`
       : "";
     return (
@@ -942,6 +947,40 @@ export class BrowserEngine {
       if (this.page !== page) return;
     }
   }
+
+  /**
+   * The URL once it has stopped changing.
+   *
+   * Only called where a bounce verdict is about to be made. A client-side auth
+   * guard redirects on a timer and issues no request until it does, so the
+   * request-based settle has nothing to wait on and the page is read while it
+   * is still, briefly, the page it was asked for.
+   */
+  private async stableUrl(): Promise<string> {
+    const page = this.page;
+    if (!page || page.isClosed()) return page?.url() ?? "";
+    const started = Date.now();
+    let url = page.url();
+    let changedAt = started;
+    for (;;) {
+      if (!keepWatchingUrl({ sinceChangeMs: Date.now() - changedAt, elapsedMs: Date.now() - started })) return url;
+      await page.waitForTimeout(SETTLE_TICK_MS).catch(() => {});
+      if (this.page !== page || page.isClosed()) return url;
+      const now = page.url();
+      if (now !== url) {
+        url = now;
+        changedAt = Date.now();
+      }
+    }
+  }
+
+  /** Where a navigation landed. Watched for a late client-side guard only when this session has credentials to lose. */
+  private async landedUrl(): Promise<string> {
+    return this.watchesForBounce ? await this.stableUrl() : (this.page?.url() ?? "");
+  }
+
+  /** Set at attach: this session was given credentials, so a bounce to a login page is a verdict worth waiting for. */
+  private watchesForBounce = false;
 
   /** Requests started and not yet finished or failed, from the context's own events. */
   private inFlight = 0;
@@ -2027,13 +2066,13 @@ export class BrowserEngine {
     try {
       settled = await this.afterAction("navigate", url);
     } catch (err) {
-      this.recordNavigationOutcome(url, page.url());
+      this.recordNavigationOutcome(url, await this.landedUrl());
       const notice = this.authLoss.take();
       if (!notice) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`${notice}${msg}`);
     }
-    this.recordNavigationOutcome(url, page.url());
+    this.recordNavigationOutcome(url, await this.landedUrl());
     return this.authLoss.take() + settled;
   }
 
