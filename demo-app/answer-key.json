@@ -1,6 +1,6 @@
 {
   "app": "Harbor demo",
-  "_comment": "What this app contains, as data, so a run can be scored against it. `defects` are the ones planted on purpose and listed in README.md; recall is measured against those. `alsoReal` are genuine problems a run found that nobody planted: they count as correct but not toward recall, so recall stays comparable between runs. `nonDefects` are things a run is known to report that are not defects: matching one is a false positive. Severities are the key author's judgement, and the scorecard says so. `match` is a list of case-insensitive regular expressions tried against a finding's evidence and title. Non-defects are tried first, so keep them narrow.",
+  "_comment": "What this app contains, as data, so a run can be scored against it (npm run bench). `defects` are the ones planted on purpose and listed in README.md; recall is measured against those. `alsoReal` are genuine problems runs have found that nobody planted: they count as correct but not toward recall, so recall stays comparable between runs. `nonDefects` are things runs are known to report that are not defects: matching one is a false positive. Severities are the key author's judgement. `match` holds case-insensitive regular expressions tried against a finding's evidence and title. Every entry carries `examples` it MUST match and `counterExamples` it must NOT — the key tests itself (bench-test), so widening a pattern cannot quietly steal another entry's findings. When you change the key, re-score every archived run: npm run bench -- --all.",
   "defects": [
     {
       "id": "dashboard-chart-404",
@@ -9,7 +9,14 @@
       "category": "network",
       "severity": "medium",
       "level": "minimal",
-      "match": ["weekly-chart\\.png"]
+      "match": ["weekly-chart\\.png", "(chart|graph).{0,40}(404|broken|fail(s|ed)? to load|does not load)", "(404|broken).{0,40}(chart|graph)"],
+      "examples": [
+        "GET /img/weekly-chart.png 404",
+        "Chart image on dashboard returns 404",
+        "Orders page requests a chart image that 404s",
+        "dashboard-weekly-chart-image-404"
+      ],
+      "counterExamples": ["img onerror fallback missing for weekly chart", "Chart legend has low contrast"]
     },
     {
       "id": "dashboard-badge-covers-button",
@@ -19,12 +26,20 @@
       "severity": "low",
       "level": "minimal",
       "match": [
-        "bulk.import.{0,40}(overlap|cover)",
-        "(overlap|cover).{0,40}bulk.import",
         "dash-new-badge",
-        "All orders.{0,40}overlap",
-        "overlap.{0,40}All orders"
-      ]
+        "(badge|bulk.import).{0,60}(overlap|cover|obscur|block)",
+        "(overlap|cover|obscur).{0,60}(badge|bulk.import)",
+        "All orders.{0,60}(overlap|covered|obscured|blocked)",
+        "dash-all-orders.{0,80}(timeout|forced|intercept|covered)"
+      ],
+      "examples": [
+        "Badge covers the All orders button",
+        "All orders link overlaps bulk-import badge 84%",
+        "e16 \"All orders\" overlaps e17 \"New: bulk import\" (84%)",
+        "testid=dash-all-orders covered by testid=dash-new-badge (84%)",
+        "click testid=dash-all-orders: strict click timeout, forced click required, URL unchanged"
+      ],
+      "counterExamples": ["bulk-import badge has no hover affordance", "cards lack hover affordances"]
     },
     {
       "id": "orders-archived-refused-empty",
@@ -33,7 +48,19 @@
       "category": "data-inconsistency",
       "severity": "high",
       "level": "minimal",
-      "match": ["status=archived", "archived.{0,60}(500|empty|refused)"]
+      "match": ["status=archived", "archived.{0,80}(500|empty|refused|fail)", "(500|refused|fail).{0,80}archived"],
+      "examples": [
+        "GET /api/orders?status=archived 500, page shows empty list, no error",
+        "Archived orders filter shows empty list instead of surfacing server error",
+        "Orders table shows stale data when the Archived filter fails (500)",
+        "Page keeps stale rows after choosing Archived; GET /api/orders?status=archived 500",
+        "archived-filter-500-silent-empty-list"
+      ],
+      "counterExamples": [
+        "Orders filter gets stuck on the failed Archived result for subsequent selections",
+        "select Archived(500) then Rejected repeats GET /api/orders?status=archived 500, same state hash",
+        "Choosing Rejected shows the Archived request: GET /api/orders?status=archived fired again"
+      ]
     },
     {
       "id": "new-order-empty-customer-silent",
@@ -42,7 +69,22 @@
       "category": "ux-confusing",
       "severity": "medium",
       "level": "medium",
-      "match": ["empty.customer", "customer.{0,40}(silent|no feedback|nothing)"]
+      "match": [
+        "(empty|blank).{0,15}customer.{0,80}(submit|nothing|silent|no feedback|no (network )?requests?|0 (network )?requests?)",
+        "submit.{0,60}(empty|blank|without).{0,20}customer",
+        "new-order-msg.{0,60}unchanged.{0,80}(blocked|0 requests)",
+        "blocked.{0,5}invalid.{0,5}submit"
+      ],
+      "examples": [
+        "Submitting the new-order form with an empty customer does nothing, silently",
+        "click new-order-submit with empty customer → 0 network requests, msg unchanged",
+        "empty-customer-silent-no-feedback",
+        "testid=new-order-msg unchanged after blocked submit, 0 requests fired\nblocked-invalid-submit-stale-message"
+      ],
+      "counterExamples": [
+        "Customers page shows empty customers table",
+        "POST /api/orders {\"customer\":\"\",\"items\":0} 201\nserver-accepts-empty-customer-zero-items"
+      ]
     },
     {
       "id": "new-order-double-submit",
@@ -51,7 +93,25 @@
       "category": "data-inconsistency",
       "severity": "high",
       "level": "medium",
-      "match": ["POST /api/orders\\b.{0,40}(twice|two)", "new-order-submit.{0,40}(twice|x2|×2)", "duplicate.orders?", "double.submit"]
+      "match": [
+        "POST /api/orders(?!/).{0,60}(twice|2x|x2|×2|two times)",
+        "2x POST /api/orders(?!/)",
+        "(double|two).{0,15}(click|submit).{0,80}(two|duplicate|twice).orders?",
+        "duplicate.orders?",
+        "double.{0,3}submit",
+        "creates? (two|2) orders"
+      ],
+      "examples": [
+        "Double-clicking Submit creates two orders (#1044, #1045)",
+        "click×2 new-order-submit → POST /api/orders fired twice → orders 1044 and 1045",
+        "double-click-creates-duplicate-orders",
+        "2x click new-order-submit -> 2x POST /api/orders 201, ids 1046,1047",
+        "Create-order button not guarded against double-submit — duplicate orders"
+      ],
+      "counterExamples": [
+        "2x click signin-role-auditor -> POST /api/signin fired twice",
+        "2x click Approve 1038 → 2nd POST /api/orders/1038/approve 409, single approval persisted"
+      ]
     },
     {
       "id": "new-order-hint-contrast",
@@ -60,7 +120,13 @@
       "category": "a11y",
       "severity": "low",
       "level": "minimal",
-      "match": ["1\\.73", "hint.{0,40}contrast", "contrast.{0,40}hint"]
+      "match": ["1\\.7\\d?\\s*:\\s*1", "hint.{0,40}contrast", "contrast.{0,40}hint"],
+      "examples": [
+        "design_audit orders-new.html contrast 1.73:1 on .hint div",
+        "helper-text-contrast-1.73\ncontrast 1.73:1 rgba(184,192,202,1) on rgb(246,248,250), needs 4.5:1",
+        "Field-hint text fails WCAG contrast on the new-order form"
+      ],
+      "counterExamples": ["Scheduled reports page: heading contrast 3.1:1 (reports-scheduled.html)", "Save changes button contrast 2.9:1"]
     },
     {
       "id": "new-order-email-no-label",
@@ -69,7 +135,13 @@
       "category": "a11y",
       "severity": "medium",
       "level": "minimal",
-      "match": ["email.{0,40}(label|placeholder)", "input\\[name=email\\]"]
+      "match": ["email.{0,40}(no|missing|without).{0,20}label", "email.{0,60}placeholder.{0,40}(not|instead of|no).{0,10}label", "input\\[name=email\\]"],
+      "examples": [
+        "Confirmation email field has no <label>, only a placeholder",
+        "email-field-placeholder-not-label",
+        "demo-app/public/orders-new.html: input[name=email] has no label"
+      ],
+      "counterExamples": ["Email address format is not validated"]
     },
     {
       "id": "reports-export-csv-throws",
@@ -78,7 +150,13 @@
       "category": "page-error",
       "severity": "high",
       "level": "medium",
-      "match": ["export.{0,10}csv", "reports-export", "reading 'rows'"]
+      "match": ["export.{0,10}csv.{0,80}(throw|error|fail|crash|nothing|no file)", "(throw|error|fail|crash).{0,60}export.{0,10}csv", "reading 'rows'"],
+      "examples": [
+        "Export CSV on Reports page throws and produces no file",
+        "page_error: Cannot read properties of undefined (reading 'rows') on click testid=reports-export-csv",
+        "Export CSV button crashes, exports nothing"
+      ],
+      "counterExamples": ["Export CSV button has no accessible name"]
     },
     {
       "id": "scheduled-reports-dead-end",
@@ -87,7 +165,21 @@
       "category": "dead-end",
       "severity": "high",
       "level": "minimal",
-      "match": ["reports-scheduled", "scheduled.reports.{0,60}(nav|no way|dead)"]
+      "match": [
+        "reports-scheduled.{0,120}(no (nav|navigation|way|header)|dead.?end|0 interactable|no interactable|no escape|headerless)",
+        "(no (nav|navigation|way back)|dead.?end|headerless).{0,120}(scheduled|reports-scheduled)",
+        "scheduled.{0,20}reports?.{0,80}(no (nav|navigation|way)|dead.?end|no escape)"
+      ],
+      "examples": [
+        "Scheduled reports page has no nav shell and no way back except browser back",
+        "GET /reports-scheduled.html renders 0 interactable elements, no nav shell",
+        "GET /reports-scheduled.html: 0 interactable elements, no nav-* testids present\nreports-scheduled-no-nav-chrome-dead-end",
+        "Scheduled reports link leads to a headerless dead-end page"
+      ],
+      "counterExamples": [
+        "Scheduled reports page: heading contrast 3.1:1 (reports-scheduled.html)",
+        "no backend route: GET /api/reports/scheduled 404, page reads 'Scheduling is coming soon.'\nreports-scheduled-stub-copy-intentional"
+      ]
     },
     {
       "id": "order-sticky-bar-covers-save",
@@ -96,7 +188,18 @@
       "category": "visual",
       "severity": "medium",
       "level": "minimal",
-      "match": ["order-stickybar", "sticky.{0,40}(save|notes|footer)", "save.notes.{0,40}cover"]
+      "match": [
+        "order-stickybar.{0,60}(cover|overlap|obscur)|(cover|overlap|obscur).{0,60}order-stickybar",
+        "(sticky|fixed|pinned).{0,40}(bar|footer|chrome).{0,80}(cover|overlap|obscur|hide).{0,60}(save|notes)",
+        "(save.notes|order-save).{0,60}(covered|obscured|hidden|overlapped)"
+      ],
+      "examples": [
+        "A fixed bar covers the Save notes button",
+        "GEOMETRY: e14 'Save notes' COVERED by pinned chrome [order-stickybar] at load scroll position",
+        "save-notes covered by sticky footer at load scroll",
+        "testid=order-save covered by testid=order-stickybar at default scroll"
+      ],
+      "counterExamples": ["order.html stickybar anchor href=/orders.html, no data-testid\nstickybar-link-missing-testid"]
     },
     {
       "id": "approve-endpoint-accepts-clerk",
@@ -105,7 +208,23 @@
       "category": "security",
       "severity": "high",
       "level": "medium",
-      "match": ["approve.{0,60}(clerk|role.check|no role)", "/approve 200"]
+      "match": [
+        "approve.{0,80}(200|succeed|accept).{0,80}(clerk|non-manager|any (signed-in )?role)",
+        "(clerk|any (signed-in )?role|non-manager).{0,80}(can|could|able to).{0,20}approve",
+        "approve.{0,40}(no|missing|lacks).{0,20}(role|permission|authori[sz]ation).{0,5}check",
+        "/approve 200",
+        "approve.{0,40}(clerk|non-manager).{0,40}\\b200\\b"
+      ],
+      "examples": [
+        "POST /api/orders/1042/approve 200 OK while signed in as clerk",
+        "Approve endpoint has no role check — any signed-in role can approve orders",
+        "POST /api/orders/1038/approve as role=clerk 200 status became approved",
+        "Clerk role can approve orders via direct API call"
+      ],
+      "counterExamples": [
+        "Approve button correctly hidden for clerk",
+        "2x click Approve 1038 → 2nd POST /api/orders/1038/approve 409, single approval persisted"
+      ]
     },
     {
       "id": "inventory-sort-as-text",
@@ -114,7 +233,23 @@
       "category": "data-inconsistency",
       "severity": "medium",
       "level": "medium",
-      "match": ["sort.{0,20}(qty|quantity)", "quantity.{0,40}(text|string)", "\\[10,\\s*120"]
+      "match": [
+        "sort.{0,30}(qty|quantity|stock|on.hand).{0,80}(text|string|lexic|alphabetic)",
+        "(qty|quantity|stock|on.hand).{0,60}(sort|order).{0,60}(text|string|lexic|alphabetic)",
+        "10,\\s*120,\\s*250",
+        "10.{0,20}before.{0,10}\\b9\\b"
+      ],
+      "examples": [
+        "Quantity column sorts 10 before 9",
+        "GET /api/inventory?sort=qty returns order [10,120,250,3,64,9]",
+        "quantity-sort-uses-string-comparison",
+        "\"Sort by Quantity\" sorts on-hand counts as text, not numbers",
+        "click testid=inventory-sort-qty -> order HB-103,HB-101 (qty 10,120,250,3,64,9)\nquantity-sort-lexicographic-not-numeric"
+      ],
+      "counterExamples": [
+        "name-sort-works-correctly",
+        "two clicks on testid=inventory-sort-qty produce identical row order\nsort-buttons-no-toggle-or-active-indicator"
+      ]
     },
     {
       "id": "orders-stored-xss",
@@ -123,7 +258,21 @@
       "category": "security",
       "severity": "high",
       "level": "extensive",
-      "match": ["dom_injection", "stored.xss", "\\bxss\\b", "onerror"]
+      "match": [
+        "dom_injection",
+        "stored.?xss",
+        "customer.{0,40}(rendered|renders).{0,20}(as )?(html|unescaped)",
+        "document\\.title (became|becomes|changed to) .?xss"
+      ],
+      "examples": [
+        "stored-xss-customer-field-rendered-unescaped",
+        "customer=<img src=x onerror=\"document.title='xss'\"> on /orders.html -> document.title becomes 'xss'",
+        "GET /api/orders order 1045 customer=<img src=x onerror>; GET /x 404; document.title became 'xss'"
+      ],
+      "counterExamples": [
+        "img onerror fallback missing for weekly chart",
+        "document.title unchanged on /order.html?id=1045 after loading injected customer name\nxss-payload-escaped-on-order-detail"
+      ]
     },
     {
       "id": "delete-reports-false-success",
@@ -132,7 +281,21 @@
       "category": "data-inconsistency",
       "severity": "high",
       "level": "medium",
-      "match": ["false_success", "workspace deleted", "delete.{0,40}(report|claim|show)s? success"]
+      "match": [
+        "false_success",
+        "workspace deleted",
+        "(delete|deleting).{0,80}(report|claim|show|say)s?.{0,20}(success|deleted|done)",
+        "DELETE /api/(orders|workspace)\\S*.{0,20}40[13].{0,80}(navigat|redirect|anyway|still)",
+        "delete.{0,40}(redirect|navigat)s?.{0,20}(as )?success"
+      ],
+      "examples": [
+        "DELETE /api/orders/1048 403; UI navigated to /orders.html anyway; GET /api/orders/1048 200 still exists",
+        "delete-redirects-as-success-on-403",
+        "POST /api/workspace/delete blocked by the safe-write policy, yet the page says Workspace deleted"
+      ],
+      "counterExamples": [
+        "testid=settings-delete-workspace click handler calls fetch DELETE /api/workspace with no confirm()\nsettings-delete-workspace-lacks-confirmation"
+      ]
     }
   ],
   "alsoReal": [
@@ -143,16 +306,48 @@
       "category": "data-loss",
       "severity": "high",
       "level": "medium",
-      "match": ["settings-save", "save changes"]
+      "match": [
+        "settings-save.{0,120}(0 (network )?requests?|no (network )?request|nothing|reverts?|lost|discard|persists nothing)",
+        "save changes.{0,120}(0 (network )?requests?|no (network )?request|sends nothing|nothing|reverts?|lost|discard|not (persist|saved))"
+      ],
+      "examples": [
+        "click settings-save fires 0 network requests; settings-name reverts after reload",
+        "Settings \"Save changes\" fires no request and silently discards edits",
+        "click testid=settings-save fires 0 network requests; GET /api/workspace 404\nsettings-save-shows-success-but-persists-nothing"
+      ],
+      "counterExamples": ["Save changes button contrast 2.9:1"]
     },
     {
-      "id": "new-order-negative-items",
+      "id": "save-notes-claims-saved",
+      "route": "/order.html",
+      "title": "Save notes shows \"Saved.\" without checking the response",
+      "category": "data-inconsistency",
+      "severity": "medium",
+      "level": "medium",
+      "match": ["save.?notes.{0,80}(unconditional|without|no res\\.ok|regardless)", "#saved.{0,40}Saved.{0,60}(no res\\.ok|without|regardless)"],
+      "examples": ["order.html script sets #saved text='Saved.' after PUT with no res.ok check\nsave-notes-unconditional-saved-message"],
+      "counterExamples": ["save-notes covered by sticky footer at load scroll"]
+    },
+    {
+      "id": "orders-api-accepts-invalid-input",
       "route": "/orders-new.html",
-      "title": "A negative item count is accepted and stored",
+      "title": "The orders API accepts invalid input: negative item counts and an empty customer",
       "category": "data-inconsistency",
       "severity": "high",
       "level": "medium",
-      "match": ["items.{0,6}-\\d", "negative.item"]
+      "match": [
+        "items.{0,10}-\\d",
+        "negative.{0,20}(item|quantity|count)",
+        "(accepts?|stored|201).{0,60}(empty|blank).{0,20}customer",
+        "customer.{0,4}\"\\s*:\\s*\"\""
+      ],
+      "examples": [
+        "POST /api/orders {items:-5} → 200; GET /api/orders/1043 items=-5",
+        "Negative item count accepted and stored by order creation",
+        "POST /api/orders {\"customer\":\"\",\"items\":0} 201\nserver-accepts-empty-customer-zero-items",
+        "GET /api/orders order 1045 items=-1; order 1044 customer=\"\""
+      ],
+      "counterExamples": ["click new-order-submit with empty customer → 0 network requests, msg unchanged"]
     },
     {
       "id": "order-not-found-live-controls",
@@ -161,7 +356,62 @@
       "category": "page-error",
       "severity": "medium",
       "level": "medium",
-      "match": ["orders/null", "not.found.{0,60}(enabled|button|control|action)"]
+      "match": ["orders/null", "not.found.{0,80}(enabled|button|control|action)"],
+      "examples": [
+        "Order-not-found page still shows fully enabled action buttons that crash on click",
+        "POST /api/orders/null/request-approval 404; page_error: Unexpected token"
+      ],
+      "counterExamples": []
+    },
+    {
+      "id": "request-approval-offered-when-pending",
+      "route": "/order.html",
+      "title": "Request approval stays enabled on an order already awaiting approval",
+      "category": "data-inconsistency",
+      "severity": "low",
+      "level": "medium",
+      "match": [
+        "(approval|request-approval).{0,40}(button|visible|enabled).{0,60}pending",
+        "pending.{0,60}request-approval.{0,40}(visible|enabled)",
+        "request.approval.{0,40}(enabled|visible|offered).{0,60}(pending|awaiting)"
+      ],
+      "examples": ["GET /api/orders/1042 status=pending; order-request-approval visible+enabled on fresh load\napproval-button-visible-after-pending"],
+      "counterExamples": ["POST .../request-approval 409 with clear error text shown to user\nduplicate-approval-request-rejected-cleanly"]
+    },
+    {
+      "id": "approvals-requested-column-shows-notes",
+      "route": "/approvals.html",
+      "title": "The Requested column shows the order's notes",
+      "category": "data-inconsistency",
+      "severity": "low",
+      "level": "medium",
+      "match": ["requested.{0,40}column.{0,60}notes", "requested.{0,40}(renders|shows).{0,20}notes"],
+      "examples": ["Approvals table Requested column actually renders notes text"],
+      "counterExamples": []
+    },
+    {
+      "id": "delete-workspace-no-confirmation",
+      "route": "/settings.html",
+      "title": "Delete workspace acts with no confirmation step",
+      "category": "data-loss",
+      "severity": "high",
+      "level": "medium",
+      "match": ["delete.?workspace.{0,80}(no confirm|lacks.?confirm|without confirm)", "(no|without) confirm.{0,40}delete.?workspace"],
+      "examples": [
+        "testid=settings-delete-workspace click handler calls fetch DELETE /api/workspace with no confirm()\nsettings-delete-workspace-lacks-confirmation"
+      ],
+      "counterExamples": []
+    },
+    {
+      "id": "stickybar-link-missing-testid",
+      "route": "/order.html",
+      "title": "The sticky bar's back link has no test id",
+      "category": "missing-testid",
+      "severity": "low",
+      "level": "minimal",
+      "match": ["sticky.?bar.{0,60}(no|missing).{0,10}(data-)?test.?id"],
+      "examples": ["order.html stickybar anchor href=/orders.html, no data-testid\nstickybar-link-missing-testid"],
+      "counterExamples": []
     },
     {
       "id": "nav-links-unstyled",
@@ -170,16 +420,41 @@
       "category": "ux-polish",
       "severity": "low",
       "level": "minimal",
-      "match": ["nav.links?.{0,40}(underline|colou?r)", "AFFORDANCES"]
+      "match": ["nav.{0,20}links?.{0,60}(underline|colou?r|affordance)", "AFFORDANCES.{0,80}nav"],
+      "examples": [
+        "Nav links have no underline and match body text color",
+        "design-audit AFFORDANCES: testid=nav-orders no underline, body-text color\nshared-nav-links-no-underline-affordance"
+      ],
+      "counterExamples": ["cards lack hover affordances", "bulk-import badge has no hover affordance"]
     },
     {
-      "id": "customers-spacing-off-grid",
+      "id": "spacing-off-grid",
       "route": "/customers.html",
-      "title": "Customers page spacing is off the 4px grid",
+      "title": "Padding off the 4px spacing grid",
       "category": "ux-polish",
       "severity": "low",
       "level": "minimal",
-      "match": ["customers.{0,40}(spacing|grid|dominant)"]
+      "match": ["(spacing|padding).{0,40}(off.{0,5}(the )?4px|off.grid)", "off.{0,5}4px.grid", "4px grid.{0,20}(10px|14px)"],
+      "examples": [
+        "Customers page: no dominant action, spacing off grid",
+        "design_audit /customers.html spacing 86% off-4px-grid (10px,14px,2px)\ncustomers-padding-off-4px-grid",
+        "design-audit order.html: 50% spacing off 4px grid, ad-hoc 14px x6, 10px x2\norder-detail-spacing-off-grid"
+      ],
+      "counterExamples": []
+    },
+    {
+      "id": "sort-no-active-state",
+      "route": "/inventory.html",
+      "title": "Sort buttons show no active state and do not toggle",
+      "category": "ux-polish",
+      "severity": "low",
+      "level": "medium",
+      "match": ["sort.{0,20}buttons?.{0,80}((no|without).{0,20}(toggle|active)|indicator)", "sort-buttons-no-toggle"],
+      "examples": [
+        "two clicks on testid=inventory-sort-qty produce identical row order\nsort-buttons-no-toggle-or-active-indicator",
+        "Quantity/Name sort buttons have no descending toggle or active-state indicator"
+      ],
+      "counterExamples": []
     }
   ],
   "nonDefects": [
@@ -187,31 +462,93 @@
       "id": "filter-stuck-after-failure",
       "title": "The orders filter is stuck on the failed Archived result",
       "why": "load() fetches whatever status is selected. Rejected had no orders yet, so its correct empty table had the same fingerprint as the Archived failure; only the request's status tells them apart.",
-      "match": ["(stuck|stale|reuses?).{0,60}(rejected|filter|archived)", "rejected.{0,60}(stuck|reuses?|repeats)"]
+      "match": [
+        "rejected.{0,100}(stuck|reuses?|repeats?|again|archived)",
+        "(stuck|reuses?|repeats?).{0,100}rejected",
+        "(filter|selection).{0,40}(stuck|frozen).{0,60}(subsequent|other|next)"
+      ],
+      "examples": [
+        "Orders filter gets stuck on the failed Archived result for subsequent selections",
+        "select Archived(500) then Rejected repeats GET /api/orders?status=archived 500, same state hash",
+        "Choosing Rejected shows the Archived request: GET /api/orders?status=archived fired again"
+      ],
+      "counterExamples": [
+        "Orders table shows stale data when the Archived filter fails (500)",
+        "GET /api/orders?status=archived 500, page shows empty list, no error"
+      ]
     },
     {
       "id": "sign-in-double-click",
       "title": "A double-click on a sign-in role button signs in twice",
       "why": "Signing in as the same role twice leaves the same state; there is nothing inconsistent to observe.",
-      "match": ["sign.?in.{0,60}(twice|double)", "/api/signin.{0,40}twice", "signin-role.{0,40}(2x|twice|double)"]
+      "match": ["sign.?in.{0,60}(twice|double|2x)", "/api/signin.{0,40}twice", "signin-role.{0,40}(2x|twice|double)", "(2x|double).{0,20}click.{0,40}signin"],
+      "examples": ["2x click signin-role-auditor -> POST /api/signin fired twice", "Role sign-in button not guarded against rapid double-click"],
+      "counterExamples": ["click×2 new-order-submit → POST /api/orders fired twice"]
     },
     {
       "id": "static-rows-inert",
       "title": "List rows do nothing when clicked",
       "why": "The customers and inventory lists are read-only by design; a row with no action is not a dead end.",
-      "match": ["rows?.{0,20}(are )?inert", "customers-row.{0,40}0 network", "row-click-is-inert"]
+      "match": ["rows?.{0,20}(are |is )?inert", "customers-row.{0,40}0 (network )?requests?", "rows?.{0,20}non.?interactive", "row.?click.{0,20}inert"],
+      "examples": [
+        "Customer rows are inert — no detail view, no hover affordance",
+        "click on testid=inventory-row-HB-101 -> no navigation, no change\ninventory-rows-non-interactive-by-design",
+        "GET /api/customers/1 404; click on customers-row-1..6 causes no navigation/state change\ncustomer-rows-non-interactive-no-detail"
+      ],
+      "counterExamples": []
     },
     {
       "id": "empty-live-region-unnamed",
       "title": "An empty status region has no accessible name",
       "why": "A role=status region is empty by design until it announces something; an empty live region has nothing to name.",
-      "match": ["(signin-status|new-order-msg).{0,80}(unnamed|accessible name)", "status.{0,20}region.{0,60}(unnamed|no accessible name|accessible name empty)"]
+      "match": [
+        "(signin-status|new-order-msg).{0,80}(unnamed|accessible name)",
+        "status.{0,20}(message )?region.{0,60}(unnamed|no accessible name|accessible name empty)"
+      ],
+      "examples": [
+        "signin-status region has no accessible name",
+        "testid=new-order-msg role=status unnamed at load",
+        "Status message region has no accessible name until it holds content"
+      ],
+      "counterExamples": ["testid=new-order-msg unchanged after blocked submit, 0 requests fired"]
     },
     {
       "id": "write-policy-block",
       "title": "A destructive control refused by the tester's write policy",
       "why": "The refusal is SceneScout's own safety net, not the app's behaviour.",
-      "match": ["blocked by (the |tester )?(safe-write|write.policy)", "WRITE-POLICY blocked", "write.policy.{0,20}\\((safe-write|read-only)\\)"]
+      "match": [
+        "^(?![\\s\\S]*(deleted|success|saved|claims?|says|yet the page))[\\s\\S]*(blocked by (the |tester |its )?(safe-write|write.policy|read-only)|WRITE-POLICY blocked|write.policy.{0,20}\\((safe-write|read-only)\\))"
+      ],
+      "examples": [
+        "delete-workspace blocked by tester safe-write policy",
+        "WRITE-POLICY blocked DELETE /api/orders/1042 (safe-write)",
+        "delete on non-session order blocked by write policy"
+      ],
+      "counterExamples": ["POST /api/workspace/delete blocked by the safe-write policy, yet the page says Workspace deleted"]
+    },
+    {
+      "id": "approve-double-click-guarded",
+      "title": "A double-click on Approve approves once",
+      "why": "The second request gets a 409 and one approval persists: the endpoint is idempotent, which is correct.",
+      "match": ["approve.{0,40}(double|2x|twice).{0,120}409", "409.{0,80}(single|idempotent|once)"],
+      "examples": ["2x click Approve 1038 → 2nd POST /api/orders/1038/approve 409, single approval persisted\napprove-double-click-idempotent-with-409"],
+      "counterExamples": ["POST /api/orders/1042/approve 200 OK while signed in as clerk"]
+    },
+    {
+      "id": "xss-escaped-on-detail",
+      "title": "The order detail page shows an injected customer name as text",
+      "why": "The detail page escapes the name — the stored XSS is on the list, not here.",
+      "match": ["(\\bescaped\\b|unchanged|not execut|as text).{0,80}(order\\.html|detail)", "xss.{0,40}\\bescaped\\b"],
+      "examples": ["document.title unchanged on /order.html?id=1045 after loading injected customer name\nxss-payload-escaped-on-order-detail"],
+      "counterExamples": ["customer=<img src=x onerror=\"document.title='xss'\"> on /orders.html -> document.title becomes 'xss'"]
+    },
+    {
+      "id": "scheduled-coming-soon-copy",
+      "title": "The scheduled reports page says scheduling is coming soon",
+      "why": "The copy is honest about an unbuilt feature. The defect on that page is that it has no way back, not its text.",
+      "match": ["^(?![\\s\\S]*(dead.?end|no (nav|navigation|way)|0 interactable|no escape|headerless))[\\s\\S]*coming soon"],
+      "examples": ["no backend route: GET /api/reports/scheduled 404, page reads 'Scheduling is coming soon.'\nreports-scheduled-stub-copy-intentional"],
+      "counterExamples": ["Scheduled reports is a dead end — page just says coming soon and has no nav"]
     }
   ]
 }

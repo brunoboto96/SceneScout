@@ -15,74 +15,144 @@
  * stated was worth what they said — measured against the key, which is the
  * one ground truth a run cannot talk itself into.
  *
+ * Every future change is accepted or rejected by the number this produces, so
+ * the failure that matters most here is a PLAUSIBLE WRONG number. Three rules
+ * follow from that. A piece of text two key entries both claim is reported as
+ * ambiguous and scored as neither. The key is validated when it is read, so a
+ * mistyped level cannot silently drop a defect from recall. And the key is
+ * hashed into every scorecard, so two runs scored against different keys are
+ * never compared by accident.
+ *
  * The key is data, not code: everything specific to one app lives in its key
  * file, so this module stays as generic as the rest of the engine.
  *
  * Pure, so every rule is table-tested.
  */
+import { createHash } from "node:crypto";
+import { z } from "zod";
 import { BUCKET_EDGES, bucketLabel, bucketOf, type RecordedDecision } from "./calibration.js";
 import type { Finding } from "./memory.js";
 
 export const LEVELS = ["minimal", "medium", "extensive"] as const;
 export type Level = (typeof LEVELS)[number];
+const SEVERITIES = ["high", "medium", "low"] as const;
 
-/** One entry of an answer key. `match` holds case-insensitive regular expressions tried against a finding's evidence and title. */
-export interface KeyEntry {
-  id: string;
-  route: string;
-  title: string;
-  /** The category a finding for it should carry. Reported, not enforced: two categories can both be defensible. */
-  category: string;
-  /** The severity the key's author would give it. A judgement, and labelled as one wherever it is reported. */
-  severity: "high" | "medium" | "low";
-  /** The lowest level whose contract is expected to find it. A defect only a fuzzing pass can reach is not a miss at `medium`. */
-  level: Level;
-  match: string[];
+const Pattern = z.string().refine(
+  (p) => {
+    try {
+      new RegExp(p, "i");
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  { message: "is not a valid regular expression" },
+);
+
+const Entry = z
+  .object({
+    id: z.string().min(1),
+    route: z.string().startsWith("/"),
+    title: z.string().min(1),
+    /** The category a finding for it should carry. Reported, not enforced: two categories can both be defensible. */
+    category: z.string().min(1),
+    /** The severity the key's author would give it. A judgement, and labelled as one wherever it is reported. */
+    severity: z.enum(SEVERITIES),
+    /** The lowest level whose contract is expected to find it. A defect only a fuzzing pass can reach is not a miss at `medium`. */
+    level: z.enum(LEVELS),
+    /** Case-insensitive regular expressions tried against a finding's evidence and title. */
+    match: z.array(Pattern).min(1),
+    /** Phrasings that MUST classify to this entry. The title is always one of them. */
+    examples: z.array(z.string()).default([]),
+    /** Near misses that must NOT classify to this entry — the other half of each contrastive pair. */
+    counterExamples: z.array(z.string()).default([]),
+  })
+  .strict();
+
+const NonDefect = z
+  .object({
+    id: z.string().min(1),
+    title: z.string().min(1),
+    /** Why it is not a defect, for the reader of a scorecard. */
+    why: z.string().min(1),
+    match: z.array(Pattern).min(1),
+    examples: z.array(z.string()).default([]),
+    counterExamples: z.array(z.string()).default([]),
+  })
+  .strict();
+
+const Key = z
+  .object({
+    app: z.string().min(1),
+    _comment: z.string().optional(),
+    /** The defects the app was built to contain. Recall is measured against these. */
+    defects: z.array(Entry).min(1),
+    /**
+     * Real problems a run found that nobody planted. They count as correct for
+     * precision but not toward recall, so the number the key was designed around
+     * stays comparable from one run to the next.
+     */
+    alsoReal: z.array(Entry).default([]),
+    nonDefects: z.array(NonDefect).default([]),
+  })
+  .strict();
+
+export type KeyEntry = z.infer<typeof Entry>;
+export type KeyNonDefect = z.infer<typeof NonDefect>;
+export type AnswerKey = z.infer<typeof Key>;
+
+/**
+ * Read and validate a key. A key that fails here fails loudly: a mistyped
+ * `"level": "Minimal"` used to drop the defect out of recall with no error,
+ * and the run scored as if the app had one defect fewer.
+ */
+export function parseKey(raw: unknown): AnswerKey {
+  const parsed = Key.safeParse(raw);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new Error(`The answer key is not valid at ${issue.path.join(".") || "(root)"}: ${issue.message}`);
+  }
+  const ids = [...parsed.data.defects, ...parsed.data.alsoReal, ...parsed.data.nonDefects].map((e) => e.id);
+  const dup = ids.find((id, i) => ids.indexOf(id) !== i);
+  if (dup) throw new Error(`The answer key uses the id ${JSON.stringify(dup)} twice.`);
+  return parsed.data;
 }
 
-/** Something a run is known to report that is NOT a defect. Matching one is a false positive, counted as such. */
-export interface KeyNonDefect {
-  id: string;
-  title: string;
-  /** Why it is not a defect, for the reader of a scorecard. */
-  why: string;
-  match: string[];
-}
-
-export interface AnswerKey {
-  app: string;
-  /** The defects the app was built to contain. Recall is measured against these. */
-  defects: KeyEntry[];
-  /**
-   * Real problems a run found that nobody planted. They count as correct for
-   * precision but not toward recall, so the number the key was designed around
-   * stays comparable from one run to the next.
-   */
-  alsoReal: KeyEntry[];
-  nonDefects: KeyNonDefect[];
+/** A short, stable fingerprint of a key, so a scorecard says which key produced it. */
+export function keyHash(key: AnswerKey): string {
+  const canonical = JSON.stringify({ defects: key.defects, alsoReal: key.alsoReal, nonDefects: key.nonDefects });
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 10);
 }
 
 const RANK: Record<Level, number> = { minimal: 0, medium: 1, extensive: 2 };
 const SEVERITY_RANK: Record<string, number> = { low: 0, medium: 1, high: 2 };
 
-type Matched = { kind: "defect" | "alsoReal"; entry: KeyEntry } | { kind: "nonDefect"; entry: KeyNonDefect };
+export type Classified = { kind: "defect" | "alsoReal"; entry: KeyEntry } | { kind: "nonDefect"; entry: KeyNonDefect } | { kind: "ambiguous"; ids: string[] };
 
-function compile(patterns: readonly string[]): RegExp[] {
-  return patterns.map((p) => new RegExp(p, "i"));
+function matches(patterns: readonly string[], text: string): boolean {
+  return patterns.some((p) => new RegExp(p, "i").test(text));
 }
 
 /**
  * What a piece of reported text is, according to the key.
  *
- * Known non-defects are tried FIRST. They are written narrowly on purpose,
- * because a false positive usually mentions the same endpoint as a real defect
- * — "the filter is stuck after the Archived 500" names the archived failure —
- * and trying the defects first would credit the false claim with the real bug.
+ * A known non-defect is a deliberate refinement of a real defect — "the filter
+ * is stuck after the Archived 500" names the Archived failure but claims
+ * something false about it — so when exactly one non-defect matches, it wins.
+ * Anything else that more than one entry claims is AMBIGUOUS, reported, and
+ * scored as neither: crediting the first match would quietly count a finding
+ * about two defects as one, and miss the other.
  */
-export function classify(text: string, key: AnswerKey): Matched | null {
-  for (const entry of key.nonDefects) if (compile(entry.match).some((r) => r.test(text))) return { kind: "nonDefect", entry };
-  for (const entry of key.defects) if (compile(entry.match).some((r) => r.test(text))) return { kind: "defect", entry };
-  for (const entry of key.alsoReal) if (compile(entry.match).some((r) => r.test(text))) return { kind: "alsoReal", entry };
+export function classify(text: string, key: AnswerKey): Classified | null {
+  const nd = key.nonDefects.filter((e) => matches(e.match, text));
+  if (nd.length === 1) return { kind: "nonDefect", entry: nd[0] };
+  if (nd.length > 1) return { kind: "ambiguous", ids: nd.map((e) => e.id) };
+  const all = [
+    ...key.defects.filter((e) => matches(e.match, text)).map((entry) => ({ kind: "defect" as const, entry })),
+    ...key.alsoReal.filter((e) => matches(e.match, text)).map((entry) => ({ kind: "alsoReal" as const, entry })),
+  ];
+  if (all.length === 1) return all[0];
+  if (all.length > 1) return { kind: "ambiguous", ids: all.map((m) => m.entry.id) };
   return null;
 }
 
@@ -96,8 +166,41 @@ export function decisionText(d: Pick<RecordedDecision, "evidence" | "observation
   return `${d.evidence ?? ""}\n${d.observation}`;
 }
 
+/**
+ * A key that disagrees with its own examples is wrong before any run is
+ * scored. Returns every title or example that classifies anywhere but its
+ * own entry, and every counter-example that classifies TO its entry.
+ */
+export function lintKey(key: AnswerKey): string[] {
+  const problems: string[] = [];
+  const describe = (got: Classified | null): string =>
+    got === null ? "nothing" : got.kind === "ambiguous" ? `ambiguous (${got.ids.join(", ")})` : got.entry.id;
+  const check = (id: string, kind: string, text: string, want: boolean): void => {
+    const got = classify(text, key);
+    const hit = got !== null && got.kind !== "ambiguous" && got.kind === kind && got.entry.id === id;
+    if (want && !hit) problems.push(`${id}: ${JSON.stringify(text)} classified as ${describe(got)}`);
+    if (!want && hit) problems.push(`${id}: counter-example ${JSON.stringify(text)} classified TO it`);
+  };
+  for (const [kind, list] of [
+    ["defect", key.defects],
+    ["alsoReal", key.alsoReal],
+  ] as const) {
+    for (const e of list) {
+      for (const t of [e.title, ...e.examples]) check(e.id, kind, t, true);
+      for (const t of e.counterExamples) check(e.id, kind, t, false);
+    }
+  }
+  for (const e of key.nonDefects) {
+    for (const t of e.examples) check(e.id, "nonDefect", t, true);
+    for (const t of e.counterExamples) check(e.id, "nonDefect", t, false);
+  }
+  return problems;
+}
+
 export interface Scorecard {
   app: string;
+  /** The key that produced this scorecard. Two scorecards with different hashes are not comparable. */
+  key: string;
   level: Level;
   /** Defects the key expects at this level or below. */
   expected: number;
@@ -109,13 +212,20 @@ export interface Scorecard {
   judgedNotFiled: string[];
   /** Found although the key only expects it at a higher level. */
   beyondLevel: string[];
+  /** Every finding the run filed, including ones it later resolved: it still reported them. */
   findings: number;
   /** Findings matching a planted or also-real defect. */
   correct: number;
   falsePositives: Array<{ id: string; title: string; why: string; severity: string }>;
   /** Findings the key knows nothing about. They need a human label before precision can be final. */
   unknown: Array<{ title: string; severity: string; evidence: string }>;
-  /** Extra findings for a defect that already had one. */
+  /** Findings two key entries both claim. Scored as neither, so the key can be sharpened. */
+  ambiguous: Array<{ title: string; ids: string[] }>;
+  /**
+   * Extra findings for a planted defect that already had one. Counted AFTER the
+   * store's own merge, which already folds findings on one failing endpoint
+   * together, so this is a floor, not a total.
+   */
   duplicates: number;
   /** For each defect found, the filed severity against the key's. */
   severity: { agree: number; higher: number; lower: number; detail: Array<{ id: string; filed: string; key: string }> };
@@ -123,11 +233,15 @@ export interface Scorecard {
 }
 
 export interface KeyCalibration {
-  /** Decisions the key could judge: a verdict about something the key names. */
+  /** Decisions the key could judge: a verdict about one thing the key names, with a usable confidence. */
   judged: number;
   correct: number;
-  /** Decisions about things the key does not name. Excluded, and disclosed. */
-  unjudged: number;
+  /** Not scored, and why. Each is a reason the denominator is smaller than the number of decisions. */
+  notInKey: number;
+  ambiguous: number;
+  badConfidence: number;
+  /** An unsure verdict is a request to look closer, not a claim that can be right or wrong. */
+  unsure: number;
   buckets: Array<{ label: string; decisions: number; stated: number; correct: number }>;
   ece: number;
 }
@@ -136,50 +250,60 @@ export interface KeyCalibration {
  * Whether a lane's verdict was right, according to the key.
  *
  * "defect" on a planted or also-real defect is right, and on a known
- * non-defect is wrong. "not_a_defect" is the reverse. An "unsure" is a request
- * to look closer, not a claim, and is never scored. A decision about something
- * the key does not name cannot be judged at all, and is disclosed as such
- * rather than scored — the same rule the in-product calibration follows, for
- * the same reason.
+ * non-defect is wrong. "not_a_defect" is the reverse. An "unsure" verdict, a
+ * decision the key does not name, and one it names ambiguously are not
+ * scored — the same rule the in-product calibration follows, for the same
+ * reason.
  */
 export function judgeDecision(d: RecordedDecision, key: AnswerKey): boolean | null {
   if (d.verdict === "unsure") return null;
   const m = classify(decisionText(d), key);
-  if (!m) return null;
+  if (!m || m.kind === "ambiguous") return null;
   const isDefect = m.kind !== "nonDefect";
   return d.verdict === "defect" ? isDefect : !isDefect;
 }
 
 export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key: AnswerKey): KeyCalibration | null {
+  if (decisions.length === 0) return null;
   const buckets = BUCKET_EDGES.map(() => ({ n: 0, conf: 0, right: 0 }));
-  let judged = 0;
-  let correct = 0;
-  let unjudged = 0;
+  const out: KeyCalibration = { judged: 0, correct: 0, notInKey: 0, ambiguous: 0, badConfidence: 0, unsure: 0, buckets: [], ece: 0 };
   for (const d of decisions) {
-    if (d.verdict === "unsure") continue;
-    const c = d.confidence;
-    const right = judgeDecision(d, key);
-    if (right === null || typeof c !== "number" || !Number.isFinite(c) || c < 0 || c > 1) {
-      unjudged += 1;
+    if (d.verdict === "unsure") {
+      out.unsure += 1;
       continue;
     }
-    judged += 1;
-    if (right) correct += 1;
+    const c = d.confidence;
+    if (typeof c !== "number" || !Number.isFinite(c) || c < 0 || c > 1) {
+      out.badConfidence += 1;
+      continue;
+    }
+    const m = classify(decisionText(d), key);
+    if (!m) {
+      out.notInKey += 1;
+      continue;
+    }
+    if (m.kind === "ambiguous") {
+      out.ambiguous += 1;
+      continue;
+    }
+    const right = d.verdict === "defect" ? m.kind !== "nonDefect" : m.kind === "nonDefect";
+    out.judged += 1;
+    if (right) out.correct += 1;
     const b = buckets[bucketOf(c)];
     b.n += 1;
     b.conf += c;
     if (right) b.right += 1;
   }
-  if (judged === 0) return unjudged > 0 ? { judged: 0, correct: 0, unjudged, buckets: [], ece: 0 } : null;
-  let ece = 0;
-  const out: KeyCalibration["buckets"] = [];
   buckets.forEach((b, i) => {
     if (b.n === 0) return;
-    ece += (b.n / judged) * Math.abs(b.conf / b.n - b.right / b.n);
-    out.push({ label: bucketLabel(i), decisions: b.n, stated: b.conf / b.n, correct: b.right / b.n });
+    out.ece += (b.n / out.judged) * Math.abs(b.conf / b.n - b.right / b.n);
+    out.buckets.push({ label: bucketLabel(i), decisions: b.n, stated: b.conf / b.n, correct: b.right / b.n });
   });
-  return { judged, correct, unjudged, buckets: out, ece };
+  return out;
 }
+
+/** What scoring needs of a finding. A run archive keeps only this much. */
+export type ScoredFinding = Pick<Finding, "title" | "severity"> & { evidence?: string; category?: string };
 
 /**
  * Score one run.
@@ -188,20 +312,21 @@ export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key:
  * across runs, and scoring an accumulated one credits a run with what an
  * earlier run found. Point the scorer at a fresh project directory per run.
  */
-export function score(key: AnswerKey, findings: readonly Finding[], decisions: readonly RecordedDecision[], level: Level = "medium"): Scorecard {
-  // Every finding the run filed counts, including one it later resolved: it
-  // was still reported, and a run that files and then retracts a false claim
-  // has still made it.
-  const open = findings;
-  const hitsByDefect = new Map<string, Finding[]>();
+export function score(key: AnswerKey, findings: readonly ScoredFinding[], decisions: readonly RecordedDecision[], level: Level = "medium"): Scorecard {
+  const hitsByDefect = new Map<string, ScoredFinding[]>();
   const falsePositives: Scorecard["falsePositives"] = [];
   const unknown: Scorecard["unknown"] = [];
+  const ambiguous: Scorecard["ambiguous"] = [];
   let correct = 0;
 
-  for (const f of open) {
+  for (const f of findings) {
     const m = classify(findingText(f), key);
     if (!m) {
       unknown.push({ title: f.title, severity: f.severity, evidence: f.evidence ?? "" });
+      continue;
+    }
+    if (m.kind === "ambiguous") {
+      ambiguous.push({ title: f.title, ids: m.ids });
       continue;
     }
     if (m.kind === "nonDefect") {
@@ -246,16 +371,18 @@ export function score(key: AnswerKey, findings: readonly Finding[], decisions: r
 
   return {
     app: key.app,
+    key: keyHash(key),
     level,
     expected: expectedDefects.length,
     found,
     missed,
     judgedNotFiled: [...judged],
     beyondLevel,
-    findings: open.length,
+    findings: findings.length,
     correct,
     falsePositives,
     unknown,
+    ambiguous,
     duplicates,
     severity,
     calibration: calibrateAgainstKey(decisions, key),
@@ -264,15 +391,32 @@ export function score(key: AnswerKey, findings: readonly Finding[], decisions: r
 
 const pct = (n: number, d: number): string => (d === 0 ? "—" : `${Math.round((n / d) * 100)}%`);
 
+/**
+ * Precision, with its bounds. The labelled ratio leaves unlabelled findings out
+ * of the denominator, so on its own it cannot move when a change adds five new
+ * false claims nobody has judged yet. The bounds can: the lower one counts
+ * every open finding as wrong, the upper one as right.
+ */
+export function precisionBounds(c: Pick<Scorecard, "correct" | "falsePositives" | "unknown" | "ambiguous" | "findings">): {
+  labelled: string;
+  low: string;
+  high: string;
+} {
+  const labelled = c.correct + c.falsePositives.length;
+  const open = c.unknown.length + c.ambiguous.length;
+  return { labelled: `${c.correct}/${labelled} (${pct(c.correct, labelled)})`, low: pct(c.correct, c.findings), high: pct(c.correct + open, c.findings) };
+}
+
 /** The scorecard as a person reads it. Leads with the two numbers, then says what each is made of. */
 export function formatScorecard(c: Scorecard): string {
-  const labelled = c.correct + c.falsePositives.length;
+  const p = precisionBounds(c);
+  const open = c.unknown.length + c.ambiguous.length;
   const lines = [
-    `SCORECARD — ${c.app}, level ${c.level}`,
+    `SCORECARD — ${c.app}, level ${c.level}, key ${c.key}`,
     ``,
     `Recall     ${c.found.length}/${c.expected} (${pct(c.found.length, c.expected)}) of the planted defects expected at this level`,
-    `Precision  ${c.correct}/${labelled} (${pct(c.correct, labelled)}) of the findings the key can label` +
-      (c.unknown.length ? ` — ${c.unknown.length} more are unlabelled` : ""),
+    `Precision  ${p.labelled} of the findings the key can label` +
+      (open ? ` — ${open} of ${c.findings} unlabelled, so between ${p.low} and ${p.high} of all findings` : ""),
     ``,
   ];
   if (c.missed.length) lines.push(`Missed: ${c.missed.join(", ")}`);
@@ -281,6 +425,10 @@ export function formatScorecard(c: Scorecard): string {
   if (c.falsePositives.length) {
     lines.push(``, `False positives (${c.falsePositives.length}):`);
     for (const fp of c.falsePositives) lines.push(`  [${fp.severity}] ${fp.title} — ${fp.why}`);
+  }
+  if (c.ambiguous.length) {
+    lines.push(``, `Ambiguous (${c.ambiguous.length}) — the key claims each twice; sharpen it:`);
+    for (const a of c.ambiguous) lines.push(`  ${a.title} (${a.ids.join(" / ")})`);
   }
   if (c.unknown.length) {
     lines.push(``, `Unlabelled (${c.unknown.length}) — add to the key once a person has judged them:`);
@@ -297,16 +445,61 @@ export function formatScorecard(c: Scorecard): string {
             .join(", ")})`
         : ""),
   );
-  if (c.duplicates) lines.push(`Duplicates: ${c.duplicates} extra finding(s) for a defect that already had one`);
-  if (c.calibration) {
-    const k = c.calibration;
+  if (c.duplicates) lines.push(`Duplicates: at least ${c.duplicates} extra finding(s) for a defect that already had one (after the store's own merge)`);
+  const k = c.calibration;
+  if (k) {
+    const skipped = [
+      k.notInKey && `${k.notInKey} about things the key does not name`,
+      k.ambiguous && `${k.ambiguous} the key names ambiguously`,
+      k.badConfidence && `${k.badConfidence} with an unusable confidence`,
+      k.unsure && `${k.unsure} unsure`,
+    ].filter(Boolean);
     lines.push(
       ``,
-      `Lane calibration against the key: ${k.correct}/${k.judged} verdicts right (${pct(k.correct, k.judged)}), expected calibration error ${k.ece.toFixed(2)}` +
-        (k.unjudged ? ` — ${k.unjudged} decision(s) about things the key does not name were not scored` : ""),
+      k.judged === 0
+        ? `Lane calibration against the key: nothing the key could judge` + (skipped.length ? ` (${skipped.join(", ")})` : "")
+        : `Lane calibration against the key: ${k.correct}/${k.judged} verdicts right (${pct(k.correct, k.judged)}), expected calibration error ${k.ece.toFixed(2)}` +
+            (skipped.length ? ` — not scored: ${skipped.join(", ")}` : ""),
     );
     for (const b of k.buckets)
       lines.push(`  stated ${b.label}: ${b.decisions} decision(s), said ${b.stated.toFixed(2)}, right ${Math.round(b.correct * 100)}%`);
   }
   return lines.join("\n");
+}
+
+// ── archiving a run ─────────────────────────────────────────────────────────
+
+/** A run kept for re-scoring: only what scoring reads, so an archive is small and holds nothing a run should not keep. */
+export interface RunArchive {
+  run: string;
+  date: string;
+  note: string;
+  findings: ScoredFinding[];
+  decisions: RecordedDecision[];
+}
+
+/**
+ * Paths into a machine's own directories, which a finding's evidence can pick
+ * up from a stack trace or an upload. An archive is committed, and a home
+ * directory names a person.
+ */
+const LOCAL_PATH_RE = /(?:\/Users\/[^/\s"']+|\/home\/[^/\s"']+|\/private\/tmp|\/tmp|[A-Za-z]:\\Users\\[^\\\s"']+)[^\s"']*/g;
+
+export function sanitize(text: string): string {
+  return text.replace(LOCAL_PATH_RE, "<path>");
+}
+
+export function toArchive(run: string, date: string, note: string, findings: readonly ScoredFinding[], decisions: readonly RecordedDecision[]): RunArchive {
+  return {
+    run,
+    date,
+    note,
+    findings: findings.map((f) => ({
+      title: sanitize(f.title),
+      severity: f.severity,
+      ...(f.category ? { category: f.category } : {}),
+      ...(f.evidence ? { evidence: sanitize(f.evidence) } : {}),
+    })),
+    decisions: decisions.map((d) => ({ ...d, observation: sanitize(d.observation), evidence: d.evidence === null ? null : sanitize(d.evidence) })),
+  };
 }

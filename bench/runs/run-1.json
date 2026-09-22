@@ -1,0 +1,737 @@
+{
+  "run": "run-1",
+  "date": "2026-09-23",
+  "note": "Prompt-only: go straight to your route; one markup value on create forms then view the listing; check a list's request status before calling it empty or stuck; file every judged defect before reporting; check coverage before finishing; do not close your session; no defect hints",
+  "findings": [
+    {
+      "title": "Dashboard weekly chart image 404s",
+      "severity": "medium",
+      "category": "network",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "\"All orders\" link overlaps \"New: bulk import\" badge on dashboard",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "testid=dash-all-orders covered by testid=dash-new-badge (84%)"
+    },
+    {
+      "title": "Nav links have no underline and match body text color",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "design-audit AFFORDANCES: testid=nav-orders no underline, body-text color"
+    },
+    {
+      "title": "Scheduled reports page has no nav chrome and zero interactive elements — true dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html: 0 interactable elements, no nav-* testids present"
+    },
+    {
+      "title": "Export CSV button crashes with a JS error, exports nothing",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "page_error: Cannot read properties of undefined (reading 'rows') on click testid=reports-export-csv"
+    },
+    {
+      "title": "Scheduled reports page has no header/nav — dead end",
+      "severity": "medium",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html — 0 interactable elements, no nav/header markup"
+    },
+    {
+      "title": "Server lets a clerk approve orders even though only managers may",
+      "severity": "high",
+      "category": "permission-leak",
+      "evidence": "POST /api/orders/1038/approve as role=clerk → 200 {\"id\":1038,...,\"status\":\"approved\"}"
+    },
+    {
+      "title": "Quantity sort on inventory table compares values as strings, not numbers",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "click testid=inventory-sort-qty -> order HB-103,HB-101,HB-106,HB-104,HB-105,HB-102 (qty 10,120,250,3,64,9)"
+    },
+    {
+      "title": "Approvals table \"Requested\" column actually shows notes, not a request date",
+      "severity": "low",
+      "category": "data-inconsistency",
+      "evidence": "approvals.html table header \"Requested\" cell renders o.notes; GET /api/approvals response has no requested/date field"
+    },
+    {
+      "title": "Quantity/Name sort buttons have no descending toggle or active-state indicator",
+      "severity": "low",
+      "category": "ux-confusing",
+      "evidence": "two clicks on testid=inventory-sort-qty produce identical row order"
+    },
+    {
+      "title": "Settings \"Save changes\" shows success but persists nothing",
+      "severity": "high",
+      "category": "data-loss",
+      "evidence": "click testid=settings-save fires 0 network requests; GET /api/workspace 404"
+    },
+    {
+      "title": "Invalid order submission (empty customer/0 items) leaves stale success message",
+      "severity": "medium",
+      "category": "stale-state",
+      "evidence": "testid=new-order-msg unchanged after blocked submit, 0 requests fired"
+    },
+    {
+      "title": "Delete workspace has no confirmation step before an irreversible wipe",
+      "severity": "high",
+      "category": "data-loss",
+      "evidence": "testid=settings-delete-workspace click handler calls fetch DELETE /api/workspace with no confirm()"
+    },
+    {
+      "title": "API creates orders with empty customer name and 0 items — no server-side validation",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/orders {\"customer\":\"\",\"items\":0} 201"
+    },
+    {
+      "title": "Archived filter fails server-side (500) but UI shows silent empty list",
+      "severity": "high",
+      "category": "http-error",
+      "evidence": "GET /api/orders?status=archived 500"
+    },
+    {
+      "title": "Customers table padding drifts from the app's 4px spacing scale",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "design_audit /customers.html spacing 86% off-4px-grid (10px,14px,2px)"
+    },
+    {
+      "title": "Order form accepts negative item counts (-1) with no client or server validation",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/orders items=-1 → 201, GET /api/orders/1045 items:-1"
+    },
+    {
+      "title": "Create order button is not guarded against double-submit — rapid double-click creates two identical orders",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "2x click → 2x POST /api/orders 201, ids 1046 and 1047 both customer=Beacon Freight items=2"
+    },
+    {
+      "title": "Helper text under Customer field fails WCAG contrast",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "contrast 1.73:1 rgba(184,192,202,1) on rgb(246,248,250), needs 4.5:1"
+    },
+    {
+      "title": "Stored XSS: order customer name rendered unescaped in orders list",
+      "severity": "high",
+      "category": "security",
+      "evidence": "GET /api/orders → order 1045 customer=\"<img src=x onerror=\\\"document.title='xss'\\\">\"; GET /x 404; document.title became \"xss\" on /orders.html"
+    },
+    {
+      "title": "Orders list renders nonsensical values: negative item count, blank customer",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/orders → order 1045 items=-1; order 1044 customer=\"\""
+    },
+    {
+      "title": "Stored XSS: order customer name renders as raw HTML on the orders list",
+      "severity": "high",
+      "category": "security",
+      "evidence": "customer=<img src=x onerror=\"document.title='xss'\"> on /orders.html → document.title becomes \"xss\"; order #1045"
+    },
+    {
+      "title": "Delete order redirects as success even when the server rejects it (403)",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "DELETE /api/orders/1048 403; UI navigated to /orders.html anyway; GET /api/orders/1048 200 (still exists)"
+    },
+    {
+      "title": "Save notes shows \"Saved.\" without checking whether the PUT succeeded",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "order.html inline script: res=await fetch(PUT ...); document.getElementById('saved').textContent='Saved.' with no res.ok check"
+    },
+    {
+      "title": "\"Request manager approval\" stays visible/enabled after the order leaves \"open\" status",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/orders/1042 status=pending; order-request-approval visible+enabled on fresh load; click -> POST .../request-approval 409"
+    },
+    {
+      "title": "Save notes button is covered by the sticky footer bar at default scroll position",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "testid=order-save covered by testid=order-stickybar at default scroll position"
+    },
+    {
+      "title": "\"Line items are edited from the list\" link has no data-testid",
+      "severity": "low",
+      "category": "missing-testid",
+      "evidence": "order.html stickybar anchor href=/orders.html, no data-testid attribute"
+    },
+    {
+      "title": "Order detail page spacing is off the 4px grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "design-audit order.html: 50% spacing off 4px grid, ad-hoc 14px x6, 10px x2"
+    }
+  ],
+  "decisions": [
+    {
+      "observation": "dashboard-weekly-chart-image-404",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "network",
+      "confidence": 0.97,
+      "evidence": "GET /img/weekly-chart.png 404",
+      "lane": "lane-1",
+      "at": "2026-09-22T19:47:40.773Z"
+    },
+    {
+      "observation": "dashboard-allorders-badge-overlap-visual",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "visual",
+      "confidence": 0.9,
+      "evidence": "testid=dash-all-orders covered by testid=dash-new-badge (84%)",
+      "lane": "lane-1",
+      "at": "2026-09-22T19:47:40.773Z"
+    },
+    {
+      "observation": "dashboard-allorders-click-fails-normally",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "ux-confusing",
+      "confidence": 0.85,
+      "evidence": "click testid=dash-all-orders: strict click timeout, forced click required, URL unchanged",
+      "lane": "lane-1",
+      "at": "2026-09-22T19:47:40.773Z"
+    },
+    {
+      "observation": "shared-nav-links-no-underline-affordance",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "ux-polish",
+      "confidence": 0.7,
+      "evidence": "design-audit AFFORDANCES: testid=nav-orders no underline, body-text color",
+      "lane": "lane-1",
+      "at": "2026-09-22T19:47:40.773Z"
+    },
+    {
+      "observation": "reports-scheduled-no-nav-chrome-dead-end",
+      "verdict": "defect",
+      "severity": "high",
+      "category": "dead-end",
+      "confidence": 0.9,
+      "evidence": "GET /reports-scheduled.html: 0 interactable elements, no nav-* testids present",
+      "lane": "lane-1",
+      "at": "2026-09-22T19:47:40.773Z"
+    },
+    {
+      "observation": "reports-scheduled-stub-copy-intentional",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "no backend route: GET /api/reports/scheduled 404, page reads 'Scheduling is coming soon.'",
+      "lane": "lane-1",
+      "at": "2026-09-22T19:47:40.773Z"
+    },
+    {
+      "observation": "dashboard-new-order-link-functions",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "click testid=dash-new-order navigated to /orders-new.html",
+      "lane": "lane-1",
+      "at": "2026-09-22T19:47:40.773Z"
+    },
+    {
+      "observation": "quantity-sort-lexicographic-not-numeric",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "confidence": 0.97,
+      "evidence": "click testid=inventory-sort-qty -> order HB-103,HB-101,HB-106,HB-104,HB-105,HB-102 (qty 10,120,250,3,64,9)",
+      "lane": "inventory",
+      "at": "2026-09-22T19:47:49.460Z"
+    },
+    {
+      "observation": "name-sort-works-correctly",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.95,
+      "evidence": "click testid=inventory-sort-name -> alphabetical Corner,Kraft,Packing,Pallet,Shipping,Void",
+      "lane": "inventory",
+      "at": "2026-09-22T19:47:49.460Z"
+    },
+    {
+      "observation": "weekly-chart-png-404-on-inventory",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "network",
+      "confidence": 0.9,
+      "evidence": "GET /img/weekly-chart.png 404",
+      "lane": "inventory",
+      "at": "2026-09-22T19:47:49.460Z"
+    },
+    {
+      "observation": "sort-buttons-no-toggle-or-active-indicator",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "ux-confusing",
+      "confidence": 0.75,
+      "evidence": "two clicks on testid=inventory-sort-qty produce identical row order",
+      "lane": "inventory",
+      "at": "2026-09-22T19:47:49.460Z"
+    },
+    {
+      "observation": "inventory-rows-non-interactive-by-design",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.8,
+      "evidence": "click on testid=inventory-row-HB-101 -> no navigation, no change",
+      "lane": "inventory",
+      "at": "2026-09-22T19:47:49.460Z"
+    },
+    {
+      "observation": "design-audit-clean-no-warn-defects",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "scout_design_audit inventory.html: 96/100 A, 0 warn-tier issues",
+      "lane": "inventory",
+      "at": "2026-09-22T19:47:49.460Z"
+    },
+    {
+      "observation": "weekly-chart.png 404 on attach/dashboard load",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "GET /img/weekly-chart.png 404 — fired from dashboard, not my routes",
+      "lane": "approvals",
+      "at": "2026-09-22T19:47:55.181Z"
+    },
+    {
+      "observation": "approvals.html design audit had no measurable defects",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "scout_design_audit: 0 warn groups, score 96/100",
+      "lane": "approvals",
+      "at": "2026-09-22T19:47:55.181Z"
+    },
+    {
+      "observation": "Export CSV button crashes, exports nothing",
+      "verdict": "defect",
+      "severity": "high",
+      "category": "page-error",
+      "confidence": 0.97,
+      "evidence": "page_error: Cannot read properties of undefined (reading 'rows') on click testid=reports-export-csv",
+      "lane": "approvals",
+      "at": "2026-09-22T19:47:55.181Z"
+    },
+    {
+      "observation": "Scheduled reports link leads to a headerless dead-end page",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "dead-end",
+      "confidence": 0.9,
+      "evidence": "GET /reports-scheduled.html — 0 interactable elements, no nav/header",
+      "lane": "approvals",
+      "at": "2026-09-22T19:47:55.181Z"
+    },
+    {
+      "observation": "Reports metric cards are static demo numbers, no backing API",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.7,
+      "evidence": "GET /api/reports 404; cards hardcoded in reports.html markup, footer says demo data only",
+      "lane": "approvals",
+      "at": "2026-09-22T19:47:55.181Z"
+    },
+    {
+      "observation": "Clerk role can approve orders via direct API call",
+      "verdict": "defect",
+      "severity": "high",
+      "category": "permission-leak",
+      "confidence": 0.95,
+      "evidence": "POST /api/orders/1038/approve as role=clerk 200 status became approved",
+      "lane": "approvals",
+      "at": "2026-09-22T19:47:55.181Z"
+    },
+    {
+      "observation": "Approvals table Requested column actually renders notes text",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "data-inconsistency",
+      "confidence": 0.9,
+      "evidence": "approvals.html row cell 4 = o.notes||'—'; /api/approvals has no requested field",
+      "lane": "approvals",
+      "at": "2026-09-22T19:47:55.181Z"
+    },
+    {
+      "observation": "Approvals queue refreshes correctly after status change",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "GET /api/approvals after approve: 1038 removed, 1042 present, matches reload",
+      "lane": "approvals",
+      "at": "2026-09-22T19:47:55.181Z"
+    },
+    {
+      "observation": "Approvals order links navigate to correct order pages",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.95,
+      "evidence": "click testid=approvals-order-link-1037 -> /order.html?id=1037; -1042 -> id=1042",
+      "lane": "approvals",
+      "at": "2026-09-22T19:47:55.181Z"
+    },
+    {
+      "observation": "clerk-blocked-from-audit-log-server-side",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": "permission-leak",
+      "confidence": 0.95,
+      "evidence": "GET /api/audit 403 for clerk role, matches UI denial",
+      "lane": "audit",
+      "at": "2026-09-22T19:47:58.702Z"
+    },
+    {
+      "observation": "audit-page-checks-role-before-fetching",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "fetch /api/me gates fetch /api/audit; clerk never triggers the 403 fetch itself",
+      "lane": "audit",
+      "at": "2026-09-22T19:47:58.702Z"
+    },
+    {
+      "observation": "audit-log-rows-match-api-for-auditor",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "GET /api/audit 200 returns 2 rows, table renders 2 matching rows",
+      "lane": "audit",
+      "at": "2026-09-22T19:47:58.702Z"
+    },
+    {
+      "observation": "settings-save-shows-success-but-persists-nothing",
+      "verdict": "defect",
+      "severity": "high",
+      "category": "data-loss",
+      "confidence": 0.97,
+      "evidence": "click testid=settings-save fires 0 network requests; GET /api/workspace 404",
+      "lane": "audit",
+      "at": "2026-09-22T19:47:58.702Z"
+    },
+    {
+      "observation": "settings-delete-workspace-lacks-confirmation",
+      "verdict": "defect",
+      "severity": "high",
+      "category": "data-loss",
+      "confidence": 0.9,
+      "evidence": "testid=settings-delete-workspace click handler calls fetch DELETE /api/workspace with no confirm()",
+      "lane": "audit",
+      "at": "2026-09-22T19:47:58.702Z"
+    },
+    {
+      "observation": "customer-rows-non-interactive-no-detail",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "GET /api/customers/1 404; click on customers-row-1..6 causes no navigation/state change",
+      "lane": "customers",
+      "at": "2026-09-22T19:48:02.894Z"
+    },
+    {
+      "observation": "customers-list-no-search-filter-sort",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.7,
+      "evidence": "customers.html renders static GET /api/customers list only, 6 rows, no controls in markup",
+      "lane": "customers",
+      "at": "2026-09-22T19:48:02.894Z"
+    },
+    {
+      "observation": "customers-padding-off-4px-grid",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "ux-polish",
+      "confidence": 0.7,
+      "evidence": "design_audit /customers.html spacing 86% off-4px-grid (10px,14px,2px)",
+      "lane": "customers",
+      "at": "2026-09-22T19:48:02.894Z"
+    },
+    {
+      "observation": "signin-role-switch-clerk-manager-auditor",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST /api/signin {role:clerk|manager} 200, redirects to /, nav-whoami updates",
+      "lane": "customers",
+      "at": "2026-09-22T19:48:02.894Z"
+    },
+    {
+      "observation": "signin-invalid-role-rejected",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST /api/signin {role:superadmin} 400 {error:Unknown role}; POST {} also 400",
+      "lane": "customers",
+      "at": "2026-09-22T19:48:02.894Z"
+    },
+    {
+      "observation": "dashboard-weekly-chart-404-out-of-scope",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "GET /img/weekly-chart.png 404 referenced by dashboard, not by customers.html or signin.html source",
+      "lane": "customers",
+      "at": "2026-09-22T19:48:02.894Z"
+    },
+    {
+      "observation": "stored-xss-customer-field-rendered-unescaped",
+      "verdict": "defect",
+      "severity": "high",
+      "category": "security",
+      "confidence": 0.98,
+      "evidence": "GET /api/orders order 1045 customer=<img src=x onerror>; GET /x 404; document.title became 'xss'",
+      "lane": "orders-html",
+      "at": "2026-09-22T19:48:07.373Z"
+    },
+    {
+      "observation": "archived-filter-500-silent-empty-list",
+      "verdict": "defect",
+      "severity": "high",
+      "category": "http-error",
+      "confidence": 0.95,
+      "evidence": "GET /api/orders?status=archived 500",
+      "lane": "orders-html",
+      "at": "2026-09-22T19:48:07.373Z"
+    },
+    {
+      "observation": "rejected-filter-correct-empty-state",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "GET /api/orders?status=rejected 200 []",
+      "lane": "orders-html",
+      "at": "2026-09-22T19:48:07.373Z"
+    },
+    {
+      "observation": "negative-item-count-and-blank-customer-rendered",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "confidence": 0.75,
+      "evidence": "GET /api/orders order 1045 items=-1; order 1044 customer=\"\"",
+      "lane": "orders-html",
+      "at": "2026-09-22T19:48:07.373Z"
+    },
+    {
+      "observation": "awaiting-approval-filter-matches-pending-status",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "GET /api/orders filtered to status=pending ids 1042,1037",
+      "lane": "orders-html",
+      "at": "2026-09-22T19:48:07.373Z"
+    },
+    {
+      "observation": "weekly-chart-404-on-dashboard-landing",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.7,
+      "evidence": "GET /img/weekly-chart.png 404 (belongs to / route, not orders.html)",
+      "lane": "orders-html",
+      "at": "2026-09-22T19:48:07.373Z"
+    },
+    {
+      "observation": "design-audit-spacing-off-grid",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.6,
+      "evidence": "page score 98/100 A; 87% paddings off 4px grid at 10px/14px/2px, judged as within normal range",
+      "lane": "orders-html",
+      "at": "2026-09-22T19:48:07.373Z"
+    },
+    {
+      "observation": "primary-journey-create-order",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.95,
+      "evidence": "journey: 4 interactions, 0 navigations, 1 screen, 16s, no backtracks",
+      "lane": "new-order",
+      "at": "2026-09-22T19:48:13.084Z"
+    },
+    {
+      "observation": "helper-text-contrast-1.73",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "a11y",
+      "confidence": 0.95,
+      "evidence": "contrast 1.73:1 rgba(184,192,202,1) on rgb(246,248,250), needs 4.5:1",
+      "lane": "new-order",
+      "at": "2026-09-22T19:48:13.084Z"
+    },
+    {
+      "observation": "blocked-invalid-submit-stale-message",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "stale-state",
+      "confidence": 0.85,
+      "evidence": "testid=new-order-msg unchanged after blocked submit, 0 requests fired",
+      "lane": "new-order",
+      "at": "2026-09-22T19:48:13.084Z"
+    },
+    {
+      "observation": "server-accepts-empty-customer-zero-items",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "confidence": 0.95,
+      "evidence": "POST /api/orders {\"customer\":\"\",\"items\":0} 201",
+      "lane": "new-order",
+      "at": "2026-09-22T19:48:13.084Z"
+    },
+    {
+      "observation": "server-accepts-negative-items",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "confidence": 0.95,
+      "evidence": "POST /api/orders items=-1 201, GET /api/orders/1045 items:-1",
+      "lane": "new-order",
+      "at": "2026-09-22T19:48:13.084Z"
+    },
+    {
+      "observation": "double-click-creates-duplicate-orders",
+      "verdict": "defect",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "confidence": 0.95,
+      "evidence": "2x click new-order-submit -> 2x POST /api/orders 201, ids 1046,1047",
+      "lane": "new-order",
+      "at": "2026-09-22T19:48:13.084Z"
+    },
+    {
+      "observation": "xss-payload-escaped-on-order-detail",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "document.title unchanged on /order.html?id=1045 after loading injected customer name",
+      "lane": "new-order",
+      "at": "2026-09-22T19:48:13.084Z"
+    },
+    {
+      "observation": "stored-xss-customer-name-on-orders-list",
+      "verdict": "defect",
+      "severity": "high",
+      "category": "security",
+      "confidence": 0.97,
+      "evidence": "customer=<img src=x onerror=\"document.title='xss'\"> on /orders.html -> document.title becomes 'xss'",
+      "lane": "new-order",
+      "at": "2026-09-22T19:48:13.084Z"
+    },
+    {
+      "observation": "created-order-link-navigates-correctly",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "click testid=new-order-created-link -> /order.html?id=1049",
+      "lane": "new-order",
+      "at": "2026-09-22T19:48:13.084Z"
+    },
+    {
+      "observation": "delete-redirects-as-success-on-403",
+      "verdict": "defect",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "confidence": 0.97,
+      "evidence": "DELETE /api/orders/1048 403; UI navigated to /orders.html anyway; GET /api/orders/1048 200 still exists",
+      "lane": "order-detail",
+      "at": "2026-09-22T19:48:17.463Z"
+    },
+    {
+      "observation": "save-notes-unconditional-saved-message",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "confidence": 0.75,
+      "evidence": "order.html script sets #saved text='Saved.' after PUT with no res.ok check",
+      "lane": "order-detail",
+      "at": "2026-09-22T19:48:17.463Z"
+    },
+    {
+      "observation": "approval-button-visible-after-pending",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "confidence": 0.9,
+      "evidence": "GET /api/orders/1042 status=pending; order-request-approval visible+enabled on fresh load",
+      "lane": "order-detail",
+      "at": "2026-09-22T19:48:17.463Z"
+    },
+    {
+      "observation": "save-button-covered-by-stickybar",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "visual",
+      "confidence": 0.7,
+      "evidence": "testid=order-save covered by testid=order-stickybar at default scroll",
+      "lane": "order-detail",
+      "at": "2026-09-22T19:48:17.463Z"
+    },
+    {
+      "observation": "stickybar-link-missing-testid",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "missing-testid",
+      "confidence": 0.95,
+      "evidence": "order.html stickybar anchor href=/orders.html, no data-testid",
+      "lane": "order-detail",
+      "at": "2026-09-22T19:48:17.463Z"
+    },
+    {
+      "observation": "order-detail-spacing-off-grid",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "ux-polish",
+      "confidence": 0.6,
+      "evidence": "design-audit order.html: 50% spacing off 4px grid, ad-hoc 14px x6, 10px x2",
+      "lane": "order-detail",
+      "at": "2026-09-22T19:48:17.463Z"
+    },
+    {
+      "observation": "duplicate-approval-request-rejected-cleanly",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST .../request-approval 409 with clear error text shown to user",
+      "lane": "order-detail",
+      "at": "2026-09-22T19:48:17.463Z"
+    }
+  ]
+}
