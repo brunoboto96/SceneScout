@@ -100,6 +100,7 @@ export function settle(ms: number): Promise<void> {
 /** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
 export async function startFixtureServer(): Promise<{ baseUrl: string; stats: ServerStats; close: () => void }> {
   const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {} };
+  const board: string[] = [];
   // Tiny server for the test app: static pages + a minimal items API for
   // write-policy testing.
   const server = http.createServer((req, res) => {
@@ -115,6 +116,27 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; stats: Se
     if (refusal) {
       res.writeHead(Number(refusal[1]), { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "refused" }));
+      return;
+    }
+    // A message board kept by the server, so a value one browser posts is
+    // seen by every other: the fixture for probes shared between sessions.
+    if (urlPath === "/api/board") {
+      if (req.method === "POST") {
+        const chunks: Buffer[] = [];
+        req.on("data", (c: Buffer) => chunks.push(c));
+        req.on("end", () => {
+          try {
+            board.push(String((JSON.parse(Buffer.concat(chunks).toString("utf8")) as { message?: unknown }).message ?? ""));
+          } catch {
+            /* a malformed post stores nothing */
+          }
+          res.writeHead(201, { "content-type": "application/json" });
+          res.end("{}");
+        });
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ messages: board }));
       return;
     }
     if (urlPath === "/api/allow") {

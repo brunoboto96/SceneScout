@@ -1027,3 +1027,16 @@ test("every call reports what it kept, not just the first one", () => {
   assert.equal(store.addLaneDecisions("orders", [d("f")]), 1);
   assert.equal(store.laneDecisions.length, 5);
 });
+
+test("a run's shared state ends with the run, and the project's memory does not", () => {
+  const store = freshStore();
+  store.auditsThisRun = 2;
+  store.probes = [{ payload: "<b x>", tag: "b", attrs: [["x", ""]], text: null, selector: "b[x]", field: "f", typedOn: "/a", baseline: 0 }];
+  store.injectionsReported.add("<b x>|/list");
+  store.addFinding({ severity: "low", category: "other", title: "kept", detail: "d", evidence: "e", url: "http://x/", state: "s", repro: [] });
+  store.endRun();
+  assert.equal(store.auditsThisRun, 0);
+  assert.deepEqual(store.probes, []);
+  assert.equal(store.injectionsReported.size, 0);
+  assert.equal(store.findings.length, 1, "findings are the project's, not the run's");
+});

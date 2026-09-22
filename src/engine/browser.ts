@@ -16,6 +16,8 @@ import {
   BROKEN_IMAGES_SCRIPT,
   brokenImageIssues,
   type BrokenImageScan,
+  displayName,
+  missingName,
 } from "./collector.js";
 import { OracleMonitor, formatViolations } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
@@ -345,7 +347,7 @@ export class BrowserEngine {
     const list = this.newlyCreated.splice(0);
     return `\n(created: ${list.join(", ")} — this session may edit or delete ${list.length === 1 ? "it" : "them"})`;
   }
-  /** Design audits run this session — the report gate requires at least one. */
+  /** Design audits run by this session. The report gate counts the whole run's, on the shared store (MemoryStore.auditsThisRun). */
   designAuditCount = 0;
   /** Active task-efficiency measurement (scout_journey), if any. */
   private journey: { goal: string; startedAt: number; fromLog: number; startUrl: string } | null = null;
@@ -590,10 +592,24 @@ export class BrowserEngine {
    * allowed POST /items that shares its prefix.
    */
   private readonly refusedByPolicy = new WeakSet<import("playwright").Request>();
-  /** Markup-shaped values this session typed, so every later page can be checked for them rendering as elements. */
-  private probes: InjectionProbe[] = [];
-  /** Injections already reported, by payload and route, so a page is not reported on every snapshot. */
-  private injectionsReported = new Set<string>();
+  /**
+   * Markup-shaped values typed by any session of this run, so every later page
+   * — in this browser or another lane's — can be checked for them rendering as
+   * elements. On the shared MemoryStore, like ownership; local before attach.
+   */
+  private get probes(): InjectionProbe[] {
+    return this.memory?.probes ?? this.localProbes;
+  }
+  private set probes(list: InjectionProbe[]) {
+    if (this.memory) this.memory.probes = list;
+    else this.localProbes = list;
+  }
+  private localProbes: InjectionProbe[] = [];
+  /** Injections already reported, by payload and route, so a page is not reported on every snapshot — nor by a second lane that opens it. */
+  private get injectionsReported(): Set<string> {
+    return this.memory?.injectionsReported ?? this.localInjectionsReported;
+  }
+  private readonly localInjectionsReported = new Set<string>();
 
   /**
    * Remember a typed value when it holds an element worth watching for. What
@@ -667,16 +683,20 @@ export class BrowserEngine {
 
   private async scanForInjections(): Promise<void> {
     const page = this.page;
-    if (!page || page.isClosed() || this.probes.length === 0) return;
+    // One copy for the whole scan: the list is shared with every lane, and
+    // another lane typing a payload during the await below would shift the
+    // indices the hits are matched back to.
+    const probes = this.probes;
+    if (!page || page.isClosed() || probes.length === 0) return;
     const url = page.url();
     let hits: RawHit[];
     try {
-      hits = (await page.evaluate(probeScript(probeQueries(this.probes)))) as RawHit[];
+      hits = (await page.evaluate(probeScript(probeQueries(probes)))) as RawHit[];
     } catch {
       // A page mid-navigation has no DOM to ask; the next drain looks again.
       return;
     }
-    for (const found of newInjections(this.probes, hits, url, this.injectionsReported)) {
+    for (const found of newInjections(probes, hits, url, this.injectionsReported)) {
       this.oracles.noteInjection(describeInjection(found.probe, url, found.outer), url);
     }
   }
@@ -1220,7 +1240,7 @@ export class BrowserEngine {
         memory.wasExercised(fp, el.key) ? "done" : null,
         el.href ? `href=${el.href.slice(0, 60)}` : null,
       ].filter(Boolean);
-      return `${el.ref} ${el.role} "${el.name || "(unnamed)"}"${flags.length ? ` [${flags.join(", ")}]` : ""}`;
+      return `${el.ref} ${el.role} "${displayName(el)}"${flags.length ? ` [${flags.join(", ")}]` : ""}`;
     };
 
     // Diff mode: when re-snapshotting the same route, report only what
@@ -2258,7 +2278,7 @@ export class BrowserEngine {
       await this.scanForContradictions();
       const violations = this.oracles.drain();
       const deadEnd = elements.length === 0;
-      const unnamed = elements.filter((el) => !el.name).length;
+      const unnamed = elements.filter(missingName).length;
       const missingTestid = elements.filter((el) => !el.testid && !el.disabled).length;
 
       const flags = [loginRedirect ? "AUTH-REDIRECT" : null, deadEnd ? "DEAD-END" : null, violations.length > 0 ? `${violations.length}⚠` : null].filter(
@@ -2536,6 +2556,7 @@ export class BrowserEngine {
     const payload = (await page.evaluate(DESIGN_COLLECT_SCRIPT)) as DesignPayload;
     payload.page.focusSamples = await probeFocusIndicators(page);
     this.designAuditCount += 1;
+    if (this.memory) this.memory.auditsThisRun += 1;
     // The census is built from previous audits, so the first few pages of a run
     // score with chrome included and later ones don't. That is the same warm-up
     // the coverage census has: nothing is knowable as "shared" until it has been
@@ -2776,6 +2797,11 @@ export class BrowserEngine {
   }
 
   async close(): Promise<void> {
+    // Marks the end of the time this session held a browser, so the pace
+    // section can say how long it was held with nothing happening. Only when a
+    // browser is actually open: attach() closes first, and a close of nothing
+    // is not an event.
+    if (this.page) this.logAction({ action: "close", url: this.page.isClosed() ? "" : this.page.url() });
     // Pending debounced coverage writes must land before the process can exit.
     try {
       this.memory?.flush();

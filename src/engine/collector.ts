@@ -280,6 +280,25 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
   return out;
 })()`;
 
+/**
+ * Roles that announce content rather than take input: a live region is empty
+ * until it has something to say, and ARIA does not require it to have a name.
+ * Reporting an empty status line as an unnamed control sent lanes to file it
+ * as an accessibility defect — twice in one measured run.
+ */
+const LIVE_REGION_ROLES = new Set(["status", "alert", "log", "timer", "marquee"]);
+
+/** Whether an element with this role and no accessible name is an unnamed control, as opposed to a live region with nothing in it yet. */
+export function missingName(el: { role: string; name: string }): boolean {
+  return !el.name && !LIVE_REGION_ROLES.has(el.role);
+}
+
+/** How the snapshot shows an element's name: an empty live region says so rather than reading as an unnamed control. */
+export function displayName(el: { role: string; name: string }): string {
+  if (el.name) return el.name;
+  return LIVE_REGION_ROLES.has(el.role) ? "(empty live region)" : "(unnamed)";
+}
+
 export interface Rect {
   x: number;
   y: number;
