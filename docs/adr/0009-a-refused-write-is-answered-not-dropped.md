@@ -55,6 +55,11 @@ dropped all over again.
 policy` instead of printing its 403: a status there is quoted as the server
 enforcing a rule, and the server was never asked.
 
+A background write the page makes during an action — telemetry, an autosave —
+is now judged too: refused by the policy, and followed by success text that was
+already on the page, it can be reported as a `false_success` naming that
+request. The violation names the request, so the misattribution is visible.
+
 Known gap: on Chromium, where service workers are allowed, a worker that
 proxies a write with `respondWith(fetch(…))` makes the request the policy
 answers a different object from the page's. The page's copy is then reported

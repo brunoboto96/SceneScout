@@ -402,6 +402,7 @@ export class BrowserEngine {
     let raw: Parameters<typeof toReplayResult>[0];
     try {
       raw = (await page.evaluate(script)) as Parameters<typeof toReplayResult>[0];
+      this.forgetReplay(method.method, target.url);
     } catch (err) {
       // The page could not run the fetch at all (a navigation mid-call, a
       // closed page). The policy answers rather than rejects, so this is not it.
@@ -418,6 +419,23 @@ export class BrowserEngine {
       result: result.refusedByPolicy ? `blocked: write policy (${result.refusedByPolicy})` : replaySignature(method.method, result.url, result.status),
     });
     return formatReplay(method.method, result);
+  }
+
+  /**
+   * Take the replayed request back out of the contradiction ledger. It was the
+   * agent's call, not the page's, so whatever the page says next is not its
+   * answer — and left in, a replay the policy refused was blamed on the next
+   * click as that click's false success, in place of the click's own request.
+   * Only this request: anything else the page fetched meanwhile stays.
+   */
+  private forgetReplay(method: string, url: string): void {
+    for (let i = this.watchedResponses.length - 1; i >= 0; i -= 1) {
+      const r = this.watchedResponses[i];
+      if (r.method === method && r.url === url) {
+        this.watchedResponses.splice(i, 1);
+        return;
+      }
+    }
   }
 
   /**
@@ -603,7 +621,7 @@ export class BrowserEngine {
    * element on the current page? Runs wherever violations are drained, so the
    * finding reaches the agent in the result of the action that revealed it.
    */
-  /** Record one answered request for the contradiction rules. Policy-aborted ones are marked, never dropped: the rules need to know they were ours. */
+  /** Record one answered request for the contradiction rules. Ones the policy stopped are marked, never dropped: the rules need to know they were ours. */
   private watchResponse(req: import("playwright").Request, status: number | null): void {
     if (this.watchedResponses.length >= BrowserEngine.MAX_WATCHED_RESPONSES) return;
     this.watchedResponses.push({

@@ -47,6 +47,9 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
       found("refused_empty")[0]?.detail ?? "(none)",
     );
 
+    // A replay the policy refuses belongs to the agent, not to the page: it
+    // must not be blamed on the next click in place of that click's own write.
+    await engine.apiRequest({ method: "PUT", path: "/api/widgets/3", body: JSON.stringify({ name: "replayed" }) });
     const saved = await engine.click(saveRef);
     check("a refused save reported as a success is its own violation", /false_success/.test(saved), saved.slice(0, 700));
     check(
