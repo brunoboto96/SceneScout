@@ -100,6 +100,11 @@ test("lane: prose around ONE fenced object is dropped unread, and the parse says
   // The contrast: two objects, or a fence holding something else, is still a guess.
   refused("```json\n" + laneReport() + "\n```\nand the corrected one:\n```json\n" + laneReport() + "\n```", /2 fenced JSON blocks/);
   refused("Notes:\n```\nnot an object\n```\n", /no text before/);
+  // Windows line endings, fenced alone or wrapped.
+  for (const crlf of ["```json\r\n" + laneReport() + "\r\n```", "Report:\r\n```json\r\n" + laneReport() + "\r\n```\r\nDone."]) {
+    const r = parseLaneReport(crlf);
+    assert.ok(r.ok, JSON.stringify(crlf.slice(0, 20)));
+  }
   // A fenced block that is not valid is refused on its content, not skipped.
   refused('Here:\n```json\n{"lane": \n```', /not valid JSON/);
 });

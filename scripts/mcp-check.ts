@@ -187,6 +187,15 @@ ${late.slice(0, 400)}`);
     if (/have no finding/.test(filed)) fail(`a filed defect was still reported as unfiled:\n${filed}`);
     console.log("✓ a lane report names what was judged and never filed, and accepts prose around one fenced object");
     await call("scout_close", { all: true });
+
+    // The server keeps one store per project for its whole life. A second run
+    // in the same process must not pass the gate on the first run's audit.
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "second-run", mode: "read-only", objective: "second run" });
+    const secondRun = await call("scout_report", { session: "second-run", level: "minimal" });
+    if (!/No scout_design_audit was run in this run/.test(secondRun))
+      fail(`a second run passed the audit gate on the first run's audit:\n${secondRun.slice(0, 400)}`);
+    await call("scout_close", { all: true });
+    console.log("✓ a run's shared state ends with its last session");
   } finally {
     fixture.close();
     fs.rmSync(projectDir, { recursive: true, force: true });

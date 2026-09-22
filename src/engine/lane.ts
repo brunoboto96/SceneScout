@@ -102,10 +102,10 @@ export type LaneReport = z.infer<typeof LaneReport>;
 /** `aroundIgnored`: the object came from the reply's one fenced block, and the text around it was dropped unread. */
 export type LaneParse = { ok: true; report: LaneReport; aroundIgnored: boolean } | { ok: false; reason: string };
 
-const FENCE_OPEN = /^```[a-z]*\s*\n/i;
-const FENCE_CLOSE = /\n?```\s*$/;
+const FENCE_OPEN = /^```[a-z]*\s*\r?\n/i;
+const FENCE_CLOSE = /\r?\n?```\s*$/;
 /** Every fenced block in a reply, with its contents. */
-const FENCED_BLOCK = /```[a-z]*[ \t]*\n([\s\S]*?)\n?```/gi;
+const FENCED_BLOCK = /```[a-z]*[ \t]*\r?\n([\s\S]*?)\r?\n?```/gi;
 
 /**
  * The reply is one JSON object and nothing else. A fenced block around it is

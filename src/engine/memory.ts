@@ -713,6 +713,19 @@ export class MemoryStore {
    */
   auditsThisRun = 0;
 
+  /**
+   * End the run: forget what only this run's sessions know. Called when the
+   * last session on this project closes. The store itself outlives it — the
+   * server keeps one per project for the life of the process — so without
+   * this, a second run in the same process passed the audit gate on the first
+   * run's audit and stayed silent about an injection the first run reported.
+   */
+  endRun(): void {
+    this.probes = [];
+    this.injectionsReported.clear();
+    this.auditsThisRun = 0;
+  }
+
   constructor(projectDir: string) {
     this.dir = path.join(projectDir, MEMORY_DIRNAME);
     this.legacyDirNote = adoptLegacyMemoryDir(projectDir);

@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatBriefs, laneName, MAX_LANES, moduleOf, planLanes, splitRoutes } from "../src/engine/brief.ts";
+import { formatBriefs, landingOf, laneName, MAX_LANES, moduleOf, planLanes, splitRoutes } from "../src/engine/brief.ts";
 
 const routesOf = (lanes: ReturnType<typeof splitRoutes>): string[] => lanes.flatMap((l) => l.routes);
 
@@ -109,6 +109,14 @@ test("each lane lands on its own first route, not the home page", () => {
   const out = formatBriefs(lanes);
   assert.match(out, /url: "<origin><landing>"/);
   assert.match(out, /landing: \/orders\/a/);
+});
+
+test("a lane never lands on a route pattern it cannot open", () => {
+  // ":id" sorts before "new"; a browser cannot open a pattern.
+  assert.equal(landingOf(["/orders/:id", "/orders/new"]), "/orders/new");
+  assert.equal(landingOf(["/items/[slug]", "/items"]), "/items");
+  assert.equal(landingOf(["/files/*", "/files/:id"]), "/", "nothing openable: start from the root");
+  assert.equal(planLanes(["/orders/:id", "/orders/new"], 1)[0].landing, "/orders/new");
 });
 
 test("the brief carries the rules a hand-written one drops", () => {

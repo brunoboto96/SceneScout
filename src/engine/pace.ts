@@ -96,7 +96,10 @@ export function measurePace(log: readonly ActionLogEntry[], nowMs: number, attac
   let first = Number.POSITIVE_INFINITY;
   let last = 0;
   for (const [session, entries] of bySession) {
-    const times = entries.map((e) => Date.parse(e.at)).filter((t) => Number.isFinite(t));
+    const times = entries
+      .map((e) => Date.parse(e.at))
+      .filter((t) => Number.isFinite(t))
+      .sort((a, b) => a - b);
     const heldIdleMs = heldIdle(lifecycle.get(session) ?? [], times, nowMs, stillOpen.has(session));
     if (times.length === 0) {
       if (heldIdleMs > 0) {

@@ -623,7 +623,7 @@ server.registerTool(
       const note =
         kept > 0
           ? ` (${kept} decision(s) kept for calibration)`
-          : ` (nothing kept for calibration — session ${JSON.stringify(lane)} is not attached here, so there is no project memory to write to. Fold a lane report before closing that lane's session.)`;
+          : ` (nothing kept for calibration, and no check that its defects were filed — session ${JSON.stringify(lane)} is not attached here, so there is no project memory to write to or read. Fold a lane report before closing that lane's session.)`;
       // Follow-through: a defect judged and never filed never reaches the
       // report. Checked against every finding on the lane's project, so one
       // the planner or another lane filed counts. Only that project's: the
@@ -1537,6 +1537,8 @@ server.registerTool(
           unvisitedRoutes: unvisited,
           mode: eng.mode,
           policyAttributed: eng.oracleLog.policyAttributed,
+          // Which sessions are still open decides whether a quiet one is holding a browser, and how long its trailing idle runs.
+          attachedSessions: [...engines.keys()],
         });
         void p;
         return text(summary, session);
@@ -1630,8 +1632,10 @@ server.registerTool(
         for (const e of engines.values()) if (e.memory?.dir) dirs.add(e.memory.dir);
         for (const e of engines.values()) keepReport(e);
         for (const name of engines.keys()) live?.dropSession(name);
+        const stores = new Set([...engines.values()].map((e) => e.memory).filter((m) => m !== null && m !== undefined));
         await Promise.allSettled([...engines.values()].map((e) => e.close()));
         engines.clear();
+        for (const store of stores) store.endRun();
         sessionQueue.clear();
         board.clear();
         lastWriter = null;
@@ -1646,6 +1650,8 @@ server.registerTool(
       await eng.close();
       const saveError = eng.memory?.lastSaveError;
       engines.delete(name);
+      // The last session on this project ends its run.
+      if (eng.memory && ![...engines.values()].some((e) => e.memory === eng.memory)) eng.memory.endRun();
       sessionQueue.forget(name);
       board.remove(name);
       if (lastWriter?.session === name) lastWriter = null;

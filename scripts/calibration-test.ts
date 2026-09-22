@@ -319,6 +319,14 @@ test("a judged defect with no finding behind it is named when the report is fold
   assert.deepEqual(unfiled, ["label-missing — input[name=email] has no label", "no-evidence"]);
 });
 
+test("a decision naming a failing endpoint is filed only by a finding on that endpoint, never by text overlap", () => {
+  // The finding's evidence is inside the decision's, but it names no failure: not the same bug by the store's rule.
+  const findings = [finding("GET /api/items")];
+  const d = decision({ observation: "toast-lies", evidence: "toast says saved but GET /api/items returned 500" });
+  assert.deepEqual(unfiledDefects([d], findings), ["toast-lies — toast says saved but GET /api/items returned 500"]);
+  assert.deepEqual(unfiledDefects([d], [finding("GET /api/items 500")]), [], "the same failing signature is filed");
+});
+
 test("a short signature does not count as filed just because it appears inside another finding", () => {
   // "404" is inside half a run's findings; it says nothing about which one covers this.
   assert.deepEqual(unfiledDefects([decision({ observation: "x", evidence: "404" })], [finding("GET /img/chart.png 404")]), ["x — 404"]);

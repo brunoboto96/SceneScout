@@ -120,8 +120,17 @@ export function planLanes(routes: readonly string[], laneCount: number, opts: Br
     objective: laneObjective(lane.modules, opts.goal),
     modules: lane.modules,
     routes: lane.routes,
-    landing: lane.routes[0],
+    landing: landingOf(lane.routes),
   }));
+}
+
+/**
+ * The first of a lane's routes a browser can open as it stands. A route the
+ * engine normalised (`/orders/:id`) is a pattern, not an address; a lane with
+ * nothing else lands on the app's root and navigates from there.
+ */
+export function landingOf(routes: readonly string[]): string {
+  return routes.find((r) => !/(^|\/)[:*]|\[[^\]]+\]/.test(r)) ?? "/";
 }
 
 function laneObjective(modules: readonly string[], goal?: string): string {

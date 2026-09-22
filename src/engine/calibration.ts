@@ -304,7 +304,14 @@ export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdi
     if (d.verdict !== "defect") continue;
     if (d.evidence) {
       const joined = [...joinKeys(d.evidence)];
-      if (joined.length > 0 && joined.some((k) => keys.has(k))) continue;
+      if (joined.some((k) => keys.has(k))) continue;
+      // A failing-endpoint signature is the store's own identity for a bug. When
+      // the decision has one and no finding shares it, text overlap is not a
+      // match: "GET /api/items" inside "... GET /api/items returned 500" is.
+      if (joined.length > 0) {
+        out.push(`${d.observation} — ${d.evidence}`);
+        continue;
+      }
       const text = squash(d.evidence);
       if (text && texts.some((t) => t === text || contains(t, text) || contains(text, t))) continue;
     }

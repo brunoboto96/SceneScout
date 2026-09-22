@@ -160,3 +160,10 @@ test("a session still attached is held idle up to now; a closed one with no clos
   const twice = [...log, step(20, "qa", { action: "close" }), step(100, "qa", { action: "attach" }), step(103, "qa"), step(104, "qa", { action: "close" })];
   assert.equal(measurePace(twice, T0 + 999_000).sessions[0].heldIdleMs, 10_000 + 10_000 + 3_000 + 1_000);
 });
+
+test("held idle does not depend on the order the log arrives in", () => {
+  const inOrder = [step(0, "qa", { action: "attach" }), step(10, "qa"), step(20, "qa"), step(100, "qa", { action: "close" })];
+  const shuffled = [inOrder[2], inOrder[0], inOrder[3], inOrder[1]];
+  assert.equal(measurePace(shuffled, T0 + 999_000).sessions[0].heldIdleMs, measurePace(inOrder, T0 + 999_000).sessions[0].heldIdleMs);
+  assert.equal(measurePace(inOrder, T0 + 999_000).sessions[0].heldIdleMs, 90_000);
+});

@@ -652,16 +652,20 @@ export class BrowserEngine {
 
   private async scanForInjections(): Promise<void> {
     const page = this.page;
-    if (!page || page.isClosed() || this.probes.length === 0) return;
+    // One copy for the whole scan: the list is shared with every lane, and
+    // another lane typing a payload during the await below would shift the
+    // indices the hits are matched back to.
+    const probes = this.probes;
+    if (!page || page.isClosed() || probes.length === 0) return;
     const url = page.url();
     let hits: RawHit[];
     try {
-      hits = (await page.evaluate(probeScript(probeQueries(this.probes)))) as RawHit[];
+      hits = (await page.evaluate(probeScript(probeQueries(probes)))) as RawHit[];
     } catch {
       // A page mid-navigation has no DOM to ask; the next drain looks again.
       return;
     }
-    for (const found of newInjections(this.probes, hits, url, this.injectionsReported)) {
+    for (const found of newInjections(probes, hits, url, this.injectionsReported)) {
       this.oracles.noteInjection(describeInjection(found.probe, url, found.outer), url);
     }
   }
