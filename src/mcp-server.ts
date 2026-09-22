@@ -609,6 +609,9 @@ server.registerTool(
       // already closed makes that the ordinary case, not an edge one.
       const owner = engines.get(lane)?.memory;
       const at = new Date().toISOString();
+      // Marks the moment the lane's browser stopped being needed, so the pace
+      // section can tell a lane still reporting from one waiting to be closed.
+      owner?.logAction({ action: "lane-report", url: engines.get(lane)?.currentUrl ?? "", session: lane });
       const kept = owner
         ? owner.addLaneDecisions(
             lane,
