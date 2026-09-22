@@ -205,7 +205,8 @@ The view is served on `127.0.0.1` only, behind a token that changes every time t
 
 **Try it with parallel agents.** The demo app has three roles and several separate areas, so a run can be split between agents. Start it with `npm run demo:serve`, then ask your agent to explore it with several agents in parallel, one role and one area each. The pictures above come from a run of three. Two things keep a parallel run efficient:
 
-- **Each agent opens its own session when it starts and closes it when it is done.** An agent waiting for its turn then holds no browser. Opening every session up front leaves browsers idling while the machine runs out of memory for the agents that are working.
+- **Each agent opens its own session when it starts, and the planner closes it once it has folded that agent's report.** An agent waiting for its turn then holds no browser. Opening every session up front leaves browsers idling while the machine runs out of memory for the agents that are working. Closing before the fold loses the lane's decisions, which have nowhere to be kept.
+- **Slow it down to follow along.** `scout_attach {paceMs}` (or `scout_session {paceMs}` mid-run) sets a floor between actions, for when you want to watch a flow rather than let it run as fast as the page allows.
 - **Run about as many agents at once as your machine has cores, less two.** Each one drives a real browser.
 
 ---
@@ -272,7 +273,7 @@ Snapshots are cheap: re-snapshotting a route returns only *what changed*, with s
 
 ## 🧰 The toolbox
 
-26 deterministic tools. The agent picks; you rarely call these by hand.
+29 deterministic tools. The agent picks; you rarely call these by hand.
 
 | Phase | Tools | What they do |
 |---|---|---|
@@ -283,6 +284,8 @@ Snapshots are cheap: re-snapshotting a route returns only *what changed*, with s
 | **Act** | `scout_click` `scout_type` `scout_select` `scout_upload` `scout_press` `scout_scroll` `scout_navigate` `scout_back` `scout_run_plan` | Drive the UI like a user; `scout_run_plan` batches a whole mechanical sequence into one call |
 | **Assess** | `scout_design_audit` `scout_journey` | Score a page's craft/a11y/consistency; measure how hard a task is to complete |
 | **Record** | `scout_note` `scout_finding` `scout_resolve` `scout_report` | Curate durable notes; file deduped findings; mark fixes; write the report, and on a recorded run the whole run as one page |
+| **Re-test** | `scout_verify` | List the findings earlier runs left open, worst route first, and record whether each is gone, still present, or changed |
+| **Split the work** | `scout_lane_brief` `scout_lane_report` | Divide the app between parallel agents by whole module, each with its own landing route and rules; fold what each hands back as one typed JSON object, and name any defect it judged but never filed |
 | **Close** | `scout_close` | Tear down one session or all |
 
 A few that punch above their weight:
@@ -292,20 +295,23 @@ A few that punch above their weight:
 - **`scout_journey`** — wraps one goal and reports interaction count, screens seen, and **backtracks**; an abandoned journey is a finding no passing E2E suite can produce.
 - **`scout_upload`** — generates a *valid* in-memory fixture (real PDF/PNG, kind inferred from `accept`) so file-upload flows stop being a blind spot.
 - **`scout_click {clicks: 2}`** — the impatient-user probe: states whether a double-click fired the same state-changing request twice (the classic double-submit bug).
+- **`scout_request`** — calls the app's own API as the session, so "the button is hidden" becomes "the server refuses it" (or doesn't).
+
+Beyond crashes and HTTP errors, two oracles catch a page **contradicting the server**: `refused_empty` (a list request was refused and the page shows its empty state with no error) and `false_success` (a save was refused and the page says it worked). A third, `dom_injection`, reports a typed markup value coming back as an element on any page any session opens.
 
 ---
 
 ## 📊 Test levels
 
-Each level is an **enforced contract** — `scout_report` checks it before finalizing.
+Each level is a contract. `scout_report` enforces what the engine can see for itself — routes visited, pages audited, and at `extensive` an empty gap ledger (every route exercised and audited, every filled form submitted, a completed journey, two roles) — and the report's gap ledger discloses the rest.
 
 | Level | What it guarantees | Rough size |
 |---|---|---|
 | `minimal` | Every route visited, ≥1 design audit, key journeys as plans, crawl problems triaged. Remaining gaps **disclosed**. | ~40 actions |
-| `medium` *(default)* | minimal + design audits across several routes + every element class exercised + every form submitted valid **and** invalid | ~150 actions |
-| `extensive` | medium + fuzzing, back/refresh/deep-link resilience, keyboard-only pass, a journey per module, ≥2 roles compared, anonymous auth-surface walk. **Refuses to finalize while any gap remains.** | budget-capped |
+| `medium` *(default)* | minimal + design audits across several routes (enforced) + every element class exercised + every form submitted valid **and** invalid (asked of the agent) | ~150 actions |
+| `extensive` | medium + fuzzing, back/refresh/deep-link resilience, keyboard-only pass, a journey per module, ≥2 roles compared, anonymous auth-surface walk. **Refuses to finalize while any gap in the ledger remains.** | budget-capped |
 
-That refusal *is* the guarantee: an extensive report can only exist when nothing known was left untested.
+That refusal *is* the guarantee: an extensive report can only exist when nothing the engine can measure was left untested. Fuzzing, the keyboard pass and the auth-surface walk are the agent's to do; the engine cannot see whether they were done well.
 
 ---
 
@@ -329,6 +335,8 @@ A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app
 - 💯 **Page scores** (0–100: a11y · craft · consistency · task-clarity), ranked worst-first, with stale scores from old runs marked as such.
 - 👥 **A role capability matrix** — what each role could and couldn't reach.
 - 🧾 **A gap ledger** — everything *not* done, so the report is honest about its own coverage.
+- ⏱️ **How the run was paced** — actions, median gap, idle share and held-idle time per session, so a browser held open for nothing is visible.
+- 🎯 **How well the lanes judged** — on a parallel run, whether the confidence each lane stated matched what the project went on to file, beside what later re-tests found ([ADR 10](docs/adr/0010-a-confidence-is-checked-not-trusted.md)).
 
 `.scenescout/report.html` — the same report as one self-contained page, with every session's trail beside it, and on a [recorded run](#-recording-a-run-and-reading-it-back) the screenshots under each finding.
 
@@ -539,7 +547,7 @@ npx -y scenescout watch <path>      # the same, live in your browser, with each 
 
 ```
 src/
-  mcp-server.ts     the 25 tools + per-session dispatch
+  mcp-server.ts     the 29 tools + per-session dispatch
   scan.ts           project discovery (framework, routes, auth)
   cli.ts            scan · serve · install · doctor · status
   installer.ts      setup logic (skill link, MCP registration, diagnostics)
@@ -549,8 +557,15 @@ src/
     fingerprint.ts  route + element-set identity (state hashing)
     oracles.ts      console/page/network/HTTP error detection
     injection.ts    the DOM-injection oracle's rules (what to watch for, how to find it)
+    claims.ts       when the page contradicts the server (refused_empty, false_success)
+    request.ts      what a replayed API call may be and where it may go
+    brief.ts        splitting the app between parallel lanes
+    lane.ts         the typed report a lane hands back
+    calibration.ts  whether a lane's confidence held up; what it judged and never filed
+    pace.ts         how a run spent its time
+    bench.ts        scoring a run against the demo app's answer key
     policy.ts       the write-policy safety net
-    ownership.ts    safe-write: which records did this run create?
+    ownership.ts    safe-write: which records were created in this process?
     uploads.ts      disk uploads, fenced to the project by real path
     journey.ts      task-ease measurement from the action log
     design.ts       the design audit + page scoring
@@ -558,9 +573,11 @@ src/
     report.ts       the gap ledger + report generation
     replay.ts       the run as one page: steps, tasks, frames under each finding
     …               collector · dispatch · fixtures · authloss · reaper
-scripts/            the 17 test suites (smoke/ holds the real-browser ones)
+scripts/            the 23 test suites (smoke/ holds the real-browser ones)
 test-app/           fixtures for the real-browser smoke tests
 skills/scenescout/   the testing method (SKILL.md): a skill in Claude Code, served by the server everywhere else
+docs/how-it-works.md  what happens at each stage, in diagrams
+docs/benchmark.md   measuring whether a change made runs better
 docs/adr/           why it's built this way
 ```
 
@@ -570,6 +587,10 @@ docs/adr/           why it's built this way
 
 ## 🧠 Design decisions
 
+**[How it works, stage by stage](docs/how-it-works.md)** — diagrams of the run lifecycle, what happens inside one action, the write policy on the wire, how a violation becomes a finding, how a parallel run is split and folded, how roles hand work to each other, where a run's time goes, and how a lane's confidence is checked afterwards.
+
+**[Measuring whether a change helped](docs/benchmark.md)** — the demo app's answer key, the scorecard (recall, precision, judged-not-filed, severity, calibration), and the results log of every run, including what did not help.
+
 The load-bearing choices are recorded as ADRs — read the relevant one before changing a rule it covers:
 
 - [1 · Completion is an enforced contract, not a claim](docs/adr/0001-completion-is-a-contract-not-a-vibe.md)
@@ -578,6 +599,10 @@ The load-bearing choices are recorded as ADRs — read the relevant one before c
 - [4 · Findings dedup on machine signals, and a merge must never lose a finding](docs/adr/0004-dedup-on-machine-signals-not-prose.md)
 - [5 · Testable logic lives outside `browser.ts`](docs/adr/0005-keep-testable-logic-out-of-the-browser-module.md)
 - [6 · Nothing in this repo names or is tuned for a tested app](docs/adr/0006-stay-project-agnostic.md)
+- [7 · The live view is local, read-only, and leaves nothing behind](docs/adr/0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md)
+- [8 · Recording is opt-in, and a recorded run is one self-contained page](docs/adr/0008-a-recorded-run-is-evidence-and-must-be-asked-for.md)
+- [9 · A refused write is answered, not dropped](docs/adr/0009-a-refused-write-is-answered-not-dropped.md)
+- [10 · A lane's confidence is checked, not trusted](docs/adr/0010-a-confidence-is-checked-not-trusted.md)
 
 ---
 
@@ -589,8 +614,9 @@ Working on SceneScout itself is the only reason to clone it:
 git clone https://github.com/brunoboto96/SceneScout.git scenescout && cd scenescout
 npm install        # installs dependencies and builds
 npm run setup      # same as `scenescout install`, but registers THIS checkout (the skill is linked, so edits are live)
-npm test           # build + 14 suites: scan, oracle, policy, fixture, dispatch, design,
-                   #                     contract, memory, install, hygiene, smoke, mcp-check
+npm test           # build + 23 suites: 21 pure-logic suites (scan, oracle, policy, … bench, hygiene),
+                   #                     then smoke and mcp-check (the server over stdio), both with real browsers
+npm run bench -- --all   # re-score every archived benchmark run against the current answer key
 npm run demo       # regenerate examples/ from the demo app
 ```
 
