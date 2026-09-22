@@ -191,6 +191,8 @@ ${late.slice(0, 400)}`);
       .flatMap((f) => fs.readFileSync(path.join(projectDir, ".scenescout", f), "utf8").split("\n"))
       .filter((l) => l.includes('"action":"lane-report"') && l.includes('"session":"orders"'));
     if (folds.length === 0) fail("folding a lane report left no lane-report marker in the run's log");
+    // It carries the lane's page, so the live feed and the replay show where the lane was when it was folded.
+    if (!folds.some((l) => /"url":"http[^"]+"/.test(l))) fail(`the lane-report marker carries no page URL: ${folds[0]}`);
     console.log("✓ a lane report names what was judged and never filed, and accepts prose around one fenced object");
     await call("scout_close", { all: true });
 

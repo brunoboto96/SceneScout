@@ -247,7 +247,10 @@ export function formatPace(pace: RunPace): string[] {
     ``,
     `**After finishing**, sessions held their browsers for a further ${sayDuration(w.afterFinishMs)}` +
       (w.afterFoldMs !== null ? `, ${sayDuration(w.afterFoldMs)} of it after their report was already folded` : ``) +
-      `. That is time waiting to be collected and closed: it grows with the number of lanes and with the slowest one, not with how well any lane worked. Closing each lane as soon as its report is folded removes it. (Before the first action: ${sayDuration(w.leadInMs)}.)`,
+      (w.afterFoldMs !== null
+        ? `. That is time waiting to be collected and closed: it grows with the number of lanes and with the slowest one, not with how well any lane worked. Closing each lane as soon as its report is folded removes it.`
+        : `: time from the last action to close.`) +
+      ` (Before the first action: ${sayDuration(w.leadInMs)}.)`,
     ``,
     `| Session | Actions | Working | Median gap | Longest gap | Idle while working | After finishing | Frames |`,
     `|---|---:|---:|---:|---:|---:|---:|---:|`,

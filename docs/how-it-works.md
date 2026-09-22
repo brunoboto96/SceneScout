@@ -304,8 +304,8 @@ The pace section of the report keeps two kinds of time apart.
   `lane-report` marker) splits this into still reporting and waiting to be
   closed. This is the planner's cost, not the lanes': it grows with the number
   of lanes and with the slowest one, however well each worked. On the
-  benchmark's eight-lane runs it was 18–28 browser-minutes a run, against 0–6%
-  idle while working. Closing each lane as soon as its report is folded removes
+  eight-lane runs recorded in [the benchmark](benchmark.md) it was 18–28
+  minutes a run summed over the lanes, against 0–6% idle while working. Closing each lane as soon as its report is folded removes
   it.
 
 Time from attach to the first action is reported too. A session that attached

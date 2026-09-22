@@ -195,6 +195,7 @@ test("the run's summary separates the lanes' efficiency from waiting to be colle
   assert.match(formatPace(tight).join("\n"), /0% was spent in gaps/);
   assert.equal(tight.waiting.afterFoldMs, null, "a run with no fold says nothing about folds");
   assert.doesNotMatch(formatPace(tight).join("\n"), /after their report/);
+  assert.doesNotMatch(formatPace(tight).join("\n"), /Closing each lane/, "no lane advice for a run with no lanes folded");
 });
 
 test("a session that attached and never acted is in the table, all of it lead-in", () => {
