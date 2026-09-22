@@ -1111,7 +1111,8 @@ test("dedup: one fact flips the literal merge — whether the two kinds are one 
     ["page-error", "console-error", true],
     ["data-loss", "data-inconsistency", true],
     ["security", "data-inconsistency", false],
-    ["other", "data-inconsistency", true], // "nothing fits" matches any family
+    ["other", "data-inconsistency", false], // "nothing fits" is a family of its own
+    ["other", "other", true],
   ] as const) {
     const store = freshStore();
     store.addFinding({ ...layout, category: first });
@@ -1137,6 +1138,16 @@ test("dedup: a bracketed phrase shared across families does not merge two bugs",
     evidence: "customer blank stored",
   });
   assert.equal(isNew, true);
+  // Within one family the same generic tag still merges two different bugs:
+  // a known limit of matching on quoted text, kept visible here.
+  const [, sameFamilyTag] = store.addFinding({
+    ...base,
+    category: "data-loss",
+    title: "Zero items accepted (no server-side validation)",
+    detail: "d",
+    evidence: "items 0 stored",
+  });
+  assert.equal(sameFamilyTag, false, "known limit: one family, one bracketed tag");
 });
 
 test("sameFamily: every category belongs to a family, and a missing one matches nothing", () => {

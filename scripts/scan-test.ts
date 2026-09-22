@@ -133,7 +133,7 @@ console.log("finding lifecycle: retro-merge + resolve");
   });
   const [, litNew2] = store.addFinding({
     severity: "medium",
-    category: "other",
+    category: "data-inconsistency",
     title: 'Audit-trail history entry shows "(role not recorded)" for actor',
     detail: "d2",
     url: "http://x/tickets/2",
@@ -152,7 +152,7 @@ console.log("finding lifecycle: retro-merge + resolve");
   });
   const [, evLit2] = store.addFinding({
     severity: "medium",
-    category: "other",
+    category: "data-loss",
     title: 'Trail displays "(actor missing entirely)" for each event',
     detail: "d2",
     evidence: "trail rows show placeholder instead of user",
@@ -160,6 +160,17 @@ console.log("finding lifecycle: retro-merge + resolve");
     state: "/orders/:id#b",
   });
   check("shared literal overrides differing evidence", evLit1 && !evLit2);
+  // Across families the same literal names a place, not a bug: kept apart.
+  const [, crossFamily] = store.addFinding({
+    severity: "low",
+    category: "visual",
+    title: 'History row "(actor missing entirely)" wraps onto two lines',
+    detail: "d3",
+    evidence: "trail row wraps",
+    url: "http://x/orders/3",
+    state: "/orders/:id#c",
+  });
+  check("a shared literal does not merge a layout finding into a data finding", crossFamily);
   store.markAttempted("/admin/import", "landed:/login");
   check("attempted routes recorded", store.attemptedRoutes["/admin/import"] === "landed:/login");
   check(

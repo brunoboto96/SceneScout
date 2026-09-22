@@ -570,12 +570,14 @@ const CATEGORY_FAMILY: Record<string, string> = {
 
 /**
  * Whether two categories are one family. "other" — the category for nothing
- * that fits — matches any; a missing or unknown category matches nothing, so a
- * finding read from an older file never merges on a guess.
+ * that fits — is a family of its own: as a wildcard, one "other" finding
+ * quoting a control absorbed both the layout and the data finding about it. A
+ * missing or unknown category matches nothing, so a finding read from an older
+ * file never merges on a guess.
  */
 export function sameFamily(a: string | undefined, b: string | undefined): boolean {
   if (!a || !b) return false;
-  if (a === "other" || b === "other") return true;
+  if (a === "other" || b === "other") return a === b;
   const fa = CATEGORY_FAMILY[a];
   return fa !== undefined && fa === CATEGORY_FAMILY[b];
 }
