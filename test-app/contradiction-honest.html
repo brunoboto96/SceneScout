@@ -20,6 +20,7 @@
 
     <button data-testid="gadgets-load-button" onclick="loadGadgets()">Load gadgets</button>
     <button data-testid="gadgets-save-button" onclick="saveGadget()">Save</button>
+    <button data-testid="gadgets-owner-button" onclick="changeOwner()">Change owner</button>
     <button data-testid="gadgets-ok-button" onclick="loadAllowed()">Load allowed list</button>
 
     <table data-testid="gadgets-table">
@@ -52,6 +53,15 @@
           body: JSON.stringify({ name: "g1" }),
         }).catch(() => null);
         status().textContent = res && res.ok ? "Saved successfully" : "Save failed. Try again.";
+      }
+
+      async function changeOwner() {
+        const res = await fetch("/api/gadgets/9", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ owner: "someone else" }),
+        }).catch(() => null);
+        status().textContent = res && res.ok ? "Owner updated" : "Could not update the owner. Try again.";
       }
 
       // A list that is genuinely empty, answered with a 200. An empty state is

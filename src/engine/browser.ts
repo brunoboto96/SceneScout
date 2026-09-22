@@ -37,7 +37,17 @@ import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
-import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire, allowsWrite, type WriteMode, isAuthExempt } from "./policy.js";
+import {
+  AUTH_FLOW_RE,
+  answersWithRefusal,
+  destructiveRefusal,
+  isDestructive,
+  isDestructiveWire,
+  allowsWrite,
+  policyRefusal,
+  type WriteMode,
+  isAuthExempt,
+} from "./policy.js";
 import { scanProject } from "../scan.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignPayload, type FocusSample } from "./design.js";
 import { acceptMatches, generatedUpload, type FixtureKind } from "./fixtures.js";
@@ -274,7 +284,7 @@ export class BrowserEngine {
     this.memory?.logAction({ ...entry, session: this.sessionKey });
   }
   /** Requests blocked by the write policy since the last action (timestamped for attribution). */
-  private blockedRequests: Array<{ at: number; sig: string }> = [];
+  private blockedRequests: Array<{ at: number; sig: string; answered: boolean }> = [];
   /**
    * WebSockets this session's pages opened. The write policy works on HTTP
    * requests; frames sent over a socket are not inspected. In observe mode that
@@ -550,7 +560,8 @@ export class BrowserEngine {
   private watchedResponses: WatchedRequest[] = [];
   private static readonly MAX_WATCHED_RESPONSES = 60;
   /**
-   * Requests the write policy aborted, by identity. The request event fires for
+   * Requests the write policy stopped, by identity — whether it dropped them or
+   * answered them with a stand-in refusal. The request event fires for
    * every non-GET the page ATTEMPTS, before the route handler decides its fate,
    * so without this the same DELETE was reported twice with opposite meanings:
    * "server state may have mutated despite read-only mode" and "WRITE-POLICY
@@ -558,7 +569,7 @@ export class BrowserEngine {
    * meet different fates, and a blocked /items/7/archive must not hide an
    * allowed POST /items that shares its prefix.
    */
-  private readonly abortedByPolicy = new WeakSet<import("playwright").Request>();
+  private readonly refusedByPolicy = new WeakSet<import("playwright").Request>();
   /** Markup-shaped values this session typed, so every later page can be checked for them rendering as elements. */
   private probes: InjectionProbe[] = [];
   /** Injections already reported, by payload and route, so a page is not reported on every snapshot. */
@@ -598,7 +609,7 @@ export class BrowserEngine {
       url: req.url(),
       status,
       resourceType: req.resourceType(),
-      blockedByPolicy: this.abortedByPolicy.has(req),
+      blockedByPolicy: this.refusedByPolicy.has(req),
     });
   }
 
@@ -700,7 +711,7 @@ export class BrowserEngine {
       this.projectDirNote = ` (its real path could not be resolved: ${err instanceof Error ? err.message : String(err)} — a symlinked project path may be wrongly refused)`;
     }
     this.oracles = new OracleMonitor();
-    this.oracles.setPolicyAbortCheck((req) => this.abortedByPolicy.has(req));
+    this.oracles.setPolicyRefusalCheck((req) => this.refusedByPolicy.has(req));
     this.lastSnap = null;
     this.designAuditCount = 0;
 
@@ -832,10 +843,14 @@ export class BrowserEngine {
           }
           return route.continue();
         }
-        if (this.blockedRequests.length < 20) this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}` });
+        const answered = answersWithRefusal(req.resourceType());
+        if (this.blockedRequests.length < 20) this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered });
         this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}`, url: this.page?.url() ?? "" });
-        this.abortedByPolicy.add(req);
+        this.refusedByPolicy.add(req);
         this.oracles.notePolicyBlock();
+        // A script's request is answered with a refusal, so the page's handling
+        // of one actually runs; a navigation is dropped (policy.ts says why).
+        if (answered) return route.fulfill(policyRefusal(this.mode, method, pathname, req.headers()["origin"]));
         return route.abort("blockedbyclient");
       });
     }
@@ -1416,10 +1431,14 @@ export class BrowserEngine {
       .map((e) => this.lateMark(e))
       .join("; ");
     const extra = this.blockedRequests.length > 5 ? ` (+${this.blockedRequests.length - 5} more)` : "";
+    const answered = this.blockedRequests.some((e) => e.answered);
     this.blockedRequests = [];
     return (
       `\n🛡 WRITE-POLICY blocked (${this.mode}): ${list}${extra}. ` +
       `This is the tester's safety policy, NOT an app bug — do not file a finding for the resulting error UI. ` +
+      (answered
+        ? `The page's own requests were answered with a 403 in the server's place, so the page's handling of a refusal is real: an error message is correct, and a success message is a false_success violation. `
+        : "") +
       (this.mode === "observe"
         ? `observe mode blocks every request that is not a GET, so no form submission reaches the server. Re-attach with mode="read-only" ONLY if the user confirms that ordinary form submissions are acceptable on this target.`
         : this.mode === "read-only"
@@ -1450,7 +1469,7 @@ export class BrowserEngine {
     // to see the DUPLICATES that the reporting dedup below intentionally hides.
     this.lastActionMutationSigs = this.mutationRequests.map((e) => e.sig);
     const fresh = this.mutationRequests
-      .filter((entry) => !this.abortedByPolicy.has(entry.req))
+      .filter((entry) => !this.refusedByPolicy.has(entry.req))
       .filter((entry) => {
         const key = entry.sig.split("?")[0];
         if (this.reportedMutationSigs.has(key)) return false;

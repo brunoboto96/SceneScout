@@ -13,6 +13,11 @@
       is that the server would not say. "Save" posts, gets a 500, and puts up
       an affirmation — so the user walks away believing their change was kept.
 
+      "Change owner" sends a PUT to a record this session did not create, which
+      the write policy refuses outside destructive mode, and the page puts up
+      an affirmation without reading the answer. That the refusal came from the
+      tester rather than the server changes nothing about the page's defect.
+
       Neither is a crash, and both look correct on screen. That is the whole
       point: they are exactly what a run that only watches for errors misses.
       The page deliberately says nothing anywhere about anything going wrong.
@@ -21,6 +26,7 @@
 
     <button data-testid="widgets-load-button" onclick="loadWidgets()">Load widgets</button>
     <button data-testid="widgets-save-button" onclick="saveWidget()">Save</button>
+    <button data-testid="widgets-owner-button" onclick="changeOwner()">Change owner</button>
 
     <table data-testid="widgets-table">
       <thead>
@@ -56,6 +62,15 @@
           body: JSON.stringify({ name: "w1" }),
         }).catch(() => {});
         document.querySelector("[data-testid=widgets-status]").textContent = "Saved successfully";
+      }
+
+      async function changeOwner() {
+        await fetch("/api/widgets/9", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ owner: "someone else" }),
+        }).catch(() => {});
+        document.querySelector("[data-testid=widgets-status]").textContent = "Owner updated";
       }
     </script>
   </body>
