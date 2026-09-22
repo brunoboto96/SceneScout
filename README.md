@@ -558,9 +558,10 @@ src/
     report.ts       the gap ledger + report generation
     replay.ts       the run as one page: steps, tasks, frames under each finding
     …               collector · dispatch · fixtures · authloss · reaper
-scripts/            the 17 test suites (smoke/ holds the real-browser ones)
+scripts/            the 22 test suites (smoke/ holds the real-browser ones)
 test-app/           fixtures for the real-browser smoke tests
 skills/scenescout/   the testing method (SKILL.md): a skill in Claude Code, served by the server everywhere else
+docs/how-it-works.md  what happens at each stage, in diagrams
 docs/adr/           why it's built this way
 ```
 
@@ -569,6 +570,8 @@ docs/adr/           why it's built this way
 ---
 
 ## 🧠 Design decisions
+
+**[How it works, stage by stage](docs/how-it-works.md)** — diagrams of the run lifecycle, what happens inside one action, the write policy on the wire, how a violation becomes a finding, how a parallel run is split and folded, and how a lane's confidence is checked afterwards.
 
 The load-bearing choices are recorded as ADRs — read the relevant one before changing a rule it covers:
 
