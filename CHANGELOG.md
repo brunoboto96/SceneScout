@@ -1,5 +1,20 @@
 # scenescout
 
+## 3.5.0
+
+### Minor Changes
+
+- 4fe8889: Parallel lanes now share what a run knows, and the planner is told what a lane left undone.
+  
+  - A markup value typed in one session is watched for in every session on the same project, so a stored injection is caught when another lane opens the list that renders it.
+  - The report gate counts design audits from every session in the run, so a planner whose lanes audited the pages is no longer refused.
+  - Folding a lane report lists each judged defect that no finding matches yet, so it can be filed before the lane's session closes.
+  - A lane report wrapped in prose around one fenced JSON block is accepted, with the prose discarded unread.
+  - `scout_lane_brief` gives each lane a landing route of its own and the rules a measured run found worth stating.
+  - The pace section shows how long each session held a browser idle before its first action and after its last, including sessions that attached and never acted.
+  - An empty live region (`role="status"` and similar) is no longer shown or counted as an unnamed control.
+- 6ec8fee: The write policy now answers a page's blocked `fetch` or XHR write with a `403` in the server's place instead of dropping it. The server is still never contacted, but the page's handling of a refusal really runs, so a page that reports a refused save or delete as a success is caught as a `false_success` (and says the refusal was the policy's stand-in). Blocked navigations are still dropped. The stand-in 403 is not reported as an HTTP error of the app.
+
 ## 3.4.0
 
 ### Minor Changes
