@@ -80,7 +80,9 @@ example or counter-example in the same change.
   scorecard says so.
 - **The key only knows what it has been told.** An unlabelled finding is not
   wrong; it needs a person to judge it, after which it belongs in the key.
-- **The key was written from runs 0 and 1.** 78 of its 108 examples are
+- **The key was written from runs 0 and 1.** Run 3 was the first run it did not
+  see, and left 9 findings unlabelled until a person judged them; those
+  judgements are now in the key, with the reason for each. 78 of its first 108 examples are
   phrasings those two runs used, so their zero ambiguous and zero unlabelled
   findings are true by construction. Run 2 is the first run the key did not
   see. The rest of the examples are rewordings a reviewer wrote to break it.
@@ -99,12 +101,15 @@ example or counter-example in the same change.
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
 re-scored against **one** key by `npm run bench -- --all`; the table below is
-key `672f2f2078`. The archived runs are in [`bench/runs/`](../bench/runs/).
+key `2b2a415d17`. The archived runs are in [`bench/runs/`](../bench/runs/).
 
 | Run | Date | What changed | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Lane calibration | Cost | Kept? |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
 | 0 | 2026-09-22 | Baseline, 3.4.0, briefs as written on the day | 11/13 | 16/21 (76%) | 21 | 0 | 5 | 1 | 26/31 (84%), ECE 0.05, Brier 0.113 | ~725k tokens, 241 tool calls, longest lane 3m38s | — |
 | 1 | 2026-09-22 | **Lane briefs only** (engine unchanged) — see below | 12/13 | 28/28 (100%) | 28 | 0 | 0 | 0 | 34/35 (97%), ECE 0.12, Brier 0.035 | ~698k tokens, 283 tool calls, longest lane 5m09s | Yes, into the skill |
+| 2 | 2026-09-22 | **Engine 3.5.0 only** — run 1's briefs verbatim | 9/13 | 25/25 (100%) | 26 | 1 | 0 | 1 | 28/29 (97%), ECE 0.10, Brier 0.055 | ~687k tokens, 266 tool calls, longest lane 5m37s | See runs 2–4 |
+| 3 | 2026-09-22 | Repeat of run 2 | 9/13 | 29/32 (91%) | 33 | 1 | 3 | 1 | 30/33 (91%), ECE 0.10, Brier 0.090 | ~680k tokens, 260 tool calls, longest lane 5m40s | See runs 2–4 |
+| 4 | 2026-09-22 | Repeat of run 2 | 11/13 | 26/27 (96%) | 27 | 0 | 1 | 1 | 29/35 (83%), ECE 0.07, Brier 0.101 | ~683k tokens, 271 tool calls, longest lane 4m40s | See runs 2–4 |
 
 **Brier is the number to compare; ECE says which way a lane is off.** Run 1's verdicts were
 right more often (97% against 84%), and its expected calibration error is
@@ -117,6 +122,59 @@ ahead (0.113 → 0.035).
 The first version of this scorer counted the five "belongs to another lane"
 dismissals as wrong verdicts, which gave ECE 0.09 → 0.04 and read as an
 improvement; that one choice was enough to reverse the comparison.
+
+### Runs 2–4 — engine 3.5.0, measured three times
+
+The engine changed and nothing else: run 1's eight lane briefs verbatim, a fresh
+demo app and project directory per run, the same planner behaviour. Three runs,
+because at 13 planted defects one defect is about 8 points of recall and a
+single run could not tell a one-defect effect from noise. Per defect, run 1
+(3.4.0) against runs 2–4 (3.5.0):
+
+| Defect | Run 1 | Runs 2–4 | Reading |
+|---|:---:|:---:|---|
+| Delete reports success after a refused write | ✓ (by luck) | **3/3** | The target of answering a refused write with a 403. Kept. |
+| Stored XSS (above the `medium` contract) | ✓ | **3/3** | The injection oracle fired in the list lane for a value the create-form lane typed. Kept. |
+| Sticky bar covers Save notes | ✓ | **0/3** | Filed every run, then merged away: see below. |
+| Double-submit creates two orders | ✓ | 1/3 | The new-order lane probed the API instead of double-clicking in two runs. Lane variance. |
+| Archived filter hides a 500 | ✓ | 2/3 | The orders lane never chose Archived in run 3. Lane variance. |
+| Empty customer does nothing | ✓ | 2/3 | Lane variance. |
+| Email field has no label | · | 0/3 | Missed in run 1 too; not an engine effect. |
+| Every other planted defect (7) | ✓ | 3/3 each | Stable. |
+
+**The sticky bar is an interaction, not noise.** Answering the refused save
+with a 403 made "Save notes shows *Saved.* even when the server rejects the
+write" a real finding for the first time. The store's duplicate check merges
+two findings when a literal quoted in one title appears anywhere in the other
+finding's text; the sticky-bar finding mentions the Save notes button, and was
+folded into the save-notes finding in all three runs. A gain in one line
+exposed an older bug that cost another.
+
+What else the series measured:
+
+- **Refusals on format: 1 in 24 lane reports**, for an observation over the
+  64-character limit, fixed in one round trip. Five reports wrapped their JSON
+  in prose and were accepted with no unwrapping by hand.
+- **The fold's unfiled check is noisy.** About 41 flags across the three runs;
+  2 were real (one lane then filed a missed defect; the other was the sticky
+  bar the merge had swallowed), 3 were variants the lanes confirmed were
+  covered, and the rest were the same finding worded differently in the report
+  and the filing. It needs a looser match before it is worth reading.
+- **A `false_success` false positive.** A real 409 followed by "Only an open
+  order can be sent for approval" was read as a success claim on the word
+  "sent". The rule knows error wording, not refusal wording.
+- **Waiting, not idling.** Split from the logs, idle gaps while lanes were
+  working were 0–6% of their working time; the 18–28 browser-minutes per run
+  were almost all lanes that had finished, held open until the slowest lane's
+  report was folded.
+- **Lane calibration fell** (Brier 0.035 in run 1; 0.055, 0.090, 0.101), with
+  low-confidence verdicts (0.4–0.6) wrong more often than stated in run 4. Three
+  runs is not enough to tell whether that is the engine or the lanes.
+
+**Kept?** The refusal answer and the shared probes each hit their target in 3/3
+runs and stay. The duplicate check, the `false_success` refusal wording and the
+unfiled check's matching are the next changes, each with its own test, and the
+next measured series re-runs these briefs against them.
 
 ### Run 1 — what changed, and what each change moved
 
