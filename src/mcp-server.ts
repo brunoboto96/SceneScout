@@ -591,10 +591,39 @@ server.registerTool(
     try {
       if (reply === undefined) return { content: [{ type: "text" as const, text: laneReportInstruction(lane) }] };
       const parsed = parseLaneReport(reply, lane);
-      const out = parsed.ok
-        ? `Lane report accepted — ${summarizeLaneReport(parsed.report)}`
-        : `Lane report REFUSED: ${parsed.reason}. Ask the lane once for the corrected object; do not re-judge its prose.`;
-      return { content: [{ type: "text" as const, text: out }] };
+      if (!parsed.ok) {
+        return {
+          content: [
+            { type: "text" as const, text: `Lane report REFUSED: ${parsed.reason}. Ask the lane once for the corrected object; do not re-judge its prose.` },
+          ],
+        };
+      }
+      // Keep what the lane decided, so the confidence it stated can be checked
+      // against what the run goes on to file. Best-effort: a lane report is
+      // still accepted if this project has no memory open yet, because the
+      // planner's fold must not depend on where the report was written.
+      // ONLY the lane's own session. Falling back to any engine with memory
+      // open put one project's decisions into another project's store whenever
+      // two sessions were attached to different apps — and the lane having
+      // already closed makes that the ordinary case, not an edge one.
+      const owner = engines.get(lane)?.memory;
+      const at = new Date().toISOString();
+      const kept = owner
+        ? owner.addLaneDecisions(
+            lane,
+            parsed.report.decisions.map((d) => ({ ...d, lane, at })),
+          )
+        : 0;
+      // Say when nothing was kept. Every lane closing its session before the
+      // planner folds its report is the order the method describes, and it
+      // leaves no memory to write to — reporting a bare "accepted" while the
+      // skill promises the decisions are kept is the kind of silence that
+      // makes a later calibration section look wrong rather than absent.
+      const note =
+        kept > 0
+          ? ` (${kept} decision(s) kept for calibration)`
+          : ` (nothing kept for calibration — session ${JSON.stringify(lane)} is not attached here, so there is no project memory to write to. Fold a lane report before closing that lane's session.)`;
+      return { content: [{ type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}` }] };
     } catch (err) {
       return errorText(err);
     }
