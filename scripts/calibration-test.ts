@@ -332,3 +332,30 @@ test("a short signature does not count as filed just because it appears inside a
   assert.deepEqual(unfiledDefects([decision({ observation: "x", evidence: "404" })], [finding("GET /img/chart.png 404")]), ["x — 404"]);
   assert.deepEqual(unfiledDefects([decision({ observation: "x", evidence: "404" })], [finding("404")]), [], "the same text exactly is filed");
 });
+
+test("a reworded report of a filed defect counts as filed", () => {
+  // Lanes reword between filing and reporting; the identifiers survive.
+  const cases: Array<[string, string]> = [
+    [
+      "click testid=reports-export-csv -> page_error: Cannot read properties of undefined (reading 'rows')",
+      "click testid=reports-export-csv → page_error: Cannot read properties of undefined (reading 'rows')",
+    ],
+    ["testid=dash-all-orders click did not navigate; covered by testid=dash-new-badge (84%)", "testid=dash-all-orders covered by testid=dash-new-badge (84%)"],
+    ["design audit: 50% paddings off 4px grid (14px x6, 10px x2)", "design audit: 50% of paddings off 4px grid (14px x6, 10px x2)"],
+    ["contrast 1.73:1 needs 4.5:1 on .hint under new-order-customer", "contrast 1.73:1 needs 4.5:1, .hint div under new-order-customer"],
+    ["GET /api/orders/1043 -> {items:-5,total:0}", 'GET /api/orders/1043 -> {"items":-5,"total":0}'],
+  ];
+  for (const [reported, filedAs] of cases) {
+    assert.deepEqual(unfiledDefects([decision({ observation: "x", evidence: reported })], [finding(filedAs)]), [], reported);
+  }
+});
+
+test("a real miss that shares one test id with a filed neighbour is still named", () => {
+  // Two different defects on one button: filing one does not file the other.
+  const filed = [finding("click new-order-submit with empty customer: 0 network requests, new-order-msg stays empty")];
+  const missed = decision({ observation: "double-submit", evidence: "2x click new-order-submit -> POST /api/orders x2 -> ids 1044,1045" });
+  assert.deepEqual(unfiledDefects([missed], filed), ["double-submit — 2x click new-order-submit -> POST /api/orders x2 -> ids 1044,1045"]);
+  // And a layout defect on a button is not filed by a data finding about that button.
+  const layout = decision({ observation: "sticky", evidence: "testid=order-save covered by testid=order-stickybar at initial scroll" });
+  assert.equal(unfiledDefects([layout], [finding('PUT /api/orders/1042 403 → UI shows "Saved."')]).length, 1);
+});

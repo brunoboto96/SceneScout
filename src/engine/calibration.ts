@@ -20,6 +20,7 @@
  *
  * Pure, so every rule here is table-tested.
  */
+import { normalizePath } from "./fingerprint.js";
 import { failingSignatures, type Finding } from "./memory.js";
 
 /** A lane decision as recorded, with when and by whom. The shape `lane.ts` parses, plus provenance. */
@@ -293,11 +294,11 @@ export const MAX_UNFILED_NAMED = 10;
  */
 export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdict" | "observation" | "evidence">[], findings: readonly Finding[]): string[] {
   const keys = new Set<string>();
-  const texts: string[] = [];
+  const filed: Filed[] = [];
   for (const f of findings) {
-    if (!f.evidence) continue;
-    for (const key of joinKeys(f.evidence)) keys.add(key);
-    texts.push(squash(f.evidence));
+    const text = `${f.evidence ?? ""} ${f.title}`;
+    if (f.evidence) for (const key of joinKeys(f.evidence)) keys.add(key);
+    filed.push({ ids: identifiers(text), words: words(text), evidenceWords: words(f.evidence ?? ""), evidence: squash(f.evidence ?? "") });
   }
   const out: string[] = [];
   for (const d of decisions) {
@@ -306,25 +307,94 @@ export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdi
       const joined = [...joinKeys(d.evidence)];
       if (joined.some((k) => keys.has(k))) continue;
       // A failing-endpoint signature is the store's own identity for a bug. When
-      // the decision has one and no finding shares it, text overlap is not a
-      // match: "GET /api/items" inside "... GET /api/items returned 500" is.
+      // the decision has one and no finding shares it, nothing else is a match.
       if (joined.length > 0) {
         out.push(`${d.observation} — ${d.evidence}`);
         continue;
       }
+      const ids = identifiers(d.evidence);
+      const w = words(d.evidence);
       const text = squash(d.evidence);
-      if (text && texts.some((t) => t === text || contains(t, text) || contains(text, t))) continue;
+      if (filed.some((f) => f.evidence === text || covers(ids, w, f))) continue;
     }
     out.push(d.evidence ? `${d.observation} — ${d.evidence}` : d.observation);
   }
   return out;
 }
 
-/** One signature inside another, when the inner one is long enough to mean something: "404" is inside half the findings in a run. */
-function contains(outer: string, inner: string): boolean {
-  return inner.length >= MIN_CONTAINED && outer.includes(inner);
+/**
+ * Whether a finding covers a decision. Lanes reword evidence between filing it
+ * and reporting it — an arrow for a hyphen, quoted JSON for bare, "8 links"
+ * for "8 link(s)" — but keep the identifiers: test ids, API paths, contrast
+ * ratios. Two shared identifiers, or one plus a real overlap in wording, or a
+ * near-identical wording, is the same observation. One shared test id alone is
+ * not: two different defects on one button (double-submit, empty submit) share
+ * it, and a real miss must not hide behind its neighbour.
+ */
+interface Filed {
+  ids: Set<string>;
+  words: Set<string>;
+  evidenceWords: Set<string>;
+  evidence: string;
 }
-const MIN_CONTAINED = 12;
+
+function covers(ids: Set<string>, w: Set<string>, f: Filed): boolean {
+  let shared = 0;
+  for (const id of ids) if (f.ids.has(id)) shared += 1;
+  // Against the evidence alone as well: a finding's title adds words the
+  // lane's report never repeats, and diluted an otherwise identical signature.
+  const overlap = Math.max(jaccard(w, f.words), jaccard(w, f.evidenceWords));
+  return shared >= 2 || (shared >= 1 && overlap >= 0.3) || overlap >= 0.6;
+}
+
+/** Test ids, kebab-case identifiers of three or more parts, METHOD /api paths with ids generalised, and contrast ratios. */
+function identifiers(text: string): Set<string> {
+  const out = new Set<string>();
+  const t = text.toLowerCase();
+  for (const m of t.matchAll(/testid=["']?([a-z0-9_-]+)/g)) out.add(m[1]);
+  for (const m of t.matchAll(/\b[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}\b/g)) out.add(m[0]);
+  for (const m of t.matchAll(/\b(get|post|put|patch|delete)\s+(\/[^\s?#"']+)/g)) out.add(`${m[1]} ${normalizePath(m[2])}`);
+  for (const m of t.matchAll(/\b\d+(?:\.\d+)?:1\b/g)) out.add(m[0]);
+  return out;
+}
+
+const STOP = new Set([
+  "the",
+  "and",
+  "with",
+  "for",
+  "but",
+  "not",
+  "was",
+  "are",
+  "has",
+  "this",
+  "that",
+  "from",
+  "into",
+  "when",
+  "then",
+  "than",
+  "only",
+  "also",
+  "its",
+]);
+
+function words(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length >= 3 && !STOP.has(w)),
+  );
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let both = 0;
+  for (const x of a) if (b.has(x)) both += 1;
+  return both / (a.size + b.size - both);
+}
 
 function squash(text: string): string {
   return text.toLowerCase().replace(/\s+/g, " ").trim();
