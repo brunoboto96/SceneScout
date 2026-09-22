@@ -64,7 +64,13 @@ test("frames are counted so an unrecorded run is visible as one", () => {
 });
 
 test("an empty or unparseable log measures nothing rather than throwing", () => {
-  assert.deepEqual(measurePace([], T0), { sessions: [], spanMs: 0, actions: 0, quiet: [] });
+  assert.deepEqual(measurePace([], T0), {
+    sessions: [],
+    spanMs: 0,
+    actions: 0,
+    quiet: [],
+    waiting: { workingMs: 0, workingIdleMs: 0, leadInMs: 0, afterFinishMs: 0, afterFoldMs: null },
+  });
   const bad = measurePace([{ at: "not a date", action: "click", url: "" }], T0);
   assert.deepEqual(bad.sessions, [], "a row with no usable time is not a session");
 });
@@ -73,7 +79,7 @@ test("the report says what idle means, and warns about a held browser", () => {
   const log = [step(0, "admin"), step(1, "admin"), step(0, "auditor")];
   const lines = formatPace(measurePace(log, T0 + STALE_SESSION_MS + 1000, ["admin", "auditor"])).join("\n");
   assert.match(lines, /How the run was paced/);
-  assert.match(lines, /waiting for the agent, not time the engine spent working/, "the number is about the agent, and says so");
+  assert.match(lines, /the agent thinking at length\. That is the lanes' own efficiency/, "the number is about the agent, and says so");
   assert.match(lines, /Held a browser with nothing to do/);
   assert.match(lines, /auditor/);
   // A run where everything is busy gets the table and no warning.
@@ -109,6 +115,7 @@ test("stated tasks and attaches are not actions: they take no time", () => {
   assert.equal(isActing("click"), true);
   assert.equal(isActing("task"), false);
   assert.equal(isActing("close"), false);
+  assert.equal(isActing("lane-report"), false);
   assert.equal(isActing("journey:start"), false);
 });
 
@@ -132,38 +139,91 @@ test("only a session still attached can be holding a browser", () => {
   assert.match(formatPace(measurePace(log, later, ["lane-b"])).join("\n"), /Held a browser with nothing to do.*lane-b/);
 });
 
-test("a browser held open around a session's actions is counted as held idle", () => {
+test("time after a lane finished is kept apart from its working time", () => {
   // A lane that waited 20s after attaching, acted for 10s, then sat for two
   // minutes waiting to be folded before it was closed.
   const log = [step(0, "orders", { action: "attach" }), step(20, "orders"), step(30, "orders"), step(150, "orders", { action: "close" })];
   const orders = measurePace(log, T0 + 999_000).sessions[0];
   assert.equal(orders.actions, 2, "attach and close are not actions");
-  assert.equal(orders.heldIdleMs, 140_000);
-  assert.match(formatPace(measurePace(log, T0 + 999_000)).join("\n"), /\| orders \| 2 \| 10s \| .* \| 2m20s \| 0 \|/);
+  assert.equal(orders.spanMs, 10_000, "working time is first action to last");
+  assert.equal(orders.leadInMs, 20_000);
+  assert.equal(orders.afterFinishMs, 120_000);
+  assert.equal(orders.afterFoldMs, null, "no fold was recorded");
+  assert.match(formatPace(measurePace(log, T0 + 999_000)).join("\n"), /\| orders \| 2 \| 10s \| .* \| 0% \| 2m00s \| 0 \|/);
 });
 
-test("a session that attached and never acted is in the table, all of it held idle", () => {
+test("a fold marker splits the time after finishing at the moment the browser stopped being needed", () => {
+  const log = [
+    step(0, "orders", { action: "attach" }),
+    step(5, "orders"),
+    step(65, "orders"),
+    step(95, "orders", { action: "lane-report" }), // 30s writing the report
+    step(245, "orders", { action: "close" }), // 150s waiting to be closed
+  ];
+  const pace = measurePace(log, T0 + 999_000);
+  const orders = pace.sessions[0];
+  assert.equal(orders.actions, 2, "the fold marker is not an action");
+  assert.equal(orders.afterFinishMs, 180_000);
+  assert.equal(orders.afterFoldMs, 150_000);
+  assert.match(formatPace(pace).join("\n"), /3m00s \(2m30s after fold\)/);
+});
+
+test("the run's summary separates the lanes' efficiency from waiting to be collected", () => {
+  // Eight quick lanes that all finish early and wait for the slowest: the
+  // case a single "held idle" figure scored as the idlest run.
+  const log = [];
+  for (let i = 0; i < 8; i += 1) {
+    const lane = `lane-${i}`;
+    log.push(
+      step(0, lane, { action: "attach" }),
+      step(1, lane),
+      step(61, lane),
+      step(62, lane, { action: "lane-report" }),
+      step(600, lane, { action: "close" }),
+    );
+  }
+  const pace = measurePace(log, T0 + 999_000);
+  assert.equal(pace.waiting.workingMs, 8 * 60_000);
+  assert.equal(pace.waiting.workingIdleMs, 8 * 60_000, "each lane's one 60s gap is over the threshold");
+  assert.equal(pace.waiting.afterFinishMs, 8 * 539_000);
+  assert.equal(pace.waiting.afterFoldMs, 8 * 538_000);
+  const text = formatPace(pace).join("\n");
+  assert.match(text, /\*\*While working\*\*.*100% was spent in gaps/);
+  assert.match(text, /\*\*After finishing\*\*, sessions held their browsers for a further 1h11m, 1h11m of it after their report was already folded/);
+
+  const tight = measurePace([step(0, "a", { action: "attach" }), step(1, "a"), step(3, "a"), step(4, "a", { action: "close" })], T0 + 999_000);
+  assert.match(formatPace(tight).join("\n"), /0% was spent in gaps/);
+  assert.equal(tight.waiting.afterFoldMs, null, "a run with no fold says nothing about folds");
+  assert.doesNotMatch(formatPace(tight).join("\n"), /after their report/);
+});
+
+test("a session that attached and never acted is in the table, all of it lead-in", () => {
   // The case the old table could not show: a re-attached browser nobody used.
   const log = [step(0, "admin"), step(5, "admin"), step(10, "inventory", { action: "attach" }), step(130, "inventory", { action: "close" })];
   const byName = Object.fromEntries(measurePace(log, T0 + 999_000).sessions.map((s) => [s.session, s]));
   assert.equal(byName.inventory?.actions, 0);
-  assert.equal(byName.inventory?.heldIdleMs, 120_000);
-  assert.equal(byName.admin.heldIdleMs, 0, "no attach recorded, nothing to measure from");
+  assert.equal(byName.inventory?.leadInMs, 120_000);
+  assert.equal(byName.admin.leadInMs + byName.admin.afterFinishMs, 0, "no attach recorded, nothing to measure from");
 });
 
-test("a session still attached is held idle up to now; a closed one with no close marker is not guessed at", () => {
+test("a session still attached is waiting up to now; a closed one with no close marker is not guessed at", () => {
   const log = [step(0, "qa", { action: "attach" }), step(10, "qa")];
-  assert.equal(measurePace(log, T0 + 70_000, ["qa"]).sessions[0].heldIdleMs, 70_000, "10s before, 60s since");
+  const open = measurePace(log, T0 + 70_000, ["qa"]).sessions[0];
+  assert.deepEqual([open.leadInMs, open.afterFinishMs], [10_000, 60_000], "10s before, 60s since");
   // Written before close was logged: when it closed is unknown, so only the leading gap counts.
-  assert.equal(measurePace(log, T0 + 70_000, []).sessions[0].heldIdleMs, 10_000);
+  const closed = measurePace(log, T0 + 70_000, []).sessions[0];
+  assert.deepEqual([closed.leadInMs, closed.afterFinishMs], [10_000, 0]);
   // Re-attached: each attach is measured on its own.
   const twice = [...log, step(20, "qa", { action: "close" }), step(100, "qa", { action: "attach" }), step(103, "qa"), step(104, "qa", { action: "close" })];
-  assert.equal(measurePace(twice, T0 + 999_000).sessions[0].heldIdleMs, 10_000 + 10_000 + 3_000 + 1_000);
+  const both = measurePace(twice, T0 + 999_000).sessions[0];
+  assert.deepEqual([both.leadInMs, both.afterFinishMs], [10_000 + 3_000, 10_000 + 1_000]);
 });
 
-test("held idle does not depend on the order the log arrives in", () => {
+test("the edges do not depend on the order the log arrives in", () => {
   const inOrder = [step(0, "qa", { action: "attach" }), step(10, "qa"), step(20, "qa"), step(100, "qa", { action: "close" })];
   const shuffled = [inOrder[2], inOrder[0], inOrder[3], inOrder[1]];
-  assert.equal(measurePace(shuffled, T0 + 999_000).sessions[0].heldIdleMs, measurePace(inOrder, T0 + 999_000).sessions[0].heldIdleMs);
-  assert.equal(measurePace(inOrder, T0 + 999_000).sessions[0].heldIdleMs, 90_000);
+  const a = measurePace(shuffled, T0 + 999_000).sessions[0];
+  const b = measurePace(inOrder, T0 + 999_000).sessions[0];
+  assert.deepEqual([a.leadInMs, a.afterFinishMs], [b.leadInMs, b.afterFinishMs]);
+  assert.deepEqual([b.leadInMs, b.afterFinishMs], [10_000, 80_000]);
 });

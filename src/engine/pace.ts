@@ -20,7 +20,7 @@ import type { ActionLogEntry } from "./memory.js";
  * counting them inflates the action count and drags the median gap toward
  * zero. One real run logged 325 entries of which 107 were stated tasks.
  */
-const MARKER_ACTIONS = new Set(["task", "attach", "close", "created-resource", "journey:start", "journey:end", "record:full", "record:failed"]);
+const MARKER_ACTIONS = new Set(["task", "attach", "close", "lane-report", "created-resource", "journey:start", "journey:end", "record:full", "record:failed"]);
 
 /** Whether a log entry represents work the browser actually did. */
 export function isActing(action: string): boolean {
@@ -41,20 +41,45 @@ export interface SessionPace {
   medianGapMs: number;
   /** The longest the browser stood still. */
   maxGapMs: number;
-  /** Share of the span spent in gaps over IDLE_GAP_MS, 0–1. */
+  /** Share of the span (the WORKING time) spent in gaps over IDLE_GAP_MS, 0–1: the agent thinking at length while the lane was still testing. */
   idleShare: number;
   /** Milliseconds since this session's last action, given the clock passed in. */
   quietMs: number;
   /** How many of its actions kept a frame. Zero on a run that was not recorded. */
   framed: number;
   /**
-   * Time the session held a browser with nothing happening: from attach to its
-   * first action, and from its last action to close (or to now, while it is
-   * still attached), summed over every attach. A session that attached and
-   * never acted is all held idle — and used to be missing from the table
-   * altogether, because it had no actions to measure.
+   * From attach to the first action, summed over every attach. A session that
+   * attached and never acted is all lead-in — and used to be missing from the
+   * table altogether, because it had no actions to measure.
    */
-  heldIdleMs: number;
+  leadInMs: number;
+  /**
+   * From the last action to close (or to now, while still attached): the lane
+   * has finished testing and holds its browser until it is collected. Kept
+   * apart from the working time because it measures the planner, not the
+   * lane: it grows with the number of lanes and with how long the slowest one
+   * takes, however efficiently each lane worked. Summed into one "held idle"
+   * figure, it made a run of eight quick lanes look like the idlest run.
+   */
+  afterFinishMs: number;
+  /**
+   * The part of afterFinishMs after the lane's report was folded — the browser
+   * was no longer needed for anything. Null when no fold was recorded, which is
+   * every single-agent run.
+   */
+  afterFoldMs: number | null;
+}
+
+/** The run's working time against its waiting time, summed over sessions. */
+export interface RunWaiting {
+  /** First-to-last action, summed over sessions. */
+  workingMs: number;
+  /** Of that, gaps over IDLE_GAP_MS. */
+  workingIdleMs: number;
+  leadInMs: number;
+  afterFinishMs: number;
+  /** Null when no session's report was folded. */
+  afterFoldMs: number | null;
 }
 
 export interface RunPace {
@@ -64,6 +89,7 @@ export interface RunPace {
   actions: number;
   /** Sessions whose last action is older than STALE_SESSION_MS: holding a browser, doing nothing. */
   quiet: string[];
+  waiting: RunWaiting;
 }
 
 function median(sorted: readonly number[]): number {
@@ -83,7 +109,11 @@ export function measurePace(log: readonly ActionLogEntry[], nowMs: number, attac
   const lifecycle = new Map<string, ActionLogEntry[]>();
   for (const entry of log) {
     const name = entry.session ?? "default";
-    const into = isActing(entry.action) ? bySession : entry.action === "attach" || entry.action === "close" ? lifecycle : null;
+    const into = isActing(entry.action)
+      ? bySession
+      : entry.action === "attach" || entry.action === "close" || entry.action === "lane-report"
+        ? lifecycle
+        : null;
     if (!into) continue;
     const list = into.get(name);
     if (list) list.push(entry);
@@ -100,10 +130,10 @@ export function measurePace(log: readonly ActionLogEntry[], nowMs: number, attac
       .map((e) => Date.parse(e.at))
       .filter((t) => Number.isFinite(t))
       .sort((a, b) => a - b);
-    const heldIdleMs = heldIdle(lifecycle.get(session) ?? [], times, nowMs, stillOpen.has(session));
+    const edge = edges(lifecycle.get(session) ?? [], times, nowMs, stillOpen.has(session));
     if (times.length === 0) {
-      if (heldIdleMs > 0) {
-        sessions.push({ session, actions: 0, spanMs: 0, medianGapMs: 0, maxGapMs: 0, idleShare: 0, quietMs: 0, framed: 0, heldIdleMs });
+      if (edge.leadInMs > 0) {
+        sessions.push({ session, actions: 0, spanMs: 0, medianGapMs: 0, maxGapMs: 0, idleShare: 0, quietMs: 0, framed: 0, ...edge });
       }
       continue;
     }
@@ -123,11 +153,20 @@ export function measurePace(log: readonly ActionLogEntry[], nowMs: number, attac
       idleShare: spanMs > 0 ? idleMs / spanMs : 0,
       quietMs: Math.max(0, nowMs - times[times.length - 1]),
       framed: entries.filter((e) => e.frame).length,
-      heldIdleMs,
+      ...edge,
     });
   }
   sessions.sort((a, b) => b.actions - a.actions);
+  const folds = sessions.filter((s) => s.afterFoldMs !== null);
+  const waiting: RunWaiting = {
+    workingMs: sessions.reduce((sum, s) => sum + s.spanMs, 0),
+    workingIdleMs: sessions.reduce((sum, s) => sum + s.idleShare * s.spanMs, 0),
+    leadInMs: sessions.reduce((sum, s) => sum + s.leadInMs, 0),
+    afterFinishMs: sessions.reduce((sum, s) => sum + s.afterFinishMs, 0),
+    afterFoldMs: folds.length > 0 ? folds.reduce((sum, s) => sum + (s.afterFoldMs ?? 0), 0) : null,
+  };
   return {
+    waiting,
     sessions,
     spanMs: sessions.length > 0 ? last - first : 0,
     actions: sessions.reduce((sum, x) => sum + x.actions, 0),
@@ -140,18 +179,27 @@ export function measurePace(log: readonly ActionLogEntry[], nowMs: number, attac
 }
 
 /**
- * Idle time at the edges of each attach: attach to first action, last action
- * to close. An attach with no close after it ends at the next attach, or at
- * now while the session is still open. A log written before close was
- * recorded has no close marker; its closed sessions count no trailing idle,
- * because when they closed is unknown.
+ * Time at the edges of each attach: attach to first action (lead-in), and last
+ * action to close (after finishing). An attach with no close after it ends at
+ * the next attach, or at now while the session is still open. A log written
+ * before close was recorded has no close marker; its closed sessions count no
+ * trailing time, because when they closed is unknown. A fold marker after the
+ * last action splits the trailing time at the moment the browser stopped being
+ * needed.
  */
-function heldIdle(markers: readonly ActionLogEntry[], actionTimes: readonly number[], nowMs: number, stillOpen: boolean): number {
+function edges(
+  markers: readonly ActionLogEntry[],
+  actionTimes: readonly number[],
+  nowMs: number,
+  stillOpen: boolean,
+): { leadInMs: number; afterFinishMs: number; afterFoldMs: number | null } {
   const events = markers
     .map((m) => ({ kind: m.action, at: Date.parse(m.at) }))
     .filter((e) => Number.isFinite(e.at))
     .sort((a, b) => a.at - b.at);
-  let idle = 0;
+  let leadInMs = 0;
+  let afterFinishMs = 0;
+  let afterFoldMs: number | null = null;
   for (let i = 0; i < events.length; i += 1) {
     if (events[i].kind !== "attach") continue;
     const start = events[i].at;
@@ -159,13 +207,17 @@ function heldIdle(markers: readonly ActionLogEntry[], actionTimes: readonly numb
     const end = next ? next.at : stillOpen ? nowMs : null;
     const inside = actionTimes.filter((t) => t >= start && (end === null || t <= end));
     if (inside.length === 0) {
-      if (end !== null) idle += end - start;
+      if (end !== null) leadInMs += end - start;
       continue;
     }
-    idle += inside[0] - start;
-    if (end !== null) idle += end - inside[inside.length - 1];
+    leadInMs += inside[0] - start;
+    if (end === null) continue;
+    const lastAction = inside[inside.length - 1];
+    afterFinishMs += end - lastAction;
+    const fold = events.filter((e) => e.kind === "lane-report" && e.at >= lastAction && e.at <= end).at(-1);
+    if (fold) afterFoldMs = (afterFoldMs ?? 0) + (end - fold.at);
   }
-  return Math.max(0, idle);
+  return { leadInMs: Math.max(0, leadInMs), afterFinishMs: Math.max(0, afterFinishMs), afterFoldMs };
 }
 
 /** Milliseconds as a person says them: 45s, 4m12s, 1h03m. */
@@ -184,17 +236,26 @@ export function sayDuration(ms: number): string {
  */
 export function formatPace(pace: RunPace): string[] {
   if (pace.sessions.length === 0) return [];
+  const w = pace.waiting;
+  const pct = (part: number, whole: number): string => (whole > 0 ? `${Math.round((part / whole) * 100)}%` : "0%");
   const lines = [
     `## How the run was paced`,
     ``,
-    `${pace.actions} action(s) over ${sayDuration(pace.spanMs)}. Stated tasks and attaches are not counted: they take no time. Idle share is time the browser stood still waiting for the agent, not time the engine spent working. Held idle is time a browser was open before a session's first action or after its last one — a lane waiting to be folded, or attached and never used.`,
+    `${pace.actions} action(s) over ${sayDuration(pace.spanMs)}. Stated tasks and attaches are not counted: they take no time.`,
     ``,
-    `| Session | Actions | Span | Median gap | Longest gap | Idle | Held idle | Frames |`,
+    `**While working** — first action to last, ${sayDuration(w.workingMs)} across sessions — ${pct(w.workingIdleMs, w.workingMs)} was spent in gaps over ${sayDuration(IDLE_GAP_MS)}, the agent thinking at length. That is the lanes' own efficiency.`,
+    ``,
+    `**After finishing**, sessions held their browsers for a further ${sayDuration(w.afterFinishMs)}` +
+      (w.afterFoldMs !== null ? `, ${sayDuration(w.afterFoldMs)} of it after their report was already folded` : ``) +
+      `. That is time waiting to be collected and closed: it grows with the number of lanes and with the slowest one, not with how well any lane worked. Closing each lane as soon as its report is folded removes it. (Before the first action: ${sayDuration(w.leadInMs)}.)`,
+    ``,
+    `| Session | Actions | Working | Median gap | Longest gap | Idle while working | After finishing | Frames |`,
     `|---|---:|---:|---:|---:|---:|---:|---:|`,
   ];
   for (const s of pace.sessions) {
+    const after = sayDuration(s.afterFinishMs) + (s.afterFoldMs !== null ? ` (${sayDuration(s.afterFoldMs)} after fold)` : ``);
     lines.push(
-      `| ${s.session} | ${s.actions} | ${sayDuration(s.spanMs)} | ${sayDuration(s.medianGapMs)} | ${sayDuration(s.maxGapMs)} | ${Math.round(s.idleShare * 100)}% | ${sayDuration(s.heldIdleMs)} | ${s.framed} |`,
+      `| ${s.session} | ${s.actions} | ${sayDuration(s.spanMs)} | ${sayDuration(s.medianGapMs)} | ${sayDuration(s.maxGapMs)} | ${Math.round(s.idleShare * 100)}% | ${after} | ${s.framed} |`,
     );
   }
   lines.push(``);
