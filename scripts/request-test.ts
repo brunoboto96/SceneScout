@@ -130,3 +130,25 @@ test("the signature is the line a finding quotes", () => {
     /\(empty body\)/,
   );
 });
+
+test("a refusal the write policy wrote is reported as the policy's, never as the server's status", () => {
+  const raw = (headers: Record<string, string>) => ({
+    status: 403,
+    statusText: "Forbidden",
+    headers: { "content-type": "application/json", ...headers },
+    body: '{"error":"Forbidden"}',
+    full: 21,
+    ms: 2,
+    url: "http://localhost:3000/api/things/1",
+  });
+  // The same 403, and the one fact that flips it: who wrote it.
+  const policy = toReplayResult(raw({ "x-scenescout-policy": "refused; mode=read-only" }));
+  assert.equal(policy.refusedByPolicy, "refused; mode=read-only");
+  const said = formatReplay("DELETE", policy);
+  assert.match(said, /^REFUSED by the write policy \(refused; mode=read-only\): DELETE \/api\/things\/1 never reached the server/);
+  assert.doesNotMatch(said, /DELETE \/api\/things\/1 403/, "no signature a finding could quote as the server enforcing it");
+
+  const server = toReplayResult(raw({}));
+  assert.equal(server.refusedByPolicy, null);
+  assert.match(formatReplay("DELETE", server), /^DELETE \/api\/things\/1 403 Forbidden/);
+});

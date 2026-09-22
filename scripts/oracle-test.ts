@@ -147,6 +147,18 @@ test("errors caused by the tester's own write-policy block are not held against 
   // failed request itself is matched by request identity inside the monitor.)
   assert.equal(isPolicyInduced({ kind: "console_error", detail: "Failed to load resource: net::ERR_BLOCKED_BY_CLIENT.Inspector" }, 30), true);
   assert.equal(isPolicyInduced({ kind: "page_error", detail: "Failed to fetch" }, 40), true);
+  // The browser's own line for the stand-in 403 the policy answers a script's write with.
+  assert.equal(isPolicyInduced({ kind: "console_error", detail: "Failed to load resource: the server responded with a status of 403 (Forbidden)" }, 30), true);
+  assert.equal(
+    isPolicyInduced({ kind: "console_error", detail: "Failed to load resource: the server responded with a status of 403 (Forbidden)" }, null),
+    false,
+    "a 403 with no block in the window is the server's own",
+  );
+  assert.equal(
+    isPolicyInduced({ kind: "console_error", detail: "Failed to load resource: the server responded with a status of 500 (Internal Server Error)" }, 30),
+    false,
+    "the policy only ever answers 403",
+  );
 
   // Without a block in the window, the very same text is the app's own
   // failure — a wrong origin, a CORS error, a refused connection — and stays.

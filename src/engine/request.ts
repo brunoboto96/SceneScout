@@ -22,6 +22,7 @@
  * Everything in this file is pure so it can be table-tested; the one
  * `page.evaluate` lives in browser.ts.
  */
+import { POLICY_REFUSAL_HEADER } from "./policy.js";
 
 /** Methods a session may replay. Anything else is refused before it reaches the page. */
 export const REPLAYABLE_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
@@ -40,6 +41,12 @@ export interface ReplayResult {
   truncated: boolean;
   ms: number;
   url: string;
+  /**
+   * Set when the write policy answered in the server's place: the server never
+   * received the request, so its status says nothing about what the server
+   * enforces. Carries the policy's marker (`refused; mode=read-only`).
+   */
+  refusedByPolicy: string | null;
 }
 
 /**
@@ -135,6 +142,7 @@ export function toReplayResult(raw: {
     truncated: raw.full > BODY_MAX,
     ms: raw.ms,
     url: raw.url,
+    refusedByPolicy: raw.headers[POLICY_REFUSAL_HEADER] ?? null,
   };
 }
 
@@ -150,8 +158,21 @@ export function replaySignature(method: ReplayMethod, url: string, status: numbe
   return `${method} ${path} ${status}`;
 }
 
-/** What the agent reads back. Leads with the signature, because that is what a finding quotes. */
+/**
+ * What the agent reads back. Leads with the signature, because that is what a
+ * finding quotes — except when the write policy answered, where there is no
+ * server signature to quote. Printing the stand-in's 403 as one would read as
+ * the server enforcing a permission it was never asked about.
+ */
 export function formatReplay(method: ReplayMethod, result: ReplayResult): string {
+  if (result.refusedByPolicy) {
+    const path = replaySignature(method, result.url, result.status).replace(/ \d+$/, "");
+    return (
+      `REFUSED by the write policy (${result.refusedByPolicy}): ${path} never reached the server.\n` +
+      `This is the engine's safety net, not the server's answer, so it says nothing about whether the server enforces this rule. ` +
+      `To test that, re-attach in a mode that allows the request on a record this session owns, or leave it out of the finding.`
+    );
+  }
   const lines = [replaySignature(method, result.url, result.status) + (result.statusText ? ` ${result.statusText}` : ""), `took ${result.ms} ms`];
   const headers = Object.entries(result.headers);
   if (headers.length > 0) lines.push(headers.map(([k, v]) => `${k}: ${v}`).join(" · "));

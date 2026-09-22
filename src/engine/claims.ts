@@ -52,13 +52,18 @@ export interface WatchedRequest {
   /** The status, or null when the request failed outright (no response). */
   status: number | null;
   resourceType: string;
-  /** True when the engine's own write policy aborted it: the tool's safety net is not an app defect. */
+  /**
+   * True when the engine's own write policy stopped it. With no status it was
+   * dropped, and the page never met a refusal it could have handled. With one,
+   * the policy answered in the server's place, and the page's handling of that
+   * refusal is exactly what these rules judge.
+   */
   blockedByPolicy?: boolean;
 }
 
 /** Whether this request is one whose refusal the page should be admitting to. */
 export function isRefused(req: WatchedRequest): boolean {
-  if (req.blockedByPolicy) return false;
+  if (req.blockedByPolicy && req.status === null) return false;
   if (!DATA_RESOURCES.has(req.resourceType)) return false;
   if (req.status === null) return true;
   return req.status >= 400;
@@ -138,6 +143,13 @@ function say(req: WatchedRequest): string {
   return `${req.method} ${shortUrl(req.url)} ${req.status === null ? "failed" : req.status}`;
 }
 
+/** Said after a contradiction whose refusal the write policy wrote, so nobody goes looking for it in the server's logs. */
+function standIn(req: WatchedRequest): string {
+  return req.blockedByPolicy
+    ? ` The refusal was the write policy's stand-in (the server never received the request); what failed is the page's handling of a refusal, which a real one would meet the same way.`
+    : "";
+}
+
 /**
  * The contradictions this action produced, if any.
  *
@@ -165,7 +177,8 @@ export function findContradictions(requests: readonly WatchedRequest[], page: Pa
       kind: "refused_empty",
       detail:
         `${say(worst)} was refused, and the page shows ${how} with no error. ` +
-        `The user is told there is nothing to see when the truth is that nothing could be loaded.`,
+        `The user is told there is nothing to see when the truth is that nothing could be loaded.` +
+        standIn(worst),
       evidence: `refused-empty ${say(worst)}`,
     });
   }
@@ -176,7 +189,7 @@ export function findContradictions(requests: readonly WatchedRequest[], page: Pa
     const message = page.texts[claims.indexOf("success")];
     out.push({
       kind: "false_success",
-      detail: `${say(worst)} was refused, and the page says ${JSON.stringify(message.trim().slice(0, 80))}. The user is told their change was kept when the server rejected it.`,
+      detail: `${say(worst)} was refused, and the page says ${JSON.stringify(message.trim().slice(0, 80))}. The user is told their change was kept when the server rejected it.${standIn(worst)}`,
       evidence: `false-success ${say(worst)}`,
     });
   }

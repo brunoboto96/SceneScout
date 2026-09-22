@@ -212,3 +212,51 @@ export function allowsWrite(mode: WriteMode, method: string, destructiveWire: bo
   // PUT/PATCH/DELETE: only in safe-write, only on this run's own records.
   return mode === "safe-write" && owned;
 }
+
+/**
+ * Which blocked requests the write policy answers rather than drops.
+ *
+ * A dropped request tells the page nothing it would ever meet in production:
+ * `fetch` rejects with a network error, and the code that handles a refusal —
+ * the branch that should say "couldn't save" — never runs. Answering a script's
+ * request with a refusal keeps the server untouched and exercises that branch,
+ * so a page that reports a refused save as saved is caught. A navigation (a
+ * native form post) is still dropped: answering it would replace the page the
+ * user was on with the stand-in body.
+ */
+export function answersWithRefusal(resourceType: string): boolean {
+  return resourceType === "fetch" || resourceType === "xhr";
+}
+
+/** Header on every refusal the policy writes, so the stand-in can be told from the server's own answer. */
+export const POLICY_REFUSAL_HEADER = "x-scenescout-policy";
+
+/**
+ * The response the write policy sends in the server's place. 403, because the
+ * request is forbidden, not failed: a 5xx invites retries, and a 401 is what
+ * many apps read as "signed out". The CORS headers let a cross-origin API
+ * call read the refusal instead of failing as a network error, which would
+ * drop it all over again. `origin` is the request's own Origin header, echoed
+ * only when there is one.
+ */
+export function policyRefusal(
+  mode: WriteMode,
+  method: string,
+  pathname: string,
+  origin?: string,
+): { status: number; headers: Record<string, string>; body: string } {
+  const headers: Record<string, string> = { "content-type": "application/json", [POLICY_REFUSAL_HEADER]: `refused; mode=${mode}` };
+  if (origin) {
+    headers["access-control-allow-origin"] = origin;
+    headers["access-control-allow-credentials"] = "true";
+    headers["access-control-expose-headers"] = POLICY_REFUSAL_HEADER;
+  }
+  return {
+    status: 403,
+    headers,
+    body: JSON.stringify({
+      error: "Forbidden",
+      message: `${method} ${pathname} was refused by the tester's ${mode} write policy. The server never received it.`,
+    }),
+  };
+}

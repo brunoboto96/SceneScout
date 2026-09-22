@@ -121,6 +121,12 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       !/DELETE \/api\/documents\/1 [23]\d\d/.test(foreignPut),
       foreignPut.slice(0, 300),
     );
+    // The policy's stand-in 403 must not read as the server enforcing anything.
+    check(
+      "…and the result says the policy refused it, with no status a finding could quote as the server's",
+      /REFUSED by the write policy/.test(foreignPut) && !/DELETE \/api\/documents\/1 403/.test(foreignPut),
+      foreignPut.slice(0, 300),
+    );
     const offOrigin = await engine2.apiRequest({ path: "http://example.test/steal" });
     check(
       "…and a request off the attached origin never leaves the browser",

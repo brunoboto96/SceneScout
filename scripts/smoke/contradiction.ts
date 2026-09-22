@@ -17,7 +17,7 @@ import { check, type SmokeContext } from "./harness.ts";
 
 export const title = "contradiction oracles";
 
-export async function run({ baseUrl }: SmokeContext): Promise<void> {
+export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
   console.log("contradiction oracles: a refusal the page does not admit to");
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-contra-"));
   const engine = new BrowserEngine();
@@ -47,6 +47,9 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       found("refused_empty")[0]?.detail ?? "(none)",
     );
 
+    // A replay the policy refuses belongs to the agent, not to the page: it
+    // must not be blamed on the next click in place of that click's own write.
+    await engine.apiRequest({ method: "PUT", path: "/api/widgets/3", body: JSON.stringify({ name: "replayed" }) });
     const saved = await engine.click(saveRef);
     check("a refused save reported as a success is its own violation", /false_success/.test(saved), saved.slice(0, 700));
     check(
@@ -58,6 +61,45 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       "...against the write that was refused, not the read",
       (found("false_success")[0]?.detail ?? "").includes("POST /api/refuse/500 500"),
       found("false_success")[0]?.detail ?? "(none)",
+    );
+
+    // A write the policy refuses (a PUT on a record this session did not
+    // create) is answered with a 403 in the server's place, so the page's
+    // handling of a refusal runs. Dropped, as it used to be, the page's
+    // .catch swallowed the network error and this lie went unreported.
+    const ownerRef = /(e\d+) button "Change owner"/.exec(snap)?.[1];
+    if (!ownerRef) throw new Error(`owner button not in snapshot: ${snap.slice(0, 400)}`);
+    const attributedBefore = engine.oracleLog.policyAttributed;
+    const loggedBefore = engine.oracleLog.all.length;
+    const owner = await engine.click(ownerRef);
+    const policyLie = found("false_success").find((v) => v.detail.includes("/api/widgets/9"));
+    check("a success claimed over the write policy's refusal is a false_success", policyLie !== undefined, owner.slice(0, 900));
+    check("...which says the refusal was the policy's stand-in", /stand-in/.test(policyLie?.detail ?? ""), policyLie?.detail ?? "(none)");
+    check("...and the server never received the write", (stats.writes["PUT /api/widgets/9"] ?? 0) === 0, JSON.stringify(stats.writes));
+    check("the policy's notice still says it blocked the write", /WRITE-POLICY blocked/.test(owner) && /answered with a 403/.test(owner), owner.slice(0, 900));
+    check(
+      "the stand-in 403 is not reported as the server's HTTP error, nor its console line as the app's",
+      !engine.oracleLog.all.slice(loggedBefore).some((v) => v.kind === "http_error" || v.kind === "console_error") &&
+        engine.oracleLog.policyAttributed > attributedBefore,
+      JSON.stringify(engine.oracleLog.all.slice(loggedBefore).map((v) => `${v.kind}: ${v.detail.slice(0, 80)}`)),
+    );
+
+    // The case the policy used to hide: a handler with no .catch, which threw
+    // on the dropped request before it could claim success. A real server 403
+    // inside the same action is still the server's, and still reported.
+    const updateRef = /(e\d+) button "Update widget"/.exec(snap)?.[1];
+    if (!updateRef) throw new Error(`update button not in snapshot: ${snap.slice(0, 400)}`);
+    const updateLoggedBefore = engine.oracleLog.all.length;
+    const updated = await engine.click(updateRef);
+    check(
+      "a handler with no .catch now reaches its success line, and is reported",
+      found("false_success").some((v) => v.detail.includes("PUT /api/widgets/7 403") && /stand-in/.test(v.detail)),
+      updated.slice(0, 900),
+    );
+    check(
+      "a real 403 from the server in the same action is still an http_error",
+      engine.oracleLog.all.slice(updateLoggedBefore).some((v) => v.kind === "http_error" && v.detail.includes("/api/refuse/403?after=update")),
+      JSON.stringify(engine.oracleLog.all.slice(updateLoggedBefore).map((v) => `${v.kind}: ${v.detail.slice(0, 90)}`)),
     );
 
     const before = found("refused_empty").length + found("false_success").length;
@@ -77,14 +119,19 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       load: /(e\d+) button "Load gadgets"/.exec(honestSnap)?.[1],
       save: /(e\d+) button "Save"/.exec(honestSnap)?.[1],
       ok: /(e\d+) button "Load allowed list"/.exec(honestSnap)?.[1],
+      owner: /(e\d+) button "Change owner"/.exec(honestSnap)?.[1],
     };
-    if (!refs.load || !refs.save || !refs.ok) throw new Error(`honest fixture buttons not in snapshot: ${honestSnap.slice(0, 400)}`);
+    if (!refs.load || !refs.save || !refs.ok || !refs.owner) throw new Error(`honest fixture buttons not in snapshot: ${honestSnap.slice(0, 400)}`);
     const baseline = found("refused_empty").length + found("false_success").length;
 
     const honestLoad = await engine.click(refs.load);
     check("a refused list the page admits to is not a contradiction", !/refused_empty/.test(honestLoad), honestLoad.slice(0, 700));
     const honestSave = await engine.click(refs.save);
     check("a refused save the page admits to is not a contradiction", !/false_success/.test(honestSave), honestSave.slice(0, 700));
+    // Counted, not grepped: the policy's notice itself names false_success.
+    const liesBefore = found("false_success").length;
+    const honestOwner = await engine.click(refs.owner);
+    check("a policy refusal the page admits to is not a contradiction", found("false_success").length === liesBefore, honestOwner.slice(0, 700));
     const genuinelyEmpty = await engine.click(refs.ok);
     check("an empty list that every request agreed to is an ordinary empty list", !/refused_empty/.test(genuinelyEmpty), genuinelyEmpty.slice(0, 700));
     check(
