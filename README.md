@@ -565,7 +565,7 @@ src/
     pace.ts         how a run spent its time
     bench.ts        scoring a run against the demo app's answer key
     policy.ts       the write-policy safety net
-    ownership.ts    safe-write: which records did this run create?
+    ownership.ts    safe-write: which records were created in this process?
     uploads.ts      disk uploads, fenced to the project by real path
     journey.ts      task-ease measurement from the action log
     design.ts       the design audit + page scoring

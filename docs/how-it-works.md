@@ -119,7 +119,7 @@ flowchart TD
     C -->|read-only| E{PUT / PATCH / DELETE<br/>or destructive POST?}
     E -->|yes| X
     E -->|no| P
-    C -->|safe-write| F{mutation on a record<br/>this run created?}
+    C -->|safe-write| F{mutation on a record<br/>created in this process?}
     F -->|yes| P
     F -->|no| G{non-destructive POST?}
     G -->|yes| P
@@ -236,8 +236,8 @@ lane made is allowed in safe-write), the markup values any session typed (so a
 payload one lane typed on a create form is caught when another lane opens the
 list that renders it), and the count of design audits (so the planner's report
 is not refused for an audit its lanes ran). None of it is written to disk. The
-typed values and the audit count end with the run, when its last session
-closes; ownership lasts until the server process exits, so a record made
+typed values and the audit count end with the run: when its last session
+closes, or moves to another project; ownership lasts until the server process exits, so a record made
 earlier in the same process can still be edited.
 
 **Why every lane is told the same thing.** The instruction a lane gets for its
@@ -294,8 +294,7 @@ sequenceDiagram
 ## 6. Where a run's time goes
 
 The pace section of the report splits a session's time three ways: the median
-gap between actions (the engine plus the agent deciding, typically a few
-seconds), idle gaps over 30 seconds (the agent thinking at length), and **held
+gap between actions (the engine plus the agent deciding), idle gaps over 30 seconds (the agent thinking at length), and **held
 idle** — time a browser was open before the session's first action or after
 its last one. Held idle is the waste a person watching sees and a per-action
 number cannot: a lane waiting to be folded, or a session attached and never
@@ -376,7 +375,7 @@ flowchart LR
     G[per-role access] --> H[reached / denied<br/>per route]
     B & C & D & E & F & H --> I{level}
     I -->|minimal| J[every route visited<br/>+ 1 audit]
-    I -->|medium| K[+ audits on min 3, visited/10<br/>distinct routes]
+    I -->|medium| K[+ audited routes: visited/10,<br/>rounded up, between 1 and 3]
     I -->|extensive| L[+ ledger EMPTY: every route<br/>exercised and audited, every<br/>filled form submitted, a completed<br/>journey, at least 2 roles]
     J & K & L --> M{satisfied?}
     M -->|no| N[refuse, and name<br/>what is missing]
