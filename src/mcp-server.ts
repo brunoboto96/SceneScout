@@ -812,6 +812,11 @@ server.registerTool(
         } catch {
           /* conflict detection is best-effort */
         }
+        // Moving this session to another project leaves its old one; if it was
+        // the last session there, that run is over. Re-attaching to the SAME
+        // project is the same run, and keeps what the run has learned.
+        const previous = eng.memory;
+        if (previous && previous !== store && ![...engines.values()].some((e) => e !== eng && e.memory === previous)) previous.endRun();
         const viewport = viewportWidth && viewportHeight ? { width: viewportWidth, height: viewportHeight } : undefined;
         const out = await eng.attach({
           url,

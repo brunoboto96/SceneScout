@@ -194,6 +194,12 @@ ${late.slice(0, 400)}`);
     const secondRun = await call("scout_report", { session: "second-run", level: "minimal" });
     if (!/No scout_design_audit was run in this run/.test(secondRun))
       fail(`a second run passed the audit gate on the first run's audit:\n${secondRun.slice(0, 400)}`);
+    // Closing the last session BY NAME ends the run too.
+    await call("scout_design_audit", { session: "second-run" });
+    await call("scout_close", { session: "second-run" });
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "third-run", mode: "read-only", objective: "third run" });
+    const thirdRun = await call("scout_report", { session: "third-run", level: "minimal" });
+    if (!/No scout_design_audit was run in this run/.test(thirdRun)) fail(`closing the last session by name did not end its run:\n${thirdRun.slice(0, 400)}`);
     await call("scout_close", { all: true });
     console.log("✓ a run's shared state ends with its last session");
   } finally {
