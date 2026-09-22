@@ -243,7 +243,7 @@ export function formatPace(pace: RunPace): string[] {
     ``,
     `${pace.actions} action(s) over ${sayDuration(pace.spanMs)}. Stated tasks and attaches are not counted: they take no time.`,
     ``,
-    `**While working** — first action to last, ${sayDuration(w.workingMs)} across sessions — ${pct(w.workingIdleMs, w.workingMs)} was spent in gaps over ${sayDuration(IDLE_GAP_MS)}, the agent thinking at length. That is the lanes' own efficiency.`,
+    `**While working** — first action to last, ${sayDuration(w.workingMs)} across sessions — ${pct(w.workingIdleMs, w.workingMs)} was spent in gaps over ${sayDuration(IDLE_GAP_MS)}, the agent thinking at length. That is how closely the sessions kept working.`,
     ``,
     `**After finishing**, sessions held their browsers for a further ${sayDuration(w.afterFinishMs)}` +
       (w.afterFoldMs !== null ? `, ${sayDuration(w.afterFoldMs)} of it after their report was already folded` : ``) +

@@ -1040,3 +1040,18 @@ test("a run's shared state ends with the run, and the project's memory does not"
   assert.equal(store.injectionsReported.size, 0);
   assert.equal(store.findings.length, 1, "findings are the project's, not the run's");
 });
+
+test("a finding filed right after a lane report is folded keeps its repro trace", () => {
+  const store = freshStore();
+  store.logAction({ action: "navigate", target: "/orders", url: "http://x/orders", session: "lane" });
+  store.logAction({ action: "click", target: "e3", url: "http://x/orders", session: "lane" });
+  store.logAction({ action: "type", target: "e4", url: "http://x/orders", session: "lane" });
+  // The planner folds the lane's report; the marker carries no page step.
+  store.logAction({ action: "lane-report", url: "", session: "lane" });
+  const [f] = store.addFinding({ ...base, url: "http://x/orders", state: "/orders#s1", title: "Filed after the fold", detail: "d", evidence: "e-after-fold" });
+  assert.deepEqual(
+    f.repro.map((r) => r.split(" ")[0]),
+    ["navigate", "click", "type"],
+    "the fold marker neither cuts the trace nor appears in it",
+  );
+});

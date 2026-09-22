@@ -185,6 +185,12 @@ ${late.slice(0, 400)}`);
     });
     const filed = await call("scout_lane_report", { lane: "orders", reply: report("input[name=email] has no label") });
     if (/have no finding/.test(filed)) fail(`a filed defect was still reported as unfiled:\n${filed}`);
+    // The fold is logged, so the pace section can tell reporting from waiting to be closed.
+    const logs = fs.readdirSync(path.join(projectDir, ".scenescout")).filter((f) => f.startsWith("session-") && f.endsWith(".jsonl"));
+    const folds = logs
+      .flatMap((f) => fs.readFileSync(path.join(projectDir, ".scenescout", f), "utf8").split("\n"))
+      .filter((l) => l.includes('"action":"lane-report"') && l.includes('"session":"orders"'));
+    if (folds.length === 0) fail("folding a lane report left no lane-report marker in the run's log");
     console.log("✓ a lane report names what was judged and never filed, and accepts prose around one fenced object");
     await call("scout_close", { all: true });
 

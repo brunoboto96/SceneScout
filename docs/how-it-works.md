@@ -293,13 +293,24 @@ sequenceDiagram
 
 ## 6. Where a run's time goes
 
-The pace section of the report splits a session's time three ways: the median
-gap between actions (the engine plus the agent deciding), idle gaps over 30 seconds (the agent thinking at length), and **held
-idle** — time a browser was open before the session's first action or after
-its last one. Held idle is the waste a person watching sees and a per-action
-number cannot: a lane waiting to be folded, or a session attached and never
-used. A session that attached and never acted used to be missing from the table
-entirely; it now appears with all of its time held idle.
+The pace section of the report keeps two kinds of time apart.
+
+- **While working** — each session's first action to its last. Inside it, the
+  median gap between actions is the engine plus the agent deciding, and gaps
+  over 30 seconds are the agent thinking at length. Their share of the working
+  time is how closely the sessions kept working.
+- **After finishing** — the last action to close. The lane is done and holds
+  its browser until it is collected; the fold of its report (logged as a
+  `lane-report` marker) splits this into still reporting and waiting to be
+  closed. This is the planner's cost, not the lanes': it grows with the number
+  of lanes and with the slowest one, however well each worked. On the
+  benchmark's eight-lane runs it was 18–28 browser-minutes a run, against 0–6%
+  idle while working. Closing each lane as soon as its report is folded removes
+  it.
+
+Time from attach to the first action is reported too. A session that attached
+and never acted used to be missing from the table entirely; it now appears
+with all of its time before a first action.
 
 The typed object is what makes the fold cheap: the planner counts rather than
 reads, a lane's reply is a few hundred tokens whatever it found, and a value

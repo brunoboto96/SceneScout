@@ -79,7 +79,7 @@ test("the report says what idle means, and warns about a held browser", () => {
   const log = [step(0, "admin"), step(1, "admin"), step(0, "auditor")];
   const lines = formatPace(measurePace(log, T0 + STALE_SESSION_MS + 1000, ["admin", "auditor"])).join("\n");
   assert.match(lines, /How the run was paced/);
-  assert.match(lines, /the agent thinking at length\. That is the lanes' own efficiency/, "the number is about the agent, and says so");
+  assert.match(lines, /the agent thinking at length\. That is how closely the sessions kept working/, "the number is about the agent, and says so");
   assert.match(lines, /Held a browser with nothing to do/);
   assert.match(lines, /auditor/);
   // A run where everything is busy gets the table and no warning.
@@ -226,4 +226,19 @@ test("the edges do not depend on the order the log arrives in", () => {
   const b = measurePace(inOrder, T0 + 999_000).sessions[0];
   assert.deepEqual([a.leadInMs, a.afterFinishMs], [b.leadInMs, b.afterFinishMs]);
   assert.deepEqual([b.leadInMs, b.afterFinishMs], [10_000, 80_000]);
+});
+
+test("a lane that acts again after its report was folded has no after-fold split", () => {
+  // Filing a defect the fold said was unfiled means acting after the fold. The
+  // browser WAS still needed, so none of the trailing time is "after fold".
+  const log = [
+    step(0, "orders", { action: "attach" }),
+    step(5, "orders"),
+    step(60, "orders", { action: "lane-report" }),
+    step(70, "orders"),
+    step(200, "orders", { action: "close" }),
+  ];
+  const orders = measurePace(log, T0 + 999_000).sessions[0];
+  assert.equal(orders.afterFinishMs, 130_000, "from the LAST action, the one after the fold");
+  assert.equal(orders.afterFoldMs, null);
 });
