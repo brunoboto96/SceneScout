@@ -186,8 +186,10 @@ test("the section says what the number is not, before any percentage", () => {
   const { decisions, findings } = run(0.9, 8, 2);
   const out = formatCalibration(calibrate(decisions, findings)).join("\n");
   assert.match(out, /not whether the app is broken/);
-  assert.ok(out.indexOf("not whether the app is broken") < out.indexOf("| Stated confidence |"), "the caveat comes before the table");
+  assert.ok(out.indexOf("not whether the app is broken") < out.indexOf("|"), "the caveat comes before any table");
   assert.match(out, /Expected calibration error/);
+  // The table's rows carry the whole point; a header alone says nothing.
+  assert.match(out, /\| 0\.8–1\.0 \| 10 \| 0\.90 \| 80% \|/, out);
 });
 
 test("re-tested findings are reported separately, because those ARE about the app", () => {
@@ -199,19 +201,74 @@ test("re-tested findings are reported separately, because those ARE about the ap
   const c = calibrate(decisions, findings);
   assert.deepEqual(c?.verified, { present: 1, gone: 1, changed: 0 });
   const out = formatCalibration(c).join("\n");
-  assert.match(out, /2 of the filed findings have since been re-tested/);
+  assert.match(out, /2 of the filed findings/);
   const one = formatCalibration(
     calibrate(
       decisions,
       findings.map((f, i) => (i === 1 ? { ...f, verdict: undefined, verifiedAt: undefined } : f)),
     ),
   ).join("\n");
-  assert.match(one, /1 of the filed findings has since been re-tested/, "it reads as English for a single finding");
+  assert.match(one, /1 of the filed findings has /, "it reads as English for a single finding");
   assert.match(out, /evidence about the app, unlike the table above/);
 });
 
 test("a run with nothing re-tested says nothing about re-testing", () => {
   const { decisions, findings } = run(0.9, 9, 1);
   const out = formatCalibration(calibrate(decisions, findings)).join("\n");
-  assert.ok(!out.includes("re-tested"), out);
+  assert.ok(!out.includes("scout_verify"), out);
+});
+
+// ── what the review's mutations showed was unpinned ─────────────────────────
+
+test("a decision about an endpoint that ANSWERED does not join to a failure on it", () => {
+  // The store counts only a failing signature as a bug's identity: a bare
+  // "POST /api/orders" names the endpoint, not what went wrong, and a double
+  // submit and an accepted negative quantity both name it. Joining on it too
+  // credited a lane for an unrelated finding on the same endpoint.
+  const c = calibrate([decision({ evidence: "POST /api/orders" })], [finding("POST /api/orders 500")]);
+  assert.equal(c?.filed, 0);
+  assert.deepEqual([...joinKeys("GET /api/x 200")], ["get /api/x 200"], "with no failure it falls back to the literal");
+});
+
+test("the re-test line counts findings, not the decisions that matched them", () => {
+  // Ten decisions about one endpoint match ONE finding. Counting per decision
+  // said "10 of the filed findings have since been re-tested" when there was
+  // one of them.
+  const decisions = Array.from({ length: 10 }, (_, i) => decision({ evidence: `GET /api/things/${i} 500` }));
+  const one = { ...finding("GET /api/things/1 500"), verdict: "present" as const, verifiedAt: "2026-09-22T11:00:00.000Z" };
+  const c = calibrate(decisions, [one]);
+  assert.equal(c?.filed, 10, "every decision is a prediction, and each was right");
+  assert.deepEqual(c?.verified, { present: 1, gone: 0, changed: 0 }, "but there is one finding");
+});
+
+test("a confidence that is not a number lands in the lowest bucket, not the highest", () => {
+  // Falling through the comparisons put NaN in 0.8–1.0 and rendered "mean
+  // stated confidence of NaN" beside it: a confidence nobody stated, reported
+  // as near-certainty. The schema refuses it; stored history is read without one.
+  assert.equal(bucketOf(Number.NaN), 0);
+  assert.equal(bucketOf(Number.POSITIVE_INFINITY), 0);
+  assert.equal(bucketOf(-1), 0);
+  assert.equal(bucketOf(99), 4);
+});
+
+test("the mean stated confidence is a mean", () => {
+  // Reporting the SUM would print "mean stated confidence of 9.00".
+  const { decisions, findings } = run(0.9, 9, 1);
+  assert.ok(Math.abs((calibrate(decisions, findings)?.stated ?? 0) - 0.9) < 1e-9);
+});
+
+test("the advice under the table matches the error above it", () => {
+  // These three bands ARE the section's advice; nothing else pins them.
+  const good = formatCalibration(calibrate(...(Object.values(run(0.9, 9, 1)) as [never, never]))).join("\n");
+  assert.match(good, /usable as probabilities/);
+  const bad = formatCalibration(calibrate(...(Object.values(run(0.9, 1, 9)) as [never, never]))).join("\n");
+  assert.match(bad, /not a rate/);
+});
+
+test("eight is the threshold, as a number and not as whatever the constant says", () => {
+  const seven = run(0.9, 7, 0);
+  const eight = run(0.9, 8, 0);
+  assert.deepEqual(formatCalibration(calibrate(seven.decisions, seven.findings)), [], "seven says nothing");
+  assert.ok(formatCalibration(calibrate(eight.decisions, eight.findings)).length > 0, "eight does");
+  assert.equal(MIN_FOR_A_VERDICT, 8);
 });

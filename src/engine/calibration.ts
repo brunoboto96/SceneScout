@@ -41,8 +41,17 @@ export interface RecordedDecision {
  */
 export const BUCKET_EDGES = [0.2, 0.4, 0.6, 0.8, 1.0] as const;
 
-/** Which bucket a confidence falls in. The top bucket is closed so 1.0 has somewhere to go. */
+/**
+ * Which bucket a confidence falls in. The top bucket is closed so 1.0 has
+ * somewhere to go.
+ *
+ * A value that is not a number lands in the LOWEST bucket, not the highest.
+ * The schema refuses those, but stored history is read back without one, and
+ * falling through the comparisons put a NaN in the 0.8–1.0 bucket — a
+ * confidence nobody stated, reported as near-certainty.
+ */
 export function bucketOf(confidence: number): number {
+  if (!Number.isFinite(confidence)) return 0;
   const c = Math.min(1, Math.max(0, confidence));
   for (let i = 0; i < BUCKET_EDGES.length; i += 1) {
     if (c <= BUCKET_EDGES[i]) return i;
@@ -80,8 +89,14 @@ export function signatureKey(evidence: string): string {
  * literal, lower-cased, since there is nothing else to key on.
  */
 export function joinKeys(evidence: string): Set<string> {
-  const sigs = endpointSignatures(evidence);
-  return sigs.size > 0 ? sigs : new Set([signatureKey(evidence).toLowerCase()]);
+  // Only a signature carrying a FAILURE status identifies a bug, which is the
+  // store's own rule: a bare `POST /api/orders` says which endpoint was
+  // involved, not what went wrong, and a double submit and an accepted
+  // negative quantity both name it. Without this filter a lane decision about
+  // an endpoint that ANSWERED would join to an unrelated finding on the same
+  // endpoint — a false hit, in the one direction the store refuses.
+  const failing = new Set([...endpointSignatures(evidence)].filter((sig) => /\s[45]\d{2}$/.test(sig)));
+  return failing.size > 0 ? failing : new Set([signatureKey(evidence).toLowerCase()]);
 }
 
 export interface Bucket {
@@ -137,6 +152,7 @@ export function calibrate(decisions: readonly RecordedDecision[], findings: read
 
   const buckets: Array<{ n: number; conf: number; hits: number }> = BUCKET_EDGES.map(() => ({ n: 0, conf: 0, hits: 0 }));
   const verified = { present: 0, gone: 0, changed: 0 };
+  const matched = new Map<string, Finding>();
   let filed = 0;
   let stated = 0;
 
@@ -153,7 +169,12 @@ export function calibrate(decisions: readonly RecordedDecision[], findings: read
     if (hit) b.hits += 1;
     if (hit) filed += 1;
     stated += d.confidence;
-    if (match?.verdict && match.verifiedAt) verified[match.verdict] += 1;
+    // By finding, not by decision: several decisions can match one finding,
+    // and this sentence counts findings.
+    if (match) matched.set(match.id, match);
+  }
+  for (const f of matched.values()) {
+    if (f.verdict && f.verifiedAt) verified[f.verdict] += 1;
   }
 
   const n = checkable.length;
@@ -188,8 +209,8 @@ export function formatCalibration(c: Calibration | null): string[] {
     `## How well the lanes judged`,
     ``,
     `${c.checkable} lane decision(s) called a defect and attached a signature; ${c.filed} became a filed finding (${pct(c.filed / c.checkable)}), ` +
-      `against a mean stated confidence of ${c.stated.toFixed(2)}. This measures agreement between the lanes and the bar this run applied — not whether the app is broken. ` +
-      `A lane can be perfectly calibrated against a planner that files the wrong things.`,
+      `against a mean stated confidence of ${c.stated.toFixed(2)}. This is the project's whole history, not just this run, and it measures agreement between the lanes and the bar this project applies — not whether the app is broken. ` +
+      `A lane can be perfectly calibrated against a planner that files the wrong things, and a defect filed without a machine signature cannot be joined at all, so it counts against the lane.`,
     ``,
     `| Stated confidence | Decisions | Said | Filed |`,
     `|---|---:|---:|---:|`,

@@ -602,17 +602,27 @@ server.registerTool(
       // against what the run goes on to file. Best-effort: a lane report is
       // still accepted if this project has no memory open yet, because the
       // planner's fold must not depend on where the report was written.
+      // A lane IS a session by convention, so its own session's memory is the
+      // right home. Picking whichever engine the map happened to iterate first
+      // wrote one project's decisions into another's memory when two sessions
+      // were attached to different projects.
+      const owner = engines.get(lane)?.memory ? engines.get(lane) : [...engines.values()].find((e) => e.memory);
       const at = new Date().toISOString();
-      let kept = 0;
-      for (const engine of engines.values()) {
-        if (!engine.memory) continue;
-        kept = engine.memory.addLaneDecisions(
-          lane,
-          parsed.report.decisions.map((d) => ({ ...d, lane, at })),
-        );
-        break;
-      }
-      const note = kept > 0 ? ` (${kept} decision(s) kept for calibration)` : "";
+      const kept = owner?.memory
+        ? owner.memory.addLaneDecisions(
+            lane,
+            parsed.report.decisions.map((d) => ({ ...d, lane, at })),
+          )
+        : 0;
+      // Say when nothing was kept. Every lane closing its session before the
+      // planner folds its report is the order the method describes, and it
+      // leaves no memory to write to — reporting a bare "accepted" while the
+      // skill promises the decisions are kept is the kind of silence that
+      // makes a later calibration section look wrong rather than absent.
+      const note =
+        kept > 0
+          ? ` (${kept} decision(s) kept for calibration)`
+          : " (no decision kept for calibration — no session in this process still has its project memory open)";
       return { content: [{ type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}` }] };
     } catch (err) {
       return errorText(err);

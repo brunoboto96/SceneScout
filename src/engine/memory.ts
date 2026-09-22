@@ -391,9 +391,17 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
 
   return out;
 }
-/** One lane's judgement of one observation, at one moment: what makes two records the same. */
+/**
+ * What makes two stored decisions the same judgement.
+ *
+ * Deliberately NOT the timestamp. `at` is stamped when the planner folds the
+ * reply, not when the lane judged, so relaying one reply twice — which the
+ * protocol invites, since a refused report is asked for again — wrote every
+ * decision a second time and doubled the lane's weight in the calibration.
+ * Identity is what was decided, so re-folding the same reply is a no-op.
+ */
 function decisionKey(d: RecordedDecision): string {
-  return `${d.lane}|${d.observation}|${d.at}`;
+  return [d.lane, d.observation, d.verdict, d.severity ?? "", d.category ?? "", d.confidence, d.evidence ?? ""].join("|");
 }
 
 /**
@@ -964,9 +972,15 @@ export class MemoryStore {
       list.push(record);
       added += 1;
     }
+    // Count what SURVIVES the cap, not what was appended: reporting "1050
+    // kept" while the store holds 1000 tells the caller something untrue about
+    // its own data. Flush whenever the stored list changed, including when the
+    // only change was eviction, or memory and disk drift apart.
+    const before = this.data.laneDecisions?.length ?? 0;
     this.data.laneDecisions = list.slice(-MAX_LANE_DECISIONS);
+    const kept = this.data.laneDecisions.length - before;
     if (added > 0) this.flush();
-    return added;
+    return Math.max(0, kept);
   }
 
   resolveFinding(id: string): Finding | null {

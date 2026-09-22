@@ -26,6 +26,7 @@ import {
   MAX_STATES_PER_ROUTE,
   pruneStates,
   type StateRecord,
+  MAX_LANE_DECISIONS,
 } from "../src/engine/memory.ts";
 
 /** Temp dirs created by the running test, cleaned up even when it fails. */
@@ -934,4 +935,73 @@ test("lane decisions survive a reload, and a second process's are not lost", () 
   store.addLaneDecisions("orders", [{ ...one, observation: "second look" }]);
   const both = openStore(path.dirname(store.dir)).laneDecisions;
   assert.deepEqual(both.map((d) => d.lane + ":" + d.observation).sort(), ["orders:empty register", "orders:second look", "stock:stale count"]);
+});
+
+test("a lane's free text is redacted and capped before it is stored", () => {
+  // An observation and a signature are written by a model reading the app
+  // under test, and hygiene-test exists because a credential must never reach
+  // disk. Storing them raw survived every test in this suite.
+  const store = freshStore();
+  const at = "2026-09-22T10:00:00.000Z";
+  store.addLaneDecisions("orders", [
+    {
+      lane: "orders",
+      observation: "login as ?token=sk-live-abcdef0123456789 fails",
+      verdict: "defect",
+      severity: "high",
+      category: "security",
+      confidence: 0.9,
+      evidence: "GET /api/login?api_key=sk-live-abcdef0123456789 403",
+      at,
+    },
+  ]);
+  const stored = store.laneDecisions[0];
+  assert.ok(!stored.observation.includes("sk-live-abcdef0123456789"), stored.observation);
+  assert.ok(!(stored.evidence ?? "").includes("sk-live-abcdef0123456789"), String(stored.evidence));
+
+  // …and neither field can grow without bound.
+  store.addLaneDecisions("orders", [
+    { lane: "orders", observation: "x".repeat(900), verdict: "unsure", severity: null, category: null, confidence: 0.5, evidence: "y".repeat(900), at },
+  ]);
+  const long = store.laneDecisions[1];
+  assert.ok(long.observation.length <= 200, String(long.observation.length));
+  assert.ok((long.evidence ?? "").length <= 200, String(long.evidence?.length));
+});
+
+test("re-folding one lane report does not double the lane's weight", () => {
+  // `at` is stamped when the planner FOLDS the reply, not when the lane
+  // judged, so a retry or a re-fold stored every decision again and counted
+  // each prediction twice in the calibration.
+  const store = freshStore();
+  const one = {
+    lane: "orders",
+    observation: "empty register",
+    verdict: "defect" as const,
+    severity: "high",
+    category: "http-error",
+    confidence: 0.9,
+    evidence: "GET /api/orders 403",
+    at: "2026-09-22T10:00:00.000Z",
+  };
+  assert.equal(store.addLaneDecisions("orders", [one]), 1);
+  assert.equal(store.addLaneDecisions("orders", [{ ...one, at: "2026-09-22T10:05:00.000Z" }]), 0, "folded again a minute later: the same judgement");
+  assert.equal(store.laneDecisions.length, 1);
+});
+
+test("lane decisions are capped, and the count reported is what survived", () => {
+  const store = freshStore();
+  const at = "2026-09-22T10:00:00.000Z";
+  const many = Array.from({ length: MAX_LANE_DECISIONS + 50 }, (_, i) => ({
+    lane: "orders",
+    observation: `obs-${i}`,
+    verdict: "defect" as const,
+    severity: "low",
+    category: "http-error",
+    confidence: 0.5,
+    evidence: `GET /api/r${i} 500`,
+    at,
+  }));
+  const kept = store.addLaneDecisions("orders", many);
+  assert.equal(store.laneDecisions.length, MAX_LANE_DECISIONS);
+  assert.equal(kept, MAX_LANE_DECISIONS, "reporting what was appended would claim more than the store holds");
 });
