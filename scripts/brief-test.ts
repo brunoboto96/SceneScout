@@ -97,13 +97,33 @@ test("each lane's objective says what it owns, against the run's goal", () => {
   assert.equal(bare.objective, "Own /orders", "with no goal it still says the remit");
 });
 
-test("the brief carries the two rules a hand-written one drops", () => {
+test("each lane lands on its own first route, not the home page", () => {
+  const lanes = planLanes(["/", "/orders/b", "/orders/a", "/stock/a"], 3);
+  const landings = Object.fromEntries(lanes.map((l) => [l.lane, l.landing]));
+  assert.equal(landings.orders, "/orders/a", "the first of its routes in the stable order");
+  assert.equal(landings.stock, "/stock/a");
+  assert.ok(
+    lanes.every((l) => l.routes.includes(l.landing)),
+    "a lane lands on a route it owns",
+  );
+  const out = formatBriefs(lanes);
+  assert.match(out, /url: "<origin><landing>"/);
+  assert.match(out, /landing: \/orders\/a/);
+});
+
+test("the brief carries the rules a hand-written one drops", () => {
   const out = formatBriefs(planLanes(["/orders/a", "/stock/a"], 2, { goal: "g" }), { mode: "safe-write", goal: "g" });
   assert.match(out, /LANE PLAN — 2 lane\(s\) over 2 route\(s\)/);
   assert.match(out, /mode: "safe-write"/, "a lane must not attach laxer than the run was authorized for");
   assert.match(out, /works ITS routes only/);
   assert.match(out, /Every acting tool takes a `task`/);
   assert.match(out, /scout_lane_report/, "and it says how to hand results back");
+  // The rules a measured run's briefs added, each aimed at one line of the scorecard.
+  assert.match(out, /File each defect with scout_finding the moment it is judged/, "judged, not filed");
+  assert.match(out, /read the status of the request behind it/, "a correct empty list read as stuck");
+  assert.match(out, /submit one markup-shaped value, then open where that record is listed/, "stored injection");
+  assert.match(out, /does NOT close its session/, "decisions kept for calibration");
+  assert.match(out, /scout_coverage before finishing/);
   assert.match(out, /── orders ──/);
   assert.match(out, /objective: Own \/orders — g/);
 });

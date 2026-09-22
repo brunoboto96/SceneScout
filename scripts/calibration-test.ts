@@ -11,7 +11,16 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bucketLabel, bucketOf, calibrate, formatCalibration, joinKeys, MIN_FOR_A_VERDICT, type RecordedDecision } from "../src/engine/calibration.ts";
+import {
+  bucketLabel,
+  bucketOf,
+  calibrate,
+  formatCalibration,
+  joinKeys,
+  MIN_FOR_A_VERDICT,
+  type RecordedDecision,
+  unfiledDefects,
+} from "../src/engine/calibration.ts";
 import type { Finding } from "../src/engine/memory.ts";
 
 let n = 0;
@@ -288,4 +297,30 @@ test("a confidence the file should not have held is excluded, not averaged in", 
   assert.ok(Math.abs((c?.stated ?? 0) - 0.9) < 1e-9, String(c?.stated));
   assert.ok(Number.isFinite(c?.ece), String(c?.ece));
   assert.match(formatCalibration(c).join("\n"), /2 further decision\(s\)/);
+});
+
+test("a judged defect with no finding behind it is named when the report is folded, and a filed one is not", () => {
+  const findings = [finding("GET /api/things/3 500"), finding("save-notes covered by sticky footer at 1280x800")];
+  const unfiled = unfiledDefects(
+    [
+      // Filed under another id of the same endpoint: the store merges these, so this is filed.
+      decision({ observation: "things-500", evidence: "GET /api/things/9 500" }),
+      // No failure signature, but the same evidence text the finding carries.
+      decision({ observation: "sticky", evidence: "save-notes covered by sticky footer" }),
+      // Judged, never filed: the case this exists for.
+      decision({ observation: "label-missing", evidence: "input[name=email] has no label" }),
+      decision({ observation: "no-evidence", evidence: null }),
+      // Not defects: nothing to file.
+      decision({ observation: "fine", verdict: "not_a_defect", evidence: "GET /api/other 500" }),
+      decision({ observation: "maybe", verdict: "unsure", evidence: "GET /api/other 500" }),
+    ],
+    findings,
+  );
+  assert.deepEqual(unfiled, ["label-missing — input[name=email] has no label", "no-evidence"]);
+});
+
+test("a short signature does not count as filed just because it appears inside another finding", () => {
+  // "404" is inside half a run's findings; it says nothing about which one covers this.
+  assert.deepEqual(unfiledDefects([decision({ observation: "x", evidence: "404" })], [finding("GET /img/chart.png 404")]), ["x — 404"]);
+  assert.deepEqual(unfiledDefects([decision({ observation: "x", evidence: "404" })], [finding("404")]), [], "the same text exactly is filed");
 });

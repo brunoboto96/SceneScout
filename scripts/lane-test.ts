@@ -73,12 +73,35 @@ test("lane: a well-formed reply parses, bare or fenced, with or without a newlin
   }
 });
 
-test("lane: text before or after the object is refused, and the reason says which", () => {
+test("lane: unfenced text around the object is refused, and the reason says which", () => {
   refused("Here is my report:\n" + laneReport(), /no text before/);
   refused(laneReport() + "\nHope this helps.", /no text after/);
-  refused("```json\n" + laneReport() + "\n```\nDone.", /closing ```/);
   refused("", /no text before/, "empty reply");
   refused("{not json", /not valid JSON/);
+});
+
+test("lane: prose around ONE fenced object is dropped unread, and the parse says so", () => {
+  // Six of eight lanes in one measured run replied like this.
+  const bare = parseLaneReport(laneReport());
+  for (const wrapped of [
+    "Done. Here is my report:\n\n```json\n" + laneReport() + "\n```",
+    "```json\n" + laneReport() + "\n```\nDone.",
+    "Summary: 3 defects.\n```\n" + laneReport() + "\n```\nLet me know if you need more.",
+  ]) {
+    const r = parseLaneReport(wrapped);
+    assert.ok(r.ok, wrapped.slice(0, 30));
+    assert.equal(r.aroundIgnored, true);
+    assert.deepEqual(r.report, bare.ok && bare.report);
+  }
+  assert.equal(bare.ok && bare.aroundIgnored, false, "a bare object has nothing around it");
+  const fencedOnly = parseLaneReport("```json\n" + laneReport() + "\n```");
+  assert.equal(fencedOnly.ok && fencedOnly.aroundIgnored, false, "nor does a lone fenced one");
+
+  // The contrast: two objects, or a fence holding something else, is still a guess.
+  refused("```json\n" + laneReport() + "\n```\nand the corrected one:\n```json\n" + laneReport() + "\n```", /2 fenced JSON blocks/);
+  refused("Notes:\n```\nnot an object\n```\n", /no text before/);
+  // A fenced block that is not valid is refused on its content, not skipped.
+  refused('Here:\n```json\n{"lane": \n```', /not valid JSON/);
 });
 
 test("lane: every value comes from a closed set, and the reason names the field", () => {

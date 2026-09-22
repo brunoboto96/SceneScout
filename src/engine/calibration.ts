@@ -273,3 +273,52 @@ function readEce(ece: number): string {
   if (ece <= 0.15) return "Close enough to compare lanes by.";
   return "Far enough apart that a lane's confidence is worth reading as an ordering rather than a rate — after checking the exclusions above, which push this upward.";
 }
+
+/** Most unfiled defects named when a lane report is folded; the rest are counted. */
+export const MAX_UNFILED_NAMED = 10;
+
+/**
+ * The defects a lane judged that no finding in the store covers yet.
+ *
+ * A lane's report is a verdict, not a filing: a defect it judged and never
+ * passed to scout_finding never reaches the report. That happened in a
+ * measured run — a covered Save button, judged a defect at 0.75 and filed by
+ * nobody — and it is cheapest to catch at the moment the planner folds the
+ * report, while the lane's session is still open.
+ *
+ * Matched on the store's failing-endpoint signature where the evidence has
+ * one, and on the evidence text otherwise. The text match is what the
+ * calibration join refuses, because there a miss is scored against the lane;
+ * here a miss only asks someone to check, which costs a look and nothing more.
+ */
+export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdict" | "observation" | "evidence">[], findings: readonly Finding[]): string[] {
+  const keys = new Set<string>();
+  const texts: string[] = [];
+  for (const f of findings) {
+    if (!f.evidence) continue;
+    for (const key of joinKeys(f.evidence)) keys.add(key);
+    texts.push(squash(f.evidence));
+  }
+  const out: string[] = [];
+  for (const d of decisions) {
+    if (d.verdict !== "defect") continue;
+    if (d.evidence) {
+      const joined = [...joinKeys(d.evidence)];
+      if (joined.length > 0 && joined.some((k) => keys.has(k))) continue;
+      const text = squash(d.evidence);
+      if (text && texts.some((t) => t === text || contains(t, text) || contains(text, t))) continue;
+    }
+    out.push(d.evidence ? `${d.observation} — ${d.evidence}` : d.observation);
+  }
+  return out;
+}
+
+/** One signature inside another, when the inner one is long enough to mean something: "404" is inside half the findings in a run. */
+function contains(outer: string, inner: string): boolean {
+  return inner.length >= MIN_CONTAINED && outer.includes(inner);
+}
+const MIN_CONTAINED = 12;
+
+function squash(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}

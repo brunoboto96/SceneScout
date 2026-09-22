@@ -20,7 +20,7 @@ import type { ActionLogEntry } from "./memory.js";
  * counting them inflates the action count and drags the median gap toward
  * zero. One real run logged 325 entries of which 107 were stated tasks.
  */
-const MARKER_ACTIONS = new Set(["task", "attach", "created-resource", "journey:start", "journey:end", "record:full", "record:failed"]);
+const MARKER_ACTIONS = new Set(["task", "attach", "close", "created-resource", "journey:start", "journey:end", "record:full", "record:failed"]);
 
 /** Whether a log entry represents work the browser actually did. */
 export function isActing(action: string): boolean {
@@ -47,6 +47,14 @@ export interface SessionPace {
   quietMs: number;
   /** How many of its actions kept a frame. Zero on a run that was not recorded. */
   framed: number;
+  /**
+   * Time the session held a browser with nothing happening: from attach to its
+   * first action, and from its last action to close (or to now, while it is
+   * still attached), summed over every attach. A session that attached and
+   * never acted is all held idle — and used to be missing from the table
+   * altogether, because it had no actions to measure.
+   */
+  heldIdleMs: number;
 }
 
 export interface RunPace {
@@ -72,20 +80,30 @@ function median(sorted: readonly number[]): number {
 export function measurePace(log: readonly ActionLogEntry[], nowMs: number, attached: readonly string[] = []): RunPace {
   const stillOpen = new Set(attached);
   const bySession = new Map<string, ActionLogEntry[]>();
+  const lifecycle = new Map<string, ActionLogEntry[]>();
   for (const entry of log) {
-    if (!isActing(entry.action)) continue;
     const name = entry.session ?? "default";
-    const list = bySession.get(name);
+    const into = isActing(entry.action) ? bySession : entry.action === "attach" || entry.action === "close" ? lifecycle : null;
+    if (!into) continue;
+    const list = into.get(name);
     if (list) list.push(entry);
-    else bySession.set(name, [entry]);
+    else into.set(name, [entry]);
   }
+  // A session that attached and never acted still held a browser.
+  for (const name of lifecycle.keys()) if (!bySession.has(name)) bySession.set(name, []);
 
   const sessions: SessionPace[] = [];
   let first = Number.POSITIVE_INFINITY;
   let last = 0;
   for (const [session, entries] of bySession) {
     const times = entries.map((e) => Date.parse(e.at)).filter((t) => Number.isFinite(t));
-    if (times.length === 0) continue;
+    const heldIdleMs = heldIdle(lifecycle.get(session) ?? [], times, nowMs, stillOpen.has(session));
+    if (times.length === 0) {
+      if (heldIdleMs > 0) {
+        sessions.push({ session, actions: 0, spanMs: 0, medianGapMs: 0, maxGapMs: 0, idleShare: 0, quietMs: 0, framed: 0, heldIdleMs });
+      }
+      continue;
+    }
     times.sort((a, b) => a - b);
     first = Math.min(first, times[0]);
     last = Math.max(last, times[times.length - 1]);
@@ -102,6 +120,7 @@ export function measurePace(log: readonly ActionLogEntry[], nowMs: number, attac
       idleShare: spanMs > 0 ? idleMs / spanMs : 0,
       quietMs: Math.max(0, nowMs - times[times.length - 1]),
       framed: entries.filter((e) => e.frame).length,
+      heldIdleMs,
     });
   }
   sessions.sort((a, b) => b.actions - a.actions);
@@ -115,6 +134,35 @@ export function measurePace(log: readonly ActionLogEntry[], nowMs: number, attac
     // what the first run of this report did for six of its eleven sessions.
     quiet: sessions.filter((s) => s.quietMs > STALE_SESSION_MS && stillOpen.has(s.session)).map((s) => s.session),
   };
+}
+
+/**
+ * Idle time at the edges of each attach: attach to first action, last action
+ * to close. An attach with no close after it ends at the next attach, or at
+ * now while the session is still open. A log written before close was
+ * recorded has no close marker; its closed sessions count no trailing idle,
+ * because when they closed is unknown.
+ */
+function heldIdle(markers: readonly ActionLogEntry[], actionTimes: readonly number[], nowMs: number, stillOpen: boolean): number {
+  const events = markers
+    .map((m) => ({ kind: m.action, at: Date.parse(m.at) }))
+    .filter((e) => Number.isFinite(e.at))
+    .sort((a, b) => a.at - b.at);
+  let idle = 0;
+  for (let i = 0; i < events.length; i += 1) {
+    if (events[i].kind !== "attach") continue;
+    const start = events[i].at;
+    const next = events.slice(i + 1).find((e) => e.kind === "attach" || e.kind === "close");
+    const end = next ? next.at : stillOpen ? nowMs : null;
+    const inside = actionTimes.filter((t) => t >= start && (end === null || t <= end));
+    if (inside.length === 0) {
+      if (end !== null) idle += end - start;
+      continue;
+    }
+    idle += inside[0] - start;
+    if (end !== null) idle += end - inside[inside.length - 1];
+  }
+  return Math.max(0, idle);
 }
 
 /** Milliseconds as a person says them: 45s, 4m12s, 1h03m. */
@@ -136,14 +184,14 @@ export function formatPace(pace: RunPace): string[] {
   const lines = [
     `## How the run was paced`,
     ``,
-    `${pace.actions} action(s) over ${sayDuration(pace.spanMs)}. Stated tasks and attaches are not counted: they take no time. Idle share is time the browser stood still waiting for the agent, not time the engine spent working.`,
+    `${pace.actions} action(s) over ${sayDuration(pace.spanMs)}. Stated tasks and attaches are not counted: they take no time. Idle share is time the browser stood still waiting for the agent, not time the engine spent working. Held idle is time a browser was open before a session's first action or after its last one — a lane waiting to be folded, or attached and never used.`,
     ``,
-    `| Session | Actions | Span | Median gap | Longest gap | Idle | Frames |`,
-    `|---|---:|---:|---:|---:|---:|---:|`,
+    `| Session | Actions | Span | Median gap | Longest gap | Idle | Held idle | Frames |`,
+    `|---|---:|---:|---:|---:|---:|---:|---:|`,
   ];
   for (const s of pace.sessions) {
     lines.push(
-      `| ${s.session} | ${s.actions} | ${sayDuration(s.spanMs)} | ${sayDuration(s.medianGapMs)} | ${sayDuration(s.maxGapMs)} | ${Math.round(s.idleShare * 100)}% | ${s.framed} |`,
+      `| ${s.session} | ${s.actions} | ${sayDuration(s.spanMs)} | ${sayDuration(s.medianGapMs)} | ${sayDuration(s.maxGapMs)} | ${Math.round(s.idleShare * 100)}% | ${sayDuration(s.heldIdleMs)} | ${s.framed} |`,
     );
   }
   lines.push(``);

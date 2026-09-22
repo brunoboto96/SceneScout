@@ -38,6 +38,12 @@ export interface LaneBrief {
   modules: string[];
   /** Every route it owns. */
   routes: string[];
+  /**
+   * Where the lane attaches: its own first route, not the app's home page.
+   * Every lane attaching on `/` meant every lane met the landing page's
+   * defects first, and several filed the same one.
+   */
+  landing: string;
 }
 
 /**
@@ -114,6 +120,7 @@ export function planLanes(routes: readonly string[], laneCount: number, opts: Br
     objective: laneObjective(lane.modules, opts.goal),
     modules: lane.modules,
     routes: lane.routes,
+    landing: lane.routes[0],
   }));
 }
 
@@ -137,19 +144,25 @@ export function formatBriefs(briefs: readonly LaneBrief[], opts: BriefOptions = 
   const lines = [
     `LANE PLAN — ${briefs.length} lane(s) over ${briefs.reduce((n, b) => n + b.routes.length, 0)} route(s).`,
     ``,
-    `Give each lane its own agent. Every lane attaches with its own session name, so the browsers run genuinely in parallel:`,
-    `  scout_attach { session: "<lane>", url, projectPath, mode: "${mode}"${opts.role ? `, storageStatePath: "<${opts.role}>"` : ""}, objective: "<objective>" }`,
+    `Give each lane its own agent. Every lane attaches with its own session name, so the browsers run genuinely in parallel, and lands on its own first route rather than the home page:`,
+    `  scout_attach { session: "<lane>", url: "<origin><landing>", projectPath, mode: "${mode}"${opts.role ? `, storageStatePath: "<${opts.role}>"` : ""}, objective: "<objective>" }`,
     ``,
-    `Rules to pass on, both of which a hand-written brief tends to drop:`,
-    `  · A lane works ITS routes only. Two lanes auditing the same register while a third module is never opened is the failure this plan exists to prevent — and route coverage will look complete either way.`,
+    `Rules to pass on, which a hand-written brief tends to drop:`,
+    `  · A lane works ITS routes only. Two lanes auditing the same register while a third module is never opened is the failure this plan exists to prevent — and route coverage will look complete either way. A defect on a page it does not own is that page's lane's to file.`,
     `  · Every acting tool takes a \`task\`. A lane that acts with none is refused, and the person watching the live view would otherwise see a browser clicking through their app with nothing to say why.`,
-    `  · A lane reports back with scout_lane_report, not prose. Call scout_lane_report with no reply to get the instruction to put in its prompt.`,
+    `  · File each defect with scout_finding the moment it is judged, before writing the report. A defect only in the report is not in the run's report.`,
+    `  · Before calling a list empty, stale or stuck, read the status of the request behind it: a correct empty result and a failed one can render identically.`,
+    `  · On a create form, submit one markup-shaped value, then open where that record is listed. Any lane's session catches it rendering as markup, so the list may belong to another lane.`,
+    `  · When a control is withheld from this role, call the endpoint behind it with scout_request: hiding a button is not enforcing a rule. When a sort or filter runs, check the result is what it claims.`,
+    `  · Check scout_coverage before finishing.`,
+    `  · A lane reports back with scout_lane_report, not prose, and does NOT close its session: the planner folds the report, which checks each judged defect was filed, then closes it. Call scout_lane_report with no reply to get the instruction to put in its prompt.`,
     ``,
   ];
   for (const b of briefs) {
     lines.push(`── ${b.lane} ──`);
     lines.push(`objective: ${b.objective}`);
     lines.push(`owns: ${b.modules.join(", ")} (${b.routes.length} route(s))`);
+    lines.push(`landing: ${b.landing}`);
     lines.push(`routes: ${b.routes.slice(0, 20).join(", ")}${b.routes.length > 20 ? ` … and ${b.routes.length - 20} more` : ""}`);
     lines.push(``);
   }

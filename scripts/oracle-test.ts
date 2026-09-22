@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { brokenImageIssues, geometryIssues } from "../src/engine/collector.ts";
+import { brokenImageIssues, displayName, geometryIssues, missingName } from "../src/engine/collector.ts";
 import { POLICY_BLOCK_WINDOW_MS, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
 import {
   describeInjection,
@@ -390,4 +390,18 @@ test("the probe list keeps the first sighting of a payload and drops the oldest 
   assert.equal(again.length, MAX_PROBES);
   assert.equal(again.find((p) => p.payload.includes('"7"'))?.baseline, 7, "a payload typed again keeps its first baseline");
   assert.equal(injectionProbe('<b title="a\nb">x</b>', "f", "u")?.selector, 'b[title="a\\a b"]', "a newline in a value is escaped for the selector");
+});
+
+test("an empty live region is not an unnamed control; an empty button still is", () => {
+  // The same missing name, and the one fact that flips it: whether the role takes input or announces.
+  for (const role of ["status", "alert", "log", "timer", "marquee"]) {
+    assert.equal(missingName({ role, name: "" }), false, role);
+    assert.equal(displayName({ role, name: "" }), "(empty live region)", role);
+  }
+  for (const role of ["button", "link", "textbox", "generic", "combobox"]) {
+    assert.equal(missingName({ role, name: "" }), true, role);
+    assert.equal(displayName({ role, name: "" }), "(unnamed)", role);
+  }
+  assert.equal(missingName({ role: "status", name: "Saved." }), false);
+  assert.equal(displayName({ role: "status", name: "Saved." }), "Saved.");
 });

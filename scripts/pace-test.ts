@@ -108,6 +108,7 @@ test("stated tasks and attaches are not actions: they take no time", () => {
   assert.equal(pace.sessions[0].medianGapMs, 20_000, "the gap between the clicks, not between a click and a marker");
   assert.equal(isActing("click"), true);
   assert.equal(isActing("task"), false);
+  assert.equal(isActing("close"), false);
   assert.equal(isActing("journey:start"), false);
 });
 
@@ -129,4 +130,33 @@ test("only a session still attached can be holding a browser", () => {
       .includes("Held a browser"),
   );
   assert.match(formatPace(measurePace(log, later, ["lane-b"])).join("\n"), /Held a browser with nothing to do.*lane-b/);
+});
+
+test("a browser held open around a session's actions is counted as held idle", () => {
+  // A lane that waited 20s after attaching, acted for 10s, then sat for two
+  // minutes waiting to be folded before it was closed.
+  const log = [step(0, "orders", { action: "attach" }), step(20, "orders"), step(30, "orders"), step(150, "orders", { action: "close" })];
+  const orders = measurePace(log, T0 + 999_000).sessions[0];
+  assert.equal(orders.actions, 2, "attach and close are not actions");
+  assert.equal(orders.heldIdleMs, 140_000);
+  assert.match(formatPace(measurePace(log, T0 + 999_000)).join("\n"), /\| orders \| 2 \| 10s \| .* \| 2m20s \| 0 \|/);
+});
+
+test("a session that attached and never acted is in the table, all of it held idle", () => {
+  // The case the old table could not show: a re-attached browser nobody used.
+  const log = [step(0, "admin"), step(5, "admin"), step(10, "inventory", { action: "attach" }), step(130, "inventory", { action: "close" })];
+  const byName = Object.fromEntries(measurePace(log, T0 + 999_000).sessions.map((s) => [s.session, s]));
+  assert.equal(byName.inventory?.actions, 0);
+  assert.equal(byName.inventory?.heldIdleMs, 120_000);
+  assert.equal(byName.admin.heldIdleMs, 0, "no attach recorded, nothing to measure from");
+});
+
+test("a session still attached is held idle up to now; a closed one with no close marker is not guessed at", () => {
+  const log = [step(0, "qa", { action: "attach" }), step(10, "qa")];
+  assert.equal(measurePace(log, T0 + 70_000, ["qa"]).sessions[0].heldIdleMs, 70_000, "10s before, 60s since");
+  // Written before close was logged: when it closed is unknown, so only the leading gap counts.
+  assert.equal(measurePace(log, T0 + 70_000, []).sessions[0].heldIdleMs, 10_000);
+  // Re-attached: each attach is measured on its own.
+  const twice = [...log, step(20, "qa", { action: "close" }), step(100, "qa", { action: "attach" }), step(103, "qa"), step(104, "qa", { action: "close" })];
+  assert.equal(measurePace(twice, T0 + 999_000).sessions[0].heldIdleMs, 10_000 + 10_000 + 3_000 + 1_000);
 });

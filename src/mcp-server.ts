@@ -36,6 +36,7 @@ import { BrowserEngine } from "./engine/browser.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
 import { FINDING_CATEGORIES, MemoryStore, redactSecrets } from "./engine/memory.js";
 import { LANE_NAME_MAX, laneReportInstruction, parseLaneReport, summarizeLaneReport } from "./engine/lane.js";
+import { MAX_UNFILED_NAMED, unfiledDefects } from "./engine/calibration.js";
 import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
 import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
 import {
@@ -260,7 +261,7 @@ function reportExtras(eng: BrowserEngine): ReportExtras {
   return {
     routesVisited: all.length - unvisited.length,
     routesTotal: all.length,
-    designAudits: eng.designAuditCount,
+    designAudits: eng.memory?.auditsThisRun ?? eng.designAuditCount,
     createdResources: eng.createdResources,
     unvisitedRoutes: unvisited,
     mode: eng.mode,
@@ -623,7 +624,23 @@ server.registerTool(
         kept > 0
           ? ` (${kept} decision(s) kept for calibration)`
           : ` (nothing kept for calibration — session ${JSON.stringify(lane)} is not attached here, so there is no project memory to write to. Fold a lane report before closing that lane's session.)`;
-      return { content: [{ type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}` }] };
+      // Follow-through: a defect judged and never filed never reaches the
+      // report. Checked against every finding on the lane's project, so one
+      // the planner or another lane filed counts. Only that project's: the
+      // same reason decisions are kept only there.
+      const unfiled = owner ? unfiledDefects(parsed.report.decisions, owner.findings) : [];
+      const followUp =
+        unfiled.length > 0
+          ? `\n⚠ ${unfiled.length} judged defect(s) have no finding with matching evidence yet:\n` +
+            unfiled
+              .slice(0, MAX_UNFILED_NAMED)
+              .map((u) => `  · ${u}`)
+              .join("\n") +
+            (unfiled.length > MAX_UNFILED_NAMED ? `\n  … +${unfiled.length - MAX_UNFILED_NAMED} more` : "") +
+            `\nFile each with scout_finding (the same evidence), or confirm which finding already covers it, before closing the lane's session. A judged defect that is never filed is not in the report.`
+          : "";
+      const around = parsed.aroundIgnored ? `\n(The text around the report's JSON block was discarded unread.)` : "";
+      return { content: [{ type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}${around}${followUp}` }] };
     } catch (err) {
       return errorText(err);
     }
@@ -1467,8 +1484,13 @@ server.registerTool(
               `\n→ Run scout_crawl (no args) to cover them in one call.`,
           );
         }
-        if (eng.designAuditCount === 0) {
-          gates.push(`No scout_design_audit was run this session — run it on at least one representative page (visual/a11y coverage is part of every level).`);
+        // Counted across every session on this project, not just the one
+        // asking: in a parallel run the lanes audit and the planner reports.
+        const auditsThisRun = eng.memory.auditsThisRun;
+        if (auditsThisRun === 0) {
+          gates.push(
+            `No scout_design_audit was run in this run, by any session — run it on at least one representative page (visual/a11y coverage is part of every level).`,
+          );
         }
         const lvl = level ?? "medium";
         const auditedRoutes = Object.values(eng.memory.routeFacts).filter((f) => f.audited).length;
@@ -1485,7 +1507,7 @@ server.registerTool(
         const gapList = computeGaps(eng.memory, {
           routesVisited: all.length - unvisited.length,
           routesTotal: all.length,
-          designAudits: eng.designAuditCount,
+          designAudits: auditsThisRun,
           unvisitedRoutes: unvisited,
           mode: eng.mode,
         });
@@ -1510,7 +1532,7 @@ server.registerTool(
           history,
           routesVisited: all.length - unvisited.length,
           routesTotal: all.length,
-          designAudits: eng.designAuditCount,
+          designAudits: auditsThisRun,
           createdResources: eng.createdResources,
           unvisitedRoutes: unvisited,
           mode: eng.mode,

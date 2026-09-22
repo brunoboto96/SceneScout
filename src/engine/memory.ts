@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { RecordedDecision } from "./calibration.js";
 import { normalizePath, shortHash } from "./fingerprint.js";
+import type { InjectionProbe } from "./injection.js";
 
 export interface StateRecord {
   url: string;
@@ -694,6 +695,23 @@ export class MemoryStore {
   readonly ownedIds = new Map<string, Set<string>>();
   /** Human-readable creation log for this run — becomes the report's cleanup list. */
   readonly createdResources: string[] = [];
+  /**
+   * Markup-shaped values any session of this run typed, and the injections
+   * already reported. Shared for the same reason ownership is: a parallel run
+   * splits the app by route, so the lane that types a payload into a create
+   * form is rarely the lane that opens the list rendering it, and a probe kept
+   * per session could only ever catch a reflected injection. Not persisted: a
+   * payload typed in an earlier run is not this run's evidence.
+   */
+  probes: InjectionProbe[] = [];
+  readonly injectionsReported = new Set<string>();
+  /**
+   * Design audits any session of this run performed. The report's gate asked
+   * the session that happened to call scout_report, so a run whose lanes
+   * audited every page was refused because the planner's own session had not.
+   * Not persisted: an audit from an earlier run does not satisfy this one.
+   */
+  auditsThisRun = 0;
 
   constructor(projectDir: string) {
     this.dir = path.join(projectDir, MEMORY_DIRNAME);

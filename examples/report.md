@@ -9,7 +9,7 @@ Generated: (by `npm run demo`)
 | Open findings | 12 (5 high) — 12 seen this session, 0 historical |
 | Route coverage | 12/12 |
 | States explored | 12 |
-| Design audits this session | 3 |
+| Design audits this run (all sessions) | 3 |
 | Oracle violations this session | 10 |
 | Errors caused by the tester's own write-policy blocks (not counted above) | 3 |
 | Elements exercised (informational — denominator grows with every state) | 7/74 |
