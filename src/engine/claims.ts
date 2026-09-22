@@ -87,12 +87,15 @@ const EMPTY_RE =
 const SUCCESS_RE = /\b(?:success(?:fully)?|saved|created|updated|deleted|removed|submitted|sent|published|approved|completed|added|changes? saved|done)\b/i;
 
 /**
- * Phrases that admit something went wrong. Their presence is what makes a page
+ * Phrases that admit something went wrong — including a refusal explained in
+ * the app's own words ("Only an open order can be sent for approval", "You
+ * can't delete an approved order"), which is correct behaviour even though it
+ * uses none of the words for an error and may contain one for success. Their presence is what makes a page
  * INNOCENT: an app that refuses a request and says so has behaved correctly,
  * whatever else is on the screen, and must not be reported.
  */
 const ERROR_RE =
-  /\b(?:error|failed|failure|could ?n[o']?t|unable to|went wrong|try again|retry|denied|forbidden|unauthori[sz]ed|not allowed|no permission|timed out|unavailable|problem loading)\b/i;
+  /\b(?:error|failed|failure|could ?n[o']?t|unable to|went wrong|try again|retry|denied|forbidden|unauthori[sz]ed|not allowed|no permission|timed out|unavailable|problem loading)\b|\b(?:can(?:not|[’']t)|must be|is already|are already|only (?:an? |the )?\w+(?: \w+)? (?:can|may))\b|\b(?:nothing|not) (?:was |been |be )?(?:saved|sent|deleted|updated|created|changed|submitted)\b/i;
 
 /** Longest piece of text judged. An empty state is a sentence; a paragraph that happens to contain one of these words is not a claim. */
 export const CLAIM_TEXT_MAX = 120;

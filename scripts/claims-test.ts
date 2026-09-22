@@ -140,6 +140,27 @@ test("a refused save shown as a success message is reported", () => {
   assert.equal(found[0].evidence, "false-success POST /api/things 422");
 });
 
+test("a refusal the page explains in its own words is not a false success", () => {
+  // Seen on a benchmark run: a 409, then a correct message that happens to
+  // contain an affirmation-shaped word ("sent"). The page admitted the refusal;
+  // it just did not use the word "error".
+  const refused = [req({ method: "POST", url: "http://app.test/api/orders/1042/request-approval", status: 409 })];
+  for (const text of [
+    "Only an open order can be sent for approval (this one is pending)",
+    "This order cannot be saved while it is shipped",
+    "You can't delete an order that has been approved",
+    "Only managers may approve orders",
+    "This order is already approved",
+    "Nothing was sent: the order must be open",
+  ]) {
+    assert.deepEqual(findContradictions(refused, page({ texts: [text] })), [], text);
+  }
+  // The contrast: the same refusal, and a message claiming it went through.
+  for (const text of ["Sent for approval", "Order sent to the manager", "Saved successfully"]) {
+    assert.equal(findContradictions(refused, page({ texts: [text] }))[0]?.kind, "false_success", text);
+  }
+});
+
 test("every writing method counts", () => {
   for (const method of ["POST", "PUT", "PATCH", "DELETE", "delete"]) {
     const found = findContradictions([req({ method, status: 500 })], page({ texts: ["Deleted"] }));
