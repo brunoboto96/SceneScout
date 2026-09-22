@@ -126,6 +126,16 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
       throw new Error(`honest fixture buttons not in snapshot: ${honestSnap.slice(0, 400)}`);
     const baseline = found("refused_empty").length + found("false_success").length;
 
+    // First, while nothing else on the page admits an error: the only text
+    // that can excuse this refusal is the page's own announced explanation.
+    const approvalBefore = found("false_success").length;
+    const approval = await engine.click(refs.approval);
+    check(
+      'a refusal the page announces in its own words is not a contradiction, though it says "sent"',
+      found("false_success").length === approvalBefore,
+      approval.slice(0, 700),
+    );
+
     const honestLoad = await engine.click(refs.load);
     check("a refused list the page admits to is not a contradiction", !/refused_empty/.test(honestLoad), honestLoad.slice(0, 700));
     const honestSave = await engine.click(refs.save);
@@ -134,13 +144,6 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
     const liesBefore = found("false_success").length;
     const honestOwner = await engine.click(refs.owner);
     check("a policy refusal the page admits to is not a contradiction", found("false_success").length === liesBefore, honestOwner.slice(0, 700));
-    const approvalBefore = found("false_success").length;
-    const approval = await engine.click(refs.approval);
-    check(
-      'a refusal the page announces in its own words is not a contradiction, though it says "sent"',
-      found("false_success").length === approvalBefore,
-      approval.slice(0, 700),
-    );
     const genuinelyEmpty = await engine.click(refs.ok);
     check("an empty list that every request agreed to is an ordinary empty list", !/refused_empty/.test(genuinelyEmpty), genuinelyEmpty.slice(0, 700));
     check(

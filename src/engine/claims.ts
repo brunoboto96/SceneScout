@@ -103,15 +103,15 @@ const ERROR_RE =
  * Correct behaviour after a refused request, though it uses none of the words
  * for an error and may contain one for success ("sent").
  *
- * Unlike ERROR_RE, this counts only in text the page ANNOUNCES — a live region,
- * an alert, a dialog (see PageState.announced). The same phrasing is ordinary
+ * Unlike ERROR_RE, this counts only in text the page ANNOUNCES — a live region
+ * or an alert (see PageState.announced). The same phrasing is ordinary
  * help text everywhere else ("This cannot be undone", "Password must be at
  * least 8 characters", "Only admins can invite members"), and page-wide it
  * excused real lies: a refused delete reporting "Workspace deleted." went
  * unreported because the Danger zone said "This cannot be undone."
  */
 const REFUSAL_RE =
-  /\b(?:can(?:not|[’'`]?t| not)|must be|(?:is|are) already|(?:only (?:an? |the )?\w+(?: \w+)?|may only|can only(?: be)?) (?:can|may|\w+)|(?:nothing|not) (?:was|has been|have been|been) (?:saved|sent|deleted|updated|created|changed|submitted))\b/i;
+  /\b(?:can(?:not|[’'`]?t| not)|must be|(?:is|are) already|only (?:an? |the )?\w+(?: \w+)? (?:can|may|be)|may only|can only(?: be)?|(?:nothing|not) (?:was|has been|have been|been) (?:saved|sent|deleted|updated|created|changed|submitted)|(?:was|were|has|have|is|are)(?: not|n[’']t)(?: been)? (?:saved|sent|deleted|updated|created|changed|submitted))\b/i;
 
 /** Whether a piece of announced text explains a refusal. */
 export function isRefusalNotice(text: string): boolean {
@@ -141,9 +141,10 @@ export interface PageState {
   /** Short pieces of visible text, in document order. */
   texts: readonly string[];
   /**
-   * The subset of those texts inside something the page announces: a live
-   * region (role=status or alert, aria-live), a dialog, or <output>. What the
-   * page SAYS in response to an action lives here; help text does not.
+   * The text of what the page announces: each live region (role=status or
+   * alert, aria-live) and <output>, read as a whole and past the cap on texts.
+   * What the page SAYS in response to an action lives here; help text — even
+   * inside a dialog — does not.
    */
   announced?: readonly string[];
   /**
@@ -231,6 +232,9 @@ export function findContradictions(requests: readonly WatchedRequest[], page: Pa
   return out;
 }
 
+/** Most announced regions read from one page. */
+export const MAX_ANNOUNCED = 40;
+
 /** Most pieces of text read from one page. A page with more than this has nothing useful to say in the extra ones. */
 export const MAX_CLAIM_TEXTS = 120;
 
@@ -252,7 +256,10 @@ export const CLAIM_SCAN_SCRIPT = `(() => {
   const visible = ${VISIBLE_SRC};
   const texts = [];
   const announced = [];
-  const ANNOUNCES = "[role='status'], [role='alert'], [aria-live]:not([aria-live='off']), [role='dialog'], [role='alertdialog'], dialog, output";
+  // Where a page SAYS something in response to an action. Not dialogs: a modal
+  // is a container of static text (its form's help, its warning), and counting
+  // it brought back the help text this set exists to exclude.
+  const ANNOUNCES = "[role~='status'], [role~='alert'], [aria-live]:not([aria-live='off']), output";
   const seen = new Set();
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
   let el = document.body;
@@ -263,7 +270,6 @@ export const CLAIM_SCAN_SCRIPT = `(() => {
     if (own && own.length <= ${CLAIM_TEXT_MAX} && !seen.has(own) && visible(el)) {
       seen.add(own);
       texts.push(own);
-      if (el.closest(ANNOUNCES)) announced.push(own);
     }
     el = walker.nextNode();
   }
@@ -284,5 +290,13 @@ export const CLAIM_SCAN_SCRIPT = `(() => {
     const rows = list.querySelectorAll(":scope > li, :scope > [role='row'], :scope > [role='listitem']");
     if (rows.length === 0) emptyLists += 1;
   }
+  // Read on its own, past the cap on page texts: a toast rendered at the end of
+  // a long page is exactly the text that must not be missed.
+  for (const region of document.querySelectorAll(ANNOUNCES)) {
+    if (!visible(region) || announced.length >= ${MAX_ANNOUNCED}) continue;
+    const said = (region.textContent || "").replace(/\\s+/g, " ").trim();
+    if (said && said.length <= ${CLAIM_TEXT_MAX} && !announced.includes(said)) announced.push(said);
+  }
+
   return { texts, announced, emptyLists };
 })()`;

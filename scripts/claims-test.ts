@@ -186,11 +186,34 @@ test("refusal-shaped help text elsewhere on the page excuses nothing", () => {
   assert.deepEqual(findContradictions(refusedDelete, page({ texts: ["Couldn’t delete the workspace", lie] })), []);
 });
 
+test("an announcement that merely mentions 'only' or a count is not a refusal", () => {
+  const refused = [req({ method: "POST", url: "http://app.test/api/cart", status: 500 })];
+  for (const noise of ["Only 3 left in stock", "Showing only open orders", "Only you can see this note"]) {
+    const found = findContradictions(refused, page({ texts: [noise, "Added to cart"], announced: [noise, "Added to cart"] }));
+    assert.equal(found[0]?.kind, noise === "Only you can see this note" ? undefined : "false_success", noise);
+  }
+});
+
+test("an announced admission that the change was not kept is not a false success", () => {
+  const refused = [req({ method: "PUT", url: "http://app.test/api/profile", status: 409 })];
+  for (const text of ["Your changes were not saved", "Your changes weren't saved", "The order wasn't sent", "Changes have not been saved"]) {
+    assert.deepEqual(findContradictions(refused, page({ texts: [text], announced: [text] })), [], text);
+  }
+});
+
+test("help text inside a modal form is not an announcement", () => {
+  // The scan does not count a dialog as announcing: a modal is a container of
+  // static text. Its help, beside a lie in the page's status region, excuses nothing.
+  const refused = [req({ method: "POST", url: "http://app.test/api/profile", status: 422 })];
+  const found = findContradictions(refused, page({ texts: ["Edit profile", "Password must be at least 8 characters", "Saved"], announced: ["Saved"] }));
+  assert.equal(found[0]?.kind, "false_success");
+});
+
 test("isRefusalNotice reads refusal wording and nothing else", () => {
   for (const t of ["Only an open order can be sent for approval", "cannot be saved", "can not be saved", "is already approved", "Nothing was saved"]) {
     assert.equal(isRefusalNotice(t), true, t);
   }
-  for (const t of ["Nothing saved yet", "Saved successfully", "Order sent", "No results", ""]) {
+  for (const t of ["Nothing saved yet", "Saved successfully", "Order sent", "No results", "Only 3 left in stock", "Showing only open orders", ""]) {
     assert.equal(isRefusalNotice(t), false, t);
   }
 });
