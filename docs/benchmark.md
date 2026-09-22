@@ -80,10 +80,17 @@ example or counter-example in the same change.
   scorecard says so.
 - **The key only knows what it has been told.** An unlabelled finding is not
   wrong; it needs a person to judge it, after which it belongs in the key.
-- **The key was written from runs 0 and 1.** 78 of its 108 examples are
-  phrasings those two runs used, so their zero ambiguous and zero unlabelled
-  findings are true by construction. Run 2 is the first run the key did not
-  see. The rest of the examples are rewordings a reviewer wrote to break it.
+- **The key was written from the runs it scores.** 78 of its first 108
+  examples are phrasings runs 0 and 1 used, so their zero ambiguous and zero
+  unlabelled findings are true by construction; the rest are rewordings a
+  reviewer wrote to break it. Runs 2–4 were the first runs it had not seen:
+  against the key of the day they left 2, 10 and 5 findings unlabelled, and
+  precision for runs 3 and 4 was then only bounded (70–100% and 78–96%). A
+  person has since judged those findings against the demo's source and the
+  judgements are in the key, so runs 2–4 are now fitted data too. Two stay
+  unjudged on purpose: a placeholder a lane filed in run 2, and a dashboard
+  count in run 3 that other lanes were changing while it was read. The next
+  run is the next test.
 - **A negated claim still matches.** "Export CSV works, no error" is credited
   as the Export CSV defect: the key recognises *what* a finding is about, not
   whether it says the thing is broken. Findings are filed as defects, so this
@@ -99,12 +106,15 @@ example or counter-example in the same change.
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
 re-scored against **one** key by `npm run bench -- --all`; the table below is
-key `672f2f2078`. The archived runs are in [`bench/runs/`](../bench/runs/).
+key `8161856bec`. The archived runs are in [`bench/runs/`](../bench/runs/).
 
 | Run | Date | What changed | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Lane calibration | Cost | Kept? |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
 | 0 | 2026-09-22 | Baseline, 3.4.0, briefs as written on the day | 11/13 | 16/21 (76%) | 21 | 0 | 5 | 1 | 26/31 (84%), ECE 0.05, Brier 0.113 | ~725k tokens, 241 tool calls, longest lane 3m38s | — |
 | 1 | 2026-09-22 | **Lane briefs only** (engine unchanged) — see below | 12/13 | 28/28 (100%) | 28 | 0 | 0 | 0 | 34/35 (97%), ECE 0.12, Brier 0.035 | ~698k tokens, 283 tool calls, longest lane 5m09s | Yes, into the skill |
+| 2 | 2026-09-22 | **Engine 3.5.0 only** — run 1's briefs verbatim | 9/13 | 25/25 (100%) | 26 | 1 | 0 | 1 | 28/29 (97%), ECE 0.10, Brier 0.055 | ~687k tokens, 266 tool calls, longest lane 5m37s | See runs 2–4 |
+| 3 | 2026-09-22 | Repeat of run 2 | 10/13 | 29/32 (91%) | 33 | 1 | 3 | 0 | 30/33 (91%), ECE 0.10, Brier 0.090 | ~680k tokens, 260 tool calls, longest lane 5m40s | See runs 2–4 |
+| 4 | 2026-09-22 | Repeat of run 2 | 11/13 | 26/27 (96%) | 27 | 0 | 1 | 1 | 29/35 (83%), ECE 0.07, Brier 0.101 | ~683k tokens, 271 tool calls, longest lane 4m40s | See runs 2–4 |
 
 **Brier is the number to compare; ECE says which way a lane is off.** Run 1's verdicts were
 right more often (97% against 84%), and its expected calibration error is
@@ -117,6 +127,69 @@ ahead (0.113 → 0.035).
 The first version of this scorer counted the five "belongs to another lane"
 dismissals as wrong verdicts, which gave ECE 0.09 → 0.04 and read as an
 improvement; that one choice was enough to reverse the comparison.
+
+### Runs 2–4 — engine 3.5.0, measured three times
+
+The engine changed and nothing else: run 1's eight lane briefs verbatim, a fresh
+demo app and project directory per run, the same planner behaviour. Three runs,
+because at 13 planted defects one defect is about 8 points of recall and a
+single run could not tell a one-defect effect from noise. Per defect, run 1
+(3.4.0) against runs 2–4 (3.5.0):
+
+| Defect | Run 1 | Runs 2–4 | Reading |
+|---|:---:|:---:|---|
+| Delete reports success after a refused write | ✓ (by luck) | **3/3** | The target of answering a refused write with a 403. Kept. |
+| Stored XSS (above the `medium` contract) | ✓ | **3/3** | The injection oracle fired in the list lane for a value the create-form lane typed. Kept. |
+| Sticky bar covers Save notes | ✓ | **1/3** | Judged every run; merged away in runs 2 and 4, see below. Run 3's survived because its title blamed the textarea. |
+| Double-submit creates two orders | ✓ | 1/3 | The logs show the new-order lane double-clicked Create only in run 4, the run that found it. Lane behaviour, not the engine. |
+| Archived filter hides a 500 | ✓ | 2/3 | The run-3 orders lane selected Archived seven times and filed nothing about it: a judgement miss, not unexplored ground. |
+| Empty customer does nothing | ✓ | 2/3 | Not established. |
+| Email field has no label | · | 0/3 | Missed in run 1 too; not an engine effect. |
+| Every other planted defect (7) | ✓ | 3/3 each | Stable. |
+
+**The sticky bar is lost to the duplicate check, depending on how it is
+titled.** The store merges two findings on one route when a string of 8–80
+characters quoted (or in parentheses) in one title matches one quoted in the
+other finding's title, detail or evidence.
+When a lane titled the sticky-bar defect with the button's quoted label
+(`… covers the "Save notes" button`), that label also appeared in the
+save-notes false-success finding's detail (`clicking "Save notes" shows
+"Saved."`), and the layout defect was folded into the data one — in runs 2 and
+4. Run 1 filed both without a merge because its sticky-bar title did not quote
+the label; run 3's survived because it blamed the textarea. The archives hold
+findings only after the merge, so the mechanism is shown by a test that
+reproduces it, in the change that fixes it, rather than by these files.
+
+What else the series measured:
+
+- **Refusals on format: 1 in 24 lane reports**, for an observation over the
+  64-character limit, fixed in one round trip. Five reports wrapped their JSON
+  in prose and were accepted with no unwrapping by hand.
+- **The fold's unfiled check is noisy.** About 41 flags across the three runs;
+  2 were real (one lane then filed a missed defect; the other was the sticky
+  bar the merge had swallowed), 3 were variants the lanes confirmed were
+  covered, and the rest were the same finding worded differently in the report
+  and the filing. It needs a looser match before it is worth reading. (Counted
+  by hand from the fold results, which the archives do not keep.)
+- **A `false_success` false positive.** A real 409 followed by "Only an open
+  order can be sent for approval" was read as a success claim on the word
+  "sent". The rule knows error wording, not refusal wording.
+- **Waiting, not idling.** Split from the logs, idle gaps while lanes were
+  working were 0–6% of their working time. Separately, lanes that had finished
+  held their browsers for 18–28 minutes a run in total, summed over eight
+  lanes, until the slowest lane's report was folded — planner overhead, which
+  the pace section now reports apart from the lanes' working time.
+- **Lane calibration fell** (Brier 0.035 in run 1; 0.055, 0.090, 0.101), with
+  low-confidence verdicts (0.4–0.6) wrong more often than stated in run 4. Three
+  runs is not enough to tell whether that is the engine or the lanes.
+
+**Kept?** The refusal answer hit its target in 3/3 runs, against one lucky find
+in run 1, and stays. The shared probes stay on the evidence of the logs — the
+list lane's injection oracle fired for a value only the create lane had typed —
+but run 1 found the stored XSS by hand without them, so 3/3 does not show they
+were needed. The duplicate check, the `false_success` refusal wording and the
+unfiled check's matching are the next changes, each with its own test, and the
+next measured series re-runs these briefs against them.
 
 ### Run 1 — what changed, and what each change moved
 
