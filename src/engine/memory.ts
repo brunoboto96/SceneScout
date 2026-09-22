@@ -1387,7 +1387,10 @@ export class MemoryStore {
         return url;
       }
     };
-    const log = this.actionLog;
+    // The planner's fold marker is not a step anyone took on a page. Left in,
+    // its empty URL read as a route change and cut the trace of a finding filed
+    // right after a fold — which is when the fold asks lanes to file.
+    const log = this.actionLog.filter((a) => a.action !== "lane-report");
     let start = Math.max(0, log.length - 12);
     for (let i = log.length - 1; i >= 0 && i >= log.length - 12; i--) {
       if (routeOf(log[i].url) !== routeOf(f.url)) {

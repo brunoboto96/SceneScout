@@ -48,7 +48,13 @@
       "category": "data-inconsistency",
       "severity": "high",
       "level": "minimal",
-      "match": ["status=archived", "archived.{0,80}(500|empty|refused|fail)", "(500|refused|fail).{0,80}archived"],
+      "match": [
+        "status=archived",
+        "archived.{0,80}(500|empty|refused|fail)",
+        "(500|refused|fail).{0,80}archived",
+        "(filter|status).{0,40}(returns|errors).{0,20}500.{0,80}(blank|empty|no empty.state|matches no)",
+        "filter that errors.{0,20}500"
+      ],
       "examples": [
         "GET /api/orders?status=archived 500, page shows empty list, no error",
         "Archived orders filter shows empty list instead of surfacing server error",
@@ -60,7 +66,9 @@
         "Archived filter returns 500; table stuck on empty with no error message",
         "Choosing Archived again still returns 500 and an empty table, no error",
         "Archived returns 500 and shows an empty table, unlike every other filter",
-        "Archived status filter silently fails (500) and any other filter works fine"
+        "Archived status filter silently fails (500) and any other filter works fine",
+        "Status filter returns 500 for one status and the table is simply blank, no empty-state message",
+        "A filter that errors (500) renders like a filter that matches no orders"
       ],
       "counterExamples": [
         "Orders filter gets stuck on the failed Archived result for subsequent selections",
@@ -208,15 +216,24 @@
       "match": [
         "order-stickybar.{0,60}(cover|overlap|obscur)|(cover|overlap|obscur).{0,60}order-stickybar",
         "(sticky|fixed|pinned).{0,40}(bar|footer|chrome).{0,80}(cover|overlap|obscur|hide).{0,60}(save|notes)",
-        "(save.notes|order-save).{0,60}(covered|obscured|hidden|overlapped)"
+        "(save.notes|order-save).{0,60}(covered|obscured|hidden|overlapped)",
+        "(order-save|save( notes)? button).{0,80}not visible until scroll",
+        "(pushes|pushing) save.{0,40}(off.?screen|below|behind)",
+        "save notes.{0,40}(hidden|behind|under).{0,20}sticky"
       ],
       "examples": [
         "A fixed bar covers the Save notes button",
         "GEOMETRY: e14 'Save notes' COVERED by pinned chrome [order-stickybar] at load scroll position",
         "save-notes covered by sticky footer at load scroll",
-        "testid=order-save covered by testid=order-stickybar at default scroll"
+        "testid=order-save covered by testid=order-stickybar at default scroll",
+        "Notes textarea is oversized, pushing Save/Delete off-screen on load\norder.html textarea testid=order-notes ~600px tall; testid=order-save not visible until scrollY=371",
+        "Notes textarea is tall and pushes Save notes behind the sticky bar",
+        "Save notes is hidden under the sticky footer on load; the notes textarea is 600px tall"
       ],
-      "counterExamples": ["order.html stickybar anchor href=/orders.html, no data-testid\nstickybar-link-missing-testid"]
+      "counterExamples": [
+        "order.html stickybar anchor href=/orders.html, no data-testid\nstickybar-link-missing-testid",
+        "Save notes: the Saved. message is not visible until scrolling, and it shows even when PUT returns 403"
+      ]
     },
     {
       "id": "approve-endpoint-accepts-clerk",
@@ -342,12 +359,17 @@
       "level": "medium",
       "match": [
         "settings-save.{0,120}(0 (network )?requests?|no (network )?request|nothing|reverts?|lost|discard|persists nothing)",
-        "save changes.{0,120}(0 (network )?requests?|no (network )?request|sends nothing|nothing|reverts?|lost|discard|not (persist|saved))"
+        "save changes.{0,120}(0 (network )?requests?|no (network )?request|sends nothing|nothing|reverts?|lost|discard|not (persist|saved))",
+        "settings.{0,60}(0|no) (network )?requests? (fire|sent)",
+        "(says|shows) saved\\..{0,40}nothing persists"
       ],
       "examples": [
         "click settings-save fires 0 network requests; settings-name reverts after reload",
         "Settings \"Save changes\" fires no request and silently discards edits",
-        "click testid=settings-save fires 0 network requests; GET /api/workspace 404\nsettings-save-shows-success-but-persists-nothing"
+        "click testid=settings-save fires 0 network requests; GET /api/workspace 404\nsettings-save-shows-success-but-persists-nothing",
+        "Save changes on Settings gives no feedback that anything was persisted — 0 network requests",
+        "Settings gives no feedback on failure: says Saved. although 0 requests fire",
+        "Save changes gives no feedback at all that the change was lost — it says Saved. and nothing persists"
       ],
       "counterExamples": ["Save changes button contrast 2.9:1"]
     },
@@ -361,11 +383,15 @@
       "match": [
         "save.?notes.{0,80}(unconditional|without|no res\\.ok|regardless)",
         "#saved.{0,40}Saved.{0,60}(no res\\.ok|without|regardless)",
-        "save.?notes.{0,40}saved.{0,40}(without|no) res\\.ok"
+        "save.?notes.{0,40}saved.{0,40}(without|no) res\\.ok",
+        "save.?notes.{0,40}saved.{0,80}(reject|refus|40[13])",
+        "PUT /api/orders/\\d+ 40[13].{0,40}\\bsaved\\b"
       ],
       "examples": [
         "order.html script sets #saved text='Saved.' after PUT with no res.ok check\nsave-notes-unconditional-saved-message",
-        "Save notes shows Saved. without res.ok check; notes unchanged on the order detail after reload"
+        "Save notes shows Saved. without res.ok check; notes unchanged on the order detail after reload",
+        "Save notes shows \"Saved.\" even when the server rejects the write\nPUT /api/orders/1042 403, page shows \"Saved.\"",
+        "Save notes: the Saved. message is not visible until scrolling, and it shows even when PUT returns 403"
       ],
       "counterExamples": ["save-notes covered by sticky footer at load scroll"]
     },
@@ -380,13 +406,16 @@
         "items.{0,10}-\\d",
         "negative.{0,20}(item|quantity|count)",
         "(accepts?|stored|201).{0,60}(empty|blank).{0,20}customer",
-        "customer.{0,4}\"\\s*:\\s*\"\""
+        "customer.{0,4}\"\\s*:\\s*\"\"",
+        "(creates?|accepts?) orders? with (an )?empty customer",
+        "customer:\"\",items"
       ],
       "examples": [
         "POST /api/orders {items:-5} → 200; GET /api/orders/1043 items=-5",
         "Negative item count accepted and stored by order creation",
         "POST /api/orders {\"customer\":\"\",\"items\":0} 201\nserver-accepts-empty-customer-zero-items",
-        "GET /api/orders order 1045 items=-1; order 1044 customer=\"\""
+        "GET /api/orders order 1045 items=-1; order 1044 customer=\"\"",
+        "Server creates orders with empty customer name (no server-side validation)\nPOST /api/orders {customer:\"\",items:2} -> 201, stored customer:\"\""
       ],
       "counterExamples": ["click new-order-submit with empty customer → 0 network requests, msg unchanged"]
     },
@@ -454,8 +483,11 @@
       "category": "missing-testid",
       "severity": "low",
       "level": "minimal",
-      "match": ["sticky.?bar.{0,60}(no|missing).{0,10}(data-)?test.?id"],
-      "examples": ["order.html stickybar anchor href=/orders.html, no data-testid\nstickybar-link-missing-testid"],
+      "match": ["sticky.?bar.{0,60}(no|missing).{0,10}(data-)?test.?id", "line items are edited from the list.{0,40}(no|missing).{0,10}(data-)?test.?id"],
+      "examples": [
+        "order.html stickybar anchor href=/orders.html, no data-testid\nstickybar-link-missing-testid",
+        "\"Line items are edited from the list\" link has no data-testid\nlink href=/orders.html text=\"Line items are edited from the list\" missing testid"
+      ],
       "counterExamples": []
     },
     {
@@ -465,10 +497,16 @@
       "category": "ux-polish",
       "severity": "low",
       "level": "minimal",
-      "match": ["nav.{0,20}links?.{0,60}(underline|colou?r|affordance)", "AFFORDANCES.{0,80}nav"],
+      "match": [
+        "nav.{0,20}links?.{0,60}(underline|colou?r|affordance)",
+        "AFFORDANCES.{0,80}nav",
+        "nav links?.{0,60}indistinguishable",
+        "link\\(s\\) with no underline"
+      ],
       "examples": [
         "Nav links have no underline and match body text color",
-        "design-audit AFFORDANCES: testid=nav-orders no underline, body-text color\nshared-nav-links-no-underline-affordance"
+        "design-audit AFFORDANCES: testid=nav-orders no underline, body-text color\nshared-nav-links-no-underline-affordance",
+        "Nav links in the shared app shell are indistinguishable from body text\ndesign_audit: 8 link(s) with no underline AND same color as body text, e.g. testid=nav-dashboard"
       ],
       "counterExamples": ["cards lack hover affordances", "bulk-import badge has no hover affordance"]
     },
@@ -479,11 +517,18 @@
       "category": "ux-polish",
       "severity": "low",
       "level": "minimal",
-      "match": ["(spacing|padding).{0,40}(off.{0,5}(the )?4px|off.grid)", "off.{0,5}4px.grid", "4px grid.{0,20}(10px|14px)"],
+      "match": [
+        "(spacing|padding).{0,40}(off.{0,5}(the )?4px|off.grid)",
+        "off.{0,5}4px.grid",
+        "4px grid.{0,20}(10px|14px)",
+        "paddings? drift.{0,20}4px",
+        "spacing \\d+% on-grid"
+      ],
       "examples": [
         "Customers page: no dominant action, spacing off grid",
         "design_audit /customers.html spacing 86% off-4px-grid (10px,14px,2px)\ncustomers-padding-off-4px-grid",
-        "design-audit order.html: 50% spacing off 4px grid, ad-hoc 14px x6, 10px x2\norder-detail-spacing-off-grid"
+        "design-audit order.html: 50% spacing off 4px grid, ad-hoc 14px x6, 10px x2\norder-detail-spacing-off-grid",
+        "Inventory table paddings drift from 4px spacing grid\ndesign-audit inventory.html spacing 4% on-grid"
       ],
       "counterExamples": []
     },
@@ -500,6 +545,67 @@
         "Quantity/Name sort buttons have no descending toggle or active-state indicator"
       ],
       "counterExamples": []
+    },
+    {
+      "id": "settings-name-no-validation",
+      "route": "/settings.html",
+      "title": "The workspace name accepts an empty value",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": ["workspace name.{0,40}(accepts?|allows?).{0,20}(empty|blank)", "settings-name.{0,40}(accepts?|cleared).{0,30}(empty|\"\")"],
+      "examples": [
+        "Workspace name field accepts empty value with no client-side validation\ntestid=settings-name accepts empty string, testid=settings-save enabled, PATCH /api/settings sent with name=\"\""
+      ],
+      "counterExamples": []
+    },
+    {
+      "id": "orders-status-label-mismatch",
+      "route": "/orders.html",
+      "title": "The \"Awaiting approval\" filter shows rows badged \"pending\"",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": ["awaiting approval.{0,80}pending", "pending.{0,60}awaiting approval"],
+      "examples": [
+        "Status filter option \"Awaiting approval\" does not match the row badge text \"pending\"\nfilter=\"Awaiting approval\" -> rows badge text \"pending\" (orders #1042, #1037)"
+      ],
+      "counterExamples": []
+    },
+    {
+      "id": "orders-no-empty-state",
+      "route": "/orders.html",
+      "title": "A filter that matches no orders shows a bare table with no empty-state message",
+      "category": "ux-polish",
+      "severity": "low",
+      "level": "medium",
+      "match": [
+        "^(?![\\s\\S]*(archived|\\b5\\d\\d\\b(?!\\s*ms)))[\\s\\S]*no empty.state (message|text)",
+        "^(?![\\s\\S]*(archived|\\b5\\d\\d\\b(?!\\s*ms)))[\\s\\S]*(filter|status).{0,40}match(es)? (zero|no) orders"
+      ],
+      "examples": [
+        "No empty-state message when a status filter matches zero orders\norders-status-filter=Rejected -> orders-rows empty, no empty-state text",
+        "Rejected filter matches zero orders (GET 200 [], no error) and shows no empty-state message",
+        "No empty-state text when a filter matches zero orders; no console errors",
+        "Filter matches zero orders and shows a blank table with no empty-state message (took 500ms)"
+      ],
+      "counterExamples": [
+        "Status filter returns 500 for one status and the table is simply blank, no empty-state message",
+        "A filter that errors (500) renders like a filter that matches no orders"
+      ]
+    },
+    {
+      "id": "new-order-email-not-submitted",
+      "route": "/orders-new.html",
+      "title": "The confirmation email is collected but never sent to the server",
+      "category": "data-loss",
+      "severity": "medium",
+      "level": "medium",
+      "match": ["email.{0,40}(collected|filled).{0,40}never (submitted|sent)", "body omits email"],
+      "examples": [
+        "Confirmation email field is collected but never submitted\nPOST /api/orders body omits email; GET /api/orders/1048 has no email key despite field being filled"
+      ],
+      "counterExamples": ["Email field has a placeholder but no label"]
     }
   ],
   "nonDefects": [
@@ -564,12 +670,15 @@
         "customers-row.{0,40}0 (network )?requests?",
         "rows?.{0,20}non.?interactive",
         "row.?click.{0,20}inert",
-        "rows?.{0,20}do nothing"
+        "rows?.{0,20}do nothing",
+        "customer rows?.{0,20}(are )?static",
+        "customers-row-1\\.\\.6 click no-op"
       ],
       "examples": [
         "Customer rows are inert — no detail view, no hover affordance",
         "click on testid=inventory-row-HB-101 -> no navigation, no change\ninventory-rows-non-interactive-by-design",
-        "GET /api/customers/1 404; click on customers-row-1..6 causes no navigation/state change\ncustomer-rows-non-interactive-no-detail"
+        "GET /api/customers/1 404; click on customers-row-1..6 causes no navigation/state change\ncustomer-rows-non-interactive-no-detail",
+        "Customer rows are static — no detail view, search, or add action\ntestid=customers-row-1..6 click no-op; GET /api/customers/1 404"
       ],
       "counterExamples": []
     },
@@ -667,6 +776,34 @@
         "Scheduled reports: 'coming soon' page lacks the site header and nav menu",
         "coming soon page is missing navigation entirely"
       ]
+    },
+    {
+      "id": "settings-save-no-feedback-claim",
+      "title": "Settings Save gives no feedback at all",
+      "why": "The page always shows \"Saved.\" after Save. The defect is that nothing is saved, not that nothing is said (settings-save-claims-saved).",
+      "match": [
+        "^(?![\\s\\S]*saved\\.)[\\s\\S]*(settings|save changes).{0,40}(gives|shows) no (visible )?feedback (at all|whatsoever)",
+        "^(?![\\s\\S]*saved\\.)[\\s\\S]*no (visible )?(success|error)(\\s*/\\s*| or )(error|success)? ?(ui|message)? after click \\(testid=settings-save\\)",
+        "^(?![\\s\\S]*saved\\.)[\\s\\S]*no feedback at all, success or failure"
+      ],
+      "overrides": ["settings-save-claims-saved"],
+      "examples": [
+        "Save changes on Settings gives no feedback at all, success or failure\nPATCH /api/settings — no visible success/error UI after click (testid=settings-save)"
+      ],
+      "counterExamples": [
+        "Save changes on Settings gives no feedback that anything was persisted — 0 network requests",
+        "Settings gives no feedback on failure: says Saved. although 0 requests fire",
+        "Save changes gives no feedback at all that the change was lost — it says Saved. and nothing persists"
+      ]
+    },
+    {
+      "id": "reports-no-dominant-action",
+      "title": "The reports page has no visually dominant primary action",
+      "why": "A design-audit craft note about a page with two actions of equal weight; not a defect.",
+      "match": ["reports.{0,40}no (visually )?dominant (primary )?action"],
+      "overrides": [],
+      "examples": ["Reports page has no visually dominant primary action\ndesign_audit reports.html: task-clarity 92, no visually dominant action"],
+      "counterExamples": []
     }
   ]
 }
