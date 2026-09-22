@@ -259,6 +259,23 @@ test("calibration is measured on verdicts the key can judge, and names every rea
   assert.equal(k?.correct, 9);
   assert.deepEqual([k?.notInKey, k?.ambiguous, k?.badConfidence, k?.unsure], [1, 1, 1, 1], "each reason counted separately");
   assert.ok((k?.ece ?? 1) < 1e-9, "nine right of ten at 0.9 is perfectly calibrated");
+  // Nine right at 0.9 contribute 0.01 each, the one wrong 0.81: mean 0.09.
+  assert.ok(Math.abs((k?.brier ?? 0) - 0.09) < 1e-9, String(k?.brier));
+});
+
+test("Brier ranks right-and-too-quiet above wrong-and-well-calibrated, where ECE does not", () => {
+  // Run 1's shape: every verdict right, each stated at 0.7. ECE 0.3, Brier 0.09.
+  const quiet = calibrateAgainstKey(
+    Array.from({ length: 10 }, () => decision({ evidence: "/dead", confidence: 0.7 })),
+    key,
+  )!;
+  // Half right, each stated at 0.5: ECE 0, Brier 0.25 — honest, and no better than a coin.
+  const coin = calibrateAgainstKey(
+    Array.from({ length: 10 }, (_, i) => decision({ evidence: "/dead", verdict: i % 2 ? "defect" : "not_a_defect", confidence: 0.5 })),
+    key,
+  )!;
+  assert.ok(quiet.ece > coin.ece, "ECE prefers the coin");
+  assert.ok(quiet.brier < coin.brier, "Brier prefers the lanes that were right");
 });
 
 test("a lane dismissing something as another lane's is not scored as a verdict on it", () => {
@@ -269,6 +286,22 @@ test("a lane dismissing something as another lane's is not scored as a verdict o
     decision({ verdict: "not_a_defect", evidence: "/dead — fired from the home page, not my routes", observation: "x" }),
   ];
   for (const d of dismissals) assert.equal(isScopeDismissal(d), true, d.evidence ?? "");
+  // Wordings lanes use for "not mine", and verdicts about the thing itself that only share a word with them.
+  for (const text of [
+    "handled by the dashboard lane",
+    "outside my routes; the dashboard lane owns it",
+    "not part of my assigned routes",
+    "chart-404-belongs-to-home",
+  ]) {
+    assert.equal(isScopeDismissal(decision({ verdict: "not_a_defect", observation: text })), true, text);
+  }
+  for (const text of [
+    "badge belongs to the header design; overlap is intentional",
+    "Empty state belongs to the design system",
+    "Export is out of scope for v1",
+  ]) {
+    assert.equal(isScopeDismissal(decision({ verdict: "not_a_defect", observation: text })), false, text);
+  }
   const k = calibrateAgainstKey(dismissals, key);
   assert.deepEqual([k?.judged, k?.outOfScope], [0, 2]);
   assert.equal(judgeDecision(dismissals[0], key), null);

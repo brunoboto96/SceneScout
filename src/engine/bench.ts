@@ -270,6 +270,14 @@ export interface KeyCalibration {
   outOfScope: number;
   buckets: Array<{ label: string; decisions: number; stated: number; correct: number }>;
   ece: number;
+  /**
+   * Mean squared gap between stated confidence and being right (0 is perfect,
+   * 0.25 is a coin flip stated as 0.5). Unlike ECE it has no buckets and
+   * rewards being right as well as being honest about it, so a run whose
+   * lanes were right more often but said so too quietly is not scored as the
+   * worse of two.
+   */
+  brier: number;
 }
 
 /**
@@ -291,7 +299,8 @@ export function judgeDecision(d: RecordedDecision, key: AnswerKey): boolean | nu
 }
 
 /** How a lane says "not mine": the wording lanes actually used, none of it about a particular app. */
-const SCOPE_DISMISSAL_RE = /out.of.(lane.)?scope|belongs?.to\b|not (in |on |from )?(my|this) (lane|routes?|pages?)\b/i;
+const SCOPE_DISMISSAL_RE =
+  /out.of.lane.scope|out-of-scope|out of (my|this) (lane|scope)|belongs?.to.{0,20}\b(lane|route|page)\b|belongs-to-|(handled|owned) by (the |another )?[\w-]* ?lane|lane owns it|not (in |on |from |part of )?(my|this) (lane|assigned routes|routes?|pages?)\b|outside (my|this) (lane|routes?|pages?)|not part of my (assigned )?routes/i;
 
 /** A not-a-defect verdict whose stated reason is that the thing is another lane's. */
 export function isScopeDismissal(d: Pick<RecordedDecision, "verdict" | "evidence" | "observation">): boolean {
@@ -301,7 +310,7 @@ export function isScopeDismissal(d: Pick<RecordedDecision, "verdict" | "evidence
 export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key: AnswerKey): KeyCalibration | null {
   if (decisions.length === 0) return null;
   const buckets = BUCKET_EDGES.map(() => ({ n: 0, conf: 0, right: 0 }));
-  const out: KeyCalibration = { judged: 0, correct: 0, notInKey: 0, ambiguous: 0, badConfidence: 0, unsure: 0, outOfScope: 0, buckets: [], ece: 0 };
+  const out: KeyCalibration = { judged: 0, correct: 0, notInKey: 0, ambiguous: 0, badConfidence: 0, unsure: 0, outOfScope: 0, buckets: [], ece: 0, brier: 0 };
   for (const d of decisions) {
     if (d.verdict === "unsure") {
       out.unsure += 1;
@@ -328,11 +337,13 @@ export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key:
     const right = d.verdict === "defect" ? m.kind !== "nonDefect" : m.kind === "nonDefect";
     out.judged += 1;
     if (right) out.correct += 1;
+    out.brier += (c - (right ? 1 : 0)) ** 2;
     const b = buckets[bucketOf(c)];
     b.n += 1;
     b.conf += c;
     if (right) b.right += 1;
   }
+  if (out.judged > 0) out.brier /= out.judged;
   buckets.forEach((b, i) => {
     if (b.n === 0) return;
     out.ece += (b.n / out.judged) * Math.abs(b.conf / b.n - b.right / b.n);
@@ -498,7 +509,7 @@ export function formatScorecard(c: Scorecard): string {
       ``,
       k.judged === 0
         ? `Lane calibration against the key: nothing the key could judge` + (skipped.length ? ` (${skipped.join(", ")})` : "")
-        : `Lane calibration against the key: ${k.correct}/${k.judged} verdicts right (${pct(k.correct, k.judged)}), expected calibration error ${k.ece.toFixed(2)}` +
+        : `Lane calibration against the key: ${k.correct}/${k.judged} verdicts right (${pct(k.correct, k.judged)}), expected calibration error ${k.ece.toFixed(2)}, Brier ${k.brier.toFixed(3)}` +
             (skipped.length ? ` — not scored: ${skipped.join(", ")}` : ""),
     );
     for (const b of k.buckets)

@@ -42,7 +42,7 @@ one found.
 | **Judged, never filed** | A lane called it a defect in its report and nobody called `scout_finding`, so it never reached the report. |
 | **False positives** | Findings matching a known non-defect, with the reason it is not one. |
 | **Severity** | Each filed defect's severity against the key's. |
-| **Lane calibration** | Whether a lane's verdict was right *according to the key*, bucketed by the confidence it stated, with an expected calibration error. A "not a defect" whose reason is that the thing belongs to another lane is not scored: it is a verdict about ownership, not about whether the thing is broken. |
+| **Lane calibration** | Whether a lane's verdict was right *according to the key*, bucketed by the confidence it stated, with an expected calibration error and a Brier score. A "not a defect" whose reason is that the thing belongs to another lane is not scored: it is a verdict about ownership, not about whether the thing is broken. |
 
 The lane calibration here is the **real** one. The report's own calibration
 section can only join a decision to a finding on a failing-endpoint signature,
@@ -99,18 +99,21 @@ example or counter-example in the same change.
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
 re-scored against **one** key by `npm run bench -- --all`; the table below is
-key `a4b1bb6ce1`. The archived runs are in [`bench/runs/`](../bench/runs/).
+key `672f2f2078`. The archived runs are in [`bench/runs/`](../bench/runs/).
 
 | Run | Date | What changed | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Lane calibration | Cost | Kept? |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
-| 0 | 2026-09-22 | Baseline, 3.4.0, briefs as written on the day | 11/13 | 16/21 (76%) | 21 | 0 | 5 | 1 | 26/31 (84%), ECE 0.05 | ~725k tokens, 241 tool calls, longest lane 3m38s | — |
-| 1 | 2026-09-22 | **Lane briefs only** (engine unchanged) — see below | 12/13 | 28/28 (100%) | 28 | 0 | 0 | 0 | 34/35 (97%), ECE 0.12 | ~698k tokens, 283 tool calls, longest lane 5m09s | Yes, into the skill |
+| 0 | 2026-09-22 | Baseline, 3.4.0, briefs as written on the day | 11/13 | 16/21 (76%) | 21 | 0 | 5 | 1 | 26/31 (84%), ECE 0.05, Brier 0.113 | ~725k tokens, 241 tool calls, longest lane 3m38s | — |
+| 1 | 2026-09-22 | **Lane briefs only** (engine unchanged) — see below | 12/13 | 28/28 (100%) | 28 | 0 | 0 | 0 | 34/35 (97%), ECE 0.12, Brier 0.035 | ~698k tokens, 283 tool calls, longest lane 5m09s | Yes, into the skill |
 
-**Read the calibration column as two numbers, not one.** Run 1's verdicts were
+**Brier is the number to compare; ECE says which way a lane is off.** Run 1's verdicts were
 right more often (97% against 84%), and its expected calibration error is
 *worse*, because the lanes were right more often than they said: every verdict
 stated at 0.6–0.8 was right. Lower ECE is not the goal on its own; a lane that
 is right and says so less loudly than it could is underconfident, not wrong.
+The Brier score — the mean squared gap between stated confidence and being
+right, with no buckets — rewards both being right and saying so, and ranks run 1
+ahead (0.113 → 0.035).
 The first version of this scorer counted the five "belongs to another lane"
 dismissals as wrong verdicts, which gave ECE 0.09 → 0.04 and read as an
 improvement; that one choice was enough to reverse the comparison.
@@ -186,6 +189,10 @@ Edits considered and not kept, so they are not retried blind:
   the in-product calibration after it scored a correct lane as wrong; the same
   reasoning keeps this scorer on explicit key patterns rather than text
   similarity.
+- **Non-defect patterns that exclude by a list of banned words** ("coming soon"
+  unless the text says "dead end" or "no nav"). Rejected after a second review
+  found ordinary phrasings the list missed, each scored as a false positive. A
+  non-defect's pattern now has to state the specific false claim.
 - **A known non-defect that wins every match it takes part in.** Rejected
   after review: realistic rewordings of three planted defects — a delete that
   navigates away "anyway", a dead end that "says coming soon", an XSS "escaped

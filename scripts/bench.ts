@@ -145,7 +145,7 @@ if (values.all) {
   for (const { a, c } of rows) {
     const p = precisionBounds(c);
     const k = c.calibration;
-    const cal = !k || k.judged === 0 ? "—" : `${k.correct}/${k.judged}, ECE ${k.ece.toFixed(2)}`;
+    const cal = !k || k.judged === 0 ? "—" : `${k.correct}/${k.judged}, ECE ${k.ece.toFixed(2)}, Brier ${k.brier.toFixed(3)}`;
     console.log(
       `| ${a.run} | ${a.date} | ${c.found.length}/${c.expected} | ${p.labelled} | ${c.findings} | ${c.unknown.length + c.ambiguous.length} | ${c.falsePositives.length} | ${c.judgedNotFiled.length} | ${cal} |`,
     );
