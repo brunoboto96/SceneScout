@@ -27,6 +27,7 @@
     <button data-testid="widgets-load-button" onclick="loadWidgets()">Load widgets</button>
     <button data-testid="widgets-save-button" onclick="saveWidget()">Save</button>
     <button data-testid="widgets-owner-button" onclick="changeOwner()">Change owner</button>
+    <button data-testid="widgets-update-button" onclick="updateWidget()">Update widget</button>
 
     <table data-testid="widgets-table">
       <thead>
@@ -62,6 +63,19 @@
           body: JSON.stringify({ name: "w1" }),
         }).catch(() => {});
         document.querySelector("[data-testid=widgets-status]").textContent = "Saved successfully";
+      }
+
+      // No .catch at all: under the old policy the dropped PUT threw here and
+      // the success line never ran, which is how the policy hid this defect.
+      // The read after it is refused by the SERVER, inside the same action.
+      async function updateWidget() {
+        await fetch("/api/widgets/7", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "w7" }),
+        });
+        await fetch("/api/refuse/403?after=update");
+        document.querySelector("[data-testid=widgets-status]").textContent = "Widget updated";
       }
 
       async function changeOwner() {

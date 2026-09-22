@@ -382,8 +382,9 @@ export class BrowserEngine {
    *
    * The fetch runs IN the page, so it passes through the same interception the
    * write policy is enforced on: a safe-write session cannot reach past the
-   * policy by calling an endpoint instead of clicking it. The refusal comes
-   * back as the policy's own error, exactly as it would for a click.
+   * policy by calling an endpoint instead of clicking it. The policy answers
+   * the fetch with its stand-in 403, and the result says so rather than
+   * printing it as the server's status.
    */
   async apiRequest(input: { method?: string; path: string; body?: string; headers?: Record<string, string> }): Promise<string> {
     const page = this.requirePage();
@@ -402,18 +403,19 @@ export class BrowserEngine {
     try {
       raw = (await page.evaluate(script)) as Parameters<typeof toReplayResult>[0];
     } catch (err) {
-      // A blocked request rejects the fetch inside the page. That is the write
-      // policy doing its job, not an app fault, and it is reported as such.
+      // The page could not run the fetch at all (a navigation mid-call, a
+      // closed page). The policy answers rather than rejects, so this is not it.
       const message = err instanceof Error ? err.message : String(err);
       this.logAction({ action: "request", target: `${method.method} ${input.path}`, url: page.url(), result: `blocked: ${message.split("\n")[0]}` });
-      return `${method.method} ${input.path} — the request did not complete: ${message.split("\n")[0]}\nIn a write-limited mode this is usually the policy refusing it, which is the engine's safety net and not a finding about the app.`;
+      return `${method.method} ${input.path} — the request did not complete: ${message.split("\n")[0]}`;
     }
     const result = toReplayResult(raw);
     this.logAction({
       action: "request",
       target: `${method.method} ${input.path}`,
       url: page.url(),
-      result: replaySignature(method.method, result.url, result.status),
+      // Not a status signature: the trail must not record the stand-in as the server's answer.
+      result: result.refusedByPolicy ? `blocked: write policy (${result.refusedByPolicy})` : replaySignature(method.method, result.url, result.status),
     });
     return formatReplay(method.method, result);
   }
@@ -777,7 +779,7 @@ export class BrowserEngine {
       // not just looked at — the difference between visited and tested.
       //
       // Only for requests the policy will actually let through. This event
-      // fires BEFORE the route handler aborts a blocked one, so counting it
+      // fires BEFORE the route handler stops a blocked one, so counting it
       // here let a REFUSED destructive POST mark the route as mutated — a form
       // that was never submitted reading as tested, in read-only mode where by
       // definition nothing is.

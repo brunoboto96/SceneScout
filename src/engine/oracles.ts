@@ -150,7 +150,7 @@ export class OracleMonitor {
     this.refusedByPolicy = check;
   }
 
-  /** Called by the engine when the write policy aborts a request, so the errors that abort causes are not held against the app. */
+  /** Called by the engine when the write policy stops a request (dropped or answered), so the errors that causes are not held against the app. */
   notePolicyBlock(): void {
     this.lastPolicyBlockAt = Date.now();
   }

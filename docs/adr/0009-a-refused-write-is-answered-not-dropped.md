@@ -51,6 +51,16 @@ blocked action says what caused it. A cross-origin API call gets CORS headers
 echoing its own origin, or the refusal would fail as a network error and be
 dropped all over again.
 
+`scout_request` meets the same stand-in, and says `REFUSED by the write
+policy` instead of printing its 403: a status there is quoted as the server
+enforcing a rule, and the server was never asked.
+
+Known gap: on Chromium, where service workers are allowed, a worker that
+proxies a write with `respondWith(fetch(…))` makes the request the policy
+answers a different object from the page's. The page's copy is then reported
+as an ordinary `http_error`, without the stand-in note. Before this change the
+same case leaked as a `request_failed`.
+
 ## Failure direction
 
 403 rather than 5xx or 401. A 5xx invites retries and reads as "the server is

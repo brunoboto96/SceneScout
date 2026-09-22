@@ -81,6 +81,24 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
       JSON.stringify(engine.oracleLog.all.slice(loggedBefore).map((v) => `${v.kind}: ${v.detail.slice(0, 80)}`)),
     );
 
+    // The case the policy used to hide: a handler with no .catch, which threw
+    // on the dropped request before it could claim success. A real server 403
+    // inside the same action is still the server's, and still reported.
+    const updateRef = /(e\d+) button "Update widget"/.exec(snap)?.[1];
+    if (!updateRef) throw new Error(`update button not in snapshot: ${snap.slice(0, 400)}`);
+    const updateLoggedBefore = engine.oracleLog.all.length;
+    const updated = await engine.click(updateRef);
+    check(
+      "a handler with no .catch now reaches its success line, and is reported",
+      found("false_success").some((v) => v.detail.includes("PUT /api/widgets/7 403") && /stand-in/.test(v.detail)),
+      updated.slice(0, 900),
+    );
+    check(
+      "a real 403 from the server in the same action is still an http_error",
+      engine.oracleLog.all.slice(updateLoggedBefore).some((v) => v.kind === "http_error" && v.detail.includes("/api/refuse/403?after=update")),
+      JSON.stringify(engine.oracleLog.all.slice(updateLoggedBefore).map((v) => `${v.kind}: ${v.detail.slice(0, 90)}`)),
+    );
+
     const before = found("refused_empty").length + found("false_success").length;
     await engine.click(loadRef);
     await engine.click(saveRef);
