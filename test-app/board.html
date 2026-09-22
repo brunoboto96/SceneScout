@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Post to the board</title></head>
+<body>
+  <!--
+    Fixture: a message posted here is stored by the SERVER and shown on
+    board-list.html, which renders it as HTML (the defect). Unlike the echo
+    pages, which keep their note in the browser, a server-stored value is seen
+    by every browser — so one session can type the payload and another can be
+    the one that opens the page it fires on, as happens when a parallel run
+    splits the create form and the list between lanes.
+  -->
+  <h1>Post to the board</h1>
+  <form id="board-form">
+    <label for="message">Message</label>
+    <input id="message" name="message" data-testid="board-message">
+    <button type="submit" data-testid="board-post">Post</button>
+  </form>
+  <p id="msg" data-testid="board-msg"></p>
+  <a href="/board-list.html" data-testid="board-list-link">Board</a>
+  <script>
+    document.getElementById("board-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const res = await fetch("/api/board", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: document.getElementById("message").value }),
+      });
+      document.getElementById("msg").textContent = res.ok ? "Posted." : "Could not post.";
+    });
+  </script>
+</body>
+</html>

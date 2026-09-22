@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Board</title></head>
+<body>
+  <h1>Board</h1>
+  <ul id="messages" data-testid="board-messages"></ul>
+  <script>
+    fetch("/api/board")
+      .then((res) => res.json())
+      .then((body) => {
+        // The defect: each message is rendered as HTML.
+        document.getElementById("messages").innerHTML = body.messages.map((m) => `<li>${m}</li>`).join("");
+      });
+  </script>
+</body>
+</html>

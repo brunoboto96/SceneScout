@@ -473,7 +473,7 @@ export function generateReport(
   );
   if (extras && extras.routesTotal > 0) lines.push(`| Route coverage | ${extras.routesVisited}/${extras.routesTotal} |`);
   lines.push(`| States explored | ${cov.states} |`);
-  if (extras) lines.push(`| Design audits this session | ${extras.designAudits} |`);
+  if (extras) lines.push(`| Design audits this run (all sessions) | ${extras.designAudits} |`);
   lines.push(`| Oracle violations this session | ${oracleLog.length} |`);
   if (extras?.policyAttributed) {
     lines.push(`| Errors caused by the tester's own write-policy blocks (not counted above) | ${extras.policyAttributed} |`);

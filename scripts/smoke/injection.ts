@@ -94,4 +94,66 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     await engine.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
   }
+
+  await acrossSessions(baseUrl);
+}
+
+/**
+ * A parallel run splits the create form and the list that renders it between
+ * two lanes. The payload one session typed has to be watched for in the
+ * other's browser, or a stored injection is only ever caught by a lane that
+ * happens to own both pages. The contrast: a session on ANOTHER project, which
+ * opens the same injected page, reports nothing — probes are shared by the
+ * run's store, not leaked between unrelated runs.
+ */
+async function acrossSessions(baseUrl: string): Promise<void> {
+  console.log("injection oracle: typed by one session, opened by another");
+  const { MemoryStore } = await import("../../dist/engine/memory.js");
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-inject-shared-"));
+  const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-inject-other-"));
+  const store = new MemoryStore(projectDir);
+  const writer = new BrowserEngine();
+  const reader = new BrowserEngine();
+  const stranger = new BrowserEngine();
+  writer.sessionKey = "writer";
+  reader.sessionKey = "reader";
+  stranger.sessionKey = "stranger";
+  try {
+    await writer.attach({ url: baseUrl, projectDir, mode: "read-only", memoryStore: store });
+    await reader.attach({ url: baseUrl, projectDir, mode: "read-only", memoryStore: store });
+    await stranger.attach({ url: baseUrl, projectDir: otherDir, mode: "read-only" });
+
+    await writer.navigate("/board.html");
+    await writer.runPlan([
+      { action: "type", target: "testid=board-message", value: '<b data-probe="shared">bold</b>', replace: true },
+      { action: "click", target: "testid=board-post" },
+    ]);
+    const writerLog = writer.oracleLog.all.filter((v) => v.kind === "dom_injection").length;
+
+    const read = await reader.navigate("/board-list.html");
+    check("a payload typed by one session is caught on the page another session opens", /dom_injection/.test(read), read.slice(0, 600));
+    const found = reader.oracleLog.all.find((v) => v.kind === "dom_injection");
+    check(
+      "...naming the field and the page it was typed on in the other session",
+      /typed into (testid=board-message|.*Message.*) on \/board\.html/.test(found?.detail ?? ""),
+      found?.detail ?? "(none)",
+    );
+    const again = await writer.navigate("/board-list.html");
+    check(
+      "the writer opening the same page does not report it a second time",
+      !/dom_injection/.test(again) && writer.oracleLog.all.filter((v) => v.kind === "dom_injection").length === writerLog,
+      again.slice(0, 400),
+    );
+
+    const unrelated = await stranger.navigate("/board-list.html");
+    check(
+      "a session on another project opening the same page reports nothing: it typed nothing",
+      !/dom_injection/.test(unrelated) && !stranger.oracleLog.all.some((v) => v.kind === "dom_injection"),
+      unrelated.slice(0, 400),
+    );
+  } finally {
+    await Promise.allSettled([writer.close(), reader.close(), stranger.close()]);
+    fs.rmSync(projectDir, { recursive: true, force: true });
+    fs.rmSync(otherDir, { recursive: true, force: true });
+  }
 }

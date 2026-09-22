@@ -99,15 +99,25 @@ export const LaneReport = z
 export type LaneDecision = z.infer<typeof LaneDecision>;
 export type LaneReport = z.infer<typeof LaneReport>;
 
-export type LaneParse = { ok: true; report: LaneReport } | { ok: false; reason: string };
+/** `aroundIgnored`: the object came from the reply's one fenced block, and the text around it was dropped unread. */
+export type LaneParse = { ok: true; report: LaneReport; aroundIgnored: boolean } | { ok: false; reason: string };
 
-const FENCE_OPEN = /^```[a-z]*\s*\n/i;
-const FENCE_CLOSE = /\n?```\s*$/;
+const FENCE_OPEN = /^```[a-z]*\s*\r?\n/i;
+const FENCE_CLOSE = /\r?\n?```\s*$/;
+/** Every fenced block in a reply, with its contents. */
+const FENCED_BLOCK = /```[a-z]*[ \t]*\r?\n([\s\S]*?)\r?\n?```/gi;
 
 /**
  * The reply is one JSON object and nothing else. A fenced block around it is
- * tolerated, because every model has been trained to add one; text before or
- * after it is not, because the point is that no one has to read the reply.
+ * tolerated, because every model has been trained to add one.
+ *
+ * Prose around ONE fenced JSON block is tolerated too, and dropped unread. The
+ * rule used to refuse it, and in a measured run six of eight lanes did it
+ * anyway: each refusal cost the planner a round trip or a hand-unwrap, to
+ * recover an object that was already unambiguous. The point — nobody has to
+ * READ the reply — survives, because the prose is never looked at. Unfenced
+ * prose is still refused, because where the object starts and ends is then a
+ * guess, and so is more than one fenced object.
  * The reason names what was wrong, since the planner relays it to the lane.
  *
  * With `expectedLane`, a report that names another lane is refused: the
@@ -116,11 +126,16 @@ const FENCE_CLOSE = /\n?```\s*$/;
  */
 export function parseLaneReport(text: string, expectedLane?: string): LaneParse {
   let body = text.trim();
-  if (FENCE_OPEN.test(body)) {
-    if (!FENCE_CLOSE.test(body)) return { ok: false, reason: "the closing ``` must end the reply, with no text after it" };
+  let aroundIgnored = false;
+  if (FENCE_OPEN.test(body) && FENCE_CLOSE.test(body) && [...body.matchAll(FENCED_BLOCK)].length === 1) {
     body = body.replace(FENCE_OPEN, "").replace(FENCE_CLOSE, "").trim();
+  } else if (!body.startsWith("{")) {
+    const objects = [...body.matchAll(FENCED_BLOCK)].map((m) => m[1].trim()).filter((b) => b.startsWith("{"));
+    if (objects.length > 1) return { ok: false, reason: `the reply holds ${objects.length} fenced JSON blocks; hand back exactly one object` };
+    if (objects.length === 0) return { ok: false, reason: "the reply must be one JSON object, with no text before it" };
+    body = objects[0];
+    aroundIgnored = true;
   }
-  if (!body.startsWith("{")) return { ok: false, reason: "the reply must be one JSON object, with no text before it" };
   let raw: unknown;
   try {
     raw = JSON.parse(body);
@@ -138,7 +153,7 @@ export function parseLaneReport(text: string, expectedLane?: string): LaneParse 
   if (expectedLane !== undefined && result.data.lane !== expectedLane) {
     return { ok: false, reason: `the report names lane "${result.data.lane}", but this reply was asked of lane "${expectedLane}"` };
   }
-  return { ok: true, report: result.data };
+  return { ok: true, report: result.data, aroundIgnored };
 }
 
 /**
@@ -164,7 +179,7 @@ export function laneReportInstruction(lane: string): string {
  * refuses good replies.
  */
 const LANE_RUBRIC: readonly string[] = [
-  "Reply with ONE JSON object and nothing else — no prose before or after it, no explanation, no headings. A fenced ```json block is fine.",
+  "Reply with ONE JSON object and nothing else — no prose before or after it, no explanation, no headings. A fenced ```json block is fine; anything outside it is discarded unread, so put nothing there you want kept.",
   `Shape: {"lane":<your lane name>,"status":<${quoteAll(LANE_STATUSES)}>,"decisions":[…],"routes":[…],"blocked_by":<string or null>}.`,
   `Each decision: {"observation":<a short id for what was observed, unique in the report, at most ${LANE_OBSERVATION_MAX} characters>,"verdict":<${quoteAll(LANE_VERDICTS)}>,"severity":<${quoteAll(LANE_SEVERITIES)} or null>,"category":<${quoteAll(LANE_CATEGORIES)} or null>,"confidence":<0..1>,"evidence":<machine signature such as "GET /api/things 500", or null>}.`,
   `A "defect" must carry a severity and a category. "evidence" is a signature, not a sentence: at most ${LANE_EVIDENCE_MAX} characters. "confidence" is how sure you are of the verdict, calibrated: 0.5 means a coin flip, 0.95 means you would bet on it.`,

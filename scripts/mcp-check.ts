@@ -135,6 +135,80 @@ async function liveViewCheck(client: Client): Promise<string> {
 }
 
 /**
+ * A parallel run over the wire: the planner reports while a lane did the
+ * auditing, and a lane's report is folded with what it judged and never filed.
+ * Both live in the server (the gate and the fold), not in the engine the smoke
+ * suite drives.
+ */
+async function laneCheck(client: Client): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-lanes-"));
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
+  try {
+    for (const session of ["planner", "orders"]) {
+      await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session, mode: "read-only", objective: `${session} lane` });
+    }
+    const early = await call("scout_report", { session: "planner", level: "minimal" });
+    if (!/No scout_design_audit was run in this run/.test(early))
+      fail(`the gate let a run with no audit through:
+${early.slice(0, 400)}`);
+    await call("scout_design_audit", { session: "orders" });
+    const late = await call("scout_report", { session: "planner", level: "minimal" });
+    if (/No scout_design_audit/.test(late))
+      fail(`a lane's audit did not count for the planner's report:
+${late.slice(0, 400)}`);
+    console.log("✓ the report gate counts a design audit from any session in the run");
+
+    const report = (evidence: string): string =>
+      JSON.stringify({
+        lane: "orders",
+        status: "complete",
+        decisions: [{ observation: "email-no-label", verdict: "defect", severity: "low", category: "a11y", confidence: 0.8, evidence }],
+        routes: ["/"],
+        blocked_by: null,
+      });
+    const unfiled = await call("scout_lane_report", {
+      lane: "orders",
+      reply: "Here is my report:\n```json\n" + report("input[name=email] has no label") + "\n```\nDone.",
+    });
+    if (!/Lane report accepted/.test(unfiled) || !/discarded unread/.test(unfiled))
+      fail(`prose around one fenced report was not accepted and disclosed:\n${unfiled}`);
+    if (!/1 judged defect\(s\) have no finding/.test(unfiled) || !unfiled.includes("email-no-label"))
+      fail(`an unfiled defect was not named at the fold:\n${unfiled}`);
+    await call("scout_finding", {
+      session: "orders",
+      severity: "low",
+      category: "a11y",
+      title: "Email field has no label",
+      detail: "The field is announced without a name.",
+      evidence: "input[name=email] has no label",
+    });
+    const filed = await call("scout_lane_report", { lane: "orders", reply: report("input[name=email] has no label") });
+    if (/have no finding/.test(filed)) fail(`a filed defect was still reported as unfiled:\n${filed}`);
+    console.log("✓ a lane report names what was judged and never filed, and accepts prose around one fenced object");
+    await call("scout_close", { all: true });
+
+    // The server keeps one store per project for its whole life. A second run
+    // in the same process must not pass the gate on the first run's audit.
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "second-run", mode: "read-only", objective: "second run" });
+    const secondRun = await call("scout_report", { session: "second-run", level: "minimal" });
+    if (!/No scout_design_audit was run in this run/.test(secondRun))
+      fail(`a second run passed the audit gate on the first run's audit:\n${secondRun.slice(0, 400)}`);
+    // Closing the last session BY NAME ends the run too.
+    await call("scout_design_audit", { session: "second-run" });
+    await call("scout_close", { session: "second-run" });
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "third-run", mode: "read-only", objective: "third run" });
+    const thirdRun = await call("scout_report", { session: "third-run", level: "minimal" });
+    if (!/No scout_design_audit was run in this run/.test(thirdRun)) fail(`closing the last session by name did not end its run:\n${thirdRun.slice(0, 400)}`);
+    await call("scout_close", { all: true });
+    console.log("✓ a run's shared state ends with its last session");
+  } finally {
+    fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * status.json is written asynchronously and can be caught mid-write, which is
  * what `scenescout status` reports as truncated. A check reads it the way a
  * patient reader does: until it parses.
@@ -314,6 +388,7 @@ async function main(): Promise<void> {
   }
   console.log("✓ scout_scan round-trip works");
 
+  await laneCheck(client);
   const liveProject = await liveViewCheck(client);
   await client.close();
   await tokenGoneCheck(liveProject);
