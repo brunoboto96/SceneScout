@@ -1155,6 +1155,7 @@ test("sameFamily: every category belongs to a family, and a missing one matches 
   assert.equal(sameFamily(undefined, "visual"), false);
   assert.equal(sameFamily("", "visual"), false);
   assert.equal(sameFamily("made-up", "made-up"), false, "an unknown category read from an old file fails safe");
+});
 
 test("a finding filed right after a lane report is folded keeps its repro trace", () => {
   const store = freshStore();
