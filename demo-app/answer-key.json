@@ -1,0 +1,217 @@
+{
+  "app": "Harbor demo",
+  "_comment": "What this app contains, as data, so a run can be scored against it. `defects` are the ones planted on purpose and listed in README.md; recall is measured against those. `alsoReal` are genuine problems a run found that nobody planted: they count as correct but not toward recall, so recall stays comparable between runs. `nonDefects` are things a run is known to report that are not defects: matching one is a false positive. Severities are the key author's judgement, and the scorecard says so. `match` is a list of case-insensitive regular expressions tried against a finding's evidence and title. Non-defects are tried first, so keep them narrow.",
+  "defects": [
+    {
+      "id": "dashboard-chart-404",
+      "route": "/",
+      "title": "Dashboard chart image returns 404",
+      "category": "network",
+      "severity": "medium",
+      "level": "minimal",
+      "match": ["weekly-chart\\.png"]
+    },
+    {
+      "id": "dashboard-badge-covers-button",
+      "route": "/",
+      "title": "A badge with a negative offset covers the All orders button",
+      "category": "visual",
+      "severity": "low",
+      "level": "minimal",
+      "match": [
+        "bulk.import.{0,40}(overlap|cover)",
+        "(overlap|cover).{0,40}bulk.import",
+        "dash-new-badge",
+        "All orders.{0,40}overlap",
+        "overlap.{0,40}All orders"
+      ]
+    },
+    {
+      "id": "orders-archived-refused-empty",
+      "route": "/orders.html",
+      "title": "The Archived filter returns a 500 and the page shows an empty table",
+      "category": "data-inconsistency",
+      "severity": "high",
+      "level": "minimal",
+      "match": ["status=archived", "archived.{0,60}(500|empty|refused)"]
+    },
+    {
+      "id": "new-order-empty-customer-silent",
+      "route": "/orders-new.html",
+      "title": "Submitting with an empty Customer does nothing and says nothing",
+      "category": "ux-confusing",
+      "severity": "medium",
+      "level": "medium",
+      "match": ["empty.customer", "customer.{0,40}(silent|no feedback|nothing)"]
+    },
+    {
+      "id": "new-order-double-submit",
+      "route": "/orders-new.html",
+      "title": "Submit stays enabled, so a double-click creates two orders",
+      "category": "data-inconsistency",
+      "severity": "high",
+      "level": "medium",
+      "match": ["POST /api/orders\\b.{0,40}(twice|two)", "new-order-submit.{0,40}(twice|x2|×2)", "duplicate.orders?", "double.submit"]
+    },
+    {
+      "id": "new-order-hint-contrast",
+      "route": "/orders-new.html",
+      "title": "Hint text at 1.73:1 contrast",
+      "category": "a11y",
+      "severity": "low",
+      "level": "minimal",
+      "match": ["1\\.73", "hint.{0,40}contrast", "contrast.{0,40}hint"]
+    },
+    {
+      "id": "new-order-email-no-label",
+      "route": "/orders-new.html",
+      "title": "Email field has a placeholder but no label",
+      "category": "a11y",
+      "severity": "medium",
+      "level": "minimal",
+      "match": ["email.{0,40}(label|placeholder)", "input\\[name=email\\]"]
+    },
+    {
+      "id": "reports-export-csv-throws",
+      "route": "/reports.html",
+      "title": "Export CSV throws",
+      "category": "page-error",
+      "severity": "high",
+      "level": "medium",
+      "match": ["export.{0,10}csv", "reports-export", "reading 'rows'"]
+    },
+    {
+      "id": "scheduled-reports-dead-end",
+      "route": "/reports-scheduled.html",
+      "title": "Scheduled reports has no navigation and no way back",
+      "category": "dead-end",
+      "severity": "high",
+      "level": "minimal",
+      "match": ["reports-scheduled", "scheduled.reports.{0,60}(nav|no way|dead)"]
+    },
+    {
+      "id": "order-sticky-bar-covers-save",
+      "route": "/order.html",
+      "title": "A fixed bar at the bottom covers the Save notes row",
+      "category": "visual",
+      "severity": "medium",
+      "level": "minimal",
+      "match": ["order-stickybar", "sticky.{0,40}(save|notes|footer)", "save.notes.{0,40}cover"]
+    },
+    {
+      "id": "approve-endpoint-accepts-clerk",
+      "route": "/approvals.html",
+      "title": "Approve is hidden from all but a manager, but the endpoint accepts a clerk",
+      "category": "security",
+      "severity": "high",
+      "level": "medium",
+      "match": ["approve.{0,60}(clerk|role.check|no role)", "/approve 200"]
+    },
+    {
+      "id": "inventory-sort-as-text",
+      "route": "/inventory.html",
+      "title": "Sorting by quantity compares the numbers as text",
+      "category": "data-inconsistency",
+      "severity": "medium",
+      "level": "medium",
+      "match": ["sort.{0,20}(qty|quantity)", "quantity.{0,40}(text|string)", "\\[10,\\s*120"]
+    },
+    {
+      "id": "orders-stored-xss",
+      "route": "/orders.html",
+      "title": "The customer name is rendered as HTML (stored XSS)",
+      "category": "security",
+      "severity": "high",
+      "level": "extensive",
+      "match": ["dom_injection", "stored.xss", "\\bxss\\b", "onerror"]
+    },
+    {
+      "id": "delete-reports-false-success",
+      "route": "/settings.html",
+      "title": "Delete order and Delete workspace report success without reading the response",
+      "category": "data-inconsistency",
+      "severity": "high",
+      "level": "medium",
+      "match": ["false_success", "workspace deleted", "delete.{0,40}(report|claim|show)s? success"]
+    }
+  ],
+  "alsoReal": [
+    {
+      "id": "settings-save-claims-saved",
+      "route": "/settings.html",
+      "title": "Save changes shows \"Saved.\" and sends nothing",
+      "category": "data-loss",
+      "severity": "high",
+      "level": "medium",
+      "match": ["settings-save", "save changes"]
+    },
+    {
+      "id": "new-order-negative-items",
+      "route": "/orders-new.html",
+      "title": "A negative item count is accepted and stored",
+      "category": "data-inconsistency",
+      "severity": "high",
+      "level": "medium",
+      "match": ["items.{0,6}-\\d", "negative.item"]
+    },
+    {
+      "id": "order-not-found-live-controls",
+      "route": "/order.html",
+      "title": "Order not found still offers enabled actions that fail",
+      "category": "page-error",
+      "severity": "medium",
+      "level": "medium",
+      "match": ["orders/null", "not.found.{0,60}(enabled|button|control|action)"]
+    },
+    {
+      "id": "nav-links-unstyled",
+      "route": "/",
+      "title": "Nav links have no underline and the body text's colour",
+      "category": "ux-polish",
+      "severity": "low",
+      "level": "minimal",
+      "match": ["nav.links?.{0,40}(underline|colou?r)", "AFFORDANCES"]
+    },
+    {
+      "id": "customers-spacing-off-grid",
+      "route": "/customers.html",
+      "title": "Customers page spacing is off the 4px grid",
+      "category": "ux-polish",
+      "severity": "low",
+      "level": "minimal",
+      "match": ["customers.{0,40}(spacing|grid|dominant)"]
+    }
+  ],
+  "nonDefects": [
+    {
+      "id": "filter-stuck-after-failure",
+      "title": "The orders filter is stuck on the failed Archived result",
+      "why": "load() fetches whatever status is selected. Rejected had no orders yet, so its correct empty table had the same fingerprint as the Archived failure; only the request's status tells them apart.",
+      "match": ["(stuck|stale|reuses?).{0,60}(rejected|filter|archived)", "rejected.{0,60}(stuck|reuses?|repeats)"]
+    },
+    {
+      "id": "sign-in-double-click",
+      "title": "A double-click on a sign-in role button signs in twice",
+      "why": "Signing in as the same role twice leaves the same state; there is nothing inconsistent to observe.",
+      "match": ["sign.?in.{0,60}(twice|double)", "/api/signin.{0,40}twice", "signin-role.{0,40}(2x|twice|double)"]
+    },
+    {
+      "id": "static-rows-inert",
+      "title": "List rows do nothing when clicked",
+      "why": "The customers and inventory lists are read-only by design; a row with no action is not a dead end.",
+      "match": ["rows?.{0,20}(are )?inert", "customers-row.{0,40}0 network", "row-click-is-inert"]
+    },
+    {
+      "id": "empty-live-region-unnamed",
+      "title": "An empty status region has no accessible name",
+      "why": "A role=status region is empty by design until it announces something; an empty live region has nothing to name.",
+      "match": ["(signin-status|new-order-msg).{0,80}(unnamed|accessible name)", "status.{0,20}region.{0,60}(unnamed|no accessible name|accessible name empty)"]
+    },
+    {
+      "id": "write-policy-block",
+      "title": "A destructive control refused by the tester's write policy",
+      "why": "The refusal is SceneScout's own safety net, not the app's behaviour.",
+      "match": ["blocked by (the |tester )?(safe-write|write.policy)", "WRITE-POLICY blocked", "write.policy.{0,20}\\((safe-write|read-only)\\)"]
+    }
+  ]
+}
