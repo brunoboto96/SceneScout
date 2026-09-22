@@ -95,7 +95,29 @@ const SUCCESS_RE = /\b(?:success(?:fully)?|saved|created|updated|deleted|removed
  * whatever else is on the screen, and must not be reported.
  */
 const ERROR_RE =
-  /\b(?:error|failed|failure|could ?n[o']?t|unable to|went wrong|try again|retry|denied|forbidden|unauthori[sz]ed|not allowed|no permission|timed out|unavailable|problem loading)\b|\b(?:can(?:not|[’']t)|must be|is already|are already|only (?:an? |the )?\w+(?: \w+)? (?:can|may))\b|\b(?:nothing|not) (?:was |been |be )?(?:saved|sent|deleted|updated|created|changed|submitted)\b/i;
+  /\b(?:error|failed|failure|could ?n[o'’]?t|unable to|went wrong|try again|retry|denied|forbidden|unauthori[sz]ed|not allowed|no permission|timed out|unavailable|problem loading)\b/i;
+
+/**
+ * A refusal explained in the app's own words: "Only an open order can be sent
+ * for approval", "You can't delete an approved order", "Nothing was saved".
+ * Correct behaviour after a refused request, though it uses none of the words
+ * for an error and may contain one for success ("sent").
+ *
+ * Unlike ERROR_RE, this counts only in text the page ANNOUNCES — a live region,
+ * an alert, a dialog (see PageState.announced). The same phrasing is ordinary
+ * help text everywhere else ("This cannot be undone", "Password must be at
+ * least 8 characters", "Only admins can invite members"), and page-wide it
+ * excused real lies: a refused delete reporting "Workspace deleted." went
+ * unreported because the Danger zone said "This cannot be undone."
+ */
+const REFUSAL_RE =
+  /\b(?:can(?:not|[’'`]?t| not)|must be|(?:is|are) already|(?:only (?:an? |the )?\w+(?: \w+)?|may only|can only(?: be)?) (?:can|may|\w+)|(?:nothing|not) (?:was|has been|have been|been) (?:saved|sent|deleted|updated|created|changed|submitted))\b/i;
+
+/** Whether a piece of announced text explains a refusal. */
+export function isRefusalNotice(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.length > 0 && trimmed.length <= CLAIM_TEXT_MAX && REFUSAL_RE.test(trimmed);
+}
 
 /** Longest piece of text judged. An empty state is a sentence; a paragraph that happens to contain one of these words is not a claim. */
 export const CLAIM_TEXT_MAX = 120;
@@ -118,6 +140,12 @@ export function classify(text: string): Claim | null {
 export interface PageState {
   /** Short pieces of visible text, in document order. */
   texts: readonly string[];
+  /**
+   * The subset of those texts inside something the page announces: a live
+   * region (role=status or alert, aria-live), a dialog, or <output>. What the
+   * page SAYS in response to an action lives here; help text does not.
+   */
+  announced?: readonly string[];
   /**
    * A list or table that renders its container and its header but no rows.
    * Structural, so it holds in any language and on any app that does not write
@@ -168,6 +196,9 @@ export function findContradictions(requests: readonly WatchedRequest[], page: Pa
   // applies. This is checked before anything else so that a page carrying both
   // an error banner and a stale empty state is not reported.
   if (claims.includes("error")) return [];
+  // A refusal explained in the app's own words, where the page announces its
+  // responses. Help text with the same wording elsewhere excuses nothing.
+  if ((page.announced ?? []).some(isRefusalNotice)) return [];
 
   const out: Contradiction[] = [];
 
@@ -220,6 +251,8 @@ export const MAX_CLAIM_TEXTS = 120;
 export const CLAIM_SCAN_SCRIPT = `(() => {
   const visible = ${VISIBLE_SRC};
   const texts = [];
+  const announced = [];
+  const ANNOUNCES = "[role='status'], [role='alert'], [aria-live]:not([aria-live='off']), [role='dialog'], [role='alertdialog'], dialog, output";
   const seen = new Set();
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
   let el = document.body;
@@ -230,6 +263,7 @@ export const CLAIM_SCAN_SCRIPT = `(() => {
     if (own && own.length <= ${CLAIM_TEXT_MAX} && !seen.has(own) && visible(el)) {
       seen.add(own);
       texts.push(own);
+      if (el.closest(ANNOUNCES)) announced.push(own);
     }
     el = walker.nextNode();
   }
@@ -250,5 +284,5 @@ export const CLAIM_SCAN_SCRIPT = `(() => {
     const rows = list.querySelectorAll(":scope > li, :scope > [role='row'], :scope > [role='listitem']");
     if (rows.length === 0) emptyLists += 1;
   }
-  return { texts, emptyLists };
+  return { texts, announced, emptyLists };
 })()`;

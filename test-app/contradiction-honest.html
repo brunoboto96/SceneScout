@@ -33,6 +33,8 @@
       <tbody data-testid="gadgets-rows"></tbody>
     </table>
     <p data-testid="gadgets-status"></p>
+    <button data-testid="gadgets-approval-button" onclick="sendForApproval()">Send for approval</button>
+    <span role="status" data-testid="gadgets-approval-status"></span>
 
     <script>
       const status = () => document.querySelector("[data-testid=gadgets-status]");
@@ -62,6 +64,15 @@
           body: JSON.stringify({ owner: "someone else" }),
         }).catch(() => null);
         status().textContent = res && res.ok ? "Owner updated" : "Could not update the owner. Try again.";
+      }
+
+      // Refused, and the page explains why in its status region — using none
+      // of the words for an error, and one ("sent") that looks like success.
+      async function sendForApproval() {
+        const res = await fetch("/api/refuse/409", { method: "POST" });
+        document.querySelector("[data-testid=gadgets-approval-status]").textContent = res.ok
+          ? "Sent for approval"
+          : "Only an open gadget can be sent for approval (this one is pending)";
       }
 
       // A list that is genuinely empty, answered with a 200. An empty state is

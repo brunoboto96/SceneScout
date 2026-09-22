@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CLAIM_TEXT_MAX, classify, findContradictions, isRefused, type PageState, type WatchedRequest } from "../src/engine/claims.ts";
+import { CLAIM_TEXT_MAX, classify, findContradictions, isRefused, isRefusalNotice, type PageState, type WatchedRequest } from "../src/engine/claims.ts";
 
 const req = (over: Partial<WatchedRequest> = {}): WatchedRequest => ({
   method: "GET",
@@ -140,24 +140,58 @@ test("a refused save shown as a success message is reported", () => {
   assert.equal(found[0].evidence, "false-success POST /api/things 422");
 });
 
-test("a refusal the page explains in its own words is not a false success", () => {
-  // Seen on a benchmark run: a 409, then a correct message that happens to
-  // contain an affirmation-shaped word ("sent"). The page admitted the refusal;
-  // it just did not use the word "error".
+test("a refusal the page announces in its own words is not a false success", () => {
+  // Seen on a benchmark run: a 409, then a correct message in the page's
+  // status region that happens to contain an affirmation-shaped word ("sent").
   const refused = [req({ method: "POST", url: "http://app.test/api/orders/1042/request-approval", status: 409 })];
   for (const text of [
     "Only an open order can be sent for approval (this one is pending)",
     "This order cannot be saved while it is shipped",
     "You can't delete an order that has been approved",
+    "You can’t delete an order that has been approved",
     "Only managers may approve orders",
+    "You may only approve open orders",
+    "Approvals can only be made by managers",
     "This order is already approved",
     "Nothing was sent: the order must be open",
   ]) {
-    assert.deepEqual(findContradictions(refused, page({ texts: [text] })), [], text);
+    assert.deepEqual(findContradictions(refused, page({ texts: [text], announced: [text] })), [], text);
   }
-  // The contrast: the same refusal, and a message claiming it went through.
+  // The contrast: the same refusal, and an announced message claiming it went through.
   for (const text of ["Sent for approval", "Order sent to the manager", "Saved successfully"]) {
-    assert.equal(findContradictions(refused, page({ texts: [text] }))[0]?.kind, "false_success", text);
+    assert.equal(findContradictions(refused, page({ texts: [text], announced: [text] }))[0]?.kind, "false_success", text);
+  }
+});
+
+test("refusal-shaped help text elsewhere on the page excuses nothing", () => {
+  // Page-wide, this wording silenced real lies: a refused delete reporting
+  // "Workspace deleted." beside a Danger zone reading "This cannot be undone."
+  const refusedDelete = [req({ method: "DELETE", url: "http://app.test/api/workspace", status: 403 })];
+  const lie = "Workspace deleted.";
+  for (const help of [
+    "This cannot be undone.",
+    "This action cannot be undone",
+    "Password must be at least 8 characters",
+    "Fields marked * must be filled in",
+    "Only admins can invite members",
+  ]) {
+    const found = findContradictions(refusedDelete, page({ texts: [help, lie], announced: [lie] }));
+    assert.equal(found[0]?.kind, "false_success", `help text "${help}" must not excuse the lie`);
+  }
+  // And an empty state is not an admission, however it is worded.
+  const refusedRead = [req({ method: "GET", url: "http://app.test/api/bookmarks", status: 500 })];
+  const empty = findContradictions(refusedRead, page({ texts: ["Nothing saved yet"], announced: ["Nothing saved yet"], emptyLists: 1 }));
+  assert.equal(empty[0]?.kind, "refused_empty", '"Nothing saved yet" is an empty state, not a refusal');
+  // Classic error words still clear the whole page, as before.
+  assert.deepEqual(findContradictions(refusedDelete, page({ texts: ["Couldn’t delete the workspace", lie] })), []);
+});
+
+test("isRefusalNotice reads refusal wording and nothing else", () => {
+  for (const t of ["Only an open order can be sent for approval", "cannot be saved", "can not be saved", "is already approved", "Nothing was saved"]) {
+    assert.equal(isRefusalNotice(t), true, t);
+  }
+  for (const t of ["Nothing saved yet", "Saved successfully", "Order sent", "No results", ""]) {
+    assert.equal(isRefusalNotice(t), false, t);
   }
 });
 
