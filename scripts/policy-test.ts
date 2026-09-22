@@ -13,12 +13,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   allowsWrite,
+  answersWithRefusal,
   AUTH_FLOW_RE,
   destructiveRefusal,
   isAuthExempt,
   isDestructive,
   isDestructiveWire,
   LABEL_HEAD_WORDS,
+  POLICY_REFUSAL_HEADER,
+  policyRefusal,
   WRITE_MODES,
 } from "../src/engine/policy.ts";
 import {
@@ -501,4 +504,31 @@ test("in observe mode only the requests a login itself needs are exempt", () => 
   ]) {
     assert.equal(exempt(p), false, `${p} must be blocked in observe`);
   }
+});
+
+test("a blocked script request is answered with a refusal; a blocked navigation is dropped", () => {
+  assert.equal(answersWithRefusal("fetch"), true);
+  assert.equal(answersWithRefusal("xhr"), true);
+  // Answering a form post would replace the page the user was on with the stand-in body.
+  assert.equal(answersWithRefusal("document"), false);
+  for (const other of ["ping", "beacon", "other", "image"]) assert.equal(answersWithRefusal(other), false, other);
+});
+
+test("the policy's refusal is a marked 403 the page can read", () => {
+  const same = policyRefusal("read-only", "DELETE", "/api/things/9");
+  // 403: a 5xx invites retries and a 401 reads as "signed out" to many apps.
+  assert.equal(same.status, 403);
+  assert.match(same.headers[POLICY_REFUSAL_HEADER], /mode=read-only/);
+  assert.equal(same.headers["content-type"], "application/json");
+  const body = JSON.parse(same.body) as { error: string; message: string };
+  assert.equal(body.error, "Forbidden");
+  assert.match(body.message, /DELETE \/api\/things\/9/);
+  assert.match(body.message, /never received/);
+  // No Origin header, no CORS headers: nothing to echo.
+  assert.equal(same.headers["access-control-allow-origin"], undefined);
+
+  // A cross-origin API call has to be allowed to read the refusal, or it fails as a network error and is dropped all over again.
+  const cross = policyRefusal("observe", "POST", "/api/things", "http://app.test");
+  assert.equal(cross.headers["access-control-allow-origin"], "http://app.test");
+  assert.equal(cross.headers["access-control-allow-credentials"], "true");
 });

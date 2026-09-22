@@ -61,8 +61,29 @@ test("only data requests are correlated", () => {
   assert.equal(isRefused(req({ resourceType: "font" })), false);
 });
 
-test("a request the tool's own write policy aborted is never an app defect", () => {
+test("a request the tool's own write policy dropped is never an app defect", () => {
   assert.equal(isRefused(req({ method: "DELETE", status: null, blockedByPolicy: true })), false);
+});
+
+test("a request the write policy answered with a refusal is judged like a real one", () => {
+  // The page met a 403 exactly as it would from the server, so what it then
+  // says is the page's own doing.
+  assert.equal(isRefused(req({ method: "DELETE", status: 403, blockedByPolicy: true })), true);
+});
+
+test("a false success on a stand-in refusal says the server never saw the request", () => {
+  const found = findContradictions([req({ method: "DELETE", url: "http://x/api/things/9", status: 403, blockedByPolicy: true })], {
+    texts: ["Thing deleted."],
+    emptyLists: 0,
+  });
+  assert.equal(found.length, 1);
+  assert.equal(found[0].kind, "false_success");
+  assert.match(found[0].detail, /stand-in/);
+  // Same signature as a real refusal, so the finding dedups with one filed from a laxer run.
+  assert.equal(found[0].evidence, "false-success DELETE /api/things/9 403");
+
+  const real = findContradictions([req({ method: "DELETE", url: "http://x/api/things/9", status: 403 })], { texts: ["Thing deleted."], emptyLists: 0 });
+  assert.doesNotMatch(real[0].detail, /stand-in/);
 });
 
 test("a request that never got a response is refused", () => {

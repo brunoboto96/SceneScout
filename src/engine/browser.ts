@@ -39,7 +39,17 @@ import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
-import { AUTH_FLOW_RE, destructiveRefusal, isDestructive, isDestructiveWire, allowsWrite, type WriteMode, isAuthExempt } from "./policy.js";
+import {
+  AUTH_FLOW_RE,
+  answersWithRefusal,
+  destructiveRefusal,
+  isDestructive,
+  isDestructiveWire,
+  allowsWrite,
+  policyRefusal,
+  type WriteMode,
+  isAuthExempt,
+} from "./policy.js";
 import { scanProject } from "../scan.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignPayload, type FocusSample } from "./design.js";
 import { acceptMatches, generatedUpload, type FixtureKind } from "./fixtures.js";
@@ -276,7 +286,7 @@ export class BrowserEngine {
     this.memory?.logAction({ ...entry, session: this.sessionKey });
   }
   /** Requests blocked by the write policy since the last action (timestamped for attribution). */
-  private blockedRequests: Array<{ at: number; sig: string }> = [];
+  private blockedRequests: Array<{ at: number; sig: string; answered: boolean }> = [];
   /**
    * WebSockets this session's pages opened. The write policy works on HTTP
    * requests; frames sent over a socket are not inspected. In observe mode that
@@ -374,8 +384,9 @@ export class BrowserEngine {
    *
    * The fetch runs IN the page, so it passes through the same interception the
    * write policy is enforced on: a safe-write session cannot reach past the
-   * policy by calling an endpoint instead of clicking it. The refusal comes
-   * back as the policy's own error, exactly as it would for a click.
+   * policy by calling an endpoint instead of clicking it. The policy answers
+   * the fetch with its stand-in 403, and the result says so rather than
+   * printing it as the server's status.
    */
   async apiRequest(input: { method?: string; path: string; body?: string; headers?: Record<string, string> }): Promise<string> {
     const page = this.requirePage();
@@ -393,21 +404,40 @@ export class BrowserEngine {
     let raw: Parameters<typeof toReplayResult>[0];
     try {
       raw = (await page.evaluate(script)) as Parameters<typeof toReplayResult>[0];
+      this.forgetReplay(method.method, target.url);
     } catch (err) {
-      // A blocked request rejects the fetch inside the page. That is the write
-      // policy doing its job, not an app fault, and it is reported as such.
+      // The page could not run the fetch at all (a navigation mid-call, a
+      // closed page). The policy answers rather than rejects, so this is not it.
       const message = err instanceof Error ? err.message : String(err);
       this.logAction({ action: "request", target: `${method.method} ${input.path}`, url: page.url(), result: `blocked: ${message.split("\n")[0]}` });
-      return `${method.method} ${input.path} — the request did not complete: ${message.split("\n")[0]}\nIn a write-limited mode this is usually the policy refusing it, which is the engine's safety net and not a finding about the app.`;
+      return `${method.method} ${input.path} — the request did not complete: ${message.split("\n")[0]}`;
     }
     const result = toReplayResult(raw);
     this.logAction({
       action: "request",
       target: `${method.method} ${input.path}`,
       url: page.url(),
-      result: replaySignature(method.method, result.url, result.status),
+      // Not a status signature: the trail must not record the stand-in as the server's answer.
+      result: result.refusedByPolicy ? `blocked: write policy (${result.refusedByPolicy})` : replaySignature(method.method, result.url, result.status),
     });
     return formatReplay(method.method, result);
+  }
+
+  /**
+   * Take the replayed request back out of the contradiction ledger. It was the
+   * agent's call, not the page's, so whatever the page says next is not its
+   * answer — and left in, a replay the policy refused was blamed on the next
+   * click as that click's false success, in place of the click's own request.
+   * Only this request: anything else the page fetched meanwhile stays.
+   */
+  private forgetReplay(method: string, url: string): void {
+    for (let i = this.watchedResponses.length - 1; i >= 0; i -= 1) {
+      const r = this.watchedResponses[i];
+      if (r.method === method && r.url === url) {
+        this.watchedResponses.splice(i, 1);
+        return;
+      }
+    }
   }
 
   /**
@@ -552,7 +582,8 @@ export class BrowserEngine {
   private watchedResponses: WatchedRequest[] = [];
   private static readonly MAX_WATCHED_RESPONSES = 60;
   /**
-   * Requests the write policy aborted, by identity. The request event fires for
+   * Requests the write policy stopped, by identity — whether it dropped them or
+   * answered them with a stand-in refusal. The request event fires for
    * every non-GET the page ATTEMPTS, before the route handler decides its fate,
    * so without this the same DELETE was reported twice with opposite meanings:
    * "server state may have mutated despite read-only mode" and "WRITE-POLICY
@@ -560,7 +591,7 @@ export class BrowserEngine {
    * meet different fates, and a blocked /items/7/archive must not hide an
    * allowed POST /items that shares its prefix.
    */
-  private readonly abortedByPolicy = new WeakSet<import("playwright").Request>();
+  private readonly refusedByPolicy = new WeakSet<import("playwright").Request>();
   /**
    * Markup-shaped values typed by any session of this run, so every later page
    * — in this browser or another lane's — can be checked for them rendering as
@@ -606,7 +637,7 @@ export class BrowserEngine {
    * element on the current page? Runs wherever violations are drained, so the
    * finding reaches the agent in the result of the action that revealed it.
    */
-  /** Record one answered request for the contradiction rules. Policy-aborted ones are marked, never dropped: the rules need to know they were ours. */
+  /** Record one answered request for the contradiction rules. Ones the policy stopped are marked, never dropped: the rules need to know they were ours. */
   private watchResponse(req: import("playwright").Request, status: number | null): void {
     if (this.watchedResponses.length >= BrowserEngine.MAX_WATCHED_RESPONSES) return;
     this.watchedResponses.push({
@@ -614,7 +645,7 @@ export class BrowserEngine {
       url: req.url(),
       status,
       resourceType: req.resourceType(),
-      blockedByPolicy: this.abortedByPolicy.has(req),
+      blockedByPolicy: this.refusedByPolicy.has(req),
     });
   }
 
@@ -720,7 +751,7 @@ export class BrowserEngine {
       this.projectDirNote = ` (its real path could not be resolved: ${err instanceof Error ? err.message : String(err)} — a symlinked project path may be wrongly refused)`;
     }
     this.oracles = new OracleMonitor();
-    this.oracles.setPolicyAbortCheck((req) => this.abortedByPolicy.has(req));
+    this.oracles.setPolicyRefusalCheck((req) => this.refusedByPolicy.has(req));
     this.lastSnap = null;
     this.designAuditCount = 0;
 
@@ -786,7 +817,7 @@ export class BrowserEngine {
       // not just looked at — the difference between visited and tested.
       //
       // Only for requests the policy will actually let through. This event
-      // fires BEFORE the route handler aborts a blocked one, so counting it
+      // fires BEFORE the route handler stops a blocked one, so counting it
       // here let a REFUSED destructive POST mark the route as mutated — a form
       // that was never submitted reading as tested, in read-only mode where by
       // definition nothing is.
@@ -852,10 +883,14 @@ export class BrowserEngine {
           }
           return route.continue();
         }
-        if (this.blockedRequests.length < 20) this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}` });
+        const answered = answersWithRefusal(req.resourceType());
+        if (this.blockedRequests.length < 20) this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered });
         this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}`, url: this.page?.url() ?? "" });
-        this.abortedByPolicy.add(req);
+        this.refusedByPolicy.add(req);
         this.oracles.notePolicyBlock();
+        // A script's request is answered with a refusal, so the page's handling
+        // of one actually runs; a navigation is dropped (policy.ts says why).
+        if (answered) return route.fulfill(policyRefusal(this.mode, method, pathname, req.headers()["origin"]));
         return route.abort("blockedbyclient");
       });
     }
@@ -1436,10 +1471,14 @@ export class BrowserEngine {
       .map((e) => this.lateMark(e))
       .join("; ");
     const extra = this.blockedRequests.length > 5 ? ` (+${this.blockedRequests.length - 5} more)` : "";
+    const answered = this.blockedRequests.some((e) => e.answered);
     this.blockedRequests = [];
     return (
       `\n🛡 WRITE-POLICY blocked (${this.mode}): ${list}${extra}. ` +
       `This is the tester's safety policy, NOT an app bug — do not file a finding for the resulting error UI. ` +
+      (answered
+        ? `The page's own requests were answered with a 403 in the server's place, so the page's handling of a refusal is real: an error message is correct, and a success message is a false_success violation. `
+        : "") +
       (this.mode === "observe"
         ? `observe mode blocks every request that is not a GET, so no form submission reaches the server. Re-attach with mode="read-only" ONLY if the user confirms that ordinary form submissions are acceptable on this target.`
         : this.mode === "read-only"
@@ -1470,7 +1509,7 @@ export class BrowserEngine {
     // to see the DUPLICATES that the reporting dedup below intentionally hides.
     this.lastActionMutationSigs = this.mutationRequests.map((e) => e.sig);
     const fresh = this.mutationRequests
-      .filter((entry) => !this.abortedByPolicy.has(entry.req))
+      .filter((entry) => !this.refusedByPolicy.has(entry.req))
       .filter((entry) => {
         const key = entry.sig.split("?")[0];
         if (this.reportedMutationSigs.has(key)) return false;
