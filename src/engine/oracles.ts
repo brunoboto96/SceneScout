@@ -33,7 +33,8 @@ export const POLICY_BLOCK_WINDOW_MS = 2000;
  * block rather than something the app did?
  *
  * Aborting a request makes the browser print a console error, and — when the
- * app does not catch the rejection — raise a page error. Left in, a report
+ * app does not catch the rejection — raise a page error. Answering one with the
+ * policy's stand-in 403 makes the browser print its "status of 403" line. Left in, a report
  * lists the tool's own safety net as defects of the app under test. (The
  * failed REQUEST itself is matched exactly, by request identity, in the
  * monitor; these two carry no request to match on, so they are attributed by
@@ -46,7 +47,7 @@ export const POLICY_BLOCK_WINDOW_MS = 2000;
 export function isPolicyInduced(v: { kind: string; detail: string }, msSincePolicyBlock: number | null): boolean {
   if (msSincePolicyBlock === null || msSincePolicyBlock > POLICY_BLOCK_WINDOW_MS) return false;
   if (v.kind !== "page_error" && v.kind !== "console_error") return false;
-  return /ERR_BLOCKED_BY_CLIENT|Failed to fetch|NetworkError when attempting to fetch|Load failed/i.test(v.detail);
+  return /ERR_BLOCKED_BY_CLIENT|Failed to fetch|NetworkError when attempting to fetch|Load failed|the server responded with a status of 403\b/i.test(v.detail);
 }
 
 /**
@@ -88,7 +89,7 @@ export class OracleMonitor {
       // Aborted requests are routine during SPA navigation.
       if (failure.includes("ERR_ABORTED")) return;
       if (BENIGN_URL_RE.test(req.url())) return;
-      if (this.abortedByPolicy(req)) {
+      if (this.refusedByPolicy(req)) {
         this.policyAttributed += 1;
         return;
       }
@@ -106,6 +107,12 @@ export class OracleMonitor {
       // Keep this filter consistent with the console oracle: a missing favicon
       // reported here on every page load teaches the driver to ignore http_error.
       if (BENIGN_URL_RE.test(res.url())) return;
+      // The write policy's own stand-in refusal, matched by request identity
+      // like a dropped one: the server never said this.
+      if (this.refusedByPolicy(res.request())) {
+        this.policyAttributed += 1;
+        return;
+      }
       // 401/403 are often expected (auth probes); still report, but as medium.
       this.record({
         kind: "http_error",
@@ -128,7 +135,7 @@ export class OracleMonitor {
   private static readonly MAX_REPORTED_SIGS = 5000;
 
   private lastPolicyBlockAt: number | null = null;
-  private abortedByPolicy: (req: Request) => boolean = () => false;
+  private refusedByPolicy: (req: Request) => boolean = () => false;
 
   /**
    * Errors attributed to the write policy's own blocks and therefore not
@@ -138,12 +145,12 @@ export class OracleMonitor {
    */
   policyAttributed = 0;
 
-  /** The engine knows exactly which requests it aborted; failed requests are matched against that, not against wording. */
-  setPolicyAbortCheck(check: (req: Request) => boolean): void {
-    this.abortedByPolicy = check;
+  /** The engine knows exactly which requests its policy stopped; failed requests and stand-in refusals are matched against that, not against wording. */
+  setPolicyRefusalCheck(check: (req: Request) => boolean): void {
+    this.refusedByPolicy = check;
   }
 
-  /** Called by the engine when the write policy aborts a request, so the errors that abort causes are not held against the app. */
+  /** Called by the engine when the write policy stops a request (dropped or answered), so the errors that causes are not held against the app. */
   notePolicyBlock(): void {
     this.lastPolicyBlockAt = Date.now();
   }

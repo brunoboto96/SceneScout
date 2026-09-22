@@ -323,7 +323,7 @@ That refusal *is* the guarantee: an extensive report can only exist when nothing
 - 🔴 **`destructive`** (`--allow-destructive`) allows everything, and only ever when *you* confirm the environment is disposable. The skill will never choose this itself.
 - 📂 Findings, memory, and reports live in a `.scenescout/` folder where you ran it. It ignores itself in git, so a stray `git add -A` never commits test data.
 
-A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app bug.
+A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app bug. The server never sees a blocked request, but a page's own `fetch` or XHR is answered with a `403` in its place rather than dropped, so the page's handling of a refusal really runs: a page that then claims success is reported as a `false_success` ([ADR 9](docs/adr/0009-a-refused-write-is-answered-not-dropped.md)).
 
 ---
 
