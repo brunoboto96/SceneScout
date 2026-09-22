@@ -335,7 +335,7 @@ A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app
 - 💯 **Page scores** (0–100: a11y · craft · consistency · task-clarity), ranked worst-first, with stale scores from old runs marked as such.
 - 👥 **A role capability matrix** — what each role could and couldn't reach.
 - 🧾 **A gap ledger** — everything *not* done, so the report is honest about its own coverage.
-- ⏱️ **How the run was paced** — actions, median gap, idle share and held-idle time per session, so a browser held open for nothing is visible.
+- ⏱️ **How the run was paced** — how closely each session kept working, and apart from that, how long finished lanes held their browsers waiting to be collected, so neither hides the other.
 - 🎯 **How well the lanes judged** — on a parallel run, whether the confidence each lane stated matched what the project went on to file, beside what later re-tests found ([ADR 10](docs/adr/0010-a-confidence-is-checked-not-trusted.md)).
 
 `.scenescout/report.html` — the same report as one self-contained page, with every session's trail beside it, and on a [recorded run](#-recording-a-run-and-reading-it-back) the screenshots under each finding.
