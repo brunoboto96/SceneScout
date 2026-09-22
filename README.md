@@ -303,15 +303,15 @@ Beyond crashes and HTTP errors, two oracles catch a page **contradicting the ser
 
 ## 📊 Test levels
 
-Each level is an **enforced contract** — `scout_report` checks it before finalizing.
+Each level is a contract. `scout_report` enforces what the engine can see for itself — routes visited, pages audited, and at `extensive` an empty gap ledger (every route exercised and audited, every filled form submitted, a completed journey, two roles) — and the report's gap ledger discloses the rest.
 
 | Level | What it guarantees | Rough size |
 |---|---|---|
 | `minimal` | Every route visited, ≥1 design audit, key journeys as plans, crawl problems triaged. Remaining gaps **disclosed**. | ~40 actions |
-| `medium` *(default)* | minimal + design audits across several routes + every element class exercised + every form submitted valid **and** invalid | ~150 actions |
-| `extensive` | medium + fuzzing, back/refresh/deep-link resilience, keyboard-only pass, a journey per module, ≥2 roles compared, anonymous auth-surface walk. **Refuses to finalize while any gap remains.** | budget-capped |
+| `medium` *(default)* | minimal + design audits across several routes (enforced) + every element class exercised + every form submitted valid **and** invalid (asked of the agent) | ~150 actions |
+| `extensive` | medium + fuzzing, back/refresh/deep-link resilience, keyboard-only pass, a journey per module, ≥2 roles compared, anonymous auth-surface walk. **Refuses to finalize while any gap in the ledger remains.** | budget-capped |
 
-That refusal *is* the guarantee: an extensive report can only exist when nothing known was left untested.
+That refusal *is* the guarantee: an extensive report can only exist when nothing the engine can measure was left untested. Fuzzing, the keyboard pass and the auth-surface walk are the agent's to do; the engine cannot see whether they were done well.
 
 ---
 
@@ -615,7 +615,7 @@ git clone https://github.com/brunoboto96/SceneScout.git scenescout && cd scenesc
 npm install        # installs dependencies and builds
 npm run setup      # same as `scenescout install`, but registers THIS checkout (the skill is linked, so edits are live)
 npm test           # build + 23 suites: 21 pure-logic suites (scan, oracle, policy, … bench, hygiene),
-                   #                     then smoke (real browsers) and mcp-check (the server over stdio)
+                   #                     then smoke and mcp-check (the server over stdio), both with real browsers
 npm run bench -- --all   # re-score every archived benchmark run against the current answer key
 npm run demo       # regenerate examples/ from the demo app
 ```

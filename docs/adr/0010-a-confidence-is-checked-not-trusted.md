@@ -32,8 +32,11 @@ that was filed published an expected calibration error of 0.90.
 Both checks exist, and each says what it is.
 
 - **In the report** (`calibration.ts`), a decision is checked only when it
-  called a defect, named a failing endpoint, and stated a usable confidence.
-  Anything else is counted as unjoinable and disclosed, never scored as wrong.
+  called a defect, named a failing endpoint, and stated a usable confidence. A
+  defect that carried evidence but could not be joined — no failing endpoint
+  in it, or an unusable confidence — is counted as unjoinable and disclosed,
+  never scored as wrong. Verdicts other than "defect", and defects with no
+  evidence, are not claims this check can look up, and are left out.
   No figure is published below eight checkable decisions; the section says so
   instead of vanishing. The section leads with what it is not: agreement with
   the project's bar over its whole history, not evidence about the app.

@@ -10,10 +10,10 @@ Two things are worth holding in mind while reading:
 - **The engine decides nothing about the app.** It reports render state,
   network facts and rule violations. Whether something is a defect, and how
   bad, is the agent's judgement. Every diagram below has that boundary in it.
-- **The engine is not the slow part.** On a measured eight-lane run the median
-  gap between one action and the next was 4 seconds, of which about 3 was the
-  agent deciding what to do. The engine's own work per action is tens of
-  milliseconds plus however long the page takes.
+- **The engine is not the slow part.** The gap between one action and the next
+  is mostly the agent deciding what to do; the engine's own work per action is
+  tens of milliseconds plus however long the page takes. Every report measures
+  this per session, in its pace section (section 6).
 
 ---
 
@@ -56,7 +56,7 @@ the subtle bugs have been.
 
 ```mermaid
 flowchart TD
-    A[tool called with a task] --> B{task stated?}
+    A[tool called] --> B{a task stated now,<br/>or still standing?}
     B -->|no| C[REFUSED:<br/>a watcher would see<br/>clicking with no reason]
     B -->|yes| D[resolve ref to element]
     D --> E{write policy<br/>allows it?}
@@ -111,17 +111,17 @@ route handler is a rule ([ADR 2](adr/0002-enforce-the-write-policy-at-the-networ
 ```mermaid
 flowchart TD
     A[request leaves the page] --> B{method}
-    B -->|GET / HEAD| P[allow]
+    B -->|GET / HEAD / OPTIONS| P[allow]
     B -->|other| C{mode}
-    C -->|observe| D{login or<br/>token refresh?}
+    C -->|observe| D{login, logout or<br/>token refresh?}
     D -->|yes| P
     D -->|no| X[refuse]
     C -->|read-only| E{PUT / PATCH / DELETE<br/>or destructive POST?}
     E -->|yes| X
     E -->|no| P
-    C -->|safe-write| F{mutation on a record<br/>this session created?}
+    C -->|safe-write| F{mutation on a record<br/>this run created?}
     F -->|yes| P
-    F -->|no| G{plain create?}
+    F -->|no| G{non-destructive POST?}
     G -->|yes| P
     G -->|no| X
     C -->|destructive| P
@@ -161,15 +161,15 @@ flowchart TD
         A5[refused request +<br/>page shows empty state]
         A6[refused write +<br/>page claims success]
     end
-    A1 --> V[oracle violation]
-    A2 --> V
-    A3 --> V
+    A1 --> B{caused by the tester's<br/>own policy block?}
+    A2 --> B
+    A3 --> B
+    B -->|yes| C[attributed to the tester,<br/>counted, not reported]
+    B -->|no| V[oracle violation]
     A4 --> V
     A5 --> V
     A6 --> V
-    V --> B{policy-induced?}
-    B -->|yes| C[attributed to the tester,<br/>counted, not reported]
-    B -->|no| D[delivered with the<br/>action's result]
+    V --> D[delivered with the<br/>action's result]
     D --> E[agent judges it]
     E --> F{claims something<br/>is ABSENT?}
     F -->|yes| G[ground it in the source first]
@@ -235,8 +235,10 @@ the run: the records any session created (so a mutation on a record another
 lane made is allowed in safe-write), the markup values any session typed (so a
 payload one lane typed on a create form is caught when another lane opens the
 list that renders it), and the count of design audits (so the planner's report
-is not refused for an audit its lanes ran). None of it is written to disk: it
-belongs to this run.
+is not refused for an audit its lanes ran). None of it is written to disk. The
+typed values and the audit count end with the run, when its last session
+closes; ownership lasts until the server process exits, so a record made
+earlier in the same process can still be edited.
 
 **Why every lane is told the same thing.** The instruction a lane gets for its
 report is byte-identical for every lane except its last sentence, which names
@@ -282,8 +284,9 @@ sequenceDiagram
   submitted is the one that knows what to look for next.
 - **Separate agents.** Each agent drives its own role, and they coordinate
   through the app itself — the record one creates is what the other sees on its
-  next snapshot — and through the shared store, which is why a record the clerk
-  created can be approved by the manager in safe-write. There is no message
+  next snapshot — and through the shared store, which is why, in safe-write, a
+  record the clerk created can be edited or deleted by the manager's session
+  (an ordinary POST such as approve passes whoever made the record). There is no message
   channel between agents; the planner sequences them if the order matters.
 
 ---
@@ -316,7 +319,9 @@ the project *filed*.
 flowchart TD
     A[lane decision] --> B{verdict == defect?}
     B -->|no| Z[not a claim that can be<br/>right or wrong]
-    B -->|yes| C{evidence names a<br/>FAILING endpoint?}
+    B -->|yes| Q{carries evidence?}
+    Q -->|no| Z
+    Q -->|yes| C{evidence names a<br/>FAILING endpoint?}
     C -->|no| U[unjoinable:<br/>counted and disclosed,<br/>NOT scored]
     C -->|yes| D{confidence usable<br/>0..1 and finite?}
     D -->|no| U
@@ -371,12 +376,18 @@ flowchart LR
     G[per-role access] --> H[reached / denied<br/>per route]
     B & C & D & E & F & H --> I{level}
     I -->|minimal| J[every route visited<br/>+ 1 audit]
-    I -->|medium| K[+ audits on several routes<br/>+ every interactable class<br/>+ forms valid AND invalid]
-    I -->|extensive| L[+ fuzzing, keyboard pass,<br/>2 roles, auth surface,<br/>ledger EMPTY]
+    I -->|medium| K[+ audits on min 3, visited/10<br/>distinct routes]
+    I -->|extensive| L[+ ledger EMPTY: every route<br/>exercised and audited, every<br/>filled form submitted, a completed<br/>journey, at least 2 roles]
     J & K & L --> M{satisfied?}
     M -->|no| N[refuse, and name<br/>what is missing]
     M -->|yes| O[write the report]
 ```
+
+What the gate enforces is narrower than what each level asks of the agent. The
+skill asks a `medium` run to exercise every interactable class and submit each
+form valid and invalid, and an `extensive` one to fuzz, walk the keyboard and
+the auth surface; the gate checks only what the engine can see for itself,
+listed above, and the report's gap ledger discloses the rest.
 
 A ledger entry has to be actionable, and a suppressed one has to be visible, or
 the ledger stops being read at all
