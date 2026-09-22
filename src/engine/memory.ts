@@ -542,6 +542,44 @@ function sameEndpointBug(existing: { status?: string; category: string; evidence
   return sharesEndpointSignature(existing, incoming);
 }
 
+/**
+ * Families of finding kinds that one bug is plausibly filed under by two
+ * sessions: a crash is a page-error to one and a console-error to another, a
+ * refused save is data-loss to one and data-inconsistency to another. Across
+ * families — a layout defect and a data defect — a shared quoted string names
+ * a place on the page, not a bug.
+ */
+const CATEGORY_FAMILY: Record<string, string> = {
+  "data-inconsistency": "data",
+  "data-loss": "data",
+  "stale-state": "data",
+  "http-error": "failure",
+  network: "failure",
+  "console-error": "failure",
+  "page-error": "failure",
+  visual: "presentation",
+  "ux-polish": "presentation",
+  a11y: "presentation",
+  "missing-testid": "presentation",
+  "ux-confusing": "flow",
+  "dead-end": "flow",
+  security: "security",
+  "permission-leak": "security",
+  performance: "performance",
+};
+
+/**
+ * Whether two categories are one family. "other" — the category for nothing
+ * that fits — matches any; a missing or unknown category matches nothing, so a
+ * finding read from an older file never merges on a guess.
+ */
+export function sameFamily(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  if (a === "other" || b === "other") return true;
+  const fa = CATEGORY_FAMILY[a];
+  return fa !== undefined && fa === CATEGORY_FAMILY[b];
+}
+
 function sameFinding(
   a: { title: string; detail?: string; evidence?: string; category?: string },
   b: { title: string; detail?: string; evidence?: string; category?: string },
@@ -559,23 +597,22 @@ function sameFinding(
   // finding's full text keeps the intended case (one states the string in its
   // title, the other mentions it in its detail).
   //
-  // A literal quoted in BOTH titles names the same thing, whatever category
-  // each session chose. One quoted only in one title and found in the other's
-  // detail bridges them only when they are the same KIND of finding: a quoted
-  // string in a title is as often the name of a control as a message the app
-  // showed, and a layout defect naming the button it covers ("Save notes")
-  // shares that literal with the data defect whose detail describes clicking
-  // it. Merged, the layout defect was filed and then lost from the report on
-  // most runs of a benchmark.
-  const aTitleLits = findingLiterals(a.title);
-  const bTitleLits = findingLiterals(b.title);
-  for (const lit of aTitleLits) if (bTitleLits.has(lit)) return true;
-  const sameKind = !a.category || !b.category || a.category === b.category;
-  if (sameKind && (aTitleLits.size > 0 || bTitleLits.size > 0)) {
-    const aAll = findingLiterals(a.title, a.detail, a.evidence);
-    const bAll = findingLiterals(b.title, b.detail, b.evidence);
-    for (const lit of aTitleLits) if (bAll.has(lit)) return true;
-    for (const lit of bTitleLits) if (aAll.has(lit)) return true;
+  // Only between findings of one FAMILY of kinds (see sameFamily). A quoted
+  // string is as often the name of a control as a message the app showed, and
+  // a layout defect naming the button it covers ("Save notes") shares that
+  // literal with the data defect describing what the button does — in its
+  // detail or its own title. Merged, the layout defect was filed and then lost
+  // from the report on most runs of a benchmark. Within a family, one bug
+  // filed twice under neighbouring categories still merges.
+  if (sameFamily(a.category, b.category)) {
+    const aTitleLits = findingLiterals(a.title);
+    const bTitleLits = findingLiterals(b.title);
+    if (aTitleLits.size > 0 || bTitleLits.size > 0) {
+      const aAll = findingLiterals(a.title, a.detail, a.evidence);
+      const bAll = findingLiterals(b.title, b.detail, b.evidence);
+      for (const lit of aTitleLits) if (bAll.has(lit)) return true;
+      for (const lit of bTitleLits) if (aAll.has(lit)) return true;
+    }
   }
   // Both carry evidence and neither matched above: distinct bugs, however
   // similar the titles — never fuzzy-merge across differing evidence.
