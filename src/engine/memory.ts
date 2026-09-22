@@ -542,7 +542,10 @@ function sameEndpointBug(existing: { status?: string; category: string; evidence
   return sharesEndpointSignature(existing, incoming);
 }
 
-function sameFinding(a: { title: string; detail?: string; evidence?: string }, b: { title: string; detail?: string; evidence?: string }): boolean {
+function sameFinding(
+  a: { title: string; detail?: string; evidence?: string; category?: string },
+  b: { title: string; detail?: string; evidence?: string; category?: string },
+): boolean {
   const aEv = a.evidence?.toLowerCase().replace(/\s+/g, " ").trim();
   const bEv = b.evidence?.toLowerCase().replace(/\s+/g, " ").trim();
   if (aEv && bEv && aEv === bEv) return true;
@@ -555,9 +558,20 @@ function sameFinding(a: { title: string; detail?: string; evidence?: string }, b
   // them, and collapsed into one. Matching a title literal against the other
   // finding's full text keeps the intended case (one states the string in its
   // title, the other mentions it in its detail).
+  //
+  // A literal quoted in BOTH titles names the same thing, whatever category
+  // each session chose. One quoted only in one title and found in the other's
+  // detail bridges them only when they are the same KIND of finding: a quoted
+  // string in a title is as often the name of a control as a message the app
+  // showed, and a layout defect naming the button it covers ("Save notes")
+  // shares that literal with the data defect whose detail describes clicking
+  // it. Merged, the layout defect was filed and then lost from the report on
+  // most runs of a benchmark.
   const aTitleLits = findingLiterals(a.title);
   const bTitleLits = findingLiterals(b.title);
-  if (aTitleLits.size > 0 || bTitleLits.size > 0) {
+  for (const lit of aTitleLits) if (bTitleLits.has(lit)) return true;
+  const sameKind = !a.category || !b.category || a.category === b.category;
+  if (sameKind && (aTitleLits.size > 0 || bTitleLits.size > 0)) {
     const aAll = findingLiterals(a.title, a.detail, a.evidence);
     const bAll = findingLiterals(b.title, b.detail, b.evidence);
     for (const lit of aTitleLits) if (bAll.has(lit)) return true;

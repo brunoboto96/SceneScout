@@ -256,6 +256,55 @@ test("dedup tier 2: a literal quoted in a TITLE bridges differing evidence", () 
   assert.equal(new2, false, "one states the string in its title, the other in its detail — same bug");
 });
 
+test("dedup: a quoted control name shared by two findings of different kinds does not merge them", () => {
+  // Seen on every run of a benchmark: a layout finding naming the button it
+  // covers, and a data finding describing what that button does. The title's
+  // quoted label ("Save notes") appears in the other finding's detail, on the
+  // same route, and the layout defect was folded into the data one — filed,
+  // then lost from the report.
+  const store = freshStore();
+  const [, saved] = store.addFinding({
+    ...base,
+    category: "data-inconsistency",
+    title: 'Notes save shows "Saved." even when the PUT is rejected',
+    detail: 'Typing a note and clicking "Save notes" shows "Saved." though PUT /api/orders/1042 was refused.',
+    evidence: "PUT /api/orders/1042 403 -> UI shows Saved.",
+  });
+  const [covered, isNew] = store.addFinding({
+    ...base,
+    category: "visual",
+    title: 'Sticky bar covers the "Save notes" button at load',
+    detail: "The fixed footer overlaps the button until the page is scrolled.",
+    evidence: "testid=order-save covered by testid=order-stickybar",
+  });
+  assert.equal(saved, true);
+  assert.equal(isNew, true, "a layout defect and a data defect that name the same button are two bugs");
+  assert.equal(store.findings.length, 2);
+  assert.equal(covered.category, "visual");
+
+  // The contrast, differing only in kind: a second LAYOUT finding that quotes
+  // the same control in its detail is the same layout bug, and still merges.
+  const [, again] = store.addFinding({
+    ...base,
+    category: "visual",
+    title: "The fixed footer hides a form control",
+    detail: 'At load the footer sits over "Save notes" until the page is scrolled.',
+    evidence: "footer overlaps order-save at scrollY=0",
+  });
+  assert.equal(again, false, "same kind, same quoted literal, same route: merged as before");
+  assert.equal(store.findings.length, 2);
+
+  // And a literal quoted in BOTH titles names the same thing across kinds.
+  const [, both] = store.addFinding({
+    ...base,
+    category: "ux-confusing",
+    title: 'The "Save notes" button reads as disabled at load',
+    detail: "Hidden until scrolled.",
+    evidence: "order-save low affordance at load",
+  });
+  assert.equal(both, false, "the label in both titles: one bug, whichever category each lane chose");
+});
+
 test("dedup: incidental literals quoted only in DETAIL prose do not merge unrelated bugs", () => {
   // Two genuinely different bugs on one screen (a data-integrity defect and a
   // layout defect) both quoted the UI strings on that screen. Pre-fix the
