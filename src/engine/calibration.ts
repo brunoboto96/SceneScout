@@ -20,7 +20,7 @@
  *
  * Pure, so every rule here is table-tested.
  */
-import type { Finding } from "./memory.js";
+import { endpointSignatures, type Finding } from "./memory.js";
 
 /** A lane decision as recorded, with when and by whom. The shape `lane.ts` parses, plus provenance. */
 export interface RecordedDecision {
@@ -65,6 +65,25 @@ export function signatureKey(evidence: string): string {
   return evidence.trim().replace(/\s+/g, " ");
 }
 
+/**
+ * The keys a piece of evidence can be joined on.
+ *
+ * Findings MERGE: the store treats `GET /api/things/3 500` and
+ * `GET /api/things/7 500` as one bug, because the path normalises to
+ * `/api/things/:id`. Joining on the literal string therefore reported five
+ * lane decisions about one endpoint as one filed and four dropped — the lanes
+ * understated by a factor of five, and the number looked like a finding about
+ * the lanes rather than a bug in this join.
+ *
+ * So the join asks the question in the store's own terms. Evidence that names
+ * no endpoint at all — "widget dashboard-training shows 0" — falls back to the
+ * literal, lower-cased, since there is nothing else to key on.
+ */
+export function joinKeys(evidence: string): Set<string> {
+  const sigs = endpointSignatures(evidence);
+  return sigs.size > 0 ? sigs : new Set([signatureKey(evidence).toLowerCase()]);
+}
+
 export interface Bucket {
   label: string;
   decisions: number;
@@ -103,7 +122,14 @@ export interface Calibration {
 export function calibrate(decisions: readonly RecordedDecision[], findings: readonly Finding[]): Calibration | null {
   const filedKeys = new Map<string, Finding>();
   for (const f of findings) {
-    if (f.evidence) filedKeys.set(signatureKey(f.evidence), f);
+    if (!f.evidence) continue;
+    // A finding verified as still present is the most informative match, so it
+    // wins a key two findings share; otherwise first write wins and the result
+    // does not depend on the order findings came back in.
+    for (const key of joinKeys(f.evidence)) {
+      const prev = filedKeys.get(key);
+      if (!prev || (f.verdict && f.verifiedAt && !(prev.verdict && prev.verifiedAt))) filedKeys.set(key, f);
+    }
   }
 
   const checkable = decisions.filter((d) => d.verdict === "defect" && d.evidence !== null);
@@ -115,7 +141,11 @@ export function calibrate(decisions: readonly RecordedDecision[], findings: read
   let stated = 0;
 
   for (const d of checkable) {
-    const match = filedKeys.get(signatureKey(d.evidence as string));
+    let match: Finding | undefined;
+    for (const key of joinKeys(d.evidence as string)) {
+      match = filedKeys.get(key);
+      if (match) break;
+    }
     const hit = match !== undefined;
     const b = buckets[bucketOf(d.confidence)];
     b.n += 1;
@@ -176,7 +206,7 @@ export function formatCalibration(c: Calibration | null): string[] {
   if (seen > 0) {
     lines.push(
       ``,
-      `${seen} of the filed findings have since been re-tested with \`scout_verify\`: ${c.verified.present} still present, ${c.verified.gone} gone, ${c.verified.changed} changed. ` +
+      `${seen} of the filed findings ${seen === 1 ? "has" : "have"} since been re-tested with \`scout_verify\`: ${c.verified.present} still present, ${c.verified.gone} gone, ${c.verified.changed} changed. ` +
         `Those verdicts are evidence about the app, unlike the table above.`,
     );
   }

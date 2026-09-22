@@ -450,7 +450,13 @@ function findingLiterals(...texts: Array<string | undefined>): Set<string> {
  * (`/api/users/7` and `/api/users/9` are one endpoint) so a per-record repro
  * does not read as a per-record bug.
  */
-function endpointSignatures(evidence: string | undefined): Set<string> {
+/**
+ * The bug signatures a piece of evidence names: method + normalised path, with
+ * the failure status when one follows. This is the store's notion of "the same
+ * bug" — exported so calibration can ask the question in the SAME terms the
+ * store answers it, rather than inventing a second rule that drifts.
+ */
+export function endpointSignatures(evidence: string | undefined): Set<string> {
   const out = new Set<string>();
   if (!evidence) return out;
   const endpoints = [...evidence.matchAll(/\b(GET|POST|PUT|PATCH|DELETE)\s+(?:https?:\/\/[^/\s]+)?(\/[A-Za-z0-9/_.:{}$-]*)/gi)];

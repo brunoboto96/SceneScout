@@ -11,7 +11,16 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bucketLabel, bucketOf, calibrate, formatCalibration, MIN_FOR_A_VERDICT, signatureKey, type RecordedDecision } from "../src/engine/calibration.ts";
+import {
+  bucketLabel,
+  bucketOf,
+  calibrate,
+  formatCalibration,
+  joinKeys,
+  MIN_FOR_A_VERDICT,
+  signatureKey,
+  type RecordedDecision,
+} from "../src/engine/calibration.ts";
 import type { Finding } from "../src/engine/memory.ts";
 
 let n = 0;
@@ -22,7 +31,7 @@ const decision = (over: Partial<RecordedDecision> = {}): RecordedDecision => ({
   severity: "medium",
   category: "data-inconsistency",
   confidence: 0.9,
-  evidence: `GET /api/things/${n} 500`,
+  evidence: `GET /api/r${n} 500`,
   at: "2026-09-22T10:00:00.000Z",
   ...over,
 });
@@ -81,12 +90,39 @@ test("a decision is filed when a finding carries the same signature", () => {
   assert.equal(c?.filed, 3);
 });
 
+test("decisions about one endpoint all count as filed when the store merged them into one finding", () => {
+  // Findings MERGE: /api/things/3 and /api/things/7 normalise to the same
+  // /api/things/:id, so five lane decisions about that endpoint produce ONE
+  // finding. Joining on the literal string reported 1 filed and 4 dropped —
+  // the lanes understated fivefold, and the number read as a verdict on them
+  // rather than a bug in the join. Found by rendering a report, not by a test.
+  const decisions = [3, 7, 11, 19, 23].map((i) => decision({ evidence: `GET /api/things/${i} 500` }));
+  const c = calibrate(decisions, [finding("GET /api/things/3 500")]);
+  assert.equal(c?.checkable, 5);
+  assert.equal(c?.filed, 5, "the store considers these one bug, and it was filed");
+});
+
+test("two different endpoints are not merged by the join", () => {
+  const decisions = [decision({ evidence: "GET /api/things/3 500" }), decision({ evidence: "GET /api/orders/3 500" })];
+  const c = calibrate(decisions, [finding("GET /api/things/3 500")]);
+  assert.equal(c?.filed, 1);
+});
+
+test("evidence that names no endpoint still joins on its own text", () => {
+  // Not every finding is an HTTP failure; a widget reading zero is evidence too.
+  const c = calibrate([decision({ evidence: "widget dashboard-count shows 0" })], [finding("widget  dashboard-count shows 0")]);
+  assert.equal(c?.filed, 1);
+  const miss = calibrate([decision({ evidence: "widget dashboard-count shows 0" })], [finding("widget other-count shows 0")]);
+  assert.equal(miss?.filed, 0);
+});
+
 test("spacing in a signature does not break the join, but case does not change", () => {
   assert.equal(signatureKey("  GET   /api/things 500 "), "GET /api/things 500");
   assert.equal(signatureKey("GET /API/Things 500"), "GET /API/Things 500", "a path is case-sensitive");
   const d = decision({ evidence: "GET  /api/things 500" });
   const c = calibrate([d], [finding("GET /api/things 500")]);
   assert.equal(c?.filed, 1);
+  assert.deepEqual([...joinKeys("GET /api/things/9 500")], ["GET /api/things/:id 500"], "the join speaks the store's own signature");
 });
 
 // ── the number itself ───────────────────────────────────────────────────────
@@ -164,6 +200,13 @@ test("re-tested findings are reported separately, because those ARE about the ap
   assert.deepEqual(c?.verified, { present: 1, gone: 1, changed: 0 });
   const out = formatCalibration(c).join("\n");
   assert.match(out, /2 of the filed findings have since been re-tested/);
+  const one = formatCalibration(
+    calibrate(
+      decisions,
+      findings.map((f, i) => (i === 1 ? { ...f, verdict: undefined, verifiedAt: undefined } : f)),
+    ),
+  ).join("\n");
+  assert.match(one, /1 of the filed findings has since been re-tested/, "it reads as English for a single finding");
   assert.match(out, /evidence about the app, unlike the table above/);
 });
 
