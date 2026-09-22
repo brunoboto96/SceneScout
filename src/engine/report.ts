@@ -6,6 +6,7 @@ import { sayVerification } from "./verify.js";
 import type { WriteMode } from "./policy.js";
 import { feedForSession } from "./live.js";
 import { buildReplayHtml, evidenceFor, type FindingEvidence, type ReplaySession } from "./replay.js";
+import { calibrate, formatCalibration } from "./calibration.js";
 import { formatPace, measurePace } from "./pace.js";
 
 function playwrightSkeleton(f: Finding): string {
@@ -693,6 +694,10 @@ export function generateReport(
   if (extras?.pace !== false) {
     lines.push(...formatPace(measurePace(memory.actionLog, Date.now(), extras?.attachedSessions ?? [])));
   }
+
+  // Only on a run that used lanes, and only once enough of them have been
+  // judged for the number to mean anything; formatCalibration decides both.
+  lines.push(...formatCalibration(calibrate(memory.laneDecisions, memory.findings)));
 
   const markdown = lines.join("\n");
   const outPath = path.join(memory.dir, "report.md");

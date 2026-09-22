@@ -755,3 +755,45 @@ test("age reads the way a person would say it", () => {
   assert.equal(ago(120), "4 months");
   assert.equal(describeAge("not a date", now), "?");
 });
+
+test("the calibration section reaches the report, and stays away when there is nothing to say", () => {
+  // Deleting the one line in report.ts that calls formatCalibration left every
+  // suite green: the feature could be disconnected from the only place a user
+  // sees it, silently.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-calib-"));
+  const store = new MemoryStore(dir);
+  const extras = { routesVisited: 1, routesTotal: 1, designAudits: 1 };
+
+  const quiet = generateReport(store, [], extras, { write: false }).markdown;
+  assert.ok(!quiet.includes("How well the lanes judged"), "a project that never ran a lane gets no section");
+
+  const at = "2026-09-22T10:00:00.000Z";
+  const decisions = Array.from({ length: 10 }, (_, i) => ({
+    lane: "orders",
+    observation: `obs-${i}`,
+    verdict: "defect" as const,
+    severity: "medium",
+    category: "http-error",
+    confidence: 0.9,
+    evidence: `GET /api/r${i} 500`,
+    at,
+  }));
+  store.addLaneDecisions("orders", decisions);
+  for (let i = 0; i < 8; i += 1) {
+    store.addFinding({
+      severity: "medium",
+      category: "http-error",
+      title: `t${i}`,
+      detail: "d",
+      url: `http://app.test/r${i}`,
+      state: `/r${i}#1`,
+      evidence: `GET /api/r${i} 500`,
+    });
+  }
+
+  const loud = generateReport(store, [], extras, { write: false }).markdown;
+  assert.match(loud, /## How well the lanes judged/);
+  assert.match(loud, /10 lane decision\(s\) called a defect/);
+  assert.match(loud, /Expected calibration error/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

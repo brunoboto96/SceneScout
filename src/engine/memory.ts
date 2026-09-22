@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { RecordedDecision } from "./calibration.js";
 import { normalizePath, shortHash } from "./fingerprint.js";
 
 export interface StateRecord {
@@ -274,6 +275,13 @@ interface MemoryFile {
    * approve but Mike can't see the module at all; should he?" questions.
    */
   roleAccess?: Record<string, Record<string, string>>;
+  /**
+   * What each parallel lane decided, kept so the confidence it stated can be
+   * checked against what the run went on to file. Without this the number was
+   * averaged into one line and discarded, which is why nobody ever knew
+   * whether a lane's 0.9 meant anything.
+   */
+  laneDecisions?: RecordedDecision[];
 }
 
 const EMPTY: MemoryFile = { version: 1, states: {}, findings: [] };
@@ -370,8 +378,39 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
   }
   if (Object.keys(out.roleAccess).length === 0) delete out.roleAccess;
 
+  // Lanes commonly run in SEPARATE processes — that is the point of a lane —
+  // so without this the spread at the top would keep one process's decisions
+  // and drop every other lane's, which is the exact bug this merge exists to
+  // prevent for findings. Keyed so merging the same foreign document twice is
+  // idempotent.
+  const byDecision = new Map<string, RecordedDecision>();
+  for (const d of theirs.laneDecisions ?? []) byDecision.set(decisionKey(d), d);
+  for (const d of mine.laneDecisions ?? []) byDecision.set(decisionKey(d), d);
+  out.laneDecisions = [...byDecision.values()].sort((a, b) => a.at.localeCompare(b.at)).slice(-MAX_LANE_DECISIONS);
+  if (out.laneDecisions.length === 0) delete out.laneDecisions;
+
   return out;
 }
+/**
+ * What makes two stored decisions the same judgement.
+ *
+ * Deliberately NOT the timestamp. `at` is stamped when the planner folds the
+ * reply, not when the lane judged, so relaying one reply twice — which the
+ * protocol invites, since a refused report is asked for again — wrote every
+ * decision a second time and doubled the lane's weight in the calibration.
+ * Identity is what was decided, so re-folding the same reply is a no-op.
+ */
+function decisionKey(d: RecordedDecision): string {
+  return [d.lane, d.observation, d.verdict, d.severity ?? "", d.category ?? "", d.confidence, d.evidence ?? ""].join("|");
+}
+
+/**
+ * Most lane decisions kept. Calibration wants a few dozen; a long-lived
+ * project would otherwise accumulate every decision ever made and re-serialise
+ * them on each save, which is what made an old history slow to open.
+ */
+export const MAX_LANE_DECISIONS = 1000;
+
 const MAX_DISCOVERED_ROUTES = 300;
 
 /** Shared finding-similarity helpers (used by live dedup and retro-merge). */
@@ -419,7 +458,23 @@ function findingLiterals(...texts: Array<string | undefined>): Set<string> {
  * (`/api/users/7` and `/api/users/9` are one endpoint) so a per-record repro
  * does not read as a per-record bug.
  */
-function endpointSignatures(evidence: string | undefined): Set<string> {
+/**
+ * The signatures that identify a BUG: only those carrying a failure status.
+ *
+ * A bare `POST /api/orders` says which endpoint was involved, not what went
+ * wrong — a double submit and an accepted negative quantity both name it, and
+ * are two bugs. Exported so calibration applies the store's own rule instead
+ * of a second copy of this regex, which is what it had.
+ */
+export function failingSignatures(evidence: string | undefined): Set<string> {
+  return new Set([...endpointSignatures(evidence)].filter((sig) => /\s[45]\d{2}$/.test(sig)));
+}
+
+/**
+ * The endpoint signatures a piece of evidence names: method + normalised path,
+ * with the failure status when one follows.
+ */
+export function endpointSignatures(evidence: string | undefined): Set<string> {
   const out = new Set<string>();
   if (!evidence) return out;
   const endpoints = [...evidence.matchAll(/\b(GET|POST|PUT|PATCH|DELETE)\s+(?:https?:\/\/[^/\s]+)?(\/[A-Za-z0-9/_.:{}$-]*)/gi)];
@@ -461,10 +516,9 @@ function sharesEndpointSignature(a: { evidence?: string }, b: { evidence?: strin
   // `POST /api/orders` (the endpoint answered 2xx, or no status was named)
   // says which endpoint was involved, not what went wrong: a double submit
   // and an accepted negative quantity both name it, and are two bugs.
-  const failing = (evidence: string): Set<string> => new Set([...endpointSignatures(evidence)].filter((sig) => /\s[45]\d{2}$/.test(sig)));
-  const aSigs = failing(a.evidence);
+  const aSigs = failingSignatures(a.evidence);
   if (aSigs.size === 0) return false;
-  for (const sig of failing(b.evidence)) if (aSigs.has(sig)) return true;
+  for (const sig of failingSignatures(b.evidence)) if (aSigs.has(sig)) return true;
   return false;
 }
 
@@ -896,6 +950,44 @@ export class MemoryStore {
     }
     fs.writeFileSync(this.assumptionsPath, content);
     return true;
+  }
+
+  /** What the lanes decided, oldest first. Empty on a project that has never run one. */
+  get laneDecisions(): RecordedDecision[] {
+    return this.data.laneDecisions ?? [];
+  }
+
+  /**
+   * Record what a lane decided. Called once per accepted lane report, so the
+   * confidence it stated can be checked later against what the run filed.
+   * Free text from the lane is redacted like every other stored string: an
+   * observation is written by a model reading the app under test.
+   */
+  addLaneDecisions(lane: string, decisions: readonly RecordedDecision[]): number {
+    if (decisions.length === 0) return 0;
+    const list = this.data.laneDecisions ?? [];
+    const seen = new Set(list.map(decisionKey));
+    let added = 0;
+    for (const d of decisions) {
+      const record: RecordedDecision = {
+        ...d,
+        lane,
+        observation: redactSecrets(d.observation).slice(0, 200),
+        evidence: d.evidence === null ? null : redactSecrets(d.evidence).slice(0, 200),
+      };
+      if (seen.has(decisionKey(record))) continue;
+      seen.add(decisionKey(record));
+      list.push(record);
+      added += 1;
+    }
+    this.data.laneDecisions = list.slice(-MAX_LANE_DECISIONS);
+    if (added > 0) this.flush();
+    // What survives the cap. Appends go to the tail and the cap keeps the
+    // tail, so all of `added` survives unless the call itself exceeds the cap.
+    // Measuring it as growth instead looked right and was not: `list` aliases
+    // the stored array, so the "before" length was read after the appends and
+    // every call after the first reported nothing kept — while storing fine.
+    return Math.min(added, MAX_LANE_DECISIONS);
   }
 
   /** Mark a finding resolved; returns it or null. */

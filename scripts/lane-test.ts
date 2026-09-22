@@ -196,6 +196,26 @@ test("lane: the instruction the planner sends names every value and every cap th
   }
   assert.ok(text.includes(`${LANE_MAX_ITEMS} decisions`));
   assert.ok(text.includes('required when the status is "blocked"'), "the blocked rule is stated like the defect rule is");
-  assert.ok(text.includes('"lane":"orders"'));
-  assert.ok(laneReportInstruction('a"b').includes('"lane":"a\\"b"'), "the lane name is escaped into the example");
+  assert.ok(text.includes('"orders"'), "the lane is told its own name");
+  assert.ok(laneReportInstruction('a"b').includes('"a\\"b"'), "the lane name is escaped into the instruction");
+});
+
+test("lane: every lane in a wave is given the same rubric, so it is one cacheable prefix", () => {
+  // The lane name used to sit in the second sentence, so two lanes' prompts
+  // diverged after about a line and shared no prefix. Every lane in a fan-out
+  // gets this text, so keeping it byte-identical until the last sentence is
+  // the difference between one cached prefix and N uncached ones.
+  const a = laneReportInstruction("orders");
+  const b = laneReportInstruction("stock");
+  let shared = 0;
+  while (shared < a.length && shared < b.length && a[shared] === b[shared]) shared += 1;
+
+  // Everything up to the sentence that states the name is identical; the two
+  // then diverge inside the name itself, which is as late as it can be.
+  const tail = a.lastIndexOf("Your lane name is");
+  assert.ok(shared >= tail, `diverged at ${shared}, before the name sentence at ${tail}`);
+  assert.equal(a.slice(0, tail), b.slice(0, tail), "the rubric is byte-identical for both lanes");
+  assert.ok(shared > 0.9 * Math.min(a.length, b.length), `only ${shared} of ${a.length} characters are shared`);
+  // And the name is the LAST thing said, not merely late.
+  assert.ok(a.trimEnd().endsWith('put exactly that in "lane".'), a.slice(-80));
 });
