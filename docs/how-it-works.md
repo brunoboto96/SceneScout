@@ -115,7 +115,7 @@ flowchart TD
     B -->|other| C{mode}
     C -->|observe| D{login or<br/>token refresh?}
     D -->|yes| P
-    D -->|no| X[abort]
+    D -->|no| X[refuse]
     C -->|read-only| E{PUT / PATCH / DELETE<br/>or destructive POST?}
     E -->|yes| X
     E -->|no| P
@@ -125,12 +125,24 @@ flowchart TD
     G -->|yes| P
     G -->|no| X
     C -->|destructive| P
-    X --> Y[logged as a policy block,<br/>errors it causes are<br/>attributed to the tester]
+    X --> R{who made it?}
+    R -->|the page's script:<br/>fetch / XHR| S[answer 403 in the<br/>server's place]
+    R -->|a navigation:<br/>form post| T[drop it]
+    S --> Y[logged as a policy block;<br/>the 403 and its console line<br/>are attributed to the tester]
+    T --> Y
+    S --> Z[the page's handling of<br/>a refusal really runs:<br/>a success claim after it<br/>is a false_success]
 ```
 
-The last box matters: aborting a request makes the browser print a console
-error, and without attribution the tool's own safety net is reported as defects
-of the app under test.
+Two boxes matter. **Attribution:** the stand-in 403, the browser's console line
+about it, and a dropped request's network error are all the tool's doing, and
+without attribution the safety net is reported as defects of the app.
+**Answering rather than dropping:** a dropped `fetch` rejects with a network
+error no real server produces, so the page's refusal branch never ran, and a
+handler that ignores the response and claims success threw before it could.
+The server is not contacted either way
+([ADR 9](adr/0009-a-refused-write-is-answered-not-dropped.md)). `scout_request`
+meets the same stand-in and says `REFUSED by the write policy` instead of a
+status, because a status there is quoted as the server enforcing a rule.
 
 ---
 
@@ -194,20 +206,22 @@ sequenceDiagram
     P->>E: scout_lane_brief {lanes, goal}
     E-->>P: whole modules per lane,<br/>balanced, none owned twice
     P->>L: brief + lane-report instruction
-    L->>E: scout_attach {session: lane}
+    L->>E: scout_attach {session: lane, url: its landing route}
     loop the lane's own routes
         L->>E: snapshot / audit / exercise
-        L->>M: scout_finding
+        L->>M: scout_finding, as each defect is judged
     end
-    L-->>P: ONE typed JSON object
+    L-->>P: ONE typed JSON object (session left open)
     P->>E: scout_lane_report {lane, reply}
-    E->>E: schema check
+    E->>E: lift the one fenced block,<br/>schema check
     alt refused
         E-->>P: the reason, to relay once
     else accepted
         E->>M: keep the decisions
-        E-->>P: one-line fold
+        E->>M: judged defects with no<br/>matching finding?
+        E-->>P: one-line fold + what is unfiled
     end
+    P->>L: file what is unfiled (if any)
     P->>E: scout_close {session: lane}
 ```
 
@@ -216,6 +230,75 @@ the lane's own session, so the fold has to happen **before** that session
 closes. A lane that closes itself and then reports hands back decisions with
 nowhere to write, and the tool says so rather than silently accepting.
 
+**What the lanes share.** Every session on one project shares one store for
+the run: the records any session created (so a mutation on a record another
+lane made is allowed in safe-write), the markup values any session typed (so a
+payload one lane typed on a create form is caught when another lane opens the
+list that renders it), and the count of design audits (so the planner's report
+is not refused for an audit its lanes ran). None of it is written to disk: it
+belongs to this run.
+
+**Why every lane is told the same thing.** The instruction a lane gets for its
+report is byte-identical for every lane except its last sentence, which names
+the lane. Built that way, the shared part is one prompt prefix, and a client
+that caches prompts pays for it once per wave rather than once per lane. The
+schema, the closed sets and every length limit come from the same constants the
+parser checks, and a test asserts every limit the parser enforces is stated,
+because a limit a lane is not told refuses good replies.
+
+**What a lane may wrap its report in.** One fenced JSON block with prose around
+it is accepted, and the prose is discarded unread: six of eight lanes in a
+measured run wrapped theirs, and each refusal cost a round trip to recover an
+object that was already unambiguous. Unfenced prose, or two fenced objects, is
+still refused, because where the report starts is then a guess.
+
+### Roles that hand work to each other
+
+Some flows need two roles: a clerk submits, a manager approves, the clerk sees
+the result. There are two ways to run one, and neither involves agents talking
+to each other.
+
+```mermaid
+sequenceDiagram
+    participant A as agent
+    participant C as session "clerk"
+    participant M as session "manager"
+    participant S as the app's server
+
+    A->>C: submit the order
+    C->>S: POST /orders
+    A->>M: scout_snapshot
+    M->>S: GET /approvals
+    Note over A,M: the snapshot IS the wait:<br/>if the order has not arrived,<br/>do other work as the manager<br/>and look again
+    A->>M: approve
+    M->>S: POST /orders/7/approve
+    A->>C: scout_snapshot, to see the outcome
+```
+
+- **One agent, two sessions** (the common case). A single agent attaches both
+  roles by name and alternates between them. Calls to different sessions run
+  concurrently; calls to one session queue, because one browser cannot take
+  two actions at once. This is the right shape for a handoff: the agent that
+  submitted is the one that knows what to look for next.
+- **Separate agents.** Each agent drives its own role, and they coordinate
+  through the app itself — the record one creates is what the other sees on its
+  next snapshot — and through the shared store, which is why a record the clerk
+  created can be approved by the manager in safe-write. There is no message
+  channel between agents; the planner sequences them if the order matters.
+
+---
+
+## 6. Where a run's time goes
+
+The pace section of the report splits a session's time three ways: the median
+gap between actions (the engine plus the agent deciding, typically a few
+seconds), idle gaps over 30 seconds (the agent thinking at length), and **held
+idle** — time a browser was open before the session's first action or after
+its last one. Held idle is the waste a person watching sees and a per-action
+number cannot: a lane waiting to be folded, or a session attached and never
+used. A session that attached and never acted used to be missing from the table
+entirely; it now appears with all of its time held idle.
+
 The typed object is what makes the fold cheap: the planner counts rather than
 reads, a lane's reply is a few hundred tokens whatever it found, and a value
 the schema refuses is caught at the boundary instead of becoming a severity
@@ -223,7 +306,7 @@ like "Low-Medium" in the report.
 
 ---
 
-## 6. Whether a lane's confidence meant anything
+## 7. Whether a lane's confidence meant anything
 
 Asking for a calibrated number and never checking it is the half of the idea
 that costs nothing and buys nothing. The check joins what a lane *said* to what
@@ -267,9 +350,16 @@ What the figure is and is not:
 - Verdicts from `scout_verify` are reported beside it and flagged as the half
   that **is** about the app.
 
+The benchmark measures the other half. Against an app whose defects are known,
+[`npm run bench`](benchmark.md) judges each verdict against an answer key —
+not against what the run filed — and reports a Brier score beside the expected
+calibration error. Why both numbers exist, and why an unjoinable decision is
+disclosed rather than scored, is
+[ADR 10](adr/0010-a-confidence-is-checked-not-trusted.md).
+
 ---
 
-## 7. What the gap ledger refuses
+## 8. What the gap ledger refuses
 
 ```mermaid
 flowchart LR
@@ -304,7 +394,7 @@ is the one file a test cannot reach without launching a browser
 |---|---|---|
 | Route and element identity | `fingerprint.ts` | `contract-test` |
 | When to stop waiting | `settle.ts` | `settle-test` |
-| What may leave the page | `policy.ts`, `ownership.ts` | `policy-test` |
+| What may leave the page, and what a refused request is told | `policy.ts`, `ownership.ts` | `policy-test`, `smoke/contradiction` |
 | Page contradicts the server | `claims.ts` | `claims-test`, `smoke/contradiction` |
 | Typed markup coming back as an element | `injection.ts` | `oracle-test`, `smoke/injection` |
 | What a lane hands back | `lane.ts` | `lane-test` |
@@ -312,5 +402,7 @@ is the one file a test cannot reach without launching a browser
 | Splitting the app between lanes | `brief.ts` | `brief-test` |
 | Re-testing what earlier runs left open | `verify.ts` | `verify-test` |
 | How the run spent its time | `pace.ts` | `pace-test` |
+| Whether a change made runs better | `bench.ts` | `bench-test` |
+| What a lane is told, and what it must file | `brief.ts`, `calibration.ts` (`unfiledDefects`) | `brief-test`, `calibration-test`, `mcp-check` |
 | Calling the app's API as the session | `request.ts` | `request-test` |
 | The live view's rules | `live.ts` | `live-test` |

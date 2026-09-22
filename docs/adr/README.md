@@ -17,6 +17,8 @@ and which failure direction was chosen deliberately.
 | [0006](0006-stay-project-agnostic.md) | Nothing in this repo names or is tuned for a tested app |
 | [0007](0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md) | The live view is local, read-only, and leaves nothing behind |
 | [0008](0008-a-recorded-run-is-evidence-and-must-be-asked-for.md) | Recording is opt-in, and a recorded run is one self-contained page |
+| [0009](0009-a-refused-write-is-answered-not-dropped.md) | A write the policy refuses is answered with a 403, so the page's refusal handling runs |
+| [0010](0010-a-confidence-is-checked-not-trusted.md) | A lane's confidence is checked, against what was filed and against a key, and disclosed where it cannot be |
 
 ## Writing a new one
 
