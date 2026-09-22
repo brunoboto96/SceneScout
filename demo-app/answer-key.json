@@ -361,11 +361,14 @@
       "match": [
         "save.?notes.{0,80}(unconditional|without|no res\\.ok|regardless)",
         "#saved.{0,40}Saved.{0,60}(no res\\.ok|without|regardless)",
-        "save.?notes.{0,40}saved.{0,40}(without|no) res\\.ok"
+        "save.?notes.{0,40}saved.{0,40}(without|no) res\\.ok",
+        "save.?notes.{0,40}saved.{0,80}(reject|refus|40[13])",
+        "PUT /api/orders/\\d+ 40[13].{0,40}\\bsaved\\b"
       ],
       "examples": [
         "order.html script sets #saved text='Saved.' after PUT with no res.ok check\nsave-notes-unconditional-saved-message",
-        "Save notes shows Saved. without res.ok check; notes unchanged on the order detail after reload"
+        "Save notes shows Saved. without res.ok check; notes unchanged on the order detail after reload",
+        "Save notes shows \"Saved.\" even when the server rejects the write\nPUT /api/orders/1042 403, page shows \"Saved.\""
       ],
       "counterExamples": ["save-notes covered by sticky footer at load scroll"]
     },
