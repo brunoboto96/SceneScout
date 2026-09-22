@@ -148,14 +148,29 @@ export function parseLaneReport(text: string, expectedLane?: string): LaneParse 
  */
 export function laneReportInstruction(lane: string): string {
   return [
-    "Reply with ONE JSON object and nothing else — no prose before or after it, no explanation, no headings. A fenced ```json block is fine.",
-    `Shape: {"lane":${JSON.stringify(lane)},"status":<${quoteAll(LANE_STATUSES)}>,"decisions":[…],"routes":[…],"blocked_by":<string or null>}.`,
-    `Each decision: {"observation":<a short id for what was observed, unique in the report, at most ${LANE_OBSERVATION_MAX} characters>,"verdict":<${quoteAll(LANE_VERDICTS)}>,"severity":<${quoteAll(LANE_SEVERITIES)} or null>,"category":<${quoteAll(LANE_CATEGORIES)} or null>,"confidence":<0..1>,"evidence":<machine signature such as "GET /api/things 500", or null>}.`,
-    `A "defect" must carry a severity and a category. "evidence" is a signature, not a sentence: at most ${LANE_EVIDENCE_MAX} characters. "confidence" is how sure you are of the verdict, calibrated: 0.5 means a coin flip, 0.95 means you would bet on it.`,
-    `"routes" lists the routes you covered, each at most ${LANE_ROUTE_MAX} characters. "blocked_by" is one line of at most ${LANE_BLOCKED_BY_MAX} characters saying what stopped you: required when the status is "blocked", allowed with "partial", null with "complete"; the detail belongs in a finding. The lane name is at most ${LANE_NAME_MAX} characters. At most ${LANE_MAX_ITEMS} decisions and ${LANE_MAX_ITEMS} routes. Unknown keys are refused.`,
-    "The object IS your final report: whatever hands it back must hand back the object verbatim, not a summary of it.",
+    ...LANE_RUBRIC,
+    // The ONLY lane-specific sentence, and it comes last on purpose. Every
+    // lane in a wave is given the same rubric, so keeping it byte-identical up
+    // to here makes it one shared prompt prefix: the cache hits from the
+    // second lane onward instead of diverging at the first sentence, which is
+    // what putting the name in the shape line used to do.
+    `Your lane name is ${JSON.stringify(lane)}; put exactly that in "lane".`,
   ].join(" ");
 }
+
+/**
+ * Everything every lane is told, identical for all of them. Built once from
+ * the same constants the parser enforces, because a limit a lane is not told
+ * refuses good replies.
+ */
+const LANE_RUBRIC: readonly string[] = [
+  "Reply with ONE JSON object and nothing else — no prose before or after it, no explanation, no headings. A fenced ```json block is fine.",
+  `Shape: {"lane":<your lane name>,"status":<${quoteAll(LANE_STATUSES)}>,"decisions":[…],"routes":[…],"blocked_by":<string or null>}.`,
+  `Each decision: {"observation":<a short id for what was observed, unique in the report, at most ${LANE_OBSERVATION_MAX} characters>,"verdict":<${quoteAll(LANE_VERDICTS)}>,"severity":<${quoteAll(LANE_SEVERITIES)} or null>,"category":<${quoteAll(LANE_CATEGORIES)} or null>,"confidence":<0..1>,"evidence":<machine signature such as "GET /api/things 500", or null>}.`,
+  `A "defect" must carry a severity and a category. "evidence" is a signature, not a sentence: at most ${LANE_EVIDENCE_MAX} characters. "confidence" is how sure you are of the verdict, calibrated: 0.5 means a coin flip, 0.95 means you would bet on it.`,
+  `"routes" lists the routes you covered, each at most ${LANE_ROUTE_MAX} characters. "blocked_by" is one line of at most ${LANE_BLOCKED_BY_MAX} characters saying what stopped you: required when the status is "blocked", allowed with "partial", null with "complete"; the detail belongs in a finding. The lane name is at most ${LANE_NAME_MAX} characters. At most ${LANE_MAX_ITEMS} decisions and ${LANE_MAX_ITEMS} routes. Unknown keys are refused.`,
+  "The object IS your final report: whatever hands it back must hand back the object verbatim, not a summary of it.",
+];
 
 function quoteAll(values: readonly string[]): string {
   return values.map((v) => `"${v}"`).join("|");

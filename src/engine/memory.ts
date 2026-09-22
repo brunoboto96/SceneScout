@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { RecordedDecision } from "./calibration.js";
 import { normalizePath, shortHash } from "./fingerprint.js";
 
 export interface StateRecord {
@@ -274,6 +275,13 @@ interface MemoryFile {
    * approve but Mike can't see the module at all; should he?" questions.
    */
   roleAccess?: Record<string, Record<string, string>>;
+  /**
+   * What each parallel lane decided, kept so the confidence it stated can be
+   * checked against what the run went on to file. Without this the number was
+   * averaged into one line and discarded, which is why nobody ever knew
+   * whether a lane's 0.9 meant anything.
+   */
+  laneDecisions?: RecordedDecision[];
 }
 
 const EMPTY: MemoryFile = { version: 1, states: {}, findings: [] };
@@ -370,8 +378,31 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
   }
   if (Object.keys(out.roleAccess).length === 0) delete out.roleAccess;
 
+  // Lanes commonly run in SEPARATE processes — that is the point of a lane —
+  // so without this the spread at the top would keep one process's decisions
+  // and drop every other lane's, which is the exact bug this merge exists to
+  // prevent for findings. Keyed so merging the same foreign document twice is
+  // idempotent.
+  const byDecision = new Map<string, RecordedDecision>();
+  for (const d of theirs.laneDecisions ?? []) byDecision.set(decisionKey(d), d);
+  for (const d of mine.laneDecisions ?? []) byDecision.set(decisionKey(d), d);
+  out.laneDecisions = [...byDecision.values()].sort((a, b) => a.at.localeCompare(b.at)).slice(-MAX_LANE_DECISIONS);
+  if (out.laneDecisions.length === 0) delete out.laneDecisions;
+
   return out;
 }
+/** One lane's judgement of one observation, at one moment: what makes two records the same. */
+function decisionKey(d: RecordedDecision): string {
+  return `${d.lane}|${d.observation}|${d.at}`;
+}
+
+/**
+ * Most lane decisions kept. Calibration wants a few dozen; a long-lived
+ * project would otherwise accumulate every decision ever made and re-serialise
+ * them on each save, which is what made an old history slow to open.
+ */
+export const MAX_LANE_DECISIONS = 1000;
+
 const MAX_DISCOVERED_ROUTES = 300;
 
 /** Shared finding-similarity helpers (used by live dedup and retro-merge). */
@@ -899,6 +930,39 @@ export class MemoryStore {
   }
 
   /** Mark a finding resolved; returns it or null. */
+  /** What the lanes decided, oldest first. Empty on a run that used none. */
+  get laneDecisions(): RecordedDecision[] {
+    return this.data.laneDecisions ?? [];
+  }
+
+  /**
+   * Record what a lane decided. Called once per accepted lane report, so the
+   * confidence it stated can be checked later against what the run filed.
+   * Free text from the lane is redacted like every other stored string: an
+   * observation is written by a model reading the app under test.
+   */
+  addLaneDecisions(lane: string, decisions: readonly RecordedDecision[]): number {
+    if (decisions.length === 0) return 0;
+    const list = this.data.laneDecisions ?? [];
+    const seen = new Set(list.map(decisionKey));
+    let added = 0;
+    for (const d of decisions) {
+      const record: RecordedDecision = {
+        ...d,
+        lane,
+        observation: redactSecrets(d.observation).slice(0, 200),
+        evidence: d.evidence === null ? null : redactSecrets(d.evidence).slice(0, 200),
+      };
+      if (seen.has(decisionKey(record))) continue;
+      seen.add(decisionKey(record));
+      list.push(record);
+      added += 1;
+    }
+    this.data.laneDecisions = list.slice(-MAX_LANE_DECISIONS);
+    if (added > 0) this.flush();
+    return added;
+  }
+
   resolveFinding(id: string): Finding | null {
     const f = this.data.findings.find((x) => x.id === id);
     if (!f) return null;

@@ -591,10 +591,29 @@ server.registerTool(
     try {
       if (reply === undefined) return { content: [{ type: "text" as const, text: laneReportInstruction(lane) }] };
       const parsed = parseLaneReport(reply, lane);
-      const out = parsed.ok
-        ? `Lane report accepted — ${summarizeLaneReport(parsed.report)}`
-        : `Lane report REFUSED: ${parsed.reason}. Ask the lane once for the corrected object; do not re-judge its prose.`;
-      return { content: [{ type: "text" as const, text: out }] };
+      if (!parsed.ok) {
+        return {
+          content: [
+            { type: "text" as const, text: `Lane report REFUSED: ${parsed.reason}. Ask the lane once for the corrected object; do not re-judge its prose.` },
+          ],
+        };
+      }
+      // Keep what the lane decided, so the confidence it stated can be checked
+      // against what the run goes on to file. Best-effort: a lane report is
+      // still accepted if this project has no memory open yet, because the
+      // planner's fold must not depend on where the report was written.
+      const at = new Date().toISOString();
+      let kept = 0;
+      for (const engine of engines.values()) {
+        if (!engine.memory) continue;
+        kept = engine.memory.addLaneDecisions(
+          lane,
+          parsed.report.decisions.map((d) => ({ ...d, lane, at })),
+        );
+        break;
+      }
+      const note = kept > 0 ? ` (${kept} decision(s) kept for calibration)` : "";
+      return { content: [{ type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}` }] };
     } catch (err) {
       return errorText(err);
     }

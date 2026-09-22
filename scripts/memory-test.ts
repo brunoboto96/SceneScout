@@ -904,3 +904,34 @@ test("a verdict is stamped on the finding and survives a reload", () => {
   assert.equal(store.verifyFinding(f.id, "gone")?.status, "resolved");
   assert.equal(store.verifyFinding("nosuchid", "gone"), null);
 });
+
+test("lane decisions survive a reload, and a second process's are not lost", () => {
+  // Lanes commonly run in separate processes — that is the point of a lane —
+  // and a new array field would be taken wholesale from whichever side wrote
+  // last, dropping every other lane's decisions. That is the exact bug the
+  // merge exists to prevent for findings.
+  const store = freshStore();
+  const at = "2026-09-22T10:00:00.000Z";
+  const one = {
+    lane: "orders",
+    observation: "empty register",
+    verdict: "defect" as const,
+    severity: "high",
+    category: "data-inconsistency",
+    confidence: 0.9,
+    evidence: "GET /api/orders 403",
+    at,
+  };
+  assert.equal(store.addLaneDecisions("orders", [one]), 1);
+  assert.equal(store.addLaneDecisions("orders", [one]), 0, "the same decision is not stored twice");
+
+  const reloaded = openStore(path.dirname(store.dir));
+  assert.equal(reloaded.laneDecisions.length, 1);
+  assert.equal(reloaded.laneDecisions[0].evidence, "GET /api/orders 403");
+
+  // A second lane writing through its own store must not erase the first.
+  reloaded.addLaneDecisions("stock", [{ ...one, lane: "stock", observation: "stale count" }]);
+  store.addLaneDecisions("orders", [{ ...one, observation: "second look" }]);
+  const both = openStore(path.dirname(store.dir)).laneDecisions;
+  assert.deepEqual(both.map((d) => d.lane + ":" + d.observation).sort(), ["orders:empty register", "orders:second look", "stock:stale count"]);
+});
