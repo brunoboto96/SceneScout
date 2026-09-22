@@ -2,7 +2,7 @@
  * Score a run against an answer key.
  *
  *   npm run bench -- <projectDir | run.json> [--level medium] [--key <key.json>] [--json <out.json>]
- *   npm run bench -- --archive <projectDir> --run <name> --date <YYYY-MM-DD> --note "<what changed>"
+ *   npm run bench -- --archive <projectDir> --run <name> [--date <YYYY-MM-DD>] --note "<what changed>"
  *   npm run bench -- --all [--level medium]
  *
  * A project directory is the one a run attached with; its `.scenescout/`
@@ -22,7 +22,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { formatScorecard, LEVELS, parseKey, precisionBounds, score, toArchive, type AnswerKey, type Level, type RunArchive } from "../src/engine/bench.ts";
+import {
+  formatScorecard,
+  LEVELS,
+  parseKey,
+  precisionBounds,
+  runDate,
+  score,
+  toArchive,
+  type AnswerKey,
+  type Level,
+  type RunArchive,
+} from "../src/engine/bench.ts";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runsDir = path.join(root, "bench", "runs");
@@ -35,7 +46,7 @@ function fail(message: string): never {
 const USAGE =
   "Usage:\n" +
   "  npm run bench -- <projectDir | run.json> [--level minimal|medium|extensive] [--key <key.json>] [--json <out.json>]\n" +
-  '  npm run bench -- --archive <projectDir> --run <name> --date <YYYY-MM-DD> --note "<what changed>"\n' +
+  '  npm run bench -- --archive <projectDir> --run <name> [--date <YYYY-MM-DD>] --note "<what changed>"\n' +
   "  npm run bench -- --all [--level medium]";
 
 // Strict: an unknown or misspelt flag, a missing value or a `--level=x` a
@@ -92,14 +103,27 @@ function readArchive(file: string): RunArchive {
   }
 }
 
+// Each mode takes only its own inputs. An argument a mode ignores is one the
+// caller thinks did something.
+const archiveOnly = (["run", "date", "note"] as const).filter((o) => values[o] !== undefined);
+if (!values.archive && archiveOnly.length) fail(`--${archiveOnly[0]} only applies to --archive.\n\n${USAGE}`);
+if ((values.archive || values.all) && positionals.length)
+  fail(`${values.archive ? "--archive" : "--all"} takes no other path: ${positionals.join(" ")}\n\n${USAGE}`);
+if ((values.archive || values.all) && values.json) fail(`--json applies only to scoring one run.\n\n${USAGE}`);
+if (values.archive && values.all) fail(`Choose --archive or --all, not both.\n\n${USAGE}`);
+
 if (values.archive) {
   const name = values.run as string | undefined;
-  const date = values.date as string | undefined;
   const note = values.note as string | undefined;
   if (!name || !/^[a-z0-9-]+$/.test(name)) fail(`--run needs a short name of lower-case letters, digits and hyphens.\n\n${USAGE}`);
-  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) fail(`--date needs YYYY-MM-DD.\n\n${USAGE}`);
   if (!note) fail(`--note needs to say what changed in this run: the results log is useless without it.\n\n${USAGE}`);
   const { findings, decisions } = readMemory(values.archive as string);
+  let date: string;
+  try {
+    date = runDate(decisions, values.date as string | undefined);
+  } catch (err) {
+    fail(`${err instanceof Error ? err.message : String(err)}\n\n${USAGE}`);
+  }
   const out = path.join(runsDir, `${name}.json`);
   if (fs.existsSync(out)) fail(`${path.relative(root, out)} already exists. Archives are evidence; pick a new name rather than overwrite one.`);
   fs.mkdirSync(runsDir, { recursive: true });

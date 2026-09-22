@@ -54,12 +54,15 @@
         "Archived orders filter shows empty list instead of surfacing server error",
         "Orders table shows stale data when the Archived filter fails (500)",
         "Page keeps stale rows after choosing Archived; GET /api/orders?status=archived 500",
-        "archived-filter-500-silent-empty-list"
+        "archived-filter-500-silent-empty-list",
+        "GET /api/orders?status=rejected 200 []; GET /api/orders?status=archived 500 and the table shows empty with no error",
+        "Filters Rejected and Shipped work; Archived returns 500 and the page shows the same empty table"
       ],
       "counterExamples": [
         "Orders filter gets stuck on the failed Archived result for subsequent selections",
         "select Archived(500) then Rejected repeats GET /api/orders?status=archived 500, same state hash",
-        "Choosing Rejected shows the Archived request: GET /api/orders?status=archived fired again"
+        "Choosing Rejected shows the Archived request: GET /api/orders?status=archived fired again",
+        "After choosing Archived (500), every later filter keeps showing the failed empty table"
       ]
     },
     {
@@ -106,7 +109,8 @@
         "click×2 new-order-submit → POST /api/orders fired twice → orders 1044 and 1045",
         "double-click-creates-duplicate-orders",
         "2x click new-order-submit -> 2x POST /api/orders 201, ids 1046,1047",
-        "Create-order button not guarded against double-submit — duplicate orders"
+        "Create-order button not guarded against double-submit — duplicate orders",
+        "After sign-in, a double-click on Submit creates two orders"
       ],
       "counterExamples": [
         "2x click signin-role-auditor -> POST /api/signin fired twice",
@@ -166,15 +170,17 @@
       "severity": "high",
       "level": "minimal",
       "match": [
-        "reports-scheduled.{0,120}(no (nav|navigation|way|header)|dead.?end|0 interactable|no interactable|no escape|headerless)",
-        "(no (nav|navigation|way back)|dead.?end|headerless).{0,120}(scheduled|reports-scheduled)",
-        "scheduled.{0,20}reports?.{0,80}(no (nav|navigation|way)|dead.?end|no escape)"
+        "(reports-scheduled|scheduled reports?|coming soon).{0,120}(no (nav|navigation|way|header|links?|back|menu|buttons?)|zero links|0 links|dead.?end|0 interactable|no interactable|no escape|headerless|stranded|browser back)",
+        "(no (nav|navigation|way back)|dead.?end|headerless).{0,120}(scheduled|reports-scheduled)"
       ],
       "examples": [
         "Scheduled reports page has no nav shell and no way back except browser back",
         "GET /reports-scheduled.html renders 0 interactable elements, no nav shell",
         "GET /reports-scheduled.html: 0 interactable elements, no nav-* testids present\nreports-scheduled-no-nav-chrome-dead-end",
-        "Scheduled reports link leads to a headerless dead-end page"
+        "Scheduled reports link leads to a headerless dead-end page",
+        "Scheduled reports page says \"coming soon\" and offers no link back to the app",
+        "reports-scheduled.html is a coming soon stub with zero links — user must use browser back",
+        "Page says coming soon; user is stranded with no back button or menu"
       ],
       "counterExamples": [
         "Scheduled reports page: heading contrast 3.1:1 (reports-scheduled.html)",
@@ -212,8 +218,9 @@
         "approve.{0,80}(200|succeed|accept).{0,80}(clerk|non-manager|any (signed-in )?role)",
         "(clerk|any (signed-in )?role|non-manager).{0,80}(can|could|able to).{0,20}approve",
         "approve.{0,40}(no|missing|lacks).{0,20}(role|permission|authori[sz]ation).{0,5}check",
-        "/approve 200",
-        "approve.{0,40}(clerk|non-manager).{0,40}\\b200\\b"
+        "approve.{0,40}(clerk|non-manager).{0,40}\\b200\\b",
+        "/approve.{0,20}\\b200\\b.{0,60}clerk",
+        "clerk.{0,60}/approve.{0,20}\\b200\\b"
       ],
       "examples": [
         "POST /api/orders/1042/approve 200 OK while signed in as clerk",
@@ -223,7 +230,8 @@
       ],
       "counterExamples": [
         "Approve button correctly hidden for clerk",
-        "2x click Approve 1038 → 2nd POST /api/orders/1038/approve 409, single approval persisted"
+        "2x click Approve 1038 → 2nd POST /api/orders/1038/approve 409, single approval persisted",
+        "POST /api/orders/1038/approve 200 as manager"
       ]
     },
     {
@@ -262,12 +270,14 @@
         "dom_injection",
         "stored.?xss",
         "customer.{0,40}(rendered|renders).{0,20}(as )?(html|unescaped)",
-        "document\\.title (became|becomes|changed to) .?xss"
+        "document\\.title (became|becomes|changed to) .?xss",
+        "(xss|payload|markup|onerror).{0,120}execut(es|ed)? on the orders (list|page)"
       ],
       "examples": [
         "stored-xss-customer-field-rendered-unescaped",
         "customer=<img src=x onerror=\"document.title='xss'\"> on /orders.html -> document.title becomes 'xss'",
-        "GET /api/orders order 1045 customer=<img src=x onerror>; GET /x 404; document.title became 'xss'"
+        "GET /api/orders order 1045 customer=<img src=x onerror>; GET /x 404; document.title became 'xss'",
+        "XSS payload in customer name is escaped on the order detail page but executes on the orders list"
       ],
       "counterExamples": [
         "img onerror fallback missing for weekly chart",
@@ -286,12 +296,16 @@
         "workspace deleted",
         "(delete|deleting).{0,80}(report|claim|show|say)s?.{0,20}(success|deleted|done)",
         "DELETE /api/(orders|workspace)\\S*.{0,20}40[13].{0,80}(navigat|redirect|anyway|still)",
-        "delete.{0,40}(redirect|navigat)s?.{0,20}(as )?success"
+        "delete.{0,40}(redirect|navigat)s?.{0,20}(as )?success",
+        "DELETE /api/(orders|workspace)\\S*.{0,120}(navigat|redirect)\\w*.{0,60}(as if|anyway|succe)"
       ],
       "examples": [
         "DELETE /api/orders/1048 403; UI navigated to /orders.html anyway; GET /api/orders/1048 200 still exists",
         "delete-redirects-as-success-on-403",
-        "POST /api/workspace/delete blocked by the safe-write policy, yet the page says Workspace deleted"
+        "POST /api/workspace/delete blocked by the safe-write policy, yet the page says Workspace deleted",
+        "DELETE /api/orders/1048 403; order unchanged on server, yet order.html navigated to /orders.html anyway",
+        "WRITE-POLICY blocked DELETE /api/orders/1042 (safe-write); UI navigated to /orders.html as if it succeeded",
+        "DELETE /api/orders/1048 blocked by the safe-write policy; UI navigated to /orders.html anyway; GET /api/orders/1048 200 still exists"
       ],
       "counterExamples": [
         "testid=settings-delete-workspace click handler calls fetch DELETE /api/workspace with no confirm()\nsettings-delete-workspace-lacks-confirmation"
@@ -324,8 +338,15 @@
       "category": "data-inconsistency",
       "severity": "medium",
       "level": "medium",
-      "match": ["save.?notes.{0,80}(unconditional|without|no res\\.ok|regardless)", "#saved.{0,40}Saved.{0,60}(no res\\.ok|without|regardless)"],
-      "examples": ["order.html script sets #saved text='Saved.' after PUT with no res.ok check\nsave-notes-unconditional-saved-message"],
+      "match": [
+        "save.?notes.{0,80}(unconditional|without|no res\\.ok|regardless)",
+        "#saved.{0,40}Saved.{0,60}(no res\\.ok|without|regardless)",
+        "save.?notes.{0,40}saved.{0,40}(without|no) res\\.ok"
+      ],
+      "examples": [
+        "order.html script sets #saved text='Saved.' after PUT with no res.ok check\nsave-notes-unconditional-saved-message",
+        "Save notes shows Saved. without res.ok check; notes unchanged on the order detail after reload"
+      ],
       "counterExamples": ["save-notes covered by sticky footer at load scroll"]
     },
     {
@@ -373,9 +394,13 @@
       "match": [
         "(approval|request-approval).{0,40}(button|visible|enabled).{0,60}pending",
         "pending.{0,60}request-approval.{0,40}(visible|enabled)",
-        "request.approval.{0,40}(enabled|visible|offered).{0,60}(pending|awaiting)"
+        "request.approval.{0,40}(enabled|visible|offered).{0,60}(pending|awaiting)",
+        "request.approval (enabled|visible|offered) on a pending order"
       ],
-      "examples": ["GET /api/orders/1042 status=pending; order-request-approval visible+enabled on fresh load\napproval-button-visible-after-pending"],
+      "examples": [
+        "GET /api/orders/1042 status=pending; order-request-approval visible+enabled on fresh load\napproval-button-visible-after-pending",
+        "Request approval enabled on a pending order: POST .../request-approval 409 once clicked"
+      ],
       "counterExamples": ["POST .../request-approval 409 with clear error text shown to user\nduplicate-approval-request-rejected-cleanly"]
     },
     {
@@ -463,33 +488,54 @@
       "title": "The orders filter is stuck on the failed Archived result",
       "why": "load() fetches whatever status is selected. Rejected had no orders yet, so its correct empty table had the same fingerprint as the Archived failure; only the request's status tells them apart.",
       "match": [
-        "rejected.{0,100}(stuck|reuses?|repeats?|again|archived)",
-        "(stuck|reuses?|repeats?).{0,100}rejected",
-        "(filter|selection).{0,40}(stuck|frozen).{0,60}(subsequent|other|next)"
+        "\\bstuck\\b",
+        "(every|each|all|any) (later|subsequent|other|next) (filter|selection|choice|status)",
+        "archived.{0,40}\\bagain\\b",
+        "\\bagain\\b.{0,40}archived",
+        "keeps? showing the (failed|archived)",
+        "(reuses?|repeats?).{0,60}archived",
+        "same state hash"
       ],
+      "overrides": ["orders-archived-refused-empty"],
       "examples": [
         "Orders filter gets stuck on the failed Archived result for subsequent selections",
         "select Archived(500) then Rejected repeats GET /api/orders?status=archived 500, same state hash",
-        "Choosing Rejected shows the Archived request: GET /api/orders?status=archived fired again"
+        "Choosing Rejected shows the Archived request: GET /api/orders?status=archived fired again",
+        "After choosing Archived (500), every later filter keeps showing the failed empty table",
+        "Shipped filter shows the Archived failure again: same empty table, same state hash",
+        "Filter is stuck after the Archived 500 — Awaiting approval also shows empty"
       ],
       "counterExamples": [
         "Orders table shows stale data when the Archived filter fails (500)",
-        "GET /api/orders?status=archived 500, page shows empty list, no error"
+        "GET /api/orders?status=archived 500, page shows empty list, no error",
+        "GET /api/orders?status=rejected 200 []; GET /api/orders?status=archived 500 and the table shows empty with no error",
+        "Filters Rejected and Shipped work; Archived returns 500 and the page shows the same empty table"
       ]
     },
     {
       "id": "sign-in-double-click",
       "title": "A double-click on a sign-in role button signs in twice",
       "why": "Signing in as the same role twice leaves the same state; there is nothing inconsistent to observe.",
-      "match": ["sign.?in.{0,60}(twice|double|2x)", "/api/signin.{0,40}twice", "signin-role.{0,40}(2x|twice|double)", "(2x|double).{0,20}click.{0,40}signin"],
+      "match": [
+        "sign.?in (button|role|control).{0,60}(twice|double|2x)",
+        "/api/signin.{0,40}twice",
+        "signin-role.{0,40}(2x|twice|double)",
+        "(2x|double).{0,20}click.{0,40}signin"
+      ],
       "examples": ["2x click signin-role-auditor -> POST /api/signin fired twice", "Role sign-in button not guarded against rapid double-click"],
-      "counterExamples": ["click×2 new-order-submit → POST /api/orders fired twice"]
+      "counterExamples": ["click×2 new-order-submit → POST /api/orders fired twice", "After sign-in, a double-click on Submit creates two orders"]
     },
     {
       "id": "static-rows-inert",
       "title": "List rows do nothing when clicked",
       "why": "The customers and inventory lists are read-only by design; a row with no action is not a dead end.",
-      "match": ["rows?.{0,20}(are |is )?inert", "customers-row.{0,40}0 (network )?requests?", "rows?.{0,20}non.?interactive", "row.?click.{0,20}inert"],
+      "match": [
+        "rows?.{0,20}(are |is )?inert",
+        "customers-row.{0,40}0 (network )?requests?",
+        "rows?.{0,20}non.?interactive",
+        "row.?click.{0,20}inert",
+        "rows?.{0,20}do nothing"
+      ],
       "examples": [
         "Customer rows are inert — no detail view, no hover affordance",
         "click on testid=inventory-row-HB-101 -> no navigation, no change\ninventory-rows-non-interactive-by-design",
@@ -517,38 +563,65 @@
       "title": "A destructive control refused by the tester's write policy",
       "why": "The refusal is SceneScout's own safety net, not the app's behaviour.",
       "match": [
-        "^(?![\\s\\S]*(deleted|success|saved|claims?|says|yet the page))[\\s\\S]*(blocked by (the |tester |its )?(safe-write|write.policy|read-only)|WRITE-POLICY blocked|write.policy.{0,20}\\((safe-write|read-only)\\))"
+        "^(?![\\s\\S]*(deleted|succe|saved|claims?|says|yet|navigat|redirect|anyway|removed|as if|still))[\\s\\S]*(refused by (the )?tester'?s write.policy|blocked by (the |tester |its )?(safe-write|write.policy|read-only)|WRITE-POLICY blocked|write.policy.{0,20}\\((safe-write|read-only)\\))"
       ],
+      "overrides": [],
       "examples": [
         "delete-workspace blocked by tester safe-write policy",
         "WRITE-POLICY blocked DELETE /api/orders/1042 (safe-write)",
         "delete on non-session order blocked by write policy"
       ],
-      "counterExamples": ["POST /api/workspace/delete blocked by the safe-write policy, yet the page says Workspace deleted"]
+      "counterExamples": [
+        "POST /api/workspace/delete blocked by the safe-write policy, yet the page says Workspace deleted",
+        "WRITE-POLICY blocked DELETE /api/orders/1042 (safe-write); UI navigated to /orders.html as if it succeeded",
+        "DELETE /api/orders/1048 blocked by the safe-write policy; UI navigated to /orders.html anyway; GET /api/orders/1048 200 still exists"
+      ]
     },
     {
       "id": "approve-double-click-guarded",
       "title": "A double-click on Approve approves once",
       "why": "The second request gets a 409 and one approval persists: the endpoint is idempotent, which is correct.",
-      "match": ["approve.{0,40}(double|2x|twice).{0,120}409", "409.{0,80}(single|idempotent|once)"],
+      "match": ["approve.{0,40}(double|2x|twice).{0,120}409", "409.{0,40}(single approval|idempotent|approved once)", "approve.{0,20}approves? once"],
       "examples": ["2x click Approve 1038 → 2nd POST /api/orders/1038/approve 409, single approval persisted\napprove-double-click-idempotent-with-409"],
-      "counterExamples": ["POST /api/orders/1042/approve 200 OK while signed in as clerk"]
+      "counterExamples": [
+        "POST /api/orders/1042/approve 200 OK while signed in as clerk",
+        "Request approval enabled on a pending order: POST .../request-approval 409 once clicked"
+      ]
     },
     {
       "id": "xss-escaped-on-detail",
       "title": "The order detail page shows an injected customer name as text",
       "why": "The detail page escapes the name — the stored XSS is on the list, not here.",
-      "match": ["(\\bescaped\\b|unchanged|not execut|as text).{0,80}(order\\.html|detail)", "xss.{0,40}\\bescaped\\b"],
+      "match": [
+        "^(?![\\s\\S]*(orders\\.html|orders list|\\blist\\b|execut(es|ed) on))[\\s\\S]*(\\bescaped\\b|not execut|as (plain )?text|document\\.title unchanged).{0,80}(order\\.html|detail)",
+        "^(?![\\s\\S]*(orders\\.html|orders list|\\blist\\b|execut(es|ed) on))[\\s\\S]*xss.{0,40}\\bescaped\\b",
+        "^(?![\\s\\S]*(orders\\.html|orders list|\\blist\\b|execut(es|ed) on))[\\s\\S]*detail.{0,60}(injected|payload|markup).{0,60}as (plain )?text"
+      ],
+      "overrides": [],
       "examples": ["document.title unchanged on /order.html?id=1045 after loading injected customer name\nxss-payload-escaped-on-order-detail"],
-      "counterExamples": ["customer=<img src=x onerror=\"document.title='xss'\"> on /orders.html -> document.title becomes 'xss'"]
+      "counterExamples": [
+        "customer=<img src=x onerror=\"document.title='xss'\"> on /orders.html -> document.title becomes 'xss'",
+        "XSS payload in customer name is escaped on the order detail page but executes on the orders list"
+      ]
     },
     {
       "id": "scheduled-coming-soon-copy",
       "title": "The scheduled reports page says scheduling is coming soon",
       "why": "The copy is honest about an unbuilt feature. The defect on that page is that it has no way back, not its text.",
-      "match": ["^(?![\\s\\S]*(dead.?end|no (nav|navigation|way)|0 interactable|no escape|headerless))[\\s\\S]*coming soon"],
+      "match": [
+        "coming soon.{0,80}(honest|intentional|acceptable|fine|clear|by design|not a defect)",
+        "(intentional|by design|honest|acceptable).{0,80}coming soon",
+        "stub.?copy.?intentional",
+        "^(?![\\s\\S]*(dead.?end|no (nav|navigation|way|header|links?|back|menu|buttons?)|zero links|0 links|0 interactable|no interactable|no escape|headerless|stranded|browser back))[\\s\\S]*coming soon"
+      ],
+      "overrides": [],
       "examples": ["no backend route: GET /api/reports/scheduled 404, page reads 'Scheduling is coming soon.'\nreports-scheduled-stub-copy-intentional"],
-      "counterExamples": ["Scheduled reports is a dead end — page just says coming soon and has no nav"]
+      "counterExamples": [
+        "Scheduled reports is a dead end — page just says coming soon and has no nav",
+        "Scheduled reports page says \"coming soon\" and offers no link back to the app",
+        "reports-scheduled.html is a coming soon stub with zero links — user must use browser back",
+        "Page says coming soon; user is stranded with no back button or menu"
+      ]
     }
   ]
 }

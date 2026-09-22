@@ -23,7 +23,9 @@ import {
   keyHash,
   lintKey,
   parseKey,
+  isScopeDismissal,
   precisionBounds,
+  runDate,
   sanitize,
   score,
   toArchive,
@@ -46,7 +48,10 @@ const key = parseKey({
   app: "test",
   defects: [entry("list-500", ["status=broken", "broken.{0,20}(500|empty)"]), entry("dead-end", ["/dead"]), entry("fuzz-only", ["onerror"], "extensive")],
   alsoReal: [entry("extra", ["unplanted"], "minimal", "low")],
-  nonDefects: [{ id: "stuck", title: "stuck filter", why: "it is not stuck", match: ["stuck.{0,40}broken"] }],
+  nonDefects: [
+    { id: "stuck", title: "stuck filter", why: "it is not stuck", match: ["stuck.{0,40}broken"], overrides: ["list-500"] },
+    { id: "copy", title: "honest copy", why: "the copy is fine", match: ["coming soon"] },
+  ],
 });
 
 let seq = 0;
@@ -107,6 +112,36 @@ test("a false positive naming the same endpoint as a real defect is classified a
   assert.equal(classify("filter stuck after the broken 500", key)?.kind, "nonDefect");
   const real = classify("GET /api/list?status=broken 500, empty table", key);
   assert.equal(real?.kind === "defect" && real.entry.id, "list-500");
+});
+
+test("a non-defect wins only over the defects it says it narrows", () => {
+  // "copy" names no defect it narrows. Letting it win everywhere turned a
+  // rewording of a real dead end into a false positive with a confident
+  // explanation beside it; now the overlap is visible and scored as neither.
+  const overlap = classify("page says coming soon and is a /dead end", key);
+  assert.equal(overlap?.kind, "ambiguous");
+  assert.deepEqual(overlap?.kind === "ambiguous" && overlap.ids, ["copy", "dead-end"]);
+  assert.equal(classify("page says coming soon", key)?.kind, "nonDefect");
+  // "stuck" does narrow list-500, so there it wins.
+  assert.equal(classify("stuck after broken 500", key)?.kind, "nonDefect");
+  // But not over a defect it does not narrow.
+  assert.equal(classify("stuck after broken, and /dead", key)?.kind, "ambiguous");
+});
+
+test("a non-defect that overrides a defect the key does not have is refused", () => {
+  assert.throws(
+    () => parseKey({ app: "t", defects: [entry("a", ["a"])], nonDefects: [{ id: "n", title: "n", why: "w", match: ["n"], overrides: ["b"] }] }),
+    /overrides "b"/,
+  );
+});
+
+test("a non-defect's own title must classify to it", () => {
+  const k = parseKey({
+    app: "t",
+    defects: [entry("a", ["^a$"])],
+    nonDefects: [{ id: "n", title: "a harmless thing", why: "w", match: ["nothing like the title"] }],
+  });
+  assert.deepEqual(lintKey(k), ['n: "a harmless thing" classified as nothing']);
 });
 
 test("text two entries both claim is ambiguous, and scored as neither", () => {
@@ -226,6 +261,25 @@ test("calibration is measured on verdicts the key can judge, and names every rea
   assert.ok((k?.ece ?? 1) < 1e-9, "nine right of ten at 0.9 is perfectly calibrated");
 });
 
+test("a lane dismissing something as another lane's is not scored as a verdict on it", () => {
+  // "Not a defect — belongs to the dashboard" is about who owns it. Scored as
+  // a wrong verdict, five such notes reversed the direction of a comparison.
+  const dismissals = [
+    decision({ verdict: "not_a_defect", evidence: "/dead", observation: "belongs to the landing page, out of lane scope" }),
+    decision({ verdict: "not_a_defect", evidence: "/dead — fired from the home page, not my routes", observation: "x" }),
+  ];
+  for (const d of dismissals) assert.equal(isScopeDismissal(d), true, d.evidence ?? "");
+  const k = calibrateAgainstKey(dismissals, key);
+  assert.deepEqual([k?.judged, k?.outOfScope], [0, 2]);
+  assert.equal(judgeDecision(dismissals[0], key), null);
+  // The same wording on a defect verdict is a claim, and is scored.
+  const claimed = decision({ verdict: "defect", evidence: "/dead", observation: "belongs to the landing page" });
+  assert.equal(isScopeDismissal(claimed), false);
+  assert.equal(judgeDecision(claimed, key), true);
+  // A not-a-defect verdict with a reason about the thing itself is scored.
+  assert.equal(judgeDecision(decision({ verdict: "not_a_defect", evidence: "/dead", observation: "works as designed" }), key), false);
+});
+
 test("nothing the key could judge reads as nothing, never as a perfect score", () => {
   // "0/0 verdicts right, expected calibration error 0.00" read as perfect.
   const out = formatScorecard(score(key, [], [decision({ observation: "unrelated" })], "minimal"));
@@ -268,13 +322,25 @@ test("the demo key agrees with every one of its own examples and counter-example
 });
 
 test("no known non-defect claims any real defect's title", () => {
-  // Non-defects win a single match, so one written too broadly turns a real
-  // defect into a false positive — which is how a run that found the planted
-  // delete bug would have been scored as having reported the write policy.
+  // A non-defect wins over the defects it narrows, so one written too broadly
+  // turns a real defect into a false positive — which is how a run that found
+  // the planted delete bug would have been scored as having reported the
+  // write policy.
   for (const d of [...demoKey.defects, ...demoKey.alsoReal]) {
     const got = classify(d.title, demoKey);
     assert.notEqual(got?.kind, "nonDefect", `${d.id}'s title is claimed by a non-defect`);
   }
+});
+
+test("a run is dated by its last decision, and never later than it", () => {
+  const ds = [decision({ at: "2026-09-22T19:47:40.773Z" }), decision({ at: "2026-09-22T19:48:17.463Z" })];
+  assert.equal(runDate(ds), "2026-09-22");
+  assert.equal(runDate(ds, "2026-09-21"), "2026-09-21", "archived from notes a day late is allowed to say when it ran");
+  // Run 1 was once dated the day after it ran, and --all sorts by date.
+  assert.throws(() => runDate(ds, "2026-09-23"), /cannot be dated 2026-09-23/);
+  assert.throws(() => runDate([]), /give it a date/);
+  assert.equal(runDate([], "2026-09-20"), "2026-09-20");
+  assert.throws(() => runDate(ds, "22/09/2026"), /YYYY-MM-DD/);
 });
 
 test("the demo key names routes the app serves", () => {

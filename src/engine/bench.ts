@@ -76,6 +76,13 @@ const NonDefect = z
     /** Why it is not a defect, for the reader of a scorecard. */
     why: z.string().min(1),
     match: z.array(Pattern).min(1),
+    /**
+     * The defects this non-defect is a narrowing of: text that matches both is
+     * the false claim, not the defect. Only these. A non-defect that happens to
+     * overlap any other entry makes the text ambiguous, because a phrasing
+     * nobody anticipated is likelier to be the real defect than the false claim.
+     */
+    overrides: z.array(z.string()).default([]),
     examples: z.array(z.string()).default([]),
     counterExamples: z.array(z.string()).default([]),
   })
@@ -115,6 +122,11 @@ export function parseKey(raw: unknown): AnswerKey {
   const ids = [...parsed.data.defects, ...parsed.data.alsoReal, ...parsed.data.nonDefects].map((e) => e.id);
   const dup = ids.find((id, i) => ids.indexOf(id) !== i);
   if (dup) throw new Error(`The answer key uses the id ${JSON.stringify(dup)} twice.`);
+  const real = new Set([...parsed.data.defects, ...parsed.data.alsoReal].map((e) => e.id));
+  for (const nd of parsed.data.nonDefects) {
+    const unknown = nd.overrides.find((id) => !real.has(id));
+    if (unknown) throw new Error(`The non-defect ${JSON.stringify(nd.id)} overrides ${JSON.stringify(unknown)}, which is not a defect in the key.`);
+  }
   return parsed.data;
 }
 
@@ -136,23 +148,29 @@ function matches(patterns: readonly string[], text: string): boolean {
 /**
  * What a piece of reported text is, according to the key.
  *
- * A known non-defect is a deliberate refinement of a real defect — "the filter
- * is stuck after the Archived 500" names the Archived failure but claims
- * something false about it — so when exactly one non-defect matches, it wins.
- * Anything else that more than one entry claims is AMBIGUOUS, reported, and
- * scored as neither: crediting the first match would quietly count a finding
- * about two defects as one, and miss the other.
+ * A known non-defect can be a deliberate narrowing of a real defect — "the
+ * filter is stuck after the Archived 500" names the Archived failure but claims
+ * something false about it — so a non-defect wins over the defects it lists in
+ * `overrides`, and over nothing else. Anything else that more than one entry
+ * claims is AMBIGUOUS, reported, and scored as neither: crediting the first
+ * match would quietly count a finding about two defects as one, and letting a
+ * non-defect win everywhere turned realistic rewordings of real defects into
+ * false positives with a confident explanation beside them.
  */
 export function classify(text: string, key: AnswerKey): Classified | null {
   const nd = key.nonDefects.filter((e) => matches(e.match, text));
-  if (nd.length === 1) return { kind: "nonDefect", entry: nd[0] };
-  if (nd.length > 1) return { kind: "ambiguous", ids: nd.map((e) => e.id) };
-  const all = [
+  const real = [
     ...key.defects.filter((e) => matches(e.match, text)).map((entry) => ({ kind: "defect" as const, entry })),
     ...key.alsoReal.filter((e) => matches(e.match, text)).map((entry) => ({ kind: "alsoReal" as const, entry })),
   ];
-  if (all.length === 1) return all[0];
-  if (all.length > 1) return { kind: "ambiguous", ids: all.map((m) => m.entry.id) };
+  if (nd.length > 1) return { kind: "ambiguous", ids: [...nd, ...real.map((m) => m.entry)].map((e) => e.id) };
+  if (nd.length === 1) {
+    const rest = real.filter((m) => !nd[0].overrides.includes(m.entry.id));
+    if (rest.length === 0) return { kind: "nonDefect", entry: nd[0] };
+    return { kind: "ambiguous", ids: [nd[0].id, ...rest.map((m) => m.entry.id)] };
+  }
+  if (real.length === 1) return real[0];
+  if (real.length > 1) return { kind: "ambiguous", ids: real.map((m) => m.entry.id) };
   return null;
 }
 
@@ -168,8 +186,9 @@ export function decisionText(d: Pick<RecordedDecision, "evidence" | "observation
 
 /**
  * A key that disagrees with its own examples is wrong before any run is
- * scored. Returns every title or example that classifies anywhere but its
- * own entry, and every counter-example that classifies TO its entry.
+ * scored. Returns every title or example — non-defects' included — that
+ * classifies anywhere but its own entry, and every counter-example that
+ * classifies TO its entry.
  */
 export function lintKey(key: AnswerKey): string[] {
   const problems: string[] = [];
@@ -191,7 +210,7 @@ export function lintKey(key: AnswerKey): string[] {
     }
   }
   for (const e of key.nonDefects) {
-    for (const t of e.examples) check(e.id, "nonDefect", t, true);
+    for (const t of [e.title, ...e.examples]) check(e.id, "nonDefect", t, true);
     for (const t of e.counterExamples) check(e.id, "nonDefect", t, false);
   }
   return problems;
@@ -242,6 +261,13 @@ export interface KeyCalibration {
   badConfidence: number;
   /** An unsure verdict is a request to look closer, not a claim that can be right or wrong. */
   unsure: number;
+  /**
+   * "Not a defect" said of something the lane dismissed as another lane's —
+   * "belongs to the dashboard, out of lane scope". That is a verdict about who
+   * owns it, not about whether it is broken, and scoring it as wrong moved the
+   * error rate by as much as any change being measured.
+   */
+  outOfScope: number;
   buckets: Array<{ label: string; decisions: number; stated: number; correct: number }>;
   ece: number;
 }
@@ -251,25 +277,38 @@ export interface KeyCalibration {
  *
  * "defect" on a planted or also-real defect is right, and on a known
  * non-defect is wrong. "not_a_defect" is the reverse. An "unsure" verdict, a
- * decision the key does not name, and one it names ambiguously are not
- * scored — the same rule the in-product calibration follows, for the same
- * reason.
+ * dismissal as another lane's, a decision the key does not name, and one it
+ * names ambiguously are not scored — the same rule the in-product calibration
+ * follows, for the same reason.
  */
 export function judgeDecision(d: RecordedDecision, key: AnswerKey): boolean | null {
   if (d.verdict === "unsure") return null;
+  if (isScopeDismissal(d)) return null;
   const m = classify(decisionText(d), key);
   if (!m || m.kind === "ambiguous") return null;
   const isDefect = m.kind !== "nonDefect";
   return d.verdict === "defect" ? isDefect : !isDefect;
 }
 
+/** How a lane says "not mine": the wording lanes actually used, none of it about a particular app. */
+const SCOPE_DISMISSAL_RE = /out.of.(lane.)?scope|belongs?.to\b|not (in |on |from )?(my|this) (lane|routes?|pages?)\b/i;
+
+/** A not-a-defect verdict whose stated reason is that the thing is another lane's. */
+export function isScopeDismissal(d: Pick<RecordedDecision, "verdict" | "evidence" | "observation">): boolean {
+  return d.verdict === "not_a_defect" && SCOPE_DISMISSAL_RE.test(decisionText(d));
+}
+
 export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key: AnswerKey): KeyCalibration | null {
   if (decisions.length === 0) return null;
   const buckets = BUCKET_EDGES.map(() => ({ n: 0, conf: 0, right: 0 }));
-  const out: KeyCalibration = { judged: 0, correct: 0, notInKey: 0, ambiguous: 0, badConfidence: 0, unsure: 0, buckets: [], ece: 0 };
+  const out: KeyCalibration = { judged: 0, correct: 0, notInKey: 0, ambiguous: 0, badConfidence: 0, unsure: 0, outOfScope: 0, buckets: [], ece: 0 };
   for (const d of decisions) {
     if (d.verdict === "unsure") {
       out.unsure += 1;
+      continue;
+    }
+    if (isScopeDismissal(d)) {
+      out.outOfScope += 1;
       continue;
     }
     const c = d.confidence;
@@ -453,6 +492,7 @@ export function formatScorecard(c: Scorecard): string {
       k.ambiguous && `${k.ambiguous} the key names ambiguously`,
       k.badConfidence && `${k.badConfidence} with an unusable confidence`,
       k.unsure && `${k.unsure} unsure`,
+      k.outOfScope && `${k.outOfScope} dismissed as another lane's`,
     ].filter(Boolean);
     lines.push(
       ``,
@@ -476,6 +516,29 @@ export interface RunArchive {
   note: string;
   findings: ScoredFinding[];
   decisions: RecordedDecision[];
+}
+
+/**
+ * The date a run is archived under. A run's decisions carry the time each was
+ * made, so the date defaults to the last of them, and a date given by hand
+ * may not be later: `--all` sorts by it, and a run dated after it happened
+ * reads as the newer of two in the results log. A run with no decisions has
+ * nothing to check against and must be given one.
+ */
+export function runDate(decisions: readonly Pick<RecordedDecision, "at">[], given?: string): string {
+  if (given !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(given)) throw new Error(`The date must be YYYY-MM-DD, not ${JSON.stringify(given)}.`);
+  const last = decisions
+    .map((d) => d.at)
+    .filter((at) => typeof at === "string" && /^\d{4}-\d{2}-\d{2}/.test(at))
+    .sort()
+    .at(-1)
+    ?.slice(0, 10);
+  if (!last) {
+    if (given === undefined) throw new Error("The run has no timestamped decisions to date it by; give it a date.");
+    return given;
+  }
+  if (given !== undefined && given > last) throw new Error(`The run's last decision was made on ${last}; it cannot be dated ${given}.`);
+  return given ?? last;
 }
 
 /**

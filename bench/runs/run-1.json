@@ -1,6 +1,6 @@
 {
   "run": "run-1",
-  "date": "2026-09-23",
+  "date": "2026-09-22",
   "note": "Prompt-only: go straight to your route; one markup value on create forms then view the listing; check a list's request status before calling it empty or stuck; file every judged defect before reporting; check coverage before finishing; do not close your session; no defect hints",
   "findings": [
     {
