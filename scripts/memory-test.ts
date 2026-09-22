@@ -1005,3 +1005,25 @@ test("lane decisions are capped, and the count reported is what survived", () =>
   assert.equal(store.laneDecisions.length, MAX_LANE_DECISIONS);
   assert.equal(kept, MAX_LANE_DECISIONS, "reporting what was appended would claim more than the store holds");
 });
+
+test("every call reports what it kept, not just the first one", () => {
+  // `list` aliases the stored array, so measuring "kept" as growth read the
+  // length AFTER the appends: every call after the first returned 0 while
+  // storing fine, and the tool then told the planner nothing had been kept.
+  const store = freshStore();
+  const at = "2026-09-22T10:00:00.000Z";
+  const d = (o: string) => ({
+    lane: "orders",
+    observation: o,
+    verdict: "defect" as const,
+    severity: "low",
+    category: "http-error",
+    confidence: 0.5,
+    evidence: `GET /api/${o} 500`,
+    at,
+  });
+  assert.equal(store.addLaneDecisions("orders", [d("a"), d("b")]), 2);
+  assert.equal(store.addLaneDecisions("orders", [d("c"), d("e")]), 2, "the second call keeps two as well");
+  assert.equal(store.addLaneDecisions("orders", [d("f")]), 1);
+  assert.equal(store.laneDecisions.length, 5);
+});

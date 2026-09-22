@@ -11,16 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  bucketLabel,
-  bucketOf,
-  calibrate,
-  formatCalibration,
-  joinKeys,
-  MIN_FOR_A_VERDICT,
-  signatureKey,
-  type RecordedDecision,
-} from "../src/engine/calibration.ts";
+import { bucketLabel, bucketOf, calibrate, formatCalibration, joinKeys, MIN_FOR_A_VERDICT, type RecordedDecision } from "../src/engine/calibration.ts";
 import type { Finding } from "../src/engine/memory.ts";
 
 let n = 0;
@@ -108,17 +99,22 @@ test("two different endpoints are not merged by the join", () => {
   assert.equal(c?.filed, 1);
 });
 
-test("evidence that names no endpoint still joins on its own text", () => {
-  // Not every finding is an HTTP failure; a widget reading zero is evidence too.
-  const c = calibrate([decision({ evidence: "widget dashboard-count shows 0" })], [finding("widget  dashboard-count shows 0")]);
-  assert.equal(c?.filed, 1);
-  const miss = calibrate([decision({ evidence: "widget dashboard-count shows 0" })], [finding("widget other-count shows 0")]);
-  assert.equal(miss?.filed, 0);
+test("evidence naming no failing endpoint is unjoinable, NOT a lane getting it wrong", () => {
+  // The literal-text fallback was the worst thing here: "500 on GET /api/r0"
+  // is ordinary English, and whichever agent wrote the finding chose the word
+  // order. It produced a key matching nothing, and a lane that was right about
+  // a bug that WAS filed published an expected calibration error of 0.90.
+  const c = calibrate([decision({ evidence: "widget dashboard-count shows 0" })], [finding("widget dashboard-count shows 0")]);
+  assert.equal(c?.checkable, 0, "nothing can be looked up for it");
+  assert.equal(c?.unjoinable, 1);
+  assert.equal(c?.filed, 0);
+  assert.deepEqual([...joinKeys("widget dashboard-count shows 0")], [], "no key at all");
+  assert.deepEqual([...joinKeys("500 on GET /api/r0")], [], "a status before its endpoint names no failure");
 });
 
-test("spacing in a signature does not break the join, but case does not change", () => {
-  assert.equal(signatureKey("  GET   /api/things 500 "), "GET /api/things 500");
-  assert.equal(signatureKey("GET /API/Things 500"), "GET /API/Things 500", "a path is case-sensitive");
+test("spacing and case in a signature do not break the join", () => {
+  // The join speaks the store's own signature, which normalises the path and
+  // lower-cases it, so the two sides agree on what one bug is.
   const d = decision({ evidence: "GET  /api/things 500" });
   const c = calibrate([d], [finding("GET /api/things 500")]);
   assert.equal(c?.filed, 1);
@@ -174,7 +170,13 @@ test("too few decisions print nothing rather than a number that swings on one", 
   const few = run(0.9, MIN_FOR_A_VERDICT - 2, 1);
   const c = calibrate(few.decisions, few.findings);
   assert.ok(c, "it is still computed");
-  assert.deepEqual(formatCalibration(c), [], "…but not published");
+  const said = formatCalibration(c).join("\n");
+  assert.ok(!said.includes("Expected calibration error"), "no figure");
+  // But the ABSENCE is explained. A run with seven decisions and a run with
+  // none looked identical when the section simply vanished, and the reader
+  // concluded the feature was broken.
+  assert.match(said, /Not enough to say yet/);
+  assert.match(said, /8 are needed/);
 
   const enough = run(0.9, MIN_FOR_A_VERDICT, 0);
   assert.ok(formatCalibration(calibrate(enough.decisions, enough.findings)).length > 0);
@@ -201,14 +203,14 @@ test("re-tested findings are reported separately, because those ARE about the ap
   const c = calibrate(decisions, findings);
   assert.deepEqual(c?.verified, { present: 1, gone: 1, changed: 0 });
   const out = formatCalibration(c).join("\n");
-  assert.match(out, /2 of the filed findings/);
+  assert.match(out, /2 of the findings those decisions matched/);
   const one = formatCalibration(
     calibrate(
       decisions,
       findings.map((f, i) => (i === 1 ? { ...f, verdict: undefined, verifiedAt: undefined } : f)),
     ),
   ).join("\n");
-  assert.match(one, /1 of the filed findings has /, "it reads as English for a single finding");
+  assert.match(one, /1 of the findings those decisions matched has /, "it reads as English for a single finding");
   assert.match(out, /evidence about the app, unlike the table above/);
 });
 
@@ -227,7 +229,7 @@ test("a decision about an endpoint that ANSWERED does not join to a failure on i
   // credited a lane for an unrelated finding on the same endpoint.
   const c = calibrate([decision({ evidence: "POST /api/orders" })], [finding("POST /api/orders 500")]);
   assert.equal(c?.filed, 0);
-  assert.deepEqual([...joinKeys("GET /api/x 200")], ["get /api/x 200"], "with no failure it falls back to the literal");
+  assert.deepEqual([...joinKeys("GET /api/x 200")], [], "an endpoint that answered is not a bug signature");
 });
 
 test("the re-test line counts findings, not the decisions that matched them", () => {
@@ -260,15 +262,30 @@ test("the mean stated confidence is a mean", () => {
 test("the advice under the table matches the error above it", () => {
   // These three bands ARE the section's advice; nothing else pins them.
   const good = formatCalibration(calibrate(...(Object.values(run(0.9, 9, 1)) as [never, never]))).join("\n");
-  assert.match(good, /usable as probabilities/);
+  assert.match(good, /track what happened closely/);
   const bad = formatCalibration(calibrate(...(Object.values(run(0.9, 1, 9)) as [never, never]))).join("\n");
-  assert.match(bad, /not a rate/);
+  assert.match(bad, /rather than a rate/);
 });
 
 test("eight is the threshold, as a number and not as whatever the constant says", () => {
   const seven = run(0.9, 7, 0);
   const eight = run(0.9, 8, 0);
-  assert.deepEqual(formatCalibration(calibrate(seven.decisions, seven.findings)), [], "seven says nothing");
-  assert.ok(formatCalibration(calibrate(eight.decisions, eight.findings)).length > 0, "eight does");
+  assert.ok(!formatCalibration(calibrate(seven.decisions, seven.findings)).join("\n").includes("Expected calibration"), "seven publishes no figure");
+  assert.match(formatCalibration(calibrate(eight.decisions, eight.findings)).join("\n"), /Expected calibration error/, "eight does");
   assert.equal(MIN_FOR_A_VERDICT, 8);
+});
+
+test("a confidence the file should not have held is excluded, not averaged in", () => {
+  // The schema guards the wire, not the file. One stored 2 among nine 0.9s
+  // published "mean stated confidence of 1.02" and moved the error across an
+  // advice band; a string published NaN.
+  const { decisions, findings } = run(0.9, 9, 1);
+  const bad = decision({ confidence: 2 });
+  const worse = decision({ confidence: "0.9" as unknown as number });
+  const c = calibrate([...decisions, bad, worse], findings);
+  assert.equal(c?.checkable, 10, "the two unusable ones are not scored");
+  assert.equal(c?.unjoinable, 2);
+  assert.ok(Math.abs((c?.stated ?? 0) - 0.9) < 1e-9, String(c?.stated));
+  assert.ok(Number.isFinite(c?.ece), String(c?.ece));
+  assert.match(formatCalibration(c).join("\n"), /2 further decision\(s\)/);
 });

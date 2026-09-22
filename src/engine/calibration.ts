@@ -20,7 +20,7 @@
  *
  * Pure, so every rule here is table-tested.
  */
-import { endpointSignatures, type Finding } from "./memory.js";
+import { failingSignatures, type Finding } from "./memory.js";
 
 /** A lane decision as recorded, with when and by whom. The shape `lane.ts` parses, plus provenance. */
 export interface RecordedDecision {
@@ -65,38 +65,26 @@ export function bucketLabel(i: number): string {
 }
 
 /**
- * A signature as a join key. Evidence is a machine signature on both sides, so
- * the only drift worth absorbing is spacing — a lane writing
- * "GET  /api/things 500" means the same endpoint as the finding that records
- * "GET /api/things 500". Case is left alone: a path is case-sensitive.
- */
-export function signatureKey(evidence: string): string {
-  return evidence.trim().replace(/\s+/g, " ");
-}
-
-/**
- * The keys a piece of evidence can be joined on.
+ * The keys a piece of evidence can be joined on, or nothing when it cannot be
+ * joined at all.
  *
  * Findings MERGE: the store treats `GET /api/things/3 500` and
  * `GET /api/things/7 500` as one bug, because the path normalises to
- * `/api/things/:id`. Joining on the literal string therefore reported five
- * lane decisions about one endpoint as one filed and four dropped — the lanes
- * understated by a factor of five, and the number looked like a finding about
- * the lanes rather than a bug in this join.
+ * `/api/things/:id`. Joining on the literal string reported five lane
+ * decisions about one endpoint as one filed and four dropped — the lanes
+ * understated fivefold, and the number read as a finding about them rather
+ * than a bug in this join. So the join uses the store's own rule.
  *
- * So the join asks the question in the store's own terms. Evidence that names
- * no endpoint at all — "widget dashboard-training shows 0" — falls back to the
- * literal, lower-cased, since there is nothing else to key on.
+ * Evidence carrying no failure signature returns NOTHING rather than falling
+ * back to its literal text. That fallback looked harmless and was the single
+ * worst thing here: `500 on GET /api/r0` — ordinary English, and whichever
+ * agent wrote the finding chose the word order — produced a key that matched
+ * nothing, and a lane that was right about a bug that WAS filed published an
+ * expected calibration error of 0.90. An unjoinable decision is now counted
+ * and disclosed as unjoinable, not scored as a lane being wrong.
  */
 export function joinKeys(evidence: string): Set<string> {
-  // Only a signature carrying a FAILURE status identifies a bug, which is the
-  // store's own rule: a bare `POST /api/orders` says which endpoint was
-  // involved, not what went wrong, and a double submit and an accepted
-  // negative quantity both name it. Without this filter a lane decision about
-  // an endpoint that ANSWERED would join to an unrelated finding on the same
-  // endpoint — a false hit, in the one direction the store refuses.
-  const failing = new Set([...endpointSignatures(evidence)].filter((sig) => /\s[45]\d{2}$/.test(sig)));
-  return failing.size > 0 ? failing : new Set([signatureKey(evidence).toLowerCase()]);
+  return failingSignatures(evidence);
 }
 
 export interface Bucket {
@@ -108,8 +96,13 @@ export interface Bucket {
   filed: number;
 }
 
+/** A confidence as stored may be anything; the schema guards the wire, not the file. */
+function usableConfidence(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+}
+
 export interface Calibration {
-  /** Decisions with a checkable outcome: a "defect" verdict carrying a signature. */
+  /** Decisions that could be joined at all: a "defect" naming a failing endpoint, with a usable confidence. */
   checkable: number;
   /** How many of those became a filed finding. */
   filed: number;
@@ -122,8 +115,15 @@ export interface Calibration {
    * anything over about 0.1 means the numbers are not usable as probabilities.
    */
   ece: number;
-  /** Of the filed ones, how many a later run re-tested, and what it found. */
+  /** Of the filed ones, how many a later run re-tested, and what it found. Counted by FINDING. */
   verified: { present: number; gone: number; changed: number };
+  /**
+   * Decisions called a defect that no key could be built for — evidence naming
+   * no failing endpoint, or a confidence the file should not have held. They
+   * are NOT scored: a decision nothing can be looked up for says nothing about
+   * the lane. Reported so the reader knows the denominator is not everything.
+   */
+  unjoinable: number;
 }
 
 /**
@@ -147,8 +147,11 @@ export function calibrate(decisions: readonly RecordedDecision[], findings: read
     }
   }
 
-  const checkable = decisions.filter((d) => d.verdict === "defect" && d.evidence !== null);
-  if (checkable.length === 0) return null;
+  const claims = decisions.filter((d) => d.verdict === "defect" && d.evidence !== null);
+  const checkable = claims.filter((d) => usableConfidence(d.confidence) !== null && joinKeys(d.evidence as string).size > 0);
+  const unjoinable = claims.length - checkable.length;
+  if (checkable.length === 0)
+    return unjoinable > 0 ? { checkable: 0, filed: 0, stated: 0, buckets: [], ece: 0, verified: { present: 0, gone: 0, changed: 0 }, unjoinable } : null;
 
   const buckets: Array<{ n: number; conf: number; hits: number }> = BUCKET_EDGES.map(() => ({ n: 0, conf: 0, hits: 0 }));
   const verified = { present: 0, gone: 0, changed: 0 };
@@ -163,18 +166,20 @@ export function calibrate(decisions: readonly RecordedDecision[], findings: read
       if (match) break;
     }
     const hit = match !== undefined;
-    const b = buckets[bucketOf(d.confidence)];
+    const confidence = usableConfidence(d.confidence) as number;
+    const b = buckets[bucketOf(confidence)];
     b.n += 1;
-    b.conf += d.confidence;
+    b.conf += confidence;
     if (hit) b.hits += 1;
     if (hit) filed += 1;
-    stated += d.confidence;
+    stated += confidence;
     // By finding, not by decision: several decisions can match one finding,
     // and this sentence counts findings.
     if (match) matched.set(match.id, match);
   }
   for (const f of matched.values()) {
-    if (f.verdict && f.verifiedAt) verified[f.verdict] += 1;
+    // A verdict read from disk is not guaranteed to be one of the three.
+    if (f.verifiedAt && f.verdict && f.verdict in verified) verified[f.verdict] += 1;
   }
 
   const n = checkable.length;
@@ -188,7 +193,7 @@ export function calibrate(decisions: readonly RecordedDecision[], findings: read
     out.push({ label: bucketLabel(i), decisions: b.n, stated: meanConf, filed: rate });
   });
 
-  return { checkable: n, filed, stated: stated / n, buckets: out, ece, verified };
+  return { checkable: n, filed, stated: stated / n, buckets: out, ece, verified, unjoinable };
 }
 
 const pct = (x: number): string => `${Math.round(x * 100)}%`;
@@ -199,18 +204,31 @@ const pct = (x: number): string => `${Math.round(x * 100)}%`;
  * the lanes that judged it.
  */
 export function formatCalibration(c: Calibration | null): string[] {
-  if (!c || c.checkable < MIN_FOR_A_VERDICT) {
-    // A handful of decisions produce a number that swings on one of them.
-    // Saying nothing is more honest than printing a percentage nobody should
-    // act on, and the section reappears once a run is big enough.
-    return [];
+  if (!c) return [];
+  if (c.checkable < MIN_FOR_A_VERDICT) {
+    // Suppress the NUMBER, not the fact. A run that recorded seven decisions
+    // and a run that recorded none look identical when the section simply
+    // vanishes, and the reader concludes the feature is broken — which is this
+    // project's own definition of a silent path.
+    const had = c.checkable + c.unjoinable;
+    if (had === 0) return [];
+    return [
+      `## How well the lanes judged`,
+      ``,
+      `Not enough to say yet: ${c.checkable} lane decision(s) could be checked${c.unjoinable > 0 ? ` (and ${c.unjoinable} could not be looked up at all)` : ""}, ` +
+        `and ${MIN_FOR_A_VERDICT} are needed before a calibration figure survives one of them changing.`,
+      ``,
+    ];
   }
   const lines = [
     `## How well the lanes judged`,
     ``,
-    `${c.checkable} lane decision(s) called a defect and attached a signature; ${c.filed} became a filed finding (${pct(c.filed / c.checkable)}), ` +
-      `against a mean stated confidence of ${c.stated.toFixed(2)}. This is the project's whole history, not just this run, and it measures agreement between the lanes and the bar this project applies — not whether the app is broken. ` +
-      `A lane can be perfectly calibrated against a planner that files the wrong things, and a defect filed without a machine signature cannot be joined at all, so it counts against the lane.`,
+    `${c.checkable} lane decision(s) called a defect on an endpoint that failed; ${c.filed} of them match a finding this project holds (${pct(c.filed / c.checkable)}), ` +
+      `against a mean stated confidence of ${c.stated.toFixed(2)}.`,
+    ``,
+    `**What this is not.** It covers the project's whole history, not this run, and it measures agreement between the lanes and the bar this project applies — not whether the app is broken. ` +
+      `A lane can be perfectly calibrated against a planner that files the wrong things. Two things also count against a lane through no fault of its own: a defect filed with no machine signature, ` +
+      `and a finding whose signature was dropped when the store merged it into another. Read the figure as an ordering, not a measurement.`,
     ``,
     `| Stated confidence | Decisions | Said | Filed |`,
     `|---|---:|---:|---:|`,
@@ -223,12 +241,19 @@ export function formatCalibration(c: Calibration | null): string[] {
     `Expected calibration error **${c.ece.toFixed(2)}** — the gap between what the lanes said and what happened, weighted by bucket. ${readEce(c.ece)}`,
   );
 
+  if (c.unjoinable > 0) {
+    lines.push(
+      ``,
+      `${c.unjoinable} further decision(s) called a defect but named no failing endpoint, so nothing could be looked up for them. They are excluded above rather than counted as wrong.`,
+    );
+  }
+
   const seen = c.verified.present + c.verified.gone + c.verified.changed;
   if (seen > 0) {
     lines.push(
       ``,
-      `${seen} of the filed findings ${seen === 1 ? "has" : "have"} since been re-tested with \`scout_verify\`: ${c.verified.present} still present, ${c.verified.gone} gone, ${c.verified.changed} changed. ` +
-        `Those verdicts are evidence about the app, unlike the table above.`,
+      `${seen} of the findings those decisions matched ${seen === 1 ? "has" : "have"} since been re-tested with \`scout_verify\`: ${c.verified.present} still present, ${c.verified.gone} gone, ${c.verified.changed} changed. ` +
+        `Those verdicts are evidence about the app, unlike the table above. Findings no lane decision matched are not counted here, so this will not agree with the re-tested column elsewhere in the report.`,
     );
   }
   lines.push(``);
@@ -238,8 +263,13 @@ export function formatCalibration(c: Calibration | null): string[] {
 /** Below this, the number swings on a single decision and is worse than no number. */
 export const MIN_FOR_A_VERDICT = 8;
 
+/**
+ * What the figure suggests, hedged on purpose. The join loses decisions it
+ * cannot key and findings whose signature a merge discarded, and both push the
+ * error upward — so a confident "these numbers are wrong" can itself be wrong.
+ */
 function readEce(ece: number): string {
-  if (ece <= 0.05) return "The numbers are usable as probabilities.";
-  if (ece <= 0.15) return "Close enough to act on, loosely.";
-  return "Too far apart to read as probabilities; treat a lane's confidence as an ordering, not a rate.";
+  if (ece <= 0.05) return "The lanes' numbers track what happened closely.";
+  if (ece <= 0.15) return "Close enough to compare lanes by.";
+  return "Far enough apart that a lane's confidence is worth reading as an ordering rather than a rate — after checking the exclusions above, which push this upward.";
 }

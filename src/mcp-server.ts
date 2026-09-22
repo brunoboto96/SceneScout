@@ -602,14 +602,14 @@ server.registerTool(
       // against what the run goes on to file. Best-effort: a lane report is
       // still accepted if this project has no memory open yet, because the
       // planner's fold must not depend on where the report was written.
-      // A lane IS a session by convention, so its own session's memory is the
-      // right home. Picking whichever engine the map happened to iterate first
-      // wrote one project's decisions into another's memory when two sessions
-      // were attached to different projects.
-      const owner = engines.get(lane)?.memory ? engines.get(lane) : [...engines.values()].find((e) => e.memory);
+      // ONLY the lane's own session. Falling back to any engine with memory
+      // open put one project's decisions into another project's store whenever
+      // two sessions were attached to different apps — and the lane having
+      // already closed makes that the ordinary case, not an edge one.
+      const owner = engines.get(lane)?.memory;
       const at = new Date().toISOString();
-      const kept = owner?.memory
-        ? owner.memory.addLaneDecisions(
+      const kept = owner
+        ? owner.addLaneDecisions(
             lane,
             parsed.report.decisions.map((d) => ({ ...d, lane, at })),
           )
@@ -622,7 +622,7 @@ server.registerTool(
       const note =
         kept > 0
           ? ` (${kept} decision(s) kept for calibration)`
-          : " (no decision kept for calibration — no session in this process still has its project memory open)";
+          : ` (nothing kept for calibration — session ${JSON.stringify(lane)} is not attached here, so there is no project memory to write to. Fold a lane report before closing that lane's session.)`;
       return { content: [{ type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}` }] };
     } catch (err) {
       return errorText(err);

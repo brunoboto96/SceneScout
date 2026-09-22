@@ -459,10 +459,20 @@ function findingLiterals(...texts: Array<string | undefined>): Set<string> {
  * does not read as a per-record bug.
  */
 /**
- * The bug signatures a piece of evidence names: method + normalised path, with
- * the failure status when one follows. This is the store's notion of "the same
- * bug" — exported so calibration can ask the question in the SAME terms the
- * store answers it, rather than inventing a second rule that drifts.
+ * The signatures that identify a BUG: only those carrying a failure status.
+ *
+ * A bare `POST /api/orders` says which endpoint was involved, not what went
+ * wrong — a double submit and an accepted negative quantity both name it, and
+ * are two bugs. Exported so calibration applies the store's own rule instead
+ * of a second copy of this regex, which is what it had.
+ */
+export function failingSignatures(evidence: string | undefined): Set<string> {
+  return new Set([...endpointSignatures(evidence)].filter((sig) => /\s[45]\d{2}$/.test(sig)));
+}
+
+/**
+ * The endpoint signatures a piece of evidence names: method + normalised path,
+ * with the failure status when one follows.
  */
 export function endpointSignatures(evidence: string | undefined): Set<string> {
   const out = new Set<string>();
@@ -506,10 +516,9 @@ function sharesEndpointSignature(a: { evidence?: string }, b: { evidence?: strin
   // `POST /api/orders` (the endpoint answered 2xx, or no status was named)
   // says which endpoint was involved, not what went wrong: a double submit
   // and an accepted negative quantity both name it, and are two bugs.
-  const failing = (evidence: string): Set<string> => new Set([...endpointSignatures(evidence)].filter((sig) => /\s[45]\d{2}$/.test(sig)));
-  const aSigs = failing(a.evidence);
+  const aSigs = failingSignatures(a.evidence);
   if (aSigs.size === 0) return false;
-  for (const sig of failing(b.evidence)) if (aSigs.has(sig)) return true;
+  for (const sig of failingSignatures(b.evidence)) if (aSigs.has(sig)) return true;
   return false;
 }
 
@@ -943,8 +952,7 @@ export class MemoryStore {
     return true;
   }
 
-  /** Mark a finding resolved; returns it or null. */
-  /** What the lanes decided, oldest first. Empty on a run that used none. */
+  /** What the lanes decided, oldest first. Empty on a project that has never run one. */
   get laneDecisions(): RecordedDecision[] {
     return this.data.laneDecisions ?? [];
   }
@@ -972,17 +980,17 @@ export class MemoryStore {
       list.push(record);
       added += 1;
     }
-    // Count what SURVIVES the cap, not what was appended: reporting "1050
-    // kept" while the store holds 1000 tells the caller something untrue about
-    // its own data. Flush whenever the stored list changed, including when the
-    // only change was eviction, or memory and disk drift apart.
-    const before = this.data.laneDecisions?.length ?? 0;
     this.data.laneDecisions = list.slice(-MAX_LANE_DECISIONS);
-    const kept = this.data.laneDecisions.length - before;
     if (added > 0) this.flush();
-    return Math.max(0, kept);
+    // What survives the cap. Appends go to the tail and the cap keeps the
+    // tail, so all of `added` survives unless the call itself exceeds the cap.
+    // Measuring it as growth instead looked right and was not: `list` aliases
+    // the stored array, so the "before" length was read after the appends and
+    // every call after the first reported nothing kept — while storing fine.
+    return Math.min(added, MAX_LANE_DECISIONS);
   }
 
+  /** Mark a finding resolved; returns it or null. */
   resolveFinding(id: string): Finding | null {
     const f = this.data.findings.find((x) => x.id === id);
     if (!f) return null;
