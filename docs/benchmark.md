@@ -86,8 +86,10 @@ example or counter-example in the same change.
   reviewer wrote to break it. Runs 2–4 were the first runs it had not seen:
   against the key of the day they left 2, 10 and 5 findings unlabelled, and
   precision for runs 3 and 4 was then only bounded (70–100% and 78–96%). A
-  person has since judged each of those findings against the demo's source and
-  the judgements are in the key, so runs 2–4 are now fitted data too. The next
+  person has since judged those findings against the demo's source and the
+  judgements are in the key, so runs 2–4 are now fitted data too. Two stay
+  unjudged on purpose: a placeholder a lane filed in run 2, and a dashboard
+  count in run 3 that other lanes were changing while it was read. The next
   run is the next test.
 - **A negated claim still matches.** "Export CSV works, no error" is credited
   as the Export CSV defect: the key recognises *what* a finding is about, not
@@ -104,7 +106,7 @@ example or counter-example in the same change.
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
 re-scored against **one** key by `npm run bench -- --all`; the table below is
-key `2b2a415d17`. The archived runs are in [`bench/runs/`](../bench/runs/).
+key `8161856bec`. The archived runs are in [`bench/runs/`](../bench/runs/).
 
 | Run | Date | What changed | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Lane calibration | Cost | Kept? |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
@@ -147,7 +149,8 @@ single run could not tell a one-defect effect from noise. Per defect, run 1
 
 **The sticky bar is lost to the duplicate check, depending on how it is
 titled.** The store merges two findings on one route when a string of 8–80
-characters quoted in one title appears anywhere in the other finding's text.
+characters quoted (or in parentheses) in one title matches one quoted in the
+other finding's title, detail or evidence.
 When a lane titled the sticky-bar defect with the button's quoted label
 (`… covers the "Save notes" button`), that label also appeared in the
 save-notes false-success finding's detail (`clicking "Save notes" shows

@@ -217,7 +217,7 @@
         "order-stickybar.{0,60}(cover|overlap|obscur)|(cover|overlap|obscur).{0,60}order-stickybar",
         "(sticky|fixed|pinned).{0,40}(bar|footer|chrome).{0,80}(cover|overlap|obscur|hide).{0,60}(save|notes)",
         "(save.notes|order-save).{0,60}(covered|obscured|hidden|overlapped)",
-        "(save|order-save).{0,80}not visible until scroll",
+        "(order-save|save( notes)? button).{0,80}not visible until scroll",
         "(pushes|pushing) save.{0,40}(off.?screen|below|behind)",
         "save notes.{0,40}(hidden|behind|under).{0,20}sticky"
       ],
@@ -230,7 +230,10 @@
         "Notes textarea is tall and pushes Save notes behind the sticky bar",
         "Save notes is hidden under the sticky footer on load; the notes textarea is 600px tall"
       ],
-      "counterExamples": ["order.html stickybar anchor href=/orders.html, no data-testid\nstickybar-link-missing-testid"]
+      "counterExamples": [
+        "order.html stickybar anchor href=/orders.html, no data-testid\nstickybar-link-missing-testid",
+        "Save notes: the Saved. message is not visible until scrolling, and it shows even when PUT returns 403"
+      ]
     },
     {
       "id": "approve-endpoint-accepts-clerk",
@@ -357,14 +360,16 @@
       "match": [
         "settings-save.{0,120}(0 (network )?requests?|no (network )?request|nothing|reverts?|lost|discard|persists nothing)",
         "save changes.{0,120}(0 (network )?requests?|no (network )?request|sends nothing|nothing|reverts?|lost|discard|not (persist|saved))",
-        "settings.{0,60}(0|no) (network )?requests? (fire|sent)"
+        "settings.{0,60}(0|no) (network )?requests? (fire|sent)",
+        "(says|shows) saved\\..{0,40}nothing persists"
       ],
       "examples": [
         "click settings-save fires 0 network requests; settings-name reverts after reload",
         "Settings \"Save changes\" fires no request and silently discards edits",
         "click testid=settings-save fires 0 network requests; GET /api/workspace 404\nsettings-save-shows-success-but-persists-nothing",
         "Save changes on Settings gives no feedback that anything was persisted — 0 network requests",
-        "Settings gives no feedback on failure: says Saved. although 0 requests fire"
+        "Settings gives no feedback on failure: says Saved. although 0 requests fire",
+        "Save changes gives no feedback at all that the change was lost — it says Saved. and nothing persists"
       ],
       "counterExamples": ["Save changes button contrast 2.9:1"]
     },
@@ -385,7 +390,8 @@
       "examples": [
         "order.html script sets #saved text='Saved.' after PUT with no res.ok check\nsave-notes-unconditional-saved-message",
         "Save notes shows Saved. without res.ok check; notes unchanged on the order detail after reload",
-        "Save notes shows \"Saved.\" even when the server rejects the write\nPUT /api/orders/1042 403, page shows \"Saved.\""
+        "Save notes shows \"Saved.\" even when the server rejects the write\nPUT /api/orders/1042 403, page shows \"Saved.\"",
+        "Save notes: the Saved. message is not visible until scrolling, and it shows even when PUT returns 403"
       ],
       "counterExamples": ["save-notes covered by sticky footer at load scroll"]
     },
@@ -574,10 +580,15 @@
       "severity": "low",
       "level": "medium",
       "match": [
-        "^(?![\\s\\S]*(archived|500|error|errors|fail))[\\s\\S]*no empty.state (message|text)",
-        "^(?![\\s\\S]*(archived|500|error|errors|fail))[\\s\\S]*(filter|status).{0,40}match(es)? (zero|no) orders"
+        "^(?![\\s\\S]*(archived|\\b5\\d\\d\\b(?!\\s*ms)))[\\s\\S]*no empty.state (message|text)",
+        "^(?![\\s\\S]*(archived|\\b5\\d\\d\\b(?!\\s*ms)))[\\s\\S]*(filter|status).{0,40}match(es)? (zero|no) orders"
       ],
-      "examples": ["No empty-state message when a status filter matches zero orders\norders-status-filter=Rejected -> orders-rows empty, no empty-state text"],
+      "examples": [
+        "No empty-state message when a status filter matches zero orders\norders-status-filter=Rejected -> orders-rows empty, no empty-state text",
+        "Rejected filter matches zero orders (GET 200 [], no error) and shows no empty-state message",
+        "No empty-state text when a filter matches zero orders; no console errors",
+        "Filter matches zero orders and shows a blank table with no empty-state message (took 500ms)"
+      ],
       "counterExamples": [
         "Status filter returns 500 for one status and the table is simply blank, no empty-state message",
         "A filter that errors (500) renders like a filter that matches no orders"
@@ -771,9 +782,9 @@
       "title": "Settings Save gives no feedback at all",
       "why": "The page always shows \"Saved.\" after Save. The defect is that nothing is saved, not that nothing is said (settings-save-claims-saved).",
       "match": [
-        "(settings|save changes).{0,40}(gives|shows) no (visible )?feedback (at all|whatsoever)",
-        "no (visible )?(success|error)(\\s*/\\s*| or )(error|success)? ?(ui|message)? after click \\(testid=settings-save\\)",
-        "no feedback at all, success or failure"
+        "^(?![\\s\\S]*saved\\.)[\\s\\S]*(settings|save changes).{0,40}(gives|shows) no (visible )?feedback (at all|whatsoever)",
+        "^(?![\\s\\S]*saved\\.)[\\s\\S]*no (visible )?(success|error)(\\s*/\\s*| or )(error|success)? ?(ui|message)? after click \\(testid=settings-save\\)",
+        "^(?![\\s\\S]*saved\\.)[\\s\\S]*no feedback at all, success or failure"
       ],
       "overrides": ["settings-save-claims-saved"],
       "examples": [
@@ -781,7 +792,8 @@
       ],
       "counterExamples": [
         "Save changes on Settings gives no feedback that anything was persisted — 0 network requests",
-        "Settings gives no feedback on failure: says Saved. although 0 requests fire"
+        "Settings gives no feedback on failure: says Saved. although 0 requests fire",
+        "Save changes gives no feedback at all that the change was lost — it says Saved. and nothing persists"
       ]
     },
     {
