@@ -293,10 +293,17 @@ export const CLAIM_SCAN_SCRIPT = `(() => {
   // Read on its own, past the cap on page texts: a toast rendered at the end of
   // a long page is exactly the text that must not be missed.
   for (const region of document.querySelectorAll(ANNOUNCES)) {
-    if (!visible(region) || announced.length >= ${MAX_ANNOUNCED}) continue;
-    const said = (region.textContent || "").replace(/\\s+/g, " ").trim();
-    if (said && said.length <= ${CLAIM_TEXT_MAX} && !announced.includes(said)) announced.push(said);
+    if (!visible(region)) continue;
+    // innerText, not textContent: hidden parts of a region are not said. Split
+    // into sentences so a long region is read rather than dropped whole.
+    const said = (region.innerText || "").replace(/\\s+/g, " ").trim();
+    for (const sentence of said.split(/(?<=[.!?])\\s+/)) {
+      if (announced.length >= ${MAX_ANNOUNCED}) break;
+      const s = sentence.trim();
+      if (s && s.length <= ${CLAIM_TEXT_MAX} && !announced.includes(s)) announced.push(s);
+    }
   }
+
 
   return { texts, announced, emptyLists };
 })()`;

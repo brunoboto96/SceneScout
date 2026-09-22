@@ -42,6 +42,9 @@
     <!-- Refusal-shaped help text, as a danger zone or a form carries. It must
          not excuse the lies above: it is not the page answering anything. -->
     <p class="help">This cannot be undone. Only admins can invite members.</p>
+    <!-- The same kind of help inside an open modal: a dialog is a container of
+         static text, not the page answering, and must not excuse the lies. -->
+    <dialog open data-testid="widgets-help-dialog"><p>Deleting a widget cannot be undone.</p></dialog>
 
     <script>
       async function loadWidgets() {

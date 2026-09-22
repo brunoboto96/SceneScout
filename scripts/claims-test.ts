@@ -188,10 +188,19 @@ test("refusal-shaped help text elsewhere on the page excuses nothing", () => {
 
 test("an announcement that merely mentions 'only' or a count is not a refusal", () => {
   const refused = [req({ method: "POST", url: "http://app.test/api/cart", status: 500 })];
-  for (const noise of ["Only 3 left in stock", "Showing only open orders", "Only you can see this note"]) {
+  for (const noise of ["Only 3 left in stock", "Showing only open orders"]) {
     const found = findContradictions(refused, page({ texts: [noise, "Added to cart"], announced: [noise, "Added to cart"] }));
-    assert.equal(found[0]?.kind, noise === "Only you can see this note" ? undefined : "false_success", noise);
+    assert.equal(found[0]?.kind, "false_success", noise);
   }
+  // Accepted limit, recorded as one: a standing announcement that reads as a
+  // permission ("Only you can see this note") excuses a lie elsewhere on the
+  // page, because any announced refusal clears it. Missing a lie here is the
+  // price of not reporting the refusals the page does explain.
+  const standing = findContradictions(
+    refused,
+    page({ texts: ["Only you can see this note", "Added to cart"], announced: ["Only you can see this note", "Added to cart"] }),
+  );
+  assert.deepEqual(standing, [], "known miss: a standing permission note in a live region");
 });
 
 test("an announced admission that the change was not kept is not a false success", () => {
