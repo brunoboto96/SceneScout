@@ -640,7 +640,8 @@
       ],
       "counterExamples": [
         "Orders list shows negative item count and $0.00 totals with no validation surfaced\nGET /api/orders 200: {\"id\":1044,\"items\":-5,\"total\":0}, {\"id\":1043,\"items\":13,\"total\":0}",
-        "Double-click on order creation produced two identical duplicate orders\nGET /api/orders ids 1046,1047 identical customer=Double Click Co items=2 total=0 status=open"
+        "Double-click on order creation produced two identical duplicate orders\nGET /api/orders ids 1046,1047 identical customer=Double Click Co items=2 total=0 status=open",
+        "Order totals match item counts for seeded orders"
       ]
     },
     {
@@ -674,7 +675,7 @@
         "New-order form is not cleared after submit",
         "Form fields are not reset after an order is created"
       ],
-      "counterExamples": ["click×2 testid=new-order-submit → POST /api/orders x2, created id=1046 and id=1047"]
+      "counterExamples": ["click×2 testid=new-order-submit → POST /api/orders x2, created id=1046 and id=1047", "Form is cleared after submit"]
     },
     {
       "id": "new-order-email-no-validation",
@@ -687,14 +688,14 @@
         "email.{0,40}(accepts?|allows?).{0,20}malformed",
         "malformed.{0,20}(email|address)",
         "email.{0,30}accepts? (invalid|malformed|any)",
-        "\\bnovalidate\\b"
+        "email.{0,40}novalidate|novalidate.{0,40}email"
       ],
       "examples": [
         "Confirmation email field accepts malformed addresses with no validation\nPOST /api/orders email=not-an-email → 200, order #1045 created, no client/server validation message",
         "Email field accepts invalid email addresses",
         "Form has novalidate, so a malformed email is never flagged"
       ],
-      "counterExamples": ["Email field has a placeholder but no label"]
+      "counterExamples": ["Email field has a placeholder but no label", "Empty customer submits silently; the form is novalidate"]
     }
   ],
   "nonDefects": [
