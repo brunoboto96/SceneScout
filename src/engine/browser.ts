@@ -194,8 +194,10 @@ function xpathLookup(xpath: string): string {
  * the page loads in, which is not an option anyone owes a choice.
  */
 function describeSelect(node: Element): Array<{ value: string; label: string }> | null {
-  const select = node as HTMLSelectElement;
-  if (!select.options) return null;
+  // A plan may target the dropdown by its <label>; selectOption follows a label to its control, so this does too.
+  const target = node instanceof HTMLLabelElement ? (node.control ?? node.querySelector("select")) : node;
+  const select = target as HTMLSelectElement | null;
+  if (!select || !select.options) return null;
   return Array.from(select.options)
     .filter((o) => !o.disabled && !o.hidden && o.value !== "")
     .map((o) => ({ value: o.value, label: (o.label || o.textContent || "").trim().slice(0, 80) }))
