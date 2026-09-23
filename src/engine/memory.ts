@@ -551,6 +551,21 @@ function sameEndpointBug(existing: { status?: string; category: string; evidence
 }
 
 /**
+ * Whether two pieces of evidence each name a request and share none — compared
+ * by method and normalised path, ignoring the status, so `GET /api/x` and
+ * `GET /api/x/ 404` are one request. Evidence that names no request (a test id,
+ * a toast's text) disagrees with nothing.
+ */
+export function requestsDisagree(a: string | undefined, b: string | undefined): boolean {
+  const requests = (ev: string | undefined) => new Set([...endpointSignatures(ev)].map((sig) => sig.split(" ").slice(0, 2).join(" ")));
+  const aReq = requests(a);
+  const bReq = requests(b);
+  if (aReq.size === 0 || bReq.size === 0) return false;
+  for (const r of aReq) if (bReq.has(r)) return false;
+  return true;
+}
+
+/**
  * Families of finding kinds that one bug is plausibly filed under by two
  * sessions: a crash is a page-error to one and a console-error to another, a
  * refused save is data-loss to one and data-inconsistency to another. Across
@@ -614,7 +629,19 @@ function sameFinding(
   // detail or its own title. Merged, the layout defect was filed and then lost
   // from the report on most runs of a benchmark. Within a family, one bug
   // filed twice under neighbouring categories still merges.
-  if (sameFamily(a.category, b.category)) {
+  //
+  // And never when both findings' evidence names requests with no endpoint in
+  // common. A quoted control name bridges two findings about that control
+  // within one family too: "an unknown order id still offers its actions"
+  // (GET /api/orders/9999 404) mentions the "Request manager approval" button
+  // that "Request manager approval stays enabled on a pending order" (POST
+  // …/request-approval 409) quotes in its title, and was merged into it.
+  // Evidence that names a request is the finding's own statement of where it
+  // happened; two findings naming different requests are two bugs. A request
+  // that answered 2xx counts too — a false success names one — so the same bug
+  // described once by its page load and once by its failing call stays as two
+  // findings: a visible duplicate, the direction ADR 4 accepts.
+  if (sameFamily(a.category, b.category) && !requestsDisagree(a.evidence, b.evidence)) {
     const aTitleLits = findingLiterals(a.title);
     const bTitleLits = findingLiterals(b.title);
     if (aTitleLits.size > 0 || bTitleLits.size > 0) {

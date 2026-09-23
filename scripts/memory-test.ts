@@ -30,6 +30,7 @@ import {
   FINDING_CATEGORIES,
   sameFamily,
   MAX_SELECT_OPTIONS,
+  requestsDisagree,
 } from "../src/engine/memory.ts";
 
 /** Temp dirs created by the running test, cleaned up even when it fails. */
@@ -1119,6 +1120,50 @@ test("dedup: one fact flips the literal merge — whether the two kinds are one 
     store.addFinding({ ...layout, category: first });
     const [, isNew] = store.addFinding({ ...twin, category: second });
     assert.equal(isNew, !merges, `${first} + ${second}`);
+  }
+});
+
+test("dedup: one fact flips the literal merge within a family — whether the two findings name the same request", () => {
+  // Seen in a benchmark run: a finding about an unknown order id mentioned the
+  // button another finding quotes in its title, both were flow findings, and
+  // the first was merged into the second — a different bug, lost.
+  const pending = {
+    ...base,
+    category: "ux-confusing",
+    title: '"Request manager approval" stays enabled on an order already awaiting approval',
+    detail: "Reloading a pending order shows the button enabled again.",
+    evidence: "POST /api/orders/1042/request-approval 409 on reload of a pending order",
+  };
+  const unknownId = {
+    ...base,
+    category: "ux-confusing",
+    title: "An unknown order id still offers its actions",
+    detail: 'The page says Order not found, yet "Request manager approval" and Delete stay enabled.',
+    evidence: "GET /api/orders/9999 404; order-request-approval enabled",
+  };
+  for (const [evidence, merges, why] of [
+    [unknownId.evidence, false, "a different request: a different bug"],
+    ["POST /api/orders/1037/request-approval 409 after a reload", true, "the same request on another order: the same bug"],
+    ["order-request-approval enabled after reload", true, "evidence naming no request still merges on the quoted literal"],
+  ] as const) {
+    const store = freshStore();
+    store.addFinding(pending);
+    const [, isNew] = store.addFinding({ ...unknownId, evidence });
+    assert.equal(isNew, !merges, why);
+  }
+});
+
+test("requestsDisagree: only two sets of named requests with nothing in common", () => {
+  for (const [a, b, disagree] of [
+    ["GET /api/orders/9999 404", "POST /api/orders/1042/request-approval 409", true],
+    ["GET /api/orders/9999 404", "GET /api/orders/1041 404", false], // one endpoint, two ids
+    ["GET /api/x", "GET /api/x/ 500", false], // the status and a trailing slash do not matter
+    ["GET /api/x 500", "POST /api/x 500", true], // the method does
+    ["GET /api/a 500; POST /api/b 409", "POST /api/b 409", false], // one request in common
+    ["GET /api/a 500", "toast says Not found", false], // one side names no request
+    [undefined, "GET /api/a 500", false],
+  ] as const) {
+    assert.equal(requestsDisagree(a, b), disagree, `${a} | ${b}`);
   }
 });
 
