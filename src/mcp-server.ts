@@ -56,7 +56,7 @@ import {
   type SessionStatus,
 } from "./engine/live.js";
 import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
-import { computeGaps, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
+import { computeGaps, formatRouteCoverage, formatUnchosenOptions, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
 import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
@@ -1426,7 +1426,7 @@ server.registerTool(
   "scout_coverage",
   {
     description:
-      "Show exploration coverage: states visited across all runs and which elements remain unexercised. Use to decide where to explore next and when the level's budget is satisfied.",
+      "Show exploration coverage: states visited across all runs, which elements remain unexercised, and which options of a dropdown used this run no session has chosen yet. Use to decide where to explore next and when the level's budget is satisfied.",
     inputSchema: { session: sessionParam },
   },
   serializedPerSession("scout_coverage", async (_args: { session?: string }, session) => {
@@ -1445,6 +1445,7 @@ server.registerTool(
         formatRouteCoverage(eng.allKnownRoutes(), unvisited),
         `Unexercised elements by route:`,
         ...cov.unexercised.slice(0, 25).map((u) => `  ${u.state}: ${u.keys.slice(0, 6).join(", ")}${u.keys.length > 6 ? ` … +${u.keys.length - 6}` : ""}`),
+        ...formatUnchosenOptions(eng.memory.unchosenOptions()),
       ];
       return text(lines.join("\n"), session);
     } catch (err) {

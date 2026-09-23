@@ -360,6 +360,21 @@ export function formatRouteCoverage(allRoutes: string[], unvisited: string[]): s
 }
 
 /**
+ * The dropdowns this run used without trying every option. A select counts as
+ * exercised after one choice, so the unexercised list above never shows these:
+ * a status filter whose one failing option nobody chose looks fully covered.
+ * Empty when there is nothing to say.
+ */
+export function formatUnchosenOptions(dropdowns: ReadonlyArray<{ route: string; key: string; unchosen: string[] }>): string[] {
+  if (dropdowns.length === 0) return [];
+  return [
+    "Dropdown options never chosen this run (each can change what the page asks the server for):",
+    ...dropdowns.slice(0, 15).map((d) => `  ${d.route} ${d.key}: ${d.unchosen.map((o) => JSON.stringify(o)).join(", ")}`),
+    ...(dropdowns.length > 15 ? [`  … +${dropdowns.length - 15} more`] : []),
+  ];
+}
+
+/**
  * The GAP LEDGER — an explicit enumeration of what was NOT tested. This is
  * what turns "extensive" from a vibe into a verifiable claim: a run is only
  * as trustworthy as its list of known gaps, and an empty ledger is the only

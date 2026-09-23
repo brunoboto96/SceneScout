@@ -21,6 +21,7 @@ import {
   computeGaps,
   escapeTableCell,
   formatRouteCoverage,
+  formatUnchosenOptions,
   describeAge,
   generateReport,
   replayDocument,
@@ -796,4 +797,13 @@ test("the calibration section reaches the report, and stays away when there is n
   assert.match(loud, /10 lane decision\(s\) called a defect/);
   assert.match(loud, /Expected calibration error/);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("formatUnchosenOptions: names each dropdown's untried options, and says nothing when there are none", () => {
+  assert.deepEqual(formatUnchosenOptions([]), []);
+  const lines = formatUnchosenOptions([{ route: "/orders", key: "orders-status-filter", unchosen: ["Approved", "Archived"] }]);
+  assert.match(lines[0], /never chosen this run/);
+  assert.equal(lines[1], '  /orders orders-status-filter: "Approved", "Archived"');
+  const many = Array.from({ length: 17 }, (_, i) => ({ route: `/r${i}`, key: "f", unchosen: ["x"] }));
+  assert.equal(formatUnchosenOptions(many).at(-1), "  … +2 more");
 });
