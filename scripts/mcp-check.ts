@@ -183,6 +183,18 @@ ${late.slice(0, 400)}`);
       detail: "The field is announced without a name.",
       evidence: "input[name=email] has no label",
     });
+    // A filing merged into an existing finding says which one, by title, so a
+    // lane whose different bug was absorbed can see it and file again.
+    const merged = await call("scout_finding", {
+      session: "orders",
+      severity: "low",
+      category: "a11y",
+      title: "The email input is unnamed",
+      detail: "Screen readers announce no name.",
+      evidence: "input[name=email] has no label",
+    });
+    if (!/Not recorded as new: merged into existing finding \w+ — \[low\] Email field has no label/.test(merged))
+      fail(`a merged filing did not name the finding it joined:\n${merged}`);
     const filed = await call("scout_lane_report", { lane: "orders", reply: report("input[name=email] has no label") });
     if (/have no finding/.test(filed)) fail(`a filed defect was still reported as unfiled:\n${filed}`);
     // The fold is logged, so the pace section can tell reporting from waiting to be closed.
