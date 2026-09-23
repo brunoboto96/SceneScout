@@ -27,6 +27,8 @@ import {
   pruneStates,
   type StateRecord,
   MAX_LANE_DECISIONS,
+  FINDING_CATEGORIES,
+  sameFamily,
 } from "../src/engine/memory.ts";
 
 /** Temp dirs created by the running test, cleaned up even when it fails. */
@@ -254,6 +256,59 @@ test("dedup tier 2: a literal quoted in a TITLE bridges differing evidence", () 
   });
   assert.equal(new1, true);
   assert.equal(new2, false, "one states the string in its title, the other in its detail — same bug");
+});
+
+test("dedup: a quoted control name shared by two findings of different kinds does not merge them", () => {
+  // Seen on every run of a benchmark: a layout finding naming the button it
+  // covers, and a data finding describing what that button does. The title's
+  // quoted label ("Save notes") appears in the other finding's detail, on the
+  // same route, and the layout defect was folded into the data one — filed,
+  // then lost from the report.
+  const store = freshStore();
+  const [, saved] = store.addFinding({
+    ...base,
+    category: "data-inconsistency",
+    title: 'Notes save shows "Saved." even when the PUT is rejected',
+    detail: 'Typing a note and clicking "Save notes" shows "Saved." though PUT /api/orders/1042 was refused.',
+    evidence: "PUT /api/orders/1042 403 -> UI shows Saved.",
+  });
+  const [covered, isNew] = store.addFinding({
+    ...base,
+    category: "visual",
+    title: 'Sticky bar covers the "Save notes" button at load',
+    detail: "The fixed footer overlaps the button until the page is scrolled.",
+    evidence: "testid=order-save covered by testid=order-stickybar",
+  });
+  assert.equal(saved, true);
+  assert.equal(isNew, true, "a layout defect and a data defect that name the same button are two bugs");
+  assert.equal(store.findings.length, 2);
+  assert.equal(covered.category, "visual");
+
+  // The contrast, differing only in kind: a second LAYOUT finding that quotes
+  // the same control in its detail is the same layout bug, and still merges.
+  const [, again] = store.addFinding({
+    ...base,
+    category: "visual",
+    title: "The fixed footer hides a form control",
+    detail: 'At load the footer sits over "Save notes" until the page is scrolled.',
+    evidence: "footer overlaps order-save at scrollY=0",
+  });
+  assert.equal(again, false, "same kind, same quoted literal, same route: merged as before");
+  assert.equal(store.findings.length, 2);
+
+  // A label quoted in BOTH titles is still a place on the page, not a bug: a
+  // data finding titled with the same control joins the data finding about
+  // it, and never the layout one.
+  const [into, bothTitles] = store.addFinding({
+    ...base,
+    category: "data-inconsistency",
+    title: 'Clicking "Save notes" shows Saved. on a 403',
+    detail: "No status check.",
+    evidence: "save notes 403 claimed saved",
+  });
+  assert.equal(bothTitles, false);
+  assert.equal(into.category, "data-inconsistency", "merged into the data finding about the same button");
+  assert.equal(covered.runs, 2, "the layout finding took only its own layout twin");
 });
 
 test("dedup: incidental literals quoted only in DETAIL prose do not merge unrelated bugs", () => {
@@ -1039,6 +1094,67 @@ test("a run's shared state ends with the run, and the project's memory does not"
   assert.deepEqual(store.probes, []);
   assert.equal(store.injectionsReported.size, 0);
   assert.equal(store.findings.length, 1, "findings are the project's, not the run's");
+});
+
+test("dedup: one fact flips the literal merge — whether the two kinds are one family", () => {
+  const layout = {
+    ...base,
+    title: 'The "Save notes" button sits under the sticky bar',
+    detail: "Covered at load.",
+    evidence: "order-save covered at load",
+  };
+  const twin = { ...layout, title: 'The "Save notes" button is hard to reach at load', evidence: "order-save unreachable at load" };
+  for (const [first, second, merges] of [
+    ["visual", "ux-polish", true], // one family
+    ["visual", "a11y", true],
+    ["visual", "data-inconsistency", false], // a layout finding and a data finding
+    ["page-error", "console-error", true],
+    ["data-loss", "data-inconsistency", true],
+    ["security", "data-inconsistency", false],
+    ["other", "data-inconsistency", false], // "nothing fits" is a family of its own
+    ["other", "other", true],
+  ] as const) {
+    const store = freshStore();
+    store.addFinding({ ...layout, category: first });
+    const [, isNew] = store.addFinding({ ...twin, category: second });
+    assert.equal(isNew, !merges, `${first} + ${second}`);
+  }
+});
+
+test("dedup: a bracketed phrase shared across families does not merge two bugs", () => {
+  const store = freshStore();
+  store.addFinding({
+    ...base,
+    category: "data-inconsistency",
+    title: "Negative item count accepted (no server-side validation)",
+    detail: "d",
+    evidence: "items -5 stored",
+  });
+  const [, isNew] = store.addFinding({
+    ...base,
+    category: "security",
+    title: "Empty customer accepted (no server-side validation)",
+    detail: "d",
+    evidence: "customer blank stored",
+  });
+  assert.equal(isNew, true);
+  // Within one family the same generic tag still merges two different bugs:
+  // a known limit of matching on quoted text, kept visible here.
+  const [, sameFamilyTag] = store.addFinding({
+    ...base,
+    category: "data-loss",
+    title: "Zero items accepted (no server-side validation)",
+    detail: "d",
+    evidence: "items 0 stored",
+  });
+  assert.equal(sameFamilyTag, false, "known limit: one family, one bracketed tag");
+});
+
+test("sameFamily: every category belongs to a family, and a missing one matches nothing", () => {
+  for (const c of FINDING_CATEGORIES) assert.equal(sameFamily(c, c), true, c);
+  assert.equal(sameFamily(undefined, "visual"), false);
+  assert.equal(sameFamily("", "visual"), false);
+  assert.equal(sameFamily("made-up", "made-up"), false, "an unknown category read from an old file fails safe");
 });
 
 test("a finding filed right after a lane report is folded keeps its repro trace", () => {
