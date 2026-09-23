@@ -333,19 +333,23 @@ interface Filed {
  */
 const MIN_RESTATED = 24;
 
+/** A test id, captured without its attribute; and a kebab-case id of three or more parts. Lowercase text only. */
+const TESTID_RE = /testid=["']?([a-z0-9_-]+)/g;
+const KEBAB_ID_RE = /\b[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}\b/g;
+
 /**
  * Whether the reported evidence appears word for word inside a finding's
  * evidence: a lane that filed "testid=row-1..6 non-interactive; GET /api/x 200
  * with only three fields" and reported the first half. It must say something
- * beyond naming a control — two words once test ids and kebab-case ids are
- * taken out — or a bare "testid=inventory-sort-qty" would be found inside
+ * beyond naming a control — two words once test ids and kebab-case ids of
+ * three or more parts are taken out — or a bare "testid=inventory-sort-qty" would be found inside
  * every finding about that control, which is the one-shared-id match covers()
  * refuses. One direction only: a short FILED evidence found inside a longer
  * report proves nothing about the rest of the report.
  */
 function restates(reported: string, f: Filed): boolean {
   if (reported.length < MIN_RESTATED || !f.evidence.includes(reported)) return false;
-  const rest = reported.replace(/testid=["']?[a-z0-9_-]+/g, " ").replace(/\b[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}\b/g, " ");
+  const rest = reported.replace(TESTID_RE, " ").replace(KEBAB_ID_RE, " ");
   return words(rest).size >= 2;
 }
 
@@ -377,8 +381,8 @@ function covers(ids: Set<string>, w: Set<string>, f: Filed): boolean {
 function identifiers(text: string): Set<string> {
   const out = new Set<string>();
   const t = text.toLowerCase();
-  for (const m of t.matchAll(/testid=["']?([a-z0-9_-]+)/g)) out.add(m[1]);
-  for (const m of t.matchAll(/\b[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}\b/g)) out.add(m[0]);
+  for (const m of t.matchAll(TESTID_RE)) out.add(m[1]);
+  for (const m of t.matchAll(KEBAB_ID_RE)) out.add(m[0]);
   for (const m of t.matchAll(/\b\d+(?:\.\d+)?:1\b/g)) out.add(m[0]);
   return out;
 }
