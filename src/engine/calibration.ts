@@ -314,7 +314,7 @@ export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdi
       const ids = identifiers(d.evidence);
       const w = words(d.evidence);
       const text = squash(d.evidence);
-      if (filed.some((f) => (text !== "" && f.evidence === text) || covers(ids, w, f))) continue;
+      if (filed.some((f) => (text !== "" && f.evidence === text) || restates(text, f) || covers(ids, w, f))) continue;
     }
     out.push(d.evidence ? `${d.observation} — ${d.evidence}` : d.observation);
   }
@@ -336,6 +336,24 @@ interface Filed {
   words: Set<string>;
   evidenceWords: Set<string>;
   evidence: string;
+}
+
+/**
+ * Shortest reported evidence that counts as restating a filing it is part of.
+ * Below it, a bare control name ("testid=order-save") would be found inside
+ * the evidence of every finding about that control.
+ */
+const MIN_RESTATED = 24;
+
+/**
+ * Whether the reported evidence appears word for word inside a finding's
+ * evidence: a lane that filed "testid=row-1..6 non-interactive; GET /api/x 200
+ * with only three fields" and reported the first half. One direction only —
+ * a short FILED evidence found inside a longer report proves nothing about
+ * the rest of the report.
+ */
+function restates(reported: string, f: Filed): boolean {
+  return reported.length >= MIN_RESTATED && f.evidence.includes(reported);
 }
 
 function covers(ids: Set<string>, w: Set<string>, f: Filed): boolean {
