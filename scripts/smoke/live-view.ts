@@ -375,7 +375,25 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     await page.waitForTimeout(400);
     check("going back to live leaves no step marked", (await page.locator('#timeline button[aria-pressed="true"]').count()) === 0);
 
+    // The close-up's Stream button is the card's: switching it off there stops
+    // the stream on both, and the choice outlasts the close-up.
+    const focusToggle = page.getByTestId("live-focus-stream-toggle");
+    const cardToggle = page.getByTestId("live-card-toggle-agent-0");
+    check("the close-up shows its session streaming", (await focusToggle.getAttribute("aria-pressed")) === "true");
+    await focusToggle.click();
+    await until("the close-up's stream to stop", async () => !pushes.has("agent-0"), 5000);
+    check("switching it off in the close-up switches the card off too", (await cardToggle.getAttribute("aria-pressed")) === "false");
     await page.getByTestId("live-focus-close").click();
+    await page.waitForTimeout(400);
+    check("...and the choice outlasts the close-up", (await cardToggle.getAttribute("aria-pressed")) === "false" && !pushes.has("agent-0"));
+    // Opening a close-up streams its session; closing it without touching the
+    // button hands the card back as it was.
+    await page.getByTestId("live-card-image-agent-0").click();
+    await until("opening the close-up to stream it", async () => pushes.has("agent-0"), 5000);
+    check("opening a close-up streams its session", (await focusToggle.getAttribute("aria-pressed")) === "true");
+    await page.getByTestId("live-focus-close").click();
+    await until("closing it to stop the stream it started", async () => !pushes.has("agent-0"), 5000);
+    check("closing it untouched leaves the card as it was", (await cardToggle.getAttribute("aria-pressed")) === "false");
 
     // The run ends: the browsers are gone, so the page must hand over the report itself.
     names = [];

@@ -225,6 +225,7 @@ export const LIVE_PAGE = `<!doctype html>
   <div class="bar">
     <strong id="focus-name"></strong>
     <span class="line" id="focus-line"></span>
+    <button type="button" id="focus-stream" aria-pressed="false" data-testid="live-focus-stream-toggle">Stream</button>
     <button type="button" id="focus-close" data-testid="live-focus-close">Close</button>
   </div>
   <div class="stage" id="focus-stage">
@@ -253,6 +254,11 @@ export const LIVE_PAGE = `<!doctype html>
   /** The header filter, lower-cased. Hides cards; never stops a session running. */
   var filter = '';
   var focused = null;
+  // Whether opening the close-up is what switched its session's stream on. The
+  // close-up streams while it is open; closing it hands the card back as it
+  // was, unless the viewer used the close-up's own Stream button, whose choice
+  // stands.
+  var focusStartedStream = false;
   var skew = 0;
   var latest = {};
   var focusTick = 0;
@@ -309,7 +315,6 @@ export const LIVE_PAGE = `<!doctype html>
   function syncEvents() {
     var want = {};
     Object.keys(cards).forEach(function (name) { if (cards[name].live) want[name] = true; });
-    if (focused && cards[focused]) want[focused] = true;
     var key = Object.keys(want).sort().join(',');
     if (key === eventsKey) return;
     eventsKey = key;
@@ -353,7 +358,19 @@ export const LIVE_PAGE = `<!doctype html>
     // Frames for a live card arrive over the shared connection; the thumbnail poll takes over again when it is switched off.
     if (on && frames[card.name]) card.img.src = frames[card.name];
     if (!on) card.img.src = shotUrl(card.name);
+    if (focused === card.name) paintFocusStream();
     syncEvents();
+  }
+  // The close-up's Stream button is the card's, shown where the viewer is looking.
+  function paintFocusStream() {
+    var card = focused && cards[focused];
+    var button = document.getElementById('focus-stream');
+    button.hidden = !card;
+    if (!card) return;
+    button.setAttribute('aria-pressed', card.live ? 'true' : 'false');
+    button.textContent = card.live ? 'Streaming' : 'Stream';
+    // Off, the picture is a still that the status poll refreshes.
+    if (!card.live && !scrubbed) document.getElementById('focus-img').src = shotUrl(card.name);
   }
   function refreshThumb(card) {
     if (card.live || document.hidden) return;
@@ -697,7 +714,7 @@ export const LIVE_PAGE = `<!doctype html>
     scrubbed = null;
     document.getElementById('scrub-where').textContent = 'Live';
     document.getElementById('scrub-live').hidden = true;
-    if (focused) document.getElementById('focus-img').src = frames[focused] || shotUrl(focused);
+    if (focused) document.getElementById('focus-img').src = (cards[focused] && cards[focused].live && frames[focused]) || shotUrl(focused);
     // Otherwise the step just left keeps its outline until the next full feed.
     renderTimeline(null);
   }
@@ -794,6 +811,10 @@ export const LIVE_PAGE = `<!doctype html>
     document.getElementById('scrub-where').textContent = 'Live';
     document.getElementById('scrub-live').hidden = true;
     document.getElementById('focus').classList.add('open');
+    var card = cards[name];
+    focusStartedStream = !!card && !card.live;
+    if (focusStartedStream) setLive(card, true);
+    paintFocusStream();
     hoverTask = null;
     renderFeed(document.getElementById('focus-feed'), (latest[name] || {}).feed, showTask);
     syncEvents();
@@ -806,6 +827,8 @@ export const LIVE_PAGE = `<!doctype html>
     focused = null;
     document.getElementById('focus').classList.remove('open');
     document.getElementById('focus-img').removeAttribute('src');
+    if (focusStartedStream && was && cards[was]) setLive(cards[was], false);
+    focusStartedStream = false;
     syncEvents();
     if (was && cards[was]) cards[was].shot.focus();
   }
@@ -865,6 +888,7 @@ export const LIVE_PAGE = `<!doctype html>
     if (!s) { line.textContent = focused ? 'This session has closed.' : ''; return; }
     var d = describe(s);
     line.textContent = d.badge + ' · ' + d.tool + ' · ' + (s.url || '');
+    paintFocusStream();
     if (focusTick % 3 === 0) loadFullFeed(focused);
     focusTick += 1;
   }
@@ -981,6 +1005,13 @@ export const LIVE_PAGE = `<!doctype html>
   });
   document.getElementById('focus-img').addEventListener('load', function () { document.getElementById('focus-stage').classList.remove('empty'); });
   document.getElementById('focus-close').addEventListener('click', closeFocus);
+  document.getElementById('focus-stream').addEventListener('click', function () {
+    var card = focused && cards[focused];
+    if (!card) return;
+    // The viewer chose: closing the close-up no longer undoes it.
+    focusStartedStream = false;
+    setLive(card, !card.live);
+  });
   // A re-rendered feed replaces the group under the pointer without a mouseleave; leaving the feed itself still resets.
   document.getElementById('focus-feed').addEventListener('mouseleave', function () { showTask(null); });
   document.getElementById('focus').addEventListener('click', function (e) { if (e.target === this) closeFocus(); });
