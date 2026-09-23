@@ -106,15 +106,18 @@ example or counter-example in the same change.
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
 re-scored against **one** key by `npm run bench -- --all`; the table below is
-key `8161856bec`. The archived runs are in [`bench/runs/`](../bench/runs/).
+key `38730d02a0`. The archived runs are in [`bench/runs/`](../bench/runs/).
 
 | Run | Date | What changed | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Lane calibration | Cost | Kept? |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
 | 0 | 2026-09-22 | Baseline, 3.4.0, briefs as written on the day | 11/13 | 16/21 (76%) | 21 | 0 | 5 | 1 | 26/31 (84%), ECE 0.05, Brier 0.113 | ~725k tokens, 241 tool calls, longest lane 3m38s | — |
 | 1 | 2026-09-22 | **Lane briefs only** (engine unchanged) — see below | 12/13 | 28/28 (100%) | 28 | 0 | 0 | 0 | 34/35 (97%), ECE 0.12, Brier 0.035 | ~698k tokens, 283 tool calls, longest lane 5m09s | Yes, into the skill |
-| 2 | 2026-09-22 | **Engine 3.5.0 only** — run 1's briefs verbatim | 9/13 | 25/25 (100%) | 26 | 1 | 0 | 1 | 28/29 (97%), ECE 0.10, Brier 0.055 | ~687k tokens, 266 tool calls, longest lane 5m37s | See runs 2–4 |
+| 2 | 2026-09-22 | **Engine 3.5.0 only** — run 1's briefs verbatim | 9/13 | 25/25 (100%) | 26 | 1 | 0 | 1 | 29/30 (97%), ECE 0.10, Brier 0.053 | ~687k tokens, 266 tool calls, longest lane 5m37s | See runs 2–4 |
 | 3 | 2026-09-22 | Repeat of run 2 | 10/13 | 29/32 (91%) | 33 | 1 | 3 | 0 | 30/33 (91%), ECE 0.10, Brier 0.090 | ~680k tokens, 260 tool calls, longest lane 5m40s | See runs 2–4 |
 | 4 | 2026-09-22 | Repeat of run 2 | 11/13 | 26/27 (96%) | 27 | 0 | 1 | 1 | 29/35 (83%), ECE 0.07, Brier 0.101 | ~683k tokens, 271 tool calls, longest lane 4m40s | See runs 2–4 |
+| 5 | 2026-09-23 | **Engine 3.6.1 only** — run 1's briefs verbatim | 11/13 | 30/31 (97%) | 31 | 0 | 1 | 0 | 31/35 (89%), ECE 0.09, Brier 0.080 | ~697k tokens, 248 tool calls, longest lane 9m30s | See runs 5–7 |
+| 6 | 2026-09-23 | Repeat of run 5 | 10/13 | 31/33 (94%) | 33 | 0 | 2 | 0 | 33/37 (89%), ECE 0.06, Brier 0.092 | ~685k tokens, 264 tool calls, longest lane 4m39s | See runs 5–7 |
+| 7 | 2026-09-23 | Repeat of run 5 | 10/13 | 29/30 (97%) | 30 | 0 | 1 | 0 | 30/35 (86%), ECE 0.12, Brier 0.089 | ~725k tokens, 292 tool calls, longest lane 6m08s | See runs 5–7 |
 
 **Brier is the number to compare; ECE says which way a lane is off.** Run 1's verdicts were
 right more often (97% against 84%), and its expected calibration error is
@@ -127,6 +130,71 @@ ahead (0.113 → 0.035).
 The first version of this scorer counted the five "belongs to another lane"
 dismissals as wrong verdicts, which gave ECE 0.09 → 0.04 and read as an
 improvement; that one choice was enough to reverse the comparison.
+
+### Runs 5–7 — engine 3.6.1, measured three times
+
+Again only the engine changed: run 1's briefs verbatim, a fresh demo app and
+project directory per run. 3.6.1 carried the three changes runs 2–4 pointed at:
+the duplicate check merges on a quoted title only between findings of one
+family of kinds, `false_success` reads refusal wording only in live regions, and
+the fold's unfiled check matches test ids and contrast ratios as well as exact
+evidence. Per defect, runs 2–4 (3.5.0) against runs 5–7 (3.6.1):
+
+| Defect | Runs 2–4 | Runs 5–7 | Reading |
+|---|:---:|:---:|---|
+| Sticky bar covers Save notes | 1/3 | **3/3** | The target of the family gate. Filed and kept as its own finding every run. Kept. |
+| Double-submit creates two orders | 1/3 | 2/3 | The new-order lane double-clicked Create in runs 5 and 7; in run 6 it submitted twice in sequence instead. Lane behaviour. |
+| Archived filter hides a 500 | 2/3 | 1/3 | The orders lane never selected Archived in runs 5 and 7, though run 5's report says it tried "all 7 options". Lane coverage, not judgement. |
+| Empty customer does nothing | 2/3 | 1/3 | Run 6 probed an empty customer through the API only; run 7 submitted the empty form and judged doing nothing correct. |
+| Email field has no label | 0/3 | 0/3 | Never found by any run since run 0. |
+| Every other planted defect (8) | 3/3 each | 3/3 each | Stable. |
+
+Recall is 11, 10, 10 against 9, 10, 11: no net change. The one engine effect in
+the table is the sticky bar, and it moved from 1/3 to 3/3; the three rows that
+moved the other way trace to what a lane chose to do, each in the logs.
+Calibration is flat (Brier 0.080, 0.092, 0.089 against 0.053, 0.090, 0.101).
+
+What else the series measured:
+
+- **No `false_success` false positive in three runs**, against one in runs 2–4.
+  One occurrence before is too few to call it fixed from the runs alone; the
+  contrastive fixtures in `claims-test` are the evidence the rule holds.
+- **The unfiled check: about 10 flags across three runs, against about 41.**
+  Two were real. One made a lane withdraw a verdict on a second look (a sort
+  button that does not reverse, where the page has no reverse feature); the
+  other was a defect the duplicate check had merged away, below. Of the eight
+  false flags, two were filings whose evidence *contains* the reported evidence
+  word for word, and the rest were the same finding worded differently. (Counted
+  by hand from the fold results.)
+- **The duplicate check still merges across two different bugs within one
+  family.** In run 6, "an unknown order id still shows live controls"
+  (`GET /api/orders/9999 404`) was merged into "Request manager approval stays
+  enabled on a pending order" (`POST …/request-approval 409`): its detail
+  mentioned the button the other's title quotes, and both are flow findings.
+  Asked to file it, the lane answered with the older finding's id.
+- **The planner's relay changed the reports.** The notification that carries a
+  lane's reply escapes `<` and `>`, and those entities reached the parser: one
+  report was refused because `<n>` became `&lt;n&gt;` and pushed a route past
+  200 characters, and every relayed evidence string carried `-&gt;` for `->`.
+- **Waiting after finishing: 38, 16 and 24 minutes a run** after a lane's
+  report was folded, summed over the lanes. While working, gaps over 30 seconds
+  were 36%, 3% and 0% of working time; run 5's lanes ran up to 9m30s against
+  about 5 minutes in the other runs.
+
+The key gained four real findings the runs surfaced (every created order has a
+$0.00 total, the switch-role page does not show the active role, the new-order
+form keeps its values after a create, and the email field accepts a malformed
+address because the form sets `novalidate`) and two non-defects (the Reorder
+flag is a badge, not a control; "an unknown id shows another order's data" is
+false). The quantity-sort pattern was narrowed after it claimed a sort-toggle
+finding that quoted the same row order. Every archived run was re-scored.
+
+**Kept?** The family gate stays: it is the only line that moved, and it moved
+the way it was aimed. Next, each with its own test: no quoted-title merge when
+both findings carry request signatures that disagree, and say so when a filing
+is merged; count filed evidence that contains the reported evidence as filed;
+list the options of a `<select>` a lane never chose; and close each lane as
+soon as its report is folded.
 
 ### Runs 2–4 — engine 3.5.0, measured three times
 
