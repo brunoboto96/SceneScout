@@ -1,5 +1,13 @@
 # scenescout
 
+## 3.6.1
+
+### Patch Changes
+
+- 90d1aec: Two findings that share only a quoted string are merged only when their kinds are one family (data, failures, presentation, flow, security, performance, and "other" on its own). A layout defect naming the button it covers ("Save notes") was being folded into the data defect about what that button does, and dropped from the report. The same bug filed twice under neighbouring categories — data-loss and data-inconsistency, page-error and console-error — still merges.
+- 8abf639: The false-success check recognises a refusal the page announces in its own words — "Only an open order can be sent for approval", "You can't delete an approved order", "This order is already approved" — in a status region, alert or dialog, as the page admitting the refusal, instead of reporting the word "sent" or "approved" as a false claim of success. The same wording as ordinary help text elsewhere on the page ("This cannot be undone", "Password must be at least 8 characters") excuses nothing.
+- ca52079: The lane-report fold's check for defects judged but never filed now recognises a filed finding when the lane reworded its evidence, matching on the identifiers that survive rewording — test ids and contrast ratios, two of them in common — or on near-identical wording. Replayed against three archived benchmark runs it raised 6 flags where it had raised 39, and still named every defect that was genuinely left unfiled. One shared test id is never enough, and API paths are not identifiers, so a missed defect on the same button or endpoint as a filed one is still named.
+
 ## 3.6.0
 
 ### Minor Changes
