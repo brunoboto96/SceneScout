@@ -44,7 +44,11 @@ finding:
   count and the new bug would never appear at all.
 
 Fuzzy matching (title tokens, quoted literals) stays **route-scoped**: it is a
-guess, and a guess applied across the whole report merges unrelated bugs.
+guess, and a guess applied across the whole report merges unrelated bugs. A
+quoted literal also merges only within one family of categories, and never when
+both findings' evidence names requests with none in common: the machine signal
+outranks the guess, so two findings that quote the same button but name
+different requests stay two findings.
 
 ## Consequences
 
