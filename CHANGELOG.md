@@ -1,5 +1,17 @@
 # scenescout
 
+## 3.7.0
+
+### Minor Changes
+
+- 1b4a688: The live view's close-up has its own Stream button, the same one as the session's card: switch streaming off or on without leaving the close-up. Opening a close-up still streams its session, and closing it without touching the button leaves the card as it was.
+- a11c96e: `scout_coverage` lists the options of each dropdown used in the run that no session has chosen, since a filter counts as exercised after one choice. Disabled and hidden options, and an empty-value placeholder or "all" option, are never listed; dropdowns with more than 20 options are pickers and are not listed either.
+
+### Patch Changes
+
+- b726af1: Two findings that quote the same control no longer merge when their evidence names different requests, and a filing merged into an existing finding now names it, with its severity and title.
+- 56382db: The lane-report fold no longer lists a judged defect as unfiled when its evidence appears word for word inside a filed finding's evidence.
+
 ## 3.6.1
 
 ### Patch Changes
