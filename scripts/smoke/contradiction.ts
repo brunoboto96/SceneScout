@@ -120,9 +120,21 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
       save: /(e\d+) button "Save"/.exec(honestSnap)?.[1],
       ok: /(e\d+) button "Load allowed list"/.exec(honestSnap)?.[1],
       owner: /(e\d+) button "Change owner"/.exec(honestSnap)?.[1],
+      approval: /(e\d+) button "Send for approval"/.exec(honestSnap)?.[1],
     };
-    if (!refs.load || !refs.save || !refs.ok || !refs.owner) throw new Error(`honest fixture buttons not in snapshot: ${honestSnap.slice(0, 400)}`);
+    if (!refs.load || !refs.save || !refs.ok || !refs.owner || !refs.approval)
+      throw new Error(`honest fixture buttons not in snapshot: ${honestSnap.slice(0, 400)}`);
     const baseline = found("refused_empty").length + found("false_success").length;
+
+    // First, while nothing else on the page admits an error: the only text
+    // that can excuse this refusal is the page's own announced explanation.
+    const approvalBefore = found("false_success").length;
+    const approval = await engine.click(refs.approval);
+    check(
+      'a refusal the page announces in its own words is not a contradiction, though it says "sent"',
+      found("false_success").length === approvalBefore,
+      approval.slice(0, 700),
+    );
 
     const honestLoad = await engine.click(refs.load);
     check("a refused list the page admits to is not a contradiction", !/refused_empty/.test(honestLoad), honestLoad.slice(0, 700));
