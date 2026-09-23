@@ -20,7 +20,6 @@
  *
  * Pure, so every rule here is table-tested.
  */
-import { normalizePath } from "./fingerprint.js";
 import { failingSignatures, type Finding } from "./memory.js";
 
 /** A lane decision as recorded, with when and by whom. The shape `lane.ts` parses, plus provenance. */
@@ -315,7 +314,7 @@ export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdi
       const ids = identifiers(d.evidence);
       const w = words(d.evidence);
       const text = squash(d.evidence);
-      if (filed.some((f) => f.evidence === text || covers(ids, w, f))) continue;
+      if (filed.some((f) => (text !== "" && f.evidence === text) || covers(ids, w, f))) continue;
     }
     out.push(d.evidence ? `${d.observation} — ${d.evidence}` : d.observation);
   }
@@ -347,13 +346,17 @@ function covers(ids: Set<string>, w: Set<string>, f: Filed): boolean {
   return shared >= 2 || (shared >= 1 && overlap >= 0.3) || overlap >= 0.6;
 }
 
-/** Test ids, kebab-case identifiers of three or more parts, METHOD /api paths with ids generalised, and contrast ratios. */
+/**
+ * Test ids, kebab-case identifiers of three or more parts, and contrast ratios.
+ * Not API paths: a path that answered 2xx names a resource, not a defect — two
+ * different bugs on POST /api/orders share it — and a failing path already has
+ * its own identity in joinKeys.
+ */
 function identifiers(text: string): Set<string> {
   const out = new Set<string>();
   const t = text.toLowerCase();
   for (const m of t.matchAll(/testid=["']?([a-z0-9_-]+)/g)) out.add(m[1]);
   for (const m of t.matchAll(/\b[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}\b/g)) out.add(m[0]);
-  for (const m of t.matchAll(/\b(get|post|put|patch|delete)\s+(\/[^\s?#"']+)/g)) out.add(`${m[1]} ${normalizePath(m[2])}`);
   for (const m of t.matchAll(/\b\d+(?:\.\d+)?:1\b/g)) out.add(m[0]);
   return out;
 }

@@ -351,11 +351,30 @@ test("a reworded report of a filed defect counts as filed", () => {
 });
 
 test("a real miss that shares one test id with a filed neighbour is still named", () => {
-  // Two different defects on one button: filing one does not file the other.
-  const filed = [finding("click new-order-submit with empty customer: 0 network requests, new-order-msg stays empty")];
+  // Two different defects on one button, and on one endpoint: filing one does
+  // not file the other. The endpoint answered 201, so it names the resource,
+  // not the defect — these are the neighbours a benchmark run actually had.
+  const filed = [
+    finding("click new-order-submit with empty customer: 0 network requests, new-order-msg stays empty"),
+    finding("POST /api/orders items=-1 accepted; GET /api/orders/1044 -> 201"),
+  ];
   const missed = decision({ observation: "double-submit", evidence: "2x click new-order-submit -> POST /api/orders x2 -> ids 1044,1045" });
   assert.deepEqual(unfiledDefects([missed], filed), ["double-submit — 2x click new-order-submit -> POST /api/orders x2 -> ids 1044,1045"]);
   // And a layout defect on a button is not filed by a data finding about that button.
   const layout = decision({ observation: "sticky", evidence: "testid=order-save covered by testid=order-stickybar at initial scroll" });
   assert.equal(unfiledDefects([layout], [finding('PUT /api/orders/1042 403 → UI shows "Saved."')]).length, 1);
+});
+
+test("an endpoint that answered 2xx does not file a different defect on it", () => {
+  // From a benchmark run: two different defects on POST /api/orders, both 2xx.
+  const filed = [
+    finding("POST /api/orders {items:-5} -> 200, GET /api/orders/1046 returns items:-5", { title: "Server accepts negative item count on order creation" }),
+  ];
+  const missed = decision({ observation: "email-dropped", evidence: "POST /api/orders body omits email; GET /api/orders/1048 has no email key" });
+  assert.equal(unfiledDefects([missed], filed).length, 1, "the email is never sent: a different defect on the same endpoint");
+});
+
+test("evidence that is only whitespace is never filed by a finding with no evidence", () => {
+  const blank = decision({ observation: "blank", evidence: "   " });
+  assert.equal(unfiledDefects([blank], [{ ...finding("x"), evidence: undefined }]).length, 1);
 });

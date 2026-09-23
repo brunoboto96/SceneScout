@@ -247,7 +247,7 @@ async function tokenGoneCheck(projectDir: string): Promise<void> {
     }
     console.log("✓ the token file is removed once the client has gone");
   } finally {
-    fs.rmSync(projectDir, { recursive: true, force: true });
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 
@@ -270,7 +270,7 @@ async function liveViewOffCheck(): Promise<void> {
   } finally {
     await client.close();
     fixture.close();
-    fs.rmSync(projectDir, { recursive: true, force: true });
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 
