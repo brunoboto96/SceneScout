@@ -29,6 +29,7 @@ import {
   MAX_LANE_DECISIONS,
   FINDING_CATEGORIES,
   sameFamily,
+  MAX_SELECT_OPTIONS,
 } from "../src/engine/memory.ts";
 
 /** Temp dirs created by the running test, cleaned up even when it fails. */
@@ -1170,4 +1171,28 @@ test("a finding filed right after a lane report is folded keeps its repro trace"
     ["navigate", "click", "type"],
     "the fold marker neither cuts the trace nor appears in it",
   );
+});
+
+test("select choices: options no session chose this run, per dropdown", () => {
+  const store = freshStore();
+  const filter = ["All", "Open", "Shipped", "Awaiting approval", "Approved", "Rejected", "Archived"];
+  store.recordSelectChoice("/orders#a1", "orders-status-filter", filter, "Awaiting approval");
+  store.recordSelectChoice("/orders#b2", "orders-status-filter", filter, "Rejected"); // another state of the same route
+  store.recordSelectChoice("/orders#c3", "orders-status-filter", filter, "All");
+  assert.deepEqual(store.unchosenOptions(), [{ route: "/orders", key: "orders-status-filter", unchosen: ["Open", "Shipped", "Approved", "Archived"] }]);
+  // Every option chosen, by any session sharing the store: nothing left to name.
+  for (const o of filter) store.recordSelectChoice("/orders#d4", "orders-status-filter", filter, o);
+  assert.deepEqual(store.unchosenOptions(), []);
+});
+
+test("select choices: a picker larger than a filter is not tracked, and a run's choices end with the run", () => {
+  const store = freshStore();
+  const zones = Array.from({ length: MAX_SELECT_OPTIONS + 1 }, (_, i) => `Zone ${i}`);
+  store.recordSelectChoice("/settings#s", "settings-timezone", zones, "Zone 3");
+  assert.deepEqual(store.unchosenOptions(), [], "hundreds of time zones are not owed a choice each");
+  const small = zones.slice(0, MAX_SELECT_OPTIONS);
+  store.recordSelectChoice("/settings#s", "settings-region", small, "Zone 1");
+  assert.equal(store.unchosenOptions()[0]?.unchosen.length, MAX_SELECT_OPTIONS - 1, "at the limit it is still a filter");
+  store.endRun();
+  assert.deepEqual(store.unchosenOptions(), [], "whether an earlier run chose an option says nothing about this one");
 });

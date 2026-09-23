@@ -186,6 +186,20 @@ function xpathLookup(xpath: string): string {
   return `document.evaluate(${JSON.stringify(xpath)}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue`;
 }
 
+/** Runs in the page against one dropdown: its enabled options' labels, and the one now chosen. */
+function describeSelect(node: Element): { options: string[]; chosen: string } | null {
+  const select = node as HTMLSelectElement;
+  if (!select.options) return null;
+  const label = (o: HTMLOptionElement) => (o.label || o.textContent || "").trim().slice(0, 80);
+  return {
+    options: Array.from(select.options)
+      .filter((o) => !o.disabled)
+      .map(label)
+      .filter((l) => l !== ""),
+    chosen: select.selectedOptions[0] ? label(select.selectedOptions[0]) : "",
+  };
+}
+
 /** Runs in the page against one file input (or the one a chooser belongs to). */
 function describeFileInput(node: Element): FileInputMeta {
   const input = node as HTMLInputElement;
@@ -2009,8 +2023,11 @@ export class BrowserEngine {
         return destructiveRefusal(optionLabel || value, this.mode);
       }
     }
-    await page.locator(`xpath=${el.xpath}`).selectOption(value, { timeout: ACTION_TIMEOUT_MS });
+    const loc = page.locator(`xpath=${el.xpath}`);
+    await loc.selectOption(value, { timeout: ACTION_TIMEOUT_MS });
     this.memory!.markExercised(this.currentFingerprint, el.key, "select");
+    const chose = await loc.evaluate(describeSelect).catch(() => null);
+    if (chose) this.memory!.recordSelectChoice(this.currentFingerprint, el.key, chose.options, chose.chosen);
     return this.afterAction("select", `${el.role} "${el.name}" = ${value}`);
   }
 
@@ -2367,6 +2384,8 @@ export class BrowserEngine {
       // What a type step has to say about the field it typed into; it goes on
       // the step's own line, so it cannot read as the previous step's.
       let note = "";
+      // A select step's options and choice, recorded against the element the bookkeeping below finds.
+      let chose: { options: string[]; chosen: string } | null = null;
       let preState: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
       try {
         if (step.action === "navigate") {
@@ -2445,8 +2464,10 @@ export class BrowserEngine {
               }
               await loc.press("Enter", { timeout: ACTION_TIMEOUT_MS });
             }
-          } else if (step.action === "select") await loc.selectOption(step.value ?? "", { timeout: ACTION_TIMEOUT_MS });
-          else if (step.action === "upload") {
+          } else if (step.action === "select") {
+            await loc.selectOption(step.value ?? "", { timeout: ACTION_TIMEOUT_MS });
+            chose = await loc.evaluate(describeSelect).catch(() => null);
+          } else if (step.action === "upload") {
             const r = await this.performUpload(loc, planUploadOptions(step.value));
             if (r.refused) {
               transcript.push(`${desc} → ${r.refused}`);
@@ -2498,10 +2519,11 @@ export class BrowserEngine {
             // state so a target the pre-capture missed (or a failed capture)
             // still records something rather than nothing.
             const preHit = preState ? findIn(preState.elements) : undefined;
-            if (preHit) this.memory!.markExercised(preState!.fp, preHit.key, `plan:${step.action}`);
-            else {
-              const postHit = findIn(elements);
-              if (postHit) this.memory!.markExercised(fp, postHit.key, `plan:${step.action}`);
+            const postHit = preHit ? undefined : findIn(elements);
+            const hit = preHit ? { fp: preState!.fp, key: preHit.key } : postHit ? { fp, key: postHit.key } : undefined;
+            if (hit) {
+              this.memory!.markExercised(hit.fp, hit.key, `plan:${step.action}`);
+              if (chose) this.memory!.recordSelectChoice(hit.fp, hit.key, chose.options, chose.chosen);
             }
           } catch {
             /* coverage bookkeeping must never fail the plan */

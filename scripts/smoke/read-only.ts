@@ -124,6 +124,15 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     check("type+Enter toward destructive submit refused", enterAttempt.includes("did NOT press Enter") && enterAttempt.includes("REFUSED"), enterAttempt);
     const selAttempt = await engine.select(refOf("Bulk actions"), "delete-all");
     check("destructive select option refused", selAttempt.includes("REFUSED"), selAttempt);
+    // Choosing one option leaves the dropdown counted as exercised; what was never
+    // chosen is listed apart. The refused choice above is not a choice.
+    const chosen = await engine.select(refOf("Bulk actions"), "none");
+    const bulk = engine.memory!.unchosenOptions().find((d) => d.key.includes("bulk-action-select"));
+    check(
+      "a dropdown's options never chosen are recorded, and a refused choice does not count as chosen",
+      bulk?.unchosen.join("|") === "Delete all rows",
+      `${JSON.stringify(engine.memory!.unchosenOptions())}\n${chosen}`,
+    );
 
     console.log("navigation oracle: broken page + stale refs");
     const preNavRef = refOf("Compute report");

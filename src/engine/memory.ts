@@ -412,6 +412,14 @@ function decisionKey(d: RecordedDecision): string {
  */
 export const MAX_LANE_DECISIONS = 1000;
 
+/**
+ * Most options a dropdown may have and still be tracked for unchosen options.
+ * A status or sort filter has a handful, each of which can change what the
+ * page asks the server for; a country or time-zone picker has hundreds, and
+ * nobody owes the page a choice of each. Larger dropdowns are not tracked.
+ */
+export const MAX_SELECT_OPTIONS = 20;
+
 const MAX_DISCOVERED_ROUTES = 300;
 
 /** Shared finding-similarity helpers (used by live dedup and retro-merge). */
@@ -777,6 +785,42 @@ export class MemoryStore {
     this.probes = [];
     this.injectionsReported.clear();
     this.auditsThisRun = 0;
+    this.selectChoices.clear();
+  }
+
+  /**
+   * Each dropdown's options and the ones chosen in THIS run, by any session,
+   * keyed by route and element. A select counts as exercised after one choice,
+   * so a lane that tried four of a filter's seven options — and reported having
+   * tried them all — left the one that failed untried with nothing to say so.
+   * Per run, like the probes: whether an earlier run chose an option says
+   * nothing about whether this one looked.
+   */
+  readonly selectChoices = new Map<string, { route: string; key: string; options: string[]; chosen: Set<string> }>();
+
+  recordSelectChoice(fingerprint: string, key: string, options: readonly string[], chosen: string): void {
+    const route = fingerprint.split("#")[0];
+    const id = `${route}\u0000${key}`;
+    const distinct = [...new Set(options)];
+    if (distinct.length > MAX_SELECT_OPTIONS) {
+      this.selectChoices.delete(id);
+      return;
+    }
+    const entry = this.selectChoices.get(id) ?? { route, key, options: [], chosen: new Set<string>() };
+    // The latest list wins: options a page added or removed since are not owed.
+    if (distinct.length > 0) entry.options = distinct;
+    if (chosen) entry.chosen.add(chosen);
+    this.selectChoices.set(id, entry);
+  }
+
+  /** Dropdowns with options no session chose this run, in the order they were first used. */
+  unchosenOptions(): Array<{ route: string; key: string; unchosen: string[] }> {
+    const out: Array<{ route: string; key: string; unchosen: string[] }> = [];
+    for (const { route, key, options, chosen } of this.selectChoices.values()) {
+      const unchosen = options.filter((o) => !chosen.has(o));
+      if (unchosen.length > 0) out.push({ route, key, unchosen });
+    }
+    return out;
   }
 
   constructor(projectDir: string) {
