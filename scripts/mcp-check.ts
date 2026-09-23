@@ -187,7 +187,7 @@ ${late.slice(0, 400)}`);
     // lane whose different bug was absorbed can see it and file again.
     const merged = await call("scout_finding", {
       session: "orders",
-      severity: "low",
+      severity: "medium",
       category: "a11y",
       title: "The email input is unnamed",
       detail: "Screen readers announce no name.",

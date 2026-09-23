@@ -628,8 +628,11 @@ function sameFinding(
   // (GET /api/orders/9999 404) mentions the "Request manager approval" button
   // that "Request manager approval stays enabled on a pending order" (POST
   // …/request-approval 409) quotes in its title, and was merged into it.
-  // Evidence that names a request is the finding's own statement of what
-  // failed; two statements about different requests are two bugs.
+  // Evidence that names a request is the finding's own statement of where it
+  // happened; two findings naming different requests are two bugs. A request
+  // that answered 2xx counts too — a false success names one — so the same bug
+  // described once by its page load and once by its failing call stays as two
+  // findings: a visible duplicate, the direction ADR 4 accepts.
   if (sameFamily(a.category, b.category) && !requestsDisagree(a.evidence, b.evidence)) {
     const aTitleLits = findingLiterals(a.title);
     const bTitleLits = findingLiterals(b.title);

@@ -48,7 +48,7 @@ guess, and a guess applied across the whole report merges unrelated bugs. A
 quoted literal also merges only within one family of categories, and never when
 both findings' evidence names requests with none in common: the machine signal
 outranks the guess, so two findings that quote the same button but name
-different failing requests stay two findings.
+different requests stay two findings.
 
 ## Consequences
 

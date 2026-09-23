@@ -1412,7 +1412,7 @@ server.registerTool(
             ? `Finding recorded: [${finding.severity}] ${finding.title} (id ${finding.id})`
             : finding.regressedAt
               ? `⟳ REOPENED as a REGRESSION: finding ${finding.id} was previously resolved but the evidence reproduces again (seen in ${finding.runs} runs). Worth calling out to the user.`
-              : `Not recorded as new: merged into existing finding ${finding.id} — [${finding.severity}] ${finding.title} (seen in ${finding.runs} runs). If that is a different bug from yours, file again with evidence naming what differs (the request, its status, or the element).`,
+              : `Not recorded as new: merged into existing finding ${finding.id} — [${finding.severity}] ${finding.title} (seen in ${finding.runs} runs). If yours is a different bug, file it again with evidence naming the request that failed for you (method and path): two findings that name different requests are kept apart.`,
           session,
         );
       } catch (err) {
