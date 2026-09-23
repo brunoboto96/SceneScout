@@ -274,7 +274,7 @@
       "match": [
         "sort.{0,30}(qty|quantity|stock|on.hand).{0,80}(text|string|lexic|alphabetic)",
         "(qty|quantity|stock|on.hand).{0,60}(sort|order).{0,60}(text|string|lexic|alphabetic)",
-        "(order|returns?|produces?|sorts?|qty):?\\W{0,3}\\[?10,\\s*120,\\s*250",
+        "(order|returns?|produces?|sorts?|sorting|qty|quantities|->|-&gt;|→):?\\W{0,3}\\[?10,\\s*120,\\s*250",
         "10.{0,20}before.{0,10}\\b9\\b"
       ],
       "examples": [
@@ -283,7 +283,9 @@
         "quantity-sort-uses-string-comparison",
         "\"Sort by Quantity\" sorts on-hand counts as text, not numbers",
         "click testid=inventory-sort-qty -> order HB-103,HB-101 (qty 10,120,250,3,64,9)\nquantity-sort-lexicographic-not-numeric",
-        "testid=inventory-sort-qty order: 10,120,250,3,64,9 (string-sorted, not numeric)"
+        "testid=inventory-sort-qty order: 10,120,250,3,64,9 (string-sorted, not numeric)",
+        "GET /api/inventory?sort=qty -> 10,120,250,3,64,9",
+        "Rows after sorting: 10, 120, 250, 3, 64, 9"
       ],
       "counterExamples": [
         "name-sort-works-correctly",
@@ -335,7 +337,7 @@
         "delete.{0,40}(redirect|navigat)s?.{0,20}(as )?success",
         "DELETE /api/(orders|workspace)\\S*.{0,120}(navigat|redirect)\\w*.{0,60}(as if|anyway|succe)",
         "DELETE /api/(orders|workspace)\\S*.{0,160}(as though|as if|without the order|went back to the list)",
-        "DELETE /api/(orders|workspace)\\S*\\s+40[13].{0,40}(page )?shows?"
+        "DELETE /api/(orders|workspace)\\S*\\s+40[13].{0,40}(page )?shows?.{0,20}(approved|deleted|success|done)"
       ],
       "examples": [
         "DELETE /api/orders/1048 403; UI navigated to /orders.html anyway; GET /api/orders/1048 200 still exists",
@@ -349,7 +351,9 @@
         "Delete order shows misleading \"approved\" status when the DELETE is refused\nDELETE /api/orders/1042 403 → page shows \"approved\""
       ],
       "counterExamples": [
-        "testid=settings-delete-workspace click handler calls fetch DELETE /api/workspace with no confirm()\nsettings-delete-workspace-lacks-confirmation"
+        "testid=settings-delete-workspace click handler calls fetch DELETE /api/workspace with no confirm()\nsettings-delete-workspace-lacks-confirmation",
+        "DELETE /api/orders/1042 403 → page shows \"Only a manager can delete an order\"",
+        "DELETE /api/workspace 403 shows no confirm dialog"
       ]
     }
   ],
@@ -622,8 +626,18 @@
       "category": "data-inconsistency",
       "severity": "low",
       "level": "medium",
-      "match": ["\\$0\\.00 totals? for orders with non-?zero item", "total.{0,30}regardless of item", "(always|every).{0,30}\\$0\\.00 total"],
-      "examples": ["Orders list shows $0.00 total for orders with nonzero item counts\nGET /api/orders id=1043,1044,1045 items=5 total=0"],
+      "match": [
+        "\\$0\\.00 totals? for orders with non-?zero item",
+        "total.{0,30}regardless of item",
+        "(always|every).{0,30}\\$0\\.00 total",
+        "total (is )?\\$0\\.00 for (every|each|all).{0,20}(new|created)",
+        "(newly |new |created ).{0,20}orders?.{0,40}(\\$0\\.00|zero) total"
+      ],
+      "examples": [
+        "Orders list shows $0.00 total for orders with nonzero item counts\nGET /api/orders id=1043,1044,1045 items=5 total=0",
+        "Order total is $0.00 for every newly created order",
+        "Newly created orders have a zero total"
+      ],
       "counterExamples": [
         "Orders list shows negative item count and $0.00 totals with no validation surfaced\nGET /api/orders 200: {\"id\":1044,\"items\":-5,\"total\":0}, {\"id\":1043,\"items\":13,\"total\":0}",
         "Double-click on order creation produced two identical duplicate orders\nGET /api/orders ids 1046,1047 identical customer=Double Click Co items=2 total=0 status=open"
@@ -649,9 +663,16 @@
       "category": "ux-confusing",
       "severity": "low",
       "level": "medium",
-      "match": ["form (keeps|retains) (submitted|its) values", "form fields unchanged between"],
+      "match": [
+        "form (keeps|retains) (submitted|its) values",
+        "form fields unchanged between",
+        "form (is not|isn.t|never) (cleared|reset)",
+        "fields? (are|is) not (cleared|reset)"
+      ],
       "examples": [
-        "Form keeps submitted values after a successful order creation, inviting accidental duplicates\nTwo sequential POST /api/orders with identical body (customer, items, email) each return 201 with a new id; form fields unchanged between clicks"
+        "Form keeps submitted values after a successful order creation, inviting accidental duplicates\nTwo sequential POST /api/orders with identical body (customer, items, email) each return 201 with a new id; form fields unchanged between clicks",
+        "New-order form is not cleared after submit",
+        "Form fields are not reset after an order is created"
       ],
       "counterExamples": ["click×2 testid=new-order-submit → POST /api/orders x2, created id=1046 and id=1047"]
     },
@@ -662,9 +683,16 @@
       "category": "ux-polish",
       "severity": "low",
       "level": "medium",
-      "match": ["email.{0,40}(accepts?|allows?).{0,20}malformed", "malformed.{0,20}(email|address)"],
+      "match": [
+        "email.{0,40}(accepts?|allows?).{0,20}malformed",
+        "malformed.{0,20}(email|address)",
+        "email.{0,30}accepts? (invalid|malformed|any)",
+        "\\bnovalidate\\b"
+      ],
       "examples": [
-        "Confirmation email field accepts malformed addresses with no validation\nPOST /api/orders email=not-an-email → 200, order #1045 created, no client/server validation message"
+        "Confirmation email field accepts malformed addresses with no validation\nPOST /api/orders email=not-an-email → 200, order #1045 created, no client/server validation message",
+        "Email field accepts invalid email addresses",
+        "Form has novalidate, so a malformed email is never flagged"
       ],
       "counterExamples": ["Email field has a placeholder but no label"]
     }
@@ -870,19 +898,28 @@
       "id": "reorder-flag-inert",
       "title": "The Reorder flag on a low-stock row is not a control",
       "why": "A status badge, not an action; a label that does nothing when clicked is not a dead control.",
-      "match": ["reorder.{0,20}(flag|label).{0,40}(not actionable|no (click|link))", "reorder flag.{0,40}not a control"],
+      "match": [
+        "reorder.{0,20}(flag|label).{0,40}(not actionable|no (click|link))",
+        "reorder flag.{0,40}not a control",
+        "reorder.{0,30}(not (clickable|a link|a button|actionable)|no (click|link))"
+      ],
       "overrides": [],
-      "examples": ["\"Reorder\" flag on low-stock rows is not actionable\ntestid=inventory-row-HB-102 \"Reorder\" label has no click handler or link"],
+      "examples": [
+        "\"Reorder\" flag on low-stock rows is not actionable\ntestid=inventory-row-HB-102 \"Reorder\" label has no click handler or link",
+        "Reorder label on low-stock rows is not clickable",
+        "The Reorder badge is not a link or button"
+      ],
       "counterExamples": []
     },
     {
       "id": "unknown-id-stale-data",
       "title": "An unknown order id shows another order's data",
       "why": "False: the page shows \"Order not found\" with an empty summary; only the controls stay live (order-not-found-live-controls).",
-      "match": ["stale order data", "renders identical state to", "unknown order id shows another order"],
+      "match": ["stale order data", "renders identical state to", "unknown order id shows another order", "(previous|another|other) order.?s? (details|data)"],
       "overrides": ["order-not-found-live-controls"],
       "examples": [
-        "Order detail page shows stale order data instead of an error for an unknown id\nGET /api/orders/99999 404; /order.html?id=99999 renders identical state to /order.html?id=1042"
+        "Order detail page shows stale order data instead of an error for an unknown id\nGET /api/orders/99999 404; /order.html?id=99999 renders identical state to /order.html?id=1042",
+        "Unknown order id displays the previous order's details"
       ],
       "counterExamples": []
     }

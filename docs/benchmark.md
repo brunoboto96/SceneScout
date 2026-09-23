@@ -89,8 +89,10 @@ example or counter-example in the same change.
   person has since judged those findings against the demo's source and the
   judgements are in the key, so runs 2–4 are now fitted data too. Two stay
   unjudged on purpose: a placeholder a lane filed in run 2, and a dashboard
-  count in run 3 that other lanes were changing while it was read. The next
-  run is the next test.
+  count in run 3 that other lanes were changing while it was read. Runs 5–7
+  were the next unseen runs: against the key of the day they left 1, 5 and 3
+  findings unlabelled and one ambiguous, and those judgements are now in the
+  key as well.
 - **A negated claim still matches.** "Export CSV works, no error" is credited
   as the Export CSV defect: the key recognises *what* a finding is about, not
   whether it says the thing is broken. Findings are filed as defects, so this
@@ -106,7 +108,7 @@ example or counter-example in the same change.
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
 re-scored against **one** key by `npm run bench -- --all`; the table below is
-key `38730d02a0`. The archived runs are in [`bench/runs/`](../bench/runs/).
+key `1f163ec182`. The archived runs are in [`bench/runs/`](../bench/runs/).
 
 | Run | Date | What changed | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Lane calibration | Cost | Kept? |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
@@ -175,7 +177,7 @@ What else the series measured:
 - **The planner's relay changed the reports.** The notification that carries a
   lane's reply escapes `<` and `>`, and those entities reached the parser: one
   report was refused because `<n>` became `&lt;n&gt;` and pushed a route past
-  200 characters, and every relayed evidence string carried `-&gt;` for `->`.
+  200 characters, and most relayed evidence strings carried `-&gt;` for `->`.
 - **Waiting after finishing: 38, 16 and 24 minutes a run** after a lane's
   report was folded, summed over the lanes. While working, gaps over 30 seconds
   were 36%, 3% and 0% of working time; run 5's lanes ran up to 9m30s against
@@ -247,7 +249,7 @@ What else the series measured:
   held their browsers for 18–28 minutes a run in total, summed over eight
   lanes, until the slowest lane's report was folded — planner overhead, which
   the pace section now reports apart from the lanes' working time.
-- **Lane calibration fell** (Brier 0.035 in run 1; 0.055, 0.090, 0.101), with
+- **Lane calibration fell** (Brier 0.035 in run 1; 0.053, 0.090, 0.101), with
   low-confidence verdicts (0.4–0.6) wrong more often than stated in run 4. Three
   runs is not enough to tell whether that is the engine or the lanes.
 
