@@ -333,6 +333,24 @@ test("a short signature does not count as filed just because it appears inside a
   assert.deepEqual(unfiledDefects([decision({ observation: "x", evidence: "404" })], [finding("404")]), [], "the same text exactly is filed");
 });
 
+test("a report restating part of a filing's evidence counts as filed; a bare control name does not", () => {
+  // Seen in benchmark runs: the lane filed "…non-interactive; GET /api/customers 200 with only
+  // four fields" and reported the first clause alone.
+  const filed = finding("testid=customers-row-1..6 non-interactive; no click handler; GET /api/customers 200 with only id/name/city fields");
+  const part = decision({ observation: "static-rows", evidence: "testid=customers-row-1..6 non-interactive; no click handler" });
+  assert.deepEqual(unfiledDefects([part], [filed]), [], "the reported evidence is inside the filing's");
+  // The contrast: the same filing, and a report that is only the control's name. Found inside
+  // the filing, it would cover every defect ever reported about that control.
+  const bare = decision({ observation: "other-bug", evidence: "testid=customers-row-1..6" });
+  assert.deepEqual(unfiledDefects([bare], [filed]), ["other-bug — testid=customers-row-1..6"], "a control name alone, however long");
+  const kebab = decision({ observation: "kebab", evidence: "customers-row-actions-column-empty" });
+  const withKebab = finding("customers-row-actions-column-empty and GET /api/customers 200 with no actions field");
+  assert.deepEqual(unfiledDefects([kebab], [withKebab]), ["kebab — customers-row-actions-column-empty"], "a bare kebab-case id is a control name too");
+  // One direction only: a short filing inside a longer report proves nothing about the rest.
+  const longer = decision({ observation: "long", evidence: "testid=order-save covered by testid=order-stickybar at initial scroll" });
+  assert.deepEqual(unfiledDefects([longer], [finding("testid=order-save")]), ["long — testid=order-save covered by testid=order-stickybar at initial scroll"]);
+});
+
 test("a reworded report of a filed defect counts as filed", () => {
   // Lanes reword between filing and reporting; the identifiers survive.
   const cases: Array<[string, string]> = [
