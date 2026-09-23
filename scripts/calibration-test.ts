@@ -341,8 +341,8 @@ test("a report restating part of a filing's evidence counts as filed; a bare con
   assert.deepEqual(unfiledDefects([part], [filed]), [], "the reported evidence is inside the filing's");
   // The contrast: the same filing, and a report that is only the control's name. Found inside
   // the filing, it would cover every defect ever reported about that control.
-  const bare = decision({ observation: "other-bug", evidence: "testid=customers-row-1" });
-  assert.deepEqual(unfiledDefects([bare], [filed]), ["other-bug — testid=customers-row-1"]);
+  const bare = decision({ observation: "other-bug", evidence: "testid=customers-row-1..6" });
+  assert.deepEqual(unfiledDefects([bare], [filed]), ["other-bug — testid=customers-row-1..6"], "a control name alone, however long");
   // One direction only: a short filing inside a longer report proves nothing about the rest.
   const longer = decision({ observation: "long", evidence: "testid=order-save covered by testid=order-stickybar at initial scroll" });
   assert.deepEqual(unfiledDefects([longer], [finding("testid=order-save")]), ["long — testid=order-save covered by testid=order-stickybar at initial scroll"]);

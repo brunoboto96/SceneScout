@@ -321,6 +321,34 @@ export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdi
   return out;
 }
 
+interface Filed {
+  ids: Set<string>;
+  words: Set<string>;
+  evidenceWords: Set<string>;
+  evidence: string;
+}
+
+/**
+ * Shortest reported evidence that counts as restating a filing it is part of.
+ */
+const MIN_RESTATED = 24;
+
+/**
+ * Whether the reported evidence appears word for word inside a finding's
+ * evidence: a lane that filed "testid=row-1..6 non-interactive; GET /api/x 200
+ * with only three fields" and reported the first half. It must say something
+ * beyond naming a control — two words once test ids and kebab-case ids are
+ * taken out — or a bare "testid=inventory-sort-qty" would be found inside
+ * every finding about that control, which is the one-shared-id match covers()
+ * refuses. One direction only: a short FILED evidence found inside a longer
+ * report proves nothing about the rest of the report.
+ */
+function restates(reported: string, f: Filed): boolean {
+  if (reported.length < MIN_RESTATED || !f.evidence.includes(reported)) return false;
+  const rest = reported.replace(/testid=["']?[a-z0-9_-]+/g, " ").replace(/\b[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}\b/g, " ");
+  return words(rest).size >= 2;
+}
+
 /**
  * Whether a finding covers a decision. Lanes reword evidence between filing it
  * and reporting it — an arrow for a hyphen, quoted JSON for bare, "8 links"
@@ -331,31 +359,6 @@ export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdi
  * quantity sorting as text, and the same sort showing no active state), and a
  * real miss must not hide behind its neighbour.
  */
-interface Filed {
-  ids: Set<string>;
-  words: Set<string>;
-  evidenceWords: Set<string>;
-  evidence: string;
-}
-
-/**
- * Shortest reported evidence that counts as restating a filing it is part of.
- * Below it, a bare control name ("testid=order-save") would be found inside
- * the evidence of every finding about that control.
- */
-const MIN_RESTATED = 24;
-
-/**
- * Whether the reported evidence appears word for word inside a finding's
- * evidence: a lane that filed "testid=row-1..6 non-interactive; GET /api/x 200
- * with only three fields" and reported the first half. One direction only —
- * a short FILED evidence found inside a longer report proves nothing about
- * the rest of the report.
- */
-function restates(reported: string, f: Filed): boolean {
-  return reported.length >= MIN_RESTATED && f.evidence.includes(reported);
-}
-
 function covers(ids: Set<string>, w: Set<string>, f: Filed): boolean {
   let shared = 0;
   for (const id of ids) if (f.ids.has(id)) shared += 1;
