@@ -324,11 +324,12 @@ export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdi
 /**
  * Whether a finding covers a decision. Lanes reword evidence between filing it
  * and reporting it — an arrow for a hyphen, quoted JSON for bare, "8 links"
- * for "8 link(s)" — but keep the identifiers: test ids, API paths, contrast
- * ratios. Two shared identifiers, or one plus a real overlap in wording, or a
- * near-identical wording, is the same observation. One shared test id alone is
- * not: two different defects on one button (double-submit, empty submit) share
- * it, and a real miss must not hide behind its neighbour.
+ * for "8 link(s)" — but keep the identifiers: test ids and contrast ratios.
+ * Two shared identifiers, or a near-identical wording, is the same
+ * observation. One shared test id is never enough, with or without some
+ * words in common: two different defects on one control share both (sort by
+ * quantity sorting as text, and the same sort showing no active state), and a
+ * real miss must not hide behind its neighbour.
  */
 interface Filed {
   ids: Set<string>;
@@ -343,7 +344,7 @@ function covers(ids: Set<string>, w: Set<string>, f: Filed): boolean {
   // Against the evidence alone as well: a finding's title adds words the
   // lane's report never repeats, and diluted an otherwise identical signature.
   const overlap = Math.max(jaccard(w, f.words), jaccard(w, f.evidenceWords));
-  return shared >= 2 || (shared >= 1 && overlap >= 0.3) || overlap >= 0.6;
+  return shared >= 2 || overlap >= 0.6;
 }
 
 /**

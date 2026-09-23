@@ -374,6 +374,13 @@ test("an endpoint that answered 2xx does not file a different defect on it", () 
   assert.equal(unfiledDefects([missed], filed).length, 1, "the email is never sent: a different defect on the same endpoint");
 });
 
+test("one shared test id and some common words do not file a different defect on that control", () => {
+  // From benchmark runs 2 and 4: two defects on the quantity sort.
+  const filed = [finding("two clicks on testid=inventory-sort-qty produce identical row order", { title: "Quantity sort has no active state" })];
+  const missed = decision({ observation: "sort-as-text", evidence: "testid=inventory-sort-qty produces order 10,120,250,3,64,9 (unsorted)" });
+  assert.equal(unfiledDefects([missed], filed).length, 1, "sorting as text is not the same defect as a missing active state");
+});
+
 test("evidence that is only whitespace is never filed by a finding with no evidence", () => {
   const blank = decision({ observation: "blank", evidence: "   " });
   assert.equal(unfiledDefects([blank], [{ ...finding("x"), evidence: undefined }]).length, 1);
