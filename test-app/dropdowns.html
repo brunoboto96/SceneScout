@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Dropdowns</title></head>
+<body>
+  <h1>Dropdowns that change under the choice</h1>
+  <!-- A "jump to" menu: it acts on the choice, then resets itself to its
+       placeholder. What was picked is only in the change, not in the value
+       read afterwards. -->
+  <select id="jump" data-testid="jump-select" aria-label="Jump to">
+    <option value="">Jump to…</option>
+    <option value="top">Top</option>
+    <option value="form">Feedback form</option>
+  </select>
+  <!-- A one-shot picker that removes itself once used. -->
+  <div id="once">
+    <select data-testid="once-select" aria-label="Pick once">
+      <option value="a">A</option>
+      <option value="b">B</option>
+    </select>
+  </div>
+  <p id="log" data-testid="dropdowns-log"></p>
+  <script>
+    const jump = document.getElementById('jump');
+    jump.addEventListener('change', () => {
+      document.getElementById('log').textContent = 'jumped to ' + jump.value;
+      jump.value = '';
+    });
+    document.querySelector('[data-testid="once-select"]').addEventListener('change', (e) => {
+      document.getElementById('log').textContent = 'picked ' + e.target.value;
+      document.getElementById('once').remove();
+    });
+  </script>
+</body>
+</html>

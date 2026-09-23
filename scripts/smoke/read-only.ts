@@ -777,6 +777,27 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     );
     check("click on a disabled control still fails (not forced through)", lockedResult.threw, lockedResult.message);
     check("failure names the real reason, not a generic timeout", /is not enabled/i.test(lockedResult.message), lockedResult.message);
+
+    console.log("coverage: a dropdown's options are read before the choice");
+    await engine.navigate("/dropdowns.html");
+    const ddSnap = await engine.snapshot(true);
+    const ddRef = (label: string): string => {
+      const m = ddSnap.match(new RegExp(`(e\\d+) [a-z]+ "${label}"`));
+      if (!m) throw new Error(`ref not found for ${label} in:\n${ddSnap}`);
+      return m[1];
+    };
+    await engine.select(ddRef("Jump to"), "top");
+    const jump = engine.memory!.unchosenOptions().find((d) => d.key.includes("jump-select"));
+    check(
+      "a dropdown that resets itself records the option picked, not its placeholder",
+      jump?.unchosen.join("|") === "Feedback form",
+      JSON.stringify(engine.memory!.unchosenOptions()),
+    );
+    const onceStarted = Date.now();
+    await engine.select(ddRef("Pick once"), "a");
+    const once = engine.memory!.unchosenOptions().find((d) => d.key.includes("once-select"));
+    check("a dropdown that removes itself on change does not stall the action", Date.now() - onceStarted < 10_000, `${Date.now() - onceStarted}ms`);
+    check("...and its options were still recorded", once?.unchosen.join("|") === "B", JSON.stringify(once));
   } finally {
     await engine.close().catch(() => {});
   }

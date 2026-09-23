@@ -794,7 +794,9 @@ export class MemoryStore {
    * so a lane that tried four of a filter's seven options — and reported having
    * tried them all — left the one that failed untried with nothing to say so.
    * Per run, like the probes: whether an earlier run chose an option says
-   * nothing about whether this one looked.
+   * nothing about whether this one looked. Keyed without the role: when two
+   * roles see different options in one dropdown, the list read last is the
+   * one reported.
    */
   readonly selectChoices = new Map<string, { route: string; key: string; options: string[]; chosen: Set<string> }>();
 
