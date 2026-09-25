@@ -38,6 +38,8 @@ export interface ServerStats {
 /** Everything a suite needs. `projectDir` is shared on purpose: later suites assert on memory earlier ones wrote. */
 export interface SmokeContext {
   baseUrl: string;
+  /** The same fixture server on another port: another origin, for pages that embed a third party. */
+  foreignBaseUrl: string;
   projectDir: string;
   stats: ServerStats;
 }
@@ -97,14 +99,68 @@ export function settle(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** A loopback origin (the fixture server's other port), or "" for anything else: a redirect built from a query parameter goes nowhere else. */
+function loopbackOrigin(value: string | null): string {
+  return value && /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(value) ? value : "";
+}
+
 /** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
-export async function startFixtureServer(): Promise<{ baseUrl: string; stats: ServerStats; close: () => void }> {
+export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBaseUrl: string; stats: ServerStats; close: () => void }> {
   const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {} };
   const board: string[] = [];
+  let codeCounter = 0;
+  const usedCodes = new Set<string>();
   // Tiny server for the test app: static pages + a minimal items API for
   // write-policy testing.
-  const server = http.createServer((req, res) => {
+  const handle: http.RequestListener = (req, res) => {
     const urlPath = (req.url ?? "/").split("?")[0];
+    // An embed that redirects before it loads, as many do (/embed → /embed/).
+    // A link that answers with no content: the navigation starts and never commits.
+    if (urlPath === "/no-content") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    // Two hops: through the app first, then out (/app-frame-redirect2 → /app-frame-redirect → <origin>).
+    if (urlPath === "/app-frame-redirect2") {
+      const to = loopbackOrigin(new URL(req.url ?? "/", "http://x").searchParams.get("to"));
+      res.writeHead(302, { location: `/app-frame-redirect?to=${encodeURIComponent(to)}` });
+      res.end();
+      return;
+    }
+    // A sign-in provider's silent renewal: redirects to the app's callback with a one-time code.
+    if (urlPath === "/idp-renew") {
+      const to = loopbackOrigin(new URL(req.url ?? "/", "http://x").searchParams.get("to"));
+      codeCounter += 1;
+      res.writeHead(302, { location: `${to}/cb?code=c${codeCounter}` });
+      res.end();
+      return;
+    }
+    // The app's callback: each code works once, as a real one does.
+    if (urlPath === "/cb") {
+      const code = new URL(req.url ?? "/", "http://x").searchParams.get("code") ?? "";
+      if (usedCodes.has(code)) {
+        res.writeHead(400, { "content-type": "text/plain" });
+        res.end("invalid_grant");
+        return;
+      }
+      usedCodes.add(code);
+      res.writeHead(302, { location: "/frame-child.html?as=cbdone" });
+      res.end();
+      return;
+    }
+    // The app's own frame URL redirecting into another site: /app-frame-redirect?to=<origin>.
+    if (urlPath === "/app-frame-redirect") {
+      const to = loopbackOrigin(new URL(req.url ?? "/", "http://x").searchParams.get("to"));
+      res.writeHead(302, { location: `${to}/frame-child.html?as=appredirect` });
+      res.end();
+      return;
+    }
+    if (urlPath === "/frame-redirect") {
+      res.writeHead(302, { location: "/frame-child.html?as=redirected" });
+      res.end();
+      return;
+    }
     if (req.method && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
       const key = `${req.method} ${urlPath}`;
       stats.writes[key] = (stats.writes[key] ?? 0) + 1;
@@ -259,11 +315,26 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; stats: Se
       res.writeHead(404);
       res.end("not found");
     }
-  });
+  };
+  const server = http.createServer(handle);
+  // A second origin for the same pages: a frame served from here is
+  // cross-origin to baseUrl, and whatever it manages to send lands in the same
+  // stats, so a suite can prove a request never arrived.
+  const foreignServer = http.createServer(handle);
   // Loopback only. With no host, Node listens on every interface, and a test
   // fixture server has no business being reachable from the network.
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as { port: number }).port;
   const baseUrl = `http://127.0.0.1:${port}`;
-  return { baseUrl, stats, close: () => server.close() };
+  await new Promise<void>((resolve) => foreignServer.listen(0, "127.0.0.1", resolve));
+  const foreignBaseUrl = `http://127.0.0.1:${(foreignServer.address() as { port: number }).port}`;
+  return {
+    baseUrl,
+    foreignBaseUrl,
+    stats,
+    close: () => {
+      server.close();
+      foreignServer.close();
+    },
+  };
 }

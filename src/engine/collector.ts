@@ -440,6 +440,66 @@ export interface BrokenImageScan {
   total: number;
 }
 
+/** One frame directly under the page, read from its <iframe> element. */
+export interface FrameInfo {
+  url: string;
+  /** The element's title, or its name when it has no title. */
+  title: string;
+  width: number;
+  height: number;
+  /** Of another origin than the app, by the write policy's own test (policy.ts foreignFrameOrigin). */
+  foreign: boolean;
+}
+
+/** A frame smaller than this in both directions is plumbing (a tracking pixel, a messaging bridge), not something a user sees. */
+const VISIBLE_FRAME_PX = 2;
+
+/**
+ * The snapshot's account of the page's frames. Nothing inside a frame is
+ * collected or can be acted on yet, and a page that shows its form in an
+ * embed used to look like a page with no form at all: say what is there,
+ * where it comes from, and that it was not looked inside. `nested` counts
+ * frames that are not read: nested inside others, or past the first 30; `writesRefused` is false only in
+ * destructive mode, where a foreign frame's writes do go out.
+ */
+export function frameLines(appUrl: string, frames: readonly FrameInfo[], opts: { nested?: number; writesRefused?: boolean } = {}): string[] {
+  const visible = frames.filter((f) => f.width >= VISIBLE_FRAME_PX && f.height >= VISIBLE_FRAME_PX);
+  const hidden = frames.length - visible.length;
+  const nested = opts.nested ?? 0;
+  if (frames.length === 0 && nested === 0) return [];
+  let app = "";
+  try {
+    app = new URL(appUrl).origin;
+  } catch {
+    /* no origin: paths are shown in full */
+  }
+  const lines = visible.slice(0, 10).map((f) => {
+    let where = f.url || "(no address)";
+    try {
+      const u = new URL(f.url);
+      if (u.origin === app) where = u.pathname + u.search;
+    } catch {
+      /* about:blank, srcdoc: shown as they are */
+    }
+    const label = f.title ? ` "${f.title.slice(0, 60)}"` : "";
+    const writes = f.foreign
+      ? opts.writesRefused === false
+        ? " — its writes go out (destructive mode)"
+        : " — writes it sends outside the app are refused"
+      : "";
+    return `  ${f.foreign ? "cross-origin" : "same-origin"} ${where.slice(0, 120)}${label} ${f.width}×${f.height}${writes}`;
+  });
+  if (visible.length > 10) lines.push(`  … +${visible.length - 10} more`);
+  if (hidden > 0) lines.push(`  (+${hidden} hidden frame${hidden === 1 ? "" : "s"})`);
+  if (nested > 0) lines.push(`  (+${nested} more frame${nested === 1 ? "" : "s"}, nested inside those or past the first 30, not read)`);
+  return [`FRAMES not explored — their controls are not listed above and cannot be acted on:`, ...lines];
+}
+
+/** Whether any frame on the page is one a user can see. */
+export function hasVisibleFrame(frames: readonly FrameInfo[]): boolean {
+  return frames.some((f) => f.width >= VISIBLE_FRAME_PX && f.height >= VISIBLE_FRAME_PX);
+}
+
 /** Snapshot lines for images that failed to load. The origin is dropped when it is the page's own, to keep the line short. */
 export function brokenImageIssues(scan: BrokenImageScan, pageUrl: string): string[] {
   let origin = "";

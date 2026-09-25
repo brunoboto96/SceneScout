@@ -1,4 +1,16 @@
-import { chromium, firefox, webkit, type Browser, type BrowserType, type BrowserContext, type FileChooser, type Locator, type Page } from "playwright";
+import {
+  chromium,
+  firefox,
+  webkit,
+  type Browser,
+  type BrowserType,
+  type BrowserContext,
+  type FileChooser,
+  type Frame,
+  type Locator,
+  type Page,
+  type Request,
+} from "playwright";
 import fs from "node:fs";
 import path from "node:path";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
@@ -15,6 +27,9 @@ import {
   type Rect,
   BROKEN_IMAGES_SCRIPT,
   brokenImageIssues,
+  frameLines,
+  hasVisibleFrame,
+  type FrameInfo,
   type BrokenImageScan,
   displayName,
   missingName,
@@ -48,6 +63,13 @@ import {
   allowsWrite,
   policyRefusal,
   type WriteMode,
+  foreignFrameOrigin,
+  foreignWrite,
+  withForeignFrameSandbox,
+  offAppPageWrite,
+  EmbedMoveTracker,
+  sandboxedRedirectPage,
+  allowsForeignWriteOnSignIn,
   isAuthExempt,
 } from "./policy.js";
 import { scanProject } from "../scan.js";
@@ -181,6 +203,35 @@ const HOVER_REVEAL_WINDOW_MS = 2500;
 /** Non-GET traffic that is auth/telemetry plumbing, not tester-caused state mutation. */
 const BENIGN_MUTATION_RE = /\/auth\/(refresh|token|session)|refresh[-_]?token|\/telemetry|\/analytics|\/heartbeat|\/sentry|\/collect\b|\/logs?\b|\/metrics\b/i;
 
+/**
+ * What the policy needs to know about where a request came from: the URLs of
+ * the frame that sent it and of its parents, up to but not including the top
+ * document, and that frame's own URL (null when the browser attributes it to no
+ * frame, as for a new window or a service worker).
+ */
+function requestSource(req: Request): { frameChain: string[]; frameUrl: string | null } {
+  const frameChain: string[] = [];
+  let frame: Frame | null;
+  try {
+    frame = req.frame();
+  } catch {
+    return { frameChain, frameUrl: null };
+  }
+  const frameUrl = frame.url();
+  const top = frame.page().mainFrame();
+  while (frame && frame !== top) {
+    frameChain.push(frame.url());
+    frame = frame.parentFrame();
+  }
+  return { frameChain, frameUrl };
+}
+
+/** The `why` of a top-window navigation refused as a possible frame escape; the notice words it on its own. */
+const ESCAPE_REFUSAL = "a possible frame escape";
+
+/** How long a snapshot waits for its frames' elements to answer. */
+const FRAME_READ_MS = 1500;
+
 /** In-page XPath lookup fragment for string-expression evaluates. */
 function xpathLookup(xpath: string): string {
   return `document.evaluate(${JSON.stringify(xpath)}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue`;
@@ -312,7 +363,7 @@ export class BrowserEngine {
     this.memory?.logAction({ ...entry, session: this.sessionKey });
   }
   /** Requests blocked by the write policy since the last action (timestamped for attribution). */
-  private blockedRequests: Array<{ at: number; sig: string; answered: boolean }> = [];
+  private blockedRequests: Array<{ at: number; sig: string; answered: boolean; why?: string }> = [];
   /**
    * WebSockets this session's pages opened. The write policy works on HTTP
    * requests; frames sent over a socket are not inspected. In observe mode that
@@ -758,6 +809,7 @@ export class BrowserEngine {
     this.contradictionsReported = new Set();
     this.pendingCreations = new Set();
     this.baseUrl = opts.url.replace(/\/$/, "");
+    this.embedMoves = new EmbedMoveTracker(this.baseUrl);
     // Ownership (ownedIds/createdResources) deliberately NOT reset here: it
     // lives on the shared MemoryStore for the whole run, so re-attaching one
     // role must not discard what another role already created — otherwise
@@ -827,6 +879,15 @@ export class BrowserEngine {
       this.watchResponse(res.request(), res.status());
     });
     this.context.on("request", (req) => {
+      // Who moved the driven page, decided on its navigation's first request
+      // (this event fires before the route handler judges that page's writes).
+      if (req.isNavigationRequest() && !req.redirectedFrom()) {
+        try {
+          if (this.page && req.frame() === this.page.mainFrame()) this.embedMoves.navigationStarted(req.url(), req.headers()["referer"], this.embeddedSites());
+        } catch {
+          /* no frame: not the driven page */
+        }
+      }
       this.inFlight += 1;
       this.lastRequestStart = Date.now();
       const type = req.resourceType();
@@ -850,6 +911,14 @@ export class BrowserEngine {
       // Same test the route handler uses: in observe only an exempt auth request goes out.
       if (this.mode === "observe" && !isAuthExempt(this.mode, method, pathnameOf(req.url()), isDestructiveWire(pathnameOf(req.url()), req.postData()))) return;
       if (this.readOnly && isDestructiveWire(pathnameOf(req.url()), req.postData())) return;
+      // A foreign frame's write is refused in every mode the route handler runs in.
+      if (this.mode !== "destructive" && this.foreignWriteOf(req)) return;
+      if (
+        this.mode !== "destructive" &&
+        offAppPageWrite(this.baseUrl, this.page?.url(), req.url(), this.embedMoves.movedTo) &&
+        !isAuthExempt(this.mode, method, pathnameOf(req.url()), isDestructiveWire(pathnameOf(req.url()), req.postData()))
+      )
+        return;
       const pageUrl = this.page?.url();
       if (pageUrl && this.memory) {
         try {
@@ -865,11 +934,103 @@ export class BrowserEngine {
       await this.context.route("**/*", async (route) => {
         const req = route.request();
         const method = req.method();
+        // A redirect is followed by the browser without asking, so its target
+        // would load unsandboxed: a frame's redirect is answered with a
+        // sandboxed page that navigates there itself, and the next hop comes
+        // back here. Built from scratch: a redirect's framing or script
+        // headers never applied to a redirect, and would block this page.
+        const standIn = async (location: string, setCookie: string | undefined) => {
+          const headers: Record<string, string> = {
+            "content-type": "text/html; charset=utf-8",
+            "content-security-policy": withForeignFrameSandbox(undefined),
+            "cache-control": "no-store",
+          };
+          if (setCookie) headers["set-cookie"] = setCookie;
+          await route.fulfill({ status: 200, headers, body: sandboxedRedirectPage(new URL(location, req.url()).href) });
+        };
+        // WebKit drops the sandbox for a frame that loads a data: URL in its own
+        // place. A top-window navigation out of the app, with no Referer, while
+        // a frame that held another site sits on a non-web URL, is that frame's
+        // escape: refused, judged on the page as it is when the request arrives.
+        if (method === "GET" && req.resourceType() === "document" && this.embedEscapeNavigation(req)) {
+          const why = ESCAPE_REFUSAL;
+          // Reported like any refusal, so a click whose navigation this stopped does not read as a click that did nothing.
+          if (this.blockedRequests.length < 20)
+            this.blockedRequests.push({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why });
+          this.logAction({ action: "write-policy:blocked", target: `navigation to ${req.url().slice(0, 140)} (${why})`, url: this.page?.url() ?? "" });
+          this.refusedByPolicy.add(req);
+          this.oracles.notePolicyBlock();
+          await route.abort("blockedbyclient").catch(() => {});
+          return;
+        }
+        const frameDoc = method === "GET" && req.resourceType() === "document" ? this.frameDocumentKind(req) : null;
+        // A document loading into a frame of another origin gets the sandbox
+        // that forbids popups and top-window navigation (policy.ts says why).
+        if (frameDoc === "foreign") {
+          try {
+            const res = await route.fetch({ maxRedirects: 0 });
+            const headers = res.headers();
+            const location = res.status() >= 300 && res.status() < 400 ? headers["location"] : undefined;
+            if (location) {
+              await standIn(location, headers["set-cookie"]);
+              return;
+            }
+            headers["content-security-policy"] = withForeignFrameSandbox(headers["content-security-policy"]);
+            await route.fulfill({ response: res, headers });
+            return;
+          } catch {
+            // Fail closed: a frame that cannot be sandboxed is not loaded.
+            await route.abort("blockedbyclient").catch(() => {});
+            return;
+          }
+        }
+        // The app's own frame document can redirect into another site, whose
+        // page would then load unsandboxed. Asked first, one hop at a time; a
+        // document that does not redirect loads as it would have, sent on
+        // rather than served from here — a served document counts as public in
+        // Chromium and could no longer reach an app on localhost. The price is
+        // a second GET of the app's frame documents that are not redirects.
+        if (frameDoc === "app") {
+          try {
+            const res = await route.fetch({ maxRedirects: 0 });
+            const location = res.status() >= 300 && res.status() < 400 ? res.headers()["location"] : undefined;
+            // Every hop, not only one out of the app: Playwright does not route the
+            // later hops of a redirect, so a chain through the app and then out
+            // would go unseen, and each hop is then fetched once, not twice.
+            if (location) {
+              await standIn(location, res.headers()["set-cookie"]);
+              return;
+            }
+          } catch {
+            /* could not ask: load it as it would have loaded */
+          }
+          await route.continue().catch(() => {});
+          return;
+        }
         if (method === "GET" || method === "HEAD" || method === "OPTIONS") return route.continue();
         const url = req.url();
         const pathname = pathnameOf(url);
+        const refuse = (why?: string) => {
+          const answered = answersWithRefusal(req.resourceType());
+          if (this.blockedRequests.length < 20) this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered, why });
+          this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}${why ? ` (${why})` : ""}`, url: this.page?.url() ?? "" });
+          this.refusedByPolicy.add(req);
+          this.oracles.notePolicyBlock();
+          // A script's request is answered with a refusal, so the page's handling
+          // of one actually runs; a navigation is dropped (policy.ts says why).
+          // Caught: a request the page has already cancelled rejects these, and an unhandled rejection ends the process.
+          if (answered) return route.fulfill(policyRefusal(this.mode, method, pathname, req.headers()["origin"], why)).catch(() => {});
+          return route.abort("blockedbyclient").catch(() => {});
+        };
+        // An embedded widget from another site writes to that site, not to the
+        // app under test: refused before any other rule, login included.
+        const foreign = this.foreignWriteOf(req);
+        if (foreign) return refuse(`sent from a frame of ${foreign}`);
         this.rememberAuthHeader(req.headers());
         const destructiveWire = isDestructiveWire(pathname, req.postData());
+        // An embed moved the session's page off the app: its writes out are not the app's, a sign-in excepted.
+        const offApp = offAppPageWrite(this.baseUrl, this.page?.url(), url, this.embedMoves.movedTo);
+        if (offApp && !isAuthExempt(this.mode, method, pathname, destructiveWire)) return refuse(`sent from a page of ${offApp}, outside the app`);
         // Auth/session flows must work in every mode — but never a destructive
         // one, and in observe only the requests a login itself needs.
         if (isAuthExempt(this.mode, method, pathname, destructiveWire)) return route.continue();
@@ -909,15 +1070,7 @@ export class BrowserEngine {
           }
           return route.continue();
         }
-        const answered = answersWithRefusal(req.resourceType());
-        if (this.blockedRequests.length < 20) this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered });
-        this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}`, url: this.page?.url() ?? "" });
-        this.refusedByPolicy.add(req);
-        this.oracles.notePolicyBlock();
-        // A script's request is answered with a refusal, so the page's handling
-        // of one actually runs; a navigation is dropped (policy.ts says why).
-        if (answered) return route.fulfill(policyRefusal(this.mode, method, pathname, req.headers()["origin"]));
-        return route.abort("blockedbyclient");
+        return refuse();
       });
     }
 
@@ -938,6 +1091,7 @@ export class BrowserEngine {
           if (sameOrigin) {
             this.oracles.attach(newPage);
             this.wireDialogHandler(newPage);
+            this.wireEmbedMoves(newPage);
             this.page = newPage;
             this.refs.clear();
             this.snapshotUrl = "";
@@ -950,6 +1104,7 @@ export class BrowserEngine {
     });
 
     this.wireDialogHandler(this.page);
+    this.wireEmbedMoves(this.page);
 
     try {
       await this.page.goto(opts.url, { waitUntil: "domcontentloaded", timeout: 20000 });
@@ -994,6 +1149,47 @@ export class BrowserEngine {
       `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""} Call scout_snapshot to see the current state.` +
       authWarning
     );
+  }
+
+  /** Whether the page was moved off the app by one of its embeds (policy.ts EmbedMoveTracker). */
+  private embedMoves = new EmbedMoveTracker("");
+
+  /**
+   * Frames that have held a document of another origin, with the first such
+   * origin. A frame that has since moved itself to a data: URL is still that
+   * site's; it leaves the record when it leaves the page, as every frame of a
+   * replaced document does, so nothing has to be cleared at the right moment.
+   * Sticky on purpose: a frame that went back to the app (a silent-renew frame
+   * landing on the app's callback) keeps counting as an embed, which refuses
+   * more, never less.
+   */
+  private foreignFrames = new WeakMap<Frame, string>();
+
+  /** The other sites the driven page embeds right now, by the frames still attached to it. */
+  private embeddedSites(): Set<string> {
+    const out = new Set<string>();
+    const page = this.page;
+    if (!page) return out;
+    const top = page.mainFrame();
+    for (const frame of page.frames()) {
+      if (frame === top) continue;
+      const origin = this.foreignFrames.get(frame) ?? foreignFrameOrigin(this.baseUrl, [frame.url()]);
+      if (origin) out.add(origin);
+    }
+    return out;
+  }
+
+  /** Feed the page's navigations to the embed-move tracker and the foreign-frame record. Wired on every page we drive, like the dialog handler. */
+  private wireEmbedMoves(page: Page): void {
+    page.on("framenavigated", (frame) => {
+      if (page !== this.page) return;
+      if (frame === page.mainFrame()) {
+        this.embedMoves.pageLoaded(frame.url());
+        return;
+      }
+      const origin = foreignFrameOrigin(this.baseUrl, [frame.url()]);
+      if (origin && !this.foreignFrames.has(frame)) this.foreignFrames.set(frame, origin);
+    });
   }
 
   /** Dialogs (confirm/alert): dismiss in read-only mode, accept otherwise. Must be wired on every page we drive, including adopted popups. */
@@ -1323,6 +1519,7 @@ export class BrowserEngine {
       ((await page.evaluate(BROKEN_IMAGES_SCRIPT).catch(() => null)) as BrokenImageScan | null) ?? { images: [], total: 0 },
       url,
     );
+    const { frames, nested: nestedFrames } = await this.frameInventory(page);
     const cov = memory.coverage();
     const unvisited = this.unvisitedKnownRoutes();
     const title = await page.title();
@@ -1334,13 +1531,20 @@ export class BrowserEngine {
       body +
       (geometry.length > 0 ? `\nGEOMETRY issues:\n` + geometry.map((g) => `  ⚠ ${g}`).join("\n") : "") +
       (brokenImages.length > 0 ? `\nBROKEN IMAGES:\n` + brokenImages.map((b) => `  ⚠ ${b}`).join("\n") : "") +
+      (frames.length > 0 || nestedFrames > 0
+        ? `\n` + frameLines(this.baseUrl, frames, { nested: nestedFrames, writesRefused: this.mode !== "destructive" }).join("\n")
+        : "") +
       (hiddenFileInputs.length > 0
         ? `\nFILE INPUTS not listed above (hidden behind a styled control — a user never sees the input itself): ${hiddenFileInputs.join("; ")}. ` +
           `scout_upload {ref} on the control that opens one, or scout_upload {} when it is the page's only file input.`
         : "") +
       this.socketNotice() +
       formatViolations(this.oracles.drain()) +
-      (elements.length === 0 ? "\n⚠ DEAD END: no interactable elements found on this page." : "")
+      (elements.length === 0
+        ? hasVisibleFrame(frames)
+          ? "\n⚠ No interactable elements in the page itself: what it shows is inside the frames listed above, which were not explored."
+          : "\n⚠ DEAD END: no interactable elements found on this page."
+        : "")
     );
   }
 
@@ -1488,6 +1692,114 @@ export class BrowserEngine {
     return entry.at < this.actionStartedAt ? `${entry.sig} (late — likely from a previous action)` : entry.sig;
   }
 
+  /**
+   * The frames directly under the page, read from their <iframe> elements in
+   * one pass each, all at once. Each read gets FRAME_READ_MS: a frame that
+   * cannot answer in time (a busy ad loop in its own process) is left out on
+   * its own rather than stalling the snapshot or dropping the others. Frames
+   * inside frames, and direct frames past the first 30, are only counted.
+   */
+  private async frameInventory(page: Page): Promise<{ frames: FrameInfo[]; nested: number }> {
+    const top = page.mainFrame();
+    const all = page.frames().filter((f) => f !== top);
+    const direct = all.filter((f) => f.parentFrame() === top);
+    const read = async (frame: Frame): Promise<FrameInfo | null> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const box = await Promise.race([
+        frame
+          .frameElement()
+          .then((el) =>
+            el.evaluate((node: Element) => {
+              const r = node.getBoundingClientRect();
+              return {
+                title: (node.getAttribute("title") || node.getAttribute("name") || "").trim(),
+                width: Math.round(r.width),
+                height: Math.round(r.height),
+              };
+            }),
+          )
+          .catch(() => null),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), FRAME_READ_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
+      return box ? { url: frame.url(), ...box, foreign: foreignFrameOrigin(this.baseUrl, [frame.url()]) !== null } : null;
+    };
+    const frames = (await Promise.all(direct.slice(0, 30).map(read))).filter((f): f is FrameInfo => f !== null);
+    return { frames, nested: all.length - Math.min(direct.length, 30) };
+  }
+
+  /**
+   * Whether a document request is the top window leaving the app, with no
+   * Referer, while a frame that held another site's document now sits on a
+   * data: or blob: URL — where WebKit no longer applies its sandbox.
+   */
+  private embedEscapeNavigation(req: Request): boolean {
+    const page = this.page;
+    if (!page || !req.isNavigationRequest() || req.redirectedFrom()) return false;
+    try {
+      if (req.frame() !== page.mainFrame()) return false;
+    } catch {
+      return false;
+    }
+    if (req.headers()["referer"]) return false;
+    if (foreignFrameOrigin(this.baseUrl, [req.url()]) === null) return false;
+    const top = page.mainFrame();
+    // data: and blob: only: where WebKit drops the sandbox. A frame the app set back to about:blank is not an escape.
+    return page.frames().some((f) => f !== top && this.foreignFrames.has(f) && /^(data|blob):/i.test(f.url()));
+  }
+
+  /**
+   * What a document request loads into: a frame (not the top window) of
+   * another origin than the app's, a frame of the app's own origin, or
+   * neither (null). On the app's own sign-in pages frames are left alone: a
+   * "sign in with" button is a foreign frame that has to open its popup.
+   */
+  private frameDocumentKind(req: Request): "foreign" | "app" | null {
+    let frame: Frame;
+    try {
+      frame = req.frame();
+    } catch {
+      return null;
+    }
+    if (frame === frame.page().mainFrame()) return null;
+    if (allowsForeignWriteOnSignIn(this.mode, this.page?.url() ?? "", this.baseUrl)) return null;
+    let url: URL;
+    try {
+      url = new URL(req.url());
+    } catch {
+      return null;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return foreignFrameOrigin(this.baseUrl, [req.url()]) ? "foreign" : "app";
+  }
+
+  /**
+   * The foreign origin behind a write headed outside the app (policy.ts
+   * foreignWrite), or null — also null on the app's own sign-in page, where a
+   * captcha frame's writes must go out for a login to work.
+   */
+  private foreignWriteOf(req: Request): string | null {
+    let unadoptedPageUrl: string | null = null;
+    try {
+      const from = req.frame().page();
+      if (this.page && from !== this.page) unadoptedPageUrl = from.url();
+    } catch {
+      /* no frame: a new window's first request, or a service worker */
+    }
+    // Frames still attached that hold, or held, another site: one that moved itself to data: is no longer foreign by its URL.
+    const pageHasForeignFrame = this.embeddedSites().size > 0;
+    const foreign = foreignWrite(this.baseUrl, {
+      url: req.url(),
+      originHeader: req.headers()["origin"],
+      unadoptedPageUrl,
+      pageHasForeignFrame,
+      ...requestSource(req),
+    });
+    if (foreign && allowsForeignWriteOnSignIn(this.mode, this.page?.url() ?? "", this.baseUrl)) return null;
+    return foreign;
+  }
+
   /** Report (and clear) write-policy blocks since the last action. */
   private drainBlocked(): string {
     this.lastActionBlocked = this.blockedRequests.length;
@@ -1498,10 +1810,19 @@ export class BrowserEngine {
       .join("; ");
     const extra = this.blockedRequests.length > 5 ? ` (+${this.blockedRequests.length - 5} more)` : "";
     const answered = this.blockedRequests.some((e) => e.answered);
+    const reasons = new Set(this.blockedRequests.map((e) => e.why).filter((w): w is string => !!w));
+    const escaped = reasons.delete(ESCAPE_REFUSAL);
+    const foreign = [...reasons];
     this.blockedRequests = [];
     return (
       `\n🛡 WRITE-POLICY blocked (${this.mode}): ${list}${extra}. ` +
       `This is the tester's safety policy, NOT an app bug — do not file a finding for the resulting error UI. ` +
+      (foreign.length > 0
+        ? `Refused because it was ${foreign.join("; ")}: it would reach a site embedded in the page rather than the app, which no mode but destructive allows. `
+        : "") +
+      (escaped
+        ? `A move of the whole page off the app, with no Referer, was refused: a frame that held another site now sits on a data: or blob: URL, where WebKit drops the frame's sandbox, so the move may be that frame's. No mode but destructive allows it. `
+        : "") +
       (answered
         ? `The page's own requests were answered with a 403 in the server's place, so the page's handling of a refusal is real: an error message is correct, and a success message is a false_success violation. `
         : "") +

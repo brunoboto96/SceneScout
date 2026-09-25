@@ -23,14 +23,15 @@ import * as multiSession from "./smoke/multi-session.ts";
 import * as authLoss from "./smoke/auth-loss.ts";
 import * as liveView from "./smoke/live-view.ts";
 import * as contradiction from "./smoke/contradiction.ts";
+import * as frames from "./smoke/frames.ts";
 import * as injection from "./smoke/injection.ts";
 
-const suites = [readOnly, safeWrite, multiSession, authLoss, liveView, injection, contradiction];
+const suites = [readOnly, safeWrite, multiSession, authLoss, liveView, injection, contradiction, frames];
 
 async function main(): Promise<void> {
   const server = await startFixtureServer();
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "scout-smoke-"));
-  const ctx: SmokeContext = { baseUrl: server.baseUrl, projectDir, stats: server.stats };
+  const ctx: SmokeContext = { baseUrl: server.baseUrl, foreignBaseUrl: server.foreignBaseUrl, projectDir, stats: server.stats };
   // `npm run smoke:run -- auth` runs only the suites whose title matches.
   const only = process.argv[2]?.toLowerCase();
   let ran = 0;

@@ -204,6 +204,237 @@ export function isAuthExempt(mode: WriteMode, method: string, pathname: string, 
   );
 }
 
+/**
+ * The origin of a request's frame when that frame belongs to another site than
+ * the app: an embedded widget, such as a form, chat or payment box served by a
+ * third party. A write from one reaches that third party, not the app under
+ * test, so no mode short of destructive lets it out.
+ *
+ * `frameChain` lists the URLs of the frame that issued the request and each of
+ * its parents, stopping before the top document. A frame with no address of
+ * its own (about:blank, srcdoc) belongs to whoever created it, so it is skipped
+ * and its parent decides. Any foreign frame in the chain makes the request
+ * foreign: an app page nested inside a widget is still being driven by it.
+ * Null for the top document, same-origin frames, and requests with no frame.
+ */
+export function foreignFrameOrigin(appUrl: string, frameChain: readonly string[]): string | null {
+  let app: string;
+  try {
+    app = new URL(appUrl).origin;
+  } catch {
+    return null;
+  }
+  for (const url of frameChain) {
+    let frame: URL;
+    try {
+      frame = new URL(url);
+    } catch {
+      continue;
+    }
+    if (frame.protocol !== "http:" && frame.protocol !== "https:") continue;
+    if (frame.origin !== app) return frame.origin;
+  }
+  return null;
+}
+
+/**
+ * The origin to name when a write started by another site is headed outside
+ * the app, or null when the write is the app's own or lands in the app.
+ *
+ * The source is foreign when the frame that sent it (or a parent) is of
+ * another origin, or when the request's Origin header names another origin
+ * than both the app and the frame it is attributed to. The second catches a
+ * foreign frame's form aimed at `_top` or `_blank`, and a popup it opens: the
+ * browser reports those against the top page or no frame at all, but the
+ * Origin header still names the frame's site. A sign-in page loaded as the
+ * whole page is not caught by it, since there the header and the page agree.
+ *
+ * A foreign write whose destination is the app itself — a sign-in provider's
+ * frame posting its reply back to the app's callback — is the app's business
+ * and is left to the ordinary rules.
+ */
+export function foreignWrite(
+  appUrl: string,
+  req: {
+    url: string;
+    frameChain: readonly string[];
+    frameUrl: string | null;
+    originHeader?: string;
+    /** The URL of the page that sent it, when that is not the page the session drives (a popup nobody adopted). */
+    unadoptedPageUrl?: string | null;
+    /** Whether the session's page has a frame of another origin right now. */
+    pageHasForeignFrame?: boolean;
+  },
+): string | null {
+  let app: string;
+  try {
+    app = new URL(appUrl).origin;
+  } catch {
+    return null;
+  }
+  const originOf = (url: string | null | undefined): string | null => {
+    if (!url) return null;
+    try {
+      const u = new URL(url);
+      return u.protocol === "http:" || u.protocol === "https:" ? u.origin : null;
+    } catch {
+      return null;
+    }
+  };
+  if (originOf(req.url) === app) return null;
+  const fromFrame = foreignFrameOrigin(appUrl, req.frameChain);
+  if (fromFrame) return fromFrame;
+  const header = originOf(req.originHeader);
+  if (header && header !== app && header !== originOf(req.frameUrl)) return header;
+  // A popup a foreign frame opened on its own site posts from its own script
+  // before it can be closed, and there the header and the page agree. The
+  // session never drives a page it did not adopt, so its writes out are not
+  // the app's.
+  if (req.unadoptedPageUrl !== undefined && req.unadoptedPageUrl !== null) return originOf(req.unadoptedPageUrl) ?? "a page the session did not open";
+  // A frame with a no-referrer policy sends "Origin: null". Out of the app,
+  // on a page that embeds another site, that is taken to be the embed.
+  if (req.originHeader === "null" && req.pageHasForeignFrame) return "an embedded frame (Origin: null)";
+  return null;
+}
+
+/**
+ * Whether the session's page was moved off the app by one of its embeds. The
+ * sandbox forbids a frame to move the page, but WebKit drops it for a frame
+ * that loads a `data:` URL in its own place, and a Chromium service worker can
+ * serve a frame's document unseen.
+ *
+ * Decided on the navigation's first request, given the other sites the page
+ * embeds at that moment (the engine asks the frames still attached, so a route
+ * change, a 204 or a download changes nothing). A move from a page with no
+ * embeds, or one carrying the app as its Referer — a click on the app's page —
+ * is the tester's: a hosted sign-in page, even one the app also embeds for
+ * silent sign-in, keeps the ordinary rules. With another site's Referer, it is
+ * an embed's. With no Referer at all (an app that sends none, or a frame that
+ * hides its origin) it is an embed's only when it goes to one of the embedded
+ * sites.
+ */
+export class EmbedMoveTracker {
+  private pending: string | null = null;
+  /** The origin the page was moved to by an embed, while it stays there. */
+  movedTo: string | null = null;
+  constructor(private readonly appUrl: string) {}
+
+  /** The top window's navigation to `url` sent its first request, with this Referer, from a page embedding these other sites. */
+  navigationStarted(url: string, referer: string | undefined, embedded: ReadonlySet<string>): void {
+    const target = foreignFrameOrigin(this.appUrl, [url]);
+    if (!target || embedded.size === 0) {
+      this.pending = null;
+      return;
+    }
+    const refererIsHttp = !!referer && /^https?:/i.test(referer);
+    if (refererIsHttp && foreignFrameOrigin(this.appUrl, [referer!]) === null) this.pending = null;
+    else if (refererIsHttp) this.pending = target;
+    else this.pending = embedded.has(target) ? target : null;
+  }
+
+  /** The top window now shows `url`: a new document, or a same-document route change. */
+  pageLoaded(url: string): void {
+    let origin: string;
+    try {
+      const u = new URL(url);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return;
+      origin = u.origin;
+    } catch {
+      return;
+    }
+    if (foreignFrameOrigin(this.appUrl, [url]) === null) {
+      this.movedTo = null;
+      this.pending = null;
+      return;
+    }
+    if (this.pending === origin) this.movedTo = origin;
+    else if (this.movedTo !== origin) this.movedTo = null;
+    this.pending = null;
+  }
+}
+
+/**
+ * The origin to name when the session's page was moved off the app by one of
+ * its embeds (EmbedMoveTracker) and writes to another site from there, or
+ * null. Refused unless it is a sign-in request.
+ */
+export function offAppPageWrite(appUrl: string, pageUrl: string | undefined, destinationUrl: string, movedByEmbed: string | null): string | null {
+  if (!movedByEmbed) return null;
+  const originOf = (url: string | undefined): string | null => {
+    if (!url) return null;
+    try {
+      const u = new URL(url);
+      return u.protocol === "http:" || u.protocol === "https:" ? u.origin : null;
+    } catch {
+      return null;
+    }
+  };
+  const app = originOf(appUrl);
+  const page = originOf(pageUrl);
+  if (!app || !page || page === app || page !== movedByEmbed) return null;
+  if (originOf(destinationUrl) === app) return null;
+  return page;
+}
+
+/**
+ * The page a sandboxed frame is given in place of a redirect: it navigates to
+ * the redirect's target itself, so the next hop is a navigation the policy
+ * routes and sandboxes again. A redirect answered as a redirect is followed by
+ * the browser without asking, and the page it lands on was not sandboxed.
+ */
+export function sandboxedRedirectPage(target: string): string {
+  const json = JSON.stringify(target).replace(/</g, "\\u003c");
+  // No referrer: the next hop would otherwise name this stand-in page, where a real redirect names the app.
+  return `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><script>location.replace(${json});</script>`;
+}
+
+/** The last path segment of a page that is a sign-in page, and nothing else: not a verification step, where a payment provider's frame sits. */
+const SIGN_IN_SEGMENT_RE = /^(login|log-in|signin|sign-in|signup|sign-up|sso|oauth)$/i;
+
+/**
+ * Whether a foreign frame's writes out may go on this page after all: a
+ * captcha on the app's own sign-in page is a cross-origin frame that posts to
+ * its own site, and refusing it would make every login fail. Only on the app's
+ * own origin, only when the page's last path segment is a sign-in word (a
+ * trailing file extension ignored, `_` read as `-`) — not "auth", which is
+ * also the last step of a card payment's verification — and not in observe, where only the login
+ * request itself goes out.
+ */
+export function allowsForeignWriteOnSignIn(mode: WriteMode, topPageUrl: string, appUrl: string): boolean {
+  if (mode === "observe" || mode === "destructive") return false;
+  let page: URL;
+  try {
+    page = new URL(topPageUrl);
+    if (page.origin !== new URL(appUrl).origin) return false;
+  } catch {
+    return false;
+  }
+  const segments = page.pathname.split("/").filter(Boolean);
+  // "sign_in" is "sign-in": underscores are how some frameworks spell it.
+  const last = (segments[segments.length - 1] ?? "").replace(/\.[a-z0-9]+$/i, "").replace(/_/g, "-");
+  return SIGN_IN_SEGMENT_RE.test(last);
+}
+
+/**
+ * The sandbox given to every document a frame of another origin loads, outside
+ * destructive mode: scripts, forms and its own origin keep working, and no
+ * popups or top-window navigation are allowed. A browser applies it to every
+ * realm the document makes, nested frames and blank ones included, which a
+ * script patch cannot reach: in Firefox a detached link's click, a
+ * `<base target>` or a borrowed `window.open` each opened a popup whose first
+ * requests never reached the policy.
+ */
+export const FOREIGN_FRAME_SANDBOX = "sandbox allow-scripts allow-forms allow-same-origin";
+
+/**
+ * A response's Content-Security-Policy with the foreign-frame sandbox added. A
+ * second policy joined with a comma is enforced alongside the first, so the
+ * document's own policy still holds.
+ */
+export function withForeignFrameSandbox(existing: string | undefined): string {
+  return existing && existing.trim() ? `${existing}, ${FOREIGN_FRAME_SANDBOX}` : FOREIGN_FRAME_SANDBOX;
+}
+
 export function allowsWrite(mode: WriteMode, method: string, destructiveWire: boolean, owned: boolean): boolean {
   if (mode === "destructive") return true;
   if (mode === "observe") return false;
@@ -244,6 +475,7 @@ export function policyRefusal(
   method: string,
   pathname: string,
   origin?: string,
+  why?: string,
 ): { status: number; headers: Record<string, string>; body: string } {
   const headers: Record<string, string> = { "content-type": "application/json", [POLICY_REFUSAL_HEADER]: `refused; mode=${mode}` };
   if (origin) {
@@ -256,7 +488,7 @@ export function policyRefusal(
     headers,
     body: JSON.stringify({
       error: "Forbidden",
-      message: `${method} ${pathname} was refused by the tester's ${mode} write policy. The server never received it.`,
+      message: `${method} ${pathname} was refused by the tester's ${mode} write policy${why ? ` (${why})` : ""}. The server never received it.`,
     }),
   };
 }

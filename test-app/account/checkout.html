@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Account checkout</title></head>
+<body>
+  <h1>Account checkout</h1>
+  <!-- The same embed on a sign-in page and on a checkout page: a captcha on the
+       first must be able to post to its own site, a payment box on the second
+       must not. Only the page's path differs. -->
+  <iframe id="embed" title="Embedded check" width="300" height="120"></iframe>
+  <script>
+    // Only a loopback origin, the fixture server's second port; anything else is ignored.
+    const raw = new URLSearchParams(location.search).get('foreign') || '';
+    const port = /^http:\/\/127\.0\.0\.1:(\d{2,5})$/.exec(raw);
+    // Rebuilt from a number on a fixed host, so nothing of the query string itself reaches the page.
+    const other = port ? 'http://127.0.0.1:' + Number(port[1]) : '';
+    if (other) document.getElementById('embed').src = other + '/frame-child.html?as=checkout';
+  </script>
+</body>
+</html>
