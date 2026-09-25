@@ -114,6 +114,13 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end();
       return;
     }
+    // The app's own frame URL redirecting into another site: /app-frame-redirect?to=<origin>.
+    if (urlPath === "/app-frame-redirect") {
+      const to = new URL(req.url ?? "/", "http://x").searchParams.get("to") ?? "";
+      res.writeHead(302, { location: `${to}/frame-child.html?as=appredirect` });
+      res.end();
+      return;
+    }
     if (urlPath === "/frame-redirect") {
       res.writeHead(302, { location: "/frame-child.html?as=redirected" });
       res.end();

@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>App frame that redirects out</title></head>
+<body>
+  <h1>A frame of the app's own that redirects to another site</h1>
+  <iframe id="embed" title="App-hosted embed" width="400" height="200"></iframe>
+  <script>
+    const other = new URLSearchParams(location.search).get('foreign');
+    if (other) document.getElementById('embed').src = '/app-frame-redirect?to=' + encodeURIComponent(other);
+  </script>
+</body>
+</html>

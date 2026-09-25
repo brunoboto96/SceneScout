@@ -209,6 +209,30 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       `${page.url()} ${JSON.stringify(stats.writes)}`,
     );
 
+    console.log("frames: the app's own frame redirecting into another site");
+    await engine.navigate(`${baseUrl}/frames-app-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    await until(
+      "the app frame's redirect target to load",
+      async () => {
+        const f = frameAs("appredirect");
+        return !!f && (await f.evaluate(() => typeof (window as unknown as { openPopup?: unknown }).openPopup === "function").catch(() => false));
+      },
+      8000,
+    );
+    const fromAppFrame: Page[] = [];
+    const onAppFramePopup = (p: Page) => fromAppFrame.push(p);
+    page.context().on("page", onAppFramePopup);
+    await frameAs("appredirect")!
+      .evaluate(() => (window as unknown as { openPopup: () => void }).openPopup())
+      .catch(() => {});
+    await page.waitForTimeout(1500);
+    page.context().off("page", onAppFramePopup);
+    check(
+      "a foreign page reached by the app's own frame redirecting is sandboxed: it cannot open a window",
+      fromAppFrame.length === 0,
+      `${fromAppFrame.length} popup(s)`,
+    );
+
     // The refused top-window navigation leaves the page on the browser's error page: load it again.
     const reload = async () => {
       await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);

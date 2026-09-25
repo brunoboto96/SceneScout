@@ -931,29 +931,33 @@ export class BrowserEngine {
       await this.context.route("**/*", async (route) => {
         const req = route.request();
         const method = req.method();
+        // A redirect is followed by the browser without asking, so its target
+        // would load unsandboxed: a frame's redirect is answered with a
+        // sandboxed page that navigates there itself, and the next hop comes
+        // back here. Built from scratch: a redirect's framing or script
+        // headers never applied to a redirect, and would block this page.
+        const standIn = async (location: string, setCookie: string | undefined) => {
+          const headers: Record<string, string> = {
+            "content-type": "text/html; charset=utf-8",
+            "content-security-policy": withForeignFrameSandbox(undefined),
+            "cache-control": "no-store",
+          };
+          if (setCookie) headers["set-cookie"] = setCookie;
+          await route.fulfill({ status: 200, headers, body: sandboxedRedirectPage(new URL(location, req.url()).href) });
+        };
+        const frameDoc = method === "GET" && req.resourceType() === "document" ? this.frameDocumentKind(req) : null;
         // A document loading into a frame of another origin gets the sandbox
         // that forbids popups and top-window navigation (policy.ts says why).
-        if (method === "GET" && req.resourceType() === "document" && this.isForeignFrameDocument(req)) {
+        if (frameDoc === "foreign") {
           try {
             const res = await route.fetch({ maxRedirects: 0 });
             const headers = res.headers();
-            headers["content-security-policy"] = withForeignFrameSandbox(headers["content-security-policy"]);
             const location = res.status() >= 300 && res.status() < 400 ? headers["location"] : undefined;
             if (location) {
-              // A redirect is followed by the browser without asking, so its
-              // target would load unsandboxed: answer with a sandboxed page
-              // that navigates there itself, and the next hop comes back here.
-              // Built from scratch: a redirect's framing or script headers
-              // never applied to a redirect, and would block this page.
-              const page: Record<string, string> = {
-                "content-type": "text/html; charset=utf-8",
-                "content-security-policy": withForeignFrameSandbox(undefined),
-                "cache-control": "no-store",
-              };
-              if (headers["set-cookie"]) page["set-cookie"] = headers["set-cookie"];
-              await route.fulfill({ status: 200, headers: page, body: sandboxedRedirectPage(new URL(location, req.url()).href) });
+              await standIn(location, headers["set-cookie"]);
               return;
             }
+            headers["content-security-policy"] = withForeignFrameSandbox(headers["content-security-policy"]);
             await route.fulfill({ response: res, headers });
             return;
           } catch {
@@ -961,6 +965,26 @@ export class BrowserEngine {
             await route.abort("blockedbyclient").catch(() => {});
             return;
           }
+        }
+        // The app's own frame document can redirect into another site, whose
+        // page would then load unsandboxed. Asked first, one hop only; a
+        // document that does not redirect to another site loads as it would
+        // have, sent on rather than served from here — a served document
+        // counts as public in Chromium and could no longer reach an app on
+        // localhost. The price is a second GET of the app's frame documents.
+        if (frameDoc === "app") {
+          try {
+            const res = await route.fetch({ maxRedirects: 0 });
+            const location = res.status() >= 300 && res.status() < 400 ? res.headers()["location"] : undefined;
+            if (location && foreignFrameOrigin(this.baseUrl, [new URL(location, req.url()).href])) {
+              await standIn(location, res.headers()["set-cookie"]);
+              return;
+            }
+          } catch {
+            /* could not ask: load it as it would have loaded */
+          }
+          await route.continue().catch(() => {});
+          return;
         }
         if (method === "GET" || method === "HEAD" || method === "OPTIONS") return route.continue();
         const url = req.url();
@@ -1110,10 +1134,13 @@ export class BrowserEngine {
   private embedMoves = new EmbedMoveTracker("");
 
   /**
-   * Frames that have held a document of another origin, with that origin. A
-   * frame that has since moved itself to a data: URL is still that site's; it
-   * leaves the record when it leaves the page, as every frame of a replaced
-   * document does, so nothing has to be cleared at the right moment.
+   * Frames that have held a document of another origin, with the first such
+   * origin. A frame that has since moved itself to a data: URL is still that
+   * site's; it leaves the record when it leaves the page, as every frame of a
+   * replaced document does, so nothing has to be cleared at the right moment.
+   * Sticky on purpose: a frame that went back to the app (a silent-renew frame
+   * landing on the app's callback) keeps counting as an embed, which refuses
+   * more, never less.
    */
   private foreignFrames = new WeakMap<Frame, string>();
 
@@ -1682,20 +1709,28 @@ export class BrowserEngine {
   }
 
   /**
-   * Whether a request is a document loading into a frame (not the top window)
-   * of another origin than the app's. Not on the app's own sign-in pages, where
-   * a "sign in with" button is a foreign frame that has to open its popup.
+   * What a document request loads into: a frame (not the top window) of
+   * another origin than the app's, a frame of the app's own origin, or
+   * neither (null). On the app's own sign-in pages frames are left alone: a
+   * "sign in with" button is a foreign frame that has to open its popup.
    */
-  private isForeignFrameDocument(req: Request): boolean {
+  private frameDocumentKind(req: Request): "foreign" | "app" | null {
     let frame: Frame;
     try {
       frame = req.frame();
     } catch {
-      return false;
+      return null;
     }
-    if (frame === frame.page().mainFrame()) return false;
-    if (foreignFrameOrigin(this.baseUrl, [req.url()]) === null) return false;
-    return !allowsForeignWriteOnSignIn(this.mode, this.page?.url() ?? "", this.baseUrl);
+    if (frame === frame.page().mainFrame()) return null;
+    if (allowsForeignWriteOnSignIn(this.mode, this.page?.url() ?? "", this.baseUrl)) return null;
+    let url: URL;
+    try {
+      url = new URL(req.url());
+    } catch {
+      return null;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return foreignFrameOrigin(this.baseUrl, [req.url()]) ? "foreign" : "app";
   }
 
   /**

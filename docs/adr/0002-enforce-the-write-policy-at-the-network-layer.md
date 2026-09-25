@@ -55,7 +55,10 @@ sandboxed page that navigates to its target, because a redirect answered as one
 is followed by the browser without asking and its target loads unsandboxed. A
 frame document that cannot be fetched to add the sandbox is not loaded, and a
 document is held until it has fully arrived, so a frame that streams shows
-nothing until it ends.
+nothing until it ends. A document of the app's own loading into a frame is
+asked first, one hop, whether it redirects to another site; if so it gets the
+same stand-in, and otherwise it loads as it would have, at the price of a second
+GET.
 
 Limits of the sandbox, and what covers them. WebKit drops it when a frame loads
 a `data:` URL in its own place, and in Chromium a frame can register a service
@@ -73,7 +76,17 @@ page, even one the app also embeds for silent sign-in, keeps the ordinary
 rules. With another site's Referer it is an embed's; with none at all it is an
 embed's only when it goes to one of the embedded sites, so on an app that sends
 no Referer the tester's own move to a site the page embeds is refused. A write
-out with `Origin: null` from a page that embeds another site is refused. A redirect's stand-in page is built
+out with `Origin: null` from a page that embeds another site is refused.
+
+What this guards against is the tester's own actions reaching a third party
+through an embed — a form it fills, a button it presses, and the embed's
+ordinary behaviour around them — not embed code written to evade the tester. A
+known gap of that second kind, in WebKit only: a frame that loads a `data:` URL
+in its own place (which drops the sandbox there), hides the Referer, and moves
+the whole page to a site the page does not embed is taken for the tester's own
+move, and that page's writes out go through the ordinary rules. Chromium and
+Firefox keep the sandbox across the `data:` load, so the move cannot happen
+there. A redirect's stand-in page is built
 with no headers of the redirect's but its cookies, and sends no referrer, so
 an embed that checks which site embeds it by the Referer may refuse to load. In Chromium, a document re-served with the
 sandbox counts as public, so its requests to a loopback address are refused by
