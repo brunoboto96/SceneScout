@@ -553,7 +553,7 @@ const VISIBLE_FRAME_PX = 2;
 export function frameLines(
   appUrl: string,
   frames: readonly FrameInfo[],
-  opts: { nested?: number; writesRefused?: boolean; read?: ReadonlySet<string> } = {},
+  opts: { nested?: number; writesRefused?: boolean; read?: ReadonlySet<string>; trustedWrites?: ReadonlySet<string> } = {},
 ): string[] {
   const visible = frames.filter((f) => f.width >= VISIBLE_FRAME_PX && f.height >= VISIBLE_FRAME_PX);
   const hidden = frames.length - visible.length;
@@ -574,10 +574,18 @@ export function frameLines(
       /* about:blank, srcdoc: shown as they are */
     }
     const label = f.title ? ` "${f.title.slice(0, 60)}"` : "";
+    let frameOrigin = "";
+    try {
+      frameOrigin = new URL(f.url).origin;
+    } catch {
+      /* no origin */
+    }
     const writes = f.foreign
       ? opts.writesRefused === false
         ? " — its writes go out (destructive mode)"
-        : " — writes it sends outside the app are refused"
+        : opts.trustedWrites?.has(frameOrigin)
+          ? " — trusted embed: its writes go out (safe-write)"
+          : " — writes it sends outside the app are refused"
       : "";
     const read = opts.read ? (opts.read.has(f.url) ? " — controls listed above" : " — not read") : "";
     return `  ${f.foreign ? "cross-origin" : "same-origin"} ${where.slice(0, 120)}${label} ${f.width}×${f.height}${read}${writes}`;
