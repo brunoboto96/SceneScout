@@ -23,7 +23,7 @@ import {
   stripForeignHref,
   frameToPageRect,
 } from "../src/engine/collector.ts";
-import { POLICY_BLOCK_WINDOW_MS, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
+import { POLICY_BLOCK_WINDOW_MS, formatViolations, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
 import {
   describeInjection,
   injectionProbe,
@@ -511,4 +511,21 @@ test("frame helpers: names capped, link queries dropped, rects placed on the pag
   // Two srcdoc frames of the app are told apart by their titles.
   const srcdoc = (title: string) => ({ url: "about:srcdoc", origin: "", title, foreign: false });
   assert.notEqual(frameElementKey("button:send", srcdoc("Inner note")), frameElementKey("button:send", srcdoc("Other widget")));
+});
+
+test("formatViolations: an embed's violation says whose it is", () => {
+  const at = new Date().toISOString();
+  const out = formatViolations([
+    {
+      kind: "http_error",
+      severity: "medium",
+      detail: "GET https://chat.example.com/x → HTTP 404",
+      url: "http://app.test/",
+      at,
+      embed: "https://chat.example.com",
+    },
+    { kind: "http_error", severity: "high", detail: "GET http://app.test/api → HTTP 500", url: "http://app.test/", at },
+  ]);
+  assert.match(out, /\[medium\] http_error \(in an embed of https:\/\/chat\.example\.com: its behaviour, not the app's\)/);
+  assert.match(out, /\[high\] http_error: GET http:\/\/app\.test\/api/, "the app's own is unchanged");
 });

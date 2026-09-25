@@ -20,6 +20,7 @@ import {
   classifyFilledStates,
   computeGaps,
   escapeTableCell,
+  embedSection,
   formatRouteCoverage,
   formatUnchosenOptions,
   describeAge,
@@ -817,4 +818,34 @@ test("report: trusted embeds are named, and whether they counted", () => {
   assert.match(ignored, /## Trusted embeds[\s\S]*not applied: trust only counts in safe-write mode, and this run was read-only/);
   const none = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 1, mode: "safe-write" }, { write: false }).markdown;
   assert.doesNotMatch(none, /Trusted embeds/);
+});
+
+test("embedSection: an embed's controls and violations, by origin, apart from the app's", () => {
+  assert.deepEqual(embedSection([], { total: 0, exercised: 0 }), [], "nothing embedded, nothing said");
+  const at = new Date().toISOString();
+  const lines = embedSection(
+    [
+      { kind: "http_error", severity: "medium", detail: "GET https://chat.example.com/x/12 → HTTP 404", url: "u", at, embed: "https://chat.example.com" },
+      { kind: "http_error", severity: "medium", detail: "GET https://chat.example.com/x/13 → HTTP 404", url: "u", at, embed: "https://chat.example.com" },
+    ],
+    { total: 4, exercised: 1 },
+  ).join("\n");
+  assert.match(lines, /## Embeds/);
+  assert.match(lines, /1\/4 of their controls exercised; not counted in the app's coverage/);
+  assert.match(lines, /\| `https:\/\/chat\.example\.com` \| 2 \|/, "one signature, ids folded");
+});
+
+test("classifyFilledStates: typing into another site's frame leaves no app form unsubmitted", () => {
+  const embed = freshStore();
+  embed.visitState("/support#a", "http://app.test/support", "/support", [
+    "frame:https://chat.example.com|textbox:message",
+    "frame:https://chat.example.com|button:send",
+  ]);
+  embed.markExercised("/support#a", "frame:https://chat.example.com|textbox:message", "type");
+  assert.deepEqual(classifyFilledStates(embed, embed.routeFacts), { unsubmitted: [], noSubmitControl: [] });
+  // The contrast: the same controls as the app's own form.
+  const own = freshStore();
+  own.visitState("/support#a", "http://app.test/support", "/support", ["textbox:message", "button:send"]);
+  own.markExercised("/support#a", "textbox:message", "type");
+  assert.deepEqual(classifyFilledStates(own, own.routeFacts).unsubmitted, ["/support"]);
 });

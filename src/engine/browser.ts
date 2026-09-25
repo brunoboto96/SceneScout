@@ -75,6 +75,7 @@ import {
   foreignWrite,
   withForeignFrameSandbox,
   offAppPageWrite,
+  embedOfRequest,
   hostileForEmbed,
   trustedEmbedOrigins,
   MAX_TRUSTED_EMBEDS,
@@ -869,6 +870,17 @@ export class BrowserEngine {
     }
     this.oracles = new OracleMonitor();
     this.oracles.setPolicyRefusalCheck((req) => this.refusedByPolicy.has(req));
+    // A request an embed sends to the app is the app's to answer: only one headed outside the app is the embed's.
+    this.oracles.setEmbedAttribution((req) => {
+      let site: string | null = null;
+      try {
+        const frame = req.frame();
+        site = frame === frame.page().mainFrame() ? null : this.foreignOriginOf(frame);
+      } catch {
+        /* no frame: a service worker's or a new window's first request */
+      }
+      return embedOfRequest(this.baseUrl, req.url(), site);
+    });
     this.lastSnap = null;
     this.designAuditCount = 0;
 

@@ -85,6 +85,35 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       foreignClick,
     );
 
+    console.log("frames: what fails inside another site's frame is labelled as that embed's");
+    type Fetcher = { fetchMissing: () => Promise<unknown> };
+    await frameAs("same")!.evaluate(() => (window as unknown as Fetcher).fetchMissing());
+    await frameAs("foreign")!.evaluate(() => (window as unknown as Fetcher).fetchMissing());
+    await page.waitForTimeout(500);
+    const withViolations = await engine.snapshot();
+    const foreignLine = /[^\n]*missing-in-frame-foreign[^\n]*/.exec(withViolations)?.[0] ?? "";
+    const sameLine = /[^\n]*missing-in-frame-same[^\n]*/.exec(withViolations)?.[0] ?? "";
+    check(
+      "a failing request inside another site's frame is the embed's, at medium",
+      /\[medium\] http_error \(in an embed of http:\/\/127\.0\.0\.1:\d+/.test(foreignLine),
+      withViolations,
+    );
+    check("...while the same failure in the app's own frame is the app's", sameLine !== "" && !/in an embed of/.test(sameLine), withViolations);
+    // The cap is the point: the same 500 is high from the app's own frame and medium from another site's.
+    type Failer = { fetchFail: () => Promise<unknown> };
+    await frameAs("same")!.evaluate(() => (window as unknown as Failer).fetchFail());
+    await frameAs("foreign")!.evaluate(() => (window as unknown as Failer).fetchFail());
+    await page.waitForTimeout(500);
+    const fiveHundreds = await engine.snapshot();
+    const appPort = new URL(baseUrl).port;
+    const foreignPort = new URL(foreignBaseUrl).port;
+    check(
+      "a 500 inside another site's frame is capped at medium and named as the embed's, while the app's own 500 stays high",
+      new RegExp(`\\[medium\\] http_error \\(in an embed of [^)]*\\): GET http://127\\.0\\.0\\.1:${foreignPort}/api/fail-500`).test(fiveHundreds) &&
+        new RegExp(`\\[high\\] http_error: GET http://127\\.0\\.0\\.1:${appPort}/api/fail-500`).test(fiveHundreds),
+      fiveHundreds,
+    );
+
     console.log("frames: a frame inside another site's frame, its links, and the keyboard");
     const innerForeign = /(e\d+) textbox "Inner note"[^\n]*⟨in cross-origin frame/.exec(snap)?.[1];
     check("a srcdoc frame inside another site's frame is that site's", !!innerForeign, snap);

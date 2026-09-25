@@ -67,6 +67,10 @@
     window.moveTopThird = (third) => {
       location.href = 'data:text/html,' + encodeURIComponent('<script>top.location = ' + JSON.stringify(third + '/frame-popup.html?via=third') + ';<\/script>');
     };
+    // A read that fails on this frame's own site.
+    window.fetchMissing = () => fetch('/api/missing-in-frame-' + new URLSearchParams(location.search).get('as')).then((r) => r.status).catch(() => 'failed');
+    // A server error on this frame's own site.
+    window.fetchFail = () => fetch('/api/fail-500').then((r) => r.status).catch(() => 'failed');
     // A write into the app itself, the way a sign-in frame posts its reply to the app's callback.
     window.sendToApp = (app) =>
       fetch(app + '/api/frame-to-app', { method: 'POST', body: 'reply', mode: 'no-cors' })
