@@ -106,6 +106,15 @@ the app's own sub-domains count as foreign: refusing a harmless write costs a
 gap in the report, and sending test traffic to a third party nobody asked
 cannot be undone.
 
+The engine lists and acts on the controls inside frames as it does on the
+page's. In a frame of another site it acts as a user would and no further:
+typed markup, fuzzing lengths and control characters, repeated-click probes
+and file uploads are refused there in every mode, destructive included,
+because the tester is authorised to test the app and not the embeds of
+others. The text a container shows in such a frame (a select's options, a
+textarea, a tagged block) is masked in the snapshot, since it can hold other
+people's data; the labels of links, buttons and fields are kept.
+
 ## Consequences
 
 A refusal is a tool result the agent must respect and cannot route around, and

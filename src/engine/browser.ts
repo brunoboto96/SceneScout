@@ -30,6 +30,11 @@ import {
   frameLines,
   hasVisibleFrame,
   type FrameInfo,
+  frameElementKey,
+  frameLabel,
+  masksForeignName,
+  MASKED_NAME,
+  type FrameTag,
   type BrokenImageScan,
   displayName,
   missingName,
@@ -67,6 +72,8 @@ import {
   foreignWrite,
   withForeignFrameSandbox,
   offAppPageWrite,
+  hostileForEmbed,
+  embedProbeRefusal,
   EmbedMoveTracker,
   sandboxedRedirectPage,
   allowsForeignWriteOnSignIn,
@@ -155,6 +162,8 @@ interface FileInputListing {
 }
 
 interface SnapshotElement extends InteractableInfo {
+  /** The frame it was collected from; absent for the page itself. */
+  frame?: FrameTag;
   ref: string;
   key: string;
   tag: string;
@@ -228,6 +237,9 @@ function requestSource(req: Request): { frameChain: string[]; frameUrl: string |
 
 /** The `why` of a top-window navigation refused as a possible frame escape; the notice words it on its own. */
 const ESCAPE_REFUSAL = "a possible frame escape";
+
+/** The most frames a snapshot reads controls from. */
+const MAX_READ_FRAMES = 10;
 
 /** How long a snapshot waits for its frames' elements to answer. */
 const FRAME_READ_MS = 1500;
@@ -1323,31 +1335,117 @@ export class BrowserEngine {
       if (stable) break;
     }
 
+    const mainCount = rawElements.length;
+    // Then each frame's own controls, read once, each within its own limit.
+    const framed = await this.collectFrames(page);
+
     // Element identity is the coverage key (testid or role+name, ordinal-
     // disambiguated). When a key persists across snapshots of the same route,
     // its ref is REUSED — diffs stay meaningful and the agent's mental model
-    // (and previously issued refs) survive re-snapshots.
+    // (and previously issued refs) survive re-snapshots. An element inside a
+    // frame carries the frame in its key (collector.ts frameElementKey).
     const route = normalizePath(page.url());
     const prevByKey = this.lastSnap?.route === route ? this.lastSnap.byKey : null;
     this.refs.clear();
+    this.refFrames.clear();
     const keyCounts = new Map<string, number>();
-    const elements: SnapshotElement[] = rawElements.map((el) => {
-      const baseKey = elementKey(el);
+    const all: Array<{ raw: RawElement; frame?: Frame; tag?: FrameTag }> = [
+      ...rawElements.map((raw) => ({ raw })),
+      ...framed.flatMap((g) => g.raws.map((raw) => ({ raw: raw as RawElement, frame: g.frame, tag: g.tag }))),
+    ];
+    const elements: SnapshotElement[] = all.map(({ raw: el, frame, tag }) => {
+      const baseKey = frameElementKey(elementKey(el), tag);
       const count = keyCounts.get(baseKey) ?? 0;
       keyCounts.set(baseKey, count + 1);
       const key = count === 0 ? baseKey : `${baseKey}~${count}`;
       const ref = prevByKey?.get(key)?.ref ?? `e${++this.refCounter}`;
       const full: SnapshotElement = {
         ...el,
+        ...(tag ? { frame: tag } : {}),
+        // Judged on the real label, then masked: the policy must see what a click would press.
+        destructive: isDestructive(el.name, el.testid),
+        ...(tag?.foreign && masksForeignName(el.tag, el.role) ? { name: MASKED_NAME } : {}),
         ref,
         key,
-        destructive: isDestructive(el.name, el.testid),
       };
       this.refs.set(ref, full);
+      if (frame) this.refFrames.set(ref, frame);
       return full;
     });
-    this.harvestRoutes(elements);
-    return { elements, truncated: rawElements.length >= 150 };
+    this.harvestRoutes(elements.filter((el) => !el.frame?.foreign));
+    this.framesRead = new Set(framed.map((g) => g.frame));
+    return { elements, truncated: mainCount >= 150 };
+  }
+
+  /**
+   * The controls inside the page's frames, up to MAX_READ_FRAMES visible ones,
+   * each read within FRAME_READ_MS so one busy frame cannot stall a snapshot.
+   * Positions are moved into the page's coordinates (the frame element's box
+   * on screen, the frame's own scroll, the page's scroll), so geometry and
+   * the design audit can place them.
+   */
+  private async collectFrames(page: Page): Promise<Array<{ frame: Frame; tag: FrameTag; raws: unknown[] }>> {
+    const top = page.mainFrame();
+    const frames = page.frames().filter((f) => f !== top && !f.isDetached());
+    if (frames.length === 0) return [];
+    const pageScroll = ((await page.evaluate("({ x: window.scrollX, y: window.scrollY })").catch(() => null)) as { x: number; y: number } | null) ?? {
+      x: 0,
+      y: 0,
+    };
+    const read = async (frame: Frame): Promise<{ frame: Frame; tag: FrameTag; raws: unknown[] } | null> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const work = (async () => {
+        const el = await frame.frameElement();
+        const box = await el.boundingBox();
+        if (!box || box.width < 2 || box.height < 2) return null;
+        const title = ((await el.getAttribute("title")) || (await el.getAttribute("name")) || "").trim();
+        const got = (await frame.evaluate(`(() => ({ els: ${COLLECT_INTERACTABLES_SCRIPT}, sx: window.scrollX, sy: window.scrollY }))()`)) as {
+          els: Array<{ rect: Rect }>;
+          sx: number;
+          sy: number;
+        };
+        const dx = box.x + pageScroll.x - got.sx;
+        const dy = box.y + pageScroll.y - got.sy;
+        const raws = got.els.map((r) => ({ ...r, rect: { ...r.rect, x: r.rect.x + dx, y: r.rect.y + dy } }));
+        let origin = "";
+        try {
+          const u = new URL(frame.url());
+          if (u.protocol === "http:" || u.protocol === "https:") origin = u.origin;
+        } catch {
+          /* no web address */
+        }
+        const foreign = (this.foreignFrames.get(frame) ?? foreignFrameOrigin(this.baseUrl, [frame.url()])) !== null;
+        return { frame, tag: { url: frame.url(), origin, title, foreign }, raws };
+      })().catch(() => null);
+      const limit = new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), FRAME_READ_MS);
+      });
+      return Promise.race([work, limit]).finally(() => clearTimeout(timer));
+    };
+    const got = await Promise.all(frames.slice(0, MAX_READ_FRAMES).map(read));
+    return got.filter((g): g is { frame: Frame; tag: FrameTag; raws: unknown[] } => g !== null);
+  }
+
+  /** The origin of another site's frame an element is in, or null for the page and the app's own frames. */
+  private foreignEmbedOf(el: SnapshotElement): string | null {
+    return el.frame?.foreign ? el.frame.origin || el.frame.url : null;
+  }
+
+  /** The frames whose controls the last snapshot listed. */
+  private framesRead = new Set<Frame>();
+
+  /** The frame each ref of the last snapshot lives in; refs of the page itself are absent. */
+  private refFrames = new Map<string, Frame>();
+
+  /**
+   * Where to look for a ref's element: its frame, or the page. A frame that has
+   * gone makes the ref stale, like a page that has navigated.
+   */
+  private scopeOf(el: SnapshotElement): Page | Frame {
+    const frame = this.refFrames.get(el.ref);
+    if (!frame) return this.requirePage();
+    if (frame.isDetached()) throw new Error(`The frame holding ${el.ref} has gone — take a new scout_snapshot.`);
+    return frame;
   }
 
   /**
@@ -1462,7 +1560,7 @@ export class BrowserEngine {
         memory.wasExercised(fp, el.key) ? "done" : null,
         el.href ? `href=${el.href.slice(0, 60)}` : null,
       ].filter(Boolean);
-      return `${el.ref} ${el.role} "${displayName(el)}"${flags.length ? ` [${flags.join(", ")}]` : ""}`;
+      return `${el.ref} ${el.role} "${displayName(el)}"${flags.length ? ` [${flags.join(", ")}]` : ""}${el.frame ? ` ⟨in ${frameLabel(el.frame)}⟩` : ""}`;
     };
 
     // Diff mode: when re-snapshotting the same route, report only what
@@ -1512,7 +1610,15 @@ export class BrowserEngine {
         elements.map(line).join("\n");
     }
 
-    const geometry = geometryIssues(elements, page.viewportSize() ?? { width: 1280, height: 900 });
+    // Per document: the page's own controls together, and each frame's apart —
+    // an embed's controls are not laid out against the page's.
+    const viewport = page.viewportSize() ?? { width: 1280, height: 900 };
+    const byDocument = new Map<string, SnapshotElement[]>();
+    for (const el of elements) {
+      const doc = el.frame ? el.key.slice(0, el.key.indexOf("|") + 1) : "";
+      byDocument.set(doc, [...(byDocument.get(doc) ?? []), el]);
+    }
+    const geometry = [...byDocument.values()].flatMap((group) => geometryIssues(group, viewport));
     geometry.push(...(await probeOverlays(page)));
     const hiddenFileInputs = await this.hiddenFileInputs(page);
     const brokenImages = brokenImageIssues(
@@ -1532,7 +1638,12 @@ export class BrowserEngine {
       (geometry.length > 0 ? `\nGEOMETRY issues:\n` + geometry.map((g) => `  ⚠ ${g}`).join("\n") : "") +
       (brokenImages.length > 0 ? `\nBROKEN IMAGES:\n` + brokenImages.map((b) => `  ⚠ ${b}`).join("\n") : "") +
       (frames.length > 0 || nestedFrames > 0
-        ? `\n` + frameLines(this.baseUrl, frames, { nested: nestedFrames, writesRefused: this.mode !== "destructive" }).join("\n")
+        ? `\n` +
+          frameLines(this.baseUrl, frames, {
+            nested: nestedFrames,
+            writesRefused: this.mode !== "destructive",
+            read: new Set([...this.framesRead].map((f) => f.url())),
+          }).join("\n")
         : "") +
       (hiddenFileInputs.length > 0
         ? `\nFILE INPUTS not listed above (hidden behind a styled control — a user never sees the input itself): ${hiddenFileInputs.join("; ")}. ` +
@@ -1568,7 +1679,7 @@ export class BrowserEngine {
     }
     // String EXPRESSION via page.evaluate (locator.evaluate treats a string as
     // an expression, not a function — the element arg never binds).
-    const live = (await page
+    const live = (await this.scopeOf(el)
       .evaluate(
         `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return null; ` +
           `return { testid: node.getAttribute('data-testid'), label: (node.getAttribute('aria-label') || node.innerText || node.textContent || node.getAttribute('placeholder') || '').trim().slice(0, 120) }; })()`,
@@ -1927,11 +2038,16 @@ export class BrowserEngine {
       this.logAction({ action: "click:refused", target: liveLabel || el.name, url: page.url() });
       return refusal;
     }
+    const embed = this.foreignEmbedOf(el);
+    if (embed && clicks > 1) {
+      this.logAction({ action: "click:refused", target: `${clicks} clicks in a frame of ${embed}`, url: page.url() });
+      return embedProbeRefusal(`a ${clicks}-click probe`, embed);
+    }
     // Submit-shaped clicks that fire zero network requests are a smell
     // (silent no-op forms): capture the count before to compare after.
     const xhrBefore = this.xhrCount;
     const submitLike = el.role === "button" && /submit|send|save|create|apply|subscribe|register|sign|post|add\b/i.test(el.name + " " + (el.testid ?? ""));
-    const { forced } = await this.resilientClick(page.locator(`xpath=${el.xpath}`), ACTION_TIMEOUT_MS, clicks);
+    const { forced } = await this.resilientClick(this.scopeOf(el).locator(`xpath=${el.xpath}`), ACTION_TIMEOUT_MS, clicks);
     this.memory!.markExercised(this.currentFingerprint, el.key, clicks > 1 ? `click×${clicks}` : "click");
     const result = await this.afterAction(clicks > 1 ? `click×${clicks}` : "click", `${el.role} "${el.name}"`);
     // Impatient-user probe: a rapid multi-click that fires the SAME
@@ -2054,15 +2170,24 @@ export class BrowserEngine {
     }
     const refusal = this.actionPolicyCheck(el, liveLabel);
     if (refusal) return refusal;
-    const locator = page.locator(`xpath=${el.xpath}`);
-    // Before the fill: a page that reflects input as it is typed already holds the element afterwards.
-    await this.noteProbe(text, `${el.role} "${el.name}"`);
+    const embed = this.foreignEmbedOf(el);
+    if (embed) {
+      const hostile = hostileForEmbed(text);
+      if (hostile) {
+        this.logAction({ action: "type:refused", target: `${el.role} in a frame of ${embed} (${hostile})`, url: page.url() });
+        return embedProbeRefusal(`typing this value (${hostile})`, embed);
+      }
+    }
+    const locator = this.scopeOf(el).locator(`xpath=${el.xpath}`);
+    // Before the fill: a page that reflects input as it is typed already holds
+    // the element afterwards. Never for another site's frame: no probe is placed there.
+    if (!embed) await this.noteProbe(text, `${el.role} "${el.name}"`);
     const fillNote = await this.fillOrAppend(locator, text, replace);
     if (pressEnter) {
       // Enter inside a form submits it — check the form's submit target, or
       // pressEnter becomes a read-only bypass for destructive submits.
       if (this.readOnly) {
-        const submitLabel = (await page
+        const submitLabel = (await this.scopeOf(el)
           .evaluate(
             `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return ''; ` +
               `const f = node.form || node.closest('form'); if (!f) return ''; ` +
@@ -2099,7 +2224,9 @@ export class BrowserEngine {
       el = resolved.el;
       const refusal = this.actionPolicyCheck(el, resolved.liveLabel);
       if (refusal) return refusal;
-      locator = page.locator(`xpath=${el.xpath}`);
+      const embed = this.foreignEmbedOf(el);
+      if (embed) return embedProbeRefusal("a file upload", embed);
+      locator = this.scopeOf(el).locator(`xpath=${el.xpath}`);
     }
     const outcome = await this.performUpload(locator, opts);
     if (outcome.refused) return outcome.refused;
@@ -2306,7 +2433,7 @@ export class BrowserEngine {
     const page = this.requirePage();
     const { el } = await this.resolveForAction(ref);
     const { before, bodyBefore, churning } = await this.hoverBaselines();
-    const locator = page.locator(`xpath=${el.xpath}`);
+    const locator = this.scopeOf(el).locator(`xpath=${el.xpath}`);
     await locator.hover({ timeout: ACTION_TIMEOUT_MS });
     // Wiggle inside the element: pointer-tracking libraries distinguish real
     // movement from a single synthetic hover event.
@@ -2316,7 +2443,7 @@ export class BrowserEngine {
       await page.mouse.move(box.x + box.width / 2 - 2, box.y + box.height / 2 - 1);
     }
     const { revealed, fallbackUsed } = await this.detectHoverReveal(before, bodyBefore, churning);
-    const attrTexts = (await page
+    const attrTexts = (await this.scopeOf(el)
       .evaluate(
         `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return []; const out = []; ` +
           `const t = node.getAttribute('title'); if (t) out.push('title: ' + t.slice(0, 300)); ` +
@@ -2351,7 +2478,7 @@ export class BrowserEngine {
     if (refusal) return refusal;
     if (this.readOnly) {
       // Bulk-action dropdowns fire on change — vet the chosen option itself.
-      const optionLabel = (await page
+      const optionLabel = (await this.scopeOf(el)
         .evaluate(
           `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return ''; const v = ${JSON.stringify(value)}; ` +
             `const opts = Array.from(node.options || []); ` +
@@ -2364,7 +2491,7 @@ export class BrowserEngine {
         return destructiveRefusal(optionLabel || value, this.mode);
       }
     }
-    const loc = page.locator(`xpath=${el.xpath}`);
+    const loc = this.scopeOf(el).locator(`xpath=${el.xpath}`);
     const options = el.tag === "select" ? await readSelectOptions(loc) : null;
     const picked = await loc.selectOption(value, { timeout: ACTION_TIMEOUT_MS });
     this.memory!.markExercised(this.currentFingerprint, el.key, "select");

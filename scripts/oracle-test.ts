@@ -9,7 +9,17 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { brokenImageIssues, displayName, frameLines, geometryIssues, hasVisibleFrame, missingName } from "../src/engine/collector.ts";
+import {
+  brokenImageIssues,
+  displayName,
+  frameElementKey,
+  frameLabel,
+  frameLines,
+  geometryIssues,
+  hasVisibleFrame,
+  masksForeignName,
+  missingName,
+} from "../src/engine/collector.ts";
 import { POLICY_BLOCK_WINDOW_MS, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
 import {
   describeInjection,
@@ -438,4 +448,47 @@ test("frameLines: says what is embedded, where from, and that it was not explore
   // The contrast: a page whose only frames are hidden has nothing a user sees inside one.
   assert.equal(hasVisibleFrame([{ url: "https://tracker.example.com/p", title: "", width: 1, height: 1, foreign: true }]), false);
   assert.equal(hasVisibleFrame([{ url: "https://forms.example.com/e", title: "", width: 600, height: 300, foreign: true }]), true);
+});
+
+test("frameElementKey: an embed's control is not the page's control of the same name", () => {
+  const foreign = { url: "https://forms.example.com/embed?x=1", origin: "https://forms.example.com", title: "", foreign: true };
+  const own = { url: "http://app.test/widget?id=3", origin: "http://app.test", title: "", foreign: false };
+  assert.equal(frameElementKey("button:submit", undefined), "button:submit", "the page's own controls keep their key");
+  assert.equal(frameElementKey("button:submit", foreign), "frame:https://forms.example.com|button:submit");
+  assert.equal(frameElementKey("button:submit", own), "frame:/widget|button:submit", "the app's frame by its path, not its query");
+  assert.equal(frameLabel(foreign), "cross-origin frame https://forms.example.com");
+  assert.equal(frameLabel({ ...own, title: "Widget" }), 'same-origin frame /widget?id=3 "Widget"');
+});
+
+test("masksForeignName: the interface is kept, what a container holds is not", () => {
+  for (const [tag, role] of [
+    ["a", "link"],
+    ["button", "button"],
+    ["input", "textbox"],
+    ["div", "button"],
+    ["span", "tab"],
+  ] as const) {
+    assert.equal(masksForeignName(tag, role), false, `${tag} ${role}`);
+  }
+  for (const [tag, role] of [
+    ["select", "combobox"],
+    ["textarea", "textbox"],
+    ["div", "generic"],
+    ["li", "listitem"],
+  ] as const) {
+    assert.equal(masksForeignName(tag, role), true, `${tag} ${role}`);
+  }
+});
+
+test("frameLines: with the frames read, says which were listed", () => {
+  const app = "http://app.test:3000/";
+  const frames = [
+    { url: "http://app.test:3000/widget", title: "", width: 400, height: 200, foreign: false },
+    { url: "https://forms.example.com/embed", title: "", width: 600, height: 300, foreign: true },
+  ];
+  const lines = frameLines(app, frames, { read: new Set(["http://app.test:3000/widget"]) });
+  assert.match(lines[0], /^FRAMES — the controls of each frame read are listed above/);
+  assert.match(lines[0], /content is masked/, "another site's frame is on the page");
+  assert.equal(lines[1], "  same-origin /widget 400×200 — controls listed above");
+  assert.equal(lines[2], "  cross-origin https://forms.example.com/embed 600×300 — not read — writes it sends outside the app are refused");
 });

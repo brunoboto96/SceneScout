@@ -440,6 +440,66 @@ export interface BrokenImageScan {
   total: number;
 }
 
+/** The frame an element was collected from, when it is not the page itself. */
+export interface FrameTag {
+  url: string;
+  /** The frame document's origin, or "" when it has no web address (about:blank, srcdoc). */
+  origin: string;
+  /** The <iframe> element's title or name. */
+  title: string;
+  /** Of another origin than the app's (policy.ts foreignFrameOrigin). */
+  foreign: boolean;
+}
+
+/**
+ * An element's coverage key inside a frame: the frame's origin (another site)
+ * or path (the app's own) before the element's own key, so a "Submit" in an
+ * embed is not the page's "Submit". Elements of the page itself keep their key
+ * unchanged, so pages without frames keep the coverage they had.
+ */
+export function frameElementKey(baseKey: string, frame: FrameTag | undefined): string {
+  if (!frame) return baseKey;
+  let where = frame.origin || frame.url;
+  if (!frame.foreign) {
+    try {
+      where = new URL(frame.url).pathname;
+    } catch {
+      /* no path to show: the URL as it is */
+    }
+  }
+  return `frame:${where}|${baseKey}`;
+}
+
+/** How a snapshot line names the frame an element is in. */
+export function frameLabel(frame: FrameTag): string {
+  let where = frame.url;
+  if (!frame.foreign) {
+    try {
+      const u = new URL(frame.url);
+      where = u.pathname + u.search;
+    } catch {
+      /* shown as it is */
+    }
+  } else if (frame.origin) where = frame.origin;
+  return `${frame.foreign ? "cross-origin" : "same-origin"} frame ${where.slice(0, 80)}${frame.title ? ` "${frame.title.slice(0, 40)}"` : ""}`;
+}
+
+/**
+ * Whether an element's name, read from another site's frame, is masked. A
+ * name taken from a container's text — a select's options, a textarea's
+ * contents, a tagged <div> — can carry other people's data (a support chat,
+ * a customer record) into the snapshot, the transcript and the report. The
+ * label of a link, a button or a field is the interface itself and is kept:
+ * the agent needs it to act.
+ */
+export function masksForeignName(tag: string, role: string): boolean {
+  if (tag === "a" || tag === "button" || tag === "input") return false;
+  return !/^(button|link|tab|menuitem|checkbox|switch|radio)$/.test(role);
+}
+
+/** The name shown for a masked element. */
+export const MASKED_NAME = "(content masked: another site's frame)";
+
 /** One frame directly under the page, read from its <iframe> element. */
 export interface FrameInfo {
   url: string;
@@ -455,14 +515,18 @@ export interface FrameInfo {
 const VISIBLE_FRAME_PX = 2;
 
 /**
- * The snapshot's account of the page's frames. Nothing inside a frame is
- * collected or can be acted on yet, and a page that shows its form in an
- * embed used to look like a page with no form at all: say what is there,
- * where it comes from, and that it was not looked inside. `nested` counts
+ * The snapshot's account of the page's frames: what is embedded, where it
+ * comes from, and whether its controls were read (`read`, by frame URL) —
+ * a page that shows its form in an embed used to look like a page with no
+ * form at all. Without `read`, nothing was looked inside. `nested` counts
  * frames that are not read: nested inside others, or past the first 30; `writesRefused` is false only in
  * destructive mode, where a foreign frame's writes do go out.
  */
-export function frameLines(appUrl: string, frames: readonly FrameInfo[], opts: { nested?: number; writesRefused?: boolean } = {}): string[] {
+export function frameLines(
+  appUrl: string,
+  frames: readonly FrameInfo[],
+  opts: { nested?: number; writesRefused?: boolean; read?: ReadonlySet<string> } = {},
+): string[] {
   const visible = frames.filter((f) => f.width >= VISIBLE_FRAME_PX && f.height >= VISIBLE_FRAME_PX);
   const hidden = frames.length - visible.length;
   const nested = opts.nested ?? 0;
@@ -487,12 +551,18 @@ export function frameLines(appUrl: string, frames: readonly FrameInfo[], opts: {
         ? " — its writes go out (destructive mode)"
         : " — writes it sends outside the app are refused"
       : "";
-    return `  ${f.foreign ? "cross-origin" : "same-origin"} ${where.slice(0, 120)}${label} ${f.width}×${f.height}${writes}`;
+    const read = opts.read ? (opts.read.has(f.url) ? " — controls listed above" : " — not read") : "";
+    return `  ${f.foreign ? "cross-origin" : "same-origin"} ${where.slice(0, 120)}${label} ${f.width}×${f.height}${read}${writes}`;
   });
   if (visible.length > 10) lines.push(`  … +${visible.length - 10} more`);
   if (hidden > 0) lines.push(`  (+${hidden} hidden frame${hidden === 1 ? "" : "s"})`);
   if (nested > 0) lines.push(`  (+${nested} more frame${nested === 1 ? "" : "s"}, nested inside those or past the first 30, not read)`);
-  return [`FRAMES not explored — their controls are not listed above and cannot be acted on:`, ...lines];
+  const header = opts.read
+    ? "FRAMES — the controls of each frame read are listed above, marked ⟨in … frame⟩, and can be acted on by ref" +
+      (visible.some((f) => f.foreign) ? "; in another site's frame, content is masked and hostile input, repeated-click probes and uploads are refused" : "") +
+      ":"
+    : "FRAMES not explored — their controls are not listed above and cannot be acted on:";
+  return [header, ...lines];
 }
 
 /** Whether any frame on the page is one a user can see. */

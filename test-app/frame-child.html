@@ -6,6 +6,9 @@
     <input name="note" aria-label="Note" data-testid="frame-note-input">
     <button type="button" id="send" data-testid="frame-send-action">Send</button>
   </form>
+  <!-- Content that belongs to other people: a chat line with a card hint. Read
+       from another site's frame, it must not reach the snapshot. -->
+  <div data-testid="frame-chat-line">Message from Alice: my card ends 4242</div>
   <script>
     // Posts to this frame's own origin, the way an embedded form posts to the site that serves it.
     window.sendNote = () =>

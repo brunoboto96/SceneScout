@@ -32,26 +32,68 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
 
     console.log("frames: the snapshot says what is embedded");
     const snap = await engine.snapshot();
-    check("a snapshot lists the page's frames and says they were not explored", snap.includes("FRAMES not explored"), snap);
-    check("...a same-origin frame by its path and title", /same-origin \/frame-child\.html\?as=same "Same-site widget" \d+×\d+/.test(snap), snap);
+    check(
+      "a snapshot lists the page's frames and says their controls are listed",
+      snap.includes("FRAMES — the controls of each frame read are listed above"),
+      snap,
+    );
+    check(
+      "...a same-origin frame by its path and title",
+      /same-origin \/frame-child\.html\?as=same "Same-site widget" \d+×\d+ — controls listed above/.test(snap),
+      snap,
+    );
     check(
       "...a cross-origin frame by its origin, saying its writes are refused",
-      /cross-origin http:\/\/127\.0\.0\.1:\d+\/frame-child\.html\?as=foreign "Third-party form" \d+×\d+ — writes it sends outside the app are refused/.test(
+      /cross-origin http:\/\/127\.0\.0\.1:\d+\/frame-child\.html\?as=foreign "Third-party form" \d+×\d+ — controls listed above — writes it sends outside the app are refused/.test(
         snap,
       ),
       snap,
     );
     check("...and a 0×0 bridge only as a count", snap.includes("(+1 hidden frame)") && !snap.includes("as=bridge"), snap);
+    check("a page whose content is all in frames is not called a dead end", !snap.includes("DEAD END"), snap);
+
+    console.log("frames: controls inside frames are listed, marked, and can be acted on");
+    const refIn = (role: string, name: string, where: string) => new RegExp(`(e\\d+) ${role} "${name}"[^\\n]*⟨in ${where}`).exec(snap)?.[1];
+    const sameSend = refIn("button", "Send", "same-origin frame /frame-child\\.html\\?as=same");
+    const foreignSend = refIn("button", "Send", "cross-origin frame http://127\\.0\\.0\\.1:\\d+");
+    const foreignNote = refIn("textbox", "Note", "cross-origin frame http://127\\.0\\.0\\.1:\\d+");
+    check("a same-origin frame's controls are listed, marked with the frame", !!sameSend, snap);
+    check("...and so are another site's frame's", !!foreignSend && !!foreignNote, snap);
     check(
-      "a page whose content is all in frames is not called a dead end",
-      !snap.includes("DEAD END") && snap.includes("inside the frames listed above"),
+      "a container's text is shown from the app's own frame, and masked from another site's",
+      /Message from Alice[^\n]*⟨in same-origin frame/.test(snap) &&
+        !/Message from Alice[^\n]*⟨in cross-origin frame/.test(snap) &&
+        /content masked[^\n]*⟨in cross-origin frame/.test(snap),
       snap,
+    );
+    const before = stats.writes["POST /api/frame-note-same"] ?? 0;
+    const sameClick = await engine.click(sameSend!);
+    await until("the same-origin frame's write to arrive", () => (stats.writes["POST /api/frame-note-same"] ?? 0) === before + 1, 5000).catch(() => {});
+    check("clicking inside the app's own frame acts there, and its write arrives", (stats.writes["POST /api/frame-note-same"] ?? 0) === before + 1, sameClick);
+    const markup = await engine.type(foreignNote!, "<img src=x onerror=alert(1)>");
+    check("markup typed into another site's frame is refused", /^REFUSED: typing this value \(it is markup\)/.test(markup), markup);
+    const long = await engine.type(foreignNote!, "x".repeat(300));
+    check("...and so is a fuzzing-length value", /^REFUSED: typing this value \(it is longer than 200/.test(long), long);
+    const plain = await engine.type(foreignNote!, "hello");
+    check("...while ordinary typing there is allowed", /^OK: type/.test(plain), plain);
+    const doubled = await engine.click(foreignSend!, 2);
+    check("a repeated-click probe in another site's frame is refused", /^REFUSED: a 2-click probe/.test(doubled), doubled);
+    const foreignClick = await engine.click(foreignSend!);
+    check(
+      "a plain click there is allowed, and the write it sends is refused by the write policy",
+      /^OK: click/.test(foreignClick) && /WRITE-POLICY blocked/.test(foreignClick) && stats.writes["POST /api/frame-note-foreign"] === undefined,
+      foreignClick,
     );
 
     console.log("frames: a write from a cross-origin frame never leaves; the same write from a same-origin frame does");
+    const sameBefore = stats.writes["POST /api/frame-note-same"] ?? 0;
     const sameStatus = await frameAs("same")!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());
-    await until("the same-origin write to arrive", () => (stats.writes["POST /api/frame-note-same"] ?? 0) === 1, 5000).catch(() => {});
-    check("a write from a same-origin frame reaches the server in read-only", stats.writes["POST /api/frame-note-same"] === 1, `status ${sameStatus}`);
+    await until("the same-origin write to arrive", () => (stats.writes["POST /api/frame-note-same"] ?? 0) === sameBefore + 1, 5000).catch(() => {});
+    check(
+      "a write from a same-origin frame reaches the server in read-only",
+      stats.writes["POST /api/frame-note-same"] === sameBefore + 1,
+      `status ${sameStatus}`,
+    );
     const foreignStatus = await frameAs("foreign")!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());
     await page.waitForTimeout(500);
     check(
