@@ -869,6 +869,17 @@ export class BrowserEngine {
     }
     this.oracles = new OracleMonitor();
     this.oracles.setPolicyRefusalCheck((req) => this.refusedByPolicy.has(req));
+    this.oracles.setEmbedAttribution(
+      (req) => {
+        try {
+          const frame = req.frame();
+          return frame === frame.page().mainFrame() ? null : this.foreignOriginOf(frame);
+        } catch {
+          return null;
+        }
+      },
+      () => this.embeddedSites(),
+    );
     this.lastSnap = null;
     this.designAuditCount = 0;
 

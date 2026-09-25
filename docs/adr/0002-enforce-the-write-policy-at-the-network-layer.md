@@ -134,6 +134,14 @@ allows everything already. Hostile input, repeated-click probes,
 uploads, masking and the sandbox apply to a trusted embed as to any other. The
 report names the list and whether it counted.
 
+What happens inside another site's frame is that site's behaviour. A failing
+request or error response from such a frame, and a console error whose script
+is served from one of the page's embeds, is labelled with the embed's origin,
+kept at medium severity at most, and grouped apart in the report; a script the
+app's own page loads from a third party is still the app's. A page error
+carries no frame, so it stays unattributed. The controls of another site's
+frame are counted apart and never enter the app's coverage or its gap ledger.
+
 ## Consequences
 
 A refusal is a tool result the agent must respect and cannot route around, and

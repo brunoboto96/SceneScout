@@ -10,6 +10,28 @@ export interface OracleViolation {
   at: string;
   /** True when this signature was already reported in full earlier this session — collapsed in tool output. */
   repeat?: boolean;
+  /**
+   * The origin of another site's frame this came from, when it did: that
+   * site's behaviour, not the app's. Kept at medium severity at most and
+   * grouped apart in the report.
+   */
+  embed?: string;
+}
+
+/**
+ * Where a console error came from, for attribution: another site the page
+ * embeds when the error's script is served from one of them, else null. A
+ * script the app's own page loads from a third party is the app's to answer
+ * for, so only an origin among the page's embeds counts.
+ */
+export function consoleEmbedOrigin(scriptUrl: string | undefined, embedded: ReadonlySet<string>): string | null {
+  if (!scriptUrl) return null;
+  try {
+    const origin = new URL(scriptUrl).origin;
+    return embedded.has(origin) ? origin : null;
+  } catch {
+    return null;
+  }
 }
 
 /** URLs whose failures are noise, not findings (favicons, source maps). */
@@ -72,6 +94,7 @@ export class OracleMonitor {
         severity: "high",
         detail: text.slice(0, 500),
         url: page.url(),
+        embed: consoleEmbedOrigin(msg.location().url, this.embeddedSites()) ?? undefined,
       });
     });
 
@@ -98,6 +121,7 @@ export class OracleMonitor {
         severity: "medium",
         detail: `${req.method()} ${req.url().slice(0, 200)} → ${failure}`,
         url: page.url(),
+        embed: this.embedOfRequest(req) ?? undefined,
       });
     });
 
@@ -119,6 +143,7 @@ export class OracleMonitor {
         severity: status >= 500 ? "high" : "medium",
         detail: `${res.request().method()} ${res.url().slice(0, 200)} → HTTP ${status}`,
         url: page.url(),
+        embed: this.embedOfRequest(res.request()) ?? undefined,
       });
     });
   }
@@ -144,6 +169,18 @@ export class OracleMonitor {
    * errors look the same.
    */
   policyAttributed = 0;
+
+  private embedOfRequest: (req: Request) => string | null = () => null;
+  private embeddedSites: () => ReadonlySet<string> = () => new Set();
+
+  /**
+   * The engine knows which frame a request came from and which other sites the
+   * page embeds; violations are attributed to an embed through these.
+   */
+  setEmbedAttribution(ofRequest: (req: Request) => string | null, embedded: () => ReadonlySet<string>): void {
+    this.embedOfRequest = ofRequest;
+    this.embeddedSites = embedded;
+  }
 
   /** The engine knows exactly which requests its policy stopped; failed requests and stand-in refusals are matched against that, not against wording. */
   setPolicyRefusalCheck(check: (req: Request) => boolean): void {
@@ -179,7 +216,10 @@ export class OracleMonitor {
       this.policyAttributed += 1;
       return;
     }
-    const violation: OracleViolation = { ...redactViolation(v), at: new Date().toISOString() };
+    // Another site's frame: its behaviour, reported, but never as the app's high-severity defect.
+    const attributed = v.embed ? { ...v, severity: "medium" as const } : v;
+    if (!attributed.embed) delete (attributed as { embed?: string }).embed;
+    const violation: OracleViolation = { ...redactViolation(attributed), at: new Date().toISOString() };
     this.buffer.push(violation);
     this.all.push(violation);
   }
@@ -226,7 +266,9 @@ export function formatViolations(violations: OracleViolation[]): string {
   if (fresh.length === 0) {
     return `\nORACLE: ${repeats} repeat violation(s) of previously reported signatures — nothing new.`;
   }
-  const lines = fresh.slice(0, 10).map((v) => `  ⚠ [${v.severity}] ${v.kind}: ${v.detail}`);
+  const lines = fresh
+    .slice(0, 10)
+    .map((v) => `  ⚠ [${v.severity}] ${v.kind}${v.embed ? ` (in an embed of ${v.embed}: its behaviour, not the app's)` : ""}: ${v.detail}`);
   const more = fresh.length > 10 ? `\n  … and ${fresh.length - 10} more` : "";
   return `\nORACLE VIOLATIONS since last action (${fresh.length} new):\n${lines.join("\n")}${more}${repeatLine}`;
 }

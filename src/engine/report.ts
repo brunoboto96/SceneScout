@@ -60,6 +60,43 @@ function violationRollup(oracleLog: OracleViolation[]): string[] {
   ];
 }
 
+/**
+ * What came from other sites' frames: their controls, and the violations
+ * they caused, by origin. Kept apart from the app's coverage and rollup —
+ * an embed's failing request is the embed's behaviour, and its controls are
+ * not the app's to cover — but listed, since the app chose to embed them.
+ */
+export function embedSection(violations: readonly OracleViolation[], coverage: { total: number; exercised: number }): string[] {
+  if (violations.length === 0 && coverage.total === 0) return [];
+  const lines = [`## Embeds (other sites' frames)`, ``];
+  if (coverage.total > 0) {
+    lines.push(`${coverage.exercised}/${coverage.total} of their controls exercised; not counted in the app's coverage or its gap ledger.`, ``);
+  }
+  if (violations.length > 0) {
+    const byOrigin = new Map<string, Map<string, number>>();
+    for (const v of violations) {
+      const origin = v.embed ?? "";
+      const sig = `${v.kind}: ${v.detail.replace(/\b\d+\b/g, ":n").slice(0, 120)}`;
+      const sigs = byOrigin.get(origin) ?? new Map<string, number>();
+      sigs.set(sig, (sigs.get(sig) ?? 0) + 1);
+      byOrigin.set(origin, sigs);
+    }
+    lines.push(
+      `Violations inside them (${violations.length}), reported as the embed's behaviour, not the app's:`,
+      ``,
+      `| Embed | Count | Signature |`,
+      `|---|---|---|`,
+    );
+    for (const [origin, sigs] of byOrigin) {
+      for (const [sig, count] of [...sigs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8)) {
+        lines.push(`| \`${escapeTableCell(origin)}\` | ${count} | \`${escapeTableCell(sig)}\` |`);
+      }
+    }
+    lines.push(``);
+  }
+  return lines;
+}
+
 const SEVERITY_ORDER: Record<Finding["severity"], number> = { high: 0, medium: 1, low: 2 };
 const SEVERITY_ICON: Record<Finding["severity"], string> = { high: "🔴", medium: "🟠", low: "🟡" };
 
@@ -706,7 +743,13 @@ export function generateReport(
     lines.push(``);
   }
 
-  lines.push(...violationRollup(oracleLog));
+  lines.push(...violationRollup(oracleLog.filter((v) => !v.embed)));
+  lines.push(
+    ...embedSection(
+      oracleLog.filter((v) => v.embed),
+      cov.embeds,
+    ),
+  );
 
   if (cov.unexercised.length > 0) {
     lines.push(`## Unexplored surface (for the next run)`);

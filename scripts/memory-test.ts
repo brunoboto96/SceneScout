@@ -31,6 +31,7 @@ import {
   sameFamily,
   MAX_SELECT_OPTIONS,
   requestsDisagree,
+  isEmbedKey,
 } from "../src/engine/memory.ts";
 
 /** Temp dirs created by the running test, cleaned up even when it fails. */
@@ -1240,4 +1241,23 @@ test("select choices: a picker larger than a filter is not tracked, and a run's 
   assert.equal(store.unchosenOptions()[0]?.unchosen.length, MAX_SELECT_OPTIONS - 1, "at the limit it is still a filter");
   store.endRun();
   assert.deepEqual(store.unchosenOptions(), [], "whether an earlier run chose an option says nothing about this one");
+});
+
+test("coverage: controls inside another site's frame are counted apart from the app's", () => {
+  const store = freshStore();
+  store.visitState("/checkout#a", "http://app.test/checkout", "/checkout", [
+    "button:pay",
+    "frame:/widget|button:save",
+    "frame:https://chat.example.com|button:send",
+    "frame:https://chat.example.com|textbox:message",
+  ]);
+  store.markExercised("/checkout#a", "frame:https://chat.example.com|button:send", "click");
+  const cov = store.coverage();
+  assert.equal(cov.elementsTotal, 2, "the page's control and the app's own frame's");
+  assert.deepEqual(cov.embeds, { total: 2, exercised: 1 });
+  assert.ok(
+    cov.unexercised.every((u) => u.keys.every((k) => !isEmbedKey(k))),
+    "an embed's controls never reach the gap ledger",
+  );
+  assert.equal(isEmbedKey("frame:about:srcdoc#Inner|button:x"), false);
 });
