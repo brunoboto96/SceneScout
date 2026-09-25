@@ -410,6 +410,15 @@ function decisionKey(d: RecordedDecision): string {
  * project would otherwise accumulate every decision ever made and re-serialise
  * them on each save, which is what made an old history slow to open.
  */
+/**
+ * Whether a coverage key belongs to a control inside another site's frame:
+ * those keys carry the frame's origin (collector.ts frameElementKey), where
+ * the app's own frames carry a path. Not the app's to cover.
+ */
+export function isEmbedKey(key: string): boolean {
+  return /^frame:https?:\/\//.test(key);
+}
+
 export const MAX_LANE_DECISIONS = 1000;
 
 /**
@@ -1506,6 +1515,8 @@ export class MemoryStore {
     elementsTotal: number;
     elementsExercised: number;
     unexercised: Array<{ state: string; keys: string[]; total: number }>;
+    /** Controls inside other sites' frames: counted apart, never in the app's totals or its gap ledger. */
+    embeds: { total: number; exercised: number };
   } {
     const byRoute = this.elementsByRoute();
     // Shared layout CHROME (sidebar nav, header, breadcrumbs) is one set of
@@ -1521,6 +1532,7 @@ export class MemoryStore {
     let elementsTotal = 0;
     let elementsExercised = 0;
     const unexercised: Array<{ state: string; keys: string[]; total: number }> = [];
+    const embeds = { total: 0, exercised: 0 };
     for (const [route, elements] of byRoute) {
       const own: string[] = [];
       // The route's OWN element count — deduped across states and with shared
@@ -1531,6 +1543,11 @@ export class MemoryStore {
       // untouched route silently drops out of the gap ledger.
       let ownTotal = 0;
       for (const [key, done] of elements) {
+        if (isEmbedKey(key)) {
+          embeds.total += 1;
+          if (done) embeds.exercised += 1;
+          continue;
+        }
         if (isChrome(key)) {
           chrome.set(key, (chrome.get(key) ?? false) || done);
           continue;
@@ -1552,7 +1569,7 @@ export class MemoryStore {
     if (chromeLeft.length > 0) {
       unexercised.push({ state: SHARED_CHROME_ROUTE, keys: chromeLeft, total: chrome.size });
     }
-    return { states: Object.keys(this.data.states).length, elementsTotal, elementsExercised, unexercised };
+    return { states: Object.keys(this.data.states).length, elementsTotal, elementsExercised, unexercised, embeds };
   }
 
   /**

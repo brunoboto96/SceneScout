@@ -415,6 +415,16 @@ export function allowsForeignWriteOnSignIn(mode: WriteMode, topPageUrl: string, 
   return SIGN_IN_SEGMENT_RE.test(last);
 }
 
+/**
+ * The embed a failing request is attributed to: the other site whose frame
+ * sent it (`frameSite`, judged on the frame chain), unless the request went to
+ * the app itself — a 500 from the app is the app's to answer, whoever called.
+ */
+export function embedOfRequest(appUrl: string, requestUrl: string, frameSite: string | null): string | null {
+  if (!frameSite) return null;
+  return foreignFrameOrigin(appUrl, [requestUrl]) === null ? null : frameSite;
+}
+
 /** The most origins a session may trust with its embeds' writes. */
 export const MAX_TRUSTED_EMBEDS = 10;
 

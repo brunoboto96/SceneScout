@@ -115,6 +115,12 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
   const handle: http.RequestListener = (req, res) => {
     const urlPath = (req.url ?? "/").split("?")[0];
     // An embed that redirects before it loads, as many do (/embed → /embed/).
+    // A server error, served on both origins.
+    if (urlPath === "/api/fail-500") {
+      res.writeHead(500, { "content-type": "text/plain" });
+      res.end("boom");
+      return;
+    }
     // A link that answers with no content: the navigation starts and never commits.
     if (urlPath === "/no-content") {
       res.writeHead(204);

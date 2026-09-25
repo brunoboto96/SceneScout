@@ -20,6 +20,7 @@ import {
   foreignWrite,
   withForeignFrameSandbox,
   hostileForEmbed,
+  embedOfRequest,
   trustedEmbedOrigins,
   trustsEmbedWrite,
   trustsForeignWrite,
@@ -766,4 +767,13 @@ test("trustsForeignWrite: every other site involved must be trusted", () => {
   // Only in safe-write, and never with nothing foreign to trust.
   assert.equal(at({ frameChain: ["https://pay.example.com/card"] }, "read-only"), false);
   assert.equal(at({ frameChain: ["about:srcdoc", "http://app.test/widget"], originHeader: "http://app.test" }), false);
+});
+
+test("embedOfRequest: an embed's failing request, unless it went to the app", () => {
+  const app = "http://app.test/";
+  assert.equal(embedOfRequest(app, "https://chat.example.com/api/x", "https://chat.example.com"), "https://chat.example.com");
+  assert.equal(embedOfRequest(app, "https://cdn.example.net/lib.js", "https://chat.example.com"), "https://chat.example.com", "anywhere outside the app");
+  // The contrasts: the app answered, or no embed sent it.
+  assert.equal(embedOfRequest(app, "http://app.test/api/orders", "https://chat.example.com"), null, "a 500 from the app is the app's");
+  assert.equal(embedOfRequest(app, "https://chat.example.com/api/x", null), null, "the app's own page or frame");
 });

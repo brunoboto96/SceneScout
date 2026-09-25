@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { SHARED_CHROME_ROUTE, type Finding, type MemoryStore, type PageScore } from "./memory.js";
+import { SHARED_CHROME_ROUTE, isEmbedKey, type Finding, type MemoryStore, type PageScore } from "./memory.js";
 import type { OracleViolation } from "./oracles.js";
 import { sayVerification } from "./verify.js";
 import type { WriteMode } from "./policy.js";
@@ -58,6 +58,43 @@ function violationRollup(oracleLog: OracleViolation[]): string[] {
     ...top.map(([sig, g]) => `| ${g.count} | \`${escapeTableCell(sig)}\` |`),
     ``,
   ];
+}
+
+/**
+ * What came from other sites' frames: their controls, and the violations
+ * they caused, by origin. Kept apart from the app's coverage and rollup —
+ * an embed's failing request is the embed's behaviour, and its controls are
+ * not the app's to cover — but listed, since the app chose to embed them.
+ */
+export function embedSection(violations: readonly OracleViolation[], coverage: { total: number; exercised: number }): string[] {
+  if (violations.length === 0 && coverage.total === 0) return [];
+  const lines = [`## Embeds (other sites' frames)`, ``];
+  if (coverage.total > 0) {
+    lines.push(`${coverage.exercised}/${coverage.total} of their controls exercised; not counted in the app's coverage or its gap ledger.`, ``);
+  }
+  if (violations.length > 0) {
+    const byOrigin = new Map<string, Map<string, number>>();
+    for (const v of violations) {
+      const origin = v.embed ?? "";
+      const sig = `${v.kind}: ${v.detail.replace(/\b\d+\b/g, ":n").slice(0, 120)}`;
+      const sigs = byOrigin.get(origin) ?? new Map<string, number>();
+      sigs.set(sig, (sigs.get(sig) ?? 0) + 1);
+      byOrigin.set(origin, sigs);
+    }
+    lines.push(
+      `Violations inside them (${violations.length}), reported as the embed's behaviour, not the app's:`,
+      ``,
+      `| Embed | Count | Signature |`,
+      `|---|---|---|`,
+    );
+    for (const [origin, sigs] of byOrigin) {
+      for (const [sig, count] of [...sigs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8)) {
+        lines.push(`| \`${escapeTableCell(origin)}\` | ${count} | \`${escapeTableCell(sig)}\` |`);
+      }
+    }
+    lines.push(``);
+  }
+  return lines;
 }
 
 const SEVERITY_ORDER: Record<Finding["severity"], number> = { high: 0, medium: 1, low: 2 };
@@ -295,13 +332,15 @@ export function classifyFilledStates(memory: MemoryStore, facts: Record<string, 
   const unsubmitted = new Set<string>();
   const noSubmitControl = new Set<string>();
   for (const st of Object.values(memory.states)) {
-    const keys = Object.keys(st.elements);
+    // Another site's frame is not the app's form: typing into an embed's chat leaves no app form unsubmitted.
+    const own = Object.fromEntries(Object.entries(st.elements).filter(([key]) => !isEmbedKey(key)));
+    const keys = Object.keys(own);
     const filledForReal = keys.some(
       (key) => st.elements[key].exercised && /^(type|select|upload|plan:(type|select|upload))/.test(st.elements[key].lastAction ?? "") && !isFilterKey(key),
     );
     if (!filledForReal) continue;
     if (facts[st.route]?.mutated || mutatedSiblingStep(st.route, facts)) continue;
-    if (offersSubmit(st.elements) || keys.length >= COLLECTOR_CAP) unsubmitted.add(st.route);
+    if (offersSubmit(own) || keys.length >= COLLECTOR_CAP) unsubmitted.add(st.route);
     else noSubmitControl.add(st.route);
   }
   // A route with several states counts as testable if ANY of them offered a
@@ -491,7 +530,10 @@ export function generateReport(
   if (extras && extras.routesTotal > 0) lines.push(`| Route coverage | ${extras.routesVisited}/${extras.routesTotal} |`);
   lines.push(`| States explored | ${cov.states} |`);
   if (extras) lines.push(`| Design audits this run (all sessions) | ${extras.designAudits} |`);
-  lines.push(`| Oracle violations this session | ${oracleLog.length} |`);
+  const fromEmbeds = oracleLog.filter((v) => v.embed).length;
+  lines.push(
+    `| Oracle violations this session | ${oracleLog.length - fromEmbeds}${fromEmbeds > 0 ? ` (plus ${fromEmbeds} inside other sites' frames)` : ""} |`,
+  );
   if (extras?.policyAttributed) {
     lines.push(`| Errors caused by the tester's own write-policy blocks (not counted above) | ${extras.policyAttributed} |`);
   }
@@ -706,7 +748,13 @@ export function generateReport(
     lines.push(``);
   }
 
-  lines.push(...violationRollup(oracleLog));
+  lines.push(...violationRollup(oracleLog.filter((v) => !v.embed)));
+  lines.push(
+    ...embedSection(
+      oracleLog.filter((v) => v.embed),
+      cov.embeds,
+    ),
+  );
 
   if (cov.unexercised.length > 0) {
     lines.push(`## Unexplored surface (for the next run)`);

@@ -1453,7 +1453,7 @@ server.registerTool(
               `⚠ MEMORY WRITE FAILING: ${eng.memory.lastSaveError} — coverage/findings since the last successful write are NOT persisted to disk. If this doesn't clear on its own, check the project directory still exists and is writable.`,
             ]
           : []),
-        `States known: ${cov.states} · Elements exercised: ${cov.elementsExercised}/${cov.elementsTotal}`,
+        `States known: ${cov.states} · Elements exercised: ${cov.elementsExercised}/${cov.elementsTotal}${cov.embeds.total > 0 ? ` (plus ${cov.embeds.exercised}/${cov.embeds.total} inside other sites' frames, not counted)` : ""}`,
         formatRouteCoverage(eng.allKnownRoutes(), unvisited),
         `Unexercised elements by route:`,
         ...cov.unexercised.slice(0, 25).map((u) => `  ${u.state}: ${u.keys.slice(0, 6).join(", ")}${u.keys.length > 6 ? ` … +${u.keys.length - 6}` : ""}`),
