@@ -125,8 +125,11 @@ at attach — such as a payment provider in test mode. In safe-write, and only
 there, writes those frames send outside the app go to the ordinary rules
 instead of being refused — provided every other site involved is trusted: each
 frame from the sender up to the page, and the Origin header, so an untrusted
-embed cannot borrow a trusted one it wraps. A popup is not a frame, and trust
-does not reach it. Read-only and observe keep their promise, and destructive
+embed cannot borrow a trusted one it wraps; a frame in that chain with no web
+address of its own (`blob:`, `data:`, as opposed to a blank or srcdoc frame,
+which is its parent's) withholds trust. A popup is not a frame, and trust does
+not reach it. A request that names no frame but carries a trusted site's
+Origin header (a trusted embed's form aimed at the top window) is trusted. Read-only and observe keep their promise, and destructive
 allows everything already. Hostile input, repeated-click probes,
 uploads, masking and the sandbox apply to a trusted embed as to any other. The
 report names the list and whether it counted.

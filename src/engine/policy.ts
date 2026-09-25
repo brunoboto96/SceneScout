@@ -440,8 +440,10 @@ export function trustedEmbedOrigins(list: readonly string[] | undefined): { orig
       rejected.push(raw);
       continue;
     }
-    if (origins.includes(u.origin)) continue;
-    if (origins.length < MAX_TRUSTED_EMBEDS) origins.push(u.origin);
+    // "pay.example.com." is "pay.example.com": one origin, one slot.
+    const origin = u.origin.replace(/\.(?=(:\d+)?$)/, "");
+    if (origins.includes(origin)) continue;
+    if (origins.length < MAX_TRUSTED_EMBEDS) origins.push(origin);
     else overflow.push(raw);
   }
   return { origins, rejected, overflow };
@@ -483,8 +485,13 @@ export function trustsForeignWrite(
   const app = originOf(appUrl);
   const involved = new Set<string>();
   for (const url of req.frameChain) {
+    // A blank or srcdoc frame is its parent's, and the parent is judged next.
+    // Any other frame with no web address (blob:, data:) could be an untrusted
+    // site that moved itself there to wrap a trusted one: no trust through it.
+    if (/^about:(blank|srcdoc)/i.test(url)) continue;
     const o = originOf(url);
-    if (o && o !== app) involved.add(o);
+    if (!o) return false;
+    if (o !== app) involved.add(o);
   }
   const header = originOf(req.originHeader);
   if (header && header !== app) involved.add(header);

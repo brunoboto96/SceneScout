@@ -730,6 +730,11 @@ test("trustedEmbedOrigins: only plain http(s) origins, at most ten", () => {
   assert.deepEqual(many.overflow, ["https://p10.example.com", "https://p11.example.com"], "valid, but over the limit: said as such");
   assert.deepEqual(many.rejected, []);
   assert.deepEqual(trustedEmbedOrigins(undefined), { origins: [], rejected: [], overflow: [] });
+  assert.deepEqual(
+    trustedEmbedOrigins(["https://pay.example.com.", "https://pay.example.com"]).origins,
+    ["https://pay.example.com"],
+    "a trailing dot is the same host",
+  );
 });
 
 test("trustsEmbedWrite: a named origin, in safe-write only", () => {
@@ -754,6 +759,10 @@ test("trustsForeignWrite: every other site involved must be trusted", () => {
   assert.equal(at({ frameChain: ["https://pay.example.com/card"], originHeader: "https://forms.example.net" }), false);
   // A popup the session never adopted is not a frame, trusted origin or not.
   assert.equal(at({ frameChain: [], originHeader: "https://pay.example.com", unadoptedPageUrl: "https://pay.example.com/checkout" }), false);
+  // A wrapper with no web address of its own (blob:, data:) cannot pass as trusted; a blank or srcdoc one is its parent's.
+  assert.equal(at({ frameChain: ["https://pay.example.com/card", "blob:https://forms.example.net/1b2c"], originHeader: "https://pay.example.com" }), false);
+  assert.equal(at({ frameChain: ["https://pay.example.com/card", "data:text/html,x"], originHeader: "https://pay.example.com" }), false);
+  assert.equal(at({ frameChain: ["about:srcdoc", "https://pay.example.com/card"], originHeader: "https://pay.example.com" }), true);
   // Only in safe-write, and never with nothing foreign to trust.
   assert.equal(at({ frameChain: ["https://pay.example.com/card"] }, "read-only"), false);
   assert.equal(at({ frameChain: ["about:srcdoc", "http://app.test/widget"], originHeader: "http://app.test" }), false);
