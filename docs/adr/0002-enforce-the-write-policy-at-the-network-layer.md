@@ -135,12 +135,16 @@ uploads, masking and the sandbox apply to a trusted embed as to any other. The
 report names the list and whether it counted.
 
 What happens inside another site's frame is that site's behaviour. A failing
-request or error response from such a frame, and a console error whose script
-is served from one of the page's embeds, is labelled with the embed's origin,
-kept at medium severity at most, and grouped apart in the report; a script the
-app's own page loads from a third party is still the app's. A page error
-carries no frame, so it stays unattributed. The controls of another site's
-frame are counted apart and never enter the app's coverage or its gap ledger.
+request or error response that such a frame sent outside the app is labelled
+with the embed's origin, kept at medium severity at most, and grouped apart in
+the report; one it sent to the app is the app's to answer, and keeps its
+severity. Attribution is by origin, so an app that embeds its own service on
+another subdomain sees that service's failures capped too. Console and page
+errors stay the app's: a console message says where its script was served
+from, not which frame ran it, and a page error names no frame. The controls of
+another site's frame are counted apart and never enter the app's coverage or
+its unexplored-surface and unsubmitted-form lists; a trusted embed's write that
+went out in safe-write still counts as the route's submission.
 
 ## Consequences
 

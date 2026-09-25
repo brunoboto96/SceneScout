@@ -99,6 +99,20 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       withViolations,
     );
     check("...while the same failure in the app's own frame is the app's", sameLine !== "" && !/in an embed of/.test(sameLine), withViolations);
+    // The cap is the point: the same 500 is high from the app's own frame and medium from another site's.
+    type Failer = { fetchFail: () => Promise<unknown> };
+    await frameAs("same")!.evaluate(() => (window as unknown as Failer).fetchFail());
+    await frameAs("foreign")!.evaluate(() => (window as unknown as Failer).fetchFail());
+    await page.waitForTimeout(500);
+    const fiveHundreds = await engine.snapshot();
+    const appPort = new URL(baseUrl).port;
+    const foreignPort = new URL(foreignBaseUrl).port;
+    check(
+      "a 500 inside another site's frame is capped at medium and named as the embed's, while the app's own 500 stays high",
+      new RegExp(`\\[medium\\] http_error \\(in an embed of [^)]*\\): GET http://127\\.0\\.0\\.1:${foreignPort}/api/fail-500`).test(fiveHundreds) &&
+        new RegExp(`\\[high\\] http_error: GET http://127\\.0\\.0\\.1:${appPort}/api/fail-500`).test(fiveHundreds),
+      fiveHundreds,
+    );
 
     console.log("frames: a frame inside another site's frame, its links, and the keyboard");
     const innerForeign = /(e\d+) textbox "Inner note"[^\n]*⟨in cross-origin frame/.exec(snap)?.[1];

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { SHARED_CHROME_ROUTE, type Finding, type MemoryStore, type PageScore } from "./memory.js";
+import { SHARED_CHROME_ROUTE, isEmbedKey, type Finding, type MemoryStore, type PageScore } from "./memory.js";
 import type { OracleViolation } from "./oracles.js";
 import { sayVerification } from "./verify.js";
 import type { WriteMode } from "./policy.js";
@@ -332,13 +332,15 @@ export function classifyFilledStates(memory: MemoryStore, facts: Record<string, 
   const unsubmitted = new Set<string>();
   const noSubmitControl = new Set<string>();
   for (const st of Object.values(memory.states)) {
-    const keys = Object.keys(st.elements);
+    // Another site's frame is not the app's form: typing into an embed's chat leaves no app form unsubmitted.
+    const own = Object.fromEntries(Object.entries(st.elements).filter(([key]) => !isEmbedKey(key)));
+    const keys = Object.keys(own);
     const filledForReal = keys.some(
       (key) => st.elements[key].exercised && /^(type|select|upload|plan:(type|select|upload))/.test(st.elements[key].lastAction ?? "") && !isFilterKey(key),
     );
     if (!filledForReal) continue;
     if (facts[st.route]?.mutated || mutatedSiblingStep(st.route, facts)) continue;
-    if (offersSubmit(st.elements) || keys.length >= COLLECTOR_CAP) unsubmitted.add(st.route);
+    if (offersSubmit(own) || keys.length >= COLLECTOR_CAP) unsubmitted.add(st.route);
     else noSubmitControl.add(st.route);
   }
   // A route with several states counts as testable if ANY of them offered a
@@ -528,7 +530,10 @@ export function generateReport(
   if (extras && extras.routesTotal > 0) lines.push(`| Route coverage | ${extras.routesVisited}/${extras.routesTotal} |`);
   lines.push(`| States explored | ${cov.states} |`);
   if (extras) lines.push(`| Design audits this run (all sessions) | ${extras.designAudits} |`);
-  lines.push(`| Oracle violations this session | ${oracleLog.length} |`);
+  const fromEmbeds = oracleLog.filter((v) => v.embed).length;
+  lines.push(
+    `| Oracle violations this session | ${oracleLog.length - fromEmbeds}${fromEmbeds > 0 ? ` (plus ${fromEmbeds} inside other sites' frames)` : ""} |`,
+  );
   if (extras?.policyAttributed) {
     lines.push(`| Errors caused by the tester's own write-policy blocks (not counted above) | ${extras.policyAttributed} |`);
   }

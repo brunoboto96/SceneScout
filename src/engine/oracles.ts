@@ -11,27 +11,11 @@ export interface OracleViolation {
   /** True when this signature was already reported in full earlier this session — collapsed in tool output. */
   repeat?: boolean;
   /**
-   * The origin of another site's frame this came from, when it did: that
-   * site's behaviour, not the app's. Kept at medium severity at most and
-   * grouped apart in the report.
+   * The origin of another site's frame a failing request came from, when it
+   * went outside the app: that site's behaviour, not the app's. Kept at medium
+   * severity at most and grouped apart in the report.
    */
   embed?: string;
-}
-
-/**
- * Where a console error came from, for attribution: another site the page
- * embeds when the error's script is served from one of them, else null. A
- * script the app's own page loads from a third party is the app's to answer
- * for, so only an origin among the page's embeds counts.
- */
-export function consoleEmbedOrigin(scriptUrl: string | undefined, embedded: ReadonlySet<string>): string | null {
-  if (!scriptUrl) return null;
-  try {
-    const origin = new URL(scriptUrl).origin;
-    return embedded.has(origin) ? origin : null;
-  } catch {
-    return null;
-  }
 }
 
 /** URLs whose failures are noise, not findings (favicons, source maps). */
@@ -94,7 +78,6 @@ export class OracleMonitor {
         severity: "high",
         detail: text.slice(0, 500),
         url: page.url(),
-        embed: consoleEmbedOrigin(msg.location().url, this.embeddedSites()) ?? undefined,
       });
     });
 
@@ -171,15 +154,16 @@ export class OracleMonitor {
   policyAttributed = 0;
 
   private embedOfRequest: (req: Request) => string | null = () => null;
-  private embeddedSites: () => ReadonlySet<string> = () => new Set();
 
   /**
-   * The engine knows which frame a request came from and which other sites the
-   * page embeds; violations are attributed to an embed through these.
+   * The engine knows which frame a request came from; a failing request is
+   * attributed to an embed through this. Console and page errors are not
+   * attributed: a console message says where its script was served from, not
+   * which frame ran it, so an SDK the app's page loads from the embed's own
+   * site would be taken for the embed.
    */
-  setEmbedAttribution(ofRequest: (req: Request) => string | null, embedded: () => ReadonlySet<string>): void {
+  setEmbedAttribution(ofRequest: (req: Request) => string | null): void {
     this.embedOfRequest = ofRequest;
-    this.embeddedSites = embedded;
   }
 
   /** The engine knows exactly which requests its policy stopped; failed requests and stand-in refusals are matched against that, not against wording. */
@@ -240,7 +224,8 @@ export class OracleMonitor {
     for (const v of out) {
       // Same normalization as the report rollup, so "the same violation"
       // means the same thing in tool output and in the final report.
-      const sig = `${v.kind}: ${v.detail
+      // An embed's violation is not the app's: its signature says whose it is.
+      const sig = `${v.embed ? `[${v.embed}] ` : ""}${v.kind}: ${v.detail
         .replace(/\b\d+\b/g, ":n")
         .replace(/[0-9a-f]{8,}/gi, ":h")
         .slice(0, 140)}`;

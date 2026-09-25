@@ -834,3 +834,18 @@ test("embedSection: an embed's controls and violations, by origin, apart from th
   assert.match(lines, /1\/4 of their controls exercised; not counted in the app's coverage/);
   assert.match(lines, /\| `https:\/\/chat\.example\.com` \| 2 \|/, "one signature, ids folded");
 });
+
+test("classifyFilledStates: typing into another site's frame leaves no app form unsubmitted", () => {
+  const embed = freshStore();
+  embed.visitState("/support#a", "http://app.test/support", "/support", [
+    "frame:https://chat.example.com|textbox:message",
+    "frame:https://chat.example.com|button:send",
+  ]);
+  embed.markExercised("/support#a", "frame:https://chat.example.com|textbox:message", "type");
+  assert.deepEqual(classifyFilledStates(embed, embed.routeFacts), { unsubmitted: [], noSubmitControl: [] });
+  // The contrast: the same controls as the app's own form.
+  const own = freshStore();
+  own.visitState("/support#a", "http://app.test/support", "/support", ["textbox:message", "button:send"]);
+  own.markExercised("/support#a", "textbox:message", "type");
+  assert.deepEqual(classifyFilledStates(own, own.routeFacts).unsubmitted, ["/support"]);
+});

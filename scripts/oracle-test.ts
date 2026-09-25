@@ -23,7 +23,7 @@ import {
   stripForeignHref,
   frameToPageRect,
 } from "../src/engine/collector.ts";
-import { POLICY_BLOCK_WINDOW_MS, consoleEmbedOrigin, formatViolations, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
+import { POLICY_BLOCK_WINDOW_MS, formatViolations, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
 import {
   describeInjection,
   injectionProbe,
@@ -511,16 +511,6 @@ test("frame helpers: names capped, link queries dropped, rects placed on the pag
   // Two srcdoc frames of the app are told apart by their titles.
   const srcdoc = (title: string) => ({ url: "about:srcdoc", origin: "", title, foreign: false });
   assert.notEqual(frameElementKey("button:send", srcdoc("Inner note")), frameElementKey("button:send", srcdoc("Other widget")));
-});
-
-test("consoleEmbedOrigin: a console error is an embed's only when its script comes from a site the page embeds", () => {
-  const embedded = new Set(["https://chat.example.com"]);
-  assert.equal(consoleEmbedOrigin("https://chat.example.com/widget.js", embedded), "https://chat.example.com");
-  // The contrasts: a third-party script the app's own page loads, the app's own script, no location.
-  assert.equal(consoleEmbedOrigin("https://cdn.example.net/analytics.js", embedded), null);
-  assert.equal(consoleEmbedOrigin("http://app.test/main.js", embedded), null);
-  assert.equal(consoleEmbedOrigin(undefined, embedded), null);
-  assert.equal(consoleEmbedOrigin("", embedded), null);
 });
 
 test("formatViolations: an embed's violation says whose it is", () => {
