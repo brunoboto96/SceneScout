@@ -157,6 +157,26 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     page.context().off("page", onRedirectPopup);
     check("an embed reached through a redirect is sandboxed too: it cannot open a window", afterRedirect.length === 0, `${afterRedirect.length} popup(s)`);
     await frameAs("redirected")!
+      .evaluate(() => (window as unknown as { dataFetch: () => void }).dataFetch())
+      .catch(() => {});
+    await page.waitForTimeout(1200);
+    check(
+      "a frame that loads a data: URL in its own place cannot post to its site with Origin: null",
+      stats.writes["POST /api/frame-datafetch"] === undefined,
+      JSON.stringify(stats.writes),
+    );
+    // A same-document route change on the app page, then the escape: the page still knows what it embeds.
+    await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    await until(
+      "the redirected embed to load again",
+      async () => {
+        const f = frameAs("redirected");
+        return !!f && (await f.evaluate(() => typeof (window as unknown as { moveTop?: unknown }).moveTop === "function").catch(() => false));
+      },
+      8000,
+    );
+    await page.evaluate(() => history.pushState({}, "", location.pathname + location.search + "#step-2"));
+    await frameAs("redirected")!
       .evaluate(() => (window as unknown as { moveTop: () => void }).moveTop())
       .catch(() => {});
     await page.waitForTimeout(2500);

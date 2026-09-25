@@ -876,6 +876,15 @@ export class BrowserEngine {
       this.watchResponse(res.request(), res.status());
     });
     this.context.on("request", (req) => {
+      // Who moved the driven page, decided on its navigation's first request
+      // (this event fires before the route handler judges that page's writes).
+      if (req.isNavigationRequest() && !req.redirectedFrom()) {
+        try {
+          if (this.page && req.frame() === this.page.mainFrame()) this.embedMoves.navigationStarted(req.url(), req.headers()["referer"]);
+        } catch {
+          /* no frame: not the driven page */
+        }
+      }
       this.inFlight += 1;
       this.lastRequestStart = Date.now();
       const type = req.resourceType();
@@ -1677,7 +1686,9 @@ export class BrowserEngine {
       /* no frame: a new window's first request, or a service worker */
     }
     const top = this.page?.mainFrame();
-    const pageHasForeignFrame = (this.page?.frames() ?? []).some((f) => f !== top && foreignFrameOrigin(this.baseUrl, [f.url()]) !== null);
+    // Present now, or embedded earlier by this document: a frame that moved itself to data: is no longer foreign by its URL.
+    const pageHasForeignFrame =
+      this.embedMoves.hasEmbeds() || (this.page?.frames() ?? []).some((f) => f !== top && foreignFrameOrigin(this.baseUrl, [f.url()]) !== null);
     const foreign = foreignWrite(this.baseUrl, {
       url: req.url(),
       originHeader: req.headers()["origin"],

@@ -42,6 +42,11 @@
       const target = location.origin + '/frame-popup.html?via=top';
       location.href = 'data:text/html,' + encodeURIComponent('<script>top.location = ' + JSON.stringify(target) + ';<\/script>');
     };
+    // Load a data: URL in this frame's place that posts to this frame's site with "Origin: null".
+    window.dataFetch = () => {
+      const target = location.origin + '/api/frame-datafetch';
+      location.href = 'data:text/html,' + encodeURIComponent('<script>fetch(' + JSON.stringify(target) + ', { method: "POST", body: "x", mode: "no-cors" });<\/script>');
+    };
     // A write into the app itself, the way a sign-in frame posts its reply to the app's callback.
     window.sendToApp = (app) =>
       fetch(app + '/api/frame-to-app', { method: 'POST', body: 'reply', mode: 'no-cors' })

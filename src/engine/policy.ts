@@ -298,19 +298,30 @@ export function foreignWrite(
 }
 
 /**
- * Whether the session's page was moved off the app by one of its embeds: it
- * left the app for the site of a frame the app's page was embedding. The
+ * Whether the session's page was moved off the app by one of its embeds. The
  * sandbox forbids a frame to move the page, but WebKit drops it for a frame
  * that loads a `data:` URL in its own place, and a Chromium service worker can
- * serve a frame's document unseen. A page the tester moved to another site
- * itself — a hosted sign-in page, a second app — is not this, and keeps the
- * ordinary rules.
+ * serve a frame's document unseen.
+ *
+ * Decided on the navigation's first request: one that leaves the app from a
+ * page embedding another site, and whose Referer is not the app, was not the
+ * tester's — a click on the app's page, or the engine's own navigation within
+ * the app, carries the app as its Referer. A page the tester moved to another
+ * site — a hosted sign-in page, even one the app also embeds for silent
+ * sign-in — keeps the ordinary rules. The record of embeds is dropped only
+ * when a new document starts loading, never on a same-document route change.
  */
 export class EmbedMoveTracker {
   private embedded = new Set<string>();
+  private pending: string | null = null;
   /** The origin the page was moved to by an embed, while it stays there. */
   movedTo: string | null = null;
   constructor(private readonly appUrl: string) {}
+
+  /** Whether the page's current document has embedded a frame of another origin. */
+  hasEmbeds(): boolean {
+    return this.embedded.size > 0;
+  }
 
   /** A frame (not the top window) loaded a document at `url`. */
   frameLoaded(url: string): void {
@@ -318,7 +329,15 @@ export class EmbedMoveTracker {
     if (origin) this.embedded.add(origin);
   }
 
-  /** The top window loaded a document at `url`. */
+  /** The top window's navigation to `url` sent its first request, with this Referer. */
+  navigationStarted(url: string, referer: string | undefined): void {
+    const target = foreignFrameOrigin(this.appUrl, [url]);
+    const fromApp = !!referer && foreignFrameOrigin(this.appUrl, [referer]) === null && /^https?:/i.test(referer);
+    this.pending = target && !fromApp && this.embedded.size > 0 ? target : null;
+    this.embedded.clear();
+  }
+
+  /** The top window now shows `url`: a new document, or a same-document route change. */
   pageLoaded(url: string): void {
     let origin: string;
     try {
@@ -328,15 +347,14 @@ export class EmbedMoveTracker {
     } catch {
       return;
     }
-    const onApp = foreignFrameOrigin(this.appUrl, [url]) === null;
-    if (onApp) {
-      this.embedded.clear();
+    if (foreignFrameOrigin(this.appUrl, [url]) === null) {
       this.movedTo = null;
+      this.pending = null;
       return;
     }
-    if (this.movedTo === origin) return;
-    this.movedTo = this.embedded.has(origin) ? origin : null;
-    this.embedded.clear();
+    if (this.pending === origin) this.movedTo = origin;
+    else if (this.movedTo !== origin) this.movedTo = null;
+    this.pending = null;
   }
 }
 

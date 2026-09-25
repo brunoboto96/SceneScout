@@ -63,11 +63,17 @@ worker that later serves its document unseen. Both can end in a popup or in the
 whole page moving to the third party's site, and the write rules still apply:
 a write from a page the session did not open is refused, and so is a write to
 another site from the session's own page once an embed has moved it off the
-app — to the site of a frame the app's page was embedding — unless it is a
-sign-in request. A page the tester reached another site on, a hosted sign-in
-page or a second app, keeps the ordinary rules: the rule is aimed at an embed
-moving the page, not at the tester doing it. A redirect's stand-in page is
-built with no headers of the redirect's but its cookies, and sends no referrer. In Chromium, a document re-served with the
+app, unless it is a sign-in request. Who moved the page is decided on the
+navigation's first request: one that leaves the app from a page that embeds
+another site, without the app as its Referer, was not the tester's. A page the
+tester moved to another site — a hosted sign-in page, even one the app also
+embeds for silent sign-in, or a second app — keeps the ordinary rules; on an
+app page that sends no Referer and embeds another site, the tester's own move
+counts as an embed's, and its writes out are refused. A frame that has moved
+itself to a `data:` URL posts with `Origin: null`, and on a page that embedded
+another site such a write out is refused. A redirect's stand-in page is built
+with no headers of the redirect's but its cookies, and sends no referrer, so
+an embed that checks which site embeds it by the Referer may refuse to load. In Chromium, a document re-served with the
 sandbox counts as public, so its requests to a loopback address are refused by
 the browser's own local-network rule: an app under test on localhost does not
 receive a foreign frame's writes at all.
