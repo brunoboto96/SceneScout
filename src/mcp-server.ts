@@ -265,6 +265,7 @@ function reportExtras(eng: BrowserEngine): ReportExtras {
     createdResources: eng.createdResources,
     unvisitedRoutes: unvisited,
     mode: eng.mode,
+    trustedEmbeds: [...eng.trustedEmbeds],
     policyAttributed: eng.oracleLog.policyAttributed,
     version: PKG_VERSION,
     attachedSessions: [...engines.keys()],
@@ -713,6 +714,14 @@ server.registerTool(
         .describe(
           "A floor between actions, in milliseconds, for when a person is watching and needs to keep up — following a flow, taking notes, demonstrating. Default 0: as fast as the page allows, which is what a run wants otherwise. Changeable mid-run with scout_session {paceMs}.",
         ),
+      trustedEmbeds: z
+        .array(z.string().max(200))
+        .max(10)
+        .optional()
+        .describe(
+          'Origins of embedded frames (e.g. "https://pay.example.com") whose writes out of the app may go out — ONLY when the user named them, typically a provider in test mode, and only in safe-write mode. ' +
+            "Never add one yourself. Hostile input, repeated-click probes and uploads stay refused in them.",
+        ),
       record: z
         .boolean()
         .default(false)
@@ -742,6 +751,7 @@ server.registerTool(
       objective,
       task,
       record,
+      trustedEmbeds,
       paceMs,
       session,
     }: {
@@ -756,6 +766,7 @@ server.registerTool(
       objective?: string;
       task?: string;
       record?: boolean;
+      trustedEmbeds?: string[];
       paceMs?: number;
       session?: string;
     }) => {
@@ -837,6 +848,7 @@ server.registerTool(
           paceMs,
           task: objective ? task : undefined,
           record,
+          trustedEmbeds,
           memoryStore: store,
         });
         eng.role = storageStatePath ? path.basename(storageStatePath).replace(/\.json$/i, "") : "anonymous";
@@ -1545,6 +1557,7 @@ server.registerTool(
           createdResources: eng.createdResources,
           unvisitedRoutes: unvisited,
           mode: eng.mode,
+          trustedEmbeds: [...eng.trustedEmbeds],
           policyAttributed: eng.oracleLog.policyAttributed,
           // Which sessions are still open decides whether a quiet one is holding a browser, and how long its trailing idle runs.
           attachedSessions: [...engines.keys()],

@@ -20,6 +20,9 @@ import {
   foreignWrite,
   withForeignFrameSandbox,
   hostileForEmbed,
+  trustedEmbedOrigins,
+  trustsEmbedWrite,
+  trustsForeignWrite,
   offAppPageWrite,
   EmbedMoveTracker,
   sandboxedRedirectPage,
@@ -699,4 +702,68 @@ test("hostileForEmbed: what is never typed into another site's frame", () => {
   for (const value of ["hello", "Zoë Müller", "qa-demo@example.com", "2 < 3 is true", "x".repeat(200), "line one\nline two", "日本語のテキスト"]) {
     assert.equal(hostileForEmbed(value), null, value.slice(0, 30));
   }
+});
+
+test("trustedEmbedOrigins: only plain http(s) origins, at most ten", () => {
+  const { origins, rejected } = trustedEmbedOrigins([
+    "https://pay.example.com",
+    "https://pay.example.com/",
+    "http://127.0.0.1:4242",
+    "https://checkout.example.com/v3",
+    "https://*.example.com",
+    "ftp://files.example.com",
+    "https://user:pw@example.com",
+    "https://example.com/?x=1",
+    "not a url",
+  ]);
+  assert.deepEqual(origins, ["https://pay.example.com", "http://127.0.0.1:4242"], "a trailing slash is the same origin, once");
+  assert.deepEqual(rejected, [
+    "https://checkout.example.com/v3",
+    "https://*.example.com",
+    "ftp://files.example.com",
+    "https://user:pw@example.com",
+    "https://example.com/?x=1",
+    "not a url",
+  ]);
+  const many = trustedEmbedOrigins(Array.from({ length: 12 }, (_, i) => `https://p${i}.example.com`));
+  assert.equal(many.origins.length, 10);
+  assert.deepEqual(many.overflow, ["https://p10.example.com", "https://p11.example.com"], "valid, but over the limit: said as such");
+  assert.deepEqual(many.rejected, []);
+  assert.deepEqual(trustedEmbedOrigins(undefined), { origins: [], rejected: [], overflow: [] });
+  assert.deepEqual(
+    trustedEmbedOrigins(["https://pay.example.com.", "https://pay.example.com"]).origins,
+    ["https://pay.example.com"],
+    "a trailing dot is the same host",
+  );
+});
+
+test("trustsEmbedWrite: a named origin, in safe-write only", () => {
+  const trusted = new Set(["https://pay.example.com"]);
+  assert.equal(trustsEmbedWrite("safe-write", trusted, "https://pay.example.com"), true);
+  for (const mode of ["observe", "read-only", "destructive"] as const) {
+    assert.equal(trustsEmbedWrite(mode, trusted, "https://pay.example.com"), false, mode);
+  }
+  assert.equal(trustsEmbedWrite("safe-write", trusted, "https://forms.example.com"), false, "an origin nobody named");
+});
+
+test("trustsForeignWrite: every other site involved must be trusted", () => {
+  const app = "http://app.test/checkout";
+  const trusted = new Set(["https://pay.example.com"]);
+  const at = (req: Parameters<typeof trustsForeignWrite>[3], mode: Parameters<typeof trustsForeignWrite>[0] = "safe-write") =>
+    trustsForeignWrite(mode, trusted, app, req);
+  assert.equal(at({ frameChain: ["https://pay.example.com/card"], originHeader: "https://pay.example.com" }), true);
+  // An untrusted embed wrapping a trusted one cannot borrow its trust; nor the other way round.
+  assert.equal(at({ frameChain: ["https://pay.example.com/card", "https://forms.example.net/wrap"], originHeader: "https://forms.example.net" }), false);
+  assert.equal(at({ frameChain: ["https://forms.example.net/inner", "https://pay.example.com/card"], originHeader: "https://forms.example.net" }), false);
+  // A trusted frame whose request names an untrusted site in its Origin header.
+  assert.equal(at({ frameChain: ["https://pay.example.com/card"], originHeader: "https://forms.example.net" }), false);
+  // A popup the session never adopted is not a frame, trusted origin or not.
+  assert.equal(at({ frameChain: [], originHeader: "https://pay.example.com", unadoptedPageUrl: "https://pay.example.com/checkout" }), false);
+  // A wrapper with no web address of its own (blob:, data:) cannot pass as trusted; a blank or srcdoc one is its parent's.
+  assert.equal(at({ frameChain: ["https://pay.example.com/card", "blob:https://forms.example.net/1b2c"], originHeader: "https://pay.example.com" }), false);
+  assert.equal(at({ frameChain: ["https://pay.example.com/card", "data:text/html,x"], originHeader: "https://pay.example.com" }), false);
+  assert.equal(at({ frameChain: ["about:srcdoc", "https://pay.example.com/card"], originHeader: "https://pay.example.com" }), true);
+  // Only in safe-write, and never with nothing foreign to trust.
+  assert.equal(at({ frameChain: ["https://pay.example.com/card"] }, "read-only"), false);
+  assert.equal(at({ frameChain: ["about:srcdoc", "http://app.test/widget"], originHeader: "http://app.test" }), false);
 });

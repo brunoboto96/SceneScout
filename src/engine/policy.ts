@@ -415,6 +415,89 @@ export function allowsForeignWriteOnSignIn(mode: WriteMode, topPageUrl: string, 
   return SIGN_IN_SEGMENT_RE.test(last);
 }
 
+/** The most origins a session may trust with its embeds' writes. */
+export const MAX_TRUSTED_EMBEDS = 10;
+
+/**
+ * The origins a session was told to trust, normalised, and what was given
+ * that is not one. An entry must be a plain http(s) origin — scheme, host and
+ * port, nothing after — so a path or a wildcard cannot widen it by accident.
+ */
+export function trustedEmbedOrigins(list: readonly string[] | undefined): { origins: string[]; rejected: string[]; overflow: string[] } {
+  const origins: string[] = [];
+  const rejected: string[] = [];
+  const overflow: string[] = [];
+  for (const raw of list ?? []) {
+    let u: URL;
+    try {
+      u = new URL(raw.trim());
+    } catch {
+      rejected.push(raw);
+      continue;
+    }
+    const bare = u.pathname === "/" && !u.search && !u.hash && !u.username && !u.password;
+    if ((u.protocol !== "http:" && u.protocol !== "https:") || !bare || raw.includes("*")) {
+      rejected.push(raw);
+      continue;
+    }
+    // "pay.example.com." is "pay.example.com": one origin, one slot.
+    const origin = u.origin.replace(/\.(?=(:\d+)?$)/, "");
+    if (origins.includes(origin)) continue;
+    if (origins.length < MAX_TRUSTED_EMBEDS) origins.push(origin);
+    else overflow.push(raw);
+  }
+  return { origins, rejected, overflow };
+}
+
+/**
+ * Whether the writes a frame of `origin` sends outside the app may go out
+ * after all: only for an origin the user named as trusted (a provider in test
+ * mode, say), and only in safe-write — read-only and observe keep their
+ * promise, and destructive allows everything already.
+ */
+export function trustsEmbedWrite(mode: WriteMode, trusted: ReadonlySet<string>, origin: string): boolean {
+  return mode === "safe-write" && trusted.has(origin);
+}
+
+/**
+ * Whether a foreign write may go out because of trust: every other site
+ * involved — each http(s) frame from the sender up to the page, and the
+ * Origin header when it names one — must be trusted, so an untrusted embed
+ * cannot borrow a trusted one it wraps. A page the session never adopted (a
+ * popup) is not a frame, and trust does not reach it.
+ */
+export function trustsForeignWrite(
+  mode: WriteMode,
+  trusted: ReadonlySet<string>,
+  appUrl: string,
+  req: { frameChain: readonly string[]; originHeader?: string; unadoptedPageUrl?: string | null },
+): boolean {
+  if (mode !== "safe-write" || trusted.size === 0 || req.unadoptedPageUrl) return false;
+  const originOf = (url: string | undefined): string | null => {
+    if (!url) return null;
+    try {
+      const u = new URL(url);
+      return u.protocol === "http:" || u.protocol === "https:" ? u.origin : null;
+    } catch {
+      return null;
+    }
+  };
+  const app = originOf(appUrl);
+  const involved = new Set<string>();
+  for (const url of req.frameChain) {
+    // A blank or srcdoc frame is its parent's, and the parent is judged next.
+    // Any other frame with no web address (blob:, data:) could be an untrusted
+    // site that moved itself there to wrap a trusted one: no trust through it.
+    if (/^about:(blank|srcdoc)/i.test(url)) continue;
+    const o = originOf(url);
+    if (!o) return false;
+    if (o !== app) involved.add(o);
+  }
+  const header = originOf(req.originHeader);
+  if (header && header !== app) involved.add(header);
+  return involved.size > 0 && [...involved].every((o) => trustsEmbedWrite(mode, trusted, o));
+}
+
 /** The longest text typed into another site's frame; past it, a value is a fuzzing probe, not a user's input. */
 export const MAX_EMBED_TEXT = 200;
 

@@ -435,7 +435,62 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     await frameAs("same")!.evaluate(() => (window as unknown as Child).postToTop());
     await until("the same-origin frame's top-window form to arrive", () => stats.writes["POST /api/frame-top-same"] === 1, 5000).catch(() => {});
     check("...while the same form in a same-origin frame does", stats.writes["POST /api/frame-top-same"] === 1, JSON.stringify(stats.writes));
+
+    await trustedEmbeds({ baseUrl, foreignBaseUrl, projectDir, stats });
   } finally {
     await engine.close().catch(() => {});
+  }
+}
+
+/**
+ * The opt-in list: the same foreign frame, the same write, and one fact varied
+ * each time — whether the origin is trusted, and the mode.
+ */
+async function trustedEmbeds({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeContext): Promise<void> {
+  console.log("frames: a trusted embed's writes, in safe-write only");
+  const cases = [
+    { mode: "safe-write", trusted: false, arrives: false, as: "untrusted" },
+    { mode: "safe-write", trusted: true, arrives: true, as: "trusted" },
+    { mode: "read-only", trusted: true, arrives: false, as: "readonly" },
+  ] as const;
+  for (const c of cases) {
+    const eng = new BrowserEngine();
+    try {
+      const attached = await eng.attach({
+        url: `${baseUrl}/account/checkout.html?foreign=${encodeURIComponent(foreignBaseUrl)}`,
+        projectDir,
+        mode: c.mode,
+        trustedEmbeds: c.trusted ? [foreignBaseUrl] : undefined,
+      });
+      if (c.trusted && c.mode === "read-only") check("attach says trust is ignored outside safe-write", /ignored in read-only mode/.test(attached), attached);
+      const p = (eng as unknown as { page: Page }).page;
+      const frame = () => p.frames().find((f) => f.url().includes("as=checkout"));
+      await until(
+        `the embed (${c.as}) to load`,
+        async () =>
+          !!frame() &&
+          (await frame()!
+            .evaluate(() => typeof (window as unknown as { sendNote?: unknown }).sendNote === "function")
+            .catch(() => false)),
+        8000,
+      );
+      if (c.trusted && c.mode === "safe-write") {
+        const snap = await eng.snapshot(true);
+        const note = /(e\d+) textbox "Note"[^\n]*⟨in cross-origin frame/.exec(snap)?.[1];
+        const typed = note ? await eng.type(note, "<img src=x onerror=alert(1)>") : `no ref in:\n${snap}`;
+        check("a trusted embed still refuses markup typed into it", /^REFUSED: typing this value \(it is markup\)/.test(typed), typed);
+      }
+      const before = stats.writes["POST /api/frame-note-checkout"] ?? 0;
+      await frame()!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());
+      await p.waitForTimeout(600);
+      const arrived = (stats.writes["POST /api/frame-note-checkout"] ?? 0) - before === 1;
+      check(
+        `${c.mode}, ${c.trusted ? "trusted" : "not trusted"}: the embed's write ${c.arrives ? "goes out" : "is refused"}`,
+        arrived === c.arrives,
+        JSON.stringify(stats.writes),
+      );
+    } finally {
+      await eng.close().catch(() => {});
+    }
   }
 }

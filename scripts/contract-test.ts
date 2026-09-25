@@ -807,3 +807,14 @@ test("formatUnchosenOptions: names each dropdown's untried options, and says not
   const many = Array.from({ length: 17 }, (_, i) => ({ route: `/r${i}`, key: "f", unchosen: ["x"] }));
   assert.equal(formatUnchosenOptions(many).at(-1), "  … +2 more");
 });
+
+test("report: trusted embeds are named, and whether they counted", () => {
+  const store = freshStore();
+  const base = { routesVisited: 1, routesTotal: 1, designAudits: 1, trustedEmbeds: ["https://pay.example.com"] };
+  const applied = generateReport(store, [], { ...base, mode: "safe-write" }, { write: false }).markdown;
+  assert.match(applied, /## Trusted embeds[\s\S]*were allowed, as the user asked[\s\S]*`https:\/\/pay\.example\.com`/);
+  const ignored = generateReport(store, [], { ...base, mode: "read-only" }, { write: false }).markdown;
+  assert.match(ignored, /## Trusted embeds[\s\S]*not applied: trust only counts in safe-write mode, and this run was read-only/);
+  const none = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 1, mode: "safe-write" }, { write: false }).markdown;
+  assert.doesNotMatch(none, /Trusted embeds/);
+});
