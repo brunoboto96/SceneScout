@@ -22,6 +22,8 @@
     topForm.action = '/api/frame-top-' + new URLSearchParams(location.search).get('as');
     document.body.appendChild(topForm);
     window.postToTop = () => topForm.submit();
+    // A popup on this frame's own site, which posts as it loads.
+    window.openPopup = () => { window.open(location.origin + '/frame-popup.html'); };
     // A write into the app itself, the way a sign-in frame posts its reply to the app's callback.
     window.sendToApp = (app) =>
       fetch(app + '/api/frame-to-app', { method: 'POST', body: 'reply', mode: 'no-cors' })

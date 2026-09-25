@@ -14,6 +14,14 @@
     // The second origin's address is handed over in the query string, since the page cannot know its port.
     const other = new URLSearchParams(location.search).get('foreign');
     if (other) document.getElementById('foreign').src = other + '/frame-child.html?as=foreign';
+    // The app's own page posting a form to another site: the app's behaviour, judged by the ordinary rules.
+    window.postOut = (url) => {
+      const form = document.createElement('form');
+      form.method = 'post';
+      form.action = url;
+      document.body.appendChild(form);
+      form.submit();
+    };
   </script>
 </body>
 </html>

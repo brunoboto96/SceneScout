@@ -65,6 +65,7 @@ import {
   type WriteMode,
   foreignFrameOrigin,
   foreignWrite,
+  allowsForeignWriteOnSignIn,
   isAuthExempt,
 } from "./policy.js";
 import { scanProject } from "../scan.js";
@@ -219,11 +220,6 @@ function requestSource(req: Request): { frameChain: string[]; frameUrl: string |
     frame = frame.parentFrame();
   }
   return { frameChain, frameUrl };
-}
-
-/** The foreign origin behind a write headed outside the app, per policy.ts foreignWrite. */
-function foreignWriteOf(appUrl: string, req: Request): string | null {
-  return foreignWrite(appUrl, { url: req.url(), originHeader: req.headers()["origin"], ...requestSource(req) });
 }
 
 /** How long a snapshot waits for its frames' elements to answer. */
@@ -899,7 +895,7 @@ export class BrowserEngine {
       if (this.mode === "observe" && !isAuthExempt(this.mode, method, pathnameOf(req.url()), isDestructiveWire(pathnameOf(req.url()), req.postData()))) return;
       if (this.readOnly && isDestructiveWire(pathnameOf(req.url()), req.postData())) return;
       // A foreign frame's write is refused in every mode the route handler runs in.
-      if (this.mode !== "destructive" && foreignWriteOf(this.baseUrl, req)) return;
+      if (this.mode !== "destructive" && this.foreignWriteOf(req)) return;
       const pageUrl = this.page?.url();
       if (pageUrl && this.memory) {
         try {
@@ -931,7 +927,7 @@ export class BrowserEngine {
         };
         // An embedded widget from another site writes to that site, not to the
         // app under test: refused before any other rule, login included.
-        const foreign = foreignWriteOf(this.baseUrl, req);
+        const foreign = this.foreignWriteOf(req);
         if (foreign) return refuse(`sent from a frame of ${foreign}`);
         this.rememberAuthHeader(req.headers());
         const destructiveWire = isDestructiveWire(pathname, req.postData());
@@ -1555,31 +1551,65 @@ export class BrowserEngine {
 
   /**
    * The frames directly under the page, read from their <iframe> elements in
-   * one pass each, all at once, and given FRAME_READ_MS in total: a frame that
-   * cannot answer in time (a busy ad loop in its own process) is left out
-   * rather than stalling the snapshot. Frames inside frames are only counted.
+   * one pass each, all at once. Each read gets FRAME_READ_MS: a frame that
+   * cannot answer in time (a busy ad loop in its own process) is left out on
+   * its own rather than stalling the snapshot or dropping the others. Frames
+   * inside frames, and direct frames past the first 30, are only counted.
    */
   private async frameInventory(page: Page): Promise<{ frames: FrameInfo[]; nested: number }> {
     const top = page.mainFrame();
     const all = page.frames().filter((f) => f !== top);
-    const direct = all.filter((f) => f.parentFrame() === top).slice(0, 30);
-    const read = (frame: Frame): Promise<FrameInfo | null> =>
-      frame
-        .frameElement()
-        .then((el) =>
-          el.evaluate((node: Element) => {
-            const r = node.getBoundingClientRect();
-            return { title: (node.getAttribute("title") || node.getAttribute("name") || "").trim(), width: Math.round(r.width), height: Math.round(r.height) };
-          }),
-        )
-        .then((box) => ({ url: frame.url(), ...box, foreign: foreignFrameOrigin(this.baseUrl, [frame.url()]) !== null }))
-        .catch(() => null);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<Array<FrameInfo | null>>((resolve) => {
-      timer = setTimeout(() => resolve([]), FRAME_READ_MS);
+    const direct = all.filter((f) => f.parentFrame() === top);
+    const read = async (frame: Frame): Promise<FrameInfo | null> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const box = await Promise.race([
+        frame
+          .frameElement()
+          .then((el) =>
+            el.evaluate((node: Element) => {
+              const r = node.getBoundingClientRect();
+              return {
+                title: (node.getAttribute("title") || node.getAttribute("name") || "").trim(),
+                width: Math.round(r.width),
+                height: Math.round(r.height),
+              };
+            }),
+          )
+          .catch(() => null),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), FRAME_READ_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
+      return box ? { url: frame.url(), ...box, foreign: foreignFrameOrigin(this.baseUrl, [frame.url()]) !== null } : null;
+    };
+    const frames = (await Promise.all(direct.slice(0, 30).map(read))).filter((f): f is FrameInfo => f !== null);
+    return { frames, nested: all.length - Math.min(direct.length, 30) };
+  }
+
+  /**
+   * The foreign origin behind a write headed outside the app (policy.ts
+   * foreignWrite), or null — also null on the app's own sign-in page, where a
+   * captcha frame's writes must go out for a login to work.
+   */
+  private foreignWriteOf(req: Request): string | null {
+    let unadoptedPageUrl: string | null = null;
+    try {
+      const from = req.frame().page();
+      if (this.page && from !== this.page) unadoptedPageUrl = from.url();
+    } catch {
+      /* no frame: a new window's first request, or a service worker */
+    }
+    const top = this.page?.mainFrame();
+    const pageHasForeignFrame = (this.page?.frames() ?? []).some((f) => f !== top && foreignFrameOrigin(this.baseUrl, [f.url()]) !== null);
+    const foreign = foreignWrite(this.baseUrl, {
+      url: req.url(),
+      originHeader: req.headers()["origin"],
+      unadoptedPageUrl,
+      pageHasForeignFrame,
+      ...requestSource(req),
     });
-    const frames = (await Promise.race([Promise.all(direct.map(read)), timeout]).finally(() => clearTimeout(timer))).filter((f): f is FrameInfo => f !== null);
-    return { frames, nested: all.length - direct.length };
+    if (foreign && allowsForeignWriteOnSignIn(this.mode, this.page?.url() ?? "")) return null;
+    return foreign;
   }
 
   /** Report (and clear) write-policy blocks since the last action. */

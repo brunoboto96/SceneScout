@@ -18,6 +18,7 @@ import {
   destructiveRefusal,
   foreignFrameOrigin,
   foreignWrite,
+  allowsForeignWriteOnSignIn,
   isAuthExempt,
   isDestructive,
   isDestructiveWire,
@@ -575,4 +576,21 @@ test("foreignWrite: a write started by another site and headed outside the app",
     null,
     "a write that lands in the app is the ordinary rules' business",
   );
+  // A popup a foreign frame opened on its own site: header and page agree, but the session never adopted that page.
+  assert.equal(
+    at({ frameUrl: "https://forms.example.com/thanks", originHeader: "https://forms.example.com", unadoptedPageUrl: "https://forms.example.com/thanks" }),
+    "https://forms.example.com",
+  );
+  assert.equal(at({ unadoptedPageUrl: null, originHeader: "http://app.test:3000" }), null, "the session's own page");
+  // "Origin: null" (a no-referrer frame) out of the app, only when the page embeds another site.
+  assert.equal(at({ originHeader: "null", pageHasForeignFrame: true }), "an embedded frame (Origin: null)");
+  assert.equal(at({ originHeader: "null", pageHasForeignFrame: false }), null);
+});
+
+test("allowsForeignWriteOnSignIn: a captcha frame on the app's own sign-in page, outside observe", () => {
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "http://app.test/login"), true);
+  assert.equal(allowsForeignWriteOnSignIn("safe-write", "http://app.test/auth/sign-in?next=/"), true);
+  assert.equal(allowsForeignWriteOnSignIn("observe", "http://app.test/login"), false, "observe sends the login request and nothing else");
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "http://app.test/checkout"), false, "not a sign-in page");
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "not a url"), false);
 });

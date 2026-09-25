@@ -36,7 +36,9 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     check("...a same-origin frame by its path and title", /same-origin \/frame-child\.html\?as=same "Same-site widget" \d+×\d+/.test(snap), snap);
     check(
       "...a cross-origin frame by its origin, saying its writes are refused",
-      /cross-origin http:\/\/127\.0\.0\.1:\d+\/frame-child\.html\?as=foreign "Third-party form" \d+×\d+ — writes from it are refused/.test(snap),
+      /cross-origin http:\/\/127\.0\.0\.1:\d+\/frame-child\.html\?as=foreign "Third-party form" \d+×\d+ — writes it sends outside the app are refused/.test(
+        snap,
+      ),
       snap,
     );
     check("...and a 0×0 bridge only as a count", snap.includes("(+1 hidden frame)") && !snap.includes("as=bridge"), snap);
@@ -64,7 +66,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     check("...and the run's log says where it came from", logged);
 
     console.log("frames: a foreign frame's write into the app is the app's business");
-    type Child = { sendToApp: (app: string) => Promise<string>; postToTop: () => void };
+    type Child = { sendToApp: (app: string) => Promise<string>; postToTop: () => void; openPopup: () => void };
     await frameAs("foreign")!.evaluate((app) => (window as unknown as Child).sendToApp(app), baseUrl);
     await until("the write into the app to arrive", () => stats.writes["POST /api/frame-to-app"] === 1, 5000).catch(() => {});
     check(
@@ -72,6 +74,17 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       stats.writes["POST /api/frame-to-app"] === 1,
       JSON.stringify(stats.writes),
     );
+
+    console.log("frames: a popup a foreign frame opens on its own site");
+    const popups: Page[] = [];
+    const onPopup = (p: Page) => popups.push(p);
+    page.context().on("page", onPopup);
+    await frameAs("foreign")!.evaluate(() => (window as unknown as Child).openPopup());
+    await until("the popup to open", () => popups.length > 0, 5000).catch(() => {});
+    await page.waitForTimeout(800);
+    page.context().off("page", onPopup);
+    check("the foreign frame's popup did open (so the next check means something)", popups.length > 0);
+    check("...and its write never reaches the server", stats.writes["POST /api/frame-popup"] === undefined, JSON.stringify(stats.writes));
 
     console.log("frames: a form aimed at the top window, from each frame");
     await frameAs("foreign")!.evaluate(() => (window as unknown as Child).postToTop());
@@ -82,8 +95,20 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       JSON.stringify(stats.writes),
     );
     // The refused top-window navigation leaves the page on the browser's error page: load it again.
-    await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
-    await framesLoaded();
+    const reload = async () => {
+      await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+      await framesLoaded();
+    };
+    await reload();
+    // Its one-fact contrast: the same form to the same place, sent by the app's own page.
+    await page.evaluate((url) => (window as unknown as { postOut: (u: string) => void }).postOut(url), `${foreignBaseUrl}/api/frame-top-foreign`);
+    await until("the app's own form to the other site to arrive", () => stats.writes["POST /api/frame-top-foreign"] === 1, 5000).catch(() => {});
+    check(
+      "...while the app's own page posting the same form to that site is the app's behaviour, and arrives",
+      stats.writes["POST /api/frame-top-foreign"] === 1,
+      JSON.stringify(stats.writes),
+    );
+    await reload();
     // Last, because it navigates the whole page away.
     await frameAs("same")!.evaluate(() => (window as unknown as Child).postToTop());
     await until("the same-origin frame's top-window form to arrive", () => stats.writes["POST /api/frame-top-same"] === 1, 5000).catch(() => {});

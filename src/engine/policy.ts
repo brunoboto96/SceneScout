@@ -255,7 +255,16 @@ export function foreignFrameOrigin(appUrl: string, frameChain: readonly string[]
  */
 export function foreignWrite(
   appUrl: string,
-  req: { url: string; frameChain: readonly string[]; frameUrl: string | null; originHeader?: string },
+  req: {
+    url: string;
+    frameChain: readonly string[];
+    frameUrl: string | null;
+    originHeader?: string;
+    /** The URL of the page that sent it, when that is not the page the session drives (a popup nobody adopted). */
+    unadoptedPageUrl?: string | null;
+    /** Whether the session's page has a frame of another origin right now. */
+    pageHasForeignFrame?: boolean;
+  },
 ): string | null {
   let app: string;
   try {
@@ -277,7 +286,32 @@ export function foreignWrite(
   if (fromFrame) return fromFrame;
   const header = originOf(req.originHeader);
   if (header && header !== app && header !== originOf(req.frameUrl)) return header;
+  // A popup a foreign frame opened on its own site posts from its own script
+  // before it can be closed, and there the header and the page agree. The
+  // session never drives a page it did not adopt, so its writes out are not
+  // the app's.
+  if (req.unadoptedPageUrl !== undefined && req.unadoptedPageUrl !== null) return originOf(req.unadoptedPageUrl) ?? "a page the session did not open";
+  // A frame with a no-referrer policy sends "Origin: null". Out of the app,
+  // on a page that embeds another site, that is taken to be the embed.
+  if (req.originHeader === "null" && req.pageHasForeignFrame) return "an embedded frame (Origin: null)";
   return null;
+}
+
+/**
+ * Whether a foreign frame's writes out may go on this page after all: a
+ * captcha on the app's own sign-in page is a cross-origin frame that posts to
+ * its own site, and refusing it would make every login fail. Not in observe,
+ * where only the login request itself goes out.
+ */
+export function allowsForeignWriteOnSignIn(mode: WriteMode, topPageUrl: string): boolean {
+  if (mode === "observe" || mode === "destructive") return false;
+  let path: string;
+  try {
+    path = new URL(topPageUrl).pathname;
+  } catch {
+    return false;
+  }
+  return AUTH_FLOW_RE.test(path);
 }
 
 export function allowsWrite(mode: WriteMode, method: string, destructiveWire: boolean, owned: boolean): boolean {

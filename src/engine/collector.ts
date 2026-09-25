@@ -459,7 +459,7 @@ const VISIBLE_FRAME_PX = 2;
  * collected or can be acted on yet, and a page that shows its form in an
  * embed used to look like a page with no form at all: say what is there,
  * where it comes from, and that it was not looked inside. `nested` counts
- * frames inside frames, which are not read; `writesRefused` is false only in
+ * frames that are not read: nested inside others, or past the first 30; `writesRefused` is false only in
  * destructive mode, where a foreign frame's writes do go out.
  */
 export function frameLines(appUrl: string, frames: readonly FrameInfo[], opts: { nested?: number; writesRefused?: boolean } = {}): string[] {
@@ -482,12 +482,16 @@ export function frameLines(appUrl: string, frames: readonly FrameInfo[], opts: {
       /* about:blank, srcdoc: shown as they are */
     }
     const label = f.title ? ` "${f.title.slice(0, 60)}"` : "";
-    const writes = f.foreign ? (opts.writesRefused === false ? " — its writes go out (destructive mode)" : " — writes from it are refused") : "";
+    const writes = f.foreign
+      ? opts.writesRefused === false
+        ? " — its writes go out (destructive mode)"
+        : " — writes it sends outside the app are refused"
+      : "";
     return `  ${f.foreign ? "cross-origin" : "same-origin"} ${where.slice(0, 120)}${label} ${f.width}×${f.height}${writes}`;
   });
   if (visible.length > 10) lines.push(`  … +${visible.length - 10} more`);
   if (hidden > 0) lines.push(`  (+${hidden} hidden frame${hidden === 1 ? "" : "s"})`);
-  if (nested > 0) lines.push(`  (+${nested} frame${nested === 1 ? "" : "s"} nested inside those, not read)`);
+  if (nested > 0) lines.push(`  (+${nested} more frame${nested === 1 ? "" : "s"}, nested inside those or past the first 30, not read)`);
   return [`FRAMES not explored — their controls are not listed above and cannot be acted on:`, ...lines];
 }
 

@@ -429,9 +429,9 @@ test("frameLines: says what is embedded, where from, and that it was not explore
   const lines = frameLines(app, frames, { nested: 2 });
   assert.match(lines[0], /FRAMES not explored/);
   assert.equal(lines[1], '  same-origin /widget?x=1 "Widget" 400×200');
-  assert.equal(lines[2], "  cross-origin https://forms.example.com/embed 600×300 — writes from it are refused");
+  assert.equal(lines[2], "  cross-origin https://forms.example.com/embed 600×300 — writes it sends outside the app are refused");
   assert.equal(lines[3], "  (+1 hidden frame)");
-  assert.equal(lines[4], "  (+2 frames nested inside those, not read)");
+  assert.equal(lines[4], "  (+2 more frames, nested inside those or past the first 30, not read)");
   assert.equal(lines.length, 5);
   // In destructive mode a foreign frame's writes do go out, and the line must not say otherwise.
   assert.match(frameLines(app, frames, { writesRefused: false })[2], /its writes go out \(destructive mode\)/);
