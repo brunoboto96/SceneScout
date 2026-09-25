@@ -20,6 +20,8 @@ import {
   foreignWrite,
   withForeignFrameSandbox,
   hostileForEmbed,
+  trustedEmbedOrigins,
+  trustsEmbedWrite,
   offAppPageWrite,
   EmbedMoveTracker,
   sandboxedRedirectPage,
@@ -699,4 +701,40 @@ test("hostileForEmbed: what is never typed into another site's frame", () => {
   for (const value of ["hello", "Zoë Müller", "qa-demo@example.com", "2 < 3 is true", "x".repeat(200), "line one\nline two", "日本語のテキスト"]) {
     assert.equal(hostileForEmbed(value), null, value.slice(0, 30));
   }
+});
+
+test("trustedEmbedOrigins: only plain http(s) origins, at most ten", () => {
+  const { origins, rejected } = trustedEmbedOrigins([
+    "https://js.stripe.com",
+    "https://js.stripe.com/",
+    "http://127.0.0.1:4242",
+    "https://checkout.example.com/v3",
+    "https://*.example.com",
+    "ftp://files.example.com",
+    "https://user:pw@example.com",
+    "https://example.com/?x=1",
+    "not a url",
+  ]);
+  assert.deepEqual(origins, ["https://js.stripe.com", "http://127.0.0.1:4242"], "a trailing slash is the same origin, once");
+  assert.deepEqual(rejected, [
+    "https://checkout.example.com/v3",
+    "https://*.example.com",
+    "ftp://files.example.com",
+    "https://user:pw@example.com",
+    "https://example.com/?x=1",
+    "not a url",
+  ]);
+  const many = trustedEmbedOrigins(Array.from({ length: 12 }, (_, i) => `https://p${i}.example.com`));
+  assert.equal(many.origins.length, 10);
+  assert.equal(many.rejected.length, 2);
+  assert.deepEqual(trustedEmbedOrigins(undefined), { origins: [], rejected: [] });
+});
+
+test("trustsEmbedWrite: a named origin, in safe-write only", () => {
+  const trusted = new Set(["https://js.stripe.com"]);
+  assert.equal(trustsEmbedWrite("safe-write", trusted, "https://js.stripe.com"), true);
+  for (const mode of ["observe", "read-only", "destructive"] as const) {
+    assert.equal(trustsEmbedWrite(mode, trusted, "https://js.stripe.com"), false, mode);
+  }
+  assert.equal(trustsEmbedWrite("safe-write", trusted, "https://forms.example.com"), false, "an origin nobody named");
 });

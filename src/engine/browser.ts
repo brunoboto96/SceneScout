@@ -76,6 +76,8 @@ import {
   withForeignFrameSandbox,
   offAppPageWrite,
   hostileForEmbed,
+  trustedEmbedOrigins,
+  trustsEmbedWrite,
   embedProbeRefusal,
   EmbedMoveTracker,
   sandboxedRedirectPage,
@@ -115,6 +117,12 @@ export interface AttachOptions {
   task?: string;
   /** Keep a frame of the page after each action, under .scenescout/recordings/. Off by default; evidence for QA work. */
   record?: boolean;
+  /**
+   * Origins of embedded frames whose writes out of the app may go out in
+   * safe-write mode — a provider in test mode, named by the user. Hostile
+   * input, repeated-click probes and uploads stay refused in them.
+   */
+  trustedEmbeds?: string[];
   /**
    * Share one MemoryStore across engines attached to the same project
    * (multi-session/multi-role runs): coverage and findings from every role
@@ -358,6 +366,9 @@ export class BrowserEngine {
   private projectDirNote = "";
   memory: MemoryStore | null = null;
   mode: WriteMode = "read-only";
+  /** Origins named as trusted embeds (policy.ts trustsEmbedWrite decides when that counts). */
+  trustedEmbeds = new Set<string>();
+  private trustNotice = "";
   /** Human label for the auth identity driving this session (the server sets it from the storage-state filename). */
   role = "anonymous";
   /** Named-session id (the server sets it; every engine shares one MemoryStore, so
@@ -809,6 +820,14 @@ export class BrowserEngine {
       throw new Error(`storageStatePath does not exist: ${opts.storageStatePath}`);
     }
     this.mode = opts.mode ?? "read-only";
+    const trust = trustedEmbedOrigins(opts.trustedEmbeds);
+    this.trustedEmbeds = new Set(trust.origins);
+    this.trustNotice =
+      (trust.origins.length > 0
+        ? this.mode === "safe-write"
+          ? ` Trusted embeds: ${trust.origins.join(", ")} — writes their frames send outside the app go out in this mode; hostile input, repeated-click probes and uploads stay refused.`
+          : ` Trusted embeds (${trust.origins.join(", ")}) are ignored in ${this.mode} mode: they apply in safe-write only.`
+        : "") + (trust.rejected.length > 0 ? ` Not a plain http(s) origin, so not trusted: ${trust.rejected.join(", ")}.` : "");
     this.sessionObjective = (opts.objective ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
     // An agent-supplied task counts as stated; the placeholder does not.
     this.setTask(opts.task ?? "Attaching and taking stock", opts.task !== undefined);
@@ -1161,7 +1180,7 @@ export class BrowserEngine {
       `Memory: ${this.memory.dir}.${this.memory.loadWarning ? ` WARNING: ${this.memory.loadWarning}` : ""}` +
       (this.memory.prunedStates > 0 ? ` Trimmed ${this.memory.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
       `${this.memory.legacyDirNote ? ` ${this.memory.legacyDirNote}` : ""}` +
-      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""} Call scout_snapshot to see the current state.` +
+      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""}${this.trustNotice} Call scout_snapshot to see the current state.` +
       authWarning
     );
   }
@@ -1687,6 +1706,7 @@ export class BrowserEngine {
           frameLines(this.baseUrl, frames, {
             nested: this.unreadNestedFrames(page, nestedFrames),
             writesRefused: this.mode !== "destructive",
+            trustedWrites: this.mode === "safe-write" ? this.trustedEmbeds : undefined,
             read: new Set([...this.framesRead].map((f) => f.url())),
           }).join("\n")
         : "") +
@@ -1953,6 +1973,8 @@ export class BrowserEngine {
       ...requestSource(req),
     });
     if (foreign && allowsForeignWriteOnSignIn(this.mode, this.page?.url() ?? "", this.baseUrl)) return null;
+    // A frame of an origin the user named as trusted, in safe-write: its writes go to the ordinary rules.
+    if (foreign && trustsEmbedWrite(this.mode, this.trustedEmbeds, foreign)) return null;
     return foreign;
   }
 

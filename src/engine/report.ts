@@ -155,6 +155,8 @@ export interface ReportExtras {
   policyAttributed?: number;
   /** The write mode the run used. In "observe" no form can be submitted, which the ledger must say rather than blame the run. */
   mode?: WriteMode;
+  /** Origins trusted with their embeds' writes; they only counted in safe-write. */
+  trustedEmbeds?: string[];
   /** The engine's version, for the HTML's header. */
   version?: string;
   /** Sessions attached right now. Only these can be holding a browser, so only these are warned about. */
@@ -686,6 +688,19 @@ export function generateReport(
     lines.push(`Safe-write mode created these resources; delete them if the environment should stay pristine:`);
     lines.push(``);
     for (const r of extras.createdResources.slice(0, 50)) lines.push(`- \`${r}\``);
+    lines.push(``);
+  }
+
+  if (extras?.trustedEmbeds && extras.trustedEmbeds.length > 0) {
+    lines.push(`## Trusted embeds`);
+    lines.push(``);
+    lines.push(
+      extras.mode === "safe-write"
+        ? `Writes that frames of these origins sent outside the app were allowed, as the user asked; anything they created lives with that provider, not in the cleanup list above:`
+        : `Named as trusted, but not applied: trust only counts in safe-write mode, and this run was ${extras.mode ?? "read-only"}:`,
+    );
+    lines.push(``);
+    for (const o of extras.trustedEmbeds) lines.push(`- \`${o}\``);
     lines.push(``);
   }
 

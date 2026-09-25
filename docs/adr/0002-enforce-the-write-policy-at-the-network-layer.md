@@ -120,6 +120,14 @@ that has since navigated is stale. The text a container shows in such a frame
 hold other people's data; the labels of links, buttons and fields are kept,
 cut to 40 characters, and a link's query and fragment are dropped.
 
+A user can name embeds they trust — plain http(s) origins, at most ten, given
+at attach — such as a payment provider in test mode. In safe-write, and only
+there, writes those frames send outside the app go to the ordinary rules
+instead of being refused; read-only and observe keep their promise, and
+destructive allows everything already. Hostile input, repeated-click probes,
+uploads, masking and the sandbox apply to a trusted embed as to any other. The
+report names the list and whether it counted.
+
 ## Consequences
 
 A refusal is a tool result the agent must respect and cannot route around, and

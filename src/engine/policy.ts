@@ -415,6 +415,46 @@ export function allowsForeignWriteOnSignIn(mode: WriteMode, topPageUrl: string, 
   return SIGN_IN_SEGMENT_RE.test(last);
 }
 
+/** The most origins a session may trust with its embeds' writes. */
+export const MAX_TRUSTED_EMBEDS = 10;
+
+/**
+ * The origins a session was told to trust, normalised, and what was given
+ * that is not one. An entry must be a plain http(s) origin — scheme, host and
+ * port, nothing after — so a path or a wildcard cannot widen it by accident.
+ */
+export function trustedEmbedOrigins(list: readonly string[] | undefined): { origins: string[]; rejected: string[] } {
+  const origins: string[] = [];
+  const rejected: string[] = [];
+  for (const raw of list ?? []) {
+    let u: URL;
+    try {
+      u = new URL(raw.trim());
+    } catch {
+      rejected.push(raw);
+      continue;
+    }
+    const bare = u.pathname === "/" && !u.search && !u.hash && !u.username && !u.password;
+    if ((u.protocol !== "http:" && u.protocol !== "https:") || !bare || raw.includes("*")) {
+      rejected.push(raw);
+      continue;
+    }
+    if (!origins.includes(u.origin) && origins.length < MAX_TRUSTED_EMBEDS) origins.push(u.origin);
+    else if (!origins.includes(u.origin)) rejected.push(raw);
+  }
+  return { origins, rejected };
+}
+
+/**
+ * Whether the writes a frame of `origin` sends outside the app may go out
+ * after all: only for an origin the user named as trusted (a provider in test
+ * mode, say), and only in safe-write — read-only and observe keep their
+ * promise, and destructive allows everything already.
+ */
+export function trustsEmbedWrite(mode: WriteMode, trusted: ReadonlySet<string>, origin: string): boolean {
+  return mode === "safe-write" && trusted.has(origin);
+}
+
 /** The longest text typed into another site's frame; past it, a value is a fuzzing probe, not a user's input. */
 export const MAX_EMBED_TEXT = 200;
 
