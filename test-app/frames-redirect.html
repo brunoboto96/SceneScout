@@ -5,6 +5,7 @@
   <h1>An embed that redirects before it loads</h1>
   <iframe id="embed" title="Redirected embed" width="400" height="200"></iframe>
   <a id="no-content" href="/no-content" data-testid="frames-no-content-link">Nothing happens</a>
+  <a id="out" rel="noreferrer" data-testid="frames-out-link">Leave the app</a>
   <script>
     // Only a loopback origin, the fixture server's second port; anything else is ignored.
     const raw = new URLSearchParams(location.search).get('foreign') || '';
@@ -12,6 +13,8 @@
     // Rebuilt from a number on a fixed host, so nothing of the query string itself reaches the page.
     const other = port ? 'http://127.0.0.1:' + Number(port[1]) : '';
     if (other) document.getElementById('embed').src = other + '/frame-redirect';
+    // A link out to another site (the second port under another host name), sending no Referer.
+    if (port) document.getElementById('out').href = 'http://localhost:' + Number(port[1]) + '/page2.html';
   </script>
 </body>
 </html>

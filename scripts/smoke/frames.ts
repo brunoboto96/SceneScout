@@ -282,6 +282,23 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       `${page.url()} ${JSON.stringify(stats.writes)}`,
     );
 
+    // The tester's own no-referrer click out, while a foreign frame sits on data:: refused, and said so.
+    await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    await loadedAs("redirected");
+    await frameAs("redirected")!
+      .evaluate(() => (window as unknown as { dataFetch: () => void }).dataFetch())
+      .catch(() => {});
+    await page.waitForTimeout(800);
+    const outSnap = await engine.snapshot(true);
+    const outRef = /(e\d+) link "Leave the app"/.exec(outSnap)?.[1];
+    const clicked = outRef ? await engine.click(outRef) : `no ref in:\n${outSnap}`;
+    check(
+      "a no-referrer move out while a foreign frame sits on data: is refused with a WRITE-POLICY notice",
+      /WRITE-POLICY blocked/.test(clicked) && /A move of the whole page off the app/.test(clicked),
+      clicked,
+    );
+    check("...and is not also filed as a failed request", !/request_failed/.test(clicked), clicked);
+
     // The contrast: the app itself set the frame back to about:blank, then the
     // tester follows a no-referrer link out. That is the tester's move, and it goes.
     await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);

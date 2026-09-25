@@ -99,12 +99,12 @@ export function settle(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
 /** A loopback origin (the fixture server's other port), or "" for anything else: a redirect built from a query parameter goes nowhere else. */
 function loopbackOrigin(value: string | null): string {
   return value && /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(value) ? value : "";
 }
 
+/** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
 export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBaseUrl: string; stats: ServerStats; close: () => void }> {
   const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {} };
   const board: string[] = [];

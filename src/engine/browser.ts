@@ -226,6 +226,9 @@ function requestSource(req: Request): { frameChain: string[]; frameUrl: string |
   return { frameChain, frameUrl };
 }
 
+/** The `why` of a top-window navigation refused as a possible frame escape; the notice words it on its own. */
+const ESCAPE_REFUSAL = "a possible frame escape";
+
 /** How long a snapshot waits for its frames' elements to answer. */
 const FRAME_READ_MS = 1500;
 
@@ -950,11 +953,12 @@ export class BrowserEngine {
         // a frame that held another site sits on a non-web URL, is that frame's
         // escape: refused, judged on the page as it is when the request arrives.
         if (method === "GET" && req.resourceType() === "document" && this.embedEscapeNavigation(req)) {
-          const why = "a frame that held another site moving the page off the app";
+          const why = ESCAPE_REFUSAL;
           // Reported like any refusal, so a click whose navigation this stopped does not read as a click that did nothing.
           if (this.blockedRequests.length < 20)
             this.blockedRequests.push({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why });
           this.logAction({ action: "write-policy:blocked", target: `navigation to ${req.url().slice(0, 140)} (${why})`, url: this.page?.url() ?? "" });
+          this.refusedByPolicy.add(req);
           this.oracles.notePolicyBlock();
           await route.abort("blockedbyclient").catch(() => {});
           return;
@@ -1806,13 +1810,18 @@ export class BrowserEngine {
       .join("; ");
     const extra = this.blockedRequests.length > 5 ? ` (+${this.blockedRequests.length - 5} more)` : "";
     const answered = this.blockedRequests.some((e) => e.answered);
-    const foreign = [...new Set(this.blockedRequests.map((e) => e.why).filter((w): w is string => !!w))];
+    const reasons = new Set(this.blockedRequests.map((e) => e.why).filter((w): w is string => !!w));
+    const escaped = reasons.delete(ESCAPE_REFUSAL);
+    const foreign = [...reasons];
     this.blockedRequests = [];
     return (
       `\n🛡 WRITE-POLICY blocked (${this.mode}): ${list}${extra}. ` +
       `This is the tester's safety policy, NOT an app bug — do not file a finding for the resulting error UI. ` +
       (foreign.length > 0
         ? `Refused because it was ${foreign.join("; ")}: it would reach a site embedded in the page rather than the app, which no mode but destructive allows. `
+        : "") +
+      (escaped
+        ? `A move of the whole page off the app, with no Referer, was refused: a frame that held another site now sits on a data: or blob: URL, where WebKit drops the frame's sandbox, so the move may be that frame's. No mode but destructive allows it. `
         : "") +
       (answered
         ? `The page's own requests were answered with a 403 in the server's place, so the page's handling of a refusal is real: an error message is correct, and a success message is a false_success violation. `
