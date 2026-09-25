@@ -16,25 +16,27 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     // White-box: the frames themselves, which the engine does not act in yet.
     const page = (engine as unknown as { page: Page }).page;
     const frameAs = (as: string): Frame | undefined => page.frames().find((f) => f.url().includes(`as=${as}`));
-    await until(
-      "all three frames to load",
-      async () => {
-        for (const as of ["same", "foreign", "bridge"]) {
-          const f = frameAs(as);
-          if (!f || !(await f.evaluate(() => typeof (window as unknown as { sendNote?: unknown }).sendNote === "function").catch(() => false))) return false;
-        }
-        return true;
-      },
-      8000,
-    );
+    const framesLoaded = () =>
+      until(
+        "all three frames to load",
+        async () => {
+          for (const as of ["same", "foreign", "bridge"]) {
+            const f = frameAs(as);
+            if (!f || !(await f.evaluate(() => typeof (window as unknown as { sendNote?: unknown }).sendNote === "function").catch(() => false))) return false;
+          }
+          return true;
+        },
+        8000,
+      );
+    await framesLoaded();
 
     console.log("frames: the snapshot says what is embedded");
     const snap = await engine.snapshot();
     check("a snapshot lists the page's frames and says they were not explored", snap.includes("FRAMES not explored"), snap);
     check("...a same-origin frame by its path and title", /same-origin \/frame-child\.html\?as=same "Same-site widget" \d+×\d+/.test(snap), snap);
     check(
-      "...a cross-origin frame by its origin, saying its writes are never sent",
-      /cross-origin http:\/\/127\.0\.0\.1:\d+\/frame-child\.html\?as=foreign "Third-party form" \d+×\d+ — writes from it are never sent/.test(snap),
+      "...a cross-origin frame by its origin, saying its writes are refused",
+      /cross-origin http:\/\/127\.0\.0\.1:\d+\/frame-child\.html\?as=foreign "Third-party form" \d+×\d+ — writes from it are refused/.test(snap),
       snap,
     );
     check("...and a 0×0 bridge only as a count", snap.includes("(+1 hidden frame)") && !snap.includes("as=bridge"), snap);
@@ -60,6 +62,32 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       (e) => e.action === "write-policy:blocked" && /sent from a frame of http:\/\/127\.0\.0\.1:\d+/.test(e.target ?? ""),
     );
     check("...and the run's log says where it came from", logged);
+
+    console.log("frames: a foreign frame's write into the app is the app's business");
+    type Child = { sendToApp: (app: string) => Promise<string>; postToTop: () => void };
+    await frameAs("foreign")!.evaluate((app) => (window as unknown as Child).sendToApp(app), baseUrl);
+    await until("the write into the app to arrive", () => stats.writes["POST /api/frame-to-app"] === 1, 5000).catch(() => {});
+    check(
+      "a foreign frame's write whose destination is the app goes through the ordinary rules",
+      stats.writes["POST /api/frame-to-app"] === 1,
+      JSON.stringify(stats.writes),
+    );
+
+    console.log("frames: a form aimed at the top window, from each frame");
+    await frameAs("foreign")!.evaluate(() => (window as unknown as Child).postToTop());
+    await page.waitForTimeout(800);
+    check(
+      "a foreign frame's form aimed at the top window never reaches the server",
+      stats.writes["POST /api/frame-top-foreign"] === undefined,
+      JSON.stringify(stats.writes),
+    );
+    // The refused top-window navigation leaves the page on the browser's error page: load it again.
+    await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    await framesLoaded();
+    // Last, because it navigates the whole page away.
+    await frameAs("same")!.evaluate(() => (window as unknown as Child).postToTop());
+    await until("the same-origin frame's top-window form to arrive", () => stats.writes["POST /api/frame-top-same"] === 1, 5000).catch(() => {});
+    check("...while the same form in a same-origin frame does", stats.writes["POST /api/frame-top-same"] === 1, JSON.stringify(stats.writes));
   } finally {
     await engine.close().catch(() => {});
   }

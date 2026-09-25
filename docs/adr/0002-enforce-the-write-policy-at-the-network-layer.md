@@ -32,12 +32,18 @@ matching on bodies blocked ordinary create/analyse POSTs whose payload merely
 mentioned a destructive word — a document under analysis, a record description —
 which is lost coverage for no safety gain.
 
-A write sent by a frame of another origin than the app's — an embedded form,
-chat or payment box — is refused in every mode except destructive, before any
-other rule, login included. It goes to the third party that serves the frame,
-not to the app under test, and none of the modes above was agreed with that
-third party. Requests the app's own pages send to other origins are not
-affected: a login or a payment call is the app's behaviour, judged as above.
+A write started by a frame of another origin than the app's — an embedded form,
+chat or payment box — and headed outside the app is refused in every mode
+except destructive, before any other rule. It goes to the third party that
+serves the frame, not to the app under test, and no mode was agreed with that
+third party. Such a write is recognised by the frame the browser reports, or,
+for a form aimed at the top window or a popup the frame opens, by the request's
+Origin header. A foreign frame's write that lands in the app itself, such as a
+sign-in provider posting its reply to the app's callback, is judged by the
+ordinary rules, and so are requests the app's own pages send to other origins.
+A payment frame and a frame from one of the app's own sub-domains count as
+foreign: refusing a harmless write costs a gap in the report, and sending test
+traffic to a third party nobody asked cannot be undone.
 
 ## Consequences
 

@@ -17,6 +17,7 @@ import {
   AUTH_FLOW_RE,
   destructiveRefusal,
   foreignFrameOrigin,
+  foreignWrite,
   isAuthExempt,
   isDestructive,
   isDestructiveWire,
@@ -548,4 +549,30 @@ test("foreignFrameOrigin: a write is foreign when a frame of another site sent i
   ] as const) {
     assert.equal(foreignFrameOrigin(app, chain), expected, why);
   }
+});
+
+test("foreignWrite: a write started by another site and headed outside the app", () => {
+  const app = "http://app.test:3000/checkout";
+  const at = (over: Partial<Parameters<typeof foreignWrite>[1]>) =>
+    foreignWrite(app, { url: "https://forms.example.com/submit", frameChain: [], frameUrl: app, ...over });
+  // The frame the browser reports.
+  assert.equal(at({ frameChain: ["https://forms.example.com/embed"], frameUrl: "https://forms.example.com/embed" }), "https://forms.example.com");
+  assert.equal(
+    at({ frameChain: ["http://app.test:3000/widget"], frameUrl: "http://app.test:3000/widget" }),
+    null,
+    "a same-origin frame's call out is the app's own",
+  );
+  // A foreign frame's form aimed at _top: reported against the top page, but its Origin header names the frame's site.
+  assert.equal(at({ originHeader: "https://forms.example.com" }), "https://forms.example.com", "target=_top");
+  assert.equal(at({ frameUrl: null, originHeader: "https://forms.example.com" }), "https://forms.example.com", "target=_blank or a popup: no frame at all");
+  // The contrasts: the header says nothing new.
+  assert.equal(at({ originHeader: "http://app.test:3000" }), null, "the app's own page calling a third party");
+  assert.equal(at({ frameUrl: "https://idp.example.com/login", originHeader: "https://idp.example.com" }), null, "a sign-in page loaded as the whole page");
+  assert.equal(at({ originHeader: "null" }), null, "an opaque origin says nothing");
+  // A foreign frame writing into the app: a sign-in reply to the app's callback.
+  assert.equal(
+    at({ url: "http://app.test:3000/auth/callback", frameChain: ["https://idp.example.com/authorize"], frameUrl: "https://idp.example.com/authorize" }),
+    null,
+    "a write that lands in the app is the ordinary rules' business",
+  );
 });

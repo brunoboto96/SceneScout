@@ -64,6 +64,7 @@ import {
   policyRefusal,
   type WriteMode,
   foreignFrameOrigin,
+  foreignWrite,
   isAuthExempt,
 } from "./policy.js";
 import { scanProject } from "../scan.js";
@@ -197,22 +198,36 @@ const HOVER_REVEAL_WINDOW_MS = 2500;
 /** Non-GET traffic that is auth/telemetry plumbing, not tester-caused state mutation. */
 const BENIGN_MUTATION_RE = /\/auth\/(refresh|token|session)|refresh[-_]?token|\/telemetry|\/analytics|\/heartbeat|\/sentry|\/collect\b|\/logs?\b|\/metrics\b/i;
 
-/** The URLs of the frame that issued a request and of its parents, up to but not including the top document. Empty for a request with no frame (a service worker's). */
-function frameChainOf(req: Request): string[] {
-  const chain: string[] = [];
+/**
+ * What the policy needs to know about where a request came from: the URLs of
+ * the frame that sent it and of its parents, up to but not including the top
+ * document, and that frame's own URL (null when the browser attributes it to no
+ * frame, as for a new window or a service worker).
+ */
+function requestSource(req: Request): { frameChain: string[]; frameUrl: string | null } {
+  const frameChain: string[] = [];
   let frame: Frame | null;
   try {
     frame = req.frame();
   } catch {
-    return chain;
+    return { frameChain, frameUrl: null };
   }
+  const frameUrl = frame.url();
   const top = frame.page().mainFrame();
   while (frame && frame !== top) {
-    chain.push(frame.url());
+    frameChain.push(frame.url());
     frame = frame.parentFrame();
   }
-  return chain;
+  return { frameChain, frameUrl };
 }
+
+/** The foreign origin behind a write headed outside the app, per policy.ts foreignWrite. */
+function foreignWriteOf(appUrl: string, req: Request): string | null {
+  return foreignWrite(appUrl, { url: req.url(), originHeader: req.headers()["origin"], ...requestSource(req) });
+}
+
+/** How long a snapshot waits for its frames' elements to answer. */
+const FRAME_READ_MS = 1500;
 
 /** In-page XPath lookup fragment for string-expression evaluates. */
 function xpathLookup(xpath: string): string {
@@ -883,6 +898,8 @@ export class BrowserEngine {
       // Same test the route handler uses: in observe only an exempt auth request goes out.
       if (this.mode === "observe" && !isAuthExempt(this.mode, method, pathnameOf(req.url()), isDestructiveWire(pathnameOf(req.url()), req.postData()))) return;
       if (this.readOnly && isDestructiveWire(pathnameOf(req.url()), req.postData())) return;
+      // A foreign frame's write is refused in every mode the route handler runs in.
+      if (this.mode !== "destructive" && foreignWriteOf(this.baseUrl, req)) return;
       const pageUrl = this.page?.url();
       if (pageUrl && this.memory) {
         try {
@@ -914,7 +931,7 @@ export class BrowserEngine {
         };
         // An embedded widget from another site writes to that site, not to the
         // app under test: refused before any other rule, login included.
-        const foreign = foreignFrameOrigin(this.baseUrl, frameChainOf(req));
+        const foreign = foreignWriteOf(this.baseUrl, req);
         if (foreign) return refuse(`sent from a frame of ${foreign}`);
         this.rememberAuthHeader(req.headers());
         const destructiveWire = isDestructiveWire(pathname, req.postData());
@@ -1363,7 +1380,7 @@ export class BrowserEngine {
       ((await page.evaluate(BROKEN_IMAGES_SCRIPT).catch(() => null)) as BrokenImageScan | null) ?? { images: [], total: 0 },
       url,
     );
-    const frames = await this.frameInventory(page);
+    const { frames, nested: nestedFrames } = await this.frameInventory(page);
     const cov = memory.coverage();
     const unvisited = this.unvisitedKnownRoutes();
     const title = await page.title();
@@ -1375,7 +1392,9 @@ export class BrowserEngine {
       body +
       (geometry.length > 0 ? `\nGEOMETRY issues:\n` + geometry.map((g) => `  ⚠ ${g}`).join("\n") : "") +
       (brokenImages.length > 0 ? `\nBROKEN IMAGES:\n` + brokenImages.map((b) => `  ⚠ ${b}`).join("\n") : "") +
-      (frames.length > 0 ? `\n` + frameLines(this.baseUrl, frames).join("\n") : "") +
+      (frames.length > 0 || nestedFrames > 0
+        ? `\n` + frameLines(this.baseUrl, frames, { nested: nestedFrames, writesRefused: this.mode !== "destructive" }).join("\n")
+        : "") +
       (hiddenFileInputs.length > 0
         ? `\nFILE INPUTS not listed above (hidden behind a styled control — a user never sees the input itself): ${hiddenFileInputs.join("; ")}. ` +
           `scout_upload {ref} on the control that opens one, or scout_upload {} when it is the page's only file input.`
@@ -1534,21 +1553,33 @@ export class BrowserEngine {
     return entry.at < this.actionStartedAt ? `${entry.sig} (late — likely from a previous action)` : entry.sig;
   }
 
-  /** The page's frames, read from their <iframe> elements. A frame that cannot be read is left out rather than stalling the snapshot. */
-  private async frameInventory(page: Page): Promise<FrameInfo[]> {
-    const out: FrameInfo[] = [];
-    for (const frame of page.frames().slice(0, 50)) {
-      if (frame === page.mainFrame()) continue;
-      try {
-        const el = await frame.frameElement();
-        const box = await el.boundingBox();
-        const title = (await el.getAttribute("title")) || (await el.getAttribute("name")) || "";
-        out.push({ url: frame.url(), title: title.trim(), width: Math.round(box?.width ?? 0), height: Math.round(box?.height ?? 0) });
-      } catch {
-        /* detached mid-read */
-      }
-    }
-    return out;
+  /**
+   * The frames directly under the page, read from their <iframe> elements in
+   * one pass each, all at once, and given FRAME_READ_MS in total: a frame that
+   * cannot answer in time (a busy ad loop in its own process) is left out
+   * rather than stalling the snapshot. Frames inside frames are only counted.
+   */
+  private async frameInventory(page: Page): Promise<{ frames: FrameInfo[]; nested: number }> {
+    const top = page.mainFrame();
+    const all = page.frames().filter((f) => f !== top);
+    const direct = all.filter((f) => f.parentFrame() === top).slice(0, 30);
+    const read = (frame: Frame): Promise<FrameInfo | null> =>
+      frame
+        .frameElement()
+        .then((el) =>
+          el.evaluate((node: Element) => {
+            const r = node.getBoundingClientRect();
+            return { title: (node.getAttribute("title") || node.getAttribute("name") || "").trim(), width: Math.round(r.width), height: Math.round(r.height) };
+          }),
+        )
+        .then((box) => ({ url: frame.url(), ...box, foreign: foreignFrameOrigin(this.baseUrl, [frame.url()]) !== null }))
+        .catch(() => null);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<Array<FrameInfo | null>>((resolve) => {
+      timer = setTimeout(() => resolve([]), FRAME_READ_MS);
+    });
+    const frames = (await Promise.race([Promise.all(direct.map(read)), timeout]).finally(() => clearTimeout(timer))).filter((f): f is FrameInfo => f !== null);
+    return { frames, nested: all.length - direct.length };
   }
 
   /** Report (and clear) write-policy blocks since the last action. */

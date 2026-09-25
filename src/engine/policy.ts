@@ -237,6 +237,49 @@ export function foreignFrameOrigin(appUrl: string, frameChain: readonly string[]
   return null;
 }
 
+/**
+ * The origin to name when a write started by another site is headed outside
+ * the app, or null when the write is the app's own or lands in the app.
+ *
+ * The source is foreign when the frame that sent it (or a parent) is of
+ * another origin, or when the request's Origin header names another origin
+ * than both the app and the frame it is attributed to. The second catches a
+ * foreign frame's form aimed at `_top` or `_blank`, and a popup it opens: the
+ * browser reports those against the top page or no frame at all, but the
+ * Origin header still names the frame's site. A sign-in page loaded as the
+ * whole page is not caught by it, since there the header and the page agree.
+ *
+ * A foreign write whose destination is the app itself — a sign-in provider's
+ * frame posting its reply back to the app's callback — is the app's business
+ * and is left to the ordinary rules.
+ */
+export function foreignWrite(
+  appUrl: string,
+  req: { url: string; frameChain: readonly string[]; frameUrl: string | null; originHeader?: string },
+): string | null {
+  let app: string;
+  try {
+    app = new URL(appUrl).origin;
+  } catch {
+    return null;
+  }
+  const originOf = (url: string | null | undefined): string | null => {
+    if (!url) return null;
+    try {
+      const u = new URL(url);
+      return u.protocol === "http:" || u.protocol === "https:" ? u.origin : null;
+    } catch {
+      return null;
+    }
+  };
+  if (originOf(req.url) === app) return null;
+  const fromFrame = foreignFrameOrigin(appUrl, req.frameChain);
+  if (fromFrame) return fromFrame;
+  const header = originOf(req.originHeader);
+  if (header && header !== app && header !== originOf(req.frameUrl)) return header;
+  return null;
+}
+
 export function allowsWrite(mode: WriteMode, method: string, destructiveWire: boolean, owned: boolean): boolean {
   if (mode === "destructive") return true;
   if (mode === "observe") return false;

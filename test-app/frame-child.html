@@ -13,6 +13,20 @@
         .then((r) => r.status)
         .catch(() => 'failed');
     document.getElementById('send').addEventListener('click', window.sendNote);
+    // A form aimed at the top window: the browser reports its request against
+    // the top page, not this frame, and only the Origin header still names
+    // this frame's site. Posts to this frame's own origin.
+    const topForm = document.createElement('form');
+    topForm.method = 'post';
+    topForm.target = '_top';
+    topForm.action = '/api/frame-top-' + new URLSearchParams(location.search).get('as');
+    document.body.appendChild(topForm);
+    window.postToTop = () => topForm.submit();
+    // A write into the app itself, the way a sign-in frame posts its reply to the app's callback.
+    window.sendToApp = (app) =>
+      fetch(app + '/api/frame-to-app', { method: 'POST', body: 'reply', mode: 'no-cors' })
+        .then(() => 'sent')
+        .catch(() => 'failed');
   </script>
 </body>
 </html>
