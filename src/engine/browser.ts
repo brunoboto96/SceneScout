@@ -2561,10 +2561,8 @@ export class BrowserEngine {
     for (let depth = 0; depth < 5; depth++) {
       let next: Frame | null = null;
       for (const child of current.childFrames()) {
-        const holds = await child
-          .frameElement()
-          .then((el) => el.evaluate((node) => node === node.ownerDocument?.activeElement))
-          .catch(() => false);
+        // Within the frame limit: a frame that never answers must not hold up a key press.
+        const holds = await this.withinFrameLimit(child.frameElement().then((el) => el.evaluate((node) => node === node.ownerDocument?.activeElement)));
         if (holds) {
           next = child;
           break;
