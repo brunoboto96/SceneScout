@@ -100,6 +100,11 @@ export function settle(ms: number): Promise<void> {
 }
 
 /** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
+/** A loopback origin (the fixture server's other port), or "" for anything else: a redirect built from a query parameter goes nowhere else. */
+function loopbackOrigin(value: string | null): string {
+  return value && /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(value) ? value : "";
+}
+
 export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBaseUrl: string; stats: ServerStats; close: () => void }> {
   const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {} };
   const board: string[] = [];
@@ -118,14 +123,14 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     }
     // Two hops: through the app first, then out (/app-frame-redirect2 → /app-frame-redirect → <origin>).
     if (urlPath === "/app-frame-redirect2") {
-      const to = new URL(req.url ?? "/", "http://x").searchParams.get("to") ?? "";
+      const to = loopbackOrigin(new URL(req.url ?? "/", "http://x").searchParams.get("to"));
       res.writeHead(302, { location: `/app-frame-redirect?to=${encodeURIComponent(to)}` });
       res.end();
       return;
     }
     // A sign-in provider's silent renewal: redirects to the app's callback with a one-time code.
     if (urlPath === "/idp-renew") {
-      const to = new URL(req.url ?? "/", "http://x").searchParams.get("to") ?? "";
+      const to = loopbackOrigin(new URL(req.url ?? "/", "http://x").searchParams.get("to"));
       codeCounter += 1;
       res.writeHead(302, { location: `${to}/cb?code=c${codeCounter}` });
       res.end();
@@ -146,7 +151,7 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     }
     // The app's own frame URL redirecting into another site: /app-frame-redirect?to=<origin>.
     if (urlPath === "/app-frame-redirect") {
-      const to = new URL(req.url ?? "/", "http://x").searchParams.get("to") ?? "";
+      const to = loopbackOrigin(new URL(req.url ?? "/", "http://x").searchParams.get("to"));
       res.writeHead(302, { location: `${to}/frame-child.html?as=appredirect` });
       res.end();
       return;

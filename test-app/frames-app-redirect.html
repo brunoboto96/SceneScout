@@ -5,7 +5,9 @@
   <h1>A frame of the app's own that redirects to another site</h1>
   <iframe id="embed" title="App-hosted embed" width="400" height="200"></iframe>
   <script>
-    const other = new URLSearchParams(location.search).get('foreign');
+    // Only a loopback origin, the fixture server's second port; anything else is ignored.
+    const raw = new URLSearchParams(location.search).get('foreign') || '';
+    const other = /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(raw) ? raw : '';
     const hops = new URLSearchParams(location.search).get('hops');
     if (other && hops === 'code') document.getElementById('embed').src = other + '/idp-renew?to=' + encodeURIComponent(location.origin);
     else if (other) document.getElementById('embed').src = (hops === '2' ? '/app-frame-redirect2?to=' : '/app-frame-redirect?to=') + encodeURIComponent(other);

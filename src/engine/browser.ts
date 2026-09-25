@@ -950,11 +950,12 @@ export class BrowserEngine {
         // a frame that held another site sits on a non-web URL, is that frame's
         // escape: refused, judged on the page as it is when the request arrives.
         if (method === "GET" && req.resourceType() === "document" && this.embedEscapeNavigation(req)) {
-          this.logAction({
-            action: "write-policy:blocked",
-            target: `navigation to ${req.url().slice(0, 140)} (a frame moving the page off the app)`,
-            url: this.page?.url() ?? "",
-          });
+          const why = "a frame that held another site moving the page off the app";
+          // Reported like any refusal, so a click whose navigation this stopped does not read as a click that did nothing.
+          if (this.blockedRequests.length < 20)
+            this.blockedRequests.push({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why });
+          this.logAction({ action: "write-policy:blocked", target: `navigation to ${req.url().slice(0, 140)} (${why})`, url: this.page?.url() ?? "" });
+          this.oracles.notePolicyBlock();
           await route.abort("blockedbyclient").catch(() => {});
           return;
         }
@@ -1727,7 +1728,7 @@ export class BrowserEngine {
   /**
    * Whether a document request is the top window leaving the app, with no
    * Referer, while a frame that held another site's document now sits on a
-   * non-web URL (data:, about:) — where WebKit no longer applies its sandbox.
+   * data: or blob: URL — where WebKit no longer applies its sandbox.
    */
   private embedEscapeNavigation(req: Request): boolean {
     const page = this.page;
@@ -1740,7 +1741,8 @@ export class BrowserEngine {
     if (req.headers()["referer"]) return false;
     if (foreignFrameOrigin(this.baseUrl, [req.url()]) === null) return false;
     const top = page.mainFrame();
-    return page.frames().some((f) => f !== top && this.foreignFrames.has(f) && !/^https?:/i.test(f.url()));
+    // data: and blob: only: where WebKit drops the sandbox. A frame the app set back to about:blank is not an escape.
+    return page.frames().some((f) => f !== top && this.foreignFrames.has(f) && /^(data|blob):/i.test(f.url()));
   }
 
   /**
@@ -1810,7 +1812,7 @@ export class BrowserEngine {
       `\n🛡 WRITE-POLICY blocked (${this.mode}): ${list}${extra}. ` +
       `This is the tester's safety policy, NOT an app bug — do not file a finding for the resulting error UI. ` +
       (foreign.length > 0
-        ? `Writes ${foreign.join("; ")} go to another site embedded in the page, not to the app, so they are never sent in any mode but destructive. `
+        ? `Refused because it was ${foreign.join("; ")}: it would reach a site embedded in the page rather than the app, which no mode but destructive allows. `
         : "") +
       (answered
         ? `The page's own requests were answered with a 403 in the server's place, so the page's handling of a refusal is real: an error message is correct, and a success message is a false_success violation. `

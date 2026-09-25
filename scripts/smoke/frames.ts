@@ -282,6 +282,28 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       `${page.url()} ${JSON.stringify(stats.writes)}`,
     );
 
+    // The contrast: the app itself set the frame back to about:blank, then the
+    // tester follows a no-referrer link out. That is the tester's move, and it goes.
+    await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    await loadedAs("redirected");
+    await page.evaluate(() => {
+      (document.getElementById("embed") as HTMLIFrameElement).src = "about:blank";
+    });
+    await page.waitForTimeout(500);
+    await page.evaluate((href) => {
+      const a = document.createElement("a");
+      a.href = href;
+      a.rel = "noreferrer";
+      document.body.appendChild(a);
+      a.click();
+    }, `${third}/page2.html`);
+    await page.waitForTimeout(1500);
+    check(
+      "...while a no-referrer link out, after the app set that frame back to about:blank, is followed",
+      new URL(page.url()).origin === new URL(third).origin,
+      page.url(),
+    );
+
     // The refused top-window navigation leaves the page on the browser's error page: load it again.
     const reload = async () => {
       await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);

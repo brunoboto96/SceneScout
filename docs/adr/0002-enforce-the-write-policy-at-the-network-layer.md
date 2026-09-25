@@ -83,7 +83,8 @@ WebKit drops the sandbox for a frame that loads a `data:` URL in its own place,
 and such a frame could move the whole page to a site the page does not embed,
 with no Referer to say where the move came from. A top-window navigation out of
 the app with no Referer, while a frame that held another site sits on a
-non-web URL, is therefore refused outright. It is judged on the page as it is
+`data:` or `blob:` URL, is therefore refused outright, and reported like any
+refusal. A frame the app set back to `about:blank` does not count. It is judged on the page as it is
 when the request arrives, so it does not depend on knowing what the tester is
 doing; an app rarely has such a frame, so it seldom refuses a move of the
 tester's. A redirect's stand-in page is built

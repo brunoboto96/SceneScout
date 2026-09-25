@@ -12,7 +12,9 @@
   <iframe title="bridge" src="/frame-child.html?as=bridge" width="0" height="0" style="border:0"></iframe>
   <script>
     // The second origin's address is handed over in the query string, since the page cannot know its port.
-    const other = new URLSearchParams(location.search).get('foreign');
+    // Only a loopback origin, the fixture server's second port; anything else is ignored.
+    const raw = new URLSearchParams(location.search).get('foreign') || '';
+    const other = /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(raw) ? raw : '';
     if (other) document.getElementById('foreign').src = other + '/frame-child.html?as=foreign';
     // The app's own page posting a form to another site: the app's behaviour, judged by the ordinary rules.
     window.postOut = (url) => {
