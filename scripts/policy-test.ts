@@ -16,6 +16,7 @@ import {
   answersWithRefusal,
   AUTH_FLOW_RE,
   destructiveRefusal,
+  foreignFrameOrigin,
   isAuthExempt,
   isDestructive,
   isDestructiveWire,
@@ -531,4 +532,20 @@ test("the policy's refusal is a marked 403 the page can read", () => {
   const cross = policyRefusal("observe", "POST", "/api/things", "http://app.test");
   assert.equal(cross.headers["access-control-allow-origin"], "http://app.test");
   assert.equal(cross.headers["access-control-allow-credentials"], "true");
+});
+
+test("foreignFrameOrigin: a write is foreign when a frame of another site sent it", () => {
+  const app = "http://app.test:3000/orders";
+  for (const [chain, expected, why] of [
+    [[], null, "the top document"],
+    [["http://app.test:3000/widget"], null, "a same-origin frame"],
+    [["https://forms.example.com/embed"], "https://forms.example.com", "a third party's embedded form"],
+    [["http://app.test:4000/embed"], "http://app.test:4000", "another port is another origin"],
+    [["about:blank", "https://chat.example.com/w"], "https://chat.example.com", "a blank frame belongs to the frame that made it"],
+    [["about:blank"], null, "a blank frame made by the app"],
+    [["http://app.test:3000/inner", "https://pay.example.com/box"], "https://pay.example.com", "an app page nested inside a widget is still driven by it"],
+    [["not a url"], null, "an address that cannot be read decides nothing"],
+  ] as const) {
+    assert.equal(foreignFrameOrigin(app, chain), expected, why);
+  }
 });

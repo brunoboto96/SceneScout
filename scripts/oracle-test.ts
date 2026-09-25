@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { brokenImageIssues, displayName, geometryIssues, missingName } from "../src/engine/collector.ts";
+import { brokenImageIssues, displayName, frameLines, geometryIssues, hasVisibleFrame, missingName } from "../src/engine/collector.ts";
 import { POLICY_BLOCK_WINDOW_MS, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
 import {
   describeInjection,
@@ -416,4 +416,22 @@ test("an empty live region is not an unnamed control; an empty button still is",
   }
   assert.equal(missingName({ role: "status", name: "Saved." }), false);
   assert.equal(displayName({ role: "status", name: "Saved." }), "Saved.");
+});
+
+test("frameLines: says what is embedded, where from, and that it was not explored", () => {
+  const app = "http://app.test:3000/";
+  assert.deepEqual(frameLines(app, []), [], "no frames, nothing to say");
+  const lines = frameLines(app, [
+    { url: "http://app.test:3000/widget?x=1", title: "Widget", width: 400, height: 200 },
+    { url: "https://forms.example.com/embed", title: "", width: 600, height: 300 },
+    { url: "https://tracker.example.com/pixel", title: "", width: 0, height: 0 },
+  ]);
+  assert.match(lines[0], /FRAMES not explored/);
+  assert.equal(lines[1], '  same-origin /widget?x=1 "Widget" 400×200');
+  assert.equal(lines[2], "  cross-origin https://forms.example.com/embed 600×300 — writes from it are never sent");
+  assert.equal(lines[3], "  (+1 hidden frame)");
+  assert.equal(lines.length, 4);
+  // The contrast: a page whose only frames are hidden has nothing a user sees inside one.
+  assert.equal(hasVisibleFrame([{ url: "https://tracker.example.com/p", title: "", width: 1, height: 1 }]), false);
+  assert.equal(hasVisibleFrame([{ url: "https://forms.example.com/e", title: "", width: 600, height: 300 }]), true);
 });

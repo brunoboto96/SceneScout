@@ -204,6 +204,39 @@ export function isAuthExempt(mode: WriteMode, method: string, pathname: string, 
   );
 }
 
+/**
+ * The origin of a request's frame when that frame belongs to another site than
+ * the app: an embedded widget, such as a form, chat or payment box served by a
+ * third party. A write from one reaches that third party, not the app under
+ * test, so no mode short of destructive lets it out.
+ *
+ * `frameChain` lists the URLs of the frame that issued the request and each of
+ * its parents, stopping before the top document. A frame with no address of
+ * its own (about:blank, srcdoc) belongs to whoever created it, so it is skipped
+ * and its parent decides. Any foreign frame in the chain makes the request
+ * foreign: an app page nested inside a widget is still being driven by it.
+ * Null for the top document, same-origin frames, and requests with no frame.
+ */
+export function foreignFrameOrigin(appUrl: string, frameChain: readonly string[]): string | null {
+  let app: string;
+  try {
+    app = new URL(appUrl).origin;
+  } catch {
+    return null;
+  }
+  for (const url of frameChain) {
+    let frame: URL;
+    try {
+      frame = new URL(url);
+    } catch {
+      continue;
+    }
+    if (frame.protocol !== "http:" && frame.protocol !== "https:") continue;
+    if (frame.origin !== app) return frame.origin;
+  }
+  return null;
+}
+
 export function allowsWrite(mode: WriteMode, method: string, destructiveWire: boolean, owned: boolean): boolean {
   if (mode === "destructive") return true;
   if (mode === "observe") return false;
@@ -244,6 +277,7 @@ export function policyRefusal(
   method: string,
   pathname: string,
   origin?: string,
+  why?: string,
 ): { status: number; headers: Record<string, string>; body: string } {
   const headers: Record<string, string> = { "content-type": "application/json", [POLICY_REFUSAL_HEADER]: `refused; mode=${mode}` };
   if (origin) {
@@ -256,7 +290,7 @@ export function policyRefusal(
     headers,
     body: JSON.stringify({
       error: "Forbidden",
-      message: `${method} ${pathname} was refused by the tester's ${mode} write policy. The server never received it.`,
+      message: `${method} ${pathname} was refused by the tester's ${mode} write policy${why ? ` (${why})` : ""}. The server never received it.`,
     }),
   };
 }

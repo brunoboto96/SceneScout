@@ -440,6 +440,59 @@ export interface BrokenImageScan {
   total: number;
 }
 
+/** One frame on the page, read from its <iframe> element. */
+export interface FrameInfo {
+  url: string;
+  /** The element's title, or its name when it has no title. */
+  title: string;
+  width: number;
+  height: number;
+}
+
+/** A frame smaller than this in both directions is plumbing (a tracking pixel, a messaging bridge), not something a user sees. */
+const VISIBLE_FRAME_PX = 2;
+
+/**
+ * The snapshot's account of the page's frames. Nothing inside a frame is
+ * collected or can be acted on yet, and a page that shows its form in an
+ * embed used to look like a page with no form at all: say what is there,
+ * where it comes from, and that it was not looked inside.
+ */
+export function frameLines(appUrl: string, frames: readonly FrameInfo[]): string[] {
+  const visible = frames.filter((f) => f.width >= VISIBLE_FRAME_PX && f.height >= VISIBLE_FRAME_PX);
+  const hidden = frames.length - visible.length;
+  if (visible.length === 0 && hidden === 0) return [];
+  let app = "";
+  try {
+    app = new URL(appUrl).origin;
+  } catch {
+    /* no origin to compare: every frame reads as foreign */
+  }
+  const lines = visible.slice(0, 10).map((f) => {
+    let where = f.url || "(no address)";
+    let foreign = false;
+    try {
+      const u = new URL(f.url);
+      if (u.protocol === "http:" || u.protocol === "https:") {
+        foreign = u.origin !== app;
+        if (!foreign) where = u.pathname + u.search;
+      }
+    } catch {
+      /* about:blank, srcdoc: shown as they are */
+    }
+    const label = f.title ? ` "${f.title.slice(0, 60)}"` : "";
+    return `  ${foreign ? "cross-origin" : "same-origin"} ${where.slice(0, 120)}${label} ${f.width}×${f.height}${foreign ? " — writes from it are never sent" : ""}`;
+  });
+  if (visible.length > 10) lines.push(`  … +${visible.length - 10} more`);
+  if (hidden > 0) lines.push(`  (+${hidden} hidden frame${hidden === 1 ? "" : "s"})`);
+  return [`FRAMES not explored — their controls are not listed above and cannot be acted on:`, ...lines];
+}
+
+/** Whether any frame on the page is one a user can see. */
+export function hasVisibleFrame(frames: readonly FrameInfo[]): boolean {
+  return frames.some((f) => f.width >= VISIBLE_FRAME_PX && f.height >= VISIBLE_FRAME_PX);
+}
+
 /** Snapshot lines for images that failed to load. The origin is dropped when it is the page's own, to keep the line short. */
 export function brokenImageIssues(scan: BrokenImageScan, pageUrl: string): string[] {
   let origin = "";

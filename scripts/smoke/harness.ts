@@ -38,6 +38,8 @@ export interface ServerStats {
 /** Everything a suite needs. `projectDir` is shared on purpose: later suites assert on memory earlier ones wrote. */
 export interface SmokeContext {
   baseUrl: string;
+  /** The same fixture server on another port: another origin, for pages that embed a third party. */
+  foreignBaseUrl: string;
   projectDir: string;
   stats: ServerStats;
 }
@@ -98,12 +100,12 @@ export function settle(ms: number): Promise<void> {
 }
 
 /** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
-export async function startFixtureServer(): Promise<{ baseUrl: string; stats: ServerStats; close: () => void }> {
+export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBaseUrl: string; stats: ServerStats; close: () => void }> {
   const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {} };
   const board: string[] = [];
   // Tiny server for the test app: static pages + a minimal items API for
   // write-policy testing.
-  const server = http.createServer((req, res) => {
+  const handle: http.RequestListener = (req, res) => {
     const urlPath = (req.url ?? "/").split("?")[0];
     if (req.method && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
       const key = `${req.method} ${urlPath}`;
@@ -259,11 +261,26 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; stats: Se
       res.writeHead(404);
       res.end("not found");
     }
-  });
+  };
+  const server = http.createServer(handle);
+  // A second origin for the same pages: a frame served from here is
+  // cross-origin to baseUrl, and whatever it manages to send lands in the same
+  // stats, so a suite can prove a request never arrived.
+  const foreignServer = http.createServer(handle);
   // Loopback only. With no host, Node listens on every interface, and a test
   // fixture server has no business being reachable from the network.
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as { port: number }).port;
   const baseUrl = `http://127.0.0.1:${port}`;
-  return { baseUrl, stats, close: () => server.close() };
+  await new Promise<void>((resolve) => foreignServer.listen(0, "127.0.0.1", resolve));
+  const foreignBaseUrl = `http://127.0.0.1:${(foreignServer.address() as { port: number }).port}`;
+  return {
+    baseUrl,
+    foreignBaseUrl,
+    stats,
+    close: () => {
+      server.close();
+      foreignServer.close();
+    },
+  };
 }

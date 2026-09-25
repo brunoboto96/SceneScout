@@ -32,6 +32,13 @@ matching on bodies blocked ordinary create/analyse POSTs whose payload merely
 mentioned a destructive word — a document under analysis, a record description —
 which is lost coverage for no safety gain.
 
+A write sent by a frame of another origin than the app's — an embedded form,
+chat or payment box — is refused in every mode except destructive, before any
+other rule, login included. It goes to the third party that serves the frame,
+not to the app under test, and none of the modes above was agreed with that
+third party. Requests the app's own pages send to other origins are not
+affected: a login or a payment call is the app's behaviour, judged as above.
+
 ## Consequences
 
 A refusal is a tool result the agent must respect and cannot route around, and

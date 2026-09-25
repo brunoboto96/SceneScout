@@ -1,4 +1,16 @@
-import { chromium, firefox, webkit, type Browser, type BrowserType, type BrowserContext, type FileChooser, type Locator, type Page } from "playwright";
+import {
+  chromium,
+  firefox,
+  webkit,
+  type Browser,
+  type BrowserType,
+  type BrowserContext,
+  type FileChooser,
+  type Frame,
+  type Locator,
+  type Page,
+  type Request,
+} from "playwright";
 import fs from "node:fs";
 import path from "node:path";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
@@ -15,6 +27,9 @@ import {
   type Rect,
   BROKEN_IMAGES_SCRIPT,
   brokenImageIssues,
+  frameLines,
+  hasVisibleFrame,
+  type FrameInfo,
   type BrokenImageScan,
   displayName,
   missingName,
@@ -48,6 +63,7 @@ import {
   allowsWrite,
   policyRefusal,
   type WriteMode,
+  foreignFrameOrigin,
   isAuthExempt,
 } from "./policy.js";
 import { scanProject } from "../scan.js";
@@ -181,6 +197,23 @@ const HOVER_REVEAL_WINDOW_MS = 2500;
 /** Non-GET traffic that is auth/telemetry plumbing, not tester-caused state mutation. */
 const BENIGN_MUTATION_RE = /\/auth\/(refresh|token|session)|refresh[-_]?token|\/telemetry|\/analytics|\/heartbeat|\/sentry|\/collect\b|\/logs?\b|\/metrics\b/i;
 
+/** The URLs of the frame that issued a request and of its parents, up to but not including the top document. Empty for a request with no frame (a service worker's). */
+function frameChainOf(req: Request): string[] {
+  const chain: string[] = [];
+  let frame: Frame | null;
+  try {
+    frame = req.frame();
+  } catch {
+    return chain;
+  }
+  const top = frame.page().mainFrame();
+  while (frame && frame !== top) {
+    chain.push(frame.url());
+    frame = frame.parentFrame();
+  }
+  return chain;
+}
+
 /** In-page XPath lookup fragment for string-expression evaluates. */
 function xpathLookup(xpath: string): string {
   return `document.evaluate(${JSON.stringify(xpath)}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue`;
@@ -312,7 +345,7 @@ export class BrowserEngine {
     this.memory?.logAction({ ...entry, session: this.sessionKey });
   }
   /** Requests blocked by the write policy since the last action (timestamped for attribution). */
-  private blockedRequests: Array<{ at: number; sig: string; answered: boolean }> = [];
+  private blockedRequests: Array<{ at: number; sig: string; answered: boolean; why?: string }> = [];
   /**
    * WebSockets this session's pages opened. The write policy works on HTTP
    * requests; frames sent over a socket are not inspected. In observe mode that
@@ -868,6 +901,21 @@ export class BrowserEngine {
         if (method === "GET" || method === "HEAD" || method === "OPTIONS") return route.continue();
         const url = req.url();
         const pathname = pathnameOf(url);
+        const refuse = (why?: string) => {
+          const answered = answersWithRefusal(req.resourceType());
+          if (this.blockedRequests.length < 20) this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered, why });
+          this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}${why ? ` (${why})` : ""}`, url: this.page?.url() ?? "" });
+          this.refusedByPolicy.add(req);
+          this.oracles.notePolicyBlock();
+          // A script's request is answered with a refusal, so the page's handling
+          // of one actually runs; a navigation is dropped (policy.ts says why).
+          if (answered) return route.fulfill(policyRefusal(this.mode, method, pathname, req.headers()["origin"], why));
+          return route.abort("blockedbyclient");
+        };
+        // An embedded widget from another site writes to that site, not to the
+        // app under test: refused before any other rule, login included.
+        const foreign = foreignFrameOrigin(this.baseUrl, frameChainOf(req));
+        if (foreign) return refuse(`sent from a frame of ${foreign}`);
         this.rememberAuthHeader(req.headers());
         const destructiveWire = isDestructiveWire(pathname, req.postData());
         // Auth/session flows must work in every mode — but never a destructive
@@ -909,15 +957,7 @@ export class BrowserEngine {
           }
           return route.continue();
         }
-        const answered = answersWithRefusal(req.resourceType());
-        if (this.blockedRequests.length < 20) this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered });
-        this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}`, url: this.page?.url() ?? "" });
-        this.refusedByPolicy.add(req);
-        this.oracles.notePolicyBlock();
-        // A script's request is answered with a refusal, so the page's handling
-        // of one actually runs; a navigation is dropped (policy.ts says why).
-        if (answered) return route.fulfill(policyRefusal(this.mode, method, pathname, req.headers()["origin"]));
-        return route.abort("blockedbyclient");
+        return refuse();
       });
     }
 
@@ -1323,6 +1363,7 @@ export class BrowserEngine {
       ((await page.evaluate(BROKEN_IMAGES_SCRIPT).catch(() => null)) as BrokenImageScan | null) ?? { images: [], total: 0 },
       url,
     );
+    const frames = await this.frameInventory(page);
     const cov = memory.coverage();
     const unvisited = this.unvisitedKnownRoutes();
     const title = await page.title();
@@ -1334,13 +1375,18 @@ export class BrowserEngine {
       body +
       (geometry.length > 0 ? `\nGEOMETRY issues:\n` + geometry.map((g) => `  ⚠ ${g}`).join("\n") : "") +
       (brokenImages.length > 0 ? `\nBROKEN IMAGES:\n` + brokenImages.map((b) => `  ⚠ ${b}`).join("\n") : "") +
+      (frames.length > 0 ? `\n` + frameLines(this.baseUrl, frames).join("\n") : "") +
       (hiddenFileInputs.length > 0
         ? `\nFILE INPUTS not listed above (hidden behind a styled control — a user never sees the input itself): ${hiddenFileInputs.join("; ")}. ` +
           `scout_upload {ref} on the control that opens one, or scout_upload {} when it is the page's only file input.`
         : "") +
       this.socketNotice() +
       formatViolations(this.oracles.drain()) +
-      (elements.length === 0 ? "\n⚠ DEAD END: no interactable elements found on this page." : "")
+      (elements.length === 0
+        ? hasVisibleFrame(frames)
+          ? "\n⚠ No interactable elements in the page itself: what it shows is inside the frames listed above, which were not explored."
+          : "\n⚠ DEAD END: no interactable elements found on this page."
+        : "")
     );
   }
 
@@ -1488,6 +1534,23 @@ export class BrowserEngine {
     return entry.at < this.actionStartedAt ? `${entry.sig} (late — likely from a previous action)` : entry.sig;
   }
 
+  /** The page's frames, read from their <iframe> elements. A frame that cannot be read is left out rather than stalling the snapshot. */
+  private async frameInventory(page: Page): Promise<FrameInfo[]> {
+    const out: FrameInfo[] = [];
+    for (const frame of page.frames().slice(0, 50)) {
+      if (frame === page.mainFrame()) continue;
+      try {
+        const el = await frame.frameElement();
+        const box = await el.boundingBox();
+        const title = (await el.getAttribute("title")) || (await el.getAttribute("name")) || "";
+        out.push({ url: frame.url(), title: title.trim(), width: Math.round(box?.width ?? 0), height: Math.round(box?.height ?? 0) });
+      } catch {
+        /* detached mid-read */
+      }
+    }
+    return out;
+  }
+
   /** Report (and clear) write-policy blocks since the last action. */
   private drainBlocked(): string {
     this.lastActionBlocked = this.blockedRequests.length;
@@ -1498,10 +1561,14 @@ export class BrowserEngine {
       .join("; ");
     const extra = this.blockedRequests.length > 5 ? ` (+${this.blockedRequests.length - 5} more)` : "";
     const answered = this.blockedRequests.some((e) => e.answered);
+    const foreign = [...new Set(this.blockedRequests.map((e) => e.why).filter((w): w is string => !!w))];
     this.blockedRequests = [];
     return (
       `\n🛡 WRITE-POLICY blocked (${this.mode}): ${list}${extra}. ` +
       `This is the tester's safety policy, NOT an app bug — do not file a finding for the resulting error UI. ` +
+      (foreign.length > 0
+        ? `Writes ${foreign.join("; ")} go to another site embedded in the page, not to the app, so they are never sent in any mode but destructive. `
+        : "") +
       (answered
         ? `The page's own requests were answered with a 403 in the server's place, so the page's handling of a refusal is real: an error message is correct, and a success message is a false_success violation. `
         : "") +

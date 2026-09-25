@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Embedded frames</title></head>
+<body>
+  <h1>A page whose content is embedded</h1>
+  <!-- The page itself has no controls: everything a user can do here is inside
+       the frames. One is served by the app, one by another origin (a third
+       party's embedded form, as far as the page can tell), and one is a 0×0
+       messaging bridge nobody sees. -->
+  <iframe id="same" title="Same-site widget" src="/frame-child.html?as=same" width="400" height="200"></iframe>
+  <iframe id="foreign" title="Third-party form" width="400" height="200"></iframe>
+  <iframe title="bridge" src="/frame-child.html?as=bridge" width="0" height="0" style="border:0"></iframe>
+  <script>
+    // The second origin's address is handed over in the query string, since the page cannot know its port.
+    const other = new URLSearchParams(location.search).get('foreign');
+    if (other) document.getElementById('foreign').src = other + '/frame-child.html?as=foreign';
+  </script>
+</body>
+</html>

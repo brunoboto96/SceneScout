@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Embedded form</title></head>
+<body>
+  <form id="f">
+    <input name="note" aria-label="Note" data-testid="frame-note-input">
+    <button type="button" id="send" data-testid="frame-send-action">Send</button>
+  </form>
+  <script>
+    // Posts to this frame's own origin, the way an embedded form posts to the site that serves it.
+    window.sendNote = () =>
+      fetch('/api/frame-note-' + new URLSearchParams(location.search).get('as'), { method: 'POST', body: 'note' })
+        .then((r) => r.status)
+        .catch(() => 'failed');
+    document.getElementById('send').addEventListener('click', window.sendNote);
+  </script>
+</body>
+</html>
