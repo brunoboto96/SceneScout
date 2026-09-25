@@ -64,14 +64,16 @@ whole page moving to the third party's site, and the write rules still apply:
 a write from a page the session did not open is refused, and so is a write to
 another site from the session's own page once an embed has moved it off the
 app, unless it is a sign-in request. Who moved the page is decided on the
-navigation's first request: one that leaves the app from a page that embeds
-another site, without the app as its Referer, was not the tester's. A page the
-tester moved to another site — a hosted sign-in page, even one the app also
-embeds for silent sign-in, or a second app — keeps the ordinary rules; on an
-app page that sends no Referer and embeds another site, the tester's own move
-counts as an embed's, and its writes out are refused. A frame that has moved
-itself to a `data:` URL posts with `Origin: null`, and on a page that embedded
-another site such a write out is refused. A redirect's stand-in page is built
+navigation's first request, from the other sites the page embeds at that
+moment — the frames still attached that hold, or once held, another site's
+document, so a frame that has moved itself to a `data:` URL still counts and a
+route change, a 204 or a download changes nothing. A move carrying the app as
+its Referer, or from a page with no embeds, is the tester's: a hosted sign-in
+page, even one the app also embeds for silent sign-in, keeps the ordinary
+rules. With another site's Referer it is an embed's; with none at all it is an
+embed's only when it goes to one of the embedded sites, so on an app that sends
+no Referer the tester's own move to a site the page embeds is refused. A write
+out with `Origin: null` from a page that embeds another site is refused. A redirect's stand-in page is built
 with no headers of the redirect's but its cookies, and sends no referrer, so
 an embed that checks which site embeds it by the Referer may refuse to load. In Chromium, a document re-served with the
 sandbox counts as public, so its requests to a loopback address are refused by

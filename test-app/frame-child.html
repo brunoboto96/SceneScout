@@ -47,6 +47,13 @@
       const target = location.origin + '/api/frame-datafetch';
       location.href = 'data:text/html,' + encodeURIComponent('<script>fetch(' + JSON.stringify(target) + ', { method: "POST", body: "x", mode: "no-cors" });<\/script>');
     };
+    // From a data: URL loaded in this frame's place, a form aimed at the top window that posts to this frame's site.
+    window.dataTopForm = () => {
+      const target = location.origin + '/api/frame-datatop';
+      location.href =
+        'data:text/html,' +
+        encodeURIComponent('<form method="post" target="_top" action=' + JSON.stringify(target) + '></form><script>document.forms[0].submit();<\/script>');
+    };
     // A write into the app itself, the way a sign-in frame posts its reply to the app's callback.
     window.sendToApp = (app) =>
       fetch(app + '/api/frame-to-app', { method: 'POST', body: 'reply', mode: 'no-cors' })

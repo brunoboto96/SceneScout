@@ -646,49 +646,36 @@ test("offAppPageWrite: only a page an embed moved off the app, writing to anothe
 
 test("EmbedMoveTracker: who moved the page, decided on its navigation's first request", () => {
   const app = "http://app.test:3000/";
-  const open = () => {
+  const forms = new Set(["https://forms.example.com"]);
+  const moved = (url: string, referer: string | undefined, embedded: ReadonlySet<string>) => {
     const t = new EmbedMoveTracker(app);
-    t.navigationStarted("http://app.test:3000/checkout", undefined);
     t.pageLoaded("http://app.test:3000/checkout");
-    t.frameLoaded("https://forms.example.com/embed");
-    return t;
+    t.navigationStarted(url, referer, embedded);
+    t.pageLoaded(url);
+    return t.movedTo;
   };
-  // An embed moving the page: the navigation does not come from the app.
-  let t = open();
-  t.navigationStarted("https://forms.example.com/thanks", "https://forms.example.com/embed");
-  t.pageLoaded("https://forms.example.com/thanks");
-  assert.equal(t.movedTo, "https://forms.example.com");
-  t.pageLoaded("https://forms.example.com/next");
-  assert.equal(t.movedTo, "https://forms.example.com", "still there");
-  // A data: frame hides its URL, so the Referer is missing: still not the tester, on a page with embeds.
-  t = open();
-  t.navigationStarted("https://forms.example.com/x", undefined);
-  t.pageLoaded("https://forms.example.com/x");
-  assert.equal(t.movedTo, "https://forms.example.com");
-  // A same-document route change keeps the record of what the page embeds.
-  t = open();
-  t.pageLoaded("http://app.test:3000/checkout/step-2");
-  assert.equal(t.hasEmbeds(), true, "pushState keeps the frames");
-  t.navigationStarted("https://forms.example.com/thanks", undefined);
-  t.pageLoaded("https://forms.example.com/thanks");
-  assert.equal(t.movedTo, "https://forms.example.com", "an escape after a route change is still caught");
-  // The contrasts: the tester moving the page from the app, even to a site the app embeds (silent sign-in).
-  t = open();
-  t.frameLoaded("https://idp.example.com/silent-renew");
-  t.navigationStarted("https://idp.example.com/login", "http://app.test:3000/checkout");
-  t.pageLoaded("https://idp.example.com/login");
-  assert.equal(t.movedTo, null, "the tester's click on the app's Sign in");
+  // An embed moving the page: another site's Referer, or none at all to the embed's own site.
+  assert.equal(moved("https://forms.example.com/thanks", "https://forms.example.com/embed", forms), "https://forms.example.com");
+  assert.equal(moved("https://forms.example.com/thanks", undefined, forms), "https://forms.example.com", "a data: frame hides its origin");
+  assert.equal(
+    moved("https://evil.example.net/x", "https://forms.example.com/embed", forms),
+    "https://evil.example.net",
+    "to a third site, with the embed's Referer",
+  );
+  // The tester moving the page: the app as Referer, even to a site the app embeds for silent sign-in.
+  assert.equal(moved("https://idp.example.com/login", "http://app.test:3000/checkout", new Set(["https://idp.example.com"])), null);
+  // No Referer (an app that sends none), to a site the page does not embed: the tester's.
+  assert.equal(moved("https://idp.example.com/login", undefined, forms), null);
   // No embeds on the page: nothing could have moved it but the tester.
-  t = new EmbedMoveTracker(app);
-  t.navigationStarted("https://idp.example.com/login", undefined);
-  t.pageLoaded("https://idp.example.com/login");
-  assert.equal(t.movedTo, null);
-  // Back on the app, nothing is moved; a new document drops the old one's embeds.
-  t = open();
-  t.navigationStarted("http://app.test:3000/", "http://app.test:3000/checkout");
+  assert.equal(moved("https://forms.example.com/thanks", "https://forms.example.com/embed", new Set()), null);
+  // It stays moved while the page stays on that site, and ends back on the app.
+  const t = new EmbedMoveTracker(app);
+  t.navigationStarted("https://forms.example.com/a", undefined, forms);
+  t.pageLoaded("https://forms.example.com/a");
+  t.pageLoaded("https://forms.example.com/b");
+  assert.equal(t.movedTo, "https://forms.example.com");
   t.pageLoaded("http://app.test:3000/");
   assert.equal(t.movedTo, null);
-  assert.equal(t.hasEmbeds(), false);
 });
 
 test("sandboxedRedirectPage: navigates to the target, and a target cannot close the script", () => {

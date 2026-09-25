@@ -303,38 +303,33 @@ export function foreignWrite(
  * that loads a `data:` URL in its own place, and a Chromium service worker can
  * serve a frame's document unseen.
  *
- * Decided on the navigation's first request: one that leaves the app from a
- * page embedding another site, and whose Referer is not the app, was not the
- * tester's — a click on the app's page, or the engine's own navigation within
- * the app, carries the app as its Referer. A page the tester moved to another
- * site — a hosted sign-in page, even one the app also embeds for silent
- * sign-in — keeps the ordinary rules. The record of embeds is dropped only
- * when a new document starts loading, never on a same-document route change.
+ * Decided on the navigation's first request, given the other sites the page
+ * embeds at that moment (the engine asks the frames still attached, so a route
+ * change, a 204 or a download changes nothing). A move from a page with no
+ * embeds, or one carrying the app as its Referer — a click on the app's page —
+ * is the tester's: a hosted sign-in page, even one the app also embeds for
+ * silent sign-in, keeps the ordinary rules. With another site's Referer, it is
+ * an embed's. With no Referer at all (an app that sends none, or a frame that
+ * hides its origin) it is an embed's only when it goes to one of the embedded
+ * sites.
  */
 export class EmbedMoveTracker {
-  private embedded = new Set<string>();
   private pending: string | null = null;
   /** The origin the page was moved to by an embed, while it stays there. */
   movedTo: string | null = null;
   constructor(private readonly appUrl: string) {}
 
-  /** Whether the page's current document has embedded a frame of another origin. */
-  hasEmbeds(): boolean {
-    return this.embedded.size > 0;
-  }
-
-  /** A frame (not the top window) loaded a document at `url`. */
-  frameLoaded(url: string): void {
-    const origin = foreignFrameOrigin(this.appUrl, [url]);
-    if (origin) this.embedded.add(origin);
-  }
-
-  /** The top window's navigation to `url` sent its first request, with this Referer. */
-  navigationStarted(url: string, referer: string | undefined): void {
+  /** The top window's navigation to `url` sent its first request, with this Referer, from a page embedding these other sites. */
+  navigationStarted(url: string, referer: string | undefined, embedded: ReadonlySet<string>): void {
     const target = foreignFrameOrigin(this.appUrl, [url]);
-    const fromApp = !!referer && foreignFrameOrigin(this.appUrl, [referer]) === null && /^https?:/i.test(referer);
-    this.pending = target && !fromApp && this.embedded.size > 0 ? target : null;
-    this.embedded.clear();
+    if (!target || embedded.size === 0) {
+      this.pending = null;
+      return;
+    }
+    const refererIsHttp = !!referer && /^https?:/i.test(referer);
+    if (refererIsHttp && foreignFrameOrigin(this.appUrl, [referer!]) === null) this.pending = null;
+    else if (refererIsHttp) this.pending = target;
+    else this.pending = embedded.has(target) ? target : null;
   }
 
   /** The top window now shows `url`: a new document, or a same-document route change. */

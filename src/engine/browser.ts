@@ -880,7 +880,7 @@ export class BrowserEngine {
       // (this event fires before the route handler judges that page's writes).
       if (req.isNavigationRequest() && !req.redirectedFrom()) {
         try {
-          if (this.page && req.frame() === this.page.mainFrame()) this.embedMoves.navigationStarted(req.url(), req.headers()["referer"]);
+          if (this.page && req.frame() === this.page.mainFrame()) this.embedMoves.navigationStarted(req.url(), req.headers()["referer"], this.embeddedSites());
         } catch {
           /* no frame: not the driven page */
         }
@@ -1109,12 +1109,38 @@ export class BrowserEngine {
   /** Whether the page was moved off the app by one of its embeds (policy.ts EmbedMoveTracker). */
   private embedMoves = new EmbedMoveTracker("");
 
-  /** Feed the page's navigations to the embed-move tracker. Wired on every page we drive, like the dialog handler. */
+  /**
+   * Frames that have held a document of another origin, with that origin. A
+   * frame that has since moved itself to a data: URL is still that site's; it
+   * leaves the record when it leaves the page, as every frame of a replaced
+   * document does, so nothing has to be cleared at the right moment.
+   */
+  private foreignFrames = new WeakMap<Frame, string>();
+
+  /** The other sites the driven page embeds right now, by the frames still attached to it. */
+  private embeddedSites(): Set<string> {
+    const out = new Set<string>();
+    const page = this.page;
+    if (!page) return out;
+    const top = page.mainFrame();
+    for (const frame of page.frames()) {
+      if (frame === top) continue;
+      const origin = this.foreignFrames.get(frame) ?? foreignFrameOrigin(this.baseUrl, [frame.url()]);
+      if (origin) out.add(origin);
+    }
+    return out;
+  }
+
+  /** Feed the page's navigations to the embed-move tracker and the foreign-frame record. Wired on every page we drive, like the dialog handler. */
   private wireEmbedMoves(page: Page): void {
     page.on("framenavigated", (frame) => {
       if (page !== this.page) return;
-      if (frame === page.mainFrame()) this.embedMoves.pageLoaded(frame.url());
-      else this.embedMoves.frameLoaded(frame.url());
+      if (frame === page.mainFrame()) {
+        this.embedMoves.pageLoaded(frame.url());
+        return;
+      }
+      const origin = foreignFrameOrigin(this.baseUrl, [frame.url()]);
+      if (origin && !this.foreignFrames.has(frame)) this.foreignFrames.set(frame, origin);
     });
   }
 
@@ -1685,10 +1711,8 @@ export class BrowserEngine {
     } catch {
       /* no frame: a new window's first request, or a service worker */
     }
-    const top = this.page?.mainFrame();
-    // Present now, or embedded earlier by this document: a frame that moved itself to data: is no longer foreign by its URL.
-    const pageHasForeignFrame =
-      this.embedMoves.hasEmbeds() || (this.page?.frames() ?? []).some((f) => f !== top && foreignFrameOrigin(this.baseUrl, [f.url()]) !== null);
+    // Frames still attached that hold, or held, another site: one that moved itself to data: is no longer foreign by its URL.
+    const pageHasForeignFrame = this.embeddedSites().size > 0;
     const foreign = foreignWrite(this.baseUrl, {
       url: req.url(),
       originHeader: req.headers()["origin"],

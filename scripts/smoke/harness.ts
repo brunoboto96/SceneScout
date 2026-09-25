@@ -108,6 +108,12 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
   const handle: http.RequestListener = (req, res) => {
     const urlPath = (req.url ?? "/").split("?")[0];
     // An embed that redirects before it loads, as many do (/embed → /embed/).
+    // A link that answers with no content: the navigation starts and never commits.
+    if (urlPath === "/no-content") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     if (urlPath === "/frame-redirect") {
       res.writeHead(302, { location: "/frame-child.html?as=redirected" });
       res.end();

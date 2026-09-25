@@ -165,6 +165,26 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       stats.writes["POST /api/frame-datafetch"] === undefined,
       JSON.stringify(stats.writes),
     );
+    const redirectedLoaded = () =>
+      until(
+        "the redirected embed to load again",
+        async () => {
+          const f = frameAs("redirected");
+          return !!f && (await f.evaluate(() => typeof (window as unknown as { moveTop?: unknown }).moveTop === "function").catch(() => false));
+        },
+        8000,
+      );
+    await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    await redirectedLoaded();
+    await frameAs("redirected")!
+      .evaluate(() => (window as unknown as { dataTopForm: () => void }).dataTopForm())
+      .catch(() => {});
+    await page.waitForTimeout(1500);
+    check(
+      "...nor from there aim a form at the top window",
+      stats.writes["POST /api/frame-datatop"] === undefined,
+      `${page.url()} ${JSON.stringify(stats.writes)}`,
+    );
     // A same-document route change on the app page, then the escape: the page still knows what it embeds.
     await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
     await until(
@@ -176,6 +196,9 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       8000,
     );
     await page.evaluate(() => history.pushState({}, "", location.pathname + location.search + "#step-2"));
+    // And a navigation that never commits: the frames stay, and so does what the page knows of them.
+    await page.click("#no-content");
+    await page.waitForTimeout(500);
     await frameAs("redirected")!
       .evaluate(() => (window as unknown as { moveTop: () => void }).moveTop())
       .catch(() => {});
