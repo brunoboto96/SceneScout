@@ -37,6 +37,11 @@
       document.body.appendChild(blank);
       blank.contentWindow.open(location.origin + '/frame-popup.html?via=borrowed');
     };
+    // Move the whole window to this frame's own site by way of a data: URL loaded in this frame's place.
+    window.moveTop = () => {
+      const target = location.origin + '/frame-popup.html?via=top';
+      location.href = 'data:text/html,' + encodeURIComponent('<script>top.location = ' + JSON.stringify(target) + ';<\/script>');
+    };
     // A write into the app itself, the way a sign-in frame posts its reply to the app's callback.
     window.sendToApp = (app) =>
       fetch(app + '/api/frame-to-app', { method: 'POST', body: 'reply', mode: 'no-cors' })

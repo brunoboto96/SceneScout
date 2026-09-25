@@ -43,20 +43,31 @@ embedding another site at the time — which also refuses the app's own page
 posting out with `Origin: null` while it embeds one, the cautious direction. A
 write out from any page other than the session's current one is refused too.
 
-A foreign frame cannot open a window or navigate the whole page at all: every
-document loading into a frame of another origin is served with the sandbox
-`Content-Security-Policy: sandbox allow-scripts allow-forms allow-same-origin`,
-which leaves out popups and top-window navigation. A popup opened on the
-frame's own site could post before it was closed, and in Firefox its first
-requests never reach the policy; a detached link's click, a `<base target>` or
-a `window.open` borrowed from a blank child frame each opened one past a
-script patch. The browser applies the sandbox to every realm the document
-makes, nested and blank frames included. A frame document that cannot be
-fetched to add it is not loaded. In Chromium, a document re-served this way
-counts as public, so its requests to a loopback address are refused by the
-browser's own local-network rule — an app under test on localhost will not
-receive a foreign frame's writes at all, which the rules above would have
-allowed.
+Every document loading into a frame of another origin is served with the
+sandbox `Content-Security-Policy: sandbox allow-scripts allow-forms
+allow-same-origin`, which leaves out popups and top-window navigation. A popup
+opened on the frame's own site could post before it was closed, and in Firefox
+its first requests never reach the policy; a detached link's click, a
+`<base target>` or a `window.open` borrowed from a blank child frame each opened
+one past a script patch. The browser applies the sandbox to every realm the
+document makes, nested and blank frames included. A redirect is answered with a
+sandboxed page that navigates to its target, because a redirect answered as one
+is followed by the browser without asking and its target loads unsandboxed. A
+frame document that cannot be fetched to add the sandbox is not loaded, and a
+document is held until it has fully arrived, so a frame that streams shows
+nothing until it ends.
+
+Limits of the sandbox, and what covers them. WebKit drops it when a frame loads
+a `data:` URL in its own place, and in Chromium a frame can register a service
+worker that later serves its document unseen. Both can end in a popup or in the
+whole page moving to the third party's site, and the write rules still apply:
+a write from a page the session did not open is refused, and so is any write to
+another site from the session's own page once that page has left the app,
+unless it is a sign-in request (a hosted login page posts to its own site; a
+hosted payment page does not count). In Chromium, a document re-served with the
+sandbox counts as public, so its requests to a loopback address are refused by
+the browser's own local-network rule: an app under test on localhost does not
+receive a foreign frame's writes at all.
 
 A foreign frame's write that lands in the app itself, such as a sign-in
 provider posting its reply to the app's callback, is judged by the ordinary

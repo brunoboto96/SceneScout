@@ -19,6 +19,8 @@ import {
   foreignFrameOrigin,
   foreignWrite,
   withForeignFrameSandbox,
+  offAppPageWrite,
+  sandboxedRedirectPage,
   FOREIGN_FRAME_SANDBOX,
   allowsForeignWriteOnSignIn,
   isAuthExempt,
@@ -618,4 +620,21 @@ test("withForeignFrameSandbox: adds the sandbox, keeping the document's own poli
   assert.equal(withForeignFrameSandbox("  "), "sandbox allow-scripts allow-forms allow-same-origin");
   assert.equal(withForeignFrameSandbox("default-src 'self'"), "default-src 'self', sandbox allow-scripts allow-forms allow-same-origin");
   assert.doesNotMatch(FOREIGN_FRAME_SANDBOX, /allow-popups|allow-top-navigation/, "no popups and no top-window navigation");
+});
+
+test("offAppPageWrite: the session's page has left the app and writes to another site", () => {
+  const app = "http://app.test:3000/";
+  assert.equal(offAppPageWrite(app, "https://forms.example.com/thanks", "https://forms.example.com/api/x"), "https://forms.example.com");
+  assert.equal(offAppPageWrite(app, "https://forms.example.com/thanks", "https://tracker.example.com/collect"), "https://forms.example.com");
+  // The contrasts.
+  assert.equal(offAppPageWrite(app, "http://app.test:3000/orders", "https://payments.example.com/charge"), null, "the app's own page calling out");
+  assert.equal(offAppPageWrite(app, "https://idp.example.com/login", "http://app.test:3000/callback"), null, "a write that lands in the app");
+  assert.equal(offAppPageWrite(app, "about:blank", "https://x.example.com/"), null, "no page address to judge");
+  assert.equal(offAppPageWrite(app, undefined, "https://x.example.com/"), null);
+});
+
+test("sandboxedRedirectPage: navigates to the target, and a target cannot close the script", () => {
+  const page = sandboxedRedirectPage("https://x.test/a?b=</script><script>alert(1)</script>");
+  assert.match(page, /location\.replace\("https:\/\/x\.test\/a\?b=\\u003c\/script>\\u003cscript>alert\(1\)\\u003c\/script>"\)/);
+  assert.equal(page.split("</script>").length, 2, "exactly one closing tag: the page's own");
 });

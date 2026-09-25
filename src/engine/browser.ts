@@ -66,6 +66,8 @@ import {
   foreignFrameOrigin,
   foreignWrite,
   withForeignFrameSandbox,
+  offAppPageWrite,
+  sandboxedRedirectPage,
   allowsForeignWriteOnSignIn,
   isAuthExempt,
 } from "./policy.js";
@@ -916,14 +918,27 @@ export class BrowserEngine {
         // that forbids popups and top-window navigation (policy.ts says why).
         if (method === "GET" && req.resourceType() === "document" && this.isForeignFrameDocument(req)) {
           try {
-            // One hop at a time: the browser follows a redirect itself, and each hop comes back here.
             const res = await route.fetch({ maxRedirects: 0 });
             const headers = res.headers();
             headers["content-security-policy"] = withForeignFrameSandbox(headers["content-security-policy"]);
-            return route.fulfill({ response: res, headers });
+            const location = res.status() >= 300 && res.status() < 400 ? headers["location"] : undefined;
+            if (location) {
+              // A redirect is followed by the browser without asking, so its
+              // target would load unsandboxed: answer with a sandboxed page
+              // that navigates there itself, and the next hop comes back here.
+              delete headers["location"];
+              delete headers["content-length"];
+              delete headers["content-encoding"];
+              headers["content-type"] = "text/html; charset=utf-8";
+              await route.fulfill({ status: 200, headers, body: sandboxedRedirectPage(new URL(location, req.url()).href) });
+              return;
+            }
+            await route.fulfill({ response: res, headers });
+            return;
           } catch {
             // Fail closed: a frame that cannot be sandboxed is not loaded.
-            return route.abort("blockedbyclient");
+            await route.abort("blockedbyclient").catch(() => {});
+            return;
           }
         }
         if (method === "GET" || method === "HEAD" || method === "OPTIONS") return route.continue();
@@ -937,8 +952,9 @@ export class BrowserEngine {
           this.oracles.notePolicyBlock();
           // A script's request is answered with a refusal, so the page's handling
           // of one actually runs; a navigation is dropped (policy.ts says why).
-          if (answered) return route.fulfill(policyRefusal(this.mode, method, pathname, req.headers()["origin"], why));
-          return route.abort("blockedbyclient");
+          // Caught: a request the page has already cancelled rejects these, and an unhandled rejection ends the process.
+          if (answered) return route.fulfill(policyRefusal(this.mode, method, pathname, req.headers()["origin"], why)).catch(() => {});
+          return route.abort("blockedbyclient").catch(() => {});
         };
         // An embedded widget from another site writes to that site, not to the
         // app under test: refused before any other rule, login included.
@@ -946,6 +962,9 @@ export class BrowserEngine {
         if (foreign) return refuse(`sent from a frame of ${foreign}`);
         this.rememberAuthHeader(req.headers());
         const destructiveWire = isDestructiveWire(pathname, req.postData());
+        // The session's page itself has left the app: its writes out are not the app's, a sign-in excepted.
+        const offApp = offAppPageWrite(this.baseUrl, this.page?.url(), url);
+        if (offApp && !isAuthExempt(this.mode, method, pathname, destructiveWire)) return refuse(`sent from a page of ${offApp}, outside the app`);
         // Auth/session flows must work in every mode — but never a destructive
         // one, and in observe only the requests a login itself needs.
         if (isAuthExempt(this.mode, method, pathname, destructiveWire)) return route.continue();

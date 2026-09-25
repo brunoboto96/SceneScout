@@ -137,6 +137,35 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       );
     }
 
+    console.log("frames: an embed behind a redirect, and one that tries to move the whole page");
+    await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    await until(
+      "the redirected embed to load",
+      async () => {
+        const f = frameAs("redirected");
+        return !!f && (await f.evaluate(() => typeof (window as unknown as { openPopup?: unknown }).openPopup === "function").catch(() => false));
+      },
+      8000,
+    );
+    const afterRedirect: Page[] = [];
+    const onRedirectPopup = (p: Page) => afterRedirect.push(p);
+    page.context().on("page", onRedirectPopup);
+    await frameAs("redirected")!
+      .evaluate(() => (window as unknown as { openPopup: () => void }).openPopup())
+      .catch(() => {});
+    await page.waitForTimeout(1500);
+    page.context().off("page", onRedirectPopup);
+    check("an embed reached through a redirect is sandboxed too: it cannot open a window", afterRedirect.length === 0, `${afterRedirect.length} popup(s)`);
+    await frameAs("redirected")!
+      .evaluate(() => (window as unknown as { moveTop: () => void }).moveTop())
+      .catch(() => {});
+    await page.waitForTimeout(2500);
+    check(
+      "...and if it moves the whole page to its own site, that page's writes out never arrive",
+      stats.writes["POST /api/frame-popup"] === undefined,
+      `${page.url()} ${JSON.stringify(stats.writes)}`,
+    );
+
     // The refused top-window navigation leaves the page on the browser's error page: load it again.
     const reload = async () => {
       await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);

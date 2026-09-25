@@ -107,6 +107,12 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
   // write-policy testing.
   const handle: http.RequestListener = (req, res) => {
     const urlPath = (req.url ?? "/").split("?")[0];
+    // An embed that redirects before it loads, as many do (/embed → /embed/).
+    if (urlPath === "/frame-redirect") {
+      res.writeHead(302, { location: "/frame-child.html?as=redirected" });
+      res.end();
+      return;
+    }
     if (req.method && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
       const key = `${req.method} ${urlPath}`;
       stats.writes[key] = (stats.writes[key] ?? 0) + 1;

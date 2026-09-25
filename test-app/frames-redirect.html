@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Embed behind a redirect</title></head>
+<body>
+  <h1>An embed that redirects before it loads</h1>
+  <iframe id="embed" title="Redirected embed" width="400" height="200"></iframe>
+  <script>
+    const other = new URLSearchParams(location.search).get('foreign');
+    if (other) document.getElementById('embed').src = other + '/frame-redirect';
+  </script>
+</body>
+</html>

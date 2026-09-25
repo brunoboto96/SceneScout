@@ -297,6 +297,42 @@ export function foreignWrite(
   return null;
 }
 
+/**
+ * The origin to name when the session's own page has left the app and writes
+ * out from there, or null. However the page got there — a frame that moved the
+ * whole window, a redirect, a link — a write from another site's page to
+ * another site is not the app's, and it is refused unless it is a sign-in
+ * request (a hosted login page posts to its own site). A hosted payment page
+ * does not qualify.
+ */
+export function offAppPageWrite(appUrl: string, pageUrl: string | undefined, destinationUrl: string): string | null {
+  const originOf = (url: string | undefined): string | null => {
+    if (!url) return null;
+    try {
+      const u = new URL(url);
+      return u.protocol === "http:" || u.protocol === "https:" ? u.origin : null;
+    } catch {
+      return null;
+    }
+  };
+  const app = originOf(appUrl);
+  const page = originOf(pageUrl);
+  if (!app || !page || page === app) return null;
+  if (originOf(destinationUrl) === app) return null;
+  return page;
+}
+
+/**
+ * The page a sandboxed frame is given in place of a redirect: it navigates to
+ * the redirect's target itself, so the next hop is a navigation the policy
+ * routes and sandboxes again. A redirect answered as a redirect is followed by
+ * the browser without asking, and the page it lands on was not sandboxed.
+ */
+export function sandboxedRedirectPage(target: string): string {
+  const json = JSON.stringify(target).replace(/</g, "\\u003c");
+  return `<!doctype html><meta charset="utf-8"><script>location.replace(${json});</script>`;
+}
+
 /** The last path segment of a page that is a sign-in page, and nothing else: not a verification step, where a payment provider's frame sits. */
 const SIGN_IN_SEGMENT_RE = /^(login|log-in|signin|sign-in|signup|sign-up|sso|oauth)$/i;
 
