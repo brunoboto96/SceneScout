@@ -9,6 +9,12 @@
   <!-- Content that belongs to other people: a chat line with a card hint. Read
        from another site's frame, it must not reach the snapshot. -->
   <div data-testid="frame-chat-line">Message from Alice: my card ends 4242</div>
+  <!-- A link whose address carries a token and an email, as conversation links do. -->
+  <a href="/conv/1?token=SECRET123&amp;email=alice@example.com" data-testid="frame-conv-link">Conversation</a>
+  <!-- A destructive control, for the keyboard route to it. -->
+  <button type="button" data-testid="frame-delete-action" onclick="document.title = 'DELETED'">Delete account</button>
+  <!-- A frame with no address of its own inside this one: it belongs to whoever serves this frame. -->
+  <iframe title="Inner note" width="300" height="70" srcdoc="<input aria-label='Inner note' data-testid='inner-note-input'><div data-testid='inner-chat-line'>Message from Bob: SSN 123-45-6789</div>"></iframe>
   <script>
     // Posts to this frame's own origin, the way an embedded form posts to the site that serves it.
     window.sendNote = () =>

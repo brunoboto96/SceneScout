@@ -85,6 +85,51 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       foreignClick,
     );
 
+    console.log("frames: a frame inside another site's frame, its links, and the keyboard");
+    const innerForeign = /(e\d+) textbox "Inner note"[^\n]*⟨in cross-origin frame/.exec(snap)?.[1];
+    check("a srcdoc frame inside another site's frame is that site's", !!innerForeign, snap);
+    check(
+      "...so what it holds is masked, while the same inside the app's frame is shown",
+      /Message from Bob[^\n]*⟨in same-origin frame/.test(snap) && !/Message from Bob[^\n]*⟨in cross-origin frame/.test(snap),
+      snap,
+    );
+    const innerTyped = innerForeign ? await engine.type(innerForeign, "<svg onload=alert(1)>") : "no ref";
+    check("...and markup typed into it is refused", /^REFUSED: typing this value \(it is markup\)/.test(innerTyped), innerTyped);
+    check(
+      "another site's link is shown without its query, the app's own with it",
+      /Conversation[^\n]*href=\/conv\/1\][^\n]*⟨in cross-origin frame/.test(snap) &&
+        /Conversation[^\n]*token=SECRET123[^\n]*⟨in same-origin frame/.test(snap) &&
+        !/token=SECRET123[^\n]*⟨in cross-origin frame/.test(snap),
+      snap,
+    );
+    await frameAs("same")!.focus('[data-testid="frame-delete-action"]');
+    const pressed = await engine.press("Enter");
+    const deleted = await frameAs("same")!.evaluate(() => document.title);
+    check(
+      "Enter on a destructive control focused inside a frame is refused in read-only",
+      /REFUSED/.test(pressed) && deleted !== "DELETED",
+      `${deleted} ${pressed}`,
+    );
+    // A frame that navigates holds a new document: its old refs must not act there.
+    const oldSameNote = refIn("textbox", "Note", "same-origin frame /frame-child\\.html\\?as=same");
+    await frameAs("same")!.evaluate((go) => {
+      location.href = go + "/frame-child.html?as=moved";
+    }, foreignBaseUrl);
+    await until("the frame to move", async () => !!frameAs("moved"), 5000).catch(() => {});
+    const afterMove = await engine.type(oldSameNote!, "<b>x</b>").catch((e: unknown) => String(e));
+    check("a ref into a frame that has since moved to another site is stale", /navigated/.test(afterMove), afterMove);
+    await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    await framesLoaded();
+
+    console.log("frames: hidden frames do not use up the frames a snapshot reads");
+    await engine.navigate(`${baseUrl}/frames-many.html`);
+    await until("the visible frame to load", async () => !!frameAs("visibleone"), 8000).catch(() => {});
+    await page.waitForTimeout(500);
+    const many = await engine.snapshot(true);
+    check("a visible frame after eleven hidden ones is read", /button "Send"[^\n]*⟨in same-origin frame \/frame-child\.html\?as=visibleone/.test(many), many);
+    await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    await framesLoaded();
+
     console.log("frames: a write from a cross-origin frame never leaves; the same write from a same-origin frame does");
     const sameBefore = stats.writes["POST /api/frame-note-same"] ?? 0;
     const sameStatus = await frameAs("same")!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());

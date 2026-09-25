@@ -462,12 +462,40 @@ export function frameElementKey(baseKey: string, frame: FrameTag | undefined): s
   let where = frame.origin || frame.url;
   if (!frame.foreign) {
     try {
-      where = new URL(frame.url).pathname;
+      const u = new URL(frame.url);
+      // A frame with no web address (srcdoc, about:blank) is told apart by its title.
+      where = u.protocol === "http:" || u.protocol === "https:" ? u.pathname : `${frame.url}#${frame.title}`;
     } catch {
-      /* no path to show: the URL as it is */
+      where = `${frame.url}#${frame.title}`;
     }
   }
   return `frame:${where}|${baseKey}`;
+}
+
+/** The longest name kept for a control in another site's frame: a chat that renders messages as buttons would otherwise print them whole. */
+export const MAX_FOREIGN_NAME = 40;
+
+/** A control's name from another site's frame, cut to MAX_FOREIGN_NAME. */
+export function capForeignName(name: string): string {
+  return name.length > MAX_FOREIGN_NAME ? `${name.slice(0, MAX_FOREIGN_NAME)}…` : name;
+}
+
+/** A link's address from another site's frame without its query and fragment, where tokens and addresses travel. */
+export function stripForeignHref(href: string): string {
+  try {
+    const u = new URL(href);
+    return u.origin + u.pathname;
+  } catch {
+    return href.split(/[?#]/)[0];
+  }
+}
+
+/**
+ * A rect read inside a frame, in the page's document coordinates: the frame
+ * element's box on screen, less the frame's own scroll, plus the page's.
+ */
+export function frameToPageRect(rect: Rect, box: { x: number; y: number }, frameScroll: { x: number; y: number }, pageScroll: { x: number; y: number }): Rect {
+  return { ...rect, x: rect.x + box.x + pageScroll.x - frameScroll.x, y: rect.y + box.y + pageScroll.y - frameScroll.y };
 }
 
 /** How a snapshot line names the frame an element is in. */
@@ -557,11 +585,14 @@ export function frameLines(
   if (visible.length > 10) lines.push(`  … +${visible.length - 10} more`);
   if (hidden > 0) lines.push(`  (+${hidden} hidden frame${hidden === 1 ? "" : "s"})`);
   if (nested > 0) lines.push(`  (+${nested} more frame${nested === 1 ? "" : "s"}, nested inside those or past the first 30, not read)`);
-  const header = opts.read
-    ? "FRAMES — the controls of each frame read are listed above, marked ⟨in … frame⟩, and can be acted on by ref" +
-      (visible.some((f) => f.foreign) ? "; in another site's frame, content is masked and hostile input, repeated-click probes and uploads are refused" : "") +
-      ":"
-    : "FRAMES not explored — their controls are not listed above and cannot be acted on:";
+  const header =
+    opts.read && opts.read.size > 0
+      ? "FRAMES — the controls of each frame read are listed above, marked ⟨in … frame⟩, and can be acted on by ref" +
+        (visible.some((f) => f.foreign)
+          ? "; in another site's frame, content is masked and hostile input, repeated-click probes and uploads are refused"
+          : "") +
+        ":"
+      : "FRAMES not explored — their controls are not listed above and cannot be acted on:";
   return [header, ...lines];
 }
 

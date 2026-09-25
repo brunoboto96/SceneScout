@@ -111,9 +111,14 @@ page's. In a frame of another site it acts as a user would and no further:
 typed markup, fuzzing lengths and control characters, repeated-click probes
 and file uploads are refused there in every mode, destructive included,
 because the tester is authorised to test the app and not the embeds of
-others. The text a container shows in such a frame (a select's options, a
-textarea, a tagged block) is masked in the snapshot, since it can hold other
-people's data; the labels of links, buttons and fields are kept.
+others. The engine enforces this for markup, values over 200 characters and
+control characters; other injection shapes are left to the agent's
+instructions. A frame with no address of its own (`srcdoc`, `about:blank`)
+inside another site's frame counts as that site's, and a ref into a frame
+that has since navigated is stale. The text a container shows in such a frame
+(a select's options, a tagged block) is masked in the snapshot, since it can
+hold other people's data; the labels of links, buttons and fields are kept,
+cut to 40 characters, and a link's query and fragment are dropped.
 
 ## Consequences
 

@@ -34,6 +34,9 @@ import {
   frameLabel,
   masksForeignName,
   MASKED_NAME,
+  capForeignName,
+  stripForeignHref,
+  frameToPageRect,
   type FrameTag,
   type BrokenImageScan,
   displayName,
@@ -1364,7 +1367,8 @@ export class BrowserEngine {
         ...(tag ? { frame: tag } : {}),
         // Judged on the real label, then masked: the policy must see what a click would press.
         destructive: isDestructive(el.name, el.testid),
-        ...(tag?.foreign && masksForeignName(el.tag, el.role) ? { name: MASKED_NAME } : {}),
+        ...(tag?.foreign ? { name: masksForeignName(el.tag, el.role) ? MASKED_NAME : capForeignName(el.name) } : {}),
+        ...(tag?.foreign && el.href ? { href: stripForeignHref(el.href) } : {}),
         ref,
         key,
       };
@@ -1404,9 +1408,7 @@ export class BrowserEngine {
           sx: number;
           sy: number;
         };
-        const dx = box.x + pageScroll.x - got.sx;
-        const dy = box.y + pageScroll.y - got.sy;
-        const raws = got.els.map((r) => ({ ...r, rect: { ...r.rect, x: r.rect.x + dx, y: r.rect.y + dy } }));
+        const raws = got.els.map((r) => ({ ...r, rect: frameToPageRect(r.rect, box, { x: got.sx, y: got.sy }, pageScroll) }));
         let origin = "";
         try {
           const u = new URL(frame.url());
@@ -1414,21 +1416,62 @@ export class BrowserEngine {
         } catch {
           /* no web address */
         }
-        const foreign = (this.foreignFrames.get(frame) ?? foreignFrameOrigin(this.baseUrl, [frame.url()])) !== null;
-        return { frame, tag: { url: frame.url(), origin, title, foreign }, raws };
+        const foreignOrigin = this.foreignOriginOf(frame);
+        return { frame, tag: { url: frame.url(), origin: foreignOrigin ?? origin, title, foreign: foreignOrigin !== null }, raws };
       })().catch(() => null);
       const limit = new Promise<null>((resolve) => {
         timer = setTimeout(() => resolve(null), FRAME_READ_MS);
       });
       return Promise.race([work, limit]).finally(() => clearTimeout(timer));
     };
-    const got = await Promise.all(frames.slice(0, MAX_READ_FRAMES).map(read));
+    // Visible frames first: a page's hidden plumbing frames must not use up the budget.
+    const boxes = await Promise.all(frames.map((f) => this.withinFrameLimit(f.frameElement().then((el) => el.boundingBox()))));
+    const visible = frames.filter((_, i) => {
+      const b = boxes[i];
+      return !!b && b.width >= 2 && b.height >= 2;
+    });
+    const got = await Promise.all(visible.slice(0, MAX_READ_FRAMES).map(read));
     return got.filter((g): g is { frame: Frame; tag: FrameTag; raws: unknown[] } => g !== null);
   }
 
   /** The origin of another site's frame an element is in, or null for the page and the app's own frames. */
   private foreignEmbedOf(el: SnapshotElement): string | null {
+    const frame = this.refFrames.get(el.ref);
+    const now = frame ? this.foreignOriginOf(frame) : null;
+    if (now) return now;
     return el.frame?.foreign ? el.frame.origin || el.frame.url : null;
+  }
+
+  /**
+   * The other site a frame belongs to, judged on the whole chain up to the
+   * page: a blank or srcdoc frame inside another site's frame is that site's,
+   * and so is a frame that once held its document (the foreign-frame record).
+   */
+  private foreignOriginOf(frame: Frame): string | null {
+    const top = frame.page().mainFrame();
+    const chain: string[] = [];
+    for (let f: Frame | null = frame; f && f !== top; f = f.parentFrame()) {
+      const recorded = this.foreignFrames.get(f);
+      if (recorded) return recorded;
+      chain.push(f.url());
+    }
+    return foreignFrameOrigin(this.baseUrl, chain);
+  }
+
+  /** A frame read that gives up after FRAME_READ_MS, answering null. */
+  private async withinFrameLimit<T>(work: Promise<T>): Promise<T | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const limit = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), FRAME_READ_MS);
+    });
+    return Promise.race([work.catch(() => null), limit]).finally(() => clearTimeout(timer));
+  }
+
+  /** Frames not directly under the page, less those whose controls were read anyway. */
+  private unreadNestedFrames(page: Page, nested: number): number {
+    const top = page.mainFrame();
+    const readNested = [...this.framesRead].filter((f) => !f.isDetached() && f.parentFrame() !== top).length;
+    return Math.max(0, nested - readNested);
   }
 
   /** The frames whose controls the last snapshot listed. */
@@ -1445,6 +1488,8 @@ export class BrowserEngine {
     const frame = this.refFrames.get(el.ref);
     if (!frame) return this.requirePage();
     if (frame.isDetached()) throw new Error(`The frame holding ${el.ref} has gone — take a new scout_snapshot.`);
+    // A frame that navigated holds a new document: the ref, and what it knew of the frame's site, are stale.
+    if (el.frame && frame.url() !== el.frame.url) throw new Error(`The frame holding ${el.ref} has navigated — take a new scout_snapshot.`);
     return frame;
   }
 
@@ -1640,7 +1685,7 @@ export class BrowserEngine {
       (frames.length > 0 || nestedFrames > 0
         ? `\n` +
           frameLines(this.baseUrl, frames, {
-            nested: nestedFrames,
+            nested: this.unreadNestedFrames(page, nestedFrames),
             writesRefused: this.mode !== "destructive",
             read: new Set([...this.framesRead].map((f) => f.url())),
           }).join("\n")
@@ -2182,7 +2227,9 @@ export class BrowserEngine {
     // Before the fill: a page that reflects input as it is typed already holds
     // the element afterwards. Never for another site's frame: no probe is placed there.
     if (!embed) await this.noteProbe(text, `${el.role} "${el.name}"`);
-    const fillNote = await this.fillOrAppend(locator, text, replace);
+    let fillNote = await this.fillOrAppend(locator, text, replace);
+    // What another site's field already held is its business, not the report's.
+    if (embed) fillNote = fillNote.replace(/existing content "(?:[^"\\]|\\.)*"/g, "existing content (masked: another site's frame)");
     if (pressEnter) {
       // Enter inside a form submits it — check the form's submit target, or
       // pressEnter becomes a read-only bypass for destructive submits.
@@ -2504,10 +2551,38 @@ export class BrowserEngine {
    * policy as click, or the keyboard becomes a read-only bypass. Shared by
    * scout_press and plan press steps; returns a refusal message or null.
    */
+  /**
+   * The frame that holds keyboard focus: the page, or — when the page's
+   * focused element is a frame — that frame, followed down as far as focus goes.
+   */
+  private async focusedFrame(page: Page): Promise<Page | Frame> {
+    let scope: Page | Frame = page;
+    let current: Frame = page.mainFrame();
+    for (let depth = 0; depth < 5; depth++) {
+      let next: Frame | null = null;
+      for (const child of current.childFrames()) {
+        const holds = await child
+          .frameElement()
+          .then((el) => el.evaluate((node) => node === node.ownerDocument?.activeElement))
+          .catch(() => false);
+        if (holds) {
+          next = child;
+          break;
+        }
+      }
+      if (!next) break;
+      scope = next;
+      current = next;
+    }
+    return scope;
+  }
+
   private async vetFocusedActivation(key: string): Promise<string | null> {
     if (!(this.readOnly && /^(Enter|NumpadEnter|Space| )$/i.test(key))) return null;
     const page = this.requirePage();
-    const focusedLabel = await page
+    // Focus inside a frame reads, from the page, as the <iframe> itself: follow it down.
+    const focused = await this.focusedFrame(page);
+    const focusedLabel = await focused
       .evaluate(
         `(() => { const el = document.activeElement; if (!el) return ""; ` +
           `return (el.getAttribute("aria-label") || el.getAttribute("data-testid") || el.innerText || el.textContent || "").trim().slice(0, 120); })()`,
