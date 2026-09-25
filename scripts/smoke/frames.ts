@@ -233,6 +233,55 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       `${fromAppFrame.length} popup(s)`,
     );
 
+    const popupsAfter = async (as: string, act: () => Promise<unknown>) => {
+      const seen: Page[] = [];
+      const on = (p: Page) => seen.push(p);
+      page.context().on("page", on);
+      await act().catch(() => {});
+      await page.waitForTimeout(1500);
+      page.context().off("page", on);
+      return seen.length;
+    };
+    const loadedAs = (as: string) =>
+      until(
+        `the frame ${as} to load`,
+        async () => {
+          const f = frameAs(as);
+          return !!f && (await f.evaluate(() => typeof (window as unknown as { openPopup?: unknown }).openPopup === "function").catch(() => false));
+        },
+        8000,
+      );
+    await engine.navigate(`${baseUrl}/frames-app-redirect.html?hops=2&foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    await loadedAs("appredirect");
+    const twoHop = await popupsAfter("appredirect", () => frameAs("appredirect")!.evaluate(() => (window as unknown as { openPopup: () => void }).openPopup()));
+    check("...and so is one reached through the app first, then out (two hops)", twoHop === 0, `${twoHop} popup(s)`);
+
+    console.log("frames: a sign-in provider's silent renewal, with a one-time code, into the app's frame");
+    await engine.navigate(`${baseUrl}/frames-app-redirect.html?hops=code&foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    await loadedAs("cbdone").catch(() => {});
+    check(
+      "a one-time code redirected into the app's frame is used once, and the frame signs in",
+      !!frameAs("cbdone"),
+      page
+        .frames()
+        .map((f) => f.url())
+        .join(" | "),
+    );
+
+    console.log("frames: in WebKit a data: frame drops the sandbox; moving the page to a site it does not embed");
+    await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    await loadedAs("redirected");
+    const third = foreignBaseUrl.replace("127.0.0.1", "localhost");
+    await frameAs("redirected")!
+      .evaluate((t) => (window as unknown as { moveTopThird: (t: string) => void }).moveTopThird(t), third)
+      .catch(() => {});
+    await page.waitForTimeout(2500);
+    check(
+      "a frame cannot move the page to a site it does not embed, and nothing is sent from there",
+      new URL(page.url()).origin === new URL(baseUrl).origin && stats.writes["POST /api/frame-popup"] === undefined,
+      `${page.url()} ${JSON.stringify(stats.writes)}`,
+    );
+
     // The refused top-window navigation leaves the page on the browser's error page: load it again.
     const reload = async () => {
       await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);

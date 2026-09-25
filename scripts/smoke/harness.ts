@@ -103,6 +103,8 @@ export function settle(ms: number): Promise<void> {
 export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBaseUrl: string; stats: ServerStats; close: () => void }> {
   const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {} };
   const board: string[] = [];
+  let codeCounter = 0;
+  const usedCodes = new Set<string>();
   // Tiny server for the test app: static pages + a minimal items API for
   // write-policy testing.
   const handle: http.RequestListener = (req, res) => {
@@ -111,6 +113,34 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     // A link that answers with no content: the navigation starts and never commits.
     if (urlPath === "/no-content") {
       res.writeHead(204);
+      res.end();
+      return;
+    }
+    // Two hops: through the app first, then out (/app-frame-redirect2 → /app-frame-redirect → <origin>).
+    if (urlPath === "/app-frame-redirect2") {
+      const to = new URL(req.url ?? "/", "http://x").searchParams.get("to") ?? "";
+      res.writeHead(302, { location: `/app-frame-redirect?to=${encodeURIComponent(to)}` });
+      res.end();
+      return;
+    }
+    // A sign-in provider's silent renewal: redirects to the app's callback with a one-time code.
+    if (urlPath === "/idp-renew") {
+      const to = new URL(req.url ?? "/", "http://x").searchParams.get("to") ?? "";
+      codeCounter += 1;
+      res.writeHead(302, { location: `${to}/cb?code=c${codeCounter}` });
+      res.end();
+      return;
+    }
+    // The app's callback: each code works once, as a real one does.
+    if (urlPath === "/cb") {
+      const code = new URL(req.url ?? "/", "http://x").searchParams.get("code") ?? "";
+      if (usedCodes.has(code)) {
+        res.writeHead(400, { "content-type": "text/plain" });
+        res.end("invalid_grant");
+        return;
+      }
+      usedCodes.add(code);
+      res.writeHead(302, { location: "/frame-child.html?as=cbdone" });
       res.end();
       return;
     }

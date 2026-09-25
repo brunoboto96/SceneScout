@@ -6,7 +6,9 @@
   <iframe id="embed" title="App-hosted embed" width="400" height="200"></iframe>
   <script>
     const other = new URLSearchParams(location.search).get('foreign');
-    if (other) document.getElementById('embed').src = '/app-frame-redirect?to=' + encodeURIComponent(other);
+    const hops = new URLSearchParams(location.search).get('hops');
+    if (other && hops === 'code') document.getElementById('embed').src = other + '/idp-renew?to=' + encodeURIComponent(location.origin);
+    else if (other) document.getElementById('embed').src = (hops === '2' ? '/app-frame-redirect2?to=' : '/app-frame-redirect?to=') + encodeURIComponent(other);
   </script>
 </body>
 </html>

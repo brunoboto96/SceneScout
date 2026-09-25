@@ -945,6 +945,19 @@ export class BrowserEngine {
           if (setCookie) headers["set-cookie"] = setCookie;
           await route.fulfill({ status: 200, headers, body: sandboxedRedirectPage(new URL(location, req.url()).href) });
         };
+        // WebKit drops the sandbox for a frame that loads a data: URL in its own
+        // place. A top-window navigation out of the app, with no Referer, while
+        // a frame that held another site sits on a non-web URL, is that frame's
+        // escape: refused, judged on the page as it is when the request arrives.
+        if (method === "GET" && req.resourceType() === "document" && this.embedEscapeNavigation(req)) {
+          this.logAction({
+            action: "write-policy:blocked",
+            target: `navigation to ${req.url().slice(0, 140)} (a frame moving the page off the app)`,
+            url: this.page?.url() ?? "",
+          });
+          await route.abort("blockedbyclient").catch(() => {});
+          return;
+        }
         const frameDoc = method === "GET" && req.resourceType() === "document" ? this.frameDocumentKind(req) : null;
         // A document loading into a frame of another origin gets the sandbox
         // that forbids popups and top-window navigation (policy.ts says why).
@@ -967,16 +980,19 @@ export class BrowserEngine {
           }
         }
         // The app's own frame document can redirect into another site, whose
-        // page would then load unsandboxed. Asked first, one hop only; a
-        // document that does not redirect to another site loads as it would
-        // have, sent on rather than served from here — a served document
-        // counts as public in Chromium and could no longer reach an app on
-        // localhost. The price is a second GET of the app's frame documents.
+        // page would then load unsandboxed. Asked first, one hop at a time; a
+        // document that does not redirect loads as it would have, sent on
+        // rather than served from here — a served document counts as public in
+        // Chromium and could no longer reach an app on localhost. The price is
+        // a second GET of the app's frame documents that are not redirects.
         if (frameDoc === "app") {
           try {
             const res = await route.fetch({ maxRedirects: 0 });
             const location = res.status() >= 300 && res.status() < 400 ? res.headers()["location"] : undefined;
-            if (location && foreignFrameOrigin(this.baseUrl, [new URL(location, req.url()).href])) {
+            // Every hop, not only one out of the app: Playwright does not route the
+            // later hops of a redirect, so a chain through the app and then out
+            // would go unseen, and each hop is then fetched once, not twice.
+            if (location) {
               await standIn(location, res.headers()["set-cookie"]);
               return;
             }
@@ -1706,6 +1722,25 @@ export class BrowserEngine {
     };
     const frames = (await Promise.all(direct.slice(0, 30).map(read))).filter((f): f is FrameInfo => f !== null);
     return { frames, nested: all.length - Math.min(direct.length, 30) };
+  }
+
+  /**
+   * Whether a document request is the top window leaving the app, with no
+   * Referer, while a frame that held another site's document now sits on a
+   * non-web URL (data:, about:) — where WebKit no longer applies its sandbox.
+   */
+  private embedEscapeNavigation(req: Request): boolean {
+    const page = this.page;
+    if (!page || !req.isNavigationRequest() || req.redirectedFrom()) return false;
+    try {
+      if (req.frame() !== page.mainFrame()) return false;
+    } catch {
+      return false;
+    }
+    if (req.headers()["referer"]) return false;
+    if (foreignFrameOrigin(this.baseUrl, [req.url()]) === null) return false;
+    const top = page.mainFrame();
+    return page.frames().some((f) => f !== top && this.foreignFrames.has(f) && !/^https?:/i.test(f.url()));
   }
 
   /**

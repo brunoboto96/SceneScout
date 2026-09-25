@@ -54,6 +54,10 @@
         'data:text/html,' +
         encodeURIComponent('<form method="post" target="_top" action=' + JSON.stringify(target) + '></form><script>document.forms[0].submit();<\/script>');
     };
+    // From a data: URL loaded in this frame's place, move the whole page to a site the page does not embed.
+    window.moveTopThird = (third) => {
+      location.href = 'data:text/html,' + encodeURIComponent('<script>top.location = ' + JSON.stringify(third + '/frame-popup.html?via=third') + ';<\/script>');
+    };
     // A write into the app itself, the way a sign-in frame posts its reply to the app's callback.
     window.sendToApp = (app) =>
       fetch(app + '/api/frame-to-app', { method: 'POST', body: 'reply', mode: 'no-cors' })
