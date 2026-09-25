@@ -1,0 +1,51 @@
+# Fails while a pull request carries the "approved waiting on earlier waves"
+# label, so approved work from a later wave cannot merge before the waves it
+# depends on have landed. Advisory until "wave hold" is a required status check
+# on the main branch ruleset, which can only be added once this has run.
+#
+# Its own workflow rather than a job in test.yml: adding or removing a label
+# re-runs this, and a label change must not re-run the whole test matrix.
+#
+# workflow_dispatch covers the "Version Packages" pull request. GitHub starts no
+# pull_request workflow for a pull request opened with the Actions token, so the
+# release workflow dispatches this on that branch, as it does test.yml. A
+# dispatched run has no pull request to read, and that pull request is never held.
+#
+# "Re-run" replays the original event, labels included: after removing the hold
+# label, the new run that the removal starts is the one that counts.
+name: wave hold
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+  workflow_dispatch:
+permissions: {}
+# Adding and removing the label in quick succession: the later event decides.
+concurrency:
+  group: wave-hold-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+jobs:
+  wave-hold:
+    name: wave hold
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Dispatched run
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          REF: ${{ github.ref_name }}
+        run: echo "Dispatched on $REF; no pull request labels to read, so nothing is held."
+      - name: Check for the hold label
+        if: github.event_name == 'pull_request'
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          HOLD: approved waiting on earlier waves
+        run: |
+          # Fail closed: 0 = held, 1 = not held, anything else = the label list could not be read.
+          # An empty list "[]" is readable and means not held.
+          status=0
+          echo "$LABELS" | jq -e --arg hold "$HOLD" 'map(ascii_downcase) | index($hold) != null' >/dev/null || status=$?
+          case $status in
+            0) echo "::error::Held by the \"$HOLD\" label. Remove it once the earlier waves have landed."; exit 1 ;;
+            1) echo "Not held for earlier waves." ;;
+            *) echo "::error::The pull request's label list could not be read (jq exit status $status), so the hold cannot be confirmed as absent."; exit 1 ;;
+          esac

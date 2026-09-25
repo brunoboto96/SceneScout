@@ -112,3 +112,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+      - name: Run the wave hold check on the version pull request
+        run: gh workflow run wave-hold.yml --ref changeset-release/main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
