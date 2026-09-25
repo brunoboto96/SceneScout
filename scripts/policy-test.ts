@@ -19,6 +19,7 @@ import {
   foreignFrameOrigin,
   foreignWrite,
   withForeignFrameSandbox,
+  hostileForEmbed,
   offAppPageWrite,
   EmbedMoveTracker,
   sandboxedRedirectPage,
@@ -682,4 +683,20 @@ test("sandboxedRedirectPage: navigates to the target, and a target cannot close 
   const page = sandboxedRedirectPage("https://x.test/a?b=</script><script>alert(1)</script>");
   assert.match(page, /location\.replace\("https:\/\/x\.test\/a\?b=\\u003c\/script>\\u003cscript>alert\(1\)\\u003c\/script>"\)/);
   assert.equal(page.split("</script>").length, 2, "exactly one closing tag: the page's own");
+});
+
+test("hostileForEmbed: what is never typed into another site's frame", () => {
+  for (const [value, why] of [
+    ["<img src=x onerror=alert(1)>", "it is markup"],
+    ["</textarea><script>", "it is markup"],
+    ["javascript:alert(1)", "it is markup"],
+    ["x".repeat(201), "it is longer than 200 characters"],
+    ["a\u0000b", "it holds control characters"],
+  ] as const) {
+    assert.equal(hostileForEmbed(value), why, JSON.stringify(value).slice(0, 40));
+  }
+  // The contrasts: what a user types.
+  for (const value of ["hello", "Zoë Müller", "qa-demo@example.com", "2 < 3 is true", "x".repeat(200), "line one\nline two", "日本語のテキスト"]) {
+    assert.equal(hostileForEmbed(value), null, value.slice(0, 30));
+  }
 });

@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Many hidden frames</title></head>
+<body>
+  <h1>Plumbing frames first, then the one a user sees</h1>
+  <div id="hidden"></div>
+  <iframe id="visible" title="The visible one" src="/frame-child.html?as=visibleone" width="400" height="200"></iframe>
+  <script>
+    // Eleven 0×0 frames ahead of the visible one, as tag managers and chat loaders leave behind.
+    const holder = document.getElementById('hidden');
+    for (let i = 0; i < 11; i++) {
+      const f = document.createElement('iframe');
+      f.src = '/frame-child.html?as=plumbing' + i;
+      f.width = '0';
+      f.height = '0';
+      f.style.border = '0';
+      holder.appendChild(f);
+    }
+  </script>
+</body>
+</html>
