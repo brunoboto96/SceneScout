@@ -298,14 +298,55 @@ export function foreignWrite(
 }
 
 /**
- * The origin to name when the session's own page has left the app and writes
- * out from there, or null. However the page got there — a frame that moved the
- * whole window, a redirect, a link — a write from another site's page to
- * another site is not the app's, and it is refused unless it is a sign-in
- * request (a hosted login page posts to its own site). A hosted payment page
- * does not qualify.
+ * Whether the session's page was moved off the app by one of its embeds: it
+ * left the app for the site of a frame the app's page was embedding. The
+ * sandbox forbids a frame to move the page, but WebKit drops it for a frame
+ * that loads a `data:` URL in its own place, and a Chromium service worker can
+ * serve a frame's document unseen. A page the tester moved to another site
+ * itself — a hosted sign-in page, a second app — is not this, and keeps the
+ * ordinary rules.
  */
-export function offAppPageWrite(appUrl: string, pageUrl: string | undefined, destinationUrl: string): string | null {
+export class EmbedMoveTracker {
+  private embedded = new Set<string>();
+  /** The origin the page was moved to by an embed, while it stays there. */
+  movedTo: string | null = null;
+  constructor(private readonly appUrl: string) {}
+
+  /** A frame (not the top window) loaded a document at `url`. */
+  frameLoaded(url: string): void {
+    const origin = foreignFrameOrigin(this.appUrl, [url]);
+    if (origin) this.embedded.add(origin);
+  }
+
+  /** The top window loaded a document at `url`. */
+  pageLoaded(url: string): void {
+    let origin: string;
+    try {
+      const u = new URL(url);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return;
+      origin = u.origin;
+    } catch {
+      return;
+    }
+    const onApp = foreignFrameOrigin(this.appUrl, [url]) === null;
+    if (onApp) {
+      this.embedded.clear();
+      this.movedTo = null;
+      return;
+    }
+    if (this.movedTo === origin) return;
+    this.movedTo = this.embedded.has(origin) ? origin : null;
+    this.embedded.clear();
+  }
+}
+
+/**
+ * The origin to name when the session's page was moved off the app by one of
+ * its embeds (EmbedMoveTracker) and writes to another site from there, or
+ * null. Refused unless it is a sign-in request.
+ */
+export function offAppPageWrite(appUrl: string, pageUrl: string | undefined, destinationUrl: string, movedByEmbed: string | null): string | null {
+  if (!movedByEmbed) return null;
   const originOf = (url: string | undefined): string | null => {
     if (!url) return null;
     try {
@@ -317,7 +358,7 @@ export function offAppPageWrite(appUrl: string, pageUrl: string | undefined, des
   };
   const app = originOf(appUrl);
   const page = originOf(pageUrl);
-  if (!app || !page || page === app) return null;
+  if (!app || !page || page === app || page !== movedByEmbed) return null;
   if (originOf(destinationUrl) === app) return null;
   return page;
 }
@@ -330,7 +371,8 @@ export function offAppPageWrite(appUrl: string, pageUrl: string | undefined, des
  */
 export function sandboxedRedirectPage(target: string): string {
   const json = JSON.stringify(target).replace(/</g, "\\u003c");
-  return `<!doctype html><meta charset="utf-8"><script>location.replace(${json});</script>`;
+  // No referrer: the next hop would otherwise name this stand-in page, where a real redirect names the app.
+  return `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><script>location.replace(${json});</script>`;
 }
 
 /** The last path segment of a page that is a sign-in page, and nothing else: not a verification step, where a payment provider's frame sits. */

@@ -67,6 +67,7 @@ import {
   foreignWrite,
   withForeignFrameSandbox,
   offAppPageWrite,
+  EmbedMoveTracker,
   sandboxedRedirectPage,
   allowsForeignWriteOnSignIn,
   isAuthExempt,
@@ -805,6 +806,7 @@ export class BrowserEngine {
     this.contradictionsReported = new Set();
     this.pendingCreations = new Set();
     this.baseUrl = opts.url.replace(/\/$/, "");
+    this.embedMoves = new EmbedMoveTracker(this.baseUrl);
     // Ownership (ownedIds/createdResources) deliberately NOT reset here: it
     // lives on the shared MemoryStore for the whole run, so re-attaching one
     // role must not discard what another role already created — otherwise
@@ -899,6 +901,12 @@ export class BrowserEngine {
       if (this.readOnly && isDestructiveWire(pathnameOf(req.url()), req.postData())) return;
       // A foreign frame's write is refused in every mode the route handler runs in.
       if (this.mode !== "destructive" && this.foreignWriteOf(req)) return;
+      if (
+        this.mode !== "destructive" &&
+        offAppPageWrite(this.baseUrl, this.page?.url(), req.url(), this.embedMoves.movedTo) &&
+        !isAuthExempt(this.mode, method, pathnameOf(req.url()), isDestructiveWire(pathnameOf(req.url()), req.postData()))
+      )
+        return;
       const pageUrl = this.page?.url();
       if (pageUrl && this.memory) {
         try {
@@ -926,11 +934,15 @@ export class BrowserEngine {
               // A redirect is followed by the browser without asking, so its
               // target would load unsandboxed: answer with a sandboxed page
               // that navigates there itself, and the next hop comes back here.
-              delete headers["location"];
-              delete headers["content-length"];
-              delete headers["content-encoding"];
-              headers["content-type"] = "text/html; charset=utf-8";
-              await route.fulfill({ status: 200, headers, body: sandboxedRedirectPage(new URL(location, req.url()).href) });
+              // Built from scratch: a redirect's framing or script headers
+              // never applied to a redirect, and would block this page.
+              const page: Record<string, string> = {
+                "content-type": "text/html; charset=utf-8",
+                "content-security-policy": withForeignFrameSandbox(undefined),
+                "cache-control": "no-store",
+              };
+              if (headers["set-cookie"]) page["set-cookie"] = headers["set-cookie"];
+              await route.fulfill({ status: 200, headers: page, body: sandboxedRedirectPage(new URL(location, req.url()).href) });
               return;
             }
             await route.fulfill({ response: res, headers });
@@ -962,8 +974,8 @@ export class BrowserEngine {
         if (foreign) return refuse(`sent from a frame of ${foreign}`);
         this.rememberAuthHeader(req.headers());
         const destructiveWire = isDestructiveWire(pathname, req.postData());
-        // The session's page itself has left the app: its writes out are not the app's, a sign-in excepted.
-        const offApp = offAppPageWrite(this.baseUrl, this.page?.url(), url);
+        // An embed moved the session's page off the app: its writes out are not the app's, a sign-in excepted.
+        const offApp = offAppPageWrite(this.baseUrl, this.page?.url(), url, this.embedMoves.movedTo);
         if (offApp && !isAuthExempt(this.mode, method, pathname, destructiveWire)) return refuse(`sent from a page of ${offApp}, outside the app`);
         // Auth/session flows must work in every mode — but never a destructive
         // one, and in observe only the requests a login itself needs.
@@ -1025,6 +1037,7 @@ export class BrowserEngine {
           if (sameOrigin) {
             this.oracles.attach(newPage);
             this.wireDialogHandler(newPage);
+            this.wireEmbedMoves(newPage);
             this.page = newPage;
             this.refs.clear();
             this.snapshotUrl = "";
@@ -1037,6 +1050,7 @@ export class BrowserEngine {
     });
 
     this.wireDialogHandler(this.page);
+    this.wireEmbedMoves(this.page);
 
     try {
       await this.page.goto(opts.url, { waitUntil: "domcontentloaded", timeout: 20000 });
@@ -1081,6 +1095,18 @@ export class BrowserEngine {
       `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""} Call scout_snapshot to see the current state.` +
       authWarning
     );
+  }
+
+  /** Whether the page was moved off the app by one of its embeds (policy.ts EmbedMoveTracker). */
+  private embedMoves = new EmbedMoveTracker("");
+
+  /** Feed the page's navigations to the embed-move tracker. Wired on every page we drive, like the dialog handler. */
+  private wireEmbedMoves(page: Page): void {
+    page.on("framenavigated", (frame) => {
+      if (page !== this.page) return;
+      if (frame === page.mainFrame()) this.embedMoves.pageLoaded(frame.url());
+      else this.embedMoves.frameLoaded(frame.url());
+    });
   }
 
   /** Dialogs (confirm/alert): dismiss in read-only mode, accept otherwise. Must be wired on every page we drive, including adopted popups. */

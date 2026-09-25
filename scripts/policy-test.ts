@@ -20,6 +20,7 @@ import {
   foreignWrite,
   withForeignFrameSandbox,
   offAppPageWrite,
+  EmbedMoveTracker,
   sandboxedRedirectPage,
   FOREIGN_FRAME_SANDBOX,
   allowsForeignWriteOnSignIn,
@@ -622,15 +623,46 @@ test("withForeignFrameSandbox: adds the sandbox, keeping the document's own poli
   assert.doesNotMatch(FOREIGN_FRAME_SANDBOX, /allow-popups|allow-top-navigation/, "no popups and no top-window navigation");
 });
 
-test("offAppPageWrite: the session's page has left the app and writes to another site", () => {
+test("offAppPageWrite: only a page an embed moved off the app, writing to another site", () => {
   const app = "http://app.test:3000/";
-  assert.equal(offAppPageWrite(app, "https://forms.example.com/thanks", "https://forms.example.com/api/x"), "https://forms.example.com");
-  assert.equal(offAppPageWrite(app, "https://forms.example.com/thanks", "https://tracker.example.com/collect"), "https://forms.example.com");
+  const moved = "https://forms.example.com";
+  assert.equal(offAppPageWrite(app, "https://forms.example.com/thanks", "https://forms.example.com/api/x", moved), moved);
+  assert.equal(offAppPageWrite(app, "https://forms.example.com/thanks", "https://tracker.example.com/collect", moved), moved);
   // The contrasts.
-  assert.equal(offAppPageWrite(app, "http://app.test:3000/orders", "https://payments.example.com/charge"), null, "the app's own page calling out");
-  assert.equal(offAppPageWrite(app, "https://idp.example.com/login", "http://app.test:3000/callback"), null, "a write that lands in the app");
-  assert.equal(offAppPageWrite(app, "about:blank", "https://x.example.com/"), null, "no page address to judge");
-  assert.equal(offAppPageWrite(app, undefined, "https://x.example.com/"), null);
+  assert.equal(
+    offAppPageWrite(app, "https://idp.example.com/idp/idx/identify", "https://idp.example.com/idp/idx/identify", null),
+    null,
+    "a sign-in page the tester went to",
+  );
+  assert.equal(
+    offAppPageWrite(app, "https://idp.example.com/login", "https://idp.example.com/api/v1/authn", moved),
+    null,
+    "moved there by the tester, not the embed",
+  );
+  assert.equal(offAppPageWrite(app, "http://app.test:3000/orders", "https://payments.example.com/charge", moved), null, "back on the app");
+  assert.equal(offAppPageWrite(app, "https://forms.example.com/thanks", "http://app.test:3000/callback", moved), null, "a write that lands in the app");
+  assert.equal(offAppPageWrite(app, undefined, "https://x.example.com/", moved), null);
+});
+
+test("EmbedMoveTracker: the page left the app for the site of a frame it was embedding", () => {
+  const t = new EmbedMoveTracker("http://app.test:3000/");
+  t.pageLoaded("http://app.test:3000/checkout");
+  t.frameLoaded("https://forms.example.com/embed");
+  t.frameLoaded("http://app.test:3000/widget");
+  t.pageLoaded("https://forms.example.com/thanks");
+  assert.equal(t.movedTo, "https://forms.example.com", "an embed's site");
+  t.pageLoaded("https://forms.example.com/next");
+  assert.equal(t.movedTo, "https://forms.example.com", "still there");
+  t.pageLoaded("http://app.test:3000/");
+  assert.equal(t.movedTo, null, "back on the app");
+  // The contrasts: a site no frame came from, and an embed's site reached after leaving the app another way.
+  t.frameLoaded("https://forms.example.com/embed");
+  t.pageLoaded("https://idp.example.com/login");
+  assert.equal(t.movedTo, null, "a sign-in page the tester went to");
+  t.pageLoaded("https://forms.example.com/x");
+  assert.equal(t.movedTo, null, "the embeds belonged to the app page that is gone");
+  t.pageLoaded("about:blank");
+  assert.equal(t.movedTo, null);
 });
 
 test("sandboxedRedirectPage: navigates to the target, and a target cannot close the script", () => {

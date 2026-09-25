@@ -61,10 +61,13 @@ Limits of the sandbox, and what covers them. WebKit drops it when a frame loads
 a `data:` URL in its own place, and in Chromium a frame can register a service
 worker that later serves its document unseen. Both can end in a popup or in the
 whole page moving to the third party's site, and the write rules still apply:
-a write from a page the session did not open is refused, and so is any write to
-another site from the session's own page once that page has left the app,
-unless it is a sign-in request (a hosted login page posts to its own site; a
-hosted payment page does not count). In Chromium, a document re-served with the
+a write from a page the session did not open is refused, and so is a write to
+another site from the session's own page once an embed has moved it off the
+app — to the site of a frame the app's page was embedding — unless it is a
+sign-in request. A page the tester reached another site on, a hosted sign-in
+page or a second app, keeps the ordinary rules: the rule is aimed at an embed
+moving the page, not at the tester doing it. A redirect's stand-in page is
+built with no headers of the redirect's but its cookies, and sends no referrer. In Chromium, a document re-served with the
 sandbox counts as public, so its requests to a loopback address are refused by
 the browser's own local-network rule: an app under test on localhost does not
 receive a foreign frame's writes at all.
