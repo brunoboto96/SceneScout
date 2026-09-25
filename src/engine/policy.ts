@@ -297,21 +297,71 @@ export function foreignWrite(
   return null;
 }
 
+/** The last path segment of a page that is a sign-in page, and nothing else: not a verification step, where a payment provider's frame sits. */
+const SIGN_IN_SEGMENT_RE = /^(login|log-in|signin|sign-in|signup|sign-up|sso|oauth|auth)$/i;
+
 /**
  * Whether a foreign frame's writes out may go on this page after all: a
  * captcha on the app's own sign-in page is a cross-origin frame that posts to
- * its own site, and refusing it would make every login fail. Not in observe,
- * where only the login request itself goes out.
+ * its own site, and refusing it would make every login fail. Only on the app's
+ * own origin, only when the page's last path segment is a sign-in word (a
+ * trailing file extension ignored), and not in observe, where only the login
+ * request itself goes out.
  */
-export function allowsForeignWriteOnSignIn(mode: WriteMode, topPageUrl: string): boolean {
+export function allowsForeignWriteOnSignIn(mode: WriteMode, topPageUrl: string, appUrl: string): boolean {
   if (mode === "observe" || mode === "destructive") return false;
-  let path: string;
+  let page: URL;
   try {
-    path = new URL(topPageUrl).pathname;
+    page = new URL(topPageUrl);
+    if (page.origin !== new URL(appUrl).origin) return false;
   } catch {
     return false;
   }
-  return AUTH_FLOW_RE.test(path);
+  const segments = page.pathname.split("/").filter(Boolean);
+  const last = (segments[segments.length - 1] ?? "").replace(/\.[a-z0-9]+$/i, "");
+  return SIGN_IN_SEGMENT_RE.test(last);
+}
+
+/**
+ * Run in every frame before its own scripts, outside destructive mode: inside
+ * a frame of another origin than the app's, a new window cannot be opened.
+ * A popup such a frame opens on its own site can send a write before the
+ * session could close it, and in Firefox that request never reaches the
+ * policy at all, so the only safe place to stop it is before it exists.
+ * window.open returns null, and a link or form aimed at a new window (any
+ * target other than _self, _parent or _top) is cancelled, including a form
+ * submitted from script. The app's own frames and pages are untouched.
+ */
+export function foreignFramePopupGuard(appUrl: string): string {
+  let app = "";
+  try {
+    app = new URL(appUrl).origin;
+  } catch {
+    /* no origin to compare: the guard stays off */
+  }
+  return `(() => {
+  const APP = ${JSON.stringify(app)};
+  try {
+    if (!APP || window.top === window) return;
+    if (!/^https?:$/.test(location.protocol) || location.origin === APP) return;
+  } catch (e) { return; }
+  const opensWindow = (el) => {
+    const t = ((el && el.getAttribute && el.getAttribute("target")) || "").trim().toLowerCase();
+    return t !== "" && t !== "_self" && t !== "_parent" && t !== "_top";
+  };
+  try { window.open = function () { return null; }; } catch (e) {}
+  document.addEventListener("click", (e) => {
+    const a = e.target && e.target.closest ? e.target.closest("a[target], area[target]") : null;
+    if (a && opensWindow(a)) { e.preventDefault(); e.stopImmediatePropagation(); }
+  }, true);
+  document.addEventListener("submit", (e) => {
+    if (opensWindow(e.target)) { e.preventDefault(); e.stopImmediatePropagation(); }
+  }, true);
+  try {
+    const submit = HTMLFormElement.prototype.submit;
+    HTMLFormElement.prototype.submit = function () { if (!opensWindow(this)) return submit.call(this); };
+  } catch (e) {}
+})()`;
 }
 
 export function allowsWrite(mode: WriteMode, method: string, destructiveWire: boolean, owned: boolean): boolean {

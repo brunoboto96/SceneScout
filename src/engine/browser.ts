@@ -65,6 +65,7 @@ import {
   type WriteMode,
   foreignFrameOrigin,
   foreignWrite,
+  foreignFramePopupGuard,
   allowsForeignWriteOnSignIn,
   isAuthExempt,
 } from "./policy.js";
@@ -845,6 +846,8 @@ export class BrowserEngine {
         serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
       if (!sharedWorkersAllowed(this.mode)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
+      // Before any frame's own scripts: a foreign frame cannot open a window (policy.ts says why).
+      if (this.mode !== "destructive") await this.context.addInitScript(foreignFramePopupGuard(this.baseUrl));
       this.page = await this.context.newPage();
     } catch (err) {
       await this.close();
@@ -1608,7 +1611,7 @@ export class BrowserEngine {
       pageHasForeignFrame,
       ...requestSource(req),
     });
-    if (foreign && allowsForeignWriteOnSignIn(this.mode, this.page?.url() ?? "")) return null;
+    if (foreign && allowsForeignWriteOnSignIn(this.mode, this.page?.url() ?? "", this.baseUrl)) return null;
     return foreign;
   }
 

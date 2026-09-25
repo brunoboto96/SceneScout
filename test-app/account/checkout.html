@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Account checkout</title></head>
+<body>
+  <h1>Account checkout</h1>
+  <!-- The same embed on a sign-in page and on a checkout page: a captcha on the
+       first must be able to post to its own site, a payment box on the second
+       must not. Only the page's path differs. -->
+  <iframe id="embed" title="Embedded check" width="300" height="120"></iframe>
+  <script>
+    const other = new URLSearchParams(location.search).get('foreign');
+    if (other) document.getElementById('embed').src = other + '/frame-child.html?as=checkout';
+  </script>
+</body>
+</html>

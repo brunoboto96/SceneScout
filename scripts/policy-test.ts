@@ -18,6 +18,7 @@ import {
   destructiveRefusal,
   foreignFrameOrigin,
   foreignWrite,
+  foreignFramePopupGuard,
   allowsForeignWriteOnSignIn,
   isAuthExempt,
   isDestructive,
@@ -588,9 +589,22 @@ test("foreignWrite: a write started by another site and headed outside the app",
 });
 
 test("allowsForeignWriteOnSignIn: a captcha frame on the app's own sign-in page, outside observe", () => {
-  assert.equal(allowsForeignWriteOnSignIn("read-only", "http://app.test/login"), true);
-  assert.equal(allowsForeignWriteOnSignIn("safe-write", "http://app.test/auth/sign-in?next=/"), true);
-  assert.equal(allowsForeignWriteOnSignIn("observe", "http://app.test/login"), false, "observe sends the login request and nothing else");
-  assert.equal(allowsForeignWriteOnSignIn("read-only", "http://app.test/checkout"), false, "not a sign-in page");
-  assert.equal(allowsForeignWriteOnSignIn("read-only", "not a url"), false);
+  const app = "http://app.test/";
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "http://app.test/login", app), true);
+  assert.equal(allowsForeignWriteOnSignIn("safe-write", "http://app.test/auth/sign-in?next=/", app), true);
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "http://app.test/account/login.html", app), true, "a file extension is ignored");
+  assert.equal(allowsForeignWriteOnSignIn("observe", "http://app.test/login", app), false, "observe sends the login request and nothing else");
+  // The contrasts: where a payment provider's frame sits, and pages that only mention a sign-in word.
+  for (const path of ["/checkout", "/checkout/verify", "/orders/verify-order", "/admin/token-list", "/session-report", "/password"]) {
+    assert.equal(allowsForeignWriteOnSignIn("read-only", `http://app.test${path}`, app), false, path);
+  }
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "https://idp.example.com/login", app), false, "a sign-in page of another site");
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "not a url", app), false);
+});
+
+test("foreignFramePopupGuard: carries the app's origin, and stays off without one", () => {
+  const guard = foreignFramePopupGuard("http://app.test:3000/orders?x=1");
+  assert.match(guard, /const APP = "http:\/\/app\.test:3000";/);
+  assert.match(guard, /window\.open = function \(\) \{ return null; \}/);
+  assert.match(foreignFramePopupGuard("not a url"), /const APP = "";/);
 });

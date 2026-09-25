@@ -38,21 +38,30 @@ except destructive, before any other rule. It goes to the third party that
 serves the frame, not to the app under test, and no mode was agreed with that
 third party. Such a write is recognised by the frame the browser reports; for a
 form the frame aims at the top window or a new tab, by the request's Origin
-header; for a popup the frame opens on its own site, by the popup being a page
-the session never adopted; and for a frame that hides its origin
-(`Origin: null`), by the page embedding another site at the time.
+header; and for a frame that hides its origin (`Origin: null`), by the page
+embedding another site at the time — which also refuses the app's own page
+posting out with `Origin: null` while it embeds one, the cautious direction. A
+write out from any page other than the session's current one is refused too.
+
+A foreign frame cannot open a window at all: an init script, run in every frame
+before its own scripts, makes `window.open` return null inside a frame of
+another origin and cancels its links and forms aimed at a new window. A popup
+opened on the frame's own site could post before it was closed, and in Firefox
+its first requests never reach the policy, so it has to be stopped before it
+exists.
 
 A foreign frame's write that lands in the app itself, such as a sign-in
 provider posting its reply to the app's callback, is judged by the ordinary
 rules, and so are requests the app's own pages send to other origins. On the
-app's own sign-in pages the rule is lifted outside observe, because a captcha
-is a cross-origin frame that posts to its own site and every login would
-otherwise fail. A payment frame and a frame from one of the app's own
-sub-domains count as foreign: refusing a harmless write costs a gap in the
-report, and sending test traffic to a third party nobody asked cannot be
-undone. A known limit: a frame that first navigates the whole window to its
-own site with a GET is, from then on, indistinguishable from a sign-in page
-loaded as the whole page.
+app's own sign-in pages — whose last path segment is a sign-in word such as
+`login` or `sign-in`, not a verification step — the rule is lifted outside
+observe, because a captcha is a cross-origin frame that posts to its own site
+and every login would otherwise fail. A payment frame and a frame from one of
+the app's own sub-domains count as foreign: refusing a harmless write costs a
+gap in the report, and sending test traffic to a third party nobody asked
+cannot be undone. A known limit: a frame that first navigates the whole window
+to its own site with a GET is, from then on, indistinguishable from a sign-in
+page loaded as the whole page.
 
 ## Consequences
 

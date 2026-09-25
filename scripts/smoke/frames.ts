@@ -80,11 +80,12 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     const onPopup = (p: Page) => popups.push(p);
     page.context().on("page", onPopup);
     await frameAs("foreign")!.evaluate(() => (window as unknown as Child).openPopup());
-    await until("the popup to open", () => popups.length > 0, 5000).catch(() => {});
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(1500);
     page.context().off("page", onPopup);
-    check("the foreign frame's popup did open (so the next check means something)", popups.length > 0);
-    check("...and its write never reaches the server", stats.writes["POST /api/frame-popup"] === undefined, JSON.stringify(stats.writes));
+    check("a foreign frame cannot open a window", popups.length === 0, `${popups.length} popup(s)`);
+    check("...so the popup's write never reaches the server", stats.writes["POST /api/frame-popup"] === undefined, JSON.stringify(stats.writes));
+    const sameCanOpen = await frameAs("same")!.evaluate(() => typeof window.open === "function" && !/return null/.test(String(window.open)));
+    check("...while a same-origin frame's window.open is untouched", sameCanOpen);
 
     console.log("frames: a form aimed at the top window, from each frame");
     await frameAs("foreign")!.evaluate(() => (window as unknown as Child).postToTop());
@@ -94,6 +95,30 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       stats.writes["POST /api/frame-top-foreign"] === undefined,
       JSON.stringify(stats.writes),
     );
+    console.log("frames: the same embed on a sign-in page and on a checkout page");
+    for (const [name, arrives] of [
+      ["login", true],
+      ["checkout", false],
+    ] as const) {
+      await engine.navigate(`${baseUrl}/account/${name}.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+      await until(
+        `the embed on ${name} to load`,
+        async () => {
+          const f = frameAs(name);
+          return !!f && (await f.evaluate(() => typeof (window as unknown as { sendNote?: unknown }).sendNote === "function").catch(() => false));
+        },
+        8000,
+      );
+      await frameAs(name)!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());
+      await page.waitForTimeout(500);
+      const got = stats.writes[`POST /api/frame-note-${name}`] === 1;
+      check(
+        arrives ? "a captcha-like embed on the app's sign-in page can post to its own site" : "...while the same embed on a checkout page cannot",
+        got === arrives,
+        JSON.stringify(stats.writes),
+      );
+    }
+
     // The refused top-window navigation leaves the page on the browser's error page: load it again.
     const reload = async () => {
       await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
