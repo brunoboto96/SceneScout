@@ -18,7 +18,8 @@ import {
   destructiveRefusal,
   foreignFrameOrigin,
   foreignWrite,
-  foreignFramePopupGuard,
+  withForeignFrameSandbox,
+  FOREIGN_FRAME_SANDBOX,
   allowsForeignWriteOnSignIn,
   isAuthExempt,
   isDestructive,
@@ -595,16 +596,26 @@ test("allowsForeignWriteOnSignIn: a captcha frame on the app's own sign-in page,
   assert.equal(allowsForeignWriteOnSignIn("read-only", "http://app.test/account/login.html", app), true, "a file extension is ignored");
   assert.equal(allowsForeignWriteOnSignIn("observe", "http://app.test/login", app), false, "observe sends the login request and nothing else");
   // The contrasts: where a payment provider's frame sits, and pages that only mention a sign-in word.
-  for (const path of ["/checkout", "/checkout/verify", "/orders/verify-order", "/admin/token-list", "/session-report", "/password"]) {
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "http://app.test/users/sign_in", app), true, "an underscore spelling");
+  for (const path of [
+    "/checkout",
+    "/checkout/verify",
+    "/checkout/auth",
+    "/payments/3ds/auth",
+    "/orders/verify-order",
+    "/admin/token-list",
+    "/session-report",
+    "/password",
+  ]) {
     assert.equal(allowsForeignWriteOnSignIn("read-only", `http://app.test${path}`, app), false, path);
   }
   assert.equal(allowsForeignWriteOnSignIn("read-only", "https://idp.example.com/login", app), false, "a sign-in page of another site");
   assert.equal(allowsForeignWriteOnSignIn("read-only", "not a url", app), false);
 });
 
-test("foreignFramePopupGuard: carries the app's origin, and stays off without one", () => {
-  const guard = foreignFramePopupGuard("http://app.test:3000/orders?x=1");
-  assert.match(guard, /const APP = "http:\/\/app\.test:3000";/);
-  assert.match(guard, /window\.open = function \(\) \{ return null; \}/);
-  assert.match(foreignFramePopupGuard("not a url"), /const APP = "";/);
+test("withForeignFrameSandbox: adds the sandbox, keeping the document's own policy", () => {
+  assert.equal(withForeignFrameSandbox(undefined), "sandbox allow-scripts allow-forms allow-same-origin");
+  assert.equal(withForeignFrameSandbox("  "), "sandbox allow-scripts allow-forms allow-same-origin");
+  assert.equal(withForeignFrameSandbox("default-src 'self'"), "default-src 'self', sandbox allow-scripts allow-forms allow-same-origin");
+  assert.doesNotMatch(FOREIGN_FRAME_SANDBOX, /allow-popups|allow-top-navigation/, "no popups and no top-window navigation");
 });

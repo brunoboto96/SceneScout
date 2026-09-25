@@ -43,25 +43,32 @@ embedding another site at the time — which also refuses the app's own page
 posting out with `Origin: null` while it embeds one, the cautious direction. A
 write out from any page other than the session's current one is refused too.
 
-A foreign frame cannot open a window at all: an init script, run in every frame
-before its own scripts, makes `window.open` return null inside a frame of
-another origin and cancels its links and forms aimed at a new window. A popup
-opened on the frame's own site could post before it was closed, and in Firefox
-its first requests never reach the policy, so it has to be stopped before it
-exists.
+A foreign frame cannot open a window or navigate the whole page at all: every
+document loading into a frame of another origin is served with the sandbox
+`Content-Security-Policy: sandbox allow-scripts allow-forms allow-same-origin`,
+which leaves out popups and top-window navigation. A popup opened on the
+frame's own site could post before it was closed, and in Firefox its first
+requests never reach the policy; a detached link's click, a `<base target>` or
+a `window.open` borrowed from a blank child frame each opened one past a
+script patch. The browser applies the sandbox to every realm the document
+makes, nested and blank frames included. A frame document that cannot be
+fetched to add it is not loaded. In Chromium, a document re-served this way
+counts as public, so its requests to a loopback address are refused by the
+browser's own local-network rule — an app under test on localhost will not
+receive a foreign frame's writes at all, which the rules above would have
+allowed.
 
 A foreign frame's write that lands in the app itself, such as a sign-in
 provider posting its reply to the app's callback, is judged by the ordinary
 rules, and so are requests the app's own pages send to other origins. On the
 app's own sign-in pages — whose last path segment is a sign-in word such as
-`login` or `sign-in`, not a verification step — the rule is lifted outside
-observe, because a captcha is a cross-origin frame that posts to its own site
-and every login would otherwise fail. A payment frame and a frame from one of
+`login` or `sign-in`, not a verification step like `verify` or `auth` — the
+rule and the sandbox are lifted outside observe: a captcha is a cross-origin
+frame that posts to its own site, and a "sign in with" button is one that opens
+a popup, and every login would otherwise fail. A payment frame and a frame from one of
 the app's own sub-domains count as foreign: refusing a harmless write costs a
 gap in the report, and sending test traffic to a third party nobody asked
-cannot be undone. A known limit: a frame that first navigates the whole window
-to its own site with a GET is, from then on, indistinguishable from a sign-in
-page loaded as the whole page.
+cannot be undone.
 
 ## Consequences
 

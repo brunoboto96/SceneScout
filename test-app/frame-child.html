@@ -23,7 +23,20 @@
     document.body.appendChild(topForm);
     window.postToTop = () => topForm.submit();
     // A popup on this frame's own site, which posts as it loads.
-    window.openPopup = () => { window.open(location.origin + '/frame-popup.html'); };
+    window.openPopup = () => { window.open(location.origin + '/frame-popup.html?via=open'); };
+    // Two ways a patched window.open does not reach: a detached link's click,
+    // and window.open borrowed from a blank child frame.
+    window.openPopupLink = () => {
+      const a = document.createElement('a');
+      a.href = location.origin + '/frame-popup.html?via=link';
+      a.target = '_blank';
+      a.click();
+    };
+    window.openPopupBorrowed = () => {
+      const blank = document.createElement('iframe');
+      document.body.appendChild(blank);
+      blank.contentWindow.open(location.origin + '/frame-popup.html?via=borrowed');
+    };
     // A write into the app itself, the way a sign-in frame posts its reply to the app's callback.
     window.sendToApp = (app) =>
       fetch(app + '/api/frame-to-app', { method: 'POST', body: 'reply', mode: 'no-cors' })

@@ -65,7 +65,7 @@ import {
   type WriteMode,
   foreignFrameOrigin,
   foreignWrite,
-  foreignFramePopupGuard,
+  withForeignFrameSandbox,
   allowsForeignWriteOnSignIn,
   isAuthExempt,
 } from "./policy.js";
@@ -846,8 +846,6 @@ export class BrowserEngine {
         serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
       if (!sharedWorkersAllowed(this.mode)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
-      // Before any frame's own scripts: a foreign frame cannot open a window (policy.ts says why).
-      if (this.mode !== "destructive") await this.context.addInitScript(foreignFramePopupGuard(this.baseUrl));
       this.page = await this.context.newPage();
     } catch (err) {
       await this.close();
@@ -914,6 +912,20 @@ export class BrowserEngine {
       await this.context.route("**/*", async (route) => {
         const req = route.request();
         const method = req.method();
+        // A document loading into a frame of another origin gets the sandbox
+        // that forbids popups and top-window navigation (policy.ts says why).
+        if (method === "GET" && req.resourceType() === "document" && this.isForeignFrameDocument(req)) {
+          try {
+            // One hop at a time: the browser follows a redirect itself, and each hop comes back here.
+            const res = await route.fetch({ maxRedirects: 0 });
+            const headers = res.headers();
+            headers["content-security-policy"] = withForeignFrameSandbox(headers["content-security-policy"]);
+            return route.fulfill({ response: res, headers });
+          } catch {
+            // Fail closed: a frame that cannot be sandboxed is not loaded.
+            return route.abort("blockedbyclient");
+          }
+        }
         if (method === "GET" || method === "HEAD" || method === "OPTIONS") return route.continue();
         const url = req.url();
         const pathname = pathnameOf(url);
@@ -1587,6 +1599,23 @@ export class BrowserEngine {
     };
     const frames = (await Promise.all(direct.slice(0, 30).map(read))).filter((f): f is FrameInfo => f !== null);
     return { frames, nested: all.length - Math.min(direct.length, 30) };
+  }
+
+  /**
+   * Whether a request is a document loading into a frame (not the top window)
+   * of another origin than the app's. Not on the app's own sign-in pages, where
+   * a "sign in with" button is a foreign frame that has to open its popup.
+   */
+  private isForeignFrameDocument(req: Request): boolean {
+    let frame: Frame;
+    try {
+      frame = req.frame();
+    } catch {
+      return false;
+    }
+    if (frame === frame.page().mainFrame()) return false;
+    if (foreignFrameOrigin(this.baseUrl, [req.url()]) === null) return false;
+    return !allowsForeignWriteOnSignIn(this.mode, this.page?.url() ?? "", this.baseUrl);
   }
 
   /**
