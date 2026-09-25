@@ -453,13 +453,28 @@ export function toSarif(result: CheckResult, toolVersion: string): object {
   };
 }
 
-/** Markdown cells: a pipe or a newline in evidence would break the table it sits in. */
+/**
+ * Markdown cells: a pipe or a newline in evidence would break the table it
+ * sits in. Backslashes are escaped first, or evidence ending in `\` would
+ * turn the pipe's escape into a literal backslash and the pipe back into a column.
+ */
 function cell(text: string): string {
-  return text.replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");
+  return text
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|")
+    .replace(/\s*\n\s*/g, " ");
+}
+
+/** A code span that the text cannot close: its fence is one backtick longer than any run of backticks inside it. */
+function code(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longest + 1);
+  const pad = longest > 0 ? " " : "";
+  return `${fence}${pad}${text}${pad}${fence}`;
 }
 
 function routeList(routes: readonly string[]): string {
-  const shown = routes.slice(0, 3).map((r) => `\`${r}\``);
+  const shown = routes.slice(0, 3).map(code);
   return shown.join(", ") + (routes.length > 3 ? ` and ${routes.length - 3} more` : "");
 }
 
@@ -496,16 +511,11 @@ export function formatCheck(result: CheckResult): string {
     const status =
       (r.loadError !== undefined ? "did not load" : r.loginRedirect ? `${r.status ?? "?"} → sign-in` : String(r.status ?? "?")) +
       (r.auditError ? ` (design not measured: ${cell(r.auditError.slice(0, 80))})` : "");
-    lines.push(`| \`${cell(r.path)}\` | ${status} | ${r.elements} | ${n} |`);
+    // Plain text, not a code span: inside a table cell a code span keeps the backslashes cell() adds.
+    lines.push(`| ${cell(r.path)} | ${status} | ${r.elements} | ${n} |`);
   }
   if (result.unvisited.length > 0) {
-    lines.push(
-      "",
-      `Not visited (over --max-routes): ${result.unvisited
-        .slice(0, 20)
-        .map((r) => `\`${r}\``)
-        .join(", ")}${result.unvisited.length > 20 ? " …" : ""}`,
-    );
+    lines.push("", `Not visited (over --max-routes): ${result.unvisited.slice(0, 20).map(code).join(", ")}${result.unvisited.length > 20 ? " …" : ""}`);
   }
   if (result.ignored.length > 0) lines.push("", `Rules ignored by --ignore: ${result.ignored.join(", ")}`);
   lines.push("", "_A check visits pages and measures what loads. It does not fill forms, click through flows or compare roles; an exploratory run does that._");

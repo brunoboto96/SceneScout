@@ -262,6 +262,21 @@ test("the report leads with the verdict", () => {
   assert.equal(summarise(result([issue("high")], "never")).passed, true);
 });
 
+test("a backslash before a pipe cannot turn the pipe back into a column", () => {
+  const r: CheckResult = { ...result([]), routes: [route({ path: "/a\\|b" })] };
+  const row = formatCheck(r)
+    .split("\n")
+    .find((l) => l.startsWith("| /a"))!;
+  // Unescaped pipes are column separators: the row must still have exactly five.
+  assert.equal(row.replace(/\\./g, "").split("|").length - 1, 5, row);
+});
+
+test("a backtick in a route cannot close the code span it is shown in", () => {
+  const md = formatCheck({ ...result([{ ...issue("high"), routes: ["/a`b"] }]), unvisited: ["/c``d"] });
+  assert.ok(md.includes("`` /a`b ``"), md);
+  assert.ok(md.includes("``` /c``d ```"), md);
+});
+
 test("a pipe in evidence cannot break the report's markdown", () => {
   const md = formatCheck(result([{ ...issue("high"), evidence: "a | b\nc" }]));
   assert.match(md, /a \\\| b c/);
