@@ -323,13 +323,21 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
 
     // The refused top-window navigation leaves the page on the browser's error page: load it again.
     const reload = async () => {
-      await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+      // A navigation the page started itself (a form post) can still be landing; let it, then go back.
+      await page.waitForLoadState("domcontentloaded").catch(() => {});
+      const target = `${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`;
+      await engine.navigate(target).catch(async (err: unknown) => {
+        if (!/interrupted by another navigation/.test(String(err))) throw err;
+        await page.waitForLoadState("domcontentloaded").catch(() => {});
+        await engine.navigate(target);
+      });
       await framesLoaded();
     };
     await reload();
     // Its one-fact contrast: the same form to the same place, sent by the app's own page.
     await page.evaluate((url) => (window as unknown as { postOut: (u: string) => void }).postOut(url), `${foreignBaseUrl}/api/frame-top-foreign`);
     await until("the app's own form to the other site to arrive", () => stats.writes["POST /api/frame-top-foreign"] === 1, 5000).catch(() => {});
+    await page.waitForURL((u) => u.origin === new URL(foreignBaseUrl).origin, { timeout: 5000 }).catch(() => {});
     check(
       "...while the app's own page posting the same form to that site is the app's behaviour, and arrives",
       stats.writes["POST /api/frame-top-foreign"] === 1,
