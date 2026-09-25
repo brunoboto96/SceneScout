@@ -1,5 +1,13 @@
 # scenescout
 
+## 3.9.0
+
+### Minor Changes
+
+- e2cf5bb: Snapshots list the controls inside the page's frames, each marked with its frame, and every action works on them by ref. In a frame of another site, container text is masked and typed markup, fuzzing-length values, repeated-click probes and uploads are refused in every mode; ordinary clicks and typing are allowed, and the write policy still refuses the writes such a frame sends outside the app.
+- 5a48f6c: What happens inside another site's frame is attributed to it: failing requests and error responses it sent outside the app are labelled with its origin, kept at medium severity at most and grouped in their own report section (a request it sent to the app stays the app's), and its controls are counted apart from the app's coverage and gap ledger.
+- fa71eb8: `scout_attach` takes `trustedEmbeds`, a list of origins the user trusts (a provider in test mode, say): in safe-write mode only, the writes their frames send outside the app go out, provided every other site involved (each frame up to the page, and the Origin header) is trusted. Anything that is not a plain http(s) origin is refused at attach, trust is ignored in the other modes, and the report names the list.
+
 ## 3.8.0
 
 ### Minor Changes
