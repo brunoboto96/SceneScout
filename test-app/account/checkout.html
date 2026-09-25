@@ -10,7 +10,9 @@
   <script>
     // Only a loopback origin, the fixture server's second port; anything else is ignored.
     const raw = new URLSearchParams(location.search).get('foreign') || '';
-    const other = /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(raw) ? raw : '';
+    const port = /^http:\/\/127\.0\.0\.1:(\d{2,5})$/.exec(raw);
+    // Rebuilt from a number on a fixed host, so nothing of the query string itself reaches the page.
+    const other = port ? 'http://127.0.0.1:' + Number(port[1]) : '';
     if (other) document.getElementById('embed').src = other + '/frame-child.html?as=checkout';
   </script>
 </body>

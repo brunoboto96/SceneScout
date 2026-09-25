@@ -14,7 +14,9 @@
     // The second origin's address is handed over in the query string, since the page cannot know its port.
     // Only a loopback origin, the fixture server's second port; anything else is ignored.
     const raw = new URLSearchParams(location.search).get('foreign') || '';
-    const other = /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(raw) ? raw : '';
+    const port = /^http:\/\/127\.0\.0\.1:(\d{2,5})$/.exec(raw);
+    // Rebuilt from a number on a fixed host, so nothing of the query string itself reaches the page.
+    const other = port ? 'http://127.0.0.1:' + Number(port[1]) : '';
     if (other) document.getElementById('foreign').src = other + '/frame-child.html?as=foreign';
     // The app's own page posting a form to another site: the app's behaviour, judged by the ordinary rules.
     window.postOut = (url) => {
