@@ -415,6 +415,31 @@ export function allowsForeignWriteOnSignIn(mode: WriteMode, topPageUrl: string, 
   return SIGN_IN_SEGMENT_RE.test(last);
 }
 
+/** The longest text typed into another site's frame; past it, a value is a fuzzing probe, not a user's input. */
+export const MAX_EMBED_TEXT = 200;
+
+/**
+ * Why a value must not be typed into another site's frame, or null when it
+ * may be. The tester is authorised to test the app, not the embeds of
+ * others: markup, fuzzing lengths and control characters typed there would
+ * be probing a third party's system without its leave.
+ */
+export function hostileForEmbed(text: string): string | null {
+  if (/<\s*[a-z!/?]/i.test(text) || /javascript:/i.test(text)) return "it is markup";
+  if (text.length > MAX_EMBED_TEXT) return `it is longer than ${MAX_EMBED_TEXT} characters`;
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) return "it holds control characters";
+  return null;
+}
+
+/** The refusal for a probe aimed at another site's frame. */
+export function embedProbeRefusal(what: string, origin: string): string {
+  return (
+    `REFUSED: ${what} inside a frame of ${origin}, another site embedded in the page. The tester is authorised to test the app, ` +
+    `not the embeds of others, so hostile input, repeated-click probes and file uploads are never sent into one, in any mode. ` +
+    `Ordinary clicks and typing there are allowed; the embed's writes out of the app are refused by the write policy.`
+  );
+}
+
 /**
  * The sandbox given to every document a frame of another origin loads, outside
  * destructive mode: scripts, forms and its own origin keep working, and no
