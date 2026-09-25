@@ -16,6 +16,14 @@ import {
   answersWithRefusal,
   AUTH_FLOW_RE,
   destructiveRefusal,
+  foreignFrameOrigin,
+  foreignWrite,
+  withForeignFrameSandbox,
+  offAppPageWrite,
+  EmbedMoveTracker,
+  sandboxedRedirectPage,
+  FOREIGN_FRAME_SANDBOX,
+  allowsForeignWriteOnSignIn,
   isAuthExempt,
   isDestructive,
   isDestructiveWire,
@@ -531,4 +539,147 @@ test("the policy's refusal is a marked 403 the page can read", () => {
   const cross = policyRefusal("observe", "POST", "/api/things", "http://app.test");
   assert.equal(cross.headers["access-control-allow-origin"], "http://app.test");
   assert.equal(cross.headers["access-control-allow-credentials"], "true");
+});
+
+test("foreignFrameOrigin: a write is foreign when a frame of another site sent it", () => {
+  const app = "http://app.test:3000/orders";
+  for (const [chain, expected, why] of [
+    [[], null, "the top document"],
+    [["http://app.test:3000/widget"], null, "a same-origin frame"],
+    [["https://forms.example.com/embed"], "https://forms.example.com", "a third party's embedded form"],
+    [["http://app.test:4000/embed"], "http://app.test:4000", "another port is another origin"],
+    [["about:blank", "https://chat.example.com/w"], "https://chat.example.com", "a blank frame belongs to the frame that made it"],
+    [["about:blank"], null, "a blank frame made by the app"],
+    [["http://app.test:3000/inner", "https://pay.example.com/box"], "https://pay.example.com", "an app page nested inside a widget is still driven by it"],
+    [["not a url"], null, "an address that cannot be read decides nothing"],
+  ] as const) {
+    assert.equal(foreignFrameOrigin(app, chain), expected, why);
+  }
+});
+
+test("foreignWrite: a write started by another site and headed outside the app", () => {
+  const app = "http://app.test:3000/checkout";
+  const at = (over: Partial<Parameters<typeof foreignWrite>[1]>) =>
+    foreignWrite(app, { url: "https://forms.example.com/submit", frameChain: [], frameUrl: app, ...over });
+  // The frame the browser reports.
+  assert.equal(at({ frameChain: ["https://forms.example.com/embed"], frameUrl: "https://forms.example.com/embed" }), "https://forms.example.com");
+  assert.equal(
+    at({ frameChain: ["http://app.test:3000/widget"], frameUrl: "http://app.test:3000/widget" }),
+    null,
+    "a same-origin frame's call out is the app's own",
+  );
+  // A foreign frame's form aimed at _top: reported against the top page, but its Origin header names the frame's site.
+  assert.equal(at({ originHeader: "https://forms.example.com" }), "https://forms.example.com", "target=_top");
+  assert.equal(at({ frameUrl: null, originHeader: "https://forms.example.com" }), "https://forms.example.com", "target=_blank or a popup: no frame at all");
+  // The contrasts: the header says nothing new.
+  assert.equal(at({ originHeader: "http://app.test:3000" }), null, "the app's own page calling a third party");
+  assert.equal(at({ frameUrl: "https://idp.example.com/login", originHeader: "https://idp.example.com" }), null, "a sign-in page loaded as the whole page");
+  assert.equal(at({ originHeader: "null" }), null, "an opaque origin says nothing");
+  // A foreign frame writing into the app: a sign-in reply to the app's callback.
+  assert.equal(
+    at({ url: "http://app.test:3000/auth/callback", frameChain: ["https://idp.example.com/authorize"], frameUrl: "https://idp.example.com/authorize" }),
+    null,
+    "a write that lands in the app is the ordinary rules' business",
+  );
+  // A popup a foreign frame opened on its own site: header and page agree, but the session never adopted that page.
+  assert.equal(
+    at({ frameUrl: "https://forms.example.com/thanks", originHeader: "https://forms.example.com", unadoptedPageUrl: "https://forms.example.com/thanks" }),
+    "https://forms.example.com",
+  );
+  assert.equal(at({ unadoptedPageUrl: null, originHeader: "http://app.test:3000" }), null, "the session's own page");
+  // "Origin: null" (a no-referrer frame) out of the app, only when the page embeds another site.
+  assert.equal(at({ originHeader: "null", pageHasForeignFrame: true }), "an embedded frame (Origin: null)");
+  assert.equal(at({ originHeader: "null", pageHasForeignFrame: false }), null);
+});
+
+test("allowsForeignWriteOnSignIn: a captcha frame on the app's own sign-in page, outside observe", () => {
+  const app = "http://app.test/";
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "http://app.test/login", app), true);
+  assert.equal(allowsForeignWriteOnSignIn("safe-write", "http://app.test/auth/sign-in?next=/", app), true);
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "http://app.test/account/login.html", app), true, "a file extension is ignored");
+  assert.equal(allowsForeignWriteOnSignIn("observe", "http://app.test/login", app), false, "observe sends the login request and nothing else");
+  // The contrasts: where a payment provider's frame sits, and pages that only mention a sign-in word.
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "http://app.test/users/sign_in", app), true, "an underscore spelling");
+  for (const path of [
+    "/checkout",
+    "/checkout/verify",
+    "/checkout/auth",
+    "/payments/3ds/auth",
+    "/orders/verify-order",
+    "/admin/token-list",
+    "/session-report",
+    "/password",
+  ]) {
+    assert.equal(allowsForeignWriteOnSignIn("read-only", `http://app.test${path}`, app), false, path);
+  }
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "https://idp.example.com/login", app), false, "a sign-in page of another site");
+  assert.equal(allowsForeignWriteOnSignIn("read-only", "not a url", app), false);
+});
+
+test("withForeignFrameSandbox: adds the sandbox, keeping the document's own policy", () => {
+  assert.equal(withForeignFrameSandbox(undefined), "sandbox allow-scripts allow-forms allow-same-origin");
+  assert.equal(withForeignFrameSandbox("  "), "sandbox allow-scripts allow-forms allow-same-origin");
+  assert.equal(withForeignFrameSandbox("default-src 'self'"), "default-src 'self', sandbox allow-scripts allow-forms allow-same-origin");
+  assert.doesNotMatch(FOREIGN_FRAME_SANDBOX, /allow-popups|allow-top-navigation/, "no popups and no top-window navigation");
+});
+
+test("offAppPageWrite: only a page an embed moved off the app, writing to another site", () => {
+  const app = "http://app.test:3000/";
+  const moved = "https://forms.example.com";
+  assert.equal(offAppPageWrite(app, "https://forms.example.com/thanks", "https://forms.example.com/api/x", moved), moved);
+  assert.equal(offAppPageWrite(app, "https://forms.example.com/thanks", "https://tracker.example.com/collect", moved), moved);
+  // The contrasts.
+  assert.equal(
+    offAppPageWrite(app, "https://idp.example.com/idp/idx/identify", "https://idp.example.com/idp/idx/identify", null),
+    null,
+    "a sign-in page the tester went to",
+  );
+  assert.equal(
+    offAppPageWrite(app, "https://idp.example.com/login", "https://idp.example.com/api/v1/authn", moved),
+    null,
+    "moved there by the tester, not the embed",
+  );
+  assert.equal(offAppPageWrite(app, "http://app.test:3000/orders", "https://payments.example.com/charge", moved), null, "back on the app");
+  assert.equal(offAppPageWrite(app, "https://forms.example.com/thanks", "http://app.test:3000/callback", moved), null, "a write that lands in the app");
+  assert.equal(offAppPageWrite(app, undefined, "https://x.example.com/", moved), null);
+});
+
+test("EmbedMoveTracker: who moved the page, decided on its navigation's first request", () => {
+  const app = "http://app.test:3000/";
+  const forms = new Set(["https://forms.example.com"]);
+  const moved = (url: string, referer: string | undefined, embedded: ReadonlySet<string>) => {
+    const t = new EmbedMoveTracker(app);
+    t.pageLoaded("http://app.test:3000/checkout");
+    t.navigationStarted(url, referer, embedded);
+    t.pageLoaded(url);
+    return t.movedTo;
+  };
+  // An embed moving the page: another site's Referer, or none at all to the embed's own site.
+  assert.equal(moved("https://forms.example.com/thanks", "https://forms.example.com/embed", forms), "https://forms.example.com");
+  assert.equal(moved("https://forms.example.com/thanks", undefined, forms), "https://forms.example.com", "a data: frame hides its origin");
+  assert.equal(
+    moved("https://evil.example.net/x", "https://forms.example.com/embed", forms),
+    "https://evil.example.net",
+    "to a third site, with the embed's Referer",
+  );
+  // The tester moving the page: the app as Referer, even to a site the app embeds for silent sign-in.
+  assert.equal(moved("https://idp.example.com/login", "http://app.test:3000/checkout", new Set(["https://idp.example.com"])), null);
+  // No Referer (an app that sends none), to a site the page does not embed: the tester's.
+  assert.equal(moved("https://idp.example.com/login", undefined, forms), null);
+  // No embeds on the page: nothing could have moved it but the tester.
+  assert.equal(moved("https://forms.example.com/thanks", "https://forms.example.com/embed", new Set()), null);
+  // It stays moved while the page stays on that site, and ends back on the app.
+  const t = new EmbedMoveTracker(app);
+  t.navigationStarted("https://forms.example.com/a", undefined, forms);
+  t.pageLoaded("https://forms.example.com/a");
+  t.pageLoaded("https://forms.example.com/b");
+  assert.equal(t.movedTo, "https://forms.example.com");
+  t.pageLoaded("http://app.test:3000/");
+  assert.equal(t.movedTo, null);
+});
+
+test("sandboxedRedirectPage: navigates to the target, and a target cannot close the script", () => {
+  const page = sandboxedRedirectPage("https://x.test/a?b=</script><script>alert(1)</script>");
+  assert.match(page, /location\.replace\("https:\/\/x\.test\/a\?b=\\u003c\/script>\\u003cscript>alert\(1\)\\u003c\/script>"\)/);
+  assert.equal(page.split("</script>").length, 2, "exactly one closing tag: the page's own");
 });

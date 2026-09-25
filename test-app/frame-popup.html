@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Popup</title></head>
+<body>
+  <p>A popup opened by an embedded frame, on the frame's own site.</p>
+  <script>
+    // Posts as it loads, before anything could close it.
+    fetch('/api/frame-popup', { method: 'POST', body: 'from the popup' });
+  </script>
+</body>
+</html>

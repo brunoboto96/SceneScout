@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { brokenImageIssues, displayName, geometryIssues, missingName } from "../src/engine/collector.ts";
+import { brokenImageIssues, displayName, frameLines, geometryIssues, hasVisibleFrame, missingName } from "../src/engine/collector.ts";
 import { POLICY_BLOCK_WINDOW_MS, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
 import {
   describeInjection,
@@ -416,4 +416,26 @@ test("an empty live region is not an unnamed control; an empty button still is",
   }
   assert.equal(missingName({ role: "status", name: "Saved." }), false);
   assert.equal(displayName({ role: "status", name: "Saved." }), "Saved.");
+});
+
+test("frameLines: says what is embedded, where from, and that it was not explored", () => {
+  const app = "http://app.test:3000/";
+  assert.deepEqual(frameLines(app, []), [], "no frames, nothing to say");
+  const frames = [
+    { url: "http://app.test:3000/widget?x=1", title: "Widget", width: 400, height: 200, foreign: false },
+    { url: "https://forms.example.com/embed", title: "", width: 600, height: 300, foreign: true },
+    { url: "https://tracker.example.com/pixel", title: "", width: 0, height: 0, foreign: true },
+  ];
+  const lines = frameLines(app, frames, { nested: 2 });
+  assert.match(lines[0], /FRAMES not explored/);
+  assert.equal(lines[1], '  same-origin /widget?x=1 "Widget" 400×200');
+  assert.equal(lines[2], "  cross-origin https://forms.example.com/embed 600×300 — writes it sends outside the app are refused");
+  assert.equal(lines[3], "  (+1 hidden frame)");
+  assert.equal(lines[4], "  (+2 more frames, nested inside those or past the first 30, not read)");
+  assert.equal(lines.length, 5);
+  // In destructive mode a foreign frame's writes do go out, and the line must not say otherwise.
+  assert.match(frameLines(app, frames, { writesRefused: false })[2], /its writes go out \(destructive mode\)/);
+  // The contrast: a page whose only frames are hidden has nothing a user sees inside one.
+  assert.equal(hasVisibleFrame([{ url: "https://tracker.example.com/p", title: "", width: 1, height: 1, foreign: true }]), false);
+  assert.equal(hasVisibleFrame([{ url: "https://forms.example.com/e", title: "", width: 600, height: 300, foreign: true }]), true);
 });
