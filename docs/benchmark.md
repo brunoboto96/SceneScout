@@ -98,17 +98,23 @@ example or counter-example in the same change.
   whether it says the thing is broken. Findings are filed as defects, so this
   matters little for recall and precision, and not at all for calibration,
   which scores the verdict separately.
-- **The answers are on disk.** The demo's source marks each seeded defect with
-  a comment, and this key sits beside it. One lane in run 0 cited such a
-  comment. Lanes are not told where the demo's source is, but nothing stops
-  them reading it.
+- **The answers are on disk, and some are served to the lanes.** The demo's
+  source marks each seeded defect with a comment, and this key sits beside it.
+  One lane in run 0 cited such a comment. Lanes are not told where the demo's
+  source is, but nothing stops them reading it. More directly: eleven of those
+  comments are in files the browser downloads (eight in the pages' own markup
+  and scripts, three in the stylesheet), and a lane that reads a page's own
+  script reads the answer. Run 8's orders lane quoted the line directly under
+  one. Every run so far was made with
+  the comments served; removing them is tracked in issue #133, and runs made
+  after that are the first whose recall cannot have been read from a page.
 
 ## Results
 
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
 re-scored against **one** key by `npm run bench -- --all`; the table below is
-key `f7695befb6`. The archived runs are in [`bench/runs/`](../bench/runs/).
+key `f8e0862a8b`. The archived runs are in [`bench/runs/`](../bench/runs/).
 
 | Run | Date | What changed | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Lane calibration | Cost | Kept? |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
@@ -120,6 +126,7 @@ key `f7695befb6`. The archived runs are in [`bench/runs/`](../bench/runs/).
 | 5 | 2026-09-23 | **Engine 3.6.1 only** — run 1's briefs verbatim | 11/13 | 30/31 (97%) | 31 | 0 | 1 | 0 | 31/35 (89%), ECE 0.09, Brier 0.080 | ~697k tokens, 248 tool calls, longest lane 9m30s | See runs 5–7 |
 | 6 | 2026-09-23 | Repeat of run 5 | 10/13 | 31/33 (94%) | 33 | 0 | 2 | 0 | 33/37 (89%), ECE 0.06, Brier 0.092 | ~685k tokens, 264 tool calls, longest lane 4m39s | See runs 5–7 |
 | 7 | 2026-09-23 | Repeat of run 5 | 10/13 | 29/30 (97%) | 30 | 0 | 1 | 0 | 30/35 (86%), ECE 0.12, Brier 0.089 | ~725k tokens, 292 tool calls, longest lane 6m08s | See runs 5–7 |
+| 8 | 2026-09-25 | **Engine 3.9.0 only** (frames) — run 1's briefs verbatim | 11/13 | 25/26 (96%) | 26 | 0 | 1 | 0 | 27/28 (96%), ECE 0.09, Brier 0.042 | ~679k tokens, 240 tool calls, longest lane 4m00s | See run 8 |
 
 **Brier is the number to compare; ECE says which way a lane is off.** Run 1's verdicts were
 right more often (97% against 84%), and its expected calibration error is
@@ -132,6 +139,51 @@ ahead (0.113 → 0.035).
 The first version of this scorer counted the five "belongs to another lane"
 dismissals as wrong verdicts, which gave ECE 0.09 → 0.04 and read as an
 improvement; that one choice was enough to reverse the comparison.
+
+### Run 8 — engine 3.9.0, measured once
+
+Only the engine changed again: run 1's briefs verbatim, a fresh demo app and
+project directory. 3.9.0 added frame support (listing and acting inside frames,
+the cross-origin write rules, trusted embeds, and attributing an embed's
+failures to it). The demo has no frames, so no direct effect was expected; the
+run checks that the frame work cost nothing on an app without frames.
+
+| Defect | Runs 5–7 | Run 8 |
+|---|:---:|:---:|
+| Sticky bar covers Save notes | 3/3 | found |
+| Double-submit creates two orders | 2/3 | found |
+| Archived filter hides a 500 | 1/3 | found |
+| Empty customer does nothing | 1/3 | missed |
+| Email field has no label | 0/3 | missed |
+| Every other planted defect (8) | 3/3 each | found |
+
+Recall 11 is inside runs 5–7's range (11, 10, 10), so no change is claimed.
+The Brier score is 0.042 against 0.080–0.092, but from 28 verdicts the key
+could judge, against 35–37: one run, and a smaller sample, so a direction to
+repeat rather than a result.
+
+What else the run showed:
+
+- **One finding needed a person.** "Failed orders fetch renders as a silent
+  empty table" is the empty-table half of the Archived defect: one code path
+  renders any failed fetch as an empty table, and only the Archived filter
+  fails. The key now matches that phrasing as the Archived defect, so it counts
+  as a duplicate. Runs 0–7 score the same under the new key.
+- **That finding quoted the page's own script, directly under a comment naming
+  the seeded defect.** See "The answers are on disk" above.
+- **Relayed evidence still carried `-&gt;` for `->`** in five of the eight
+  lane reports. Decoding it before evidence is stored is tracked in issue #130.
+- **One lane's decisions nearly went uncounted.** The planner closed the audit
+  lane's session before folding its report, so the fold kept nothing for
+  calibration. The session was re-attached read-only and the same report
+  folded again, which kept all six decisions. A guard for this is tracked in
+  issue #132.
+- **The unlabelled-email defect has now been missed in eight consecutive runs (1–8; run 0 found it).**
+  The snapshot names an input by its placeholder when it has no label, so no
+  rule can tell the two apart; that is tracked in issue #128.
+
+**Kept?** Nothing to keep or reject: the run measures a feature the demo does
+not exercise, and shows no loss.
 
 ### Runs 5–7 — engine 3.6.1, measured three times
 
