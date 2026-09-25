@@ -423,9 +423,10 @@ export const MAX_TRUSTED_EMBEDS = 10;
  * that is not one. An entry must be a plain http(s) origin — scheme, host and
  * port, nothing after — so a path or a wildcard cannot widen it by accident.
  */
-export function trustedEmbedOrigins(list: readonly string[] | undefined): { origins: string[]; rejected: string[] } {
+export function trustedEmbedOrigins(list: readonly string[] | undefined): { origins: string[]; rejected: string[]; overflow: string[] } {
   const origins: string[] = [];
   const rejected: string[] = [];
+  const overflow: string[] = [];
   for (const raw of list ?? []) {
     let u: URL;
     try {
@@ -439,10 +440,11 @@ export function trustedEmbedOrigins(list: readonly string[] | undefined): { orig
       rejected.push(raw);
       continue;
     }
-    if (!origins.includes(u.origin) && origins.length < MAX_TRUSTED_EMBEDS) origins.push(u.origin);
-    else if (!origins.includes(u.origin)) rejected.push(raw);
+    if (origins.includes(u.origin)) continue;
+    if (origins.length < MAX_TRUSTED_EMBEDS) origins.push(u.origin);
+    else overflow.push(raw);
   }
-  return { origins, rejected };
+  return { origins, rejected, overflow };
 }
 
 /**
@@ -453,6 +455,40 @@ export function trustedEmbedOrigins(list: readonly string[] | undefined): { orig
  */
 export function trustsEmbedWrite(mode: WriteMode, trusted: ReadonlySet<string>, origin: string): boolean {
   return mode === "safe-write" && trusted.has(origin);
+}
+
+/**
+ * Whether a foreign write may go out because of trust: every other site
+ * involved — each http(s) frame from the sender up to the page, and the
+ * Origin header when it names one — must be trusted, so an untrusted embed
+ * cannot borrow a trusted one it wraps. A page the session never adopted (a
+ * popup) is not a frame, and trust does not reach it.
+ */
+export function trustsForeignWrite(
+  mode: WriteMode,
+  trusted: ReadonlySet<string>,
+  appUrl: string,
+  req: { frameChain: readonly string[]; originHeader?: string; unadoptedPageUrl?: string | null },
+): boolean {
+  if (mode !== "safe-write" || trusted.size === 0 || req.unadoptedPageUrl) return false;
+  const originOf = (url: string | undefined): string | null => {
+    if (!url) return null;
+    try {
+      const u = new URL(url);
+      return u.protocol === "http:" || u.protocol === "https:" ? u.origin : null;
+    } catch {
+      return null;
+    }
+  };
+  const app = originOf(appUrl);
+  const involved = new Set<string>();
+  for (const url of req.frameChain) {
+    const o = originOf(url);
+    if (o && o !== app) involved.add(o);
+  }
+  const header = originOf(req.originHeader);
+  if (header && header !== app) involved.add(header);
+  return involved.size > 0 && [...involved].every((o) => trustsEmbedWrite(mode, trusted, o));
 }
 
 /** The longest text typed into another site's frame; past it, a value is a fuzzing probe, not a user's input. */

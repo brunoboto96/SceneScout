@@ -719,7 +719,7 @@ server.registerTool(
         .max(10)
         .optional()
         .describe(
-          'Origins of embedded frames (e.g. "https://js.stripe.com") whose writes out of the app may go out — ONLY when the user named them, typically a provider in test mode, and only in safe-write mode. ' +
+          'Origins of embedded frames (e.g. "https://pay.example.com") whose writes out of the app may go out — ONLY when the user named them, typically a provider in test mode, and only in safe-write mode. ' +
             "Never add one yourself. Hostile input, repeated-click probes and uploads stay refused in them.",
         ),
       record: z

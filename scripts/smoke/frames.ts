@@ -474,6 +474,12 @@ async function trustedEmbeds({ baseUrl, foreignBaseUrl, projectDir, stats }: Smo
             .catch(() => false)),
         8000,
       );
+      if (c.trusted && c.mode === "safe-write") {
+        const snap = await eng.snapshot(true);
+        const note = /(e\d+) textbox "Note"[^\n]*⟨in cross-origin frame/.exec(snap)?.[1];
+        const typed = note ? await eng.type(note, "<img src=x onerror=alert(1)>") : `no ref in:\n${snap}`;
+        check("a trusted embed still refuses markup typed into it", /^REFUSED: typing this value \(it is markup\)/.test(typed), typed);
+      }
       const before = stats.writes["POST /api/frame-note-checkout"] ?? 0;
       await frame()!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());
       await p.waitForTimeout(600);

@@ -123,8 +123,11 @@ cut to 40 characters, and a link's query and fragment are dropped.
 A user can name embeds they trust — plain http(s) origins, at most ten, given
 at attach — such as a payment provider in test mode. In safe-write, and only
 there, writes those frames send outside the app go to the ordinary rules
-instead of being refused; read-only and observe keep their promise, and
-destructive allows everything already. Hostile input, repeated-click probes,
+instead of being refused — provided every other site involved is trusted: each
+frame from the sender up to the page, and the Origin header, so an untrusted
+embed cannot borrow a trusted one it wraps. A popup is not a frame, and trust
+does not reach it. Read-only and observe keep their promise, and destructive
+allows everything already. Hostile input, repeated-click probes,
 uploads, masking and the sandbox apply to a trusted embed as to any other. The
 report names the list and whether it counted.
 

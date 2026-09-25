@@ -696,8 +696,10 @@ export function generateReport(
     lines.push(``);
     lines.push(
       extras.mode === "safe-write"
-        ? `Writes that frames of these origins sent outside the app were allowed, as the user asked; anything they created lives with that provider, not in the cleanup list above:`
-        : `Named as trusted, but not applied: trust only counts in safe-write mode, and this run was ${extras.mode ?? "read-only"}:`,
+        ? `Writes that frames of these origins sent outside the app were allowed, as the user asked; anything they created lives with that provider, and SceneScout cannot list it:`
+        : extras.mode === "destructive"
+          ? `Named as trusted, and not needed: destructive mode let every embed's writes out:`
+          : `Named as trusted, but not applied: trust only counts in safe-write mode, and this run was ${extras.mode ?? "read-only"}:`,
     );
     lines.push(``);
     for (const o of extras.trustedEmbeds) lines.push(`- \`${o}\``);

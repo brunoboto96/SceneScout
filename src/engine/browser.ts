@@ -77,7 +77,8 @@ import {
   offAppPageWrite,
   hostileForEmbed,
   trustedEmbedOrigins,
-  trustsEmbedWrite,
+  MAX_TRUSTED_EMBEDS,
+  trustsForeignWrite,
   embedProbeRefusal,
   EmbedMoveTracker,
   sandboxedRedirectPage,
@@ -826,8 +827,12 @@ export class BrowserEngine {
       (trust.origins.length > 0
         ? this.mode === "safe-write"
           ? ` Trusted embeds: ${trust.origins.join(", ")} — writes their frames send outside the app go out in this mode; hostile input, repeated-click probes and uploads stay refused.`
-          : ` Trusted embeds (${trust.origins.join(", ")}) are ignored in ${this.mode} mode: they apply in safe-write only.`
-        : "") + (trust.rejected.length > 0 ? ` Not a plain http(s) origin, so not trusted: ${trust.rejected.join(", ")}.` : "");
+          : this.mode === "destructive"
+            ? ` Trusted embeds (${trust.origins.join(", ")}) are not needed in destructive mode, which lets every embed's writes out.`
+            : ` Trusted embeds (${trust.origins.join(", ")}) are ignored in ${this.mode} mode: they apply in safe-write only.`
+        : "") +
+      (trust.rejected.length > 0 ? ` Not a plain http(s) origin, so not trusted: ${trust.rejected.join(", ")}.` : "") +
+      (trust.overflow.length > 0 ? ` More than ${MAX_TRUSTED_EMBEDS} trusted embeds; not trusted: ${trust.overflow.join(", ")}.` : "");
     this.sessionObjective = (opts.objective ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
     // An agent-supplied task counts as stated; the placeholder does not.
     this.setTask(opts.task ?? "Attaching and taking stock", opts.task !== undefined);
@@ -1965,16 +1970,13 @@ export class BrowserEngine {
     }
     // Frames still attached that hold, or held, another site: one that moved itself to data: is no longer foreign by its URL.
     const pageHasForeignFrame = this.embeddedSites().size > 0;
-    const foreign = foreignWrite(this.baseUrl, {
-      url: req.url(),
-      originHeader: req.headers()["origin"],
-      unadoptedPageUrl,
-      pageHasForeignFrame,
-      ...requestSource(req),
-    });
+    const source = requestSource(req);
+    const originHeader = req.headers()["origin"];
+    const foreign = foreignWrite(this.baseUrl, { url: req.url(), originHeader, unadoptedPageUrl, pageHasForeignFrame, ...source });
     if (foreign && allowsForeignWriteOnSignIn(this.mode, this.page?.url() ?? "", this.baseUrl)) return null;
-    // A frame of an origin the user named as trusted, in safe-write: its writes go to the ordinary rules.
-    if (foreign && trustsEmbedWrite(this.mode, this.trustedEmbeds, foreign)) return null;
+    // Frames of origins the user named as trusted, in safe-write, every one involved: the ordinary rules.
+    if (foreign && trustsForeignWrite(this.mode, this.trustedEmbeds, this.baseUrl, { frameChain: source.frameChain, originHeader, unadoptedPageUrl }))
+      return null;
     return foreign;
   }
 
