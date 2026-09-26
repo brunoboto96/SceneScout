@@ -35,7 +35,7 @@ import { z } from "zod";
 import { BrowserEngine } from "./engine/browser.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
 import { FINDING_CATEGORIES, MemoryStore, redactSecrets } from "./engine/memory.js";
-import { LANE_NAME_MAX, LaneLedger, laneCloseGuard, laneReportInstruction, parseLaneReport, summarizeLaneReport } from "./engine/lane.js";
+import { decodedEntitiesNote, LANE_NAME_MAX, LaneLedger, laneCloseGuard, laneReportInstruction, parseLaneReport, summarizeLaneReport } from "./engine/lane.js";
 import { MAX_UNFILED_NAMED, unfiledDefects } from "./engine/calibration.js";
 import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
 import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
@@ -657,7 +657,10 @@ server.registerTool(
           : "";
       laneLedger.fold(lane, engines.get(lane)?.attached === true);
       const around = parsed.aroundIgnored ? `\n(The text around the report's JSON block was discarded unread.)` : "";
-      return { content: [{ type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}${around}${followUp}` }] };
+      const decoded = decodedEntitiesNote(parsed.entitiesDecoded);
+      return {
+        content: [{ type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}${around}${decoded}${followUp}` }],
+      };
     } catch (err) {
       return errorText(err);
     }

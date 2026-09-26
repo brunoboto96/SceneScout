@@ -99,8 +99,11 @@ export const LaneReport = z
 export type LaneDecision = z.infer<typeof LaneDecision>;
 export type LaneReport = z.infer<typeof LaneReport>;
 
-/** `aroundIgnored`: the object came from the reply's one fenced block, and the text around it was dropped unread. */
-export type LaneParse = { ok: true; report: LaneReport; aroundIgnored: boolean } | { ok: false; reason: string };
+/**
+ * `aroundIgnored`: the object came from the reply's one fenced block, and the text around it was dropped unread.
+ * `entitiesDecoded`: how many HTML character references in its string values were decoded.
+ */
+export type LaneParse = { ok: true; report: LaneReport; aroundIgnored: boolean; entitiesDecoded: number } | { ok: false; reason: string };
 
 const FENCE_OPEN = /^```[a-z]*\s*\r?\n/i;
 const FENCE_CLOSE = /\r?\n?```\s*$/;
@@ -144,7 +147,12 @@ export function parseLaneReport(text: string, expectedLane?: string): LaneParse 
     const trailing = /after JSON|Unexpected non-whitespace/i.test(message);
     return { ok: false, reason: trailing ? "the reply must be one JSON object, with no text after it" : `not valid JSON: ${message}` };
   }
-  const result = LaneReport.safeParse(raw);
+  // Decoded before the schema, so every cap measures the text the lane wrote.
+  // Only a reply that looks relay-escaped is decoded: one holding a literal
+  // `<` or `>` was not escaped on the way, and its `&amp;` is what the lane
+  // meant (a page that double-escapes its text is a defect a lane can report).
+  const decoded = /[<>]/.test(text) ? { value: raw, count: 0 } : decodeStringValues(raw);
+  const result = LaneReport.safeParse(decoded.value);
   if (!result.success) {
     const issue = result.error.issues[0];
     const at = issue.path.length ? ` at ${issue.path.join(".")}` : "";
@@ -153,7 +161,79 @@ export function parseLaneReport(text: string, expectedLane?: string): LaneParse 
   if (expectedLane !== undefined && result.data.lane !== expectedLane) {
     return { ok: false, reason: `the report names lane "${result.data.lane}", but this reply was asked of lane "${expectedLane}"` };
   }
-  return { ok: true, report: result.data, aroundIgnored };
+  return { ok: true, report: result.data, aroundIgnored, entitiesDecoded: decoded.count };
+}
+
+/**
+ * The HTML character references a relay adds when it escapes text: the five
+ * named ones an escaper emits, and decimal or hex numeric ones. Anything else
+ * that looks like a reference (`&nbsp;`, `&#0;`, a bare `&`) is left as it is.
+ */
+const CHAR_REFERENCE = /&(?:(lt|gt|amp|quot|apos)|#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6}));/g;
+const NAMED_REFERENCES: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
+
+/**
+ * One pass over the text, so each reference is decoded exactly once:
+ * `&amp;lt;` becomes `&lt;`, not `<`, because the `&` a match produces is
+ * never scanned again.
+ */
+function decodeReferences(text: string): { text: string; count: number } {
+  let count = 0;
+  const out = text.replace(CHAR_REFERENCE, (whole, name: string | undefined, dec: string | undefined, hex: string | undefined) => {
+    if (name) {
+      count += 1;
+      return NAMED_REFERENCES[name];
+    }
+    const code = hex !== undefined ? parseInt(hex, 16) : Number(dec);
+    // NUL, surrogates and anything past the last code point are not characters a relay escaped.
+    if (code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return whole;
+    count += 1;
+    return String.fromCodePoint(code);
+  });
+  return { text: out, count };
+}
+
+/**
+ * A planner relaying a lane's reply often HTML-escapes it, so `->` arrives as
+ * `-&gt;` and no longer matches the finding filed with the same evidence.
+ * Decoded in string VALUES only, after JSON.parse: JSON's own syntax contains
+ * no `<`, `>` or `&`, so an escaper can only have touched it by turning its
+ * quotes into `&quot;`, and that reply does not parse at all; it is refused
+ * as invalid JSON rather than repaired. Keys are a fixed set of plain words
+ * and are left alone.
+ */
+function decodeStringValues(value: unknown): { value: unknown; count: number } {
+  if (typeof value === "string") {
+    const d = decodeReferences(value);
+    return { value: d.text, count: d.count };
+  }
+  if (Array.isArray(value)) {
+    let count = 0;
+    const out = value.map((v) => {
+      const d = decodeStringValues(v);
+      count += d.count;
+      return d.value;
+    });
+    return { value: out, count };
+  }
+  if (value !== null && typeof value === "object") {
+    let count = 0;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      const d = decodeStringValues(v);
+      count += d.count;
+      out[k] = d.value;
+    }
+    return { value: out, count };
+  }
+  return { value, count: 0 };
+}
+
+/** The line the fold adds when the parse decoded references, so a reader knows the tool changed the text; empty when it did not. */
+export function decodedEntitiesNote(count: number): string {
+  if (count === 0) return "";
+  const what = count === 1 ? "1 HTML character reference" : `${count} HTML character references`;
+  return `\n(${what} in the report ${count === 1 ? "was" : "were"} decoded once, as a relay that escapes text would have added ${count === 1 ? "it" : "them"}.)`;
 }
 
 /**

@@ -28,6 +28,7 @@ import {
   LANE_VERDICTS,
   LaneLedger,
   laneCloseGuard,
+  decodedEntitiesNote,
   laneReportInstruction,
   parseLaneReport,
   summarizeLaneReport,
@@ -109,6 +110,69 @@ test("lane: prose around ONE fenced object is dropped unread, and the parse says
   }
   // A fenced block that is not valid is refused on its content, not skipped.
   refused('Here:\n```json\n{"lane": \n```', /not valid JSON/);
+});
+
+// A planner relaying a lane's reply often HTML-escapes it. The escaped text
+// then fails to match findings and answer-key patterns, and once pushed a
+// route past its cap so the whole report was refused.
+test("lane: HTML character references a relay added are decoded in every string field", () => {
+  const arrow = parseLaneReport(laneReport({}, { evidence: "testid=a -&gt; /orders.html" }));
+  assert.ok(arrow.ok, arrow.ok ? "" : arrow.reason);
+  assert.equal(arrow.report.decisions[0].evidence, "testid=a -> /orders.html");
+  assert.equal(arrow.entitiesDecoded, 1);
+  assert.match(decodedEntitiesNote(arrow.entitiesDecoded), /1 HTML character reference .*decoded/);
+
+  // Every string field, every named and numeric form.
+  const markup = parseLaneReport(
+    laneReport(
+      { lane: "orders&#39;", routes: ["/things/&lt;n&gt;?a=1&amp;b=2"], status: "partial", blocked_by: "&quot;Save&quot; is &#x2014; disabled&#8230;" },
+      { observation: "it&apos;s-escaped", evidence: "&lt;img src=x onerror&gt;" },
+    ),
+  );
+  assert.ok(markup.ok, markup.ok ? "" : markup.reason);
+  assert.equal(markup.report.lane, "orders'");
+  assert.deepEqual(markup.report.routes, ["/things/<n>?a=1&b=2"]);
+  assert.equal(markup.report.blocked_by, '"Save" is — disabled…');
+  assert.equal(markup.report.decisions[0].observation, "it's-escaped");
+  assert.equal(markup.report.decisions[0].evidence, "<img src=x onerror>");
+  assert.equal(markup.entitiesDecoded, 11);
+  assert.match(decodedEntitiesNote(11), /11 HTML character references .*decoded/);
+
+  // Fenced with prose around it: both notes apply.
+  const wrapped = parseLaneReport("Report:\n```json\n" + laneReport({}, { evidence: "a -&gt; b" }) + "\n```");
+  assert.ok(wrapped.ok && wrapped.aroundIgnored && wrapped.entitiesDecoded === 1);
+});
+
+test("lane: a length cap applies to the decoded text, so a route escaped past it is accepted", () => {
+  const route = "/things/<n>" + "r".repeat(LANE_ROUTE_MAX - "/things/<n>".length);
+  assert.equal(route.length, LANE_ROUTE_MAX);
+  const escapedRoute = route.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  assert.ok(escapedRoute.length > LANE_ROUTE_MAX);
+  const capped = parseLaneReport(laneReport({ routes: [escapedRoute] }));
+  assert.ok(capped.ok, capped.ok ? "" : capped.reason);
+  assert.deepEqual(capped.report.routes, [route]);
+  refused(laneReport({ routes: [escapedRoute + "r"] }), /at routes\.0$/, "one past the cap once decoded");
+});
+
+test("lane: references are decoded once only, and anything else that looks like one is left alone", () => {
+  // An escaped entity comes back as that entity, not as the character.
+  const once = parseLaneReport(laneReport({}, { evidence: "&amp;lt;b&amp;gt; shown as text" }));
+  assert.ok(once.ok);
+  assert.equal(once.report.decisions[0].evidence, "&lt;b&gt; shown as text");
+  // Not one of the references decoded, or not a valid one, so left alone.
+  const loose = parseLaneReport(laneReport({}, { evidence: "a & b &nbsp; &#xZZ; &#0; &#1114112; &unknown;" }));
+  assert.ok(loose.ok);
+  assert.equal(loose.report.decisions[0].evidence, "a & b &nbsp; &#xZZ; &#0; &#1114112; &unknown;");
+  assert.equal(loose.entitiesDecoded, 0);
+});
+
+test("lane: the contrast, a reply with no references is unchanged and the fold carries no decode note", () => {
+  const text = laneReport({}, { evidence: "testid=a -> /orders.html" });
+  const plain = parseLaneReport(text);
+  assert.ok(plain.ok);
+  assert.equal(plain.entitiesDecoded, 0);
+  assert.deepEqual(plain.report, JSON.parse(text));
+  assert.equal(decodedEntitiesNote(plain.entitiesDecoded), "");
 });
 
 test("lane: every value comes from a closed set, and the reason names the field", () => {
@@ -362,4 +426,21 @@ test("lane close guard: a closed lane is forgotten, so a new session with its na
   assert.ok(!laneCloseGuard(["orders"], ledger).ok, "the new lane's report is not the old one's");
   ledger.clear();
   assert.deepEqual(laneCloseGuard(["orders"], ledger), { ok: true });
+});
+
+test("a reply that was not relay-escaped keeps its references: a literal < means nothing was escaped on the way", () => {
+  const reply = JSON.stringify({
+    lane: "orders",
+    status: "complete",
+    decisions: [
+      { observation: "name-double-escaped", verdict: "defect", severity: "low", category: "visual", confidence: 0.9, evidence: "<td> shows Tom &amp; Jerry" },
+    ],
+    routes: ["/orders"],
+    blocked_by: null,
+  });
+  const parsed = parseLaneReport(reply);
+  assert.ok(parsed.ok);
+  assert.equal(parsed.report.decisions[0].evidence, "<td> shows Tom &amp; Jerry");
+  assert.equal(parsed.entitiesDecoded, 0);
+  assert.equal(decodedEntitiesNote(parsed.entitiesDecoded), "");
 });
