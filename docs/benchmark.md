@@ -105,9 +105,9 @@ example or counter-example in the same change.
   comments are in files the browser downloads (eight in the pages' own markup
   and scripts, three in the stylesheet), and a lane that reads a page's own
   script reads the answer. Run 8's orders lane quoted the line directly under
-  one. Every run so far was made with
-  the comments served; removing them is tracked in issue #133, and runs made
-  after that are the first whose recall cannot have been read from a page.
+  one. Every run so far was made with the comments served; removing them is
+  tracked in issue #133, and runs made after that are the first whose recall
+  cannot have been read from a page.
 
 ## Results
 
@@ -178,9 +178,10 @@ What else the run showed:
   calibration. The session was re-attached read-only and the same report
   folded again, which kept all six decisions. A guard for this is tracked in
   issue #132.
-- **The unlabelled-email defect has now been missed in eight consecutive runs (1–8; run 0 found it).**
-  The snapshot names an input by its placeholder when it has no label, so no
-  rule can tell the two apart; that is tracked in issue #128.
+- **The unlabelled-email defect has now been missed in eight consecutive
+  runs** (1–8; run 0 found it). The snapshot names an input by its placeholder
+  when it has no label, so no rule can tell the two apart; that is tracked in
+  issue #128.
 
 **Kept?** Nothing to keep or reject: the run measures a feature the demo does
 not exercise, and shows no loss.
