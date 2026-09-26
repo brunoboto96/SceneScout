@@ -485,8 +485,9 @@ test("a run is dated by its last decision, and never later than it", () => {
 
 test("the demo key sets aside what depends on a convention, and says which", () => {
   // Lanes dismissed these as not defects and were scored wrong for it: the
-  // demo declares no spacing scale, and nav links are recognisable by position.
-  for (const id of ["spacing-off-grid", "nav-links-unstyled"]) {
+  // demo declares no spacing scale, nav links are recognisable by position, and
+  // a data-testid is a test-automation convention no user meets.
+  for (const id of ["spacing-off-grid", "nav-links-unstyled", "stickybar-link-missing-testid"]) {
     const e = demoKey.contextual.find((c) => c.id === id);
     assert.ok(e && e.reason.length > 20, `${id} is contextual, with a reason`);
     assert.equal(judgeDecision(decision({ verdict: "not_a_defect", evidence: e.examples[0] ?? e.title }), demoKey), null, id);
@@ -538,6 +539,7 @@ test("the held-out key agrees with every one of its own examples and counter-exa
   assert.deepEqual(lintKey(holdoutKey), []);
   for (const d of [...holdoutKey.defects, ...holdoutKey.alsoReal]) {
     assert.notEqual(classify(d.title, holdoutKey)?.kind, "nonDefect", `${d.id}'s title is claimed by a non-defect`);
+    assert.notEqual(classify(d.title, holdoutKey)?.kind, "contextual", `${d.id}'s title is set aside as contextual`);
   }
 });
 

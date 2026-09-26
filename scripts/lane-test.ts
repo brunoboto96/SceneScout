@@ -31,9 +31,13 @@ import {
   decodedEntitiesNote,
   laneReportInstruction,
   parseLaneReport,
+  requestsPair,
+  statedRequests,
   summarizeLaneReport,
+  templatedPathsMatch,
 } from "../src/engine/lane.ts";
-import { FINDING_CATEGORIES } from "../src/engine/memory.ts";
+import { unfiledDefects } from "../src/engine/calibration.ts";
+import { FINDING_CATEGORIES, type Finding } from "../src/engine/memory.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -443,4 +447,159 @@ test("a reply that was not relay-escaped keeps its references: a literal < means
   assert.equal(parsed.report.decisions[0].evidence, "<td> shows Tom &amp; Jerry");
   assert.equal(parsed.entitiesDecoded, 0);
   assert.equal(decodedEntitiesNote(parsed.entitiesDecoded), "");
+});
+
+// Pairing a judged defect with a finding whose evidence writes the path as a
+// template. The lane quotes the call it made (`/api/things/1038/archive`); the
+// finding is often filed with the route (`/api/things/{id}/archive`). The
+// guard exists to catch unfiled defects, so a false "filed" is the costly
+// mistake: most of these cases are the ones that must stay unfiled.
+
+function filedAs(evidence: string): Finding {
+  return {
+    id: "f1",
+    severity: "high",
+    category: "security",
+    title: "Viewer role can archive things",
+    detail: "d",
+    evidence,
+    url: "http://app.test/things",
+    state: "things#1",
+    repro: [],
+    foundAt: "2026-09-26T10:00:00.000Z",
+    runs: 1,
+  };
+}
+const judged = (evidence: string) => ({ verdict: "defect" as const, observation: "viewer-archives", evidence });
+const unfiledBy = (reported: string, ...filed: string[]) =>
+  unfiledDefects(
+    [judged(reported)],
+    filed.map((e) => filedAs(e)),
+  );
+
+test("a templated finding covers the failing request a lane judged; one fact changed and it does not", () => {
+  const reported = "GET /api/things/7 500";
+  // The pair: the same call, written as a route and as the request made.
+  for (const route of ["/api/things/{thingId}", "/api/things/:id", "/api/things/*", "/api/things/7"]) {
+    assert.deepEqual(unfiledBy(reported, `GET ${route} 500`), [], route);
+  }
+  assert.deepEqual(unfiledBy("GET /api/things/{thingId} 500", "GET /api/things/7 500"), [], "either side may be the template");
+  // Its contrast.
+  for (const other of [
+    "GET /api/things/{id} 404", // another status
+    "DELETE /api/things/{id} 500", // another method
+    "GET /api/widgets/{id} 500", // another resource
+    "GET /api/things/{id}/parts 500", // one segment more
+  ]) {
+    assert.deepEqual(unfiledBy(reported, other), [`viewer-archives — ${reported}`], other);
+  }
+});
+
+test("a template stands for an id, never for a word", () => {
+  assert.equal(unfiledBy("GET /api/users/me 500", "GET /api/users/{id} 500").length, 1, "`me` is a word, not an id");
+  assert.equal(unfiledBy("GET /api/things/export 500", "GET /api/things/:id 500").length, 1, "`export` is a word, not an id");
+  assert.equal(unfiledBy("GET /api/things/7 500", "GET /*/*/* 500").length, 1, "stars do not stand for every path");
+  assert.equal(unfiledBy("GET /api/things/0b8f5c1e-2d3a-4f6b-9c7d-1e2f3a4b5c6d 500", "GET /api/things/{id} 500").length, 0, "a UUID is an id");
+});
+
+test("a decision naming two failing requests is not filed by a finding for one of them", () => {
+  const reported = "GET /api/things/7 500; POST /api/orders 500";
+  assert.equal(unfiledBy(reported, "GET /api/things/{id} 500").length, 1, "templated finding for the first only");
+  assert.equal(unfiledBy(reported, "GET /api/things/7 500").length, 1, "literal finding for the first only");
+  assert.deepEqual(unfiledBy(reported, "GET /api/things/{id} 500", "POST /api/orders 500"), [], "both filed");
+});
+
+test("on a request that did not fail, a template pairs the path and the rest of the evidence must be the finding's", () => {
+  // Filed: the same evidence with the path written as a route, or a restatement of part of it.
+  assert.deepEqual(unfiledBy("POST /api/things/1038/archive 200 as role=viewer", "POST /api/things/{id}/archive 200 as role=viewer"), []);
+  assert.deepEqual(
+    unfiledBy("POST /api/things/1038/archive 200 as role=viewer", "POST /api/things/{id}/archive 200 as role=viewer; GET /api/audit shows no entry"),
+    [],
+    "a restatement of the first part",
+  );
+  // Not filed: the call is the same, but the defect differs in one word.
+  const editor = "POST /api/things/1038/archive 200 as role=editor (expected 403)";
+  assert.equal(unfiledBy(editor, "POST /api/things/{id}/archive 200 as role=viewer").length, 1, "another role is another defect");
+  assert.equal(unfiledBy("POST /api/things/1038/archive 200 but archived_at stays null", "POST /api/things/{id}/archive 200 as role=viewer").length, 1);
+  // Filed: the finding's evidence followed only by the status the call should have returned.
+  const route = "POST /api/orders/{id}/approve 200 as role=clerk";
+  for (const reported of [
+    "POST /api/orders/1038/approve 200 as role=clerk (reject 403)",
+    "POST /api/orders/1038/approve 200 as role=clerk (expected 403)",
+    "POST /api/orders/1038/approve 200 as role=clerk reject 403",
+  ]) {
+    assert.deepEqual(unfiledBy(reported, route), [], reported);
+  }
+  // Not filed: anything else after it is a claim the finding does not make.
+  for (const reported of [
+    "POST /api/orders/1038/approve 200 as role=clerk (reject 403) and viewer too",
+    "POST /api/orders/1038/approve 200 as role=clerk (reject 403); GET /api/x 500",
+    "POST /api/orders/1038/approve 200 as role=clerk2 (reject 403)",
+  ]) {
+    assert.equal(unfiledBy(reported, route).length, 1, reported);
+  }
+  // A failing signature naming a different request still blocks the pair.
+  assert.equal(unfiledBy("POST /api/things/1038/archive 200 as role=viewer; GET /api/audit 500", "POST /api/things/{id}/archive 200 as role=viewer").length, 1);
+});
+
+test("a path template stands for exactly one id segment, in either direction", () => {
+  const seg = (text: string) => statedRequests(text)[0]?.segments ?? [];
+  const cases: Array<[string, string, boolean, string]> = [
+    ["GET /api/a/{id}", "GET /api/a/7", true, "brace template"],
+    ["GET /api/a/7", "GET /api/a/:id", true, "colon template, other side"],
+    ["GET /api/a/*/b", "GET /api/a/1044/b", true, "star"],
+    ["GET /api/a/{id}", "GET /api/a/0123456789abcdef", true, "a long hex id"],
+    ["GET /api/a/{id}", "GET /api/a/:id", true, "template against template"],
+    ["GET /api/u/{uid}/o/{oid}", "GET /api/u/3/o/44", true, "two templated segments"],
+    ["GET /api/u/{uid}/o/{oid}", "GET /api/u/3/p/44", false, "two templates, one literal differs"],
+    ["GET /api/a/{id}", "GET /api/a/me", false, "a word is not an id"],
+    ["GET /api/a/*/b", "GET /api/a/x-1/b", false, "nor for a star"],
+    ["GET /{id}", "GET /404", false, "a number in the first segment is a page, not an id"],
+    ["GET /*/*/*", "GET /api/a/7", false, "stars do not stand for every path"],
+    ["GET /api/a/{id}/b", "GET /api/a/1/2/b", false, "a template does not swallow a slash"],
+    ["GET /api/a/*", "GET /api/a/1/2", false, "nor does a star"],
+    ["GET /api/a/{id}", "GET /api/a", false, "nor stand for nothing"],
+    ["GET /api/a/{id}/b", "GET /api/a//b", false, "nor for an empty segment"],
+    ["GET /api/a/**", "GET /api/a/1", false, "a double star is a literal"],
+    ["GET /api/a/order-{id}", "GET /api/a/order-7", false, "only whole segments are templates"],
+    ["GET /api/a/{id}/", "GET /api/a/7", true, "a trailing slash is ignored"],
+    ["GET /api/a/{id}?page=2", "GET /api/a/7", true, "a query string is ignored"],
+    ["GET https://app.test/api/a/{id}", "GET /api/A/7", true, "origin and case are ignored"],
+    ["GET /api/a/%7Bid%7D", "GET /api/a/7", true, "a percent-encoded template"],
+    ["GET /api/a/7", "GET /api/b/7", false, "a different literal"],
+  ];
+  for (const [a, b, want, why] of cases) {
+    assert.equal(templatedPathsMatch(seg(a), seg(b)), want, `${why}: ${a} vs ${b}`);
+    assert.equal(templatedPathsMatch(seg(b), seg(a)), want, `${why} (reversed)`);
+  }
+});
+
+test("a stated request's status is the one written directly after it", () => {
+  const [r] = statedRequests("POST /api/a/7/b 200 as role=viewer (expected 403)");
+  assert.equal(r.status, "200", "a later status is another claim");
+  assert.equal(statedRequests("GET /api/a/7?x=1 -> 404")[0].status, "404", "after a query and an arrow");
+  assert.equal(statedRequests("GET /api/a/7: 500")[0].status, "500", "after a colon");
+  assert.equal(statedRequests("GET /api/a/7 returned 500")[0].status, null, "not after other words");
+  assert.deepEqual(
+    statedRequests("GET /api/a/7 500").map((q) => q.segments),
+    [["api", "a", "7"]],
+  );
+  const [x] = statedRequests("GET /api/a/{id} 500");
+  const [y] = statedRequests("GET /api/a/7 500");
+  const [z] = statedRequests("GET /api/a/7");
+  assert.equal(requestsPair(x, y), true);
+  assert.equal(requestsPair(x, z), false, "a stated status does not pair with none");
+  const [w] = statedRequests("GET /api/a/7 404");
+  assert.equal(requestsPair(x, w), false, "another status is another outcome of the call");
+});
+
+test("evidence ending in a long run of whitespace is read in linear time", () => {
+  // The status separator once had two adjacent optional runs of spaces, which
+  // split a long run every way there is before giving up.
+  const evidence = `GET /api/a/7${" ".repeat(100_000)}x`;
+  const t0 = performance.now();
+  const [r] = statedRequests(evidence);
+  const ms = performance.now() - t0;
+  assert.equal(r.status, null);
+  assert.ok(ms < 250, `took ${ms.toFixed(0)} ms`);
 });
