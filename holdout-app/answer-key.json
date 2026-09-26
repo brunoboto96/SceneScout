@@ -1,0 +1,379 @@
+{
+  "app": "Fernbrook library (held out)",
+  "_comment": "The held-out app's key, in the same schema as demo-app/answer-key.json (npm run bench -- --app holdout). Nothing may be tuned against this app: do not read this key before writing lane briefs for it, and do not turn a miss here into an engine or skill rule. `defects` are planted and listed in README.md; recall is measured against them. `alsoReal` are genuine unplanted problems; `nonDefects` are things a run may report that are not defects. `match` holds case-insensitive regular expressions tried against a finding's evidence and title; every entry's title and `examples` must classify to it and no `counterExamples` may (bench-test). When you change the key, re-score every archived run: npm run bench -- --all.",
+  "defects": [
+    {
+      "id": "notices-500-stuck-loading",
+      "route": "/",
+      "title": "The home page's notices request fails with a 500 and the panel says Loading notices forever",
+      "category": "network",
+      "severity": "medium",
+      "level": "minimal",
+      "match": [
+        "/api/notices",
+        "notices.{0,60}(500|loading|stuck|never (load|appear|finish)|spinner|forever)",
+        "(500|stuck|still loading|never loads).{0,60}notices"
+      ],
+      "examples": [
+        "GET /api/notices 500",
+        "Home page notices stay on 'Loading notices…' forever",
+        "Notices panel never loads; the request fails with 500",
+        "home-notices stuck on loading with no error shown"
+      ],
+      "counterExamples": ["Home summary tiles show ? when /api/summary fails", "Notices heading uses a serif font unlike the tiles"]
+    },
+    {
+      "id": "account-export-clipped",
+      "route": "/account.html",
+      "title": "The Download my data link is clipped out of sight by its fixed-height panel",
+      "category": "visual",
+      "severity": "medium",
+      "level": "minimal",
+      "match": [
+        "account-export",
+        "download my data.{0,100}(clipped|unreachable|hidden|cut off|overflow|not visible|cannot be (seen|reached)|out of sight)",
+        "(clipped|unreachable|cut off|overflow).{0,100}(download my data|your data)",
+        "your data.{0,40}panel.{0,80}(too short|clips|cuts off|overflow)"
+      ],
+      "examples": [
+        "e31 link \"Download my data\" is UNREACHABLE — fully clipped inside an overflow-hidden ancestor (at 237,582; the container cannot scroll to reveal it)",
+        "Download my data link is cut off by the Your data panel",
+        "testid=account-export clipped by overflow:hidden",
+        "Your data panel is too short: its list and the download link are cut off"
+      ],
+      "counterExamples": ["GET /api/export returns the member's own loans and holds", "Account page hides the card table for staff"]
+    },
+    {
+      "id": "loans-overdue-contrast",
+      "route": "/loans.html",
+      "title": "The overdue tag on the loans page fails contrast at 1.84:1",
+      "category": "a11y",
+      "severity": "low",
+      "level": "minimal",
+      "match": [
+        "1\\.8\\d?\\s*:\\s*1",
+        "overdue.{0,60}(low contrast|contrast (fail|ratio|is too low|too low|below)|fails? .{0,20}contrast|hard to read|illegible|faint|washed.out)",
+        "(low contrast|contrast fail\\w*|hard to read|faint).{0,80}overdue"
+      ],
+      "examples": [
+        "design_audit loans.html contrast 1.84:1 on span.tag.late \"overdue\"",
+        "The overdue tag on the loans page is hard to read",
+        "contrast 1.84:1 rgb(238,163,147) on rgb(253,241,238), needs 4.5:1",
+        "Overdue label fails WCAG contrast"
+      ],
+      "counterExamples": [
+        "Overdue loans are not sorted first",
+        "Home shows 1 overdue for the member and loans lists 1 overdue",
+        "Home page overdue tile contrast is fine"
+      ]
+    },
+    {
+      "id": "holds-drop-unnamed",
+      "route": "/holds.html",
+      "title": "The icon-only button that cancels a hold has no accessible name",
+      "category": "a11y",
+      "severity": "medium",
+      "level": "minimal",
+      "match": [
+        "holds-drop",
+        "(cancel|remove|drop|delete|icon|×).{0,40}(button|control).{0,80}(unnamed|no.(accessible.)?(name|label))",
+        "(unnamed|icon.only).{0,80}\\bholds?\\b"
+      ],
+      "examples": [
+        "button \"(unnamed)\" testid=holds-drop-32",
+        "Icon-only cancel button on the holds page has no accessible name",
+        "Holds: the remove-hold buttons are unnamed",
+        "hold-cancel-button-no-accessible-name"
+      ],
+      "counterExamples": [
+        "Cancelling your own hold removes the row",
+        "DELETE /api/holds/31 403 for a member: That is not your hold",
+        "Place hold button has no accessible label",
+        "book-hold-msg status region has no accessible name"
+      ]
+    },
+    {
+      "id": "events-joined-dead-end",
+      "route": "/events-joined.html",
+      "title": "After joining an event the confirmation page is a dead end with no navigation",
+      "category": "dead-end",
+      "severity": "medium",
+      "level": "medium",
+      "match": [
+        "events-joined",
+        "(seat (is )?saved|after joining|join(ing)? an event).{0,100}(dead.?end|no (way back|nav|navigation|links?|header|menu)|0 (links|interactable)|stranded|browser back)",
+        "(dead.?end|no (way back|navigation)|stranded).{0,100}(seat|join|event)"
+      ],
+      "examples": [
+        "/events-joined.html is a dead end: no navigation, no links",
+        "After joining an event the confirmation page has no way back",
+        "Your seat is saved page: 0 interactable elements, user must use browser back",
+        "Dead end after Join on the events page"
+      ],
+      "counterExamples": ["Joining a full event shows 'That event is full'", "Events page has no way to leave an event once joined"]
+    },
+    {
+      "id": "member-record-any-id",
+      "route": "/account.html",
+      "title": "A member who calls /api/members/<id> directly can read any other member's record, contact details included",
+      "category": "security",
+      "severity": "high",
+      "level": "medium",
+      "match": [
+        "^(?![\\s\\S]*\\b(librarian|branch head|staff)\\b)[\\s\\S]*/api/members/(M-(?!1002\\b)\\d{4}|<id>|:id|\\{id\\})",
+        "^(?![\\s\\S]*\\b(librarian|branch head|staff)\\b)[\\s\\S]*\\bmembers?\\b.{0,40}(read|fetch|see|view|get|access).{0,40}(any|another|other) members?'?s? (record|details|profile|contact|email|phone|address)",
+        "\\bidor\\b[\\s\\S]{0,120}members?'?s? (record|profile|details|contact)"
+      ],
+      "examples": [
+        "GET /api/members/M-1004 200 as member M-1002: returns another member's email, phone and address",
+        "A member can read any other member's record by id (IDOR)",
+        "Member role can fetch another member's contact details through /api/members/<id>",
+        "The member list is 403 for a member but /api/members/M-1001 returns the full record"
+      ],
+      "counterExamples": [
+        "GET /api/members/M-1002 200: the account page shows your own card",
+        "GET /api/members 403 for a member; the members page says only library staff can see it",
+        "IDOR: a member can cancel another member's hold via DELETE /api/holds/31",
+        "Librarian sees every member's contact details",
+        "GET /api/members/M-1001 200 as librarian"
+      ]
+    },
+    {
+      "id": "catalogue-available-filter-lies",
+      "route": "/catalogue.html",
+      "title": "Available now only still lists titles whose every copy is on loan",
+      "category": "data-inconsistency",
+      "severity": "medium",
+      "level": "medium",
+      "match": [
+        "available=1",
+        "available (now )?only.{0,120}(on loan|not available|unavailable|0 (of|available)|out on loan|checked out)",
+        "(on loan|unavailable).{0,80}available (now )?only"
+      ],
+      "examples": [
+        "GET /api/books?available=1 returns titles with every copy on loan",
+        "'Available now only' still lists books that are all on loan",
+        "Available now only filter keeps unavailable titles",
+        "Ticking Available now only hides only the withdrawn book; titles all on loan stay",
+        "Catalogue 'Available now only' still lists books that are all on loan"
+      ],
+      "counterExamples": ["Catalogue shows 'all on loan' for The Salt Road", "Catalogue still shows 2 of 2 on the shelf after checking a copy out"]
+    },
+    {
+      "id": "book-hold-silent-no-op",
+      "route": "/book.html",
+      "title": "Place hold on a book with copies on the shelf does nothing and says nothing",
+      "category": "ux-confusing",
+      "severity": "medium",
+      "level": "medium",
+      "match": [
+        "place hold.{0,100}(does nothing|nothing happens|no (feedback|message|request|response)|silent|0 (network )?requests?|does not respond|no.op|unchanged)",
+        "book-hold(?!-msg).{0,80}(nothing|0 (network )?requests?|no.op|silent|unchanged)",
+        "(silent|nothing happens|no.op).{0,60}place hold"
+      ],
+      "examples": [
+        "Place hold on an available book does nothing and says nothing",
+        "click book-hold → 0 network requests, book-hold-msg unchanged",
+        "Place hold button is a silent no-op when copies are on the shelf",
+        "Nothing happens when I press Place hold on Night Trains of the North"
+      ],
+      "counterExamples": [
+        "Place hold on a book with every copy out says 'Hold placed. You are number 2 in the queue.'",
+        "A second hold on the same book is refused: That member already has a hold on this book"
+      ]
+    },
+    {
+      "id": "loans-renew-double-submit",
+      "route": "/loans.html",
+      "title": "Renew stays enabled while it saves, so a double-click spends both renewals",
+      "category": "data-inconsistency",
+      "severity": "high",
+      "level": "medium",
+      "match": [
+        "(double|two).{0,15}(click|submit|press|tap).{0,60}renew",
+        "renew.{0,40}(double.?click|double.?submit|clicked twice|pressed twice)",
+        "renew.{0,80}(spends|uses up|consumes|burns) both renewals",
+        "2x POST /api/loans/\\d+/renew",
+        "POST /api/loans/\\d+/renew.{0,40}(twice|2x|x2|×2|two times)"
+      ],
+      "examples": [
+        "Double-clicking Renew renews the loan twice",
+        "2x POST /api/loans/202/renew — one double-click spends both renewals",
+        "Renew stays enabled during the request; a double-click uses up both renewals",
+        "renew double-click: due date moves 28 days, renewed 2 of 2"
+      ],
+      "counterExamples": ["Renewing a third time is refused: A loan can be renewed 2 times", "Double-click on Join saves one seat"]
+    },
+    {
+      "id": "checkout-false-success",
+      "route": "/checkout.html",
+      "title": "Checkout says Checked out after the server refused the loan",
+      "category": "data-inconsistency",
+      "severity": "high",
+      "level": "medium",
+      "match": [
+        "checked out.{0,140}(409|403|404|refused|rejected|owes|fine limit|limit for borrowing|not on the shelf|no copy|was not created|never created)",
+        "(409|403|404|refused|rejected|owes).{0,140}checked out",
+        "checkout.{0,60}(false success|claims success|reports success|shows success)",
+        "checkout-false-success"
+      ],
+      "examples": [
+        "Checkout says 'Checked out' after POST /api/loans 409 (member owes $7.40)",
+        "POST /api/loans 409 but the page says Checked out ... Due back 17 Oct",
+        "Checkout reports success for a member over the fine limit",
+        "A member-role checkout is refused with 403 and the page still says Checked out",
+        "checkout-false-success-after-refusal"
+      ],
+      "counterExamples": ["Checked out The Quiet Orchard to M-1001. Due back 17 Oct 2026.", "Waive is refused 403 for a librarian and the page shows the error"]
+    },
+    {
+      "id": "book-review-stored-xss",
+      "route": "/book.html",
+      "title": "A review's text is rendered as HTML on the book page, so markup in a review runs for every reader (stored XSS)",
+      "category": "security",
+      "severity": "high",
+      "level": "extensive",
+      "match": [
+        "dom_injection",
+        "stored.?xss",
+        "reviews?.{0,80}(xss|onerror|<img|<script|as html|innerhtml|unescaped|rendered as (html|an element|markup)|injection)",
+        "(xss|onerror|<img|<script|injection|markup|payload).{0,80}reviews?\\b",
+        "document\\.title (became|becomes|changed to) .?xss"
+      ],
+      "examples": [
+        "Stored XSS in book reviews: <img src=x onerror=alert(1)> runs for every reader",
+        "Review text is rendered as HTML on the book page",
+        "dom_injection: typed markup came back as an element on /book.html?id=1",
+        "POST /api/books/1/reviews text=<img src=x onerror=\"document.title='xss'\">; document.title became 'xss'"
+      ],
+      "counterExamples": ["Posting an empty review is refused: A review needs some text", "Reviewer names are shown as initials"]
+    },
+    {
+      "id": "catalogue-stale-after-loan",
+      "route": "/catalogue.html",
+      "title": "The catalogue shows stale availability: it keeps its first load in the tab even after a book is checked out or returned",
+      "category": "data-inconsistency",
+      "severity": "medium",
+      "level": "extensive",
+      "match": [
+        "catalogue.{0,100}(stale|cached|sessionstorage|out of date|never refresh)",
+        "(stale|cached|sessionstorage|out of date).{0,100}catalogue",
+        "after (a |the )?(checkout|checking .{0,40}out|returning|return).{0,120}catalogue.{0,80}(still|stale|unchanged|old)",
+        "fernbrook\\.catalogue",
+        "catalogue.{0,120}(after|since) (a |the )?(checkout|checking|return|loan).{0,80}(still|stale|unchanged|not updated|old)",
+        "catalogue.{0,60}(still|unchanged|not updated).{0,80}(after|since) (a |the )?(checkout|checking|return|loan)"
+      ],
+      "examples": [
+        "Catalogue still shows 2 of 2 on the shelf after checking a copy out",
+        "Catalogue availability is stale: cached in sessionStorage and never refreshed",
+        "After returning a book the catalogue still says all on loan until the tab is closed",
+        "sessionStorage fernbrook.catalogue is read instead of refetching /api/books"
+      ],
+      "counterExamples": [
+        "Catalogue 'Available now only' still lists books that are all on loan",
+        "The book page shows the right number on the shelf",
+        "The catalogue list after checkout is correct"
+      ]
+    },
+    {
+      "id": "catalogue-search-throws",
+      "route": "/catalogue.html",
+      "title": "Catalogue search treats the text as a regular expression and throws on characters like ( or +",
+      "category": "page-error",
+      "severity": "medium",
+      "level": "extensive",
+      "match": [
+        "invalid regular expression",
+        "nothing to repeat",
+        "unterminated (group|character class)",
+        "search.{0,80}(throws|exception|syntaxerror|page.?error|uncaught|regexp|regex|special characters?|as a regular expression)",
+        "(syntaxerror|regexp|regex|uncaught).{0,80}search"
+      ],
+      "examples": [
+        "Uncaught SyntaxError: Invalid regular expression: /(/i: Unterminated group",
+        "Catalogue search throws on '(' and the list stops updating",
+        "Typing C++ into the catalogue search raises 'Nothing to repeat'",
+        "Search box treats input as a regex"
+      ],
+      "counterExamples": ["Search for 'moss' shows A Field Guide to Moss", "Search with no matches shows 'No titles match.'"]
+    }
+  ],
+  "alsoReal": [
+    {
+      "id": "checkout-offers-books-with-no-copy",
+      "route": "/checkout.html",
+      "title": "The checkout book list offers titles with no copy on the shelf",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": ["checkout.{0,60}(list|select|dropdown|options?).{0,80}(no copy|all on loan|unavailable|not on the shelf)"],
+      "examples": ["Checkout dropdown offers books that are all on loan", "Checkout book select lists titles with no copy on the shelf"],
+      "counterExamples": ["Checkout book select omits the withdrawn title"]
+    }
+  ],
+  "nonDefects": [
+    {
+      "id": "members-refused-to-member",
+      "title": "The members page refuses a member",
+      "why": "The member list is for library staff; the server refuses it with a 403 and the page says so.",
+      "match": [
+        "^(?![\\s\\S]*(M-\\d{4}|another|other member|any member|record|idor))[\\s\\S]*(members (page|list)|/api/members(?!/)).{0,40}(403|refus|forbidden|only library staff)"
+      ],
+      "overrides": [],
+      "examples": ["GET /api/members 403 for a member; the members page shows the refusal", "Members page is forbidden to a member"],
+      "counterExamples": ["A member can read any other member's record by id"]
+    },
+    {
+      "id": "waive-refused-for-librarian",
+      "title": "Waiving a fine is refused for a librarian",
+      "why": "Only the branch head may waive a fine. The server checks it and the page shows the error.",
+      "match": ["waiv(e|ing).{0,80}(403|refused|forbidden|only the branch head)"],
+      "overrides": [],
+      "examples": ["POST /api/fines/M-1004/waive 403 as librarian: Only the branch head can waive a fine"],
+      "counterExamples": ["Head waives M-1005's fine and the row disappears"]
+    },
+    {
+      "id": "renew-limit-refused",
+      "title": "A third renewal is refused",
+      "why": "A loan may be renewed twice; the third is refused with a 409 and the page shows the reason.",
+      "match": ["^(?![\\s\\S]*(double|twice|2x|both renewals))[\\s\\S]*(third renewal|renew(ed|al)?.{0,30}(limit|2 times)).{0,60}(409|refused)"],
+      "overrides": [],
+      "examples": ["Third renewal refused with 409", "Renewal limit reached: POST /api/loans/203/renew 409 refused"],
+      "counterExamples": []
+    },
+    {
+      "id": "hold-duplicate-refused",
+      "title": "A second hold on the same book is refused",
+      "why": "One hold per member per book; the server answers 409 with a message the page shows.",
+      "match": ["(second|duplicate|another) hold.{0,80}(409|refused|already has a hold)", "already has a hold on this book"],
+      "overrides": [],
+      "examples": ["POST /api/holds 409: That member already has a hold on this book"],
+      "counterExamples": []
+    },
+    {
+      "id": "empty-live-region-unnamed",
+      "title": "An empty status region has no accessible name",
+      "why": "A role=status or role=alert region is empty by design until it announces something.",
+      "match": [
+        "(book-hold-msg|book-review-msg|checkout-msg|signin-error|events-msg).{0,80}(unnamed|accessible name)",
+        "(status|live) region.{0,60}(unnamed|no accessible name)"
+      ],
+      "overrides": [],
+      "examples": ["checkout-msg (empty live region) reported as unnamed", "book-hold-msg status region has no accessible name"],
+      "counterExamples": []
+    },
+    {
+      "id": "write-policy-block",
+      "title": "A control refused by the tester's write policy",
+      "why": "The refusal is SceneScout's own safety net, not the app's behaviour.",
+      "match": [
+        "WRITE-POLICY blocked [A-Z]+ \\S+( \\((safe-write|read-only|observe)\\))?\\.?\\s*(?:$|\\n)",
+        "blocked by (the |tester |its )?(safe-write|write.policy|read-only)( policy)?\\.?\\s*(?:$|\\n)",
+        "refused by (the )?tester.?s write policy"
+      ],
+      "overrides": [],
+      "examples": ["WRITE-POLICY blocked DELETE /api/holds/31 (safe-write)"],
+      "counterExamples": []
+    }
+  ]
+}

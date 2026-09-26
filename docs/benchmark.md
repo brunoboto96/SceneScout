@@ -24,6 +24,9 @@ npm run bench -- --archive /tmp/bench/run-3 --run run-3 --note "what changed"   
 npm run bench -- --all                     # re-score every archived run against the current key
 ```
 
+These score the demo, which is the default. The held-out app takes `--app
+holdout`; see [the held-out app](#the-held-out-app).
+
 Archive every run you intend to compare. An archive keeps only what scoring
 reads — findings and lane decisions, with local paths removed — so when the key
 changes, `--all` re-scores the old runs against the new key. Two scorecards
@@ -81,8 +84,9 @@ example or counter-example in the same change.
 
 - **One small app.** Fourteen planted defects is a narrow test. A skill tuned
   hard against it will learn *this app*, and the score will rise without the
-  engine getting better anywhere else. The fix is a held-out set — a second app
-  the skill is never tuned against — and there is not one yet.
+  engine getting better anywhere else. The [held-out app](#the-held-out-app)
+  is the check on that: a second app nothing is tuned against. It is small too,
+  so it bounds the problem rather than removing it.
 - **One run per configuration.** An agent run is not deterministic. A change of
   one finding between two runs can be noise. Treat single-run deltas as
   indicative, and repeat before acting on a small one.
@@ -119,6 +123,62 @@ example or counter-example in the same change.
   one. Every run so far was made with the comments served; removing them is
   tracked in issue #133, and runs made after that are the first whose recall
   cannot have been read from a page.
+
+## The held-out app
+
+[`holdout-app/`](../holdout-app/) is a second small app, a library loans desk,
+with thirteen planted defects of the same kinds as the demo's (an HTTP failure,
+a layout defect, a contrast failure, an unnamed control, a dead end, a
+permission the server skips, a filter that lies, a silent no-op, a double
+submit, a false success, a stored XSS, stale state and a page error) but none
+of the demo's particular bugs. It has its own [answer key](../holdout-app/answer-key.json)
+in the same schema. It exists to answer one question the demo cannot: **does
+what was learned on the demo generalise?** A change that lifts the demo's
+recall and leaves the held-out app's flat taught the engine the demo. Five of
+the thirteen share both kind and mechanism with a demo defect (the double
+submit, the stored XSS, the dead end, the false success and the contrast
+failure), so on those the held-out score mostly measures transfer to the same
+kind of bug in a new place; the other eight work by different mechanisms.
+
+```bash
+npm run holdout:serve                      # http://127.0.0.1:4180; restart it before each run
+npm run bench -- /tmp/bench/holdout-1 --app holdout
+npm run bench -- --archive /tmp/bench/holdout-1 --app holdout --run holdout-1 --note "what changed"
+npm run bench -- --all --app holdout       # --all alone prints one table per app
+```
+
+`--app` picks the key; it defaults to `demo`, so every earlier command and
+archive scores as before. An archive records its app, and is always scored
+with that app's key: asking for another app's key for it, by `--app` or by
+passing the other app's key file to `--key`, is refused, and `--all` scores
+each archive against its own app's key, one table per app. (`--key` can still
+name a key no benchmark app ships, for trying out a draft.)
+Archives made before there was a second app carry no `app` and are the demo's.
+
+The rules that keep it held out:
+
+- **Nothing is tuned against it.** Runs on it are reported beside the demo's,
+  never optimised against. A miss on the held-out app is not a bug report for
+  the engine: do not add its failures to an engine rule, an oracle, the skill
+  or a brief. If a demo change is what fixes it, the held-out score says so on
+  its own.
+- **Its key is not read by anyone writing lane briefs for it.** A brief written
+  by someone who knows the answers measures the brief's author. The same goes
+  for its `server.mjs`, which marks where the defects are, and for the spoilers
+  table in its README. Like the demo's, these answers are on disk in this
+  repository; a run whose lanes cite them is not a held-out run.
+- **Nothing it serves names a defect.** `holdout-test` fails if a served file
+  mentions a planted defect, its key's ids, or the words a tester would search
+  for, so a lane that reads a page's own script does not read the answer. The
+  demo learned this late (see "The answers are on disk" above).
+- **Labelling is allowed; teaching is not.** When a held-out run reports
+  something the key does not know, a person may judge it against the source
+  and add it to the held-out key as `alsoReal` or a non-defect, as for the
+  demo. What must not happen is the engine being changed so the next held-out
+  run finds more.
+- **Its planted defects stay planted.** `holdout-test` fails if a well-meant
+  fix removes one, because every held-out score before and after would stop
+  being comparable.
 
 ## Results
 

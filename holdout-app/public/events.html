@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Events · Fernbrook Library</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <a class="name" href="/" data-testid="nav-name">Fernbrook Library</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-home">Home</a>
+        <a href="/catalogue.html" data-testid="nav-catalogue">Catalogue</a>
+        <a href="/loans.html" data-testid="nav-loans">Loans</a>
+        <a href="/holds.html" data-testid="nav-holds">Holds</a>
+        <a href="/checkout.html" data-testid="nav-checkout">Check out</a>
+        <a href="/members.html" data-testid="nav-members">Members</a>
+        <a href="/fines.html" data-testid="nav-fines">Fines</a>
+        <a href="/events.html" data-testid="nav-events" aria-current="page">Events</a>
+        <a href="/account.html" data-testid="nav-account">Account</a>
+      </nav>
+      <a class="who" href="/signin.html" data-testid="nav-switch"><span id="who">member</span> · switch</a>
+    </header>
+    <main>
+      <h1>Events</h1>
+      <p class="intro">Free to join. Seats are limited.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Event</th>
+            <th>When</th>
+            <th>Seats left</th>
+          </tr>
+        </thead>
+        <tbody id="rows" data-testid="events-rows"></tbody>
+      </table>
+      <h2>Save a seat</h2>
+      <form id="f" data-testid="events-form">
+        <label for="event">Event</label>
+        <select id="event" name="event" data-testid="events-select"></select>
+        <div class="row"><button class="go" type="submit" data-testid="events-join">Join</button></div>
+        <p class="status error" id="msg" role="alert" data-testid="events-msg"></p>
+      </form>
+    </main>
+    <footer>Fernbrook Library loans desk · invented data only</footer>
+    <script src="/app.js"></script>
+    <script>
+      fetch("/api/events")
+        .then((r) => r.json())
+        .then((list) => {
+          document.getElementById("rows").innerHTML = list
+            .map(
+              (e) =>
+                '<tr data-testid="events-row-' +
+                e.id +
+                '"><td>' +
+                fernbrook.esc(e.title) +
+                "</td><td>" +
+                fernbrook.date(e.date) +
+                "</td><td>" +
+                e.left +
+                "</td></tr>",
+            )
+            .join("");
+          document.getElementById("event").innerHTML = list.map((e) => '<option value="' + e.id + '">' + fernbrook.esc(e.title) + "</option>").join("");
+        });
+      document.getElementById("f").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const id = document.getElementById("event").value;
+        const res = await fetch("/api/events/" + id + "/join", { method: "POST" });
+        if (!res.ok) {
+          document.getElementById("msg").textContent = (await res.json().catch(() => ({}))).error || "Could not save a seat.";
+          return;
+        }
+        location.href = "/events-joined.html";
+      });
+    </script>
+  </body>
+</html>
