@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { formatPace, IDLE_GAP_MS, measurePace, sayDuration, STALE_SESSION_MS, isActing } from "../src/engine/pace.ts";
+import { FORMS_READ_FAILED, FORMS_SUBMIT_UNMATCHED } from "../src/engine/forms.ts";
 import type { ActionLogEntry } from "../src/engine/memory.ts";
 
 const T0 = Date.parse("2026-09-20T20:00:00.000Z");
@@ -116,6 +117,9 @@ test("stated tasks and attaches are not actions: they take no time", () => {
   assert.equal(isActing("task"), false);
   assert.equal(isActing("close"), false);
   assert.equal(isActing("lane-report"), false);
+  // Bookkeeping about forms the engine could not read or match: no step anyone took.
+  assert.equal(isActing(FORMS_READ_FAILED), false);
+  assert.equal(isActing(FORMS_SUBMIT_UNMATCHED), false);
   assert.equal(isActing("journey:start"), false);
 });
 

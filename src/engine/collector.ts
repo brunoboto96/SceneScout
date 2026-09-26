@@ -21,22 +21,12 @@ export const VISIBLE_SRC = `(el) => {
   }`;
 
 /**
- * Anything that plausibly presents as a modal/dialog panel. Deliberately wider
- * than the ARIA set: a hand-rolled role-less modal must still count as "an
- * overlay is up", or the scroll-lock oracle files a false leaked-lock finding
- * against every healthy modal that locks the page behind it.
+ * The collector's element path, as page-side source. Exported so a page-side
+ * probe that names an element (forms.ts) names it with the SAME path the
+ * snapshot listed it under, and the engine can map it back to that element's
+ * coverage key.
  */
-export const DIALOG_LIKE_SEL = '[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"], [class*="modal" i], [class*="dialog" i]';
-// Declared above the collector script because that script interpolates it.
-
-/**
- * Page-side interactable collector. Shipped as a STRING, not a function:
- * loader transforms (tsx/vitest esbuild hooks inject a `__name` helper) break
- * serialized functions inside the browser, where the helper doesn't exist.
- * A string expression is immune to any build/loader instrumentation.
- */
-export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
-  const xpathOf = (el) => {
+export const XPATH_OF_SRC = `(el) => {
     const parts = [];
     let node = el;
     while (node && node.nodeType === 1 && node.tagName.toLowerCase() !== "html") {
@@ -50,9 +40,14 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
       node = node.parentElement;
     }
     return "/html/" + parts.join("/");
-  };
-  const visible = ${VISIBLE_SRC};
-  const accessibleName = (el) => {
+  }`;
+
+/**
+ * The collector's accessible name, as page-side source. Exported for the same
+ * reason as XPATH_OF_SRC: a page-side probe that names an element (forms.ts)
+ * must name it exactly as the snapshot did, or the two cannot be compared.
+ */
+export const ACCESSIBLE_NAME_SRC = `(el) => {
     const aria = el.getAttribute("aria-label");
     if (aria) return aria.trim();
     // aria-labelledby before any fallback: it is the standard way to name an
@@ -86,7 +81,27 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
     }
     const text = el.innerText || el.textContent || "";
     return text.trim().replace(/\\s+/g, " ").slice(0, 80);
-  };
+  }`;
+
+/**
+ * Anything that plausibly presents as a modal/dialog panel. Deliberately wider
+ * than the ARIA set: a hand-rolled role-less modal must still count as "an
+ * overlay is up", or the scroll-lock oracle files a false leaked-lock finding
+ * against every healthy modal that locks the page behind it.
+ */
+export const DIALOG_LIKE_SEL = '[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"], [class*="modal" i], [class*="dialog" i]';
+// Declared above the collector script because that script interpolates it.
+
+/**
+ * Page-side interactable collector. Shipped as a STRING, not a function:
+ * loader transforms (tsx/vitest esbuild hooks inject a `__name` helper) break
+ * serialized functions inside the browser, where the helper doesn't exist.
+ * A string expression is immune to any build/loader instrumentation.
+ */
+export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
+  const xpathOf = ${XPATH_OF_SRC};
+  const visible = ${VISIBLE_SRC};
+  const accessibleName = ${ACCESSIBLE_NAME_SRC};
   const selector =
     'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="tab"], ' +
     '[role="menuitem"], [role="checkbox"], [role="switch"], [role="combobox"], [onclick], [data-testid]';

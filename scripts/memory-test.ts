@@ -33,6 +33,23 @@ import {
   requestsDisagree,
   isEmbedKey,
 } from "../src/engine/memory.ts";
+import {
+  FORMS_READ_FAILED,
+  FORMS_SUBMIT_UNMATCHED,
+  TEXT_ENTRY_TYPES,
+  allTextEmpty,
+  formIdentity,
+  formStatus,
+  isEmptySubmit,
+  isFormBookkeeping,
+  isNavigationTeardown,
+  isTextEntry,
+  sameControl,
+  submits,
+  tracksForm,
+  type FieldFacts,
+  type FormProbe,
+} from "../src/engine/forms.ts";
 
 /** Temp dirs created by the running test, cleaned up even when it fails. */
 let dirs: string[] = [];
@@ -1241,6 +1258,172 @@ test("select choices: a picker larger than a filter is not tracked, and a run's 
   assert.equal(store.unchosenOptions()[0]?.unchosen.length, MAX_SELECT_OPTIONS - 1, "at the limit it is still a filter");
   store.endRun();
   assert.deepEqual(store.unchosenOptions(), [], "whether an earlier run chose an option says nothing about this one");
+});
+
+/** A field as the page reports it: a visible, enabled, writable, empty text input unless told otherwise. */
+function field(over: Partial<FieldFacts> = {}): FieldFacts {
+  return { tag: "input", type: "text", disabled: false, readOnly: false, visible: true, filled: false, ...over };
+}
+
+/** What the page reports about a form an action touched: a click on its enabled submit control unless told otherwise. */
+function formProbe(over: Partial<FormProbe> = {}): FormProbe {
+  return {
+    attrs: { id: "", name: "", action: "", method: "" },
+    submit: "/html[1]/body[1]/form[1]/button[1]",
+    submitTestid: null,
+    submitName: "Save",
+    fields: [field()],
+    self: field({ tag: "button", type: "" }),
+    selfIsSubmit: true,
+    defaultDisabled: false,
+    ...over,
+  };
+}
+
+test("empty submit: a submit counts as empty only when every text-entry field is blank", () => {
+  const email = field({ type: "email" });
+  const name = field();
+  const submit = formProbe({ fields: [email, name] });
+  assert.equal(isEmptySubmit("click", submit), true, "both blank: the empty submit");
+  // The contrastive case: identical but for one filled field.
+  assert.equal(isEmptySubmit("click", { ...submit, fields: [field({ type: "email", filled: true }), name] }), false, "one field filled is not an empty submit");
+  // Fields that cannot be left blank by typing do not stop it being empty, and do not make it filled.
+  const withChoices = [
+    email,
+    field({ type: "checkbox", filled: true }),
+    field({ type: "radio", filled: true }),
+    field({ tag: "select", type: "", filled: true }),
+    field({ type: "hidden", filled: true }),
+  ];
+  assert.equal(isEmptySubmit("click", { ...submit, fields: withChoices }), true, "a ticked box or a chosen option is not typed text");
+  // Nor do fields nobody can type into.
+  const unreachable = [email, field({ disabled: true, filled: true }), field({ readOnly: true, filled: true }), field({ visible: false, filled: true })];
+  assert.equal(isEmptySubmit("click", { ...submit, fields: unreachable }), true, "disabled, read-only and hidden fields are not the user's to empty");
+  assert.equal(isEmptySubmit("click", null), false);
+});
+
+test("empty submit: a form with no text-entry field is never tracked or counted", () => {
+  const choicesOnly = [field({ type: "checkbox" }), field({ tag: "select", type: "" }), field({ type: "search" }), field({ type: "file" })];
+  assert.equal(tracksForm(choicesOnly), false);
+  assert.equal(formStatus({ fields: choicesOnly, submitDisabled: false }), "untracked");
+  assert.equal(allTextEmpty(choicesOnly), false, "nothing to leave blank is not 'all blank'");
+  assert.equal(tracksForm([...choicesOnly, field({ tag: "textarea", type: "" })]), true, "a textarea is text entry");
+  for (const type of TEXT_ENTRY_TYPES) assert.equal(isTextEntry(field({ type })), true, type);
+});
+
+test("empty submit: a form whose every submit control is disabled while it is blank is guarded, not owed a try", () => {
+  assert.equal(formStatus({ fields: [field()], submitDisabled: false }), "open");
+  assert.equal(formStatus({ fields: [field()], submitDisabled: true }), "guarded", "the page refuses the empty submit itself");
+  // Contrastive: disabled for some other reason while filled says nothing about the empty submit.
+  assert.equal(formStatus({ fields: [field({ filled: true })], submitDisabled: true }), "open");
+});
+
+test("empty submit: what counts as a submit — a click on a native submit control, Enter where the browser submits implicitly", () => {
+  const typing = (over: Partial<FieldFacts>, extra: Partial<FormProbe> = {}): FormProbe => formProbe({ self: field(over), selfIsSubmit: false, ...extra });
+  assert.equal(submits("click", formProbe()), true);
+  assert.equal(submits("click", formProbe({ selfIsSubmit: false })), false, "a type=button click inside the form submits nothing");
+  assert.equal(submits("click", typing({})), false, "clicking into a field submits nothing");
+  assert.equal(submits("enter", typing({})), true, "Enter in a text input submits");
+  assert.equal(submits("enter", typing({ type: "search" })), true, "…and in a search input");
+  assert.equal(submits("enter", typing({ type: "checkbox" })), false, "Enter in a checkbox does not submit");
+  assert.equal(submits("enter", typing({ type: "radio" })), false, "…nor in a radio");
+  assert.equal(submits("enter", typing({ tag: "textarea", type: "" })), false, "Enter in a textarea is a newline");
+  assert.equal(submits("enter", typing({}, { defaultDisabled: true })), false, "Enter does not submit while the default button is disabled");
+  assert.equal(submits("enter", formProbe()), true, "Enter activates a focused submit control");
+  assert.equal(submits("enter", formProbe({ selfIsSubmit: false })), false, "…but not some other button");
+});
+
+test("empty submit: only a page navigating away under a form read is expected; anything else is worth logging", () => {
+  assert.equal(isNavigationTeardown("page.evaluate: Execution context was destroyed, most likely because of a navigation"), true);
+  assert.equal(isNavigationTeardown("locator.evaluate: Target page, context or browser has been closed"), true);
+  assert.equal(isNavigationTeardown("frame was detached"), true);
+  assert.equal(isNavigationTeardown("ReferenceError: xpathOf is not defined"), false);
+  assert.equal(isNavigationTeardown("Timeout 1000ms exceeded."), false);
+});
+
+test("empty submit: forms seen are listed until any session submits them empty, per route, per run", () => {
+  const store = freshStore();
+  store.recordForm("/things/new#a1", "tid:thing-save");
+  store.recordForm("/things/new#b2", "tid:thing-save"); // another state of the same route: the same form
+  store.recordForm("/things/new#a1", "button:add note");
+  store.recordForm("/other#c3", "tid:thing-save"); // the same control on another route is another form
+  assert.deepEqual(store.formsNeverSubmittedEmpty(), [
+    { route: "/things/new", key: "tid:thing-save" },
+    { route: "/things/new", key: "button:add note" },
+    { route: "/other", key: "tid:thing-save" },
+  ]);
+  store.recordFormSubmit("/things/new#b2", "tid:thing-save", false);
+  assert.equal(store.formsNeverSubmittedEmpty().length, 3, "a filled submit leaves it listed");
+  store.recordFormSubmit("/things/new#b2", "tid:thing-save", true);
+  assert.deepEqual(
+    store.formsNeverSubmittedEmpty().map((f) => `${f.route} ${f.key}`),
+    ["/things/new button:add note", "/other tid:thing-save"],
+    "an empty submit on any state of the route clears it, and only there",
+  );
+  store.recordForm("/other#c4", "tid:thing-save", true);
+  assert.deepEqual(
+    store.formsNeverSubmittedEmpty().map((f) => `${f.route} ${f.key}`),
+    ["/things/new button:add note"],
+    "seen guarded (submit disabled while blank), it leaves the list",
+  );
+  store.recordForm("/embed#e", "frame:https://widget.example|button:send");
+  assert.equal(store.formsNeverSubmittedEmpty().length, 1, "another site's frame is not the app's form");
+  store.endRun();
+  assert.deepEqual(store.formsNeverSubmittedEmpty(), [], "an earlier run's forms are not this run's to-do list");
+});
+
+test("empty submit: a submit only marks a form already listed, and says when it matched none", () => {
+  const store = freshStore();
+  store.recordForm("/things/new#a1", "tid:thing-save");
+  assert.equal(store.recordFormSubmit("/things/new#a1", "button:cancel", false), false, "a key read at submit time names no listed form");
+  assert.equal(store.recordFormSubmit("/things/new#a1", "button:cancel", true), false);
+  assert.deepEqual(
+    [...store.emptySubmits.values()].map((f) => f.key),
+    ["tid:thing-save"],
+    "a submit never adds an entry, filled or empty",
+  );
+  assert.equal(store.recordFormSubmit("/things/new#a1", "tid:thing-save", true), true);
+  assert.deepEqual(store.formsNeverSubmittedEmpty(), []);
+});
+
+test("empty submit: a form is known by its id, then its name, then its action and method, and only then by its submit control", () => {
+  const none = { id: "", name: "", action: "", method: "" };
+  assert.equal(formIdentity({ ...none, id: "profile-form", name: "p", action: "/x" }), "form:#profile-form");
+  assert.equal(formIdentity({ ...none, name: "pay", action: "/x" }), "form:name=pay");
+  assert.equal(formIdentity({ ...none, action: "/things", method: "post" }), "form:POST /things");
+  assert.equal(formIdentity({ ...none, action: "/things" }), "form:GET /things", "no method is a GET");
+  // The page resolves the action to a full URL; a record id or a per-load token in it is not a new form.
+  assert.equal(
+    formIdentity({ ...none, action: "http://app.test/things/42/comments?token=a1b2", method: "post" }),
+    formIdentity({ ...none, action: "http://app.test/things/7/comments?token=z9y8", method: "post" }),
+  );
+  assert.equal(formIdentity({ ...none, action: "http://app.test/things/42/comments?token=a1b2", method: "post" }), "form:POST /things/:id/comments");
+  assert.equal(formIdentity({ ...none, id: "  " }), null, "a blank attribute is no identity");
+  assert.equal(formIdentity(none), null, "nothing of its own: the engine falls back to the submit control's key");
+});
+
+test("empty submit: a snapshot element is the probed submit control only when its testid and name agree", () => {
+  const probe = { submitTestid: "thing-send", submitName: "Send message" };
+  assert.equal(sameControl({ testid: "thing-send", name: "Send message" }, probe), true);
+  // Contrastive: the same path now naming the button that used to sit there.
+  assert.equal(sameControl({ testid: "thing-cancel", name: "Cancel" }, probe), false);
+  assert.equal(sameControl({ testid: null, name: "Send message" }, probe), false, "a testid on one side only is a different control");
+  assert.equal(sameControl({ testid: null, name: "Cancel" }, { submitTestid: null, submitName: "Send" }), false, "untagged: the name decides");
+  assert.equal(sameControl({ testid: null, name: "Send" }, { submitTestid: null, submitName: "Send" }), true);
+});
+
+test("empty submit: the forms bookkeeping stays out of a finding's repro trace", () => {
+  const store = freshStore();
+  store.logAction({ action: "navigate", target: "/things/new", url: "http://x/things/new", session: "s" });
+  store.logAction({ action: "click", target: "e3", url: "http://x/things/new", session: "s" });
+  store.logAction({ action: FORMS_SUBMIT_UNMATCHED, target: "click submit of a form", url: "http://x/things/new", session: "s" });
+  store.logAction({ action: FORMS_READ_FAILED, target: "form probe took over 1000 ms", url: "http://x/things/new", session: "s" });
+  const [f] = store.addFinding({ ...base, url: "http://x/things/new", state: "/things/new#s1", title: "Save does nothing", detail: "d", evidence: "e-forms" });
+  assert.deepEqual(
+    f.repro.map((r) => r.split(" ")[0]),
+    ["navigate", "click"],
+  );
+  assert.equal(isFormBookkeeping(FORMS_SUBMIT_UNMATCHED) && isFormBookkeeping(FORMS_READ_FAILED) && !isFormBookkeeping("click"), true);
 });
 
 test("coverage: controls inside another site's frame are counted apart from the app's", () => {

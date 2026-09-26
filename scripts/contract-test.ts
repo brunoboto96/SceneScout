@@ -16,6 +16,7 @@ import path from "node:path";
 import test, { afterEach } from "node:test";
 import { isNonPageRoute, normalizePath } from "../src/engine/fingerprint.ts";
 import { MemoryStore } from "../src/engine/memory.ts";
+import { formatNeverSubmittedEmpty } from "../src/engine/forms.ts";
 import {
   classifyFilledStates,
   computeGaps,
@@ -807,6 +808,17 @@ test("formatUnchosenOptions: names each dropdown's untried options, and says not
   assert.equal(lines[1], '  /orders orders-status-filter: "Approved", "Archived"');
   const many = Array.from({ length: 17 }, (_, i) => ({ route: `/r${i}`, key: "f", unchosen: ["x"] }));
   assert.equal(formatUnchosenOptions(many).at(-1), "  … +2 more");
+});
+
+test("formatNeverSubmittedEmpty: names each untried form by route and submit control, capped, and says nothing when there are none", () => {
+  assert.deepEqual(formatNeverSubmittedEmpty([]), []);
+  const lines = formatNeverSubmittedEmpty([{ route: "/things/new", key: "tid:thing-save" }]);
+  assert.match(lines[0], /never submitted empty this run/);
+  assert.equal(lines[1], "  /things/new tid:thing-save");
+  const many = Array.from({ length: 17 }, (_, i) => ({ route: `/r${i}`, key: "button:save" }));
+  const capped = formatNeverSubmittedEmpty(many);
+  assert.equal(capped.length, 1 + 15 + 1);
+  assert.equal(capped.at(-1), "  … +2 more");
 });
 
 test("report: trusted embeds are named, and whether they counted", () => {
