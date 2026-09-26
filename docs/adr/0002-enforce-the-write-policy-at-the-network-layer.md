@@ -150,6 +150,102 @@ another site's frame are counted apart and never enter the app's coverage or
 its unexplored-surface and unsubmitted-form lists; a trusted embed's write that
 went out in safe-write still counts as the route's submission.
 
+### Writes sent as a page is left
+
+A page can send a write as it is being left: a `navigator.sendBeacon` or a
+`fetch(..., { keepalive: true })` on `pagehide`, `visibilitychange` or
+`unload`, which the browser keeps sending after the page has gone. Firefox and
+WebKit hand it to the context's route handler like any other request. Chromium
+never does: the request arrives with no network id, or after the page's own
+DevTools session has gone, and the driver sends it on unseen. So in Chromium it
+reached the server in every mode, observe included, on every navigation the
+engine made.
+
+Three ways to close it were weighed:
+
+- **A script in every page** that, in the modes that refuse writes, wraps
+  `sendBeacon` and keepalive `fetch`. The page's own code cannot know the
+  policy's verdict (read-only lets a plain POST through and refuses a
+  destructive one), so it would either refuse every such write, changing what
+  a page does in a mode that allows it, or reroute it through a request the
+  page no longer lives to send. And a script can be got around: a page can
+  take the original functions from a fresh frame before the wrapper lands.
+- **Leaving each page for `about:blank` while watching the page's own
+  DevTools session.** The page session sees the request, but it is the same
+  session the route handler already uses, and it covers only the navigations
+  the engine starts, not a page that moves itself or a frame of another site.
+- **Intercepting at the browser level (chosen).** A DevTools session on the
+  browser target, with the Fetch domain enabled, pauses every request that
+  reaches the network after the route handler, these included, for every page
+  and frame of the browser. It adds no script to the page and changes nothing a
+  page does when the policy allows the write.
+
+So in Chromium, in every mode but destructive, the engine pauses requests at
+the browser level too. A read (GET, HEAD, OPTIONS) goes on at once, and so
+does a write the route handler already let through. That is recognised by a
+short ledger keyed by the mode, the method, the URL and a SHA-256 digest of
+the body, claimed once: a harmless save let through never excuses a different
+body sent to the same URL, such as a delete command beaconed as the page is
+left. Any other write is one the route handler never saw, and is judged by the
+route handler's rules in the same order (`judgeUnseenWrite` in `unload.ts`).
+
+What is known of its sender comes from its headers (`unseenWriteSource`),
+since the frame that sent it may be gone:
+
+- A write out of the app whose Origin header names another site is treated as
+  that site's embed's and refused outside destructive. That includes a
+  sign-in provider's page, reached as the whole page, sending a beacon to
+  itself as it is left, which the route handler would let through while the
+  page lived: the cautious direction.
+- A write out of the app with `Origin: null` is treated as an embed's too, and
+  refused, whether or not the page embeds another site; the page can no
+  longer be asked.
+- The sign-in exception (a captcha on the app's own sign-in page) is decided
+  on the Referer, the page the request was sent from, never on the page the
+  session has moved to by the time the request is seen. With no Referer the
+  exception does not apply. Under the browsers' default referrer policy a
+  request to another site carries only the app's origin as its Referer, with
+  no path, so in practice the exception seldom applies: a captcha's write sent
+  as the sign-in page is left is refused, unless the page sends full
+  referrers. The direction is refusal; a sign-in the tester completes is not
+  affected, since its requests are sent while the page lives and go through
+  the route handler.
+- Trusted embeds, in safe-write, are recognised by the Origin header alone.
+- A page an embed moved off the app is named by the Referer, or, with none,
+  by the page the session drives.
+
+A refused write is dropped rather than answered, since the page that would
+read the answer is gone, and is reported with the other refused writes in the
+result of the action that left the page. One that goes out is reported as a
+possible mutation, as a routed one is. Every paused request is answered
+exactly once: an error while judging or reporting it is logged, the request is
+refused, and the refusal is still reported.
+
+The same layer sees each later hop of a redirect, which the route handler
+never does. In Chromium a 307 or 308 that carries a write on to a new address
+is judged there like any write (`writeRedirectHopsJudged` in `browsers.ts`), so
+a harmless POST redirected to a destructive address is refused. Firefox and
+WebKit still send such a hop on unjudged, a known limit.
+
+A write's body crosses the DevTools connection twice, once to the route
+handler and once to the browser-level interception, and both sides hash it
+for the ledger, so a page that posts large bodies pays for them twice in
+transfer and hashing. Pausing every request adds a round trip to each. Measured on the demo app, an
+eight-page crawl in read-only, five runs each, medians: 1250 ms and 1256 ms
+with the interception, 1284 ms without it (runs 1180 to 1314 ms). The
+difference is inside the noise, so the pattern stays `*` rather than a list of
+resource types.
+
+A page the engine closes (at the end of a session, on a re-attach, a popup of
+another site) is left for `about:blank` first, in every browser: a write sent
+as a page is closed, rather than navigated, is not routed in Firefox or WebKit
+either. What a page sends on its way out then meets the policy on every
+engine; `unloadWriteInterception` in `browsers.ts` records where, and the
+unload smoke suite asserts both directions on each. WebKit may cancel an
+unload write the route handler lets through once the page has gone, so there a
+mode that allows the write does not promise it arrives
+(`allowedUnloadWritesMayBeLost`); nothing it refused is sent.
+
 ## Consequences
 
 A refusal is a tool result the agent must respect and cannot route around, and

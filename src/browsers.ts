@@ -193,14 +193,48 @@ export function beaconResourceType(engine: BrowserEngineName): "ping" | "beacon"
 }
 
 /**
- * Whether a beacon a page sends as it is being left (sendBeacon, or a
- * keepalive fetch, on `pagehide`) escapes interception. In Chromium it is
- * never routed, so the write policy does not see it and it reaches the server
- * in every mode; Firefox and WebKit route it, and the policy refuses it like
- * any other. A limit of the network-layer policy (ADR 2), reported in ADR 12;
- * the check smoke suite asserts both directions per engine.
+ * Where the write policy meets a write a page sends as it is being left (a
+ * sendBeacon or keepalive fetch on `pagehide`, `visibilitychange` or
+ * `unload`, or one still leaving as a page is closed).
+ *
+ * - `route`: Firefox and WebKit hand it to the context's route handler like
+ *   any other request.
+ * - `browser-fetch`: Chromium never routes it (it arrives with no network id,
+ *   or after the page's session has gone, and the driver sends it on), so on
+ *   its own it reached the server in every mode. The engine also pauses
+ *   requests at the browser level with the DevTools Fetch domain and judges
+ *   there, by the same rules, every write the route handler did not
+ *   (unload.ts). Only in modes where the policy can refuse: destructive
+ *   installs neither.
+ *
+ * Either way the write is judged and a refusal is reported like any other
+ * (ADR 2); the unload smoke suite asserts it per engine.
  */
-export function unloadBeaconsEscapePolicy(engine: BrowserEngineName): boolean {
+export function unloadWriteInterception(engine: BrowserEngineName): "route" | "browser-fetch" {
+  return engine === "chromium" ? "browser-fetch" : "route";
+}
+
+/**
+ * Whether a write a page sends as it is being left may be lost after the
+ * write policy lets it through. WebKit cancels such a request when the route
+ * handler answers after the page has gone, so a mode that allows the write
+ * does not promise it arrives; nothing is sent that the policy refused. Firefox
+ * sends it on, and so does Chromium's browser-level interception. In
+ * destructive mode nothing is intercepted and every engine sends it.
+ */
+export function allowedUnloadWritesMayBeLost(engine: BrowserEngineName): boolean {
+  return engine === "webkit";
+}
+
+/**
+ * Whether a write carried on by a redirect (a 307 or 308 keeps the method and
+ * the body) is judged at its new address. The route handler sees only the
+ * first request of a redirect in every engine. In Chromium the browser-level
+ * interception (`unloadWriteInterception`) sees each hop and judges it like any
+ * write; Firefox and WebKit send the later hops on unjudged, a known limit of
+ * the policy there (ADR 2).
+ */
+export function writeRedirectHopsJudged(engine: BrowserEngineName): boolean {
   return engine === "chromium";
 }
 

@@ -47,6 +47,18 @@ import {
   type OwnedIds,
 } from "../src/engine/ownership.ts";
 import { AUTH_LOSS_STREAK, AuthLossTracker, LOGIN_ROUTE_RE } from "../src/engine/authloss.ts";
+import {
+  bodyDigest,
+  headerOf,
+  judgeUnseenWrite,
+  pausedRequestBody,
+  pausedRequestBytes,
+  ROUTED_WRITE_TTL_MS,
+  RoutedWrites,
+  UNSEEN_REFUSAL_TTL_MS,
+  UnseenRefusals,
+  unseenWriteSource,
+} from "../src/engine/unload.ts";
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
 
 // ---------------------------------------------------------------------------
@@ -776,4 +788,148 @@ test("embedOfRequest: an embed's failing request, unless it went to the app", ()
   // The contrasts: the app answered, or no embed sent it.
   assert.equal(embedOfRequest(app, "http://app.test/api/orders", "https://chat.example.com"), null, "a 500 from the app is the app's");
   assert.equal(embedOfRequest(app, "https://chat.example.com/api/x", null), null, "the app's own page or frame");
+});
+
+// ---------------------------------------------------------------------------
+// Writes the route handler never sees (Chromium's unload beacons): unload.ts
+// ---------------------------------------------------------------------------
+
+test("an unseen write is judged by the route handler's rules: observe refuses a plain beacon, read-only lets it go and refuses a destructive one", () => {
+  const judge = (mode: (typeof WRITE_MODES)[number], pathname: string, body: string | null, extra: Partial<Parameters<typeof judgeUnseenWrite>[0]> = {}) =>
+    judgeUnseenWrite({
+      mode,
+      method: "POST",
+      pathname,
+      destructiveWire: isDestructiveWire(pathname, body),
+      foreign: null,
+      offApp: null,
+      owned: false,
+      ...extra,
+    });
+  // The contrastive pair the unload smoke suite drives: one body, the mode flips the verdict; one mode, the body flips it.
+  assert.deepEqual(judge("observe", "/api/unload/beacon", '{"note":"draft"}'), { allow: false });
+  assert.deepEqual(judge("read-only", "/api/unload/beacon", '{"note":"draft"}'), { allow: true });
+  assert.deepEqual(judge("read-only", "/api/unload/beacon", '{"action":"delete"}'), { allow: false });
+  assert.deepEqual(judge("destructive", "/api/unload/beacon", '{"action":"delete"}'), { allow: true });
+  assert.deepEqual(judge("safe-write", "/api/items/7/delete", null, { owned: true }), { allow: true }, "safe-write: its own record");
+  assert.deepEqual(judge("safe-write", "/api/items/7/delete", null), { allow: false });
+  // Same answer as allowsWrite on every mode and method, for a write from the app's own page.
+  for (const mode of WRITE_MODES)
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"])
+      for (const destructiveWire of [false, true])
+        for (const owned of [false, true])
+          assert.equal(
+            judgeUnseenWrite({ mode, method, pathname: "/api/things/1", destructiveWire, foreign: null, offApp: null, owned }).allow,
+            allowsWrite(mode, method, destructiveWire, owned),
+            `${mode} ${method} destructive=${destructiveWire} owned=${owned}`,
+          );
+  assert.deepEqual(judge("observe", "/api/auth/login", "{}"), { allow: true }, "a sign-in still goes out in observe");
+  assert.deepEqual(judgeUnseenWrite({ mode: "observe", method: "GET", pathname: "/x", destructiveWire: false, foreign: null, offApp: null, owned: false }), {
+    allow: true,
+  });
+});
+
+test("an unseen write another site sent, or one from a page an embed moved off the app, is refused with the reason the route handler gives", () => {
+  const base = { method: "POST", pathname: "/collect", destructiveWire: false, offApp: null, owned: false } as const;
+  assert.deepEqual(judgeUnseenWrite({ ...base, mode: "read-only", foreign: "https://chat.example.com" }), {
+    allow: false,
+    why: "sent from a frame of https://chat.example.com",
+  });
+  assert.deepEqual(judgeUnseenWrite({ ...base, mode: "read-only", foreign: null }), { allow: true }, "the contrast: the app's own beacon");
+  assert.deepEqual(judgeUnseenWrite({ ...base, mode: "destructive", foreign: "https://chat.example.com" }), { allow: true });
+  const moved = { ...base, foreign: null, offApp: "https://idp.example.com" };
+  assert.deepEqual(judgeUnseenWrite({ ...moved, mode: "read-only" }), { allow: false, why: "sent from a page of https://idp.example.com, outside the app" });
+  assert.deepEqual(judgeUnseenWrite({ ...moved, mode: "read-only", pathname: "/login" }), { allow: true }, "a sign-in excepted");
+});
+
+test("a write the route handler let through is claimed once, under the mode it was judged in, and not after it has gone stale", () => {
+  const ledger = new RoutedWrites();
+  const plain = bodyDigest(Buffer.from('{"note":"draft"}'));
+  ledger.note("read-only", "POST", "http://app.test/api/items#top", plain, 1000);
+  assert.equal(ledger.claim("observe", "POST", "http://app.test/api/items", plain, 1001), false, "a flow's stricter rule is not excused by the crawl's");
+  assert.equal(ledger.claim("read-only", "PUT", "http://app.test/api/items", plain, 1001), false);
+  assert.equal(ledger.claim("read-only", "POST", "http://app.test/api/items", plain, 1001), true, "the fragment is not part of the request");
+  assert.equal(ledger.claim("read-only", "POST", "http://app.test/api/items", plain, 1002), false, "claimed once: an identical unload write is still judged");
+  ledger.note("observe", "POST", "http://app.test/api/auth/login", "", 2000);
+  assert.equal(ledger.claim("observe", "POST", "http://app.test/api/auth/login", "", 2000 + ROUTED_WRITE_TTL_MS + 1), false, "stale");
+  for (let i = 0; i < 250; i++) ledger.note("observe", "POST", `http://app.test/api/n/${i}`, "", 3000);
+  assert.equal(ledger.claim("observe", "POST", "http://app.test/api/n/0", "", 3000), false, "the oldest are dropped past the cap");
+  assert.equal(ledger.claim("observe", "POST", "http://app.test/api/n/249", "", 3000), true);
+});
+
+test("a harmless write let through never excuses another body to the same URL: the ledger's key includes the body", () => {
+  const ledger = new RoutedWrites();
+  const url = "http://app.test/api/unload/race";
+  ledger.note("read-only", "POST", url, bodyDigest(Buffer.from('{"note":"draft"}')), 1000);
+  // Same mode, method and URL, a delete command for a body: not the request that was judged, so it is judged itself.
+  assert.equal(ledger.claim("read-only", "POST", url, bodyDigest(Buffer.from('{"action":"delete"}')), 1001), false);
+  assert.equal(ledger.claim("read-only", "POST", url, "", 1001), false, "nor one whose body the protocol did not include");
+  assert.equal(ledger.claim("read-only", "POST", url, bodyDigest(Buffer.from('{"note":"draft"}')), 1001), true, "the contrast: the very same request");
+  assert.equal(bodyDigest(null), "");
+  assert.equal(bodyDigest(Buffer.alloc(0)), "");
+  // Both sides hash the same bytes: the route handler's postDataBuffer and the paused request's base64 entries.
+  const b64 = Buffer.from('{"note":"draft"}').toString("base64");
+  assert.equal(bodyDigest(pausedRequestBytes({ postDataEntries: [{ bytes: b64 }] })), bodyDigest(Buffer.from('{"note":"draft"}')));
+});
+
+test("who sent an unseen write, from its headers: embeds by Origin, the sign-in exception by the page it was sent from", () => {
+  const app = "http://app.test/";
+  const src = (input: Partial<Parameters<typeof unseenWriteSource>[0]> & { url: string }) =>
+    unseenWriteSource({ appUrl: app, mode: "read-only", trustedEmbeds: new Set(), movedByEmbed: null, ...input });
+  // A sign-in provider's page, reached as the whole page, beaconing to itself as it is left: taken to be an embed's (the cautious direction).
+  assert.deepEqual(src({ url: "https://idp.example.com/collect", originHeader: "https://idp.example.com", referer: "https://idp.example.com/authorize" }), {
+    foreign: "https://idp.example.com",
+    offApp: null,
+  });
+  // The contrast: the app's own beacon to itself.
+  assert.deepEqual(src({ url: "http://app.test/api/collect", originHeader: "http://app.test", referer: "http://app.test/orders" }), {
+    foreign: null,
+    offApp: null,
+  });
+  // Origin: null, out of the app: an embed's, whether or not the page embeds one.
+  assert.equal(src({ url: "https://tracker.example.net/b", originHeader: "null" }).foreign, "an embedded frame (Origin: null)");
+  assert.equal(src({ url: "http://app.test/api/b", originHeader: "null" }).foreign, null, "into the app it is the app's business");
+  // A trusted embed's Origin: its writes out go to the ordinary rules in safe-write, and only there.
+  const trusted = new Set(["https://pay.example.com"]);
+  const pay = { url: "https://pay.example.com/api/confirm", originHeader: "https://pay.example.com", trustedEmbeds: trusted };
+  assert.equal(src({ ...pay, mode: "safe-write" }).foreign, null);
+  assert.equal(src({ ...pay, mode: "read-only" }).foreign, "https://pay.example.com");
+  // Leaving the app's sign-in page, whose captcha posts to its own site. A cross-origin request carries only the
+  // origin as its Referer under the default policy (strict-origin-when-cross-origin), which names no sign-in page:
+  // the exception does not apply, and the write is refused. That is what a browser sends, so it is the common case.
+  const captcha = { url: "https://captcha.example.com/verify", originHeader: "https://captcha.example.com" };
+  assert.equal(src({ ...captcha, referer: "http://app.test/" }).foreign, "https://captcha.example.com");
+  // Only a page whose referrer policy sends the full URL (unsafe-url, no-referrer-when-downgrade) names its path.
+  assert.equal(src({ ...captcha, referer: "http://app.test/login" }).foreign, null);
+  assert.equal(src({ ...captcha, referer: "http://app.test/login", mode: "observe" }).foreign, "https://captcha.example.com", "never in observe");
+  assert.equal(src({ ...captcha, referer: "http://app.test/settings" }).foreign, "https://captcha.example.com", "not from another page");
+  // Where the session is when the request is seen does not count: only the page it was sent from.
+  assert.equal(src({ ...captcha, referer: "http://app.test/", currentPageUrl: "http://app.test/login" }).foreign, "https://captcha.example.com");
+  assert.equal(src({ ...captcha, currentPageUrl: "http://app.test/login" }).foreign, "https://captcha.example.com", "no Referer, no exception");
+  // A page an embed moved off the app: its Referer names it, else the session's page stands in.
+  const moved = { url: "https://idp.example.com/x", movedByEmbed: "https://idp.example.com" };
+  assert.equal(src({ ...moved, referer: "https://idp.example.com/page" }).offApp, "https://idp.example.com");
+  assert.equal(src({ ...moved, currentPageUrl: "https://idp.example.com/page" }).offApp, "https://idp.example.com");
+  assert.equal(src({ ...moved, url: "http://app.test/api/x", referer: "https://idp.example.com/page" }).offApp, null, "a write into the app is the app's");
+});
+
+test("a paused request's body is read from its base64 entries, else its postData, and its headers by any case", () => {
+  const b64 = (t: string) => Buffer.from(t, "utf8").toString("base64");
+  assert.equal(pausedRequestBody({ postDataEntries: [{ bytes: b64('{"action":') }, { bytes: b64('"delete"}') }] }), '{"action":"delete"}');
+  assert.equal(pausedRequestBody({ postData: "plain" }), "plain");
+  assert.equal(pausedRequestBody({}), undefined);
+  assert.equal(isDestructiveWire("/api/unload/beacon", pausedRequestBody({ postDataEntries: [{ bytes: b64('{"action":"delete"}') }] })), true);
+  assert.equal(headerOf({ Origin: "http://app.test" }, "origin"), "http://app.test");
+  assert.equal(headerOf({ referer: "http://app.test/a" }, "Referer"), "http://app.test/a");
+  assert.equal(headerOf(undefined, "origin"), undefined);
+});
+
+test("a write refused at the browser level is recognised when the driver reports it, by method and URL, and only for a while", () => {
+  const refused = new UnseenRefusals();
+  refused.note("POST", "http://app.test/api/things/7/delete#x", 1000);
+  assert.equal(refused.has("POST", "http://app.test/api/things/7/delete", 1001), true, "fragment dropped");
+  assert.equal(refused.has("POST", "http://app.test/api/things/7/delete", 1002), true, "not consumed: several listeners ask");
+  assert.equal(refused.has("PUT", "http://app.test/api/things/7/delete", 1001), false);
+  assert.equal(refused.has("POST", "http://app.test/api/things/8/delete", 1001), false, "the contrast: another request");
+  assert.equal(refused.has("POST", "http://app.test/api/things/7/delete", 1000 + UNSEEN_REFUSAL_TTL_MS + 1), false, "stale");
 });

@@ -171,7 +171,7 @@ A flow file that is not valid stops the check before it starts, with exit 2 and 
 
 Flows run in the crawl's browser context, one after another in file-name order, so cookies, storage and a signed-in session carry from the crawl to each flow and from one flow to the next; each starts from the page its first step names.
 
-A flow's result also lists the WebSocket connections its page opened: the write rule covers HTTP only, and messages sent over a socket are not inspected. In Chromium, a request a page sends with `keepalive` or `navigator.sendBeacon` while it is being left (on `pagehide`, or a beacon on a timer that fires during the unload) is never routed, so the write rule does not see it and it reaches the server in any mode; Firefox and WebKit route it and the rule refuses it.
+A flow's result also lists the WebSocket connections its page opened: the write rule covers HTTP only, and messages sent over a socket are not inspected. A request a page sends with `keepalive` or `navigator.sendBeacon` while it is being left (on `pagehide`, or a beacon on a timer that fires during the unload, including as the flow leaves its page) is judged by the same rule in every browser and refused under `never`; a beacon is then listed as a background request, and a keepalive fetch is charged to the step, or to the last step, it lands in.
 
 Anything else in the flows directory (another file type, a subdirectory, a symbolic link that resolves outside it) is listed in the report as skipped, with the reason. A symbolic link to a file inside the directory is followed.
 

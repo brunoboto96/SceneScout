@@ -193,6 +193,26 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       const key = `${req.method} ${urlPath}`;
       stats.writes[key] = (stats.writes[key] ?? 0) + 1;
     }
+    // Plain saves and a delete command share this URL: the delete-bearing ones are counted apart, so a suite can prove none arrived.
+    if (urlPath === "/api/unload/race" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        if (Buffer.concat(chunks).toString("utf8").includes('"action":"delete"')) {
+          const key = "POST /api/unload/race (delete)";
+          stats.writes[key] = (stats.writes[key] ?? 0) + 1;
+        }
+        res.writeHead(204);
+        res.end();
+      });
+      return;
+    }
+    // A write carried on by a redirect: a 307 keeps the method and the body, to a destructive address.
+    if (urlPath === "/api/unload/redirect") {
+      res.writeHead(307, { location: "/api/unload/redirected/delete" });
+      res.end();
+      return;
+    }
     // Endpoints that refuse, for the contradiction oracles. The status is in
     // the path so a fixture page can ask for the one it wants to be refused
     // with, and the body is JSON because these stand in for an app's own API.

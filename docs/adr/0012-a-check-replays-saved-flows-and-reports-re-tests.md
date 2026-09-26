@@ -122,16 +122,15 @@ reviewer sees what a green check was allowed to do.
   one after another in file-name order, so cookies, storage and a signed-in
   session carry from the crawl to each flow and from one flow to the next.
   Each flow starts from the page its first step names.
-- **A limit of the network-layer rule, in Chromium.** A request a page sends
+- **Writes sent as a page is left are judged too.** A request a page sends
   with `keepalive` or `navigator.sendBeacon` while it is being left (on
-  `pagehide`, or a beacon on a timer that fires during the unload) is never
-  routed in Chromium, so the write policy does not see it and it reaches the
-  server in every mode, observe included. Firefox and WebKit route it, and the
-  policy refuses it; as a beacon it is then listed and charged to no step.
-  `unloadBeaconsEscapePolicy` in `browsers.ts` records which engine does
-  which, and the check smoke suite asserts both directions per engine. This is
-  the engine's rule (ADR 2), not something flows add; it applies to every
-  navigation the engine makes, and needs its own fix.
+  `pagehide`, or a beacon on a timer that fires during the unload) meets the
+  flow's rule in every browser: Firefox and WebKit route it, and in Chromium,
+  which never routes it, the engine judges it at the browser level by the same
+  rules (ADR 2, `unloadWriteInterception` in `browsers.ts`). So it is refused
+  under `never`, and a refused beacon is listed and charged to no step like any
+  other. Until this was closed, Chromium sent it in every mode, observe
+  included; the check smoke suite asserts the refusal on each engine.
 - **Pages loaded only to re-test are measured, nothing else.** They are not
   checked routes, no page rule applies to them, they do not count towards
   `--max-routes`, their links are not harvested into the route list, and they
