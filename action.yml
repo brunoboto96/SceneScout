@@ -1,0 +1,233 @@
+# Runs `scenescout check` against an app the workflow has already started, and
+# fails the step the way the CLI's exit code says: 1 when the gate fails, 2 (with
+# a "could not run" annotation) when there is no verdict to give. The report
+# goes on the job summary, and report.md, check.json and check.sarif are kept as
+# an artifact. How to use it: docs/ci.md.
+#
+# Every input that is not listed in ACTION_ONLY_INPUTS (action/check-action.mjs)
+# is passed to the CLI as `--<name>=<value>`, so those inputs are named exactly
+# as the CLI's options are; check-test fails if the two lists drift apart.
+name: SceneScout check
+description: A deterministic check of a running web app (HTTP and page errors, layout, broken images, contrast, names, dead ends) that gates a pull request.
+author: brunoboto96
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  url:
+    description: The address of the running app to check, e.g. http://127.0.0.1:3000. Required.
+    required: true
+  fail-on:
+    description: The severity that fails the gate — high, medium, low or never.
+    required: false
+    default: high
+  mode:
+    description: observe or read-only. A check only visits pages, so nothing it does needs a write.
+    required: false
+    default: read-only
+  max-routes:
+    description: The most routes to visit, 1 to 150. Empty means the CLI's default (50).
+    required: false
+    default: ""
+  paths:
+    description: Check only these paths, comma-separated, each starting with / (e.g. /,/orders). Empty means every route found.
+    required: false
+    default: ""
+  ignore:
+    description: Rules to drop, comma-separated (`scenescout check --help` lists them).
+    required: false
+    default: ""
+  storage-state:
+    description: A Playwright storage-state file to check while signed in, relative to working-directory.
+    required: false
+    default: ""
+  browser:
+    description: chromium, firefox or webkit.
+    required: false
+    default: chromium
+  project:
+    description: The project directory, relative to working-directory. Empty means working-directory itself.
+    required: false
+    default: ""
+  out:
+    description: Where to write report.md, check.json and check.sarif. Empty means <project>/.scenescout/check.
+    required: false
+    default: ""
+  working-directory:
+    description: The directory the check runs in; relative paths in the other inputs are resolved against it.
+    required: false
+    default: .
+  version:
+    description: The scenescout npm version to run. Empty means the version this action's ref was released as.
+    required: false
+    default: ""
+  cli:
+    description: A built scenescout CLI (dist/cli.js) to run instead of the npm package. For testing the action itself.
+    required: false
+    default: ""
+  node-version:
+    description: The Node.js to install when the runner has no Node 20 or newer on PATH.
+    required: false
+    default: "24"
+  install-deps:
+    description: On Linux, install the system libraries the browser needs (uses sudo). Set to false on a runner that already has them.
+    required: false
+    default: "true"
+  upload-artifact:
+    description: Keep report.md, check.json and check.sarif as a workflow artifact.
+    required: false
+    default: "true"
+  artifact-name:
+    description: The artifact's name. Empty means scenescout-check-<job id>, with -2, -3 … for later uses in the same job. Jobs of a matrix share a job id, so give each cell its own name.
+    required: false
+    default: ""
+  upload-sarif:
+    description: Upload check.sarif to GitHub code scanning. The job needs `permissions` with `security-events write`.
+    required: false
+    default: "false"
+
+outputs:
+  passed:
+    description: '"true" when the gate passed, "false" when it failed, empty when the check could not run.'
+    value: ${{ steps.run.outputs.passed }}
+  exit-code:
+    description: The CLI's exit code — 0 passed, 1 failed the gate, 2 could not run.
+    value: ${{ steps.run.outputs.exit-code }}
+  failing:
+    description: How many issues are at the fail-on severity or worse.
+    value: ${{ steps.run.outputs.failing }}
+  high:
+    description: How many high-severity issues the check found.
+    value: ${{ steps.run.outputs.high }}
+  medium:
+    description: How many medium-severity issues the check found.
+    value: ${{ steps.run.outputs.medium }}
+  low:
+    description: How many low-severity issues the check found.
+    value: ${{ steps.run.outputs.low }}
+  report:
+    description: The path of report.md.
+    value: ${{ steps.run.outputs.report }}
+  json:
+    description: The path of check.json.
+    value: ${{ steps.run.outputs.json }}
+  sarif:
+    description: The path of check.sarif.
+    value: ${{ steps.run.outputs.sarif }}
+  artifact-name:
+    description: The name the results were uploaded under.
+    value: ${{ steps.resolve.outputs.artifact-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Look for Node.js 20 or newer
+      id: node
+      shell: bash
+      run: |
+        if command -v node >/dev/null && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 20 ]; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Install Node.js
+      if: steps.node.outputs.present != 'true'
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Get SceneScout
+      id: resolve
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUTS: ${{ toJSON(inputs) }}
+      run: node "$GITHUB_ACTION_PATH/action/check-action.mjs" resolve
+
+    # Restore and save are separate steps: the combined action saves in a post
+    # step that runs only when the job succeeds, so a failed gate would never
+    # cache the browser and every failing run would download it again.
+    - name: Restore the browser cache
+      id: cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.resolve.outputs.browsers-path }}
+        key: scenescout-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.install-target }}-playwright-${{ steps.resolve.outputs.playwright-version }}
+
+    - name: Install the browser's system libraries
+      if: runner.os == 'Linux' && inputs.install-deps == 'true'
+      shell: bash
+      env:
+        PLAYWRIGHT_CLI: ${{ steps.resolve.outputs.playwright-cli }}
+        ENGINE: ${{ steps.resolve.outputs.engine }}
+      run: |
+        if [ "$(id -u)" = "0" ]; then node "$PLAYWRIGHT_CLI" install-deps "$ENGINE"
+        else sudo "$(command -v node)" "$PLAYWRIGHT_CLI" install-deps "$ENGINE"; fi
+
+    - name: Install the browser
+      id: install
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SCENESCOUT_CLI: ${{ steps.resolve.outputs.cli }}
+        TARGET: ${{ steps.resolve.outputs.install-target }}
+        PLAYWRIGHT_BROWSERS_PATH: ${{ steps.resolve.outputs.browsers-path }}
+      run: node "$SCENESCOUT_CLI" install --browser-only --browsers "$TARGET"
+
+    # Saved as soon as the browser is in place, before the check runs, so no
+    # verdict can keep it from being saved. Skipped on an exact hit: that key is
+    # already stored.
+    - name: Save the browser cache
+      if: always() && steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.resolve.outputs.browsers-path }}
+        key: ${{ steps.cache.outputs.cache-primary-key }}
+
+    # Never fails: the exit code becomes an output, so the report is kept and
+    # uploaded before the last step fails the job with it.
+    - name: Run the check
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUTS: ${{ toJSON(inputs) }}
+        SCENESCOUT_CLI: ${{ steps.resolve.outputs.cli }}
+        SCENESCOUT_OUT_DIR: ${{ steps.resolve.outputs.out-dir }}
+        SCENESCOUT_VERSION: ${{ steps.resolve.outputs.version }}
+        PLAYWRIGHT_BROWSERS_PATH: ${{ steps.resolve.outputs.browsers-path }}
+      run: node "$GITHUB_ACTION_PATH/action/check-action.mjs" run
+
+    # The uploads and the verdict run whatever happened before them (always()):
+    # an upload that fails must not hide the gate's verdict.
+    - name: Keep the results
+      if: always() && inputs.upload-artifact == 'true' && steps.run.outputs.json != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.resolve.outputs.artifact-name }}
+        path: |
+          ${{ steps.run.outputs.report }}
+          ${{ steps.run.outputs.json }}
+          ${{ steps.run.outputs.sarif }}
+        # The default output folder is .scenescout/, which the upload would otherwise skip as hidden.
+        include-hidden-files: true
+        if-no-files-found: warn
+
+    - name: Upload to code scanning
+      if: always() && inputs.upload-sarif == 'true' && steps.run.outputs.sarif != ''
+      uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+      with:
+        sarif_file: ${{ steps.run.outputs.sarif }}
+        category: scenescout-check
+
+    - name: Verdict
+      if: always() && steps.run.outputs.exit-code != ''
+      shell: bash
+      env:
+        INPUTS: ${{ toJSON(inputs) }}
+        EXIT_CODE: ${{ steps.run.outputs.exit-code }}
+        FAILING: ${{ steps.run.outputs.failing }}
+        ERROR: ${{ steps.run.outputs.error }}
+      run: node "$GITHUB_ACTION_PATH/action/check-action.mjs" verdict

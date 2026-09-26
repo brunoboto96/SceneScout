@@ -100,11 +100,93 @@ jobs:
           SCENESCOUT_BROWSER: ${{ matrix.browser }}
         run: npm run smoke
 
+  # The GitHub Action at the repository root (action.yml), run the way a user
+  # runs it, against the demo app, with the CLI built from this commit. The
+  # demo's seeded defects that show at page load are all medium or low, so the
+  # default gate must pass and `fail-on: medium` must fail. One OS: the action's
+  # logic is table-tested in check-test on every OS already; this job proves the
+  # YAML, the browser install and the exit-code handling on a real runner.
+  #
+  # SARIF is never uploaded here: the demo's defects would become this
+  # repository's code-scanning alerts. The job's token cannot upload it anyway.
+  check-action:
+    name: ubuntu-latest · check action
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Start the demo app
+        run: |
+          npm run demo:serve > "$RUNNER_TEMP/demo.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:4173/; then exit 0; fi
+            sleep 1
+          done
+          echo "The demo app did not answer on port 4173:"; cat "$RUNNER_TEMP/demo.log"; exit 1
+      - name: Default gate (must pass)
+        id: default
+        uses: ./
+        with:
+          url: http://127.0.0.1:4173
+          cli: dist/cli.js
+          out: ${{ runner.temp }}/check-default
+          upload-sarif: "false"
+      - name: Stricter gate (must fail)
+        id: strict
+        continue-on-error: true
+        uses: ./
+        with:
+          url: http://127.0.0.1:4173
+          cli: dist/cli.js
+          fail-on: medium
+          out: ${{ runner.temp }}/check-medium
+          # Uploads too: a second use in one job must get an artifact name of its own.
+          upload-sarif: "false"
+      - name: Each gate ended the way the demo's defects say it should
+        env:
+          DEFAULT_OUTCOME: ${{ steps.default.outcome }}
+          DEFAULT_EXIT: ${{ steps.default.outputs.exit-code }}
+          DEFAULT_PASSED: ${{ steps.default.outputs.passed }}
+          DEFAULT_HIGH: ${{ steps.default.outputs.high }}
+          DEFAULT_MEDIUM: ${{ steps.default.outputs.medium }}
+          DEFAULT_REPORT: ${{ steps.default.outputs.report }}
+          STRICT_OUTCOME: ${{ steps.strict.outcome }}
+          STRICT_EXIT: ${{ steps.strict.outputs.exit-code }}
+          STRICT_PASSED: ${{ steps.strict.outputs.passed }}
+          STRICT_FAILING: ${{ steps.strict.outputs.failing }}
+          STRICT_JSON: ${{ runner.temp }}/check-medium/check.json
+          DEFAULT_ARTIFACT: ${{ steps.default.outputs.artifact-name }}
+          STRICT_ARTIFACT: ${{ steps.strict.outputs.artifact-name }}
+        run: |
+          set -x
+          test "$DEFAULT_ARTIFACT" = scenescout-check-check-action
+          test "$STRICT_ARTIFACT" = scenescout-check-check-action-2
+          test "$DEFAULT_OUTCOME" = success
+          test "$DEFAULT_EXIT" = 0
+          test "$DEFAULT_PASSED" = true
+          test "$DEFAULT_HIGH" = 0
+          test "$DEFAULT_MEDIUM" -ge 1
+          test -s "$DEFAULT_REPORT"
+          test "$STRICT_OUTCOME" = failure
+          # Read from the file as well as the outputs: a gate failure (1) must not be a could-not-run (2).
+          node -e 'const j = require(process.argv[1]); if (j.gate.passed !== false || j.gate.failing < 1) process.exit(1)' "$STRICT_JSON"
+          test "$STRICT_EXIT" = 1
+          test "$STRICT_PASSED" = false
+          test "$STRICT_FAILING" -ge 1
+
   # The branch ruleset requires ONE check, named "test". A matrix reports one
   # check per cell under changing names, so this job is the stable name that
-  # summarises them: green only when every cell is.
+  # summarises them: green only when every cell is. The action's job is part of
+  # it: a broken action is a broken release, and the job runs alongside the
+  # matrix, so it adds a few runner minutes and no wait.
   test:
-    needs: [suite, cross-browser]
+    needs: [suite, cross-browser, check-action]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -112,5 +194,7 @@ jobs:
         run: |
           echo "suite result: ${{ needs.suite.result }}"
           echo "cross-browser result: ${{ needs.cross-browser.result }}"
+          echo "check-action result: ${{ needs.check-action.result }}"
           test "${{ needs.suite.result }}" = "success"
           test "${{ needs.cross-browser.result }}" = "success"
+          test "${{ needs.check-action.result }}" = "success"
