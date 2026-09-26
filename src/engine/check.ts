@@ -307,6 +307,13 @@ export interface CheckOptions {
   ignore: CheckRule[];
 }
 
+/**
+ * Every `--option` `scenescout check` accepts. The GitHub Action at the
+ * repository root mirrors this list input for input, and check-test fails when
+ * the two drift apart.
+ */
+export const CHECK_OPTION_NAMES = ["project", "out", "fail-on", "mode", "storage-state", "browser", "max-routes", "paths", "ignore"] as const;
+
 export const MAX_CHECK_ROUTES = 150;
 export const DEFAULT_CHECK_ROUTES = 50;
 
@@ -327,7 +334,7 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
     if (eq < 0) i += 1;
     flags.set(name, value);
   }
-  const known = new Set(["project", "out", "fail-on", "mode", "storage-state", "browser", "max-routes", "paths", "ignore"]);
+  const known = new Set<string>(CHECK_OPTION_NAMES);
   for (const name of flags.keys()) if (!known.has(name)) return { ok: false, error: `unknown option --${name}` };
   if (positional.length !== 1) return { ok: false, error: "give exactly one URL to check, e.g. scenescout check http://127.0.0.1:3000" };
   let url: URL;
