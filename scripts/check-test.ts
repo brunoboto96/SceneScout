@@ -6,7 +6,9 @@
  *   npx tsx --test --test-name-pattern "gate" scripts/check-test.ts
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -30,14 +32,35 @@ import {
 import { brokenImageIssues, geometryIssues } from "../src/engine/collector.ts";
 import { httpErrorDetail } from "../src/engine/oracles.ts";
 import {
+  loadFlows,
+  matchRequest,
+  parseFlow,
+  parseTarget,
+  requestPathMatches,
+  resolveFlowsDir,
+  splitRefusals,
+  statusMatches,
+  urlMatches,
+  type FlowRun,
+} from "../src/engine/flow.ts";
+import { writeSelfIgnore, type Finding } from "../src/engine/memory.ts";
+import { checkRetestPlan, retestResults, wellFormedFindings, type MeasuredPage } from "../src/engine/verify.ts";
+import {
   CHECK_OPTION_NAMES,
   CHECK_RULES,
+  DEFAULT_SETTINGS,
+  type GateRetests,
+  describeSettings,
+  exitCodeOf,
+  retestGateFailures,
   formatCheck,
   gateFailures,
   geometryRule,
   issuesFromRoutes,
   parseCheckArgs,
+  redactFlowRuns,
   redactRoutes,
+  refusedFlowReason,
   withoutOwnResponse,
   summarise,
   toSarif,
@@ -272,7 +295,20 @@ test("the gate: fails on its severity or worse, never below it, and never with '
 });
 
 function result(issues: CheckIssue[], failOn: CheckResult["failOn"] = "high"): CheckResult {
-  return { url: `${ORIGIN}/`, generatedAt: "2026-09-25T00:00:00.000Z", mode: "read-only", failOn, routes: [route()], issues, unvisited: [], ignored: [] };
+  return {
+    url: `${ORIGIN}/`,
+    generatedAt: "2026-09-25T00:00:00.000Z",
+    mode: "read-only",
+    failOn,
+    routes: [route()],
+    issues,
+    unvisited: [],
+    ignored: [],
+    flows: [],
+    retest: null,
+    settings: { ...DEFAULT_SETTINGS },
+    skippedFlows: [],
+  };
 }
 
 test("the report leads with the verdict", () => {
@@ -365,7 +401,19 @@ test("every rule has a severity, a title and help text", () => {
 test("arguments: the defaults", () => {
   const parsed = parseCheckArgs(["http://127.0.0.1:3000"], "/work/app");
   assert.ok(parsed.ok);
-  assert.deepEqual(parsed.options, { url: "http://127.0.0.1:3000/", projectDir: "/work/app", failOn: "high", mode: "read-only", maxRoutes: 50, ignore: [] });
+  assert.deepEqual(parsed.options, {
+    url: "http://127.0.0.1:3000/",
+    projectDir: "/work/app",
+    failOn: "high",
+    mode: "read-only",
+    maxRoutes: 50,
+    ignore: [],
+    // Spelled out, not read from DEFAULT_SETTINGS: a default that drifts to allow, stop or never must fail here.
+    retest: true,
+    flowWrites: "never",
+    onRefusedStep: "report",
+    gateRetests: "high",
+  });
 });
 
 test("arguments: every option, in both spellings, with relative paths resolved against the working directory", () => {
@@ -388,6 +436,14 @@ test("arguments: every option, in both spellings, with relative paths resolved a
       "--out=/tmp/out",
       "--browser",
       "webkit",
+      "--flows",
+      "ci/flows",
+      "--retest=off",
+      "--flow-writes",
+      "allow",
+      "--on-refused-step=stop",
+      "--gate-retests",
+      "all",
     ],
     "/work",
   );
@@ -403,6 +459,11 @@ test("arguments: every option, in both spellings, with relative paths resolved a
     maxRoutes: 10,
     paths: ["/a", "/b"],
     ignore: ["contrast", "tiny-target"],
+    flows: "/work/ci/flows",
+    retest: false,
+    flowWrites: "allow",
+    onRefusedStep: "stop",
+    gateRetests: "all",
   });
 });
 
@@ -415,6 +476,11 @@ test("arguments: each mistake is refused with a sentence", () => {
     [["http://x", "--fail-on", "critical"], /--fail-on must be/],
     [["http://x", "--mode", "safe-write"], /--mode must be observe or read-only/],
     [["http://x", "--mode", "destructive"], /--mode must be observe or read-only/],
+    [["http://x", "--retest", "yes"], /--retest must be on or off/],
+    [["http://x", "--flows", " "], /--flows needs a directory, or off/],
+    [["http://x", "--flow-writes", "always"], /--flow-writes must be one of never, allow/],
+    [["http://x", "--on-refused-step", "skip"], /--on-refused-step must be one of report, stop/],
+    [["http://x", "--gate-retests", "medium"], /--gate-retests must be one of never, high, all/],
     [["http://x", "--max-routes", "0"], /--max-routes/],
     [["http://x", "--max-routes", "151"], /--max-routes/],
     [["http://x", "--max-routes", "2.5"], /--max-routes/],
@@ -579,6 +645,11 @@ test("action: the arguments it builds are ones the CLI accepts, carrying every o
     browser: "webkit",
     project: "site",
     out: "results",
+    flows: "off",
+    retest: "off",
+    "flow-writes": "allow",
+    "on-refused-step": "stop",
+    "gate-retests": "never",
     cli: "dist/cli.js",
     "upload-sarif": "true",
   };
@@ -597,6 +668,11 @@ test("action: the arguments it builds are ones the CLI accepts, carrying every o
     maxRoutes: 10,
     paths: ["/a", "/b"],
     ignore: ["contrast"],
+    flows: "off",
+    retest: false,
+    flowWrites: "allow",
+    onRefusedStep: "stop",
+    gateRetests: "never",
   });
   for (const own of ACTION_ONLY_INPUTS.filter((n) => n !== "url")) assert.ok(!args.some((a) => a.startsWith(`--${own}`)), own);
 });
@@ -692,7 +768,7 @@ test("action: an upload that fails cannot hide the verdict, and a failed gate st
 
 test("action: its outputs are check.json's numbers, and nothing when there is no verdict", () => {
   const json = toSummaryJson(result([issue("high"), issue("medium", "contrast"), issue("low", "contrast")]), "1.0.0");
-  assert.deepEqual(summaryOutputs(json), { passed: "false", failing: "1", high: "1", medium: "1", low: "1" });
+  assert.deepEqual(summaryOutputs(json), { passed: "false", failing: "1", high: "1", medium: "1", low: "1", "could-not-run": "0", "retests-failing": "0" });
   assert.equal(summaryOutputs(null), null);
   assert.equal(summaryOutputs({}), null);
 });
@@ -722,4 +798,624 @@ test("action: this repository runs it against the demo app, gated by the require
     assert.equal(String(s.with?.["upload-sarif"]), "false", "the demo's seeded defects must never become this repository's code-scanning alerts");
     assert.equal(s.with?.cli, "dist/cli.js", "the dogfood runs the CLI built from this commit, not the published one");
   }
+});
+
+// ---------------------------------------------------------------------------
+// Saved flows (engine/flow.ts): the file format, the matching rules, and how a
+// replay becomes issues and a verdict. The replay itself is in the smoke suite.
+// ---------------------------------------------------------------------------
+
+const FLOW = {
+  name: "open details",
+  steps: [
+    { action: "navigate", target: "/things" },
+    { action: "click", target: 'role=button[name="Show details"]' },
+    { action: "type", target: "label=Search", value: "abc", pressEnter: true },
+    { action: "select", target: "testid=sort", value: "newest" },
+    { action: "press", value: "Escape" },
+    { action: "expect-text", text: "Details loaded" },
+    { action: "expect-url", pattern: "^/things(\\?|$)" },
+    { action: "expect-request", request: "GET /api/things/*", status: "2xx" },
+  ],
+};
+
+test("flows: a valid flow parses, and takes its file name when it names itself nothing", () => {
+  const parsed = parseFlow(JSON.stringify(FLOW), "details.json");
+  assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+  assert.equal(parsed.flow.name, "open details");
+  assert.equal(parsed.flow.steps.length, 8);
+  const unnamed = parseFlow(JSON.stringify({ steps: FLOW.steps }), "details.json");
+  assert.ok(unnamed.ok && unnamed.flow.name === "details");
+});
+
+test("flows: every mistake names the file and the field", () => {
+  const bad = (steps: unknown[], extra: Record<string, unknown> = {}) => JSON.stringify({ steps, ...extra });
+  const nav = { action: "navigate", target: "/" };
+  const cases: Array<[string, RegExp]> = [
+    ["{ not json", /^f\.json: not valid JSON/],
+    [bad([]), /^f\.json: steps needs at least one step/],
+    [
+      bad([nav, { action: "hover", target: "testid=x" }]),
+      /^f\.json: steps\[1\]\.action must be one of navigate, click, type, select, press, expect-text, expect-url, expect-request/,
+    ],
+    [bad([nav, { action: "click" }]), /^f\.json: steps\[1\]\.target is required/],
+    [bad([nav, { action: "click", target: "#save" }]), /^f\.json: steps\[1\]\.target must be testid=…, text=…, label=… or role=/],
+    [bad([nav, { action: "click", tragte: "testid=x", target: "testid=x" }]), /^f\.json: steps\[1\] unknown field\(s\) "tragte"/],
+    [bad([{ action: "click", target: "testid=x" }]), /^f\.json: steps\[0\]\.action must be "navigate"/],
+    [bad([{ action: "navigate", target: "https://elsewhere.example/" }]), /^f\.json: steps\[0\]\.target must be a path on the app/],
+    [bad([nav, { action: "expect-url", pattern: "(" }]), /^f\.json: steps\[1\]\.pattern is not a valid regular expression/],
+    [bad([nav, { action: "expect-request", request: "/api/x", status: 200 }]), /^f\.json: steps\[1\]\.request must be a method and a path/],
+    [bad([nav, { action: "expect-request", request: "GET /api/x", status: "ok" }]), /^f\.json: steps\[1\]\.status/],
+    [bad([nav, { action: "type", target: "label=Name" }]), /^f\.json: steps\[1\]\.value is required/],
+    [bad([nav], { steps2: [] }), /^f\.json: \(the whole file\) unknown field\(s\) "steps2"/],
+    [bad(Array.from({ length: 51 }, () => nav)), /^f\.json: steps holds at most 50 steps/],
+  ];
+  for (const [text, re] of cases) {
+    const parsed = parseFlow(text, "f.json");
+    assert.ok(!parsed.ok, text);
+    assert.match(parsed.error, re, text);
+  }
+});
+
+test("flows: targets are scout_run_plan's, plus role with an optional name", () => {
+  assert.deepEqual(parseTarget("testid=save"), { by: "testid", value: "save" });
+  assert.deepEqual(parseTarget("text=Saved!"), { by: "text", value: "Saved!" });
+  assert.deepEqual(parseTarget("label=Email address"), { by: "label", value: "Email address" });
+  assert.deepEqual(parseTarget("role=button"), { by: "role", role: "button" });
+  assert.deepEqual(parseTarget('role=button[name="Save draft"]'), { by: "role", role: "button", name: "Save draft" });
+  assert.deepEqual(parseTarget("role=Link[name='Next page']"), { by: "role", role: "link", name: "Next page" });
+  assert.deepEqual(parseTarget("role=tab[name=Settings]"), { by: "role", role: "tab", name: "Settings" });
+  for (const bad of ["", "testid=", "#save", "role=", "role=button[label=x]", "css=.save"]) assert.equal(parseTarget(bad), null, bad);
+});
+
+test("flows: a URL pattern sees the path, query and hash, never the origin", () => {
+  assert.ok(urlMatches("^/things/\\d+$", "http://127.0.0.1:3000/things/42"));
+  assert.ok(urlMatches("^/things/\\d+$", "https://preview-7.example.com/things/42"));
+  assert.ok(urlMatches("tab=open", "http://x/things?tab=open"));
+  assert.ok(!urlMatches("^127", "http://127.0.0.1:3000/"));
+  assert.ok(!urlMatches("^/things/\\d+$", "http://x/things/new"));
+});
+
+test("flows: an expected request matches by method and path, with * for one segment and a status or a class", () => {
+  assert.ok(requestPathMatches("/api/things/*", "/api/things/42"));
+  assert.ok(requestPathMatches("/api/things/", "/api/things"));
+  assert.ok(!requestPathMatches("/api/things/*", "/api/things/42/notes"));
+  assert.ok(!requestPathMatches("/api/things", "/api/thing"));
+  assert.ok(statusMatches(200, 200) && !statusMatches(200, 201));
+  assert.ok(statusMatches("2xx", 204) && !statusMatches("2xx", 304));
+  const seen = [
+    { method: "GET", url: "http://x/api/things/42?full=1", status: 500 },
+    { method: "POST", url: "http://x/api/things/42", status: 200 },
+  ];
+  assert.deepEqual(matchRequest({ request: "POST /api/things/*", status: 200 }, seen), { ok: true });
+  assert.deepEqual(matchRequest({ request: "GET /api/things/*", status: "2xx" }, seen), { ok: false, reason: "GET /api/things/* answered 500, expected 2xx" });
+  assert.deepEqual(matchRequest({ request: "GET /api/other", status: 200 }, seen), {
+    ok: false,
+    reason: "no GET /api/other request was sent since the last action",
+  });
+});
+
+test("flows: the directory is the one named, none when off, and otherwise the project's own when it exists", () => {
+  const own = path.join("/p", ".scenescout", "flows");
+  assert.deepEqual(
+    resolveFlowsDir(undefined, "/p", (d) => d === own),
+    { dir: own },
+  );
+  assert.deepEqual(
+    resolveFlowsDir(undefined, "/p", () => false),
+    { dir: null },
+  );
+  assert.deepEqual(
+    resolveFlowsDir("off", "/p", () => true),
+    { dir: null },
+  );
+  assert.deepEqual(
+    resolveFlowsDir("/ci/flows", "/p", () => true),
+    { dir: "/ci/flows" },
+  );
+  // Named and missing is a mistake, not a check with no flows.
+  assert.deepEqual(
+    resolveFlowsDir("/ci/flows", "/p", () => false),
+    { error: "--flows: no directory at /ci/flows" },
+  );
+});
+
+test("flows: a directory is read in name order, other files are left alone, and one bad flow stops it", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scout-flows-"));
+  try {
+    fs.writeFileSync(path.join(dir, "b.json"), JSON.stringify({ steps: [{ action: "navigate", target: "/b" }] }));
+    fs.writeFileSync(path.join(dir, "a.json"), JSON.stringify({ steps: [{ action: "navigate", target: "/a" }] }));
+    fs.writeFileSync(path.join(dir, "notes.md"), "not a flow");
+    assert.deepEqual(
+      loadFlows(dir).flows.map((f) => f.file),
+      ["a.json", "b.json"],
+    );
+    fs.writeFileSync(path.join(dir, "c.json"), JSON.stringify({ steps: [{ action: "click", target: "testid=x" }] }));
+    assert.throws(() => loadFlows(dir), /^Error: flow c\.json: steps\[0\]\.action must be "navigate"/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function flowRun(over: Partial<FlowRun> = {}): FlowRun {
+  return {
+    name: "open details",
+    file: "details.json",
+    steps: 4,
+    outcome: { status: "passed" },
+    violations: [],
+    refusedBackground: [],
+    websockets: [],
+    ...over,
+  };
+}
+const BROKE: FlowRun["outcome"] = {
+  status: "failed",
+  step: 3,
+  did: 'expect text "Details loaded"',
+  reason: 'no visible text "Details loaded" within 5s',
+  path: "/things",
+};
+
+test("flows: a broken step is a high issue naming the flow and the step, and fails the default gate; a flow that passed adds nothing", () => {
+  const broke = issuesFromRoutes([route()], ORIGIN, [], [flowRun({ outcome: BROKE })]);
+  assert.deepEqual(
+    broke.map((i) => [i.rule, i.severity, i.evidence, i.routes]),
+    [
+      [
+        "flow-step-failed",
+        "high",
+        'flow "open details" (details.json) step 3 of 4, expect text "Details loaded": no visible text "Details loaded" within 5s',
+        ["/things"],
+      ],
+    ],
+  );
+  assert.equal(gateFailures(broke, "high").length, 1);
+  const passed = issuesFromRoutes([route()], ORIGIN, [], [flowRun()]);
+  assert.deepEqual(passed, []);
+  assert.deepEqual(issuesFromRoutes([route()], ORIGIN, ["flow-step-failed"], [flowRun({ outcome: BROKE })]), []);
+});
+
+test("flows: what the oracles caught during a flow goes through the page rules, and is one issue with the same failure on a crawled page", () => {
+  const v = { kind: "http_error" as const, severity: "high" as const, detail: httpErrorDetail("GET", `${ORIGIN}/api/things/42`, 500), url: `${ORIGIN}/things` };
+  const issues = issuesFromRoutes([route({ path: "/", violations: [v] })], ORIGIN, [], [flowRun({ violations: [{ path: "/things", violation: v }] })]);
+  assert.deepEqual(
+    issues.map((i) => [i.rule, i.evidence, i.routes]),
+    [["server-error", "GET /api/things/42 → HTTP 500", ["/", "/things"]]],
+  );
+});
+
+const REFUSED = flowRun({
+  name: "add",
+  file: "add.json",
+  steps: 2,
+  outcome: { status: "refused", step: 2, did: "click testid=add", reason: "the observe write policy refused POST /api/things", path: "/things" },
+});
+
+test("flows: a refused step is no issue about the app, and says which setting refused it", () => {
+  assert.deepEqual(issuesFromRoutes([route()], ORIGIN, [], [REFUSED]), []);
+  const never = { flows: [flowRun(), REFUSED], mode: "read-only" as const, settings: { ...DEFAULT_SETTINGS } };
+  assert.match(
+    refusedFlowReason(never) ?? "",
+    /^flow "add" \(add\.json\) step 2 of 2, click testid=add: the observe write policy refused POST \/api\/things\. Flows replay with --flow-writes never, so no step may send a write whatever --mode says/,
+  );
+  assert.match(
+    refusedFlowReason({ ...never, settings: { ...DEFAULT_SETTINGS, flowWrites: "allow" } }) ?? "",
+    /Flows replay under --mode read-only, which refuses that write/,
+  );
+  assert.equal(refusedFlowReason({ ...never, flows: [flowRun(), flowRun({ outcome: BROKE })] }), null);
+});
+
+test("on-refused-step report: the flow is marked could not run, everything else keeps its verdict, and the exit code is 2", () => {
+  const passedRest: CheckResult = { ...result([]), flows: [flowRun({ name: "details" }), REFUSED] };
+  assert.equal(summarise(passedRest).passed, true, "the rest passed");
+  assert.equal(summarise(passedRest).couldNotRun, 1);
+  assert.equal(exitCodeOf(passedRest), 2);
+  const md = formatCheck(passedRest);
+  assert.match(md, /\*\*COULD NOT RUN\*\* — 1 flow\(s\) had a step refused \(see Flows\); the rest passed — /);
+  assert.match(
+    md,
+    /- ⊘ add \(`add\.json`\): could not run — step 2 of 2, click testid=add: the observe write policy refused POST \/api\/things _\(--flow-writes never\)_/,
+  );
+  assert.match(md, /- ✓ details/);
+  const failedRest: CheckResult = { ...result([issue("high")]), flows: [REFUSED] };
+  assert.match(formatCheck(failedRest), /\*\*COULD NOT RUN\*\* — .*the rest failed — 1 issue/);
+  assert.equal(exitCodeOf(failedRest), 2, "incomplete outranks the gate");
+  const json = toSummaryJson(passedRest, "1.0.0") as { gate: { passed: boolean; couldNotRun: number } };
+  assert.deepEqual([json.gate.passed, json.gate.couldNotRun], [true, 1]);
+  const sarif = toSarif(passedRest, "1") as {
+    runs: Array<{ invocations: Array<{ executionSuccessful: boolean; toolExecutionNotifications: Array<{ message: { text: string } }> }>; results: unknown[] }>;
+  };
+  const inv = sarif.runs[0].invocations[0];
+  assert.equal(inv.executionSuccessful, false);
+  assert.match(inv.toolExecutionNotifications[0].message.text, /^Could not run: flow "add" \(add\.json\) step 2 of 2/);
+  assert.deepEqual(sarif.runs[0].results, [], "a flow that could not run is not a result about the app");
+  // With nothing refused the run is complete, and the exit code is the gate's.
+  const whole: CheckResult = { ...result([]), flows: [flowRun()] };
+  assert.equal(exitCodeOf(whole), 0);
+  assert.equal((toSarif(whole, "1") as typeof sarif).runs[0].invocations[0].executionSuccessful, true);
+  assert.equal(exitCodeOf(result([issue("high")])), 1);
+});
+
+test("settings: the report and check.json say what the check was allowed to do", () => {
+  const r = result([]);
+  assert.equal(describeSettings(r), "flow writes: never (flows replay under observe) · refused step: report · re-tests: on, gating those filed high");
+  assert.equal(
+    describeSettings({ ...r, settings: { flowWrites: "allow", onRefusedStep: "stop", gateRetests: "all", retest: true } }),
+    "flow writes: allow (flows replay under read-only) · refused step: stop · re-tests: on, gating every one still reproducing",
+  );
+  assert.match(describeSettings({ ...r, settings: { ...DEFAULT_SETTINGS, retest: false } }), /re-tests: off$/);
+  assert.match(formatCheck(r), /^Settings — flow writes: never/m);
+  assert.deepEqual((toSummaryJson(r, "1") as { settings: unknown }).settings, DEFAULT_SETTINGS);
+});
+
+test("flows: the report and check.json say how each flow went", () => {
+  const r: CheckResult = {
+    ...result(issuesFromRoutes([], ORIGIN, [], [flowRun({ outcome: BROKE })])),
+    flows: [flowRun({ name: "listed" }), flowRun({ outcome: BROKE })],
+  };
+  const md = formatCheck(r);
+  assert.match(md, /## Flows \(2\)/);
+  assert.match(md, /- ✓ listed \(`details\.json`\): 4 step\(s\) passed/);
+  assert.match(md, /- ✗ open details \(`details\.json`\): step 3 of 4, expect text "Details loaded": no visible text/);
+  assert.match(md, /\*\*FAILED\*\*/);
+  const json = toSummaryJson(r, "1.0.0") as { flows: unknown[] };
+  assert.deepEqual(json.flows, [
+    { name: "listed", file: "details.json", steps: 4, status: "passed", refusedBackground: [], websockets: [] },
+    {
+      name: "open details",
+      file: "details.json",
+      steps: 4,
+      status: "failed",
+      step: 3,
+      did: 'expect text "Details loaded"',
+      reason: 'no visible text "Details loaded" within 5s',
+      path: "/things",
+      refusedBackground: [],
+      websockets: [],
+    },
+  ]);
+});
+
+test("flows: a token in a flow's page or request URL is redacted before anything is written", () => {
+  const v = { kind: "http_error" as const, severity: "high" as const, detail: "GET /x → HTTP 500", url: `${ORIGIN}/reset?token=Q7x9Rt2mLp4VzK8w` };
+  const [clean] = redactFlowRuns([
+    flowRun({
+      outcome: { ...BROKE, did: "navigate /reset?token=Q7x9Rt2mLp4VzK8w", path: "/reset?token=Q7x9Rt2mLp4VzK8w" } as FlowRun["outcome"],
+      violations: [{ path: "/reset?token=Q7x9Rt2mLp4VzK8w", violation: v }],
+      refusedBackground: ["POST https://collector.example/c?token=Q7x9Rt2mLp4VzK8w"],
+      websockets: ["wss://live.example/socket?token=Q7x9Rt2mLp4VzK8w"],
+    }),
+  ]);
+  assert.ok(!JSON.stringify(clean).includes("Q7x9Rt2mLp4VzK8w"), JSON.stringify(clean));
+  // Everything written from it: the report, check.json and the SARIF.
+  const r: CheckResult = { ...result(issuesFromRoutes([], ORIGIN, [], [clean])), flows: [clean] };
+  const written = formatCheck(r) + JSON.stringify(toSummaryJson(r, "1")) + JSON.stringify(toSarif(r, "1"));
+  assert.ok(written.includes("navigate /reset?token=[redacted]"), written);
+  assert.ok(!written.includes("Q7x9Rt2mLp4VzK8w"), written);
+});
+
+test("flows: the flows directory is the one part of .scenescout/ that git does not ignore", (t) => {
+  const git = spawnSync("git", ["--version"]);
+  if (git.status !== 0) return t.skip("git is not installed");
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "scout-ignore-"));
+  try {
+    spawnSync("git", ["init", "-q"], { cwd: repo });
+    const dir = path.join(repo, ".scenescout");
+    fs.mkdirSync(path.join(dir, "flows"), { recursive: true });
+    writeSelfIgnore(dir);
+    for (const f of ["memory.json", "flows/notes.txt", "flows/sign-in.json"]) fs.writeFileSync(path.join(dir, f), "{}");
+    const untracked = spawnSync("git", ["status", "--porcelain", "-uall"], { cwd: repo, encoding: "utf8" }).stdout.trim();
+    assert.equal(untracked, "?? .scenescout/flows/sign-in.json");
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Re-testing open findings (engine/verify.ts): which ones a page load can
+// reproduce, and what a load says about each.
+// ---------------------------------------------------------------------------
+
+function finding(over: Partial<Finding> = {}): Finding {
+  return {
+    id: "f1",
+    severity: "high",
+    category: "http-error",
+    title: "Summary widget fails to load",
+    detail: "",
+    evidence: "GET /api/summary 500",
+    url: `${ORIGIN}/dashboard?range=week`,
+    state: "/dashboard#x",
+    repro: [`crawl /dashboard?range=week @ ${ORIGIN}/dashboard?range=week`, `snapshot @ ${ORIGIN}/dashboard?range=week`],
+    foundAt: "2026-09-01T00:00:00.000Z",
+    runs: 1,
+    ...over,
+  };
+}
+
+test("retest: only a failed GET whose page was only looked at can be re-tested by loading the page", () => {
+  const plan = (f: Finding) => checkRetestPlan([f]).candidates;
+  assert.deepEqual(
+    plan(finding()).map((c) => [c.path, c.signatures]),
+    [["/dashboard?range=week", ["GET /api/summary 500"]]],
+  );
+  // How the page was reached is not part of the reproduction: only what happened on it.
+  assert.equal(plan(finding({ repro: [`click Reports @ ${ORIGIN}/dashboard`, `design-audit @ ${ORIGIN}/dashboard`] })).length, 1);
+  const refused: Array<[string, Partial<Finding>]> = [
+    ["a click on the page", { repro: [`navigate @ ${ORIGIN}/dashboard`, `click Refresh @ ${ORIGIN}/dashboard`] }],
+    ["a plan step on the page", { repro: [`navigate @ ${ORIGIN}/dashboard`, `plan:type label=Search @ ${ORIGIN}/dashboard`] }],
+    ["a replayed request", { repro: [`navigate @ ${ORIGIN}/dashboard`, `request GET /api/summary @ ${ORIGIN}/dashboard`] }],
+    ["an action it does not know", { repro: [`navigate @ ${ORIGIN}/dashboard`, `something-new @ ${ORIGIN}/dashboard`] }],
+    ["no repro at all", { repro: [] }],
+    ["a failed POST", { evidence: "POST /api/summary 500" }],
+    ["a GET and a POST", { evidence: "GET /api/summary 500 after POST /api/refresh 500" }],
+    ["no status", { evidence: "GET /api/summary" }],
+    ["no request", { evidence: "widget summary shows 0" }],
+    ["a redacted secret in its URL", { url: `${ORIGIN}/reset?token=[redacted] [1 secret redacted]` }],
+    ["resolved", { status: "resolved" }],
+  ];
+  for (const [why, over] of refused) assert.deepEqual(plan(finding(over)), [], why);
+  assert.equal(checkRetestPlan([finding(), finding({ id: "f2", status: "resolved" }), finding({ id: "f3", evidence: "copy is unclear" })]).open, 2);
+});
+
+const page = (over: Partial<MeasuredPage> = {}): MeasuredPage => ({
+  path: "/dashboard?range=week",
+  status: 200,
+  loginRedirect: false,
+  httpErrors: [],
+  ...over,
+});
+
+test("retest: the same failure on load reproduces it; a clean load says possibly fixed; no load says nothing", () => {
+  const [c] = checkRetestPlan([finding()]).candidates;
+  const verdict = (pages: MeasuredPage[]) => retestResults([c], pages)[0];
+  assert.equal(verdict([page({ httpErrors: [httpErrorDetail("GET", `${ORIGIN}/api/summary?x=1`, 500)] })]).verdict, "reproduces");
+  // Another status on the same request is a different failure: not this finding reproducing.
+  assert.equal(verdict([page({ httpErrors: [httpErrorDetail("GET", `${ORIGIN}/api/summary`, 404)] })]).verdict, "possibly-fixed");
+  assert.equal(verdict([page()]).verdict, "possibly-fixed");
+  assert.deepEqual(
+    [verdict([]), verdict([page({ status: null, loadError: "net::ERR_CONNECTION_RESET" })]), verdict([page({ loginRedirect: true })])].map((r) => [
+      r.verdict,
+      r.note,
+    ]),
+    [
+      ["not-reached", "the page was not visited"],
+      ["not-reached", "the page did not load"],
+      ["not-reached", "the page sent the browser to sign-in"],
+    ],
+  );
+  // The document's own status is not among the violations the check keeps, so it is read from the route.
+  const [own] = checkRetestPlan([finding({ evidence: "GET /dashboard 500" })]).candidates;
+  assert.equal(retestResults([own], [page({ status: 500 })])[0].verdict, "reproduces");
+});
+
+const RETESTS: NonNullable<CheckResult["retest"]> = {
+  open: 4,
+  results: [
+    { id: "f1", severity: "high", title: "Summary widget fails to load", path: "/dashboard", signatures: ["GET /api/summary 500"], verdict: "reproduces" },
+    { id: "f2", severity: "medium", title: "Avatar 404", path: "/", signatures: ["GET /img/a.png 404"], verdict: "reproduces" },
+    { id: "f3", severity: "high", title: "Feed fails", path: "/feed", signatures: ["GET /api/feed 500"], verdict: "possibly-fixed" },
+  ],
+};
+
+test("gate-retests: high gates a still-reproducing finding filed high, all gates every one, never gates none; possibly fixed never does", () => {
+  const at = (gateRetests: GateRetests, failOn: CheckResult["failOn"] = "high"): CheckResult => ({
+    ...result([], failOn),
+    retest: RETESTS,
+    settings: { ...DEFAULT_SETTINGS, gateRetests },
+  });
+  assert.deepEqual(
+    retestGateFailures(at("high")).map((r) => r.id),
+    ["f1"],
+  );
+  assert.deepEqual(
+    retestGateFailures(at("all")).map((r) => r.id),
+    ["f1", "f2"],
+  );
+  assert.deepEqual(retestGateFailures(at("never")), []);
+  // --fail-on never reports only, re-tests included.
+  assert.deepEqual(retestGateFailures(at("all", "never")), []);
+  assert.deepEqual([summarise(at("high")).passed, summarise(at("high")).failing, summarise(at("high")).retestsFailing], [false, 1, 1]);
+  assert.equal(exitCodeOf(at("high")), 1);
+  assert.equal(summarise(at("never")).passed, true);
+  assert.equal(exitCodeOf(at("never")), 0);
+  const md = formatCheck(at("high"));
+  assert.match(md, /\*\*FAILED\*\* — 1 failing the gate \(0 issue\(s\), 1 re-tested finding\(s\)\)/);
+  assert.match(md, /\[high\] Summary widget fails to load \(f1\) on `\/dashboard`: still reproduces — \*\*fails the gate\*\*/);
+  assert.match(md, /\[medium\] Avatar 404 \(f2\) on `\/`: still reproduces — `GET/);
+  assert.match(md, /\[high\] Feed fails \(f3\) on `\/feed`: possibly fixed/);
+  assert.match(md, /1 open finding\(s\) need an interaction to reproduce/);
+  const sarif = toSarif(at("high"), "1") as {
+    runs: Array<{ results: Array<{ ruleId: string; message: { text: string } }>; tool: { driver: { rules: Array<{ id: string }> } } }>;
+  };
+  assert.deepEqual(
+    sarif.runs[0].results.map((x) => x.ruleId),
+    ["open-finding-reproduces"],
+  );
+  assert.ok(sarif.runs[0].tool.driver.rules.some((x) => x.id === "open-finding-reproduces"));
+  assert.deepEqual((toSarif(at("never"), "1") as typeof sarif).runs[0].results, []);
+  assert.deepEqual((toSummaryJson(at("high"), "1.0.0") as { retest: unknown }).retest, RETESTS);
+});
+
+test("retest: a hand-edited memory entry the rules cannot read is left out, not a crash", () => {
+  const good = finding();
+  const kept = wellFormedFindings([
+    good,
+    null,
+    "x",
+    { ...good, id: 7 },
+    { ...good, evidence: 500 },
+    { ...good, repro: "crawl /" },
+    { ...good, url: undefined },
+  ]);
+  assert.deepEqual(kept, [good]);
+  assert.equal(checkRetestPlan(kept).candidates.length, 1);
+});
+
+test("action: a partly-run check names the flow that could not run and what the rest found; a true no-verdict exit keeps its message", () => {
+  const error =
+    'could not run a saved flow: flow "add" (add.json) step 2 of 2, click testid=add: the observe write policy refused POST /api/things. Flows replay with --flow-writes never';
+  const restPassed = verdict({ exitCode: "2", failOn: "high", url: "http://x", error, passed: "true", failing: "0", couldNotRun: "1" });
+  assert.equal(restPassed.exit, 2);
+  assert.match(
+    restPassed.annotation ?? "",
+    /^::error title=SceneScout check could not run 1 flow\(s\)::On http:\/\/x: flow "add" \(add\.json\) step 2 of 2, click testid=add: the observe write policy refused POST \/api\/things\. .* The rest of the check passed\. The report is on the job summary/,
+  );
+  assert.ok(!/No verdict|setup problem/.test(restPassed.annotation ?? ""), restPassed.annotation ?? "");
+  const restFailed = verdict({ exitCode: "2", failOn: "medium", url: "http://x", error, passed: "false", failing: "3", couldNotRun: "1" });
+  assert.match(restFailed.annotation ?? "", /The rest of the check failed: 3 issue\(s\) at medium severity or worse\./);
+  // No check.json (the outputs are empty), or one with nothing that could not run: the check had no verdict at all.
+  for (const partial of [
+    { passed: "", couldNotRun: "" },
+    { passed: "true", couldNotRun: "0" },
+  ]) {
+    const none = verdict({ exitCode: "2", failOn: "high", url: "http://x", error: "Could not load http://x", ...partial });
+    assert.match(
+      none.annotation ?? "",
+      /^::error title=SceneScout check could not run::No verdict for http:\/\/x: Could not load http:\/\/x\. This is a setup problem/,
+      JSON.stringify(partial),
+    );
+  }
+  // check.json's couldNotRun reaches the step's outputs, and a missing field reads as none.
+  const json = toSummaryJson({ ...result([]), flows: [REFUSED] }, "1.0.0");
+  assert.equal(summaryOutputs(json)?.["could-not-run"], "1");
+  assert.equal(summaryOutputs({ gate: { passed: true }, counts: {} })?.["could-not-run"], "0");
+});
+
+test("action: the verdict step is handed what a partly-run message needs", () => {
+  const steps = action.runs.steps as Array<{ name: string; env?: Record<string, string> }>;
+  const env = steps.find((s) => s.name === "Verdict")!.env ?? {};
+  assert.equal(env.PASSED, "${{ steps.run.outputs.passed }}");
+  assert.equal(env.COULD_NOT_RUN, "${{ steps.run.outputs.could-not-run }}");
+});
+
+test("flows: a role target must name an ARIA role, so a typo stops the check when the file is read", () => {
+  const flow = (target: string) =>
+    JSON.stringify({
+      steps: [
+        { action: "navigate", target: "/" },
+        { action: "click", target },
+      ],
+    });
+  const typo = parseFlow(flow('role=buton[name="Save"]'), "f.json");
+  assert.ok(!typo.ok);
+  assert.match(typo.error, /^f\.json: steps\[1\]\.target names the role "buton", which is not an ARIA role/);
+  for (const ok of ['role=button[name="Save"]', "role=link", "role=textbox[name=Email]", "role=tab"]) assert.ok(parseFlow(flow(ok), "f.json").ok, ok);
+});
+
+test("flows: a refused beacon or ping is listed, not charged to the step, whatever its origin; every other refused write is charged, wherever it goes", () => {
+  const app = "http://127.0.0.1:4173";
+  assert.deepEqual(
+    splitRefusals(
+      [
+        { sig: `POST ${app}/api/things`, type: "fetch" },
+        // An API on another port is still the step's write.
+        { sig: "POST http://127.0.0.1:5999/api/things", type: "fetch" },
+        { sig: "POST http://127.0.0.1:5999/collect", type: "xhr" },
+        { sig: `navigation to ${app}/submit`, type: "document" },
+        { sig: "POST http://127.0.0.1:5999/beacon", type: "ping" },
+        { sig: `POST ${app}/beacon`, type: "beacon" },
+        { sig: "POST (no kind recorded)" },
+      ],
+      app,
+    ),
+    {
+      charged: [
+        "POST /api/things",
+        "POST http://127.0.0.1:5999/api/things",
+        "POST http://127.0.0.1:5999/collect",
+        "navigation to /submit",
+        "POST (no kind recorded)",
+      ],
+      background: ["POST http://127.0.0.1:5999/beacon", `POST ${app}/beacon`],
+    },
+  );
+  const r: CheckResult = {
+    ...result([]),
+    flows: [flowRun({ refusedBackground: ["POST http://127.0.0.1:5999/beacon"], websockets: ["ws://127.0.0.1:4173/live"] })],
+  };
+  const md = formatCheck(r);
+  assert.match(md, /refused background requests \(beacons and pings, not charged to a step\): `POST http:\/\/127\.0\.0\.1:5999\/beacon`/);
+  assert.match(md, /WebSocket connections opened \(not covered by the write rule\): `ws:\/\/127\.0\.0\.1:4173\/live`/);
+  assert.equal(exitCodeOf(r), 0, "a refused beacon alone leaves the flow passed");
+  const json = toSummaryJson(r, "1") as { flows: Array<{ refusedBackground: string[]; websockets: string[] }> };
+  assert.deepEqual([json.flows[0].refusedBackground, json.flows[0].websockets], [["POST http://127.0.0.1:5999/beacon"], ["ws://127.0.0.1:4173/live"]]);
+});
+
+test("flows: what else is in the flows directory is listed as skipped with its reason; a link is followed only inside the directory", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "scout-skip-"));
+  try {
+    const dir = path.join(root, "flows");
+    fs.mkdirSync(path.join(dir, "old"), { recursive: true });
+    const valid = JSON.stringify({ steps: [{ action: "navigate", target: "/" }] });
+    fs.writeFileSync(path.join(dir, "a.json"), valid);
+    fs.writeFileSync(path.join(dir, "README.md"), "notes");
+    fs.writeFileSync(path.join(root, "outside.json"), valid);
+    fs.symlinkSync(path.join(dir, "a.json"), path.join(dir, "b.json"));
+    fs.symlinkSync(path.join(root, "outside.json"), path.join(dir, "c.json"));
+    fs.symlinkSync(path.join(root, "missing.json"), path.join(dir, "d.json"));
+    const { flows, skipped } = loadFlows(dir);
+    assert.deepEqual(
+      flows.map((f) => f.file),
+      ["a.json", "b.json"],
+    );
+    assert.deepEqual(skipped, [
+      { file: "README.md", reason: "not a .json file" },
+      { file: "c.json", reason: "a symbolic link to a file outside the flows directory" },
+      { file: "d.json", reason: "a symbolic link to nothing" },
+      { file: "old", reason: "a directory: flows are not read from subdirectories" },
+    ]);
+    const md = formatCheck({ ...result([]), skippedFlows: skipped });
+    assert.match(md, /- skipped `c\.json`: a symbolic link to a file outside the flows directory/);
+    assert.deepEqual((toSummaryJson({ ...result([]), skippedFlows: skipped }, "1") as { skippedFlows: unknown }).skippedFlows, skipped);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("retest: pages loaded only to re-test are counted in the report, apart from the routes", () => {
+  const r: CheckResult = { ...result([]), retest: { open: 1, extraPages: 2, results: [] } };
+  assert.match(
+    formatCheck(r),
+    /2 page\(s\) were loaded only to re-test these findings; they are not in the routes above and no page rule was applied to them\./,
+  );
+});
+
+test("action: the annotation says what failing counts when re-tested findings are in it", () => {
+  // --gate-retests all: 3 failing, 2 of them re-tested findings, 1 an issue.
+  const failed = verdict({ exitCode: "1", failing: "3", retestsFailing: "2", failOn: "high", url: "http://x" });
+  assert.match(
+    failed.annotation ?? "",
+    /::3 failing the gate \(1 issue\(s\) at high severity or worse, 2 re-tested finding\(s\) still reproducing\) on http:\/\/x\./,
+  );
+  // No re-tests in the gate: the sentence is the one it always was.
+  assert.match(
+    verdict({ exitCode: "1", failing: "3", retestsFailing: "0", failOn: "high", url: "http://x" }).annotation ?? "",
+    /::3 issue\(s\) at high severity or worse on http/,
+  );
+  const partial = verdict({ exitCode: "2", failing: "2", retestsFailing: "2", failOn: "high", url: "http://x", error: "x", passed: "false", couldNotRun: "1" });
+  assert.match(
+    partial.annotation ?? "",
+    /The rest of the check failed: 2 failing the gate \(0 issue\(s\) at high severity or worse, 2 re-tested finding\(s\) still reproducing\)/,
+  );
+  const r: CheckResult = {
+    ...result([]),
+    retest: { open: 1, results: [{ id: "f", severity: "high", title: "t", path: "/", signatures: ["GET /x 500"], verdict: "reproduces" }] },
+  };
+  assert.equal(summaryOutputs(toSummaryJson(r, "1"))?.["retests-failing"], "1");
+  const steps = action.runs.steps as Array<{ name: string; env?: Record<string, string> }>;
+  assert.equal(steps.find((s) => s.name === "Verdict")!.env?.RETESTS_FAILING, "${{ steps.run.outputs.retests-failing }}");
+});
+
+test("SARIF: a gating re-test's level is the severity its finding was filed at", () => {
+  const at = (severity: string): string => {
+    const r: CheckResult = {
+      ...result([]),
+      retest: { open: 1, results: [{ id: "f", severity, title: "t", path: "/", signatures: ["GET /x 500"], verdict: "reproduces" }] },
+      settings: { ...DEFAULT_SETTINGS, gateRetests: "all" },
+    };
+    return (toSarif(r, "1") as { runs: Array<{ results: Array<{ level: string }> }> }).runs[0].results[0].level;
+  };
+  assert.deepEqual(["high", "medium", "low", "critical"].map(at), ["error", "warning", "note", "error"]);
 });

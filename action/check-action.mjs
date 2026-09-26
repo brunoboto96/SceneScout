@@ -93,6 +93,10 @@ export function summaryOutputs(json) {
     high: String(json.counts.high ?? 0),
     medium: String(json.counts.medium ?? 0),
     low: String(json.counts.low ?? 0),
+    // Flows a refused step kept from running (--on-refused-step report): the rest has a verdict, this part does not.
+    "could-not-run": String(json.gate.couldNotRun ?? 0),
+    // Of `failing`, how many are re-tested findings (--gate-retests), so the annotation can say what it counts.
+    "retests-failing": String(json.gate.retestsFailing ?? 0),
   };
 }
 
@@ -104,21 +108,40 @@ export function escapeAnnotation(text) {
 /**
  * How the step ends. Exit 1 is the gate's verdict; 2, or anything else (a
  * crash, a signal), means the check could not run, and says so, so a broken
- * setup is never read as a failing app.
+ * setup is never read as a failing app. A 2 that left a check.json behind
+ * with flows that could not run is a partly-run check: it says which flow and
+ * step, and what the rest of the check found, rather than "no verdict".
  */
-export function verdict({ exitCode, failing, failOn, url, error }) {
+/** What `failing` counts, in words: issues, and re-tested findings when --gate-retests put some in the gate. */
+export function failingText(failing, retestsFailing, failOn) {
+  const n = Number(failing) || 0;
+  const r = Math.min(Number(retestsFailing) || 0, n);
+  const at = `at ${failOn || "high"} severity or worse`;
+  return r > 0 ? `${n} failing the gate (${n - r} issue(s) ${at}, ${r} re-tested finding(s) still reproducing)` : `${n} issue(s) ${at}`;
+}
+
+export function verdict({ exitCode, failing, failOn, url, error, passed, couldNotRun, retestsFailing }) {
   const code = Number(exitCode);
   if (code === 0) return { exit: 0, annotation: null };
   if (code === 1) {
-    const n = Number(failing) || 0;
     return {
       exit: 1,
       annotation: `::error title=SceneScout check failed::${escapeAnnotation(
-        `${n} issue(s) at ${failOn || "high"} severity or worse on ${url}. The report is on the job summary and in report.md.`,
+        `${failingText(failing, retestsFailing, failOn)} on ${url}. The report is on the job summary and in report.md.`,
       )}`,
     };
   }
   const why = String(error ?? "").trim() || (Number.isNaN(code) ? "the check did not start" : `it exited with code ${code}`);
+  const incomplete = Number(couldNotRun) || 0;
+  if (code === 2 && incomplete > 0 && (passed === "true" || passed === "false")) {
+    const rest = passed === "true" ? "The rest of the check passed" : `The rest of the check failed: ${failingText(failing, retestsFailing, failOn)}`;
+    return {
+      exit: 2,
+      annotation: `::error title=SceneScout check could not run ${incomplete} flow(s)::${escapeAnnotation(
+        `On ${url}: ${why.replace(/^could not run a saved flow:\s*/, "")} ${rest}. The report is on the job summary and in report.md.`,
+      )}`,
+    };
+  }
   return {
     exit: 2,
     annotation: `::error title=SceneScout check could not run::${escapeAnnotation(`No verdict for ${url}: ${why}. This is a setup problem, not a result about the app.`)}`,
@@ -273,7 +296,7 @@ function run() {
     report: file("report.md"),
     json: file("check.json"),
     sarif: file("check.sarif"),
-    ...(summary ?? { passed: "", failing: "", high: "", medium: "", low: "" }),
+    ...(summary ?? { passed: "", failing: "", high: "", medium: "", low: "", "could-not-run": "", "retests-failing": "" }),
   });
 }
 
@@ -285,6 +308,9 @@ function end() {
     failOn: String(inputs["fail-on"] ?? "").trim(),
     url: String(inputs.url ?? "").trim(),
     error: process.env.ERROR,
+    passed: process.env.PASSED,
+    couldNotRun: process.env.COULD_NOT_RUN,
+    retestsFailing: process.env.RETESTS_FAILING,
   });
   if (v.annotation) console.log(v.annotation);
   process.exit(v.exit);

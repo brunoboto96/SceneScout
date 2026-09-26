@@ -669,6 +669,8 @@ function sameFinding(
 
 /** Per-project directory for memory, session logs, and reports. */
 export const MEMORY_DIRNAME = ".scenescout";
+/** The one directory under it that is committed rather than ignored: saved flows (flow.ts). */
+export const SELF_IGNORE_KEEP = "flows";
 /** What the directory was called before the tool was renamed. */
 export const LEGACY_MEMORY_DIRNAME = ".scenecraft";
 
@@ -738,6 +740,10 @@ function liveOwnerPid(dir: string, isAlive: (pid: number) => boolean): number | 
  * `git status`. That gets the same result without editing a file we do not
  * own, and it disappears cleanly when someone deletes the directory.
  *
+ * The one exception is `flows/`: saved flows are inputs a team commits so
+ * CI replays them, not output. A file written before that exception existed
+ * is still left alone; docs/ci.md says which two lines to add to it.
+ *
  * Best-effort and idempotent — a read-only checkout must never break attach,
  * and an existing file is left exactly as the user left it.
  */
@@ -749,7 +755,10 @@ export function writeSelfIgnore(dir: string): string | null {
       ignorePath,
       "# SceneScout exploratory-test artifacts: memory, session logs, status, report.\n" +
         "# Self-ignoring so a `git add -A` in the tested project can never commit them.\n" +
-        "*\n",
+        "*\n" +
+        "# Except the flows `scenescout check` replays: they are written to be committed.\n" +
+        `!${SELF_IGNORE_KEEP}/\n` +
+        `!${SELF_IGNORE_KEEP}/*.json\n`,
     );
     return `Wrote ${MEMORY_DIRNAME}/.gitignore so these test artifacts stay out of your commits.`;
   } catch {

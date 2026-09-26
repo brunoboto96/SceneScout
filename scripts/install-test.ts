@@ -35,6 +35,7 @@ import {
   browserPresence,
   defaultAttachNote,
   defaultEngine,
+  beaconResourceType,
   echoesFailedLoads,
   focusAdvanceKey,
   headlessShellDir,
@@ -44,6 +45,7 @@ import {
   screencastSupport,
   serviceWorkerPolicy,
   sharedWorkersAllowed,
+  unloadBeaconsEscapePolicy,
 } from "../src/browsers.ts";
 
 import { explorePrompt, loadPlaybook, PLAYBOOK_RELATIVE_PATH, SERVER_INSTRUCTIONS, stripFrontMatter } from "../src/playbook.ts";
@@ -1084,4 +1086,15 @@ test("npm failing with nothing on stderr is still given a reason", () => {
   assert.equal(silent.status === "failed" ? silent.detail : "", "npm exited 1");
   const killed = ensureCommand(plan, () => ({ status: null, stdout: "", stderr: "", missing: false }));
   assert.equal(killed.status === "failed" ? killed.detail : "", "npm exited without finishing");
+});
+
+test("a beacon is a ping in Chromium and a beacon elsewhere, and only Chromium lets one sent on pagehide past interception", () => {
+  assert.deepEqual(
+    (["chromium", "firefox", "webkit"] as const).map((e) => [e, beaconResourceType(e), unloadBeaconsEscapePolicy(e)]),
+    [
+      ["chromium", "ping", true],
+      ["firefox", "beacon", false],
+      ["webkit", "beacon", false],
+    ],
+  );
 });
