@@ -6,7 +6,7 @@
  * every engine the verdict must be the policy's: sent where the mode allows
  * the write, and refused and reported where it does not.
  */
-import { allowedUnloadWritesMayBeLost, unloadWriteInterception, writeRedirectHopsJudged } from "../../dist/browsers.js";
+import { allowedUnloadWritesMayBeLost, frameUnloadWritesMayGoUnissued, unloadWriteInterception, writeRedirectHopsJudged } from "../../dist/browsers.js";
 import { BrowserEngine, type WriteMode } from "../../dist/engine/browser.js";
 import { BROWSER, check, settle, type SmokeContext } from "./harness.ts";
 
@@ -70,8 +70,10 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     JSON.stringify(stats.writes),
   );
   check(
-    `read-only (${how}): nothing is reported as refused, and the writes are named as possible mutations`,
-    !readOnly.result.includes("WRITE-POLICY blocked") && /may have mutated[^\n]*\/api\/unload\//.test(readOnly.result),
+    `read-only (${how}): nothing is reported as refused, the writes are named as possible mutations, and the fixture raises no http_error`,
+    !readOnly.result.includes("WRITE-POLICY blocked") &&
+      /may have mutated[^\n]*\/api\/unload\//.test(readOnly.result) &&
+      !/http_error[^\n]*\/api\/unload\//.test(readOnly.result),
     readOnly.result,
   );
 
@@ -100,11 +102,21 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       (mayBeLost ? embed.delta(BEACON) <= 1 && embed.delta(KEEPALIVE) <= 1 : embed.delta(BEACON) === 1 && embed.delta(KEEPALIVE) === 1),
     JSON.stringify(stats.writes),
   );
-  check(
-    `read-only (${how}): the embed's writes are reported as refused, as another site's frame's`,
+  // Firefox may tear the frame down before its writes are issued (frameUnloadWritesMayGoUnissued): then nothing reaches
+  // the route handler and there is nothing to report. The hard assertion, never reaching the server, is the one above.
+  const embedReported =
     embed.result.includes("WRITE-POLICY blocked (read-only)") &&
-      /\/api\/unload\/embed-beacon/.test(embed.result) &&
-      /sent from a frame of http:\/\/127\.0\.0\.1/.test(embed.result),
+    /\/api\/unload\/embed-beacon/.test(embed.result) &&
+    /sent from a frame of http:\/\/127\.0\.0\.1/.test(embed.result);
+  const embedLetThrough = /may have mutated[^\n]*\/api\/unload\/embed-/.test(embed.result);
+  check(
+    frameUnloadWritesMayGoUnissued(BROWSER)
+      ? `read-only (${how}): the embed's writes are reported as refused, as another site's frame's, or were never issued; never let through`
+      : `read-only (${how}): the embed's writes are reported as refused, as another site's frame's`,
+    !embedLetThrough &&
+      !/http_error[^\n]*\/api\/unload\//.test(embed.result) &&
+      // Where the frame may be torn down first, one, both or neither may have been issued; any that was is refused.
+      (embedReported || frameUnloadWritesMayGoUnissued(BROWSER)),
     embed.result,
   );
 

@@ -213,6 +213,12 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end();
       return;
     }
+    // Every other write the unload fixture sends is accepted, so a write that goes out is not also an http_error.
+    if (urlPath.startsWith("/api/unload/")) {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     // Endpoints that refuse, for the contradiction oracles. The status is in
     // the path so a fixture page can ask for the one it wants to be refused
     // with, and the body is JSON because these stand in for an app's own API.

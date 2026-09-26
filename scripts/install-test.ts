@@ -48,6 +48,7 @@ import {
   unloadWriteInterception,
   allowedUnloadWritesMayBeLost,
   writeRedirectHopsJudged,
+  frameUnloadWritesMayGoUnissued,
 } from "../src/browsers.ts";
 
 import { explorePrompt, loadPlaybook, PLAYBOOK_RELATIVE_PATH, SERVER_INSTRUCTIONS, stripFrontMatter } from "../src/playbook.ts";
@@ -1098,11 +1099,12 @@ test("a beacon is a ping in Chromium and a beacon elsewhere; only Chromium needs
       unloadWriteInterception(e),
       allowedUnloadWritesMayBeLost(e),
       writeRedirectHopsJudged(e),
+      frameUnloadWritesMayGoUnissued(e),
     ]),
     [
-      ["chromium", "ping", "browser-fetch", false, true],
-      ["firefox", "beacon", "route", false, false],
-      ["webkit", "beacon", "route", true, false],
+      ["chromium", "ping", "browser-fetch", false, true, false],
+      ["firefox", "beacon", "route", false, false, true],
+      ["webkit", "beacon", "route", true, false, false],
     ],
   );
 });

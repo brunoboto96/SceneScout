@@ -244,7 +244,7 @@ engine; `unloadWriteInterception` in `browsers.ts` records where, and the
 unload smoke suite asserts both directions on each. WebKit may cancel an
 unload write the route handler lets through once the page has gone, so there a
 mode that allows the write does not promise it arrives
-(`allowedUnloadWritesMayBeLost`); nothing it refused is sent.
+(`allowedUnloadWritesMayBeLost`); nothing it refused is sent. Firefox, under load, can tear another site's frame down before the writes it sends on `pagehide` are issued at all, so nothing is sent and there is nothing to report (`frameUnloadWritesMayGoUnissued`).
 
 ## Consequences
 

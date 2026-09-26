@@ -227,6 +227,19 @@ export function allowedUnloadWritesMayBeLost(engine: BrowserEngineName): boolean
 }
 
 /**
+ * Whether the writes another site's frame sends on `pagehide` may never be
+ * issued when the top page is left. Firefox can tear such a frame down before
+ * its requests reach the route handler, so there is nothing to refuse or to
+ * report, and nothing is sent. It depends on timing: seen in CI and under load
+ * locally, not on an idle machine. Chromium's browser-level interception and
+ * WebKit's route handler met them every time in the same runs. The writes the
+ * top page itself sends are not affected.
+ */
+export function frameUnloadWritesMayGoUnissued(engine: BrowserEngineName): boolean {
+  return engine === "firefox";
+}
+
+/**
  * Whether a write carried on by a redirect (a 307 or 308 keeps the method and
  * the body) is judged at its new address. The route handler sees only the
  * first request of a redirect in every engine. In Chromium the browser-level
