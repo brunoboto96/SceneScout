@@ -809,7 +809,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       return m[1];
     };
     const esRefByName = (name: string): string => {
-      const m = esSnap.match(new RegExp(`(e\\d+) [a-z]+ "${name.replace(/\$/g, "\\$")}"`));
+      const m = esSnap.match(new RegExp(`(e\\d+) [a-z]+ "${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`));
       if (!m) throw new Error(`ref not found for "${name}" in:\n${esSnap}`);
       return m[1];
     };
