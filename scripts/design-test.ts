@@ -201,3 +201,57 @@ test("the screen and interaction thresholds fire just past their limits, not at 
   assert.ok(!measureJourney(clicks(15), true).verdict.some((v) => /interactions —/.test(v)));
   assert.ok(measureJourney(clicks(16), true).verdict.some((v) => /16 interactions/.test(v)));
 });
+
+// ---------------------------------------------------------------------------
+// Measurable defects as data — what `scenescout check` reads instead of the prose
+// ---------------------------------------------------------------------------
+
+test("a faint label is a contrast defect; the same label at full contrast is none", () => {
+  const faint = analyzeDesign(payload([rec({ text: "Hint", color: "rgb(184, 192, 202)", bg: "rgb(246, 248, 250)" })]), VIEWPORT);
+  const clear = analyzeDesign(payload([rec({ text: "Hint", color: "rgb(30, 30, 30)", bg: "rgb(246, 248, 250)" })]), VIEWPORT);
+  assert.deepEqual(
+    faint.defects.map((d) => d.rule),
+    ["contrast"],
+  );
+  assert.match(faint.defects[0].detail, /1\.\d\d:1 \(needs 4\.5:1\)/);
+  assert.deepEqual(clear.defects, []);
+});
+
+test("every defect is also in the prose report, so check and scout_design_audit cannot disagree", () => {
+  const p = payload([
+    rec({ text: "Hint", color: "rgb(184, 192, 202)", bg: "rgb(246, 248, 250)" }),
+    rec({ tag: "button", testid: "tiny", interactive: true, text: "x", rect: { x: 0, y: 100, w: 14, h: 14 } }),
+    rec({ testid: "cut", text: "A long label", clipped: true, rect: { x: 0, y: 200, w: 40, h: 20 } }),
+  ]);
+  p.page.scrollW = 1600;
+  p.page.focusSamples = [{ label: 'button "Go"', indicator: false }];
+  const { report, defects } = analyzeDesign(p, VIEWPORT);
+  assert.deepEqual([...new Set(defects.map((d) => d.rule))].sort(), ["clipped-text", "contrast", "focus-indicator", "horizontal-scroll", "tiny-target"]);
+  const contrast = defects.find((d) => d.rule === "contrast")!;
+  assert.ok(report.includes(contrast.detail), contrast.detail);
+  assert.match(report, /TINY targets \(1[,)][\s\S]*\[tiny\] — 14×14px/);
+  assert.match(report, /CLIPPED text \(1\)[\s\S]*\[cut\]/);
+  assert.match(report, /1\/1 keyboard tab stops show NO visible focus indicator[^\n]*button "Go"/);
+  assert.match(report, /page scrolls horizontally — content 1600px/);
+});
+
+test("a control is one fact whether or not the shell is known yet: same rule, same wording", () => {
+  const small = rec({ tag: "button", testid: "nav-x", interactive: true, text: "x", rect: { x: 0, y: 0, w: 14.4, h: 14.4 } });
+  const before = analyzeDesign(payload([small, rec({ text: "Body" })]), VIEWPORT).defects.find((d) => d.rule === "tiny-target")!;
+  const after = analyzeDesign(payload([small, rec({ text: "Body" })]), VIEWPORT, new Set([styleSignature(small)])).defects.find(
+    (d) => d.rule === "tiny-target",
+  )!;
+  assert.equal(before.chrome, undefined);
+  assert.equal(after.chrome, true);
+  assert.equal(before.detail, after.detail);
+});
+
+test("shell contrast failures are flagged as chrome defects once the shell is known", () => {
+  const known = new Set([styleSignature(BAD_BADGE)]);
+  const { defects } = analyzeDesign(payload([BAD_BADGE, rec({ text: "Body" })]), VIEWPORT, known);
+  assert.ok(
+    defects.some((d) => d.rule === "contrast" && d.chrome === true),
+    JSON.stringify(defects),
+  );
+  assert.ok(!defects.some((d) => d.rule === "contrast" && !d.chrome), JSON.stringify(defects));
+});

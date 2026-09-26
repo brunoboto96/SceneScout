@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Check: links</title></head>
+<body>
+  <!-- For `scenescout check`: one link whose server drops the connection, so
+       the page never loads, and one ordinary page. A route that fails to load
+       must be tried once, not again on every discovery round. -->
+  <h1>Links</h1>
+  <a href="/drop-connection" data-testid="check-links-broken">A page whose server hangs up</a>
+  <a href="/check-links-2.html" data-testid="check-links-next">Next page</a>
+</body>
+</html>

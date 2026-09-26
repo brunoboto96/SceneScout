@@ -740,7 +740,7 @@ function liveOwnerPid(dir: string, isAlive: (pid: number) => boolean): number | 
  * Best-effort and idempotent — a read-only checkout must never break attach,
  * and an existing file is left exactly as the user left it.
  */
-function writeSelfIgnore(dir: string): string | null {
+export function writeSelfIgnore(dir: string): string | null {
   try {
     const ignorePath = path.join(dir, ".gitignore");
     if (fs.existsSync(ignorePath)) return null;

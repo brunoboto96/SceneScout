@@ -18,6 +18,17 @@ export interface OracleViolation {
   embed?: string;
 }
 
+/** How an HTTP error violation states its request. One formatter, so a reader of the detail (the check) cannot drift from its writer. */
+export function httpErrorDetail(method: string, url: string, status: number): string {
+  return `${method} ${url.slice(0, 200)} → HTTP ${status}`;
+}
+
+/** The status an http_error detail names, or null when the detail is not one. */
+export function httpStatusOf(detail: string): number | null {
+  const m = /→ HTTP (\d{3})$/.exec(detail.replace(/ \[\d+ secrets? redacted\]$/, ""));
+  return m ? Number(m[1]) : null;
+}
+
 /** URLs whose failures are noise, not findings (favicons, source maps). */
 const BENIGN_URL_RE = /favicon|\.map($|\?)/i;
 
@@ -188,7 +199,7 @@ export class OracleMonitor {
       this.record({
         kind: "http_error",
         severity: status >= 500 ? "high" : "medium",
-        detail: `${res.request().method()} ${res.url().slice(0, 200)} → HTTP ${status}`,
+        detail: httpErrorDetail(res.request().method(), res.url(), status),
         url: page.url(),
         embed: this.embedOfRequest(res.request()) ?? undefined,
       });

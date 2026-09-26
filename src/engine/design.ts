@@ -295,6 +295,9 @@ function hueOf([r, g, b]: [number, number, number]): number | null {
 }
 
 const label = (r: StyleRecord): string => (r.testid ? `[${r.testid}]` : `<${r.tag}> "${r.text.slice(0, 30) || "(no text)"}"`);
+/** One wording for a small target, page or shell alike: the shell section's, so its prose is unchanged. */
+const tinyTargetDetail = (r: StyleRecord): string => `${label(r)} — ${Math.round(r.rect.w)}×${Math.round(r.rect.h)}px tap target`;
+const clippedTextDetail = (r: StyleRecord): string => `${label(r)} — text is clipped by its container`;
 
 /**
  * Stable identity for one styled element, used to recognise the SAME component
@@ -339,6 +342,18 @@ function tooSmall(r: StyleRecord): boolean {
   return r.tag !== "a" && (r.rect.h < 24 || r.rect.w < 24) && r.rect.h > 0;
 }
 
+/**
+ * One measurable defect (a ⚠ line), as data. The report prints the same facts
+ * as prose; `scenescout check` reads these instead of parsing it. Craft
+ * suggestions (→ lines) are judgement calls and are deliberately not here.
+ */
+export interface DesignDefect {
+  rule: "contrast" | "tiny-target" | "clipped-text" | "focus-indicator" | "image-aspect" | "horizontal-scroll";
+  detail: string;
+  /** Part of the shared app shell rather than this page: one fix, however many pages show it. */
+  chrome?: boolean;
+}
+
 /** Multi-indicator quality score for one page (0–100 each; overall weighted). */
 export interface DesignScore {
   overall: number;
@@ -367,10 +382,10 @@ export function analyzeDesign(
   payload: DesignPayload,
   viewport: { width: number; height: number },
   chromeKeys: Set<string> = new Set(),
-): { report: string; score: DesignScore | null; signatures: string[] } {
+): { report: string; score: DesignScore | null; signatures: string[]; defects: DesignDefect[] } {
   const { records: allRecords, page } = payload;
   if (allRecords.length === 0) {
-    return { report: "DESIGN AUDIT: no visible styled elements found (page empty or not hydrated).", score: null, signatures: [] };
+    return { report: "DESIGN AUDIT: no visible styled elements found (page empty or not hydrated).", score: null, signatures: [], defects: [] };
   }
   const signatures = allRecords.map(styleSignature);
   const isChrome = (r: StyleRecord): boolean => chromeKeys.has(styleSignature(r));
@@ -379,7 +394,7 @@ export function analyzeDesign(
   // set so no rule can accidentally reach past the page's own content.
   const records = chromeKeys.size > 0 ? allRecords.filter((r) => !isChrome(r)) : allRecords;
   if (records.length === 0) {
-    return { report: "DESIGN AUDIT: this page is entirely shared layout chrome — nothing page-specific to score.", score: null, signatures };
+    return { report: "DESIGN AUDIT: this page is entirely shared layout chrome — nothing page-specific to score.", score: null, signatures, defects: [] };
   }
   const sections: string[] = [];
 
@@ -820,12 +835,14 @@ export function analyzeDesign(
   // shell — sub-minimum tap targets and clipped labels in a sidebar would be
   // seen by no page at all.
   const chromeSection: string[] = [];
+  const chromeDefects: DesignDefect[] = [];
   if (chromeRecords.length > 0) {
-    const chromeIssues = [
-      ...contrastFailures(chromeRecords),
-      ...chromeRecords.filter((r) => r.interactive && tooSmall(r)).map((r) => `${label(r)} — ${Math.round(r.rect.w)}×${Math.round(r.rect.h)}px tap target`),
-      ...chromeRecords.filter((r) => r.clipped && r.textLen > 0).map((r) => `${label(r)} — text is clipped by its container`),
-    ];
+    chromeDefects.push(
+      ...contrastFailures(chromeRecords).map((detail) => ({ rule: "contrast" as const, detail, chrome: true })),
+      ...chromeRecords.filter((r) => r.interactive && tooSmall(r)).map((r) => ({ rule: "tiny-target" as const, detail: tinyTargetDetail(r), chrome: true })),
+      ...chromeRecords.filter((r) => r.clipped && r.textLen > 0).map((r) => ({ rule: "clipped-text" as const, detail: clippedTextDetail(r), chrome: true })),
+    );
+    const chromeIssues = chromeDefects.map((d) => d.detail);
     if (chromeIssues.length > 0) {
       chromeSection.push(
         `SHARED CHROME (${chromeRecords.length} shell elements, excluded from this page's score and reported here instead):\n` +
@@ -847,5 +864,20 @@ export function analyzeDesign(
     `\n\nJudge with product context: ⚠ lines are measurable defects; → lines are craft suggestions (how the page could be BETTER, not just what's broken). ` +
     `Not every flag is a bug — dense data tables legitimately use small targets. The score is a comparator across pages and runs, not an absolute verdict. ` +
     `File real defects with scout_finding (category "visual"/"a11y") and genuine improvement opportunities as severity-low "ux-polish", quoting the concrete numbers.`;
-  return { report, score, signatures };
+  const defects: DesignDefect[] = [
+    ...contrastFails.map((detail) => ({ rule: "contrast" as const, detail })),
+    // Worded exactly as the shell's (below), so one control is one fact whether or not it is known chrome yet.
+    ...tiny.map((r) => ({ rule: "tiny-target" as const, detail: tinyTargetDetail(r) })),
+    ...clipped.filter((r) => r.textLen > 0).map((r) => ({ rule: "clipped-text" as const, detail: clippedTextDetail(r) })),
+    ...focusless.map((f) => ({ rule: "focus-indicator" as const, detail: `${f.label} — no visible focus indicator` })),
+    ...distorted.map(({ img, off }) => ({
+      rule: "image-aspect" as const,
+      detail: `${img.label} — rendered ${img.rw}×${img.rh} vs natural ${img.nw}×${img.nh} (aspect off by ${Math.round(off * 100)}%)`,
+    })),
+    ...(page.scrollW > viewport.width + 8
+      ? [{ rule: "horizontal-scroll" as const, detail: `content ${page.scrollW}px wide in a ${viewport.width}px viewport` }]
+      : []),
+    ...chromeDefects,
+  ];
+  return { report, score, signatures, defects };
 }
