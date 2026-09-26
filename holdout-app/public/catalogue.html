@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catalogue · Fernbrook Library</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <a class="name" href="/" data-testid="nav-name">Fernbrook Library</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-home">Home</a>
+        <a href="/catalogue.html" data-testid="nav-catalogue" aria-current="page">Catalogue</a>
+        <a href="/loans.html" data-testid="nav-loans">Loans</a>
+        <a href="/holds.html" data-testid="nav-holds">Holds</a>
+        <a href="/checkout.html" data-testid="nav-checkout">Check out</a>
+        <a href="/members.html" data-testid="nav-members">Members</a>
+        <a href="/fines.html" data-testid="nav-fines">Fines</a>
+        <a href="/events.html" data-testid="nav-events">Events</a>
+        <a href="/account.html" data-testid="nav-account">Account</a>
+      </nav>
+      <a class="who" href="/signin.html" data-testid="nav-switch"><span id="who">member</span> · switch</a>
+    </header>
+    <main>
+      <h1>Catalogue</h1>
+      <p class="intro">Every title the branch holds. Open one to place a hold or read reviews.</p>
+      <div class="row">
+        <label for="q">Search</label>
+        <input id="q" type="search" placeholder="Title or author" data-testid="catalogue-search" style="max-width: 280px" />
+        <label class="check"><input type="checkbox" id="avail" data-testid="catalogue-available" /> Available now only</label>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Author</th>
+            <th>Year</th>
+            <th>On the shelf</th>
+          </tr>
+        </thead>
+        <tbody id="rows" data-testid="catalogue-rows"></tbody>
+      </table>
+      <p class="muted" id="none" data-testid="catalogue-none" hidden>No titles match.</p>
+      <p class="error" id="err" role="alert" data-testid="catalogue-error" hidden></p>
+    </main>
+    <footer>Fernbrook Library loans desk · invented data only</footer>
+    <script src="/app.js"></script>
+    <script>
+      const KEY = "fernbrook.catalogue";
+      let all = null;
+      try {
+        all = JSON.parse(sessionStorage.getItem(KEY) || "null");
+      } catch {
+        all = null;
+      }
+      async function fetchBooks(query) {
+        const res = await fetch("/api/books" + query);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      }
+      function shelf(b) {
+        if (b.copies === 0) return '<span class="tag out">withdrawn</span>';
+        return b.available > 0 ? '<span class="tag">' + b.available + " of " + b.copies + "</span>" : '<span class="tag out">all on loan</span>';
+      }
+      function render(list) {
+        const q = document.getElementById("q").value.trim();
+        const re = q ? new RegExp(q, "i") : null;
+        const shown = re ? list.filter((b) => re.test(b.title) || re.test(b.author)) : list;
+        document.getElementById("rows").innerHTML = shown
+          .map(
+            (b) =>
+              '<tr><td><a href="/book.html?id=' +
+              b.id +
+              '" data-testid="catalogue-book-' +
+              b.id +
+              '">' +
+              fernbrook.esc(b.title) +
+              "</a></td><td>" +
+              fernbrook.esc(b.author) +
+              "</td><td>" +
+              b.year +
+              "</td><td>" +
+              shelf(b) +
+              "</td></tr>",
+          )
+          .join("");
+        document.getElementById("none").hidden = shown.length > 0;
+      }
+      let current = [];
+      async function load() {
+        const err = document.getElementById("err");
+        try {
+          if (document.getElementById("avail").checked) {
+            current = await fetchBooks("?available=1");
+          } else {
+            if (!all) {
+              all = await fetchBooks("");
+              sessionStorage.setItem(KEY, JSON.stringify(all));
+            }
+            current = all;
+          }
+          err.hidden = true;
+        } catch (e) {
+          err.textContent = "Could not load the catalogue (" + e.message + ").";
+          err.hidden = false;
+          current = [];
+        }
+        render(current);
+      }
+      document.getElementById("q").addEventListener("input", () => render(current));
+      document.getElementById("avail").addEventListener("change", load);
+      load();
+    </script>
+  </body>
+</html>

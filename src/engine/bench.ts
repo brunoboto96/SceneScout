@@ -598,6 +598,12 @@ export function formatScorecard(c: Scorecard): string {
 
 /** A run kept for re-scoring: only what scoring reads, so an archive is small and holds nothing a run should not keep. */
 export interface RunArchive {
+  /**
+   * The benchmark app the run was made against, which decides the key it is
+   * scored with. Archives made before there was more than one app have none,
+   * and are the default app's.
+   */
+  app?: string;
   run: string;
   date: string;
   note: string;
@@ -647,8 +653,16 @@ export function sanitize(text: string): string {
   return text.replace(LOCAL_PATH_RE, "<path>");
 }
 
-export function toArchive(run: string, date: string, note: string, findings: readonly ScoredFinding[], decisions: readonly RecordedDecision[]): RunArchive {
+export function toArchive(
+  run: string,
+  date: string,
+  note: string,
+  findings: readonly ScoredFinding[],
+  decisions: readonly RecordedDecision[],
+  app: string,
+): RunArchive {
   return {
+    app,
     run,
     date,
     note,
@@ -660,4 +674,77 @@ export function toArchive(run: string, date: string, note: string, findings: rea
     })),
     decisions: decisions.map((d) => ({ ...d, observation: sanitize(d.observation), evidence: d.evidence === null ? null : sanitize(d.evidence) })),
   };
+}
+
+// ── which app, and so which key ─────────────────────────────────────────────
+
+/**
+ * The app a run is for when nothing says otherwise. Every archive made before
+ * there was a second benchmark app is this one's, and carries no `app`.
+ */
+export const DEFAULT_APP = "demo";
+
+/** The app an archive was made against. */
+export function archiveApp(a: Pick<RunArchive, "app">): string {
+  return a.app ?? DEFAULT_APP;
+}
+
+/**
+ * The app whose key scores a run. Scoring a run against another app's key
+ * produces a plausible wrong number — every planted defect "missed", every
+ * finding "unlabelled" — so a request that disagrees with what the archive
+ * records is refused rather than obeyed.
+ *
+ * `requested` is what the caller asked for (`--app`), `archived` what the
+ * run's archive records, and `known` the apps that have a key.
+ */
+export function chooseApp(opts: { requested?: string; archived?: string; known: readonly string[] }): string {
+  const { requested, archived, known } = opts;
+  for (const [what, app] of [
+    ["--app", requested],
+    ["The archive's app", archived],
+  ] as const) {
+    if (app !== undefined && !known.includes(app)) throw new Error(`${what} ${JSON.stringify(app)} is not a benchmark app; the apps are ${known.join(", ")}.`);
+  }
+  if (requested !== undefined && archived !== undefined && requested !== archived)
+    throw new Error(`This run was archived for the ${archived} app; scoring it against the ${requested} app's key would score the wrong answers.`);
+  return requested ?? archived ?? DEFAULT_APP;
+}
+
+/**
+ * Which benchmark app a key file belongs to, by the name the key gives its
+ * app, or undefined for a key no benchmark app ships (a draft, a test key).
+ * A copy of one app's key, edited or not, still names that app.
+ */
+export function appOfKey(key: Pick<AnswerKey, "app">, keys: Readonly<Record<string, Pick<AnswerKey, "app">>>): string | undefined {
+  return Object.keys(keys).find((app) => keys[app].app === key.app);
+}
+
+/**
+ * Refuse a key file that belongs to another benchmark app than the archive
+ * being scored: `--key` naming the held-out key scored a demo archive against
+ * the wrong answers without a word.
+ */
+export function checkKeyForArchive(
+  key: Pick<AnswerKey, "app">,
+  archive: Pick<RunArchive, "app">,
+  keys: Readonly<Record<string, Pick<AnswerKey, "app">>>,
+): void {
+  const keyApp = appOfKey(key, keys);
+  const runApp = archiveApp(archive);
+  if (keyApp !== undefined && keyApp !== runApp)
+    throw new Error(
+      `This run was archived for the ${runApp} app, and that key is the ${keyApp} app's; scoring one against the other would score the wrong answers.`,
+    );
+}
+
+/** Archives grouped by app, in the order each app is first met, each group in `byRunOrder`. */
+export function groupByApp(archives: readonly RunArchive[]): Map<string, RunArchive[]> {
+  const groups = new Map<string, RunArchive[]>();
+  for (const a of archives) {
+    const app = archiveApp(a);
+    groups.set(app, [...(groups.get(app) ?? []), a]);
+  }
+  for (const list of groups.values()) list.sort(byRunOrder);
+  return groups;
 }
