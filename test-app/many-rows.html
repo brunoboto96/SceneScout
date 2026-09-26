@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Many rows</title></head>
+<body>
+  <!-- A long list inside an app root: one form of 2000 rows, each with a text
+       field and an "Add" button, saved by one submit at the end, which lies
+       past the snapshot's element cap. A header text box beside "Sign in"
+       sits outside it. Reading every field's facts must stay cheap. -->
+  <div id="root">
+    <header>
+      <input type="text" aria-label="Search the list">
+      <button>Sign in</button>
+    </header>
+    <main><form novalidate><div><div><table><tbody></tbody></table></div></div><button data-testid="rows-save">Save all</button></form></main>
+  </div>
+  <script>
+    const rows = [];
+    for (let i = 0; i < 2000; i++) {
+      rows.push('<tr><td><div><span>Item ' + i + '</span></div></td><td><input type="text" aria-label="Quantity ' + i + '"></td><td><div><div><button type="button">Add</button></div></div></td><td>' + '<span>x</span>'.repeat(10) + '</td></tr>');
+    }
+    document.querySelector('tbody').innerHTML = rows.join('');
+    document.forms[0].addEventListener('submit', (e) => e.preventDefault());
+  </script>
+</body>
+</html>

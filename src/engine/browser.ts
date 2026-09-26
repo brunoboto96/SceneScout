@@ -58,6 +58,22 @@ import {
   type BrowserEngineName,
 } from "../browsers.js";
 import { revealedLines } from "./hover.js";
+import {
+  FORMS_INVENTORY_SCRIPT,
+  FORM_PROBE_BODY,
+  formProbeExpression,
+  formIdentity,
+  formStatus,
+  FORMS_READ_FAILED,
+  FORMS_SUBMIT_UNMATCHED,
+  isEmptySubmit,
+  sameControl,
+  isNavigationTeardown,
+  submits,
+  tracksForm,
+  type FormFacts,
+  type FormProbe,
+} from "./forms.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
@@ -257,6 +273,30 @@ const MAX_READ_FRAMES = 10;
 
 /** How long a snapshot waits for its frames' elements to answer. */
 const FRAME_READ_MS = 1500;
+
+/** The coverage key of the page's own element at this xpath (never one in a frame: its xpath names a node in another document). */
+function keyAtXpath(elements: readonly SnapshotElement[], xpath: string): string | null {
+  return elements.find((el) => !el.frame && el.xpath === xpath)?.key ?? null;
+}
+
+/** The page's own element at the probe's submit xpath, when it really is that control (forms.ts sameControl). */
+function submitControlIn(elements: readonly SnapshotElement[], probe: FormProbe): SnapshotElement | null {
+  const el = elements.find((e) => !e.frame && e.xpath === probe.submit);
+  return el && sameControl(el, probe) ? el : null;
+}
+
+/** Page-side: the form an element belongs to, and what its fields hold now (forms.ts). */
+const probeFormOf = new Function("node", FORM_PROBE_BODY) as (node: Element) => FormProbe | null;
+
+/**
+ * How long a form read may take: the inventory on every collect, the probe
+ * before a submit-capable action. One pass over document.forms takes a few
+ * milliseconds; this only stops a wedged page stalling the action.
+ */
+const FORM_READ_MS = 1000;
+
+/** A form a collect found: its identity key, and whether the page itself refuses its empty submit. */
+type SeenForm = { key: string; guarded: boolean };
 
 /** In-page XPath lookup fragment for string-expression evaluates. */
 function xpathLookup(xpath: string): string {
@@ -1347,7 +1387,7 @@ export class BrowserEngine {
   }
 
   /** Collect the current page's interactables into SnapshotElements with stable refs. */
-  private async collect(): Promise<{ elements: SnapshotElement[]; truncated: boolean }> {
+  private async collect(): Promise<{ elements: SnapshotElement[]; truncated: boolean; forms: SeenForm[] }> {
     const page = this.requirePage();
     type RawElement = {
       tag: string;
@@ -1378,6 +1418,9 @@ export class BrowserEngine {
     }
 
     const mainCount = rawElements.length;
+    // The page's forms, read in the same settled page as its elements. The
+    // page's own document only: an xpath names a node in one document.
+    const rawForms = ((await this.formRead("form inventory", page.evaluate(FORMS_INVENTORY_SCRIPT))) ?? []) as FormFacts[];
     // Then each frame's own controls, read once, each within its own limit.
     const framed = await this.collectFrames(page);
 
@@ -1417,8 +1460,19 @@ export class BrowserEngine {
     });
     this.harvestRoutes(elements.filter((el) => !el.frame?.foreign));
     this.framesRead = new Set(framed.map((g) => g.frame));
-    return { elements, truncated: mainCount >= 150 };
+    // A form is known by its own attributes, else by its submit control's coverage
+    // key (forms.ts formIdentity); a form with neither is not tracked.
+    const forms = rawForms.flatMap((f): SeenForm[] => {
+      const status = formStatus(f);
+      const key = status === "untracked" ? null : (formIdentity(f.attrs) ?? keyAtXpath(elements, f.submit));
+      return key ? [{ key, guarded: status === "guarded" }] : [];
+    });
+    this.lastCollectTruncated = mainCount >= 150;
+    return { elements, truncated: mainCount >= 150, forms };
   }
+
+  /** Whether the latest collect stopped at the element cap, so some controls have no key at all. */
+  private lastCollectTruncated = false;
 
   /**
    * The controls inside the page's frames, up to MAX_READ_FRAMES visible ones,
@@ -1541,7 +1595,7 @@ export class BrowserEngine {
    */
   private async captureCoverageState(): Promise<{ fp: string; elements: SnapshotElement[]; url: string }> {
     const page = this.requirePage();
-    const { elements } = await this.collect();
+    const { elements, forms } = await this.collect();
     const url = page.url();
     const fp = fingerprintState(url, elements);
     this.memory?.visitState(
@@ -1550,6 +1604,7 @@ export class BrowserEngine {
       normalizePath(url),
       elements.map((el) => el.key),
     );
+    for (const f of forms) this.memory?.recordForm(fp, f.key, f.guarded);
     return { fp, elements, url };
   }
 
@@ -1613,7 +1668,7 @@ export class BrowserEngine {
     const memory = this.memory!;
     await this.settle();
 
-    const { elements, truncated } = await this.collect();
+    const { elements, truncated, forms } = await this.collect();
     const url = page.url();
     this.snapshotUrl = url;
     const route = normalizePath(url);
@@ -1625,6 +1680,7 @@ export class BrowserEngine {
       route,
       elements.map((el) => el.key),
     );
+    for (const f of forms) memory.recordForm(fp, f.key, f.guarded);
     memory.recordRoleAccess(this.role, route, "reached");
     // A snapshot is what an agent takes when it wants to LOOK at something, so
     // it is the frame a reader most wants beside the step. Recording only the
@@ -2103,6 +2159,97 @@ export class BrowserEngine {
     }
   }
 
+  /**
+   * A form read (the inventory, or the probe before a submit), bounded by
+   * FORM_READ_MS. This bookkeeping must never fail or stall the action, so a
+   * failure yields null — but only a page navigating away under the read is
+   * expected; a timeout or any other error goes in the action log.
+   */
+  private async formRead<T>(what: string, work: Promise<T>): Promise<T | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const limit = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), FORM_READ_MS);
+    });
+    const outcome = await Promise.race([
+      work.then(
+        (value) => ({ value }),
+        (err: unknown) => ({ err }),
+      ),
+      limit,
+    ]).finally(() => clearTimeout(timer));
+    const url = this.page?.url() ?? "";
+    if (outcome === "timeout") {
+      this.logAction({ action: FORMS_READ_FAILED, target: `${what} took over ${FORM_READ_MS} ms`, url });
+      return null;
+    }
+    if ("err" in outcome) {
+      const message = outcome.err instanceof Error ? outcome.err.message.split("\n")[0] : String(outcome.err);
+      if (!isNavigationTeardown(message)) this.logAction({ action: FORMS_READ_FAILED, target: `${what}: ${message}`.slice(0, 300), url });
+      return null;
+    }
+    return outcome.value;
+  }
+
+  /** The form a located element belongs to, read just before an action that may submit it (forms.ts). */
+  private probeForm(target: Locator): Promise<FormProbe | null> {
+    return this.formRead("form probe", target.evaluate(probeFormOf, undefined, { timeout: FORM_READ_MS }));
+  }
+
+  /** The form the focused element belongs to, for a key press that may submit through it. */
+  private probeFocusedForm(): Promise<FormProbe | null> {
+    return this.formRead("form probe", this.requirePage().evaluate(formProbeExpression("document.activeElement")) as Promise<FormProbe | null>);
+  }
+
+  /**
+   * A plan's pre-action state, fit to record a submit of this form against.
+   * A plan reuses its previous capture while the URL has not changed, but the
+   * page can shift under the same URL (a control inserted above the form
+   * moves every xpath after it). Only a REUSED capture is suspect: when the
+   * form has no identity of its own and the reused state does not hold its
+   * submit control, the state is captured afresh. A capture this step just
+   * took is never taken twice, and a step with no state gets one.
+   */
+  private async stateHolding(
+    probe: FormProbe,
+    state: { fp: string; elements: SnapshotElement[]; url: string } | null,
+    reused: boolean,
+  ): Promise<{ fp: string; elements: SnapshotElement[]; url: string } | null> {
+    if (state && (!reused || formIdentity(probe.attrs) || submitControlIn(state.elements, probe))) return state;
+    return (await this.captureCoverageState().catch(() => null)) ?? state;
+  }
+
+  /** Whether this probe describes a submit of a tracked form, so the submit is worth recording. */
+  private static isTrackedSubmit(kind: "click" | "enter", probe: FormProbe | null): probe is FormProbe {
+    return probe !== null && tracksForm(probe.fields) && submits(kind, probe);
+  }
+
+  /**
+   * Mark a submit of a listed form against the state it was made in. The
+   * form is known by its own attributes when it has any; otherwise by the
+   * snapshot element at its submit control's xpath, accepted only when that
+   * element's testid and name agree with the control the probe found (for a
+   * click on that control, the element clicked). A submit that matches no
+   * listed form is logged, never dropped silently and never added to the
+   * list. Whether it was a submit, and an empty one, is forms.ts's rule.
+   */
+  private noteFormSubmit(state: { fp: string; elements: readonly SnapshotElement[] } | null, kind: "click" | "enter", probe: FormProbe | null): void {
+    if (!this.memory || !BrowserEngine.isTrackedSubmit(kind, probe)) return;
+    const empty = isEmptySubmit(kind, probe);
+    const key = formIdentity(probe.attrs) ?? (state ? (submitControlIn(state.elements, probe)?.key ?? null) : null);
+    if (state?.fp && key && this.memory.recordFormSubmit(state.fp, key, empty)) return;
+    // A page past the snapshot's element cap may never list this control, so
+    // a fresh snapshot would not help: say it is untracked, not what to retry.
+    const beyondCap = !key && this.lastCollectTruncated && !state?.elements.some((e) => !e.frame && e.xpath === probe.submit);
+    const what = `${empty ? "empty " : ""}${kind} submit of a form (submit control ${JSON.stringify(probe.submitName)} at ${probe.submit})`;
+    this.logAction({
+      action: FORMS_SUBMIT_UNMATCHED,
+      target: beyondCap
+        ? `${what} is untracked: the page has more controls than a snapshot lists, so this form, which has no id, name or action, cannot be keyed`
+        : `${what} matches no form listed for this page, so it is not counted — take a scout_snapshot and submit again`,
+      url: this.page?.url() ?? "",
+    });
+  }
+
   async click(ref: string, clicks = 1): Promise<string> {
     const page = this.requirePage();
     const { el, liveLabel } = await this.resolveForAction(ref);
@@ -2120,8 +2267,14 @@ export class BrowserEngine {
     // (silent no-op forms): capture the count before to compare after.
     const xhrBefore = this.xhrCount;
     const submitLike = el.role === "button" && /submit|send|save|create|apply|subscribe|register|sign|post|add\b/i.test(el.name + " " + (el.testid ?? ""));
-    const { forced } = await this.resilientClick(this.scopeOf(el).locator(`xpath=${el.xpath}`), ACTION_TIMEOUT_MS, clicks);
+    const clickTarget = this.scopeOf(el).locator(`xpath=${el.xpath}`);
+    // Read before the click: what the form's fields hold when it goes. Only a
+    // button or an input can submit a form; nothing else is asked.
+    const form = !el.frame && (el.tag === "button" || el.tag === "input") ? await this.probeForm(clickTarget) : null;
+    const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
+    const { forced } = await this.resilientClick(clickTarget, ACTION_TIMEOUT_MS, clicks);
     this.memory!.markExercised(this.currentFingerprint, el.key, clicks > 1 ? `click×${clicks}` : "click");
+    this.noteFormSubmit(formState, "click", form);
     const result = await this.afterAction(clicks > 1 ? `click×${clicks}` : "click", `${el.role} "${el.name}"`);
     // Impatient-user probe: a rapid multi-click that fires the SAME
     // state-changing request more than once means the action is not guarded
@@ -2275,7 +2428,11 @@ export class BrowserEngine {
           return `Filled ${el.role} "${el.name}" but did NOT press Enter. ` + destructiveRefusal(submitLabel, this.mode);
         }
       }
+      // After the fill, before the key: the fields as they are when it submits.
+      const form = !el.frame && el.tag === "input" ? await this.probeForm(locator) : null;
+      const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
       await locator.press("Enter", { timeout: ACTION_TIMEOUT_MS });
+      this.noteFormSubmit(formState, "enter", form);
     }
     this.memory!.markExercised(this.currentFingerprint, el.key, "type");
     return this.afterAction("type", `${el.role} "${el.name}" ← ${JSON.stringify(text.slice(0, 60))}${pressEnter ? " + Enter" : ""}${fillNote}`);
@@ -2667,7 +2824,12 @@ export class BrowserEngine {
     // Identify the focused control BEFORE the key lands — activating it may
     // navigate, close a dialog, or otherwise destroy the element.
     const focused = BrowserEngine.ACTIVATION_KEY_RE.test(key) ? await this.focusedInteractable() : null;
+    // Enter submits from a field or a submit control; Space only activates a control.
+    const formKind = BrowserEngine.ACTIVATION_KEY_RE.test(key) ? (/enter/i.test(key) ? "enter" : "click") : null;
+    const form = formKind ? await this.probeFocusedForm() : null;
+    const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
     await page.keyboard.press(key);
+    if (formKind) this.noteFormSubmit(formState, formKind, form);
     if (focused && this.memory && this.currentFingerprint) {
       this.memory.markExercised(this.currentFingerprint, focused, `press:${key}`);
     }
@@ -2916,7 +3078,7 @@ export class BrowserEngine {
         continue;
       }
       await this.settle();
-      const { elements } = await this.collect();
+      const { elements, forms } = await this.collect();
       const finalUrl = page.url();
       const route = normalizePath(finalUrl);
       const fp = fingerprintState(finalUrl, elements);
@@ -2926,6 +3088,7 @@ export class BrowserEngine {
         route,
         elements.map((el) => el.key),
       );
+      for (const f of forms) memory.recordForm(fp, f.key, f.guarded);
       memory.recordRoleAccess(this.role, route, "reached");
       // If we landed somewhere else (auth wall, canonical redirect), the
       // REQUESTED route still counts as covered for THIS role — a role that
@@ -3061,6 +3224,8 @@ export class BrowserEngine {
       // A select step's options and choice, recorded against the dropdown the bookkeeping below finds.
       let chose: { options: Array<{ value: string; label: string }>; picked: string[] } | null = null;
       let preState: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
+      // The form this step may submit, read before it went (forms.ts).
+      let form: { kind: "click" | "enter"; probe: FormProbe | null } | null = null;
       try {
         if (step.action === "navigate") {
           const result = await this.navigate(step.target ?? step.value ?? "/");
@@ -3086,6 +3251,15 @@ export class BrowserEngine {
           if (refusal) {
             transcript.push(`${desc} → ${refusal}`);
             break;
+          }
+          if (BrowserEngine.ACTIVATION_KEY_RE.test(key)) {
+            const kind = /enter/i.test(key) ? "enter" : "click";
+            const probe = await this.probeFocusedForm();
+            if (BrowserEngine.isTrackedSubmit(kind, probe)) {
+              const reusable = lastCapture?.url === page.url() ? lastCapture : null;
+              preState = await this.stateHolding(probe, reusable, reusable !== null);
+              form = { kind, probe };
+            }
           }
           await page.keyboard.press(key);
         } else {
@@ -3113,8 +3287,14 @@ export class BrowserEngine {
             transcript.push(`${desc} → ${destructiveRefusal(label || step.target, this.mode)}`);
             break;
           }
-          if (step.action === "click") forcedClick = (await this.resilientClick(loc, ACTION_TIMEOUT_MS)).forced;
-          else if (step.action === "hover") {
+          if (step.action === "click") {
+            const probe = await this.probeForm(loc);
+            if (BrowserEngine.isTrackedSubmit("click", probe)) {
+              preState = await this.stateHolding(probe, preState, preState !== null && preState === lastCapture);
+              form = { kind: "click", probe };
+            }
+            forcedClick = (await this.resilientClick(loc, ACTION_TIMEOUT_MS)).forced;
+          } else if (step.action === "hover") {
             const { before, bodyBefore, churning } = await this.hoverBaselines();
             await loc.hover({ timeout: ACTION_TIMEOUT_MS });
             const { revealed } = await this.detectHoverReveal(before, bodyBefore, churning);
@@ -3136,6 +3316,11 @@ export class BrowserEngine {
                   break;
                 }
               }
+              const probe = await this.probeForm(loc);
+              if (BrowserEngine.isTrackedSubmit("enter", probe)) {
+                preState = await this.stateHolding(probe, preState, preState !== null && preState === lastCapture);
+                form = { kind: "enter", probe };
+              }
               await loc.press("Enter", { timeout: ACTION_TIMEOUT_MS });
             }
           } else if (step.action === "select") {
@@ -3152,6 +3337,7 @@ export class BrowserEngine {
           }
         }
         await this.settle();
+        if (form) this.noteFormSubmit(preState, form.kind, form.probe);
         // A plan is the RECOMMENDED way to run a mechanical sequence, so its
         // steps are where most of a recorded run actually happens. Leaving
         // them unframed reproduced, inside run_plan, the same hole that crawl
@@ -3166,7 +3352,7 @@ export class BrowserEngine {
           try {
             // Record the state the action LANDED on (it may be a new screen
             // this plan just reached, and it deserves coverage of its own)…
-            const { elements } = await this.collect();
+            const { elements, forms } = await this.collect();
             const url = page.url();
             const fp = fingerprintState(url, elements);
             this.memory!.visitState(
@@ -3175,6 +3361,7 @@ export class BrowserEngine {
               normalizePath(url),
               elements.map((el) => el.key),
             );
+            for (const f of forms) this.memory!.recordForm(fp, f.key, f.guarded);
             this.memory!.recordRoleAccess(this.role, normalizePath(url), "reached");
             lastCapture = { fp, elements, url };
             // …but mark the acted-on element in the state it came FROM, using

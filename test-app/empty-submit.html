@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Empty submit</title></head>
+<body>
+  <!-- Page chrome: a text box beside a "Sign in" button, with no <form>. Not a form, never listed. -->
+  <nav>
+    <input type="text" aria-label="Quick find" data-testid="nav-find">
+    <button data-testid="nav-sign-in">Sign in</button>
+  </nav>
+  <h1>Forms whose empty submit does nothing</h1>
+  <!-- A form with a required field whose submit, left blank, silently does
+       nothing: no request, no message. novalidate, so the browser's own
+       validation does not step in. No id, name or action: it is known by its
+       submit control. -->
+  <form data-testid="signup-form" novalidate>
+    <label for="email">Email (required)</label>
+    <input id="email" type="email" required data-testid="signup-email">
+    <label for="name">Name</label>
+    <input id="name" type="text" data-testid="signup-name">
+    <button data-testid="signup-submit">Create account</button>
+  </form>
+  <!-- A form with a button that does not submit: type="button" adds a row. Only "Save list" submits. -->
+  <form novalidate>
+    <label for="item">Item</label>
+    <input id="item" type="text" data-testid="items-name">
+    <button type="button" data-testid="items-add">Add item</button>
+    <button data-testid="items-save">Save list</button>
+  </form>
+  <!-- The same text box and button as the nav, in a <form>: listed, known by its action and method. -->
+  <form action="/things" method="post" novalidate>
+    <input type="text" aria-label="Quick find" data-testid="lookup-text">
+    <button data-testid="lookup-go">Sign in</button>
+  </form>
+  <!-- A form whose submit is disabled while its field is blank: the page refuses the empty submit itself. Never listed. -->
+  <form novalidate>
+    <input type="email" aria-label="Invite email" data-testid="invite-email">
+    <button data-testid="invite-send" disabled>Send invite</button>
+  </form>
+  <!-- A Cancel button before the submit, which the first submit removes: afterwards the submit sits where Cancel was. -->
+  <form data-testid="message-form" novalidate>
+    <input type="text" aria-label="Message" data-testid="message-text">
+    <button type="button" data-testid="message-cancel">Cancel</button>
+    <button data-testid="message-send">Send message</button>
+  </form>
+  <!-- A form submitted by a plan's type step with Enter; its filled submit shows an undo bar above everything, moving every form after it. -->
+  <form data-testid="feedback-form" novalidate>
+    <label for="subject">Subject</label>
+    <input id="subject" type="text" data-testid="feedback-subject">
+    <label for="feedback-text">Feedback</label>
+    <textarea id="feedback-text" data-testid="feedback-text"></textarea>
+    <button data-testid="feedback-send">Send feedback</button>
+  </form>
+  <!-- A form submitted by a plan's click step. -->
+  <form novalidate>
+    <input type="text" aria-label="New name" data-testid="rename-name">
+    <button data-testid="rename-submit">Rename</button>
+  </form>
+  <!-- A form whose field is here and whose submit control is linked back from elsewhere by form="code". Known by its id. -->
+  <form id="code" novalidate>
+    <input type="text" aria-label="Code" data-testid="code-value">
+  </form>
+  <!-- Two tab panels, each a form with an untagged "Save": one key for the button, two forms. Known by their ids. -->
+  <div role="tablist">
+    <button type="button" data-testid="tab-profile">Profile tab</button>
+    <button type="button" data-testid="tab-billing">Billing tab</button>
+  </div>
+  <form id="profile-form" novalidate>
+    <input type="text" aria-label="Display name">
+    <button>Save</button>
+  </form>
+  <form id="billing-form" novalidate hidden>
+    <input type="text" aria-label="Billing address">
+    <button>Save</button>
+  </form>
+  <!-- An untagged submit whose label follows the amount. Known by its name. -->
+  <form name="pay" novalidate>
+    <input type="number" aria-label="Amount" data-testid="pay-amount">
+    <button>Pay $12</button>
+  </form>
+  <!-- A form whose (relative) action names a record and carries a token that changes on every load. -->
+  <form data-testid="comment-form" method="post" novalidate>
+    <input type="text" aria-label="Comment" data-testid="comment-text">
+    <button data-testid="comment-post">Post comment</button>
+  </form>
+  <!-- Nothing to leave blank: a checkbox and a select. Never listed. -->
+  <form>
+    <label><input type="checkbox" data-testid="prefs-digest"> Weekly digest</label>
+    <select data-testid="prefs-theme" aria-label="Theme"><option>Light</option><option>Dark</option></select>
+    <button data-testid="prefs-apply">Apply preferences</button>
+  </form>
+  <!-- A search box is a filter, not a field to leave blank. Never listed. -->
+  <form role="search">
+    <input type="search" aria-label="Find" data-testid="find-query">
+    <button data-testid="find-go">Search</button>
+  </form>
+  <!-- The same text box and button with no <form> around them. Not a form, never listed. -->
+  <div class="panel">
+    <input type="text" aria-label="Note" data-testid="note-text">
+    <button type="button" data-testid="note-save">Save note</button>
+  </div>
+  <button form="code" data-testid="code-submit">Check code</button>
+  <p id="log" data-testid="empty-submit-log"></p>
+  <script>
+    const log = (text) => { document.getElementById('log').textContent = text; };
+    const byTestid = (id) => document.querySelector('[data-testid="' + id + '"]');
+    for (const form of document.forms) form.addEventListener('submit', (e) => e.preventDefault());
+    byTestid('signup-form').addEventListener('submit', () => {
+      // The defect: blank required field, so return without a word.
+      if (!byTestid('signup-email').value) return;
+      // A filled submit adds a button inside the form, before its submit
+      // control, so that control's path in the page changes.
+      const busy = document.createElement('button');
+      busy.type = 'button';
+      busy.textContent = 'Stop checking';
+      const submit = byTestid('signup-submit');
+      submit.parentNode.insertBefore(busy, submit);
+    });
+    byTestid('items-add').addEventListener('click', () => log('row added'));
+    byTestid('invite-email').addEventListener('input', (e) => {
+      byTestid('invite-send').disabled = !e.target.value;
+    });
+    byTestid('message-form').addEventListener('submit', () => {
+      const cancel = byTestid('message-cancel');
+      if (cancel) cancel.remove();
+    });
+    byTestid('feedback-form').addEventListener('submit', () => {
+      if (!byTestid('feedback-subject').value) return;
+      // An undo bar, itself a form, above everything: every form after it moves.
+      const undo = document.createElement('form');
+      undo.innerHTML = 'Thanks for the feedback. <button type="button">Undo</button>';
+      document.body.insertBefore(undo, document.body.firstChild);
+    });
+    byTestid('tab-profile').addEventListener('click', () => {
+      document.getElementById('profile-form').hidden = false;
+      document.getElementById('billing-form').hidden = true;
+    });
+    byTestid('tab-billing').addEventListener('click', () => {
+      document.getElementById('profile-form').hidden = true;
+      document.getElementById('billing-form').hidden = false;
+    });
+    byTestid('comment-form').setAttribute('action', 'things/' + (1 + Math.floor(Math.random() * 1000)) + '/comments?token=' + Math.random().toString(36).slice(2));
+    byTestid('pay-amount').addEventListener('input', (e) => {
+      document.forms.pay.querySelector('button').textContent = 'Pay $' + (e.target.value || 12);
+    });
+  </script>
+</body>
+</html>

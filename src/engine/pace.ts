@@ -13,6 +13,7 @@
  * the live view both read them.
  */
 import type { ActionLogEntry } from "./memory.js";
+import { FORMS_READ_FAILED, FORMS_SUBMIT_UNMATCHED } from "./forms.js";
 
 /**
  * Log entries that are not actions: a stated task, an attach, the note that a
@@ -20,7 +21,19 @@ import type { ActionLogEntry } from "./memory.js";
  * counting them inflates the action count and drags the median gap toward
  * zero. One real run logged 325 entries of which 107 were stated tasks.
  */
-const MARKER_ACTIONS = new Set(["task", "attach", "close", "lane-report", "created-resource", "journey:start", "journey:end", "record:full", "record:failed"]);
+const MARKER_ACTIONS = new Set([
+  "task",
+  "attach",
+  "close",
+  "lane-report",
+  "created-resource",
+  "journey:start",
+  "journey:end",
+  "record:full",
+  "record:failed",
+  FORMS_READ_FAILED,
+  FORMS_SUBMIT_UNMATCHED,
+]);
 
 /** Whether a log entry represents work the browser actually did. */
 export function isActing(action: string): boolean {
