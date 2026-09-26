@@ -23,6 +23,7 @@
  * Pure logic, no browser, so every rule here is table-tested.
  */
 import { z } from "zod";
+import { isIdSegment } from "./fingerprint.js";
 import { FINDING_CATEGORIES } from "./memory.js";
 
 /** Upper bound on the decisions and routes arrays, so a report is always small enough to hold whole. */
@@ -287,6 +288,102 @@ export function summarizeLaneReport(r: LaneReport): string {
   ];
   if (r.blocked_by) parts.push(`blocked by ${r.blocked_by}`);
   return `${r.lane}: ${parts.join(", ")}`;
+}
+
+/**
+ * A request named in evidence: its method, its path split into segments, and
+ * the status written directly after it, as in `POST /api/things/7/archive 200`.
+ * `start` and `end` locate the path as written, so a caller can put another
+ * text's path in its place.
+ */
+export interface StatedRequest {
+  method: string;
+  segments: string[];
+  status: string | null;
+  start: number;
+  end: number;
+}
+
+/**
+ * Method, optional origin, path (template characters included), optional query
+ * and fragment, then a status only when it comes next: after an arrow or a
+ * colon, or after spaces, and nothing else. A status further along
+ * ("... (expected 403)") is a different claim about the request and is not
+ * read as its status.
+ *
+ * The separator is two alternatives rather than `\s*(?:->|:)?\s*`: with the
+ * arrow optional, two adjacent `\s*` can split a run of spaces every way
+ * there is, and evidence ending in a long run of whitespace took quadratic
+ * time to reject.
+ */
+const STATED_REQUEST_RE =
+  /\b(GET|POST|PUT|PATCH|DELETE)\s+(?:https?:\/\/[^/\s]+)?(\/[A-Za-z0-9/_.:{}$*~%-]*)(?:\?[^\s#]*)?(?:#\S*)?(?:(?:\s*(?:->|→|=>|:)\s*|\s+)([1-5]\d{2})\b)?/gi;
+
+/** The requests a piece of evidence names, in order. */
+export function statedRequests(text: string): StatedRequest[] {
+  const out: StatedRequest[] = [];
+  for (const m of text.matchAll(STATED_REQUEST_RE)) {
+    const raw = m[2].replace(/[.:,]+$/, "");
+    const start = (m.index ?? 0) + m[0].indexOf(m[2]);
+    out.push({ method: m[1].toUpperCase(), segments: pathSegments(raw), status: m[3] ?? null, start, end: start + raw.length });
+  }
+  return out;
+}
+
+function pathSegments(path: string): string[] {
+  const trimmed = path.replace(/\/+$/, "");
+  if (trimmed === "") return [];
+  return trimmed
+    .slice(1)
+    .split("/")
+    .map((seg) => {
+      try {
+        return decodeURIComponent(seg).toLowerCase();
+      } catch {
+        return seg.toLowerCase();
+      }
+    });
+}
+
+/**
+ * A path-template segment: `{name}`, `:name` or `*`. Whole segments only —
+ * `order-{id}` is a literal, and so is `**`, which some routers read as "any
+ * number of segments": a template here stands for exactly one.
+ */
+export function isTemplateSegment(seg: string): boolean {
+  return seg === "*" || /^\{[^/{}]+\}$/.test(seg) || /^:[a-z_][a-z0-9_-]*$/i.test(seg);
+}
+
+/**
+ * Whether two paths name the same route. A template segment on either side
+ * stands for ONE segment that is an id by route identity's own rule
+ * (`isIdSegment`: a number after the first segment, a UUID, a long hex
+ * string), or for another template. Never for a word: `/users/{id}` is not
+ * `/users/me`, `/things/:id` is not `/things/export`, and a path of three stars does
+ * not stand for every three-segment path. Same number of segments, every literal
+ * equal (case-insensitive), so a template never absorbs a slash or an empty
+ * segment.
+ */
+export function templatedPathsMatch(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  // +1: segments start at the first real one; isIdSegment counts as split("/") does.
+  const standsFor = (seg: string, i: number) => isTemplateSegment(seg) || isIdSegment(seg, i + 1);
+  return a.every((x, i) => {
+    const y = b[i];
+    if (isTemplateSegment(x)) return standsFor(y, i);
+    if (isTemplateSegment(y)) return standsFor(x, i);
+    return x === y;
+  });
+}
+
+/**
+ * Whether two stated requests are the same call: same method, same route with
+ * a template read as an id (see templatedPathsMatch), and the same status — both stated and equal, or
+ * both unstated. A different status is a different outcome of the call, and
+ * pairing a 200 with a 403 would file one claim under its opposite.
+ */
+export function requestsPair(a: StatedRequest, b: StatedRequest): boolean {
+  return a.method === b.method && a.status === b.status && templatedPathsMatch(a.segments, b.segments);
 }
 
 /**

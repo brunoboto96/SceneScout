@@ -20,6 +20,7 @@
  *
  * Pure, so every rule here is table-tested.
  */
+import { requestsPair, type StatedRequest, statedRequests, templatedPathsMatch } from "./lane.js";
 import { failingSignatures, type Finding } from "./memory.js";
 
 /** A lane decision as recorded, with when and by whom. The shape `lane.ts` parses, plus provenance. */
@@ -286,35 +287,71 @@ export const MAX_UNFILED_NAMED = 10;
  * nobody — and it is cheapest to catch at the moment the planner folds the
  * report, while the lane's session is still open.
  *
- * Matched on the store's failing-endpoint signature where the evidence has
- * one, and on the evidence text otherwise. The text match is what the
- * calibration join refuses, because there a miss is scored against the lane;
- * here a miss only asks someone to check, which costs a look and nothing more.
+ * The check exists to catch unfiled defects, so a false "filed" costs more
+ * than a false alarm, which only asks someone to look. A decision counts as
+ * filed by one of three rules, tried in order:
+ *
+ * 1. Failing signatures. When the decision's evidence names one or more
+ *    failing requests (the store's `failingSignatures`), it is filed only when
+ *    EVERY one of them is covered by a finding's signature: same method, same
+ *    status, same route, where a path-template segment (`{id}`, `:id`, `*`) on
+ *    either side stands for one id segment (see `templatedPathsMatch`). So a
+ *    finding filed as `GET /api/things/{id} 500` covers `GET /api/things/7 500`,
+ *    and a decision naming two failing requests is not filed by a finding for
+ *    one of them.
+ * 2. A request that did not fail. When the decision names a request with a
+ *    2xx or 3xx status, or none, and a finding names the same request
+ *    (template-aware, same status), the decision is filed only when its
+ *    evidence, with its path written as the finding's, is the finding's
+ *    evidence exactly, restates part of it, or is the finding's evidence
+ *    followed only by that request's other status (`… 200 as role=viewer
+ *    (expected 403)` against `… 200 as role=viewer`). Word overlap is not enough
+ *    there: a 200 names a resource, not a defect, and two different defects
+ *    on one endpoint read alike. A failing signature in the decision does not
+ *    block this when it names the same request (`POST /api/things/7/archive
+ *    200 (expected 403)` reads as a 403 to the store); one naming any other
+ *    request does, and sends the decision to rule 1's verdict.
+ * 3. Text. Evidence naming no failing request is matched on its text: the
+ *    same evidence, a restatement of part of it, or shared identifiers and
+ *    near-identical wording. The calibration join refuses a text match,
+ *    because there a miss is scored against the lane.
  */
 export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdict" | "observation" | "evidence">[], findings: readonly Finding[]): string[] {
-  const keys = new Set<string>();
+  const keys: StatedRequest[] = [];
   const filed: Filed[] = [];
   for (const f of findings) {
     const text = `${f.evidence ?? ""} ${f.title}`;
-    if (f.evidence) for (const key of joinKeys(f.evidence)) keys.add(key);
-    filed.push({ ids: identifiers(text), words: words(text), evidenceWords: words(f.evidence ?? ""), evidence: squash(f.evidence ?? "") });
+    const requests = statedRequests(f.evidence ?? "");
+    // The store's signatures, and the finding's own failing requests as
+    // written: the store reads no `*` in a path, so `GET /api/things/* 500`
+    // has no signature of its own.
+    if (f.evidence) for (const key of joinKeys(f.evidence)) keys.push(...statedRequests(key));
+    keys.push(...requests.filter((q) => q.status !== null && /^[45]/.test(q.status)));
+    filed.push({
+      ids: identifiers(text),
+      words: words(text),
+      evidenceWords: words(f.evidence ?? ""),
+      evidence: squash(f.evidence ?? ""),
+      raw: f.evidence ?? "",
+      requests,
+    });
   }
   const out: string[] = [];
   for (const d of decisions) {
     if (d.verdict !== "defect") continue;
     if (d.evidence) {
-      const joined = [...joinKeys(d.evidence)];
-      if (joined.some((k) => keys.has(k))) continue;
+      const evidence = d.evidence;
+      const joined = [...joinKeys(evidence)];
+      const failing = joined.flatMap((sig) => statedRequests(sig));
+      if (failing.length > 0 && failing.every((sig) => keys.some((k) => requestsPair(sig, k)))) continue;
+      if (filed.some((f) => restatesRequest(evidence, failing, f))) continue;
       // A failing-endpoint signature is the store's own identity for a bug. When
-      // the decision has one and no finding shares it, nothing else is a match.
+      // the decision has one and no finding covers it, nothing else is a match.
       if (joined.length > 0) {
         out.push(`${d.observation} — ${d.evidence}`);
         continue;
       }
-      const ids = identifiers(d.evidence);
-      const w = words(d.evidence);
-      const text = squash(d.evidence);
-      if (filed.some((f) => (text !== "" && f.evidence === text) || restates(text, f) || covers(ids, w, f))) continue;
+      if (filed.some((f) => matchesText(evidence, f))) continue;
     }
     out.push(d.evidence ? `${d.observation} — ${d.evidence}` : d.observation);
   }
@@ -326,6 +363,55 @@ interface Filed {
   words: Set<string>;
   evidenceWords: Set<string>;
   evidence: string;
+  /** The evidence as written, so a path in it can be put into a decision's text. */
+  raw: string;
+  requests: StatedRequest[];
+}
+
+/** Rule 3: the same evidence, a restatement of part of it, or shared identifiers and wording. */
+function matchesText(reported: string, f: Filed): boolean {
+  const text = squash(reported);
+  return (text !== "" && f.evidence === text) || restates(text, f) || covers(identifiers(reported), words(reported), f);
+}
+
+/**
+ * Rule 2 of unfiledDefects: the decision names a request that did not fail,
+ * the finding names the same request, and the decision's evidence — its path
+ * written as the finding's, so a template and the id it stands for are not a
+ * difference — is the finding's evidence exactly, restates part of it, or
+ * adds only the status the request should have returned.
+ * `failing` is the decision's failing signatures; each must name this same
+ * request, or the pair is refused.
+ */
+function restatesRequest(evidence: string, failing: readonly StatedRequest[], f: Filed): boolean {
+  for (const r of statedRequests(evidence)) {
+    if (r.status !== null && /^[45]/.test(r.status)) continue;
+    const paired = f.requests.find((q) => requestsPair(r, q));
+    if (!paired) continue;
+    if (!failing.every((sig) => sig.method === r.method && templatedPathsMatch(sig.segments, r.segments))) continue;
+    const aligned = squash(evidence.slice(0, r.start) + f.raw.slice(paired.start, paired.end) + evidence.slice(r.end));
+    if (aligned !== "" && (f.evidence === aligned || restates(aligned, f) || addsOnlyExpectedStatus(aligned, f.evidence, r.status))) return true;
+  }
+  return false;
+}
+
+/**
+ * The status a lane adds after the call it quotes, to say what the call
+ * should have returned: "(expected 403)", "(reject 403)", "reject 403". One
+ * status, an optional verb, optional brackets, and nothing else.
+ */
+const EXPECTED_STATUS_RE = /^[\s,;]*\(?\s*(?:(?:expected|expect|rejected|reject)\s*:?\s*)?([1-5]\d{2})\s*\)?[\s.,;]*$/;
+
+/**
+ * Whether the reported evidence is the filed evidence followed by nothing but
+ * the status the request should have returned, which differs from the one it
+ * did. Anything else after it — another request, another role, another
+ * claim — is something the finding does not say, so it is not covered.
+ */
+function addsOnlyExpectedStatus(reported: string, filed: string, status: string | null): boolean {
+  if (filed === "" || !reported.startsWith(filed)) return false;
+  const expected = EXPECTED_STATUS_RE.exec(reported.slice(filed.length))?.[1];
+  return expected !== undefined && expected !== status;
 }
 
 /**
