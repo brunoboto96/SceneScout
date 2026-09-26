@@ -13,8 +13,10 @@
 import { createHash } from "node:crypto";
 import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
 import type { DesignDefect } from "./design.js";
+import { flowStepEvidence, type FlowRun, type SkippedFlowFile } from "./flow.js";
 import { redactSecrets } from "./memory.js";
 import { httpErrorDetail, httpStatusOf, type OracleViolation } from "./oracles.js";
+import type { CheckRetest } from "./verify.js";
 
 export const CHECK_SEVERITIES = ["high", "medium", "low"] as const;
 export type CheckSeverity = (typeof CHECK_SEVERITIES)[number];
@@ -105,6 +107,11 @@ export const CHECK_RULES = {
   "tiny-target": { severity: "low", title: "Small click target", help: "Below the 24px WCAG 2.2 target-size minimum." },
   "clipped-text": { severity: "low", title: "Text clipped", help: "Text is wider than its box and cut off without an ellipsis." },
   "image-aspect": { severity: "low", title: "Image distorted", help: "The rendered box does not match the image's proportions." },
+  "flow-step-failed": {
+    severity: "high",
+    title: "Saved flow broke",
+    help: "A step of a flow saved in .scenescout/flows could not be done, or what it expected was not there. The evidence names the flow, the step and what happened instead.",
+  },
 } as const satisfies Record<string, { severity: CheckSeverity; title: string; help: string }>;
 
 export type CheckRule = keyof typeof CHECK_RULES;
@@ -180,8 +187,18 @@ export function geometryRule(line: string): CheckRule | null {
  * Turn per-route measurements into issues, one per distinct fact. The same
  * failing request on ten pages is one issue seen on ten routes: the shared
  * shell's defects would otherwise bury the one page that is actually broken.
+ *
+ * Saved flows add two kinds: the step a flow broke at, and anything the
+ * oracles caught while it ran. The second kind goes through the same rules as
+ * a crawled page's, so a request that fails on load and again inside a flow is
+ * one issue, not two.
  */
-export function issuesFromRoutes(routes: readonly RouteHealth[], origin: string, ignore: readonly CheckRule[] = []): CheckIssue[] {
+export function issuesFromRoutes(
+  routes: readonly RouteHealth[],
+  origin: string,
+  ignore: readonly CheckRule[] = [],
+  flows: readonly FlowRun[] = [],
+): CheckIssue[] {
   const byKey = new Map<string, CheckIssue>();
   const add = (rule: CheckRule, evidence: string, route: string, opts: { severity?: CheckSeverity; embed?: string } = {}): void => {
     if (ignore.includes(rule)) return;
@@ -220,6 +237,11 @@ export function issuesFromRoutes(routes: readonly RouteHealth[], origin: string,
     for (const u of r.unnamed) add("unnamed-control", u, route);
     for (const p of r.placeholderOnly) add("placeholder-only-label", p, route);
     for (const d of r.design) add(d.rule, d.detail, d.chrome ? "(shared chrome)" : route);
+  }
+  for (const f of flows) {
+    for (const { path, violation } of f.violations) add(violationRule(violation), violation.detail, path, { embed: violation.embed });
+    // A refused step is not the app's defect: the check reports it as "could not run" (refusedFlowReason).
+    if (f.outcome.status === "failed") add("flow-step-failed", flowStepEvidence(f), f.outcome.path);
   }
   return [...byKey.values()].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.rule.localeCompare(b.rule));
 }
@@ -279,6 +301,20 @@ export function redactRoutes(routes: readonly RouteHealth[]): RouteHealth[] {
   }));
 }
 
+/** The same redaction for what flows measured: the page paths and the request URLs their violations quote. */
+export function redactFlowRuns(runs: readonly FlowRun[]): FlowRun[] {
+  return runs.map((f) => ({
+    ...f,
+    outcome:
+      f.outcome.status === "passed"
+        ? f.outcome
+        : { ...f.outcome, path: redactRoute(f.outcome.path), did: redactRoute(f.outcome.did), reason: redactRoute(f.outcome.reason) },
+    refusedBackground: f.refusedBackground.map(redactRoute),
+    websockets: f.websockets.map(redactRoute),
+    violations: f.violations.map(({ path, violation }) => ({ path: redactRoute(path), violation: { ...violation, url: redactRoute(violation.url) } })),
+  }));
+}
+
 export function countBySeverity(issues: readonly CheckIssue[]): Record<CheckSeverity, number> {
   const counts: Record<CheckSeverity, number> = { high: 0, medium: 0, low: 0 };
   for (const i of issues) counts[i.severity] += 1;
@@ -294,7 +330,32 @@ export function gateFailures(issues: readonly CheckIssue[], failOn: FailOn): Che
 /** Exit codes, stable for scripts: a gate failure is distinguishable from the check not running. */
 export const EXIT = { pass: 0, gateFailed: 1, error: 2 } as const;
 
-export interface CheckOptions {
+/**
+ * The settings a project chooses for what a check may do beyond visiting
+ * pages. Each default is the one that does the least harm on an unfamiliar
+ * project: it never writes and never silently hides a result (ADR 12).
+ */
+export const FLOW_WRITES = ["never", "allow"] as const;
+export type FlowWrites = (typeof FLOW_WRITES)[number];
+export const ON_REFUSED_STEP = ["report", "stop"] as const;
+export type OnRefusedStep = (typeof ON_REFUSED_STEP)[number];
+export const GATE_RETESTS = ["never", "high", "all"] as const;
+export type GateRetests = (typeof GATE_RETESTS)[number];
+
+/** What a green check was allowed to do, written beside every verdict so a reviewer can see it. */
+export interface CheckSettings {
+  /** never: flows replay under observe's rule whatever --mode says. allow: under --mode. */
+  flowWrites: FlowWrites;
+  /** report: a refused flow is marked "could not run" and everything else keeps its verdict. stop: the check ends there. */
+  onRefusedStep: OnRefusedStep;
+  /** Which still-reproducing re-tested findings fail the gate. */
+  gateRetests: GateRetests;
+  retest: boolean;
+}
+
+export const DEFAULT_SETTINGS: CheckSettings = { flowWrites: "never", onRefusedStep: "report", gateRetests: "high", retest: true };
+
+export interface CheckOptions extends CheckSettings {
   url: string;
   projectDir: string;
   outDir?: string;
@@ -305,6 +366,8 @@ export interface CheckOptions {
   maxRoutes: number;
   paths?: string[];
   ignore: CheckRule[];
+  /** The flows directory to replay; "off" for none; absent for the project's own when it has one. */
+  flows?: string;
 }
 
 /**
@@ -312,7 +375,22 @@ export interface CheckOptions {
  * repository root mirrors this list input for input, and check-test fails when
  * the two drift apart.
  */
-export const CHECK_OPTION_NAMES = ["project", "out", "fail-on", "mode", "storage-state", "browser", "max-routes", "paths", "ignore"] as const;
+export const CHECK_OPTION_NAMES = [
+  "project",
+  "out",
+  "fail-on",
+  "mode",
+  "storage-state",
+  "browser",
+  "max-routes",
+  "paths",
+  "ignore",
+  "flows",
+  "retest",
+  "flow-writes",
+  "on-refused-step",
+  "gate-retests",
+] as const;
 
 export const MAX_CHECK_ROUTES = 150;
 export const DEFAULT_CHECK_ROUTES = 50;
@@ -352,7 +430,7 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
   if (!FAIL_ON.includes(failOn)) return { ok: false, error: `--fail-on must be one of ${FAIL_ON.join(", ")}` };
   const mode = flags.get("mode") ?? "read-only";
   if (mode !== "observe" && mode !== "read-only") {
-    return { ok: false, error: "--mode must be observe or read-only: a check only visits pages, so nothing it does needs a write" };
+    return { ok: false, error: "--mode must be observe or read-only: the write policy for the crawl, and for saved flows under --flow-writes allow" };
   }
   const browser = flags.get("browser");
   if (browser !== undefined && !(BROWSER_ENGINES as readonly string[]).includes(browser)) {
@@ -376,6 +454,20 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
   const ignore = list(flags.get("ignore")) ?? [];
   const unknownRules = ignore.filter((r) => !(r in CHECK_RULES));
   if (unknownRules.length > 0) return { ok: false, error: `unknown rule(s) in --ignore: ${unknownRules.join(", ")}. Rules: ${CHECK_RULE_IDS.join(", ")}` };
+  const retest = flags.get("retest") ?? "on";
+  if (retest !== "on" && retest !== "off") return { ok: false, error: "--retest must be on or off" };
+  const flows = flags.get("flows");
+  if (flows !== undefined && flows.trim() === "") return { ok: false, error: "--flows needs a directory, or off" };
+  const oneOf = <T extends string>(name: string, allowed: readonly T[], fallback: T): T | null => {
+    const v = flags.get(name) ?? fallback;
+    return (allowed as readonly string[]).includes(v) ? (v as T) : null;
+  };
+  const flowWrites = oneOf("flow-writes", FLOW_WRITES, DEFAULT_SETTINGS.flowWrites);
+  if (!flowWrites) return { ok: false, error: `--flow-writes must be one of ${FLOW_WRITES.join(", ")}` };
+  const onRefusedStep = oneOf("on-refused-step", ON_REFUSED_STEP, DEFAULT_SETTINGS.onRefusedStep);
+  if (!onRefusedStep) return { ok: false, error: `--on-refused-step must be one of ${ON_REFUSED_STEP.join(", ")}` };
+  const gateRetests = oneOf("gate-retests", GATE_RETESTS, DEFAULT_SETTINGS.gateRetests);
+  if (!gateRetests) return { ok: false, error: `--gate-retests must be one of ${GATE_RETESTS.join(", ")}` };
 
   const resolve = (p: string): string => (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) ? p : `${cwd.replace(/[\\/]$/, "")}/${p}`);
   return {
@@ -391,8 +483,18 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
       maxRoutes,
       ...(paths ? { paths } : {}),
       ignore: ignore as CheckRule[],
+      ...(flows !== undefined ? { flows: flows === "off" ? "off" : resolve(flows) } : {}),
+      retest: retest === "on",
+      flowWrites,
+      onRefusedStep,
+      gateRetests,
     },
   };
+}
+
+/** The settings part of the options, as the result records them. */
+export function settingsOf(options: CheckSettings): CheckSettings {
+  return { flowWrites: options.flowWrites, onRefusedStep: options.onRefusedStep, gateRetests: options.gateRetests, retest: options.retest };
 }
 
 export interface CheckResult {
@@ -405,15 +507,68 @@ export interface CheckResult {
   /** Routes the engine knew of but did not reach within --max-routes. */
   unvisited: string[];
   ignored: CheckRule[];
+  /** Every saved flow replayed, in file order. */
+  flows: FlowRun[];
+  /** Open findings from the project's memory, re-tested by loading their page. Null when --retest off or there is no memory. */
+  retest: { open: number; results: CheckRetest[]; extraPages?: number } | null;
+  settings: CheckSettings;
+  /** Entries of the flows directory that were not replayed, each with its reason. */
+  skippedFlows: SkippedFlowFile[];
+}
+
+/**
+ * Why a check has no verdict because of a flow, or null. A step the write
+ * policy refused asks for something a check will not do; the flow did not
+ * run, so it neither passed nor broke, and the check exits "could not run"
+ * rather than reporting a verdict on the rest as if the flow were fine.
+ */
+export function refusedFlowReason(result: Pick<CheckResult, "flows" | "mode" | "settings">): string | null {
+  const refused = result.flows.filter((f) => f.outcome.status === "refused");
+  if (refused.length === 0) return null;
+  const why =
+    result.settings.flowWrites === "never"
+      ? "Flows replay with --flow-writes never, so no step may send a write whatever --mode says: remove the step, or pass --flow-writes allow to replay flows under --mode"
+      : `Flows replay under --mode ${result.mode}, which refuses that write: remove the step, or leave the flow to an exploratory run`;
+  return `${refused.map(flowStepEvidence).join("; ")}. ${why}.`;
+}
+
+/**
+ * Re-tested findings that fail the gate: those still reproducing that
+ * --gate-retests covers. "possibly fixed" and "not re-tested" never do, and
+ * --fail-on never turns every gate off, this one included.
+ */
+export function retestGateFailures(result: Pick<CheckResult, "retest" | "failOn" | "settings">): CheckRetest[] {
+  const { gateRetests } = result.settings;
+  if (!result.retest || gateRetests === "never" || result.failOn === "never") return [];
+  return result.retest.results.filter((r) => r.verdict === "reproduces" && (gateRetests === "all" || r.severity === "high"));
 }
 
 export function summarise(result: CheckResult): {
   passed: boolean;
   counts: Record<CheckSeverity, number>;
   failing: number;
+  /** Of `failing`, how many are re-tested findings. */
+  retestsFailing: number;
+  /** Flows a refused step kept from running: the check has no verdict on them, so it exits 2 whatever the rest did. */
+  couldNotRun: number;
 } {
-  const failing = gateFailures(result.issues, result.failOn).length;
-  return { passed: failing === 0, counts: countBySeverity(result.issues), failing };
+  const retestsFailing = retestGateFailures(result).length;
+  const failing = gateFailures(result.issues, result.failOn).length + retestsFailing;
+  const couldNotRun = result.flows.filter((f) => f.outcome.status === "refused").length;
+  return { passed: failing === 0, counts: countBySeverity(result.issues), failing, retestsFailing, couldNotRun };
+}
+
+/** The exit code a finished check ends with. A flow that could not run outranks the gate: the verdict is incomplete. */
+export function exitCodeOf(result: CheckResult): number {
+  const { passed, couldNotRun } = summarise(result);
+  if (couldNotRun > 0) return EXIT.error;
+  return passed ? EXIT.pass : EXIT.gateFailed;
+}
+
+/** One line of the settings, for the report and the job summary. */
+export function describeSettings(result: Pick<CheckResult, "settings" | "mode">): string {
+  const s = result.settings;
+  return `flow writes: ${s.flowWrites === "never" ? "never (flows replay under observe)" : `allow (flows replay under ${result.mode})`} · refused step: ${s.onRefusedStep} · re-tests: ${s.retest ? `on, gating ${s.gateRetests === "never" ? "nothing" : s.gateRetests === "all" ? "every one still reproducing" : "those filed high"}` : "off"}`;
 }
 
 const SARIF_LEVEL: Record<CheckSeverity, "error" | "warning" | "note"> = { high: "error", medium: "warning", low: "note" };
@@ -424,9 +579,46 @@ const SARIF_LEVEL: Record<CheckSeverity, "error" | "warning" | "note"> = { high:
  * app (the APP base id). Fingerprints come from the evidence, not the
  * location, so a preview deployment on a new URL does not reopen every alert.
  */
+const RETEST_SARIF_RULE = {
+  id: "open-finding-reproduces",
+  name: "Open finding still reproduces",
+  shortDescription: { text: "Open finding still reproduces" },
+  help: { text: "A finding an earlier run filed and left open failed the same way when its page loaded again. It gates according to --gate-retests." },
+  defaultConfiguration: { level: "error" },
+};
+
 export function toSarif(result: CheckResult, toolVersion: string): object {
   const used = [...new Set(result.issues.map((i) => i.rule))];
   const base = new URL(result.url);
+  const reproducing = retestGateFailures(result);
+  const refused = result.flows.filter((f) => f.outcome.status === "refused");
+  const issueResults: object[] = result.issues.map((i) => ({
+    ruleId: i.rule,
+    level: SARIF_LEVEL[i.severity],
+    message: {
+      text: `${CHECK_RULES[i.rule].title}: ${i.evidence}${i.routes.length > 1 ? ` (on ${i.routes.length} routes)` : ""}${i.embed ? ` (in an embed of ${i.embed})` : ""}`,
+    },
+    locations: i.routes.slice(0, 10).map((r) =>
+      r === "(shared chrome)"
+        ? {
+            physicalLocation: { artifactLocation: { uri: "", uriBaseId: "APP" } },
+            message: { text: "the app's shared shell, on every page that renders it" },
+          }
+        : { physicalLocation: { artifactLocation: { uri: r.replace(/^\//, ""), uriBaseId: "APP" } } },
+    ),
+    partialFingerprints: { "scenescoutCheck/v1": i.fingerprint },
+  }));
+  // Only the re-tests that fail the gate are results: a reviewer reading code scanning sees what failed it.
+  const retestResults: object[] = reproducing.map((r) => ({
+    ruleId: RETEST_SARIF_RULE.id,
+    // The severity the finding was filed at, as the page rules map theirs; an unknown one reads as the worst.
+    level: SARIF_LEVEL[(CHECK_SEVERITIES as readonly string[]).includes(r.severity) ? (r.severity as CheckSeverity) : "high"],
+    message: {
+      text: `Open finding still reproduces: [${r.severity}] ${r.title} (${r.id}) — ${r.signatures.join(", ")} (gated by --gate-retests ${result.settings.gateRetests})`,
+    },
+    locations: [{ physicalLocation: { artifactLocation: { uri: r.path.replace(/^\//, ""), uriBaseId: "APP" } } }],
+    partialFingerprints: { "scenescoutCheck/v1": createHash("sha256").update(`retest\u0000${r.id}`).digest("hex").slice(0, 32) },
+  }));
   return {
     $schema: "https://json.schemastore.org/sarif-2.1.0.json",
     version: "2.1.0",
@@ -437,32 +629,31 @@ export function toSarif(result: CheckResult, toolVersion: string): object {
             name: "SceneScout",
             version: toolVersion,
             informationUri: "https://github.com/brunoboto96/SceneScout",
-            rules: used.map((id) => ({
-              id,
-              name: CHECK_RULES[id].title,
-              shortDescription: { text: CHECK_RULES[id].title },
-              help: { text: CHECK_RULES[id].help },
-              defaultConfiguration: { level: SARIF_LEVEL[CHECK_RULES[id].severity] },
-            })),
+            rules: [
+              ...used.map((id) => ({
+                id,
+                name: CHECK_RULES[id].title,
+                shortDescription: { text: CHECK_RULES[id].title },
+                help: { text: CHECK_RULES[id].help },
+                defaultConfiguration: { level: SARIF_LEVEL[CHECK_RULES[id].severity] },
+              })),
+              ...(reproducing.length > 0 ? [RETEST_SARIF_RULE] : []),
+            ],
           },
         },
-        originalUriBaseIds: { APP: { uri: `${base.origin}/` } },
-        results: result.issues.map((i) => ({
-          ruleId: i.rule,
-          level: SARIF_LEVEL[i.severity],
-          message: {
-            text: `${CHECK_RULES[i.rule].title}: ${i.evidence}${i.routes.length > 1 ? ` (on ${i.routes.length} routes)` : ""}${i.embed ? ` (in an embed of ${i.embed})` : ""}`,
+        // A flow that could not run is not a result about the app: it is the tool saying its run was incomplete.
+        invocations: [
+          {
+            executionSuccessful: refused.length === 0,
+            toolExecutionNotifications: refused.map((f) => ({
+              level: "error",
+              descriptor: { id: "flow-could-not-run" },
+              message: { text: `Could not run: ${flowStepEvidence(f)}` },
+            })),
           },
-          locations: i.routes.slice(0, 10).map((r) =>
-            r === "(shared chrome)"
-              ? {
-                  physicalLocation: { artifactLocation: { uri: "", uriBaseId: "APP" } },
-                  message: { text: "the app's shared shell, on every page that renders it" },
-                }
-              : { physicalLocation: { artifactLocation: { uri: r.replace(/^\//, ""), uriBaseId: "APP" } } },
-          ),
-          partialFingerprints: { "scenescoutCheck/v1": i.fingerprint },
-        })),
+        ],
+        originalUriBaseIds: { APP: { uri: `${base.origin}/` } },
+        results: [...issueResults, ...retestResults],
       },
     ],
   };
@@ -495,7 +686,7 @@ function routeList(routes: readonly string[]): string {
 
 /** The human report: the verdict first, then what failed it, then everything else. */
 export function formatCheck(result: CheckResult): string {
-  const { passed, counts, failing } = summarise(result);
+  const { passed, counts, failing, retestsFailing, couldNotRun } = summarise(result);
   const lines: string[] = [];
   lines.push(`# SceneScout check`);
   lines.push("");
@@ -504,12 +695,19 @@ export function formatCheck(result: CheckResult): string {
   );
   lines.push("");
   const unaudited = unauditedRoutes(result.routes).length;
+  const failingText =
+    retestsFailing > 0
+      ? `${failing} failing the gate (${failing - retestsFailing} issue(s), ${retestsFailing} re-tested finding(s))`
+      : `${failing} issue(s) at the gate's severity`;
   lines.push(
-    (passed
-      ? `**PASSED** — ${counts.high} high · ${counts.medium} medium · ${counts.low} low`
-      : `**FAILED** — ${failing} issue(s) at the gate's severity · ${counts.high} high · ${counts.medium} medium · ${counts.low} low`) +
+    (couldNotRun > 0 ? `**COULD NOT RUN** — ${couldNotRun} flow(s) had a step refused (see Flows); the rest ` : "") +
+      (passed
+        ? `${couldNotRun > 0 ? "passed" : "**PASSED**"} — ${counts.high} high · ${counts.medium} medium · ${counts.low} low`
+        : `${couldNotRun > 0 ? "failed" : "**FAILED**"} — ${failingText} · ${counts.high} high · ${counts.medium} medium · ${counts.low} low`) +
       (unaudited > 0 ? ` · design not measured on ${unaudited} route(s)` : ""),
   );
+  // Right under the verdict: what a green check was allowed to do is part of what it means.
+  lines.push("", `Settings — ${describeSettings(result)}`);
   for (const sev of CHECK_SEVERITIES) {
     const of = result.issues.filter((i) => i.severity === sev);
     if (of.length === 0) continue;
@@ -532,21 +730,81 @@ export function formatCheck(result: CheckResult): string {
   if (result.unvisited.length > 0) {
     lines.push("", `Not visited (over --max-routes): ${result.unvisited.slice(0, 20).map(code).join(", ")}${result.unvisited.length > 20 ? " …" : ""}`);
   }
+  if (result.flows.length > 0 || result.skippedFlows.length > 0) {
+    lines.push("", `## Flows (${result.flows.length})`, "");
+    for (const f of result.flows) {
+      const o = f.outcome;
+      lines.push(
+        o.status === "passed"
+          ? `- ✓ ${cell(f.name)} (${code(f.file)}): ${f.steps} step(s) passed`
+          : o.status === "refused"
+            ? `- ⊘ ${cell(f.name)} (${code(f.file)}): could not run — step ${o.step} of ${f.steps}, ${cell(o.did)}: ${cell(o.reason)} _(--flow-writes ${result.settings.flowWrites})_`
+            : `- ✗ ${cell(f.name)} (${code(f.file)}): step ${o.step} of ${f.steps}, ${cell(o.did)}: ${cell(o.reason)}`,
+      );
+      if (f.refusedBackground.length > 0)
+        lines.push(`  - refused background requests (beacons and pings, not charged to a step): ${f.refusedBackground.map(code).join(", ")}`);
+      if (f.websockets.length > 0) lines.push(`  - WebSocket connections opened (not covered by the write rule): ${f.websockets.map(code).join(", ")}`);
+    }
+    for (const s of result.skippedFlows) lines.push(`- skipped ${code(s.file)}: ${cell(s.reason)}`);
+  }
+  if (result.retest && result.retest.open > 0) {
+    const { open, results } = result.retest;
+    lines.push("", `## Open findings re-tested (${results.length} of ${open})`, "");
+    const says: Record<CheckRetest["verdict"], string> = {
+      reproduces: "still reproduces",
+      "possibly-fixed": "possibly fixed: the page loaded and the request did not fail",
+      "not-reached": "not re-tested",
+    };
+    const gating = new Set(retestGateFailures(result));
+    for (const r of results) {
+      lines.push(
+        `- [${r.severity}] ${cell(r.title)} (${r.id}) on ${code(r.path)}: ${says[r.verdict]}${r.note ? ` (${r.note})` : ""}${gating.has(r) ? " — **fails the gate**" : ""} — ${r.signatures.map(code).join(", ")}`,
+      );
+    }
+    if (result.retest.extraPages) {
+      lines.push(
+        "",
+        `${result.retest.extraPages} page(s) were loaded only to re-test these findings; they are not in the routes above and no page rule was applied to them.`,
+      );
+    }
+    if (open > results.length) {
+      lines.push(
+        "",
+        `${open - results.length} open finding(s) need an interaction to reproduce, or name no failed GET, so a check cannot re-test them; \`scout_verify\` in an exploratory run can.`,
+      );
+    }
+    lines.push(
+      "",
+      `_Re-tests gate by --gate-retests ${result.settings.gateRetests}: ${
+        result.settings.gateRetests === "never"
+          ? "none of them"
+          : result.settings.gateRetests === "all"
+            ? "every finding still reproducing"
+            : "a finding filed high that still reproduces"
+      } fails the gate; "possibly fixed" and "not re-tested" never do. A check never writes the project's memory, so nothing is resolved here._`,
+    );
+  }
   if (result.ignored.length > 0) lines.push("", `Rules ignored by --ignore: ${result.ignored.join(", ")}`);
-  lines.push("", "_A check visits pages and measures what loads. It does not fill forms, click through flows or compare roles; an exploratory run does that._");
+  lines.push(
+    "",
+    result.flows.length > 0
+      ? "_A check visits pages, measures what loads and replays the flows saved for it. It does not explore, fill forms of its own accord or compare roles; an exploratory run does that._"
+      : "_A check visits pages and measures what loads. It does not fill forms, click through flows or compare roles; an exploratory run does that. Flows saved in .scenescout/flows are replayed._",
+  );
   return lines.join("\n") + "\n";
 }
 
 /** The machine summary: stable keys for scripts and follow-up jobs. */
 export function toSummaryJson(result: CheckResult, toolVersion: string): object {
-  const { passed, counts, failing } = summarise(result);
+  const { passed, counts, failing, retestsFailing, couldNotRun } = summarise(result);
   return {
     tool: "scenescout-check",
     version: toolVersion,
     url: result.url,
     generatedAt: result.generatedAt,
     mode: result.mode,
-    gate: { failOn: result.failOn, passed, failing },
+    gate: { failOn: result.failOn, passed, failing, retestsFailing, couldNotRun },
+    settings: result.settings,
     counts,
     routes: result.routes.map((r) => ({
       path: r.path,
@@ -558,6 +816,17 @@ export function toSummaryJson(result: CheckResult, toolVersion: string): object 
     })),
     unvisited: result.unvisited,
     ignored: result.ignored,
+    flows: result.flows.map((f) => ({
+      name: f.name,
+      file: f.file,
+      steps: f.steps,
+      status: f.outcome.status,
+      ...(f.outcome.status === "passed" ? {} : { step: f.outcome.step, did: f.outcome.did, reason: f.outcome.reason, path: f.outcome.path }),
+      refusedBackground: f.refusedBackground,
+      websockets: f.websockets,
+    })),
+    skippedFlows: result.skippedFlows,
+    retest: result.retest,
     issues: result.issues,
   };
 }
