@@ -1,5 +1,12 @@
 # scenescout
 
+## 3.11.1
+
+### Patch Changes
+
+- 847c149: Two different defects on one element now stay two findings. Finding dedup compares what is wrong as well as where: identical evidence, a shared quoted label or a reworded title merges two findings only when they are one kind of defect (the same category, or neighbouring categories of one family such as `page-error` and `console-error`). `visual`, `ux-polish`, `a11y` and `missing-testid` are each their own kind, so a link clipped out of view and the same link styled like body text are no longer merged. When `scout_finding` merges a filing it now names the category of the finding it joined and which categories the filing could have merged with.
+- aca7a28: When a lane report is folded, a judged defect on a failing request now counts as filed when a finding names that request with its path written as a template: `GET /api/things/{id} 500` (or `:id`, or `*`) covers a lane's `GET /api/things/7 500`. A template stands only for one id segment (a number, a UUID or a long hex id), never for a word such as `me` or `export`. A defect naming several failing requests counts as filed only when every one of them is. On a request that did not fail, the lane's evidence, once the paths are aligned, must be the finding's, a restatement of part of it, or the finding's evidence followed only by the status the call should have returned, as in `… 200 as role=viewer (expected 403)`.
+
 ## 3.11.0
 
 ### Minor Changes
