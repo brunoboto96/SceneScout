@@ -141,7 +141,11 @@ the report; one it sent to the app is the app's to answer, and keeps its
 severity. Attribution is by origin, so an app that embeds its own service on
 another subdomain sees that service's failures capped too. Console and page
 errors stay the app's: a console message says where its script was served
-from, not which frame ran it, and a page error names no frame. The controls of
+from, not which frame ran it, and a page error names no frame. The one
+exception is the "Failed to load resource" line Chromium and WebKit print for
+a failed request (Firefox prints none): its location is the request's own URL,
+so it follows that request's attribution, and an embed's failure no longer
+reaches the app a second time through its console echo. The controls of
 another site's frame are counted apart and never enter the app's coverage or
 its unexplored-surface and unsubmitted-form lists; a trusted embed's write that
 went out in safe-write still counts as the route's submission.

@@ -26,6 +26,8 @@ import {
   LANE_SEVERITIES,
   LANE_STATUSES,
   LANE_VERDICTS,
+  LaneLedger,
+  laneCloseGuard,
   decodedEntitiesNote,
   laneReportInstruction,
   parseLaneReport,
@@ -310,6 +312,120 @@ test("lane: every lane in a wave is given the same rubric, so it is one cacheabl
   assert.ok(shared > 0.9 * Math.min(a.length, b.length), `only ${shared} of ${a.length} characters are shared`);
   // And the name is the LAST thing said, not merely late.
   assert.ok(a.trimEnd().endsWith('put exactly that in "lane".'), a.slice(-80));
+});
+
+test("lane close guard: a session nothing named as a lane always closes", () => {
+  // The contrast every other case depends on: a single-session run, and the
+  // planner's own session in a parallel one, are never refused.
+  const ledger = new LaneLedger();
+  assert.deepEqual(laneCloseGuard(["default"], ledger), { ok: true });
+  // Other lanes being named or folded says nothing about this one.
+  ledger.name("orders");
+  ledger.fold("orders", true);
+  ledger.name("stock");
+  assert.deepEqual(laneCloseGuard(["default"], ledger), { ok: true }, "the planner's own session");
+});
+
+test("lane close guard: a lane closes once its report is accepted, and not before", () => {
+  const ledger = new LaneLedger();
+  ledger.name("orders");
+  const before = laneCloseGuard(["orders"], ledger);
+  assert.ok(!before.ok, "named by a brief or an instruction, never folded");
+  assert.deepEqual(before.unfolded, ["orders"]);
+  assert.match(before.message, /no report from it has been accepted/);
+  ledger.fold("orders", true);
+  assert.deepEqual(laneCloseGuard(["orders"], ledger), { ok: true });
+});
+
+test("lane close guard: a lane whose only fold was refused is refused, and says what to do", () => {
+  // The order that lost a lane's decisions: its fold was refused for a cap,
+  // the planner closed the lane, then re-sent the corrected object.
+  const ledger = new LaneLedger();
+  ledger.refuse("orders", true);
+  const g = laneCloseGuard(["orders"], ledger);
+  assert.ok(!g.ok);
+  assert.match(g.message, /"orders": its last report was REFUSED/);
+  assert.match(g.message, /scout_lane_report \{ lane, reply \}/, "names the fold");
+  assert.match(g.message, /force: true/, "names the way to close anyway");
+  // The corrected object is accepted: now it closes.
+  ledger.fold("orders", true);
+  assert.deepEqual(laneCloseGuard(["orders"], ledger), { ok: true });
+  // A later refused re-send does not undo an accepted fold.
+  ledger.refuse("orders", true);
+  assert.deepEqual(laneCloseGuard(["orders"], ledger), { ok: true });
+});
+
+test("lane close guard: force closes an unfolded lane", () => {
+  const ledger = new LaneLedger();
+  ledger.refuse("orders", true);
+  ledger.name("stock");
+  assert.deepEqual(laneCloseGuard(["orders", "stock"], ledger, true), { ok: true });
+});
+
+test("lane close guard: closing every session names every unfolded lane and only those", () => {
+  const ledger = new LaneLedger();
+  ledger.name("orders");
+  ledger.fold("orders", true);
+  ledger.refuse("stock", true);
+  ledger.name("users");
+  const g = laneCloseGuard(["default", "orders", "stock", "users"], ledger);
+  assert.ok(!g.ok);
+  assert.deepEqual(g.unfolded, ["stock", "users"]);
+  assert.match(g.message, /2 sessions are lanes/);
+  assert.match(g.message, /"stock": its last report was REFUSED/);
+  assert.match(g.message, /"users": no report from it has been accepted/);
+  // Only the unfolded lanes are listed as the reason…
+  assert.doesNotMatch(g.message, /· "(orders|default)"/);
+  // …and the sessions that could close are offered one by one by name.
+  assert.match(g.message, /closed one by one by name meanwhile: scout_close \{ session: "default" \}, scout_close \{ session: "orders" \}\./);
+  // A close of the lane alone has no other session to offer.
+  const alone = laneCloseGuard(["users"], ledger);
+  assert.ok(!alone.ok);
+  assert.doesNotMatch(alone.message, /one by one/);
+});
+
+test("lane close guard: a brief's lane named like a live session is not a lane", () => {
+  // The planner's own session attached before the split existed; a brief
+  // lane sharing its name must not make the planner need force to close it.
+  const ledger = new LaneLedger();
+  const live = new Set(["admin"]);
+  ledger.nameBriefed(["admin", "orders"], (s) => live.has(s));
+  assert.equal(ledger.state("admin"), "not-a-lane");
+  assert.deepEqual(laneCloseGuard(["admin"], ledger), { ok: true });
+  // The contrast: the brief's other lane, not yet attached, is one.
+  assert.equal(ledger.state("orders"), "unfolded");
+  assert.ok(!laneCloseGuard(["orders"], ledger).ok);
+});
+
+test("lane close guard: a report for a session that is not attached records nothing", () => {
+  // After a forced close, a report still arriving must not make a later
+  // session with that name count as folded (or as refused).
+  const ledger = new LaneLedger();
+  ledger.name("orders");
+  ledger.forget("orders"); // the forced close
+  ledger.fold("orders", false);
+  assert.equal(ledger.state("orders"), "not-a-lane");
+  ledger.name("orders"); // a new lane of that name is briefed
+  assert.ok(!laneCloseGuard(["orders"], ledger).ok, "the earlier fold did not count for the new session");
+  ledger.clear();
+  ledger.refuse("orders", false);
+  assert.equal(ledger.state("orders"), "not-a-lane", "a refused reply for a gone session names nothing");
+  // The contrast: the same report while the session is attached is folded.
+  ledger.name("orders");
+  ledger.fold("orders", true);
+  assert.deepEqual(laneCloseGuard(["orders"], ledger), { ok: true });
+});
+
+test("lane close guard: a closed lane is forgotten, so a new session with its name starts fresh", () => {
+  const ledger = new LaneLedger();
+  ledger.name("orders");
+  ledger.fold("orders", true);
+  ledger.forget("orders");
+  assert.equal(ledger.state("orders"), "not-a-lane");
+  ledger.name("orders");
+  assert.ok(!laneCloseGuard(["orders"], ledger).ok, "the new lane's report is not the old one's");
+  ledger.clear();
+  assert.deepEqual(laneCloseGuard(["orders"], ledger), { ok: true });
 });
 
 test("a reply that was not relay-escaped keeps its references: a literal < means nothing was escaped on the way", () => {

@@ -35,7 +35,7 @@ import { z } from "zod";
 import { BrowserEngine } from "./engine/browser.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
 import { FINDING_CATEGORIES, MemoryStore, redactSecrets } from "./engine/memory.js";
-import { decodedEntitiesNote, LANE_NAME_MAX, laneReportInstruction, parseLaneReport, summarizeLaneReport } from "./engine/lane.js";
+import { decodedEntitiesNote, LANE_NAME_MAX, LaneLedger, laneCloseGuard, laneReportInstruction, parseLaneReport, summarizeLaneReport } from "./engine/lane.js";
 import { MAX_UNFILED_NAMED, unfiledDefects } from "./engine/calibration.js";
 import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
 import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
@@ -556,6 +556,9 @@ server.server.setRequestHandler(GetPromptRequestSchema, (request) => {
 // Splitting the app between lanes: the other half of the parallel protocol.
 // scout_lane_report is how a lane hands its answers back; this is what the
 // planner hands it in the first place.
+// Which sessions those two tools have named as lanes, and whose report was
+// folded, so scout_close can refuse to drop a lane's decisions.
+const laneLedger = new LaneLedger();
 server.registerTool(
   "scout_lane_brief",
   {
@@ -572,7 +575,12 @@ server.registerTool(
     try {
       const eng = engineFor(session);
       const all = routes && routes.length > 0 ? routes : eng.allKnownRoutes();
-      return text(formatBriefs(planLanes(all, lanes, { goal, mode: eng.mode, role: eng.role }), { goal, mode: eng.mode, role: eng.role }), session);
+      const briefs = planLanes(all, lanes, { goal, mode: eng.mode, role: eng.role });
+      laneLedger.nameBriefed(
+        briefs.map((b) => b.lane),
+        (s) => engines.has(s),
+      );
+      return text(formatBriefs(briefs, { goal, mode: eng.mode, role: eng.role }), session);
     } catch (err) {
       return errorText(err);
     }
@@ -592,9 +600,13 @@ server.registerTool(
   },
   async ({ lane, reply }: { lane: string; reply?: string }) => {
     try {
-      if (reply === undefined) return { content: [{ type: "text" as const, text: laneReportInstruction(lane) }] };
+      if (reply === undefined) {
+        laneLedger.name(lane);
+        return { content: [{ type: "text" as const, text: laneReportInstruction(lane) }] };
+      }
       const parsed = parseLaneReport(reply, lane);
       if (!parsed.ok) {
+        laneLedger.refuse(lane, engines.get(lane)?.attached === true);
         return {
           content: [
             { type: "text" as const, text: `Lane report REFUSED: ${parsed.reason}. Ask the lane once for the corrected object; do not re-judge its prose.` },
@@ -644,6 +656,7 @@ server.registerTool(
             (unfiled.length > MAX_UNFILED_NAMED ? `\n  … +${unfiled.length - MAX_UNFILED_NAMED} more` : "") +
             `\nFile each with scout_finding (the same evidence), or confirm which finding already covers it, before closing the lane's session. A judged defect that is never filed is not in the report.`
           : "";
+      laneLedger.fold(lane, engines.get(lane)?.attached === true);
       const around = parsed.aroundIgnored ? `\n(The text around the report's JSON block was discarded unread.)` : "";
       const decoded = decodedEntitiesNote(parsed.entitiesDecoded);
       return {
@@ -1643,16 +1656,25 @@ server.registerTool(
   "scout_close",
   {
     description:
-      "Close a session's browser (memory persists on disk). Default: the DEFAULT session. Pass session to close a specific one, or all=true to close every live session at the end of a multi-role run.",
+      "Close a session's browser (memory persists on disk). Default: the DEFAULT session. Pass session to close a specific one, or all=true to close every live session at the end of a multi-role run. " +
+      "A session that is a lane of a parallel run (named by scout_lane_brief or scout_lane_report) is not closed until its lane report has been accepted by scout_lane_report, since folding needs the session attached; the refusal names every such lane.",
     inputSchema: {
       session: z.string().max(40).optional().describe("Session to close (default: the default session)"),
       all: z.boolean().default(false).describe("Close every live session"),
+      force: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Close even a lane whose report has not been folded yet. Its decisions are then lost: nothing is kept for calibration and nothing checks its defects were filed. Prefer folding it with scout_lane_report first.",
+        ),
     },
   },
-  serializedControl(async ({ session, all }: { session?: string; all?: boolean }) => {
+  serializedControl(async ({ session, all, force }: { session?: string; all?: boolean; force?: boolean }) => {
     try {
       if (all) {
         const names = [...engines.keys()];
+        const guard = laneCloseGuard(names, laneLedger, force);
+        if (!guard.ok) return text(`${guard.message}\nNo session was closed.`, activeName);
         // Closes are independent per-browser — run them in parallel so N wedged
         // sessions cost one 8s teardown cap total, not N of them.
         const dirs = new Set<string>();
@@ -1665,6 +1687,7 @@ server.registerTool(
         for (const store of stores) store.endRun();
         sessionQueue.clear();
         board.clear();
+        laneLedger.clear();
         lastWriter = null;
         for (const dir of dirs) flushStatus(dir);
         return text(`All sessions closed (${names.join(", ") || "none were live"}). Memory and reports remain in .scenescout/.`, activeName);
@@ -1672,6 +1695,8 @@ server.registerTool(
       const name = session ?? activeName;
       const eng = engines.get(name);
       if (!eng) return text(`No live session "${name}".`, name);
+      const guard = laneCloseGuard([name], laneLedger, force);
+      if (!guard.ok) return text(guard.message, name);
       keepReport(eng);
       live?.dropSession(name);
       await eng.close();
@@ -1681,6 +1706,10 @@ server.registerTool(
       if (eng.memory && ![...engines.values()].some((e) => e.memory === eng.memory)) eng.memory.endRun();
       sessionQueue.forget(name);
       board.remove(name);
+      laneLedger.forget(name);
+      // The last session closing ends the run, and its lanes with it: a brief's
+      // names that never attached must not make a later run's session a lane.
+      if (engines.size === 0) laneLedger.clear();
       if (lastWriter?.session === name) lastWriter = null;
       if (eng.memory?.dir) flushStatus(eng.memory.dir);
       if (activeName === name) activeName = engines.keys().next().value ?? "default";

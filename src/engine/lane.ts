@@ -288,3 +288,110 @@ export function summarizeLaneReport(r: LaneReport): string {
   if (r.blocked_by) parts.push(`blocked by ${r.blocked_by}`);
   return `${r.lane}: ${parts.join(", ")}`;
 }
+
+/**
+ * Which sessions are lanes of a parallel run, and whether each one's report
+ * has been folded, so a lane's session is not closed before its decisions
+ * have somewhere to go.
+ *
+ * Folding a report writes its decisions to the lane's own session's project
+ * memory. Closing that session first leaves nothing to write to: a planner
+ * that closes a lane whose fold was just refused (a cap exceeded, say) and
+ * then re-sends the corrected object loses every decision in it.
+ *
+ * A session counts as a lane only when something in this run named it as
+ * one: scout_lane_brief listed it, scout_lane_report issued its instruction,
+ * or a reply was folded (accepted or refused) under its name while that
+ * session was attached. Nothing is inferred from other lanes' activity: the
+ * planner's own session is not a lane, and a single-session run never names
+ * one, so neither is ever refused a close by this. The ledger belongs to one
+ * run: the server clears it when the last session closes, because lane names
+ * are module names and a later run may well attach a role with one of them.
+ */
+export class LaneLedger {
+  private readonly named = new Set<string>();
+  private readonly refused = new Set<string>();
+  private readonly folded = new Set<string>();
+
+  /** An instruction named this session as a lane. */
+  name(lane: string): void {
+    this.named.add(lane);
+  }
+
+  /**
+   * A brief's lanes. One whose name is a session already live is skipped:
+   * that session was attached before the split existed, so it is the
+   * planner's own (or another role's), not a lane waiting to report.
+   */
+  nameBriefed(lanes: readonly string[], isLive: (session: string) => boolean): void {
+    for (const lane of lanes) if (!isLive(lane)) this.named.add(lane);
+  }
+
+  /**
+   * A reply for this lane was refused: it is a lane, and nothing it decided is
+   * kept yet. Only while its session is attached: a reply for a session that
+   * is gone says nothing about a later session given the same name.
+   */
+  refuse(lane: string, attached: boolean): void {
+    if (!attached) return;
+    this.named.add(lane);
+    if (!this.folded.has(lane)) this.refused.add(lane);
+  }
+
+  /** A reply for this lane was accepted. Only while its session is attached, for the same reason. */
+  fold(lane: string, attached: boolean): void {
+    if (!attached) return;
+    this.named.add(lane);
+    this.folded.add(lane);
+    this.refused.delete(lane);
+  }
+
+  /** The session closed: a later session with the same name is a fresh lane. */
+  forget(lane: string): void {
+    this.named.delete(lane);
+    this.refused.delete(lane);
+    this.folded.delete(lane);
+  }
+
+  clear(): void {
+    this.named.clear();
+    this.refused.clear();
+    this.folded.clear();
+  }
+
+  state(lane: string): "not-a-lane" | "folded" | "refused" | "unfolded" {
+    if (!this.named.has(lane)) return "not-a-lane";
+    if (this.folded.has(lane)) return "folded";
+    return this.refused.has(lane) ? "refused" : "unfolded";
+  }
+}
+
+export type CloseGuard = { ok: true } | { ok: false; unfolded: string[]; message: string };
+
+/**
+ * Whether scout_close may close these sessions. Refused only when one of them
+ * is a lane whose report has not been accepted; `force` closes anyway. The
+ * message names every such lane and the two ways on.
+ */
+export function laneCloseGuard(sessions: readonly string[], ledger: LaneLedger, force = false): CloseGuard {
+  if (force) return { ok: true };
+  const pending = sessions.filter((s) => ledger.state(s) === "refused" || ledger.state(s) === "unfolded");
+  if (pending.length === 0) return { ok: true };
+  const one = pending.length === 1;
+  const lines = pending.map((s) =>
+    ledger.state(s) === "refused"
+      ? `  · ${JSON.stringify(s)}: its last report was REFUSED and no corrected one has been accepted`
+      : `  · ${JSON.stringify(s)}: no report from it has been accepted yet`,
+  );
+  const others = sessions.filter((s) => !pending.includes(s));
+  const message =
+    `Not closed: ${one ? "this session is a lane" : `${pending.length} sessions are lanes`} of a parallel run whose report has not been folded.\n` +
+    lines.join("\n") +
+    `\nFolding keeps a lane's decisions in its own session's project memory and checks its defects were filed; closing the session first loses them. ` +
+    `Fold with scout_lane_report { lane, reply } (for a refused report, the lane's corrected object), then close. ` +
+    `To close anyway and lose ${one ? "that lane's" : "those lanes'"} decisions, pass force: true.` +
+    (others.length > 0
+      ? `\nThe other session(s) can be closed one by one by name meanwhile: ${others.map((s) => `scout_close { session: ${JSON.stringify(s)} }`).join(", ")}.`
+      : "");
+  return { ok: false, unfolded: pending, message };
+}
