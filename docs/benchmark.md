@@ -41,8 +41,9 @@ one found.
 | **Precision** | Findings that match a planted defect or a known real one, out of every finding the key can label. Unlabelled findings are listed and counted beside it, and the scorecard prints the bounds: precision if every unlabelled finding turned out wrong, and if every one turned out right. |
 | **Judged, never filed** | A lane called it a defect in its report and nobody called `scout_finding`, so it never reached the report. |
 | **False positives** | Findings matching a known non-defect, with the reason it is not one. |
+| **Set aside** | Findings matching a *contextual* entry: something that is a defect only under a convention the run cannot see. They are in neither precision's numerator nor its denominator, and are not unlabelled; the scorecard lists them and says how many. |
 | **Severity** | Each filed defect's severity against the key's. |
-| **Lane calibration** | Whether a lane's verdict was right *according to the key*, bucketed by the confidence it stated, with an expected calibration error and a Brier score. A "not a defect" whose reason is that the thing belongs to another lane is not scored: it is a verdict about ownership, not about whether the thing is broken. |
+| **Lane calibration** | Whether a lane's verdict was right *according to the key*, bucketed by the confidence it stated, with an expected calibration error and a Brier score. A "not a defect" whose reason is that the thing belongs to another lane is not scored: it is a verdict about ownership, not about whether the thing is broken. Nor is a verdict about a contextual entry, either way: both answers are defensible. Each reason a verdict was not scored is counted and printed. |
 
 The lane calibration here is the **real** one. The report's own calibration
 section can only join a decision to a finding on a failing-endpoint signature,
@@ -62,8 +63,17 @@ entries both claim is **ambiguous**, listed, and scored as neither, so an
 unanticipated phrasing shows up as a line asking for the key to be sharpened
 instead of as a confident false positive.
 
+A **contextual** entry (`contextual` in the key) names an observation that is a
+defect only under a convention the run cannot see, and its `reason` says which
+convention: padding off a 4px grid matters only where the project declares a
+spacing scale. It is one more claimant on the same terms as a real entry: it
+wins over nothing, no non-defect may list it in `overrides`, and text it shares
+with any other entry is ambiguous. That is deliberate: setting a finding aside
+takes it out of precision, so a contextual pattern that won its overlaps would
+hide a real defect from the score as quietly as a greedy non-defect once did.
+
 The key tests itself (`bench-test`): every entry's title and examples,
-non-defects' included, must classify to that entry, and no counter-example may.
+non-defects' and contextual entries' included, must classify to that entry, and no counter-example may.
 When a run is scored, add any phrasing it used that the key got wrong as an
 example or counter-example in the same change.
 
@@ -92,7 +102,8 @@ example or counter-example in the same change.
   count in run 3 that other lanes were changing while it was read. Runs 5–7
   were the next unseen runs: against the key of the day they left 1, 5 and 3
   findings unlabelled and one ambiguous, and those judgements are now in the
-  key as well.
+  key as well. Runs 9 and 10 left 4 each (precision bounded at 87–100% and
+  83–100%); those are judged and in the key too.
 - **A negated claim still matches.** "Export CSV works, no error" is credited
   as the Export CSV defect: the key recognises *what* a finding is about, not
   whether it says the thing is broken. Findings are filed as defects, so this
@@ -113,32 +124,151 @@ example or counter-example in the same change.
 
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
-re-scored against **one** key by `npm run bench -- --all`; the table below is
-key `f8e0862a8b`. The archived runs are in [`bench/runs/`](../bench/runs/).
+re-scored against **one** key by `npm run bench -- --all`. The table below is
+key `71458d9246`; a struck value is the same run under the previous key,
+`f8e0862a8b`. For runs 0–8 the whole change is the new `contextual` list (see
+"Runs 9 and 10"): the findings and verdicts on the spacing-grid and nav-link
+entries are set aside instead of scored. The narrowed approve pattern and the
+entries added for runs 9 and 10 change no finding or verdict in runs 0–8, and
+the rule for "not mine" dismissals is unchanged. Recall did not move for any run. "All findings" counts every finding
+the run filed, including the ones set aside. The archived runs are in [`bench/runs/`](../bench/runs/).
 
 | Run | Date | What changed | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Lane calibration | Cost | Kept? |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
-| 0 | 2026-09-22 | Baseline, 3.4.0, briefs as written on the day | 11/13 | 16/21 (76%) | 21 | 0 | 5 | 1 | 26/31 (84%), ECE 0.05, Brier 0.113 | ~725k tokens, 241 tool calls, longest lane 3m38s | — |
-| 1 | 2026-09-22 | **Lane briefs only** (engine unchanged) — see below | 12/13 | 28/28 (100%) | 28 | 0 | 0 | 0 | 34/35 (97%), ECE 0.12, Brier 0.035 | ~698k tokens, 283 tool calls, longest lane 5m09s | Yes, into the skill |
-| 2 | 2026-09-22 | **Engine 3.5.0 only** — run 1's briefs verbatim | 9/13 | 25/25 (100%) | 26 | 1 | 0 | 1 | 29/30 (97%), ECE 0.10, Brier 0.053 | ~687k tokens, 266 tool calls, longest lane 5m37s | See runs 2–4 |
-| 3 | 2026-09-22 | Repeat of run 2 | 10/13 | 29/32 (91%) | 33 | 1 | 3 | 0 | 30/33 (91%), ECE 0.10, Brier 0.090 | ~680k tokens, 260 tool calls, longest lane 5m40s | See runs 2–4 |
-| 4 | 2026-09-22 | Repeat of run 2 | 11/13 | 26/27 (96%) | 27 | 0 | 1 | 1 | 29/35 (83%), ECE 0.07, Brier 0.101 | ~683k tokens, 271 tool calls, longest lane 4m40s | See runs 2–4 |
-| 5 | 2026-09-23 | **Engine 3.6.1 only** — run 1's briefs verbatim | 11/13 | 30/31 (97%) | 31 | 0 | 1 | 0 | 31/35 (89%), ECE 0.09, Brier 0.080 | ~697k tokens, 248 tool calls, longest lane 9m30s | See runs 5–7 |
-| 6 | 2026-09-23 | Repeat of run 5 | 10/13 | 31/33 (94%) | 33 | 0 | 2 | 0 | 33/37 (89%), ECE 0.06, Brier 0.092 | ~685k tokens, 264 tool calls, longest lane 4m39s | See runs 5–7 |
-| 7 | 2026-09-23 | Repeat of run 5 | 10/13 | 29/30 (97%) | 30 | 0 | 1 | 0 | 30/35 (86%), ECE 0.12, Brier 0.089 | ~725k tokens, 292 tool calls, longest lane 6m08s | See runs 5–7 |
-| 8 | 2026-09-25 | **Engine 3.9.0 only** (frames) — run 1's briefs verbatim | 11/13 | 25/26 (96%) | 26 | 0 | 1 | 0 | 27/28 (96%), ECE 0.09, Brier 0.042 | ~679k tokens, 240 tool calls, longest lane 4m00s | See run 8 |
+| 0 | 2026-09-22 | Baseline, 3.4.0, briefs as written on the day | 11/13 | ~~16/21 (76%)~~ 14/19 (74%) | 21 (2 set aside) | 0 | 5 | 1 | ~~26/31 (84%), ECE 0.05, Brier 0.113~~ 24/29 (83%), ECE 0.05, Brier 0.109 | ~725k tokens, 241 tool calls, longest lane 3m38s | — |
+| 1 | 2026-09-22 | **Lane briefs only** (engine unchanged) — see below | 12/13 | ~~28/28 (100%)~~ 25/25 (100%) | 28 (3 set aside) | 0 | 0 | 0 | ~~34/35 (97%), ECE 0.12, Brier 0.035~~ 31/31 (100%), ECE 0.10, Brier 0.017 | ~698k tokens, 283 tool calls, longest lane 5m09s | Yes, into the skill |
+| 2 | 2026-09-22 | **Engine 3.5.0 only** — run 1's briefs verbatim | 9/13 | ~~25/25 (100%)~~ 20/20 (100%) | 26 (5 set aside) | 1 | 0 | 1 | ~~29/30 (97%), ECE 0.10, Brier 0.053~~ 25/26 (96%), ECE 0.07, Brier 0.046 | ~687k tokens, 266 tool calls, longest lane 5m37s | See runs 2–4 |
+| 3 | 2026-09-22 | Repeat of run 2 | 10/13 | ~~29/32 (91%)~~ 23/26 (88%) | 33 (6 set aside) | 1 | 3 | 0 | ~~30/33 (91%), ECE 0.10, Brier 0.090~~ 24/27 (89%), ECE 0.08, Brier 0.082 | ~680k tokens, 260 tool calls, longest lane 5m40s | See runs 2–4 |
+| 4 | 2026-09-22 | Repeat of run 2 | 11/13 | ~~26/27 (96%)~~ 22/23 (96%) | 27 (4 set aside) | 0 | 1 | 1 | ~~29/35 (83%), ECE 0.07, Brier 0.101~~ 25/29 (86%), ECE 0.05, Brier 0.080 | ~683k tokens, 271 tool calls, longest lane 4m40s | See runs 2–4 |
+| 5 | 2026-09-23 | **Engine 3.6.1 only** — run 1's briefs verbatim | 11/13 | ~~30/31 (97%)~~ 25/26 (96%) | 31 (5 set aside) | 0 | 1 | 0 | ~~31/35 (89%), ECE 0.09, Brier 0.080~~ 27/29 (93%), ECE 0.12, Brier 0.060 | ~697k tokens, 248 tool calls, longest lane 9m30s | See runs 5–7 |
+| 6 | 2026-09-23 | Repeat of run 5 | 10/13 | ~~31/33 (94%)~~ 26/28 (93%) | 33 (5 set aside) | 0 | 2 | 0 | ~~33/37 (89%), ECE 0.06, Brier 0.092~~ 28/30 (93%), ECE 0.06, Brier 0.064 | ~685k tokens, 264 tool calls, longest lane 4m39s | See runs 5–7 |
+| 7 | 2026-09-23 | Repeat of run 5 | 10/13 | ~~29/30 (97%)~~ 26/27 (96%) | 30 (3 set aside) | 0 | 1 | 0 | ~~30/35 (86%), ECE 0.12, Brier 0.089~~ 27/30 (90%), ECE 0.07, Brier 0.072 | ~725k tokens, 292 tool calls, longest lane 6m08s | See runs 5–7 |
+| 8 | 2026-09-25 | **Engine 3.9.0 only** (frames) — run 1's briefs verbatim | 11/13 | ~~25/26 (96%)~~ 22/23 (96%) | 26 (3 set aside) | 0 | 1 | 0 | ~~27/28 (96%), ECE 0.09, Brier 0.042~~ 24/24 (100%), ECE 0.09, Brier 0.014 | ~679k tokens, 240 tool calls, longest lane 4m00s | See run 8 |
+| 9 | 2026-09-26 | **Engine 3.10.0 (wave 1)** — run 1's briefs verbatim, demo served without its seeded-defect comments | 13/13 | 31/31 (100%) | 31 | 0 | 0 | 0 | 30/33 (91%), ECE 0.12, Brier 0.123 | not recorded | See runs 9–10 |
+| 10 | 2026-09-26 | Repeat of run 9 | 11/13 | 22/22 (100%) | 24 (2 set aside) | 0 | 0 | 0 | 23/26 (88%), ECE 0.14, Brier 0.109 | not recorded | See runs 9–10 |
 
 **Brier is the number to compare; ECE says which way a lane is off.** Run 1's verdicts were
-right more often (97% against 84%), and its expected calibration error is
+right more often (97% against 84% under key `f8e0862a8b`; 100% against 83% now), and its expected calibration error is
 *worse*, because the lanes were right more often than they said: every verdict
 stated at 0.6–0.8 was right. Lower ECE is not the goal on its own; a lane that
 is right and says so less loudly than it could is underconfident, not wrong.
 The Brier score — the mean squared gap between stated confidence and being
 right, with no buckets — rewards both being right and saying so, and ranks run 1
-ahead (0.113 → 0.035).
+ahead (0.113 → 0.035 under key `f8e0862a8b`; 0.109 → 0.017 now).
 The first version of this scorer counted the five "belongs to another lane"
 dismissals as wrong verdicts, which gave ECE 0.09 → 0.04 and read as an
 improvement; that one choice was enough to reverse the comparison.
+
+### Runs 9 and 10 — engine 3.10.0 (wave 1), measured twice
+
+Only the engine changed: run 1's briefs verbatim, a fresh demo app and project
+directory each time. 3.10.0 carries the first wave of fixes from run 8: a
+field labelled only by its placeholder is flagged, forms never submitted empty
+are listed in coverage, character references a relay adds to a lane's report
+are decoded, a lane's session is not closed before its report is folded (the
+lane-close guard), and a failed load another site's frame sent is attributed
+to that embed. They are also the first two runs made
+with the demo's seeded-defect comments no longer served (issue #133), so their
+recall cannot have been read from a page.
+
+| Defect | Runs 5–8 | Run 9 | Run 10 |
+|---|:---:|:---:|:---:|
+| Email field has no label | 0/4 | found | found |
+| Empty customer does nothing | 1/4 | found | missed |
+| Sticky bar covers Save notes | 4/4 | found | missed |
+| Double-submit creates two orders | 3/4 | found | found |
+| Archived filter hides a 500 | 2/4 | found | found |
+| Every other planted defect (8) | 4/4 each | found | found |
+
+Recall was 13/13 and 11/13. The email-label defect, missed in every run from 1
+to 8, was found in both: the placeholder-label rule is the change aimed at it.
+Run 10 missed two:
+
+- **The empty-customer submit.** The new-order lane submitted the empty form,
+  saw no new order on the server and judged it "blocked client-side", not a
+  defect, at 0.8. The page says nothing when it refuses, which is the defect.
+  The key now matches that verdict, so it is scored as a wrong one.
+- **The sticky bar.** The order-detail lane measured Save notes covered by the
+  bar at the top of the page and clear at the bottom, and judged it harmless
+  because it covers Save only before scrolling, at 0.7. A control covered at
+  the position the page loads in is the defect, so the verdict is scored as
+  wrong.
+
+Under the new key the wrong verdicts are three in run 9 and three in run 10:
+the four "not my page" verdicts on the dashboard's broken image (below), the
+empty-customer verdict and the sticky-bar verdict.
+
+One run each is a direction, not a size: 13 against a range of 10–11 for runs
+5–8, then 11. The email-label defect found twice is the result worth repeating.
+
+**Calibration, and why the key gained a third list.** Under the previous key
+(`f8e0862a8b`) the lanes' verdicts were right 26/39 and 22/31 times, the lowest of
+any run, and the 22 wrong verdicts break down as:
+
+- **16 were lanes calling two convention-dependent entries "not a defect"**:
+  padding off a 4px grid (12 verdicts) and navigation links without an
+  underline (4). The demo declares no spacing scale, and a link inside a
+  navigation bar is recognisable by its position; WCAG's distinguishable-links
+  rule is aimed at links in running text. Those lanes were not wrong, and
+  neither were the lanes in earlier runs that filed the same things.
+- **4 were "not my page" verdicts on the dashboard's broken image**, worded
+  in ways the dismissal rule does not read as "not mine": "an asset of
+  another page, not /route", "absent on a direct load", "from the other
+  page's load", "not from this route". They stay scored as wrong under the
+  unchanged rule. Widening the rule's wording was tried and not kept: the
+  rule cannot know which routes a lane owns, so the same words also dismiss a
+  lane's wrong verdict about its own page ("absent on a direct
+  /orders-new.html load, so fine"), and runs 2, 4, 6 and 7 used equivalent
+  wordings that the old rule scored, so the runs would no longer be scored
+  alike. Those own-page wordings are now table-tested as not dismissals. The
+  structural fix is follow-up work, not done here: archive each lane's
+  routes from its lane report, and treat a not-a-defect as a dismissal only
+  when the matched key entry's route is outside that lane's routes.
+- **1 was a key mis-match.** "The page hides approve and reject from a clerk,
+  not a defect" was classified as the planted defect that the approve
+  *endpoint* accepts a clerk. The entry no longer matches a page hiding the
+  controls, and that wording is its counter-example.
+- **1 was a genuinely wrong verdict**: the sticky bar, above. The key also
+  gained a sixth wrong one it did not match before: the empty-customer
+  verdict, above.
+
+So the key has a `contextual` list, for observations that are defects only
+under a convention the run cannot see, each with the convention in `reason`.
+The spacing-grid and nav-link entries moved there from the also-real list, and
+a third joined them: run 10's "the orders filter is not kept in the URL",
+which is a defect only where a project treats list state as addressable. A
+finding matching one is set aside — neither right nor wrong — and a verdict on
+one is not scored either way. Re-scored, every earlier run's labelled
+precision and calibration moved, and for runs 0–8 this list is the only cause
+(struck values in the table above); recall did not.
+
+The seven findings the key did not know were judged against the demo's source:
+
+- **Real, and new to the key:** Delete workspace and Save changes offered to a
+  clerk and a read-only auditor, whom the server refuses; the order page still
+  saying "open" after approval is requested; and the sticky bar's "Line items
+  are edited from the list" pointing at a list with no way to edit items
+  (found in both runs).
+- **Real, and a rewording of an entry the key had:** orders created with 0
+  items (the orders API's missing validation, which already covered negative
+  counts), the confirmation email discarded (the email never sent to the
+  server), and Request approval still offered on a pending order.
+- **Contextual:** the orders filter not kept in the URL, above.
+
+What else the runs showed:
+
+- **A nav-link entry had to name the navigation.** Its generic "link(s) with
+  no underline" pattern would have set aside unstyled links in running text,
+  which the distinguishable-links rule does cover; it now needs "nav" nearby,
+  and a paragraph-link wording is its counter-example.
+- **The lane-close guard raised one false alarm in run 9.** The finding's
+  evidence named the endpoint as `/api/orders/{id}/approve` while the lane
+  quoted `/api/orders/1038/approve`, so the guard did not pair the two. Not
+  fixed here; recorded so the pairing can be checked when it is.
+- **No false positives in either run.**
+
+**Kept?** Nothing is decided from one run each. The wave stays; repeat before
+reading a size into any number here.
 
 ### Run 8 — engine 3.9.0, measured once
 
@@ -395,3 +525,10 @@ Edits considered and not kept, so they are not retried blind:
   on the detail page but executed on the list" — were scored as false
   positives. A non-defect now wins only over the defects it names in
   `overrides`.
+- **Widening the "not mine" wording rule to take more phrasings.** Rejected
+  in review for runs 9 and 10. Phrasings such as "absent on a direct load" or
+  "from the other page's load" are as likely to be the owning lane's verdict
+  on its own page, which the rule cannot tell apart without knowing each
+  lane's routes, and a wider rule would score new runs differently from old
+  runs that used the same words. The rule stays as it was; the follow-up is to
+  archive each lane's routes and decide by the matched entry's route.

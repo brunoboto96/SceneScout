@@ -42,10 +42,19 @@ Both checks exist, and each says what it is.
   the project's bar over its whole history, not evidence about the app.
   Verdicts from `scout_verify`, which are about the app, are reported beside it.
 - **In the benchmark** (`bench.ts`), each verdict is judged against the key. An
-  unsure verdict, a decision the key does not name or names ambiguously, and a
-  not-a-defect whose stated reason is that another lane owns the thing are not
-  scored, and each is counted by reason. It reports a Brier score beside the
-  expected calibration error.
+  unsure verdict, a decision the key does not name or names ambiguously, a
+  not-a-defect whose stated reason is that another lane owns the thing, and a
+  verdict on a *contextual* entry — something that is a defect only under a
+  convention the run cannot see, such as a spacing scale the project may not
+  declare — are not scored, and each is counted by reason. It reports a Brier
+  score beside the expected calibration error.
+
+  The contextual list is not a way to wave away verdicts that score badly.
+  An entry must name, in its `reason`, the convention that decides it; it
+  wins over no other entry; and text it shares with a real defect is
+  ambiguous and reported as such, not set aside. A verdict can only leave
+  the score this way by being about something the key has written down as
+  convention-dependent, in the open, where a reviewer can dispute it.
 
 ## Consequences
 
