@@ -344,6 +344,42 @@ A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app
 
 ---
 
+## 🚦 In CI: a deterministic check
+
+An exploratory run is driven by a model, so two runs never find exactly the same things. That suits a report, but not a gate. `scenescout check` is the part that needs no model. It visits the start URL, the project's scanned routes and every same-origin link it finds, and measures each page:
+
+- HTTP and page errors
+- layout geometry (covered, clipped and overlapping controls, blocking overlays)
+- broken images
+- controls with no name
+- contrast and focus
+- pages with no way out
+
+```bash
+npx scenescout check http://127.0.0.1:3000 --fail-on high
+```
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Passed the gate |
+| 1 | Failed it: something at the `--fail-on` severity or worse |
+| 2 | Could not run: a bad argument, an app that never answered, or only the sign-in page reached |
+
+It writes `report.md`, `check.sarif` (for code-scanning dashboards) and `check.json` to `.scenescout/check/`, and on GitHub Actions it also puts the report on the job's summary page.
+
+It never writes to the app (`--mode observe` or `read-only`), and by default it fails only on facts that mean a page is broken: a page that did not load, an uncaught exception, a 5xx, a failure shown as success. Other options:
+
+- `--fail-on medium` or `low` makes the gate stricter.
+- `--ignore <rule>` drops a rule.
+- `--paths /a,/b` checks only those pages.
+- `--storage-state <file>` checks while signed in.
+
+`scenescout check --help` lists every option. Why the defaults are what they are: [ADR 11](docs/adr/0011-a-gate-is-deterministic-and-fails-only-on-what-it-can-prove.md).
+
+The check fills no forms and follows no flows. That is the exploratory run's job, and its findings belong in a report, not a gate.
+
+---
+
 ## 🩺 Troubleshooting
 
 Run `npx -y scenescout doctor` first — it checks every setup item below (everything but the last row, which is about your app) and prints the fix.
@@ -549,7 +585,8 @@ npx -y scenescout watch <path>      # the same, live in your browser, with each 
 src/
   mcp-server.ts     the 29 tools + per-session dispatch
   scan.ts           project discovery (framework, routes, auth)
-  cli.ts            scan · serve · install · doctor · status
+  cli.ts            scan · serve · install · doctor · check · status
+  check-run.ts      drives a check: attach, crawl every route, collect what was measured
   installer.ts      setup logic (skill link, MCP registration, diagnostics)
   engine/
     browser.ts      the engine class: attach, snapshot, actions, crawl, plans
@@ -571,9 +608,10 @@ src/
     design.ts       the design audit + page scoring
     memory.ts       cross-run storage + finding dedup
     report.ts       the gap ledger + report generation
+    check.ts        the check's rules, gate, report and SARIF
     replay.ts       the run as one page: steps, tasks, frames under each finding
     …               collector · dispatch · fixtures · authloss · reaper
-scripts/            the 23 test suites (smoke/ holds the real-browser ones)
+scripts/            the 24 test suites (smoke/ holds the real-browser ones)
 test-app/           fixtures for the real-browser smoke tests
 skills/scenescout/   the testing method (SKILL.md): a skill in Claude Code, served by the server everywhere else
 docs/how-it-works.md  what happens at each stage, in diagrams
@@ -603,6 +641,7 @@ The load-bearing choices are recorded as ADRs — read the relevant one before c
 - [8 · Recording is opt-in, and a recorded run is one self-contained page](docs/adr/0008-a-recorded-run-is-evidence-and-must-be-asked-for.md)
 - [9 · A refused write is answered, not dropped](docs/adr/0009-a-refused-write-is-answered-not-dropped.md)
 - [10 · A lane's confidence is checked, not trusted](docs/adr/0010-a-confidence-is-checked-not-trusted.md)
+- [11 · A gate is deterministic, and fails only on what it can prove](docs/adr/0011-a-gate-is-deterministic-and-fails-only-on-what-it-can-prove.md)
 
 ---
 
@@ -614,7 +653,7 @@ Working on SceneScout itself is the only reason to clone it:
 git clone https://github.com/brunoboto96/SceneScout.git scenescout && cd scenescout
 npm install        # installs dependencies and builds
 npm run setup      # same as `scenescout install`, but registers THIS checkout (the skill is linked, so edits are live)
-npm test           # build + 23 suites: 21 pure-logic suites (scan, oracle, policy, … bench, hygiene),
+npm test           # build + 24 suites: 22 pure-logic suites (scan, oracle, policy, … bench, hygiene),
                    #                     then smoke and mcp-check (the server over stdio), both with real browsers
 npm run bench -- --all   # re-score every archived benchmark run against the current answer key
 npm run demo       # regenerate examples/ from the demo app

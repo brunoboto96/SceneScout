@@ -6,6 +6,7 @@
  *   scenescout serve                Run the MCP server on stdio
  *   scenescout install              Install the skill, download the browser, register the MCP server
  *   scenescout doctor               Check every piece of the setup and say how to fix what is missing
+ *   scenescout check <url>          Visit every route, measure it, and pass or fail (no model involved)
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -41,7 +42,9 @@ import {
   resolveClaudeDir,
   spawnRunner,
 } from "./installer.js";
-import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME } from "./engine/memory.js";
+import { defaultCheckDir, runCheck } from "./check-run.js";
+import { EXIT, formatCheck, parseCheckArgs, summarise, toSarif, toSummaryJson, unmeasuredReason } from "./engine/check.js";
+import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME, writeSelfIgnore } from "./engine/memory.js";
 import {
   formatStatus,
   liveEngines,
@@ -59,8 +62,14 @@ import { formatScan, scanProject } from "./scan.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(here, "..");
 
+/** This package's version, as published. */
+function packageVersion(): string {
+  return (JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version: string }).version;
+}
+
 function usage(exitCode = 1): never {
-  console.log(`SceneScout — AI exploratory UI testing engine (MCP)
+  // The version beside the name: an old global install is otherwise easy to mistake for this one.
+  console.log(`SceneScout ${packageVersion()} — AI exploratory UI testing engine (MCP)
 
 Usage:
   scenescout scan <projectPath>     Discover framework, routes, auth states
@@ -77,6 +86,14 @@ Usage:
   scenescout doctor                 Check the setup and print the fix for anything missing
                                     (--engine: only node, the build and the browser — for plugin
                                      installs and other MCP clients)
+  scenescout check <url>            Visit every route, measure each one, and pass or fail — no model involved,
+                                    so it can gate a pull request. Writes report.md, check.sarif and check.json.
+                                    (--fail-on high|medium|low|never (default high); --mode observe|read-only;
+                                     --max-routes N (default 50); --paths /a,/b to check only those;
+                                     --ignore rule,rule; --storage-state file to check signed in;
+                                     --project dir (default: here); --out dir (default: .scenescout/check);
+                                     --browser chromium|firefox|webkit)
+                                    Exit code: 0 passed, 1 failed the gate, 2 could not run.
   scenescout status [projectPath]   What is the engine doing right now? (every session + recent actions)
   scenescout watch [projectPath]    Open the live view in a browser: what each session is doing, a thumbnail
                                     of its page, and a live stream you can switch on per session
@@ -414,9 +431,8 @@ async function install(flags: string[]): Promise<void> {
   } else {
     const onPath = (): string | null =>
       findOnUserPath({ names: process.platform === "win32" ? [`${CLI_NAME}.cmd`] : [CLI_NAME], pathValue: process.env.PATH ?? "" });
-    const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version: string };
     const done = ensureCommand(
-      planCommand({ packageRoot, nodePath: process.execPath, version: pkg.version, resolved: onPath(), platform: process.platform }),
+      planCommand({ packageRoot, nodePath: process.execPath, version: packageVersion(), resolved: onPath(), platform: process.platform }),
       spawnRunner,
     );
     if (done.status === "present") {
@@ -477,6 +493,49 @@ async function doctor(flags: string[]): Promise<void> {
   );
 }
 
+/** `scenescout check`: exit 0 passed, 1 failed the gate, 2 could not run. */
+async function check(args: string[]): Promise<never> {
+  if (args.includes("--help") || args.includes("-h")) usage(0);
+  const parsed = parseCheckArgs(args, process.cwd());
+  if (!parsed.ok) {
+    console.error(`scenescout check: ${parsed.error}`);
+    process.exit(EXIT.error);
+  }
+  const options = parsed.options;
+  const outDir = options.outDir ?? defaultCheckDir(options.projectDir);
+  let result;
+  try {
+    console.log(`Checking ${options.url} …`);
+    result = await runCheck(options, (line) => console.log(line));
+  } catch (err) {
+    console.error(`scenescout check: could not run: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(EXIT.error);
+  }
+  const unmeasured = unmeasuredReason(result.routes, !options.paths);
+  if (unmeasured) {
+    console.error(`scenescout check: could not measure ${options.url}: ${unmeasured}`);
+    process.exit(EXIT.error);
+  }
+  const markdown = formatCheck(result);
+  try {
+    const version = packageVersion();
+    if (!options.outDir) writeSelfIgnore(path.dirname(outDir));
+    fs.mkdirSync(outDir, { recursive: true });
+    fs.writeFileSync(path.join(outDir, "report.md"), markdown);
+    fs.writeFileSync(path.join(outDir, "check.sarif"), JSON.stringify(toSarif(result, version), null, 2) + "\n");
+    fs.writeFileSync(path.join(outDir, "check.json"), JSON.stringify(toSummaryJson(result, version), null, 2) + "\n");
+    // On GitHub Actions the verdict also goes on the run's summary page.
+    if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, markdown);
+  } catch (err) {
+    // A verdict nobody can read is not a pass or a fail: exit as "could not run", never as the gate's 1.
+    console.error(`scenescout check: could not write the results to ${outDir}: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(EXIT.error);
+  }
+  console.log("\n" + markdown);
+  console.log(`Wrote report.md, check.sarif and check.json to ${outDir}`);
+  process.exit(summarise(result).passed ? EXIT.pass : EXIT.gateFailed);
+}
+
 const [, , command, ...args] = process.argv;
 
 // A CLI's failure mode should be a sentence, not a stack trace. `scan` on a
@@ -494,8 +553,7 @@ try {
       usage(0);
     case "--version":
     case "-v": {
-      const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version: string };
-      console.log(pkg.version);
+      console.log(packageVersion());
       break;
     }
     case "scan": {
@@ -514,6 +572,10 @@ try {
     }
     case "doctor": {
       await doctor(args);
+      break;
+    }
+    case "check": {
+      await check(args);
       break;
     }
     case "status": {

@@ -19,6 +19,7 @@ and which failure direction was chosen deliberately.
 | [0008](0008-a-recorded-run-is-evidence-and-must-be-asked-for.md) | Recording is opt-in, and a recorded run is one self-contained page |
 | [0009](0009-a-refused-write-is-answered-not-dropped.md) | A write the policy refuses is answered with a 403, so the page's refusal handling runs |
 | [0010](0010-a-confidence-is-checked-not-trusted.md) | A lane's confidence is checked, against what was filed and against a key, and disclosed where it cannot be |
+| [0011](0011-a-gate-is-deterministic-and-fails-only-on-what-it-can-prove.md) | `scenescout check` involves no model, never writes, and fails by default only on what proves a page broken |
 
 ## Writing a new one
 

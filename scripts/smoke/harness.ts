@@ -121,6 +121,28 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end("boom");
       return;
     }
+    // A server that hangs up without answering: the navigation fails at once (no timeout to wait out).
+    if (urlPath === "/drop-connection") {
+      req.socket.destroy();
+      return;
+    }
+    // A members area that always sends the visitor to sign in, as with a missing or expired session.
+    if (urlPath.startsWith("/members/")) {
+      res.writeHead(302, { location: "/login" });
+      res.end();
+      return;
+    }
+    // A second walled area whose sign-in page links out to a public page.
+    if (urlPath.startsWith("/check-walled/")) {
+      res.writeHead(302, { location: "/check/signin" });
+      res.end();
+      return;
+    }
+    if (urlPath === "/check/signin") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(fs.readFileSync(path.join(appDir, "check-signin.html")));
+      return;
+    }
     // A link that answers with no content: the navigation starts and never commits.
     if (urlPath === "/no-content") {
       res.writeHead(204);
