@@ -33,7 +33,15 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           REF: ${{ github.ref_name }}
-        run: echo "Dispatched on $REF; no pull request labels to read, so nothing is held."
+        run: |
+          # Only the release workflow's version branch is dispatched here. A
+          # dispatch anywhere else would put a passing "wave hold" on a held
+          # pull request's commit and hide the failing one, so it fails.
+          if [ "$REF" != "changeset-release/main" ]; then
+            echo "::error::wave hold is only dispatched on changeset-release/main; on $REF it runs from pull request events."
+            exit 1
+          fi
+          echo "Dispatched on $REF; no pull request labels to read, so nothing is held."
       - name: Check for the hold label
         if: github.event_name == 'pull_request'
         env:
