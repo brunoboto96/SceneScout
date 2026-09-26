@@ -1,6 +1,5 @@
-/* A bundled font, so layout — and with it the overlap percentages and page
-   scores in examples/report.md — is the same on every platform. The system
-   font stack resolved to a different face on each OS. Inter is licensed under
+/* A bundled font, so layout is the same on every platform. The system font
+   stack resolved to a different face on each OS. Inter is licensed under
    the SIL Open Font License; see fonts/OFL.txt. */
 @font-face {
   font-family: "Inter";
@@ -196,7 +195,6 @@ textarea:focus-visible {
 .muted {
   color: var(--muted);
 }
-/* SEEDED DEFECT: helper text too faint to read (fails WCAG contrast). */
 .hint {
   color: #b8c0ca;
   font-size: 13px;
@@ -213,7 +211,6 @@ textarea:focus-visible {
   color: var(--danger);
   margin-top: 8px;
 }
-/* The save row sticks to the bottom of the viewport on long pages... */
 .savebar {
   position: sticky;
   bottom: 0;
@@ -221,7 +218,6 @@ textarea:focus-visible {
   padding: 10px 0;
   background: var(--bg);
 }
-/* ...SEEDED DEFECT: and so does this bar, which was added later and sits on top of it. */
 .stickybar {
   position: fixed;
   left: 0;
@@ -237,7 +233,6 @@ textarea:focus-visible {
 .stickybar a {
   color: #9cc5ff;
 }
-/* SEEDED DEFECT: positioned by eye with a negative margin; it lands on top of a button. */
 .newbadge {
   display: inline-block;
   position: relative;
@@ -257,8 +252,7 @@ footer {
   padding: 24px;
 }
 
-/* Roles and approvals. Colours checked at 4.5:1 or better: only the seeded
-   defects in this app are meant to fail a design audit. */
+/* Roles and approvals. Colours checked at 4.5:1 or better. */
 header.bar nav {
   flex-wrap: wrap;
 }

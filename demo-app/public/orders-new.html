@@ -26,7 +26,6 @@
         <div class="hint">The company or person the order is for.</div>
         <label for="items">Number of items</label>
         <input id="items" name="items" type="number" min="1" value="1" data-testid="new-order-items" />
-        <!-- SEEDED DEFECT: this field has no label, only a placeholder. -->
         <input name="email" type="email" placeholder="Confirmation email (optional)" data-testid="new-order-email" style="margin-top: 14px" />
         <div class="row" style="margin-top: 18px">
           <button class="primary" type="submit" data-testid="new-order-submit">Create order</button>
@@ -40,9 +39,7 @@
       document.getElementById("f").addEventListener("submit", async (e) => {
         e.preventDefault();
         const customer = document.getElementById("customer").value.trim();
-        // SEEDED DEFECT: an empty customer silently does nothing — no message, no focus.
         if (!customer) return;
-        // SEEDED DEFECT: the button stays enabled while the request is in flight.
         const res = await fetch("/api/orders", {
           method: "POST",
           headers: { "content-type": "application/json" },
