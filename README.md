@@ -351,7 +351,7 @@ An exploratory run is driven by a model, so two runs never find exactly the same
 - HTTP and page errors
 - layout geometry (covered, clipped and overlapping controls, blocking overlays)
 - broken images
-- controls with no name
+- controls with no name, and fields whose only label is a placeholder
 - contrast and focus
 - pages with no way out
 
@@ -366,6 +366,16 @@ npx scenescout check http://127.0.0.1:3000 --fail-on high
 | 2 | Could not run: a bad argument, an app that never answered, or only the sign-in page reached |
 
 It writes `report.md`, `check.sarif` (for code-scanning dashboards) and `check.json` to `.scenescout/check/`, and on GitHub Actions it also puts the report on the job's summary page.
+
+On GitHub Actions, this repository is also an action that installs everything and keeps the results:
+
+```yaml
+- uses: brunoboto96/SceneScout@v3.10.0
+  with:
+    url: http://127.0.0.1:3000
+```
+
+[docs/ci.md](docs/ci.md) has a complete workflow (start the app, wait for it, check it), the action's inputs and outputs, code-scanning upload, and the same check on GitLab CI, CircleCI or any shell.
 
 It never writes to the app (`--mode observe` or `read-only`), and by default it fails only on facts that mean a page is broken: a page that did not load, an uncaught exception, a 5xx, a failure shown as success. Other options:
 

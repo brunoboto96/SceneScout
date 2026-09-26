@@ -36,6 +36,8 @@ export interface RouteHealth {
   elements: number;
   /** Controls with no accessible name, described by role and test id. */
   unnamed: string[];
+  /** Fields whose only label is their placeholder, described like `unnamed` plus the placeholder text. */
+  placeholderOnly: string[];
   violations: Array<Pick<OracleViolation, "kind" | "severity" | "detail" | "url" | "embed">>;
   /** GEOMETRY lines from the snapshot's layout checks, overlay probe included. */
   geometry: string[];
@@ -92,6 +94,11 @@ export const CHECK_RULES = {
   "overlapping-controls": { severity: "low", title: "Controls overlap", help: "Two controls in the same layer cover most of each other." },
   "broken-image": { severity: "medium", title: "Broken image", help: "The browser could not render the image." },
   "unnamed-control": { severity: "medium", title: "Control with no accessible name", help: "Assistive technology announces the control without a name." },
+  "placeholder-only-label": {
+    severity: "medium",
+    title: "Field labelled only by its placeholder",
+    help: "The field has no label, aria-label, aria-labelledby or title. Its placeholder is not a label: it disappears as soon as the user types, and some assistive technology does not announce it.",
+  },
   contrast: { severity: "low", title: "Text contrast below WCAG", help: "Text needs 4.5:1 (3:1 when large) against its background." },
   "focus-indicator": { severity: "low", title: "No visible focus indicator", help: "Tabbing to the control changes nothing on screen." },
   "horizontal-scroll": { severity: "medium", title: "Page scrolls sideways", help: "Content is wider than the viewport." },
@@ -211,6 +218,7 @@ export function issuesFromRoutes(routes: readonly RouteHealth[], origin: string,
     }
     for (const line of r.brokenImages) if (!/^…and \d+ more/.test(line)) add("broken-image", stripRefs(line), route);
     for (const u of r.unnamed) add("unnamed-control", u, route);
+    for (const p of r.placeholderOnly) add("placeholder-only-label", p, route);
     for (const d of r.design) add(d.rule, d.detail, d.chrome ? "(shared chrome)" : route);
   }
   return [...byKey.values()].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.rule.localeCompare(b.rule));
@@ -299,6 +307,13 @@ export interface CheckOptions {
   ignore: CheckRule[];
 }
 
+/**
+ * Every `--option` `scenescout check` accepts. The GitHub Action at the
+ * repository root mirrors this list input for input, and check-test fails when
+ * the two drift apart.
+ */
+export const CHECK_OPTION_NAMES = ["project", "out", "fail-on", "mode", "storage-state", "browser", "max-routes", "paths", "ignore"] as const;
+
 export const MAX_CHECK_ROUTES = 150;
 export const DEFAULT_CHECK_ROUTES = 50;
 
@@ -319,7 +334,7 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
     if (eq < 0) i += 1;
     flags.set(name, value);
   }
-  const known = new Set(["project", "out", "fail-on", "mode", "storage-state", "browser", "max-routes", "paths", "ignore"]);
+  const known = new Set<string>(CHECK_OPTION_NAMES);
   for (const name of flags.keys()) if (!known.has(name)) return { ok: false, error: `unknown option --${name}` };
   if (positional.length !== 1) return { ok: false, error: "give exactly one URL to check, e.g. scenescout check http://127.0.0.1:3000" };
   let url: URL;

@@ -93,6 +93,41 @@ jobs:
           commit-message: Version Packages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The GitHub Action (action.yml) is used as brunoboto96/SceneScout@v3: a
+      # major tag that follows the latest v3.x.y release, as actions/checkout's
+      # v4 does. `changeset publish` has just made and pushed vX.Y.Z; this points
+      # vX at the same commit. An exact tag (@v3.10.0) or a commit SHA never
+      # moves, for users who pin.
+      #
+      # npm has already published by now, so this step never fails the job. The
+      # tag rulesets keep exact release tags (refs/tags/v*.*.*) from being moved
+      # and major tags (v3) from being deleted, so moving v3 is allowed. If a
+      # setting ever refuses it, the refusal becomes a warning rather than a red
+      # release.
+      - name: Point the major tag at this release
+        if: steps.changesets.outputs.published == 'true'
+        # The version comes from package.json, not the action's publishedPackages
+        # output: @changesets/cli 3 prints its publish summary in a format the
+        # action no longer parses, so that output arrives empty. `published` is
+        # still set, and publishing only ever releases this commit's version.
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if ! git rev-parse --verify --quiet "refs/tags/v$version" > /dev/null; then
+            echo "::warning title=Major tag not updated::No v$version tag was created by the publish, so the major tag stays where it is."
+            exit 0
+          fi
+          case "$version" in *-*) echo "v$version is a prerelease; the major tag stays where it is."; exit 0 ;; esac
+          major="v${version%%.*}"
+          # Lightweight, so it needs no tagger identity, and git resolves it straight to the commit.
+          git tag --force "$major" "v$version^{commit}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$major" > /dev/null; then
+            if git push --force origin "refs/tags/$major"; then echo "Moved $major to v$version."; exit 0; fi
+            what="move"
+          else
+            if git push origin "refs/tags/$major"; then echo "Created $major at v$version."; exit 0; fi
+            what="create"
+          fi
+          echo "::warning title=Major tag not updated::Could not $what $major at v$version, so users of @$major do not get this release yet. Check that no tag ruleset restricts updating $major: only exact release tags (refs/tags/v*.*.*) should be protected against moves."
 
   # A separate job, so the permission to start workflows is never held by the
   # job that runs repository code and can publish. It keys off pr-number, which

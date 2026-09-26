@@ -10,9 +10,27 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
+import {
+  ACTION_ONLY_INPUTS,
+  browsersPath,
+  checkArgs,
+  defaultArtifactName,
+  engineOf,
+  explainError,
+  hasCheckCommand,
+  noCheckCommand,
+  installTarget,
+  isVersionSpec,
+  npmCommand,
+  outDirFor,
+  summaryOutputs,
+  verdict,
+} from "../action/check-action.mjs";
 import { brokenImageIssues, geometryIssues } from "../src/engine/collector.ts";
 import { httpErrorDetail } from "../src/engine/oracles.ts";
 import {
+  CHECK_OPTION_NAMES,
   CHECK_RULES,
   formatCheck,
   gateFailures,
@@ -41,6 +59,7 @@ function route(over: Partial<RouteHealth> = {}): RouteHealth {
     loginRedirect: false,
     elements: 10,
     unnamed: [],
+    placeholderOnly: [],
     violations: [],
     geometry: [],
     brokenImages: [],
@@ -317,6 +336,25 @@ test("SARIF: severities map to levels, rules list only what was found, locations
   assert.ok(byRule["page-error"].partialFingerprints["scenescoutCheck/v1"]);
 });
 
+test("a field labelled only by its placeholder is its own medium rule, apart from a control with no name at all", () => {
+  const issues = issuesFromRoutes(
+    [route({ path: "/new", unnamed: ["textbox [testid=search-box]"], placeholderOnly: ['textbox [testid=email-field] "Your email"'] })],
+    ORIGIN,
+  );
+  assert.deepEqual(
+    issues.map((i) => [i.rule, i.severity, i.evidence]),
+    [
+      ["placeholder-only-label", "medium", 'textbox [testid=email-field] "Your email"'],
+      ["unnamed-control", "medium", "textbox [testid=search-box]"],
+    ],
+  );
+  assert.equal(gateFailures(issues, "high").length, 0, "neither fails the default gate");
+  const sarif = toSarif(result(issues), "9.9.9") as { runs: Array<{ tool: { driver: { rules: Array<{ id: string; help: { text: string } }> } } }> };
+  const rule = sarif.runs[0].tool.driver.rules.find((r) => r.id === "placeholder-only-label");
+  assert.match(rule?.help.text ?? "", /disappears as soon as the user types/);
+  assert.deepEqual(issuesFromRoutes([route({ placeholderOnly: ['textbox "Your email"'] })], ORIGIN, ["placeholder-only-label"]), [], "--ignore takes it out");
+});
+
 test("every rule has a severity, a title and help text", () => {
   for (const [id, r] of Object.entries(CHECK_RULES)) {
     assert.ok(["high", "medium", "low"].includes(r.severity), id);
@@ -496,4 +534,192 @@ test("a page's own error status is one issue even when its URL carried a token, 
     issuesFromRoutes([r], ORIGIN).map((i) => i.rule),
     ["route-client-error"],
   );
+});
+
+// ---------------------------------------------------------------------------
+// The GitHub Action (action.yml + action/check-action.mjs). Its inputs are the
+// CLI's options by name, so the two lists are held equal here: adding an
+// option to one and not the other fails this suite, not a user's workflow.
+// ---------------------------------------------------------------------------
+
+const REPO = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+const readYaml = (rel: string): Record<string, any> => parseYaml(fs.readFileSync(path.join(REPO, rel), "utf8"));
+const action = readYaml("action.yml");
+const actionInputs = Object.keys(action.inputs as Record<string, unknown>);
+/** The inputs as the runner hands them over: every input, at its default. */
+const defaultInputs = (): Record<string, string> =>
+  Object.fromEntries(Object.entries(action.inputs as Record<string, { default?: string }>).map(([k, v]) => [k, v.default ?? ""]));
+
+test("action: every input that is not the action's own is a `scenescout check` option, and every option is an input", () => {
+  const forwarded = actionInputs.filter((name) => !ACTION_ONLY_INPUTS.includes(name)).sort();
+  const options: string[] = [...CHECK_OPTION_NAMES].sort();
+  assert.deepEqual(
+    forwarded,
+    options,
+    `options missing from action.yml: ${options.filter((o) => !forwarded.includes(o)).join(", ") || "none"}; ` +
+      `inputs the CLI does not accept: ${forwarded.filter((f) => !options.includes(f)).join(", ") || "none"}`,
+  );
+  // A name left in ACTION_ONLY_INPUTS after its input is removed would hide a CLI option of that name from the action.
+  assert.deepEqual(
+    ACTION_ONLY_INPUTS.filter((name) => !actionInputs.includes(name)),
+    [],
+  );
+});
+
+test("action: the arguments it builds are ones the CLI accepts, carrying every option and none of the action's own inputs", () => {
+  const inputs = {
+    ...defaultInputs(),
+    url: "http://127.0.0.1:3000/start",
+    "fail-on": "medium",
+    mode: "observe",
+    "max-routes": "10",
+    paths: "/a,/b",
+    ignore: "contrast",
+    "storage-state": "auth/user.json",
+    browser: "webkit",
+    project: "site",
+    out: "results",
+    cli: "dist/cli.js",
+    "upload-sarif": "true",
+  };
+  const args = checkArgs(inputs);
+  assert.equal(args[0], "check");
+  const parsed = parseCheckArgs(args.slice(1), "/work");
+  assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+  assert.deepEqual(parsed.options, {
+    url: "http://127.0.0.1:3000/start",
+    projectDir: "/work/site",
+    outDir: "/work/results",
+    failOn: "medium",
+    mode: "observe",
+    storageStatePath: "/work/auth/user.json",
+    browser: "webkit",
+    maxRoutes: 10,
+    paths: ["/a", "/b"],
+    ignore: ["contrast"],
+  });
+  for (const own of ACTION_ONLY_INPUTS.filter((n) => n !== "url")) assert.ok(!args.some((a) => a.startsWith(`--${own}`)), own);
+});
+
+test("action: its defaults are the CLI's defaults, and an empty input is left to the CLI", () => {
+  const args = checkArgs({ ...defaultInputs(), url: "http://127.0.0.1:3000" });
+  const viaAction = parseCheckArgs(args.slice(1), "/work");
+  const direct = parseCheckArgs(["http://127.0.0.1:3000", "--browser", "chromium"], "/work");
+  assert.ok(viaAction.ok && direct.ok);
+  assert.deepEqual(viaAction.options, direct.options);
+  assert.ok(!args.some((a) => a.startsWith("--max-routes") || a.startsWith("--paths") || a.startsWith("--out")));
+});
+
+test("action: a missing url or an unknown browser stops it before anything is downloaded", () => {
+  assert.throws(() => checkArgs({ ...defaultInputs(), url: "  " }), /url input is required/);
+  assert.throws(() => engineOf({ browser: "ie" }), /must be one of chromium, firefox, webkit/);
+  assert.equal(engineOf({ browser: "" }), "chromium");
+  assert.equal(installTarget("chromium"), "chromium-headless-shell");
+  assert.equal(installTarget("webkit"), "webkit");
+});
+
+test("action: it reads results from where the CLI writes them", () => {
+  assert.equal(outDirFor({ out: "", project: "" }, "/work"), path.resolve("/work", ".scenescout", "check"));
+  assert.equal(outDirFor({ out: "", project: "site" }, "/work"), path.resolve("/work", "site", ".scenescout", "check"));
+  assert.equal(outDirFor({ out: "results", project: "site" }, "/work"), path.resolve("/work", "results"));
+});
+
+test("action: the browser cache it saves is the one Playwright downloads to", () => {
+  assert.equal(browsersPath({}, "linux", "/home/u"), "/home/u/.cache/ms-playwright");
+  assert.equal(browsersPath({ XDG_CACHE_HOME: "/cache" }, "linux", "/home/u"), "/cache/ms-playwright");
+  assert.equal(browsersPath({}, "darwin", "/Users/u"), "/Users/u/Library/Caches/ms-playwright");
+  assert.equal(browsersPath({ LOCALAPPDATA: "C:\\Users\\r\\AppData\\Local" }, "win32", "C:\\Users\\r"), "C:\\Users\\r\\AppData\\Local\\ms-playwright");
+  assert.equal(browsersPath({ PLAYWRIGHT_BROWSERS_PATH: "/pw" }, "linux", "/home/u"), "/pw");
+});
+
+test("action: npm is started without a shell, and only a plain version, range or tag is installed", () => {
+  assert.deepEqual(npmCommand("linux", "/usr/bin/node"), { file: "npm", prefixArgs: [] });
+  assert.deepEqual(
+    npmCommand("win32", "C:\\node\\node.exe", () => true),
+    { file: "C:\\node\\node.exe", prefixArgs: ["C:\\node\\node_modules\\npm\\bin\\npm-cli.js"] },
+  );
+  assert.throws(() => npmCommand("win32", "C:\\node\\node.exe", () => false), /npm was not found/);
+  for (const ok of ["3.10.0", "^3.10", "~3.10.1", "latest", "3.10.0-next.1"]) assert.ok(isVersionSpec(ok), ok);
+  for (const bad of ["", "3 && curl x", "3|x", "$(id)", "3;x", "3>x"]) assert.ok(!isVersionSpec(bad), bad);
+});
+
+test("action: the exit code decides how the step ends, and a setup problem never reads as a failing app", () => {
+  assert.deepEqual(verdict({ exitCode: 0, failOn: "high", url: "http://x" }), { exit: 0, annotation: null });
+  const failed = verdict({ exitCode: "1", failing: "3", failOn: "medium", url: "http://x" });
+  assert.equal(failed.exit, 1);
+  assert.match(failed.annotation ?? "", /^::error title=SceneScout check failed::3 issue\(s\) at medium severity or worse on http:\/\/x/);
+  const broken = verdict({ exitCode: "2", failOn: "high", url: "http://x", error: "Could not load http://x — is the app running?\nsecond line" });
+  assert.equal(broken.exit, 2);
+  assert.match(broken.annotation ?? "", /^::error title=SceneScout check could not run::No verdict for http:\/\/x: Could not load/);
+  assert.ok(!(broken.annotation ?? "").includes("\n"), "a newline would end the annotation early");
+  // A crash or a signal is not the gate's 1.
+  for (const exitCode of ["137", "signal SIGKILL", NaN]) assert.equal(verdict({ exitCode, failOn: "high", url: "http://x" }).exit, 2, String(exitCode));
+});
+
+test("action: a CLI older than the action says so, instead of a bare could-not-run", () => {
+  // The usage line the CLI prints today; a release before `check` has none.
+  assert.ok(hasCheckCommand("  scenescout check <url>            Visit every route, measure each one"));
+  assert.ok(!hasCheckCommand("  scenescout doctor                 Check the setup and print the fix"));
+  assert.ok(hasCheckCommand(fs.readFileSync(path.join(REPO, "src", "cli.ts"), "utf8")), "the CLI's usage text no longer has the line the action looks for");
+  assert.match(noCheckCommand("3.9.0"), /^scenescout 3\.9\.0 has no check command.*vX\.Y\.Z tag.*version input/);
+  assert.match(
+    explainError("unknown option --timeout", "3.10.0"),
+    /^scenescout 3\.10\.0 does not accept the timeout input, so it is older than this action\. .*vX\.Y\.Z/,
+  );
+  // Any other error is the CLI's own sentence, untouched.
+  assert.equal(explainError("Could not load http://x — is the app running?", "3.10.0"), "Could not load http://x — is the app running?");
+  assert.equal(explainError(undefined, "3.10.0"), "");
+});
+
+test("action: each use in a job gets its own artifact name, so a second use does not collide with the first", () => {
+  assert.equal(defaultArtifactName("check", 1), "scenescout-check-check");
+  assert.equal(defaultArtifactName("check", 2), "scenescout-check-check-2");
+  assert.equal(defaultArtifactName("ui check/x", 1), "scenescout-check-ui_check_x");
+  assert.equal(defaultArtifactName(undefined, 3), "scenescout-check-3");
+  assert.equal(defaultInputs()["artifact-name"], "", "a fixed default name collides on the second use");
+});
+
+test("action: an upload that fails cannot hide the verdict, and a failed gate still saves the browser cache", () => {
+  const steps = action.runs.steps as Array<{ name: string; if?: string; uses?: string }>;
+  const step = (name: string) => steps.find((s) => s.name === name)!;
+  for (const name of ["Keep the results", "Upload to code scanning", "Verdict"]) assert.match(step(name).if ?? "", /^always\(\) && /, name);
+  const names = steps.map((s) => s.name);
+  assert.ok(names.indexOf("Save the browser cache") < names.indexOf("Run the check"), "saved before any verdict exists");
+  assert.match(step("Restore the browser cache").uses ?? "", /^actions\/cache\/restore@/);
+  assert.match(step("Save the browser cache").uses ?? "", /^actions\/cache\/save@/);
+  assert.ok(!steps.some((s) => /^actions\/cache@/.test(s.uses ?? "")), "the combined action saves only when the job succeeds");
+});
+
+test("action: its outputs are check.json's numbers, and nothing when there is no verdict", () => {
+  const json = toSummaryJson(result([issue("high"), issue("medium", "contrast"), issue("low", "contrast")]), "1.0.0");
+  assert.deepEqual(summaryOutputs(json), { passed: "false", failing: "1", high: "1", medium: "1", low: "1" });
+  assert.equal(summaryOutputs(null), null);
+  assert.equal(summaryOutputs({}), null);
+});
+
+test("action: third-party steps are pinned by commit, and no input is pasted into a script", () => {
+  const steps = action.runs.steps as Array<{ uses?: string; run?: string }>;
+  const source = fs.readFileSync(path.join(REPO, "action.yml"), "utf8");
+  for (const s of steps.filter((s) => s.uses)) {
+    assert.match(s.uses!, /^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/, `${s.uses} is not pinned to a full commit SHA`);
+    assert.ok(new RegExp(`${s.uses!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} # v\\d`).test(source), `${s.uses} has no "# vX" comment naming its version`);
+  }
+  // `${{ }}` inside `run:` is substituted before the shell parses it: an input would become code.
+  for (const s of steps.filter((s) => s.run)) assert.ok(!s.run!.includes("${{"), `a run: script interpolates an expression:\n${s.run}`);
+});
+
+test("action: this repository runs it against the demo app, gated by the required check, and never uploads the demo's SARIF here", () => {
+  const workflow = readYaml(".github/workflows/test.yml");
+  assert.ok(readYaml(".github/workflows/release.yml").jobs, "release.yml parses");
+  const jobs = workflow.jobs as Record<string, { needs?: string[]; steps?: Array<{ uses?: string; with?: Record<string, unknown> }> }>;
+  const found = Object.entries(jobs).find(([, j]) => j.steps?.some((s) => s.uses === "./"));
+  assert.ok(found, "no job in test.yml runs the local action (uses: ./)");
+  const [name, job] = found;
+  assert.ok(jobs.test.needs?.includes(name), `the required "test" job does not need ${name}`);
+  const uses = job.steps!.filter((s) => s.uses === "./");
+  assert.ok(uses.length >= 2, "the default gate and a stricter one");
+  for (const s of uses) {
+    assert.equal(String(s.with?.["upload-sarif"]), "false", "the demo's seeded defects must never become this repository's code-scanning alerts");
+    assert.equal(s.with?.cli, "dist/cli.js", "the dogfood runs the CLI built from this commit, not the published one");
+  }
 });
