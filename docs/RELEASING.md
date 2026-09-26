@@ -66,11 +66,14 @@ Two repository settings the workflow depends on are already in place:
 
 - GitHub Actions is allowed to create pull requests (Settings → Actions →
   General → Workflow permissions), so it can open the version pull request.
-- The tag ruleset protects `v*` tags from being **moved or deleted** by anyone
-  but the maintainer, and allows creating them. GitHub does not accept the
-  Actions app as a bypass actor on a repository owned by a user account, so a
-  ruleset that also restricted creation would stop the workflow from tagging a
-  release after it had already published to npm.
+- One tag ruleset protects exact release tags (`v*.*.*`) from being **moved or
+  deleted** by anyone but the maintainer, and allows creating them. GitHub does
+  not accept the Actions app as a bypass actor on a repository owned by a user
+  account, so a ruleset that also restricted creation would stop the workflow
+  from tagging a release after it had already published to npm.
+- A second tag ruleset protects major tags (`v3`) from deletion only. The
+  release workflow moves the major tag to each new release, which is how
+  `uses: brunoboto96/SceneScout@v3` follows the latest 3.x.
 
 ## If a publish fails half-way
 
