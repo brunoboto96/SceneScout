@@ -88,6 +88,20 @@ const NonDefect = z
   })
   .strict();
 
+const Contextual = z
+  .object({
+    id: z.string().min(1),
+    route: z.string().startsWith("/"),
+    title: z.string().min(1),
+    category: z.string().min(1),
+    /** The convention that decides it: where it would be a defect, and why the run cannot tell whether it holds here. */
+    reason: z.string().min(1),
+    match: z.array(Pattern).min(1),
+    examples: z.array(z.string()).default([]),
+    counterExamples: z.array(z.string()).default([]),
+  })
+  .strict();
+
 const Key = z
   .object({
     app: z.string().min(1),
@@ -101,11 +115,20 @@ const Key = z
      */
     alsoReal: z.array(Entry).default([]),
     nonDefects: z.array(NonDefect).default([]),
+    /**
+     * Observations that are defects only under a convention the run cannot
+     * see — a spacing scale the project may or may not declare, say. Neither
+     * lane is wrong about them, so they are set aside: a finding matching one
+     * is neither correct nor a false positive, and a verdict on one is not
+     * scored for calibration.
+     */
+    contextual: z.array(Contextual).default([]),
   })
   .strict();
 
 export type KeyEntry = z.infer<typeof Entry>;
 export type KeyNonDefect = z.infer<typeof NonDefect>;
+export type KeyContextual = z.infer<typeof Contextual>;
 export type AnswerKey = z.infer<typeof Key>;
 
 /**
@@ -119,7 +142,7 @@ export function parseKey(raw: unknown): AnswerKey {
     const issue = parsed.error.issues[0];
     throw new Error(`The answer key is not valid at ${issue.path.join(".") || "(root)"}: ${issue.message}`);
   }
-  const ids = [...parsed.data.defects, ...parsed.data.alsoReal, ...parsed.data.nonDefects].map((e) => e.id);
+  const ids = [...parsed.data.defects, ...parsed.data.alsoReal, ...parsed.data.nonDefects, ...parsed.data.contextual].map((e) => e.id);
   const dup = ids.find((id, i) => ids.indexOf(id) !== i);
   if (dup) throw new Error(`The answer key uses the id ${JSON.stringify(dup)} twice.`);
   const real = new Set([...parsed.data.defects, ...parsed.data.alsoReal].map((e) => e.id));
@@ -132,14 +155,18 @@ export function parseKey(raw: unknown): AnswerKey {
 
 /** A short, stable fingerprint of a key, so a scorecard says which key produced it. */
 export function keyHash(key: AnswerKey): string {
-  const canonical = JSON.stringify({ defects: key.defects, alsoReal: key.alsoReal, nonDefects: key.nonDefects });
+  const canonical = JSON.stringify({ defects: key.defects, alsoReal: key.alsoReal, nonDefects: key.nonDefects, contextual: key.contextual });
   return createHash("sha256").update(canonical).digest("hex").slice(0, 10);
 }
 
 const RANK: Record<Level, number> = { minimal: 0, medium: 1, extensive: 2 };
 const SEVERITY_RANK: Record<string, number> = { low: 0, medium: 1, high: 2 };
 
-export type Classified = { kind: "defect" | "alsoReal"; entry: KeyEntry } | { kind: "nonDefect"; entry: KeyNonDefect } | { kind: "ambiguous"; ids: string[] };
+export type Classified =
+  | { kind: "defect" | "alsoReal"; entry: KeyEntry }
+  | { kind: "nonDefect"; entry: KeyNonDefect }
+  | { kind: "contextual"; entry: KeyContextual }
+  | { kind: "ambiguous"; ids: string[] };
 
 function matches(patterns: readonly string[], text: string): boolean {
   return patterns.some((p) => new RegExp(p, "i").test(text));
@@ -156,12 +183,19 @@ function matches(patterns: readonly string[], text: string): boolean {
  * match would quietly count a finding about two defects as one, and letting a
  * non-defect win everywhere turned realistic rewordings of real defects into
  * false positives with a confident explanation beside them.
+ *
+ * A contextual entry is one more claimant on the same terms as a real one: it
+ * wins over nothing, no non-defect can override it, and text it shares with
+ * any other entry is ambiguous. Setting a finding aside removes it from
+ * precision, so a pattern that let it win would hide real defects from the
+ * score as quietly as a greedy non-defect once did.
  */
 export function classify(text: string, key: AnswerKey): Classified | null {
   const nd = key.nonDefects.filter((e) => matches(e.match, text));
-  const real = [
+  const real: Array<Exclude<Classified, { kind: "nonDefect" } | { kind: "ambiguous" }>> = [
     ...key.defects.filter((e) => matches(e.match, text)).map((entry) => ({ kind: "defect" as const, entry })),
     ...key.alsoReal.filter((e) => matches(e.match, text)).map((entry) => ({ kind: "alsoReal" as const, entry })),
+    ...key.contextual.filter((e) => matches(e.match, text)).map((entry) => ({ kind: "contextual" as const, entry })),
   ];
   if (nd.length > 1) return { kind: "ambiguous", ids: [...nd, ...real.map((m) => m.entry)].map((e) => e.id) };
   if (nd.length === 1) {
@@ -188,7 +222,7 @@ export function decisionText(d: Pick<RecordedDecision, "evidence" | "observation
  * A key that disagrees with its own examples is wrong before any run is
  * scored. Returns every title or example — non-defects' included — that
  * classifies anywhere but its own entry, and every counter-example that
- * classifies TO its entry.
+ * classifies TO its entry. Contextual entries are held to the same rule.
  */
 export function lintKey(key: AnswerKey): string[] {
   const problems: string[] = [];
@@ -209,9 +243,14 @@ export function lintKey(key: AnswerKey): string[] {
       for (const t of e.counterExamples) check(e.id, kind, t, false);
     }
   }
-  for (const e of key.nonDefects) {
-    for (const t of [e.title, ...e.examples]) check(e.id, "nonDefect", t, true);
-    for (const t of e.counterExamples) check(e.id, "nonDefect", t, false);
+  for (const [kind, list] of [
+    ["nonDefect", key.nonDefects],
+    ["contextual", key.contextual],
+  ] as const) {
+    for (const e of list) {
+      for (const t of [e.title, ...e.examples]) check(e.id, kind, t, true);
+      for (const t of e.counterExamples) check(e.id, kind, t, false);
+    }
   }
   return problems;
 }
@@ -236,6 +275,8 @@ export interface Scorecard {
   /** Findings matching a planted or also-real defect. */
   correct: number;
   falsePositives: Array<{ id: string; title: string; why: string; severity: string }>;
+  /** Findings that are defects only under a convention the run cannot see. Outside precision entirely: neither right nor wrong. */
+  contextual: Array<{ id: string; title: string }>;
   /** Findings the key knows nothing about. They need a human label before precision can be final. */
   unknown: Array<{ title: string; severity: string; evidence: string }>;
   /** Findings two key entries both claim. Scored as neither, so the key can be sharpened. */
@@ -268,6 +309,8 @@ export interface KeyCalibration {
    * error rate by as much as any change being measured.
    */
   outOfScope: number;
+  /** A verdict on something that is a defect only under a convention the run cannot see: either answer is defensible. */
+  contextual: number;
   buckets: Array<{ label: string; decisions: number; stated: number; correct: number }>;
   ece: number;
   /**
@@ -285,15 +328,15 @@ export interface KeyCalibration {
  *
  * "defect" on a planted or also-real defect is right, and on a known
  * non-defect is wrong. "not_a_defect" is the reverse. An "unsure" verdict, a
- * dismissal as another lane's, a decision the key does not name, and one it
- * names ambiguously are not scored — the same rule the in-product calibration
+ * dismissal as another lane's, a decision the key does not name, one it
+ * names ambiguously, and one about a contextual entry are not scored — the same rule the in-product calibration
  * follows, for the same reason.
  */
 export function judgeDecision(d: RecordedDecision, key: AnswerKey): boolean | null {
   if (d.verdict === "unsure") return null;
   if (isScopeDismissal(d)) return null;
   const m = classify(decisionText(d), key);
-  if (!m || m.kind === "ambiguous") return null;
+  if (!m || m.kind === "ambiguous" || m.kind === "contextual") return null;
   const isDefect = m.kind !== "nonDefect";
   return d.verdict === "defect" ? isDefect : !isDefect;
 }
@@ -310,7 +353,19 @@ export function isScopeDismissal(d: Pick<RecordedDecision, "verdict" | "evidence
 export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key: AnswerKey): KeyCalibration | null {
   if (decisions.length === 0) return null;
   const buckets = BUCKET_EDGES.map(() => ({ n: 0, conf: 0, right: 0 }));
-  const out: KeyCalibration = { judged: 0, correct: 0, notInKey: 0, ambiguous: 0, badConfidence: 0, unsure: 0, outOfScope: 0, buckets: [], ece: 0, brier: 0 };
+  const out: KeyCalibration = {
+    judged: 0,
+    correct: 0,
+    notInKey: 0,
+    ambiguous: 0,
+    badConfidence: 0,
+    unsure: 0,
+    outOfScope: 0,
+    contextual: 0,
+    buckets: [],
+    ece: 0,
+    brier: 0,
+  };
   for (const d of decisions) {
     if (d.verdict === "unsure") {
       out.unsure += 1;
@@ -332,6 +387,10 @@ export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key:
     }
     if (m.kind === "ambiguous") {
       out.ambiguous += 1;
+      continue;
+    }
+    if (m.kind === "contextual") {
+      out.contextual += 1;
       continue;
     }
     const right = d.verdict === "defect" ? m.kind !== "nonDefect" : m.kind === "nonDefect";
@@ -367,6 +426,7 @@ export function score(key: AnswerKey, findings: readonly ScoredFinding[], decisi
   const falsePositives: Scorecard["falsePositives"] = [];
   const unknown: Scorecard["unknown"] = [];
   const ambiguous: Scorecard["ambiguous"] = [];
+  const contextual: Scorecard["contextual"] = [];
   let correct = 0;
 
   for (const f of findings) {
@@ -381,6 +441,10 @@ export function score(key: AnswerKey, findings: readonly ScoredFinding[], decisi
     }
     if (m.kind === "nonDefect") {
       falsePositives.push({ id: m.entry.id, title: f.title, why: m.entry.why, severity: f.severity });
+      continue;
+    }
+    if (m.kind === "contextual") {
+      contextual.push({ id: m.entry.id, title: f.title });
       continue;
     }
     correct += 1;
@@ -431,6 +495,7 @@ export function score(key: AnswerKey, findings: readonly ScoredFinding[], decisi
     findings: findings.length,
     correct,
     falsePositives,
+    contextual,
     unknown,
     ambiguous,
     duplicates,
@@ -445,16 +510,18 @@ const pct = (n: number, d: number): string => (d === 0 ? "—" : `${Math.round((
  * Precision, with its bounds. The labelled ratio leaves unlabelled findings out
  * of the denominator, so on its own it cannot move when a change adds five new
  * false claims nobody has judged yet. The bounds can: the lower one counts
- * every open finding as wrong, the upper one as right.
+ * every open finding as wrong, the upper one as right. Findings set aside as
+ * contextual are in neither: they are not claims the run could get right.
  */
-export function precisionBounds(c: Pick<Scorecard, "correct" | "falsePositives" | "unknown" | "ambiguous" | "findings">): {
+export function precisionBounds(c: Pick<Scorecard, "correct" | "falsePositives" | "unknown" | "ambiguous" | "findings" | "contextual">): {
   labelled: string;
   low: string;
   high: string;
 } {
   const labelled = c.correct + c.falsePositives.length;
   const open = c.unknown.length + c.ambiguous.length;
-  return { labelled: `${c.correct}/${labelled} (${pct(c.correct, labelled)})`, low: pct(c.correct, c.findings), high: pct(c.correct + open, c.findings) };
+  const scored = c.findings - c.contextual.length;
+  return { labelled: `${c.correct}/${labelled} (${pct(c.correct, labelled)})`, low: pct(c.correct, scored), high: pct(c.correct + open, scored) };
 }
 
 /** The scorecard as a person reads it. Leads with the two numbers, then says what each is made of. */
@@ -466,15 +533,23 @@ export function formatScorecard(c: Scorecard): string {
     ``,
     `Recall     ${c.found.length}/${c.expected} (${pct(c.found.length, c.expected)}) of the planted defects expected at this level`,
     `Precision  ${p.labelled} of the findings the key can label` +
-      (open ? ` — ${open} of ${c.findings} unlabelled, so between ${p.low} and ${p.high} of all findings` : ""),
-    ``,
+      (open
+        ? ` — ${open} of ${c.findings - c.contextual.length} unlabelled, so between ${p.low} and ${p.high} of ${c.contextual.length ? "the findings not set aside" : "all findings"}`
+        : ""),
   ];
+  if (c.contextual.length)
+    lines.push(`Set aside  ${c.contextual.length} of ${c.findings} finding(s): defects only under a convention the run cannot see, so in neither count`);
+  lines.push(``);
   if (c.missed.length) lines.push(`Missed: ${c.missed.join(", ")}`);
   if (c.judgedNotFiled.length) lines.push(`Judged a defect in a lane report, never filed: ${c.judgedNotFiled.join(", ")}`);
   if (c.beyondLevel.length) lines.push(`Found above this level's contract: ${c.beyondLevel.join(", ")}`);
   if (c.falsePositives.length) {
     lines.push(``, `False positives (${c.falsePositives.length}):`);
     for (const fp of c.falsePositives) lines.push(`  [${fp.severity}] ${fp.title} — ${fp.why}`);
+  }
+  if (c.contextual.length) {
+    lines.push(``, `Set aside as contextual (${c.contextual.length}):`);
+    for (const x of c.contextual) lines.push(`  ${x.title} (${x.id})`);
   }
   if (c.ambiguous.length) {
     lines.push(``, `Ambiguous (${c.ambiguous.length}) — the key claims each twice; sharpen it:`);
@@ -504,6 +579,7 @@ export function formatScorecard(c: Scorecard): string {
       k.badConfidence && `${k.badConfidence} with an unusable confidence`,
       k.unsure && `${k.unsure} unsure`,
       k.outOfScope && `${k.outOfScope} dismissed as another lane's`,
+      k.contextual && `${k.contextual} about things that are defects only under a convention the run cannot see`,
     ].filter(Boolean);
     lines.push(
       ``,
@@ -522,6 +598,12 @@ export function formatScorecard(c: Scorecard): string {
 
 /** A run kept for re-scoring: only what scoring reads, so an archive is small and holds nothing a run should not keep. */
 export interface RunArchive {
+  /**
+   * The benchmark app the run was made against, which decides the key it is
+   * scored with. Archives made before there was more than one app have none,
+   * and are the default app's.
+   */
+  app?: string;
   run: string;
   date: string;
   note: string;
@@ -553,6 +635,14 @@ export function runDate(decisions: readonly Pick<RecordedDecision, "at">[], give
 }
 
 /**
+ * The order `--all` lists runs in: by date, then by name with its numbers
+ * compared as numbers, so run-10 follows run-9 rather than run-1.
+ */
+export function byRunOrder(a: Pick<RunArchive, "date" | "run">, b: Pick<RunArchive, "date" | "run">): number {
+  return a.date.localeCompare(b.date) || a.run.localeCompare(b.run, undefined, { numeric: true });
+}
+
+/**
  * Paths into a machine's own directories, which a finding's evidence can pick
  * up from a stack trace or an upload. An archive is committed, and a home
  * directory names a person.
@@ -563,8 +653,16 @@ export function sanitize(text: string): string {
   return text.replace(LOCAL_PATH_RE, "<path>");
 }
 
-export function toArchive(run: string, date: string, note: string, findings: readonly ScoredFinding[], decisions: readonly RecordedDecision[]): RunArchive {
+export function toArchive(
+  run: string,
+  date: string,
+  note: string,
+  findings: readonly ScoredFinding[],
+  decisions: readonly RecordedDecision[],
+  app: string,
+): RunArchive {
   return {
+    app,
     run,
     date,
     note,
@@ -576,4 +674,77 @@ export function toArchive(run: string, date: string, note: string, findings: rea
     })),
     decisions: decisions.map((d) => ({ ...d, observation: sanitize(d.observation), evidence: d.evidence === null ? null : sanitize(d.evidence) })),
   };
+}
+
+// ── which app, and so which key ─────────────────────────────────────────────
+
+/**
+ * The app a run is for when nothing says otherwise. Every archive made before
+ * there was a second benchmark app is this one's, and carries no `app`.
+ */
+export const DEFAULT_APP = "demo";
+
+/** The app an archive was made against. */
+export function archiveApp(a: Pick<RunArchive, "app">): string {
+  return a.app ?? DEFAULT_APP;
+}
+
+/**
+ * The app whose key scores a run. Scoring a run against another app's key
+ * produces a plausible wrong number — every planted defect "missed", every
+ * finding "unlabelled" — so a request that disagrees with what the archive
+ * records is refused rather than obeyed.
+ *
+ * `requested` is what the caller asked for (`--app`), `archived` what the
+ * run's archive records, and `known` the apps that have a key.
+ */
+export function chooseApp(opts: { requested?: string; archived?: string; known: readonly string[] }): string {
+  const { requested, archived, known } = opts;
+  for (const [what, app] of [
+    ["--app", requested],
+    ["The archive's app", archived],
+  ] as const) {
+    if (app !== undefined && !known.includes(app)) throw new Error(`${what} ${JSON.stringify(app)} is not a benchmark app; the apps are ${known.join(", ")}.`);
+  }
+  if (requested !== undefined && archived !== undefined && requested !== archived)
+    throw new Error(`This run was archived for the ${archived} app; scoring it against the ${requested} app's key would score the wrong answers.`);
+  return requested ?? archived ?? DEFAULT_APP;
+}
+
+/**
+ * Which benchmark app a key file belongs to, by the name the key gives its
+ * app, or undefined for a key no benchmark app ships (a draft, a test key).
+ * A copy of one app's key, edited or not, still names that app.
+ */
+export function appOfKey(key: Pick<AnswerKey, "app">, keys: Readonly<Record<string, Pick<AnswerKey, "app">>>): string | undefined {
+  return Object.keys(keys).find((app) => keys[app].app === key.app);
+}
+
+/**
+ * Refuse a key file that belongs to another benchmark app than the archive
+ * being scored: `--key` naming the held-out key scored a demo archive against
+ * the wrong answers without a word.
+ */
+export function checkKeyForArchive(
+  key: Pick<AnswerKey, "app">,
+  archive: Pick<RunArchive, "app">,
+  keys: Readonly<Record<string, Pick<AnswerKey, "app">>>,
+): void {
+  const keyApp = appOfKey(key, keys);
+  const runApp = archiveApp(archive);
+  if (keyApp !== undefined && keyApp !== runApp)
+    throw new Error(
+      `This run was archived for the ${runApp} app, and that key is the ${keyApp} app's; scoring one against the other would score the wrong answers.`,
+    );
+}
+
+/** Archives grouped by app, in the order each app is first met, each group in `byRunOrder`. */
+export function groupByApp(archives: readonly RunArchive[]): Map<string, RunArchive[]> {
+  const groups = new Map<string, RunArchive[]>();
+  for (const a of archives) {
+    const app = archiveApp(a);
+    groups.set(app, [...(groups.get(app) ?? []), a]);
+  }
+  for (const list of groups.values()) list.sort(byRunOrder);
+  return groups;
 }

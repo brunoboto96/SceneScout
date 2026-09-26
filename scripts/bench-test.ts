@@ -13,12 +13,22 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import os from "node:os";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  appOfKey,
+  archiveApp,
+  byRunOrder,
   calibrateAgainstKey,
+  checkKeyForArchive,
+  chooseApp,
   classify,
+  DEFAULT_APP,
+  decisionText,
   formatScorecard,
+  groupByApp,
   judgeDecision,
   keyHash,
   lintKey,
@@ -159,6 +169,83 @@ test("text two entries both claim is ambiguous, and scored as neither", () => {
 test("matching is case-insensitive and anything unmatched is unknown, not wrong", () => {
   assert.equal(classify("STATUS=BROKEN", key)?.kind, "defect");
   assert.equal(classify("something the key never heard of", key), null);
+});
+
+// ── contextual entries ─────────────────────────────────────────────────────
+
+// An observation that is a defect only under a convention the run cannot see,
+// such as a spacing scale the project may or may not declare.
+const ctxKey = parseKey({
+  ...key,
+  contextual: [
+    { id: "grid", route: "/x", title: "padding off grid", category: "ux-polish", reason: "only where a spacing scale is declared", match: ["off.grid"] },
+  ],
+});
+
+test("a contextual entry is validated like the others", () => {
+  const ctx = { id: "c", route: "/x", title: "c", category: "ux", reason: "r", match: ["c"] };
+  assert.throws(() => parseKey({ app: "t", defects: [entry("a", ["a"])], contextual: [{ ...ctx, match: ["(unclosed"] }] }), /contextual\.0\.match/);
+  assert.throws(() => parseKey({ app: "t", defects: [entry("a", ["a"])], contextual: [{ ...ctx, reason: "" }] }), /contextual\.0\.reason/);
+  assert.throws(
+    () => parseKey({ app: "t", defects: [entry("a", ["a"])], contextual: [{ ...ctx, severity: "low" }] }),
+    /contextual\.0/,
+    "a severity it is never scored on",
+  );
+  assert.throws(() => parseKey({ app: "t", defects: [entry("a", ["a"])], contextual: [{ ...ctx, id: "a" }] }), /twice/);
+  // A non-defect narrows a real defect; a contextual entry is not one.
+  assert.throws(
+    () =>
+      parseKey({ app: "t", defects: [entry("a", ["a"])], contextual: [ctx], nonDefects: [{ id: "n", title: "n", why: "w", match: ["n"], overrides: ["c"] }] }),
+    /overrides "c"/,
+  );
+  assert.notEqual(keyHash(ctxKey), keyHash(key), "the list is part of the key's hash");
+});
+
+test("a contextual entry wins over nothing: overlapping any other entry is ambiguous", () => {
+  const alone = classify("padding off grid", ctxKey);
+  assert.equal(alone?.kind === "contextual" && alone.entry.id, "grid");
+  assert.equal(classify("padding off grid on the /dead page", ctxKey)?.kind, "ambiguous", "with a real defect");
+  assert.equal(classify("coming soon, padding off grid", ctxKey)?.kind, "ambiguous", "with a non-defect");
+});
+
+test("a finding matching a contextual entry is set aside: neither correct, wrong nor unlabelled", () => {
+  const card = score(ctxKey, [finding("status=broken 500"), finding("padding off grid"), finding("mystery")], [], "minimal");
+  assert.equal(card.correct, 1);
+  assert.equal(card.falsePositives.length, 0);
+  assert.equal(card.unknown.length, 1);
+  assert.deepEqual(card.contextual, [{ id: "grid", title: "padding off grid" }]);
+  const p = precisionBounds(card);
+  assert.equal(p.labelled, "1/1 (100%)");
+  assert.deepEqual([p.low, p.high], ["50%", "100%"], "bounds are over the two findings not set aside, not all three");
+  const out = formatScorecard(card);
+  assert.match(out, /Set aside\s+1 of 3 finding\(s\)/);
+  assert.match(out, /1 of 2 unlabelled/);
+  // The same finding scored against the key without the list is unlabelled.
+  assert.equal(score(key, [finding("padding off grid")], [], "minimal").unknown.length, 1);
+});
+
+test("a verdict on a contextual entry is not scored either way, and is counted under its own reason", () => {
+  const onCtx = [decision({ verdict: "defect", evidence: "padding off grid" }), decision({ verdict: "not_a_defect", evidence: "padding off grid" })];
+  for (const d of onCtx) assert.equal(judgeDecision(d, ctxKey), null, d.verdict);
+  const k = calibrateAgainstKey([...onCtx, decision({ evidence: "/dead" })], ctxKey);
+  assert.deepEqual([k?.judged, k?.contextual, k?.notInKey], [1, 2, 0]);
+  assert.match(
+    formatScorecard(score(ctxKey, [], [...onCtx, decision({ evidence: "/dead" })], "minimal")),
+    /2 about things that are defects only under a convention/,
+  );
+  // Without the list, the not-a-defect verdict is unscored as unknown, not as contextual.
+  assert.equal(calibrateAgainstKey(onCtx, key)?.contextual, 0);
+});
+
+test("the key's self-test covers contextual entries", () => {
+  const k = parseKey({
+    app: "t",
+    defects: [entry("a", ["^a$"])],
+    contextual: [{ id: "c", route: "/x", title: "a convention", category: "ux", reason: "r", match: ["convention"], counterExamples: ["a convention too"] }],
+  });
+  assert.deepEqual(lintKey(k), ['c: counter-example "a convention too" classified TO it']);
+  const titleMiss = parseKey({ ...k, contextual: [{ ...k.contextual[0], match: ["nothing like it"], counterExamples: [] }] });
+  assert.deepEqual(lintKey(titleMiss), ['c: "a convention" classified as nothing']);
 });
 
 // ── judging a lane's verdict ───────────────────────────────────────────────
@@ -304,6 +391,7 @@ test("a lane dismissing something as another lane's is not scored as a verdict o
   }
   const k = calibrateAgainstKey(dismissals, key);
   assert.deepEqual([k?.judged, k?.outOfScope], [0, 2]);
+  assert.equal(k?.contextual, 0);
   assert.equal(judgeDecision(dismissals[0], key), null);
   // The same wording on a defect verdict is a claim, and is scored.
   const claimed = decision({ verdict: "defect", evidence: "/dead", observation: "belongs to the landing page" });
@@ -311,6 +399,24 @@ test("a lane dismissing something as another lane's is not scored as a verdict o
   assert.equal(judgeDecision(claimed, key), true);
   // A not-a-defect verdict with a reason about the thing itself is scored.
   assert.equal(judgeDecision(decision({ verdict: "not_a_defect", evidence: "/dead", observation: "works as designed" }), key), false);
+});
+
+test("a not-a-defect about the lane's own page is scored, however it words where the thing came from", () => {
+  // The pattern cannot know which routes a lane owns, so wording that places
+  // a thing "from the X load" or "absent on a direct load" is as likely to be
+  // the owning lane's verdict on its own page as a dismissal. Widening the
+  // pattern to take these would drop wrong verdicts from calibration.
+  for (const text of [
+    "empty table from the archived load is expected",
+    "GET /img/chart.png 404 from the home load; image is optional",
+    "absent on a direct /orders-new.html load, so fine",
+    "Hint present on direct /orders-new.html load; renders as designed",
+    "Spinner from initial load clears within a second",
+    "Error text comes from the form's own validation, not from the server",
+  ]) {
+    const d = decision({ verdict: "not_a_defect", observation: text });
+    assert.equal(isScopeDismissal(d), false, text);
+  }
 });
 
 test("nothing the key could judge reads as nothing, never as a perfect score", () => {
@@ -333,7 +439,7 @@ test("the scorecard leads with recall and precision, and names its key", () => {
 test("an archive keeps what scoring reads and nothing that names a person or a machine", () => {
   const f = finding("POST /api/x 500 at /Users/u/project/src/app.ts:12", { title: "Crash in /home/u/app" });
   const d = decision({ observation: "saw /private/tmp/run-3/x", evidence: "C:\\Users\\u\\app\\x.js" });
-  const a = toArchive("run-9", "2026-09-23", "note", [f], [d]);
+  const a = toArchive("run-9", "2026-09-23", "note", [f], [d], "demo");
   const text = JSON.stringify(a);
   assert.ok(!/\/Users\/|\/home\/|\/private\/tmp|C:\\\\Users/.test(text), text);
   assert.equal(sanitize("see /Users/a/b/c.ts:4 and /tmp/x"), "see <path> and <path>");
@@ -362,6 +468,7 @@ test("no known non-defect claims any real defect's title", () => {
   for (const d of [...demoKey.defects, ...demoKey.alsoReal]) {
     const got = classify(d.title, demoKey);
     assert.notEqual(got?.kind, "nonDefect", `${d.id}'s title is claimed by a non-defect`);
+    assert.notEqual(got?.kind, "contextual", `${d.id}'s title is set aside as contextual`);
   }
 });
 
@@ -376,8 +483,38 @@ test("a run is dated by its last decision, and never later than it", () => {
   assert.throws(() => runDate(ds, "22/09/2026"), /YYYY-MM-DD/);
 });
 
+test("the demo key sets aside what depends on a convention, and says which", () => {
+  // Lanes dismissed these as not defects and were scored wrong for it: the
+  // demo declares no spacing scale, and nav links are recognisable by position.
+  for (const id of ["spacing-off-grid", "nav-links-unstyled"]) {
+    const e = demoKey.contextual.find((c) => c.id === id);
+    assert.ok(e && e.reason.length > 20, `${id} is contextual, with a reason`);
+    assert.equal(judgeDecision(decision({ verdict: "not_a_defect", evidence: e.examples[0] ?? e.title }), demoKey), null, id);
+  }
+  // A page hiding approve controls from a clerk is not the endpoint accepting one.
+  const hidden = decision({
+    verdict: "not_a_defect",
+    observation: "approvals-hides-actions-for-clerk",
+    evidence: "testid=approvals-who clerk notice, no approve/reject controls",
+  });
+  assert.equal(classify(decisionText(hidden), demoKey), null);
+});
+
+test("archived runs are listed by date, then by name with numbers compared as numbers", () => {
+  const runs = [
+    { run: "run-10", date: "2026-09-26" },
+    { run: "run-2", date: "2026-09-22" },
+    { run: "run-9", date: "2026-09-26" },
+    { run: "run-1", date: "2026-09-22" },
+  ];
+  assert.deepEqual(
+    [...runs].sort(byRunOrder).map((r) => r.run),
+    ["run-1", "run-2", "run-9", "run-10"],
+  );
+});
+
 test("the demo key names routes the app serves", () => {
-  for (const d of [...demoKey.defects, ...demoKey.alsoReal]) {
+  for (const d of [...demoKey.defects, ...demoKey.alsoReal, ...demoKey.contextual]) {
     const file = d.route === "/" ? "index.html" : d.route.replace(/^\//, "");
     assert.ok(fs.existsSync(path.join(root, "demo-app", "public", file)), `${d.id}: ${d.route} is not a page the demo serves`);
   }
@@ -391,4 +528,142 @@ test("the demo key has one planted defect for every row of the README's seeded t
   const rows = table.split("\n").filter((l) => /^\| [^-|][^|]*\|/.test(l) && !l.startsWith("| Where"));
   const defects = rows.filter((r) => !/Not a defect/i.test(r));
   assert.equal(defects.length, demoKey.defects.length, `README seeds ${defects.length}, the key lists ${demoKey.defects.length}`);
+});
+
+// ── the held-out app, and scoring each run with its own app's key ──────────
+
+const holdoutKey = parseKey(JSON.parse(fs.readFileSync(path.join(root, "holdout-app", "answer-key.json"), "utf8")));
+
+test("the held-out key agrees with every one of its own examples and counter-examples", () => {
+  assert.deepEqual(lintKey(holdoutKey), []);
+  for (const d of [...holdoutKey.defects, ...holdoutKey.alsoReal]) {
+    assert.notEqual(classify(d.title, holdoutKey)?.kind, "nonDefect", `${d.id}'s title is claimed by a non-defect`);
+  }
+});
+
+test("the held-out key plants twelve to fourteen defects at every level, on routes the app serves", () => {
+  assert.ok(holdoutKey.defects.length >= 12 && holdoutKey.defects.length <= 14, String(holdoutKey.defects.length));
+  for (const level of ["minimal", "medium", "extensive"])
+    assert.ok(
+      holdoutKey.defects.some((d) => d.level === level),
+      level,
+    );
+  for (const d of [...holdoutKey.defects, ...holdoutKey.alsoReal, ...holdoutKey.contextual]) {
+    const file = d.route === "/" ? "index.html" : d.route.replace(/^\//, "");
+    assert.ok(fs.existsSync(path.join(root, "holdout-app", "public", file)), `${d.id}: ${d.route} is not a page the held-out app serves`);
+  }
+  // Its own key, not a copy of the demo's: no id is shared.
+  const demoIds = new Set([...demoKey.defects, ...demoKey.alsoReal, ...demoKey.nonDefects].map((e) => e.id));
+  assert.deepEqual(
+    holdoutKey.defects.map((d) => d.id).filter((id) => demoIds.has(id)),
+    [],
+  );
+});
+
+test("the held-out key has one planted defect for every row of its README's spoilers table", () => {
+  const readme = fs.readFileSync(path.join(root, "holdout-app", "README.md"), "utf8");
+  const table = readme.slice(readme.indexOf("## What is planted"));
+  const rows = table.split("\n").filter((l) => /^\| [^-|][^|]*\|/.test(l) && !l.startsWith("| Where"));
+  const defects = rows.filter((r) => !/Not a defect/i.test(r));
+  assert.equal(defects.length, holdoutKey.defects.length, `README plants ${defects.length}, the key lists ${holdoutKey.defects.length}`);
+  // The warning comes before the answers, not after them.
+  assert.ok(readme.indexOf("stop reading here") < readme.indexOf("## What is planted"));
+});
+
+test("an archive records the app it was made against, and one from before there were two apps is the demo's", () => {
+  assert.equal(toArchive("h-1", "2026-09-26", "n", [], [], "holdout").app, "holdout");
+  assert.equal(archiveApp({ app: "holdout" }), "holdout");
+  assert.equal(archiveApp({}), DEFAULT_APP);
+  assert.equal(DEFAULT_APP, "demo");
+  // Every archive committed so far names a known app or predates the second one.
+  for (const f of fs.readdirSync(path.join(root, "bench", "runs")).filter((x) => x.endsWith(".json"))) {
+    const a = JSON.parse(fs.readFileSync(path.join(root, "bench", "runs", f), "utf8")) as { app?: string };
+    assert.ok(a.app === undefined || a.app === "demo" || a.app === "holdout", `${f}: app ${a.app}`);
+  }
+});
+
+test("the app a run is scored as: what was asked, else what the archive says, else the demo — never two that disagree", () => {
+  const known = ["demo", "holdout"];
+  assert.equal(chooseApp({ known }), "demo");
+  assert.equal(chooseApp({ requested: "holdout", known }), "holdout");
+  assert.equal(chooseApp({ archived: "holdout", known }), "holdout");
+  assert.equal(chooseApp({ requested: "holdout", archived: "holdout", known }), "holdout");
+  assert.throws(() => chooseApp({ requested: "demo", archived: "holdout", known }), /archived for the holdout app/);
+  assert.throws(() => chooseApp({ requested: "harbour", known }), /--app "harbour" is not a benchmark app/);
+  assert.throws(() => chooseApp({ archived: "other", known }), /archive's app "other"/);
+});
+
+test("a key file is known by the app it names, and one of another benchmark app's is refused for an archive", () => {
+  const keys = { demo: demoKey, holdout: holdoutKey };
+  assert.equal(appOfKey(holdoutKey, keys), "holdout");
+  assert.equal(appOfKey({ app: "a draft key" }, keys), undefined);
+  assert.throws(() => checkKeyForArchive(holdoutKey, {}, keys), /archived for the demo app, and that key is the holdout app's/);
+  assert.throws(() => checkKeyForArchive(demoKey, { app: "holdout" }, keys), /archived for the holdout app/);
+  assert.doesNotThrow(() => checkKeyForArchive(holdoutKey, { app: "holdout" }, keys));
+  assert.doesNotThrow(() => checkKeyForArchive({ app: "a draft key" }, {}, keys), "a draft key belongs to no app, so it may score anything");
+});
+
+test("--all groups archives by app, so each is scored against its own key", () => {
+  const a = (run: string, date: string, app?: string) => ({ ...(app ? { app } : {}), run, date, note: "", findings: [], decisions: [] });
+  const groups = groupByApp([
+    a("run-10", "2026-09-22"),
+    a("run-2", "2026-09-22"),
+    a("holdout-1", "2026-09-27", "holdout"),
+    a("run-1", "2026-09-21", "demo"),
+    a("run-0", "2026-09-21"),
+  ]);
+  assert.deepEqual([...groups.keys()], ["demo", "holdout"]);
+  assert.deepEqual(
+    groups.get("demo")!.map((x) => x.run),
+    ["run-0", "run-1", "run-2", "run-10"],
+    "within an app, runs keep the numeric order --all lists them in",
+  );
+  assert.deepEqual(
+    groups.get("holdout")!.map((x) => x.run),
+    ["holdout-1"],
+  );
+});
+
+test("a held-out run scored against the demo's key is a plausible wrong number, which is why the key follows the app", () => {
+  const findings = holdoutKey.defects.map((d) => finding(d.examples[0] ?? d.title, { severity: d.severity }));
+  const right = score(holdoutKey, findings, [], "extensive");
+  assert.equal(right.found.length, holdoutKey.defects.length);
+  const wrong = score(demoKey, findings, [], "extensive");
+  assert.ok(wrong.found.length < 3, `the demo key credits ${wrong.found.join(", ")}`);
+  assert.equal(wrong.expected, demoKey.defects.length);
+});
+
+test("npm run bench scores an archive with its own app's key, and refuses another app's", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-app-"));
+  try {
+    const findings = holdoutKey.defects.slice(0, 3).map((d) => ({ title: d.title, severity: d.severity }));
+    const holdout = path.join(dir, "holdout-9.json");
+    fs.writeFileSync(holdout, JSON.stringify({ app: "holdout", run: "holdout-9", date: "2026-09-26", note: "n", findings, decisions: [] }));
+    const legacy = path.join(dir, "run-legacy.json");
+    fs.writeFileSync(legacy, JSON.stringify({ run: "run-legacy", date: "2026-09-26", note: "n", findings: [], decisions: [] }));
+    const bench = (...args: string[]) =>
+      spawnSync(process.execPath, ["--import", "tsx", path.join(root, "scripts", "bench.ts"), ...args], { cwd: root, encoding: "utf8", timeout: 60_000 });
+
+    const scored = bench(holdout);
+    assert.equal(scored.status, 0, scored.stderr);
+    const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(scored.stdout.split("\n")[0], new RegExp(`${escape(holdoutKey.app)}.*key ${keyHash(holdoutKey)}`));
+    assert.match(scored.stdout, new RegExp(`Recall\\s+3/${holdoutKey.defects.filter((d) => d.level !== "extensive").length}`));
+
+    const refused = bench(holdout, "--app", "demo");
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /archived for the holdout app/);
+
+    const old = bench(legacy);
+    assert.equal(old.status, 0, old.stderr);
+    assert.match(old.stdout.split("\n")[0], new RegExp(`${escape(demoKey.app)}.*key ${keyHash(demoKey)}`));
+
+    // --key naming the other app's key file is the same mistake by another route.
+    const byFile = bench("--key", path.join(root, "holdout-app", "answer-key.json"), legacy);
+    assert.notEqual(byFile.status, 0);
+    assert.match(byFile.stderr, /archived for the demo app, and that key is the holdout app's/);
+    assert.equal(bench("--key", path.join(root, "demo-app", "answer-key.json"), legacy).status, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
