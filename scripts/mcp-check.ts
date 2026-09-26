@@ -54,6 +54,11 @@ function fail(message: string): never {
   process.exit(1);
 }
 
+/** A cleanup close that is refused leaves browsers running; fail rather than leak them. */
+function assertClosedAll(reply: string): void {
+  if (!reply.includes("All sessions closed")) fail(`scout_close { all: true } did not close every session:\n${reply}`);
+}
+
 /**
  * The person running the agent gets the live view's address from the agent:
  * attach has to carry it, and it has to work. Checked over the wire because
@@ -118,7 +123,7 @@ async function liveViewCheck(client: Client): Promise<string> {
 
     // The run's end is when somebody wants the report, and the engines are
     // gone by then: the view has to keep serving what the run found.
-    await client.callTool({ name: "scout_close", arguments: { all: true } });
+    assertClosedAll(textOf(await client.callTool({ name: "scout_close", arguments: { all: true } })));
     const afterClose = (await (await fetch(`${url}api/report`)).json()) as { markdown?: string };
     if (!afterClose.markdown?.startsWith("# SceneScout Report"))
       fail(`the report is gone once the run's sessions closed: ${JSON.stringify(afterClose).slice(0, 200)}`);
@@ -167,6 +172,17 @@ ${late.slice(0, 400)}`);
         routes: ["/"],
         blocked_by: null,
       });
+    // A lane whose only fold was refused keeps its session: closing it would
+    // leave the corrected report nowhere to keep its decisions.
+    const refusedFold = await call("scout_lane_report", { lane: "orders", reply: "{not json" });
+    if (!/Lane report REFUSED/.test(refusedFold)) fail(`a malformed lane report was not refused:\n${refusedFold}`);
+    const earlyClose = await call("scout_close", { session: "orders" });
+    if (!/Not closed/.test(earlyClose) || !/force: true/.test(earlyClose)) fail(`a lane with only a refused fold was closed:\n${earlyClose}`);
+    const earlyAll = await call("scout_close", { all: true });
+    if (!/Not closed/.test(earlyAll) || !earlyAll.includes('· "orders"') || earlyAll.includes('· "planner"'))
+      fail(`closing every session did not stop at exactly the unfolded lane:\n${earlyAll}`);
+    if (!earlyAll.includes('scout_close { session: "planner" }')) fail(`closing every session did not offer the others by name:\n${earlyAll}`);
+    console.log("✓ scout_close keeps a lane whose report has not been folded, and names it");
     const unfiled = await call("scout_lane_report", {
       lane: "orders",
       reply: "Here is my report:\n```json\n" + report("input[name=email] has no label") + "\n```\nDone.",
@@ -206,7 +222,7 @@ ${late.slice(0, 400)}`);
     // It carries the lane's page, so the live feed and the replay show where the lane was when it was folded.
     if (!folds.some((l) => /"url":"http[^"]+"/.test(l))) fail(`the lane-report marker carries no page URL: ${folds[0]}`);
     console.log("✓ a lane report names what was judged and never filed, and accepts prose around one fenced object");
-    await call("scout_close", { all: true });
+    assertClosedAll(await call("scout_close", { all: true }));
 
     // The server keeps one store per project for its whole life. A second run
     // in the same process must not pass the gate on the first run's audit.
@@ -216,11 +232,22 @@ ${late.slice(0, 400)}`);
       fail(`a second run passed the audit gate on the first run's audit:\n${secondRun.slice(0, 400)}`);
     // Closing the last session BY NAME ends the run too.
     await call("scout_design_audit", { session: "second-run" });
-    await call("scout_close", { session: "second-run" });
+    // A brief whose lanes are never run: one shares the live session's name
+    // (so it is that session, not a lane), the other never attaches.
+    const brief = await call("scout_lane_brief", { session: "second-run", lanes: 2, routes: ["/second-run/a", "/reports/b"] });
+    if (!brief.includes("── second-run ──") || !brief.includes("── reports ──")) fail(`the brief did not name the expected lanes:\n${brief}`);
+    const closedSecond = await call("scout_close", { session: "second-run" });
+    if (!closedSecond.includes('Session "second-run" closed')) fail(`a brief lane named like the live session made it a lane:\n${closedSecond}`);
+    // That close ended the run, and the brief's lanes with it: a later session
+    // that happens to share a lane's name is not a lane.
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "reports", mode: "read-only", objective: "a later role" });
+    const closedLater = await call("scout_close", { session: "reports" });
+    if (!closedLater.includes('Session "reports" closed')) fail(`a lane name outlived its run:\n${closedLater}`);
+    console.log("✓ a brief's lane names end with the run, and never cover a session already live");
     await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "third-run", mode: "read-only", objective: "third run" });
     const thirdRun = await call("scout_report", { session: "third-run", level: "minimal" });
     if (!/No scout_design_audit was run in this run/.test(thirdRun)) fail(`closing the last session by name did not end its run:\n${thirdRun.slice(0, 400)}`);
-    await call("scout_close", { all: true });
+    assertClosedAll(await call("scout_close", { all: true }));
     console.log("✓ a run's shared state ends with its last session");
   } finally {
     fixture.close();
@@ -277,7 +304,7 @@ async function liveViewOffCheck(): Promise<void> {
     if (status.live) fail(`SCENESCOUT_LIVE=off still advertises a port: ${JSON.stringify(status.live)}`);
     if (fs.existsSync(path.join(projectDir, ".scenescout", "live-token"))) fail("SCENESCOUT_LIVE=off still wrote a token file");
     if (!Array.isArray(status.detail) || status.detail.length !== 1) fail("status.json lost its per-session entries when the live view is off");
-    await client.callTool({ name: "scout_close", arguments: { all: true } });
+    assertClosedAll(textOf(await client.callTool({ name: "scout_close", arguments: { all: true } })));
     console.log("✓ SCENESCOUT_LIVE=off opens no port and still writes per-session status");
   } finally {
     await client.close();
