@@ -53,7 +53,9 @@
         "archived.{0,80}(500|empty|refused|fail)",
         "(500|refused|fail).{0,80}archived",
         "(filter|status).{0,40}(returns|errors).{0,20}500.{0,80}(blank|empty|no empty.state|matches no)",
-        "filter that errors.{0,20}500"
+        "filter that errors.{0,20}500",
+        "failed orders fetch.{0,40}(silent|empty).{0,20}(table|list)",
+        "res\\.ok \\? await res\\.json\\(\\) : \\[\\]"
       ],
       "examples": [
         "GET /api/orders?status=archived 500, page shows empty list, no error",
@@ -68,14 +70,17 @@
         "Archived returns 500 and shows an empty table, unlike every other filter",
         "Archived status filter silently fails (500) and any other filter works fine",
         "Status filter returns 500 for one status and the table is simply blank, no empty-state message",
-        "A filter that errors (500) renders like a filter that matches no orders"
+        "A filter that errors (500) renders like a filter that matches no orders",
+        "Failed orders fetch renders as a silent empty table",
+        "orders.html inline script: `const orders = res.ok ? await res.json() : [];` with no error branch"
       ],
       "counterExamples": [
         "Orders filter gets stuck on the failed Archived result for subsequent selections",
         "select Archived(500) then Rejected repeats GET /api/orders?status=archived 500, same state hash",
         "Choosing Rejected shows the Archived request: GET /api/orders?status=archived fired again",
         "After choosing Archived (500), every later filter keeps showing the failed empty table",
-        "After the Archived 500, choosing Shipped still shows the empty table"
+        "After the Archived 500, choosing Shipped still shows the empty table",
+        "Failed inventory fetch renders as an empty list"
       ]
     },
     {
