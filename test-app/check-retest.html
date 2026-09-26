@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Check: a failing request on load</title></head>
+<body>
+  <!-- For `scenescout check --retest`: a page whose load asks for something the
+       server fails with a 500, so an open finding naming that request is
+       reproduced by loading the page. check-flow.html loads without it.
+       It links to a page nothing else in the check links to, so a re-test load
+       that harvested links would change the check's unvisited list. -->
+  <h1>Summary</h1>
+  <p data-testid="retest-summary">Loading…</p>
+  <a href="/check-flow.html" data-testid="retest-back">Back to things</a>
+  <a href="/check-links-2.html" data-testid="retest-more">More</a>
+  <script>
+    fetch("/api/fail-500").then((res) => {
+      document.querySelector('[data-testid="retest-summary"]').textContent = res.ok ? "Loaded" : "Could not load the summary";
+    });
+  </script>
+</body>
+</html>

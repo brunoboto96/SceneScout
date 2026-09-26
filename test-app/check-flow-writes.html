@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Check: flow steps that write</title></head>
+<body>
+  <!-- For `scenescout check`'s flow write rule: the ways a page sends a write
+       while a flow runs, and which of them a step is charged with.
+       - A form posted with Enter.
+       - "Save later": a save that goes out 500 ms after the "Saving shortly"
+         it announces, so after a flow's last step that waits for that text.
+       - "Add remotely" (with ?other=<origin>): a fetch POST to another
+         origin, as an app whose API is on another port does, then "Added".
+       - ?beacon=<origin>: a sendBeacon to that origin on a timer, the way
+         telemetry does, which no step causes. The contrast to "Add remotely":
+         same origin, same method, sent as a beacon instead of a fetch (to its
+         own path, so the smoke suite can count the two apart).
+       - ?heartbeat=1: a fetch POST to this origin on a timer, which no step
+         causes either, but is sent as a fetch.
+       - "Save on leave": a sendBeacon to this origin on pagehide. -->
+  <h1>New thing</h1>
+  <p data-testid="writes-ready">Ready</p>
+  <form method="post" action="/api/items" data-testid="writes-form">
+    <label>Title <input name="title" type="text" data-testid="writes-title"></label>
+    <button type="submit" data-testid="writes-create">Create</button>
+  </form>
+  <button type="button" data-testid="writes-save-later">Save later</button>
+  <button type="button" data-testid="writes-add-remote">Add remotely</button>
+  <button type="button" data-testid="writes-save-on-leave">Save on leave</button>
+  <p data-testid="writes-status" role="status"></p>
+  <script>
+    const status = document.querySelector('[data-testid="writes-status"]');
+    const params = new URLSearchParams(location.search);
+    const loopback = (value) => (value && /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(value) ? value : "");
+    document.querySelector('[data-testid="writes-save-later"]').addEventListener("click", () => {
+      status.textContent = "Saving shortly";
+      setTimeout(() => fetch("/api/items", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => {}), 500);
+    });
+    document.querySelector('[data-testid="writes-add-remote"]').addEventListener("click", () => {
+      const other = loopback(params.get("other"));
+      fetch(`${other}/api/items`, { method: "POST", mode: "no-cors", body: "{}" })
+        .catch(() => {})
+        .finally(() => (status.textContent = "Added"));
+    });
+    document.querySelector('[data-testid="writes-save-on-leave"]').addEventListener("click", () => {
+      status.textContent = "Will save on leave";
+      addEventListener("pagehide", () => navigator.sendBeacon("/api/leave", "{}"));
+    });
+    const beacon = loopback(params.get("beacon"));
+    if (beacon) setInterval(() => navigator.sendBeacon(`${beacon}/api/beacon`, "x"), 50);
+    if (params.get("heartbeat") === "1") setInterval(() => fetch("/api/heartbeat", { method: "POST", body: "{}" }).catch(() => {}), 50);
+  </script>
+</body>
+</html>
