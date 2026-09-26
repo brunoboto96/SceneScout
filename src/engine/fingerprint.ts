@@ -8,6 +8,17 @@ const NUM_RE = /^\d+$/;
 const UI_STATE_PARAM_RE = /^(tab|view|mode|step|panel|section)$/i;
 
 /**
+ * Whether a path segment is an id that route identity collapses to `:id`: a
+ * UUID or long hex string anywhere, a number from the second real segment on.
+ * `index` counts as `path.split("/")` does, so the first real segment of a
+ * leading-slash path is 1 (see the note on numeric first segments below).
+ */
+export function isIdSegment(seg: string, index: number): boolean {
+  if (UUID_RE.test(seg) || HEX_RE.test(seg)) return true;
+  return NUM_RE.test(seg) && index > 1;
+}
+
+/**
  * Normalize a URL into a route-class identity:
  * - path ids collapse (/orders/123 → /orders/:id)
  * - hash-router paths count as the path (#/orders/5 → /orders/:id)
@@ -40,11 +51,7 @@ export function normalizePath(rawUrl: string): string {
   }
   // segments[0] is always "" for a leading-slash path, so the first REAL
   // segment is index 1 — that is the one a bare numeric page occupies.
-  const segments = path.split("/").map((seg, i) => {
-    if (UUID_RE.test(seg) || HEX_RE.test(seg)) return ":id";
-    if (NUM_RE.test(seg) && i > 1) return ":id";
-    return seg;
-  });
+  const segments = path.split("/").map((seg, i) => (isIdSegment(seg, i) ? ":id" : seg));
   let normalized = segments.join("/") || "/";
   if (normalized === "") normalized = "/";
 
