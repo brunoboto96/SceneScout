@@ -23,6 +23,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import {
+  byRunOrder,
   formatScorecard,
   LEVELS,
   parseKey,
@@ -137,7 +138,7 @@ if (values.all) {
   if (files.length === 0) fail(`No archived runs in ${path.relative(root, runsDir)}.`);
   const rows = files
     .map((f) => readArchive(path.join(runsDir, f)))
-    .sort((a, b) => a.date.localeCompare(b.date) || a.run.localeCompare(b.run))
+    .sort(byRunOrder)
     .map((a) => ({ a, c: score(key, a.findings, a.decisions, level) }));
   console.log(`Every archived run, re-scored against key ${rows[0].c.key} at ${level}:\n`);
   console.log(`| Run | Date | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Calibration |`);
