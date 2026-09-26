@@ -507,20 +507,6 @@
       "counterExamples": []
     },
     {
-      "id": "stickybar-link-missing-testid",
-      "route": "/order.html",
-      "title": "The sticky bar's back link has no test id",
-      "category": "missing-testid",
-      "severity": "low",
-      "level": "minimal",
-      "match": ["sticky.?bar.{0,60}(no|missing).{0,10}(data-)?test.?id", "line items are edited from the list.{0,40}(no|missing).{0,10}(data-)?test.?id"],
-      "examples": [
-        "order.html stickybar anchor href=/orders.html, no data-testid\nstickybar-link-missing-testid",
-        "\"Line items are edited from the list\" link has no data-testid\nlink href=/orders.html text=\"Line items are edited from the list\" missing testid"
-      ],
-      "counterExamples": []
-    },
-    {
       "id": "sort-no-active-state",
       "route": "/inventory.html",
       "title": "Sort buttons show no active state and do not toggle",
@@ -1028,6 +1014,22 @@
         "The status filter resets on back navigation"
       ],
       "counterExamples": ["The orders filter is stuck on the failed Archived result", "The Archived filter returns a 500 and the page shows an empty table"]
+    },
+    {
+      "id": "stickybar-link-missing-testid",
+      "route": "/order.html",
+      "title": "The sticky bar's back link has no test id",
+      "category": "missing-testid",
+      "reason": "A data-testid is a test-automation convention, not something a user meets. It is a defect only where the project requires one on every interactive element. The demo puts one on most controls, so a run can see the habit, but it declares no such rule.",
+      "match": ["sticky.?bar.{0,60}(no|missing).{0,10}(data-)?test.?id", "line items are edited from the list.{0,40}(no|missing).{0,10}(data-)?test.?id"],
+      "examples": [
+        "order.html stickybar anchor href=/orders.html, no data-testid\nstickybar-link-missing-testid",
+        "\"Line items are edited from the list\" link has no data-testid\nlink href=/orders.html text=\"Line items are edited from the list\" missing testid"
+      ],
+      "counterExamples": [
+        "Sticky bar says line items are edited from the list, but the list has no item editing\ntestid=order-stickybar link href=/orders.html; orders list has no item edit control",
+        "testid=order-save covered by testid=order-stickybar at default scroll"
+      ]
     }
   ]
 }
