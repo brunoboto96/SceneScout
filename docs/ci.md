@@ -58,8 +58,8 @@ jobs:
 
 ### Which ref to use
 
-- **Use an exact release tag, such as `@v3.10.0`, for now.** It never moves, and it is what the rest of this page assumes.
-- `@v3` is meant to follow the latest 3.x release. Until the repository's tag settings let a release move it, it may stay on the first 3.x release that had the action, so it can lag behind.
+- `@v3` follows the latest 3.x release: each release moves it, so you get fixes without editing the workflow, and a new major version never arrives unannounced.
+- An exact release tag, such as `@v3.10.0`, never moves. Use it when you want every upgrade to be a reviewed change; the examples on this page use it for that reason.
 - A full commit SHA also works, but only the SHA of a release commit (the one a `vX.Y.Z` tag points at). Pin a tag or a release SHA if your policy is to review every change to a third-party action.
 
 The action runs the scenescout npm package of the same version as its ref, so `@v3.10.0` runs `scenescout@3.10.0`. At a commit between releases (a branch, or a SHA that no tag points at), the action installs the last published version instead, which can be older than the action; if that version has no `check` command, or does not accept one of the inputs, the step stops with an annotation that says so. The `version` input overrides the version in every case.

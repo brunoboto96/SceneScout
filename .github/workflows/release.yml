@@ -100,9 +100,10 @@ jobs:
       # moves, for users who pin.
       #
       # npm has already published by now, so this step never fails the job. The
-      # repository's tag ruleset protects refs/tags/v* against update, and the
-      # Actions token cannot bypass it: creating the major tag works, moving it
-      # is refused, and the refusal becomes a warning rather than a red release.
+      # tag rulesets keep exact release tags (refs/tags/v*.*.*) from being moved
+      # and major tags (v3) from being deleted, so moving v3 is allowed. If a
+      # setting ever refuses it, the refusal becomes a warning rather than a red
+      # release.
       - name: Point the major tag at this release
         if: steps.changesets.outputs.published == 'true'
         env:
@@ -120,7 +121,7 @@ jobs:
             if git push origin "refs/tags/$major"; then echo "Created $major at v$version."; exit 0; fi
             what="create"
           fi
-          echo "::warning title=Major tag not updated::Could not $what $major at v$version, so users of @$major do not get this release yet. The tag ruleset protecting refs/tags/v* (ruleset 23663840) refuses it: narrow that ruleset to refs/tags/v*.*.* and add a separate rule for major tags that lets GitHub Actions update them."
+          echo "::warning title=Major tag not updated::Could not $what $major at v$version, so users of @$major do not get this release yet. Check that no tag ruleset restricts updating $major: only exact release tags (refs/tags/v*.*.*) should be protected against moves."
 
   # A separate job, so the permission to start workflows is never held by the
   # job that runs repository code and can publish. It keys off pr-number, which
