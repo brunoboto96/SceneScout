@@ -7,6 +7,9 @@
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import type http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 // @ts-expect-error — plain .mjs, no types; it exports createDemoServer().
 import { createDemoServer } from "../demo-app/server.mjs";
@@ -79,4 +82,22 @@ test("seeded: creating an order is not idempotent, so a double submit makes two"
   assert.equal(one.status, 201);
   assert.equal(two.status, 201);
   assert.notEqual((one.body as { id: number }).id, (two.body as { id: number }).id);
+});
+
+test("nothing the browser is served tells a tester where the seeded defects are", () => {
+  // The demo app is the benchmark target: a comment in a served file naming a
+  // planted defect hands the answer to the agent being scored.
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "../demo-app");
+  const key = JSON.parse(fs.readFileSync(path.join(root, "answer-key.json"), "utf8")) as { defects: Array<{ id: string }> };
+  assert.ok(key.defects.length > 0);
+  const spoilers = ["seeded defect", ...key.defects.map((d) => d.id.toLowerCase())];
+  const publicDir = path.join(root, "public");
+  const served = fs.readdirSync(publicDir, { recursive: true, encoding: "utf8" }).filter((f) => fs.statSync(path.join(publicDir, f)).isFile());
+  assert.ok(served.includes("index.html"));
+  const hits: string[] = [];
+  for (const file of served) {
+    const lines = fs.readFileSync(path.join(publicDir, file), "latin1").toLowerCase().split("\n");
+    lines.forEach((line, i) => hits.push(...spoilers.filter((s) => line.includes(s)).map((s) => `${file}:${i + 1} ${s}`)));
+  }
+  assert.deepEqual(hits, []);
 });

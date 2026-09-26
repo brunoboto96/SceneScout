@@ -52,10 +52,7 @@
       async function load() {
         const status = document.getElementById("status").value;
         const res = await fetch("/api/orders" + (status ? "?status=" + status : ""));
-        // SEEDED DEFECT: a failed response is rendered as an empty table, with no message.
         const orders = res.ok ? await res.json() : [];
-        // SEEDED DEFECT: the customer name is rendered as HTML, so a name that
-        // holds markup runs as script for everyone who opens the list (stored XSS).
         rows.innerHTML = orders
           .map(
             (o) =>

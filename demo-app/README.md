@@ -42,7 +42,7 @@ Stop here if you would rather see what a run finds on its own.
 | New order | Submit stays enabled: a double-click creates two orders | The double-click probe (`clicks: 2`) |
 | New order | Hint text at 1.73:1 contrast | Design audit |
 | New order | Email field has a placeholder but no label | Snapshot and crawl count it as unnamed |
-| Reports | Export CSV throws | Page-error oracle |
+| Reports | Export CSV throws: its click handler still reads a data object (`window.reportData`) that nothing defines any more | Page-error oracle |
 | Reports → Scheduled | No navigation, no way back | Crawl flags a dead end |
 | Order | A fixed bar at the bottom covers the sticky Save notes row | Geometry oracle, by hit-testing the button's centre (visible in `examples/screenshots/order-detail.png`) |
 | Approvals | The page hides Approve from anyone but a manager, but the approve endpoint accepts a clerk. Reject is checked properly | Calling the endpoint directly, as the agent does for any refusal shown only by a hidden button |

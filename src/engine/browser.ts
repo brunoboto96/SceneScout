@@ -103,7 +103,8 @@ import {
   isAuthExempt,
 } from "./policy.js";
 import { scanProject } from "../scan.js";
-import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignPayload, type FocusSample } from "./design.js";
+import type { RouteHealth } from "./check.js";
+import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignDefect, type DesignPayload, type FocusSample } from "./design.js";
 import { acceptMatches, generatedUpload, type FixtureKind } from "./fixtures.js";
 
 export type { WriteMode } from "./policy.js";
@@ -923,6 +924,8 @@ export class BrowserEngine {
     });
     this.lastSnap = null;
     this.designAuditCount = 0;
+    // A new attach may be a restarted app: what failed to load before gets another try.
+    this.loadFailedRoutes = new Set();
 
     // The engine learns the route list itself so completion is an objective,
     // enforceable contract (scout_report refuses while known routes are unvisited)
@@ -1749,19 +1752,8 @@ export class BrowserEngine {
 
     // Per document: the page's own controls together, and each frame's apart —
     // an embed's controls are not laid out against the page's.
-    const viewport = page.viewportSize() ?? { width: 1280, height: 900 };
-    const byDocument = new Map<string, SnapshotElement[]>();
-    for (const el of elements) {
-      const doc = el.frame ? el.key.slice(0, el.key.indexOf("|") + 1) : "";
-      byDocument.set(doc, [...(byDocument.get(doc) ?? []), el]);
-    }
-    const geometry = [...byDocument.values()].flatMap((group) => geometryIssues(group, viewport));
-    geometry.push(...(await probeOverlays(page)));
+    const { geometry, brokenImages } = await this.measureLayout(page, elements, url);
     const hiddenFileInputs = await this.hiddenFileInputs(page);
-    const brokenImages = brokenImageIssues(
-      ((await page.evaluate(BROKEN_IMAGES_SCRIPT).catch(() => null)) as BrokenImageScan | null) ?? { images: [], total: 0 },
-      url,
-    );
     const { frames, nested: nestedFrames } = await this.frameInventory(page);
     const cov = memory.coverage();
     const unvisited = this.unvisitedKnownRoutes();
@@ -2599,6 +2591,27 @@ export class BrowserEngine {
     '[class*="tooltip" i], [class*="hovercard" i], [class*="popover" i]';
 
   /**
+   * The layout checks a snapshot prints: geometry per document (the page's own
+   * controls together, each frame's apart, since an embed's controls are not
+   * laid out against the page's), the overlay probe, and images that failed.
+   */
+  private async measureLayout(page: Page, elements: SnapshotElement[], url: string): Promise<{ geometry: string[]; brokenImages: string[] }> {
+    const viewport = page.viewportSize() ?? { width: 1280, height: 900 };
+    const byDocument = new Map<string, SnapshotElement[]>();
+    for (const el of elements) {
+      const doc = el.frame ? el.key.slice(0, el.key.indexOf("|") + 1) : "";
+      byDocument.set(doc, [...(byDocument.get(doc) ?? []), el]);
+    }
+    const geometry = [...byDocument.values()].flatMap((group) => geometryIssues(group, viewport));
+    geometry.push(...(await probeOverlays(page)));
+    const brokenImages = brokenImageIssues(
+      ((await page.evaluate(BROKEN_IMAGES_SCRIPT).catch(() => null)) as BrokenImageScan | null) ?? { images: [], total: 0 },
+      url,
+    );
+    return { geometry, brokenImages };
+  }
+
+  /**
    * Visible overlay texts right now — diffed before/after a hover to isolate
    * what the hover revealed. Returns null when the read itself failed, so a
    * failed baseline is never mistaken for "no overlays were open".
@@ -2962,17 +2975,61 @@ export class BrowserEngine {
     return this.memory?.discoveredRoutes[routeClass] ?? routeClass;
   }
 
+  /** Routes whose page failed to load in this process: still unvisited, but not tried again by a crawl that picks its own targets. */
+  private loadFailedRoutes = new Set<string>();
+
+  /** Unvisited known routes a crawl would still try: those that already failed to load in this process are left out. */
+  crawlableRoutes(): string[] {
+    return this.unvisitedKnownRoutes().filter((r) => !this.loadFailedRoutes.has(normalizePath(r)));
+  }
+
+  /** What the last crawl measured on each route, as data: `scenescout check` builds its verdict from this. */
+  private crawlHealth: RouteHealth[] = [];
+
+  /** The per-route results of the most recent crawl. */
+  get lastCrawlHealth(): readonly RouteHealth[] {
+    return this.crawlHealth;
+  }
+
+  /** A check's extra measurements on a crawled page: the snapshot's layout checks and the design audit's defects. */
+  private async inspectRoute(
+    page: Page,
+    elements: SnapshotElement[],
+    url: string,
+  ): Promise<{ geometry: string[]; brokenImages: string[]; design: DesignDefect[]; auditError?: string }> {
+    const { geometry, brokenImages } = await this.measureLayout(page, elements, url);
+    try {
+      const { defects, sampled } = await this.auditPage();
+      // Nothing styled to read is not a clean page: contrast, focus and target size went unmeasured.
+      return sampled > 0
+        ? { geometry, brokenImages, design: defects }
+        : { geometry, brokenImages, design: [], auditError: "no visible styled elements to measure" };
+    } catch (err) {
+      // A page that navigated away mid-audit has nothing to measure. The
+      // route's other results still stand, and the report says the audit is missing.
+      return { geometry, brokenImages, design: [], auditError: err instanceof Error ? err.message.split("\n")[0] : String(err) };
+    }
+  }
+
   /**
    * Engine-side route sweep: visit each path, record the state in memory, and
    * collect per-route health — one tool call instead of one LLM turn per route.
    * Output is anomaly-oriented: a summary line per route, details only where
    * something is wrong. Navigation-only, so it is safe in read-only mode.
    */
-  async crawl(paths?: string[]): Promise<string> {
+  async crawl(paths?: string[], opts: { inspect?: boolean; limit?: number } = {}): Promise<string> {
     const page = this.requirePage();
     const memory = this.memory!;
-    const targets = (paths && paths.length > 0 ? paths : this.unvisitedKnownRoutes().map((r) => this.navigablePath(r))).slice(0, 150);
+    this.crawlHealth = [];
+    const targets = (paths && paths.length > 0 ? paths : this.crawlableRoutes().map((r) => this.navigablePath(r))).slice(0, Math.min(150, opts.limit ?? 150));
     if (targets.length === 0) {
+      const failed = this.unvisitedKnownRoutes().filter((r) => this.loadFailedRoutes.has(normalizePath(r)));
+      if (failed.length > 0) {
+        return (
+          `Nothing new to crawl. ${failed.length} route(s) failed to load earlier in this session and are still unvisited: ${failed.slice(0, 20).join(", ")}${failed.length > 20 ? " …" : ""}. ` +
+          `A crawl without paths does not retry them; pass them as paths once the app is reachable, e.g. scout_crawl {paths:${JSON.stringify(failed.slice(0, 3).map((r) => this.navigablePath(r)))}}.`
+        );
+      }
       return this.allKnownRoutes().length > 0
         ? "Nothing to crawl: every known route has been visited. Use scout_coverage for remaining unexercised elements."
         : "No routes to crawl yet: no scanned or link-discovered routes. Take a snapshot first (links harvest routes) or pass explicit paths.";
@@ -2993,8 +3050,31 @@ export class BrowserEngine {
         const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
         status = resp?.status() ?? "no-response";
       } catch (err) {
+        const reason = err instanceof Error ? err.message.split("\n")[0] : String(err);
+        // Not retried by later crawls in this process (a check would otherwise try it
+        // on every discovery round). Deliberately not written to memory: one outage
+        // must not count a route as covered in every later run's gap ledger.
+        this.loadFailedRoutes.add(normalizePath(url));
+        // The browser commits its own error page for this failure tens of
+        // milliseconds after goto has thrown, and that commit interrupts the next
+        // navigation, charging this route's failure to the next one. Wait for it;
+        // a browser that shows no error page simply lets the wait time out.
+        await page.waitForEvent("framenavigated", { predicate: (f) => f === page.mainFrame(), timeout: 1500 }).catch(() => undefined);
         summary.push(`${path} — LOAD FAILED`);
-        problems.push(`${path}: ${err instanceof Error ? err.message.split("\n")[0] : err}`);
+        problems.push(`${path}: ${reason}`);
+        this.crawlHealth.push({
+          path,
+          url,
+          status: null,
+          loadError: reason,
+          loginRedirect: false,
+          elements: 0,
+          unnamed: [],
+          violations: [],
+          geometry: [],
+          brokenImages: [],
+          design: [],
+        });
         continue;
       }
       await this.settle();
@@ -3033,7 +3113,24 @@ export class BrowserEngine {
 
       await this.scanForInjections();
       await this.scanForContradictions();
+      // Measured before the drain: the audit's Tab presses can load things too.
+      const inspected = opts.inspect ? await this.inspectRoute(page, elements, finalUrl) : null;
       const violations = this.oracles.drain();
+      this.crawlHealth.push({
+        path,
+        url: finalUrl,
+        status: typeof status === "number" ? status : null,
+        loginRedirect,
+        elements: elements.length,
+        unnamed: elements
+          .filter((el) => missingName(el) && !el.frame?.foreign)
+          .map((el) => `${el.role}${el.testid ? ` [testid=${el.testid}]` : ` at ${el.xpath}`}`),
+        violations: violations.map(({ kind, severity, detail, url, embed }) => ({ kind, severity, detail, url, ...(embed ? { embed } : {}) })),
+        geometry: inspected?.geometry ?? [],
+        brokenImages: inspected?.brokenImages ?? [],
+        design: inspected?.design ?? [],
+        ...(inspected?.auditError ? { auditError: inspected.auditError } : {}),
+      });
       const deadEnd = elements.length === 0;
       const unnamed = elements.filter(missingName).length;
       const missingTestid = elements.filter((el) => !el.testid && !el.disabled).length;
@@ -3339,6 +3436,12 @@ export class BrowserEngine {
 
   /** Computed-style design audit of the current page — visual judgment material without pixels. */
   async designAudit(): Promise<string> {
+    const { url, report } = await this.auditPage();
+    return `URL: ${url}\n` + report;
+  }
+
+  /** The design audit's measurements, as data as well as prose; scout_design_audit and a check's crawl share it. */
+  private async auditPage(): Promise<{ url: string; report: string; defects: DesignDefect[]; sampled: number }> {
     const page = this.requirePage();
     await this.settle();
     const payload = (await page.evaluate(DESIGN_COLLECT_SCRIPT)) as DesignPayload;
@@ -3349,7 +3452,7 @@ export class BrowserEngine {
     // score with chrome included and later ones don't. That is the same warm-up
     // the coverage census has: nothing is knowable as "shared" until it has been
     // seen on several routes.
-    const { report, score, signatures } = analyzeDesign(
+    const { report, score, signatures, defects } = analyzeDesign(
       payload,
       page.viewportSize() ?? { width: 1280, height: 900 },
       this.memory?.designChromeKeys() ?? new Set(),
@@ -3365,7 +3468,7 @@ export class BrowserEngine {
       this.memory?.markRouteFact(route, { audited: true });
     }
     this.logAction({ action: "design-audit", url: page.url(), result: score ? `score:${score.overall}` : undefined, ...(await this.frameFor("design-audit")) });
-    return `URL: ${page.url()}\n` + report;
+    return { url: page.url(), report, defects, sampled: payload.records.length };
   }
 
   /**

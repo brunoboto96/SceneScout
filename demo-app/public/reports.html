@@ -43,7 +43,6 @@
     <footer>Harbor order desk · demo data only</footer>
     <script>
       document.getElementById("export").addEventListener("click", () => {
-        // SEEDED DEFECT: the export helper was renamed and this call site was missed.
         const csv = window.reportData.rows.map((r) => r.join(",")).join("\n");
         const a = document.createElement("a");
         a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
