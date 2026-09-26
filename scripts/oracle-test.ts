@@ -19,6 +19,10 @@ import {
   hasVisibleFrame,
   masksForeignName,
   missingName,
+  placeholderOnly,
+  placeholderEvidence,
+  describeControl,
+  labelFlag,
   capForeignName,
   stripForeignHref,
   frameToPageRect,
@@ -439,6 +443,37 @@ test("an empty live region is not an unnamed control; an empty button still is",
   }
   assert.equal(missingName({ role: "status", name: "Saved." }), false);
   assert.equal(displayName({ role: "status", name: "Saved." }), "Saved.");
+});
+
+test("a field's shown name is not a label when it came from its placeholder, name attribute or type", () => {
+  // The same shown name each time; only where it came from differs.
+  const labelled = { role: "textbox", name: "Your email", nameFrom: null };
+  const placeholder = { role: "textbox", name: "Your email", nameFrom: "placeholder" as const };
+  const fallback = { role: "textbox", name: "email", nameFrom: "fallback" as const };
+  assert.deepEqual([missingName(labelled), placeholderOnly(labelled), labelFlag(labelled)], [false, false, null]);
+  assert.deepEqual([missingName(placeholder), placeholderOnly(placeholder), labelFlag(placeholder)], [false, true, "no label: placeholder only"]);
+  assert.deepEqual([missingName(fallback), placeholderOnly(fallback), labelFlag(fallback)], [true, false, "no label"]);
+  // The name is still shown, so the agent can tell the field apart and target it.
+  assert.equal(displayName(placeholder), "Your email");
+  assert.equal(displayName(fallback), "email");
+  // An element the collector says nothing about is judged as before.
+  assert.equal(missingName({ role: "button", name: "Save" }), false);
+});
+
+test("a blank aria-label leaves a placeholder field unnamed, and filed only as that", () => {
+  // The same placeholder field; a whitespace aria-label ends the name before the placeholder is reached.
+  const blank = { role: "textbox", name: "", nameFrom: "placeholder" as const };
+  assert.deepEqual([missingName(blank), placeholderOnly(blank), labelFlag(blank)], [true, false, "no label"]);
+  assert.equal(displayName(blank), "(unnamed)");
+});
+
+test("a placeholder-only field's evidence caps the placeholder, and names the control as the unnamed list does", () => {
+  const el = { role: "textbox", testid: null, xpath: "/html/body/form[1]/input[3]", name: "Email" };
+  assert.equal(describeControl(el), "textbox at /html/body/form[1]/input[3]");
+  assert.equal(placeholderEvidence(el), 'textbox at /html/body/form[1]/input[3] "Email"');
+  const long = placeholderEvidence({ ...el, testid: "hint-field", name: "x".repeat(300) });
+  assert.equal(long, `textbox [testid=hint-field] "${"x".repeat(79)}…"`);
+  assert.equal(placeholderEvidence({ ...el, name: "y".repeat(80) }), `textbox at /html/body/form[1]/input[3] "${"y".repeat(80)}"`, "80 exactly is kept whole");
 });
 
 test("frameLines: says what is embedded, where from, and that it was not explored", () => {
