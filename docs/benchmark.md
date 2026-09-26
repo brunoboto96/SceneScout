@@ -191,26 +191,28 @@ Its runs are reported in [Held-out results](#held-out-results).
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
 re-scored against **one** key by `npm run bench -- --all`. The table below is
-key `71458d9246`; a struck value is the same run under the previous key,
-`f8e0862a8b`. For runs 0–8 the whole change is the new `contextual` list (see
-"Runs 9 and 10"): the findings and verdicts on the spacing-grid and nav-link
-entries are set aside instead of scored. The narrowed approve pattern and the
-entries added for runs 9 and 10 change no finding or verdict in runs 0–8, and
-the rule for "not mine" dismissals is unchanged. Recall did not move for any run. "All findings" counts every finding
+key `83cb84211d`; a struck value is the same run under the previous key,
+`71458d9246`. The whole change is one entry: the sticky bar's link with no
+`data-testid` moved from the also-real list to the `contextual` list (see
+"Runs 9 and 10"), so in runs 1–9 that finding is set aside instead of counted
+correct, and a verdict on it is no longer scored. Runs 0 and 10 did not file
+it and did not move. The key before that, `f8e0862a8b`, is the one the
+contextual list was introduced against; the Brier comparison below quotes it.
+Recall did not move for any run. "All findings" counts every finding
 the run filed, including the ones set aside. The archived runs are in [`bench/runs/`](../bench/runs/).
 
 | Run | Date | What changed | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Lane calibration | Cost | Kept? |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
-| 0 | 2026-09-22 | Baseline, 3.4.0, briefs as written on the day | 11/13 | ~~16/21 (76%)~~ 14/19 (74%) | 21 (2 set aside) | 0 | 5 | 1 | ~~26/31 (84%), ECE 0.05, Brier 0.113~~ 24/29 (83%), ECE 0.05, Brier 0.109 | ~725k tokens, 241 tool calls, longest lane 3m38s | — |
-| 1 | 2026-09-22 | **Lane briefs only** (engine unchanged) — see below | 12/13 | ~~28/28 (100%)~~ 25/25 (100%) | 28 (3 set aside) | 0 | 0 | 0 | ~~34/35 (97%), ECE 0.12, Brier 0.035~~ 31/31 (100%), ECE 0.10, Brier 0.017 | ~698k tokens, 283 tool calls, longest lane 5m09s | Yes, into the skill |
-| 2 | 2026-09-22 | **Engine 3.5.0 only** — run 1's briefs verbatim | 9/13 | ~~25/25 (100%)~~ 20/20 (100%) | 26 (5 set aside) | 1 | 0 | 1 | ~~29/30 (97%), ECE 0.10, Brier 0.053~~ 25/26 (96%), ECE 0.07, Brier 0.046 | ~687k tokens, 266 tool calls, longest lane 5m37s | See runs 2–4 |
-| 3 | 2026-09-22 | Repeat of run 2 | 10/13 | ~~29/32 (91%)~~ 23/26 (88%) | 33 (6 set aside) | 1 | 3 | 0 | ~~30/33 (91%), ECE 0.10, Brier 0.090~~ 24/27 (89%), ECE 0.08, Brier 0.082 | ~680k tokens, 260 tool calls, longest lane 5m40s | See runs 2–4 |
-| 4 | 2026-09-22 | Repeat of run 2 | 11/13 | ~~26/27 (96%)~~ 22/23 (96%) | 27 (4 set aside) | 0 | 1 | 1 | ~~29/35 (83%), ECE 0.07, Brier 0.101~~ 25/29 (86%), ECE 0.05, Brier 0.080 | ~683k tokens, 271 tool calls, longest lane 4m40s | See runs 2–4 |
-| 5 | 2026-09-23 | **Engine 3.6.1 only** — run 1's briefs verbatim | 11/13 | ~~30/31 (97%)~~ 25/26 (96%) | 31 (5 set aside) | 0 | 1 | 0 | ~~31/35 (89%), ECE 0.09, Brier 0.080~~ 27/29 (93%), ECE 0.12, Brier 0.060 | ~697k tokens, 248 tool calls, longest lane 9m30s | See runs 5–7 |
-| 6 | 2026-09-23 | Repeat of run 5 | 10/13 | ~~31/33 (94%)~~ 26/28 (93%) | 33 (5 set aside) | 0 | 2 | 0 | ~~33/37 (89%), ECE 0.06, Brier 0.092~~ 28/30 (93%), ECE 0.06, Brier 0.064 | ~685k tokens, 264 tool calls, longest lane 4m39s | See runs 5–7 |
-| 7 | 2026-09-23 | Repeat of run 5 | 10/13 | ~~29/30 (97%)~~ 26/27 (96%) | 30 (3 set aside) | 0 | 1 | 0 | ~~30/35 (86%), ECE 0.12, Brier 0.089~~ 27/30 (90%), ECE 0.07, Brier 0.072 | ~725k tokens, 292 tool calls, longest lane 6m08s | See runs 5–7 |
-| 8 | 2026-09-25 | **Engine 3.9.0 only** (frames) — run 1's briefs verbatim | 11/13 | ~~25/26 (96%)~~ 22/23 (96%) | 26 (3 set aside) | 0 | 1 | 0 | ~~27/28 (96%), ECE 0.09, Brier 0.042~~ 24/24 (100%), ECE 0.09, Brier 0.014 | ~679k tokens, 240 tool calls, longest lane 4m00s | See run 8 |
-| 9 | 2026-09-26 | **Engine 3.10.0 (wave 1)** — run 1's briefs verbatim, demo served without its seeded-defect comments | 13/13 | 31/31 (100%) | 31 | 0 | 0 | 0 | 30/33 (91%), ECE 0.12, Brier 0.123 | not recorded | See runs 9–10 |
+| 0 | 2026-09-22 | Baseline, 3.4.0, briefs as written on the day | 11/13 | 14/19 (74%) | 21 (2 set aside) | 0 | 5 | 1 | 24/29 (83%), ECE 0.05, Brier 0.109 | ~725k tokens, 241 tool calls, longest lane 3m38s | — |
+| 1 | 2026-09-22 | **Lane briefs only** (engine unchanged) — see below | 12/13 | ~~25/25 (100%)~~ 24/24 (100%) | 28 (4 set aside) | 0 | 0 | 0 | ~~31/31 (100%), ECE 0.10, Brier 0.017~~ 30/30 (100%), ECE 0.11, Brier 0.017 | ~698k tokens, 283 tool calls, longest lane 5m09s | Yes, into the skill |
+| 2 | 2026-09-22 | **Engine 3.5.0 only** — run 1's briefs verbatim | 9/13 | ~~20/20 (100%)~~ 19/19 (100%) | 26 (6 set aside) | 1 | 0 | 1 | ~~25/26 (96%), ECE 0.07, Brier 0.046~~ 24/25 (96%), ECE 0.07, Brier 0.048 | ~687k tokens, 266 tool calls, longest lane 5m37s | See runs 2–4 |
+| 3 | 2026-09-22 | Repeat of run 2 | 10/13 | ~~23/26 (88%)~~ 22/25 (88%) | 33 (7 set aside) | 1 | 3 | 0 | ~~24/27 (89%), ECE 0.08, Brier 0.082~~ 23/26 (88%), ECE 0.08, Brier 0.085 | ~680k tokens, 260 tool calls, longest lane 5m40s | See runs 2–4 |
+| 4 | 2026-09-22 | Repeat of run 2 | 11/13 | ~~22/23 (96%)~~ 21/22 (95%) | 27 (5 set aside) | 0 | 1 | 1 | ~~25/29 (86%), ECE 0.05, Brier 0.080~~ 24/28 (86%), ECE 0.05, Brier 0.083 | ~683k tokens, 271 tool calls, longest lane 4m40s | See runs 2–4 |
+| 5 | 2026-09-23 | **Engine 3.6.1 only** — run 1's briefs verbatim | 11/13 | ~~25/26 (96%)~~ 24/25 (96%) | 31 (6 set aside) | 0 | 1 | 0 | ~~27/29 (93%), ECE 0.12, Brier 0.060~~ 26/28 (93%), ECE 0.12, Brier 0.061 | ~697k tokens, 248 tool calls, longest lane 9m30s | See runs 5–7 |
+| 6 | 2026-09-23 | Repeat of run 5 | 10/13 | ~~26/28 (93%)~~ 25/27 (93%) | 33 (6 set aside) | 0 | 2 | 0 | ~~28/30 (93%), ECE 0.06, Brier 0.064~~ 27/29 (93%), ECE 0.06, Brier 0.066 | ~685k tokens, 264 tool calls, longest lane 4m39s | See runs 5–7 |
+| 7 | 2026-09-23 | Repeat of run 5 | 10/13 | ~~26/27 (96%)~~ 25/26 (96%) | 30 (4 set aside) | 0 | 1 | 0 | ~~27/30 (90%), ECE 0.07, Brier 0.072~~ 26/29 (90%), ECE 0.07, Brier 0.074 | ~725k tokens, 292 tool calls, longest lane 6m08s | See runs 5–7 |
+| 8 | 2026-09-25 | **Engine 3.9.0 only** (frames) — run 1's briefs verbatim | 11/13 | ~~22/23 (96%)~~ 21/22 (95%) | 26 (4 set aside) | 0 | 1 | 0 | ~~24/24 (100%), ECE 0.09, Brier 0.014~~ 23/23 (100%), ECE 0.09, Brier 0.015 | ~679k tokens, 240 tool calls, longest lane 4m00s | See run 8 |
+| 9 | 2026-09-26 | **Engine 3.10.0 (wave 1)** — run 1's briefs verbatim, demo served without its seeded-defect comments | 13/13 | ~~31/31 (100%)~~ 30/30 (100%) | 31 (1 set aside) | 0 | 0 | 0 | ~~30/33 (91%), ECE 0.12, Brier 0.123~~ 29/32 (91%), ECE 0.12, Brier 0.126 | not recorded | See runs 9–10 |
 | 10 | 2026-09-26 | Repeat of run 9 | 11/13 | 22/22 (100%) | 24 (2 set aside) | 0 | 0 | 0 | 23/26 (88%), ECE 0.14, Brier 0.109 | not recorded | See runs 9–10 |
 
 **Brier is the number to compare; ECE says which way a lane is off.** Run 1's verdicts were
@@ -320,6 +322,12 @@ The seven findings the key did not know were judged against the demo's source:
   counts), the confirmation email discarded (the email never sent to the
   server), and Request approval still offered on a pending order.
 - **Contextual:** the orders filter not kept in the URL, above.
+
+Test ids are now context-dependent in both keys: the demo's missing-`data-testid`
+entry (the sticky bar's link) moved from the also-real list to `contextual`, as
+the held-out key already had it, because a test id is a test-automation
+convention no user meets, and the demo declares no rule that every control
+carries one.
 
 What else the runs showed:
 
@@ -670,8 +678,8 @@ by a key that was not fitted to it. The judgements:
 - **Contextual (3):** nav links without an underline, as on the demo; a link
   with no `data-testid`, because a test id is a project convention no user
   meets (the app uses them on most controls, so a run sees the habit but not
-  whether it is a rule; the demo's key counts one missing test id as real, from
-  before it had a contextual list, and is not changed here); and the events
+  whether it is a rule; the demo's key now treats its missing test id the same
+  way); and the events
   list not being in date order, which the page never claims.
 
 Four matches in the old key were wrong, and each is fixed: the `holds-drop` test-id
@@ -701,7 +709,7 @@ were not.
 | Recall | 13/13, 11/13 (24/26, 92%) | 9/10, 7/10 (16/20, 80%) |
 | Precision (labelled) | 100%, 100% | 83%, 96% |
 | False positives | 0, 0 | 3, 1 |
-| Brier | 0.123, 0.109 | 0.098, 0.113 |
+| Brier | 0.126, 0.109 | 0.098, 0.113 |
 
 Recall is lower on the held-out app, and the misses are not where a demo-only
 engine would put them. Of the four `medium` defects that share kind and
