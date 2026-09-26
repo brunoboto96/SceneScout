@@ -29,6 +29,7 @@ import {
   MAX_LANE_DECISIONS,
   FINDING_CATEGORIES,
   sameFamily,
+  mergeableCategories,
   MAX_SELECT_OPTIONS,
   requestsDisagree,
   isEmbedKey,
@@ -1116,6 +1117,160 @@ test("a run's shared state ends with the run, and the project's memory does not"
   assert.equal(store.findings.length, 1, "findings are the project's, not the run's");
 });
 
+test("dedup: two different defects on one element stay two, and a rewording of one still merges", () => {
+  // Seen in a benchmark run: a link clipped out of view by an overflow-hidden
+  // panel (visual) and the same link "styled like body text" (ux-polish) were
+  // filed on one route, naming one element. The styling finding was merged
+  // into the clipping one — where was compared, what was wrong was not.
+  // The pair differs in ONE fact, the category; the evidence shapes and the
+  // quoted link text are the same in both directions.
+  const clipped = {
+    ...base,
+    category: "visual",
+    state: "/reports#1",
+    title: '"Export as CSV" link is clipped out of view inside the report panel',
+    detail: "The panel has a fixed height and hides its overflow; the link sits below it.",
+    evidence: "testid=report-export clipped by overflow-hidden testid=report-panel",
+  };
+  const rows = [
+    // [second filing, merges, why]
+    [
+      {
+        category: "ux-polish",
+        title: "Export link is styled like body text",
+        detail: 'The "Export as CSV" link has no underline and the body text colour.',
+        evidence: "testid=report-export no underline, color == body text",
+      },
+      false,
+      "a different claim about the same element (quoted in the detail) is a second defect",
+    ],
+    [
+      { category: "ux-polish", title: "Export link is styled like body text", detail: "No underline.", evidence: clipped.evidence },
+      false,
+      "identical evidence naming only the element says where, not what is wrong",
+    ],
+    [
+      { category: "a11y", title: "The export link is clipped out of view inside the report panel", detail: "d", evidence: undefined },
+      false,
+      "a near-identical title under another kind, with nothing else to go on, is not a rewording",
+    ],
+    [
+      {
+        category: "visual",
+        title: "The export link is cut off by the report panel",
+        detail: 'The "Export as CSV" link sits below the panel\'s fixed height.',
+        evidence: "testid=report-export unreachable: clipped by overflow-hidden ancestor of testid=report-panel",
+      },
+      true,
+      "the same claim reworded, same kind: one finding",
+    ],
+    [
+      { category: "visual", title: "Export link clipped (panel overflow)", detail: "d", evidence: clipped.evidence },
+      true,
+      "identical evidence, same kind: one finding",
+    ],
+    [
+      { category: "visual", title: "Export as CSV link is clipped out of view in the report panel", detail: "d", evidence: undefined },
+      true,
+      "a paraphrased title of the same kind still merges when one side has no evidence",
+    ],
+  ] as const;
+  for (const [second, merges, why] of rows) {
+    const store = freshStore();
+    store.addFinding(clipped);
+    const [kept, isNew] = store.addFinding({ ...clipped, ...second });
+    assert.equal(isNew, !merges, why);
+    assert.equal(store.findings.length, merges ? 1 : 2, why);
+    if (!merges) assert.equal(kept.category, second.category, `${why}: the second finding keeps its own kind`);
+  }
+});
+
+test("dedup: identical evidence on one route is not one bug when the kinds differ", () => {
+  // The endpoint rule already demanded one category across routes; on the
+  // same route, identical evidence merged a security finding and a UX finding
+  // about one refused request.
+  const store = freshStore();
+  store.addFinding({ ...base, category: "security", title: "Role boundary leaks", detail: "x", evidence: "GET /api/admin 403" });
+  const [, isNew] = store.addFinding({ ...base, category: "ux-confusing", title: "403 shows a blank page", detail: "y", evidence: "GET /api/admin 403" });
+  assert.equal(isNew, true, "a security finding and a UX finding with one signature are two bugs");
+  // A crash seen as a page error by one lane and a console error by another,
+  // with the same evidence, is still one crash.
+  const [, crash] = store.addFinding({
+    ...base,
+    category: "page-error",
+    title: "Save throws",
+    detail: "a",
+    evidence: "TypeError: x is undefined at save.js:12",
+  });
+  const [, twin] = store.addFinding({
+    ...base,
+    category: "console-error",
+    title: "Console error on save",
+    detail: "b",
+    evidence: "TypeError: x is undefined at save.js:12",
+  });
+  assert.equal(crash, true);
+  assert.equal(twin, false, "one family, identical evidence: one finding");
+});
+
+test("dedup: visual and ux-confusing with identical evidence are two findings", () => {
+  // The label pair archived benchmark runs disagree on most often: a control
+  // covered by an overlay filed as a layout defect by one lane and as a
+  // confusing flow by another. Kept as a visible duplicate (ADR 4).
+  const store = freshStore();
+  const covered = { ...base, state: "/orders#1", detail: "d", evidence: "testid=order-save covered by testid=promo-badge" };
+  store.addFinding({ ...covered, category: "visual", title: "Badge covers the Save button" });
+  const [, isNew] = store.addFinding({ ...covered, category: "ux-confusing", title: "Save cannot be clicked where it is drawn" });
+  assert.equal(isNew, true);
+  assert.equal(store.findings.length, 2);
+});
+
+test("an entry merged under the old rule is left as it is on reload", () => {
+  // A visual finding that absorbed a ux-polish filing before the kinds were
+  // split holds one entry with two runs. Reloading must neither split it (the
+  // absorbed title is gone) nor merge anything further into it.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
+  dirs.push(dir);
+  const memDir = path.join(dir, ".scenescout");
+  fs.mkdirSync(memDir, { recursive: true });
+  const entry = (id: string, category: string, title: string, evidence: string, runs: number) => ({
+    id,
+    severity: "medium",
+    category,
+    title,
+    detail: 'The "Export as CSV" link.',
+    evidence,
+    url: "http://x/reports",
+    state: "/reports#1",
+    repro: [],
+    foundAt: "2026-01-01T00:00:00Z",
+    runs,
+  });
+  fs.writeFileSync(
+    path.join(memDir, "memory.json"),
+    JSON.stringify({
+      version: 1,
+      states: {},
+      findings: [
+        entry("aaa", "visual", '"Export as CSV" link is clipped out of view', "testid=report-export clipped by testid=report-panel", 2),
+        entry("bbb", "ux-polish", '"Export as CSV" link has no hover state', "testid=report-export no hover style", 1),
+      ],
+    }),
+  );
+  const store = openStore(dir);
+  assert.equal(store.findings.length, 2, "the merged entry and a later ux-polish finding on the same link stay apart");
+  assert.equal(store.findings.find((f) => f.id === "aaa")?.runs, 2, "the merged entry keeps its run count");
+  assert.equal(store.findings.find((f) => f.id === "bbb")?.runs, 1);
+});
+
+test("mergeableCategories: what a finding of each kind may merge with", () => {
+  assert.deepEqual(mergeableCategories("visual"), ["visual"]);
+  assert.deepEqual(mergeableCategories("ux-polish"), ["ux-polish"]);
+  assert.deepEqual(mergeableCategories("data-loss"), ["data-inconsistency", "stale-state", "data-loss"]);
+  assert.deepEqual(mergeableCategories("made-up"), ["made-up"], "an unknown kind merges only with itself");
+  for (const c of FINDING_CATEGORIES) assert.ok(mergeableCategories(c).includes(c), c);
+});
+
 test("dedup: one fact flips the literal merge — whether the two kinds are one family", () => {
   const layout = {
     ...base,
@@ -1125,8 +1280,12 @@ test("dedup: one fact flips the literal merge — whether the two kinds are one 
   };
   const twin = { ...layout, title: 'The "Save notes" button is hard to reach at load', evidence: "order-save unreachable at load" };
   for (const [first, second, merges] of [
-    ["visual", "ux-polish", true], // one family
-    ["visual", "a11y", true],
+    ["visual", "visual", true],
+    // The presentation kinds are each their own family: one element carries a
+    // layout defect, a styling one and an accessibility one independently.
+    ["visual", "ux-polish", false],
+    ["visual", "a11y", false],
+    ["a11y", "missing-testid", false],
     ["visual", "data-inconsistency", false], // a layout finding and a data finding
     ["page-error", "console-error", true],
     ["data-loss", "data-inconsistency", true],

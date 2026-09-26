@@ -713,14 +713,21 @@ revised against its own scores after run 0, these were written blind, so the
 gap mixes transfer with brief authorship. One run each is a direction, not a
 size: on a ten-defect app one defect is 10 points of recall.
 
-**An engine observation, recorded and not fixed here.** In run 2 the account
+**An engine observation, recorded here and addressed by task 32 (#172).** In run 2 the account
 lane filed "export link styled as body text", and SceneScout's finding dedup
 merged it into a different finding on the same element, the link clipped out
 of view: two distinct findings on one element became one. The merged-away
 claim is judged not a defect above, so run 2's score lost nothing (run 1, which
 kept both, took a false positive for it), but the same merge would hide a real
-second defect on an element that already has one. A fix belongs to the dedup
-and is measured on the demo and the test fixtures, not tuned here.
+second defect on an element that already has one. Task 32 changes the dedup
+so findings of different kinds on one element stay apart (ADR 4); it was made
+against the test fixtures, not tuned here. The archived runs cannot show its
+effect: their findings were stored after dedup, so re-scoring them changes
+nothing. The effect will be measured in the next demo and held-out runs, after
+the wave 3 engine changes land, against runs 9 and 10 and held-out runs 1 and
+2. One cost is expected: the finding run 2 lost to the merge is a known
+non-defect, so on the held-out app the change should show as one more false
+positive, as run 1 already did.
 
 A second, from both runs: the evidence for the checkbox finding gives its name
 as `"checkbox"`, while the browser's accessibility tree names it "Available

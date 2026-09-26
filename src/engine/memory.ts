@@ -581,6 +581,14 @@ export function requestsDisagree(a: string | undefined, b: string | undefined): 
  * refused save is data-loss to one and data-inconsistency to another. Across
  * families — a layout defect and a data defect — a shared quoted string names
  * a place on the page, not a bug.
+ *
+ * The presentation kinds are each a family of their own. They are not
+ * alternative labels for one observation: one element is routinely wrong in
+ * several independent ways at once — clipped out of view (visual), styled like
+ * body text (ux-polish), unnamed to a screen reader (a11y), missing its test id
+ * — and the findings about it quote the same control name and name the same
+ * test id. As one family, a link "styled like body text" was merged into the
+ * finding that the same link was clipped, and the second finding was lost.
  */
 const CATEGORY_FAMILY: Record<string, string> = {
   "data-inconsistency": "data",
@@ -590,10 +598,10 @@ const CATEGORY_FAMILY: Record<string, string> = {
   network: "failure",
   "console-error": "failure",
   "page-error": "failure",
-  visual: "presentation",
-  "ux-polish": "presentation",
-  a11y: "presentation",
-  "missing-testid": "presentation",
+  visual: "visual",
+  "ux-polish": "ux-polish",
+  a11y: "a11y",
+  "missing-testid": "missing-testid",
   "ux-confusing": "flow",
   "dead-end": "flow",
   security: "security",
@@ -615,10 +623,34 @@ export function sameFamily(a: string | undefined, b: string | undefined): boolea
   return fa !== undefined && fa === CATEGORY_FAMILY[b];
 }
 
+/**
+ * Whether two findings may be one defect by KIND — what is wrong, as opposed
+ * to where. The same category, or two categories of one family. Every
+ * route-scoped rule below asks this first: evidence, a quoted literal and a
+ * title all say where a defect is as often as what it is, so none of them may
+ * merge a finding of one kind into a finding of another.
+ */
+function sameKind(a: string | undefined, b: string | undefined): boolean {
+  return (!!a && a === b) || sameFamily(a, b);
+}
+
+/**
+ * The categories a finding of `category` can merge with, in list order —
+ * so scout_finding can tell a lane whose filing was merged which kinds would
+ * have been kept apart. An unknown category merges only with itself.
+ */
+export function mergeableCategories(category: string): string[] {
+  const known = FINDING_CATEGORIES.filter((c) => sameKind(category, c));
+  return known.length > 0 ? known : [category];
+}
+
 function sameFinding(
   a: { title: string; detail?: string; evidence?: string; category?: string },
   b: { title: string; detail?: string; evidence?: string; category?: string },
 ): boolean {
+  // What is wrong before where: two kinds of defect are two findings, however
+  // alike their evidence, quoted text or titles.
+  if (!sameKind(a.category, b.category)) return false;
   const aEv = a.evidence?.toLowerCase().replace(/\s+/g, " ").trim();
   const bEv = b.evidence?.toLowerCase().replace(/\s+/g, " ").trim();
   if (aEv && bEv && aEv === bEv) return true;
@@ -638,7 +670,9 @@ function sameFinding(
   // literal with the data defect describing what the button does — in its
   // detail or its own title. Merged, the layout defect was filed and then lost
   // from the report on most runs of a benchmark. Within a family, one bug
-  // filed twice under neighbouring categories still merges.
+  // filed twice under neighbouring categories still merges. Stricter than the
+  // kind check above in one way: an unknown category read from an older file
+  // is never merged on a quoted string, even with itself.
   //
   // And never when both findings' evidence names requests with no endpoint in
   // common. A quoted control name bridges two findings about that control
