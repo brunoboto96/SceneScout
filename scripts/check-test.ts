@@ -59,6 +59,7 @@ function route(over: Partial<RouteHealth> = {}): RouteHealth {
     loginRedirect: false,
     elements: 10,
     unnamed: [],
+    placeholderOnly: [],
     violations: [],
     geometry: [],
     brokenImages: [],
@@ -333,6 +334,25 @@ test("SARIF: severities map to levels, rules list only what was found, locations
   assert.equal(byRule["contrast"].level, "note");
   assert.deepEqual(byRule["page-error"].locations[0].physicalLocation.artifactLocation, { uri: "orders", uriBaseId: "APP" });
   assert.ok(byRule["page-error"].partialFingerprints["scenescoutCheck/v1"]);
+});
+
+test("a field labelled only by its placeholder is its own medium rule, apart from a control with no name at all", () => {
+  const issues = issuesFromRoutes(
+    [route({ path: "/new", unnamed: ["textbox [testid=search-box]"], placeholderOnly: ['textbox [testid=email-field] "Your email"'] })],
+    ORIGIN,
+  );
+  assert.deepEqual(
+    issues.map((i) => [i.rule, i.severity, i.evidence]),
+    [
+      ["placeholder-only-label", "medium", 'textbox [testid=email-field] "Your email"'],
+      ["unnamed-control", "medium", "textbox [testid=search-box]"],
+    ],
+  );
+  assert.equal(gateFailures(issues, "high").length, 0, "neither fails the default gate");
+  const sarif = toSarif(result(issues), "9.9.9") as { runs: Array<{ tool: { driver: { rules: Array<{ id: string; help: { text: string } }> } } }> };
+  const rule = sarif.runs[0].tool.driver.rules.find((r) => r.id === "placeholder-only-label");
+  assert.match(rule?.help.text ?? "", /disappears as soon as the user types/);
+  assert.deepEqual(issuesFromRoutes([route({ placeholderOnly: ['textbox "Your email"'] })], ORIGIN, ["placeholder-only-label"]), [], "--ignore takes it out");
 });
 
 test("every rule has a severity, a title and help text", () => {
