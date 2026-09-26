@@ -106,10 +106,16 @@ jobs:
       # release.
       - name: Point the major tag at this release
         if: steps.changesets.outputs.published == 'true'
-        env:
-          PUBLISHED: ${{ steps.changesets.outputs.publishedPackages }}
+        # The version comes from package.json, not the action's publishedPackages
+        # output: @changesets/cli 3 prints its publish summary in a format the
+        # action no longer parses, so that output arrives empty. `published` is
+        # still set, and publishing only ever releases this commit's version.
         run: |
-          version=$(node -p 'JSON.parse(process.env.PUBLISHED).find((p) => p.name === "scenescout").version')
+          version=$(node -p 'require("./package.json").version')
+          if ! git rev-parse --verify --quiet "refs/tags/v$version" > /dev/null; then
+            echo "::warning title=Major tag not updated::No v$version tag was created by the publish, so the major tag stays where it is."
+            exit 0
+          fi
           case "$version" in *-*) echo "v$version is a prerelease; the major tag stays where it is."; exit 0 ;; esac
           major="v${version%%.*}"
           # Lightweight, so it needs no tagger identity, and git resolves it straight to the commit.
