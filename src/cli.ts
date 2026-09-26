@@ -42,8 +42,8 @@ import {
   resolveClaudeDir,
   spawnRunner,
 } from "./installer.js";
-import { defaultCheckDir, runCheck } from "./check-run.js";
-import { EXIT, formatCheck, parseCheckArgs, summarise, toSarif, toSummaryJson, unmeasuredReason } from "./engine/check.js";
+import { defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
+import { EXIT, exitCodeOf, formatCheck, parseCheckArgs, refusedFlowReason, toSarif, toSummaryJson, unmeasuredReason } from "./engine/check.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME, writeSelfIgnore } from "./engine/memory.js";
 import {
   formatStatus,
@@ -92,7 +92,16 @@ Usage:
                                      --max-routes N (default 50); --paths /a,/b to check only those;
                                      --ignore rule,rule; --storage-state file to check signed in;
                                      --project dir (default: here); --out dir (default: .scenescout/check);
-                                     --browser chromium|firefox|webkit)
+                                     --browser chromium|firefox|webkit;
+                                     --flows dir|off: replay the flows saved there (default: .scenescout/flows);
+                                     --retest on|off: re-test open findings a page load reproduces (default on);
+                                     --flow-writes never|allow: never (default) replays flows under observe's
+                                      rule whatever --mode says; allow replays them under --mode, so their
+                                      form submissions are sent;
+                                     --on-refused-step report|stop: report (default) marks a flow whose step was
+                                      refused "could not run", keeps every other verdict and exits 2; stop exits 2 there;
+                                     --gate-retests never|high|all: which still-reproducing findings fail the gate
+                                      (default high: those filed high))
                                     Exit code: 0 passed, 1 failed the gate, 2 could not run.
   scenescout status [projectPath]   What is the engine doing right now? (every session + recent actions)
   scenescout watch [projectPath]    Open the live view in a browser: what each session is doing, a thumbnail
@@ -503,10 +512,17 @@ async function check(args: string[]): Promise<never> {
   }
   const options = parsed.options;
   const outDir = options.outDir ?? defaultCheckDir(options.projectDir);
+  let inputs: CheckInputs;
+  try {
+    inputs = readCheckInputs(options);
+  } catch (err) {
+    console.error(`scenescout check: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(EXIT.error);
+  }
   let result;
   try {
-    console.log(`Checking ${options.url} …`);
-    result = await runCheck(options, (line) => console.log(line));
+    console.log(`Checking ${options.url} …${inputs.flows.length > 0 ? ` (and ${inputs.flows.length} saved flow(s))` : ""}`);
+    result = await runCheck(options, (line) => console.log(line), inputs);
   } catch (err) {
     console.error(`scenescout check: could not run: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(EXIT.error);
@@ -514,6 +530,12 @@ async function check(args: string[]): Promise<never> {
   const unmeasured = unmeasuredReason(result.routes, !options.paths);
   if (unmeasured) {
     console.error(`scenescout check: could not measure ${options.url}: ${unmeasured}`);
+    process.exit(EXIT.error);
+  }
+  const refused = refusedFlowReason(result);
+  // --on-refused-step stop: no verdict is written at all.
+  if (refused && options.onRefusedStep === "stop") {
+    console.error(`scenescout check: could not run a saved flow: ${refused}`);
     process.exit(EXIT.error);
   }
   const markdown = formatCheck(result);
@@ -533,7 +555,9 @@ async function check(args: string[]): Promise<never> {
   }
   console.log("\n" + markdown);
   console.log(`Wrote report.md, check.sarif and check.json to ${outDir}`);
-  process.exit(summarise(result).passed ? EXIT.pass : EXIT.gateFailed);
+  // --on-refused-step report: everything else has its verdict in the files, and the exit code still says the run was incomplete.
+  if (refused) console.error(`scenescout check: could not run a saved flow: ${refused}`);
+  process.exit(exitCodeOf(result));
 }
 
 const [, , command, ...args] = process.argv;

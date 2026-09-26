@@ -363,7 +363,7 @@ npx scenescout check http://127.0.0.1:3000 --fail-on high
 |---|---|
 | 0 | Passed the gate |
 | 1 | Failed it: something at the `--fail-on` severity or worse |
-| 2 | Could not run: a bad argument, an app that never answered, or only the sign-in page reached |
+| 2 | Could not run, or not all of it: a bad argument, an app that never answered, only the sign-in page reached, a saved flow that is not valid, or a flow step the write policy refused |
 
 It writes `report.md`, `check.sarif` (for code-scanning dashboards) and `check.json` to `.scenescout/check/`, and on GitHub Actions it also puts the report on the job's summary page.
 
@@ -377,16 +377,24 @@ On GitHub Actions, this repository is also an action that installs everything an
 
 [docs/ci.md](docs/ci.md) has a complete workflow (start the app, wait for it, check it), the action's inputs and outputs, code-scanning upload, and the same check on GitLab CI, CircleCI or any shell.
 
-It never writes to the app (`--mode observe` or `read-only`), and by default it fails only on facts that mean a page is broken: a page that did not load, an uncaught exception, a 5xx, a failure shown as success. Other options:
+With the default settings its saved flows send no HTTP write (they replay under observe's rule), and its crawl runs under `--mode observe` or `read-only`; `--flow-writes allow` lets flows write as `--mode` allows. By default it fails only on facts that mean a page is broken: a page that did not load, an uncaught exception, a 5xx, a failure shown as success. Other options:
 
 - `--fail-on medium` or `low` makes the gate stricter.
 - `--ignore <rule>` drops a rule.
 - `--paths /a,/b` checks only those pages.
 - `--storage-state <file>` checks while signed in.
+- `--flows <dir>` or `off` chooses which saved flows to replay; `--retest off` skips re-testing open findings.
+- `--flow-writes never|allow` (default `never`): `never` replays flows under observe's rule whatever `--mode` says; `allow` replays them under `--mode`, so in `read-only` a flow's form submissions are sent to the target on every run.
+- `--on-refused-step report|stop` (default `report`): `report` marks a flow whose step was refused "could not run", keeps every other verdict and exits 2; `stop` exits 2 at that step with no results.
+- `--gate-retests never|high|all` (default `high`): which still-reproducing re-tested findings fail the gate.
+
+The defaults are what an unconfigured check does, for a first try or an AI agent running it unattended: its flows send no HTTP write and it never silently hides a result. Each setting is a choice for the project; the report and `check.json` print the values a check ran with.
 
 `scenescout check --help` lists every option. Why the defaults are what they are: [ADR 11](docs/adr/0011-a-gate-is-deterministic-and-fails-only-on-what-it-can-prove.md).
 
-The check fills no forms and follows no flows. That is the exploratory run's job, and its findings belong in a report, not a gate.
+It also replays the flows saved in `.scenescout/flows/*.json`, with no model: the steps `scout_run_plan` takes (navigate, click, type, select, press) plus `expect-text`, `expect-url` and `expect-request`. A flow whose step breaks fails the gate, naming the flow and the step. And it re-tests the open findings earlier runs left in the project's memory that a page load can reproduce, reporting each as still reproducing or possibly fixed; by default a finding filed high that still reproduces fails the gate. [docs/ci.md](docs/ci.md#saved-flows) has the flow format; [ADR 12](docs/adr/0012-a-check-replays-saved-flows-and-reports-re-tests.md) says why it works this way.
+
+Beyond those flows it explores nothing and fills no forms. That is the exploratory run's job, and its findings belong in a report, not a gate.
 
 ---
 
@@ -652,6 +660,7 @@ The load-bearing choices are recorded as ADRs — read the relevant one before c
 - [9 · A refused write is answered, not dropped](docs/adr/0009-a-refused-write-is-answered-not-dropped.md)
 - [10 · A lane's confidence is checked, not trusted](docs/adr/0010-a-confidence-is-checked-not-trusted.md)
 - [11 · A gate is deterministic, and fails only on what it can prove](docs/adr/0011-a-gate-is-deterministic-and-fails-only-on-what-it-can-prove.md)
+- [12 · A check replays saved flows and re-tests open findings, within settings whose defaults do the least harm](docs/adr/0012-a-check-replays-saved-flows-and-reports-re-tests.md)
 
 ---
 

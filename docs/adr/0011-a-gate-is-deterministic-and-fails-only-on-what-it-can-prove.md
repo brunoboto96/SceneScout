@@ -18,12 +18,15 @@ way out. `scenescout check` is that part on its own.
 
 - **No model at any step.** `check` visits routes (the start URL, the project's
   scanned routes and every same-origin link it finds, up to `--max-routes`) and
-  measures each one. It never fills a form, clicks through a flow or judges
-  anything. Exploration belongs to the agent-driven run, which reports rather
-  than gates.
+  measures each one. It never explores, and never clicks through a flow of its
+  own choosing or judges anything; the only flows it follows are the ones saved
+  for it (ADR 12). Exploration belongs to the agent-driven run, which reports
+  rather than gates.
 - **Visiting only.** `--mode` accepts `observe` and `read-only`, nothing that
   writes. A check never needs a write, and a gate pointed at a shared
-  environment should not be able to make one.
+  environment should not be able to make one. Saved flows replay under observe's
+  rule unless `--flow-writes allow`, and a step that is refused is reported as
+  "could not run" (ADR 12).
 - **Default gate: high.** Only facts that mean the page is broken fail it by
   default: a page that did not load or answered 5xx, an uncaught exception, a
   5xx from a request the page made, a failed request shown as success or as an
@@ -41,9 +44,11 @@ way out. `scenescout check` is that part on its own.
 - **One issue per fact.** The same failing request on ten pages is one issue
   listing ten routes. Evidence carries no snapshot refs and no origin, so its
   fingerprint is the same on a laptop, a CI runner and a preview deployment.
-- **A throwaway memory.** A check never reads or writes the project's
-  `.scenescout/memory.json`: earlier exploratory runs' visits would otherwise
-  count as this check's and skip those routes.
+- **A throwaway memory.** A check never writes the project's
+  `.scenescout/memory.json`, and its crawl never reads it: earlier exploratory
+  runs' visits would otherwise count as this check's and skip those routes.
+  (Since ADR 12 the check reads the memory's open findings to re-test them,
+  and leaves the file as it found it.)
 - **Exit codes mean one thing each:** 0 passed, 1 failed the gate, 2 could not
   run (a bad argument, an app that never answered, a saved session that no
   longer signs in, a start page that bounces to sign-in, results that could not be

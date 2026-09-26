@@ -20,6 +20,7 @@ and which failure direction was chosen deliberately.
 | [0009](0009-a-refused-write-is-answered-not-dropped.md) | A write the policy refuses is answered with a 403, so the page's refusal handling runs |
 | [0010](0010-a-confidence-is-checked-not-trusted.md) | A lane's confidence is checked, against what was filed and against a key, and disclosed where it cannot be |
 | [0011](0011-a-gate-is-deterministic-and-fails-only-on-what-it-can-prove.md) | `scenescout check` involves no model, never writes, and fails by default only on what proves a page broken |
+| [0012](0012-a-check-replays-saved-flows-and-reports-re-tests.md) | A check replays the flows saved in `.scenescout/flows` and fails on a broken step, and re-tests open findings a page load reproduces; what it may write, how a refused step ends and which re-tests gate are settings whose defaults never write and never hide a result |
 
 ## Writing a new one
 

@@ -23,7 +23,7 @@
  * Pure, so the ordering and the wording can be table-tested.
  */
 import { normalizePath } from "./fingerprint.js";
-import type { Finding } from "./memory.js";
+import { failingSignatures, type Finding } from "./memory.js";
 
 /** What a re-test found. */
 export const VERDICTS = ["gone", "present", "changed"] as const;
@@ -167,4 +167,149 @@ export function sayVerification(f: { verdict?: Verdict; verifiedAt?: string }): 
   if (f.verdict === "present") return ` · confirmed still present on ${on}`;
   if (f.verdict === "changed") return ` · re-tested ${on}, behaviour has changed since it was filed`;
   return ` · re-tested ${on}`;
+}
+
+// ---------------------------------------------------------------------------
+// Re-testing by page load, for `scenescout check`.
+//
+// The campaign above hands findings to an agent, who re-walks them with
+// judgement. A check has none, so it re-tests only the findings whose
+// reproduction is mechanical: the evidence names a GET that failed with a
+// status, and the finding's repro shows nothing done on its page but looking
+// at it. Loading that page again and watching the same request is then the
+// whole reproduction, and its answer is a fact rather than an opinion.
+// ---------------------------------------------------------------------------
+
+/**
+ * Actions that only look at a page. A repro whose steps on the finding's page
+ * are all of these was reproduced by loading the page; any other step (a
+ * click, a typed value, a replayed request, anything this list does not know)
+ * means loading it is not the reproduction.
+ */
+const LOOK_ONLY = new Set([
+  "attach",
+  "navigate",
+  "plan:navigate",
+  "crawl",
+  "back",
+  "snapshot",
+  "screenshot",
+  "design-audit",
+  "task",
+  "journey:start",
+  "journey:end",
+  "record:full",
+]);
+
+/** A finding a check can re-test by loading one page. */
+export interface LoadRetest {
+  item: VerifyItem;
+  /** The page to load: the path and query it was filed on. */
+  path: string;
+  /** The failing GET signatures (`GET /api/x 500`, paths normalised) it names. */
+  signatures: string[];
+}
+
+/** How the finding's page is reached again, or null when a check cannot re-test it deterministically. */
+export function loadRetest(item: VerifyItem): LoadRetest | null {
+  const signatures = [...failingSignatures(item.evidence)];
+  // A POST that failed is not re-sent by loading a page, and a check would refuse to send it anyway.
+  if (signatures.length === 0 || signatures.some((s) => !s.startsWith("GET "))) return null;
+  // The first repro line is how the page was reached; every later one happened on it.
+  if (item.repro.length === 0) return null;
+  for (const line of item.repro.slice(1)) {
+    if (!LOOK_ONLY.has(line.split(/\s/, 1)[0])) return null;
+  }
+  let url: URL;
+  try {
+    url = new URL(item.url);
+  } catch {
+    return null;
+  }
+  // A secret was redacted out of the stored URL: loading what is left is a different page.
+  if (/redacted/i.test(item.url)) return null;
+  return { item, path: `${url.pathname}${url.search}`, signatures };
+}
+
+export const RETEST_VERDICTS = ["reproduces", "possibly-fixed", "not-reached"] as const;
+export type RetestVerdict = (typeof RETEST_VERDICTS)[number];
+
+export interface CheckRetest {
+  id: string;
+  severity: string;
+  title: string;
+  path: string;
+  signatures: string[];
+  verdict: RetestVerdict;
+  /** Why it was not reached, when it was not. */
+  note?: string;
+}
+
+/** What a page load measured, reduced to what a re-test compares. */
+export interface MeasuredPage {
+  path: string;
+  status: number | null;
+  loadError?: string;
+  loginRedirect: boolean;
+  /** Details of the http_error violations seen while it loaded. */
+  httpErrors: string[];
+}
+
+/**
+ * Each re-testable finding against the page load that re-tests it.
+ *
+ * `reproduces` when the load saw one of the finding's failing requests fail
+ * with the same status; `possibly-fixed` when the page loaded and none did —
+ * possibly, because the page may simply not have asked this time; and
+ * `not-reached` when the page did not load or bounced to sign-in, which says
+ * nothing about the finding either way.
+ */
+export function retestResults(candidates: readonly LoadRetest[], pages: readonly MeasuredPage[]): CheckRetest[] {
+  return candidates.map(({ item, path, signatures }) => {
+    const base = { id: item.id, severity: item.severity, title: item.title, path, signatures };
+    const page = pages.find((p) => p.path === path);
+    if (!page) return { ...base, verdict: "not-reached", note: "the page was not visited" };
+    if (page.loadError !== undefined) return { ...base, verdict: "not-reached", note: "the page did not load" };
+    if (page.loginRedirect) return { ...base, verdict: "not-reached", note: "the page sent the browser to sign-in" };
+    const seen = new Set<string>();
+    for (const detail of page.httpErrors) for (const s of failingSignatures(detail)) seen.add(s);
+    // The document's own failure is left out of the violations (withoutOwnResponse), so it is added back here.
+    if (page.status !== null && page.status >= 400) for (const s of failingSignatures(`GET ${page.path.split("?")[0]} ${page.status}`)) seen.add(s);
+    return { ...base, verdict: signatures.some((s) => seen.has(s)) ? "reproduces" : "possibly-fixed" };
+  });
+}
+
+/**
+ * The findings a check re-tests: the open ones it can reproduce by loading a
+ * page, in the campaign's order and within its cap, plus how many open
+ * findings there are in all, so the report can say how many it left to a run.
+ */
+export function checkRetestPlan(findings: readonly Finding[]): { candidates: LoadRetest[]; open: number } {
+  const open = findings.filter((f) => (f.status ?? "open") !== "resolved");
+  const eligible = open.filter((f) => loadRetest(item(f)) !== null);
+  const candidates = verifyWorklist(eligible)
+    .map(loadRetest)
+    .filter((c): c is LoadRetest => c !== null);
+  return { candidates, open: open.length };
+}
+
+/**
+ * The entries of a memory file's findings list a re-test can read. The file is
+ * JSON someone may have edited; an entry missing the fields the rules read is
+ * left out rather than failing the check, which only ever reports re-tests.
+ */
+export function wellFormedFindings(list: readonly unknown[]): Finding[] {
+  return list.filter((f): f is Finding => {
+    if (typeof f !== "object" || f === null) return false;
+    const x = f as Record<string, unknown>;
+    return (
+      typeof x.id === "string" &&
+      typeof x.url === "string" &&
+      typeof x.title === "string" &&
+      typeof x.severity === "string" &&
+      (x.evidence === undefined || typeof x.evidence === "string") &&
+      Array.isArray(x.repro) &&
+      x.repro.every((r) => typeof r === "string")
+    );
+  });
 }
