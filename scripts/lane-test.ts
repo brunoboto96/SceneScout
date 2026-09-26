@@ -144,7 +144,7 @@ test("lane: HTML character references a relay added are decoded in every string 
 test("lane: a length cap applies to the decoded text, so a route escaped past it is accepted", () => {
   const route = "/things/<n>" + "r".repeat(LANE_ROUTE_MAX - "/things/<n>".length);
   assert.equal(route.length, LANE_ROUTE_MAX);
-  const escapedRoute = route.replace("<", "&lt;").replace(">", "&gt;");
+  const escapedRoute = route.replace(/</g, "&lt;").replace(/>/g, "&gt;");
   assert.ok(escapedRoute.length > LANE_ROUTE_MAX);
   const capped = parseLaneReport(laneReport({ routes: [escapedRoute] }));
   assert.ok(capped.ok, capped.ok ? "" : capped.reason);
