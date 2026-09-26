@@ -93,6 +93,34 @@ jobs:
           commit-message: Version Packages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The GitHub Action (action.yml) is used as brunoboto96/SceneScout@v3: a
+      # major tag that follows the latest v3.x.y release, as actions/checkout's
+      # v4 does. `changeset publish` has just made and pushed vX.Y.Z; this points
+      # vX at the same commit. An exact tag (@v3.10.0) or a commit SHA never
+      # moves, for users who pin.
+      #
+      # npm has already published by now, so this step never fails the job. The
+      # repository's tag ruleset protects refs/tags/v* against update, and the
+      # Actions token cannot bypass it: creating the major tag works, moving it
+      # is refused, and the refusal becomes a warning rather than a red release.
+      - name: Point the major tag at this release
+        if: steps.changesets.outputs.published == 'true'
+        env:
+          PUBLISHED: ${{ steps.changesets.outputs.publishedPackages }}
+        run: |
+          version=$(node -p 'JSON.parse(process.env.PUBLISHED).find((p) => p.name === "scenescout").version')
+          case "$version" in *-*) echo "v$version is a prerelease; the major tag stays where it is."; exit 0 ;; esac
+          major="v${version%%.*}"
+          # Lightweight, so it needs no tagger identity, and git resolves it straight to the commit.
+          git tag --force "$major" "v$version^{commit}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$major" > /dev/null; then
+            if git push --force origin "refs/tags/$major"; then echo "Moved $major to v$version."; exit 0; fi
+            what="move"
+          else
+            if git push origin "refs/tags/$major"; then echo "Created $major at v$version."; exit 0; fi
+            what="create"
+          fi
+          echo "::warning title=Major tag not updated::Could not $what $major at v$version, so users of @$major do not get this release yet. The tag ruleset protecting refs/tags/v* (ruleset 23663840) refuses it: narrow that ruleset to refs/tags/v*.*.* and add a separate rule for major tags that lets GitHub Actions update them."
 
   # A separate job, so the permission to start workflows is never held by the
   # job that runs repository code and can publish. It keys off pr-number, which
