@@ -5,6 +5,7 @@ import {
   type Browser,
   type BrowserType,
   type BrowserContext,
+  type CDPSession,
   type FileChooser,
   type Frame,
   type Locator,
@@ -75,6 +76,7 @@ import {
   screencastSupport,
   serviceWorkerPolicy,
   sharedWorkersAllowed,
+  unloadWriteInterception,
   type BrowserEngineName,
 } from "../browsers.js";
 import { revealedLines } from "./hover.js";
@@ -126,6 +128,17 @@ import { scanProject } from "../scan.js";
 import type { RouteHealth } from "./check.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignDefect, type DesignPayload, type FocusSample } from "./design.js";
 import { acceptMatches, generatedUpload, type FixtureKind } from "./fixtures.js";
+import {
+  bodyDigest,
+  headerOf,
+  isReadMethod,
+  judgeUnseenWrite,
+  pausedRequestBytes,
+  RoutedWrites,
+  UnseenRefusals,
+  unseenWriteSource,
+  type UnseenWriteVerdict,
+} from "./unload.js";
 
 export type { WriteMode } from "./policy.js";
 
@@ -739,7 +752,21 @@ export class BrowserEngine {
   /** The browser this engine launched; reported by attach so a finding can say where it was seen. */
   private engineName: BrowserEngineName = "chromium";
   /** Non-GET requests fired since the last action — surfaces silent state mutation in read-only runs (timestamped for attribution). */
-  private mutationRequests: Array<{ at: number; sig: string; req: import("playwright").Request }> = [];
+  private mutationRequests: Array<{ at: number; sig: string; req?: import("playwright").Request }> = [];
+  /**
+   * Chromium only (browsers.ts `unloadWriteInterception`): the writes the
+   * route handler already let through, so the browser-level interception that
+   * catches what it never sees does not judge them twice. That session lives
+   * as long as the browser, so a page closed at the end still meets it.
+   */
+  private readonly routedWrites = new RoutedWrites();
+  /** Writes refused at the browser level, so the driver's own report of them (a redirect hop failing) is known as the policy's doing. */
+  private readonly unseenRefusals = new UnseenRefusals();
+
+  /** Whether the write policy stopped this request, at the route handler or at the browser level. */
+  private refusedByAnyPolicy(req: import("playwright").Request): boolean {
+    return this.refusedByPolicy.has(req) || this.unseenRefusals.has(req.method(), req.url());
+  }
   /**
    * Every request answered since the last action, with its status. The HTTP
    * oracle sees each 4xx as it happens and reports it on its own; this ledger
@@ -813,7 +840,7 @@ export class BrowserEngine {
       url: req.url(),
       status,
       resourceType: req.resourceType(),
-      blockedByPolicy: this.refusedByPolicy.has(req),
+      blockedByPolicy: this.refusedByAnyPolicy(req),
     });
   }
 
@@ -932,7 +959,7 @@ export class BrowserEngine {
       this.projectDirNote = ` (its real path could not be resolved: ${err instanceof Error ? err.message : String(err)} — a symlinked project path may be wrongly refused)`;
     }
     this.oracles = new OracleMonitor();
-    this.oracles.setPolicyRefusalCheck((req) => this.refusedByPolicy.has(req));
+    this.oracles.setPolicyRefusalCheck((req) => this.refusedByAnyPolicy(req));
     // A request an embed sends to the app is the app's to answer: only one headed outside the app is the embed's.
     this.oracles.setEmbedAttribution((req) => {
       let site: string | null = null;
@@ -1150,7 +1177,10 @@ export class BrowserEngine {
         if (offApp && !isAuthExempt(this.mode, method, pathname, destructiveWire)) return refuse(`sent from a page of ${offApp}, outside the app`);
         // Auth/session flows must work in every mode — but never a destructive
         // one, and in observe only the requests a login itself needs.
-        if (isAuthExempt(this.mode, method, pathname, destructiveWire)) return route.continue();
+        if (isAuthExempt(this.mode, method, pathname, destructiveWire)) {
+          this.routedWrites.note(this.mode, method, url, bodyDigest(req.postDataBuffer()));
+          return route.continue();
+        }
 
         let owned = this.isOwnedResource(pathname);
         // A single UI action commonly fires create-then-immediately-save
@@ -1185,10 +1215,21 @@ export class BrowserEngine {
               .finally(() => this.pendingCreations.delete(task));
             this.pendingCreations.add(task);
           }
+          this.routedWrites.note(this.mode, method, url, bodyDigest(req.postDataBuffer()));
           return route.continue();
         }
         return refuse();
       });
+      // Chromium never routes a write a page sends as it is being left; it is judged at the browser level instead.
+      if (unloadWriteInterception(this.engineName) === "browser-fetch" && this.browser) {
+        try {
+          await this.interceptUnseenWrites(this.browser);
+        } catch (err) {
+          // Fail closed: without it, a page being left would write past the policy.
+          await this.close();
+          throw new Error(`Could not start the write policy's browser-level interception: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+        }
+      }
     }
 
     // Popups / target=_blank: adopt same-origin pages as the active page (with
@@ -1214,7 +1255,7 @@ export class BrowserEngine {
             this.snapshotUrl = "";
             this.lastSnap = null;
           } else {
-            void newPage.close().catch(() => {});
+            void BrowserEngine.leaveAndClose(newPage);
           }
         })
         .catch(() => {});
@@ -2069,6 +2110,126 @@ export class BrowserEngine {
     return foreign;
   }
 
+  /**
+   * Pause, at the browser level, every request the context's route handler
+   * lets through or never sees (unload.ts says why), and judge the writes it
+   * never saw. Everything else is sent on at once.
+   */
+  private async interceptUnseenWrites(browser: Browser): Promise<void> {
+    this.routedWrites.clear();
+    const session = await browser.newBrowserCDPSession();
+    session.on("Fetch.requestPaused", (event) => void this.judgeUnseenRequest(session, event));
+    await session.send("Fetch.enable", { patterns: [{ urlPattern: "*" }] });
+  }
+
+  private async judgeUnseenRequest(
+    session: CDPSession,
+    event: {
+      requestId: string;
+      resourceType?: string;
+      request: { url: string; method: string; headers?: Record<string, string>; postData?: string; postDataEntries?: Array<{ bytes?: string }> };
+    },
+  ): Promise<void> {
+    const { url, method, headers } = event.request;
+    // Every paused request gets exactly one answer, whatever throws on the way: a request left paused hangs its page.
+    let answered = false;
+    const answer = async (allow: boolean): Promise<void> => {
+      answered = true;
+      await (
+        allow
+          ? session.send("Fetch.continueRequest", { requestId: event.requestId })
+          : session.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" })
+      ).catch(() => {
+        /* the request or the browser is already gone */
+      });
+    };
+    try {
+      // Reads, and everything in destructive, go on. A later hop of a redirect is judged like any write: the route handler never sees one.
+      if (isReadMethod(method) || this.mode === "destructive") return await answer(true);
+      const bytes = pausedRequestBytes(event.request);
+      if (this.routedWrites.claim(this.mode, method, url, bodyDigest(bytes))) return await answer(true);
+      let verdict: UnseenWriteVerdict;
+      let pathname = url;
+      try {
+        pathname = pathnameOf(url);
+        const { foreign, offApp } = unseenWriteSource({
+          appUrl: this.baseUrl,
+          mode: this.mode,
+          url,
+          originHeader: headerOf(headers, "origin"),
+          referer: headerOf(headers, "referer"),
+          currentPageUrl: this.page?.url(),
+          trustedEmbeds: this.trustedEmbeds,
+          movedByEmbed: this.embedMoves.movedTo,
+        });
+        verdict = judgeUnseenWrite({
+          mode: this.mode,
+          method,
+          pathname,
+          destructiveWire: isDestructiveWire(pathname, bytes?.toString("utf8")),
+          foreign,
+          offApp,
+          owned: this.isOwnedResource(pathname),
+        });
+      } catch (err) {
+        // Fail closed: a write that cannot be judged is refused, and reported as refused below.
+        console.error(
+          `[scenescout] write policy: could not judge ${method} at the browser level, refused: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        verdict = { allow: false };
+      }
+      // Known as refused before the browser fails it, so the driver's report of the failure finds it.
+      if (!verdict.allow) this.unseenRefusals.note(method, url);
+      await answer(verdict.allow);
+      if (verdict.allow) {
+        // Reported like any other write that went out, as the request event does for a routed one.
+        if (!BENIGN_MUTATION_RE.test(url) && this.mutationRequests.length < 20)
+          this.mutationRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 120)}` });
+        return;
+      }
+      // Refused and reported as any refusal is. Dropped rather than answered: the page that sent it is going or gone.
+      if (this.blockedRequests.length < 20)
+        this.blockedRequests.push({
+          at: Date.now(),
+          sig: `${method} ${url.slice(0, 140)}`,
+          answered: false,
+          why: verdict.why,
+          type: (event.resourceType ?? "other").toLowerCase(),
+        });
+      this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}${verdict.why ? ` (${verdict.why})` : ""}`, url: this.page?.url() ?? "" });
+      this.oracles.notePolicyBlock();
+    } catch (err) {
+      console.error(`[scenescout] write policy: browser-level interception failed on ${method}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      if (!answered) {
+        // Fail closed, and still say so: a refusal nobody hears about reads as a write that went out.
+        try {
+          this.unseenRefusals.note(method, url);
+        } catch {
+          /* the error above is already logged */
+        }
+        await answer(false);
+        try {
+          if (this.blockedRequests.length < 20)
+            this.blockedRequests.push({
+              at: Date.now(),
+              sig: `${method} ${url.slice(0, 140)}`,
+              answered: false,
+              type: (event.resourceType ?? "other").toLowerCase(),
+            });
+          this.logAction({
+            action: "write-policy:blocked",
+            target: `${method} ${url.slice(0, 140)} (not judged: an error in the policy)`,
+            url: this.page?.url() ?? "",
+          });
+          this.oracles.notePolicyBlock();
+        } catch (err) {
+          console.error(`[scenescout] write policy: could not report a refusal: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+  }
+
   /** Report (and clear) write-policy blocks since the last action. */
   private drainBlocked(): string {
     this.lastActionBlocked = this.blockedRequests.length;
@@ -2125,7 +2286,7 @@ export class BrowserEngine {
     // to see the DUPLICATES that the reporting dedup below intentionally hides.
     this.lastActionMutationSigs = this.mutationRequests.map((e) => e.sig);
     const fresh = this.mutationRequests
-      .filter((entry) => !this.refusedByPolicy.has(entry.req))
+      .filter((entry) => !entry.req || !this.refusedByAnyPolicy(entry.req))
       .filter((entry) => {
         const key = entry.sig.split("?")[0];
         if (this.reportedMutationSigs.has(key)) return false;
@@ -3927,12 +4088,34 @@ export class BrowserEngine {
     }
   }
 
+  /**
+   * Leave a page for about:blank. A write a page sends as it is closed (a
+   * sendBeacon or keepalive fetch on pagehide) is not routed in Firefox or
+   * WebKit, so it reached the server in every mode; one it sends as it
+   * navigates is routed and judged like any other. (Chromium routes neither;
+   * its browser-level interception catches both.)
+   */
+  private static async leave(page: Page): Promise<void> {
+    if (page.isClosed() || page.url() === "about:blank") return;
+    await page.goto("about:blank", { timeout: 3000 }).catch(() => {});
+  }
+
+  /** Close a page the engine will not drive, after leaving it (`leave`), so what it sends on its way out meets the policy. */
+  private static async leaveAndClose(page: Page): Promise<void> {
+    await BrowserEngine.leave(page);
+    await page.close().catch(() => {});
+  }
+
   async close(): Promise<void> {
     // Marks the end of the time this session held a browser, so the pace
     // section can say how long it was held with nothing happening. Only when a
     // browser is actually open: attach() closes first, and a close of nothing
     // is not an event.
     if (this.page) this.logAction({ action: "close", url: this.page.isClosed() ? "" : this.page.url() });
+    // Every page is left before it is closed, while the write policy still holds, so what a page sends on its way out
+    // is judged and its refusal logged before the flush below.
+    const pages = this.context?.pages() ?? [];
+    await BrowserEngine.settleWithin(Promise.allSettled(pages.map((p) => BrowserEngine.leave(p))), 5000);
     // Pending debounced coverage writes must land before the process can exit.
     try {
       this.memory?.flush();
@@ -3947,7 +4130,7 @@ export class BrowserEngine {
     // orphan cleaner on the next attach (or server start).
     await BrowserEngine.settleWithin(
       (async () => {
-        await this.page?.close().catch(() => {});
+        for (const p of this.context?.pages() ?? []) await p.close().catch(() => {});
         await this.context?.close().catch(() => {});
         await this.browser?.close().catch(() => {});
       })(),
@@ -3956,6 +4139,8 @@ export class BrowserEngine {
     this.page = null;
     this.context = null;
     this.browser = null;
+    this.routedWrites.clear();
+    this.unseenRefusals.clear();
     this.refs.clear();
     this.snapshotUrl = "";
     this.currentFingerprint = "";
