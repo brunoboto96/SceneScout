@@ -1,19 +1,71 @@
 /**
  * Runs `scenescout check`: attach, crawl every route the engine can find,
- * measure each one, and write the verdict. The rules live in engine/check.ts;
- * this file only drives the browser and the files.
+ * measure each one, replay the saved flows, re-test the open findings a page
+ * load can reproduce, and write the verdict. The rules live in
+ * engine/check.ts, engine/flow.ts and engine/verify.ts; this file only drives
+ * the browser and the files.
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "./engine/browser.js";
-import { issuesFromRoutes, redactRoute, redactRoutes, withoutOwnResponse, type CheckOptions, type CheckResult, type RouteHealth } from "./engine/check.js";
-import { MemoryStore, MEMORY_DIRNAME } from "./engine/memory.js";
+import {
+  issuesFromRoutes,
+  redactFlowRuns,
+  redactRoute,
+  redactRoutes,
+  settingsOf,
+  withoutOwnResponse,
+  type CheckOptions,
+  type CheckResult,
+  type RouteHealth,
+} from "./engine/check.js";
+import { loadFlows, resolveFlowsDir, type Flow, type FlowRun, type SkippedFlowFile } from "./engine/flow.js";
+import { MemoryStore, MEMORY_DIRNAME, type Finding } from "./engine/memory.js";
+import { checkRetestPlan, retestResults, wellFormedFindings } from "./engine/verify.js";
 
 /** Link discovery rounds: each crawl reveals the routes its pages link to. Past a few, a site is paginating rather than revealing. */
 const MAX_ROUNDS = 6;
 
-export async function runCheck(options: CheckOptions, log: (line: string) => void = () => {}): Promise<CheckResult> {
+/** What a check reads from the project before it starts: its saved flows and the findings earlier runs left. */
+export interface CheckInputs {
+  flows: Flow[];
+  /** Entries of the flows directory that were not replayed, each with its reason. */
+  skippedFlows?: SkippedFlowFile[];
+  /** The project's findings, or null when --retest is off or the project has no memory yet. */
+  findings: Finding[] | null;
+}
+
+/**
+ * Read the flows and the findings, before any browser starts. Throws with a
+ * sentence naming the file and the field on anything it cannot read: a flow
+ * that is silently skipped is a flow that silently passes.
+ */
+export function readCheckInputs(options: CheckOptions): CheckInputs {
+  const where = resolveFlowsDir(options.flows, options.projectDir, (p) => fs.existsSync(p) && fs.statSync(p).isDirectory());
+  if ("error" in where) throw new Error(where.error);
+  const { flows, skipped: skippedFlows } = where.dir ? loadFlows(where.dir) : { flows: [], skipped: [] };
+  if (!options.retest) return { flows, skippedFlows, findings: null };
+  // Read, never written: a check leaves the project's memory as it found it.
+  const memoryPath = path.join(options.projectDir, MEMORY_DIRNAME, "memory.json");
+  if (!fs.existsSync(memoryPath)) return { flows, skippedFlows, findings: null };
+  let findings: unknown;
+  try {
+    findings = (JSON.parse(fs.readFileSync(memoryPath, "utf8")) as { findings?: unknown }).findings;
+  } catch (err) {
+    throw new Error(
+      `could not read ${memoryPath} to re-test its findings (${err instanceof Error ? err.message : String(err)}). Pass --retest off to check without it`,
+    );
+  }
+  if (findings !== undefined && !Array.isArray(findings)) throw new Error(`${memoryPath}: "findings" is not a list. Pass --retest off to check without it`);
+  return { flows, skippedFlows, findings: wellFormedFindings((findings as unknown[] | undefined) ?? []) };
+}
+
+export async function runCheck(
+  options: CheckOptions,
+  log: (line: string) => void = () => {},
+  inputs: CheckInputs = { flows: [], findings: null },
+): Promise<CheckResult> {
   // A throwaway memory: a check is one run, and a store shared with earlier
   // exploratory runs would count their visits as this check's and skip those routes.
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-check-"));
@@ -51,17 +103,62 @@ export async function runCheck(options: CheckOptions, log: (line: string) => voi
         log(`  ${routes.length} route(s) checked`);
       }
     }
+    // Pages of open findings the crawl did not load exactly: loaded now, so each re-test has its own measurement.
+    // Kept apart from `routes`: they are measured only to re-test, never checked against the page rules, and do not count
+    // towards --max-routes. With --paths the check stays on the paths it was given.
+    const plan = inputs.findings ? checkRetestPlan(inputs.findings) : null;
+    const retestPages: RouteHealth[] = [];
+    if (plan && !options.paths) {
+      const missing = [...new Set(plan.candidates.map((c) => c.path))].filter((p) => !routes.some((r) => r.path === p));
+      if (missing.length > 0) {
+        await engine.crawl(missing, { limit: missing.length, measureOnly: true });
+        retestPages.push(...engine.lastCrawlHealth);
+        log(`  ${missing.length} page(s) of open findings loaded only to re-test them`);
+      }
+    }
+    const flowRuns: FlowRun[] = [];
+    for (const flow of inputs.flows) {
+      // --flow-writes never: observe's rule, whatever --mode lets the crawl do.
+      const replay = await engine.replayFlow(flow.steps, options.flowWrites === "never" ? "observe" : options.mode);
+      flowRuns.push({ name: flow.name, file: flow.file, steps: flow.steps.length, ...replay });
+      log(`  flow ${flow.name}: ${replay.outcome.status}${replay.outcome.status === "passed" ? "" : ` at step ${replay.outcome.step}`}`);
+      // --on-refused-step stop: nothing after a refused step runs, and the check ends without a verdict.
+      if (replay.outcome.status === "refused" && options.onRefusedStep === "stop") break;
+    }
+    const retest = plan
+      ? {
+          open: plan.open,
+          extraPages: retestPages.length,
+          results: retestResults(
+            plan.candidates,
+            [...routes, ...retestPages].map((r) => ({
+              path: r.path,
+              status: r.status,
+              ...(r.loadError !== undefined ? { loadError: r.loadError } : {}),
+              loginRedirect: r.loginRedirect,
+              httpErrors: withoutOwnResponse(r)
+                .violations.filter((v) => v.kind === "http_error")
+                .map((v) => v.detail),
+            })),
+          ),
+        }
+      : null;
     const measured = redactRoutes(routes.map(withoutOwnResponse));
+    const flows = redactFlowRuns(flowRuns);
     return {
       url: redactRoute(options.url),
       generatedAt: new Date().toISOString(),
       mode: options.mode,
       failOn: options.failOn,
       routes: measured,
-      issues: issuesFromRoutes(measured, start.origin, options.ignore),
+      issues: issuesFromRoutes(measured, start.origin, options.ignore, flows),
       // Routes that failed to load are issues already; "not visited" is only what --max-routes left out.
       unvisited: options.paths ? [] : engine.crawlableRoutes().map(redactRoute),
       ignored: options.ignore,
+      flows,
+      skippedFlows: inputs.skippedFlows ?? [],
+      retest,
+      settings: settingsOf(options),
     };
   } finally {
     await engine.close().catch((err: unknown) => log(`closing the browser failed: ${err instanceof Error ? err.message : String(err)}`));

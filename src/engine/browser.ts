@@ -14,7 +14,7 @@ import {
 import fs from "node:fs";
 import path from "node:path";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
-import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, TASK_SET, type ActionLogEntry } from "./memory.js";
+import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
 import { normalizeTask } from "./task.js";
 import { CLAIM_SCAN_SCRIPT, findContradictions, type PageState, type WatchedRequest } from "./claims.js";
@@ -47,9 +47,24 @@ import {
   labelFlag,
   type NameFrom,
 } from "./collector.js";
-import { OracleMonitor, formatViolations } from "./oracles.js";
+import { OracleMonitor, formatViolations, httpErrorDetail } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
+import {
+  describeStep,
+  FLOW_AFTER_LAST_STEP_MS,
+  FLOW_STEP_TIMEOUT_MS,
+  isAction,
+  matchRequest,
+  parseTarget,
+  splitRefusals,
+  TARGET_HELP,
+  urlMatches,
+  type FlowReplay,
+  type FlowStep,
+  type FlowTarget,
+  type SeenRequest,
+} from "./flow.js";
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { describePace, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
 import { buildRequestScript, formatReplay, replaySignature, requestHeaders, resolveMethod, resolveRequestUrl, toReplayResult } from "./request.js";
@@ -439,7 +454,7 @@ export class BrowserEngine {
     this.memory?.logAction({ ...entry, session: this.sessionKey });
   }
   /** Requests blocked by the write policy since the last action (timestamped for attribution). */
-  private blockedRequests: Array<{ at: number; sig: string; answered: boolean; why?: string }> = [];
+  private blockedRequests: Array<{ at: number; sig: string; answered: boolean; why?: string; type?: string }> = [];
   /**
    * WebSockets this session's pages opened. The write policy works on HTTP
    * requests; frames sent over a socket are not inspected. In observe mode that
@@ -1057,7 +1072,7 @@ export class BrowserEngine {
           const why = ESCAPE_REFUSAL;
           // Reported like any refusal, so a click whose navigation this stopped does not read as a click that did nothing.
           if (this.blockedRequests.length < 20)
-            this.blockedRequests.push({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why });
+            this.blockedRequests.push({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why, type: req.resourceType() });
           this.logAction({ action: "write-policy:blocked", target: `navigation to ${req.url().slice(0, 140)} (${why})`, url: this.page?.url() ?? "" });
           this.refusedByPolicy.add(req);
           this.oracles.notePolicyBlock();
@@ -1113,7 +1128,8 @@ export class BrowserEngine {
         const pathname = pathnameOf(url);
         const refuse = (why?: string) => {
           const answered = answersWithRefusal(req.resourceType());
-          if (this.blockedRequests.length < 20) this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered, why });
+          if (this.blockedRequests.length < 20)
+            this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered, why, type: req.resourceType() });
           this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}${why ? ` (${why})` : ""}`, url: this.page?.url() ?? "" });
           this.refusedByPolicy.add(req);
           this.oracles.notePolicyBlock();
@@ -1621,7 +1637,11 @@ export class BrowserEngine {
    * route classes (including ?tab= screens) that feed the completion contract,
    * so the contract works for any app, not just filesystem-routed Next.
    */
+  /** Set while a measure-only crawl reads a page: its links are not the app's route list. */
+  private harvestPaused = false;
+
   private harvestRoutes(elements: SnapshotElement[]): void {
+    if (this.harvestPaused) return;
     if (!this.memory) return;
     const found: Array<{ route: string; example: string }> = [];
     for (const el of elements) {
@@ -3026,7 +3046,13 @@ export class BrowserEngine {
    * Output is anomaly-oriented: a summary line per route, details only where
    * something is wrong. Navigation-only, so it is safe in read-only mode.
    */
-  async crawl(paths?: string[], opts: { inspect?: boolean; limit?: number } = {}): Promise<string> {
+  /**
+   * `measureOnly`: load and measure the pages and nothing else. No route is
+   * harvested from their links, none is marked visited or attempted, and a
+   * failed load is not remembered, so the pages and what they link to stay on
+   * the unvisited list exactly as before. A check's re-test loads use it.
+   */
+  async crawl(paths?: string[], opts: { inspect?: boolean; limit?: number; measureOnly?: boolean } = {}): Promise<string> {
     const page = this.requirePage();
     const memory = this.memory!;
     this.crawlHealth = [];
@@ -3063,7 +3089,7 @@ export class BrowserEngine {
         // Not retried by later crawls in this process (a check would otherwise try it
         // on every discovery round). Deliberately not written to memory: one outage
         // must not count a route as covered in every later run's gap ledger.
-        this.loadFailedRoutes.add(normalizePath(url));
+        if (!opts.measureOnly) this.loadFailedRoutes.add(normalizePath(url));
         // The browser commits its own error page for this failure tens of
         // milliseconds after goto has thrown, and that commit interrupts the next
         // navigation, charging this route's failure to the next one. Wait for it;
@@ -3088,25 +3114,28 @@ export class BrowserEngine {
         continue;
       }
       await this.settle();
-      const { elements, forms } = await this.collect();
+      this.harvestPaused = opts.measureOnly === true;
+      const { elements, forms } = await this.collect().finally(() => (this.harvestPaused = false));
       const finalUrl = page.url();
       const route = normalizePath(finalUrl);
       const fp = fingerprintState(finalUrl, elements);
-      memory.visitState(
-        fp,
-        finalUrl,
-        route,
-        elements.map((el) => el.key),
-      );
-      for (const f of forms) memory.recordForm(fp, f.key, f.guarded);
-      memory.recordRoleAccess(this.role, route, "reached");
+      if (!opts.measureOnly) {
+        memory.visitState(
+          fp,
+          finalUrl,
+          route,
+          elements.map((el) => el.key),
+        );
+        for (const f of forms) memory.recordForm(fp, f.key, f.guarded);
+        memory.recordRoleAccess(this.role, route, "reached");
+      }
       // If we landed somewhere else (auth wall, canonical redirect), the
       // REQUESTED route still counts as covered for THIS role — a role that
       // can't see /admin must not block the completion contract forever. An
       // auth-loss bounce is recorded under a prefix that does NOT count.
       const requestedRoute = normalizePath(url);
       const loginRedirect = this.authLoss.isLoginRedirect(path, finalUrl, this.baseUrl);
-      if (route !== requestedRoute) {
+      if (route !== requestedRoute && !opts.measureOnly) {
         const outcome = loginRedirect ? `${AUTH_LOSS_PREFIX}${route}` : `landed:${route}`;
         memory.markAttempted(requestedRoute, outcome, this.role);
         memory.recordRoleAccess(this.role, requestedRoute, outcome);
@@ -3118,7 +3147,7 @@ export class BrowserEngine {
       this.authLoss.clear();
       // Error-status routes render but would otherwise be re-crawled forever —
       // an attempt with the status satisfies the contract.
-      if (typeof status === "number" && status >= 400) memory.markAttempted(requestedRoute, `status:${status}`, this.role);
+      if (typeof status === "number" && status >= 400 && !opts.measureOnly) memory.markAttempted(requestedRoute, `status:${status}`, this.role);
       this.logAction({ action: "crawl", target: path, url: finalUrl, ...(await this.frameFor("crawl")) });
 
       await this.scanForInjections();
@@ -3206,10 +3235,9 @@ export class BrowserEngine {
     const page = this.requirePage();
     const transcript: string[] = [];
     const resolveTarget = (target: string) => {
-      if (target.startsWith("testid=")) return page.locator(`[data-testid=${JSON.stringify(target.slice(7))}]`).first();
-      if (target.startsWith("text=")) return page.getByText(target.slice(5), { exact: false }).first();
-      if (target.startsWith("label=")) return page.getByLabel(target.slice(6)).first();
-      throw new Error(`Plan targets must be "testid=…", "text=…", or "label=…" (got: ${target})`);
+      const parsed = parseTarget(target);
+      if (!parsed) throw new Error(`Plan targets must be ${TARGET_HELP} (got: ${target})`);
+      return BrowserEngine.locatorFor(page, parsed).first();
     };
     /** Last state captured this plan — reused as the next step's pre-state while the page has not moved. */
     let lastCapture: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
@@ -3444,6 +3472,206 @@ export class BrowserEngine {
     // positions push informational entries that are not steps.
     const ran = transcript.filter((l) => /^\d+\. /.test(l)).length;
     return `PLAN (${ran}/${Math.min(steps.length, 20)} steps ran):\n${transcript.join("\n")}\nTake scout_snapshot to see the resulting state.`;
+  }
+
+  /** A plan's or a flow's target as a Playwright locator (every match; callers pick). */
+  private static locatorFor(page: Page, target: FlowTarget): import("playwright").Locator {
+    switch (target.by) {
+      case "testid":
+        return page.locator(`[data-testid=${JSON.stringify(target.value)}]`);
+      case "text":
+        return page.getByText(target.value, { exact: false });
+      case "label":
+        return page.getByLabel(target.value);
+      case "role":
+        return page.getByRole(target.role as Parameters<Page["getByRole"]>[0], target.name === undefined ? {} : { name: target.name });
+    }
+  }
+
+  /**
+   * Replay one saved flow for `scenescout check`. Acts and reports only: the
+   * schema, the matching rules and what an outcome means live in flow.ts and
+   * check.ts. It stops at the first step that breaks, or that the write policy
+   * refuses, and hands back what the oracles caught on the way.
+   *
+   * Stricter than a plan on purpose: a click is never forced through
+   * something covering its target (a user could not click it either), and a
+   * step does not count as done until the page has settled.
+   */
+  async replayFlow(steps: readonly FlowStep[], mode: "observe" | "read-only" = this.mode === "observe" ? "observe" : "read-only"): Promise<FlowReplay> {
+    const page = this.requirePage();
+    // The write policy reads this.mode on every request, so the flow's rule holds for exactly as long as the flow runs.
+    const crawlMode = this.mode;
+    this.mode = mode;
+    const context = this.context!;
+    const violations: FlowReplay["violations"] = [];
+    const here = (): string => {
+      try {
+        const u = new URL(this.page?.url() ?? "");
+        return `${u.pathname}${u.search}`;
+      } catch {
+        return "/";
+      }
+    };
+    /** Responses since the most recent action step: what an expect-request looks through. */
+    let seen: SeenRequest[] = [];
+    const onResponse = (res: import("playwright").Response): void => {
+      seen.push({ method: res.request().method(), url: res.url(), status: res.status() });
+    };
+    context.on("response", onResponse);
+    const appOrigin = new URL(this.baseUrl).origin;
+    const refusedBackground: string[] = [];
+    const websockets = new Set<string>();
+    const onSocket = (ws: import("playwright").WebSocket): void => void websockets.add(ws.url().slice(0, 120));
+    page.on("websocket", onSocket);
+    /** Refused writes since the last call that a step is charged with; background ones (beacons, pings) are only listed (splitRefusals). */
+    const ownRefusals = (): string[] => {
+      const { charged, background } = splitRefusals(this.blockedRequests.splice(0), appOrigin);
+      for (const sig of background) if (!refusedBackground.includes(sig) && refusedBackground.length < 20) refusedBackground.push(sig);
+      return charged;
+    };
+    const done = (outcome: FlowReplay["outcome"]): FlowReplay => ({ outcome, violations, refusedBackground, websockets: [...websockets] });
+    // Nothing from the crawl before this flow is charged to it.
+    this.oracles.drain(false);
+    this.blockedRequests = [];
+    const collect = (except?: string): void => {
+      const path = here();
+      for (const v of this.oracles.drain())
+        if (v.detail !== except)
+          violations.push({ path, violation: { kind: v.kind, severity: v.severity, detail: v.detail, url: v.url, ...(v.embed ? { embed: v.embed } : {}) } });
+    };
+    const poll = async (done: () => boolean): Promise<boolean> => {
+      const until = Date.now() + FLOW_STEP_TIMEOUT_MS;
+      for (;;) {
+        if (done()) return true;
+        if (Date.now() >= until) return false;
+        await (this.page ?? page).waitForTimeout(100).catch(() => {});
+      }
+    };
+    const firstLine = (err: unknown): string =>
+      (err instanceof Error ? err.message : String(err))
+        .split("\n")[0]
+        .replace(/^[a-z]+\.[a-zA-Z]+: /, "")
+        .trim();
+    try {
+      for (const [i, step] of steps.entries()) {
+        const n = i + 1;
+        const did = describeStep(step);
+        if (isAction(step)) seen = [];
+        let failure: string | null = null;
+        let refusal: string | null = null;
+        this.actionStartedAt = Date.now();
+        try {
+          const current = this.requirePage();
+          if (step.action === "navigate") {
+            const url = `${this.baseUrl}${step.target}`;
+            const resp = await current.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
+            await this.settle();
+            const status = resp?.status() ?? null;
+            if (status !== null && status >= 400) {
+              failure = `the page answered HTTP ${status}`;
+              // The page's own status is this step's failure; the oracle's record of the same response is not a second issue.
+              // The oracle stores its details redacted (redactViolation), so the comparison is redacted too.
+              collect(redactSecrets(httpErrorDetail("GET", current.url().replace(/#.*$/, ""), status)));
+            }
+          } else if (step.action === "press") {
+            refusal = await this.vetFocusedActivation(step.value);
+            if (!refusal) {
+              await current.keyboard.press(step.value);
+              await this.settle();
+            }
+          } else if (step.action === "click" || step.action === "type" || step.action === "select") {
+            const loc = BrowserEngine.locatorFor(current, parseTarget(step.target)!).first();
+            const found = await loc
+              .waitFor({ state: "visible", timeout: FLOW_STEP_TIMEOUT_MS })
+              .then(() => true)
+              .catch(() => false);
+            if (!found) {
+              failure = `nothing visible matches ${step.target} within ${FLOW_STEP_TIMEOUT_MS / 1000}s`;
+            } else {
+              const label = (
+                (await loc.getAttribute("aria-label").catch(() => null)) ??
+                (await loc.textContent({ timeout: 1000 }).catch(() => null)) ??
+                ""
+              ).trim();
+              if (this.readOnly && step.action !== "type" && isDestructive(label, step.action === "select" ? step.value : undefined)) {
+                refusal = destructiveRefusal(label || step.target, this.mode);
+              } else if (step.action === "click") {
+                await loc.click({ timeout: FLOW_STEP_TIMEOUT_MS });
+              } else if (step.action === "select") {
+                await loc.selectOption(step.value, { timeout: FLOW_STEP_TIMEOUT_MS });
+              } else {
+                await this.noteProbe(step.value, step.target);
+                await this.fillOrAppend(loc, step.value, step.replace ?? false);
+                if (step.pressEnter) {
+                  const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
+                  const submitLabel = ((await submit.textContent({ timeout: 1000 }).catch(() => "")) ?? "").trim();
+                  if (this.readOnly && isDestructive(submitLabel)) refusal = destructiveRefusal(submitLabel, this.mode);
+                  else await loc.press("Enter", { timeout: FLOW_STEP_TIMEOUT_MS });
+                }
+              }
+              if (!refusal) await this.settle();
+            }
+          } else if (step.action === "expect-text") {
+            const visible = current.getByText(step.text, { exact: false }).filter({ visible: true }).first();
+            const ok = await visible
+              .waitFor({ state: "visible", timeout: FLOW_STEP_TIMEOUT_MS })
+              .then(() => true)
+              .catch(() => false);
+            if (!ok) failure = `no visible text ${JSON.stringify(step.text)} within ${FLOW_STEP_TIMEOUT_MS / 1000}s`;
+          } else if (step.action === "expect-url") {
+            const ok = await poll(() => urlMatches(step.pattern, this.page?.url() ?? ""));
+            if (!ok) failure = `the page is at ${here()}, which does not match /${step.pattern}/`;
+          } else {
+            let last: ReturnType<typeof matchRequest> = { ok: false, reason: "" };
+            await poll(() => (last = matchRequest(step, seen)).ok);
+            if (!last.ok) failure = last.reason;
+          }
+        } catch (err) {
+          failure = firstLine(err);
+        }
+        await this.scanForInjections().catch(() => {});
+        await this.scanForContradictions().catch(() => {});
+        // What the write policy refused of the app's own requests while this step ran is the step's, whatever caused it.
+        const blocked = ownRefusals();
+        if (!refusal && blocked.length > 0) refusal = `the ${this.mode} write policy refused ${blocked.join(", ")}`;
+        collect();
+        if (refusal) return done({ status: "refused", step: n, did, reason: refusal.split("\n")[0], path: here() });
+        if (failure) return done({ status: "failed", step: n, did, reason: failure, path: here() });
+      }
+      // A write the last step set off can land after its checks ran (a debounced save): wait a moment, settle, look
+      // again; then leave the page while the flow's rule still holds, so nothing it sends on the way out goes under
+      // the crawl's rule, and look once more.
+      await (this.page ?? page).waitForTimeout(FLOW_AFTER_LAST_STEP_MS).catch(() => {});
+      await this.settle().catch(() => {});
+      const late = ownRefusals();
+      collect();
+      await (this.page ?? page).goto("about:blank").catch(() => {});
+      await this.settle().catch(() => {});
+      late.push(...ownRefusals());
+      const last = steps[steps.length - 1];
+      if (late.length > 0 && last) {
+        return done({
+          status: "refused",
+          step: steps.length,
+          did: describeStep(last),
+          reason: `after the last step, the ${this.mode} write policy refused ${late.join(", ")}`,
+          path: here(),
+        });
+      }
+      return done({ status: "passed" });
+    } finally {
+      // Leave the flow's page before the crawl's rule comes back, so nothing it still sends goes out under a looser one.
+      await (this.page ?? page).goto("about:blank").catch(() => {});
+      this.blockedRequests = [];
+      this.oracles.drain(false);
+      this.mode = crawlMode;
+      page.off("websocket", onSocket);
+      context.off("response", onResponse);
+      this.refs.clear();
+      this.lastSnap = null;
+      this.snapshotUrl = "";
+    }
   }
 
   /** Computed-style design audit of the current page — visual judgment material without pixels. */

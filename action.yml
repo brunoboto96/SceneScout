@@ -23,7 +23,7 @@ inputs:
     required: false
     default: high
   mode:
-    description: observe or read-only. A check only visits pages, so nothing it does needs a write.
+    description: observe or read-only. The write policy for the crawl, and for saved flows when flow-writes is allow.
     required: false
     default: read-only
   max-routes:
@@ -52,6 +52,26 @@ inputs:
     default: ""
   out:
     description: Where to write report.md, check.json and check.sarif. Empty means <project>/.scenescout/check.
+    required: false
+    default: ""
+  flows:
+    description: A directory of saved flows to replay, relative to working-directory, or off. Empty means <project>/.scenescout/flows when it exists.
+    required: false
+    default: ""
+  retest:
+    description: on or off. Re-test the open findings in the project's memory that a page load can reproduce. Empty means on.
+    required: false
+    default: ""
+  flow-writes:
+    description: never or allow. never replays flows under observe's rule whatever mode says; allow replays them under mode, so their form submissions are sent to the target. Empty means never.
+    required: false
+    default: ""
+  on-refused-step:
+    description: report or stop. report marks a flow whose step was refused as could not run, keeps every other verdict and exits 2; stop exits 2 at once with no results. Empty means report.
+    required: false
+    default: ""
+  gate-retests:
+    description: never, high or all. Which re-tested findings that still reproduce fail the gate; high means those filed at high severity. Empty means high.
     required: false
     default: ""
   working-directory:
@@ -89,14 +109,20 @@ inputs:
 
 outputs:
   passed:
-    description: '"true" when the gate passed, "false" when it failed, empty when the check could not run.'
+    description: '"true" when the gate passed, "false" when it failed, empty when the check could not run. When could-not-run is above 0 (on-refused-step report) it describes the rest of the check, so "true" can come with exit-code 2.'
     value: ${{ steps.run.outputs.passed }}
   exit-code:
     description: The CLI's exit code — 0 passed, 1 failed the gate, 2 could not run.
     value: ${{ steps.run.outputs.exit-code }}
   failing:
-    description: How many issues are at the fail-on severity or worse.
+    description: What fails the gate - issues at the fail-on severity or worse, plus the re-tested findings gate-retests gates.
     value: ${{ steps.run.outputs.failing }}
+  retests-failing:
+    description: Of failing, how many are re-tested findings that still reproduce and that gate-retests puts in the gate.
+    value: ${{ steps.run.outputs.retests-failing }}
+  could-not-run:
+    description: How many saved flows a refused step kept from running (on-refused-step report). Above 0, exit-code is 2 and passed describes the rest of the check.
+    value: ${{ steps.run.outputs.could-not-run }}
   high:
     description: How many high-severity issues the check found.
     value: ${{ steps.run.outputs.high }}
@@ -230,4 +256,7 @@ runs:
         EXIT_CODE: ${{ steps.run.outputs.exit-code }}
         FAILING: ${{ steps.run.outputs.failing }}
         ERROR: ${{ steps.run.outputs.error }}
+        PASSED: ${{ steps.run.outputs.passed }}
+        COULD_NOT_RUN: ${{ steps.run.outputs.could-not-run }}
+        RETESTS_FAILING: ${{ steps.run.outputs.retests-failing }}
       run: node "$GITHUB_ACTION_PATH/action/check-action.mjs" verdict

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Check: a saved flow</title></head>
+<body>
+  <!-- For `scenescout check`'s saved flows. The honest half of a contrastive pair: check-flow-broken.html is this page with one fact changed, the endpoint behind Show details, which there answers 500.
+       Add a thing sends a POST, for the write policy's refusal of a flow step. -->
+  <h1>Things</h1>
+  <label>Filter <input data-testid="flow-filter" type="text"></label>
+  <button type="button" data-testid="flow-show-details">Show details</button>
+  <button type="button" data-testid="flow-add">Add a thing</button>
+  <p data-testid="flow-status" role="status"></p>
+  <script>
+    const status = document.querySelector('[data-testid="flow-status"]');
+    document.querySelector('[data-testid="flow-show-details"]').addEventListener("click", async () => {
+      const res = await fetch("/api/allow");
+      if (res.ok) {
+        status.textContent = "Details loaded";
+        history.pushState(null, "", "?details=open");
+      } else {
+        status.textContent = "Could not load details";
+      }
+    });
+    document.querySelector('[data-testid="flow-add"]').addEventListener("click", async () => {
+      const res = await fetch("/api/items", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      status.textContent = res.ok ? "Added" : "Could not add";
+    });
+  </script>
+</body>
+</html>

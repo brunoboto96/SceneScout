@@ -1007,7 +1007,7 @@ server.registerTool(
   "scout_run_plan",
   {
     description:
-      "Execute up to 20 actions in ONE call — use for mechanical sequences (fill a form, walk a wizard) so each step doesn't cost a round-trip. Targets resolve at execution time by semantic locator: 'testid=…', 'text=…', or 'label=…' (never snapshot refs). An `upload` step attaches a file as scout_upload does (target required — the file input or the control that opens its chooser; value = a fixture kind or a project-relative path). The plan ABORTS at the first NEW oracle violation, policy refusal, or failed step, returning a transcript of how far it got; repeats of already-reported violations do not abort (they stay logged for the report).",
+      "Execute up to 20 actions in ONE call — use for mechanical sequences (fill a form, walk a wizard) so each step doesn't cost a round-trip. Targets resolve at execution time by semantic locator: 'testid=…', 'text=…', 'label=…' or 'role=button[name=Save]' (never snapshot refs). The same steps, saved to .scenescout/flows/<name>.json with expect-text / expect-url / expect-request steps added, are replayed by `scenescout check` on every pull request. An `upload` step attaches a file as scout_upload does (target required — the file input or the control that opens its chooser; value = a fixture kind or a project-relative path). The plan ABORTS at the first NEW oracle violation, policy refusal, or failed step, returning a transcript of how far it got; repeats of already-reported violations do not abort (they stay logged for the report).",
     inputSchema: {
       steps: z
         .array(
@@ -1017,7 +1017,7 @@ server.registerTool(
               .string()
               .optional()
               .describe(
-                "testid=…, text=…, label=… (or a path for navigate; 'top'/'bottom'/±px for scroll; for upload: the file input or the control that opens its chooser)",
+                "testid=…, text=…, label=…, role=<role>[name=\"…\"] (or a path for navigate; 'top'/'bottom'/±px for scroll; for upload: the file input or the control that opens its chooser)",
               ),
             value: z
               .string()

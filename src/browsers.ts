@@ -183,6 +183,28 @@ export function echoesFailedLoads(engine: BrowserEngineName): boolean {
 }
 
 /**
+ * The resource type a navigator.sendBeacon request carries when it is
+ * intercepted: Chromium calls it "ping", Firefox and WebKit "beacon". A saved
+ * flow excuses a refused beacon from its step (flow.ts `splitRefusals`), so
+ * every engine's name for it must be known.
+ */
+export function beaconResourceType(engine: BrowserEngineName): "ping" | "beacon" {
+  return engine === "chromium" ? "ping" : "beacon";
+}
+
+/**
+ * Whether a beacon a page sends as it is being left (sendBeacon, or a
+ * keepalive fetch, on `pagehide`) escapes interception. In Chromium it is
+ * never routed, so the write policy does not see it and it reaches the server
+ * in every mode; Firefox and WebKit route it, and the policy refuses it like
+ * any other. A limit of the network-layer policy (ADR 2), reported in ADR 12;
+ * the check smoke suite asserts both directions per engine.
+ */
+export function unloadBeaconsEscapePolicy(engine: BrowserEngineName): boolean {
+  return engine === "chromium";
+}
+
+/**
  * Run in every page before its own scripts: takes shared workers away.
  *
  * A request issued by a shared worker cannot be intercepted in any browser, so
