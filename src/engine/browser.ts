@@ -41,6 +41,11 @@ import {
   type BrokenImageScan,
   displayName,
   missingName,
+  placeholderOnly,
+  placeholderEvidence,
+  describeControl,
+  labelFlag,
+  type NameFrom,
 } from "./collector.js";
 import { OracleMonitor, formatViolations } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
@@ -209,6 +214,8 @@ interface SnapshotElement extends InteractableInfo {
   rect: Rect;
   /** Set when the control is pinned chrome whose centre is owned by other pinned chrome (hit-tested in the page). */
   coveredBy?: string | null;
+  /** Set when a field's name is its placeholder, name attribute or type rather than a label. */
+  nameFrom?: NameFrom | null;
 }
 
 const SETTLE_MS = 400;
@@ -1402,6 +1409,7 @@ export class BrowserEngine {
       layer?: number;
       chrome?: boolean;
       coveredBy?: string | null;
+      nameFrom?: NameFrom | null;
     };
     // SPAs (and dev servers mid-recompile) can present an empty shell for a
     // few seconds — and a shell that already renders its chrome (sidebar,
@@ -1697,6 +1705,7 @@ export class BrowserEngine {
         dup ? `copy#${Number(dup[1]) + 1}` : null,
         el.disabled ? "disabled" : null,
         el.destructive ? "DESTRUCTIVE" : null,
+        labelFlag(el),
         memory.wasExercised(fp, el.key) ? "done" : null,
         el.href ? `href=${el.href.slice(0, 60)}` : null,
       ].filter(Boolean);
@@ -3070,6 +3079,7 @@ export class BrowserEngine {
           loginRedirect: false,
           elements: 0,
           unnamed: [],
+          placeholderOnly: [],
           violations: [],
           geometry: [],
           brokenImages: [],
@@ -3116,15 +3126,15 @@ export class BrowserEngine {
       // Measured before the drain: the audit's Tab presses can load things too.
       const inspected = opts.inspect ? await this.inspectRoute(page, elements, finalUrl) : null;
       const violations = this.oracles.drain();
+      const own = elements.filter((el) => !el.frame?.foreign);
       this.crawlHealth.push({
         path,
         url: finalUrl,
         status: typeof status === "number" ? status : null,
         loginRedirect,
         elements: elements.length,
-        unnamed: elements
-          .filter((el) => missingName(el) && !el.frame?.foreign)
-          .map((el) => `${el.role}${el.testid ? ` [testid=${el.testid}]` : ` at ${el.xpath}`}`),
+        unnamed: own.filter(missingName).map(describeControl),
+        placeholderOnly: own.filter(placeholderOnly).map(placeholderEvidence),
         violations: violations.map(({ kind, severity, detail, url, embed }) => ({ kind, severity, detail, url, ...(embed ? { embed } : {}) })),
         geometry: inspected?.geometry ?? [],
         brokenImages: inspected?.brokenImages ?? [],
@@ -3132,7 +3142,9 @@ export class BrowserEngine {
         ...(inspected?.auditError ? { auditError: inspected.auditError } : {}),
       });
       const deadEnd = elements.length === 0;
-      const unnamed = elements.filter(missingName).length;
+      // A field labelled only by its placeholder counts here too: to someone reading the crawl, it has no label.
+      // Counted over the page's own controls, as the check's lists are: another site's frame is not this app's to fix.
+      const unnamed = own.filter((el) => missingName(el) || placeholderOnly(el)).length;
       const missingTestid = elements.filter((el) => !el.testid && !el.disabled).length;
 
       const flags = [loginRedirect ? "AUTH-REDIRECT" : null, deadEnd ? "DEAD-END" : null, violations.length > 0 ? `${violations.length}⚠` : null].filter(

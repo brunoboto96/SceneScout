@@ -62,6 +62,12 @@ async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server
     check("...and the broken image it leaves", has("broken-image", /weekly-chart\.png/, "/"));
     check("the badge covering All orders", has("overlapping-controls", /"All orders" overlaps "New: bulk import"/, "/"));
     check("the faint hint text, with its ratio", has("contrast", /1\.73:1/, "/orders-new.html"));
+    check(
+      "the confirmation email field, labelled only by its placeholder",
+      has("placeholder-only-label", /new-order-email.*Confirmation email/, "/orders-new.html") &&
+        !summary.issues.some((i) => i.rule === "unnamed-control" && i.routes.includes("/orders-new.html")),
+      JSON.stringify(summary.issues.filter((i) => i.routes.includes("/orders-new.html"))),
+    );
     check("the Save notes button under the fixed bar", has("covered-control", /"Save notes" is COVERED by pinned chrome/));
     check("the Scheduled reports dead end", has("dead-end", /reports-scheduled/, "/reports-scheduled.html"));
     const healthy = ["/approvals.html", "/inventory.html", "/customers.html", "/audit.html"];
@@ -128,6 +134,28 @@ async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server
   );
   check("...and fails the default gate", links.status === 1, links.out.slice(-600));
 
+  // The same field labelled every way that counts, then by its placeholder alone, then by nothing but its name attribute.
+  await runCli([`${baseUrl}/field-labels.html`, "--project", work, "--out", path.join(work, "labels"), "--paths", "/field-labels.html"]);
+  const labelIssues = (JSON.parse(fs.readFileSync(path.join(work, "labels", "check.json"), "utf8")) as Summary).issues.filter((i) =>
+    ["placeholder-only-label", "unnamed-control"].includes(i.rule),
+  );
+  check(
+    "only the field with nothing but a placeholder is filed as placeholder-only; a label, aria-label, wrapping label, aria-labelledby or title each count",
+    labelIssues
+      .filter((i) => i.rule === "placeholder-only-label")
+      .map((i) => i.evidence)
+      .join("|") === 'textbox [testid=field-placeholder-only] "Email"',
+    JSON.stringify(labelIssues),
+  );
+  check(
+    "...and the field with only a name attribute, and the one whose blank aria-label hides its placeholder, are unnamed; a submit button named by its value is not",
+    labelIssues
+      .filter((i) => i.rule === "unnamed-control")
+      .map((i) => i.evidence)
+      .join("|") === "textbox [testid=field-name-only]|textbox [testid=field-blank-aria-label]",
+    JSON.stringify(labelIssues),
+  );
+
   // Every page bounced to sign-in: only the sign-in page was measured, which is no verdict on the app.
   const walled = await runCli([baseUrl, "--project", work, "--out", path.join(work, "walled"), "--paths", "/members/a,/members/b"]);
   check(
@@ -165,6 +193,27 @@ async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server
     );
     await engine.attach({ url: baseUrl, projectDir, mode: "read-only" });
     check("a new attach gives a failed route another try", engine.crawlableRoutes().includes("/drop-connection"), JSON.stringify(engine.crawlableRoutes()));
+
+    // The snapshot still shows the placeholder, so the field can be told apart, and says it is not a label.
+    await engine.navigate("/field-labels.html");
+    const snap = await engine.snapshot(true);
+    const lineOf = (testid: string): string => snap.split("\n").find((l) => l.includes(`testid=${testid}`)) ?? "";
+    check(
+      "the snapshot flags a field whose only label is its placeholder, and shows the placeholder as its name",
+      /textbox "Email" \[.*no label: placeholder only/.test(lineOf("field-placeholder-only")) &&
+        /textbox "email" \[.*no label\b/.test(lineOf("field-name-only")) &&
+        /textbox "\(unnamed\)" \[.*no label(?!:)/.test(lineOf("field-blank-aria-label")),
+      snap,
+    );
+    check(
+      "...and flags none of the labelled ones",
+      ["field-label-for", "field-aria-label", "field-label-wrapping", "field-labelledby", "field-title", "field-submit"].every(
+        (t) => lineOf(t) && !/no label/.test(lineOf(t)),
+      ),
+      snap,
+    );
+    const crawled = await engine.crawl(["/field-labels.html"]);
+    check("the crawl counts the three unlabelled fields as unnamed, each once", /field-labels\.html — 200 · \d+ el.* · 3 unnamed/.test(crawled), crawled);
   } finally {
     await engine.close();
   }

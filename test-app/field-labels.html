@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Field labels</title>
+  <style>
+    input, textarea { display: block; margin: 12px 0; padding: 8px; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <!-- The same field, with the same placeholder, labelled in each of the ways
+       that count and then in none. Only the last three are reported: the one
+       with only a placeholder as placeholder-only; the one with only a name
+       attribute, and the one whose blank aria-label hides its placeholder, as
+       unnamed and nothing else. -->
+  <h1>Field labels</h1>
+  <form>
+    <label for="by-for">Email</label>
+    <input id="by-for" name="email" type="email" placeholder="Email" data-testid="field-label-for">
+    <input name="email" type="email" placeholder="Email" aria-label="Email" data-testid="field-aria-label">
+    <label>Email <input name="email" type="email" placeholder="Email" data-testid="field-label-wrapping"></label>
+    <span id="email-caption">Email</span>
+    <input name="email" type="email" placeholder="Email" aria-labelledby="email-caption" data-testid="field-labelledby">
+    <input name="email" type="email" placeholder="Email" title="Email" data-testid="field-title">
+    <input name="email" type="email" placeholder="Email" data-testid="field-placeholder-only">
+    <input name="email" type="email" data-testid="field-name-only">
+    <input name="email" type="email" placeholder="Email" aria-label="  " data-testid="field-blank-aria-label">
+    <input type="submit" value="Send" data-testid="field-submit">
+  </form>
+</body>
+</html>

@@ -351,7 +351,7 @@ An exploratory run is driven by a model, so two runs never find exactly the same
 - HTTP and page errors
 - layout geometry (covered, clipped and overlapping controls, blocking overlays)
 - broken images
-- controls with no name
+- controls with no name, and fields whose only label is a placeholder
 - contrast and focus
 - pages with no way out
 

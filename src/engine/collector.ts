@@ -102,6 +102,33 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
   const xpathOf = ${XPATH_OF_SRC};
   const visible = ${VISIBLE_SRC};
   const accessibleName = ${ACCESSIBLE_NAME_SRC};
+  // Whether a field's accessibleName came from something that is not a label. The
+  // name falls back to the placeholder, then the name attribute, then the type,
+  // so every field can be told apart and targeted, and it is half of the
+  // element's key, which project memory keeps across runs: it stays as it is.
+  // This says what the fallback hides. A real label is aria-label,
+  // aria-labelledby, a <label> (for= or wrapping, read through el.labels),
+  // title, or for a button-like input its value or the browser's default text.
+  // "placeholder" when the placeholder is all there is, "fallback" when not even
+  // that, null when the field is labelled or is not a field.
+  const nameFrom = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (tag !== "input" && tag !== "textarea") return null;
+    if ((el.getAttribute("aria-label") || "").trim()) return null;
+    const labelledBy = (el.getAttribute("aria-labelledby") || "").split(/\\s+/).filter(Boolean);
+    if (labelledBy.some((id) => { const n = document.getElementById(id); return n && (n.textContent || "").trim(); })) return null;
+    for (const label of Array.from(el.labels || [])) {
+      // A wrapping label's text includes a textarea's own content; that is not a label.
+      const own = label.contains(el) ? el.textContent || "" : "";
+      if ((label.textContent || "").replace(own, "").trim()) return null;
+    }
+    if ((el.getAttribute("title") || "").trim()) return null;
+    const type = tag === "input" ? el.type : "";
+    if (type === "submit" || type === "reset") return null;
+    if (type === "button" && (el.value || "").trim()) return null;
+    if (type === "image" && (el.getAttribute("alt") || "").trim()) return null;
+    return (el.getAttribute("placeholder") || "").trim() ? "placeholder" : "fallback";
+  };
   const selector =
     'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="tab"], ' +
     '[role="menuitem"], [role="checkbox"], [role="switch"], [role="combobox"], [onclick], [data-testid]';
@@ -275,6 +302,7 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
       tag,
       role,
       name: accessibleName(el),
+      nameFrom: nameFrom(el),
       testid: el.getAttribute("data-testid"),
       xpath: xpathOf(el),
       disabled: el.disabled === true || el.getAttribute("aria-disabled") === "true",
@@ -303,9 +331,52 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
  */
 const LIVE_REGION_ROLES = new Set(["status", "alert", "log", "timer", "marquee"]);
 
-/** Whether an element with this role and no accessible name is an unnamed control, as opposed to a live region with nothing in it yet. */
-export function missingName(el: { role: string; name: string }): boolean {
+/**
+ * Where a field's shown name came from when it is not a label (the collector's
+ * nameFrom): its placeholder, or its name attribute or type. Absent or null
+ * when the name is a real one.
+ */
+export type NameFrom = "placeholder" | "fallback";
+
+/**
+ * Whether an element is an unnamed control, as opposed to a live region with
+ * nothing in it yet. A field whose shown name is only its name attribute or
+ * type is unnamed too: the collector fills those in so the field can be
+ * targeted, but nothing announces them.
+ */
+export function missingName(el: { role: string; name: string; nameFrom?: NameFrom | null }): boolean {
+  if (el.nameFrom === "fallback") return true;
   return !el.name && !LIVE_REGION_ROLES.has(el.role);
+}
+
+/**
+ * Whether a field's only label is its placeholder. Kept apart from missingName
+ * because browsers do announce a placeholder when nothing else names the
+ * field, so it is not nameless; but the text is gone as soon as the user
+ * types, and it was never a label. The shown name must be non-empty: a blank
+ * aria-label ends the name before the placeholder is reached, so that field is
+ * unnamed (missingName) and only that.
+ */
+export function placeholderOnly(el: { name: string; nameFrom?: NameFrom | null }): boolean {
+  return el.nameFrom === "placeholder" && !!el.name;
+}
+
+/** How a crawl names a control in the check's evidence: by role and test id, or role and XPath. */
+export function describeControl(el: { role: string; testid: string | null; xpath: string }): string {
+  return `${el.role}${el.testid ? ` [testid=${el.testid}]` : ` at ${el.xpath}`}`;
+}
+
+/** A placeholder-only field's evidence: the control, then its placeholder, capped so a paragraph of hint text stays one line. */
+export function placeholderEvidence(el: { role: string; testid: string | null; xpath: string; name: string }): string {
+  const text = el.name.length > 80 ? `${el.name.slice(0, 79)}…` : el.name;
+  return `${describeControl(el)} "${text}"`;
+}
+
+/** The snapshot's flag for a field with no label, or null when it has one. */
+export function labelFlag(el: { name: string; nameFrom?: NameFrom | null }): string | null {
+  if (placeholderOnly(el)) return "no label: placeholder only";
+  if (el.nameFrom) return "no label";
+  return null;
 }
 
 /** How the snapshot shows an element's name: an empty live region says so rather than reading as an unnamed control. */
