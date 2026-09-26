@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Unload writes</title></head>
+<body>
+  <!-- For the write policy on writes a page sends as it is being left: on
+       pagehide, a same-origin navigator.sendBeacon and a same-origin
+       fetch(..., { keepalive: true }), each to its own path so the smoke
+       suite can count them apart. The body is an ordinary draft save, or,
+       with ?intent=delete, a command to delete ({"action":"delete"}), which
+       the policy reads as destructive. So one page gives both halves of each
+       contrast: the same plain write under a mode that allows it and one that
+       does not, and the same mode with a plain body and a destructive one.
+       - ?frame=<origin>: also embeds this page from another origin
+         (?embedded=1), which sends the same plain writes to its own site, on
+         paths of its own, as the top page is left. The app's writes and the
+         embed's leave together; only the embed's are another site's.
+       - ?race=1: instead, thirty plain saves to /api/unload/race that the
+         page cancels at staggered moments, then on pagehide a beacon to that
+         same URL whose body is a delete command.
+       - ?redirect=1: also, on load, a plain save to /api/unload/redirect,
+         which the server answers with a 307 to a destructive address. -->
+  <h1>Draft</h1>
+  <p data-testid="unload-ready">Ready</p>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const loopback = (value) => (value && /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(value) ? value : "");
+    const plain = '{"note":"draft"}';
+    const destructive = '{"action":"delete"}';
+    const body = params.get("intent") === "delete" ? destructive : plain;
+    const embedded = params.get("embedded") === "1";
+    const prefix = embedded ? "/api/unload/embed-" : "/api/unload/";
+    if (params.get("race") === "1") {
+      // Cancelled at staggered moments, so some are cancelled after the policy let them through and before they left.
+      for (let i = 0; i < 30; i++) {
+        const cancel = new AbortController();
+        fetch("/api/unload/race", { method: "POST", headers: { "content-type": "text/plain" }, body: plain, signal: cancel.signal }).catch(() => {});
+        setTimeout(() => cancel.abort(), i);
+      }
+      addEventListener("pagehide", () => navigator.sendBeacon("/api/unload/race", destructive));
+    } else {
+      addEventListener("pagehide", () => {
+        navigator.sendBeacon(`${prefix}beacon`, body);
+        fetch(`${prefix}keepalive`, { method: "POST", keepalive: true, headers: { "content-type": "text/plain" }, body }).catch(() => {});
+      });
+    }
+    const frame = loopback(params.get("frame"));
+    if (frame && !embedded) {
+      const iframe = document.createElement("iframe");
+      iframe.title = "Embedded draft";
+      iframe.src = `${frame}/unload-writes.html?embedded=1`;
+      document.body.append(iframe);
+    }
+    if (params.get("redirect") === "1") {
+      fetch("/api/unload/redirect", { method: "POST", headers: { "content-type": "text/plain" }, body: plain }).catch(() => {});
+    }
+  </script>
+</body>
+</html>

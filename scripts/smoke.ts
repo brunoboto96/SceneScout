@@ -26,8 +26,9 @@ import * as contradiction from "./smoke/contradiction.ts";
 import * as frames from "./smoke/frames.ts";
 import * as injection from "./smoke/injection.ts";
 import * as checkGate from "./smoke/check.ts";
+import * as unload from "./smoke/unload.ts";
 
-const suites = [readOnly, safeWrite, multiSession, authLoss, liveView, injection, contradiction, frames, checkGate];
+const suites = [readOnly, safeWrite, multiSession, authLoss, liveView, injection, contradiction, frames, unload, checkGate];
 
 async function main(): Promise<void> {
   const server = await startFixtureServer();

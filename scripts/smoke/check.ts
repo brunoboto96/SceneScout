@@ -12,7 +12,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 // @ts-expect-error — plain .mjs, no types; it exports createDemoServer().
 import { createDemoServer } from "../../demo-app/server.mjs";
-import { unloadBeaconsEscapePolicy } from "../../dist/browsers.js";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { BROWSER, check, type SmokeContext } from "./harness.ts";
 
@@ -512,12 +511,10 @@ async function flowWriteEdges({
       `${beacon.status} ${JSON.stringify(beacon.flows)} ${beacon.out.slice(-600)}`,
     );
   }
-  // A beacon still in flight as the flow leaves the page is one sent during unload, which Chromium does not route (unloadBeaconsEscapePolicy).
+  // A beacon still in flight as the flow leaves the page is one sent during unload: refused too, on every engine (unloadWriteInterception).
   check(
-    unloadBeaconsEscapePolicy(BROWSER)
-      ? `...and the fetch never reached the other origin (${BROWSER}: a beacon in flight as the page is left can, the known unload limit)`
-      : `...and neither the fetch nor any beacon reached the other origin (${BROWSER})`,
-    writes("POST /api/items") === itemsAtStart && (unloadBeaconsEscapePolicy(BROWSER) || writes("POST /api/beacon") === beaconsAtStart),
+    `...and neither the fetch nor any beacon reached the other origin, one in flight as the page is left included (${BROWSER})`,
+    writes("POST /api/items") === itemsAtStart && writes("POST /api/beacon") === beaconsAtStart,
     JSON.stringify(stats.writes),
   );
 
@@ -540,7 +537,7 @@ async function flowWriteEdges({
   }
   check("...and no heartbeat reached the server", writes("POST /api/heartbeat") === heartbeatsBefore, JSON.stringify(stats.writes));
 
-  // A beacon sent as the flow leaves the page: Chromium never routes it, so it reaches the server whatever the rule; the others refuse it.
+  // A beacon sent as the flow leaves the page: refused under the flow's rule on every engine, and listed.
   const leavesBefore = writes("POST /api/leave");
   const leave = await runFlows("flow-leave-beacon", {
     "leave.json": {
@@ -552,14 +549,9 @@ async function flowWriteEdges({
     },
   });
   const listed = (leave.flows?.[0]?.refusedBackground ?? []).some((s) => /\/api\/leave/.test(s));
-  const escapes = unloadBeaconsEscapePolicy(BROWSER);
   check(
-    escapes
-      ? `${BROWSER}: a beacon sent on pagehide as the flow leaves the page is not intercepted, so it reaches the server (a known limit) and the flow passes without listing it`
-      : `${BROWSER}: a beacon sent on pagehide as the flow leaves the page is refused under the flow's rule and listed as a background request; the flow passes and nothing reaches the server`,
-    leave.status === 0 &&
-      leave.flows?.[0]?.status === "passed" &&
-      (escapes ? writes("POST /api/leave") === leavesBefore + 1 && !listed : writes("POST /api/leave") === leavesBefore && listed),
+    `${BROWSER}: a beacon sent on pagehide as the flow leaves the page is refused under the flow's rule and listed as a background request; the flow passes and nothing reaches the server`,
+    leave.status === 0 && leave.flows?.[0]?.status === "passed" && writes("POST /api/leave") === leavesBefore && listed,
     `${leave.status} ${JSON.stringify(leave.flows)} writes=${JSON.stringify(stats.writes)}`,
   );
 

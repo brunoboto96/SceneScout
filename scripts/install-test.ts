@@ -45,7 +45,10 @@ import {
   screencastSupport,
   serviceWorkerPolicy,
   sharedWorkersAllowed,
-  unloadBeaconsEscapePolicy,
+  unloadWriteInterception,
+  allowedUnloadWritesMayBeLost,
+  writeRedirectHopsJudged,
+  frameUnloadWritesMayGoUnissued,
 } from "../src/browsers.ts";
 
 import { explorePrompt, loadPlaybook, PLAYBOOK_RELATIVE_PATH, SERVER_INSTRUCTIONS, stripFrontMatter } from "../src/playbook.ts";
@@ -1088,13 +1091,20 @@ test("npm failing with nothing on stderr is still given a reason", () => {
   assert.equal(killed.status === "failed" ? killed.detail : "", "npm exited without finishing");
 });
 
-test("a beacon is a ping in Chromium and a beacon elsewhere, and only Chromium lets one sent on pagehide past interception", () => {
+test("a beacon is a ping in Chromium and a beacon elsewhere; only Chromium needs its unload writes caught at the browser level and judges a redirect's later hops, and only WebKit may lose an unload write it lets through", () => {
   assert.deepEqual(
-    (["chromium", "firefox", "webkit"] as const).map((e) => [e, beaconResourceType(e), unloadBeaconsEscapePolicy(e)]),
+    (["chromium", "firefox", "webkit"] as const).map((e) => [
+      e,
+      beaconResourceType(e),
+      unloadWriteInterception(e),
+      allowedUnloadWritesMayBeLost(e),
+      writeRedirectHopsJudged(e),
+      frameUnloadWritesMayGoUnissued(e),
+    ]),
     [
-      ["chromium", "ping", true],
-      ["firefox", "beacon", false],
-      ["webkit", "beacon", false],
+      ["chromium", "ping", "browser-fetch", false, true, false],
+      ["firefox", "beacon", "route", false, false, true],
+      ["webkit", "beacon", "route", true, false, false],
     ],
   );
 });
