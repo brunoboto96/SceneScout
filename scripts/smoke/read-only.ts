@@ -5,6 +5,7 @@ import fs from "node:fs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { feedForSession } from "../../dist/engine/live.js";
 import { generateReport } from "../../dist/engine/report.js";
+import { FORMS_INVENTORY_SCRIPT } from "../../dist/engine/forms.js";
 import { focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
 import { BROWSER, check, settle, type SmokeContext } from "./harness.ts";
 
@@ -798,6 +799,204 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     const once = engine.memory!.unchosenOptions().find((d) => d.key.includes("once-select"));
     check("a dropdown that removes itself on change does not stall the action", Date.now() - onceStarted < 10_000, `${Date.now() - onceStarted}ms`);
     check("...and its options were still recorded", once?.unchosen.join("|") === "B", JSON.stringify(once));
+
+    console.log("coverage: forms never submitted empty");
+    await engine.navigate("/empty-submit.html");
+    let esSnap = await engine.snapshot(true);
+    const esRef = (testid: string): string => {
+      const m = esSnap.match(new RegExp(`(e\\d+) [^\\n]*testid=${testid}\\b`));
+      if (!m) throw new Error(`ref not found for ${testid} in:\n${esSnap}`);
+      return m[1];
+    };
+    const esRefByName = (name: string): string => {
+      const m = esSnap.match(new RegExp(`(e\\d+) [a-z]+ "${name.replace(/\$/g, "\\$")}"`));
+      if (!m) throw new Error(`ref not found for "${name}" in:\n${esSnap}`);
+      return m[1];
+    };
+    const untried = (): string[] =>
+      engine
+        .memory!.formsNeverSubmittedEmpty()
+        .filter((f) => f.route === "/empty-submit.html")
+        .map((f) => f.key);
+    const listed = (key: string): boolean => untried().includes(key);
+    const entries = (): string[] => [...engine.memory!.emptySubmits.values()].filter((f) => f.route === "/empty-submit.html").map((f) => f.key);
+    check(
+      "every <form> with a text field and an enabled submit is listed, by its own id, name or action when it has one, else by its submit control",
+      JSON.stringify([...untried()].sort()) ===
+        JSON.stringify([
+          "form:#code",
+          "form:#profile-form",
+          "form:POST /things",
+          "form:POST /things/:id/comments",
+          "form:name=pay",
+          "tid:feedback-send",
+          "tid:items-save",
+          "tid:message-send",
+          "tid:rename-submit",
+          "tid:signup-submit",
+        ]),
+      JSON.stringify(untried()),
+    );
+    // The contrastive pair: the same text box and button, in a <form> (listed) and in page chrome or a loose panel (not).
+    check(
+      "a text box beside a button with no <form> around it (nav chrome, a loose panel) is not a form",
+      !untried().some((k) => /nav-|note-/.test(k)),
+      JSON.stringify(untried()),
+    );
+    check("a form with no text field, and a search box, are never listed", !untried().some((k) => /prefs|find/.test(k)), JSON.stringify(untried()));
+    check("a form whose submit is disabled while its field is blank is never listed", !untried().some((k) => /invite/.test(k)), JSON.stringify(untried()));
+
+    await engine.type(esRef("signup-email"), "someone@example.com");
+    const filledClick = await engine.click(esRef("signup-submit"));
+    check("a submit with one field filled does not count as empty", listed("tid:signup-submit"), JSON.stringify(untried()));
+    // The filled submit put a button before the submit control, so the snapshot's path for it is stale.
+    let logBefore = engine.memory!.actionLog.length;
+    await engine.type(esRef("signup-email"), "", true);
+    const unmatched = engine.memory!.actionLog.slice(logBefore).find((e) => e.action === "forms:submit-unmatched");
+    check(
+      "a submit that cannot be matched to the snapshot is logged, not dropped silently",
+      !!unmatched && listed("tid:signup-submit"),
+      `${JSON.stringify(unmatched)} ${filledClick}`,
+    );
+    esSnap = await engine.snapshot(true);
+    await engine.type(esRef("signup-email"), "", true);
+    check("scout_type Enter with every text field blank submits it empty: the form leaves the list", !listed("tid:signup-submit"), JSON.stringify(untried()));
+
+    // The first submit removes Cancel, so the submit control then sits at the
+    // path the snapshot knew as Cancel's.
+    await engine.type(esRef("message-text"), "hello", true);
+    logBefore = engine.memory!.actionLog.length;
+    await engine.type(esRef("message-text"), "hello again", true, true);
+    await engine.type(esRef("message-text"), "", true, true);
+    check(
+      "a stale path that now names another control is not credited to it: no entry for Cancel, the form still listed, the miss logged",
+      !entries().includes("tid:message-cancel") &&
+        listed("tid:message-send") &&
+        engine.memory!.actionLog.slice(logBefore).some((e) => e.action === "forms:submit-unmatched"),
+      JSON.stringify(entries()),
+    );
+    esSnap = await engine.snapshot(true);
+    await engine.type(esRef("message-text"), "", true);
+    check("...and after a fresh snapshot the empty submit counts", !listed("tid:message-send"), JSON.stringify(untried()));
+
+    await engine.click(esRef("items-add"));
+    check("a type='button' click inside the form with its field blank is not a submit", listed("tid:items-save"), JSON.stringify(untried()));
+    await engine.type(esRef("items-name"), "");
+    await engine.press("Enter");
+    check("scout_press Enter in a blank field submits it empty", !listed("tid:items-save"), JSON.stringify(untried()));
+
+    const lookupClick = await engine.click(esRef("lookup-go"));
+    check("scout_click on a form's submit with its field blank submits it empty", !listed("form:POST /things"), JSON.stringify(untried()));
+    check("...and the silent empty submit is noted as firing nothing", lookupClick.includes("fired ZERO network requests"), lookupClick);
+
+    await engine.type(esRef("nav-find"), "", true);
+    await engine.type(esRef("note-text"), "", true);
+    check(
+      "Enter in a field outside any <form> submits nothing, so no form is recorded for it",
+      !entries().some((k) => /nav-|note-/.test(k)),
+      JSON.stringify(entries()),
+    );
+
+    // Two tab panels, each a form with an untagged "Save": the same button key, two forms.
+    await engine.click(esRef("tab-billing"));
+    esSnap = await engine.snapshot(true);
+    check(
+      "the second tab panel's form is listed as a form of its own",
+      listed("form:#billing-form") && listed("form:#profile-form"),
+      JSON.stringify(untried()),
+    );
+    await engine.click(esRefByName("Save"));
+    check(
+      "an empty submit of one panel's form leaves the other panel's form listed",
+      !listed("form:#billing-form") && listed("form:#profile-form"),
+      JSON.stringify(untried()),
+    );
+
+    // A submit whose label follows the amount: the form stays one form.
+    await engine.type(esRef("pay-amount"), "15");
+    esSnap = await engine.snapshot(true);
+    check(
+      "a submit whose label changed is still one form",
+      entries().filter((k) => /pay/i.test(k)).length === 1 && listed("form:name=pay"),
+      JSON.stringify(entries()),
+    );
+    await engine.type(esRef("pay-amount"), "", false, true);
+    esSnap = await engine.snapshot(true);
+    await engine.click(esRefByName("Pay $12"));
+    check("...and its empty submit clears it", !listed("form:name=pay"), JSON.stringify(untried()));
+
+    await engine.runPlan([{ action: "type", target: "testid=feedback-subject", value: "", pressEnter: true }]);
+    check("a plan's type step with pressEnter on a blank form submits it empty", !listed("tid:feedback-send"), JSON.stringify(untried()));
+    await engine.runPlan([
+      { action: "type", target: "testid=code-value", value: "" },
+      { action: "press", value: "Enter" },
+    ]);
+    check(
+      "a plan's press step, Enter in the field of a form submitted by a form='id' button, submits it empty",
+      !listed("form:#code"),
+      JSON.stringify(untried()),
+    );
+    // A filled submit by a press step moves every later form (an undo bar is
+    // inserted above them) with no capture after it, so the plan's last
+    // capture is stale when the click on the rename form comes.
+    await engine.runPlan([
+      { action: "type", target: "testid=feedback-subject", value: "hello", replace: true },
+      { action: "press", value: "Enter" },
+      { action: "click", target: "testid=rename-submit" },
+    ]);
+    check("a plan's click still counts after the page moved under the same URL", !listed("tid:rename-submit"), JSON.stringify(untried()));
+
+    // Its action names a record and a token that change on every load: still one form.
+    await engine.navigate("/empty-submit.html");
+    await engine.snapshot(true);
+    check(
+      "a form whose relative action differs per load only by a record id and a token is one entry",
+      entries().filter((k) => k.includes("/comments")).length === 1,
+      JSON.stringify(entries()),
+    );
+
+    console.log("coverage: the form inventory is cheap on a long form");
+    await engine.navigate("/many-rows.html");
+    const rowsPage = (engine as unknown as { page: import("playwright").Page }).page;
+    await rowsPage.waitForFunction("document.querySelectorAll('tbody input').length === 2000");
+    const timings: number[] = [];
+    let found: Array<{ fields: unknown[] }> = [];
+    for (let i = 0; i < 3; i++) {
+      const started = performance.now();
+      found = (await rowsPage.evaluate(FORMS_INVENTORY_SCRIPT)) as Array<{ fields: unknown[] }>;
+      timings.push(performance.now() - started);
+    }
+    const best = Math.min(...timings);
+    check("the inventory reads a form of 2000 text fields in well under 100 ms", best < 100, `${timings.map((t) => t.toFixed(1)).join(", ")} ms`);
+    // 2000 identical blank rows come back as one set of facts, not 2000 copies.
+    check(
+      "...and finds that one form, its identical rows read as one set of field facts, and nothing in the header's text box and 'Sign in'",
+      found.length === 1 && found[0].fields.length === 1,
+      JSON.stringify(found).slice(0, 300),
+    );
+    // A plan's first step captures the page itself; the form's submit lies
+    // past the element cap, so it is not in that capture — which is no reason
+    // to capture the same page a second time.
+    const engineInternals = engine as unknown as { collect: (...args: unknown[]) => Promise<unknown> };
+    const realCollect = engineInternals.collect;
+    let collects = 0;
+    engineInternals.collect = function (this: unknown, ...args: unknown[]) {
+      collects += 1;
+      return realCollect.apply(this, args);
+    };
+    const rowsLogBefore = engine.memory!.actionLog.length;
+    try {
+      await engine.runPlan([{ action: "click", target: "testid=rows-save" }]);
+    } finally {
+      engineInternals.collect = realCollect;
+    }
+    check("a plan's click step collects the page once before and once after, never twice before", collects === 2, `${collects} collects`);
+    const rowsMiss = engine.memory!.actionLog.slice(rowsLogBefore).find((e) => e.action === "forms:submit-unmatched");
+    check(
+      "a submit whose control lies past the snapshot's element cap is logged as untracked, not as something a new snapshot would fix",
+      !!rowsMiss && /untracked/.test(rowsMiss.target ?? "") && !/take a scout_snapshot/.test(rowsMiss.target ?? ""),
+      JSON.stringify(rowsMiss),
+    );
   } finally {
     await engine.close().catch(() => {});
   }

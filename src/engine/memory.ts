@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { RecordedDecision } from "./calibration.js";
 import { normalizePath, shortHash } from "./fingerprint.js";
+import { isFormBookkeeping } from "./forms.js";
 import type { InjectionProbe } from "./injection.js";
 
 export interface StateRecord {
@@ -822,6 +823,7 @@ export class MemoryStore {
     this.injectionsReported.clear();
     this.auditsThisRun = 0;
     this.selectChoices.clear();
+    this.emptySubmits.clear();
   }
 
   /**
@@ -859,6 +861,57 @@ export class MemoryStore {
       if (unchosen.length > 0) out.push({ route, key, unchosen });
     }
     return out;
+  }
+
+  /**
+   * Each form a session saw this run, by route and identity (forms.ts
+   * formIdentity: its own attributes, else its first submit control's
+   * coverage key), and whether any session has submitted it with every
+   * text field blank (forms.ts has the definition). Per run and shared across
+   * sessions, like the dropdown choices: an earlier run's empty submit says
+   * nothing about this build, and in a parallel run any lane may try it.
+   */
+  readonly emptySubmits = new Map<string, { route: string; key: string; triedEmpty: boolean; guarded?: boolean }>();
+
+  /**
+   * A form seen on a visited state. Recording it again changes nothing, except
+   * that `guarded` (every submit control disabled while its fields were blank)
+   * takes it off the list for good: the page refuses the empty submit itself,
+   * and no one could clear an entry whose submit cannot be pressed.
+   */
+  recordForm(fingerprint: string, key: string, guarded = false): void {
+    const entry = this.formEntry(fingerprint, key);
+    if (entry && guarded) entry.guarded = true;
+  }
+
+  /**
+   * A submit of a form already seen; `empty` when every text field was blank
+   * at the moment it went. It only marks: a submit never puts a form on the
+   * list, since a key read at submit time is the one most likely to be stale.
+   * Returns whether the form was on the list, so a miss can be logged.
+   */
+  recordFormSubmit(fingerprint: string, key: string, empty: boolean): boolean {
+    const entry = this.formEntry(fingerprint, key, false);
+    if (entry && empty) entry.triedEmpty = true;
+    return entry !== null;
+  }
+
+  private formEntry(fingerprint: string, key: string, create = true): { route: string; key: string; triedEmpty: boolean; guarded?: boolean } | null {
+    // Another site's frame is not the app's form to probe.
+    if (isEmbedKey(key)) return null;
+    const route = fingerprint.split("#")[0];
+    const id = `${route}\u0000${key}`;
+    let entry = this.emptySubmits.get(id) ?? null;
+    if (!entry && create) {
+      entry = { route, key, triedEmpty: false };
+      this.emptySubmits.set(id, entry);
+    }
+    return entry;
+  }
+
+  /** Forms seen this run that no session has submitted empty, in the order they were first seen. */
+  formsNeverSubmittedEmpty(): Array<{ route: string; key: string }> {
+    return [...this.emptySubmits.values()].filter((f) => !f.triedEmpty && !f.guarded).map(({ route, key }) => ({ route, key }));
   }
 
   constructor(projectDir: string) {
@@ -1472,7 +1525,8 @@ export class MemoryStore {
     // The planner's fold marker is not a step anyone took on a page. Left in,
     // its empty URL read as a route change and cut the trace of a finding filed
     // right after a fold — which is when the fold asks lanes to file.
-    const log = this.actionLog.filter((a) => a.action !== "lane-report");
+    // Nor is the forms bookkeeping (a read that failed, a submit it could not match).
+    const log = this.actionLog.filter((a) => a.action !== "lane-report" && !isFormBookkeeping(a.action));
     let start = Math.max(0, log.length - 12);
     for (let i = log.length - 1; i >= 0 && i >= log.length - 12; i--) {
       if (routeOf(log[i].url) !== routeOf(f.url)) {
