@@ -208,9 +208,11 @@ test("nothing the browser is served tells a tester where the planted defects are
   // This is the held-out benchmark target: a comment in a served file naming a
   // planted defect hands the answer to the agent being scored, and the whole
   // point of this app is that nobody has seen the answers.
-  const key = JSON.parse(fs.readFileSync(path.join(appDir, "answer-key.json"), "utf8")) as { defects: Array<{ id: string }> };
-  assert.ok(key.defects.length >= 12);
-  const spoilers = [/seeded/, /defect/, /planted/, /deliberate/, /\bbugs?\b/, /answer.key/, /held.out/, /holdout/, ...key.defects.map((d) => new RegExp(d.id))];
+  type Entry = { id: string };
+  const key = JSON.parse(fs.readFileSync(path.join(appDir, "answer-key.json"), "utf8")) as Partial<Record<"defects" | "alsoReal" | "contextual", Entry[]>>;
+  const ids = [...(key.defects ?? []), ...(key.alsoReal ?? []), ...(key.contextual ?? [])].map((e) => e.id);
+  assert.ok((key.defects ?? []).length >= 12);
+  const spoilers = [/seeded/, /defect/, /planted/, /deliberate/, /\bbugs?\b/, /answer.key/, /held.out/, /holdout/, ...ids.map((id) => new RegExp(id))];
   const files = fs.readdirSync(publicDir, { recursive: true, encoding: "utf8" }).filter((f) => fs.statSync(path.join(publicDir, f)).isFile());
   assert.ok(files.includes("index.html"));
   const hits: string[] = [];
