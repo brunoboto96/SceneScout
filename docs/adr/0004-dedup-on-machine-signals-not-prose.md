@@ -43,6 +43,18 @@ finding:
   enough to count as a regression, absorbing would bump a fixed entry's run
   count and the new bug would never appear at all.
 
+Every route-scoped rule — identical evidence, a quoted literal, title tokens —
+first requires the two findings to be one **kind** of defect: the same
+category, or two categories of one family (a crash filed as `page-error` and as
+`console-error`; a refused save filed as `data-loss` and as
+`data-inconsistency`). Evidence, a quoted control name and a title say where a
+defect is as often as what it is, so on their own they merged two different
+defects on one element: a link styled like body text (`ux-polish`) was absorbed
+into the finding that the same link was clipped out of view (`visual`). The
+presentation kinds — `visual`, `ux-polish`, `a11y`, `missing-testid` — are
+each a family of their own, because one element is routinely wrong in several
+of those ways at once and the findings name the same test id and label.
+
 Fuzzy matching (title tokens, quoted literals) stays **route-scoped**: it is a
 guess, and a guess applied across the whole report merges unrelated bugs. A
 quoted literal also merges only within one family of categories, and never when
@@ -53,7 +65,19 @@ different requests stay two findings.
 ## Consequences
 
 One endpoint bug reads as one finding however many pages exposed it, and
-per-record noise collapses. Two different bugs on one endpoint+status in the
+per-record noise collapses. Two defects on one element stay two when they are
+of different kinds. The price is a visible duplicate whenever one defect is
+filed under two kinds from different families. The archived benchmark runs show
+which labels disagree in practice: `visual` against `ux-confusing` recurs (a
+badge covering a button in six runs, a sticky bar covering a button in one),
+and `http-error` against `ux-confusing` against `page-error`, and `data-loss`
+against `ux-confusing`, appear once each; a presentation defect filed once as
+`visual` and once as `ux-polish` joins them. Those duplicates are accepted: a
+silent merge can hide a second, real defect on the same element, while a
+visible duplicate costs a reader a moment — the direction chosen below.
+Two different claims of the SAME kind on one element (clipped, and overlapped,
+both `visual`) can still merge on a shared quoted label: telling them apart
+would mean comparing prose. Two different bugs on one endpoint+status in the
 same category can still merge — accepted, because narrowing further would
 require comparing prose, which is what this rule exists to avoid.
 

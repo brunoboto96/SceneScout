@@ -34,7 +34,7 @@ import { ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, McpError }
 import { z } from "zod";
 import { BrowserEngine } from "./engine/browser.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
-import { FINDING_CATEGORIES, MemoryStore, redactSecrets } from "./engine/memory.js";
+import { FINDING_CATEGORIES, MemoryStore, mergeableCategories, redactSecrets } from "./engine/memory.js";
 import { decodedEntitiesNote, LANE_NAME_MAX, LaneLedger, laneCloseGuard, laneReportInstruction, parseLaneReport, summarizeLaneReport } from "./engine/lane.js";
 import { MAX_UNFILED_NAMED, unfiledDefects } from "./engine/calibration.js";
 import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
@@ -1441,7 +1441,7 @@ server.registerTool(
             ? `Finding recorded: [${finding.severity}] ${finding.title} (id ${finding.id})`
             : finding.regressedAt
               ? `⟳ REOPENED as a REGRESSION: finding ${finding.id} was previously resolved but the evidence reproduces again (seen in ${finding.runs} runs). Worth calling out to the user.`
-              : `Not recorded as new: merged into existing finding ${finding.id} — [${finding.severity}] ${finding.title}${finding.evidence ? ` (evidence: ${finding.evidence.slice(0, 160)})` : " (no evidence)"}, seen in ${finding.runs} runs. If yours is a different bug, file it again with evidence naming the request that failed for you (method and path): two findings are kept apart when both name requests and none is shared.`,
+              : `Not recorded as new: merged into existing finding ${finding.id} — [${finding.severity}] ${finding.title}${finding.evidence ? ` (evidence: ${finding.evidence.slice(0, 160)})` : " (no evidence)"}, filed as ${finding.category}, seen in ${finding.runs} runs. If yours is a different bug, file it again: under the category that says what is wrong if it is another kind of defect (a finding filed as ${category} merges only with one filed as ${mergeableCategories(category).join(" or ")}), or with evidence naming the request that failed for you (method and path) — two findings are kept apart when both name requests and none is shared.`,
           session,
         );
       } catch (err) {

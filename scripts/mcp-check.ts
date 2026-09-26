@@ -211,6 +211,10 @@ ${late.slice(0, 400)}`);
     });
     if (!/Not recorded as new: merged into existing finding \w+ — \[low\] Email field has no label \(evidence: input\[name=email\] has no label\)/.test(merged))
       fail(`a merged filing did not name the finding it joined:\n${merged}`);
+    // And says which kinds would have been kept apart, so a lane whose second
+    // defect on the same element was absorbed knows how to file it.
+    if (!/filed as a11y, .*a finding filed as a11y merges only with one filed as a11y\)/.test(merged))
+      fail(`a merged filing did not say which kinds merge:\n${merged}`);
     const filed = await call("scout_lane_report", { lane: "orders", reply: report("input[name=email] has no label") });
     if (/have no finding/.test(filed)) fail(`a filed defect was still reported as unfiled:\n${filed}`);
     // The fold is logged, so the pace section can tell reporting from waiting to be closed.
