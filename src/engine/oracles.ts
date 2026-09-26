@@ -68,6 +68,65 @@ export function isPolicyInduced(v: { kind: string; detail: string }, msSincePoli
 }
 
 /**
+ * The request a console message is the browser's own echo of, or null when it
+ * is not one.
+ *
+ * Chromium and WebKit print "Failed to load resource: …" for a subresource
+ * that answered with an error status or got no answer, and give the
+ * resource's address as the message's location (Firefox prints nothing; see
+ * `echoesFailedLoads` in browsers.ts). The line carries no address in its
+ * text, so without this it could only be charged to the page. Returned in the
+ * form `requestKey` gives a request's URL, so the two can be matched.
+ */
+export function failedLoadEchoOf(text: string, locationUrl: string | undefined, pageUrl: string): string | null {
+  if (!/^Failed to load resource: /.test(text) || !locationUrl) return null;
+  try {
+    return requestKey(new URL(locationUrl, pageUrl).href);
+  } catch {
+    return null;
+  }
+}
+
+/** A request's address as the echo lookup keys it: absolute, and without its fragment, which is never sent. */
+export function requestKey(url: string): string {
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    return u.href;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Which recent requests an embed sent, by address, so the browser's echo of
+ * one that failed is charged where the request was.
+ *
+ * Only addresses an embed requested are kept, and the latest request to an
+ * address decides: when the app then requests the same address, its echo is
+ * the app's again. Bounded, dropping the oldest, so a long run does not hold
+ * every address it saw.
+ */
+export class EmbedRequestLog {
+  private byKey = new Map<string, string>();
+  constructor(private readonly cap = 500) {}
+
+  note(url: string, embed: string | null): void {
+    const key = requestKey(url);
+    this.byKey.delete(key);
+    if (!embed) return;
+    this.byKey.set(key, embed);
+    if (this.byKey.size > this.cap) this.byKey.delete(this.byKey.keys().next().value as string);
+  }
+
+  /** The embed whose request a console message echoes, or null when it echoes none of theirs. */
+  embedOfEcho(text: string, locationUrl: string | undefined, pageUrl: string): string | null {
+    const key = failedLoadEchoOf(text, locationUrl, pageUrl);
+    return key === null ? null : (this.byKey.get(key) ?? null);
+  }
+}
+
+/**
  * Invariant oracles: passive listeners that record violations regardless of
  * what the agent is doing. The engine drains the buffer after every action and
  * appends violations to the tool result, so the agent is told when something
@@ -89,8 +148,13 @@ export class OracleMonitor {
         severity: "high",
         detail: text.slice(0, 500),
         url: page.url(),
+        // The one console line that names its request: the browser's echo of an embed's failed load is the embed's too.
+        embed: this.embedRequests.embedOfEcho(text, msg.location().url, page.url()) ?? undefined,
       });
     });
+
+    // Noted as each request starts, which is always before the browser can echo its failure.
+    page.on("request", (req) => this.embedRequests.note(req.url(), this.embedOfRequest(req)));
 
     page.on("pageerror", (err) => {
       this.record({
@@ -165,13 +229,15 @@ export class OracleMonitor {
   policyAttributed = 0;
 
   private embedOfRequest: (req: Request) => string | null = () => null;
+  private embedRequests = new EmbedRequestLog();
 
   /**
    * The engine knows which frame a request came from; a failing request is
    * attributed to an embed through this. Console and page errors are not
    * attributed: a console message says where its script was served from, not
    * which frame ran it, so an SDK the app's page loads from the embed's own
-   * site would be taken for the embed.
+   * site would be taken for the embed. The exception is the browser's echo of
+   * a failed load, which names its request and goes where the request went.
    */
   setEmbedAttribution(ofRequest: (req: Request) => string | null): void {
     this.embedOfRequest = ofRequest;

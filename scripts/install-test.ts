@@ -35,6 +35,7 @@ import {
   browserPresence,
   defaultAttachNote,
   defaultEngine,
+  echoesFailedLoads,
   focusAdvanceKey,
   headlessShellDir,
   launchTarget,
@@ -684,6 +685,15 @@ test("service workers are allowed only where the write policy can see what they 
   assert.equal(serviceWorkerPolicy("chromium"), "allow");
   assert.equal(serviceWorkerPolicy("firefox"), "block");
   assert.equal(serviceWorkerPolicy("webkit"), "block");
+});
+
+test("the browsers that print their own console line for a failed load", () => {
+  // Chromium and WebKit print "Failed to load resource: …" with the resource as
+  // its location; Firefox prints nothing. The frames smoke suite asserts the
+  // echo is charged to whoever sent the request only where there is one.
+  assert.equal(echoesFailedLoads("chromium"), true);
+  assert.equal(echoesFailedLoads("firefox"), false);
+  assert.equal(echoesFailedLoads("webkit"), true);
 });
 
 test("the live view streams by push where the browser can, and by polling where it cannot", () => {

@@ -4,7 +4,9 @@
  * same-origin frame that does.
  */
 import type { Frame, Page } from "playwright";
+import { echoesFailedLoads } from "../../dist/browsers.js";
 import { BrowserEngine } from "../../dist/engine/browser.js";
+import type { OracleViolation } from "../../dist/engine/oracles.js";
 import { BROWSER, check, until, type SmokeContext } from "./harness.ts";
 
 export const title = "frames";
@@ -113,6 +115,38 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
         new RegExp(`\\[high\\] http_error: GET http://127\\.0\\.0\\.1:${appPort}/api/fail-500`).test(fiveHundreds),
       fiveHundreds,
     );
+
+    console.log("frames: the browser's console echo of a failed load goes where the request went");
+    // The one fact varied: which frame sends the same request to the same address on the embed's site.
+    const oracles = (engine as unknown as { oracles: { all: OracleViolation[] } }).oracles;
+    const echoTarget = `${foreignBaseUrl}/api/fail-500?echo=1`;
+    const echoesAfter = async (inFrame: Frame) => {
+      const from = oracles.all.length;
+      await inFrame.evaluate((u) => fetch(u, { mode: "no-cors" }).catch(() => "failed"), echoTarget);
+      await page.waitForTimeout(500);
+      return oracles.all.slice(from).filter((v) => v.kind === "console_error" && /^Failed to load resource/.test(v.detail));
+    };
+    const embedEchoes = await echoesAfter(frameAs("foreign")!);
+    const appEchoes = await echoesAfter(page.mainFrame());
+    const echoLines = JSON.stringify({ embedEchoes, appEchoes });
+    if (echoesFailedLoads(BROWSER)) {
+      check(
+        `${BROWSER}: an embed's failed load, echoed to the console, is the embed's at medium, not the app's console error`,
+        embedEchoes.length === 1 && embedEchoes[0].embed === foreignBaseUrl && embedEchoes[0].severity === "medium",
+        echoLines,
+      );
+      check(
+        "...while the app's own page failing the same load keeps its echo, high and the app's",
+        appEchoes.length === 1 && appEchoes[0].embed === undefined && appEchoes[0].severity === "high",
+        echoLines,
+      );
+    } else {
+      check(
+        `${BROWSER}: the browser prints no console line for a failed load, so none is charged to the app`,
+        embedEchoes.length === 0 && appEchoes.length === 0,
+        echoLines,
+      );
+    }
 
     console.log("frames: a frame inside another site's frame, its links, and the keyboard");
     const innerForeign = /(e\d+) textbox "Inner note"[^\n]*⟨in cross-origin frame/.exec(snap)?.[1];

@@ -23,7 +23,17 @@ import {
   stripForeignHref,
   frameToPageRect,
 } from "../src/engine/collector.ts";
-import { POLICY_BLOCK_WINDOW_MS, formatViolations, isPolicyInduced, redactViolation } from "../src/engine/oracles.ts";
+import { EventEmitter } from "node:events";
+import type { Page } from "playwright";
+import {
+  EmbedRequestLog,
+  OracleMonitor,
+  POLICY_BLOCK_WINDOW_MS,
+  failedLoadEchoOf,
+  formatViolations,
+  isPolicyInduced,
+  redactViolation,
+} from "../src/engine/oracles.ts";
 import {
   describeInjection,
   injectionProbe,
@@ -528,4 +538,73 @@ test("formatViolations: an embed's violation says whose it is", () => {
   ]);
   assert.match(out, /\[medium\] http_error \(in an embed of https:\/\/chat\.example\.com: its behaviour, not the app's\)/);
   assert.match(out, /\[high\] http_error: GET http:\/\/app\.test\/api/, "the app's own is unchanged");
+});
+
+test("failedLoadEchoOf: the browser's own line for a failed load names its request by location", () => {
+  const page = "http://app.test/checkout";
+  const cases: [string, string | undefined, string | null][] = [
+    // Chromium and WebKit: an error status, and a load that got no answer.
+    [
+      "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      "https://pay.example.com/api/x?y=1",
+      "https://pay.example.com/api/x?y=1",
+    ],
+    ["Failed to load resource: net::ERR_CONNECTION_REFUSED", "https://pay.example.com/api/x", "https://pay.example.com/api/x"],
+    // The fragment is never sent, so it is not part of the request.
+    ["Failed to load resource: the server responded with a status of 404 (Not Found)", "https://pay.example.com/a.png#top", "https://pay.example.com/a.png"],
+    // A relative location is resolved against the page.
+    ["Failed to load resource: the server responded with a status of 404 (Not Found)", "/api/things", "http://app.test/api/things"],
+    // Any other console error is not an echo, whatever its location says.
+    ["Uncaught TypeError: x is undefined", "https://pay.example.com/sdk.js", null],
+    ["Not allowed to use restricted network port 1: http://127.0.0.1:1/x", "https://pay.example.com/frame", null],
+    ["Error: Failed to load resource: whatever", "https://pay.example.com/x", null],
+    // An echo with no location cannot be matched to a request.
+    ["Failed to load resource: the server responded with a status of 500 (Internal Server Error)", undefined, null],
+    ["Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "", null],
+  ];
+  for (const [text, location, want] of cases) assert.equal(failedLoadEchoOf(text, location, page), want, `${text} @ ${location}`);
+});
+
+test("EmbedRequestLog: an echo follows the latest request to its address", () => {
+  const log = new EmbedRequestLog(3);
+  const echo500 = "Failed to load resource: the server responded with a status of 500 (Internal Server Error)";
+  const page = "http://app.test/";
+  log.note("https://pay.example.com/api/fail#frag", "https://pay.example.com");
+  assert.equal(log.embedOfEcho(echo500, "https://pay.example.com/api/fail", page), "https://pay.example.com");
+  assert.equal(log.embedOfEcho("Uncaught Error: boom", "https://pay.example.com/api/fail", page), null, "only the echo line follows the request");
+  assert.equal(log.embedOfEcho(echo500, "https://pay.example.com/api/other", page), null, "an address no embed requested is the app's");
+  // The app then requests the same address: its echo is the app's.
+  log.note("https://pay.example.com/api/fail", null);
+  assert.equal(log.embedOfEcho(echo500, "https://pay.example.com/api/fail", page), null);
+  // Bounded: the oldest address is dropped past the cap.
+  for (const n of [1, 2, 3, 4]) log.note(`https://pay.example.com/r${n}`, "https://pay.example.com");
+  assert.equal(log.embedOfEcho(echo500, "https://pay.example.com/r1", page), null);
+  assert.equal(log.embedOfEcho(echo500, "https://pay.example.com/r4", page), "https://pay.example.com");
+});
+
+test("OracleMonitor: an embed's failed load echoed to the console is the embed's; the app's echo stays the app's", () => {
+  const page = Object.assign(new EventEmitter(), { url: () => "http://app.test/checkout" });
+  const monitor = new OracleMonitor();
+  type FakeRequest = { url: () => string; from: string | null };
+  monitor.setEmbedAttribution((req) => (req as unknown as FakeRequest).from);
+  monitor.attach(page as unknown as Page);
+  const url = "https://pay.example.com/api/fail";
+  const echo = () =>
+    page.emit("console", {
+      type: () => "error",
+      text: () => "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      location: () => ({ url, lineNumber: 0, columnNumber: 0 }),
+    });
+  // The same request, once from the embed's frame and once from the app's own page.
+  page.emit("request", { url: () => url, from: "https://pay.example.com" });
+  echo();
+  page.emit("request", { url: () => url, from: null });
+  echo();
+  const [fromEmbed, fromApp] = monitor.drain();
+  assert.equal(fromEmbed.kind, "console_error");
+  assert.equal(fromEmbed.embed, "https://pay.example.com");
+  assert.equal(fromEmbed.severity, "medium", "an embed's echo is capped like its request");
+  assert.equal(fromApp.kind, "console_error");
+  assert.equal(fromApp.embed, undefined);
+  assert.equal(fromApp.severity, "high", "the app's own echo is unchanged");
 });

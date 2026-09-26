@@ -170,6 +170,19 @@ export function focusAdvanceKey(engine: BrowserEngineName, platform: NodeJS.Plat
 }
 
 /**
+ * Whether the browser prints a console error of its own for a subresource that
+ * failed: "Failed to load resource: the server responded with a status of
+ * 500 …" or "Failed to load resource: net::ERR_…". Chromium and WebKit do, and
+ * give the resource's address as the message's location; Firefox prints
+ * nothing. Where it is printed, the console oracle charges the line to
+ * whoever sent the request (oracles.ts `failedLoadEchoOf`), so one failing
+ * request inside an embed is not also filed as the app's console error.
+ */
+export function echoesFailedLoads(engine: BrowserEngineName): boolean {
+  return engine !== "firefox";
+}
+
+/**
  * Run in every page before its own scripts: takes shared workers away.
  *
  * A request issued by a shared worker cannot be intercepted in any browser, so
