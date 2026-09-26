@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Members · Fernbrook Library</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <a class="name" href="/" data-testid="nav-name">Fernbrook Library</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-home">Home</a>
+        <a href="/catalogue.html" data-testid="nav-catalogue">Catalogue</a>
+        <a href="/loans.html" data-testid="nav-loans">Loans</a>
+        <a href="/holds.html" data-testid="nav-holds">Holds</a>
+        <a href="/checkout.html" data-testid="nav-checkout">Check out</a>
+        <a href="/members.html" data-testid="nav-members" aria-current="page">Members</a>
+        <a href="/fines.html" data-testid="nav-fines">Fines</a>
+        <a href="/events.html" data-testid="nav-events">Events</a>
+        <a href="/account.html" data-testid="nav-account">Account</a>
+      </nav>
+      <a class="who" href="/signin.html" data-testid="nav-switch"><span id="who">member</span> · switch</a>
+    </header>
+    <main>
+      <h1>Members</h1>
+      <p class="intro">Everyone with a card at this branch.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Card</th>
+            <th>Name</th>
+            <th>On loan</th>
+            <th>Fines</th>
+          </tr>
+        </thead>
+        <tbody id="rows" data-testid="members-rows"></tbody>
+      </table>
+      <p class="error" id="err" role="alert" data-testid="members-error" hidden></p>
+    </main>
+    <footer>Fernbrook Library loans desk · invented data only</footer>
+    <script src="/app.js"></script>
+    <script>
+      fetch("/api/members").then(async (res) => {
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const err = document.getElementById("err");
+          err.textContent = body.error || "Could not load members (HTTP " + res.status + ").";
+          err.hidden = false;
+          return;
+        }
+        document.getElementById("rows").innerHTML = body
+          .map(
+            (m) =>
+              '<tr data-testid="members-row-' +
+              m.id +
+              '"><td>' +
+              m.id +
+              "</td><td>" +
+              fernbrook.esc(m.name) +
+              "</td><td>" +
+              m.loans +
+              "</td><td>$" +
+              m.fines.toFixed(2) +
+              "</td></tr>",
+          )
+          .join("");
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Home · Fernbrook Library</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <a class="name" href="/" data-testid="nav-name">Fernbrook Library</a>
+      <nav aria-label="Main">
+        <a href="/" data-testid="nav-home" aria-current="page">Home</a>
+        <a href="/catalogue.html" data-testid="nav-catalogue">Catalogue</a>
+        <a href="/loans.html" data-testid="nav-loans">Loans</a>
+        <a href="/holds.html" data-testid="nav-holds">Holds</a>
+        <a href="/checkout.html" data-testid="nav-checkout">Check out</a>
+        <a href="/members.html" data-testid="nav-members">Members</a>
+        <a href="/fines.html" data-testid="nav-fines">Fines</a>
+        <a href="/events.html" data-testid="nav-events">Events</a>
+        <a href="/account.html" data-testid="nav-account">Account</a>
+      </nav>
+      <a class="who" href="/signin.html" data-testid="nav-switch"><span id="who">member</span> · switch</a>
+    </header>
+    <main>
+      <h1>Good to see you</h1>
+      <p class="intro">Your loans, your holds and what is on at the branch.</p>
+      <div class="tiles">
+        <a class="panel tile" href="/loans.html" data-testid="home-loans"><span class="n" id="n-loans">–</span><span class="l">on loan</span></a>
+        <a class="panel tile" href="/loans.html" data-testid="home-overdue"><span class="n" id="n-overdue">–</span><span class="l">overdue</span></a>
+        <a class="panel tile" href="/holds.html" data-testid="home-holds"><span class="n" id="n-holds">–</span><span class="l">holds waiting</span></a>
+      </div>
+      <h2>Notices</h2>
+      <div class="panel" id="notices" data-testid="home-notices"><p class="muted">Loading notices…</p></div>
+      <p><a class="button go" href="/catalogue.html" data-testid="home-browse">Browse the catalogue</a></p>
+    </main>
+    <footer>Fernbrook Library loans desk · invented data only</footer>
+    <script src="/app.js"></script>
+    <script>
+      fetch("/api/summary")
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
+        .then((s) => {
+          document.getElementById("n-loans").textContent = s.loans;
+          document.getElementById("n-overdue").textContent = s.overdue;
+          document.getElementById("n-holds").textContent = s.holds;
+        })
+        .catch(() => {
+          for (const id of ["n-loans", "n-overdue", "n-holds"]) document.getElementById(id).textContent = "?";
+        });
+      fetch("/api/notices").then(async (r) => {
+        if (!r.ok) return;
+        const list = await r.json();
+        const box = document.getElementById("notices");
+        box.innerHTML = list.length
+          ? list.map((n) => "<p><strong>" + fernbrook.esc(n.title) + "</strong> " + fernbrook.esc(n.body) + "</p>").join("")
+          : '<p class="muted">No notices today.</p>';
+      });
+    </script>
+  </body>
+</html>
