@@ -75,7 +75,7 @@
       "severity": "medium",
       "level": "minimal",
       "match": [
-        "holds-drop",
+        "(unnamed|no.(accessible.)?name|name ?= ?\"\"|name \"\")[\\s\\S]{0,80}holds-drop|holds-drop[\\s\\S]{0,80}(unnamed|no.(accessible.)?name|name ?= ?\"\"|name \"\")",
         "(cancel|remove|drop|delete|icon|×).{0,40}(button|control).{0,80}(unnamed|no.(accessible.)?(name|label))",
         "(unnamed|icon.only).{0,80}\\bholds?\\b"
       ],
@@ -83,13 +83,16 @@
         "button \"(unnamed)\" testid=holds-drop-32",
         "Icon-only cancel button on the holds page has no accessible name",
         "Holds: the remove-hold buttons are unnamed",
-        "hold-cancel-button-no-accessible-name"
+        "hold-cancel-button-no-accessible-name",
+        "testid=holds-drop-* button name \"\"\nDrop-hold button has no accessible name or tooltip"
       ],
       "counterExamples": [
         "Cancelling your own hold removes the row",
         "DELETE /api/holds/31 403 for a member: That is not your hold",
         "Place hold button has no accessible label",
-        "book-hold-msg status region has no accessible name"
+        "book-hold-msg status region has no accessible name",
+        "click testid=holds-drop-35 -> DELETE /api/holds/35 no confirm\nDropping a hold is immediate with no confirmation or undo",
+        "DELETE /api/holds/35 then GET /api/holds omits 35\nholds-drop-own-hold-persists"
       ]
     },
     {
@@ -167,9 +170,9 @@
       "severity": "medium",
       "level": "medium",
       "match": [
-        "place hold.{0,100}(does nothing|nothing happens|no (feedback|message|request|response)|silent|0 (network )?requests?|does not respond|no.op|unchanged)",
-        "book-hold(?!-msg).{0,80}(nothing|0 (network )?requests?|no.op|silent|unchanged)",
-        "(silent|nothing happens|no.op).{0,60}place hold"
+        "^(?![\\s\\S]*(not found|no such book|unknown book|id=9{3,}))[\\s\\S]*place hold.{0,100}(does nothing|nothing happens|no (feedback|message|request|response)|silent|0 (network )?requests?|does not respond|no.op|unchanged)",
+        "^(?![\\s\\S]*(not found|no such book|unknown book|id=9{3,}))[\\s\\S]*book-hold(?!-msg).{0,80}(nothing|0 (network )?requests?|no.op|silent|unchanged)",
+        "^(?![\\s\\S]*(not found|no such book|unknown book|id=9{3,}))[\\s\\S]*(silent|nothing happens|no.op).{0,60}place hold"
       ],
       "examples": [
         "Place hold on an available book does nothing and says nothing",
@@ -179,7 +182,8 @@
       ],
       "counterExamples": [
         "Place hold on a book with every copy out says 'Hold placed. You are number 2 in the queue.'",
-        "A second hold on the same book is refused: That member already has a hold on this book"
+        "A second hold on the same book is refused: That member already has a hold on this book",
+        "/book.html?id=999 testid=book-hold visible, click → no request\n\"Book not found\" page still shows a Place hold button that does nothing"
       ]
     },
     {
@@ -200,9 +204,14 @@
         "Double-clicking Renew renews the loan twice",
         "2x POST /api/loans/202/renew — one double-click spends both renewals",
         "Renew stays enabled during the request; a double-click uses up both renewals",
-        "renew double-click: due date moves 28 days, renewed 2 of 2"
+        "renew double-click: due date moves 28 days, renewed 2 of 2",
+        "POST /api/loans/202/renew x2 -> 200,409; testid=loans-renew-202 enabled at 2 of 2\nRenew stays enabled at the renewal limit and a quick double-click reports an error"
       ],
-      "counterExamples": ["Renewing a third time is refused: A loan can be renewed 2 times", "Double-click on Join saves one seat"]
+      "counterExamples": [
+        "Renewing a third time is refused: A loan can be renewed 2 times",
+        "Double-click on Join saves one seat",
+        "testid=loans-renew-202 enabled at renewals=2; POST /api/loans/202/renew 409\nRenew button stays enabled on a loan already renewed 2 of 2 times"
+      ]
     },
     {
       "id": "checkout-false-success",
@@ -306,9 +315,208 @@
       "category": "ux-confusing",
       "severity": "low",
       "level": "medium",
-      "match": ["checkout.{0,60}(list|select|dropdown|options?).{0,80}(no copy|all on loan|unavailable|not on the shelf)"],
-      "examples": ["Checkout dropdown offers books that are all on loan", "Checkout book select lists titles with no copy on the shelf"],
-      "counterExamples": ["Checkout book select omits the withdrawn title"]
+      "match": [
+        "checkout.{0,60}(list|select|dropdown|options?).{0,80}(no copy|all on loan|unavailable|not on the shelf)",
+        "(book )?(dropdown|select).{0,40}(offers|lists).{0,40}(titles|books) with no cop(y|ies)",
+        "checkout-book.{0,40}(lists|offers).{0,40}available\\s*[:=]\\s*0"
+      ],
+      "examples": [
+        "Checkout dropdown offers books that are all on loan",
+        "Checkout book select lists titles with no copy on the shelf",
+        "testid=checkout-book lists available:0 titles; POST /api/loans 409\nBook dropdown offers titles with no copies available"
+      ],
+      "counterExamples": ["Checkout book select omits the withdrawn title", "\"Available now only\" filter keeps titles with no copies available"]
+    },
+    {
+      "id": "loans-renew-offered-at-limit",
+      "route": "/loans.html",
+      "title": "Renew stays enabled on a loan already renewed 2 of 2 times, and always fails",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": [
+        "^(?![\\s\\S]*(double|twice|\\bx2\\b|2x|×2|both renewals))[\\s\\S]*renew.{0,60}(enabled|offered|still (shown|available|clickable)).{0,60}(2 of 2|renewals=2|renewal limit|at (the )?limit|already renewed)",
+        "^(?![\\s\\S]*(double|twice|\\bx2\\b|2x|×2|both renewals))[\\s\\S]*(2 of 2|renewal limit|at (the )?limit|already renewed).{0,60}renew.{0,30}(enabled|offered|still shown)"
+      ],
+      "examples": [
+        "testid=loans-renew-202 enabled at renewals=2; POST /api/loans/202/renew 409\nRenew button stays enabled on a loan already renewed 2 of 2 times",
+        "Renew is still offered on a loan at the renewal limit",
+        "testid=loans-renew-202 enabled at renewals=2; POST /api/loans/202/renew 409\nrenew-enabled-at-limit-409"
+      ],
+      "counterExamples": [
+        "POST /api/loans/202/renew x2 -> 200,409; testid=loans-renew-202 enabled at 2 of 2\nRenew stays enabled at the renewal limit and a quick double-click reports an error",
+        "Third renewal refused with 409"
+      ]
+    },
+    {
+      "id": "checkout-double-submit",
+      "route": "/checkout.html",
+      "title": "Check out stays enabled while it saves, so a double-click lends the same book to one member twice",
+      "category": "data-inconsistency",
+      "severity": "medium",
+      "level": "medium",
+      "match": [
+        "(double|two).{0,15}(click|submit|press).{0,60}check.?out.{0,80}(two|2|duplicate|second) loans?",
+        "check.?out.{0,60}(double.?click|double.?submit|clicked twice).{0,80}(two|2|duplicate) loans",
+        "POST /api/loans (x2|×2|twice).{0,60}(loans \\d+,\\s*\\d+|two loans|duplicate)",
+        "check.?out.{0,60}double.?click.{0,80}(two loans|duplicate|lends.{0,40}twice)"
+      ],
+      "examples": [
+        "POST /api/loans x2 -> loans 210,211 book=3 member=M-1002\nDouble-clicking Check out creates two loans of the same book for one member",
+        "A double-click on Check out creates duplicate loans"
+      ],
+      "counterExamples": [
+        "click x2 testid=checkout-submit -> POST /api/loans x2 (both 403)\ncheckout-submit-double-click-fires-twice",
+        "Double-clicking Renew renews the loan twice"
+      ]
+    },
+    {
+      "id": "hold-on-withdrawn-book",
+      "route": "/book.html",
+      "title": "A hold can be placed on a withdrawn book, which has no copies to lend",
+      "category": "data-inconsistency",
+      "severity": "medium",
+      "level": "medium",
+      "match": [
+        "(hold|/api/holds).{0,80}(withdrawn|zero copies|no copies|copies\\s*[:=]\\s*0)",
+        "(withdrawn|zero cop|no copies).{0,60}hold (is )?(accepted|placed|created)"
+      ],
+      "examples": [
+        "POST /api/holds book=6 (copies=0) 201\nHold can be placed on a book withdrawn from the collection",
+        "POST /api/holds {book:6 copies:0} 201\nServer accepts a hold on a book with zero copies",
+        "POST /api/holds book=6 201 (copies=0)\nA hold can be placed on a withdrawn book with no copies",
+        "Place hold on Letters from the Estuary, which is withdrawn, says Hold placed. You are number 1 in the queue."
+      ],
+      "counterExamples": [
+        "The catalogue labels a title with no copies as withdrawn",
+        "Place hold on a book with every copy out says 'Hold placed. You are number 2 in the queue.'"
+      ]
+    },
+    {
+      "id": "book-not-found-hold-shown",
+      "route": "/book.html",
+      "title": "On a book that is not found, Place hold is still shown and does nothing",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": [
+        "(book not found|not found|no such book|unknown book|id=9{3,}).{0,120}(place hold|book-hold)",
+        "(place hold|book-hold).{0,120}(book not found|not.found page)"
+      ],
+      "examples": [
+        "/book.html?id=999 testid=book-hold visible, click → no request\n\"Book not found\" page still shows a Place hold button that does nothing",
+        "Place hold is visible on the Book not found page"
+      ],
+      "counterExamples": [
+        "GET /api/books/999 404; page shows \"Book not found\"\nbook-not-found-refused-empty-oracle",
+        "Place hold on an available book does nothing and says nothing"
+      ]
+    },
+    {
+      "id": "staff-hold-needs-member",
+      "route": "/book.html",
+      "title": "Place hold is offered to staff, but the page has no way to name the member, so it always fails",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": [
+        "a hold needs a member",
+        "(librarian|staff|branch head).{0,80}place hold.{0,80}(fails|refused|400|no way to (name|pick|choose))",
+        "place hold.{0,40}(offered|shown) to (staff|librarians?|a librarian).{0,80}(fails|no way to (name|pick|choose))"
+      ],
+      "examples": ["role=librarian testid=book-hold → \"A hold needs a member\"\nLibrarian is offered Place hold on the book page but it always fails"],
+      "counterExamples": ["A second hold on the same book is refused: That member already has a hold on this book"]
+    },
+    {
+      "id": "home-holds-plural",
+      "route": "/",
+      "title": "The home page's holds tile reads \"1 holds waiting\"",
+      "category": "ux-polish",
+      "severity": "low",
+      "level": "medium",
+      "match": ["\\b1 holds waiting", "holds.{0,40}(not )?(plural|pluralis|pluraliz)", "(plural|pluralis|pluraliz).{0,60}holds"],
+      "examples": [
+        "testid=home-holds text \"1 holds waiting\"\nHome holds tile does not pluralise: \"1 holds waiting\"",
+        "testid=home-holds text \"1 holds waiting\"\nHome shows \"1 holds waiting\" — count label not pluralised correctly"
+      ],
+      "counterExamples": ["Home holds tile shows 2 holds waiting"]
+    },
+    {
+      "id": "events-no-joined-state",
+      "route": "/events.html",
+      "title": "The events page never shows which events the member has joined",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": ["events?.{0,60}(never |does not |doesn't )?(show|mark|indicate)s?.{0,40}(already )?joined", "no (joined|booked) (state|marker|indicator)"],
+      "examples": [
+        "POST /api/events/2/join 200 {\"left\":19} repeated, no joined marker in testid=events-rows\nEvents page does not show which events the member has already joined",
+        "POST /api/events/1/join 200 {left:10} repeat; /events.html no joined state\nEvents page never shows which events you have already joined"
+      ],
+      "counterExamples": ["Joining an event takes one seat: left 20 -> 19", "Events page has no way to leave an event once joined"]
+    },
+    {
+      "id": "holds-no-status-or-position",
+      "route": "/holds.html",
+      "title": "The holds list does not say which holds are ready to collect or where each one is in its queue",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": [
+        "holds? (list|page|table|rows).{0,40}(does not|doesn't|never|no|lacks?|without|not).{0,30}(status|position|ready to collect)",
+        "rows lack status"
+      ],
+      "examples": ["GET /api/holds rows lack status/position; table columns Book,For,Placed\nHolds list does not show status or queue position"],
+      "counterExamples": ["Place hold on a book with every copy out says 'Hold placed. You are number 2 in the queue.'"]
+    },
+    {
+      "id": "holds-drop-no-confirmation",
+      "route": "/holds.html",
+      "title": "Dropping a hold happens in one click with no confirmation or undo, and the place in the queue is lost",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": [
+        "(drop(ping)?|cancel(ling)?|remov(e|ing)).{0,20}holds?.{0,60}(no confirm|without confirm|no undo|immediate)",
+        "holds-drop.{0,80}(no confirm|without confirm|immediately)"
+      ],
+      "examples": [
+        "click testid=holds-drop-35 -> DELETE /api/holds/35 no confirm\nDropping a hold is immediate with no confirmation or undo",
+        "click testid=holds-drop-35 -> DELETE immediately, no confirm\nholds-drop-no-confirmation"
+      ],
+      "counterExamples": ["testid=holds-drop-32 button accessible name \"\"\nHold \"drop\" buttons have no accessible name"]
+    },
+    {
+      "id": "holds-drop-double-click-error",
+      "route": "/holds.html",
+      "title": "Drop stays enabled while it saves, so a double-click drops the hold and then shows \"No such hold\"",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": ["DELETE /api/holds/\\d+ (x2|×2|twice)", "(double.?click|clicked twice).{0,40}drop.{0,120}no such hold", "drop.{0,20}double.?click"],
+      "examples": [
+        "DELETE /api/holds/36 x2 -> 200 then 404; testid=holds-error \"No such hold\"\nDouble-clicking drop removes the hold but shows \"No such hold\" error",
+        "DELETE /api/holds/37 x2 -> 404; testid=holds-error \"No such hold\"\nDouble-click on drop fires DELETE twice and shows \"No such hold\" after a successful drop",
+        "DELETE /api/holds/36 x2 -> 200 then 404; testid=holds-error \"No such hold\"\nholds-drop-double-click-error"
+      ],
+      "counterExamples": ["DELETE /api/holds/32 403 for a member: That is not your hold", "DELETE /api/holds/999 404 No such hold"]
+    },
+    {
+      "id": "fines-waive-no-confirmation",
+      "route": "/fines.html",
+      "title": "Waive clears a member's fine in one click with no confirmation or undo",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": ["waiv(e|ing).{0,80}(no confirm|without confirm|no undo|one click)", "(no confirm|without confirm).{0,60}waiv"],
+      "examples": [
+        "click testid=fines-waive-M-1002 -> POST /api/fines/M-1002/waive 200, no confirm\nWaive removes a fine in one click with no confirmation or undo",
+        "testid=fines-waive-M-1004 click×2 -> POST /api/fines/M-1004/waive ×2 200\nWaive button fires twice on a rapid double-click and gives no confirmation or feedback"
+      ],
+      "counterExamples": [
+        "POST /api/fines/M-1004/waive 403 as librarian: Only the branch head can waive a fine",
+        "click x2 testid=fines-waive-M-1002 -> 2x POST /api/fines/M-1002/waive 200 {fines:0}\nwaive-double-click-fires-twice-idempotent"
+      ]
     }
   ],
   "nonDefects": [
@@ -336,10 +544,12 @@
       "id": "renew-limit-refused",
       "title": "A third renewal is refused",
       "why": "A loan may be renewed twice; the third is refused with a 409 and the page shows the reason.",
-      "match": ["^(?![\\s\\S]*(double|twice|2x|both renewals))[\\s\\S]*(third renewal|renew(ed|al)?.{0,30}(limit|2 times)).{0,60}(409|refused)"],
+      "match": [
+        "^(?![\\s\\S]*(double|twice|2x|both renewals|enabled|offered|still (shown|available|clickable)))[\\s\\S]*(third renewal|renew(ed|al)?.{0,30}(limit|2 times)).{0,60}(409|refused)"
+      ],
       "overrides": [],
       "examples": ["Third renewal refused with 409", "Renewal limit reached: POST /api/loans/203/renew 409 refused"],
-      "counterExamples": []
+      "counterExamples": ["testid=loans-renew-202 enabled at renewals=2; POST /api/loans/202/renew 409\nrenew-enabled-at-limit-409"]
     },
     {
       "id": "hold-duplicate-refused",
@@ -374,6 +584,105 @@
       "overrides": [],
       "examples": ["WRITE-POLICY blocked DELETE /api/holds/31 (safe-write)"],
       "counterExamples": []
+    },
+    {
+      "id": "export-link-styled-as-body-text",
+      "title": "The Download my data link is styled like body text",
+      "why": "It is drawn as a button: a 1px border, padding and rounded corners. Its text colour and missing underline are what a button-styled link looks like, so the claim that it reads as body text is false. It is also clipped out of sight, which is the planted defect and a different claim.",
+      "match": [
+        "(account-export|download my data).{0,80}(styled.(like|as).body.text|looks?.like.body.text|like body text|indistinguishable from (body )?text|no underline)"
+      ],
+      "overrides": ["account-export-clipped"],
+      "examples": [
+        "testid=account-export no underline, color == body text\nDownload my data link is styled like body text",
+        "testid=account-export no underline, color == body text\naccount-export-link-looks-like-body-text",
+        "testid=account-export no underline, color == body text\naccount-export-link-styled-as-body-text"
+      ],
+      "counterExamples": [
+        "testid=account-export unreachable: clipped by overflow-hidden ancestor of testid=account-data-panel\n\"Download my data\" link is clipped out of view inside the data panel",
+        "testid=account-export clipped by overflow-hidden testid=account-data-panel"
+      ]
+    },
+    {
+      "id": "available-checkbox-unnamed",
+      "title": "The Available now only checkbox has no accessible name",
+      "why": "The checkbox sits inside its label, so its accessible name is \"Available now only\", and clicking the label text toggles it: the click target is the whole label, about 151x23 px, not the 13x13 box. The box is drawn at the browser's default size. A lane read the name as \"checkbox\" from the snapshot; the accessibility tree has the label's text.",
+      "match": [
+        "(catalogue-available|available.(now.)?only|availab\\w*.(filter.)?checkbox).{0,80}(no.accessible.name|unnamed|name=\"checkbox\"|13x13)",
+        "availab\\w*.{0,40}checkbox.{0,40}(no.accessible.name|13x13)"
+      ],
+      "overrides": [],
+      "examples": [
+        "testid=catalogue-available name=\"checkbox\" 13x13px\nAvailability filter checkbox has no accessible name and a 13x13 target",
+        "testid=catalogue-available name=\"checkbox\" 13x13px\nAvailable-only checkbox has no accessible name and a 13x13 target",
+        "testid=catalogue-available name=\"checkbox\" 13x13px\navailable-checkbox-no-accessible-name-13px"
+      ],
+      "counterExamples": ["'Available now only' still lists books that are all on loan", "Place hold button has no accessible label"]
+    },
+    {
+      "id": "fines-refused-to-member",
+      "title": "The fines page refuses a member",
+      "why": "Fines are handled by staff. The server refuses a member with a 403 and the page says so, and the header's navigation is on the page, so it is not a dead end. The note that only the branch head can waive a fine is true for every role but the head.",
+      "match": ["(fines (page|list)|/api/fines(?!/)).{0,60}(403|refus|forbidden|dead.?end|handled at the desk)"],
+      "overrides": [],
+      "examples": [
+        "role=member GET /api/fines 403 testid=fines-error shown\nFines page linked for members but is a dead end showing a waive note that does not apply",
+        "GET /api/fines 403 -> testid=fines-error 'Fines are handled at the desk'"
+      ],
+      "counterExamples": [
+        "POST /api/fines/M-1004/waive 403 as librarian: Only the branch head can waive a fine",
+        "/events-joined.html is a dead end: no navigation, no links"
+      ]
+    }
+  ],
+  "contextual": [
+    {
+      "id": "nav-links-unstyled",
+      "route": "/",
+      "title": "Nav links have no underline and a colour close to the body text's",
+      "category": "ux-polish",
+      "reason": "Link styling depends on position. A link inside a navigation bar is recognisable as a link by where it is, and WCAG's distinguishable-links rule (1.4.1) is aimed at links in running text; whether nav links must also be underlined or coloured is the project's own convention. The same entry is contextual in the demo's key.",
+      "match": [
+        "\\bnav.{0,20}links?.{0,60}(underline|unstyled|colou?r|affordance|body text)",
+        "nav links?.{0,60}indistinguishable",
+        "testid=nav-\\w+.{0,40}no underline"
+      ],
+      "examples": [
+        "testid=nav-home no underline, color=body text (8 links)\nShared chrome: nav links are unstyled and indistinguishable from body text",
+        "design-audit 8 links no underline same colour as body e.g. nav-catalogue\nshared-chrome-nav-links-body-colour",
+        "design_audit /: 8 links no underline same color [nav-catalogue]\nnav-links-same-color-as-text"
+      ],
+      "counterExamples": [
+        "testid=account-export no underline, color == body text\nDownload my data link is styled like body text",
+        "Links in paragraph text have no underline and the body text's colour"
+      ]
+    },
+    {
+      "id": "missing-testid",
+      "route": "/loans.html",
+      "title": "A link or control has no data-testid",
+      "category": "missing-testid",
+      "reason": "A data-testid is a test-automation convention, not something a user meets. It is a defect only where the project requires one on every interactive element. This app puts one on most controls, so a run can see the habit, but not whether it is a rule; the demo's key counted one as real before this list existed.",
+      "match": ["(missing|no|without|lacks?) (a )?data-testid", "data-testid.{0,20}missing", "missing.testid"],
+      "examples": [
+        "loans.html a[href^=\"/book.html\"] missing data-testid\nBook title links in the loans table have no data-testid",
+        "loans.html a[href^=\"/book.html\"] missing data-testid\nloans-book-links-missing-testid"
+      ],
+      "counterExamples": ["testid=holds-drop-32 button accessible name \"\""]
+    },
+    {
+      "id": "events-not-in-date-order",
+      "route": "/events.html",
+      "title": "The events list is not in date order",
+      "category": "ux-confusing",
+      "reason": "The page states no order and offers no sort control that misbehaves. Listing events soonest first is a common expectation, not one the app declares, so whether this order is wrong is the project's call.",
+      "match": ["events?.{0,40}not.(in.)?(date|chronological)", "not.chronological", "not.(in.)?date.order"],
+      "examples": [
+        "testid=events-row-3 date 2026-09-28 after testid=events-row-2 date 2026-10-07\nEvents list is not in date order",
+        "testid=events-row-3 date 2026-09-28 after testid=events-row-2 date 2026-10-07\nevents-list-not-chronological",
+        "GET /api/events order 2026-10-01, 2026-10-07, 2026-09-28\nevents-not-in-date-order"
+      ],
+      "counterExamples": ["Joining an event takes one seat: left 20 -> 19"]
     }
   ]
 }

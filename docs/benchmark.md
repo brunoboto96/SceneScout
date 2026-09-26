@@ -107,7 +107,11 @@ example or counter-example in the same change.
   were the next unseen runs: against the key of the day they left 1, 5 and 3
   findings unlabelled and one ambiguous, and those judgements are now in the
   key as well. Runs 9 and 10 left 4 each (precision bounded at 87–100% and
-  83–100%); those are judged and in the key too.
+  83–100%); those are judged and in the key too. The held-out key is in the
+  same position after its first two runs: beyond the thirteen planted defects,
+  one also-real entry and six non-defects it started with, every entry was
+  judged from what those runs reported (see
+  [Held-out runs 1 and 2](#held-out-runs-1-and-2)).
 - **A negated claim still matches.** "Export CSV works, no error" is credited
   as the Export CSV defect: the key recognises *what* a finding is about, not
   whether it says the thing is broken. Findings are filed as defects, so this
@@ -179,6 +183,8 @@ The rules that keep it held out:
 - **Its planted defects stay planted.** `holdout-test` fails if a well-meant
   fix removes one, because every held-out score before and after would stop
   being comparable.
+
+Its runs are reported in [Held-out results](#held-out-results).
 
 ## Results
 
@@ -563,6 +569,163 @@ What the numbers do **not** show:
   dashboard's broken image; lanes closed before their reports were folded, so
   nothing was kept for calibration until they were re-attached; and the report
   gate counted design audits per session, which forced the planner to run one.
+
+## Held-out results
+
+Each row is one run of the [held-out app](#the-held-out-app) at `medium`, in
+`safe-write`, eight parallel lanes, re-scored by `npm run bench -- --all`
+against key `4ffabb6bd3`. A struck value is the same run under the key the runs
+were made against, `77ebf9b0d9`. Nothing in this table is kept or rejected:
+held-out runs are reported, never optimised against.
+
+| Run | Date | What changed | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Lane calibration | Cost | Kept? |
+|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
+| holdout-1 | 2026-09-26 | **Engine 3.10.0 (wave 1)**, first held-out run; briefs written by an agent that saw the app only through the browser | 9/10 | ~~11/11 (100%)~~ 15/18 (83%) | 20 (2 set aside) | ~~9~~ 0 | ~~0~~ 3 | 0 | ~~19/21 (90%), ECE 0.13, Brier 0.111~~ 23/26 (88%), ECE 0.12, Brier 0.098 | not recorded | — |
+| holdout-2 | 2026-09-26 | Repeat of holdout-1, same briefs | ~~8/10~~ 7/10 | ~~11/11 (100%)~~ 22/23 (96%) | 24 (1 set aside) | ~~13~~ 0 | ~~0~~ 1 | 0 | ~~18/20 (90%), ECE 0.15, Brier 0.069~~ 29/32 (91%), ECE 0.16, Brier 0.113 | not recorded | — |
+
+### Held-out runs 1 and 2
+
+The held-out app is the check on the demo: a second app nothing is tuned
+against, so a gain that shows on the demo and not here was learned from the
+demo. These are its first two runs, on engine 3.10.0, the engine of demo runs 9
+and 10. The eight lane briefs were written by an agent that saw the app only
+through the browser and never read its key, its `server.mjs` or its README's
+spoilers table; both runs used the same briefs, a fresh app and a fresh project
+directory.
+
+| Defect | holdout-1 | holdout-2 |
+|---|:---:|:---:|
+| Overdue tag contrast 1.84:1 | found | missed |
+| Place hold on a book with copies on the shelf does nothing | missed | missed (a near miss, below) |
+| Renew double-click spends both renewals | found | missed |
+| Every other planted defect at `medium` (7) | found | found |
+| Stored XSS in reviews (above `medium`) | found | found |
+
+Recall was 9/10 and 7/10. What the archives show about the misses:
+
+- **Place hold, both runs.** No lane clicked Place hold on a book with a copy
+  on the shelf; the holds the lanes placed were on books all out on loan, or
+  withdrawn. A coverage miss, not a judgement one.
+- **The overdue tag, run 2.** The loans lane renewed the member's only overdue
+  loan (its own decisions record the overdue count going to 0), after which the
+  page has no overdue tag to measure. The archive does not keep the order, so
+  whether the audit ran before or after is not known.
+- **The renew double-submit, run 2.** The lane renewed one loan twice in
+  sequence (0 → 1 → 2) and did not double-click. Lane behaviour, as with the
+  demo's double-submit in runs 2–7.
+
+**Near misses, decided by what the planted defect is:**
+
+- Run 2's "Book not found page still shows a Place hold button that does
+  nothing" was credited, under the old key, as the Place hold no-op. It is a
+  different defect: the page sets `hidden` on the button, which the
+  stylesheet's `display: inline-block` for buttons overrides, and the handler
+  returns early because there is no book. The planted defect is a real book
+  with copies on the shelf. It is now its own also-real entry and the planted
+  entry's counter-example, which is why run 2's recall fell from 8 to 7.
+- Run 2's "Renew button stays enabled on a loan already renewed 2 of 2 times"
+  is not the double-submit: it is the button offered where the server always
+  refuses, one click, one 409 with a clear message. It is a separate low
+  also-real entry, on the same terms as the demo's "Request approval still
+  offered on a pending order". Run 1's "Renew stays enabled at the renewal
+  limit and a quick double-click reports an error" *is* the double-submit:
+  its evidence is two renew requests from one double-click (200, then 409),
+  which is the planted mechanism, though the loan had only one renewal left to
+  spend.
+- Run 2's "Double-clicking Check out creates two loans of the same book for
+  one member" is real and not planted: the checkout button is not disabled
+  while it saves either. It is also-real, not a match for the renew defect.
+- "A hold on a book with zero copies" and "a hold on a withdrawn book" are the
+  same defect (the one zero-copy title is the withdrawn one), and one entry.
+  The same `hidden` override means the page also offers Place hold on the
+  withdrawn book, so this one is reachable without calling the API.
+
+**Precision and the key.** Under the key the runs were made against, precision
+was 11/11 in both runs and meant little: 9 and 13 findings were unlabelled, so
+all it could say was 55–100% and 46–100%. The key has since been completed
+from these runs' findings, judged against the app's source, so **these rows
+are the first runs the held-out key never saw, and its new entries were judged
+from what these same runs found**; the next held-out run is the first scored
+by a key that was not fitted to it. The judgements:
+
+- **Real, new to the key (11):** Renew offered at the renewal limit; a
+  double-click on Check out lending one book twice; a hold accepted on a
+  withdrawn book; Place hold shown on a book that is not found; Place hold
+  offered to staff with no way to name a member, so it always fails; "1 holds
+  waiting"; the events page never showing which events a member joined; the
+  holds list not saying which holds are ready or where each is in its queue;
+  dropping a hold and waiving a fine each in one click with no confirmation
+  or undo (irreversible for the member, as the demo's Delete workspace); and a
+  double-click on a hold's drop button dropping it and then showing "No such
+  hold".
+- **Real, a rewording of an entry the key had:** the checkout book list
+  offering titles with no copy on the shelf.
+- **Not a defect (3), each with the false claim as its matcher:** the Download
+  my data link "styled like body text" (it is a bordered button); the
+  Available now only checkbox "has no accessible name and a 13x13 target"
+  (it is wrapped in its label, whose text names it and is part of the click
+  target); and the fines page "a dead end" for a member (it refuses a member
+  with a 403, says so, and keeps the header's navigation), as the key already
+  treats the members page.
+- **Contextual (3):** nav links without an underline, as on the demo; a link
+  with no `data-testid`, because a test id is a project convention no user
+  meets (the app uses them on most controls, so a run sees the habit but not
+  whether it is a rule; the demo's key counts one missing test id as real, from
+  before it had a contextual list, and is not changed here); and the events
+  list not being in date order, which the page never claims.
+
+Four matches in the old key were wrong, and each is fixed: the `holds-drop` test-id
+pattern claimed every finding about that button (so run 2's "no confirmation"
+counted as a duplicate of the unnamed button, and two correct "dropping works"
+verdicts in run 1 were scored as wrong); the third-renewal non-defect claimed
+"Renew is still offered at the limit"; the Place hold no-op claimed the
+not-found page; and the export-clipped pattern claimed the "styled like body
+text" finding by its test id (now overridden by that finding's non-defect).
+One finding in each run names the home page's notices 500 on the account page;
+it stays counted as that defect: the request is the home page's, reported by a
+lane that saw it in the network log.
+
+**Calibration** is 23/26 and 29/32. Under the old key it was 19/21 and 18/20,
+and three of its four wrong verdicts were the mis-matches above. The wrong
+verdicts now are the lanes' own verdicts on the three false positives in run 1;
+in run 2, the verdicts on the export link's styling and the checkbox, plus one
+"not a defect" on the notices 500 whose reason is that it is the home lane's, worded ("home lane") in a way the dismissal rule does not
+read, like the demo's runs 9 and 10. Run 2's Brier rose (0.069 → 0.113)
+because eleven verdicts stated at 0.4–0.6 are now judged where before most
+were not.
+
+**Against the demo on the same engine** (runs 9 and 10, 3.10.0):
+
+| | Demo runs 9, 10 | Held-out runs 1, 2 |
+|---|---|---|
+| Recall | 13/13, 11/13 (24/26, 92%) | 9/10, 7/10 (16/20, 80%) |
+| Precision (labelled) | 100%, 100% | 83%, 96% |
+| False positives | 0, 0 | 3, 1 |
+| Brier | 0.123, 0.109 | 0.098, 0.113 |
+
+Recall is lower on the held-out app, and the misses are not where a demo-only
+engine would put them. Of the four `medium` defects that share kind and
+mechanism with a demo defect (double-submit, dead end, false success,
+contrast), run 1 found 4 and run 2 found 2; of the six that work by other
+mechanisms, each run found 5. Every miss traces to what a lane did or did not
+do, not to a finding judged wrong. The briefs also differ: the demo's were
+revised against its own scores after run 0, these were written blind, so the
+gap mixes transfer with brief authorship. One run each is a direction, not a
+size: on a ten-defect app one defect is 10 points of recall.
+
+**An engine observation, recorded and not fixed here.** In run 2 the account
+lane filed "export link styled as body text", and SceneScout's finding dedup
+merged it into a different finding on the same element, the link clipped out
+of view: two distinct findings on one element became one. The merged-away
+claim is judged not a defect above, so run 2's score lost nothing (run 1, which
+kept both, took a false positive for it), but the same merge would hide a real
+second defect on an element that already has one. A fix belongs to the dedup
+and is measured on the demo and the test fixtures, not tuned here.
+
+A second, from both runs: the evidence for the checkbox finding gives its name
+as `"checkbox"`, while the browser's accessibility tree names it "Available
+now only" from the label that wraps it. Where that name came from is not in the
+archive; it is recorded so it can be checked, not fixed against this app.
 
 ## Rejected and not-yet-tried
 
