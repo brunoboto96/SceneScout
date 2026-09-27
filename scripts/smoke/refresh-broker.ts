@@ -124,6 +124,34 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       "...and none says it brokered anything",
       opened.every((e) => e.refreshSummary() === ""),
     );
+    for (const engine of opened.splice(0)) await engine.close();
+
+    // ---- A login saved since that no longer holds the token's slot ---------
+    // The role is signed in again as something the broker cannot map the
+    // session's token onto (here a cookie sign-in, with no stored session).
+    // The session's refresh goes out as is, and the new login is left alone.
+    await recordProfile(baseUrl, project);
+    const lone = new BrowserEngine();
+    opened.push(lone);
+    await lone.attach({ url: `${baseUrl}/rt-app`, projectDir: project, mode: "read-only", role: "member", refreshBroker: true });
+    check("the lone lane starts signed in", (await verdict(lone)) === "in");
+    const newLogin = {
+      cookies: [
+        { name: "fixture_session", value: "another-sign-in", domain: "127.0.0.1", path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Lax" },
+      ],
+      origins: [],
+    };
+    writeProfile(project, "member", newLogin);
+    const savedLogin = fs.readFileSync(profilePath(project, "member"), "utf8");
+    const loneStart = refreshFamilies();
+    expireFixtureAccess();
+    await lone.navigate(`${baseUrl}/rt-app`);
+    check("a refresh whose slot is gone from the profile is still sent, and the lane stays signed in", (await verdict(lone)) === "in");
+    check("...it did refresh", refreshFamilies().rotations === loneStart.rotations + 1, JSON.stringify({ loneStart, now: refreshFamilies() }));
+    // Closing waits for any write-back still in flight, so what is on disk after it is final.
+    await lone.close();
+    check("...and the login saved since is not overwritten by the lane's state", fs.readFileSync(profilePath(project, "member"), "utf8") === savedLogin);
+    check("...and no lock is left behind", !fs.existsSync(lockPathFor(profilePath(project, "member"))));
   } finally {
     for (const engine of opened) await engine.close().catch(() => {});
     fs.rmSync(project, { recursive: true, force: true });
