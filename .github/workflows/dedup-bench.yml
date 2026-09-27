@@ -1,0 +1,81 @@
+# The finding-dedup benchmark with the model judge: `npm run dedup-bench --
+# --judge` on the pairs built from the archived runs, scored against the
+# answer keys. The model's key is a repository secret, which is why this runs
+# here rather than on a laptop. How it is read: docs/benchmark.md, "Finding
+# dedup as a measured decision".
+#
+# It commits nothing: the scorecard goes to the job summary and is uploaded as
+# an artifact, and the result is recorded by hand in a pull request.
+#
+# Only workflow_dispatch, never pull_request or pull_request_target: the job
+# holds the key, so it runs only code someone with write access chose. Only the
+# step that calls the model holds the key. ci-test holds this workflow to that.
+name: dedup-bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      efforts:
+        description: Reasoning efforts to judge at, comma-separated (none, low, medium, high, xhigh, max).
+        type: string
+        default: none,low
+      provider:
+        description: The model's provider. Only its key reaches the run.
+        type: choice
+        options: [openai]
+        default: openai
+
+permissions:
+  contents: read
+
+jobs:
+  judge:
+    name: dedup judge
+    runs-on: ubuntu-latest
+    # One call per pair per effort, 200 pairs, one at a time: 400 calls at the
+    # default efforts, and a higher effort takes longer per call.
+    timeout-minutes: 180
+    steps:
+      # No actions cache anywhere in this job (setup-node's included): what a
+      # job holding a key saves, later runs would restore.
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      # --ignore-scripts: no dependency's install script runs in a job that holds a key.
+      - run: npm ci --ignore-scripts
+
+      - name: Judge the pairs
+        shell: bash
+        env:
+          OPENAI_API_KEY: ${{ inputs.provider == 'openai' && secrets.OPENAI_API_KEY || '' }}
+          EFFORTS: ${{ inputs.efforts }}
+          PROVIDER: ${{ inputs.provider }}
+          OUT: ${{ runner.temp }}/dedup-bench
+        run: |
+          if ! [[ "$EFFORTS" =~ ^[a-z]+(,[a-z]+)*$ ]]; then echo "::error::efforts must be a comma-separated list of effort names, not $EFFORTS"; exit 1; fi
+          # Without the key the script scores the rule alone and reports the judge as not run: fail rather than record that as a result.
+          if [ -z "$OPENAI_API_KEY" ]; then echo "::error::the OPENAI_API_KEY secret is not set"; exit 1; fi
+          mkdir -p "$OUT"
+          npm run -s dedup-bench -- --judge --efforts "$EFFORTS" --provider "$PROVIDER" | tee "$OUT/scorecard.txt"
+          # The script redacts the key from what it prints; this is the check before anything leaves the runner.
+          if grep -qF -- "$OPENAI_API_KEY" "$OUT/scorecard.txt"; then echo "::error::the key appears in the scorecard; nothing is uploaded"; rm -f "$OUT/scorecard.txt"; exit 1; fi
+          { echo "### Dedup benchmark, judge at efforts $EFFORTS"; echo; echo '```'; cat "$OUT/scorecard.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the scorecard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dedup-bench-scorecard
+          path: ${{ runner.temp }}/dedup-bench/scorecard.txt
+          if-no-files-found: error
+
+      # After the upload, so the scorecard of a judge whose calls failed is kept to read.
+      # A refused or exhausted key does not stop the script: each failed call falls back
+      # to the rule and is counted, so a judge with too few answers says "no figures".
+      - name: The judge answered at every effort
+        shell: bash
+        env:
+          CARD: ${{ runner.temp }}/dedup-bench/scorecard.txt
+        run: |
+          if grep -q 'not run (' "$CARD"; then echo "::error::the judge did not run at every effort"; exit 1; fi
+          if grep -E '\] judge .*no figures$' "$CARD"; then echo "::error::the judge answered too few pairs to score (see the failures in the scorecard)"; exit 1; fi
