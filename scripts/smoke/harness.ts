@@ -210,6 +210,15 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       });
       return;
     }
+    // A sign-in the page beacons as it is left, answered late with a 307 to an ordinary save: the save is a request the
+    // engine hears of well after the page sent the sign-in, so after a flow has handed back to the crawl's rule.
+    if (urlPath === "/api/handback/login") {
+      setTimeout(() => {
+        res.writeHead(307, { location: "/api/handback/saved" });
+        res.end();
+      }, 1500);
+      return;
+    }
     // A write carried on by a redirect: a 307 keeps the method and the body, to a destructive address.
     if (urlPath === "/api/unload/redirect") {
       res.writeHead(307, { location: "/api/unload/redirected/delete" });

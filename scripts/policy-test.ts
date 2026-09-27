@@ -36,6 +36,9 @@ import {
   POLICY_REFUSAL_HEADER,
   policyRefusal,
   WRITE_MODES,
+  LOOSENED_RULE_HOLD_MS,
+  stricterMode,
+  WriteRule,
 } from "../src/engine/policy.ts";
 import {
   deriveCollection,
@@ -855,6 +858,34 @@ test("a write the route handler let through is claimed once, under the mode it w
   for (let i = 0; i < 250; i++) ledger.note("observe", "POST", `http://app.test/api/n/${i}`, "", 3000);
   assert.equal(ledger.claim("observe", "POST", "http://app.test/api/n/0", "", 3000), false, "the oldest are dropped past the cap");
   assert.equal(ledger.claim("observe", "POST", "http://app.test/api/n/249", "", 3000), true);
+});
+
+test("a write heard of just after a flow hands back is judged by the flow's rule, not the crawl's it hands back to", () => {
+  // The race: a beacon the flow's page sent as it was left, under observe, paused at the browser level 20 ms after the
+  // crawl's read-only rule came back. Judged by the rule in force when it was heard of, read-only let it out.
+  const rule = new WriteRule("read-only");
+  rule.set("observe", 1000);
+  assert.equal(rule.at(1000), "observe", "tightening applies at once");
+  rule.set("read-only", 2000);
+  assert.equal(rule.at(2020), "observe", "the flow's rule still judges a write heard of 20 ms after the hand-back");
+  assert.equal(rule.at(2000 + LOOSENED_RULE_HOLD_MS), "observe");
+  assert.equal(rule.at(2000 + LOOSENED_RULE_HOLD_MS + 1), "read-only", "and only for the hold: the crawl gets its own rule back");
+  // The hold runs from the loosening, not from the tightening: a flow that ran longer than the hold is still covered.
+  const long = new WriteRule("read-only");
+  long.set("observe", 1000);
+  long.set("read-only", 1000 + 3 * LOOSENED_RULE_HOLD_MS);
+  assert.equal(long.at(1000 + 3 * LOOSENED_RULE_HOLD_MS + 20), "observe");
+  // Two hand-backs in a row: each looser step is held, so the strictest recent one judges.
+  const steps = new WriteRule("observe");
+  steps.set("read-only", 1000);
+  steps.set("safe-write", 1500);
+  assert.equal(steps.at(1600), "observe");
+  assert.equal(steps.at(1000 + LOOSENED_RULE_HOLD_MS + 1), "read-only");
+  assert.equal(steps.at(1500 + LOOSENED_RULE_HOLD_MS + 1), "safe-write");
+  assert.deepEqual(
+    WRITE_MODES.map((m) => stricterMode(m, "read-only")),
+    ["observe", "read-only", "read-only", "read-only"],
+  );
 });
 
 test("a harmless write let through never excuses another body to the same URL: the ledger's key includes the body", () => {
