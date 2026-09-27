@@ -1138,8 +1138,7 @@ Without them the demo had 8,508 pairs (1,972 same), accuracy 81.1%, Brier 0.189
 | Held-out, all pairs | 181 | 49 / 132 | current rule | 86.2% | 0.138 (0.30) | 0.138 [n=153 stated 0 actual 0.15; n=28 stated 1 actual 0.93] | 2 | 23 |
 | Demo, sample | 100 | 21 / 79 | current rule | 81.0% | 0.190 (−0.15) | 0.190 [n=98 / n=2] | 0 | 19 |
 | Held-out, sample | 100 | 30 / 70 | current rule | 86.0% | 0.140 (0.33) | 0.140 [n=82 / n=18] | 1 | 13 |
-| Both samples | 200 | | model judge, effort none | owed | owed | owed | | |
-| Both samples | 200 | | model judge, effort low | owed | owed | owed | | |
+| Both samples | 200 | | model judge, efforts none and low | see [judge runs](#judge-run-1-refused-parse-no-usable-comparison) | | | | |
 
 The rule almost never merges wrongly and leaves most same-entry pairs apart.
 On the demo its Brier is slightly worse than always stating the base rate
@@ -1151,17 +1150,76 @@ useful part: stated 0 is right 80% of the time on the demo.
 **The model judge is measured, not used.** `npm run dedup-bench -- --judge
 --efforts none,low` asks a model about each of the 200 sampled pairs (cap split
 evenly between the apps) through the `scenescout ci` provider adapters, one
-tool call per pair returning `same`/`different`/`unsure` and `p_same`; unsure
+tool call per pair returning `same`/`different`/`unsure` and its confidence
+in that verdict, from which `p_same` is derived (same at confidence c is c,
+different is 1 − c; run 1 asked for `p_same` directly); unsure
 answers are counted and left out of the figures, and a failed call falls back
 to the rule and is counted as failed. It needs `OPENAI_API_KEY` or
 `ANTHROPIC_API_KEY`: the Messages API has no effort `none`, so on Anthropic only
 `low` runs. Cost is one call per pair per effort, a few hundred input tokens
-each, printed at the end of a run. No key was available when this was built,
-so the judge rows are owed; the `dedup-bench` workflow (dispatched by hand) runs
-the judge with the repository's `OPENAI_API_KEY` secret and puts the scorecard
-in its job summary and an artifact. The judge is not wired into the store: it replaces
-the rule only if its Brier beats the rule's on these pairs, at a pair count and
-on both apps, and until then the rule is the only thing that dedups.
+each, printed at the end of a run. The `dedup-bench` workflow (dispatched by
+hand) runs the judge with the repository's `OPENAI_API_KEY` secret and puts the
+scorecard in its job summary and an artifact. The judge is not wired into the
+store: it replaces the rule only if its Brier beats the rule's on these pairs,
+at a pair count and on both apps, and until then the rule is the only thing
+that dedups.
+
+### Judge run 1: refused-parse, no usable comparison
+
+One dispatch of the `dedup-bench` workflow on 2026-09-27, OpenAI `gpt-6-luna`
+at efforts `none` and `low`, on the 200 sampled pairs. Keys `c1786bc817` (demo)
+and `b5a7933f32` (held-out), unchanged; 22 archives (19 demo, 3 held-out), so
+the pair set is larger than in the table above: 407 findings placed on a page
+(left out: 15 identical text, 7 unmatched, 0 ambiguous, 25 known non-defect).
+The rule rows below are from the same run and the same sample, the only
+comparison the judge rows may be read against. One run per effort: no noise
+floor is measured.
+
+| App | Pairs | Same / different | Decider | Scored | Unsure | Failed | Accuracy | Brier (skill vs base rate) | ECE [equal-count buckets over p_same] | Wrong merges | Missed merges |
+|---|---:|---|---|---:|---:|---:|---:|---|---|---:|---:|
+| Demo, all pairs | 10,327 | 2,427 / 7,900 | current rule | 10,327 | 0 | 0 | 80.4% | 0.196 (−0.09) | 0.196 [n=9,925 stated 0 actual 0.20; n=402 stated 1 actual 1.00] | 0 | 2,025 |
+| Held-out, all pairs | 213 | 61 / 152 | current rule | 213 | 0 | 0 | 85.9% | 0.141 (0.31) | 0.141 [n=178 stated 0 actual 0.16; n=35 stated 1 actual 0.94] | 2 | 28 |
+| Demo, sample | 100 | 21 / 79 | current rule | 100 | 0 | 0 | 82.0% | 0.180 (−0.08) | 0.180 [n=97 stated 0 actual 0.19; n=3 stated 1 actual 1.00] | 0 | 18 |
+| Held-out, sample | 100 | 32 / 68 | current rule | 100 | 0 | 0 | 86.0% | 0.140 (0.36) | 0.140 [n=82 stated 0 actual 0.17; n=18 stated 1 actual 1.00] | 0 | 14 |
+| Demo, sample | 100 | 21 / 79 | judge, effort none | 39 (18 same) | 0 | 61 | 100.0% of 39 | 0.000 of 39 | 0.010 [n=8 stated 0.00 actual 0.00; n=12 stated 0.01 actual 0.00; n=19 stated 0.93 actual 0.95] | | |
+| Held-out, sample | 100 | 32 / 68 | judge, effort none | 52 (31 same) | 0 | 48 | 100.0% of 52 | 0.000 of 52 | 0.005 [n=13 stated 0.00 actual 0.00; n=11 stated 0.27 actual 0.27; n=25 stated 0.99 actual 1.00; n=3 stated 1.00 actual 1.00] | | |
+| Demo, sample | 100 | 21 / 79 | judge, effort low | 37 (19 same) | 0 | 63 | 100.0% of 37 | 0.000 of 37 | 0.011 [n=8 stated 0.00 actual 0.00; n=10 stated 0.01 actual 0.00; n=18 stated 0.98 actual 1.00; n=1 stated 1.00 actual 1.00] | | |
+| Held-out, sample | 100 | 32 / 68 | judge, effort low | 50 (31 same) | 0 | 50 | 100.0% of 50 | 0.000 of 50 | 0.008 [n=16 stated 0.00 actual 0.00; n=10 stated 0.68 actual 0.70; n=22 stated 0.99 actual 1.00; n=2 stated 1.00 actual 1.00] | | |
+
+**Most of the judge's answers could not be read, so its figures are not
+comparable to the rule's.** Of 400 calls, 222 were refused by the parser, and
+220 of those for one reason: the verdict `different` with `p_same` between
+0.84 and 0.999 (the other two were tool arguments that were not valid JSON,
+over 30,000 characters long). The judge's accuracy and Brier are therefore
+over the 37 to 52 pairs per app whose answers were coherent, a subset the
+judge selected itself. The subset leans towards "same" pairs (31 of 52 on the
+held-out sample against 32 of 100 in the sample), because the refused answers
+were all "different". A Brier of 0.000 on that subset says the coherent
+answers were right and confident, not that the judge beats the rule on these
+pairs: the rule's 0.140 and 0.180 are over all 100. The run also printed
+identical token totals at both efforts (66,397 input, none cached, and 21,373
+output). The accounting was checked against a stand-in API and counts each
+effort apart; the likely reading is that neither effort produced reasoning
+tokens, each usable answer cost the same few output tokens, and at each
+effort one call ran to the 16,000-token output cap (the two replies whose
+arguments were cut-off JSON): 16,000 + 199 × 27 = 21,373. That is inferred,
+not shown; run 2 prints each call's output tokens. No cost is given for run 1.
+
+**Decision: the judge is not wired in, and the rule stays.** The rule of
+[#185](https://github.com/brunoboto96/SceneScout/pull/185) asks for the judge's
+Brier to beat the rule's on these pairs, on both apps. This run has no Brier for
+the judge on these pairs: over half of each sample is missing, and not at
+random. This records a negative result for this configuration of the judge.
+It does not show that a model judge cannot beat the rule.
+
+**What the run suggested.** The refused answers look like `p_same` read as
+confidence in the stated verdict, not the probability of "same". One bounded
+edit, to the judge's tool contract only, is made for run 2: the judge states
+the verdict and its confidence in it, `p_same` is derived from the two, a
+confidence below 0.5 is still refused and counted as a contradiction, and each
+pair's judgement, the rule's verdict, the key's label and the call's output
+tokens are written to a per-pair file (ids only), so the judge and the rule
+can be compared pair by pair.
 
 ## Rejected and not-yet-tried
 

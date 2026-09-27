@@ -57,16 +57,18 @@ jobs:
           # Without the key the script scores the rule alone and reports the judge as not run: fail rather than record that as a result.
           if [ -z "$OPENAI_API_KEY" ]; then echo "::error::the OPENAI_API_KEY secret is not set"; exit 1; fi
           mkdir -p "$OUT"
-          npm run -s dedup-bench -- --judge --efforts "$EFFORTS" --provider "$PROVIDER" | tee "$OUT/scorecard.txt"
+          npm run -s dedup-bench -- --judge --efforts "$EFFORTS" --provider "$PROVIDER" --pairs "$OUT/pairs.jsonl" | tee "$OUT/scorecard.txt"
           # The script redacts the key from what it prints; this is the check before anything leaves the runner.
-          if grep -qF -- "$OPENAI_API_KEY" "$OUT/scorecard.txt"; then echo "::error::the key appears in the scorecard; nothing is uploaded"; rm -f "$OUT/scorecard.txt"; exit 1; fi
+          if grep -qF -- "$OPENAI_API_KEY" "$OUT/scorecard.txt" "$OUT/pairs.jsonl"; then echo "::error::the key appears in the scorecard or the per-pair lines; nothing is uploaded"; rm -f "$OUT/scorecard.txt" "$OUT/pairs.jsonl"; exit 1; fi
           { echo "### Dedup benchmark, judge at efforts $EFFORTS"; echo; echo '```'; cat "$OUT/scorecard.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep the scorecard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dedup-bench-scorecard
-          path: ${{ runner.temp }}/dedup-bench/scorecard.txt
+          path: |
+            ${{ runner.temp }}/dedup-bench/scorecard.txt
+            ${{ runner.temp }}/dedup-bench/pairs.jsonl
           if-no-files-found: error
 
       # After the upload, so the scorecard of a judge whose calls failed is kept to read.
