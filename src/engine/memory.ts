@@ -783,6 +783,29 @@ function sameFinding(
   return findingJaccard(findingTokens(a.title), findingTokens(b.title)) >= 0.5;
 }
 
+/** A finding's stored id: its category, title and route, so the same finding filed twice hashes the same. */
+export function findingId(f: Pick<Finding, "category" | "title" | "state">): string {
+  return shortHash(`${f.category}|${f.title.toLowerCase().trim()}|${f.state.split("#")[0]}`);
+}
+
+/**
+ * The dedup rule `addFinding` applies: whether `incoming` is the finding
+ * `existing` already records. The same id; or, on the same route, the same
+ * finding by evidence, a quoted literal or title overlap (sameFinding); or,
+ * from any route, the same endpoint failing the same way (sameEndpointBug).
+ * Exported so the benchmark scores the rule the store runs, not a copy of it.
+ */
+export function isDuplicateFinding(
+  existing: Pick<Finding, "id" | "category" | "title" | "state" | "status"> & { detail?: string; evidence?: string },
+  incoming: Pick<Finding, "category" | "title" | "state"> & { detail?: string; evidence?: string },
+): boolean {
+  return (
+    existing.id === findingId(incoming) ||
+    (existing.state.split("#")[0] === incoming.state.split("#")[0] && sameFinding(existing, incoming)) ||
+    sameEndpointBug(existing, incoming)
+  );
+}
+
 /** Per-project directory for memory, session logs, and reports. */
 export const MEMORY_DIRNAME = ".scenescout";
 /** The one directory under it that is committed rather than ignored: saved flows (flow.ts). */
@@ -1641,9 +1664,8 @@ export class MemoryStore {
       url: redactSecrets(input.url),
       evidence: input.evidence ? redactSecrets(input.evidence) : input.evidence,
     };
-    const route = f.state.split("#")[0];
-    const id = shortHash(`${f.category}|${f.title.toLowerCase().trim()}|${route}`);
-    const existing = this.data.findings.find((x) => x.id === id || (x.state.split("#")[0] === route && sameFinding(x, f)) || sameEndpointBug(x, f));
+    const id = findingId(f);
+    const existing = this.data.findings.find((x) => isDuplicateFinding(x, f));
     if (existing) {
       existing.runs += 1;
       existing.foundAt = new Date().toISOString();
