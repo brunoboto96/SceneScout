@@ -1050,6 +1050,22 @@ file each judged defect. Recall stayed at 5/13 and precision was 6/6 labelled
 noisy, but the edit did not move the behaviour it targeted, so it was
 rejected and the rules are unchanged.
 
+**Rejected: asking the OpenAI request for parallel tool calls (ci-parallel-1).**
+Unattended runs make about one tool call per model turn, so the 40-turn cap
+bounds how much of the app a run reaches. The candidate edit set
+`parallel_tool_calls: true` on the Responses API request, with the prompt,
+caps, model and effort unchanged; the Anthropic request was confirmed to send
+no `tool_choice`, so parallel tool use is not disabled there. The loop already
+runs every call in a reply, up to 16, and answers each with its own output.
+One run: all 40 turns carried exactly one call (distribution 40 × 1), the run
+stopped at the turn cap, and recall stayed at 5/13 against ci-run-1's 5/13 on
+the same model and effort, with two defects gained (the double submit, the
+approve endpoint accepting a clerk) and two lost (the badge covering its
+button, the hint's contrast), which is within one run's noise. The Responses
+API's own default for the parameter is already `true`, so the edit changed
+nothing the model sees; single calls are the model's choice, not the
+request's. The change was reverted and no second run was spent.
+
 <!-- ci-results:start (generated from bench/ci-results.json by scripts/bench/ci-record.ts; do not edit by hand) -->
 
 | Date | App | Version | Source | Provider · model · effort | Key | Recall | Precision (bounds) | Brier | Ended | Turns | Tokens in (cached) / out | Wall | Cost |
@@ -1058,6 +1074,7 @@ rejected and the rules are unchanged.
 | 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · medium | c1786bc817 | 3/13 | 3/3 (100%) | — | turns | 40 | 885,574 (858,517) / 3,152 | 1m 38s | $0.013 |
 | 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 6/6 (86%–100%) | — | done | 27 | 533,110 (509,907) / 1,730 | 1m 05s | $0.008 |
 | 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · medium | c1786bc817 | 4/13 | 5/5 (100%) | — | done | 65 | 1,657,036 (1,620,750) / 7,123 | 2m 55s | $0.023 |
+| 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | turns | 40 | 826,683 (802,609) / 1,597 | 1m 18s | $0.011 |
 
 <!-- ci-results:end -->
 
