@@ -109,6 +109,9 @@ export function settle(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** The session cookie the fixture's cookie sign-in sets. */
+export const SIGN_IN_COOKIE = "fixture_session";
+
 /** A loopback origin (the fixture server's other port), or "" for anything else: a redirect built from a query parameter goes nowhere else. */
 function loopbackOrigin(value: string | null): string {
   return value && /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(value) ? value : "";
@@ -367,6 +370,26 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     if (urlPath.startsWith("/api/documents/") && req.method === "PUT") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    // A cookie sign-in, as an SSO callback ends: one GET sets a session cookie
+    // and sends the browser on to the account page. /cookie-account then serves
+    // the signed-in page or its signed-out pair by that cookie alone, and
+    // /cookie-signout clears it.
+    if (urlPath === "/cookie-signin") {
+      res.writeHead(302, { location: "/cookie-account", "set-cookie": `${SIGN_IN_COOKIE}=member; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600` });
+      res.end();
+      return;
+    }
+    if (urlPath === "/cookie-signout") {
+      res.writeHead(302, { location: "/cookie-account", "set-cookie": `${SIGN_IN_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0` });
+      res.end();
+      return;
+    }
+    if (urlPath === "/cookie-account") {
+      const signedIn = (req.headers.cookie ?? "").split(/;\s*/).includes(`${SIGN_IN_COOKIE}=member`);
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, signedIn ? "cookie-account.html" : "cookie-account-signed-out.html")));
       return;
     }
     // Extensionless /login, because the engine's auth heuristic matches a path

@@ -141,6 +141,7 @@ import {
   unseenWriteSource,
   type UnseenWriteVerdict,
 } from "./unload.js";
+import { loginCommand, permissionNote, resolveAttachAuth, roleLabel, type AttachAuth } from "./profiles.js";
 
 export type { WriteMode } from "./policy.js";
 
@@ -148,6 +149,12 @@ export interface AttachOptions {
   url: string;
   projectDir: string;
   storageStatePath?: string;
+  /**
+   * A role whose profile `scenescout login` saved under .scenescout/auth/.
+   * Each session that names it gets its own context built from that file.
+   * Refused together with storageStatePath.
+   */
+  role?: string;
   mode?: WriteMode;
   headed?: boolean;
   /** Which browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else Chromium. */
@@ -455,8 +462,10 @@ export class BrowserEngine {
   /** Origins named as trusted embeds (policy.ts trustsEmbedWrite decides when that counts). */
   trustedEmbeds = new Set<string>();
   private trustNotice = "";
-  /** Human label for the auth identity driving this session (the server sets it from the storage-state filename). */
+  /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
   role = "anonymous";
+  /** How the attached session signed in: a role profile, a storage-state file, or not at all. */
+  auth: AttachAuth = { kind: "none" };
   /** Named-session id (the server sets it; every engine shares one MemoryStore, so
    *  per-session reads of the interleaved action log must filter by this). */
   sessionKey = "default";
@@ -946,9 +955,20 @@ export class BrowserEngine {
   }
 
   async attach(opts: AttachOptions): Promise<string> {
+    // Resolved before anything is closed, so a bad role or a missing profile
+    // leaves a live session as it was.
+    const auth = resolveAttachAuth({ projectDir: opts.projectDir, url: opts.url, role: opts.role, storageStatePath: opts.storageStatePath });
+    const storageStatePath = auth.kind === "none" ? undefined : auth.storageStatePath;
+    if (storageStatePath && !fs.existsSync(storageStatePath)) {
+      throw new Error(`storageStatePath does not exist: ${storageStatePath}`);
+    }
     await this.close();
-    if (opts.storageStatePath && !fs.existsSync(opts.storageStatePath)) {
-      throw new Error(`storageStatePath does not exist: ${opts.storageStatePath}`);
+    this.auth = auth;
+    this.role = roleLabel(auth);
+    let profileNote = "";
+    if (auth.kind === "role") {
+      const note = permissionNote(auth.storageStatePath, fs.statSync(auth.storageStatePath).mode);
+      if (note) profileNote = `\n⚠ ${note}`;
     }
     this.currentMode = opts.mode ?? "read-only";
     this.writeRule = new WriteRule(this.currentMode);
@@ -1032,7 +1052,7 @@ export class BrowserEngine {
       this.engineName = opts.browser ?? defaultEngine(process.env);
       this.browser = await this.launchWithRecovery(this.engineName, opts.headed ?? false);
       this.context = await this.browser.newContext({
-        storageState: opts.storageStatePath,
+        storageState: storageStatePath,
         viewport: opts.viewport ?? { width: 1280, height: 900 },
         serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
@@ -1328,16 +1348,19 @@ export class BrowserEngine {
     // Whether a bounce verdict can matter later: only a session carrying
     // credentials has any to lose, and only it pays for watching the URL on
     // every navigation. An anonymous crawl keeps its full speed.
-    this.watchesForBounce = Boolean(opts.storageStatePath);
+    this.watchesForBounce = Boolean(storageStatePath);
     const landed = await this.stableUrl();
-    const authFailed = Boolean(opts.storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), landed, this.baseUrl);
+    const authFailed = Boolean(storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), landed, this.baseUrl);
     // An earlier run may have written down how this app's login state is
     // regenerated. "Regenerate it" is advice the reader already had; the
     // command that worked last time is the part worth keeping.
     const recipe = authFailed ? this.memory.setupRecipe() : [];
     const authWarning = authFailed
-      ? `\n⚠ AUTH FAILED — the storage state at ${opts.storageStatePath} did not produce a signed-in session: ` +
-        `attaching landed on ${landed}, a login page. Regenerate it (its token has most likely expired) and re-attach. ` +
+      ? `\n⚠ AUTH FAILED — the storage state at ${storageStatePath} did not produce a signed-in session: ` +
+        `attaching landed on ${landed}, a login page. ` +
+        (auth.kind === "role"
+          ? `Record it again with \`${loginCommand(auth.role, this.baseUrl)}\` (its session has most likely expired) and re-attach. `
+          : `Regenerate it (its token has most likely expired) and re-attach. `) +
         `Continuing now tests a logged-out app.` +
         (recipe.length > 0
           ? `\n  Recorded by an earlier run under setup:\n${recipe.map((line) => `    · ${line}`).join("\n")}`
@@ -1347,11 +1370,12 @@ export class BrowserEngine {
       `Attached to ${this.page.url()} (mode=${this.mode}` +
       `${this.engineName === "chromium" ? "" : `, browser=${this.engineName}, service workers blocked because their requests cannot be intercepted here`}` +
       `${focusAdvanceKey(this.engineName, process.platform) === "Tab" ? "" : `, keyboard: Tab stops only at text fields in this browser — press Alt+Tab to reach buttons and links`}` +
-      `${opts.storageStatePath ? `, auth=${opts.storageStatePath}` : ""}). ` +
+      `${auth.kind === "role" ? `, role=${auth.role}` : auth.kind === "file" ? `, auth=${auth.storageStatePath}` : ""}). ` +
       `Memory: ${this.memory.dir}.${this.memory.loadWarning ? ` WARNING: ${this.memory.loadWarning}` : ""}` +
       (this.memory.prunedStates > 0 ? ` Trimmed ${this.memory.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
       `${this.memory.legacyDirNote ? ` ${this.memory.legacyDirNote}` : ""}` +
       `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""}${this.trustNotice} Call scout_snapshot to see the current state.` +
+      profileNote +
       authWarning
     );
   }
