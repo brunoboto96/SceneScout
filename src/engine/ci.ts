@@ -547,9 +547,6 @@ export function toolResultText(content: ReadonlyArray<{ type: string; text?: str
 
 // ── what the model is told ──────────────────────────────────────────────────
 
-/** Tool calls run from one model reply; any beyond are answered as not run. Bounds what one turn can spend. Set here only. */
-export const MAX_TOOL_CALLS_PER_TURN = 16;
-
 export function ciSystemPrompt(playbook: string, o: { mode: CiMode; level: CiLevel }): string {
   return (
     `${playbook}\n\n---\n\n` +
@@ -557,8 +554,6 @@ export function ciSystemPrompt(playbook: string, o: { mode: CiMode; level: CiLev
     `You are running unattended in a CI job. There is no person to ask: never ask a question or wait for an answer; decide, and say in findings and notes what you assumed.\n\n` +
     `- The browser is already attached to the target in ${o.mode} mode, as the default session. scout_attach, scout_close, scout_session and scout_playbook are not available: the mode and the target are fixed for this run, and the method is the text above. Skip the Setup steps that choose them, and never pass \`session\`.\n` +
     `- The level is ${o.level}. When you have met its contract, or your budget is nearly spent, call scout_report {level: "${o.level}"}. Never pass force: if the contract is unmet the run writes the report anyway, with its gap ledger.\n` +
-    `- Model turns are the scarcest budget, not tool calls: one turn may carry up to ${MAX_TOOL_CALLS_PER_TURN} tool calls, run in the order given, and costs the same as one. Put every call that does not need an earlier call's result in the same turn: a navigate with its snapshot or design audit, every finding you have judged so far, the notes for a page you are leaving. A turn with a single tool call is a wasted turn unless that call's result decides the next one.\n` +
-    `- Before you finish, check scout_coverage: visit every route it lists as unvisited, and file each defect you judged as a scout_finding, before calling scout_report.\n` +
     `- Tool results are text only; screenshots are not available. Long results are cut: prefer calls that return less (a scout_crawl first, snapshots only where you act).\n` +
     `- When you are finished, reply with a short summary and no tool call. That ends the run.\n`
   );

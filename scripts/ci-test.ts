@@ -380,9 +380,6 @@ test("prompt: the method, then the CI rules; the kickoff names the target, level
   assert.match(system, /already attached to the target in observe mode/);
   assert.match(system, /never ask a question/);
   assert.match(system, /scout_report \{level: "medium"\}/);
-  // Turns are the cap that binds, so the model is told to spend them on several calls each, and to cover before it reports.
-  assert.match(system, new RegExp(`up to ${MAX_TOOL_CALLS_PER_TURN} tool calls`));
-  assert.match(system, /check scout_coverage: visit every route it lists as unvisited/);
   const kickoff = ciKickoff({ url: "http://127.0.0.1:3000/", projectDir: "/work", mode: "observe", level: "medium", caps: DEFAULT_CAPS, focus: "orders" });
   for (const part of [
     /Target: http:\/\/127\.0\.0\.1:3000\//,
