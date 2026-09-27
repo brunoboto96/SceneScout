@@ -407,7 +407,6 @@ test("anthropic: the request caches the method, carries effort and tools; a repl
   assert.deepEqual(body.system, [{ type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } }]);
   assert.deepEqual(body.tools, [{ name: "scout_crawl", description: "crawl", input_schema: { type: "object", properties: {} } }]);
   assert.deepEqual(body.output_config, { effort: "low" });
-  assert.equal(body.tool_choice, undefined, "no tool_choice, so disable_parallel_tool_use is never set and a reply may carry several calls");
   assert.deepEqual(body.messages, [{ role: "user", content: "KICKOFF" }]);
   const content = [
     { type: "thinking", thinking: "", signature: "sig" },
@@ -461,7 +460,6 @@ test("openai: the request is stateless, with encrypted reasoning, effort and fun
   assert.equal(body.store, false);
   assert.deepEqual(body.include, ["reasoning.encrypted_content"]);
   assert.deepEqual(body.reasoning, { effort: "low" });
-  assert.equal(body.parallel_tool_calls, true, "parallel tool calls are asked for explicitly");
   assert.deepEqual(body.tools, [
     { type: "function", name: "scout_crawl", description: "crawl", parameters: { type: "object", properties: {} }, strict: false },
   ]);

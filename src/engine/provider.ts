@@ -95,7 +95,6 @@ export class AnthropicConversation implements Conversation {
         // And the growing conversation: the top-level breakpoint moves to its last block on every call.
         cache_control: { type: "ephemeral" },
         output_config: { effort: this.o.effort },
-        // No tool_choice: parallel tool use stays on (it is only off under disable_parallel_tool_use).
         messages: this.messages,
       },
     };
@@ -164,9 +163,6 @@ export class OpenAIConversation implements Conversation {
         instructions: this.o.system,
         input: this.input,
         tools: this.o.tools.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.parameters, strict: false })),
-        // Several independent calls in one reply, each answered by its own
-        // function_call_output: a run's turn cap then buys more than one action a turn.
-        parallel_tool_calls: true,
         reasoning: { effort: this.o.effort },
         max_output_tokens: MAX_OUTPUT_TOKENS,
         // Stateless: nothing of the tested app is kept on the provider's side
