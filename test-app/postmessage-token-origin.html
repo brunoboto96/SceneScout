@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Signed in</title>
+  </head>
+  <body>
+    <!--
+      The correct counterpart to postmessage-token.html: the same message,
+      the same token under access_token, posted with the page's own origin as
+      targetOrigin, so the browser drops it for any other origin. The
+      postmessage_token oracle must stay quiet here.
+    -->
+    <h1>Signed in</h1>
+    <p data-testid="signin-status">You can close this window.</p>
+    <a href="/index.html" data-testid="signin-home-link">Back to the app</a>
+    <script>
+      // An invented token, assembled here so no JWT-shaped literal sits in the repository.
+      const part = (o) => btoa(JSON.stringify(o)).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+      const token = [part({ alg: "HS256", typ: "JWT" }), part({ sub: "demo-user", scope: "read write", exp: 4102444800 }), "c2lnbmF0dXJlLWludmVudGVkLWZvci10ZXN0cw"].join(".");
+      // A sign-in callback handing its result to whoever opened it (itself, when opened directly).
+      const target = window.opener || window.parent;
+      target.postMessage({ type: "signed-in", access_token: token }, window.location.origin);
+    </script>
+  </body>
+</html>

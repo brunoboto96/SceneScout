@@ -418,6 +418,7 @@ is the one file a test cannot reach without launching a browser
 | What may leave the page, and what a refused request is told | `policy.ts`, `ownership.ts` | `policy-test`, `smoke/contradiction` |
 | Page contradicts the server | `claims.ts` | `claims-test`, `smoke/contradiction` |
 | Typed markup coming back as an element | `injection.ts` | `oracle-test`, `smoke/injection` |
+| A token posted with targetOrigin `"*"` | `postmessage.ts` | `oracle-test`, `smoke/postmessage` |
 | What a lane hands back | `lane.ts` | `lane-test` |
 | Whether its confidence held up | `calibration.ts` | `calibration-test` |
 | Splitting the app between lanes | `brief.ts` | `brief-test` |
