@@ -33,6 +33,8 @@ import {
   MAX_SELECT_OPTIONS,
   requestsDisagree,
   isEmbedKey,
+  isWorthALook,
+  mergeTier,
 } from "../src/engine/memory.ts";
 import {
   FORMS_READ_FAILED,
@@ -109,6 +111,61 @@ test("dedup tier 1: the same normalized evidence merges across rephrased titles"
   const [, new2] = store.addFinding({ ...base, title: "Reports endpoint denies User role on every load", detail: "y", evidence: "get /api/reports  403" });
   assert.equal(new1, true, "first finding should be new");
   assert.equal(new2, false, "same evidence signature should merge");
+});
+
+test("worth a look: a defect wins a merge either way, and an unknown tier on disk reads as a defect", () => {
+  const look = { tier: "worth_a_look" as const, convention: "a 4px spacing scale" };
+  assert.deepEqual(mergeTier(look, {}), {}, "filed again as a defect: promoted, convention dropped");
+  assert.deepEqual(mergeTier({}, look), {}, "a defect stays a defect when someone later calls it worth a look");
+  assert.deepEqual(mergeTier(look, { tier: "worth_a_look", convention: "another" }), look, "the first convention is kept");
+  assert.deepEqual(mergeTier({ tier: "worth_a_look" }, look), look, "a missing convention is filled in");
+  assert.equal(isWorthALook({ tier: "worth_a_look" }), true);
+  assert.equal(isWorthALook({}), false);
+  assert.equal(isWorthALook({ tier: "something-newer" as never }), false, "never out of the defect count on a value this version does not know");
+
+  const store = freshStore();
+  const evidence = "padding 13px off a 4px grid";
+  const [first] = store.addFinding({ ...base, category: "visual", title: "Off-grid padding", detail: "x", evidence, ...look });
+  assert.equal(first.tier, "worth_a_look");
+  assert.equal(first.severity, "medium");
+  const [again, isNew, promoted] = store.addFinding({ ...base, severity: "high", category: "visual", title: "Off-grid padding", detail: "x", evidence });
+  assert.equal(isNew, false);
+  assert.equal(promoted, true, "the merge reply can say it was promoted");
+  assert.equal(again.id, first.id);
+  assert.equal(again.tier, undefined, "promoted to a defect");
+  assert.equal(again.convention, undefined);
+  assert.equal(again.severity, "high", "at the severity the defect was filed at");
+  const [, , twice] = store.addFinding({ ...base, severity: "low", category: "visual", title: "Off-grid padding", detail: "x", evidence });
+  assert.equal(twice, false, "a defect filed again is not a promotion");
+  assert.equal(store.findings.find((f) => f.id === first.id)?.severity, "high", "and a plain re-find keeps its severity as before");
+});
+
+test("worth a look: two stores writing one memory at once never demote a defect back to worth a look", () => {
+  const a = freshStore();
+  const look = {
+    ...base,
+    severity: "low" as const,
+    category: "visual",
+    title: "Off-grid padding",
+    detail: "x",
+    evidence: "paddings off a 4px grid: 7px, 13px",
+  };
+  const [first] = a.addFinding({ ...look, tier: "worth_a_look", convention: "a 4px spacing scale" });
+  a.flush();
+  // A second process opens the same memory and files the same thing as a defect.
+  const b = openStore(path.dirname(a.dir));
+  const [promoted] = b.addFinding({ ...look, severity: "high" });
+  assert.equal(promoted.tier, undefined);
+  b.flush();
+  // The first process, still holding its worth-a-look, re-finds it later and writes: the newer copy is its own.
+  a.findings.find((f) => f.id === first.id)!.foundAt = new Date(Date.now() + 60_000).toISOString();
+  a.addFinding({ ...look, tier: "worth_a_look", convention: "a 4px spacing scale" });
+  a.flush();
+  const onDisk = (
+    JSON.parse(fs.readFileSync(path.join(a.dir, "memory.json"), "utf8")) as { findings: Array<{ id: string; tier?: string; severity: string }> }
+  ).findings.find((f) => f.id === first.id);
+  assert.equal(onDisk?.tier, undefined, "the defect another store recorded survives the merge");
+  assert.equal(onDisk?.severity, "high", "at the defect's severity, not the worth-a-look's");
 });
 
 test("dedup: differing evidence never fuzzy-merges", () => {

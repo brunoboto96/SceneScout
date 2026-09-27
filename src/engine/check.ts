@@ -114,11 +114,49 @@ export const CHECK_RULES = {
   },
 } as const satisfies Record<string, { severity: CheckSeverity; title: string; help: string }>;
 
-export type CheckRule = keyof typeof CHECK_RULES;
-export const CHECK_RULE_IDS = Object.keys(CHECK_RULES) as CheckRule[];
+/**
+ * Rules whose measurement is exact and whose meaning depends on a convention
+ * of the project the check cannot see. SceneScout is used against any app, so
+ * it does not decide those conventions: these are listed as "worth a look",
+ * each naming the convention that would make it a defect, and never counted,
+ * given a severity or gated on, at any --fail-on. SARIF reports them at level
+ * "note". `convention` finishes the sentence "a defect only if your project
+ * uses …". --ignore takes them like any other rule.
+ */
+export const WORTH_A_LOOK_RULES = {
+  "off-grid-spacing": {
+    title: "Spacing off a 4px grid",
+    help: "More than a fifth of the page's paddings or vertical margins are not multiples of 4px. That matters where a project keeps a 4px spacing scale, and not where it uses another scale or none.",
+    convention: "a 4px spacing scale",
+  },
+  "indistinct-link": {
+    title: "Link styled like body text",
+    help: "Links with no underline, in the same colour as the page's body text. In running text a reader cannot tell them from the text around them; in navigation this styling is common, and the check cannot tell the two apart.",
+    convention: "a visible link style (an underline or a distinct colour) wherever links appear, navigation included",
+  },
+} as const satisfies Record<string, { title: string; help: string; convention: string }>;
+
+export type DefectRule = keyof typeof CHECK_RULES;
+export type WorthALookRule = keyof typeof WORTH_A_LOOK_RULES;
+export type CheckRule = DefectRule | WorthALookRule;
+export const CHECK_RULE_IDS = [...Object.keys(CHECK_RULES), ...Object.keys(WORTH_A_LOOK_RULES)] as CheckRule[];
+
+export function isWorthALookRule(rule: string): rule is WorthALookRule {
+  return Object.prototype.hasOwnProperty.call(WORTH_A_LOOK_RULES, rule);
+}
+
+/** An observation in the "worth a look" tier: no severity, never in the gate, and the convention that would decide it. */
+export interface CheckObservation {
+  rule: WorthALookRule;
+  evidence: string;
+  routes: string[];
+  /** Finishes "a defect only if your project uses …". */
+  convention: string;
+  fingerprint: string;
+}
 
 export interface CheckIssue {
-  rule: CheckRule;
+  rule: DefectRule;
   severity: CheckSeverity;
   /** The fact, stable across runs: no snapshot refs, no ports. What dedup and fingerprints key on. */
   evidence: string;
@@ -192,21 +230,30 @@ export function geometryRule(line: string): CheckRule | null {
  * oracles caught while it ran. The second kind goes through the same rules as
  * a crawled page's, so a request that fails on load and again inside a flow is
  * one issue, not two.
+ *
+ * A fact under a worth-a-look rule goes to `worthALook` instead, deduplicated
+ * the same way; the two lists never share an entry.
  */
-export function issuesFromRoutes(
+export function checkFindings(
   routes: readonly RouteHealth[],
   origin: string,
   ignore: readonly CheckRule[] = [],
   flows: readonly FlowRun[] = [],
-): CheckIssue[] {
+): { issues: CheckIssue[]; worthALook: CheckObservation[] } {
   const byKey = new Map<string, CheckIssue>();
+  const looks = new Map<string, CheckObservation>();
   const add = (rule: CheckRule, evidence: string, route: string, opts: { severity?: CheckSeverity; embed?: string } = {}): void => {
     if (ignore.includes(rule)) return;
     const clean = redactSecrets(withoutOrigin(evidence, origin)).slice(0, 300);
     const key = `${rule}\u0000${clean}`;
-    const found = byKey.get(key);
+    const found = byKey.get(key) ?? looks.get(key);
     if (found) {
       if (!found.routes.includes(route)) found.routes.push(route);
+      return;
+    }
+    const fingerprint = createHash("sha256").update(key).digest("hex").slice(0, 32);
+    if (isWorthALookRule(rule)) {
+      looks.set(key, { rule, evidence: clean, routes: [route], convention: WORTH_A_LOOK_RULES[rule].convention, fingerprint });
       return;
     }
     byKey.set(key, {
@@ -215,7 +262,7 @@ export function issuesFromRoutes(
       evidence: clean,
       routes: [route],
       ...(opts.embed ? { embed: opts.embed } : {}),
-      fingerprint: createHash("sha256").update(key).digest("hex").slice(0, 32),
+      fingerprint,
     });
   };
   for (const r of routes) {
@@ -243,7 +290,20 @@ export function issuesFromRoutes(
     // A refused step is not the app's defect: the check reports it as "could not run" (refusedFlowReason).
     if (f.outcome.status === "failed") add("flow-step-failed", flowStepEvidence(f), f.outcome.path);
   }
-  return [...byKey.values()].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.rule.localeCompare(b.rule));
+  return {
+    issues: [...byKey.values()].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.rule.localeCompare(b.rule)),
+    worthALook: [...looks.values()].sort((a, b) => a.rule.localeCompare(b.rule)),
+  };
+}
+
+/** The defect tier of `checkFindings`: what counts, and what the gate reads. */
+export function issuesFromRoutes(
+  routes: readonly RouteHealth[],
+  origin: string,
+  ignore: readonly CheckRule[] = [],
+  flows: readonly FlowRun[] = [],
+): CheckIssue[] {
+  return checkFindings(routes, origin, ignore, flows).issues;
 }
 
 /**
@@ -452,7 +512,7 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
   if (paths && paths.length === 0) return { ok: false, error: "--paths is empty" };
   if (paths?.some((p) => !p.startsWith("/"))) return { ok: false, error: "--paths are paths on the app, each starting with /" };
   const ignore = list(flags.get("ignore")) ?? [];
-  const unknownRules = ignore.filter((r) => !(r in CHECK_RULES));
+  const unknownRules = ignore.filter((r) => !(CHECK_RULE_IDS as readonly string[]).includes(r));
   if (unknownRules.length > 0) return { ok: false, error: `unknown rule(s) in --ignore: ${unknownRules.join(", ")}. Rules: ${CHECK_RULE_IDS.join(", ")}` };
   const retest = flags.get("retest") ?? "on";
   if (retest !== "on" && retest !== "off") return { ok: false, error: "--retest must be on or off" };
@@ -504,6 +564,8 @@ export interface CheckResult {
   failOn: FailOn;
   routes: RouteHealth[];
   issues: CheckIssue[];
+  /** Observations that are defects only under a convention of the project: listed apart, never counted or gated. */
+  worthALook: CheckObservation[];
   /** Routes the engine knew of but did not reach within --max-routes. */
   unvisited: string[];
   ignored: CheckRule[];
@@ -587,8 +649,18 @@ const RETEST_SARIF_RULE = {
   defaultConfiguration: { level: "error" },
 };
 
+function sarifLocation(route: string): object {
+  return route === "(shared chrome)"
+    ? {
+        physicalLocation: { artifactLocation: { uri: "", uriBaseId: "APP" } },
+        message: { text: "the app's shared shell, on every page that renders it" },
+      }
+    : { physicalLocation: { artifactLocation: { uri: route.replace(/^\//, ""), uriBaseId: "APP" } } };
+}
+
 export function toSarif(result: CheckResult, toolVersion: string): object {
   const used = [...new Set(result.issues.map((i) => i.rule))];
+  const lookRules = [...new Set(result.worthALook.map((o) => o.rule))];
   const base = new URL(result.url);
   const reproducing = retestGateFailures(result);
   const refused = result.flows.filter((f) => f.outcome.status === "refused");
@@ -598,15 +670,19 @@ export function toSarif(result: CheckResult, toolVersion: string): object {
     message: {
       text: `${CHECK_RULES[i.rule].title}: ${i.evidence}${i.routes.length > 1 ? ` (on ${i.routes.length} routes)` : ""}${i.embed ? ` (in an embed of ${i.embed})` : ""}`,
     },
-    locations: i.routes.slice(0, 10).map((r) =>
-      r === "(shared chrome)"
-        ? {
-            physicalLocation: { artifactLocation: { uri: "", uriBaseId: "APP" } },
-            message: { text: "the app's shared shell, on every page that renders it" },
-          }
-        : { physicalLocation: { artifactLocation: { uri: r.replace(/^\//, ""), uriBaseId: "APP" } } },
-    ),
+    locations: i.routes.slice(0, 10).map(sarifLocation),
     partialFingerprints: { "scenescoutCheck/v1": i.fingerprint },
+  }));
+  // Always "note", whatever --fail-on says: a result a code-scanning dashboard shows, never one that reads as an error.
+  const lookResults: object[] = result.worthALook.map((o) => ({
+    ruleId: o.rule,
+    level: "note",
+    message: {
+      text: `Worth a look — ${WORTH_A_LOOK_RULES[o.rule].title}: ${o.evidence}${o.routes.length > 1 ? ` (on ${o.routes.length} routes)` : ""}. A defect only if your project uses ${o.convention}.`,
+    },
+    locations: o.routes.slice(0, 10).map(sarifLocation),
+    partialFingerprints: { "scenescoutCheck/v1": o.fingerprint },
+    properties: { tier: "worth-a-look", convention: o.convention },
   }));
   // Only the re-tests that fail the gate are results: a reviewer reading code scanning sees what failed it.
   const retestResults: object[] = reproducing.map((r) => ({
@@ -637,6 +713,14 @@ export function toSarif(result: CheckResult, toolVersion: string): object {
                 help: { text: CHECK_RULES[id].help },
                 defaultConfiguration: { level: SARIF_LEVEL[CHECK_RULES[id].severity] },
               })),
+              ...lookRules.map((id) => ({
+                id,
+                name: WORTH_A_LOOK_RULES[id].title,
+                shortDescription: { text: WORTH_A_LOOK_RULES[id].title },
+                help: { text: `${WORTH_A_LOOK_RULES[id].help} Worth a look: a defect only if your project uses ${WORTH_A_LOOK_RULES[id].convention}.` },
+                defaultConfiguration: { level: "note" },
+                properties: { tags: ["worth-a-look"] },
+              })),
               ...(reproducing.length > 0 ? [RETEST_SARIF_RULE] : []),
             ],
           },
@@ -653,7 +737,7 @@ export function toSarif(result: CheckResult, toolVersion: string): object {
           },
         ],
         originalUriBaseIds: { APP: { uri: `${base.origin}/` } },
-        results: [...issueResults, ...retestResults],
+        results: [...issueResults, ...lookResults, ...retestResults],
       },
     ],
   };
@@ -704,7 +788,8 @@ export function formatCheck(result: CheckResult): string {
       (passed
         ? `${couldNotRun > 0 ? "passed" : "**PASSED**"} — ${counts.high} high · ${counts.medium} medium · ${counts.low} low`
         : `${couldNotRun > 0 ? "failed" : "**FAILED**"} — ${failingText} · ${counts.high} high · ${counts.medium} medium · ${counts.low} low`) +
-      (unaudited > 0 ? ` · design not measured on ${unaudited} route(s)` : ""),
+      (unaudited > 0 ? ` · design not measured on ${unaudited} route(s)` : "") +
+      (result.worthALook.length > 0 ? ` · ${result.worthALook.length} worth a look, never gated` : ""),
   );
   // Right under the verdict: what a green check was allowed to do is part of what it means.
   lines.push("", `Settings — ${describeSettings(result)}`);
@@ -715,6 +800,20 @@ export function formatCheck(result: CheckResult): string {
     for (const i of of) {
       lines.push(
         `- **${CHECK_RULES[i.rule].title}** \`${i.rule}\`: ${cell(i.evidence)}${i.embed ? ` _(in an embed of ${i.embed}: its behaviour, not the app's)_` : ""} — ${routeList(i.routes)}`,
+      );
+    }
+  }
+  if (result.worthALook.length > 0) {
+    lines.push(
+      "",
+      `## Worth a look (${result.worthALook.length})`,
+      "",
+      "Measured exactly, and defects only under a convention of your project that the check cannot see. They are not counted above and never fail the gate, at any --fail-on.",
+      "",
+    );
+    for (const o of result.worthALook) {
+      lines.push(
+        `- **${WORTH_A_LOOK_RULES[o.rule].title}** \`${o.rule}\`: ${cell(o.evidence)} — a defect only if your project uses ${o.convention} — ${routeList(o.routes)}`,
       );
     }
   }
@@ -828,5 +927,7 @@ export function toSummaryJson(result: CheckResult, toolVersion: string): object 
     skippedFlows: result.skippedFlows,
     retest: result.retest,
     issues: result.issues,
+    // Apart from `issues` and `counts`, which the gate reads: none of these is counted or gated.
+    worthALook: result.worthALook,
   };
 }

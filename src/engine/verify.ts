@@ -23,7 +23,7 @@
  * Pure, so the ordering and the wording can be table-tested.
  */
 import { normalizePath } from "./fingerprint.js";
-import { failingSignatures, type Finding } from "./memory.js";
+import { failingSignatures, isWorthALook, type Finding } from "./memory.js";
 
 /** What a re-test found. */
 export const VERDICTS = ["gone", "present", "changed"] as const;
@@ -282,10 +282,11 @@ export function retestResults(candidates: readonly LoadRetest[], pages: readonly
 /**
  * The findings a check re-tests: the open ones it can reproduce by loading a
  * page, in the campaign's order and within its cap, plus how many open
- * findings there are in all, so the report can say how many it left to a run.
+ * findings (defects, not worth-a-look) there are in all, so the report can say how many it left to a run.
  */
 export function checkRetestPlan(findings: readonly Finding[]): { candidates: LoadRetest[]; open: number } {
-  const open = findings.filter((f) => (f.status ?? "open") !== "resolved");
+  // A worth-a-look is not a defect, so a check never re-tests it and it can never gate.
+  const open = findings.filter((f) => (f.status ?? "open") !== "resolved" && !isWorthALook(f));
   const eligible = open.filter((f) => loadRetest(item(f)) !== null);
   const candidates = verifyWorklist(eligible)
     .map(loadRetest)

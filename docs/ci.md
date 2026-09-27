@@ -100,7 +100,7 @@ And the action's own:
 
 ### Outputs
 
-`passed` (`true` or `false`, empty when the check could not run; with `could-not-run` above 0 it describes the rest of the check, so `true` can come with exit code 2), `exit-code`, `failing` (what fails the gate: issues at the gate's severity or worse, plus re-tested findings that `--gate-retests` gates), `could-not-run` (flows a refused step kept from running), `retests-failing` (of `failing`, the re-tested findings), `high`, `medium`, `low`, the paths `report`, `json` and `sarif`, and `artifact-name`.
+`passed` (`true` or `false`, empty when the check could not run; with `could-not-run` above 0 it describes the rest of the check, so `true` can come with exit code 2), `exit-code`, `failing` (what fails the gate: issues at the gate's severity or worse, plus re-tested findings that `--gate-retests` gates), `could-not-run` (flows a refused step kept from running), `retests-failing` (of `failing`, the re-tested findings), `high`, `medium`, `low`, `worth-a-look` (observations listed as worth a look, below; not in `high`, `medium` or `low`, and never in `failing`), the paths `report`, `json` and `sarif`, and `artifact-name`.
 
 A later step can read them, for example to comment on the pull request. To keep the job going after a failed gate, give the step `continue-on-error: true` and look at `steps.scenescout.outputs.exit-code`.
 
@@ -195,6 +195,26 @@ When the project's `.scenescout/memory.json` holds findings earlier exploratory 
 - **not re-tested**: the page did not load, or sent the browser to sign-in.
 
 Re-tests are reported in `report.md` and `check.json`. Whether one fails the gate is `--gate-retests` (below); "possibly fixed" and "not re-tested" never do. The check reads the memory and never writes it, so nothing is resolved; `scout_verify` in an exploratory run does that, and re-tests the findings that need an interaction. `--retest off` skips all of this. The memory is ignored by git unless a project commits it, so without that this applies to checks run where the memory lives.
+
+## Worth a look
+
+Some rules measure something exactly that is a defect only under a convention of the project the check cannot see. SceneScout does not decide those conventions ([ADR 13](adr/0013-a-convention-is-the-projects-to-decide.md)), so these rules report into a tier of their own:
+
+| Rule | What it measures | A defect only if the project uses |
+|---|---|---|
+| `off-grid-spacing` | more than a fifth of a page's paddings or vertical margins not a multiple of 4px | a 4px spacing scale |
+| `indistinct-link` | links with no underline, in the page's body-text colour | a visible link style (an underline or a distinct colour) wherever links appear, navigation included |
+
+Their effect on a check:
+
+- They have no severity, are not in the counts, and never fail the gate, at any `--fail-on`.
+- `report.md`, and so the job summary, lists them under **Worth a look** below the issues, each with the convention that would make it a defect.
+- `check.json` lists them under `worthALook`, apart from `issues`, `counts` and `gate`, each with its `rule`, `evidence`, `routes`, `convention` and `fingerprint`.
+- `check.sarif` has them as results at level `note`, with `properties.tier` set to `worth-a-look` and the convention in `properties.convention`; their rules carry the tag `worth-a-look`.
+- The GitHub Action publishes their number as the `worth-a-look` output.
+- `--ignore` removes them like any other rule.
+
+A control smaller than 24×24px is not in this tier: WCAG 2.2 sets that minimum (2.5.8, level AA) for any pointer, so `tiny-target` stays a low issue.
 
 ## What a check may do
 

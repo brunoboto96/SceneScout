@@ -332,6 +332,7 @@ A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app
 `.scenescout/report.md` — a deduplicated, worst-first report with:
 
 - 🐛 **Findings** with repro traces and generated Playwright regression-test skeletons.
+- 🔎 **Worth a look** — observations that are defects only under a convention of your project the run cannot see (a spacing scale, link styling in navigation, test ids on every control), each naming that convention. Listed below the findings and not counted as defects ([ADR 13](docs/adr/0013-a-convention-is-the-projects-to-decide.md)).
 - 💯 **Page scores** (0–100: a11y · craft · consistency · task-clarity), ranked worst-first, with stale scores from old runs marked as such.
 - 👥 **A role capability matrix** — what each role could and couldn't reach.
 - 🧾 **A gap ledger** — everything *not* done, so the report is honest about its own coverage.
@@ -354,6 +355,8 @@ An exploratory run is driven by a model, so two runs never find exactly the same
 - controls with no name, and fields whose only label is a placeholder
 - contrast and focus
 - pages with no way out
+
+Some of what it measures is a defect only under a convention the check cannot see: paddings off a 4px grid, and links styled like body text. Those are listed under **Worth a look**, each with the convention that would make it a defect. They are never counted and never fail the gate, at any `--fail-on`; SARIF reports them at level `note` ([ADR 13](docs/adr/0013-a-convention-is-the-projects-to-decide.md)).
 
 ```bash
 npx scenescout check http://127.0.0.1:3000 --fail-on high
@@ -380,7 +383,7 @@ On GitHub Actions, this repository is also an action that installs everything an
 With the default settings its saved flows send no HTTP write (they replay under observe's rule), and its crawl runs under `--mode observe` or `read-only`; `--flow-writes allow` lets flows write as `--mode` allows. By default it fails only on facts that mean a page is broken: a page that did not load, an uncaught exception, a 5xx, a failure shown as success. Other options:
 
 - `--fail-on medium` or `low` makes the gate stricter.
-- `--ignore <rule>` drops a rule.
+- `--ignore <rule>` drops a rule, worth-a-look rules included.
 - `--paths /a,/b` checks only those pages.
 - `--storage-state <file>` checks while signed in.
 - `--flows <dir>` or `off` chooses which saved flows to replay; `--retest off` skips re-testing open findings.
@@ -661,6 +664,7 @@ The load-bearing choices are recorded as ADRs — read the relevant one before c
 - [10 · A lane's confidence is checked, not trusted](docs/adr/0010-a-confidence-is-checked-not-trusted.md)
 - [11 · A gate is deterministic, and fails only on what it can prove](docs/adr/0011-a-gate-is-deterministic-and-fails-only-on-what-it-can-prove.md)
 - [12 · A check replays saved flows and re-tests open findings, within settings whose defaults do the least harm](docs/adr/0012-a-check-replays-saved-flows-and-reports-re-tests.md)
+- [13 · What depends on a project's convention is the project's to decide](docs/adr/0013-a-convention-is-the-projects-to-decide.md)
 
 ---
 

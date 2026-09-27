@@ -337,18 +337,32 @@ function contrastFailures(records: StyleRecord[]): string[] {
   return out;
 }
 
+/** The commonest off-grid values, smallest first and without their counts: "7px, 13px". */
+function gridValues(top: ReadonlyArray<[number, number]>): string {
+  return top
+    .map(([v]) => v)
+    .sort((a, b) => a - b)
+    .map((v) => `${v}px`)
+    .join(", ");
+}
+
 /** Below the WCAG 2.2 target-size minimum; inline links are exempt by that rule. */
 function tooSmall(r: StyleRecord): boolean {
   return r.tag !== "a" && (r.rect.h < 24 || r.rect.w < 24) && r.rect.h > 0;
 }
 
 /**
- * One measurable defect (a ⚠ line), as data. The report prints the same facts
- * as prose; `scenescout check` reads these instead of parsing it. Craft
- * suggestions (→ lines) are judgement calls and are deliberately not here.
+ * One measured fact, as data. The report prints the same facts as prose;
+ * `scenescout check` reads these instead of parsing it. Most are ⚠ lines.
+ * Two are → lines whose measurement is exact but whose meaning depends on a
+ * convention of the project: paddings and margins off a 4px grid matter only
+ * where a project uses that spacing scale, and links styled like body text
+ * are ordinary in navigation. They are here so a check can list them as
+ * worth a look (check.ts decides the tier, never this file); every other
+ * craft suggestion is a judgement call and is deliberately not.
  */
 export interface DesignDefect {
-  rule: "contrast" | "tiny-target" | "clipped-text" | "focus-indicator" | "image-aspect" | "horizontal-scroll";
+  rule: "contrast" | "tiny-target" | "clipped-text" | "focus-indicator" | "image-aspect" | "horizontal-scroll" | "off-grid-spacing" | "indistinct-link";
   detail: string;
   /** Part of the shared app shell rather than this page: one fix, however many pages show it. */
   chrome?: boolean;
@@ -682,8 +696,8 @@ export function analyzeDesign(
   const bodyColorFreq = new Map<string, number>();
   for (const r of records) if (r.textLen > 40 && r.tag !== "a" && r.color !== "unknown") bodyColorFreq.set(r.color, (bodyColorFreq.get(r.color) ?? 0) + 1);
   const dominantBody = [...bodyColorFreq.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const indistinct = dominantBody ? records.filter((r) => r.tag === "a" && r.textLen > 0 && !r.underline && r.color === dominantBody) : [];
   if (dominantBody) {
-    const indistinct = records.filter((r) => r.tag === "a" && r.textLen > 0 && !r.underline && r.color === dominantBody);
     if (indistinct.length > 0) {
       affordances.push(`→ ${indistinct.length} link(s) with no underline AND the same color as body text (e.g. ${label(indistinct[0])}) — invisible as links`);
     }
@@ -877,6 +891,12 @@ export function analyzeDesign(
     ...(page.scrollW > viewport.width + 8
       ? [{ rule: "horizontal-scroll" as const, detail: `content ${page.scrollW}px wide in a ${viewport.width}px viewport` }]
       : []),
+    // The same thresholds as the SPACING and AFFORDANCES lines above, so the check and the audit agree on what they saw.
+    // Worded without counts or percentages: a spacing scale and a link style are app-wide conventions, so the same
+    // values on ten pages are one entry on ten routes, and the entry's fingerprint does not move when content does.
+    ...(pad.n > 10 && pad.pct > 20 ? [{ rule: "off-grid-spacing" as const, detail: `paddings off a 4px grid: ${gridValues(pad.top)}` }] : []),
+    ...(mar.n > 10 && mar.pct > 20 ? [{ rule: "off-grid-spacing" as const, detail: `vertical margins off a 4px grid: ${gridValues(mar.top)}` }] : []),
+    ...(indistinct.length > 0 ? [{ rule: "indistinct-link" as const, detail: `links with no underline in the body-text colour ${dominantBody}` }] : []),
     ...chromeDefects,
   ];
   return { report, score, signatures, defects };

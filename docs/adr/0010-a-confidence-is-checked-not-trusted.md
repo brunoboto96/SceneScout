@@ -55,6 +55,10 @@ Both checks exist, and each says what it is.
   ambiguous and reported as such, not set aside. A verdict can only leave
   the score this way by being about something the key has written down as
   convention-dependent, in the open, where a reviewer can dispute it.
+- **A lane's own "worth a look"** (ADR 13) is the same idea from the other
+  side: the lane says the answer depends on a convention it cannot see, and
+  names it. Neither check scores that verdict; each counts it under its own
+  reason, apart from `unsure`, which is a lane saying it could not tell.
 
 ## Consequences
 

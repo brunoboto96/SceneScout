@@ -224,6 +224,33 @@ test("a finding matching a contextual entry is set aside: neither correct, wrong
   assert.equal(score(key, [finding("padding off grid")], [], "minimal").unknown.length, 1);
 });
 
+test("a finding the run filed as worth a look is in neither recall nor precision, and is counted and printed", () => {
+  const look = (evidence: string) => finding(evidence, { tier: "worth_a_look", convention: "a 4px spacing scale" });
+  // On a planted defect, a known non-defect and nothing the key names: none of them moves a count.
+  const card = score(key, [finding("status=broken 500"), look("/dead page"), look("coming soon"), look("mystery")], [], "minimal");
+  assert.deepEqual(card.found, ["list-500"], "a worth-a-look on a planted defect is no recall credit");
+  assert.deepEqual(card.missed, ["dead-end"]);
+  assert.equal(card.correct, 1);
+  assert.equal(card.falsePositives.length, 0, "nor a false positive on a non-defect");
+  assert.equal(card.unknown.length, 0, "nor unlabelled");
+  assert.equal(card.worthALook.length, 3);
+  assert.deepEqual(precisionBounds(card), { labelled: "1/1 (100%)", low: "100%", high: "100%" });
+  const out = formatScorecard(card);
+  assert.match(out, /Set aside\s+3 of 4 finding\(s\) the run filed as worth a look/);
+  assert.match(out, /Filed as worth a look \(3\):\n {2}\/dead page — a defect only if the project uses a 4px spacing scale/);
+  // The archive keeps the tier, so a re-score sets the same findings aside.
+  const archived = toArchive("run-w", "2026-09-27", "n", [look("/dead page")], [], "demo");
+  assert.deepEqual(archived.findings[0], {
+    title: "/dead page",
+    severity: "high",
+    category: "data-inconsistency",
+    evidence: "/dead page",
+    tier: "worth_a_look",
+    convention: "a 4px spacing scale",
+  });
+  assert.equal(score(key, archived.findings, [], "minimal").worthALook.length, 1);
+});
+
 test("a verdict on a contextual entry is not scored either way, and is counted under its own reason", () => {
   const onCtx = [decision({ verdict: "defect", evidence: "padding off grid" }), decision({ verdict: "not_a_defect", evidence: "padding off grid" })];
   for (const d of onCtx) assert.equal(judgeDecision(d, ctxKey), null, d.verdict);
@@ -340,11 +367,14 @@ test("calibration is measured on verdicts the key can judge, and names every rea
     decision({ evidence: "status=broken /dead" }),
     decision({ evidence: "/dead", confidence: 7 }),
     decision({ evidence: "/dead", verdict: "unsure" }),
+    // On a planted defect, and still not scored: the lane said it depends on a convention, which the key cannot mark right or wrong.
+    decision({ evidence: "/dead", verdict: "worth_a_look", convention: "a 4px spacing scale" }),
   ];
   const k = calibrateAgainstKey([...right, wrong, ...skipped], key);
   assert.equal(k?.judged, 10);
   assert.equal(k?.correct, 9);
-  assert.deepEqual([k?.notInKey, k?.ambiguous, k?.badConfidence, k?.unsure], [1, 1, 1, 1], "each reason counted separately");
+  assert.deepEqual([k?.notInKey, k?.ambiguous, k?.badConfidence, k?.unsure, k?.worthALook], [1, 1, 1, 1, 1], "each reason counted separately");
+  assert.equal(judgeDecision(decision({ evidence: "/dead", verdict: "worth_a_look", convention: "a 4px spacing scale" }), key), null);
   assert.ok((k?.ece ?? 1) < 1e-9, "nine right of ten at 0.9 is perfectly calibrated");
   // Nine right at 0.9 contribute 0.01 each, the one wrong 0.81: mean 0.09.
   assert.ok(Math.abs((k?.brier ?? 0) - 0.09) < 1e-9, String(k?.brier));
