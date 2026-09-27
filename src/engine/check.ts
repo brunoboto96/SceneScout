@@ -752,8 +752,10 @@ function cell(text: string): string {
   return text
     .replace(/\\/g, "\\\\")
     .replace(/\|/g, "\\|")
-    .replace(/\s*\n\s*/g, " ");
+    .replace(/\s*[\r\n]\s*/g, " ");
 }
+/** The same escaping, for other markdown tables: the CI run's summary. */
+export const markdownCell = cell;
 
 /** A code span that the text cannot close: its fence is one backtick longer than any run of backticks inside it. */
 function code(text: string): string {

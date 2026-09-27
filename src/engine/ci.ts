@@ -11,6 +11,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
+import { markdownCell } from "./check.js";
 import { isWorthALook, redactSecrets, type Finding } from "./memory.js";
 
 // ── options ─────────────────────────────────────────────────────────────────
@@ -628,10 +629,7 @@ function pathOf(url: string): string {
 }
 
 /** Findings summary lines are page text a model wrote: nothing that looks like a secret, nothing that breaks the table. */
-const cell = (s: string, secrets: readonly string[]): string =>
-  redactKeys(redactSecrets(s), secrets)
-    .replace(/\|/g, "\\|")
-    .replace(/[\r\n]+/g, " ");
+const cell = (s: string, secrets: readonly string[]): string => markdownCell(redactKeys(redactSecrets(s), secrets));
 
 /** The job summary: how the run ended, what it spent, and this run's findings. The full report is report.md. */
 export function ciSummaryMarkdown(r: CiResult, secrets: readonly string[] = []): string {

@@ -235,7 +235,8 @@ jobs:
           test "$STOP" = done
           test "$TURNS" = 2
           test -s "$REPORT" && test -s "$SUMMARY" && test -s "$SARIF" && test -s "$JSON"
-          node -e 'const s = require(process.argv[1]); if (s.version !== "2.1.0" || !Array.isArray(s.runs)) process.exit(1)' "$SARIF"
+          # Read as JSON: require() loads a .sarif file as JavaScript.
+          node -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (s.version !== "2.1.0" || !Array.isArray(s.runs)) process.exit(1)' "$SARIF"
           set +x # the lines below name the key; a trace would print it
           # The stand-in API quotes the key back in the model's last reply; it must be redacted everywhere it lands.
           if grep -rF "$OPENAI_API_KEY" "$OUT" "$GITHUB_STEP_SUMMARY"; then echo "the key was written"; exit 1; fi

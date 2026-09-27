@@ -1029,3 +1029,23 @@ test("benchmark workflow: started by hand only, reads the repository and nothing
   assert.equal(String(steps[upload].with?.["include-hidden-files"]), "true");
   for (const s of steps) assert.ok(!/^\s*(npm run bench|npx tsx scripts\/bench|git (commit|push))/m.test(s.run ?? ""), "it scores and commits nothing");
 });
+
+test("summary: a backslash and a pipe in a cell cannot break the table's columns", () => {
+  const rows: Array<[string, string]> = [
+    ["plain", "plain"],
+    ["a|b", "a\\|b"],
+    ["ends with \\", "ends with \\\\"],
+    // Unescaped, the backslash would turn the pipe's escape into a literal backslash and the pipe back into a column.
+    ["a\\|b", "a\\\\\\|b"],
+    ["C:\\dir|x\ny", "C:\\\\dir\\|x y"],
+    // A lone carriage return is a line break too.
+    ["x\ry", "x y"],
+  ];
+  for (const [title, expected] of rows) {
+    const md = ciSummaryMarkdown(RESULT({ findings: [finding({ title })] }));
+    const row = md.split("\n").find((l) => l.startsWith("| high |"))!;
+    assert.equal(row, `| high | functional | ${expected} | /things?x=1 |`, JSON.stringify(title));
+    // Every unescaped pipe is a column border: always five, whatever the title holds.
+    assert.equal(row.replace(/\\\\/g, "").replace(/\\\|/g, "").split("|").length - 1, 5, JSON.stringify(title));
+  }
+});
