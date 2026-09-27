@@ -4,6 +4,8 @@
 
 Whatever the CI system, the job has the same three parts: start the app, wait until it answers, run the check. The check never starts the app itself.
 
+The exploratory side can run in CI too, with a model's API in place of a person or coding agent: [an unattended exploratory run](#an-unattended-exploratory-run), below. It reports and never gates.
+
 | Exit code | Meaning | What the job should do |
 |---|---|---|
 | 0 | Passed the gate | Pass |
@@ -286,3 +288,109 @@ jobs:
 ```
 
 In any system, treat exit code 2 differently from 1 if you can: 2 means the job never measured the app.
+
+## An unattended exploratory run
+
+`scenescout ci <url>` is an exploratory run with nobody present. A model reached through its API drives the same `scout_*` tools, by the same method a coding agent follows, and the run ends in the same report. It needs an API key and costs what the model's API charges; `scenescout check` needs neither. Why it works this way: [ADR 14](adr/0014-an-unattended-run-reports-and-never-gates.md).
+
+It reports and never gates:
+
+| Exit code | Meaning |
+|---|---|
+| 0 | The run ran and the report is written, whether the model finished or a cap ended it. What it found does not change this. |
+| 2 | It could not run: a bad argument, no key or two keys and no `--provider`, a key or request the API refused, an app that never answered, a saved session that no longer signs in, or results that could not be written. |
+
+Two runs of the same app explore differently and find different things, so a finding from this run is something to read. To fail a pull request on something, use `scenescout check`, or a saved flow it replays.
+
+### The model
+
+The key is read from the environment and nowhere else: there is no option or action input for it.
+
+| Key set | Provider | API | Default model |
+|---|---|---|---|
+| `ANTHROPIC_API_KEY` | `anthropic` | Messages API | `claude-sonnet-5` |
+| `OPENAI_API_KEY` | `openai` | Responses API, with function calling | `gpt-6-luna` |
+| both | the one `--provider` names; without it the run exits 2 | | |
+
+- `--model <id>` runs another model of the same provider.
+- `--effort none|low|medium|high|xhigh|max` sets the reasoning effort; the default is `low`. `none` exists only on the OpenAI API.
+- `--base-url <url>` sends requests to another endpoint that implements the same API (for OpenAI, `POST <base>/responses`; for Anthropic, `POST <base>/messages`), for example a gateway or a self-hosted server. It must be `https`, or plain `http` to `127.0.0.1` or `localhost`, since the key is sent to it.
+- A call that is throttled or meets a server error is retried up to three times, with a growing, jittered wait that honours `retry-after`; one the API refuses (a bad key, a bad request) is not retried and ends the run with exit 2.
+
+Keys never reach the output. The browser and the MCP server run in a child process started without them, and every line the run prints or writes is passed through a redaction of the key values and of anything shaped like a provider key.
+
+### Caps
+
+| Option | Default | Counts |
+|---|---|---|
+| `--max-turns` | 40 | Model calls. Several tool calls in one reply are one turn. |
+| `--max-tokens` | 1,500,000 | Input and output tokens over the whole run, cached input included. |
+| `--max-minutes` | 20 | Wall time of the exploration. |
+
+The caps are checked before each model call. No model call, retry or wait between retries runs past the time cap, and no tool call either: each is given only the time left, and a tool call reached after the cap is answered as not run. At most 16 tool calls are run from one model reply; any beyond are answered as not run. Attaching the browser counts towards the time cap. The first cap reached ends the exploration; then the report is written and the browser closed, which share a budget of three minutes, and the files are written, which takes seconds. So the command ends at most about `--max-minutes` plus 4 minutes after it starts. One turn's usage is known only after it, so a run can end up to one turn over the token cap. The summary, `ci.json` and the action's `stop` output name what ended the run: `done` (the model finished), `turns`, `tokens`, `time`, `provider-error` or `could-not-start`.
+
+Each turn sends the conversation so far, so input tokens grow with every turn: the method and the tool descriptions alone are around 20,000 tokens, and each tool result adds to what every later turn sends. With the defaults a run usually reaches the token or the time cap before the turn cap. Tool results longer than 16,000 characters are cut before they reach the model; the report keeps everything.
+
+What a run costs follows from the token cap. At the defaults on `gpt-6-luna` ($0.10 per million input tokens, $0.01 cached, $0.50 output), a run that reaches the 1,500,000-token cap costs about $0.05 to $0.15, since most of each turn's input repeats the turn before and is read from the provider's cache; with nothing cached, the most it can cost is about $0.18. A run can end up to one turn over the cap, which adds a little. `--max-tokens` is the setting that bounds the cost.
+
+### What the run may do
+
+| Option | Values | Default | |
+|---|---|---|---|
+| `--mode` | `observe`, `read-only`, `safe-write`, `destructive` | `read-only` | The write policy the browser runs under, enforced on the network as in any run. `observe` sends no request other than a GET; `read-only` lets ordinary form submissions through and refuses PUT, PATCH, DELETE and destructive POSTs; `safe-write` lets the run create records and change or delete only the ones it created; `destructive` refuses nothing. |
+| `--allow-destructive` | a switch | off | Needed with `--mode destructive`, which without it exits 2. On its own it changes nothing. |
+| `--level` | `minimal`, `medium`, `extensive` | `medium` | The completion contract the run works towards. When a cap ends the run first, the report is generated anyway and its gap ledger lists what was not done; the summary says whether the contract was met. |
+| `--focus` | a few words | none | An area or flow to spend the run on. |
+
+In `destructive` mode the model may send any request the app accepts, including deleting or changing records the run did not create, with nobody watching; it takes two options together so that a mode value copied from another workflow, or chosen by an agent, never enables it. The defaults follow the same rule as the check's: an unconfigured run does the least harm on an app it knows nothing about, and anything more is an option away. Which mode a project's CI uses is the project's decision.
+
+The run attaches once, to the URL it is given, in the mode it is given; the model cannot attach elsewhere or change the mode. It gets the scout_* tools a single agent uses to explore, find and report, and not those for attaching, closing, parallel lanes or screenshots. It is one agent rather than several lanes: see ADR 14.
+
+`--storage-state <file>` explores while signed in; a session that no longer signs in exits 2 before the model is called. `--browser`, `--project` and `--out` are as for `check`.
+
+### What it writes
+
+In `<project>/.scenescout/ci/`, or `--out`:
+
+- `report.md` and `report.html`: the report, exactly as an agent's run writes it (it is also in `.scenescout/report.md`, with the run's memory);
+- `summary.md`: how the run ended, what it spent, and the findings this run made or saw again. On GitHub Actions it is also appended to the job summary;
+- `ci.json`: the same, for a script: `stop`, `contractMet`, `usage` (`turns`, `inputTokens`, `cachedInputTokens`, `outputTokens`, `seconds`, `estimatedCostUsd`), `counts` and `findings`;
+- `ci.sarif`: the findings as SARIF 2.1.0, at `error`, `warning` or `note` by severity, and worth-a-look findings as notes.
+
+The usage line reads like `14 turn(s), 402,310 tokens in (301,200 cached), 18,400 out, 9m 12s, estimated cost $0.0223`. The cost is estimated from the token counts the API returns and the published price of the default models. `--price-in`, `--price-cached-in` and `--price-out` (US dollars per million tokens) replace those prices, or give one for any other model; cached input with no price of its own is charged at the input price. With neither a built-in price nor both `--price-in` and `--price-out`, the line says the cost was not estimated.
+
+The project's `.scenescout/memory.json` is written as in any run, so a later run, or `scenescout check`'s re-tests, can build on what this one found. On a CI runner that memory is gone after the job unless the workflow keeps it, for example with `actions/cache` on `.scenescout/memory.json`.
+
+### GitHub Actions
+
+The action lives in the repository's `ci` folder. Its inputs are the command's options by name, as for the check's action, and the key is passed in the step's `env` from a secret:
+
+```yaml
+      - name: SceneScout CI run
+        id: explore
+        uses: brunoboto96/SceneScout/ci@v3 # or an exact tag, from the first release that has it
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          url: http://127.0.0.1:3000
+          mode: read-only
+          max-minutes: "20"
+```
+
+Put it after the steps that start the app and wait for it, as in the check's workflow above, and give the job a `timeout-minutes` of at least `max-minutes` plus 5, plus what the steps before it take (checkout, install, starting the app, and the browser download on a cold cache), so the job's timeout never stops the step before its files are written. The action installs Node when needed, SceneScout and the browser (cached), runs the command, puts the summary on the job summary and keeps the output folder as an artifact. Its step fails only on exit 2.
+
+Its own inputs are the check action's: `working-directory`, `version`, `cli`, `node-version`, `install-deps`, `upload-artifact`, `artifact-name` (default `scenescout-ci-<job id>`) and `upload-sarif` (to code scanning under the category `scenescout-ci`). Its outputs are `exit-code`, `stop`, `high`, `medium`, `low`, `worth-a-look`, `turns`, `tokens`, `estimated-cost`, and the paths `report`, `summary`, `json` and `sarif`.
+
+A pull request from a fork gets no secrets, so the step exits 2 there for want of a key; run it on pushes, on a schedule, or on pull requests from the same repository. Under `pull_request_target`, a fork's code runs with the repository's secrets; a job that sets the key and checks out and starts a fork's app gives that code the key and makes its pages the text the model reads.
+
+### Other CI systems
+
+```bash
+npx --yes scenescout@3 install --browser-only --browsers chromium-headless-shell
+npm start &
+npx --yes wait-on http://127.0.0.1:3000 --timeout 60000
+npx --yes scenescout@3 ci http://127.0.0.1:3000 --out scenescout-ci
+# exit 0: the run ran (read scenescout-ci/summary.md) · 2: it could not run
+```
+
+with `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` set from the CI system's secret store.
