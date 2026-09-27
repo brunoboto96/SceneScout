@@ -179,7 +179,19 @@ In Claude Code the skill gives you a command with flags for the same thing:
 
 The agent scans the project (if there is one), attaches read-only, explores, and writes findings to `.scenescout/report.md`. That's it.
 
-**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (a Playwright storage-state to explore as: a name found by the scan, or a path to the JSON file) · `--observe` / `--safe-write` / `--allow-destructive`.
+**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (who to explore as: a login saved with `scenescout login`, a storage state found by the scan, or a path to a Playwright storage-state JSON) · `--observe` / `--safe-write` / `--allow-destructive`.
+
+### 🔑 Signing in as a role
+
+For an app behind SSO or MFA, sign in once yourself and let every session reuse it:
+
+```bash
+scenescout login http://localhost:3000 --role admin
+```
+
+A browser window opens at the URL. Sign in however the app asks, then come back to the terminal and press **Enter**: the session is saved as `.scenescout/auth/admin.json` in the project. Closing the window or pressing Ctrl+C saves nothing. The file is readable by your account only, `.scenescout/` keeps itself out of git, and the command prints where it saved and how many cookies and origins it holds, never what they are. `--project <dir>` saves into another project; `--browser firefox|webkit` records in another browser.
+
+Then `/scenescout --role admin`, or `scout_attach { role: "admin" }` from any agent. Every session attached with the same role gets its own browser built from that one login, so parallel lanes can all run as `admin`. A role with no saved login is refused with the command to run. `role` and `storageStatePath` are alternatives: pass one.
 
 ---
 
@@ -430,7 +442,7 @@ Run `npx -y scenescout doctor` first — it checks every setup item below (every
 | Installed as a plugin, and the tools fail with *"Executable not found in $PATH: npx"* | A plugin starts the server with a bare `npx`, which Claude Code can only find if it was launched from an environment that has Node on its `PATH`. Under nvm or fnm that means starting Claude Code from a terminal, not from a dock or launcher. Or use `npx -y scenescout install` instead, which registers the absolute path of `npx`. |
 | *"… build has not been downloaded yet"* on attach | The browser download was skipped or failed, or the run asked for a browser you did not install. Run the command the message names, for example `npx -y scenescout install --browser-only --browsers firefox`. On Linux, system libraries may be missing too: `npx playwright install --with-deps chromium`. |
 | Tools broke after moving the folder or changing node version | The registration stores absolute paths. `npx -y scenescout install` refreshes them. |
-| Attach fails or every route lands on the login page | Your app isn't running at `--url`, or the `--role` storage state has expired — regenerate it the way your project's Playwright setup does. |
+| Attach fails or every route lands on the login page | Your app isn't running at `--url`, or the `--role` session has expired. For a saved login, run `scenescout login <url> --role <name>` again; for a storage-state file, regenerate it the way your project's Playwright setup does. |
 
 ### ⬆️ Upgrading from an older version
 
@@ -613,6 +625,7 @@ The CLI is also useful on its own:
 npx -y scenescout scan <path>       # project discovery: framework, routes, saved logins
 npx -y scenescout status <path>     # what every session of a running engine is doing right now
 npx -y scenescout watch <path>      # the same, live in your browser, with each session's page
+npx -y scenescout login <url> --role admin   # sign in once in a visible browser; sessions attach with role: "admin"
 ```
 
 ---
@@ -623,9 +636,10 @@ npx -y scenescout watch <path>      # the same, live in your browser, with each 
 src/
   mcp-server.ts     the 29 tools + per-session dispatch
   scan.ts           project discovery (framework, routes, auth)
-  cli.ts            scan · serve · install · doctor · check · ci · status
+  cli.ts            scan · serve · install · doctor · check · ci · login · status · watch
   check-run.ts      drives a check: attach, crawl every route, collect what was measured
   ci-run.ts         drives a CI run: the MCP server as a child, the model's API, the agent loop
+  login-run.ts      drives `scenescout login`: a visible browser, Enter to save the role's profile
   installer.ts      setup logic (skill link, MCP registration, diagnostics)
   engine/
     browser.ts      the engine class: attach, snapshot, actions, crawl, plans
@@ -646,6 +660,7 @@ src/
     journey.ts      task-ease measurement from the action log
     design.ts       the design audit + page scoring
     memory.ts       cross-run storage + finding dedup
+    profiles.ts     saved sign-ins: role names, where a profile lives, owner-only files, attach by role
     report.ts       the gap ledger + report generation
     check.ts        the check's rules, gate, report and SARIF
     ci.ts           a CI run's options, provider choice, caps, key redaction, tools and files

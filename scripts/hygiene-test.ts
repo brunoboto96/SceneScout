@@ -121,6 +121,8 @@ const REDACTION_FIXTURE_FILES = /^scripts\/((memory|oracle|hygiene)-test\.ts|smo
 test("the rules fire on the shapes they exist for, and stay quiet on placeholders", () => {
   for (const p of [
     ".scenescout/memory.json",
+    ".scenescout/auth/admin.json",
+    "app/.scenescout/auth/qa-lead.json",
     "app/playwright/.auth/admin.json",
     ".env",
     ".env.local",
