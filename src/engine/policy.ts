@@ -163,6 +163,51 @@ export function destructiveRefusal(label: string, mode: string = "read-only"): s
 export type WriteMode = "observe" | "read-only" | "safe-write" | "destructive";
 export const WRITE_MODES = ["observe", "read-only", "safe-write", "destructive"] as const;
 
+/** The stricter of two modes: WRITE_MODES runs from the strictest to the loosest. */
+export function stricterMode(a: WriteMode, b: WriteMode): WriteMode {
+  return WRITE_MODES.indexOf(a) <= WRITE_MODES.indexOf(b) ? a : b;
+}
+
+/**
+ * How long a rule that was just loosened still judges writes. A request is
+ * judged when the engine hears of it, which can be after the page sent it: a
+ * beacon a page sends as it is left reaches the browser-level interception
+ * tens of milliseconds after the page has gone, and a routed request waits its
+ * turn behind the handler. Five seconds is two orders of magnitude above the
+ * delays seen, and the price is only that writes sent in the first seconds
+ * after a flow ends are judged by the flow's stricter rule.
+ */
+export const LOOSENED_RULE_HOLD_MS = 5000;
+
+/**
+ * The write rule in force, as the judges must read it: a request is judged by
+ * the rule in force when the page sent it, which the engine cannot see, so by
+ * the strictest rule in force at any time in the hold before it is judged.
+ * Tightening the rule applies at once; loosening it (a flow handing back to
+ * the crawl) keeps the stricter rule in force for `holdMs`, so a write the
+ * flow's page sent under the flow's rule is never judged under the looser one
+ * because it was heard of a moment late.
+ */
+export class WriteRule {
+  private held: Array<{ mode: WriteMode; until: number }> = [];
+
+  constructor(
+    private current: WriteMode,
+    private readonly holdMs = LOOSENED_RULE_HOLD_MS,
+  ) {}
+
+  set(mode: WriteMode, now = Date.now()): void {
+    if (stricterMode(this.current, mode) === this.current && this.current !== mode) this.held.push({ mode: this.current, until: now + this.holdMs });
+    this.current = mode;
+  }
+
+  /** The rule a write heard of now is judged by. */
+  at(now = Date.now()): WriteMode {
+    this.held = this.held.filter((h) => h.until >= now);
+    return this.held.reduce((rule, h) => stricterMode(rule, h.mode), this.current);
+  }
+}
+
 /**
  * May this non-GET request leave the page? Auth-flow requests are let through
  * before this is asked. `owned` means the request addresses a record this run

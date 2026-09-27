@@ -1,0 +1,102 @@
+# A QA review from a pull-request comment. Copy this file to
+# .github/workflows/ in the repository whose app is tested. An allowed account
+# comments `/scenescout qa` on a pull request (optionally followed by a preview
+# URL and a few words of focus) and gets a SceneScout report on it.
+#
+# It tests the pull request's DEPLOYED PREVIEW and never builds or runs the pull
+# request's code: the job that holds the model's key checks out nothing and runs
+# only SceneScout, from an exact release. What the project provides, and the
+# variables it may set, are in docs/ci.md ("A QA review from a pull-request
+# comment") of the SceneScout repository; why: its ADR 15.
+#
+# issue_comment runs this file as it is on the default branch, with the
+# repository's secrets, whoever opened the pull request. That is why the key
+# job is reached only through the gate, and why nothing below checks out code.
+name: scenescout-qa
+# The pull request's number is in every run's title: the report job tells a run a newer
+# command cancelled from one cancelled by hand or a timeout by finding a later run with this title.
+run-name: "scenescout-qa · #${{ github.event.issue.number }}"
+
+on:
+  issue_comment:
+    types: [created]
+
+# Nothing by default: each job asks for what it needs.
+permissions: {}
+
+jobs:
+  # No secrets, no checkout. Reads the comment and the pull request, checks the
+  # commenter against the allowlist and refuses forks, finds the preview URL and
+  # acknowledges the comment with a reaction.
+  gate:
+    # startsWith ignores case and does not skip leading whitespace; the gate's parser matches the same way.
+    if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/scenescout qa')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write # react to the comment, and reply when no run starts
+      deployments: read # find the head commit's preview deployment
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      pr: ${{ steps.gate.outputs.pr }}
+      sha: ${{ steps.gate.outputs.sha }}
+      url: ${{ steps.gate.outputs.url }}
+      focus: ${{ steps.gate.outputs.focus }}
+      login: ${{ steps.gate.outputs.login }}
+    steps:
+      - id: gate
+        uses: brunoboto96/SceneScout/qa@v3.13.0
+        with:
+          stage: gate
+          allowed: ${{ vars.SCENESCOUT_QA_ALLOWED }}
+          allow-forks: ${{ vars.SCENESCOUT_QA_ALLOW_FORKS }}
+          preview-url: ${{ vars.SCENESCOUT_QA_PREVIEW_URL }}
+          environment: ${{ vars.SCENESCOUT_QA_ENVIRONMENT }}
+
+  # The only job that holds the key. It reads nothing but the preview's URL
+  # from the gate, checks out nothing, and runs SceneScout from an exact release.
+  qa:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    # 20 minutes of exploration, up to 4 more to write the report, and the install before it.
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    # One run per pull request: a new command cancels the run already going on the same one.
+    concurrency:
+      group: scenescout-qa-${{ github.repository }}-${{ needs.gate.outputs.pr }}
+      cancel-in-progress: true
+    steps:
+      - uses: brunoboto96/SceneScout/ci@v3.13.0
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          url: ${{ needs.gate.outputs.url }}
+          focus: ${{ needs.gate.outputs.focus }}
+          mode: read-only
+          max-turns: "40"
+          max-tokens: "1500000"
+          max-minutes: "20"
+          artifact-name: scenescout-qa-${{ needs.gate.outputs.pr }}
+          upload-sarif: "false"
+
+  # No key. Posts the results on the pull request, or says the run could not run.
+  report:
+    needs: [gate, qa]
+    if: always() && needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write # post the reply
+      actions: read # link the run's artifact, and look for a newer run on the same pull request
+    steps:
+      - uses: brunoboto96/SceneScout/qa@v3.13.0
+        with:
+          stage: report
+          result: ${{ needs.qa.result }}
+          artifact-name: scenescout-qa-${{ needs.gate.outputs.pr }}
+          pr: ${{ needs.gate.outputs.pr }}
+          sha: ${{ needs.gate.outputs.sha }}
+          url: ${{ needs.gate.outputs.url }}
+          login: ${{ needs.gate.outputs.login }}
