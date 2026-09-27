@@ -7,6 +7,7 @@
  *   scenescout install              Install the skill, download the browser, register the MCP server
  *   scenescout doctor               Check every piece of the setup and say how to fix what is missing
  *   scenescout check <url>          Visit every route, measure it, and pass or fail (no model involved)
+ *   scenescout ci <url>             An exploratory run driven by a model's API, unattended, that reports
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -43,6 +44,8 @@ import {
   spawnRunner,
 } from "./installer.js";
 import { defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
+import { httpClient, runCi } from "./ci-run.js";
+import { detectProvider, EXIT_CI, KEY_ENV, parseCiArgs, redactKeys, secretValues } from "./engine/ci.js";
 import { EXIT, exitCodeOf, formatCheck, parseCheckArgs, refusedFlowReason, toSarif, toSummaryJson, unmeasuredReason } from "./engine/check.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME, writeSelfIgnore } from "./engine/memory.js";
 import {
@@ -103,6 +106,25 @@ Usage:
                                      --gate-retests never|high|all: which still-reproducing findings fail the gate
                                       (default high: those filed high))
                                     Exit code: 0 passed, 1 failed the gate, 2 could not run.
+  scenescout ci <url>               An exploratory run with no person present: a model reached through its API
+                                    drives the tools by the SceneScout method and the run ends in the report.
+                                    It reports and never gates. The key is read from ANTHROPIC_API_KEY or
+                                    OPENAI_API_KEY only. Writes report.md, summary.md, ci.json and ci.sarif.
+                                    (--provider anthropic|openai: needed only when both keys are set;
+                                     --model id (default claude-sonnet-5 / gpt-5.6-luna); --effort none|low|medium|
+                                      high|xhigh|max (default low; none is OpenAI only); --base-url https://…/v1 for
+                                      another endpoint that implements the same API;
+                                     --max-turns N (default 40); --max-tokens N (default 1500000);
+                                     --max-minutes N (default 20): the run stops at the first cap reached and still
+                                      writes the report;
+                                     --price-in, --price-cached-in, --price-out: US dollars per million tokens,
+                                      over the built-in prices, for the cost estimate of any model;
+                                     --mode observe|read-only|safe-write|destructive (default read-only;
+                                      destructive only with --allow-destructive as well); --level minimal|medium|
+                                      extensive (default medium); --focus "an area or flow";
+                                     --storage-state file; --browser chromium|firefox|webkit;
+                                     --project dir (default: here); --out dir (default: .scenescout/ci))
+                                    Exit code: 0 the run ran (findings never change it), 2 could not run.
   scenescout status [projectPath]   What is the engine doing right now? (every session + recent actions)
   scenescout watch [projectPath]    Open the live view in a browser: what each session is doing, a thumbnail
                                     of its page, and a live stream you can switch on per session
@@ -560,6 +582,46 @@ async function check(args: string[]): Promise<never> {
   process.exit(exitCodeOf(result));
 }
 
+/** `scenescout ci`: exit 0 when the run ran, 2 when it could not. Findings never change the exit code. */
+async function ci(args: string[]): Promise<never> {
+  if (args.includes("--help") || args.includes("-h")) usage(0);
+  const secrets = secretValues(process.env);
+  const say = (line: string): void => console.log(redactKeys(line, secrets));
+  const fail = (message: string): never => {
+    console.error(redactKeys(`scenescout ci: ${message}`, secrets));
+    process.exit(EXIT_CI.couldNotRun);
+  };
+  const parsed = parseCiArgs(args, process.cwd());
+  if (!parsed.ok) return fail(parsed.error);
+  const options = parsed.options;
+  const provider = detectProvider(process.env, options);
+  if (!provider.ok) return fail(provider.error);
+  const resolved = provider.resolved;
+  const key = (process.env[KEY_ENV[resolved.provider]] ?? "").trim();
+  say(`Exploring ${options.url} with ${resolved.provider} ${resolved.model} (effort ${resolved.effort}), ${options.mode} mode, level ${options.level} …`);
+  let run;
+  try {
+    run = await runCi(options, resolved, {
+      makeClient: (system, tools, kickoff) => httpClient(resolved, key, system, tools, kickoff),
+      log: say,
+      secrets,
+      version: packageVersion(),
+    });
+  } catch (err) {
+    return fail(`could not run: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const { result, exitCode, written } = run;
+  if (written.length > 0) say(`Wrote ${written.join(", ")} to ${options.outDir ?? path.join(options.projectDir, MEMORY_DIRNAME, "ci")}`);
+  if (exitCode !== EXIT_CI.completed) {
+    const why =
+      result.stop === "could-not-start" || result.stop === "provider-error"
+        ? `${result.stop === "provider-error" ? "the model's API failed" : "could not start"}${result.stopDetail ? `: ${result.stopDetail}` : ""}`
+        : "the report could not be written";
+    fail(`could not run: ${why}`);
+  }
+  process.exit(exitCode);
+}
+
 const [, , command, ...args] = process.argv;
 
 // A CLI's failure mode should be a sentence, not a stack trace. `scan` on a
@@ -600,6 +662,10 @@ try {
     }
     case "check": {
       await check(args);
+      break;
+    }
+    case "ci": {
+      await ci(args);
       break;
     }
     case "status": {

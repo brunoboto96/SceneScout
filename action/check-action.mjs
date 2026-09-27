@@ -154,7 +154,7 @@ export function verdict({ exitCode, failing, failOn, url, error, passed, couldNo
   };
 }
 
-function inputsFromEnv() {
+export function inputsFromEnv() {
   try {
     return JSON.parse(process.env.INPUTS || "{}");
   } catch (err) {
@@ -162,7 +162,7 @@ function inputsFromEnv() {
   }
 }
 
-function setOutputs(values) {
+export function setOutputs(values) {
   const file = process.env.GITHUB_OUTPUT;
   const lines = Object.entries(values).map(([k, v]) => `${k}=${String(v).replace(/[\r\n]+/g, " ")}`);
   if (file) fs.appendFileSync(file, lines.join("\n") + "\n");
@@ -187,7 +187,7 @@ export function isVersionSpec(version) {
 }
 
 /** Install the published package into a directory of its own, so install and check use one copy with one Playwright. */
-function installPackage(version) {
+export function installPackage(version) {
   if (!isVersionSpec(version)) throw new Error(`the version input is not an npm version, range or tag: "${version}"`);
   const prefix = path.join(process.env.RUNNER_TEMP || os.tmpdir(), `scenescout-${version.replace(/[^0-9A-Za-z.-]/g, "_")}`);
   fs.mkdirSync(prefix, { recursive: true });

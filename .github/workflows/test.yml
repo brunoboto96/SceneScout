@@ -180,13 +180,78 @@ jobs:
           test "$STRICT_PASSED" = false
           test "$STRICT_FAILING" -ge 1
 
+  # The ci action (ci/action.yml), end to end with no network: the demo app, a
+  # stand-in for the model's API on this runner, and a dummy key from the job's
+  # environment. The run must complete, write its files and never print the key.
+  ci-action:
+    name: ubuntu-latest · ci action
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Not a secret: an invented value the stand-in API checks, so the job can look for it in the output.
+      OPENAI_API_KEY: dummy-ci-action-key-0123456789abcdef
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Start the demo app and the stand-in model API
+        run: |
+          npm run demo:serve > "$RUNNER_TEMP/demo.log" 2>&1 &
+          EXPECTED_KEY="$OPENAI_API_KEY" node scripts/fake-model-api.mjs 4180 > "$RUNNER_TEMP/api.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:4173/ && curl -s -o /dev/null http://127.0.0.1:4180/; then exit 0; fi
+            sleep 1
+          done
+          echo "The demo app or the stand-in API did not answer:"; cat "$RUNNER_TEMP/demo.log" "$RUNNER_TEMP/api.log"; exit 1
+      - name: CI run through the action
+        id: run
+        uses: ./ci
+        with:
+          url: http://127.0.0.1:4173
+          cli: dist/cli.js
+          base-url: http://127.0.0.1:4180/v1
+          max-minutes: "5"
+          out: ${{ runner.temp }}/ci-run
+          upload-sarif: "false"
+      - name: The run completed, wrote its files and printed no key
+        env:
+          OUTCOME: ${{ steps.run.outcome }}
+          EXIT: ${{ steps.run.outputs.exit-code }}
+          STOP: ${{ steps.run.outputs.stop }}
+          TURNS: ${{ steps.run.outputs.turns }}
+          REPORT: ${{ steps.run.outputs.report }}
+          SUMMARY: ${{ steps.run.outputs.summary }}
+          SARIF: ${{ steps.run.outputs.sarif }}
+          JSON: ${{ steps.run.outputs.json }}
+          OUT: ${{ runner.temp }}/ci-run
+        run: |
+          set -x
+          test "$OUTCOME" = success
+          test "$EXIT" = 0
+          test "$STOP" = done
+          test "$TURNS" = 2
+          test -s "$REPORT" && test -s "$SUMMARY" && test -s "$SARIF" && test -s "$JSON"
+          node -e 'const s = require(process.argv[1]); if (s.version !== "2.1.0" || !Array.isArray(s.runs)) process.exit(1)' "$SARIF"
+          set +x # the lines below name the key; a trace would print it
+          # The stand-in API quotes the key back in the model's last reply; it must be redacted everywhere it lands.
+          if grep -rF "$OPENAI_API_KEY" "$OUT" "$GITHUB_STEP_SUMMARY"; then echo "the key was written"; exit 1; fi
+          # The action's own log cannot be read back from here, so the same run is repeated with its output kept.
+          mkdir -p "$RUNNER_TEMP/ci-cli"
+          node dist/cli.js ci http://127.0.0.1:4173 --base-url http://127.0.0.1:4180/v1 --project "$RUNNER_TEMP/ci-cli" > "$RUNNER_TEMP/ci-cli.log" 2>&1
+          grep -F "[redacted key]" "$RUNNER_TEMP/ci-cli.log"
+          if grep -F "$OPENAI_API_KEY" "$RUNNER_TEMP/ci-cli.log"; then echo "the key was printed"; exit 1; fi
+
   # The branch ruleset requires ONE check, named "test". A matrix reports one
   # check per cell under changing names, so this job is the stable name that
   # summarises them: green only when every cell is. The action's job is part of
   # it: a broken action is a broken release, and the job runs alongside the
   # matrix, so it adds a few runner minutes and no wait.
   test:
-    needs: [suite, cross-browser, check-action]
+    needs: [suite, cross-browser, check-action, ci-action]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -195,6 +260,8 @@ jobs:
           echo "suite result: ${{ needs.suite.result }}"
           echo "cross-browser result: ${{ needs.cross-browser.result }}"
           echo "check-action result: ${{ needs.check-action.result }}"
+          echo "ci-action result: ${{ needs.ci-action.result }}"
           test "${{ needs.suite.result }}" = "success"
           test "${{ needs.cross-browser.result }}" = "success"
           test "${{ needs.check-action.result }}" = "success"
+          test "${{ needs.ci-action.result }}" = "success"

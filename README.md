@@ -399,6 +399,23 @@ It also replays the flows saved in `.scenescout/flows/*.json`, with no model: th
 
 Beyond those flows it explores nothing and fills no forms. That is the exploratory run's job, and its findings belong in a report, not a gate.
 
+## 🤖 In CI: an unattended exploratory run
+
+`scenescout ci` runs the exploratory side in a CI job, with no person and no coding agent. A model reached through its API drives the same `scout_*` tools by the same method, and the run ends in the ordinary report:
+
+```bash
+export OPENAI_API_KEY=…          # or ANTHROPIC_API_KEY; read from the environment only
+npx scenescout ci http://127.0.0.1:3000
+```
+
+- **It reports and never gates.** Exit 0 when the run ran, whatever it found; exit 2 when it could not run (no key, a key the API refused, an app that never answered). Two runs of the same app find different things, so a finding is something to read, never a reason to fail a build. `scenescout check` is the gate.
+- **Providers:** the Anthropic Messages API (default model `claude-sonnet-5`) or the OpenAI Responses API (default `gpt-5.6-luna`), chosen by which key is set; with both set, `--provider` decides. `--model` and `--effort` (default `low`) override; `--base-url` points at another endpoint that implements the same API.
+- **Caps:** at most 40 model turns, 1,500,000 tokens and 20 minutes (`--max-turns`, `--max-tokens`, `--max-minutes`). The first cap reached ends the exploration; the report is still written, and says which cap ended it.
+- **Mode:** `read-only` by default; `--mode observe` sends no form at all, `--mode safe-write` lets the run create records and change only the ones it created. `--mode destructive` runs only with `--allow-destructive` as well.
+- **Output**, in `.scenescout/ci/` (or `--out`): `report.md` and `report.html` (the report an agent's run writes), `summary.md` (also appended to the GitHub job summary), `ci.json` and `ci.sarif`, with a usage line: turns, tokens, time and an estimated cost where the model's price is known (`--price-in`, `--price-out` give one for any model).
+
+There is a GitHub Action for it (`uses: brunoboto96/SceneScout/ci@…`). [docs/ci.md](docs/ci.md#an-unattended-exploratory-run) has the workflow and every option; [ADR 14](docs/adr/0014-an-unattended-run-reports-and-never-gates.md) says why it works this way.
+
 ---
 
 ## 🩺 Troubleshooting
@@ -606,8 +623,9 @@ npx -y scenescout watch <path>      # the same, live in your browser, with each 
 src/
   mcp-server.ts     the 29 tools + per-session dispatch
   scan.ts           project discovery (framework, routes, auth)
-  cli.ts            scan · serve · install · doctor · check · status
+  cli.ts            scan · serve · install · doctor · check · ci · status
   check-run.ts      drives a check: attach, crawl every route, collect what was measured
+  ci-run.ts         drives a CI run: the MCP server as a child, the model's API, the agent loop
   installer.ts      setup logic (skill link, MCP registration, diagnostics)
   engine/
     browser.ts      the engine class: attach, snapshot, actions, crawl, plans
@@ -630,6 +648,8 @@ src/
     memory.ts       cross-run storage + finding dedup
     report.ts       the gap ledger + report generation
     check.ts        the check's rules, gate, report and SARIF
+    ci.ts           a CI run's options, provider choice, caps, key redaction, tools and files
+    provider.ts     the Anthropic and OpenAI message shapes, and retries
     replay.ts       the run as one page: steps, tasks, frames under each finding
     …               collector · dispatch · fixtures · authloss · reaper
 scripts/            the 24 test suites (smoke/ holds the real-browser ones)

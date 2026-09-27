@@ -1,0 +1,112 @@
+# One real `scenescout ci` run against a benchmark app, started by hand. The
+# model's key is a repository secret, which is why this runs here rather than on
+# a laptop. It scores nothing and commits nothing: it uploads the run's project
+# directory, and the run is scored locally with
+#
+#   gh run download <run id> -n <artifact name> -D bench-run
+#   npm run bench -- bench-run --app <demo|holdout>
+#
+# Only workflow_dispatch, never pull_request or pull_request_target: the job
+# holds the key, so it runs only the code of a ref someone with write access
+# chose. ci-test holds this workflow to that trigger and to read-only permissions.
+name: ci-benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: The benchmark app to run against.
+        type: choice
+        options: [demo, holdout]
+        default: demo
+      model:
+        description: The model id. Empty means the CLI's default.
+        type: string
+        default: ""
+      effort:
+        description: Reasoning effort (none, low, medium, high, xhigh, max). Empty means the CLI's default.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: scenescout ci · ${{ inputs.app }}
+    runs-on: ubuntu-latest
+    # 20 minutes of exploration, up to 4 more to write the report, and the setup before it.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      - name: Start the ${{ inputs.app }} app
+        id: app
+        env:
+          APP: ${{ inputs.app }}
+        run: |
+          if [ "$APP" = holdout ]; then port=4180; else port=4173; fi
+          npm run "$APP:serve" > "$RUNNER_TEMP/app.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -sf -o /dev/null "http://127.0.0.1:$port/"; then
+              echo "url=http://127.0.0.1:$port" >> "$GITHUB_OUTPUT"
+              # A fresh project directory: bench scores everything in its memory, so it must hold this run only.
+              mkdir -p "$RUNNER_TEMP/bench-run"
+              echo "project=$RUNNER_TEMP/bench-run" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "The $APP app did not answer on port $port:"; cat "$RUNNER_TEMP/app.log"; exit 1
+
+      - name: CI run
+        id: run
+        uses: ./ci
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          url: ${{ steps.app.outputs.url }}
+          cli: dist/cli.js
+          provider: openai
+          model: ${{ inputs.model }}
+          effort: ${{ inputs.effort }}
+          project: ${{ steps.app.outputs.project }}
+          upload-artifact: "false"
+          upload-sarif: "false"
+
+      - name: No key in what will be uploaded
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PROJECT: ${{ steps.app.outputs.project }}
+        run: |
+          test -s "$PROJECT/.scenescout/memory.json"
+          if grep -rlF -- "$OPENAI_API_KEY" "$PROJECT"; then echo "::error::the key appears in the files above; nothing is uploaded"; exit 1; fi
+
+      - name: Usage
+        env:
+          SUMMARY: ${{ steps.run.outputs.summary }}
+          APP: ${{ inputs.app }}
+          STOP: ${{ steps.run.outputs.stop }}
+        run: |
+          {
+            echo "### Benchmark run on the $APP app"
+            echo
+            echo "Ended: $STOP. $(grep '^| Usage |' "$SUMMARY" | sed -e 's/^| Usage | //' -e 's/ |$//')"
+            echo
+            echo "Score it locally: download the \`scenescout-ci-benchmark-$APP\` artifact into a directory and run \`npm run bench -- <that directory> --app $APP\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The project directory itself, so the artifact unpacks to the layout bench reads: <dir>/.scenescout/memory.json.
+      - name: Keep the run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scenescout-ci-benchmark-${{ inputs.app }}
+          path: ${{ steps.app.outputs.project }}
+          include-hidden-files: true
+          if-no-files-found: error
