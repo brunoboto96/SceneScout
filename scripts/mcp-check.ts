@@ -10,7 +10,8 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawnSync } from "node:child_process";
-import { startFixtureServer } from "./smoke/harness.ts";
+import { writeProfile } from "../dist/engine/profiles.js";
+import { revokeFixtureTokens, startFixtureServer, TOKEN_COOKIE } from "./smoke/harness.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverPath = path.join(here, "..", "dist", "mcp-server.js");
@@ -267,6 +268,76 @@ ${late.slice(0, 400)}`);
 }
 
 /**
+ * A lane that lost its sign-in says so where the planner folds its report,
+ * not only in its own calls: the line is added by the server's scout_lane_report,
+ * so it is checked over the wire. One lane re-attaches from a refreshed
+ * profile, one finds its profile revoked too, and one never lost its sign-in
+ * and gets no line.
+ */
+async function reattachLaneCheck(client: Client): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-reattach-"));
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
+  // A saved login for a role, built from a fresh sign-in on the fixture's revocable
+  // token route, as `scenescout login` would save it.
+  const saveLogin = async (role: string): Promise<void> => {
+    const res = await fetch(`${fixture.baseUrl}/token-signin`, { redirect: "manual" });
+    const token = new RegExp(`${TOKEN_COOKIE}=([^;]+)`).exec(res.headers.get("set-cookie") ?? "")?.[1];
+    if (!token) fail("the fixture's revocable sign-in set no token cookie");
+    const cookie = { name: TOKEN_COOKIE, value: token, domain: "127.0.0.1", path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Lax" };
+    writeProfile(projectDir, role, { cookies: [cookie], origins: [] });
+  };
+  const report = (lane: string): string => JSON.stringify({ lane, status: "complete", decisions: [], routes: ["/token-orders"], blocked_by: null });
+  const loseSignIn = async (session: string): Promise<string> => {
+    let last = "";
+    for (const route of ["/token-orders", "/token-settings", "/token-profile"])
+      last = await call("scout_navigate", { session, target: route, task: "Walking the signed-in pages" });
+    return last;
+  };
+  try {
+    for (const role of ["member", "viewer"]) await saveLogin(role);
+    for (const [session, role] of [
+      ["orders", "member"],
+      ["billing", "viewer"],
+      ["steady", "member"],
+    ]) {
+      await call("scout_attach", {
+        url: `${fixture.baseUrl}/token-home`,
+        projectPath: projectDir,
+        session,
+        mode: "read-only",
+        role,
+        objective: `${session} lane`,
+      });
+      const home = await call("scout_snapshot", { session });
+      if (!home.includes("Signed in as a member")) fail(`a session attached by role did not start signed in:\n${home.slice(0, 400)}`);
+    }
+    // The server ends every session; member's login is saved again, viewer's is not.
+    revokeFixtureTokens();
+    await saveLogin("member");
+    const recovered = await loseSignIn("orders");
+    if (!recovered.includes("SESSION RE-ATTACHED")) fail(`the role session did not re-attach:\n${recovered}`);
+    // viewer's profile holds a token revoked with the rest: its re-attach lands on the login page too.
+    const lost = await loseSignIn("billing");
+    if (!lost.includes("SESSION AUTH LOST")) fail(`a re-attach from a revoked profile was not reported as lost:\n${lost}`);
+
+    const folded = await call("scout_lane_report", { lane: "orders", reply: report("orders") });
+    if (!folded.includes(`↻ Session "orders": its sign-in was lost and it re-attached once from role 'member''s saved profile`))
+      fail(`a folded lane report did not name the lane that re-attached:\n${folded}`);
+    const failed = await call("scout_lane_report", { lane: "billing", reply: report("billing") });
+    if (!failed.includes(`↻ Session "billing": its sign-in was lost and re-attaching from role 'viewer''s saved profile did not recover it`))
+      fail(`a folded lane report did not name the lane whose re-attach failed:\n${failed}`);
+    const quiet = await call("scout_lane_report", { lane: "steady", reply: report("steady") });
+    if (!/Lane report accepted/.test(quiet) || quiet.includes("↻")) fail(`a lane that never lost its sign-in was reported as re-attached:\n${quiet}`);
+    console.log("✓ a folded lane report names a lane that re-attached, or whose re-attach failed, and no other");
+    assertClosedAll(await call("scout_close", { all: true }));
+  } finally {
+    fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
+/**
  * status.json is written asynchronously and can be caught mid-write, which is
  * what `scenescout status` reports as truncated. A check reads it the way a
  * patient reader does: until it parses.
@@ -447,6 +518,7 @@ async function main(): Promise<void> {
   console.log("✓ scout_scan round-trip works");
 
   await laneCheck(client);
+  await reattachLaneCheck(client);
   const liveProject = await liveViewCheck(client);
   await client.close();
   await tokenGoneCheck(liveProject);
