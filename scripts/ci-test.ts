@@ -1064,6 +1064,12 @@ test("benchmark workflow: started by hand or called, reads the repository and no
   assert.ok(run, "it runs the ci action from this commit");
   assert.equal(run.with?.cli, "dist/cli.js");
   assert.equal(run.with?.provider, "${{ inputs.provider }}");
+  // The run's caps are inputs of both triggers, passed to the action's inputs of the same name; empty keeps the CLI's default.
+  for (const cap of ["max-turns", "max-tokens"]) {
+    assert.ok(cap in action.inputs, `the ci action has no ${cap} input`);
+    assert.equal(run.with?.[cap], `\${{ inputs.${cap} }}`);
+    for (const trigger of ["workflow_dispatch", "workflow_call"]) assert.equal(wf.on[trigger].inputs[cap]?.default, "", `${trigger} ${cap}`);
+  }
   // Each key reaches the run only when its provider was chosen, and only from the secret, through env.
   assert.equal(run.env?.OPENAI_API_KEY, "${{ inputs.provider == 'openai' && secrets.OPENAI_API_KEY || '' }}");
   assert.equal(run.env?.ANTHROPIC_API_KEY, "${{ inputs.provider == 'anthropic' && secrets.ANTHROPIC_API_KEY || '' }}");
