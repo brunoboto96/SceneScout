@@ -1138,7 +1138,7 @@ Without them the demo had 8,508 pairs (1,972 same), accuracy 81.1%, Brier 0.189
 | Held-out, all pairs | 181 | 49 / 132 | current rule | 86.2% | 0.138 (0.30) | 0.138 [n=153 stated 0 actual 0.15; n=28 stated 1 actual 0.93] | 2 | 23 |
 | Demo, sample | 100 | 21 / 79 | current rule | 81.0% | 0.190 (−0.15) | 0.190 [n=98 / n=2] | 0 | 19 |
 | Held-out, sample | 100 | 30 / 70 | current rule | 86.0% | 0.140 (0.33) | 0.140 [n=82 / n=18] | 1 | 13 |
-| Both samples | 200 | | model judge, efforts none and low | see [judge run 1](#judge-run-1-no-usable-comparison) | | | | |
+| Both samples | 200 | | model judge, efforts none and low | see [judge runs](#judge-run-1-refused-parse-no-usable-comparison) | | | | |
 
 The rule almost never merges wrongly and leaves most same-entry pairs apart.
 On the demo its Brier is slightly worse than always stating the base rate
@@ -1150,7 +1150,9 @@ useful part: stated 0 is right 80% of the time on the demo.
 **The model judge is measured, not used.** `npm run dedup-bench -- --judge
 --efforts none,low` asks a model about each of the 200 sampled pairs (cap split
 evenly between the apps) through the `scenescout ci` provider adapters, one
-tool call per pair returning `same`/`different`/`unsure` and `p_same`; unsure
+tool call per pair returning `same`/`different`/`unsure` and its confidence
+in that verdict, from which `p_same` is derived (same at confidence c is c,
+different is 1 − c; run 1 asked for `p_same` directly); unsure
 answers are counted and left out of the figures, and a failed call falls back
 to the rule and is counted as failed. It needs `OPENAI_API_KEY` or
 `ANTHROPIC_API_KEY`: the Messages API has no effort `none`, so on Anthropic only
@@ -1162,7 +1164,7 @@ store: it replaces the rule only if its Brier beats the rule's on these pairs,
 at a pair count and on both apps, and until then the rule is the only thing
 that dedups.
 
-### Judge run 1: no usable comparison
+### Judge run 1: refused-parse, no usable comparison
 
 One dispatch of the `dedup-bench` workflow on 2026-09-27, OpenAI `gpt-6-luna`
 at efforts `none` and `low`, on the 200 sampled pairs. Keys `c1786bc817` (demo)
@@ -1196,8 +1198,12 @@ were all "different". A Brier of 0.000 on that subset says the coherent
 answers were right and confident, not that the judge beats the rule on these
 pairs: the rule's 0.140 and 0.180 are over all 100. The run also printed
 identical token totals at both efforts (66,397 input, none cached, and 21,373
-output), which two sets of different answers are unlikely to produce; until
-that is explained, no cost is given for this run.
+output). The accounting was checked against a stand-in API and counts each
+effort apart; the likely reading is that neither effort produced reasoning
+tokens, each usable answer cost the same few output tokens, and at each
+effort one call ran to the 16,000-token output cap (the two replies whose
+arguments were cut-off JSON): 16,000 + 199 × 27 = 21,373. That is inferred,
+not shown; run 2 prints each call's output tokens. No cost is given for run 1.
 
 **Decision: the judge is not wired in, and the rule stays.** The rule of
 [#185](https://github.com/brunoboto96/SceneScout/pull/185) asks for the judge's
@@ -1206,13 +1212,14 @@ the judge on these pairs: over half of each sample is missing, and not at
 random. This records a negative result for this configuration of the judge.
 It does not show that a model judge cannot beat the rule.
 
-**What the run suggests, not yet tried.** The refused answers look like
-`p_same` read as confidence in the stated verdict, not the probability of
-"same". One bounded edit, to the judge's tool contract only: ask for the
-verdict and a confidence in it, and derive `p_same` from the two. Then re-run
-with each pair's judgement printed, so the judge and the rule can be compared
-pair by pair on the same pairs, and repeat the run before acting on any delta.
-The identical token totals need to be explained before any cost is compared.
+**What the run suggested.** The refused answers look like `p_same` read as
+confidence in the stated verdict, not the probability of "same". One bounded
+edit, to the judge's tool contract only, is made for run 2: the judge states
+the verdict and its confidence in it, `p_same` is derived from the two, a
+confidence below 0.5 is still refused and counted as a contradiction, and each
+pair's judgement, the rule's verdict, the key's label and the call's output
+tokens are written to a per-pair file (ids only), so the judge and the rule
+can be compared pair by pair.
 
 ## Rejected and not-yet-tried
 
