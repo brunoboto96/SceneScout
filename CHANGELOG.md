@@ -1,5 +1,11 @@
 # scenescout
 
+## 3.13.1
+
+### Patch Changes
+
+- ab8b9f9: The `ci` GitHub Action takes a `cache` input (default `true`). `cache: false` skips restoring and saving the browser in the actions cache, for a job that checks out a ref chosen by an input and must not write to the cache.
+
 ## 3.13.0
 
 ### Minor Changes
