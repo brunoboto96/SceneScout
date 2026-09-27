@@ -430,6 +430,8 @@ npx scenescout ci http://127.0.0.1:3000
 
 There is a GitHub Action for it (`uses: brunoboto96/SceneScout/ci@…`). [docs/ci.md](docs/ci.md#an-unattended-exploratory-run) has the workflow and every option; [ADR 14](docs/adr/0014-an-unattended-run-reports-and-never-gates.md) says why it works this way.
 
+On a pull request, an allowed account can comment `/scenescout qa` to run it against that pull request's deployed preview and get the results as a reply. The job that holds the key checks out nothing and runs SceneScout from an exact release tag, so the pull request's code never runs beside the key. [docs/ci.md](docs/ci.md#a-qa-review-from-a-pull-request-comment) has the workflow to copy and what a project configures; [ADR 15](docs/adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md) says why.
+
 ---
 
 ## 🩺 Troubleshooting
@@ -670,7 +672,7 @@ src/
     provider.ts     the Anthropic and OpenAI message shapes, and retries
     replay.ts       the run as one page: steps, tasks, frames under each finding
     …               collector · dispatch · fixtures · authloss · reaper
-scripts/            the 24 test suites (smoke/ holds the real-browser ones)
+scripts/            the test suites (smoke/ holds the real-browser ones)
 test-app/           fixtures for the real-browser smoke tests
 skills/scenescout/   the testing method (SKILL.md): a skill in Claude Code, served by the server everywhere else
 docs/how-it-works.md  what happens at each stage, in diagrams
