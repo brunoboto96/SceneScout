@@ -13,7 +13,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import http from "node:http";
 import os from "node:os";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -49,7 +50,9 @@ import {
   buildPairs,
   decideDuplicate,
   formatPairScore,
+  JUDGE_SYSTEM,
   JUDGE_TOOL,
+  pairId,
   parseJudgement,
   ruleJudgement,
   samplePairs,
@@ -1074,36 +1077,62 @@ const turn = (input: unknown, name = JUDGE_TOOL.name): ModelTurn => ({
   usage: { input: 10, cachedInput: 0, cacheWrite: 0, output: 5 },
 });
 
-test("dedup judge: only a coherent judge_pair call is read; anything else is an error, never a guess", () => {
-  assert.deepEqual(parseJudgement(turn({ verdict: "same", p_same: 0.8 })), { ok: true, judgement: { verdict: "same", pSame: 0.8 } });
-  assert.deepEqual(parseJudgement(turn({ verdict: "unsure", p_same: 0.5 })), { ok: true, judgement: { verdict: "unsure", pSame: 0.5 } });
-  for (const [bad, why] of [
-    [turn({ verdict: "same", p_same: 0.3 }), /contradicts/],
-    [turn({ verdict: "different", p_same: 0.7 }), /contradicts/],
-    [turn({ verdict: "same", p_same: 1.2 }), /not a probability/],
-    [turn({ verdict: "same", p_same: "0.9" }), /not a probability/],
-    [turn({ verdict: "maybe", p_same: 0.5 }), /not same, different or unsure/],
-    [turn({ verdict: "same", p_same: 0.9 }, "other_tool"), /did not call judge_pair/],
-    [{ text: "They look the same.", calls: [], usage: NO_USAGE, note: "the model declined to continue" }, /declined/],
-  ] as const)
-    assert.match((parseJudgement(bad) as { error: string }).error, why);
+const pSameOf = (r: ReturnType<typeof parseJudgement>): number => {
+  assert.ok(r.ok, JSON.stringify(r));
+  return Number(r.judgement.pSame.toFixed(6));
+};
+
+test("dedup judge: the judge states confidence in its own verdict, and p_same is derived from the two", () => {
+  // The contrastive pair: one confidence, the verdict flipped, p_same mirrored.
+  assert.equal(pSameOf(parseJudgement(turn({ verdict: "same", confidence: 0.9 }))), 0.9);
+  assert.equal(pSameOf(parseJudgement(turn({ verdict: "different", confidence: 0.9 }))), 0.1);
+  // A first run's commonest answer — different, with 0.99 — is a confident "different", not a contradiction.
+  assert.equal(pSameOf(parseJudgement(turn({ verdict: "different", confidence: 0.99 }))), 0.01);
+  assert.equal(pSameOf(parseJudgement(turn({ verdict: "same", confidence: 0.5 }))), 0.5);
+  assert.deepEqual(parseJudgement(turn({ verdict: "unsure", confidence: 0.5 })), { ok: true, judgement: { verdict: "unsure", pSame: 0.5 } });
+  assert.deepEqual(parseJudgement(turn({ verdict: "unsure" })), { ok: true, judgement: { verdict: "unsure", pSame: 0.5 } });
+  assert.deepEqual((JUDGE_TOOL.parameters as { required: string[] }).required, ["verdict", "confidence"]);
+  assert.match(JUDGE_SYSTEM, /different with confidence 0\.9 means a 10% chance they are one defect/);
+});
+
+test("dedup judge: only a coherent judge_pair call is read; a contradiction is told apart from an error, and neither is a guess", () => {
+  for (const [bad, why, failure] of [
+    [turn({ verdict: "same", confidence: 0.3 }), /contradicts its confidence 0\.3/, "contradiction"],
+    [turn({ verdict: "different", confidence: 0.2 }), /contradicts its confidence 0\.2/, "contradiction"],
+    [turn({ verdict: "same", confidence: 1.2 }), /not a probability/, "error"],
+    [turn({ verdict: "same", confidence: "0.9" }), /not a probability/, "error"],
+    // The first run's field alone is not an answer to the question now asked.
+    [turn({ verdict: "same", p_same: 0.9 }), /confidence undefined is not a probability/, "error"],
+    [turn({ verdict: "maybe", confidence: 0.5 }), /not same, different or unsure/, "error"],
+    [turn({ verdict: "same", confidence: 0.9 }, "other_tool"), /did not call judge_pair/, "error"],
+    [{ text: "They look the same.", calls: [], usage: NO_USAGE, note: "the model declined to continue" }, /declined/, "error"],
+  ] as const) {
+    const r = parseJudgement(bad) as { ok: boolean; error: string; failure: string };
+    assert.equal(r.ok, false);
+    assert.match(r.error, why);
+    assert.equal(r.failure, failure, r.error);
+  }
 });
 
 test("dedup judge: off by default the rule decides; a failing or unsure judge falls back to the rule and says so", async () => {
   const pair = { route: "/r", a: pf("Export fails", "POST /api/export 500"), b: pf("Export broken", "POST /api/export 500") };
   assert.deepEqual(await decideDuplicate(pair), { duplicate: true, by: "rule" });
-  const differs = await decideDuplicate(pair, async () => turn({ verdict: "different", p_same: 0.1 }));
-  assert.deepEqual(differs, { duplicate: false, by: "model", judgement: { verdict: "different", pSame: 0.1 } });
+  const differs = await decideDuplicate(pair, async () => turn({ verdict: "different", confidence: 0.75 }));
+  assert.deepEqual(differs, { duplicate: false, by: "model", judgement: { verdict: "different", pSame: 0.25 } });
   const thrown = await decideDuplicate(pair, async () => {
     throw new Error("HTTP 529: overloaded");
   });
   assert.equal(thrown.by, "rule");
   assert.equal(thrown.duplicate, true);
   assert.match(thrown.note!, /model judge failed \(HTTP 529: overloaded\); the current rule decided/);
-  const malformed = await decideDuplicate(pair, async () => turn({ verdict: "same", p_same: 0.2 }));
+  assert.equal(thrown.failure, "error");
+  const malformed = await decideDuplicate(pair, async () => turn({ verdict: "same", confidence: 0.2 }));
   assert.equal(malformed.by, "rule");
+  assert.equal(malformed.failure, "contradiction");
+  assert.deepEqual(malformed.stated, { verdict: "same", confidence: 0.2 });
   assert.match(malformed.note!, /contradicts/);
-  const unsure = await decideDuplicate(pair, async () => turn({ verdict: "unsure", p_same: 0.5 }));
+  const unsure = await decideDuplicate(pair, async () => turn({ verdict: "unsure", confidence: 0.5 }));
+  assert.equal(unsure.failure, undefined);
   assert.equal(unsure.by, "rule");
   assert.match(unsure.note!, /unsure; the current rule decided/);
 });
@@ -1117,7 +1146,7 @@ test("dedup judge: through the real OpenAI adapter, a structured reply is read a
     sent.push(JSON.parse(String(init?.body)));
     return reply(200, {
       status: "completed",
-      output: [{ type: "function_call", call_id: "call_1", name: "judge_pair", arguments: JSON.stringify({ verdict: "different", p_same: 0.2 }) }],
+      output: [{ type: "function_call", call_id: "call_1", name: "judge_pair", arguments: JSON.stringify({ verdict: "different", confidence: 0.75 }) }],
       usage: { input_tokens: 120, output_tokens: 9 },
     });
   };
@@ -1129,7 +1158,7 @@ test("dedup judge: through the real OpenAI adapter, a structured reply is read a
         sleep: async () => {},
       }).next(60_000);
   const d = await decideDuplicate(pair, ask(ok as typeof fetch));
-  assert.deepEqual(d, { duplicate: false, by: "model", judgement: { verdict: "different", pSame: 0.2 } });
+  assert.deepEqual(d, { duplicate: false, by: "model", judgement: { verdict: "different", pSame: 0.25 } });
   const body = sent[0] as { reasoning: { effort: string }; tools: Array<{ name: string }>; input: Array<{ content: string }> };
   assert.equal(body.reasoning.effort, "none");
   assert.deepEqual(
@@ -1145,4 +1174,96 @@ test("dedup judge: through the real OpenAI adapter, a structured reply is read a
   // whoever prints a note must redact it first, as dedup-bench does.
   assert.ok(fell.note!.includes(KEY));
   assert.ok(!redactKeys(fell.note!, [KEY]).includes(KEY));
+});
+
+test("dedup-bench: each effort's calls reach the API at that effort and are counted apart, and the per-pair lines carry ids, not text", async () => {
+  // A stand-in API: output tokens depend on the effort asked for, and every third answer contradicts itself.
+  const efforts: string[] = [];
+  let n = 0;
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      const effort = (JSON.parse(raw) as { reasoning: { effort: string } }).reasoning.effort;
+      efforts.push(effort);
+      n += 1;
+      const answer = n % 3 === 0 ? { verdict: "same", confidence: 0.2 } : { verdict: "different", confidence: 0.9 };
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          status: "completed",
+          output: [{ type: "function_call", call_id: `c${n}`, name: "judge_pair", arguments: JSON.stringify(answer) }],
+          usage: { input_tokens: 100, output_tokens: effort === "none" ? 7 : 13 },
+        }),
+      );
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  const pairsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dedup-pairs-")), "pairs.jsonl");
+  const KEY = "sk-dedup-bench-test-0123456789";
+  try {
+    const out = await new Promise<string>((resolve, reject) =>
+      execFile(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          path.join(root, "scripts", "dedup-bench.ts"),
+          "--judge",
+          "--efforts",
+          "none,low",
+          "--cap",
+          "4",
+          "--provider",
+          "openai",
+          "--base-url",
+          `http://127.0.0.1:${port}/v1`,
+          "--pairs",
+          pairsFile,
+        ],
+        { env: { PATH: process.env.PATH, OPENAI_API_KEY: KEY } },
+        (err, stdout, stderr) => (err ? reject(new Error(`${err.message}\n${stderr}`)) : resolve(stdout)),
+      ),
+    );
+    // Two pairs per app at cap 4, four calls per effort.
+    assert.deepEqual(efforts, ["none", "none", "none", "none", "low", "low", "low", "low"]);
+    assert.match(out, /Tokens at effort none: 400 in \(0 cached\), 28 out\./);
+    assert.match(out, /Tokens at effort low: 400 in \(0 cached\), 52 out\./);
+    const contradictions = [...out.matchAll(/ {2}(\d+) answers contradicted their own verdict/g)].map((m) => Number(m[1]));
+    assert.equal(contradictions.length, 4, "one count per app per effort");
+    assert.equal(
+      contradictions.reduce((a, b) => a + b, 0),
+      2,
+      "calls 3 and 6 of 8 contradicted themselves",
+    );
+    assert.ok(!out.includes(KEY));
+    const lines = fs
+      .readFileSync(pairsFile, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    assert.equal(lines.length, 8);
+    for (const l of lines) {
+      assert.deepEqual(Object.keys(l), ["app", "effort", "pair", "keyA", "keyB", "key", "judge", "pSame", "failure", "stated", "rule", "outputTokens"]);
+      assert.match(String(l.pair), /^[0-9a-f]{12}$/);
+      assert.equal(l.outputTokens, l.effort === "none" ? 7 : 13);
+      if (l.failure === "contradiction") assert.deepEqual([l.judge, l.pSame, l.stated], [null, null, { verdict: "same", confidence: 0.2 }]);
+      else assert.deepEqual([l.judge, l.pSame, l.failure, l.stated], ["different", 0.1, null, null]);
+    }
+    // The same pairs at both efforts, so the lines can be joined pair by pair.
+    const ids = (e: string) => lines.filter((l) => l.effort === e).map((l) => `${l.app}/${l.pair}`);
+    assert.deepEqual(ids("none"), ids("low"));
+    const text = fs.readFileSync(pairsFile, "utf8");
+    assert.ok(!/title|evidence|POST |GET /.test(text), "no finding's text in the per-pair lines");
+  } finally {
+    server.close();
+  }
+});
+
+test("dedup pairs: a pair's id is stable, differs between pairs, and carries none of the findings' text", () => {
+  const p = (title: string): LabelledPair => ({ app: "demo", route: "/r", a: pf("Export fails", "POST /api/export 500"), b: pf(title, "x"), same: false });
+  assert.equal(pairId(p("B")), pairId(p("B")));
+  assert.notEqual(pairId(p("B")), pairId(p("C")));
+  assert.match(pairId(p("B")), /^[0-9a-f]{12}$/);
 });

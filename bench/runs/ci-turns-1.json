@@ -1,0 +1,45 @@
+{
+  "app": "demo",
+  "run": "ci-turns-1",
+  "date": "2026-09-27",
+  "note": "Unattended scenescout ci run by hand with the benchmark workflow at e13193a (3.13.0), gpt-6-luna effort medium; the one change: turn cap 80 instead of 40 (token cap 3M instead of 1.5M).",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard action links overlap the bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard All orders overlaps New: bulk import 85%"
+    },
+    {
+      "title": "Scheduled reports page is an empty dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables after reports-scheduled-link"
+    },
+    {
+      "title": "Application navigation links lack a distinct link affordance",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "shared navigation: 8 links un-underlined and body-text-colored"
+    },
+    {
+      "title": "Order notes save control is covered by the pinned bar",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order detail Save notes covered by order-stickybar"
+    },
+    {
+      "title": "New order accepts a malformed optional email and missing item count",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/orders creates order with items blank and confirmation email not-an-email"
+    }
+  ],
+  "decisions": []
+}

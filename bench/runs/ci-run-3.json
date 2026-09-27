@@ -1,0 +1,57 @@
+{
+  "app": "demo",
+  "run": "ci-run-3",
+  "date": "2026-09-27",
+  "note": "Unattended scenescout ci run taken by hand with the benchmark workflow, engine 3.13.0 at 6575b46: the CI rules tell the model that turns, not tool calls, are its budget and to check scout_coverage before reporting (rejected: recall unchanged); see Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard chart asset returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard links overlap bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard All orders overlaps New: bulk import 85%"
+    },
+    {
+      "title": "New order helper text has insufficient contrast",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "orders-new helper text contrast 1.73:1"
+    },
+    {
+      "title": "Navigation links are visually indistinguishable from body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "8 links no underline same color as body text"
+    },
+    {
+      "title": "Scheduled reports route is an empty dead end",
+      "severity": "medium",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables"
+    },
+    {
+      "title": "Order detail save button is covered by sticky bar",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order detail Save notes covered by order-stickybar"
+    },
+    {
+      "title": "Order detail line-items link lacks a test id",
+      "severity": "low",
+      "category": "missing-testid",
+      "evidence": "order detail link Line items are edited from the list missing testid"
+    },
+    {
+      "title": "Order detail requests an invalid null order",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/orders/null 404"
+    }
+  ],
+  "decisions": []
+}
