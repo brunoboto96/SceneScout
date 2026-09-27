@@ -122,6 +122,10 @@ inputs:
     description: The artifact's name. Empty means scenescout-ci-<job id>, with -2, -3 … for later uses in the same job.
     required: false
     default: ""
+  cache:
+    description: Restore and save the browser in the actions cache. Set to false in a job that must not write to the cache, such as one that checks out a ref chosen by an input.
+    required: false
+    default: "true"
   upload-sarif:
     description: Upload ci.sarif to GitHub code scanning. The job needs `permissions` with `security-events write`.
     required: false
@@ -200,6 +204,7 @@ runs:
 
     - name: Restore the browser cache
       id: cache
+      if: inputs.cache == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.resolve.outputs.browsers-path }}
@@ -226,7 +231,7 @@ runs:
       run: node "$SCENESCOUT_CLI" install --browser-only --browsers "$TARGET"
 
     - name: Save the browser cache
-      if: always() && steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
+      if: always() && inputs.cache == 'true' && steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.resolve.outputs.browsers-path }}
