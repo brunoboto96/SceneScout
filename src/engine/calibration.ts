@@ -21,17 +21,19 @@
  * Pure, so every rule here is table-tested.
  */
 import { requestsPair, type StatedRequest, statedRequests, templatedPathsMatch } from "./lane.js";
-import { failingSignatures, type Finding } from "./memory.js";
+import { failingSignatures, isWorthALook, type Finding } from "./memory.js";
 
 /** A lane decision as recorded, with when and by whom. The shape `lane.ts` parses, plus provenance. */
 export interface RecordedDecision {
   lane: string;
   observation: string;
-  verdict: "defect" | "not_a_defect" | "unsure";
+  verdict: "defect" | "not_a_defect" | "unsure" | "worth_a_look";
   severity: string | null;
   category: string | null;
   confidence: number;
   evidence: string | null;
+  /** The convention that would decide a "worth_a_look"; absent on other verdicts and on decisions recorded before the tier existed. */
+  convention?: string | null;
   at: string;
 }
 
@@ -125,6 +127,13 @@ export interface Calibration {
    * the lane. Reported so the reader knows the denominator is not everything.
    */
   unjoinable: number;
+  /**
+   * Decisions a lane called "worth a look": real, and a defect only under a
+   * project convention the run cannot see. Neither answer to "was it filed?"
+   * says the lane was right or wrong, so they are not scored; counted so the
+   * reader knows they were left out on purpose and why.
+   */
+  worthALook: number;
 }
 
 /**
@@ -137,7 +146,8 @@ export interface Calibration {
  */
 export function calibrate(decisions: readonly RecordedDecision[], findings: readonly Finding[]): Calibration | null {
   const filedKeys = new Map<string, Finding>();
-  for (const f of findings) {
+  // Filed as worth a look is not filed as a defect: a lane that called it a defect was not agreed with.
+  for (const f of findings.filter((x) => !isWorthALook(x))) {
     if (!f.evidence) continue;
     // A finding verified as still present is the most informative match, so it
     // wins a key two findings share; otherwise first write wins and the result
@@ -151,8 +161,11 @@ export function calibrate(decisions: readonly RecordedDecision[], findings: read
   const claims = decisions.filter((d) => d.verdict === "defect" && d.evidence !== null);
   const checkable = claims.filter((d) => usableConfidence(d.confidence) !== null && joinKeys(d.evidence as string).size > 0);
   const unjoinable = claims.length - checkable.length;
+  const worthALook = decisions.filter((d) => d.verdict === "worth_a_look").length;
   if (checkable.length === 0)
-    return unjoinable > 0 ? { checkable: 0, filed: 0, stated: 0, buckets: [], ece: 0, verified: { present: 0, gone: 0, changed: 0 }, unjoinable } : null;
+    return unjoinable > 0 || worthALook > 0
+      ? { checkable: 0, filed: 0, stated: 0, buckets: [], ece: 0, verified: { present: 0, gone: 0, changed: 0 }, unjoinable, worthALook }
+      : null;
 
   const buckets: Array<{ n: number; conf: number; hits: number }> = BUCKET_EDGES.map(() => ({ n: 0, conf: 0, hits: 0 }));
   const verified = { present: 0, gone: 0, changed: 0 };
@@ -194,7 +207,7 @@ export function calibrate(decisions: readonly RecordedDecision[], findings: read
     out.push({ label: bucketLabel(i), decisions: b.n, stated: meanConf, filed: rate });
   });
 
-  return { checkable: n, filed, stated: stated / n, buckets: out, ece, verified, unjoinable };
+  return { checkable: n, filed, stated: stated / n, buckets: out, ece, verified, unjoinable, worthALook };
 }
 
 const pct = (x: number): string => `${Math.round(x * 100)}%`;
@@ -211,13 +224,14 @@ export function formatCalibration(c: Calibration | null): string[] {
     // and a run that recorded none look identical when the section simply
     // vanishes, and the reader concludes the feature is broken — which is this
     // project's own definition of a silent path.
-    const had = c.checkable + c.unjoinable;
+    const had = c.checkable + c.unjoinable + c.worthALook;
     if (had === 0) return [];
     return [
       `## How well the lanes judged`,
       ``,
       `Not enough to say yet: ${c.checkable} lane decision(s) could be checked${c.unjoinable > 0 ? ` (and ${c.unjoinable} could not be looked up at all)` : ""}, ` +
         `and ${MIN_FOR_A_VERDICT} are needed before a calibration figure survives one of them changing.`,
+      ...worthALookNote(c),
       ``,
     ];
   }
@@ -249,6 +263,8 @@ export function formatCalibration(c: Calibration | null): string[] {
     );
   }
 
+  lines.push(...worthALookNote(c));
+
   const seen = c.verified.present + c.verified.gone + c.verified.changed;
   if (seen > 0) {
     lines.push(
@@ -259,6 +275,16 @@ export function formatCalibration(c: Calibration | null): string[] {
   }
   lines.push(``);
   return lines;
+}
+
+/** The line saying how many "worth a look" decisions were left out, and why; nothing when there were none. */
+function worthALookNote(c: Calibration): string[] {
+  if (c.worthALook === 0) return [];
+  return [
+    ``,
+    `${c.worthALook} decision(s) were marked worth a look: real, and a defect only under a convention of the project the run cannot see. ` +
+      `Whether one was filed says nothing about whether the lane was right, so they are not scored.`,
+  ];
 }
 
 /** Below this, the number swings on a single decision and is worse than no number. */
@@ -319,7 +345,8 @@ export const MAX_UNFILED_NAMED = 10;
 export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdict" | "observation" | "evidence">[], findings: readonly Finding[]): string[] {
   const keys: StatedRequest[] = [];
   const filed: Filed[] = [];
-  for (const f of findings) {
+  // A defect filed only as worth a look is not in the report's findings, so it is still unfiled.
+  for (const f of findings.filter((x) => !isWorthALook(x))) {
     const text = `${f.evidence ?? ""} ${f.title}`;
     const requests = statedRequests(f.evidence ?? "");
     // The store's signatures, and the finding's own failing requests as

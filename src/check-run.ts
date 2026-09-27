@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "./engine/browser.js";
 import {
-  issuesFromRoutes,
+  checkFindings,
   redactFlowRuns,
   redactRoute,
   redactRoutes,
@@ -145,13 +145,15 @@ export async function runCheck(
       : null;
     const measured = redactRoutes(routes.map(withoutOwnResponse));
     const flows = redactFlowRuns(flowRuns);
+    const { issues, worthALook } = checkFindings(measured, start.origin, options.ignore, flows);
     return {
       url: redactRoute(options.url),
       generatedAt: new Date().toISOString(),
       mode: options.mode,
       failOn: options.failOn,
       routes: measured,
-      issues: issuesFromRoutes(measured, start.origin, options.ignore, flows),
+      issues,
+      worthALook,
       // Routes that failed to load are issues already; "not visited" is only what --max-routes left out.
       unvisited: options.paths ? [] : engine.crawlableRoutes().map(redactRoute),
       ignored: options.ignore,

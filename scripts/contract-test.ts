@@ -725,6 +725,56 @@ test("history is indexed by default, so the findings this run made are not burie
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("worth a look: listed below the findings with what would confirm it, and in no defect total", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-look-"));
+  const store = new MemoryStore(dir);
+  const extras = { routesVisited: 1, routesTotal: 1, designAudits: 1 };
+  store.addFinding({
+    severity: "high",
+    category: "http-error",
+    title: "Orders list answers 500",
+    detail: "…",
+    url: "http://app.test/orders",
+    state: "/orders#1",
+    evidence: "GET /api/orders 500",
+  });
+  const before = generateReport(store, [], extras, { write: false });
+  const [look] = store.addFinding({
+    severity: "low",
+    category: "visual",
+    title: "Paddings off a 4px grid",
+    detail: "13px and 7px paddings on the card list.",
+    url: "http://app.test/orders",
+    state: "/orders#1",
+    evidence: "paddings off a 4px grid: 7px, 13px",
+    tier: "worth_a_look",
+    convention: "a 4px spacing scale",
+  });
+  const after = generateReport(store, [], extras, { write: false });
+  const md = after.markdown;
+  // The totals are the same with it as without it.
+  const totals = (m: string) => m.split("\n").find((l) => l.startsWith("| Open findings"));
+  assert.equal(totals(md), totals(before.markdown));
+  assert.match(totals(md) ?? "", /\| 1 \(1 high\)/);
+  assert.equal(
+    after.summary.split("\n").find((l) => l.startsWith("OPEN FINDINGS")),
+    before.summary.split("\n").find((l) => l.startsWith("OPEN FINDINGS")),
+  );
+  assert.match(md, /\| Worth a look \(not counted as defects\) \| 1 \|/);
+  assert.match(after.summary, /Worth a look .*: 1/);
+  // Its own section, below the findings: what was seen and what would confirm it.
+  const section = md.indexOf("## Worth a look (1)");
+  assert.ok(section > md.indexOf("## Findings — seen this session (1)"), "below the confirmed findings");
+  assert.match(md.slice(section), /A defect only if\*\* your project uses a 4px spacing scale/);
+  assert.match(md.slice(section), /\*\*Seen:\*\* `paddings off a 4px grid: 7px, 13px`/);
+  assert.match(md.slice(section), new RegExp(`\\*\\*Id:\\*\\* \`${look.id}\``), "the id bullet the live view hangs frames under");
+  // Not also printed as a finding.
+  assert.ok(!md.slice(0, section).includes("Paddings off a 4px grid"), "listed once, in its own section");
+  // A report with none has no section at all.
+  assert.ok(!before.markdown.includes("## Worth a look"));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("resolved findings are indexed too: they are the least actionable thing in the report", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-res-"));
   const store = new MemoryStore(dir);

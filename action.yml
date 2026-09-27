@@ -123,6 +123,9 @@ outputs:
   could-not-run:
     description: How many saved flows a refused step kept from running (on-refused-step report). Above 0, exit-code is 2 and passed describes the rest of the check.
     value: ${{ steps.run.outputs.could-not-run }}
+  worth-a-look:
+    description: How many observations the check listed as worth a look - defects only under a convention of the project (a 4px spacing scale, a link style). They are not in high, medium or low and never fail the gate.
+    value: ${{ steps.run.outputs.worth-a-look }}
   high:
     description: How many high-severity issues the check found.
     value: ${{ steps.run.outputs.high }}

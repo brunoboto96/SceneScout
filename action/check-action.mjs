@@ -84,6 +84,9 @@ export function browsersPath(env, platform, home) {
   return path.posix.join(env.XDG_CACHE_HOME || path.posix.join(home, ".cache"), "ms-playwright");
 }
 
+/** The outputs summaryOutputs sets, each declared in action.yml; all empty when there is no verdict. */
+export const SUMMARY_OUTPUT_NAMES = ["passed", "failing", "high", "medium", "low", "could-not-run", "retests-failing", "worth-a-look"];
+
 /** The numbers the action publishes, read from check.json. Null when there is no verdict to read. */
 export function summaryOutputs(json) {
   if (!json || typeof json !== "object" || !json.gate || !json.counts) return null;
@@ -97,6 +100,9 @@ export function summaryOutputs(json) {
     "could-not-run": String(json.gate.couldNotRun ?? 0),
     // Of `failing`, how many are re-tested findings (--gate-retests), so the annotation can say what it counts.
     "retests-failing": String(json.gate.retestsFailing ?? 0),
+    // Observations that are defects only under a convention of the project: listed, never counted or gated.
+    // A check.json written before the tier existed has none.
+    "worth-a-look": String(Array.isArray(json.worthALook) ? json.worthALook.length : 0),
   };
 }
 
@@ -296,7 +302,7 @@ function run() {
     report: file("report.md"),
     json: file("check.json"),
     sarif: file("check.sarif"),
-    ...(summary ?? { passed: "", failing: "", high: "", medium: "", low: "", "could-not-run": "", "retests-failing": "" }),
+    ...(summary ?? Object.fromEntries(SUMMARY_OUTPUT_NAMES.map((name) => [name, ""]))),
   });
 }
 

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { SHARED_CHROME_ROUTE, isEmbedKey, type Finding, type MemoryStore, type PageScore } from "./memory.js";
+import { SHARED_CHROME_ROUTE, isEmbedKey, isWorthALook, type Finding, type MemoryStore, type PageScore } from "./memory.js";
 import type { OracleViolation } from "./oracles.js";
 import { sayVerification } from "./verify.js";
 import type { WriteMode } from "./policy.js";
@@ -109,6 +109,33 @@ const SEVERITY_ICON: Record<Finding["severity"], string> = { high: "🔴", mediu
 function projectName(dir: string): string {
   const parent = path.dirname(dir);
   return path.basename(parent) || path.basename(dir) || "project";
+}
+
+/**
+ * The "Worth a look" section: observations that are real and are defects only
+ * under a convention of the project the run cannot see. Each says what was
+ * seen and what would confirm it. Listed below the findings and never in their
+ * totals, because SceneScout does not decide a project's conventions; nothing
+ * when there are none. The first bullet names the id, as a finding's does, so
+ * the live view hangs the frames recorded around it under the entry.
+ */
+export function formatWorthALook(items: readonly Finding[], sessionStart: string): string[] {
+  if (items.length === 0) return [];
+  const lines = [
+    `## Worth a look (${items.length})`,
+    ``,
+    `Real observations that are defects only under a convention of your project that the run cannot see. They are not counted as findings above; each says what would make it one.`,
+    ``,
+  ];
+  for (const f of items) {
+    lines.push(`### ${f.title}`, ``);
+    lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}${f.foundAt >= sessionStart ? "" : " · seen in an earlier run"}`);
+    lines.push(`- **A defect only if** your project uses ${f.convention ?? "a convention the finding does not name"}`);
+    if (f.evidence) lines.push(`- **Seen:** \`${f.evidence}\``);
+    lines.push(`- **Where:** \`${f.state}\` (${f.url})`);
+    lines.push(``, f.detail, ``);
+  }
+  return lines;
 }
 
 /**
@@ -511,7 +538,10 @@ export function generateReport(
 
   const lines: string[] = [];
   const resolved = findings.filter((f) => f.status === "resolved");
-  const open = findings.filter((f) => f.status !== "resolved");
+  // Worth a look is listed below the findings and counted nowhere a defect is:
+  // "open", "current" and "historical" hold defects only.
+  const worthALook = findings.filter((f) => f.status !== "resolved" && isWorthALook(f));
+  const open = findings.filter((f) => f.status !== "resolved" && !isWorthALook(f));
   const now = Date.now();
   const current = open.filter((f) => f.foundAt >= memory.sessionStart);
   const historical = open.filter((f) => f.foundAt < memory.sessionStart);
@@ -527,6 +557,7 @@ export function generateReport(
   lines.push(
     `| Open findings | ${open.length} (${open.filter((f) => f.severity === "high").length} high) — ${current.length} seen this session, ${historical.length} historical${resolved.length ? `, ${resolved.length} resolved (listed at the bottom)` : ""} |`,
   );
+  if (worthALook.length > 0) lines.push(`| Worth a look (not counted as defects) | ${worthALook.length} |`);
   if (extras && extras.routesTotal > 0) lines.push(`| Route coverage | ${extras.routesVisited}/${extras.routesTotal} |`);
   lines.push(`| States explored | ${cov.states} |`);
   if (extras) lines.push(`| Design audits this run (all sessions) | ${extras.designAudits} |`);
@@ -703,6 +734,8 @@ export function generateReport(
     }
   }
 
+  lines.push(...formatWorthALook(worthALook, memory.sessionStart));
+
   if (resolved.length > 0) {
     lines.push(`## ✅ Resolved (${resolved.length})`);
     lines.push(``);
@@ -847,6 +880,7 @@ export function generateReport(
     `Top open findings:`,
     ...open.slice(0, 10).map((f) => `  ${SEVERITY_ICON[f.severity]} [${f.severity}] ${f.title} (${f.id})`),
     ...(open.length > 10 ? [`  … +${open.length - 10} more in the report`] : []),
+    ...(worthALook.length > 0 ? [`Worth a look (defects only under a project convention; not counted above): ${worthALook.length}`] : []),
     ``,
     `Gap ledger${gaps.length === 0 ? ": EMPTY — nothing known left untested" : ` (${gaps.length}):`}`,
     ...gaps.map((g) => `  ⚠ ${g}`),
