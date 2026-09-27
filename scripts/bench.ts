@@ -19,8 +19,9 @@
  * app's key; `--key` may name a draft key, but not another benchmark app's.
  * `--all` scores each archive against its own app's key, one table per app.
  *
- * `--archive` keeps what scoring reads — findings and lane decisions, with
- * local paths removed — under bench/runs/, so the run can be re-scored when the
+ * `--archive` keeps what scoring reads — findings, lane decisions and the
+ * routes each lane's report said it covered, with local paths removed — under
+ * bench/runs/, so the run can be re-scored when the
  * key changes. `--all` re-scores every archive against the current key, which
  * is what keeps a before-and-after pair comparable: two scorecards from
  * different keys are not.
@@ -109,12 +110,20 @@ function loadKey(file: string): AnswerKey {
   }
 }
 
-function readMemory(projectDir: string): { findings: Parameters<typeof toArchive>[3]; decisions: Parameters<typeof toArchive>[4] } {
+function readMemory(projectDir: string): {
+  findings: Parameters<typeof toArchive>[3];
+  decisions: Parameters<typeof toArchive>[4];
+  laneRoutes: Record<string, string[]>;
+} {
   const memoryPath = path.join(projectDir, ".scenescout", "memory.json");
   if (!fs.existsSync(memoryPath)) fail(`No memory at ${memoryPath} — point this at the directory the run attached with.`);
   try {
-    const memory = JSON.parse(fs.readFileSync(memoryPath, "utf8")) as { findings?: unknown[]; laneDecisions?: unknown[] };
-    return { findings: (memory.findings ?? []) as never, decisions: (memory.laneDecisions ?? []) as never };
+    const memory = JSON.parse(fs.readFileSync(memoryPath, "utf8")) as { findings?: unknown[]; laneDecisions?: unknown[]; laneRoutes?: unknown };
+    return {
+      findings: (memory.findings ?? []) as never,
+      decisions: (memory.laneDecisions ?? []) as never,
+      laneRoutes: (memory.laneRoutes ?? {}) as Record<string, string[]>,
+    };
   } catch (err) {
     fail(`Could not read ${memoryPath}: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -146,7 +155,7 @@ if (values.archive) {
   const note = values.note as string | undefined;
   if (!name || !/^[a-z0-9-]+$/.test(name)) fail(`--run needs a short name of lower-case letters, digits and hyphens.\n\n${USAGE}`);
   if (!note) fail(`--note needs to say what changed in this run: the results log is useless without it.\n\n${USAGE}`);
-  const { findings, decisions } = readMemory(values.archive as string);
+  const { findings, decisions, laneRoutes } = readMemory(values.archive as string);
   let date: string;
   try {
     date = runDate(decisions, values.date as string | undefined);
@@ -157,8 +166,14 @@ if (values.archive) {
   const out = path.join(runsDir, `${name}.json`);
   if (fs.existsSync(out)) fail(`${path.relative(root, out)} already exists. Archives are evidence; pick a new name rather than overwrite one.`);
   fs.mkdirSync(runsDir, { recursive: true });
-  fs.writeFileSync(out, JSON.stringify(toArchive(name, date, note, findings, decisions, app), null, 2) + "\n");
-  console.log(`Archived ${findings.length} finding(s) and ${decisions.length} decision(s) of a ${app} run to ${path.relative(root, out)}.`);
+  fs.writeFileSync(out, JSON.stringify(toArchive(name, date, note, findings, decisions, app, laneRoutes), null, 2) + "\n");
+  const lanes = Object.keys(laneRoutes).length;
+  console.log(
+    `Archived ${findings.length} finding(s), ${decisions.length} decision(s) and ${lanes} lane(s)' routes of a ${app} run to ${path.relative(root, out)}.` +
+      (decisions.length > 0 && lanes === 0
+        ? `\nNo lane routes were recorded, so "not mine" verdicts in this run are read by their wording. Routes are kept when scout_lane_report folds a report while the lane's session is attached.`
+        : ""),
+  );
   process.exit(0);
 }
 
@@ -176,7 +191,7 @@ if (values.all) {
   if (groups.length === 0) fail(`No archived ${requestedApp ? `${requestedApp} ` : ""}runs in ${path.relative(root, runsDir)}.`);
   groups.forEach(([app, runs], i) => {
     const key = loadKey(APP_KEYS[app]);
-    const rows = runs.map((a) => ({ a, c: score(key, a.findings, a.decisions, level) }));
+    const rows = runs.map((a) => ({ a, c: score(key, a.findings, a.decisions, level, a.laneRoutes) }));
     if (i > 0) console.log("");
     console.log(`Every archived ${app} run, re-scored against key ${rows[0].c.key} (${key.app}) at ${level}:\n`);
     console.log(`| Run | Date | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Calibration |`);
@@ -196,7 +211,7 @@ if (values.all) {
 const target = positionals[0];
 if (!target || positionals.length > 1) fail(USAGE);
 const archived = target.endsWith(".json") ? readArchive(target) : undefined;
-const source = archived ?? { ...readMemory(target), run: path.basename(target), date: "", note: "" };
+const source: Pick<RunArchive, "findings" | "decisions" | "laneRoutes"> = archived ?? readMemory(target);
 let key: AnswerKey;
 if (keyFile) {
   key = loadKey(keyFile);
@@ -217,7 +232,7 @@ if (keyFile) {
   }
   key = loadKey(APP_KEYS[app]);
 }
-const card = score(key, source.findings, source.decisions, level);
+const card = score(key, source.findings, source.decisions, level, source.laneRoutes);
 console.log(formatScorecard(card));
 if (values.json) {
   fs.writeFileSync(values.json as string, JSON.stringify(card, null, 2) + "\n");

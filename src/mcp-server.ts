@@ -642,6 +642,9 @@ server.registerTool(
             parsed.report.decisions.map((d) => ({ ...d, lane, at })),
           )
         : 0;
+      // And the routes it covered, so the benchmark can tell a lane's remark
+      // about another lane's page from a verdict on its own.
+      owner?.addLaneRoutes(lane, parsed.report.routes);
       // Say when nothing was kept. Every lane closing its session before the
       // planner folds its report is the order the method describes, and it
       // leaves no memory to write to — reporting a bare "accepted" while the

@@ -33,7 +33,9 @@ import {
   keyHash,
   lintKey,
   parseKey,
+  isOwnershipRemark,
   isScopeDismissal,
+  laneRoutePaths,
   precisionBounds,
   runDate,
   sanitize,
@@ -449,6 +451,139 @@ test("a not-a-defect about the lane's own page is scored, however it words where
   }
 });
 
+// ── whose page it is, by the lanes' routes ─────────────────────────────────
+
+test("a route from a lane report names every page in it", () => {
+  // Lanes write routes as free text. Every page named counts, a note's
+  // included: a page left out would set a verdict about it aside, while a
+  // page taken in only keeps a verdict scored.
+  const cases: Array<[string, string[]]> = [
+    ["/order.html?id=1042 (from /orders.html link)", ["/order.html", "/orders.html"]],
+    ["/audit.html (as clerk and as auditor)", ["/audit.html"]],
+    ["Orders (/orders.html)", ["/orders.html"]],
+    ["orders.html", ["/orders.html"]],
+    ["127.0.0.1:4173/orders.html", ["/orders.html"]],
+    ["localhost:3000/things/42/edit", ["/things/:id/edit"]],
+    ["http://127.0.0.1:4173", ["/"]],
+    ["http://127.0.0.1:4173/orders.html", ["/orders.html"]],
+    ["/inventory.html: sort and filters", ["/inventory.html"]],
+    ["/", ["/"]],
+    ["/index.html", ["/"]],
+    ["/settings/", ["/settings"]],
+    ["/#/things?tab=open", ["/things"]],
+    ["/reports.html, /reports-scheduled.html", ["/reports.html", "/reports-scheduled.html"]],
+    ["/reports.html and /reports-scheduled.html", ["/reports.html", "/reports-scheduled.html"]],
+    ["/a.html + /b.html | /c.html\n/d.html", ["/a.html", "/b.html", "/c.html", "/d.html"]],
+    ["/orders.html → /order.html?id=3", ["/orders.html", "/order.html"]],
+    ["/orders.html -> /order.html", ["/orders.html", "/order.html"]],
+    ["dashboard", []],
+    ["the orders area", []],
+    ["(none)", []],
+  ];
+  for (const [raw, want] of cases) assert.deepEqual(laneRoutePaths(raw), want, raw);
+});
+
+const routeKey = parseKey({
+  app: "routes",
+  defects: [
+    { ...entry("chart-404", ["chart\\.png 404"]), route: "/" },
+    { ...entry("sort-as-text", ["sorts? .{0,20}as text"]), route: "/stock.html" },
+    { ...entry("nav-overlap", ["nav .{0,20}overlaps"]), route: "/", everyPage: true },
+    { ...entry("delete-lies", ["delete .{0,30}reports success"]), route: "/settings.html", alsoOn: ["/thing.html"] },
+  ],
+  nonDefects: [{ id: "policy", title: "write policy", why: "the tester refused it", match: ["refused by the write policy"] }],
+});
+const stockLane = { stock: ["/stock.html?sort=qty (from the nav)"] };
+
+test("a not-a-defect on a defect outside the lane's routes is an ownership remark, and the same words on its own route are a verdict", () => {
+  // Run 11's orders and stock lanes dismissed the dashboard's broken image
+  // in words the wording rule does not read ("raised on / before
+  // navigating"), so right remarks about another lane's page scored as wrong
+  // verdicts. Knowing the lane's routes decides it by where the thing is.
+  const remark = decision({ lane: "stock", verdict: "not_a_defect", evidence: "GET /img/chart.png 404", observation: "raised on / before navigating" });
+  assert.equal(isScopeDismissal(remark), false, "the wording rule misses it");
+  assert.equal(judgeDecision(remark, routeKey), false, "and without routes it is scored as a wrong verdict");
+  assert.equal(isOwnershipRemark(remark, routeKey, stockLane), true);
+  assert.equal(judgeDecision(remark, routeKey, stockLane), null);
+  // The same text from a lane that covered "/" is its own wrong verdict.
+  const home = { stock: [...stockLane.stock, "/ (landing)"] };
+  assert.equal(isOwnershipRemark(remark, routeKey, home), false);
+  assert.equal(judgeDecision(remark, routeKey, home), false);
+
+  // And the reverse: "not my lane" wording on a defect on the lane's own route
+  // is a verdict. The wording rule drops it; the route rule scores it.
+  const own = decision({ lane: "stock", verdict: "not_a_defect", evidence: "quantity sorts as text", observation: "handled by the dashboard lane" });
+  assert.equal(isScopeDismissal(own), true);
+  assert.equal(judgeDecision(own, routeKey), null);
+  assert.equal(judgeDecision(own, routeKey, stockLane), false);
+
+  const k = calibrateAgainstKey([remark, own], routeKey, stockLane)!;
+  assert.deepEqual([k.judged, k.correct, k.outOfScope, k.ownership], [1, 0, 1, "routes"]);
+  // Each verdict the route rule set aside is listed, so a run can be audited.
+  assert.deepEqual(k.setAsideByRoute, [{ lane: "stock", id: "chart-404", confidence: 0.9 }]);
+  const card = formatScorecard(score(routeKey, [], [remark, own], "minimal", stockLane));
+  assert.match(card, /1 dismissed as another lane's \(by the lanes' routes\)/);
+  assert.match(card, /Set aside as another lane's, by the lanes' routes \(1\):\n\s+stock on chart-404, stated 0\.90/);
+  // By wording nothing is listed: there is no entry to name.
+  assert.deepEqual(calibrateAgainstKey([own], routeKey)?.setAsideByRoute, []);
+});
+
+test("a defect in chrome every page carries is every lane's, and one on several pages is owned from any of them", () => {
+  // A lane that owns any page cannot call the shared nav "not mine": the nav
+  // is on its page too.
+  const chrome = decision({ lane: "stock", verdict: "not_a_defect", evidence: "nav links overlaps the logo", observation: "not my page" });
+  assert.equal(isOwnershipRemark(chrome, routeKey, stockLane), false);
+  assert.equal(judgeDecision(chrome, routeKey, stockLane), false);
+  // By wording it would have been dropped.
+  assert.equal(judgeDecision(chrome, routeKey), null);
+
+  const del = decision({ lane: "thing", verdict: "not_a_defect", evidence: "Delete order reports success", observation: "settings lane owns it" });
+  assert.equal(judgeDecision(del, routeKey, { thing: ["/thing.html?id=7"] }), false, "shown on the lane's own page");
+  assert.equal(judgeDecision(del, routeKey, { thing: ["/other.html"] }), null, "on none of the lane's pages");
+});
+
+test("a lane's worth-a-look is counted as that, whatever its routes say", () => {
+  // Both skip reasons apply to one run: a worth-a-look is not a claim, and the
+  // route rule only reads not-a-defect verdicts.
+  const look = decision({ lane: "stock", verdict: "worth_a_look", evidence: "GET /img/chart.png 404", observation: "not my page" });
+  assert.equal(judgeDecision(look, routeKey, stockLane), null);
+  const k = calibrateAgainstKey([look], routeKey, stockLane)!;
+  assert.deepEqual([k.worthALook, k.outOfScope, k.setAsideByRoute.length], [1, 0, 0]);
+});
+
+test("a not-a-defect the key calls right, or cannot place, is never taken for an ownership remark", () => {
+  // Only a real defect has a page someone owns. A lane right that something
+  // is not a defect is scored right, whichever page it is on.
+  const right = decision({ lane: "stock", verdict: "not_a_defect", evidence: "refused by the write policy", observation: "not my page" });
+  assert.equal(isOwnershipRemark(right, routeKey, stockLane), false);
+  assert.equal(judgeDecision(right, routeKey, stockLane), true);
+  const unknown = decision({ lane: "stock", verdict: "not_a_defect", observation: "something the key does not name, not my page" });
+  const k = calibrateAgainstKey([unknown], routeKey, stockLane)!;
+  assert.deepEqual([k.outOfScope, k.notInKey], [0, 1]);
+  // A defect verdict is a claim wherever it is.
+  const claim = decision({ lane: "stock", verdict: "defect", evidence: "GET /img/chart.png 404" });
+  assert.equal(judgeDecision(claim, routeKey, stockLane), true);
+});
+
+test("a lane whose routes are not known is read by wording, as every archive before routes were kept is", () => {
+  const remark = (lane: string) =>
+    decision({ lane, verdict: "not_a_defect", evidence: "GET /img/chart.png 404", observation: "belongs to the dashboard lane" });
+  // No routes at all: the wording rule, unchanged.
+  assert.equal(judgeDecision(remark("stock"), routeKey), null);
+  assert.equal(calibrateAgainstKey([remark("stock")], routeKey)?.ownership, "wording");
+  // Routes for other lanes only, or routes that name no path: this lane by wording.
+  assert.equal(isOwnershipRemark(remark("orders"), routeKey, stockLane), true);
+  assert.equal(isOwnershipRemark(remark("vague"), routeKey, { vague: ["dashboard", "(everything)"] }), true);
+  // One route that names no page makes the lane unknown: it may be the page the verdict is about.
+  assert.equal(isOwnershipRemark(remark("partly"), routeKey, { partly: ["/stock.html", "the dashboard area"] }), true, "wording decides");
+  const unreadable = decision({ lane: "partly", verdict: "not_a_defect", evidence: "GET /img/chart.png 404", observation: "raised on / before navigating" });
+  assert.equal(judgeDecision(unreadable, routeKey, { partly: ["/stock.html", "the dashboard area"] }), false, "and a remark it misses stays scored");
+  const plain = decision({ lane: "orders", verdict: "not_a_defect", evidence: "GET /img/chart.png 404", observation: "raised on / before navigating" });
+  assert.equal(isOwnershipRemark(plain, routeKey, stockLane), false);
+  assert.equal(calibrateAgainstKey([remark("stock"), remark("orders")], routeKey, stockLane)?.ownership, "mixed");
+  assert.match(formatScorecard(score(routeKey, [], [remark("stock")], "minimal")), /1 dismissed as another lane's \(by wording: no lane routes archived\)/);
+});
+
 test("nothing the key could judge reads as nothing, never as a perfect score", () => {
   // "0/0 verdicts right, expected calibration error 0.00" read as perfect.
   const out = formatScorecard(score(key, [], [decision({ observation: "unrelated" })], "minimal"));
@@ -476,6 +611,47 @@ test("an archive keeps what scoring reads and nothing that names a person or a m
   assert.deepEqual(Object.keys(a.findings[0]).sort(), ["category", "evidence", "severity", "title"], "only what scoring reads");
   // And an archive scores exactly as the memory it came from.
   assert.deepEqual(score(key, a.findings, a.decisions, "minimal").found, score(key, [f], [d], "minimal").found);
+  assert.equal("laneRoutes" in a, false, "no routes recorded, none archived");
+});
+
+test("no query string or fragment from a lane's route reaches an archive", () => {
+  // A lane copies routes from the address bar, and an address can carry a token.
+  const secret = "abc123def456ghi";
+  const a = toArchive("run-12", "2026-09-27", "note", [], [], "demo", {
+    auth: [
+      `/cb?access_token=${secret}`,
+      `/cb#access_token=${secret}`,
+      `/files/x.pdf?X-Amz-Signature=${secret}&X-Amz-Date=1`,
+      `/login?code=${secret} (after redirect)`,
+      `/s session_id=${secret}`,
+    ],
+  });
+  const text = JSON.stringify(a);
+  assert.ok(!text.includes(secret), text);
+  assert.ok(!/access_token|X-Amz|code=|session_id/.test(text), text);
+  assert.deepEqual(a.laneRoutes?.auth.map(laneRoutePaths), [["/cb"], ["/cb"], ["/files/x.pdf"], ["/login"], ["/s"]]);
+  // A hash route keeps its path.
+  assert.deepEqual(toArchive("r", "2026-09-27", "n", [], [], "demo", { spa: ["/#/things?token=x"] }).laneRoutes, { spa: ["/#/things"] });
+});
+
+test("a key entry names each of its pages once, and one on every page names no others", () => {
+  const base = { ...entry("e", ["x"]), route: "/a" };
+  assert.throws(() => parseKey({ app: "t", defects: [{ ...base, alsoOn: ["/b"], everyPage: true }] }), /both alsoOn and everyPage/);
+  assert.throws(() => parseKey({ app: "t", defects: [{ ...base, alsoOn: ["/a"] }] }), /names the page "\/a" twice/);
+  assert.throws(() => parseKey({ app: "t", defects: [{ ...base, alsoOn: ["/b", "/b"] }] }), /twice/);
+  assert.equal(parseKey({ app: "t", defects: [{ ...base, alsoOn: ["/b"] }] }).defects[0].alsoOn?.[0], "/b");
+});
+
+test("an archive keeps each lane's routes, so ownership is re-scored by them", () => {
+  const d = decision({ lane: "stock", verdict: "not_a_defect", evidence: "GET /img/chart.png 404", observation: "raised on / before navigating" });
+  const a = toArchive("run-12", "2026-09-27", "note", [], [d], "demo", { stock: ["/stock.html, notes in /Users/u/notes.md"] });
+  assert.deepEqual(a.laneRoutes, { stock: ["/stock.html, notes in <path>"] });
+  const archived = JSON.parse(JSON.stringify(a)) as typeof a;
+  assert.deepEqual(
+    score(routeKey, archived.findings, archived.decisions, "minimal", archived.laneRoutes).calibration,
+    score(routeKey, [], [d], "minimal", { stock: ["/stock.html"] }).calibration,
+  );
+  assert.equal(score(routeKey, archived.findings, archived.decisions, "minimal", archived.laneRoutes).calibration?.outOfScope, 1);
 });
 
 // ── the demo app's own key ─────────────────────────────────────────────────
@@ -564,6 +740,26 @@ test("the demo key has one planted defect for every row of the README's seeded t
 // ── the held-out app, and scoring each run with its own app's key ──────────
 
 const holdoutKey = parseKey(JSON.parse(fs.readFileSync(path.join(root, "holdout-app", "answer-key.json"), "utf8")));
+
+test("every entry in both keys names the page it is on", () => {
+  // Ownership is decided by an entry's pages, so each must read as exactly
+  // one path, and an entry on every page must say so rather than name "/".
+  for (const k of [demoKey, holdoutKey]) {
+    for (const e of [...k.defects, ...k.alsoReal, ...k.contextual]) {
+      for (const r of [e.route, ...(e.alsoOn ?? [])]) assert.deepEqual(laneRoutePaths(r), [r], `${k.app} ${e.id} ${r}`);
+    }
+    const nav = k.contextual.find((e) => e.id === "nav-links-unstyled");
+    assert.equal(nav?.everyPage, true, `${k.app}: the nav is on every page`);
+  }
+  // An endpoint defect any lane can reach with a direct request is every lane's.
+  for (const [k, id] of [
+    [demoKey, "approve-endpoint-accepts-clerk"],
+    [demoKey, "orders-api-accepts-invalid-input"],
+    [holdoutKey, "member-record-any-id"],
+  ] as const) {
+    assert.equal([...k.defects, ...k.alsoReal].find((e) => e.id === id)?.everyPage, true, id);
+  }
+});
 
 test("the held-out key agrees with every one of its own examples and counter-examples", () => {
   assert.deepEqual(lintKey(holdoutKey), []);
