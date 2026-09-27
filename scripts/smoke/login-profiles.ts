@@ -14,8 +14,8 @@ import os from "node:os";
 import path from "node:path";
 import { chromium, firefox, webkit } from "playwright";
 import { BrowserEngine } from "../../dist/engine/browser.js";
-import { profilePath, writeProfile } from "../../dist/engine/profiles.js";
-import { captureState } from "../../dist/login-run.js";
+import { profilePath } from "../../dist/engine/profiles.js";
+import { saveLogin, savedLine } from "../../dist/login-run.js";
 import { BROWSER, check, SIGN_IN_COOKIE, type SmokeContext } from "./harness.ts";
 
 export const title = "login profiles";
@@ -41,9 +41,19 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       const page = await context.newPage();
       await page.goto(`${baseUrl}/cookie-signin`);
       check("the fixture's sign-in lands on the signed-in page", (await page.textContent("h1")) === SIGNED_IN, await page.content());
-      const saved = writeProfile(project, "member", await captureState(context));
+      const options = { url: `${baseUrl}/cookie-account`, role: "member", projectDir: project };
+      const saved = await saveLogin(context, options);
       check("the profile is saved under .scenescout/auth/<role>.json", saved.path === path.join(project, ".scenescout", "auth", "member.json"), saved.path);
       check("...holding the sign-in cookie", saved.summary.cookies >= 1, JSON.stringify(saved.summary));
+      // What `scenescout login` prints once saved: how long the login lasts, read
+      // from the cookie the fixture sets for an hour, by name and never by value.
+      const printed = savedLine(options, saved);
+      check(
+        "login's output says how long the saved sign-in lasts, from the cookie that dates it",
+        /\nLasts: about (59m\d\ds|1h00m) \(the last dated credential, cookie "fixture_session"\)\.\n/.test(printed),
+        printed,
+      );
+      check("...and never prints the cookie's value", !printed.includes("=member"), printed);
     } finally {
       await browser.close();
     }

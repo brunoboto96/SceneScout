@@ -99,14 +99,26 @@ export async function runLogin(
     end = waitForEnd(browserClosed);
     const how = await end.done;
     if (how !== "enter") throw new Error(NOT_SAVED[how]);
-    const state = await captureState(context);
-    const saved = writeProfile(options.projectDir, options.role, state);
-    return { ...saved, lifetime: readLifetime(state, { url: options.url }) };
+    return await saveLogin(context, options);
   } finally {
     end?.dispose();
     // Closing a browser the person already closed fails; nothing is left to clean up then.
     await browser.close().catch(() => {});
   }
+}
+
+/**
+ * Save a signed-in context as the role's profile and read how long it lasts:
+ * what `scenescout login` does once Enter is pressed, apart so it can be run
+ * against a headless browser.
+ */
+export async function saveLogin(
+  context: BrowserContext,
+  options: Pick<LoginOptions, "url" | "role" | "projectDir">,
+): Promise<{ path: string; summary: ProfileSummary; lifetime: ProfileLifetime }> {
+  const state = await captureState(context);
+  const saved = writeProfile(options.projectDir, options.role, state);
+  return { ...saved, lifetime: readLifetime(state, { url: options.url }) };
 }
 
 /** The lines printed on success: where, how much, how long it lasts. Never the profile's contents. */
