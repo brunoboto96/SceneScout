@@ -528,11 +528,19 @@
       "category": "ux-confusing",
       "severity": "low",
       "level": "medium",
-      "match": ["workspace name.{0,40}(accepts?|allows?).{0,20}(empty|blank)", "settings-name.{0,40}(accepts?|cleared).{0,30}(empty|\"\")"],
-      "examples": [
-        "Workspace name field accepts empty value with no client-side validation\ntestid=settings-name accepts empty string, testid=settings-save enabled, PATCH /api/settings sent with name=\"\""
+      "match": [
+        "workspace name.{0,40}(accepts?|allows?).{0,20}(empty|blank)",
+        "settings-name.{0,40}(accepts?|cleared).{0,30}(empty|\"\")",
+        "(accepts?|allows?|takes?) (an? )?(empty|blank) workspace name"
       ],
-      "counterExamples": []
+      "examples": [
+        "Workspace name field accepts empty value with no client-side validation\ntestid=settings-name accepts empty string, testid=settings-save enabled, PATCH /api/settings sent with name=\"\"",
+        "testid=settings-name=\"\" click testid=settings-save -> \"Saved.\"\nSettings accepts a blank workspace name and reports \"Saved.\""
+      ],
+      "counterExamples": [
+        "testid=settings-name=\"\" click testid=settings-save fires 0 network requests; name reverts after reload",
+        "Settings refuses a blank workspace name with an error"
+      ]
     },
     {
       "id": "orders-status-label-mismatch",
@@ -714,16 +722,56 @@
       "severity": "low",
       "level": "medium",
       "match": [
-        "(status|order|page).{0,30}(stays|remains|still (says|shows)) \"?open\"?.{0,40}(after|once).{0,30}request",
-        "request-approval.{0,5}200.{0,80}page (still )?shows open"
+        "^(?![\\s\\S]*request-approval\\s+40\\d)[\\s\\S]*(status|order|header|page).{0,30}(stays|remains|keeps? (showing|saying)|still (says|shows)) \"?open\"?.{0,40}(after|once).{0,30}request",
+        "request-approval.{0,5}200.{0,80}(page|header) (still )?shows \"?open"
       ],
       "examples": [
-        "Order status stays \"open\" after requesting manager approval\nPOST /api/orders/1042/request-approval 200; GET /api/orders/1042 status=pending; page shows open"
+        "Order status stays \"open\" after requesting manager approval\nPOST /api/orders/1042/request-approval 200; GET /api/orders/1042 status=pending; page shows open",
+        "POST /api/orders/1043/request-approval 200; header status \"open\", GET /api/orders/1043 status=pending\nOrder header keeps showing \"open\" after approval is requested"
       ],
       "counterExamples": [
         "Request manager approval still offered on a pending order\nPOST /api/orders/1042/request-approval 409 status=pending",
-        "GET /api/orders/1042 status=pending; order-request-approval visible+enabled on fresh load\napproval-button-visible-after-pending"
+        "GET /api/orders/1042 status=pending; order-request-approval visible+enabled on fresh load\napproval-button-visible-after-pending",
+        "POST /api/orders/1042/request-approval 403 as auditor\nOrder header keeps showing \"open\" after the approval request is refused"
       ]
+    },
+    {
+      "id": "reports-cards-fixed",
+      "route": "/reports.html",
+      "title": "The report cards are fixed in the page and disagree with the orders the app holds",
+      "category": "data-inconsistency",
+      "severity": "medium",
+      "level": "medium",
+      "match": [
+        "reports?.{0,40}(cards?|figures|numbers|counts|totals?)\\b.{0,60}(fixed in|static|hard.?coded|disagree|(don'?t|do not|never) match|mismatch|contradict)",
+        "(static|hard.?coded|fixed).{0,20}(report )?cards.{0,60}(orders|data)"
+      ],
+      "examples": [
+        "reports.html static cards 17/$6,420 vs GET /api/orders 200 seeded n=6 sum=5414.75\nReports cards are fixed in the HTML and disagree with the orders data",
+        "Reports card figures (17 orders, $6,420) do not match the 6 orders worth $5,414.75 the app holds"
+      ],
+      "counterExamples": [
+        "Scheduled reports page is a static coming-soon stub with no navigation",
+        "Export CSV on Reports throws and nothing is exported",
+        "Dashboard open-orders count disagrees with the orders list while other lanes create orders"
+      ]
+    },
+    {
+      "id": "audit-times-no-date",
+      "route": "/audit.html",
+      "title": "The audit log shows times with no date, so entries from different days look out of order",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": [
+        "audit.{0,60}(times?|timestamps?).{0,40}(without|no|lacks?|missing) (a |any )?dates?",
+        "audit.{0,80}(looks?|appears?|seems?) (un|out of )(sorted|order)"
+      ],
+      "examples": [
+        "testid=audit-rows times 01:58 then 09:14 (no date)\nAudit log shows times without dates, so order looks unsorted",
+        "Audit log timestamps have no date"
+      ],
+      "counterExamples": ["Audit log records a clerk approving an order", "The audit log refuses a clerk and says it is for managers and auditors"]
     }
   ],
   "nonDefects": [
