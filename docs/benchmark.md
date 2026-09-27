@@ -1042,8 +1042,24 @@ model call.
 |---|---|---|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|
 | 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 7/8 (88%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |
 | 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · medium | c1786bc817 | 3/13 | 3/3 (100%) | — | turns | 40 | 885,574 (858,517) / 3,152 | 1m 38s | $0.013 |
+| 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · medium | c1786bc817 | 4/13 | 5/5 (100%) | — | done | 65 | 1,657,036 (1,620,750) / 7,123 | 2m 55s | $0.023 |
 
 <!-- ci-results:end -->
+
+**Turn cap, 40 to 80 (ci-turns-1).** One change against ci-run-2, which ended
+at the 40-turn cap: the same model and effort (gpt-6-luna, medium) with
+`max-turns` 80 and `max-tokens` 3,000,000 (both doubled; the time cap stayed
+20 minutes), dispatched through the benchmark workflow's new inputs. The
+engine moved from `7280e29` to `e13193a` between the two, with no change to
+`scenescout ci`'s loop or prompt. The run ended by itself at 65 turns, so 80
+was not binding. Recall 3/13 to 4/13: gained the scheduled-reports dead end
+and the sticky bar covering Save, lost the double submit. Precision 5/5, up
+from 3/3. Tokens and cost rose by about 1.9 times ($0.013 to $0.023). **Not
+adopted:** a net one-defect gain from one run is within the run-to-run spread
+(ci-run-1 and ci-run-2 differ by two on an effort change), and ci-run-1 found
+5/13 in 36 turns at low effort, so more turns do not yet explain a gap. The
+CLI's default cap stays 40; the workflow inputs stay, so a later experiment
+can set the caps without editing the workflow.
 
 ## Finding dedup as a measured decision (task 15)
 
