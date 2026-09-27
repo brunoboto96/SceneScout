@@ -9,8 +9,11 @@
  * loads. The browser half — opening a window and reading its state back — is
  * in login-run.ts.
  *
- * A profile is a Playwright storage state: live session cookies and
- * localStorage for the app it was recorded against. It is never printed,
+ * A profile is a Playwright storage state (live session cookies, and
+ * localStorage and IndexedDB per origin) for the app it was recorded against,
+ * plus the sessionStorage Playwright's storage state leaves out: several
+ * single-page-app sign-in libraries keep their tokens there, so without it a
+ * restored session looks signed out. It is never printed,
  * never logged, and never leaves the project's .scenescout/ directory, which
  * ignores itself in git.
  */
@@ -100,24 +103,152 @@ export interface StorageStateShape {
   origins: unknown[];
 }
 
+/** One origin's sessionStorage, as a profile keeps it. */
+export interface SessionStorageOrigin {
+  origin: string;
+  entries: { name: string; value: string }[];
+}
+
+/**
+ * A profile on disk: the storage state Playwright restores itself, plus the
+ * sessionStorage it has no field for. A profile saved before sessionStorage
+ * was captured has no `sessionStorage` key and loads as it always did.
+ */
+export interface ProfileShape extends StorageStateShape {
+  sessionStorage?: SessionStorageOrigin[];
+}
+
+/**
+ * The key the restore script leaves in a tab's sessionStorage once it has
+ * seeded that origin, so a page reloaded or navigated within the tab keeps
+ * what the app has since written (or removed) instead of being seeded again.
+ * Never captured into a profile.
+ */
+export const SESSION_RESTORED_MARKER = "__scenescout_session_restored";
+
+/** A real origin a script can match against `location.origin`; opaque ("null"), about:, data: and file: frames have nothing to keep. */
+function isWebOrigin(origin: unknown): origin is string {
+  if (typeof origin !== "string") return false;
+  try {
+    const url = new URL(origin);
+    return (url.protocol === "http:" || url.protocol === "https:") && url.origin === origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Merge what each frame of each open tab held in sessionStorage into one list
+ * per origin. Two tabs on one origin each have their own sessionStorage; the
+ * profile keeps one, so a later read of the same key wins. Opaque origins,
+ * non-string values and the restore marker are dropped; an origin left with
+ * nothing is left out.
+ */
+export function mergeSessionStorage(frames: readonly { origin: unknown; entries: unknown }[]): SessionStorageOrigin[] {
+  const byOrigin = new Map<string, Map<string, string>>();
+  for (const frame of frames) {
+    if (!isWebOrigin(frame.origin) || !Array.isArray(frame.entries)) continue;
+    const kept = byOrigin.get(frame.origin) ?? new Map<string, string>();
+    for (const entry of frame.entries) {
+      if (!Array.isArray(entry) || entry.length !== 2) continue;
+      const [name, value] = entry as unknown[];
+      if (typeof name !== "string" || typeof value !== "string" || name === SESSION_RESTORED_MARKER) continue;
+      kept.set(name, value);
+    }
+    byOrigin.set(frame.origin, kept);
+  }
+  return [...byOrigin]
+    .filter(([, entries]) => entries.size > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([origin, entries]) => ({ origin, entries: [...entries].map(([name, value]) => ({ name, value })) }));
+}
+
+/** A storage state with sessionStorage added, when there is any to add. */
+export function withSessionStorage(state: unknown, sessionStorage: SessionStorageOrigin[]): unknown {
+  if (sessionStorage.length === 0 || !state || typeof state !== "object") return state;
+  return { ...(state as object), sessionStorage };
+}
+
+/**
+ * Split a profile read from disk into what Playwright restores (the storage
+ * state, handed to newContext) and the sessionStorage restored by script.
+ * A malformed sessionStorage list is refused rather than half-applied: a
+ * session that silently loses its token tests a signed-out app.
+ */
+export function splitProfile(raw: unknown): { storageState: StorageStateShape; sessionStorage: SessionStorageOrigin[] } {
+  const checked = summarizeState(raw);
+  if (!checked.ok) throw new Error(checked.error);
+  const { sessionStorage, ...storageState } = raw as ProfileShape;
+  if (sessionStorage === undefined) return { storageState, sessionStorage: [] };
+  const valid =
+    Array.isArray(sessionStorage) &&
+    sessionStorage.every(
+      (o) => o && isWebOrigin(o.origin) && Array.isArray(o.entries) && o.entries.every((e) => e && typeof e.name === "string" && typeof e.value === "string"),
+    );
+  if (!valid) throw new Error("the profile's sessionStorage list is malformed: record it again with `scenescout login`");
+  return { storageState, sessionStorage };
+}
+
+/**
+ * The init script that restores sessionStorage. It runs in every frame before
+ * the page's own code, and writes only into a frame whose origin is one the
+ * profile holds, only once per tab: after that the app's own writes stand.
+ * An app that signs out with sessionStorage.clear() would take the marker with
+ * it and be signed back in on the next page, so in those frames clear() puts
+ * the marker back after clearing. Values go in as JSON, so nothing in them is
+ * ever run. No sessionStorage to restore: no script.
+ */
+export function sessionStorageInitScript(sessionStorage: readonly SessionStorageOrigin[]): string | null {
+  if (sessionStorage.length === 0) return null;
+  const seed: Record<string, [string, string][]> = {};
+  for (const o of sessionStorage) seed[o.origin] = o.entries.map((e) => [e.name, e.value]);
+  return `(() => {
+  const seed = ${JSON.stringify(seed)};
+  const marker = ${JSON.stringify(SESSION_RESTORED_MARKER)};
+  if (!Object.prototype.hasOwnProperty.call(seed, location.origin)) return;
+  const proto = Object.getPrototypeOf(sessionStorage);
+  const clear = proto.clear;
+  proto.clear = function () {
+    clear.call(this);
+    if (this === sessionStorage) this.setItem(marker, "1");
+  };
+  if (sessionStorage.getItem(marker) !== null) return;
+  for (const [name, value] of seed[location.origin]) sessionStorage.setItem(name, value);
+  sessionStorage.setItem(marker, "1");
+})();`;
+}
+
 /** What is safe to print about a profile: how much it holds, never what. */
 export interface ProfileSummary {
   cookies: number;
+  /** Origins with localStorage or IndexedDB (Playwright's `origins` list). */
   origins: number;
+  /** Origins with sessionStorage. */
+  sessionOrigins: number;
+  /** IndexedDB databases, across every origin. */
+  indexedDBs: number;
 }
 
 /** Check the shape of a storage state before writing it; a profile nobody can load is worse than none. */
 export function summarizeState(state: unknown): { ok: true; summary: ProfileSummary } | { ok: false; error: string } {
   if (!state || typeof state !== "object") return { ok: false, error: "the browser returned no storage state" };
-  const s = state as Partial<StorageStateShape>;
+  const s = state as Partial<ProfileShape>;
   if (!Array.isArray(s.cookies) || !Array.isArray(s.origins)) return { ok: false, error: "the storage state has no cookies or origins list" };
-  return { ok: true, summary: { cookies: s.cookies.length, origins: s.origins.length } };
+  const indexedDBs = s.origins.reduce<number>((n, o) => {
+    const dbs = o && typeof o === "object" ? (o as { indexedDB?: unknown }).indexedDB : undefined;
+    return n + (Array.isArray(dbs) ? dbs.length : 0);
+  }, 0);
+  const sessionOrigins = Array.isArray(s.sessionStorage) ? s.sessionStorage.length : 0;
+  return { ok: true, summary: { cookies: s.cookies.length, origins: s.origins.length, sessionOrigins, indexedDBs } };
 }
 
 /** The one line printed after saving: where, and how much. Never the contents. */
 export function describeSaved(file: string, summary: ProfileSummary): string {
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
-  return `Saved to ${file} (${plural(summary.cookies, "cookie")}, ${plural(summary.origins, "origin")} with local storage).`;
+  return (
+    `Saved to ${file} (${plural(summary.cookies, "cookie")}, ${plural(summary.origins, "origin")} with local storage or IndexedDB, ` +
+    `${plural(summary.sessionOrigins, "origin")} with session storage, ${plural(summary.indexedDBs, "IndexedDB database")}).`
+  );
 }
 
 /**

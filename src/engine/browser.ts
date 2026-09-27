@@ -5,6 +5,7 @@ import {
   type Browser,
   type BrowserType,
   type BrowserContext,
+  type BrowserContextOptions,
   type CDPSession,
   type FileChooser,
   type Frame,
@@ -139,7 +140,7 @@ import {
   unseenWriteSource,
   type UnseenWriteVerdict,
 } from "./unload.js";
-import { loginCommand, permissionNote, resolveAttachAuth, roleLabel, type AttachAuth } from "./profiles.js";
+import { loginCommand, permissionNote, resolveAttachAuth, roleLabel, sessionStorageInitScript, splitProfile, type AttachAuth } from "./profiles.js";
 
 export type { WriteMode } from "./policy.js";
 
@@ -923,6 +924,17 @@ export class BrowserEngine {
     if (storageStatePath && !fs.existsSync(storageStatePath)) {
       throw new Error(`storageStatePath does not exist: ${storageStatePath}`);
     }
+    // Read and checked here, also before anything is closed. Playwright restores
+    // the storage state; sessionStorage, which it has no field for, is put back
+    // by an init script before the app's own code runs.
+    let profile: ReturnType<typeof splitProfile> | undefined;
+    if (storageStatePath) {
+      try {
+        profile = splitProfile(JSON.parse(fs.readFileSync(storageStatePath, "utf8")));
+      } catch (err) {
+        throw new Error(`could not load the storage state at ${storageStatePath}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     await this.close();
     this.auth = auth;
     this.role = roleLabel(auth);
@@ -1011,10 +1023,12 @@ export class BrowserEngine {
       this.engineName = opts.browser ?? defaultEngine(process.env);
       this.browser = await this.launchWithRecovery(this.engineName, opts.headed ?? false);
       this.context = await this.browser.newContext({
-        storageState: storageStatePath,
+        storageState: profile?.storageState as BrowserContextOptions["storageState"],
         viewport: opts.viewport ?? { width: 1280, height: 900 },
         serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
+      const restoreSession = sessionStorageInitScript(profile?.sessionStorage ?? []);
+      if (restoreSession) await this.context.addInitScript(restoreSession);
       if (!sharedWorkersAllowed(this.mode)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
       this.page = await this.context.newPage();
     } catch (err) {

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Signing in</title>
+  </head>
+  <body>
+    <!--
+      A sign-in that keeps its token ONLY in IndexedDB, as some auth SDKs do.
+      Once the write has committed the page says so; idb-account.html reads it back.
+    -->
+    <p data-testid="idb-signin-status">Signing in…</p>
+    <script>
+      const open = indexedDB.open("fixture-auth", 1);
+      open.onupgradeneeded = () => open.result.createObjectStore("tokens");
+      open.onsuccess = () => {
+        const tx = open.result.transaction("tokens", "readwrite");
+        tx.objectStore("tokens").put("member-token", "token");
+        tx.oncomplete = () => {
+          document.querySelector("p").textContent = "Stored the IndexedDB token";
+        };
+      };
+    </script>
+  </body>
+</html>

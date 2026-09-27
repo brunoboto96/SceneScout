@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Signing out</title>
+  </head>
+  <body>
+    <!--
+      Signs out as a sign-in library would and returns to the account page:
+      by removing the token, or with ?clear by clearing all of sessionStorage,
+      which is how many sign-out handlers do it.
+    -->
+    <p data-testid="session-signout-status">Signing out…</p>
+    <script>
+      if (new URLSearchParams(location.search).has("clear")) sessionStorage.clear();
+      else sessionStorage.removeItem("fixture_token");
+      location.replace("/session-account.html");
+    </script>
+  </body>
+</html>
