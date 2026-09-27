@@ -7,7 +7,7 @@ import { feedForSession } from "../../dist/engine/live.js";
 import { generateReport } from "../../dist/engine/report.js";
 import { FORMS_INVENTORY_SCRIPT } from "../../dist/engine/forms.js";
 import { focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
-import { BROWSER, check, settle, type SmokeContext } from "./harness.ts";
+import { BROWSER, check, eventually, settle, type SmokeContext } from "./harness.ts";
 
 export const title = "read-only exploration";
 
@@ -655,11 +655,19 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     if (serviceWorkerPolicy(BROWSER) === "allow") {
       check("the fixture's service worker is active (otherwise this proves nothing)", workerSnap.includes("worker: active"), workerSnap.slice(0, 300));
       const syncResult = await engine.click(syncRef);
-      await settle(600);
+      // The worker sends its DELETE when it gets to the message, on its own
+      // schedule. On a loaded machine that is after the click has settled, and
+      // the engine then reports the refusal with the next action, marked late.
+      // So wait for the policy to have refused it, then take that next action.
+      const deleteRefusal = /WRITE-POLICY blocked[^\n]*\/api\/items\/999/;
+      const internals = engine as unknown as { blockedRequests: Array<{ sig: string }> };
+      await eventually(() => deleteRefusal.test(syncResult) || internals.blockedRequests.some((e) => e.sig.includes("/api/items/999")), 15000);
+      // The next action's result carries a refusal that came in after the click's own result was written.
+      const nextResult = await engine.navigate("/shared-worker.html");
       check(
-        "read-only: the worker-issued DELETE is reported as blocked",
-        syncResult.includes("WRITE-POLICY blocked") && syncResult.includes("/api/items/999"),
-        syncResult,
+        "read-only: the worker-issued DELETE is reported as blocked, with the click or late with the next action",
+        deleteRefusal.test(syncResult + nextResult),
+        `${syncResult}\n--- next action ---\n${nextResult}`,
       );
     } else {
       // The driver cannot intercept worker traffic in this browser, so the
@@ -667,7 +675,9 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       // reached the server in read-only mode.
       check(`${BROWSER}: the service worker is kept from registering`, !workerSnap.includes("worker: active"), workerSnap.slice(0, 300));
       await engine.click(syncRef);
+      // Absence has no event to wait for: give a DELETE that did escape time to land.
       await settle(600);
+      await engine.navigate("/shared-worker.html");
     }
     check("read-only: the worker-issued DELETE never reaches the server", stats.workerDeletes === 0, `server received ${stats.workerDeletes} DELETE(s)`);
 
@@ -675,7 +685,6 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     // No browser lets the driver intercept a request a shared worker issues, so
     // the page is not given shared workers at all. A DELETE sent from one used
     // to reach the server in read-only mode, in every browser, with nothing logged.
-    await engine.navigate("/shared-worker.html");
     const sharedSnap = await engine.snapshot(true);
     check("the page sees no SharedWorker to construct", sharedSnap.includes("shared worker: unavailable"), sharedSnap.slice(0, 300));
     const sharedRef = sharedSnap.match(/(e\d+) button "Sync through shared worker"/)?.[1];
