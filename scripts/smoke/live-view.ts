@@ -9,7 +9,7 @@ import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { feedForSession, FEED_LINES, LiveServer, StatusBoard, type LiveProvider } from "../../dist/engine/live.js";
 import { buildReplayHtml, resolveFrame } from "../../dist/engine/replay.js";
-import { chromium, firefox, webkit } from "playwright";
+import { chromium, firefox, webkit, type Page } from "playwright";
 import { BROWSER, check, until, type SmokeContext } from "./harness.ts";
 
 export const title = "live view";
@@ -204,6 +204,142 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
 }
 
 /**
+ * The close-up against what can happen while it is open. The overlay covers
+ * the header and the cards for a pointer, but not for the keyboard, so "Stream
+ * all" and another card's close-up are both one Tab away; the session can
+ * close under it; and a still can fail to capture once.
+ */
+async function closeUpFollowUps(
+  page: Page,
+  pushes: Map<string, unknown>,
+  failShots: Map<string, number>,
+  setNames: (names: string[]) => void,
+  names: string[],
+): Promise<void> {
+  const all = page.getByTestId("live-all-toggle");
+  const focusToggle = page.getByTestId("live-focus-stream-toggle");
+  const press = async (testId: string): Promise<void> => {
+    await page.getByTestId(testId).focus();
+    await page.keyboard.press("Enter");
+  };
+  const streaming = (name: string): Promise<boolean> =>
+    page
+      .getByTestId(`live-card-toggle-${name}`)
+      .getAttribute("aria-pressed")
+      .then((v) => v === "true");
+
+  // "Stream all" pressed while a close-up it did not start is open, twice:
+  // off, then on. Closing the close-up afterwards must leave the card as
+  // "Stream all" left it, not switch it back off.
+  check("before: Stream all is on and agent-0 is not streaming", (await all.getAttribute("aria-pressed")) === "true" && !(await streaming("agent-0")));
+  await page.getByTestId("live-card-image-agent-0").click();
+  await until("the close-up to stream agent-0", async () => pushes.has("agent-0"), 5000);
+  await press("live-all-toggle");
+  await press("live-all-toggle");
+  await until("Stream all to be back on", async () => (await all.getAttribute("aria-pressed")) === "true", 5000);
+  await page.getByTestId("live-focus-close").click();
+  await page.waitForTimeout(600);
+  check(
+    "Stream all pressed from the keyboard while a close-up is open still holds for that card once it closes",
+    (await streaming("agent-0")) && pushes.has("agent-0"),
+    `card streaming ${await streaming("agent-0")}, stream open ${pushes.has("agent-0")}`,
+  );
+
+  // Another card's close-up opened from the keyboard while one is open hands
+  // the first session back as it was.
+  await all.click();
+  await until("every stream to stop", async () => pushes.size === 0, 5000);
+  await page.getByTestId("live-card-image-agent-1").click();
+  await until("the close-up to stream agent-1", async () => pushes.has("agent-1"), 5000);
+  await press("live-card-image-agent-2");
+  await until("the second close-up to stream agent-2", async () => pushes.has("agent-2"), 5000);
+  await until("agent-1's stream to stop", async () => !pushes.has("agent-1"), 5000).catch(() => {});
+  check(
+    "opening a second close-up from the keyboard stops the stream the first one started",
+    !pushes.has("agent-1") && !(await streaming("agent-1")) && (await page.locator("#focus-name").textContent()) === "agent-2",
+    `agent-1 stream open ${pushes.has("agent-1")}, card streaming ${await streaming("agent-1")}`,
+  );
+  await page.getByTestId("live-focus-close").click();
+  await until("closing it to stop agent-2's stream", async () => !pushes.has("agent-2"), 5000);
+
+  // The open close-up's own card, reached from the keyboard: opening it again
+  // changes nothing, and its Stream toggle is a choice that outlasts the close-up.
+  await page.getByTestId("live-card-image-agent-4").click();
+  await until("the close-up to stream agent-4", async () => pushes.has("agent-4"), 5000);
+  await press("live-card-image-agent-4");
+  await page.getByTestId("live-focus-close").click();
+  await until("closing it to stop agent-4's stream", async () => !pushes.has("agent-4"), 5000).catch(() => {});
+  check("opening the same close-up again from the keyboard still hands the card back on close", !pushes.has("agent-4") && !(await streaming("agent-4")));
+  await page.getByTestId("live-card-image-agent-4").click();
+  await until("the close-up to stream agent-4 again", async () => pushes.has("agent-4"), 5000);
+  await press("live-card-toggle-agent-4");
+  await press("live-card-toggle-agent-4");
+  await page.getByTestId("live-focus-close").click();
+  await page.waitForTimeout(600);
+  check("the card's own toggle pressed behind the close-up is a choice that outlasts it", pushes.has("agent-4") && (await streaming("agent-4")));
+  await page.getByTestId("live-card-toggle-agent-4").click();
+  await until("agent-4's stream to stop", async () => !pushes.has("agent-4"), 5000);
+
+  // A still that fails to capture once keeps the picture up. Watched with a
+  // MutationObserver because the old blank lasted only until the next poll.
+  await page.getByTestId("live-card-image-agent-3").click();
+  await until("the close-up to stream agent-3", async () => pushes.has("agent-3"), 5000);
+  await focusToggle.click();
+  await until("agent-3's stream to stop", async () => !pushes.has("agent-3"), 5000);
+  await until(
+    "the close-up to show a still",
+    () => page.locator("#focus-img").evaluate((i: HTMLImageElement) => /^.*\/shot\/agent-3\.jpg\?ts=/.test(i.src) && i.complete && i.naturalWidth > 0),
+    5000,
+  );
+  // The card behind the close-up polls the same still. Standing in for a
+  // hidden tab stops its poll (and only its poll), so the failed capture below
+  // is the close-up's and not the card's.
+  // Strings, because the bundler wraps a named closure in a helper the page does not have.
+  await page.evaluate(`Object.defineProperty(document, "hidden", { configurable: true, get: () => true })`);
+  await page.evaluate(`(() => {
+    const stage = document.getElementById("focus-stage");
+    stage.blanked = false;
+    new MutationObserver(() => { if (stage.classList.contains("empty")) stage.blanked = true; })
+      .observe(stage, { attributes: true, attributeFilter: ["class"] });
+  })()`);
+  const before = await page.locator("#focus-img").getAttribute("src");
+  // Past the server's shot cache, so the next capture is really asked for.
+  await page.waitForTimeout(1600);
+  failShots.set("agent-3", 1);
+  await until("the failing capture to be asked for", async () => !failShots.get("agent-3"), 5000);
+  await page.waitForTimeout(2500);
+  const blanked = await page.locator("#focus-stage").evaluate((n: HTMLElement & { blanked?: boolean }) => !!n.blanked);
+  const after = await page.locator("#focus-img").getAttribute("src");
+  check("one failed capture leaves the close-up's still on screen", !blanked, `stage went empty: ${blanked}`);
+  check("...and the still carries on refreshing after it", !!after && after !== before, `${before} -> ${after}`);
+  // Two in a row is a session with nothing to show, and the close-up says so.
+  failShots.set("agent-3", 2);
+  await until("both failing captures to be asked for", async () => !failShots.get("agent-3"), 8000);
+  await until("the stage to say there is no frame", () => page.locator("#focus-stage").evaluate((n) => n.classList.contains("empty")), 5000).catch(() => {});
+  check("...while two failed captures in a row say there is no frame", await page.locator("#focus-stage").evaluate((n) => n.classList.contains("empty")));
+  await page.evaluate(() => delete (document as { hidden?: boolean }).hidden);
+  await page.getByTestId("live-focus-close").click();
+
+  // The session closes while its close-up is open: its Stream button goes with it.
+  await page.getByTestId("live-card-image-agent-7").click();
+  await until("the close-up on agent-7", () => focusToggle.isVisible(), 5000);
+  setNames(names.filter((n) => n !== "agent-7"));
+  await until(
+    "the close-up to say the session has closed",
+    () =>
+      page
+        .locator("#focus-line")
+        .textContent()
+        .then((t) => t === "This session has closed."),
+    5000,
+  );
+  check("a session that closes under its close-up takes the Stream button with it", !(await focusToggle.isVisible()));
+  await page.getByTestId("live-focus-close").click();
+  setNames(names);
+  await until("agent-7 to come back", () => page.getByTestId("live-card-agent-7").isVisible(), 5000);
+}
+
+/**
  * The page itself, in a real browser, with more sessions streaming than a
  * browser allows connections to one host. With a stream per <img> the status
  * poll queued behind the streams and the page froze; over one shared
@@ -220,6 +356,8 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
   const at = new Date().toISOString();
   const pushes = new Map<string, (frame: Buffer) => void>();
   let polls = 0;
+  // Sessions whose next still capture fails, and how many times.
+  const failShots = new Map<string, number>();
   const provider: LiveProvider = {
     snapshot: () => {
       // Standing in for an engine that has exited: the page's watch sees the
@@ -305,7 +443,14 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
           })
         : null,
     frame: async (rel) => (recorded && rel === "recordings/agent-0/0001-click.jpg" ? jpeg : null),
-    screenshot: async () => jpeg,
+    screenshot: async (session) => {
+      const failing = failShots.get(session) ?? 0;
+      if (failing > 0) {
+        failShots.set(session, failing - 1);
+        return null;
+      }
+      return jpeg;
+    },
     startStream: async (session, onFrame) => {
       pushes.set(session, onFrame);
       return async () => {
@@ -394,6 +539,8 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     await page.getByTestId("live-focus-close").click();
     await until("closing it to stop the stream it started", async () => !pushes.has("agent-0"), 5000);
     check("closing it untouched leaves the card as it was", (await cardToggle.getAttribute("aria-pressed")) === "false");
+
+    await closeUpFollowUps(page, pushes, failShots, (next) => (names = next), names);
 
     // The run ends: the browsers are gone, so the page must hand over the report itself.
     names = [];
