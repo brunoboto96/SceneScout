@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 // @ts-expect-error — plain .mjs, no types; it exports createDemoServer().
 import { createDemoServer } from "../../demo-app/server.mjs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
+import { LOOSENED_RULE_HOLD_MS } from "../../dist/engine/policy.js";
+import { writeRedirectHopsJudged } from "../../dist/browsers.js";
 import { BROWSER, check, type SmokeContext } from "./harness.ts";
 
 export const title = "check (deterministic gate)";
@@ -564,6 +566,74 @@ async function flowWriteEdges({
     writes("POST /api/items") === itemsAtStart && writes("POST /api/beacon") === beaconsAtStart,
     JSON.stringify(stats.writes),
   );
+
+  // The hand-back: a step arms a beacon on pagehide, then opens a same-origin tab, which becomes the page the flow
+  // drives; the page behind it stays open with its beacon armed. The session ends well after the flow's rule has
+  // stopped being held (LOOSENED_RULE_HOLD_MS), under the crawl's read-only rule, which lets a same-origin beacon out:
+  // so a page the flow did not leave at its hand-back sends its beacon then, as the session closes it.
+  const engine = new BrowserEngine();
+  const leavesAtStart = writes("POST /api/leave");
+  let replay: Awaited<ReturnType<BrowserEngine["replayFlow"]>> | null = null;
+  try {
+    const project = path.join(work, "flow-handback");
+    fs.mkdirSync(project, { recursive: true });
+    await engine.attach({ url: baseUrl, projectDir: project, mode: "read-only" });
+    replay = await engine.replayFlow(
+      [
+        { action: "navigate", target: "/check-flow-writes.html" },
+        { action: "click", target: "testid=writes-save-on-leave" },
+        { action: "click", target: "testid=writes-open-tab" },
+        // The tab is adopted once it has loaded: wait for that before looking for its text, or the step reads the page behind it.
+        { action: "expect-url", pattern: "/check-flow\\.html$" },
+        { action: "expect-text", text: "Add a thing" },
+      ],
+      "observe",
+    );
+    await new Promise((resolve) => setTimeout(resolve, LOOSENED_RULE_HOLD_MS + 1000));
+  } finally {
+    await engine.close();
+  }
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  check(
+    `${BROWSER}: when a flow ends, every page in the context is left under the flow's rule before the crawl's comes back, the one a step opened a tab from included: its beacon on leaving never reaches the server`,
+    replay?.outcome.status === "passed" && writes("POST /api/leave") === leavesAtStart,
+    `${JSON.stringify(replay?.outcome)} writes=${JSON.stringify(stats.writes)}`,
+  );
+
+  // A write heard of after the hand-back: the flow's page beacons a sign-in as it is left (let out under observe), which
+  // the server redirects 1.5 s later to an ordinary save. Chromium judges that hop at the browser level, by then under
+  // the crawl's read-only rule, which lets a plain save out; the flow's rule must still judge it (WriteRule's hold).
+  // Firefox and WebKit send a redirect's later hops unjudged (writeRedirectHopsJudged), so there it is not asserted.
+  if (writeRedirectHopsJudged(BROWSER)) {
+    const lateEngine = new BrowserEngine();
+    const savedAtStart = writes("POST /api/handback/saved");
+    const signInsAtStart = writes("POST /api/handback/login");
+    let lateReplay: Awaited<ReturnType<BrowserEngine["replayFlow"]>> | null = null;
+    try {
+      const project = path.join(work, "flow-late-hop");
+      fs.mkdirSync(project, { recursive: true });
+      await lateEngine.attach({ url: baseUrl, projectDir: project, mode: "read-only" });
+      lateReplay = await lateEngine.replayFlow(
+        [
+          { action: "navigate", target: "/check-flow-writes.html" },
+          { action: "click", target: "testid=writes-sign-in-on-leave" },
+          { action: "expect-text", text: "Will sign in on leave" },
+        ],
+        "observe",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    } finally {
+      await lateEngine.close();
+    }
+    check(
+      `${BROWSER}: a write the flow's page set off as it was left, heard of only after the hand-back, is judged by the flow's rule and never reaches the server`,
+      lateReplay?.outcome.status === "passed" &&
+        lateEngine.mode === "read-only" &&
+        writes("POST /api/handback/login") > signInsAtStart &&
+        writes("POST /api/handback/saved") === savedAtStart,
+      `${JSON.stringify(lateReplay?.outcome)} writes=${JSON.stringify(stats.writes)}`,
+    );
+  }
 
   // The same timer sending a fetch to the app's own origin is charged: a check cannot tell it from the step's own write.
   const heartbeatsBefore = writes("POST /api/heartbeat");
