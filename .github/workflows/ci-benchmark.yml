@@ -37,6 +37,14 @@ on:
         description: Reasoning effort (none, low, medium, high, xhigh, max). Empty means the CLI's default.
         type: string
         default: ""
+      max-turns:
+        description: The most model calls. Empty means the CLI's default.
+        type: string
+        default: ""
+      max-tokens:
+        description: The most tokens, input and output summed over the run. Empty means the CLI's default.
+        type: string
+        default: ""
   workflow_call:
     inputs:
       app:
@@ -53,6 +61,14 @@ on:
         default: ""
       effort:
         description: Reasoning effort. Empty means the CLI's default.
+        type: string
+        default: ""
+      max-turns:
+        description: The most model calls. Empty means the CLI's default.
+        type: string
+        default: ""
+      max-tokens:
+        description: The most tokens, input and output summed over the run. Empty means the CLI's default.
         type: string
         default: ""
       ref:
@@ -135,6 +151,8 @@ jobs:
           provider: ${{ inputs.provider }}
           model: ${{ inputs.model }}
           effort: ${{ inputs.effort }}
+          max-turns: ${{ inputs.max-turns }}
+          max-tokens: ${{ inputs.max-tokens }}
           project: ${{ steps.app.outputs.project }}
           upload-artifact: "false"
           upload-sarif: "false"

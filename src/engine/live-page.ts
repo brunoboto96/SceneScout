@@ -259,6 +259,11 @@ export const LIVE_PAGE = `<!doctype html>
   // was, unless the viewer used the close-up's own Stream button, whose choice
   // stands.
   var focusStartedStream = false;
+  // The close-up's still, loaded off-screen and swapped in once it has
+  // arrived: one request at a time, and a single failed capture leaves the
+  // picture up rather than blanking the stage until the next poll.
+  var focusStill = null;
+  var focusStillFailures = 0;
   var skew = 0;
   var latest = {};
   var focusTick = 0;
@@ -358,7 +363,11 @@ export const LIVE_PAGE = `<!doctype html>
     // Frames for a live card arrive over the shared connection; the thumbnail poll takes over again when it is switched off.
     if (on && frames[card.name]) card.img.src = frames[card.name];
     if (!on) card.img.src = shotUrl(card.name);
-    if (focused === card.name) paintFocusStream();
+    if (focused === card.name) {
+      // A failure counted before streaming began says nothing about the stills after it.
+      focusStillFailures = 0;
+      paintFocusStream();
+    }
     syncEvents();
   }
   // The close-up's Stream button is the card's, shown where the viewer is looking.
@@ -370,7 +379,32 @@ export const LIVE_PAGE = `<!doctype html>
     button.setAttribute('aria-pressed', card.live ? 'true' : 'false');
     button.textContent = card.live ? 'Streaming' : 'Stream';
     // Off, the picture is a still that the status poll refreshes.
-    if (!card.live && !scrubbed) document.getElementById('focus-img').src = shotUrl(card.name);
+    if (!card.live && !scrubbed) refreshFocusStill(card.name);
+  }
+  function refreshFocusStill(name) {
+    if (focusStill) return;
+    var next = new Image();
+    focusStill = next;
+    function current() {
+      var card = cards[name];
+      return focusStill === next && focused === name && card && !card.live && !scrubbed;
+    }
+    next.onload = function () {
+      if (current()) {
+        focusStillFailures = 0;
+        document.getElementById('focus-img').src = next.src;
+      }
+      if (focusStill === next) focusStill = null;
+    };
+    next.onerror = function () {
+      if (current()) {
+        focusStillFailures += 1;
+        // One failure can be a capture that missed; two in a row is a session with nothing to show.
+        if (focusStillFailures >= 2) document.getElementById('focus-stage').classList.add('empty');
+      }
+      if (focusStill === next) focusStill = null;
+    };
+    next.src = shotUrl(name);
   }
   function refreshThumb(card) {
     if (card.live || document.hidden) return;
@@ -426,7 +460,12 @@ export const LIVE_PAGE = `<!doctype html>
     root.appendChild(top); root.appendChild(task); root.appendChild(doing); root.appendChild(pace); root.appendChild(tool); root.appendChild(url); root.appendChild(shot); root.appendChild(feed); root.appendChild(foot);
 
     var card = { name: name, root: root, role: role, badge: badge, task: task, doing: doing, pace: pace, tool: tool, url: url, shot: shot, img: img, feed: feed, toggle: toggle, spec: spec, live: false };
-    toggle.addEventListener('click', function () { setLive(card, !card.live); });
+    toggle.addEventListener('click', function () {
+      // Reachable from the keyboard behind an open close-up: a choice made on
+      // the card stands after the close-up closes, as one made in it does.
+      if (focused === name) focusStartedStream = false;
+      setLive(card, !card.live);
+    });
     shot.addEventListener('click', function () { openFocus(name); });
     img.src = shotUrl(name);
     if (streamAll) setLive(card, true);
@@ -798,7 +837,14 @@ export const LIVE_PAGE = `<!doctype html>
   }
 
   function openFocus(name) {
+    // Reachable from the keyboard with a close-up already open: hand the first
+    // session back as it was before showing the next, or a stream it started
+    // is left running with nothing to switch it off.
+    if (focused === name) return;
+    if (focused) closeFocus();
     focused = name;
+    focusStill = null;
+    focusStillFailures = 0;
     scrubbed = null;
     // The ticks belong to the session just left; showing them under this one's
     // name, and playing its frames when one is clicked, is worse than none.
@@ -829,6 +875,7 @@ export const LIVE_PAGE = `<!doctype html>
     document.getElementById('focus-img').removeAttribute('src');
     if (focusStartedStream && was && cards[was]) setLive(cards[was], false);
     focusStartedStream = false;
+    focusStill = null;
     syncEvents();
     if (was && cards[was]) cards[was].shot.focus();
   }
@@ -885,10 +932,12 @@ export const LIVE_PAGE = `<!doctype html>
     var s = focused && latest[focused];
     var line = document.getElementById('focus-line');
     paintBrief();
+    // Before the early return: a session that has closed has no card, and its
+    // Stream button must go with it rather than stay up doing nothing.
+    paintFocusStream();
     if (!s) { line.textContent = focused ? 'This session has closed.' : ''; return; }
     var d = describe(s);
     line.textContent = d.badge + ' · ' + d.tool + ' · ' + (s.url || '');
-    paintFocusStream();
     if (focusTick % 3 === 0) loadFullFeed(focused);
     focusTick += 1;
   }
@@ -991,6 +1040,10 @@ export const LIVE_PAGE = `<!doctype html>
     streamAll = !streamAll;
     this.setAttribute('aria-pressed', streamAll ? 'true' : 'false');
     this.textContent = streamAll ? 'Streaming all' : 'Stream all';
+    // A choice for every card, the close-up's included: closing it afterwards
+    // must not undo it for that one card. Reachable from the keyboard while a
+    // close-up is open, since the overlay only covers the header for a pointer.
+    focusStartedStream = false;
     Object.keys(cards).forEach(function (name) { setLive(cards[name], streamAll); });
   });
   // A session with nothing to show answers 503; say so rather than leaving a broken-image icon.
