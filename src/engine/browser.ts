@@ -19,6 +19,7 @@ import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, redactSecret
 import type { SessionDescription } from "./live.js";
 import { normalizeTask } from "./task.js";
 import { CLAIM_SCAN_SCRIPT, findContradictions, type PageState, type WatchedRequest } from "./claims.js";
+import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
 import {
@@ -873,6 +874,37 @@ export class BrowserEngine {
     }
   }
 
+  /** postMessage-token findings already reported this session, by route, receiving frame, path and shape. */
+  private tokenPostsReported = new Set<string>();
+
+  /**
+   * What the capture script handed back from a postMessage to "*": classified
+   * here (postmessage.ts) and dropped, so no value outlives this call. Only the
+   * path, shape and masked preview reach the oracle log.
+   */
+  private noteTokenPosts(frame: Frame, entries: unknown): void {
+    const hits = tokenHits(entries);
+    if (hits.length === 0) return;
+    let pageUrl: string;
+    let frameUrl: string;
+    let embed: string | null;
+    try {
+      const page = frame.page();
+      pageUrl = page.url();
+      frameUrl = frame.url();
+      embed = frame === page.mainFrame() ? null : this.foreignOriginOf(frame);
+    } catch {
+      // The frame went away between the call and its report: nothing left to attribute it to.
+      return;
+    }
+    for (const hit of hits) {
+      const key = tokenPostKey(hit, pageUrl, frameUrl);
+      if (this.tokenPostsReported.has(key)) continue;
+      this.tokenPostsReported.add(key);
+      this.oracles.noteTokenPost(describeTokenPost(hit, frameUrl), pageUrl, embed);
+    }
+  }
+
   /** Contradiction signatures already reported this session — the same refused endpoint on every page must not flood the run. */
   private contradictionsReported = new Set<string>();
 
@@ -937,6 +969,7 @@ export class BrowserEngine {
     this.blockedRequests = [];
     this.watchedResponses = [];
     this.contradictionsReported = new Set();
+    this.tokenPostsReported = new Set();
     this.pendingCreations = new Set();
     this.baseUrl = opts.url.replace(/\/$/, "");
     this.embedMoves = new EmbedMoveTracker(this.baseUrl);
@@ -996,6 +1029,9 @@ export class BrowserEngine {
         serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
       if (!sharedWorkersAllowed(this.mode)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
+      // The postMessage-token oracle: every frame's postMessage is wrapped, and a "*" call hands its longer strings here.
+      await this.context.exposeBinding(POSTMESSAGE_BINDING, (source, entries: unknown) => this.noteTokenPosts(source.frame, entries));
+      await this.context.addInitScript(postMessageCaptureScript());
       this.page = await this.context.newPage();
     } catch (err) {
       await this.close();
