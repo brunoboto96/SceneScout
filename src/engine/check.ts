@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
 import type { DesignDefect } from "./design.js";
 import { flowStepEvidence, type FlowRun, type SkippedFlowFile } from "./flow.js";
+import { parseLimitFlag } from "./limits.js";
 import { redactSecrets } from "./memory.js";
 import { httpErrorDetail, httpStatusOf, type OracleViolation } from "./oracles.js";
 import type { CheckRetest } from "./verify.js";
@@ -423,6 +424,10 @@ export interface CheckOptions extends CheckSettings {
   mode: "observe" | "read-only";
   storageStatePath?: string;
   browser?: BrowserEngineName;
+  /** How long one action may take; absent means the environment variable, else the default (limits.ts). */
+  actionTimeoutMs?: number;
+  /** How long a page may take to load; absent means the environment variable, else the default (limits.ts). */
+  navTimeoutMs?: number;
   maxRoutes: number;
   paths?: string[];
   ignore: CheckRule[];
@@ -450,6 +455,8 @@ export const CHECK_OPTION_NAMES = [
   "flow-writes",
   "on-refused-step",
   "gate-retests",
+  "action-timeout-ms",
+  "nav-timeout-ms",
 ] as const;
 
 export const MAX_CHECK_ROUTES = 150;
@@ -496,6 +503,10 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
   if (browser !== undefined && !(BROWSER_ENGINES as readonly string[]).includes(browser)) {
     return { ok: false, error: `--browser must be one of ${BROWSER_ENGINES.join(", ")}` };
   }
+  const actionTimeout = parseLimitFlag("action", flags.get("action-timeout-ms"));
+  if (!actionTimeout.ok) return actionTimeout;
+  const navTimeout = parseLimitFlag("nav", flags.get("nav-timeout-ms"));
+  if (!navTimeout.ok) return navTimeout;
   const maxRaw = flags.get("max-routes");
   const maxRoutes = maxRaw === undefined ? DEFAULT_CHECK_ROUTES : Number(maxRaw);
   if (!Number.isInteger(maxRoutes) || maxRoutes < 1 || maxRoutes > MAX_CHECK_ROUTES) {
@@ -540,6 +551,8 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
       mode,
       ...(flags.has("storage-state") ? { storageStatePath: resolve(flags.get("storage-state")!) } : {}),
       ...(browser ? { browser: browser as BrowserEngineName } : {}),
+      ...(actionTimeout.value !== undefined ? { actionTimeoutMs: actionTimeout.value } : {}),
+      ...(navTimeout.value !== undefined ? { navTimeoutMs: navTimeout.value } : {}),
       maxRoutes,
       ...(paths ? { paths } : {}),
       ignore: ignore as CheckRule[],

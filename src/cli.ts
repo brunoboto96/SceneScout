@@ -96,6 +96,9 @@ Usage:
                                      --ignore rule,rule; --storage-state file to check signed in;
                                      --project dir (default: here); --out dir (default: .scenescout/check);
                                      --browser chromium|firefox|webkit;
+                                     --action-timeout-ms N (default 5000), --nav-timeout-ms N (default 20000;
+                                      15000 per crawled route): raise on a loaded runner, or set
+                                      SCENESCOUT_ACTION_TIMEOUT_MS / SCENESCOUT_NAV_TIMEOUT_MS;
                                      --flows dir|off: replay the flows saved there (default: .scenescout/flows);
                                      --retest on|off: re-test open findings a page load reproduces (default on);
                                      --flow-writes never|allow: never (default) replays flows under observe's
@@ -123,6 +126,7 @@ Usage:
                                       destructive only with --allow-destructive as well); --level minimal|medium|
                                       extensive (default medium); --focus "an area or flow";
                                      --storage-state file; --browser chromium|firefox|webkit;
+                                     --action-timeout-ms N, --nav-timeout-ms N: as for check;
                                      --project dir (default: here); --out dir (default: .scenescout/ci))
                                     Exit code: 0 the run ran (findings never change it), 2 could not run.
   scenescout status [projectPath]   What is the engine doing right now? (every session + recent actions)

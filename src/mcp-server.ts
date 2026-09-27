@@ -69,6 +69,15 @@ import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
 import { formatNeverSubmittedEmpty } from "./engine/forms.js";
 import { computeGaps, formatRouteCoverage, formatUnchosenOptions, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
+import {
+  ACTION_TIMEOUT_ENV,
+  DEFAULT_ACTION_TIMEOUT_MS,
+  DEFAULT_CRAWL_NAV_TIMEOUT_MS,
+  DEFAULT_NAV_TIMEOUT_MS,
+  LIMIT_BOUNDS,
+  NAV_TIMEOUT_ENV,
+  watchdogFor,
+} from "./engine/limits.js";
 import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
@@ -447,9 +456,12 @@ function serializedPerSession<A>(
       if (needsTask(label) && !eng.hasTask) return Promise.resolve(text(taskRefusal(label), session));
     }
     const exec = async (): Promise<ToolResult> => {
-      writeStatus(session, "running", label, timeoutMs);
+      // A session that raised its time limits gets its watchdog raised by as much (limits.ts).
+      const current = engines.get(session);
+      const watchdogMs = current ? watchdogFor(timeoutMs, current.timeLimits) : timeoutMs;
+      writeStatus(session, "running", label, watchdogMs);
       try {
-        const out = await withWatchdog(label, fn(args, session), timeoutMs, watchdogTimeout);
+        const out = await withWatchdog(label, fn(args, session), watchdogMs, watchdogTimeout);
         // `activeName` is process-global and every scout_attach moves it. With
         // several sessions live — the multi-role runs this tool encourages —
         // an omitted `session` silently binds to whichever browser attached
@@ -759,6 +771,24 @@ server.registerTool(
           "Keep a frame of the page after every action, under .scenescout/recordings/, and show it beside that step in report.html. " +
             "Off by default: a recording is pictures of the app under test sitting in the project folder. Turn it on for QA work, where the run is evidence and not only a report.",
         ),
+      actionTimeoutMs: z
+        .number()
+        .int()
+        .min(LIMIT_BOUNDS.action.min)
+        .max(LIMIT_BOUNDS.action.max)
+        .optional()
+        .describe(
+          `How long one click, keystroke, hover or pick may take, in ms. Default: the ${ACTION_TIMEOUT_ENV} environment variable, else ${DEFAULT_ACTION_TIMEOUT_MS}. Raise it only when timeouts come from a loaded machine rather than the app.`,
+        ),
+      navTimeoutMs: z
+        .number()
+        .int()
+        .min(LIMIT_BOUNDS.nav.min)
+        .max(LIMIT_BOUNDS.nav.max)
+        .optional()
+        .describe(
+          `How long a page may take to load, in ms. Default: the ${NAV_TIMEOUT_ENV} environment variable, else ${DEFAULT_NAV_TIMEOUT_MS} (crawled pages ${DEFAULT_CRAWL_NAV_TIMEOUT_MS}; a value set here applies to them too). Raise it only when timeouts come from a loaded machine rather than the app.`,
+        ),
       session: z
         .string()
         .max(40)
@@ -783,6 +813,8 @@ server.registerTool(
       record,
       trustedEmbeds,
       paceMs,
+      actionTimeoutMs,
+      navTimeoutMs,
       session,
     }: {
       url: string;
@@ -798,6 +830,8 @@ server.registerTool(
       record?: boolean;
       trustedEmbeds?: string[];
       paceMs?: number;
+      actionTimeoutMs?: number;
+      navTimeoutMs?: number;
       session?: string;
     }) => {
       try {
@@ -879,6 +913,8 @@ server.registerTool(
           task: objective ? task : undefined,
           record,
           trustedEmbeds,
+          actionTimeoutMs,
+          navTimeoutMs,
           memoryStore: store,
         });
         eng.role = storageStatePath ? path.basename(storageStatePath).replace(/\.json$/i, "") : "anonymous";

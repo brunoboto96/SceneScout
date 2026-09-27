@@ -35,6 +35,9 @@ export interface ServerStats {
   writes: Record<string, number>;
 }
 
+/** How long the fixture server holds /slow-page back. */
+export const SLOW_PAGE_MS = 2500;
+
 /** Everything a suite needs. `projectDir` is shared on purpose: later suites assert on memory earlier ones wrote. */
 export interface SmokeContext {
   baseUrl: string;
@@ -129,6 +132,14 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     if (urlPath === "/api/fail-500") {
       res.writeHead(500, { "content-type": "text/plain" });
       res.end("boom");
+      return;
+    }
+    // A page the server holds back before answering: slower than a lowered page-load limit, faster than the default.
+    if (urlPath === "/slow-page") {
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end(fs.readFileSync(path.join(appDir, "slow.html")));
+      }, SLOW_PAGE_MS);
       return;
     }
     // A server that hangs up without answering: the navigation fails at once (no timeout to wait out).

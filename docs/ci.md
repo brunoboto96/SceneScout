@@ -80,6 +80,8 @@ Every option of `scenescout check` is an input with the same name. `scenescout c
 | `ignore` | none | Rules to drop, comma-separated |
 | `storage-state` | none | A Playwright storage-state file, to check while signed in |
 | `browser` | `chromium` | `chromium`, `firefox` or `webkit` |
+| `action-timeout-ms` | 5000 | How long one click, keystroke or pick may take, 1000 to 120000 (below) |
+| `nav-timeout-ms` | 20000; 15000 per crawled route | How long a page may take to load, 1000 to 300000 (below) |
 | `project` | `working-directory` | The project directory |
 | `out` | `<project>/.scenescout/check` | Where the three files go |
 | `flows` | `<project>/.scenescout/flows`, when it exists | A directory of saved flows to replay, or `off` (below) |
@@ -218,6 +220,10 @@ Their effect on a check:
 
 A control smaller than 24×24px is not in this tier: WCAG 2.2 sets that minimum (2.5.8, level AA) for any pointer, so `tiny-target` stays a low issue.
 
+### On a loaded runner
+
+A check gives each action on a page 5 s and each crawled page 15 s to load. On a shared or busy runner these can run out while the app is fine, and the check then reports a timeout that belongs to the machine. When that happens the message names the limit that ran out and how to raise it: `--action-timeout-ms` and `--nav-timeout-ms` (the action's `action-timeout-ms` and `nav-timeout-ms`), or `SCENESCOUT_ACTION_TIMEOUT_MS` and `SCENESCOUT_NAV_TIMEOUT_MS` in the environment. A flag wins over the variable, and the variable over the default. A page-load limit that is set applies to every page the check opens, the start page, crawled routes and flow steps alike. A value outside the bounds stops the check with exit 2 before anything is measured. `scenescout ci` takes the same two flags.
+
 ## What a check may do
 
 Three settings describe choices a project makes about what its check may do beyond visiting pages. Their defaults are only a starting point: they are what an unconfigured check does, whether a person tries it for the first time or an AI agent runs it unattended, and they follow one rule — an unconfigured check does the least harm on an unfamiliar project: it sends no HTTP write and never silently hides a result. Anything else is one flag away. The effective values are printed under the verdict in `report.md` (and so on the job summary) and in `check.json` under `settings`, so a reviewer can see what a green check was allowed to do.
@@ -346,7 +352,7 @@ In `destructive` mode the model may send any request the app accepts, including 
 
 The run attaches once, to the URL it is given, in the mode it is given; the model cannot attach elsewhere or change the mode. It gets the scout_* tools a single agent uses to explore, find and report, and not those for attaching, closing, parallel lanes or screenshots. It is one agent rather than several lanes: see ADR 14.
 
-`--storage-state <file>` explores while signed in; a session that no longer signs in exits 2 before the model is called. `--browser`, `--project` and `--out` are as for `check`.
+`--storage-state <file>` explores while signed in; a session that no longer signs in exits 2 before the model is called. `--browser`, `--action-timeout-ms`, `--nav-timeout-ms`, `--project` and `--out` are as for `check`.
 
 ### What it writes
 
