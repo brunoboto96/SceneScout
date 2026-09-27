@@ -1,0 +1,272 @@
+# Runs `scenescout ci` against an app the workflow has already started: a model
+# reached through its API explores the app by the SceneScout method, unattended,
+# and writes the report. It reports and never gates: the step fails only when the
+# run could not run (exit 2), never because of what it found. The summary goes on
+# the job summary, and the report, summary.md, ci.json and ci.sarif are kept as an
+# artifact. How to use it: docs/ci.md.
+#
+# The API key is not an input. Set ANTHROPIC_API_KEY or OPENAI_API_KEY in this
+# step's `env`, from a secret; the CLI reads it from the environment only.
+#
+# Every input not listed in CI_ACTION_ONLY_INPUTS (action/ci-action.mjs) is passed
+# to the CLI as `--<name>=<value>`, so the inputs are named exactly as the CLI's
+# options are; ci-test fails if the two lists drift apart.
+name: SceneScout CI run
+description: An unattended exploratory run of a running web app, driven by a model's API, that writes the SceneScout report. Reports; never gates.
+author: brunoboto96
+branding:
+  icon: search
+  color: blue
+
+inputs:
+  url:
+    description: The address of the running app to explore, e.g. http://127.0.0.1:3000. Required.
+    required: true
+  provider:
+    description: anthropic or openai. Empty means the one whose key is set; required when both are.
+    required: false
+    default: ""
+  model:
+    description: The model id. Empty means the CLI's default for the provider (claude-sonnet-5, gpt-6-luna).
+    required: false
+    default: ""
+  effort:
+    description: Reasoning effort - none, low, medium, high, xhigh or max (none is OpenAI only). Empty means low.
+    required: false
+    default: ""
+  base-url:
+    description: The API root for another endpoint implementing the same API, e.g. https://llm.example.com/v1. Empty means the provider's own.
+    required: false
+    default: ""
+  max-turns:
+    description: The most model calls. Empty means 40.
+    required: false
+    default: ""
+  max-tokens:
+    description: The most tokens, input and output summed over the run. Empty means 1500000.
+    required: false
+    default: ""
+  max-minutes:
+    description: The most minutes of exploration; the report is written after. Empty means 20.
+    required: false
+    default: ""
+  price-in:
+    description: US dollars per million input tokens, for the cost estimate. Empty means the built-in price for the model, if it has one.
+    required: false
+    default: ""
+  price-cached-in:
+    description: US dollars per million cached input tokens. Empty means the built-in price, else price-in.
+    required: false
+    default: ""
+  price-out:
+    description: US dollars per million output tokens. Empty means the built-in price for the model, if it has one.
+    required: false
+    default: ""
+  mode:
+    description: observe, read-only, safe-write, or destructive (only with allow-destructive). The write policy the browser runs under.
+    required: false
+    default: read-only
+  allow-destructive:
+    description: true to let mode be destructive, in which the run may send any request, deleting records it did not create included. Empty means false.
+    required: false
+    default: ""
+  level:
+    description: minimal, medium or extensive. The completion contract the run works towards. Empty means medium.
+    required: false
+    default: ""
+  focus:
+    description: An area or flow to concentrate on, in a few words.
+    required: false
+    default: ""
+  storage-state:
+    description: A Playwright storage-state file to explore while signed in, relative to working-directory.
+    required: false
+    default: ""
+  browser:
+    description: chromium, firefox or webkit.
+    required: false
+    default: chromium
+  project:
+    description: The project directory, relative to working-directory. Empty means working-directory itself.
+    required: false
+    default: ""
+  out:
+    description: Where to write the files. Empty means <project>/.scenescout/ci.
+    required: false
+    default: ""
+  working-directory:
+    description: The directory the run happens in; relative paths in the other inputs are resolved against it.
+    required: false
+    default: .
+  version:
+    description: The scenescout npm version to run. Empty means the version this action's ref was released as.
+    required: false
+    default: ""
+  cli:
+    description: A built scenescout CLI (dist/cli.js) to run instead of the npm package. For testing the action itself.
+    required: false
+    default: ""
+  node-version:
+    description: The Node.js to install when the runner has no Node 20 or newer on PATH.
+    required: false
+    default: "24"
+  install-deps:
+    description: On Linux, install the system libraries the browser needs (uses sudo). Set to false on a runner that already has them.
+    required: false
+    default: "true"
+  upload-artifact:
+    description: Keep the report, summary.md, ci.json and ci.sarif as a workflow artifact.
+    required: false
+    default: "true"
+  artifact-name:
+    description: The artifact's name. Empty means scenescout-ci-<job id>, with -2, -3 … for later uses in the same job.
+    required: false
+    default: ""
+  upload-sarif:
+    description: Upload ci.sarif to GitHub code scanning. The job needs `permissions` with `security-events write`.
+    required: false
+    default: "false"
+
+outputs:
+  exit-code:
+    description: The CLI's exit code - 0 the run ran, 2 it could not run. Findings never change it.
+    value: ${{ steps.run.outputs.exit-code }}
+  stop:
+    description: What ended the run - done, turns, tokens, time, provider-error or could-not-start.
+    value: ${{ steps.run.outputs.stop }}
+  high:
+    description: High-severity findings this run made or saw again.
+    value: ${{ steps.run.outputs.high }}
+  medium:
+    description: Medium-severity findings this run made or saw again.
+    value: ${{ steps.run.outputs.medium }}
+  low:
+    description: Low-severity findings this run made or saw again.
+    value: ${{ steps.run.outputs.low }}
+  worth-a-look:
+    description: Observations filed as worth a look - defects only under a convention of the project.
+    value: ${{ steps.run.outputs.worth-a-look }}
+  turns:
+    description: Model calls the run made.
+    value: ${{ steps.run.outputs.turns }}
+  tokens:
+    description: Tokens the run used, input and output.
+    value: ${{ steps.run.outputs.tokens }}
+  estimated-cost:
+    description: Estimated cost in US dollars, empty when the model's price is not known to SceneScout.
+    value: ${{ steps.run.outputs.estimated-cost }}
+  report:
+    description: The path of report.md.
+    value: ${{ steps.run.outputs.report }}
+  summary:
+    description: The path of summary.md.
+    value: ${{ steps.run.outputs.summary }}
+  json:
+    description: The path of ci.json.
+    value: ${{ steps.run.outputs.json }}
+  sarif:
+    description: The path of ci.sarif.
+    value: ${{ steps.run.outputs.sarif }}
+  artifact-name:
+    description: The name the results were uploaded under.
+    value: ${{ steps.resolve.outputs.artifact-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Look for Node.js 20 or newer
+      id: node
+      shell: bash
+      run: |
+        if command -v node >/dev/null && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 20 ]; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Install Node.js
+      if: steps.node.outputs.present != 'true'
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Get SceneScout
+      id: resolve
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUTS: ${{ toJSON(inputs) }}
+      run: node "$GITHUB_ACTION_PATH/../action/ci-action.mjs" resolve
+
+    - name: Restore the browser cache
+      id: cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.resolve.outputs.browsers-path }}
+        key: scenescout-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.install-target }}-playwright-${{ steps.resolve.outputs.playwright-version }}
+
+    - name: Install the browser's system libraries
+      if: runner.os == 'Linux' && inputs.install-deps == 'true'
+      shell: bash
+      env:
+        PLAYWRIGHT_CLI: ${{ steps.resolve.outputs.playwright-cli }}
+        ENGINE: ${{ steps.resolve.outputs.engine }}
+      run: |
+        if [ "$(id -u)" = "0" ]; then node "$PLAYWRIGHT_CLI" install-deps "$ENGINE"
+        else sudo "$(command -v node)" "$PLAYWRIGHT_CLI" install-deps "$ENGINE"; fi
+
+    - name: Install the browser
+      id: install
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SCENESCOUT_CLI: ${{ steps.resolve.outputs.cli }}
+        TARGET: ${{ steps.resolve.outputs.install-target }}
+        PLAYWRIGHT_BROWSERS_PATH: ${{ steps.resolve.outputs.browsers-path }}
+      run: node "$SCENESCOUT_CLI" install --browser-only --browsers "$TARGET"
+
+    - name: Save the browser cache
+      if: always() && steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.resolve.outputs.browsers-path }}
+        key: ${{ steps.cache.outputs.cache-primary-key }}
+
+    # Never fails: the exit code becomes an output, so the files are kept before the last step ends the job.
+    # The key reaches the CLI through the environment the calling step set; it is never an input or an output.
+    - name: Run the exploration
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUTS: ${{ toJSON(inputs) }}
+        SCENESCOUT_CLI: ${{ steps.resolve.outputs.cli }}
+        SCENESCOUT_OUT_DIR: ${{ steps.resolve.outputs.out-dir }}
+        PLAYWRIGHT_BROWSERS_PATH: ${{ steps.resolve.outputs.browsers-path }}
+      run: node "$GITHUB_ACTION_PATH/../action/ci-action.mjs" run
+
+    - name: Keep the results
+      if: always() && inputs.upload-artifact == 'true' && steps.run.outputs.json != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.resolve.outputs.artifact-name }}
+        path: |
+          ${{ steps.resolve.outputs.out-dir }}
+        include-hidden-files: true
+        if-no-files-found: warn
+
+    - name: Upload to code scanning
+      if: always() && inputs.upload-sarif == 'true' && steps.run.outputs.sarif != ''
+      uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+      with:
+        sarif_file: ${{ steps.run.outputs.sarif }}
+        category: scenescout-ci
+
+    - name: Verdict
+      if: always() && steps.run.outputs.exit-code != ''
+      shell: bash
+      env:
+        INPUTS: ${{ toJSON(inputs) }}
+        EXIT_CODE: ${{ steps.run.outputs.exit-code }}
+        ERROR: ${{ steps.run.outputs.error }}
+      run: node "$GITHUB_ACTION_PATH/../action/ci-action.mjs" verdict
