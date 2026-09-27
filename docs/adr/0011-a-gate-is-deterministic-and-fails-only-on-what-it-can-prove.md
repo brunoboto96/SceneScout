@@ -70,6 +70,9 @@ way out. `scenescout check` is that part on its own.
   that need an interaction, and its report says what it does not cover. The
   unlabelled email field is missed: the snapshot names an input by its
   placeholder, so no rule can yet tell a placeholder from a label.
+- Rules whose meaning depends on a project's convention (spacing off a 4px
+  grid, a link styled like body text) have no severity at all: they
+  are listed as "worth a look" and never gate (ADR 13).
 - Severities are a fixed table in `check.ts`. Moving a rule's default severity
   changes every user's gate, so it is a user-visible change with a changeset,
   and `check-test` pins the table's consequences.

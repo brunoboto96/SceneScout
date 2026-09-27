@@ -34,6 +34,8 @@ export const LANE_EVIDENCE_MAX = 160;
 export const LANE_OBSERVATION_MAX = 64;
 /** One line saying what blocked the lane; the detail belongs in a finding. */
 export const LANE_BLOCKED_BY_MAX = 200;
+/** One line naming the convention that would decide a "worth_a_look": "a 4px spacing scale", not an essay. */
+export const LANE_CONVENTION_MAX = 160;
 /** The planner chooses the lane name, so this cap is on the planner's side; it is stated all the same. */
 export const LANE_NAME_MAX = 40;
 /** A route as the lane saw it, query string included. */
@@ -42,7 +44,16 @@ export const LANE_ROUTE_MAX = 200;
 export const LANE_SEVERITIES = ["high", "medium", "low"] as const;
 /** The same set scout_finding accepts, so a lane can report every finding it filed. */
 export const LANE_CATEGORIES = FINDING_CATEGORIES;
-export const LANE_VERDICTS = ["defect", "not_a_defect", "unsure"] as const;
+/**
+ * "worth_a_look" is the third answer beside defect and not a defect: the
+ * observation is real, and whether it is a defect depends on a convention of
+ * the project that the run cannot see (a spacing scale, how navigation links
+ * are styled, whether controls carry test ids, whether the app ships to touch
+ * screens). SceneScout is used against any app, so it does not decide those;
+ * it names the convention and leaves the call to the project. It is not "I
+ * could not tell", which stays "unsure".
+ */
+export const LANE_VERDICTS = ["defect", "not_a_defect", "unsure", "worth_a_look"] as const;
 export const LANE_STATUSES = ["complete", "partial", "blocked"] as const;
 
 const Confidence = z.number().min(0).max(1);
@@ -62,11 +73,31 @@ export const LaneDecision = z
     confidence: Confidence,
     /** The same machine signature scout_finding takes as its cross-run dedup key. */
     evidence: z.string().min(1).max(LANE_EVIDENCE_MAX).nullable(),
+    /**
+     * The project convention that would make a "worth_a_look" a defect.
+     * Optional so a reply written before the verdict existed still parses;
+     * required (non-null) on a worth_a_look. On any other verdict the parser
+     * drops it and the fold says so: refusing a whole report over a field
+     * nothing reads would cost a round trip for nothing.
+     */
+    // Any string here: its length is checked only on a worth_a_look (below), because on every other verdict it is ignored.
+    convention: z.string().nullable().optional(),
   })
   .strict()
   .superRefine((d, ctx) => {
     if (d.verdict === "defect" && (d.severity === null || d.category === null)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a defect needs a severity and a category" });
+    }
+    if (d.verdict === "worth_a_look") {
+      if (d.convention === undefined || d.convention === null || d.convention.trim() === "") {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a worth_a_look must name the convention that would decide it", path: ["convention"] });
+      } else if (d.convention.length > LANE_CONVENTION_MAX) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `a convention is at most ${LANE_CONVENTION_MAX} characters`,
+          path: ["convention"],
+        });
+      }
     }
   });
 
@@ -103,8 +134,11 @@ export type LaneReport = z.infer<typeof LaneReport>;
 /**
  * `aroundIgnored`: the object came from the reply's one fenced block, and the text around it was dropped unread.
  * `entitiesDecoded`: how many HTML character references in its string values were decoded.
+ * `conventionsIgnored`: the verdict of each decision whose `convention` was dropped because it was not a worth_a_look.
  */
-export type LaneParse = { ok: true; report: LaneReport; aroundIgnored: boolean; entitiesDecoded: number } | { ok: false; reason: string };
+export type LaneParse =
+  | { ok: true; report: LaneReport; aroundIgnored: boolean; entitiesDecoded: number; conventionsIgnored: LaneDecision["verdict"][] }
+  | { ok: false; reason: string };
 
 const FENCE_OPEN = /^```[a-z]*\s*\r?\n/i;
 const FENCE_CLOSE = /\r?\n?```\s*$/;
@@ -162,7 +196,24 @@ export function parseLaneReport(text: string, expectedLane?: string): LaneParse 
   if (expectedLane !== undefined && result.data.lane !== expectedLane) {
     return { ok: false, reason: `the report names lane "${result.data.lane}", but this reply was asked of lane "${expectedLane}"` };
   }
-  return { ok: true, report: result.data, aroundIgnored, entitiesDecoded: decoded.count };
+  // A convention means something only on a worth_a_look; elsewhere it is dropped, so nothing stored carries it, and named in the fold.
+  const conventionsIgnored: LaneDecision["verdict"][] = [];
+  const decisions = result.data.decisions.map((d) => {
+    if (d.verdict === "worth_a_look" || d.convention === undefined || d.convention === null) return d;
+    conventionsIgnored.push(d.verdict);
+    const { convention: _dropped, ...rest } = d;
+    return rest;
+  });
+  return { ok: true, report: { ...result.data, decisions }, aroundIgnored, entitiesDecoded: decoded.count, conventionsIgnored };
+}
+
+/** The line the fold adds for each verdict whose convention was dropped: "convention ignored on a defect verdict"; empty when none was. */
+export function ignoredConventionsNote(verdicts: readonly LaneDecision["verdict"][]): string {
+  if (verdicts.length === 0) return "";
+  const counts = new Map<string, number>();
+  for (const v of verdicts) counts.set(v, (counts.get(v) ?? 0) + 1);
+  const parts = [...counts].map(([v, n]) => `convention ignored on ${n === 1 ? `${/^[aeiou]/.test(v) ? "an" : "a"} ${v} verdict` : `${n} ${v} verdicts`}`);
+  return `\n(${parts.join("; ")}: only a worth_a_look names a convention.)`;
 }
 
 /**
@@ -262,8 +313,9 @@ export function laneReportInstruction(lane: string): string {
 const LANE_RUBRIC: readonly string[] = [
   "Reply with ONE JSON object and nothing else — no prose before or after it, no explanation, no headings. A fenced ```json block is fine; anything outside it is discarded unread, so put nothing there you want kept.",
   `Shape: {"lane":<your lane name>,"status":<${quoteAll(LANE_STATUSES)}>,"decisions":[…],"routes":[…],"blocked_by":<string or null>}.`,
-  `Each decision: {"observation":<a short id for what was observed, unique in the report, at most ${LANE_OBSERVATION_MAX} characters>,"verdict":<${quoteAll(LANE_VERDICTS)}>,"severity":<${quoteAll(LANE_SEVERITIES)} or null>,"category":<${quoteAll(LANE_CATEGORIES)} or null>,"confidence":<0..1>,"evidence":<machine signature such as "GET /api/things 500", or null>}.`,
+  `Each decision: {"observation":<a short id for what was observed, unique in the report, at most ${LANE_OBSERVATION_MAX} characters>,"verdict":<${quoteAll(LANE_VERDICTS)}>,"severity":<${quoteAll(LANE_SEVERITIES)} or null>,"category":<${quoteAll(LANE_CATEGORIES)} or null>,"confidence":<0..1>,"evidence":<machine signature such as "GET /api/things 500", or null>,"convention":<string or null>}.`,
   `A "defect" must carry a severity and a category. "evidence" is a signature, not a sentence: at most ${LANE_EVIDENCE_MAX} characters. "confidence" is how sure you are of the verdict, calibrated: 0.5 means a coin flip, 0.95 means you would bet on it.`,
+  `"worth_a_look" is for an observation that is real but is a defect only under a convention of the project you cannot see (a spacing scale, how navigation links are styled, whether controls carry test ids, whether the app targets touch screens): it must name that convention in "convention", one line of at most ${LANE_CONVENTION_MAX} characters, such as "a 4px spacing scale". On every other verdict leave "convention" null or out: it is ignored there. It is not for "I could not tell": that is "unsure".`,
   `"routes" lists the routes you covered, each at most ${LANE_ROUTE_MAX} characters. "blocked_by" is one line of at most ${LANE_BLOCKED_BY_MAX} characters saying what stopped you: required when the status is "blocked", allowed with "partial", null with "complete"; the detail belongs in a finding. The lane name is at most ${LANE_NAME_MAX} characters. At most ${LANE_MAX_ITEMS} decisions and ${LANE_MAX_ITEMS} routes. Unknown keys are refused.`,
   "The object IS your final report: whatever hands it back must hand back the object verbatim, not a summary of it.",
 ];
@@ -277,12 +329,14 @@ export function summarizeLaneReport(r: LaneReport): string {
   const defects = r.decisions.filter((d) => d.verdict === "defect");
   const high = defects.filter((d) => d.severity === "high").length;
   const unsure = r.decisions.filter((d) => d.verdict === "unsure").length;
+  const worthALook = r.decisions.filter((d) => d.verdict === "worth_a_look").length;
   const mean = r.decisions.length ? r.decisions.reduce((s, d) => s + d.confidence, 0) / r.decisions.length : 0;
   const parts = [
     r.status,
     `${r.decisions.length} judged`,
     `${defects.length} defects (${high} high)`,
     `${unsure} unsure`,
+    ...(worthALook > 0 ? [`${worthALook} worth a look`] : []),
     `mean confidence ${mean.toFixed(2)}`,
     `${r.routes.length} routes`,
   ];

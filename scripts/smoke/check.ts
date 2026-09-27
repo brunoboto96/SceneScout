@@ -158,6 +158,53 @@ async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server
     JSON.stringify(labelIssues),
   );
 
+  // Two pages identical but for off-grid paddings and navigation links styled like body text. Whether
+  // either is a defect depends on the project's conventions: the gate says the same about both, at the
+  // strictest --fail-on, and only the worth-a-look list differs.
+  type LookSummary = Summary & { counts: object; gate: object; worthALook: Array<{ rule: string; convention: string; routes: string[] }> };
+  const conventions = async (page: string): Promise<{ status: number | null; out: string; summary: LookSummary; report: string; sarif: string }> => {
+    const dir = path.join(work, page);
+    const r = await runCli([`${baseUrl}/${page}.html`, "--project", work, "--out", dir, "--paths", `/${page}.html`, "--fail-on", "low"]);
+    return {
+      ...r,
+      summary: JSON.parse(fs.readFileSync(path.join(dir, "check.json"), "utf8")) as LookSummary,
+      report: fs.readFileSync(path.join(dir, "report.md"), "utf8"),
+      sarif: fs.readFileSync(path.join(dir, "check.sarif"), "utf8"),
+    };
+  };
+  const drifting = await conventions("check-conventions");
+  const plain = await conventions("check-conventions-plain");
+  const lookRules = drifting.summary.worthALook.map((o) => o.rule).sort();
+  check(
+    "off-grid paddings and body-coloured navigation links are listed as worth a look, each with the convention that decides it",
+    lookRules.join(",") === "indistinct-link,off-grid-spacing" &&
+      drifting.summary.worthALook.some((o) => o.rule === "off-grid-spacing" && o.convention === "a 4px spacing scale"),
+    JSON.stringify(drifting.summary.worthALook),
+  );
+  check("...and the identical page without them has none", plain.summary.worthALook.length === 0, JSON.stringify(plain.summary.worthALook));
+  // Compared by rule, severity and evidence, with the page's own path written as <page>: the two pages have
+  // different paths, so the routes an issue lists, and evidence naming its page, always differ.
+  const facts = (r: typeof drifting): string => {
+    const page = r.summary.routes[0]?.path ?? "";
+    const issues = r.summary.issues.map((i) => `${i.rule} ${i.severity} ${i.evidence.split(page).join("<page>")}`).sort();
+    return JSON.stringify([issues, r.summary.counts, r.summary.gate, r.status]);
+  };
+  check(
+    "...and the two get the same issues, counts, gate verdict and exit code, even at --fail-on low",
+    facts(drifting) === facts(plain),
+    `${facts(drifting)}\n${facts(plain)}`,
+  );
+  check(
+    "...the report lists them in their own section with what would confirm each, and the SARIF at level note",
+    /## Worth a look \(2\)/.test(drifting.report) &&
+      /a defect only if your project uses a 4px spacing scale/.test(drifting.report) &&
+      !/## Worth a look/.test(plain.report) &&
+      (JSON.parse(drifting.sarif) as { runs: Array<{ results: Array<{ ruleId: string; level: string }> }> }).runs[0].results
+        .filter((r) => r.ruleId === "off-grid-spacing" || r.ruleId === "indistinct-link")
+        .every((r) => r.level === "note"),
+    drifting.report.slice(0, 1500),
+  );
+
   // Every page bounced to sign-in: only the sign-in page was measured, which is no verdict on the app.
   const walled = await runCli([baseUrl, "--project", work, "--out", path.join(work, "walled"), "--paths", "/members/a,/members/b"]);
   check(

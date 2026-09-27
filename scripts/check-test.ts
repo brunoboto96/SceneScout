@@ -6,6 +6,7 @@
  *   npx tsx --test --test-name-pattern "gate" scripts/check-test.ts
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -26,6 +27,7 @@ import {
   isVersionSpec,
   npmCommand,
   outDirFor,
+  SUMMARY_OUTPUT_NAMES,
   summaryOutputs,
   verdict,
 } from "../action/check-action.mjs";
@@ -48,7 +50,10 @@ import { checkRetestPlan, retestResults, wellFormedFindings, type MeasuredPage }
 import {
   CHECK_OPTION_NAMES,
   CHECK_RULES,
+  checkFindings,
   DEFAULT_SETTINGS,
+  FAIL_ON,
+  WORTH_A_LOOK_RULES,
   type GateRetests,
   describeSettings,
   exitCodeOf,
@@ -302,6 +307,7 @@ function result(issues: CheckIssue[], failOn: CheckResult["failOn"] = "high"): C
     failOn,
     routes: [route()],
     issues,
+    worthALook: [],
     unvisited: [],
     ignored: [],
     flows: [],
@@ -396,6 +402,157 @@ test("every rule has a severity, a title and help text", () => {
     assert.ok(["high", "medium", "low"].includes(r.severity), id);
     assert.ok(r.title.length > 0 && r.help.length > 0, id);
   }
+  // A worth-a-look rule has no severity, and names the convention that would decide it.
+  for (const [id, r] of Object.entries(WORTH_A_LOOK_RULES)) {
+    assert.ok(!("severity" in r), id);
+    assert.ok(r.title.length > 0 && r.help.length > 0 && r.convention.length > 0, id);
+    assert.ok(!(id in CHECK_RULES), `${id} is in one tier, not both`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Worth a look: convention-dependent observations. The two routes below are
+// identical but for the design audit's convention-dependent lines, and the
+// gate must say the same thing about both at every --fail-on.
+// ---------------------------------------------------------------------------
+
+const CONVENTION_DEPENDENT = [
+  { rule: "off-grid-spacing" as const, detail: "paddings off a 4px grid: 7px, 13px" },
+  { rule: "indistinct-link" as const, detail: "links with no underline in the body-text colour rgba(17, 17, 17, 1)" },
+];
+const plainRoute = route({ path: "/list", design: [{ rule: "contrast", detail: '<p> "Hint" — 2.10:1 (needs 4.5:1)' }] });
+const lookRoute = route({ path: "/list", design: [...plainRoute.design, ...CONVENTION_DEPENDENT] });
+
+function fullResult(r: RouteHealth, failOn: CheckResult["failOn"]): CheckResult {
+  const { issues, worthALook } = checkFindings([r], ORIGIN);
+  return { ...result(issues, failOn), routes: [r], worthALook };
+}
+
+test("worth a look: convention-dependent rules land in their own tier, with the convention named, and nothing else moves", () => {
+  const plain = checkFindings([plainRoute], ORIGIN);
+  const look = checkFindings([lookRoute], ORIGIN);
+  assert.deepEqual(look.issues, plain.issues, "the defects are the same with or without the observations");
+  assert.deepEqual(plain.worthALook, []);
+  assert.deepEqual(
+    look.worthALook.map((o) => [o.rule, o.convention]),
+    [
+      ["indistinct-link", WORTH_A_LOOK_RULES["indistinct-link"].convention],
+      ["off-grid-spacing", "a 4px spacing scale"],
+    ],
+  );
+  assert.deepEqual(
+    issuesFromRoutes([lookRoute], ORIGIN).map((i) => i.rule),
+    ["contrast"],
+    "issuesFromRoutes is the defect tier only",
+  );
+  // Deduplicated like issues: the same shell observation on two pages is one entry on both routes.
+  const shell = { rule: "off-grid-spacing" as const, detail: "paddings off a 4px grid: 6px", chrome: true };
+  const twice = checkFindings([route({ path: "/a", design: [shell] }), route({ path: "/b", design: [shell] })], ORIGIN);
+  assert.equal(twice.worthALook.length, 1);
+  assert.deepEqual(twice.worthALook[0].routes, ["(shared chrome)"]);
+  // --ignore takes them like any rule.
+  assert.deepEqual(
+    checkFindings([lookRoute], ORIGIN, ["off-grid-spacing"]).worthALook.map((o) => o.rule),
+    ["indistinct-link"],
+  );
+  // A small target is WCAG 2.2 AA's published minimum, not a project convention: it stays a low issue, with the fingerprint it always had.
+  const small = checkFindings([route({ design: [{ rule: "tiny-target", detail: "button [close] — 14×14px" }] })], ORIGIN);
+  assert.deepEqual(small.worthALook, []);
+  assert.deepEqual(
+    small.issues.map((i) => [i.rule, i.severity, i.fingerprint]),
+    [["tiny-target", "low", createHash("sha256").update("tiny-target\u0000button [close] — 14×14px").digest("hex").slice(0, 32)]],
+  );
+});
+
+test("worth a look: never fails the gate at any --fail-on, and the verdict is the one the identical page without them gets", () => {
+  for (const failOn of FAIL_ON) {
+    const plain = fullResult(plainRoute, failOn);
+    const look = fullResult(lookRoute, failOn);
+    assert.equal(look.worthALook.length, 2);
+    assert.deepEqual(summarise(look), summarise(plain), `--fail-on ${failOn}`);
+    assert.equal(exitCodeOf(look), exitCodeOf(plain), `--fail-on ${failOn}`);
+  }
+  // With nothing else on the page, the strictest gate still passes.
+  const only = { ...fullResult(route({ design: CONVENTION_DEPENDENT }), "low") };
+  assert.equal(only.issues.length, 0);
+  assert.equal(summarise(only).passed, true);
+  assert.equal(exitCodeOf(only), 0);
+  assert.deepEqual(summarise(only).counts, { high: 0, medium: 0, low: 0 }, "not counted at any severity");
+});
+
+test("worth a look: SARIF level note with the convention, the report's own section, and check.json apart from issues", () => {
+  const look = fullResult(lookRoute, "low");
+  const sarif = toSarif(look, "1") as {
+    runs: Array<{
+      tool: { driver: { rules: Array<{ id: string; defaultConfiguration: { level: string }; properties?: { tags: string[] } }> } };
+      results: Array<{ ruleId: string; level: string; message: { text: string }; properties?: { tier: string; convention: string } }>;
+    }>;
+  };
+  const run = sarif.runs[0];
+  const lookResults = run.results.filter((r) => r.ruleId in WORTH_A_LOOK_RULES);
+  assert.equal(lookResults.length, 2);
+  for (const r of lookResults) {
+    assert.equal(r.level, "note", r.ruleId);
+    assert.equal(r.properties?.tier, "worth-a-look");
+    assert.match(r.message.text, /^Worth a look — .*A defect only if your project uses /);
+  }
+  for (const id of Object.keys(WORTH_A_LOOK_RULES)) {
+    const rule = run.tool.driver.rules.find((r) => r.id === id)!;
+    assert.equal(rule.defaultConfiguration.level, "note", id);
+    assert.deepEqual(rule.properties?.tags, ["worth-a-look"]);
+  }
+  assert.equal(run.results.find((r) => r.ruleId === "contrast")?.level, "note", "a low defect stays as it was");
+
+  const md = formatCheck(look);
+  const plainMd = formatCheck(fullResult(plainRoute, "low"));
+  assert.match(md, /\*\*FAILED\*\* — 1 issue\(s\) at the gate's severity · 0 high · 0 medium · 1 low · 2 worth a look, never gated/);
+  assert.match(plainMd, /\*\*FAILED\*\* — 1 issue\(s\) at the gate's severity · 0 high · 0 medium · 1 low\n/);
+  const section = md.indexOf("## Worth a look (2)");
+  assert.ok(section > md.indexOf("## Low (1)"), "below the counted issues");
+  assert.ok(section < md.indexOf("## Routes"));
+  assert.match(md, /never fail the gate, at any --fail-on/);
+  assert.match(
+    md,
+    /\*\*Spacing off a 4px grid\*\* `off-grid-spacing`: paddings off a 4px grid: 7px, 13px — a defect only if your project uses a 4px spacing scale — `\/list`/,
+  );
+  assert.ok(!plainMd.includes("Worth a look"), "no section when there is nothing in it");
+  assert.match(md, /\| \/list \| 200 \| 10 \| 1 \|/, "the route's issue count is the defects only");
+
+  const json = toSummaryJson(look, "1") as {
+    counts: object;
+    gate: { failing: number };
+    issues: CheckIssue[];
+    worthALook: Array<{ rule: string; convention: string }>;
+  };
+  const plainJson = toSummaryJson(fullResult(plainRoute, "low"), "1") as typeof json;
+  assert.deepEqual(json.counts, plainJson.counts);
+  assert.deepEqual(json.gate, plainJson.gate);
+  assert.deepEqual(json.issues, plainJson.issues);
+  assert.deepEqual(
+    json.worthALook.map((o) => o.rule),
+    ["indistinct-link", "off-grid-spacing"],
+  );
+  assert.deepEqual(plainJson.worthALook, []);
+});
+
+test("worth a look: an open finding filed as worth a look is never re-tested by a check, so it can never gate", () => {
+  const base: Finding = {
+    id: "f1",
+    severity: "high",
+    category: "http-error",
+    title: "t",
+    detail: "d",
+    evidence: "GET /api/things 500",
+    url: `${ORIGIN}/things`,
+    state: "/things#1",
+    repro: ["navigate @ /things"],
+    foundAt: "2026-09-25T00:00:00.000Z",
+    runs: 1,
+  };
+  assert.equal(checkRetestPlan([base]).candidates.length, 1, "the same finding as a defect is re-tested");
+  const look = checkRetestPlan([{ ...base, tier: "worth_a_look", convention: "a 4px spacing scale" }]);
+  assert.equal(look.candidates.length, 0);
+  assert.equal(look.open, 0, "and not counted among the open findings a check leaves to a run");
 });
 
 test("arguments: the defaults", () => {
@@ -768,9 +925,33 @@ test("action: an upload that fails cannot hide the verdict, and a failed gate st
 
 test("action: its outputs are check.json's numbers, and nothing when there is no verdict", () => {
   const json = toSummaryJson(result([issue("high"), issue("medium", "contrast"), issue("low", "contrast")]), "1.0.0");
-  assert.deepEqual(summaryOutputs(json), { passed: "false", failing: "1", high: "1", medium: "1", low: "1", "could-not-run": "0", "retests-failing": "0" });
+  assert.deepEqual(summaryOutputs(json), {
+    passed: "false",
+    failing: "1",
+    high: "1",
+    medium: "1",
+    low: "1",
+    "could-not-run": "0",
+    "retests-failing": "0",
+    "worth-a-look": "0",
+  });
   assert.equal(summaryOutputs(null), null);
   assert.equal(summaryOutputs({}), null);
+  // The worth-a-look count is its own output, and moves none of the others.
+  const looks = toSummaryJson(fullResult(lookRoute, "low"), "1.0.0");
+  const plain = toSummaryJson(fullResult(plainRoute, "low"), "1.0.0");
+  const { "worth-a-look": lookCount, ...lookRest } = summaryOutputs(looks)!;
+  const { "worth-a-look": plainCount, ...plainRest } = summaryOutputs(plain)!;
+  assert.equal(lookCount, "2");
+  assert.equal(plainCount, "0");
+  assert.deepEqual(lookRest, plainRest);
+  // A check.json written before the tier existed has no list, and reads as none.
+  const { worthALook: _dropped, ...older } = looks as Record<string, unknown>;
+  assert.equal(summaryOutputs(older)?.["worth-a-look"], "0");
+  // Every output it sets is declared in action.yml, read from the run step, and listed for the no-verdict case.
+  const declared = action.outputs as Record<string, { value: string }>;
+  assert.deepEqual(Object.keys(summaryOutputs(json)!).sort(), [...SUMMARY_OUTPUT_NAMES].sort());
+  for (const name of SUMMARY_OUTPUT_NAMES) assert.equal(declared[name]?.value, `\${{ steps.run.outputs.${name} }}`, name);
 });
 
 test("action: third-party steps are pinned by commit, and no input is pasted into a script", () => {
