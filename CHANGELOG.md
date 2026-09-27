@@ -1,5 +1,19 @@
 # scenescout
 
+## 3.12.0
+
+### Minor Changes
+
+- 967e98c: Add a "worth a look" tier for observations that are defects only under a convention of the project the run cannot see, such as a spacing scale, link styling in navigation, or test ids on every control. SceneScout reports each one with the convention that would decide it, and never counts it as a defect.
+  
+  - Lane reports accept the verdict `worth_a_look`, which must name its `convention`. A `convention` on any other verdict is ignored, and the fold says so. Lane calibration and the benchmark's key calibration leave it unscored and count it under its own reason.
+  - `scout_finding` takes an optional `convention`, which files the finding in this tier. The report lists these findings under "Worth a look", below the findings, as "a defect only if your project uses …", and leaves them out of every defect total. Filing the same thing again as a defect promotes it, at the defect's severity, and the reply says so. The benchmark sets such findings aside from recall and precision, and the fold lists a lane's judged defect as unfiled when it was filed only as worth a look.
+  - `scenescout check` reports two new rules, `off-grid-spacing` and `indistinct-link`, in this tier. They have no severity and never fail the gate at any `--fail-on`. SARIF reports them at level `note`. The report and the job summary list them in their own section, `check.json` puts them under `worthALook`, separate from `issues`, and the GitHub Action publishes their number as the `worth-a-look` output. Every existing rule is unchanged.
+
+### Patch Changes
+
+- c40892f: `scout_lane_report` keeps the routes each lane's accepted report lists in the project's memory (`laneRoutes` in `.scenescout/memory.json`), with query strings and fragments removed so no token in an address is stored, and `npm run bench -- --archive` carries them into the run archive. The benchmark then decides whether a lane's "not a defect" is a remark about another lane's page by where the matched defect is, not by how the verdict is worded: a defect none of whose pages the lane covered is set aside as another lane's and listed on the scorecard, and one on the lane's own page, or one every lane can reach, is scored. Answer-key entries can name further pages with `alsoOn` and mark a defect every lane can reach with `everyPage`. Archives made before routes were kept, and lanes with a route that names no page, are scored by wording, as before.
+
 ## 3.11.1
 
 ### Patch Changes
