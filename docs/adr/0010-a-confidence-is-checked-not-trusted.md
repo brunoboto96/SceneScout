@@ -47,7 +47,9 @@ Both checks exist, and each says what it is.
   verdict on a *contextual* entry — something that is a defect only under a
   convention the run cannot see, such as a spacing scale the project may not
   declare — are not scored, and each is counted by reason. It reports a Brier
-  score beside the expected calibration error.
+  score beside the expected calibration error. Which lane owns a thing is
+  decided by the lanes' archived routes against the key entry's pages where
+  a run kept them, and by the verdict's wording only for runs that did not.
 
   The contextual list is not a way to wave away verdicts that score badly.
   An entry must name, in its `reason`, the convention that decides it; it

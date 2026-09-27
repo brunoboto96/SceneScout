@@ -27,6 +27,7 @@ import {
   pruneStates,
   type StateRecord,
   MAX_LANE_DECISIONS,
+  MAX_LANE_ROUTES,
   FINDING_CATEGORIES,
   sameFamily,
   mergeableCategories,
@@ -1011,6 +1012,57 @@ test("lane decisions survive a reload, and a second process's are not lost", () 
   store.addLaneDecisions("orders", [{ ...one, observation: "second look" }]);
   const both = openStore(path.dirname(store.dir)).laneDecisions;
   assert.deepEqual(both.map((d) => d.lane + ":" + d.observation).sort(), ["orders:empty register", "orders:second look", "stock:stale count"]);
+});
+
+test("a lane's routes survive a reload, and a second process's lanes are not lost", () => {
+  // The benchmark decides whether a lane's "not a defect" is about its own
+  // page from these, and each lane folds its report in its own process.
+  const store = freshStore();
+  assert.deepEqual(store.laneRoutes, {});
+  assert.equal(store.addLaneRoutes("orders", ["/orders.html", "/order.html?id=3 (from the list)"]), 2);
+  assert.equal(store.addLaneRoutes("orders", ["/order.html (from the list)", "/orders.html", "  "]), 0, "a report folded twice adds nothing");
+
+  const reloaded = openStore(path.dirname(store.dir));
+  assert.deepEqual(reloaded.laneRoutes, { orders: ["/order.html (from the list)", "/orders.html"] });
+  reloaded.addLaneRoutes("stock", ["/stock.html"]);
+  store.addLaneRoutes("orders", ["/audit.html"]);
+  assert.deepEqual(openStore(path.dirname(store.dir)).laneRoutes, {
+    orders: ["/order.html (from the list)", "/orders.html", "/audit.html"],
+    stock: ["/stock.html"],
+  });
+
+  // And a merge is a union per lane, so folding the same document twice changes nothing.
+  const a: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [], laneRoutes: { orders: ["/a"] } };
+  const b: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [], laneRoutes: { orders: ["/b"], stock: ["/s"] } };
+  const once = mergeMemory(a, b);
+  assert.deepEqual(once.laneRoutes, { orders: ["/b", "/a"], stock: ["/s"] });
+  assert.deepEqual(mergeMemory(once, b).laneRoutes, once.laneRoutes);
+  assert.equal("laneRoutes" in mergeMemory({ version: 1, states: {}, findings: [] }, { version: 1, states: {}, findings: [] }), false);
+});
+
+test("a lane's route is stored without its query string or fragment", () => {
+  // A lane copies routes from the address bar, and an address can carry a token.
+  const store = freshStore();
+  const secret = "abc123def456ghi";
+  store.addLaneRoutes("auth", [`/cb?access_token=${secret}`, `/cb#code=${secret}`, `/files/x.pdf?X-Amz-Signature=${secret}`, `/#/things?session_id=${secret}`]);
+  const file = fs.readFileSync(path.join(store.dir, "memory.json"), "utf8");
+  assert.ok(!file.includes(secret), file);
+  assert.deepEqual(store.laneRoutes.auth, ["/cb", "/files/x.pdf", "/#/things"], "two spellings of /cb are one route");
+});
+
+test("past the cap, a lane keeps the routes it covered most recently", () => {
+  const store = freshStore();
+  const many = Array.from({ length: MAX_LANE_ROUTES + 5 }, (_, i) => `/p${i}.html`);
+  store.addLaneRoutes("big", many);
+  const kept = store.laneRoutes.big;
+  assert.equal(kept.length, MAX_LANE_ROUTES);
+  assert.equal(kept.at(-1), `/p${MAX_LANE_ROUTES + 4}.html`, "the newest is kept");
+  assert.ok(!kept.includes("/p0.html"), "the oldest goes");
+  // Covering an old page again makes it recent, so it survives the next cap.
+  store.addLaneRoutes("big", ["/p5.html (again)", "/new.html"]);
+  assert.ok(store.laneRoutes.big.includes("/p5.html (again)"));
+  assert.ok(!store.laneRoutes.big.includes("/p5.html"), "one entry per page");
+  assert.ok(!store.laneRoutes.big.includes("/p6.html"), "and what was oldest goes instead");
 });
 
 test("a lane's free text is redacted and capped before it is stored", () => {

@@ -110,3 +110,57 @@ export function fingerprintState(url: string, elements: InteractableInfo[]): str
 export function shortHash(input: string): string {
   return createHash("sha1").update(input).digest("hex").slice(0, 10);
 }
+
+/**
+ * A route as a lane wrote it, with every query string and every fragment that
+ * is not a hash route removed. A lane copies routes out of the address bar, and
+ * an address can carry `?access_token=`, `?code=`, `?session_id=` or a signed
+ * URL's `X-Amz-Signature=`; none of it identifies the page, and none of it may
+ * be stored or archived. A hash route (`#/things`) keeps its path, not its query.
+ * A `name=value` pair whose name reads as a credential is removed wherever it is.
+ */
+export function stripRouteQuery(route: string): string {
+  return route
+    .replace(/\?[^\s()[\]]*/g, "")
+    .replace(/#(?!\/)[^\s()[\]]*/g, "")
+    .replace(/[\w-]*(token|signature|secret|password|session|code|key|auth|credential)[\w-]*=[^\s()[\]]*/gi, "")
+    .trim();
+}
+
+/** Page files a lane may name without a leading slash ("orders.html"). */
+const BARE_PAGE_RE = /^[\w-]+(\/[\w.-]+)*\.(html?|php|aspx?|jsp)$/i;
+/** A host with a port, or a loopback or IPv4 host, written without a scheme ("127.0.0.1:4173/orders.html"). */
+const BARE_HOST_RE = /^(?:[\w.-]+:\d+|localhost|\d{1,3}(?:\.\d{1,3}){3})(\/.*)?$/i;
+
+/**
+ * Every path one route from a lane report names, in the form a benchmark key
+ * entry's `route` is written in; empty when it names none.
+ *
+ * A lane writes its routes as free text — "/order.html?id=1042 (from
+ * /orders.html link)", "Orders (/orders.html)", "orders.html",
+ * "127.0.0.1:4173/orders.html", "/reports.html and /reports-scheduled.html".
+ * EVERY path in it counts, including one in a note: the benchmark uses these
+ * to set aside a verdict as another lane's, so a page left out makes a wrong
+ * verdict disappear, while a page taken in only keeps a verdict scored. A bare
+ * origin is "/", a bare page file gains its slash, the query goes, ids
+ * collapse as the engine's route identity collapses them, and "/index.html" is
+ * "/".
+ */
+export function laneRoutePaths(raw: string): string[] {
+  const out = new Set<string>();
+  for (const word of raw.split(/[\s,;|+()[\]]+|→|->|=>/)) {
+    const token = word.replace(/^[<"'`]+|[>"'`.:!]+$/g, "");
+    if (!token) continue;
+    let path: string | undefined;
+    const url = /^https?:\/\/[^/\s]+(\/.*)?$/i.exec(token) ?? BARE_HOST_RE.exec(token);
+    if (url) path = url[1] || "/";
+    else if (token.startsWith("/") || token.startsWith("#/")) path = token;
+    else if (BARE_PAGE_RE.test(token.split(/[?#]/)[0])) path = `/${token}`;
+    if (path === undefined) continue;
+    let p = normalizePath(path).split("?")[0];
+    p = p.replace(/\/index\.html?$/i, "/");
+    if (p.length > 1) p = p.replace(/\/+$/, "");
+    out.add(p || "/");
+  }
+  return [...out];
+}

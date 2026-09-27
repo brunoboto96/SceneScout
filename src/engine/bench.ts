@@ -31,6 +31,9 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { BUCKET_EDGES, bucketLabel, bucketOf, type RecordedDecision } from "./calibration.js";
+import { laneRoutePaths, stripRouteQuery } from "./fingerprint.js";
+
+export { laneRoutePaths };
 import type { Finding } from "./memory.js";
 
 export const LEVELS = ["minimal", "medium", "extensive"] as const;
@@ -49,10 +52,25 @@ const Pattern = z.string().refine(
   { message: "is not a valid regular expression" },
 );
 
+/**
+ * Other pages the same defect shows on, beyond `route`. A lane that owns any
+ * of them owns the defect, so its "not a defect" is a verdict, not a remark
+ * about another lane's page.
+ */
+const AlsoOn = z.array(z.string().startsWith("/")).min(1).optional();
+/**
+ * Every lane can reach the defect: it is in chrome every page carries (a
+ * shared nav, header or footer), or in an endpoint any lane can call. No lane
+ * can call it another lane's, so a verdict on it is always scored.
+ */
+const EveryPage = z.boolean().optional();
+
 const Entry = z
   .object({
     id: z.string().min(1),
     route: z.string().startsWith("/"),
+    alsoOn: AlsoOn,
+    everyPage: EveryPage,
     title: z.string().min(1),
     /** The category a finding for it should carry. Reported, not enforced: two categories can both be defensible. */
     category: z.string().min(1),
@@ -92,6 +110,8 @@ const Contextual = z
   .object({
     id: z.string().min(1),
     route: z.string().startsWith("/"),
+    alsoOn: AlsoOn,
+    everyPage: EveryPage,
     title: z.string().min(1),
     category: z.string().min(1),
     /** The convention that decides it: where it would be a defect, and why the run cannot tell whether it holds here. */
@@ -145,6 +165,13 @@ export function parseKey(raw: unknown): AnswerKey {
   const ids = [...parsed.data.defects, ...parsed.data.alsoReal, ...parsed.data.nonDefects, ...parsed.data.contextual].map((e) => e.id);
   const dup = ids.find((id, i) => ids.indexOf(id) !== i);
   if (dup) throw new Error(`The answer key uses the id ${JSON.stringify(dup)} twice.`);
+  for (const e of [...parsed.data.defects, ...parsed.data.alsoReal, ...parsed.data.contextual]) {
+    if (e.alsoOn && e.everyPage)
+      throw new Error(`The entry ${JSON.stringify(e.id)} has both alsoOn and everyPage; an entry on every page names no other pages.`);
+    const pages = [e.route, ...(e.alsoOn ?? [])];
+    const dup = pages.find((p, i) => pages.indexOf(p) !== i);
+    if (dup) throw new Error(`The entry ${JSON.stringify(e.id)} names the page ${JSON.stringify(dup)} twice in route and alsoOn.`);
+  }
   const real = new Set([...parsed.data.defects, ...parsed.data.alsoReal].map((e) => e.id));
   for (const nd of parsed.data.nonDefects) {
     const unknown = nd.overrides.find((id) => !real.has(id));
@@ -309,6 +336,17 @@ export interface KeyCalibration {
    * error rate by as much as any change being measured.
    */
   outOfScope: number;
+  /**
+   * How ownership was decided: by the lanes' archived routes, by the wording
+   * of the verdict (archives made before routes were kept), or by each where
+   * some lanes' routes are known and others' are not.
+   */
+  ownership: "routes" | "wording" | "mixed";
+  /**
+   * Each verdict the route rule set aside, with the entry it matched, so a
+   * run's scorecard shows exactly which verdicts left the score and why.
+   */
+  setAsideByRoute: Array<{ lane: string; id: string; confidence: number }>;
   /** A verdict on something that is a defect only under a convention the run cannot see: either answer is defensible. */
   contextual: number;
   buckets: Array<{ label: string; decisions: number; stated: number; correct: number }>;
@@ -332,9 +370,9 @@ export interface KeyCalibration {
  * names ambiguously, and one about a contextual entry are not scored — the same rule the in-product calibration
  * follows, for the same reason.
  */
-export function judgeDecision(d: RecordedDecision, key: AnswerKey): boolean | null {
+export function judgeDecision(d: RecordedDecision, key: AnswerKey, laneRoutes?: LaneRoutes): boolean | null {
   if (d.verdict === "unsure") return null;
-  if (isScopeDismissal(d)) return null;
+  if (isOwnershipRemark(d, key, laneRoutes)) return null;
   const m = classify(decisionText(d), key);
   if (!m || m.kind === "ambiguous" || m.kind === "contextual") return null;
   const isDefect = m.kind !== "nonDefect";
@@ -345,13 +383,82 @@ export function judgeDecision(d: RecordedDecision, key: AnswerKey): boolean | nu
 const SCOPE_DISMISSAL_RE =
   /out.of.lane.scope|out-of-scope|out of (my|this) (lane|scope)|belongs?.to.{0,20}\b(lane|route|page)\b|belongs-to-|(handled|owned) by (the |another )?[\w-]* ?lane|lane owns it|not (in |on |from |part of )?(my|this) (lane|assigned routes|routes?|pages?)\b|outside (my|this) (lane|routes?|pages?)|not part of my (assigned )?routes/i;
 
-/** A not-a-defect verdict whose stated reason is that the thing is another lane's. */
+/**
+ * A not-a-defect verdict whose stated reason is that the thing is another
+ * lane's. The WORDING rule: all a run archived before lane routes were kept
+ * can be judged by, and still what decides for a lane whose routes are not
+ * known. It cannot tell a lane's own page from another's, which is why it is
+ * not widened (see `isOwnershipRemark`).
+ */
 export function isScopeDismissal(d: Pick<RecordedDecision, "verdict" | "evidence" | "observation">): boolean {
   return d.verdict === "not_a_defect" && SCOPE_DISMISSAL_RE.test(decisionText(d));
 }
 
-export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key: AnswerKey): KeyCalibration | null {
+/** The routes each lane's report said it covered, as reported: lane name → routes. */
+export type LaneRoutes = Readonly<Record<string, readonly string[]>>;
+
+/** The pages a key entry is on, in the same form as `laneRoutePaths`. */
+function entryPaths(e: Pick<KeyEntry, "route" | "alsoOn">): string[] {
+  return [e.route, ...(e.alsoOn ?? [])].flatMap(laneRoutePaths);
+}
+
+/**
+ * A lane's routes as a set of paths, or undefined when they are not known
+ * well enough to decide by: none were recorded, or ANY of them names no path
+ * ("the orders area"). A route that could not be read may be the very page a
+ * verdict is about, and deciding without it would set that verdict aside.
+ */
+function lanePaths(lane: string, laneRoutes: LaneRoutes | undefined): Set<string> | undefined {
+  const routes = laneRoutes && Object.hasOwn(laneRoutes, lane) ? laneRoutes[lane] : undefined;
+  if (!routes || routes.length === 0) return undefined;
+  const paths = new Set<string>();
+  for (const r of routes) {
+    const named = laneRoutePaths(r);
+    if (named.length === 0) return undefined;
+    for (const p of named) paths.add(p);
+  }
+  return paths;
+}
+
+/** Why a not-a-defect was set aside as another lane's: by the lane's routes (with the entry it matched), or by its wording. */
+export type OwnershipRemark = { by: "routes"; id: string } | { by: "wording" };
+
+/**
+ * A not-a-defect that is a remark about who owns the thing, not a verdict on
+ * whether it is broken.
+ *
+ * Where the lane's routes are known, decided by WHERE the thing is: the
+ * verdict matches a planted or also-real defect whose pages are all outside
+ * the lane's routes. The wording no longer matters either way — "raised on /
+ * before navigating" from the orders lane is a remark about the dashboard's
+ * defect, and "handled by another lane" from the lane that owns the page is
+ * its own wrong verdict. A defect in chrome every page carries (`everyPage`)
+ * is every lane's, so it is never another lane's. A verdict that matches a
+ * known non-defect, a contextual entry, several entries or none is not about
+ * a defect with a page to own, and is judged as it would be otherwise.
+ *
+ * Where they are not known — every archive made before routes were kept, and
+ * any lane that reported no route — the wording rule decides, unchanged, so
+ * those runs score as they always have.
+ */
+export function ownershipRemark(d: RecordedDecision, key: AnswerKey, laneRoutes?: LaneRoutes): OwnershipRemark | null {
+  if (d.verdict !== "not_a_defect") return null;
+  const own = lanePaths(d.lane, laneRoutes);
+  if (!own) return isScopeDismissal(d) ? { by: "wording" } : null;
+  const m = classify(decisionText(d), key);
+  if (!m || (m.kind !== "defect" && m.kind !== "alsoReal")) return null;
+  if (m.entry.everyPage) return null;
+  return entryPaths(m.entry).some((p) => own.has(p)) ? null : { by: "routes", id: m.entry.id };
+}
+
+export function isOwnershipRemark(d: RecordedDecision, key: AnswerKey, laneRoutes?: LaneRoutes): boolean {
+  return ownershipRemark(d, key, laneRoutes) !== null;
+}
+
+export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key: AnswerKey, laneRoutes?: LaneRoutes): KeyCalibration | null {
   if (decisions.length === 0) return null;
+  const lanes = [...new Set(decisions.map((d) => d.lane))];
+  const known = lanes.filter((l) => lanePaths(l, laneRoutes) !== undefined).length;
   const buckets = BUCKET_EDGES.map(() => ({ n: 0, conf: 0, right: 0 }));
   const out: KeyCalibration = {
     judged: 0,
@@ -361,6 +468,8 @@ export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key:
     badConfidence: 0,
     unsure: 0,
     outOfScope: 0,
+    ownership: known === 0 ? "wording" : known === lanes.length ? "routes" : "mixed",
+    setAsideByRoute: [],
     contextual: 0,
     buckets: [],
     ece: 0,
@@ -371,8 +480,10 @@ export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key:
       out.unsure += 1;
       continue;
     }
-    if (isScopeDismissal(d)) {
+    const remark = ownershipRemark(d, key, laneRoutes);
+    if (remark) {
       out.outOfScope += 1;
+      if (remark.by === "routes") out.setAsideByRoute.push({ lane: d.lane, id: remark.id, confidence: d.confidence });
       continue;
     }
     const c = d.confidence;
@@ -421,7 +532,13 @@ export type ScoredFinding = Pick<Finding, "title" | "severity"> & { evidence?: s
  * across runs, and scoring an accumulated one credits a run with what an
  * earlier run found. Point the scorer at a fresh project directory per run.
  */
-export function score(key: AnswerKey, findings: readonly ScoredFinding[], decisions: readonly RecordedDecision[], level: Level = "medium"): Scorecard {
+export function score(
+  key: AnswerKey,
+  findings: readonly ScoredFinding[],
+  decisions: readonly RecordedDecision[],
+  level: Level = "medium",
+  laneRoutes?: LaneRoutes,
+): Scorecard {
   const hitsByDefect = new Map<string, ScoredFinding[]>();
   const falsePositives: Scorecard["falsePositives"] = [];
   const unknown: Scorecard["unknown"] = [];
@@ -500,7 +617,7 @@ export function score(key: AnswerKey, findings: readonly ScoredFinding[], decisi
     ambiguous,
     duplicates,
     severity,
-    calibration: calibrateAgainstKey(decisions, key),
+    calibration: calibrateAgainstKey(decisions, key, laneRoutes),
   };
 }
 
@@ -578,7 +695,8 @@ export function formatScorecard(c: Scorecard): string {
       k.ambiguous && `${k.ambiguous} the key names ambiguously`,
       k.badConfidence && `${k.badConfidence} with an unusable confidence`,
       k.unsure && `${k.unsure} unsure`,
-      k.outOfScope && `${k.outOfScope} dismissed as another lane's`,
+      k.outOfScope &&
+        `${k.outOfScope} dismissed as another lane's (${k.ownership === "routes" ? "by the lanes' routes" : k.ownership === "wording" ? "by wording: no lane routes archived" : "by the lanes' routes where archived, else by wording"})`,
       k.contextual && `${k.contextual} about things that are defects only under a convention the run cannot see`,
     ].filter(Boolean);
     lines.push(
@@ -590,6 +708,10 @@ export function formatScorecard(c: Scorecard): string {
     );
     for (const b of k.buckets)
       lines.push(`  stated ${b.label}: ${b.decisions} decision(s), said ${b.stated.toFixed(2)}, right ${Math.round(b.correct * 100)}%`);
+    if (k.setAsideByRoute.length) {
+      lines.push(`  Set aside as another lane's, by the lanes' routes (${k.setAsideByRoute.length}):`);
+      for (const r of k.setAsideByRoute) lines.push(`    ${r.lane} on ${r.id}, stated ${Number.isFinite(r.confidence) ? r.confidence.toFixed(2) : "?"}`);
+    }
   }
   return lines.join("\n");
 }
@@ -609,6 +731,11 @@ export interface RunArchive {
   note: string;
   findings: ScoredFinding[];
   decisions: RecordedDecision[];
+  /**
+   * The routes each lane's report said it covered. Archives made before these
+   * were kept have none, and their ownership remarks are read by wording.
+   */
+  laneRoutes?: Record<string, string[]>;
 }
 
 /**
@@ -660,12 +787,17 @@ export function toArchive(
   findings: readonly ScoredFinding[],
   decisions: readonly RecordedDecision[],
   app: string,
+  laneRoutes: LaneRoutes = {},
 ): RunArchive {
+  // No query string or fragment reaches an archive: a lane copies routes from
+  // the address bar, and an address can carry a token.
+  const routes = Object.fromEntries(Object.entries(laneRoutes).map(([lane, list]) => [lane, list.map((r) => sanitize(stripRouteQuery(r)))]));
   return {
     app,
     run,
     date,
     note,
+    ...(Object.keys(routes).length ? { laneRoutes: routes } : {}),
     findings: findings.map((f) => ({
       title: sanitize(f.title),
       severity: f.severity,

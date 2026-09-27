@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { RecordedDecision } from "./calibration.js";
-import { normalizePath, shortHash } from "./fingerprint.js";
+import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
 import type { InjectionProbe } from "./injection.js";
 
@@ -284,6 +284,13 @@ interface MemoryFile {
    * whether a lane's 0.9 meant anything.
    */
   laneDecisions?: RecordedDecision[];
+  /**
+   * The routes each lane said it covered, as its lane report listed them:
+   * lane name → routes. Kept so the benchmark can tell a lane's "not a
+   * defect" about another lane's page (an ownership remark) from one about
+   * its own page (a verdict), which the wording alone cannot.
+   */
+  laneRoutes?: Record<string, string[]>;
 }
 
 const EMPTY: MemoryFile = { version: 1, states: {}, findings: [] };
@@ -391,7 +398,35 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
   out.laneDecisions = [...byDecision.values()].sort((a, b) => a.at.localeCompare(b.at)).slice(-MAX_LANE_DECISIONS);
   if (out.laneDecisions.length === 0) delete out.laneDecisions;
 
+  // The same reason as decisions: each lane folds in its own process. A set
+  // union per lane, so merging the same document twice changes nothing.
+  out.laneRoutes = { ...(theirs.laneRoutes ?? {}) };
+  for (const [lane, routes] of Object.entries(mine.laneRoutes ?? {})) {
+    out.laneRoutes[lane] = unionRoutes(out.laneRoutes[lane] ?? [], routes);
+  }
+  if (Object.keys(out.laneRoutes).length === 0) delete out.laneRoutes;
+
   return out;
+}
+
+/** Most routes kept per lane. A lane report carries at most a few hundred; this keeps a long-lived project's file small. */
+export const MAX_LANE_ROUTES = 255;
+
+/**
+ * `b` added to `a`. Two routes naming the same page(s) are one — the later
+ * wording wins — and past the cap the NEWEST are kept: a long-lived project
+ * reuses lane names, and what a lane covers now is what a new verdict is
+ * judged against.
+ */
+function unionRoutes(a: readonly string[], b: readonly string[]): string[] {
+  const byPage = new Map<string, string>();
+  for (const r of [...a, ...b]) {
+    const paths = laneRoutePaths(r);
+    const id = paths.length ? paths.sort().join(" ") : `text:${r}`;
+    byPage.delete(id);
+    byPage.set(id, r);
+  }
+  return [...byPage.values()].slice(-MAX_LANE_ROUTES);
 }
 /**
  * What makes two stored decisions the same judgement.
@@ -1250,6 +1285,31 @@ export class MemoryStore {
     // the stored array, so the "before" length was read after the appends and
     // every call after the first reported nothing kept — while storing fine.
     return Math.min(added, MAX_LANE_DECISIONS);
+  }
+
+  /** The routes each lane's report said it covered. Empty on a project that has never run one. */
+  get laneRoutes(): Record<string, string[]> {
+    return this.data.laneRoutes ?? {};
+  }
+
+  /**
+   * Record the routes a lane's accepted report listed, added to any it listed
+   * before. Redacted like every other string a lane writes, with query
+   * strings and fragments removed. Returns how many were new.
+   */
+  addLaneRoutes(lane: string, routes: readonly string[]): number {
+    const before = this.data.laneRoutes?.[lane] ?? [];
+    // No query string or fragment is stored: a route is copied from the
+    // address bar, and an address can carry a token.
+    const after = unionRoutes(
+      before,
+      routes.map((r) => redactSecrets(stripRouteQuery(r))).filter((r) => r.length > 0),
+    );
+    const added = after.filter((r) => !before.includes(r)).length;
+    if (after.length === before.length && after.every((r, i) => r === before[i])) return 0;
+    this.data.laneRoutes = { ...(this.data.laneRoutes ?? {}), [lane]: after };
+    this.flush();
+    return added;
   }
 
   /** Mark a finding resolved; returns it or null. */
