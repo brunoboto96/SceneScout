@@ -27,11 +27,27 @@ import * as liveView from "./smoke/live-view.ts";
 import * as contradiction from "./smoke/contradiction.ts";
 import * as frames from "./smoke/frames.ts";
 import * as injection from "./smoke/injection.ts";
+import * as postmessage from "./smoke/postmessage.ts";
 import * as checkGate from "./smoke/check.ts";
 import * as unload from "./smoke/unload.ts";
 import * as ciRun from "./smoke/ci.ts";
 
-const suites = [readOnly, safeWrite, multiSession, authLoss, loginProfiles, reattach, liveView, injection, contradiction, frames, unload, checkGate, ciRun];
+const suites = [
+  readOnly,
+  safeWrite,
+  multiSession,
+  authLoss,
+  loginProfiles,
+  reattach,
+  liveView,
+  injection,
+  postmessage,
+  contradiction,
+  frames,
+  unload,
+  checkGate,
+  ciRun,
+];
 
 async function main(): Promise<void> {
   const server = await startFixtureServer();

@@ -1,6 +1,6 @@
 {
   "name": "scenescout",
-  "version": "3.12.0",
+  "version": "3.13.1",
   "description": "SceneScout — exploratory UI testing for AI coding agents. An MCP server that gives any agent (Claude Code, Cursor, VS Code Copilot, Codex, Gemini CLI and others) a structured view of a running web app, always-on oracles, a network-level write policy, memory across runs and a gap-checked report.",
   "license": "MIT",
   "author": "brunoboto96",
@@ -72,7 +72,7 @@
     "mcp-check": "npm run build && npm run mcp-check:run",
     "mcp-check:run": "tsx scripts/mcp-check.ts",
     "test": "npm run build && npm run test:unit && npm run smoke:run && npm run mcp-check:run",
-    "test:unit": "npm run scan-test && npm run oracle-test && npm run policy-test && npm run fixture-test && npm run dispatch-test && npm run design-test && npm run check-test && npm run ci-test && npm run contract-test && npm run pace-test && npm run request-test && npm run settle-test && npm run claims-test && npm run verify-test && npm run brief-test && npm run lane-test && npm run calibration-test && npm run bench-test && npm run memory-test && npm run install-test && npm run profiles-test && npm run live-test && npm run demo-test && npm run holdout-test && npm run hygiene-test",
+    "test:unit": "npm run scan-test && npm run oracle-test && npm run policy-test && npm run fixture-test && npm run dispatch-test && npm run design-test && npm run check-test && npm run ci-test && npm run qa-test && npm run contract-test && npm run pace-test && npm run request-test && npm run settle-test && npm run claims-test && npm run verify-test && npm run brief-test && npm run lane-test && npm run calibration-test && npm run bench-test && npm run memory-test && npm run install-test && npm run profiles-test && npm run live-test && npm run demo-test && npm run holdout-test && npm run hygiene-test",
     "scan-test": "tsx scripts/scan-test.ts",
     "oracle-test": "tsx --test scripts/oracle-test.ts",
     "policy-test": "tsx --test scripts/policy-test.ts",
@@ -81,6 +81,7 @@
     "design-test": "tsx --test scripts/design-test.ts",
     "check-test": "tsx --test scripts/check-test.ts",
     "ci-test": "tsx --test scripts/ci-test.ts",
+    "qa-test": "tsx --test scripts/qa-test.ts",
     "contract-test": "tsx --test scripts/contract-test.ts",
     "lane-test": "tsx --test scripts/lane-test.ts",
     "memory-test": "tsx --test scripts/memory-test.ts",
@@ -98,6 +99,7 @@
     "brief-test": "tsx --test scripts/brief-test.ts",
     "calibration-test": "tsx --test scripts/calibration-test.ts",
     "bench": "tsx scripts/bench.ts",
+    "bench:ci": "tsx scripts/bench/ci-record.ts",
     "bench-test": "tsx --test scripts/bench-test.ts",
     "dedup-bench": "tsx scripts/dedup-bench.ts"
   },

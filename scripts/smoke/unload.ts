@@ -8,7 +8,7 @@
  */
 import { allowedUnloadWritesMayBeLost, frameUnloadWritesMayGoUnissued, unloadWriteInterception, writeRedirectHopsJudged } from "../../dist/browsers.js";
 import { BrowserEngine, type WriteMode } from "../../dist/engine/browser.js";
-import { BROWSER, check, settle, type SmokeContext } from "./harness.ts";
+import { BROWSER, check, eventually, settle, until, type SmokeContext } from "./harness.ts";
 
 export const title = "unload writes";
 
@@ -19,35 +19,59 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
   const writes = (key: string): number => stats.writes[key] ?? 0;
   const how = `${BROWSER}, caught by ${unloadWriteInterception(BROWSER)}`;
 
+  const mayBeLost = allowedUnloadWritesMayBeLost(BROWSER);
   /**
    * Load the page in `mode` with `query`, leave it for another page, and hand back what the engine said (on attach and
-   * on leaving) and how many of each write reached the server meanwhile.
+   * on leaving) and how many of each write reached the server meanwhile. `arrives` names the writes the mode lets
+   * through: those are waited for, since on a loaded machine one can land well after the navigation returns.
    */
-  const visit = async (mode: WriteMode, query: string): Promise<{ result: string; delta: (key: string) => number }> => {
+  const visit = async (
+    mode: WriteMode,
+    query: string,
+    arrives: { beforeLeaving?: string[]; afterLeaving?: string[] } = {},
+  ): Promise<{ result: string; delta: (key: string) => number }> => {
     const engine = new BrowserEngine();
     const before = { ...stats.writes };
+    const delta = (key: string): number => writes(key) - (before[key] ?? 0);
+    const landed = (keys: string[] = []) => eventually(() => keys.every((key) => delta(key) >= 1), 15000);
     try {
       const attached = await engine.attach({ url: `${baseUrl}/unload-writes.html${query}`, projectDir, mode });
+      // The race page's saves are cancelled on timers up to 30 ms after load; there is no event for "all cancelled".
       await settle(300);
+      if (query.includes("frame=")) {
+        // The embed must have loaded, and armed its pagehide handler, before the page is left.
+        const page = (engine as unknown as { page: import("playwright").Page }).page;
+        await until(
+          "the embed of another site to load",
+          async () => {
+            const embed = page.frames().find((f) => f.url().includes("embedded=1"));
+            return !!embed && (await embed.evaluate(() => document.readyState === "complete").catch(() => false));
+          },
+          15000,
+        );
+      }
+      await landed(arrives.beforeLeaving);
       // Absolute: a relative target resolves against the attach URL, query included.
       const result = attached + "\n" + (await engine.navigate(`${baseUrl}/index.html`));
+      // WebKit may cancel an unload write its route handler let through (allowedUnloadWritesMayBeLost): there only
+      // destructive mode, which intercepts nothing, is sure to deliver.
+      if (!mayBeLost || mode === "destructive") await landed(arrives.afterLeaving);
       // Absence has no event to wait for: give a request that did escape time to land.
       await settle(500);
-      return { result, delta: (key: string) => writes(key) - (before[key] ?? 0) };
+      return { result, delta };
     } finally {
       await engine.close();
     }
   };
-  const leave = async (mode: WriteMode, intent: "save" | "delete"): Promise<{ result: string; beacon: number; keepalive: number }> => {
-    const { result, delta } = await visit(mode, intent === "delete" ? "?intent=delete" : "");
+  const leave = async (mode: WriteMode, intent: "save" | "delete", sent: boolean): Promise<{ result: string; beacon: number; keepalive: number }> => {
+    const { result, delta } = await visit(mode, intent === "delete" ? "?intent=delete" : "", sent ? { afterLeaving: [BEACON, KEEPALIVE] } : {});
     return { result, beacon: delta(BEACON), keepalive: delta(KEEPALIVE) };
   };
-  const mayBeLost = allowedUnloadWritesMayBeLost(BROWSER);
   const refusedBoth = (result: string, mode: WriteMode): boolean =>
     result.includes(`WRITE-POLICY blocked (${mode})`) && /POST \S*\/api\/unload\/beacon/.test(result) && /POST \S*\/api\/unload\/keepalive/.test(result);
 
   console.log("a draft saved on the way out: observe refuses it, read-only sends it");
-  const observed = await leave("observe", "save");
+  const observed = await leave("observe", "save", false);
   check(
     `observe (${how}): neither the beacon nor the keepalive fetch sent on pagehide reaches the server`,
     observed.beacon === 0 && observed.keepalive === 0,
@@ -59,7 +83,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     observed.result,
   );
 
-  const readOnly = await leave("read-only", "save");
+  const readOnly = await leave("read-only", "save", true);
   // WebKit may cancel an unload write the route handler lets through once the page has gone (allowedUnloadWritesMayBeLost):
   // there the policy's verdict is asserted (let through, not refused), not the delivery.
   check(
@@ -78,7 +102,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
   );
 
   console.log("a delete sent on the way out: read-only refuses it, destructive sends it");
-  const refused = await leave("read-only", "delete");
+  const refused = await leave("read-only", "delete", false);
   check(
     `read-only (${how}): a beacon and a keepalive fetch whose body is a delete command never reach the server`,
     refused.beacon === 0 && refused.keepalive === 0,
@@ -86,7 +110,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
   );
   check(`read-only (${how}): both are reported as refused`, refusedBoth(refused.result, "read-only"), refused.result);
 
-  const destructive = await leave("destructive", "delete");
+  const destructive = await leave("destructive", "delete", true);
   check(
     `destructive (${how}): the same delete commands reach the server, since destructive allows everything`,
     destructive.beacon === 1 && destructive.keepalive === 1,
@@ -94,7 +118,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
   );
 
   console.log("an embed of another site writing to its own site as the page is left");
-  const embed = await visit("read-only", `?frame=${encodeURIComponent(foreignBaseUrl)}`);
+  const embed = await visit("read-only", `?frame=${encodeURIComponent(foreignBaseUrl)}`, { afterLeaving: [BEACON, KEEPALIVE] });
   check(
     `read-only (${how}): the embed's beacon and keepalive fetch to its own site never reach it, while the app's own plain writes go out`,
     embed.delta("POST /api/unload/embed-beacon") === 0 &&
@@ -130,7 +154,10 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
   );
 
   console.log("a write carried on by a 307 to a destructive address");
-  const redirect = await visit("read-only", "?redirect=1");
+  const redirect = await visit("read-only", "?redirect=1", {
+    // Where the hop is not judged it is sent on, and arrives after the save it carries on.
+    beforeLeaving: ["POST /api/unload/redirect", ...(writeRedirectHopsJudged(BROWSER) ? [] : ["POST /api/unload/redirected/delete"])],
+  });
   const hopsJudged = writeRedirectHopsJudged(BROWSER);
   check(
     hopsJudged

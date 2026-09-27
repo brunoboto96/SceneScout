@@ -1,0 +1,51 @@
+{
+  "app": "demo",
+  "run": "ci-parallel-1",
+  "date": "2026-09-27",
+  "note": "OpenAI Responses request asks for parallel_tool_calls explicitly; the API default is already true; prompt, caps, model and effort unchanged",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Most register padding values drift from 4px spacing grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "orders.html spacing 10px×48,14px×48,2px×28"
+    },
+    {
+      "title": "Register links are visually indistinguishable from body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "orders.html 8 links same color as body, no underline"
+    },
+    {
+      "title": "Order detail Save notes button covered by sticky bar",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order.html order-save covered by order-stickybar"
+    },
+    {
+      "title": "Rapid double-click creates duplicate orders",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/orders fired twice on rapid double-click"
+    },
+    {
+      "title": "Clerk can approve an order through the API",
+      "severity": "high",
+      "category": "permission-leak",
+      "evidence": "POST /api/orders/1038/approve 200 OK as Clerk"
+    },
+    {
+      "title": "Scheduled reports route is a blank dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables"
+    }
+  ],
+  "decisions": []
+}

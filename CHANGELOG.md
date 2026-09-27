@@ -1,5 +1,28 @@
 # scenescout
 
+## 3.13.1
+
+### Patch Changes
+
+- ab8b9f9: The `ci` GitHub Action takes a `cache` input (default `true`). `cache: false` skips restoring and saving the browser in the actions cache, for a job that checks out a ref chosen by an input and must not write to the cache.
+
+## 3.13.0
+
+### Minor Changes
+
+- a6bc077: Add a QA review started from a pull-request comment. An account the repository allows (by default its owners) comments `/scenescout qa` on a pull request, optionally with a preview URL and a focus, and an unattended `scenescout ci` run explores that pull request's deployed preview and posts its results as a reply, with a link to the full report. The job that holds the model's key checks out nothing and runs SceneScout from an exact release tag, so the pull request's code never runs beside the key; pull requests from forks are refused unless the repository allows them. The workflow to copy is `examples/workflows/scenescout-qa.yml`, and the new `brunoboto96/SceneScout/qa` action runs its keyless steps.
+- 7280e29: Add `scenescout ci <url>`, an exploratory run with no person present: a model reached through the Anthropic Messages API or the OpenAI Responses API drives the scout_* tools by the SceneScout method and the run ends in the ordinary report. It reports and never gates: it exits 0 when the run ran, whatever it found, and 2 when it could not run.
+  
+  - The key is read from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` only and is redacted from everything the run prints or writes; with both set, `--provider` chooses. `--model`, `--effort` (default `low`) and `--base-url` override the defaults (`claude-sonnet-5`, `gpt-6-luna`).
+  - The run stops at the first of 40 turns, 1,500,000 tokens or 20 minutes (`--max-turns`, `--max-tokens`, `--max-minutes`), still writes the report, and says which cap ended it.
+  - It runs in `read-only` mode by default (`--mode observe|read-only|safe-write`, or `destructive` together with `--allow-destructive`) at level `medium` (`--level`).
+  - It writes `report.md`, `report.html`, `summary.md` (also on the GitHub job summary), `ci.json` and `ci.sarif`, with a usage line of turns, tokens, time and an estimated cost. `--price-in`, `--price-cached-in` and `--price-out` set the prices the estimate uses, for any model.
+  - A second GitHub Action, `brunoboto96/SceneScout/ci`, runs it; its inputs are the command's options.
+
+### Patch Changes
+
+- d392192: `scenescout check` no longer lets a write out under the crawl's rule when a saved flow's page sent it under the flow's: a beacon a page sent as the flow left it, heard of a moment after the hand-back, could reach the server under `--flow-writes never` about one run in five in Chromium, and a page a step had opened a tab from stayed open and sent its leaving beacon when the session closed. Every page in the context is now left before the crawl's rule comes back, and the flow's rule keeps judging for five seconds after.
+
 ## 3.12.0
 
 ### Minor Changes

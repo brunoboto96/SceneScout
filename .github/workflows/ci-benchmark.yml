@@ -1,14 +1,19 @@
-# One real `scenescout ci` run against a benchmark app, started by hand. The
-# model's key is a repository secret, which is why this runs here rather than on
-# a laptop. It scores nothing and commits nothing: it uploads the run's project
-# directory, and the run is scored locally with
+# One real `scenescout ci` run against a benchmark app. The model's key is a
+# repository secret, which is why this runs here rather than on a laptop. It
+# scores nothing and commits nothing: it uploads the run's project directory.
+#
+# Started by hand, the run is scored locally with
 #
 #   gh run download <run id> -n <artifact name> -D bench-run
 #   npm run bench -- bench-run --app <demo|holdout>
 #
-# Only workflow_dispatch, never pull_request or pull_request_target: the job
-# holds the key, so it runs only the code of a ref someone with write access
-# chose. ci-test holds this workflow to that trigger and to read-only permissions.
+# The weekly benchmark (bench-weekly.yml) calls it once per app, then scores
+# and records the runs in a job of its own that never holds the key.
+#
+# Only workflow_dispatch and workflow_call, never pull_request or
+# pull_request_target: the job holds the key, so it runs only the code of a ref
+# someone with write access chose, or the release tag the weekly run names.
+# ci-test holds this workflow to those triggers and to read-only permissions.
 name: ci-benchmark
 
 on:
@@ -19,6 +24,11 @@ on:
         type: choice
         options: [demo, holdout]
         default: demo
+      provider:
+        description: The model's provider. Only that provider's key reaches the run.
+        type: choice
+        options: [openai, anthropic]
+        default: openai
       model:
         description: The model id. Empty means the CLI's default.
         type: string
@@ -27,6 +37,53 @@ on:
         description: Reasoning effort (none, low, medium, high, xhigh, max). Empty means the CLI's default.
         type: string
         default: ""
+      max-turns:
+        description: The most model calls. Empty means the CLI's default.
+        type: string
+        default: ""
+      max-tokens:
+        description: The most tokens, input and output summed over the run. Empty means the CLI's default.
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      app:
+        description: demo or holdout.
+        type: string
+        required: true
+      provider:
+        description: openai or anthropic. Only that provider's key reaches the run.
+        type: string
+        default: openai
+      model:
+        description: The model id. Empty means the CLI's default.
+        type: string
+        default: ""
+      effort:
+        description: Reasoning effort. Empty means the CLI's default.
+        type: string
+        default: ""
+      max-turns:
+        description: The most model calls. Empty means the CLI's default.
+        type: string
+        default: ""
+      max-tokens:
+        description: The most tokens, input and output summed over the run. Empty means the CLI's default.
+        type: string
+        default: ""
+      ref:
+        description: The ref to check out and run, e.g. a release tag. Empty means the calling workflow's.
+        type: string
+        default: ""
+    secrets:
+      OPENAI_API_KEY:
+        required: false
+      ANTHROPIC_API_KEY:
+        required: false
+    outputs:
+      commit:
+        description: The commit that ran.
+        value: ${{ jobs.run.outputs.commit }}
 
 permissions:
   contents: read
@@ -37,12 +94,28 @@ jobs:
     runs-on: ubuntu-latest
     # 20 minutes of exploration, up to 4 more to write the report, and the setup before it.
     timeout-minutes: 40
+    outputs:
+      commit: ${{ steps.commit.outputs.sha }}
     steps:
+      # The job holds a model's key, so it runs only a release tag, main or a
+      # full commit id: checked before anything is checked out.
+      - name: The ref is a release, main or a commit
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          if [ -n "$REF" ] && ! [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$|^main$|^[0-9a-f]{40}$ ]]; then
+            echo "::error::ref must be a release tag (vX.Y.Z), main or a full commit id, not $REF"; exit 1
+          fi
+      # No actions cache anywhere in this job (setup-node's included): what a
+      # job that checks out a chosen ref saves, later runs on main would restore.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: npm
       - run: npm ci
       - run: npm run build
 
@@ -68,25 +141,34 @@ jobs:
       - name: CI run
         id: run
         uses: ./ci
+        # Only the chosen provider's key: a run is never charged to the other one.
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEY: ${{ inputs.provider == 'openai' && secrets.OPENAI_API_KEY || '' }}
+          ANTHROPIC_API_KEY: ${{ inputs.provider == 'anthropic' && secrets.ANTHROPIC_API_KEY || '' }}
         with:
           url: ${{ steps.app.outputs.url }}
           cli: dist/cli.js
-          provider: openai
+          provider: ${{ inputs.provider }}
           model: ${{ inputs.model }}
           effort: ${{ inputs.effort }}
+          max-turns: ${{ inputs.max-turns }}
+          max-tokens: ${{ inputs.max-tokens }}
           project: ${{ steps.app.outputs.project }}
           upload-artifact: "false"
           upload-sarif: "false"
+          cache: "false"
 
       - name: No key in what will be uploaded
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEY: ${{ inputs.provider == 'openai' && secrets.OPENAI_API_KEY || '' }}
+          ANTHROPIC_API_KEY: ${{ inputs.provider == 'anthropic' && secrets.ANTHROPIC_API_KEY || '' }}
           PROJECT: ${{ steps.app.outputs.project }}
         run: |
           test -s "$PROJECT/.scenescout/memory.json"
-          if grep -rlF -- "$OPENAI_API_KEY" "$PROJECT"; then echo "::error::the key appears in the files above; nothing is uploaded"; exit 1; fi
+          for key in "$OPENAI_API_KEY" "$ANTHROPIC_API_KEY"; do
+            [ -n "$key" ] || continue
+            if grep -rlF -- "$key" "$PROJECT"; then echo "::error::the key appears in the files above; nothing is uploaded"; exit 1; fi
+          done
 
       - name: Usage
         env:

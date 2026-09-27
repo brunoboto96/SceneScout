@@ -309,7 +309,7 @@ A few that punch above their weight:
 - **`scout_click {clicks: 2}`** — the impatient-user probe: states whether a double-click fired the same state-changing request twice (the classic double-submit bug).
 - **`scout_request`** — calls the app's own API as the session, so "the button is hidden" becomes "the server refuses it" (or doesn't).
 
-Beyond crashes and HTTP errors, two oracles catch a page **contradicting the server**: `refused_empty` (a list request was refused and the page shows its empty state with no error) and `false_success` (a save was refused and the page says it worked). A third, `dom_injection`, reports a typed markup value coming back as an element on any page any session opens.
+Beyond crashes and HTTP errors, two oracles catch a page **contradicting the server**: `refused_empty` (a list request was refused and the page shows its empty state with no error) and `false_success` (a save was refused and the page says it worked). A third, `dom_injection`, reports a typed markup value coming back as an element on any page any session opens. A fourth, `postmessage_token`, reports a page calling `postMessage` with targetOrigin `"*"` on a message that carries a token (a JWT, a `Bearer` value, or an opaque value under a key such as `access_token`): the report names where in the message it was, its shape and its first four characters, never the token.
 
 ---
 
@@ -427,6 +427,8 @@ npx scenescout ci http://127.0.0.1:3000
 - **Output**, in `.scenescout/ci/` (or `--out`): `report.md` and `report.html` (the report an agent's run writes), `summary.md` (also appended to the GitHub job summary), `ci.json` and `ci.sarif`, with a usage line: turns, tokens, time and an estimated cost where the model's price is known (`--price-in`, `--price-out` give one for any model).
 
 There is a GitHub Action for it (`uses: brunoboto96/SceneScout/ci@…`). [docs/ci.md](docs/ci.md#an-unattended-exploratory-run) has the workflow and every option; [ADR 14](docs/adr/0014-an-unattended-run-reports-and-never-gates.md) says why it works this way.
+
+On a pull request, an allowed account can comment `/scenescout qa` to run it against that pull request's deployed preview and get the results as a reply. The job that holds the key checks out nothing and runs SceneScout from an exact release tag, so the pull request's code never runs beside the key. [docs/ci.md](docs/ci.md#a-qa-review-from-a-pull-request-comment) has the workflow to copy and what a project configures; [ADR 15](docs/adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md) says why.
 
 ---
 
@@ -667,7 +669,7 @@ src/
     provider.ts     the Anthropic and OpenAI message shapes, and retries
     replay.ts       the run as one page: steps, tasks, frames under each finding
     …               collector · dispatch · fixtures · authloss · reaper
-scripts/            the 24 test suites (smoke/ holds the real-browser ones)
+scripts/            the test suites (smoke/ holds the real-browser ones)
 test-app/           fixtures for the real-browser smoke tests
 skills/scenescout/   the testing method (SKILL.md): a skill in Claude Code, served by the server everywhere else
 docs/how-it-works.md  what happens at each stage, in diagrams
