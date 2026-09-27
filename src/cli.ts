@@ -8,6 +8,7 @@
  *   scenescout doctor               Check every piece of the setup and say how to fix what is missing
  *   scenescout check <url>          Visit every route, measure it, and pass or fail (no model involved)
  *   scenescout ci <url>             An exploratory run driven by a model's API, unattended, that reports
+ *   scenescout login <url> --role r Sign in once in a visible browser and save it as a named role
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -45,6 +46,8 @@ import {
 } from "./installer.js";
 import { defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
 import { httpClient, runCi } from "./ci-run.js";
+import { runLogin, savedLine } from "./login-run.js";
+import { parseLoginArgs } from "./engine/profiles.js";
 import { detectProvider, EXIT_CI, KEY_ENV, parseCiArgs, redactKeys, secretValues } from "./engine/ci.js";
 import { EXIT, exitCodeOf, formatCheck, parseCheckArgs, refusedFlowReason, toSarif, toSummaryJson, unmeasuredReason } from "./engine/check.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME, writeSelfIgnore } from "./engine/memory.js";
@@ -125,6 +128,13 @@ Usage:
                                      --storage-state file; --browser chromium|firefox|webkit;
                                      --project dir (default: here); --out dir (default: .scenescout/ci))
                                     Exit code: 0 the run ran (findings never change it), 2 could not run.
+  scenescout login <url> --role <name>
+                                    Open a visible browser at the URL, sign in there (SSO, MFA, anything), then
+                                    press Enter in this terminal to save the session as that role's profile, in
+                                    .scenescout/auth/<name>.json (owner-only; never printed, never committed).
+                                    Closing the window or Ctrl+C saves nothing. Agents then attach with
+                                    scout_attach { role: "<name>" }, as many sessions as they like from one login.
+                                    (--project dir (default: here); --browser chromium|firefox|webkit)
   scenescout status [projectPath]   What is the engine doing right now? (every session + recent actions)
   scenescout watch [projectPath]    Open the live view in a browser: what each session is doing, a thumbnail
                                     of its page, and a live stream you can switch on per session
@@ -622,6 +632,24 @@ async function ci(args: string[]): Promise<never> {
   process.exit(exitCode);
 }
 
+/** `scenescout login`: exit 0 saved, 1 nothing saved. */
+async function login(args: string[]): Promise<never> {
+  if (args.includes("--help") || args.includes("-h")) usage(0);
+  const parsed = parseLoginArgs(args, process.cwd());
+  if (!parsed.ok) {
+    console.error(`scenescout login: ${parsed.error}`);
+    process.exit(1);
+  }
+  try {
+    const saved = await runLogin(parsed.options, (line) => console.log(line));
+    console.log(savedLine(parsed.options, saved));
+  } catch (err) {
+    console.error(`scenescout login: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
 const [, , command, ...args] = process.argv;
 
 // A CLI's failure mode should be a sentence, not a stack trace. `scan` on a
@@ -666,6 +694,10 @@ try {
     }
     case "ci": {
       await ci(args);
+      break;
+    }
+    case "login": {
+      await login(args);
       break;
     }
     case "status": {
