@@ -3,7 +3,7 @@
  * archived runs.
  *
  *   npm run dedup-bench                                   the store's rule only
- *   npm run dedup-bench -- --judge [--efforts none,low] [--cap 200] [--provider openai|anthropic] [--model <id>]
+ *   npm run dedup-bench -- --judge [--efforts none,low] [--cap 200] [--provider openai|anthropic] [--model <id>] [--pairs <file>]
  *
  * Pairs are two findings on one page from the same app's archived runs,
  * labelled "same" when the key classifies both to one entry (engine/dedup.ts).
@@ -12,6 +12,12 @@
  * ANTHROPIC_API_KEY or OPENAI_API_KEY in the environment and spends tokens:
  * one call per pair per effort. The key is never printed. Demo and held-out
  * pairs are reported apart; nothing is tuned against the held-out ones.
+ *
+ * `--pairs <file>` writes one JSON line per sampled pair per effort: the pair's
+ * id, the judge's verdict and p_same (or, for an answer that contradicted
+ * itself, what it stated), the rule's verdict, the key's label and
+ * the judge call's output tokens, so the two deciders can be compared pair by
+ * pair. Ids only: no finding's text is written.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -19,11 +25,12 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { httpClient } from "../src/ci-run.ts";
 import { parseKey, type AnswerKey, type RunArchive } from "../src/engine/bench.ts";
-import { addUsage, detectProvider, KEY_ENV, NO_USAGE, redactKeys, secretValues, type ProviderName, type Usage } from "../src/engine/ci.ts";
+import { addUsage, checkBaseUrl, detectProvider, KEY_ENV, NO_USAGE, redactKeys, secretValues, type ProviderName, type Usage } from "../src/engine/ci.ts";
 import {
   buildPairs,
   decideDuplicate,
   formatPairScore,
+  pairId,
   ruleJudgement,
   samplePairs,
   scorePairs,
@@ -46,11 +53,19 @@ const { values } = parseArgs({
     cap: { type: "string", default: "200" },
     provider: { type: "string" },
     model: { type: "string" },
+    "base-url": { type: "string" },
+    pairs: { type: "string" },
   },
 });
 const cap = Number(values.cap);
 if (!Number.isInteger(cap) || cap < 1 || cap > 200) {
   console.error("--cap must be a whole number from 1 to 200.");
+  process.exit(1);
+}
+
+const baseUrl = values["base-url"] === undefined ? undefined : checkBaseUrl(values["base-url"]);
+if (baseUrl && !baseUrl.ok) {
+  console.error(baseUrl.error);
   process.exit(1);
 }
 
@@ -100,11 +115,12 @@ for (const [app, ps] of byApp) {
   console.log(`  ${formatPairScore("rule", ruleScore(sample))}`);
 }
 
+const pairLines: string[] = [];
 if (values.judge) {
   const env = process.env;
   const secrets = secretValues(env);
   for (const effort of values.efforts.split(",").map((e) => e.trim())) {
-    const found = detectProvider(env, { provider: values.provider as ProviderName | undefined, model: values.model, effort });
+    const found = detectProvider(env, { provider: values.provider as ProviderName | undefined, model: values.model, effort, baseUrl: baseUrl?.url });
     if (!found.ok) {
       console.log(`\nJudge at effort ${effort}: not run (${found.error}). Keys are read from ${Object.values(KEY_ENV).join(" or ")}.`);
       continue;
@@ -112,26 +128,54 @@ if (values.judge) {
     const { resolved } = found;
     const apiKey = env[KEY_ENV[resolved.provider]]!.trim();
     let usage: Usage = NO_USAGE;
+    let callOutput: number | null = null;
     const ask: Ask = async (system, tools, kickoff) => {
       const turn = await httpClient(resolved, apiKey, system, tools, kickoff).next(120_000);
       usage = addUsage(usage, turn.usage);
+      callOutput = turn.usage.output;
       return turn;
     };
     for (const [app, sample] of samples) {
       const judgements: Array<Judgement | null> = [];
       const failures = new Map<string, number>();
+      let contradictions = 0;
       for (const p of sample) {
+        callOutput = null;
         const d = await decideDuplicate(p, ask);
-        judgements.push(d.by === "model" || d.judgement?.verdict === "unsure" ? d.judgement! : null);
+        const judged = d.by === "model" || d.judgement?.verdict === "unsure" ? d.judgement! : null;
+        judgements.push(judged);
         if (d.note && d.by === "rule" && !d.judgement) failures.set(d.note, (failures.get(d.note) ?? 0) + 1);
+        if (d.failure === "contradiction") contradictions += 1;
+        pairLines.push(
+          JSON.stringify({
+            app,
+            effort,
+            pair: pairId(p),
+            keyA: p.a.keyId,
+            keyB: p.b.keyId,
+            key: p.same ? "same" : "different",
+            judge: judged?.verdict ?? null,
+            pSame: judged && judged.verdict !== "unsure" ? Number(judged.pSame.toFixed(4)) : null,
+            failure: d.failure ?? null,
+            stated: d.stated ?? null,
+            rule: ruleJudgement(p).verdict,
+            outputTokens: callOutput,
+          }),
+        );
       }
       const s = scorePairs(
         sample.map((p) => p.same),
         judgements,
       );
       console.log(`\n[${app}] ${formatPairScore(`judge ${resolved.provider} ${resolved.model} effort ${effort}`, s)}`);
+      console.log(`  ${contradictions} answers contradicted their own verdict (confidence below 0.5)`);
       for (const [note, n] of failures) console.log(redactKeys(`  ${n}× ${note}`, secrets));
     }
     console.log(`Tokens at effort ${effort}: ${usage.input} in (${usage.cachedInput} cached), ${usage.output} out.`);
   }
+}
+
+if (values.pairs) {
+  fs.writeFileSync(values.pairs, pairLines.map((l) => `${l}\n`).join(""));
+  console.log(`\n${pairLines.length} per-pair lines written.`);
 }
