@@ -1,0 +1,27 @@
+{
+  "app": "demo",
+  "run": "ci-run-2",
+  "date": "2026-09-27",
+  "note": "Unattended scenescout ci run taken by hand with the benchmark workflow, engine 3.12.0 at 7280e29; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Rapid double-click on Create order creates duplicate orders",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/orders twice from one rapid double-click creates duplicate orders"
+    },
+    {
+      "title": "Dashboard All orders link overlaps bulk-import badge",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "Dashboard geometry: dash-all-orders overlaps dash-new-badge 85%"
+    }
+  ],
+  "decisions": []
+}

@@ -33,6 +33,7 @@ export const CI_ACTION_ONLY_INPUTS = [
   "upload-sarif",
   "upload-artifact",
   "artifact-name",
+  "cache",
 ];
 
 /** The arguments for `scenescout ci`, from the action's inputs. */
