@@ -107,8 +107,8 @@ example or counter-example in the same change.
   were the next unseen runs: against the key of the day they left 1, 5 and 3
   findings unlabelled and one ambiguous, and those judgements are now in the
   key as well. Runs 9 and 10 left 4 each (precision bounded at 87–100% and
-  83–100%); those are judged and in the key too. The held-out key is in the
-  same position after its first two runs: beyond the thirteen planted defects,
+  83–100%); those are judged and in the key too, and so are run 11's 4 and
+  held-out run 3's 3. The held-out key is in the same position after its first two runs: beyond the thirteen planted defects,
   one also-real entry and six non-defects it started with, every entry was
   judged from what those runs reported (see
   [Held-out runs 1 and 2](#held-out-runs-1-and-2)).
@@ -191,8 +191,15 @@ Its runs are reported in [Held-out results](#held-out-results).
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
 re-scored against **one** key by `npm run bench -- --all`. The table below is
-key `83cb84211d`; a struck value is the same run under the previous key,
-`71458d9246`. The whole change is one entry: the sticky bar's link with no
+key `19cc8e67e8`, which adds what run 11 found (see
+[Run 11 and held-out run 3](#run-11-and-held-out-run-3-wave-3s-engine-fixes)).
+Against the key before it, `83cb84211d`, only one earlier value moved: run 1's
+reports lane judged the report cards' fixed figures "not a defect", and the
+cards are now an also-real entry, so run 1's calibration shows two struck
+values, the first under `71458d9246` and the second under `83cb84211d`. Run
+11's struck values are its score under `83cb84211d`, before its four
+unlabelled findings were judged. Every other struck value is the same run
+under `71458d9246`, the key before `83cb84211d`. That change was one entry: the sticky bar's link with no
 `data-testid` moved from the also-real list to the `contextual` list (see
 "Runs 9 and 10"), so in runs 1–9 that finding is set aside instead of counted
 correct, and a verdict on it is no longer scored. Runs 0 and 10 did not file
@@ -204,7 +211,7 @@ the run filed, including the ones set aside. The archived runs are in [`bench/ru
 | Run | Date | What changed | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Lane calibration | Cost | Kept? |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
 | 0 | 2026-09-22 | Baseline, 3.4.0, briefs as written on the day | 11/13 | 14/19 (74%) | 21 (2 set aside) | 0 | 5 | 1 | 24/29 (83%), ECE 0.05, Brier 0.109 | ~725k tokens, 241 tool calls, longest lane 3m38s | — |
-| 1 | 2026-09-22 | **Lane briefs only** (engine unchanged) — see below | 12/13 | ~~25/25 (100%)~~ 24/24 (100%) | 28 (4 set aside) | 0 | 0 | 0 | ~~31/31 (100%), ECE 0.10, Brier 0.017~~ 30/30 (100%), ECE 0.11, Brier 0.017 | ~698k tokens, 283 tool calls, longest lane 5m09s | Yes, into the skill |
+| 1 | 2026-09-22 | **Lane briefs only** (engine unchanged) — see below | 12/13 | ~~25/25 (100%)~~ 24/24 (100%) | 28 (4 set aside) | 0 | 0 | 0 | ~~31/31 (100%), ECE 0.10, Brier 0.017~~ ~~30/30 (100%), ECE 0.11, Brier 0.017~~ 30/31 (97%), ECE 0.08, Brier 0.033 | ~698k tokens, 283 tool calls, longest lane 5m09s | Yes, into the skill |
 | 2 | 2026-09-22 | **Engine 3.5.0 only** — run 1's briefs verbatim | 9/13 | ~~20/20 (100%)~~ 19/19 (100%) | 26 (6 set aside) | 1 | 0 | 1 | ~~25/26 (96%), ECE 0.07, Brier 0.046~~ 24/25 (96%), ECE 0.07, Brier 0.048 | ~687k tokens, 266 tool calls, longest lane 5m37s | See runs 2–4 |
 | 3 | 2026-09-22 | Repeat of run 2 | 10/13 | ~~23/26 (88%)~~ 22/25 (88%) | 33 (7 set aside) | 1 | 3 | 0 | ~~24/27 (89%), ECE 0.08, Brier 0.082~~ 23/26 (88%), ECE 0.08, Brier 0.085 | ~680k tokens, 260 tool calls, longest lane 5m40s | See runs 2–4 |
 | 4 | 2026-09-22 | Repeat of run 2 | 11/13 | ~~22/23 (96%)~~ 21/22 (95%) | 27 (5 set aside) | 0 | 1 | 1 | ~~25/29 (86%), ECE 0.05, Brier 0.080~~ 24/28 (86%), ECE 0.05, Brier 0.083 | ~683k tokens, 271 tool calls, longest lane 4m40s | See runs 2–4 |
@@ -214,18 +221,179 @@ the run filed, including the ones set aside. The archived runs are in [`bench/ru
 | 8 | 2026-09-25 | **Engine 3.9.0 only** (frames) — run 1's briefs verbatim | 11/13 | ~~22/23 (96%)~~ 21/22 (95%) | 26 (4 set aside) | 0 | 1 | 0 | ~~24/24 (100%), ECE 0.09, Brier 0.014~~ 23/23 (100%), ECE 0.09, Brier 0.015 | ~679k tokens, 240 tool calls, longest lane 4m00s | See run 8 |
 | 9 | 2026-09-26 | **Engine 3.10.0 (wave 1)** — run 1's briefs verbatim, demo served without its seeded-defect comments | 13/13 | ~~31/31 (100%)~~ 30/30 (100%) | 31 (1 set aside) | 0 | 0 | 0 | ~~30/33 (91%), ECE 0.12, Brier 0.123~~ 29/32 (91%), ECE 0.12, Brier 0.126 | not recorded | See runs 9–10 |
 | 10 | 2026-09-26 | Repeat of run 9 | 11/13 | 22/22 (100%) | 24 (2 set aside) | 0 | 0 | 0 | 23/26 (88%), ECE 0.14, Brier 0.109 | not recorded | See runs 9–10 |
+| 11 | 2026-09-27 | **Engine 3.11.1 (wave 3)** — run 1's briefs verbatim | 11/13 | ~~25/25 (100%)~~ 29/29 (100%) | 30 (1 set aside) | ~~4~~ 0 | 0 | 0 | ~~24/32 (75%), ECE 0.06, Brier 0.165~~ 26/34 (76%), ECE 0.08, Brier 0.169 | not recorded | See run 11 |
 
 **Brier is the number to compare; ECE says which way a lane is off.** Run 1's verdicts were
-right more often (97% against 84% under key `f8e0862a8b`; 100% against 83% now), and its expected calibration error is
-*worse*, because the lanes were right more often than they said: every verdict
-stated at 0.6–0.8 was right. Lower ECE is not the goal on its own; a lane that
+right more often (97% against 84% under key `f8e0862a8b`; 97% against 83% now), and its expected calibration error is
+*worse*, because the lanes were right more often than they said: under key
+`f8e0862a8b` every verdict stated at 0.6–0.8 was right. Lower ECE is not the goal on its own; a lane that
 is right and says so less loudly than it could is underconfident, not wrong.
 The Brier score — the mean squared gap between stated confidence and being
 right, with no buckets — rewards both being right and saying so, and ranks run 1
-ahead (0.113 → 0.035 under key `f8e0862a8b`; 0.109 → 0.017 now).
+ahead (0.113 → 0.035 under key `f8e0862a8b`; 0.109 → 0.033 now).
 The first version of this scorer counted the five "belongs to another lane"
 dismissals as wrong verdicts, which gave ECE 0.09 → 0.04 and read as an
 improvement; that one choice was enough to reverse the comparison.
+
+### Run 11 and held-out run 3: wave 3's engine fixes
+
+Only the engine changed: 3.11.1, with run 1's briefs verbatim on the demo and
+held-out run 1's briefs on the held-out app, and a fresh app and project
+directory for each. Wave 3 carries three fixes from runs 9 and 10 and held-out
+runs 1 and 2: a write a page sends as it is left is judged by the write policy
+(#177); finding dedup keeps two different kinds of defect on one element as two
+findings (#174, task 32); and the lane-close check pairs a finding whose
+evidence names an id template (`/api/orders/{id}/approve`) with the concrete
+path a lane quoted (#175). The archives keep neither the lane-close check's
+alarms nor the writes sent on leaving a page, so only the dedup change is
+measured here. Held-out run 3's lanes ran on Opus 5.5, where earlier lanes
+inherited the session model; nothing in the archive separates an effect of that
+from run-to-run noise.
+
+| Defect | Run 9 | Run 10 | Run 11 |
+|---|:---:|:---:|:---:|
+| Email field has no label | found | found | found |
+| Empty customer does nothing | found | missed | missed |
+| Sticky bar covers Save notes | found | missed | missed |
+| Every other planted defect (10) | found | found | found |
+
+| Defect | Held-out 1 | Held-out 2 | Held-out 3 |
+|---|:---:|:---:|:---:|
+| Overdue tag contrast 1.84:1 | found | missed | missed |
+| Place hold on a book with copies on the shelf does nothing | missed | missed | missed |
+| Renew double-click spends both renewals | found | missed | found |
+| Every other planted defect at `medium` (7) | found | found | found |
+
+Recall was 11/13 on the demo and 8/10 on the held-out app. The misses:
+
+- **Empty customer and sticky bar, run 11.** The same two as run 10, missed the
+  same way. The new-order lane saw no request after an empty submit and judged
+  it "blocked client-side", not a defect, at 0.6; the page says nothing when it
+  refuses, which is the defect. The order-detail lane found Save notes out of
+  reach at the page's load position and reachable at the bottom, and judged
+  that not a defect at 0.6. Both are wrong verdicts.
+- **The overdue tag, held-out run 3.** As in held-out run 2: the home lane
+  renewed the member's only overdue loan (its decisions record the overdue
+  count going from 1 to 0 after the renew), after which no page shows an
+  overdue tag to measure, and no lane had measured it before.
+- **Place hold, held-out run 3.** The book lane noted Place hold on a book with
+  two copies on the shelf and judged the button's presence "not a defect" at
+  0.55, and its decisions record no click on it; the holds it placed were on a
+  book with every copy out, the withdrawn book and a missing id. A coverage
+  miss, as in held-out runs 1 and 2, this time on the right page and control.
+
+**Precision and the key.** Run 11 left 4 findings unlabelled and held-out run 3
+left 3 (precision bounded at 86–100% and 70–85%). They were judged against the
+apps' source:
+
+- **Real, new to the demo key (2):** the report cards are fixed in the page's
+  markup, and say 17 orders and $6,420 "this month" while the app holds 6
+  orders worth $5,414.75 (medium); and the audit log shows times with no date,
+  so an entry made at 01:58 is listed above one at 09:14 with nothing to say
+  it belongs to a later day (low).
+- **Rewordings, each an entry widened with a counter-example for its near
+  miss:** "Order header keeps showing open after approval is requested" is the
+  stale order status (the counter-example is the same wording after a refused
+  request, where "open" is right); "Settings accepts a blank workspace name and
+  reports Saved." is the missing name validation (the counter-example is Save
+  sending no request, which is its own entry); held-out run 3's "Renew button
+  stays enabled on a loan that has used all its renewals" is the Renew button
+  offered at the limit (the counter-examples are a refused third renewal that
+  says nothing about the button, and a loan with one renewal left).
+- **Not a defect, held-out (1):** "Join stays enabled, and a double-click sends
+  two join requests". The server adds a member to an event once, a repeat join
+  answers 200 and takes no second seat, and the page leaves for the
+  confirmation after the first answer, so nothing is spent twice. Lanes in
+  held-out runs 1 and 2 checked exactly this and judged it not a defect (at 0.8
+  and 0.75); those verdicts are now scored right, which is the only change to
+  runs 1 and 2.
+- **Contextual, held-out (1):** every Waive button has the same accessible name.
+  Each sits in a table row whose cells name the member, which WCAG accepts as
+  the control's context; a name unique across the page is a stricter
+  convention the app does not declare.
+
+The report-cards entry re-scored one earlier verdict: run 1's reports lane
+judged the cards "static demo numbers" and not a defect at 0.7, citing the
+footer's "demo data only". The footer is on every page and describes the data,
+not the cards, and the cards contradict the orders the same app serves, so the
+key calls that verdict wrong and run 1's Brier rises from 0.017 to 0.033.
+Reading the footer as permission for placeholder figures would make the entry
+contextual instead; it is recorded as real.
+
+**Calibration.** Brier is 0.169 for run 11 (0.165 before its findings were
+judged) against 0.126 and 0.109 for runs 9 and 10, and 0.157 for held-out run 3
+against 0.096 and 0.111. The verdicts the key calls wrong:
+
+- **Run 11, 8 of 34.** Five are "not my page" remarks on the dashboard's broken
+  chart image, worded in ways the dismissal rule does not read: "on dashboard,
+  not inventory", "raised on / before navigating", "dashboard route, not
+  owned", "raised from dashboard load", "owned by / lane" (runs 9 and 10 had
+  three and one). One is the dashboard lane's own "the console error is the
+  same 404", not a defect, at 0.7: a remark that the console line is not a
+  second defect, which the key reads as a verdict on the broken image itself.
+  Two are the lane misjudgements behind the two misses above.
+- **Held-out run 3, 7 of 26.** Three are "not my page" remarks on the home
+  page's notices 500 ("not called by fines.html", "not requested on
+  /catalogue.html reload", "owned by /"; held-out runs 1 and 2 had none and
+  one). Four are lanes calling a known non-defect a defect and filing it: the
+  export link's styling (0.55), the fines page refusing a member (0.45), the
+  checkbox's name and target (0.7) and the Join double-click (0.4). The first
+  three are held-out run 1's three false positives again, at nearly the stated
+  confidences run 1 gave them (0.55, 0.45, 0.75).
+
+No key gap is left among them: the two new demo entries added two right
+verdicts to run 11 (at 0.6 and 0.45), which is why its Brier moved from 0.165 to
+0.169. Most of the drop is ownership wording. Leaving out the "not my page"
+remarks on the chart image and the notices 500, Brier is 0.110 for run 11
+against 0.070 and 0.093 for runs 9 and 10, and 0.107 for held-out run 3 against
+0.096 and 0.099. What remains is on the demo the same two misjudgements run 10
+made, and on the held-out app the same false positives as run 1. The scorer
+is unchanged: the follow-up recorded under runs 9 and 10 (archive each lane's
+routes, and count a not-a-defect as a dismissal when the matched entry's route
+is outside them) is what would take those remarks out, and widening the wording
+rule stays rejected.
+
+**Dedup (task 32).** Findings, and extra findings for a planted defect that
+already had one, per run:
+
+| Run | Findings | Extra for a planted defect | Of those, one claim filed twice |
+|---|---:|---:|---:|
+| 9 | 31 | 4 | 2 |
+| 10 | 24 | 2 | 1 |
+| 11 | 30 | 3 | 1 |
+| Held-out 1 | 20 | 0 | 0 |
+| Held-out 2 | 24 | 1 | 0 |
+| Held-out 3 | 23 | 0 | 0 |
+
+The rest of the "extra" column is one planted defect seen in two places, which
+its key entry names as one: Delete order and Delete workspace both reporting
+success, the approve endpoint and the audit log both showing a clerk's
+approval, and the notices 500 seen from two pages. The claim filed twice is the
+scheduled-reports dead end in every demo run (and the stored XSS in run 9).
+
+- **The export link.** "Styled like body text" appears as its own finding in
+  held-out run 3, beside the clipped-link finding on the same element, and is
+  scored as a known false positive, as expected. It is the fourth false
+  positive; the other three are held-out run 1's again.
+- **No real second defect surfaced that the old rule would have merged.** The
+  old rule merged two kinds only within the one "presentation" family (visual,
+  ux-polish, accessibility, test ids), and the export link is the only pair of
+  those kinds on one element in either run. Run 11's pairs of different kinds
+  on one element (Save changes sending nothing and accepting a blank name;
+  Delete workspace having no confirmation and being offered to refused roles)
+  are in different families, which the old rule kept apart too, as run 9 shows
+  with pairs of its own.
+- **The accepted cost did not show.** No layout defect was filed twice under
+  neighbouring labels, and duplicates did not rise (3 against 4 and 2 on the
+  demo, 0 against 0 and 1 on the held-out app).
+- **The archive cannot prove a negative.** Running both rules over the archived
+  findings merges no pair in any of the six runs, but an archive drops each
+  finding's detail text, which is where held-out run 2's shared quoted name
+  was, so that check cannot rule out a merge the store would have made.
+
+**Kept?** One run on each app is a direction, not a size. Recall equals run
+10's on the demo and sits between held-out runs 1 and 2; every miss is a lane's
+verdict or coverage, not a finding judged wrong. The three wave 3 fixes stay.
 
 ### Runs 9 and 10 — engine 3.10.0 (wave 1), measured twice
 
@@ -582,14 +750,20 @@ What the numbers do **not** show:
 
 Each row is one run of the [held-out app](#the-held-out-app) at `medium`, in
 `safe-write`, eight parallel lanes, re-scored by `npm run bench -- --all`
-against key `4ffabb6bd3`. A struck value is the same run under the key the runs
-were made against, `77ebf9b0d9`. Nothing in this table is kept or rejected:
-held-out runs are reported, never optimised against.
+against key `1bc84f1a04`, which adds what held-out run 3 found. Where a cell
+has two struck values, the first is under `77ebf9b0d9`, the key runs 1 and 2
+were made against, and the second under `4ffabb6bd3`, the key completed from
+them; a single struck value in runs 1 and 2 is under `77ebf9b0d9`, and in run
+3 under `4ffabb6bd3`. Runs 1 and 2 moved under the new key only in
+calibration: each had a lane judge a double-click on Join "not a defect", which
+the key now agrees with. Nothing in this table is kept or rejected: held-out
+runs are reported, never optimised against.
 
 | Run | Date | What changed | Recall | Precision (labelled) | All findings | Unlabelled | False pos. | Judged, not filed | Lane calibration | Cost | Kept? |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
-| holdout-1 | 2026-09-26 | **Engine 3.10.0 (wave 1)**, first held-out run; briefs written by an agent that saw the app only through the browser | 9/10 | ~~11/11 (100%)~~ 15/18 (83%) | 20 (2 set aside) | ~~9~~ 0 | ~~0~~ 3 | 0 | ~~19/21 (90%), ECE 0.13, Brier 0.111~~ 23/26 (88%), ECE 0.12, Brier 0.098 | not recorded | — |
-| holdout-2 | 2026-09-26 | Repeat of holdout-1, same briefs | ~~8/10~~ 7/10 | ~~11/11 (100%)~~ 22/23 (96%) | 24 (1 set aside) | ~~13~~ 0 | ~~0~~ 1 | 0 | ~~18/20 (90%), ECE 0.15, Brier 0.069~~ 29/32 (91%), ECE 0.16, Brier 0.113 | not recorded | — |
+| holdout-1 | 2026-09-26 | **Engine 3.10.0 (wave 1)**, first held-out run; briefs written by an agent that saw the app only through the browser | 9/10 | ~~11/11 (100%)~~ 15/18 (83%) | 20 (2 set aside) | ~~9~~ 0 | ~~0~~ 3 | 0 | ~~19/21 (90%), ECE 0.13, Brier 0.111~~ ~~23/26 (88%), ECE 0.12, Brier 0.098~~ 24/27 (89%), ECE 0.13, Brier 0.096 | not recorded | — |
+| holdout-2 | 2026-09-26 | Repeat of holdout-1, same briefs | ~~8/10~~ 7/10 | ~~11/11 (100%)~~ 22/23 (96%) | 24 (1 set aside) | ~~13~~ 0 | ~~0~~ 1 | 0 | ~~18/20 (90%), ECE 0.15, Brier 0.069~~ ~~29/32 (91%), ECE 0.16, Brier 0.113~~ 30/33 (91%), ECE 0.16, Brier 0.111 | not recorded | — |
+| holdout-3 | 2026-09-27 | **Engine 3.11.1 (wave 3)**, same briefs as holdout-1 | 8/10 | ~~14/17 (82%)~~ 15/19 (79%) | 23 (~~3~~ 4 set aside) | ~~3~~ 0 | ~~3~~ 4 | 0 | ~~18/24 (75%), ECE 0.13, Brier 0.157~~ 19/26 (73%), ECE 0.15, Brier 0.157 | not recorded | — |
 
 ### Held-out runs 1 and 2
 
@@ -709,7 +883,7 @@ were not.
 | Recall | 13/13, 11/13 (24/26, 92%) | 9/10, 7/10 (16/20, 80%) |
 | Precision (labelled) | 100%, 100% | 83%, 96% |
 | False positives | 0, 0 | 3, 1 |
-| Brier | 0.126, 0.109 | 0.098, 0.113 |
+| Brier | 0.126, 0.109 | ~~0.098, 0.113~~ 0.096, 0.111 |
 
 Recall is lower on the held-out app, and the misses are not where a demo-only
 engine would put them. Of the four `medium` defects that share kind and
@@ -721,7 +895,7 @@ revised against its own scores after run 0, these were written blind, so the
 gap mixes transfer with brief authorship. One run each is a direction, not a
 size: on a ten-defect app one defect is 10 points of recall.
 
-**An engine observation, recorded here and addressed by task 32 (#172).** In run 2 the account
+**An engine observation, addressed by task 32 (#172) and measured in held-out run 3.** In run 2 the account
 lane filed "export link styled as body text", and SceneScout's finding dedup
 merged it into a different finding on the same element, the link clipped out
 of view: two distinct findings on one element became one. The merged-away
@@ -729,13 +903,14 @@ claim is judged not a defect above, so run 2's score lost nothing (run 1, which
 kept both, took a false positive for it), but the same merge would hide a real
 second defect on an element that already has one. Task 32 changes the dedup
 so findings of different kinds on one element stay apart (ADR 4); it was made
-against the test fixtures, not tuned here. The archived runs cannot show its
-effect: their findings were stored after dedup, so re-scoring them changes
-nothing. The effect will be measured in the next demo and held-out runs, after
-the wave 3 engine changes land, against runs 9 and 10 and held-out runs 1 and
-2. One cost is expected: the finding run 2 lost to the merge is a known
-non-defect, so on the held-out app the change should show as one more false
-positive, as run 1 already did.
+against the test fixtures, not tuned here. Held-out run 3, the first on the
+changed engine, kept the two apart: the clipped link is credited as the planted
+defect, and "styled like body text" is filed separately and scored as a known
+false positive, the one extra false positive this paragraph expected. Neither
+held-out run 3 nor demo run 11 surfaced a real second defect on one element
+that the old rule would have merged, and neither filed more duplicates than
+the runs before it; the measurement is in
+[Run 11 and held-out run 3](#run-11-and-held-out-run-3-wave-3s-engine-fixes).
 
 A second, from both runs: the evidence for the checkbox finding gives its name
 as `"checkbox"`, while the browser's accessibility tree names it "Available
