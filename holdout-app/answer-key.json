@@ -335,17 +335,20 @@
       "severity": "low",
       "level": "medium",
       "match": [
-        "^(?![\\s\\S]*(double|twice|\\bx2\\b|2x|×2|both renewals))[\\s\\S]*renew.{0,60}(enabled|offered|still (shown|available|clickable)).{0,60}(2 of 2|renewals=2|renewal limit|at (the )?limit|already renewed)",
+        "^(?![\\s\\S]*(double|twice|\\bx2\\b|2x|×2|both renewals))[\\s\\S]*renew.{0,60}(enabled|offered|still (shown|available|clickable)).{0,60}(2 of 2|renewals[ =]2(/2)?\\b|renewal limit|at (the )?limit|already renewed|used (up )?all (of )?(its|the|their) renewals)",
         "^(?![\\s\\S]*(double|twice|\\bx2\\b|2x|×2|both renewals))[\\s\\S]*(2 of 2|renewal limit|at (the )?limit|already renewed).{0,60}renew.{0,30}(enabled|offered|still shown)"
       ],
       "examples": [
         "testid=loans-renew-202 enabled at renewals=2; POST /api/loans/202/renew 409\nRenew button stays enabled on a loan already renewed 2 of 2 times",
         "Renew is still offered on a loan at the renewal limit",
-        "testid=loans-renew-202 enabled at renewals=2; POST /api/loans/202/renew 409\nrenew-enabled-at-limit-409"
+        "testid=loans-renew-202 enabled at renewals=2; POST /api/loans/202/renew 409\nrenew-enabled-at-limit-409",
+        "POST /api/loans/202/renew 409 testid=loans-renew-202 enabled at renewals 2/2\nRenew button stays enabled on a loan that has used all its renewals"
       ],
       "counterExamples": [
         "POST /api/loans/202/renew x2 -> 200,409; testid=loans-renew-202 enabled at 2 of 2\nRenew stays enabled at the renewal limit and a quick double-click reports an error",
-        "Third renewal refused with 409"
+        "Third renewal refused with 409",
+        "A loan that has used all its renewals is refused a third: POST /api/loans/202/renew 409 with the reason shown",
+        "Renew is enabled on a loan at renewals 1/2 and renews it once"
       ]
     },
     {
@@ -633,9 +636,47 @@
         "POST /api/fines/M-1004/waive 403 as librarian: Only the branch head can waive a fine",
         "/events-joined.html is a dead end: no navigation, no links"
       ]
+    },
+    {
+      "id": "join-double-click-one-seat",
+      "title": "A double-click on Join sends two join requests",
+      "why": "The server adds a member to an event once: a repeat join from the same member answers 200 and takes no second seat, and the page leaves for the confirmation after the first answer. Two requests go out and nothing is spent twice, so the double-click costs the member nothing.",
+      "match": [
+        "\\bjoin\\b.{0,80}(double.?click|clicked twice|click(ed)? ?(x2|×2|2x)|two (join )?POSTs|POSTs? .{0,30}(x2|×2|twice))",
+        "(double.?click|clicked twice).{0,40}\\bjoin\\b"
+      ],
+      "overrides": [],
+      "examples": [
+        "testid=events-join click x2 -> POST /api/events/1/join x2 200\nJoin button stays enabled during submit; double click fires two join POSTs",
+        "Double-click on Join saves one seat"
+      ],
+      "counterExamples": [
+        "POST /api/events/2/join 200 {\"left\":19} repeated, no joined marker in testid=events-rows\nEvents page does not show which events the member has already joined",
+        "Dead end after Join on the events page"
+      ]
     }
   ],
   "contextual": [
+    {
+      "id": "waive-buttons-same-name",
+      "route": "/fines.html",
+      "title": "Every Waive button has the same accessible name",
+      "category": "accessibility",
+      "reason": "Each Waive button sits in a table row whose cells name the member, so a screen reader in table navigation hears which fine it waives. WCAG accepts a control's purpose from its row context; a name unique across the page (\"Waive M-1002's fine\") is a stricter convention some projects adopt and this app does not declare.",
+      "match": [
+        "waive.{0,60}(same|identical|duplicate|repeated) (accessible )?names?",
+        "(same|identical|duplicate) (accessible )?names?.{0,40}waive",
+        "accessible name \"?waive\"? ?(x|×) ?\\d"
+      ],
+      "examples": [
+        "testid=fines-waive-* accessible name \"Waive\" x3\nEvery Waive button has the same accessible name",
+        "Waive buttons share an identical accessible name"
+      ],
+      "counterExamples": [
+        "testid=holds-drop-32 button accessible name \"\"\nHold \"drop\" buttons have no accessible name",
+        "Waive clears a member's fine in one click with no confirmation or undo"
+      ]
+    },
     {
       "id": "nav-links-unstyled",
       "route": "/",
