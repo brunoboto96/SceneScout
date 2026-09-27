@@ -1036,14 +1036,64 @@ it, forced or not, and the first run it makes is of the release after it. Had
 it tried, the run would have stopped at the missing `./ci` action, before any
 model call.
 
+ci-run-3 was a prompt experiment on the engine at commit `6575b46`, with
+ci-run-1's provider, model, effort and caps. In ci-run-1 and ci-run-2 every
+turn carried exactly one tool call, although a turn may carry up to 16 and the
+40-turn cap is the budget that binds (ci-run-2 reached it; ci-run-1 stopped at
+36 turns after 70 seconds of a 20-minute allowance). The edit added two lines
+to the CI rules the model is given: turns, not tool calls, are the budget, so
+calls that do not need an earlier call's result share a turn; and before
+`scout_report`, check `scout_coverage`, visit what it lists as unvisited and
+file each judged defect. Recall stayed at 5/13 and precision was 6/6 labelled
+(86–100% with one unlabelled). The model put two calls in a turn 3 times in
+26 and finished at 27 turns in 65 seconds, earlier than ci-run-1. One run is
+noisy, but the edit did not move the behaviour it targeted, so it was
+rejected and the rules are unchanged.
+
+**Rejected: asking the OpenAI request for parallel tool calls (ci-parallel-1).**
+Unattended runs make about one tool call per model turn, so the 40-turn cap
+bounds how much of the app a run reaches. The candidate edit set
+`parallel_tool_calls: true` on the Responses API request, with the prompt,
+caps, model and effort unchanged; the Anthropic request was confirmed to send
+no `tool_choice`, so parallel tool use is not disabled there. The loop already
+runs every call in a reply, up to 16, and answers each with its own output.
+One run: all 40 turns carried exactly one call (distribution 40 × 1), the run
+stopped at the turn cap, and recall stayed at 5/13 against ci-run-1's 5/13 on
+the same model and effort, with two defects gained (the double submit, the
+approve endpoint accepting a clerk) and two lost (the badge covering its
+button, the hint's contrast), which is within one run's noise. The Responses
+API's own default for the parameter is already `true`, so the edit changed
+nothing the model sees; single calls are the model's choice, not the
+request's. The change was reverted and no second run was spent.
+
 <!-- ci-results:start (generated from bench/ci-results.json by scripts/bench/ci-record.ts; do not edit by hand) -->
 
 | Date | App | Version | Source | Provider · model · effort | Key | Recall | Precision (bounds) | Brier | Ended | Turns | Tokens in (cached) / out | Wall | Cost |
 |---|---|---|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|
 | 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 7/8 (88%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |
 | 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · medium | c1786bc817 | 3/13 | 3/3 (100%) | — | turns | 40 | 885,574 (858,517) / 3,152 | 1m 38s | $0.013 |
+| 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 6/6 (86%–100%) | — | done | 27 | 533,110 (509,907) / 1,730 | 1m 05s | $0.008 |
+| 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · medium | c1786bc817 | 4/13 | 5/5 (100%) | — | done | 65 | 1,657,036 (1,620,750) / 7,123 | 2m 55s | $0.023 |
+| 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | turns | 40 | 826,683 (802,609) / 1,597 | 1m 18s | $0.011 |
+| 2026-09-27 | demo | 3.13.1 | dispatched | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 5/5 (100%) | — | done | 33 | 670,885 (646,007) / 1,755 | 1m 14s | $0.010 |
+| 2026-09-27 | holdout | 3.13.1 | dispatched | openai · gpt-6-luna · low | b5a7933f32 | 3/10 | 3/5 (43%–71%) | — | turns | 40 | 870,166 (842,856) / 1,930 | 2m 34s | $0.012 |
 
 <!-- ci-results:end -->
+
+**Turn cap, 40 to 80 (ci-turns-1).** One change against ci-run-2, which ended
+at the 40-turn cap: the same model and effort (gpt-6-luna, medium) with
+`max-turns` 80 and `max-tokens` 3,000,000 (both doubled; the time cap stayed
+20 minutes), dispatched through the benchmark workflow's new inputs. The
+engine moved from `7280e29` to `e13193a` between the two, with no change to
+`scenescout ci`'s loop or prompt. The run ended by itself at 65 turns, so 80
+was not binding. Recall 3/13 to 4/13: gained the scheduled-reports dead end
+and the sticky bar covering Save, lost the double submit. Precision 5/5, up
+from 3/3. Tokens and cost rose by about 1.9 times ($0.013 to $0.023). **Not
+adopted:** a net one-defect gain from one run is within the run-to-run spread
+(ci-run-1 and ci-run-2 differ by two on an effort change), and ci-run-1 found
+5/13 in 36 turns at low effort, so more turns do not yet explain a gap. The
+CLI's default cap stays 40; the workflow inputs stay, so a later experiment
+can set the caps without editing the workflow.
 
 ## Finding dedup as a measured decision (task 15)
 
@@ -1088,8 +1138,7 @@ Without them the demo had 8,508 pairs (1,972 same), accuracy 81.1%, Brier 0.189
 | Held-out, all pairs | 181 | 49 / 132 | current rule | 86.2% | 0.138 (0.30) | 0.138 [n=153 stated 0 actual 0.15; n=28 stated 1 actual 0.93] | 2 | 23 |
 | Demo, sample | 100 | 21 / 79 | current rule | 81.0% | 0.190 (−0.15) | 0.190 [n=98 / n=2] | 0 | 19 |
 | Held-out, sample | 100 | 30 / 70 | current rule | 86.0% | 0.140 (0.33) | 0.140 [n=82 / n=18] | 1 | 13 |
-| Both samples | 200 | | model judge, effort none | owed | owed | owed | | |
-| Both samples | 200 | | model judge, effort low | owed | owed | owed | | |
+| Both samples | 200 | | model judge, efforts none and low | see [judge run 1](#judge-run-1-refused-parse-no-usable-comparison) and [run 2](#judge-run-2-the-judge-beats-the-rule-on-both-apps) | | | | |
 
 The rule almost never merges wrongly and leaves most same-entry pairs apart.
 On the demo its Brier is slightly worse than always stating the base rate
@@ -1101,15 +1150,129 @@ useful part: stated 0 is right 80% of the time on the demo.
 **The model judge is measured, not used.** `npm run dedup-bench -- --judge
 --efforts none,low` asks a model about each of the 200 sampled pairs (cap split
 evenly between the apps) through the `scenescout ci` provider adapters, one
-tool call per pair returning `same`/`different`/`unsure` and `p_same`; unsure
+tool call per pair returning `same`/`different`/`unsure` and its confidence
+in that verdict, from which `p_same` is derived (same at confidence c is c,
+different is 1 − c; run 1 asked for `p_same` directly); unsure
 answers are counted and left out of the figures, and a failed call falls back
 to the rule and is counted as failed. It needs `OPENAI_API_KEY` or
 `ANTHROPIC_API_KEY`: the Messages API has no effort `none`, so on Anthropic only
 `low` runs. Cost is one call per pair per effort, a few hundred input tokens
-each, printed at the end of a run. No key was available when this was built,
-so the judge rows are owed. The judge is not wired into the store: it replaces
-the rule only if its Brier beats the rule's on these pairs, at a pair count and
-on both apps, and until then the rule is the only thing that dedups.
+each, printed at the end of a run. The `dedup-bench` workflow (dispatched by
+hand) runs the judge with the repository's `OPENAI_API_KEY` secret and puts the
+scorecard in its job summary and an artifact. The judge is not wired into the
+store: it replaces the rule only if its Brier beats the rule's on these pairs,
+at a pair count and on both apps, and until then the rule is the only thing
+that dedups.
+
+### Judge run 1: refused-parse, no usable comparison
+
+One dispatch of the `dedup-bench` workflow on 2026-09-27, OpenAI `gpt-6-luna`
+at efforts `none` and `low`, on the 200 sampled pairs. Keys `c1786bc817` (demo)
+and `b5a7933f32` (held-out), unchanged; 22 archives (19 demo, 3 held-out), so
+the pair set is larger than in the table above: 407 findings placed on a page
+(left out: 15 identical text, 7 unmatched, 0 ambiguous, 25 known non-defect).
+The rule rows below are from the same run and the same sample, the only
+comparison the judge rows may be read against. One run per effort: no noise
+floor is measured.
+
+| App | Pairs | Same / different | Decider | Scored | Unsure | Failed | Accuracy | Brier (skill vs base rate) | ECE [equal-count buckets over p_same] | Wrong merges | Missed merges |
+|---|---:|---|---|---:|---:|---:|---:|---|---|---:|---:|
+| Demo, all pairs | 10,327 | 2,427 / 7,900 | current rule | 10,327 | 0 | 0 | 80.4% | 0.196 (−0.09) | 0.196 [n=9,925 stated 0 actual 0.20; n=402 stated 1 actual 1.00] | 0 | 2,025 |
+| Held-out, all pairs | 213 | 61 / 152 | current rule | 213 | 0 | 0 | 85.9% | 0.141 (0.31) | 0.141 [n=178 stated 0 actual 0.16; n=35 stated 1 actual 0.94] | 2 | 28 |
+| Demo, sample | 100 | 21 / 79 | current rule | 100 | 0 | 0 | 82.0% | 0.180 (−0.08) | 0.180 [n=97 stated 0 actual 0.19; n=3 stated 1 actual 1.00] | 0 | 18 |
+| Held-out, sample | 100 | 32 / 68 | current rule | 100 | 0 | 0 | 86.0% | 0.140 (0.36) | 0.140 [n=82 stated 0 actual 0.17; n=18 stated 1 actual 1.00] | 0 | 14 |
+| Demo, sample | 100 | 21 / 79 | judge, effort none | 39 (18 same) | 0 | 61 | 100.0% of 39 | 0.000 of 39 | 0.010 [n=8 stated 0.00 actual 0.00; n=12 stated 0.01 actual 0.00; n=19 stated 0.93 actual 0.95] | | |
+| Held-out, sample | 100 | 32 / 68 | judge, effort none | 52 (31 same) | 0 | 48 | 100.0% of 52 | 0.000 of 52 | 0.005 [n=13 stated 0.00 actual 0.00; n=11 stated 0.27 actual 0.27; n=25 stated 0.99 actual 1.00; n=3 stated 1.00 actual 1.00] | | |
+| Demo, sample | 100 | 21 / 79 | judge, effort low | 37 (19 same) | 0 | 63 | 100.0% of 37 | 0.000 of 37 | 0.011 [n=8 stated 0.00 actual 0.00; n=10 stated 0.01 actual 0.00; n=18 stated 0.98 actual 1.00; n=1 stated 1.00 actual 1.00] | | |
+| Held-out, sample | 100 | 32 / 68 | judge, effort low | 50 (31 same) | 0 | 50 | 100.0% of 50 | 0.000 of 50 | 0.008 [n=16 stated 0.00 actual 0.00; n=10 stated 0.68 actual 0.70; n=22 stated 0.99 actual 1.00; n=2 stated 1.00 actual 1.00] | | |
+
+**Most of the judge's answers could not be read, so its figures are not
+comparable to the rule's.** Of 400 calls, 222 were refused by the parser, and
+220 of those for one reason: the verdict `different` with `p_same` between
+0.84 and 0.999 (the other two were tool arguments that were not valid JSON,
+over 30,000 characters long). The judge's accuracy and Brier are therefore
+over the 37 to 52 pairs per app whose answers were coherent, a subset the
+judge selected itself. The subset leans towards "same" pairs (31 of 52 on the
+held-out sample against 32 of 100 in the sample), because the refused answers
+were all "different". A Brier of 0.000 on that subset says the coherent
+answers were right and confident, not that the judge beats the rule on these
+pairs: the rule's 0.140 and 0.180 are over all 100. The run also printed
+identical token totals at both efforts (66,397 input, none cached, and 21,373
+output). The accounting was checked against a stand-in API and counts each
+effort apart; the likely reading is that neither effort produced reasoning
+tokens, each usable answer cost the same few output tokens, and at each
+effort one call ran to the 16,000-token output cap (the two replies whose
+arguments were cut-off JSON): 16,000 + 199 × 27 = 21,373. That is inferred,
+not shown; run 2 prints each call's output tokens. No cost is given for run 1.
+
+**Decision: the judge is not wired in, and the rule stays.** The rule of
+[#185](https://github.com/brunoboto96/SceneScout/pull/185) asks for the judge's
+Brier to beat the rule's on these pairs, on both apps. This run has no Brier for
+the judge on these pairs: over half of each sample is missing, and not at
+random. This records a negative result for this configuration of the judge.
+It does not show that a model judge cannot beat the rule.
+
+**What the run suggested.** The refused answers look like `p_same` read as
+confidence in the stated verdict, not the probability of "same". One bounded
+edit, to the judge's tool contract only, is made for run 2: the judge states
+the verdict and its confidence in it, `p_same` is derived from the two, a
+confidence below 0.5 is still refused and counted as a contradiction, and each
+pair's judgement, the rule's verdict, the key's label and the call's output
+tokens are written to a per-pair file (ids only), so the judge and the rule
+can be compared pair by pair.
+
+### Judge run 2: the judge beats the rule on both apps
+
+One dispatch of the `dedup-bench` workflow on 2026-09-27 after the contract
+change above, same model, efforts, keys, archives and 200 sampled pairs as run
+1, so the rule's rows in run 1's table are this run's rule rows too. Every
+answer was usable: 0 unsure, 0 failed, 0 contradictions at either effort, so
+the judge is scored on all 100 pairs per app, the same pairs as the rule.
+
+| App | Decider | Scored | Unsure | Failed | Accuracy | Brier (skill vs base rate) | ECE [equal-count buckets over p_same] | Wrong merges | Missed merges |
+|---|---|---:|---:|---:|---:|---|---|---:|---:|
+| Demo, sample (21 / 79) | current rule | 100 | 0 | 0 | 82.0% | 0.180 (−0.08) | 0.180 [n=97 stated 0 actual 0.19; n=3 stated 1 actual 1.00] | 0 | 18 |
+| Demo, sample | judge, effort none | 100 | 0 | 0 | 98.0% | 0.019 (0.88) | 0.024 [n=58 stated 0.01 actual 0.00; n=20 stated 0.03 actual 0.10; n=20 stated 0.82 actual 0.85; n=2 stated 1.00 actual 1.00] | 0 | 2 |
+| Demo, sample | judge, effort low | 100 | 0 | 0 | 98.0% | 0.019 (0.88) | 0.025 [n=60 stated 0.01 actual 0.00; n=20 stated 0.04 actual 0.10; n=20 stated 0.91 actual 0.95] | 0 | 2 |
+| Held-out, sample (32 / 68) | current rule | 100 | 0 | 0 | 86.0% | 0.140 (0.36) | 0.140 [n=82 stated 0 actual 0.17; n=18 stated 1 actual 1.00] | 0 | 14 |
+| Held-out, sample | judge, effort none | 100 | 0 | 0 | 99.0% | 0.007 (0.97) | 0.012 [n=56 stated 0.01 actual 0.00; n=23 stated 0.45 actual 0.48; n=21 stated 0.99 actual 1.00] | 0 | 1 |
+| Held-out, sample | judge, effort low | 100 | 0 | 0 | 99.0% | 0.010 (0.95) | 0.010 [n=52 stated 0.01 actual 0.00; n=20 stated 0.18 actual 0.20; n=25 stated 0.99 actual 1.00; n=3 stated 1.00 actual 1.00] | 0 | 1 |
+
+**Pair by pair**, from the per-pair file: at each effort the judge is right
+on 16 demo pairs and 13 held-out pairs where the rule is wrong, and wrong on
+none where the rule is right. All 29 are missed merges the judge makes; the
+judge makes no wrong merge. Its three errors are the same three pairs at
+both efforts, each a "same" pair it calls different: two findings of
+off-grid spacing (the key entry spans pages, see above), two of invalid input
+accepted by the orders API, and two of a fine waived without confirmation on
+the held-out app. No pair's verdict differs between effort none and low.
+
+**Tokens.** 75,597 input (none cached) at each effort; 5,160 output at none
+and 5,172 at low. Every call's output was 24 to 26 tokens at both efforts, so
+effort low produced no more output than none: no reasoning tokens at either.
+That fits run 1's reading: 199 answers at about 27 tokens (its `p_same`
+values ran to three decimals) and one call per effort at the 16,000-token cap
+give 21,373. Run 1 kept no per-call counts, so this is consistent, not proven.
+No price is given; the per-call figure is what a cost estimate would use.
+
+**Decision: the judge passes #185's rule.** Its Brier beats the rule's on
+these pairs, at 100 pairs per app, on both apps and at both efforts (demo
+0.019 against 0.180, held-out 0.007 and 0.010 against 0.140), and in the
+paired comparison it never loses a pair the rule wins. Effort none is enough:
+low changed no verdict. The limits: one run per effort, so no run-to-run
+noise is measured; the pairs cluster by key entry, so 29 flips are fewer
+independent facts than 29; the labels come from the key, not a person; and
+the contract change was made after run 1, which covered both apps, so the
+held-out pairs were seen once before this run (their failures shaped the
+edit, not their labels).
+
+**Wiring it in is a separate change.** The store's dedup runs in the MCP
+server, which holds no model key, on every finding filed. A model judge
+there means a provider call per candidate duplicate, a key, and finding text
+sent to the provider. Where it belongs (the `scenescout ci` run, which already
+has a model, or an opt-in setting for the store with the rule as the default
+and the fallback) is a design decision for its own change. Until then the
+rule still decides in the store.
 
 ## Rejected and not-yet-tried
 
