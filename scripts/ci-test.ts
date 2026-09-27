@@ -1202,7 +1202,9 @@ test("dedup benchmark workflow: dispatched only, reads the repository, and the k
   assert.equal(job.permissions, undefined, "the job does not widen the permissions");
   assert.ok(!NAMES_A_KEY.test(JSON.stringify(job.env ?? {})), "no key in the job's env");
   const steps = job.steps ?? [];
-  const judge = steps.find((s) => /npm run -s dedup-bench -- --judge --efforts "\$EFFORTS" --provider "\$PROVIDER"/.test(s.run ?? ""));
+  const judge = steps.find((s) =>
+    /npm run -s dedup-bench -- --judge --efforts "\$EFFORTS" --provider "\$PROVIDER" --pairs "\$OUT\/pairs\.jsonl"/.test(s.run ?? ""),
+  );
   assert.ok(judge, "it runs the judge at the dispatched efforts");
   assert.deepEqual(
     steps.filter((s) => NAMES_A_KEY.test(JSON.stringify(s))),
@@ -1216,6 +1218,7 @@ test("dedup benchmark workflow: dispatched only, reads the repository, and the k
   assert.match(judge.run!, /if \[ -z "\$OPENAI_API_KEY" \]; then [^\n]*exit 1; fi/, "a missing key fails, rather than scoring the rule alone");
   assert.match(judge.run!, />> "\$GITHUB_STEP_SUMMARY"/, "the scorecard goes to the job summary");
   // The key check comes before the scorecard is written anywhere that leaves the runner.
+  assert.ok(judge.run!.indexOf('grep -qF -- "$OPENAI_API_KEY" "$OUT/scorecard.txt" "$OUT/pairs.jsonl"') >= 0, "both files are checked for the key");
   assert.ok(judge.run!.indexOf('grep -qF -- "$OPENAI_API_KEY"') < judge.run!.indexOf("GITHUB_STEP_SUMMARY"));
   const accepts = (efforts: string) =>
     spawnSync("bash", ["-eo", "pipefail", "-c", judge.run!.split("\n")[0]], { env: { PATH: process.env.PATH, EFFORTS: efforts } }).status === 0;
@@ -1223,7 +1226,11 @@ test("dedup benchmark workflow: dispatched only, reads the repository, and the k
   for (const e of ["", "none, low", "low;echo hi", "$(id)", "low,"]) assert.ok(!accepts(e), `accepts ${JSON.stringify(e)}`);
   const upload = steps.findIndex((s) => /^actions\/upload-artifact@[0-9a-f]{40}$/.test((s.uses ?? "").split(" ")[0]));
   assert.ok(upload > steps.indexOf(judge), "the scorecard is uploaded, after the key check, by an action pinned by commit");
-  assert.equal(steps[upload].with?.path, "${{ runner.temp }}/dedup-bench/scorecard.txt");
+  assert.deepEqual(
+    String(steps[upload].with?.path).trim().split("\n"),
+    ["${{ runner.temp }}/dedup-bench/scorecard.txt", "${{ runner.temp }}/dedup-bench/pairs.jsonl"],
+    "the scorecard and the per-pair lines",
+  );
   // A refused key does not stop the script: each failed call falls back to the rule and is counted, and it exits 0.
   const answered = steps.findIndex((s) => /grep -q 'not run \('[^\n]*exit 1; fi/.test(s.run ?? ""));
   assert.ok(answered > upload, "a judge that did not answer fails the run, after the scorecard is kept");
