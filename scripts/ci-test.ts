@@ -8,6 +8,7 @@
  *   npx tsx --test --test-name-pattern "cap" scripts/ci-test.ts
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -50,6 +51,19 @@ import {
   type Usage,
 } from "../src/engine/ci.ts";
 import type { Finding } from "../src/engine/memory.ts";
+import {
+  appendRows,
+  compareVersions,
+  decideRun,
+  parseResults,
+  parseRunSummary,
+  renderTable,
+  replaceTable,
+  resultRow,
+  TABLE_END,
+  TABLE_START,
+  type CiResultRow,
+} from "./bench/ci-results.ts";
 import {
   AnthropicConversation,
   backoffMs,
@@ -1019,28 +1033,398 @@ test("action: this repository runs it against the demo app and a stand-in API, g
   );
 });
 
-test("benchmark workflow: started by hand only, reads the repository and nothing more, and uploads what bench reads", () => {
-  const wf = parseYaml(fs.readFileSync(path.join(REPO, ".github", "workflows", "ci-benchmark.yml"), "utf8")) as Record<string, any>;
-  assert.deepEqual(Object.keys(wf.on), ["workflow_dispatch"], "never pull_request or pull_request_target: the job holds the key");
+type WorkflowStep = { uses?: string; run?: string; env?: Record<string, string>; with?: Record<string, string> };
+type WorkflowJob = {
+  permissions?: Record<string, string>;
+  needs?: string | string[];
+  if?: string;
+  uses?: string;
+  with?: Record<string, string>;
+  secrets?: Record<string, string>;
+  env?: Record<string, string>;
+  steps?: WorkflowStep[];
+};
+const readWorkflow = (name: string) => parseYaml(fs.readFileSync(path.join(REPO, ".github", "workflows", name), "utf8")) as Record<string, any>;
+/** Where a model's key is named, as `secrets.OPENAI_API_KEY` or `secrets.ANTHROPIC_API_KEY`. */
+const NAMES_A_KEY = /secrets\.(OPENAI|ANTHROPIC)_API_KEY/;
+
+test("benchmark workflow: started by hand or called, reads the repository and nothing more, and uploads what bench reads", () => {
+  const wf = readWorkflow("ci-benchmark.yml");
+  assert.deepEqual(Object.keys(wf.on).sort(), ["workflow_call", "workflow_dispatch"], "never pull_request or pull_request_target: the job holds the key");
   assert.deepEqual(wf.permissions, { contents: "read" });
-  const jobs = Object.values(
-    wf.jobs as Record<
-      string,
-      { permissions?: unknown; steps: Array<{ uses?: string; run?: string; env?: Record<string, string>; with?: Record<string, string> }> }
-    >,
-  );
+  // A caller passes a key only if it has one: neither is required, so a repository with one provider can still call it.
+  assert.deepEqual(wf.on.workflow_call.secrets, { OPENAI_API_KEY: { required: false }, ANTHROPIC_API_KEY: { required: false } });
+  assert.equal(wf.on.workflow_dispatch.inputs.provider.default, "openai");
+  assert.equal(wf.on.workflow_call.inputs.provider.default, "openai");
+  const jobs = Object.values(wf.jobs as Record<string, WorkflowJob>);
   for (const job of jobs) assert.equal(job.permissions, undefined, "no job widens the permissions");
-  const steps = jobs.flatMap((j) => j.steps);
+  for (const job of jobs) assert.ok(!NAMES_A_KEY.test(JSON.stringify(job.env ?? {})), "no key in a job's env: only the steps that need it");
+  const steps = jobs.flatMap((j) => j.steps ?? []);
   const run = steps.find((s) => s.uses === "./ci");
   assert.ok(run, "it runs the ci action from this commit");
   assert.equal(run.with?.cli, "dist/cli.js");
-  assert.equal(run.env?.OPENAI_API_KEY, "${{ secrets.OPENAI_API_KEY }}", "the key comes from the secret, through env");
+  assert.equal(run.with?.provider, "${{ inputs.provider }}");
+  // Each key reaches the run only when its provider was chosen, and only from the secret, through env.
+  assert.equal(run.env?.OPENAI_API_KEY, "${{ inputs.provider == 'openai' && secrets.OPENAI_API_KEY || '' }}");
+  assert.equal(run.env?.ANTHROPIC_API_KEY, "${{ inputs.provider == 'anthropic' && secrets.ANTHROPIC_API_KEY || '' }}");
   const upload = steps.findIndex((s) => /^actions\/upload-artifact@/.test(s.uses ?? ""));
-  const keyCheck = steps.findIndex((s) => /grep -rlF -- "\$OPENAI_API_KEY"/.test(s.run ?? ""));
-  assert.ok(keyCheck >= 0 && upload > keyCheck, "the key check runs before the upload");
+  const keyCheck = steps.findIndex((s) => /for key in "\$OPENAI_API_KEY" "\$ANTHROPIC_API_KEY"/.test(s.run ?? "") && /grep -rlF -- "\$key"/.test(s.run ?? ""));
+  assert.ok(keyCheck >= 0 && upload > keyCheck, "the key check looks for both keys, before the upload");
+  assert.deepEqual(steps[keyCheck].env && { o: steps[keyCheck].env!.OPENAI_API_KEY, a: steps[keyCheck].env!.ANTHROPIC_API_KEY }, {
+    o: run.env?.OPENAI_API_KEY,
+    a: run.env?.ANTHROPIC_API_KEY,
+  });
+  // An empty key would match every file: the check skips it rather than failing every run.
+  assert.match(steps[keyCheck].run!, /\[ -n "\$key" \] \|\| continue/);
+  const withKey = steps.filter((s) => NAMES_A_KEY.test(JSON.stringify(s)));
+  assert.deepEqual(withKey, [run, steps[keyCheck]], "the key is in the run and the check, and nowhere else");
   assert.equal(steps[upload].with?.path, "${{ steps.app.outputs.project }}", "the project directory itself, so it unpacks to <dir>/.scenescout/memory.json");
   assert.equal(String(steps[upload].with?.["include-hidden-files"]), "true");
   for (const s of steps) assert.ok(!/^\s*(npm run bench|npx tsx scripts\/bench|git (commit|push))/m.test(s.run ?? ""), "it scores and commits nothing");
+  // A caller chooses the ref, so the weekly run can run a release tag.
+  assert.equal(steps[0].with?.ref, "${{ inputs.ref }}");
+});
+
+test("weekly benchmark: scheduled or dispatched, and the key and the write token never meet in one job", () => {
+  const wf = readWorkflow("bench-weekly.yml");
+  assert.deepEqual(Object.keys(wf.on).sort(), ["schedule", "workflow_dispatch"], "never pull_request or pull_request_target");
+  assert.equal(wf.on.schedule.length, 1);
+  assert.match(wf.on.schedule[0].cron, /^\d+ \d+ \* \* \d$/, "weekly");
+  const inputs = wf.on.workflow_dispatch.inputs;
+  assert.equal(inputs.force.type, "boolean");
+  assert.equal(inputs.force.default, false);
+  assert.equal(inputs.provider.default, "openai", "the default provider, unless dispatched otherwise");
+  assert.deepEqual(wf.permissions, {}, "every job asks for what it needs");
+  const jobs = wf.jobs as Record<string, WorkflowJob>;
+  assert.deepEqual(Object.keys(jobs), ["decide", "bench", "record", "test-results-pr"]);
+  assert.deepEqual(jobs.decide.permissions, { contents: "read", "pull-requests": "read" });
+  assert.deepEqual(jobs.bench.permissions, { contents: "read" }, "the job that calls the model can only read");
+  assert.deepEqual(jobs.record.permissions, { contents: "write", "pull-requests": "write" });
+  assert.deepEqual(jobs["test-results-pr"].permissions, { actions: "write" });
+
+  // The key: only the bench job names it, and only the chosen provider's.
+  for (const [name, job] of Object.entries(jobs))
+    assert.equal(NAMES_A_KEY.test(JSON.stringify(job)), name === "bench", `${name} ${name === "bench" ? "passes" : "names"} a key`);
+  assert.equal(jobs.bench.uses, "./.github/workflows/ci-benchmark.yml", "the same run as the manual benchmark, not a copy");
+  assert.deepEqual(jobs.bench.secrets, {
+    OPENAI_API_KEY: "${{ needs.decide.outputs.provider == 'openai' && secrets.OPENAI_API_KEY || '' }}",
+    ANTHROPIC_API_KEY: "${{ needs.decide.outputs.provider == 'anthropic' && secrets.ANTHROPIC_API_KEY || '' }}",
+  });
+  assert.equal(jobs.bench.with?.ref, "${{ needs.decide.outputs.tag }}", "it runs the release, not whatever main holds");
+  assert.equal(jobs.bench.with?.provider, "${{ needs.decide.outputs.provider }}");
+  assert.equal(jobs.bench.if, "needs.decide.outputs.run == 'true'", "nothing runs unless decide says a release came out, or it was forced");
+  assert.ok(!NAMES_A_KEY.test(JSON.stringify(jobs.record)) && !/secrets\./.test(JSON.stringify(jobs.record)), "the job that can push holds no secret");
+
+  const record = jobs.record.steps!.map((s) => s.run ?? "").join("\n");
+  const decide = jobs.decide.steps!.find((s) => /bench:ci -- decide/.test(s.run ?? ""));
+  assert.ok(decide, "decide asks ci-record whether to run");
+  assert.match(decide.run!, /open_prs=\$\(gh pr list --state open --label benchmark --json number --jq length\)/, "an open results pull request is counted");
+  assert.match(decide.run!, /--open-prs "\$open_prs" --release-has-ci "\$has_ci"/);
+  assert.match(decide.run!, /git cat-file -e "\$TAG:ci\/action\.yml"/, "whether the release has the ci action to run");
+  // One app failing must not discard the other's paid run.
+  assert.equal(jobs.record.if, "always() && needs.decide.outputs.run == 'true'");
+  const download = jobs.record.steps!.find((s) => /^actions\/download-artifact@/.test(s.uses ?? "")) as WorkflowStep & { "continue-on-error"?: boolean };
+  assert.equal(download["continue-on-error"], true, "a failed app uploads nothing, and that alone does not stop the other being recorded");
+  assert.match(
+    record,
+    /if \[ ! -s "\$dir\/\.scenescout\/ci\/ci\.json" \]; then[\s\S]*run failed; nothing recorded for it\." >> "\$GITHUB_STEP_SUMMARY"[\s\S]*continue/,
+  );
+  assert.match(record, /if \[ "\$recorded" -eq 0 \]; then [^\n]*exit 1; fi/, "nothing to record at all fails the job");
+  // A pipe hides a failing command unless pipefail is on: every script runs under bash, which sets it.
+  for (const [name, job] of Object.entries(jobs))
+    for (const st of job.steps ?? [])
+      if (st.run && st.run !== "npm ci --ignore-scripts") assert.equal((st as { shell?: string }).shell, "bash", `${name}: ${st.run.slice(0, 60)}`);
+  assert.ok(
+    jobs.decide.steps!.findIndex((s) => /labels\/benchmark/.test(s.run ?? "")) >= 0,
+    "the label the pull request needs is checked before any model call",
+  );
+  assert.match(record, /npm run -s bench -- "\$dir" --app "\$app" --json "\$card"/, "each app scored against its own key");
+  assert.match(record, /npm run -s bench -- --archive "\$dir" --app "\$app"/, "each run archived, so it can be re-scored");
+  assert.match(record, /bench:ci -- record --app "\$app"/);
+  assert.match(
+    record,
+    /git push --force-with-lease="refs\/heads\/\$BRANCH:\$lease" origin "HEAD:refs\/heads\/\$BRANCH"/,
+    "a branch of its own, never main, which a re-run can replace",
+  );
+  assert.match(record, /lease=\$\(git ls-remote origin "refs\/heads\/\$BRANCH" \| cut -f1\)/, "leased on what an earlier attempt left, or on its absence");
+  assert.match(
+    record,
+    /gh pr list --state open --head "\$BRANCH"[\s\S]*exit 0[\s\S]*gh pr create/,
+    "a re-run reuses the pull request an earlier attempt opened",
+  );
+  assert.equal(jobs.record.steps!.find((s) => s.env?.BRANCH)?.env?.BRANCH, "bench/ci-results-${{ github.run_id }}", "the run id names the branch");
+  assert.ok(!/git push[^\n]*\bmain\b/.test(record), "never pushes to main");
+  assert.match(record, /gh pr create --base main --head "\$BRANCH" --label benchmark/);
+  for (const job of Object.values(jobs))
+    for (const s of job.steps ?? []) assert.ok(!/\$\{\{\s*(inputs|needs)\./.test(s.run ?? ""), `no input is pasted into a script: ${s.run}`);
+  for (const job of [jobs.decide, jobs.record]) assert.ok(job.steps!.some((s) => s.run === "npm ci --ignore-scripts"));
+});
+
+test("weekly benchmark: every check it dispatches on the results branch accepts that branch, and wave hold accepts no other", () => {
+  const jobs = readWorkflow("bench-weekly.yml").jobs as Record<string, WorkflowJob>;
+  const script = jobs["test-results-pr"].steps!.map((s) => s.run ?? "").join("\n");
+  const dispatched = [...script.matchAll(/gh workflow run (\S+) --ref "\$BRANCH"/g)].map((m) => m[1]);
+  assert.deepEqual(dispatched.sort(), ["test.yml", "wave-hold.yml"], "the required checks: test and wave hold");
+  /** Runs every script a dispatched run of this workflow runs, on this branch, and returns their exit codes. */
+  const onDispatch = (file: string, ref: string): number[] => {
+    const wf = readWorkflow(file);
+    assert.ok("workflow_dispatch" in wf.on, `${file} cannot be dispatched`);
+    const steps = Object.values(wf.jobs as Record<string, WorkflowJob>).flatMap((j) => (j.steps ?? []) as Array<WorkflowStep & { if?: string }>);
+    return steps
+      .filter((st) => st.run && /workflow_dispatch/.test(st.if ?? "") && /github\.ref_name/.test(JSON.stringify(st.env ?? {})))
+      .map((st) => spawnSync("bash", ["-eo", "pipefail", "-c", st.run!], { env: { PATH: process.env.PATH, REF: ref }, encoding: "utf8" }).status ?? -1);
+  };
+  const results = "bench/ci-results-123456789";
+  for (const file of dispatched) for (const status of onDispatch(file, results)) assert.equal(status, 0, `${file} refuses ${results}`);
+  assert.deepEqual(onDispatch("wave-hold.yml", results), [0], "wave hold's dispatch rule was run");
+  assert.deepEqual(onDispatch("wave-hold.yml", "changeset-release/main"), [0]);
+  // Narrow: any other branch still fails, so a dispatch cannot put a passing wave hold on a held pull request.
+  for (const other of ["feature/x", "bench/ci-results-", "bench/ci-results-12/x", "bench/ci-results-abc", "x/bench/ci-results-1"])
+    assert.deepEqual(onDispatch("wave-hold.yml", other), [1], other);
+});
+
+// ── the weekly benchmark's record ───────────────────────────────────────────
+
+const ROW = (over: Partial<CiResultRow> = {}): CiResultRow => ({
+  date: "2026-01-05",
+  app: "demo",
+  version: "1.2.0",
+  commit: "abcdef1",
+  source: "scheduled",
+  provider: "openai",
+  model: "some-model-1",
+  effort: "low",
+  key: "0123456789",
+  recall: { found: 5, expected: 13 },
+  precision: { correct: 7, labelled: 8, low: "70%", high: "90%" },
+  brier: null,
+  stop: "done",
+  turns: 36,
+  tokens: { input: 741_675, cachedInput: 716_628, output: 2_190 },
+  seconds: 70,
+  costUsd: 0.01076598,
+  archive: "ci-demo-1-2-0-1",
+  ...over,
+});
+
+test("versions: compared by number, and anything but a plain X.Y.Z refused", () => {
+  const cases: Array<[string, string, number]> = [
+    ["1.2.0", "1.2.0", 0],
+    ["v1.2.0", "1.2.0", 0],
+    ["1.10.0", "1.9.9", 1],
+    ["2.0.0", "10.0.0", -1],
+    ["1.2.1", "1.2.0", 1],
+  ];
+  for (const [a, b, sign] of cases) assert.equal(Math.sign(compareVersions(a, b)), sign, `${a} vs ${b}`);
+  assert.throws(() => compareVersions("latest", "1.0.0"), /Not a version/);
+  assert.throws(() => compareVersions("1.0", "1.0.0"), /Not a version/);
+  // The release tag is checked as vX.Y.Z before this; a prerelease is refused here too, not ordered.
+  assert.throws(() => compareVersions("1.3.0-rc.1", "1.3.0"), /Not a version/);
+});
+
+test("weekly decision: runs only when a release came out since the schedule last benchmarked it with this provider, or when forced", () => {
+  const rows = [
+    ROW({ version: "1.1.0", date: "2025-12-01", archive: "a" }),
+    ROW({ version: "1.2.0", date: "2026-01-05", archive: "b" }),
+    // Another provider's newer row does not count for this one.
+    ROW({ version: "1.4.0", provider: "anthropic", date: "2026-02-02", archive: "c" }),
+    // Row order does not decide which is newest.
+    ROW({ version: "1.0.0", date: "2026-03-01", archive: "d" }),
+    // Neither a dispatched run (another model or effort, perhaps) nor a manual one (of a commit no release holds) stands in for the schedule.
+    ROW({ version: "1.3.0", source: "dispatched", effort: "high", date: "2026-03-02", archive: "e" }),
+    ROW({ version: "1.3.0", source: "manual", date: "2026-03-03", archive: "f" }),
+  ];
+  const base = { force: false, openResultsPrs: 0, releaseHasCi: true };
+  const cases: Array<{ latest: string; provider: string; force?: boolean; openResultsPrs?: number; releaseHasCi?: boolean; run: boolean; reason: RegExp }> = [
+    {
+      latest: "1.2.0",
+      provider: "openai",
+      run: false,
+      reason: /No SceneScout release since v1\.2\.0, benchmarked with openai on 2026-01-05 \(latest release: v1\.2\.0\)/,
+    },
+    { latest: "v1.2.0", provider: "openai", run: false, reason: /No SceneScout release/ },
+    { latest: "1.2.1", provider: "openai", run: true, reason: /v1\.2\.1 was released since v1\.2\.0 was benchmarked with openai on 2026-01-05/ },
+    // Only a dispatched and a manual row hold 1.3.0: the scheduled run of it has not been made.
+    { latest: "1.3.0", provider: "openai", run: true, reason: /v1\.3\.0 was released since v1\.2\.0/ },
+    // Older than what was recorded (a release withdrawn, say): nothing new to measure.
+    { latest: "1.1.5", provider: "openai", run: false, reason: /No SceneScout release since v1\.2\.0/ },
+    { latest: "1.4.0", provider: "anthropic", run: false, reason: /since v1\.4\.0, benchmarked with anthropic/ },
+    { latest: "1.2.0", provider: "someother", run: true, reason: /Nothing benchmarked on schedule with someother yet/ },
+    { latest: "1.2.0", provider: "openai", force: true, run: true, reason: /Forced/ },
+    // An unmerged results pull request: main's record is behind, and running would pay for the same release again.
+    { latest: "1.3.0", provider: "openai", openResultsPrs: 1, run: false, reason: /1 results pull request\(s\) labelled benchmark are still open/ },
+    { latest: "1.3.0", provider: "openai", openResultsPrs: 2, force: true, run: true, reason: /Forced/ },
+    // A release from before scenescout ci: nothing to run, forced or not.
+    { latest: "1.3.0", provider: "openai", releaseHasCi: false, run: false, reason: /v1\.3\.0 predates scenescout ci/ },
+    { latest: "1.3.0", provider: "openai", releaseHasCi: false, force: true, run: false, reason: /predates scenescout ci/ },
+  ];
+  for (const c of cases) {
+    const d = decideRun({ ...base, ...c, rows });
+    assert.equal(d.run, c.run, JSON.stringify(c));
+    assert.match(d.reason, c.reason, JSON.stringify(c));
+  }
+  assert.equal(decideRun({ ...base, latest: "1.0.0", rows: [], provider: "openai" }).run, true, "an empty record runs");
+  assert.throws(() => decideRun({ ...base, latest: "", rows, provider: "openai" }), /Not a version/, "a release that is not a version fails the job");
+  assert.throws(() => decideRun({ ...base, latest: "nightly", rows, provider: "openai", force: true }), /Not a version/, "even when forced");
+  assert.throws(() => decideRun({ ...base, latest: "1.3.0", rows, provider: "openai", openResultsPrs: -1 }), /openResultsPrs/);
+  // The committed record: the two manual rows do not make the schedule skip the release after them.
+  const committed = parseResults(JSON.parse(fs.readFileSync(path.join(REPO, "bench", "ci-results.json"), "utf8"))).rows;
+  assert.equal(decideRun({ ...base, latest: "3.13.0", rows: committed, provider: "openai" }).run, true);
+});
+
+const CI_JSON = {
+  tool: "scenescout",
+  command: "ci",
+  version: "1.2.0",
+  provider: "openai",
+  model: "some-model-1",
+  effort: "low",
+  stop: { reason: "turns", text: "stopped at the turn cap (40 model calls)" },
+  usage: { turns: 40, inputTokens: 885_574, cachedInputTokens: 858_517, cacheWriteTokens: 0, outputTokens: 3_152, seconds: 98, estimatedCostUsd: 0.01286687 },
+};
+const CARD = {
+  key: "0123456789",
+  expected: 13,
+  found: ["a", "b", "c"],
+  correct: 3,
+  falsePositives: [{}],
+  unknown: [{}],
+  ambiguous: [],
+  findings: 6,
+  contextual: [{}],
+  worthALook: [],
+  calibration: null,
+};
+
+test("result row: what the run reported about itself, and how the key scored it", () => {
+  const row = resultRow({
+    app: "holdout",
+    source: "dispatched",
+    date: "2026-01-12",
+    commit: "abcdef0123456789",
+    archive: "ci-holdout-1-2-0-7",
+    run: parseRunSummary(CI_JSON),
+    card: CARD as never,
+  });
+  assert.deepEqual(row, {
+    date: "2026-01-12",
+    app: "holdout",
+    version: "1.2.0",
+    commit: "abcdef0",
+    source: "dispatched",
+    provider: "openai",
+    model: "some-model-1",
+    effort: "low",
+    key: "0123456789",
+    recall: { found: 3, expected: 13 },
+    // 3 right of 4 labelled; of the 5 scored (6 less the contextual one), 3 are right at worst and 4 at best.
+    precision: { correct: 3, labelled: 4, low: "60%", high: "80%" },
+    brier: null,
+    stop: "turns",
+    turns: 40,
+    tokens: { input: 885_574, cachedInput: 858_517, output: 3_152 },
+    seconds: 98,
+    costUsd: 0.01286687,
+    archive: "ci-holdout-1-2-0-7",
+  });
+  // Brier only when the run judged something; a price the CLI did not know is null, not zero.
+  const judged = resultRow({
+    app: "demo",
+    source: "scheduled",
+    date: "2026-01-12",
+    commit: "abcdef0",
+    archive: "x",
+    run: parseRunSummary({ ...CI_JSON, usage: { ...CI_JSON.usage, estimatedCostUsd: null } }),
+    card: { ...CARD, calibration: { brier: 0.125, judged: 4 } } as never,
+  });
+  assert.equal(judged.brier, 0.125);
+  assert.equal(judged.costUsd, null);
+  assert.equal(
+    resultRow({
+      app: "demo",
+      source: "manual",
+      date: "2026-01-12",
+      commit: "abcdef0",
+      archive: "x",
+      run: parseRunSummary(CI_JSON),
+      card: { ...CARD, calibration: { brier: 0, judged: 0 } } as never,
+    }).brier,
+    null,
+  );
+
+  const base = { app: "demo", source: "scheduled", date: "2026-01-12", commit: "abcdef0", archive: "x", run: parseRunSummary(CI_JSON), card: CARD as never };
+  assert.throws(() => resultRow({ ...base, app: "other" }), /app must be one of demo, holdout/);
+  assert.throws(() => resultRow({ ...base, source: "cron" }), /source must be one of manual, scheduled, dispatched/);
+  assert.throws(() => resultRow({ ...base, date: "12/01/2026" }), /date must be YYYY-MM-DD/);
+  assert.throws(() => resultRow({ ...base, commit: "main" }), /commit must be a commit hash/);
+  assert.throws(() => resultRow({ ...base, archive: "Run 1" }), /archive must be a run name/);
+  assert.throws(() => parseRunSummary({ ...CI_JSON, usage: undefined }), /no usage or stop/);
+  assert.throws(() => parseRunSummary({ ...CI_JSON, model: "" }), /model must be a non-empty string/);
+  assert.throws(() => parseRunSummary({ ...CI_JSON, usage: { ...CI_JSON.usage, turns: -1 } }), /usage.turns must be a whole number/);
+  assert.throws(() => parseRunSummary({ ...CI_JSON, usage: { ...CI_JSON.usage, estimatedCostUsd: "cheap" } }), /estimatedCostUsd/);
+  assert.throws(() => resultRow({ ...base, run: parseRunSummary({ ...CI_JSON, version: "dev" }) }), /Not a version/);
+});
+
+test("results file: rows are appended in order and a recorded run is never replaced", () => {
+  const one = appendRows({ rows: [] }, [ROW({ archive: "a" })]);
+  const two = appendRows(one, [ROW({ archive: "b" }), ROW({ archive: "c" })]);
+  assert.deepEqual(
+    two.rows.map((r) => r.archive),
+    ["a", "b", "c"],
+  );
+  assert.deepEqual(
+    one.rows.map((r) => r.archive),
+    ["a"],
+    "the input is not changed",
+  );
+  assert.throws(() => appendRows(two, [ROW({ archive: "b", version: "9.9.9" })]), /b is already recorded/);
+  assert.throws(() => appendRows(one, [ROW({ archive: "d" }), ROW({ archive: "d" })]), /d is already recorded/);
+  assert.deepEqual(parseResults({ rows: [ROW()] }).rows, [ROW()]);
+  assert.throws(() => parseResults({ rows: [{}] }), /row 0 is not a result row/);
+  assert.throws(() => parseResults([]), /rows array/);
+});
+
+test("results table: one line per row, and it replaces only what is between its markers", () => {
+  const table = renderTable([
+    ROW(),
+    ROW({ archive: "b", brier: 0.1234, costUsd: null, seconds: 45, precision: { correct: 3, labelled: 3, low: "100%", high: "100%" } }),
+  ]);
+  const lines = table.split("\n");
+  assert.equal(lines.length, 4);
+  assert.equal(
+    lines[2],
+    "| 2026-01-05 | demo | 1.2.0 | scheduled | openai · some-model-1 · low | 0123456789 | 5/13 | 7/8 (70%–90%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |",
+  );
+  assert.match(lines[3], /\| 3\/3 \(100%\) \| 0\.123 \| done \| 36 \| .* \| 45s \| — \|$/);
+  for (const l of lines) assert.equal(l.split("|").length, lines[0].split("|").length, "every line has the header's columns");
+
+  const doc = `intro\n\n${TABLE_START}\nold table\n${TABLE_END}\n\nafter\n`;
+  assert.equal(replaceTable(doc, "NEW"), `intro\n\n${TABLE_START}\n\nNEW\n\n${TABLE_END}\n\nafter\n`);
+  assert.equal(replaceTable(replaceTable(doc, "NEW"), "NEW"), replaceTable(doc, "NEW"), "idempotent");
+  assert.throws(() => replaceTable("no markers", "x"), /markers exactly once/);
+  assert.throws(() => replaceTable(`${TABLE_END}\n${TABLE_START}`, "x"), /in that order/);
+  assert.throws(() => replaceTable(`${TABLE_START}${TABLE_START}${TABLE_END}`, "x"), /exactly once/);
+});
+
+test("results: docs/benchmark.md shows exactly what bench/ci-results.json records, and each row has its archive", () => {
+  const results = parseResults(JSON.parse(fs.readFileSync(path.join(REPO, "bench", "ci-results.json"), "utf8")));
+  const doc = fs.readFileSync(path.join(REPO, "docs", "benchmark.md"), "utf8");
+  assert.equal(doc, replaceTable(doc, renderTable(results.rows)), "regenerate it with npm run bench:ci -- render");
+  for (const r of results.rows) {
+    const archive = path.join(REPO, "bench", "runs", `${r.archive}.json`);
+    assert.ok(fs.existsSync(archive), `${r.archive} has no archive in bench/runs`);
+    assert.equal((JSON.parse(fs.readFileSync(archive, "utf8")) as { app?: string }).app, r.app, `${r.archive} is archived as another app's run`);
+  }
+  // The two runs taken by hand before the workflow existed are the first rows.
+  assert.deepEqual(
+    results.rows
+      .slice(0, 2)
+      .map((r) => [r.archive, r.source, r.version, r.effort, `${r.recall.found}/${r.recall.expected}`, `${r.precision.correct}/${r.precision.labelled}`]),
+    [
+      ["ci-run-1", "manual", "3.12.0", "low", "5/13", "7/8"],
+      ["ci-run-2", "manual", "3.12.0", "medium", "3/13", "3/3"],
+    ],
+  );
 });
 
 test("summary: a backslash and a pipe in a cell cannot break the table's columns", () => {

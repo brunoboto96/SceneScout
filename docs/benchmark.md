@@ -991,6 +991,60 @@ as `"checkbox"`, while the browser's accessibility tree names it "Available
 now only" from the label that wraps it. Where that name came from is not in the
 archive; it is recorded so it can be checked, not fixed against this app.
 
+## Unattended runs (scenescout ci)
+
+[`scenescout ci`](ci.md) runs the SceneScout method without an agent at the
+keyboard: one model, reached through its API, explores the app in `read-only`
+until it finishes or reaches a cap. Its rows are not comparable with the
+[Results](#results) above, which are eight parallel lanes in `safe-write`
+driven by an agent; compare them with each other.
+
+The [weekly benchmark workflow](../.github/workflows/bench-weekly.yml) records
+them. Once a week it compares the latest GitHub release with the newest
+version it has recorded on schedule for the provider it would use, and runs
+only when a release has come out since and no results pull request labelled
+`benchmark` is still open; otherwise it writes one line to the job summary and
+stops. Only scheduled rows count: a dispatched run may have used another model
+or effort, and a manual run may have been of a commit no release contains.
+When it runs, it checks out the release's tag, runs `scenescout ci` against
+the demo and the held-out app through the same
+[benchmark workflow](../.github/workflows/ci-benchmark.yml) a manual run uses,
+scores each with `npm run bench -- <dir> --app <app> --json`, archives it under
+`bench/runs/` as `ci-<app>-<version>-<run number>` and opens a pull request
+labelled `benchmark` that appends a row per app to
+[`bench/ci-results.json`](../bench/ci-results.json) and regenerates the table
+below. If one app's run fails, the other's is still recorded and the job
+summary names the one that failed. Dispatched by hand, it takes the provider,
+model and effort, and `force` to run with no new release or with a results
+pull request open.
+
+It uses one provider per run: OpenAI unless dispatched with another, so a
+repository holding both keys is not charged twice. Each provider has its own
+record of the last version it benchmarked. The job that calls the model can
+only read the repository, and the job that writes the results never holds the
+model's key.
+
+A row is one run, and a single run is noisy: ci-run-1 and ci-run-2 differ only
+in effort and moved recall by two defects. Precision is the labelled ratio
+with its bounds; Brier is lane calibration's, and is "—" because an unattended
+run has no lanes to state a confidence. Cost is the run's own estimate from
+the model's list price. The first two rows were taken by hand with the
+benchmark workflow on the engine at commit `7280e29`, before this workflow
+existed. That commit reports itself as 3.12.0, but the v3.12.0 tag predates
+`scenescout ci`: its tag has no `ci/action.yml`, so the workflow does not run
+it, forced or not, and the first run it makes is of the release after it. Had
+it tried, the run would have stopped at the missing `./ci` action, before any
+model call.
+
+<!-- ci-results:start (generated from bench/ci-results.json by scripts/bench/ci-record.ts; do not edit by hand) -->
+
+| Date | App | Version | Source | Provider · model · effort | Key | Recall | Precision (bounds) | Brier | Ended | Turns | Tokens in (cached) / out | Wall | Cost |
+|---|---|---|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|
+| 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 7/8 (88%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |
+| 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · medium | c1786bc817 | 3/13 | 3/3 (100%) | — | turns | 40 | 885,574 (858,517) / 3,152 | 1m 38s | $0.013 |
+
+<!-- ci-results:end -->
+
 ## Rejected and not-yet-tried
 
 Edits considered and not kept, so they are not retried blind:
