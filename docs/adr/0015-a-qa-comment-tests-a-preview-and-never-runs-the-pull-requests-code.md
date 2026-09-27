@@ -112,3 +112,32 @@ an unknown commenter, a pull request whose repositories cannot be read, a URL
 that is not https) or not start, it does not start. When a design could either
 let the pull request's code share a runner with the key or give up a feature,
 it gives up the feature.
+
+## Addendum: allowing by role and by team
+
+Projects asked to open the command beyond a list of logins. Two more lists
+now combine with it as a union: author associations (`OWNER`, `MEMBER`,
+`COLLABORATOR`, read from the event, so no API call) and teams of the
+repository's organization (read with the team membership API). The default
+with all three unset is unchanged, and setting any of them replaces it.
+
+- **A list the gate cannot read fails the gate.** An association outside the
+  three, or a team that is not `org/team-slug`, stops the `gate` job with an
+  error rather than being skipped, so a typo can neither quietly narrow nor
+  widen who may run.
+- **Team membership needs its own token, and only the gate gets it.** The
+  workflow's token cannot read an organization's teams, so a project passes a
+  GitHub App token or a personal access token with `read:org` as a separate
+  secret. That makes the `gate` job hold a secret, but not the model's key:
+  the token can read the organization's membership, not run a model, and the
+  `gate` job still checks out and runs nothing from the pull request. `qa-test`
+  holds the template to it: the token only as the gate step's `team-token`
+  input, never in the `qa` or `report` job.
+- **Every unconfirmed answer refuses.** No token, a 401, 403 or 404, a pending
+  invitation, a failed call, or a team of another organization (never looked
+  up, so the token is only used about the repository's own organization)
+  leaves the commenter not allowed by team, with an annotation saying why.
+- **Lookups happen only when they can change the answer**: for a comment that
+  is the command, from someone the logins and roles have not already allowed.
+  A commenter allowed by none of the lists still gets only a reaction, and
+  their pull request is not read.

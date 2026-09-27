@@ -407,7 +407,7 @@ Copy [examples/workflows/scenescout-qa.yml](../examples/workflows/scenescout-qa.
 
 | Job | Holds the key | Permissions | What it does |
 |---|---|---|---|
-| `gate` | no | `pull-requests: write`, `deployments: read` | Reads the comment and the pull request, checks the commenter and where the pull request comes from, finds the preview's URL, and reacts to the comment. |
+| `gate` | no | `pull-requests: write`, `deployments: read` | Reads the comment and the pull request, checks the commenter and where the pull request comes from, finds the preview's URL, and reacts to the comment. The only job that may receive the optional team token (below). |
 | `qa` | yes | `contents: read` | Runs only when the gate says so. Runs `brunoboto96/SceneScout/ci` at an exact release against the preview's URL, with the caps below, and keeps the results as an artifact. |
 | `report` | no | `pull-requests: write`, `actions: read` | Posts the results on the pull request, with a link to the artifact, or says the run could not run. |
 
@@ -439,12 +439,31 @@ All optional, as repository variables (Settings → Secrets and variables → Ac
 
 | Variable | Default | |
 |---|---|---|
-| `SCENESCOUT_QA_ALLOWED` | the repository's owners | The GitHub logins that may start a run, separated by commas or spaces. Unset, the owners may: the owner's login on a repository a user owns, and any commenter GitHub marks as `OWNER` (on a repository an organization owns, an owner of that organization). Set, it replaces that default, so include the owners' logins if they should keep the command. |
+| `SCENESCOUT_QA_ALLOWED` | the repository's owners | The GitHub logins that may start a run, separated by commas or spaces. See [Who may start a run](#who-may-start-a-run). |
+| `SCENESCOUT_QA_ALLOWED_ROLES` | none | Comment author associations that may start a run: `OWNER`, `MEMBER`, `COLLABORATOR`, separated by commas or spaces. |
+| `SCENESCOUT_QA_ALLOWED_TEAMS` | none | Teams of the repository's organization whose active members may start a run, as `org/team-slug`, separated by commas or spaces. Needs the `SCENESCOUT_QA_TEAM_TOKEN` secret. |
 | `SCENESCOUT_QA_PREVIEW_URL` | none | A template for the preview's URL, with `{pr}` (the pull request's number) and `{sha}` (its head commit) filled in, e.g. `https://pr-{pr}.preview.example.com`. |
 | `SCENESCOUT_QA_ENVIRONMENT` | any | Without a template, the preview is the newest successful deployment of the head commit, as the deployments API reports it; this limits it to one environment's deployments. |
 | `SCENESCOUT_QA_ALLOW_FORKS` | off | `true` runs on pull requests from forks. Off, a fork's pull request gets a reply saying why nothing ran. |
 
+And one optional repository secret (Settings → Secrets and variables → Actions → Secrets):
+
+| Secret | |
+|---|---|
+| `SCENESCOUT_QA_TEAM_TOKEN` | Read only when `SCENESCOUT_QA_ALLOWED_TEAMS` is set: a token that can read the organization's team membership, either a GitHub App installation token with the organization's Members permission (read), or a personal access token with `read:org`. The workflow's own token cannot read team membership. The template passes it to the `gate` job only; never add it to the `qa` or `report` job. |
+
 The preview's URL is chosen in this order: the URL in the comment, the template, the deployment. It must be `https` and carry no credentials. The run explores the preview signed out: the `qa` job checks out nothing, so it has no saved session to read.
+
+### Who may start a run
+
+`SCENESCOUT_QA_ALLOWED`, `SCENESCOUT_QA_ALLOWED_ROLES` and `SCENESCOUT_QA_ALLOWED_TEAMS` combine as a union: a commenter listed by login, whose author association is in the role list, or who is an active member of a listed team may start a run.
+
+- **With all three unset**, the repository's owners may: the owner's login on a repository a user owns, and any commenter GitHub marks as `OWNER` (on a repository an organization owns, an owner of that organization).
+- **With any of them set, it replaces that default.** Include yourself: add your login, or `OWNER` to the roles, if the owners should keep the command.
+- **Roles** come from the comment's `author_association` in the event, so they need no API call. `OWNER`, `MEMBER` and `COLLABORATOR` are the values that may be listed. Any other value (a typo, or `CONTRIBUTOR`, `NONE` and the like, which describe people with no standing in the repository) fails the `gate` job with an error naming it, and no comment is acted on until it is fixed.
+- **Teams** are read with `GET /orgs/{org}/teams/{team_slug}/memberships/{username}`, using `SCENESCOUT_QA_TEAM_TOKEN`, and only for a comment that is the command from someone the logins and roles have not already allowed. A membership counts only when its state is `active`. Every other outcome refuses and says why as an annotation on the `gate` job: no token, a 401 or 403 (the token cannot read the organization), a 404 (not a member, or the token cannot see the team), a pending invitation, or a call that fails after its retries. A team of an organization other than the repository's owner is never looked up, so the token is only ever used about the repository's own organization; the gate logs an error naming it. None of these falls back to allowing. An entry that is not `org/team-slug` fails the `gate` job, as an unknown role does.
+
+A commenter who is not allowed, by any path, gets the 😕 reaction and nothing else: the pull request is not read.
 
 ### What it costs, and how much it runs
 
@@ -458,4 +477,4 @@ The workflow refuses pull requests from forks by default, and `SCENESCOUT_QA_ALL
 
 ### This repository
 
-SceneScout has no deployed preview, so it does not run this workflow on its own pull requests. Its test suite (`qa-test`) holds the template to the rules above: the key only in the `qa` job, that job reached only through the gate, with read-only permissions and no checkout or script of its own, SceneScout from an exact release tag (the one that ships `qa/`), and one run per pull request. It also runs both keyless stages against a stand-in GitHub API.
+SceneScout has no deployed preview, so it does not run this workflow on its own pull requests. Its test suite (`qa-test`) holds the template to the rules above: the key only in the `qa` job, the team token only in the `gate` job's `team-token` input, that job reached only through the gate, with read-only permissions and no checkout or script of its own, SceneScout from an exact release tag (the one that ships `qa/`), and one run per pull request. It also runs both keyless stages against a stand-in GitHub API.
