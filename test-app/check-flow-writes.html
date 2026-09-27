@@ -15,7 +15,12 @@
          own path, so the smoke suite can count the two apart).
        - ?heartbeat=1: a fetch POST to this origin on a timer, which no step
          causes either, but is sent as a fetch.
-       - "Save on leave": a sendBeacon to this origin on pagehide. -->
+       - "Save on leave": a sendBeacon to this origin on pagehide.
+       - "Sign in on leave": a sendBeacon on pagehide to a sign-in address the
+         fixture server answers 1.5 s later with a 307 to an ordinary save.
+       - "Open things in a new tab": a same-origin link with target=_blank.
+         The tab becomes the page the flow drives, and this page, with
+         whatever it has armed, stays open behind it. -->
   <h1>New thing</h1>
   <p data-testid="writes-ready">Ready</p>
   <form method="post" action="/api/items" data-testid="writes-form">
@@ -25,6 +30,8 @@
   <button type="button" data-testid="writes-save-later">Save later</button>
   <button type="button" data-testid="writes-add-remote">Add remotely</button>
   <button type="button" data-testid="writes-save-on-leave">Save on leave</button>
+  <button type="button" data-testid="writes-sign-in-on-leave">Sign in on leave</button>
+  <a href="/check-flow.html" target="_blank" data-testid="writes-open-tab">Open things in a new tab</a>
   <p data-testid="writes-status" role="status"></p>
   <script>
     const status = document.querySelector('[data-testid="writes-status"]');
@@ -43,6 +50,10 @@
     document.querySelector('[data-testid="writes-save-on-leave"]').addEventListener("click", () => {
       status.textContent = "Will save on leave";
       addEventListener("pagehide", () => navigator.sendBeacon("/api/leave", "{}"));
+    });
+    document.querySelector('[data-testid="writes-sign-in-on-leave"]').addEventListener("click", () => {
+      status.textContent = "Will sign in on leave";
+      addEventListener("pagehide", () => navigator.sendBeacon("/api/handback/login", "{}"));
     });
     const beacon = loopback(params.get("beacon"));
     if (beacon) setInterval(() => navigator.sendBeacon(`${beacon}/api/beacon`, "x"), 50);

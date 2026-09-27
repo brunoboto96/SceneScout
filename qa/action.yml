@@ -1,0 +1,138 @@
+# The two keyless stages of a QA review started by a `/scenescout qa` comment on
+# a pull request. The run itself is the ci action (ci/action.yml), in a job of
+# its own that holds the model's key; this action never sees that key, never
+# checks out the repository and never runs the pull request's code. The
+# workflow it belongs in, and what a project configures: docs/ci.md. Why it is
+# shaped this way: docs/adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md.
+#
+#   stage: gate    read the comment, check who wrote it and where the pull
+#                  request comes from, find the preview's URL, react, and set
+#                  run=true only when every check passes
+#   stage: report  download the run's results and post them on the pull request
+#
+# The logic is action/qa-action.mjs, table-tested by qa-test.
+name: SceneScout QA
+description: Start a SceneScout QA run from a pull-request comment and post its results, without ever running the pull request's code.
+author: brunoboto96
+branding:
+  icon: message-square
+  color: blue
+
+inputs:
+  stage:
+    description: gate or report.
+    required: true
+  github-token:
+    description: The token for the GitHub API. The gate needs pull-requests write and deployments read; the report needs pull-requests write and actions read (to link the artifact, and to tell a run a newer one cancelled from one cancelled by hand or a timeout).
+    required: false
+    default: ${{ github.token }}
+  allowed:
+    description: (gate) The GitHub logins that may start a run, separated by commas or spaces. Empty means the repository's owner only.
+    required: false
+    default: ""
+  allow-forks:
+    description: (gate) true to run on pull requests from forks. Empty means forks are refused, with a reply that says why.
+    required: false
+    default: ""
+  preview-url:
+    description: (gate) A template for the pull request's preview URL, with {pr} and {sha} filled in, e.g. https://pr-{pr}.preview.example.com. Empty means the newest successful deployment of the head commit, unless the comment gives a URL.
+    required: false
+    default: ""
+  environment:
+    description: (gate) Only deployments to this environment count as the preview. Empty means any.
+    required: false
+    default: ""
+  result:
+    description: (report) The result of the job that ran the model - success, failure, cancelled or skipped.
+    required: false
+    default: ""
+  artifact-name:
+    description: (report) The name the run's results were uploaded under.
+    required: false
+    default: ""
+  pr:
+    description: (report) The pull request's number, from the gate.
+    required: false
+    default: ""
+  sha:
+    description: (report) The head commit the gate saw.
+    required: false
+    default: ""
+  url:
+    description: (report) The preview URL the run tested.
+    required: false
+    default: ""
+  login:
+    description: (report) Who asked for the run.
+    required: false
+    default: ""
+
+outputs:
+  run:
+    description: (gate) true when the comment starts a run.
+    value: ${{ steps.gate.outputs.run }}
+  pr:
+    description: (gate) The pull request's number.
+    value: ${{ steps.gate.outputs.pr }}
+  sha:
+    description: (gate) The pull request's head commit.
+    value: ${{ steps.gate.outputs.sha }}
+  url:
+    description: (gate) The preview URL to test.
+    value: ${{ steps.gate.outputs.url }}
+  focus:
+    description: (gate) The focus the comment gave, if any.
+    value: ${{ steps.gate.outputs.focus }}
+  login:
+    description: (gate) Who asked for the run.
+    value: ${{ steps.gate.outputs.login }}
+
+runs:
+  using: composite
+  steps:
+    - name: Look for Node.js 20 or newer
+      id: node
+      shell: bash
+      run: |
+        if command -v node >/dev/null && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 20 ]; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Install Node.js
+      if: steps.node.outputs.present != 'true'
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: "24"
+
+    - name: Decide whether this comment starts a run
+      id: gate
+      if: inputs.stage == 'gate'
+      shell: bash
+      env:
+        INPUTS: ${{ toJSON(inputs) }}
+      run: node "$GITHUB_ACTION_PATH/../action/qa-action.mjs" gate
+
+    - name: Download the run's results
+      if: inputs.stage == 'report' && inputs.result != 'cancelled' && inputs.artifact-name != ''
+      continue-on-error: true
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/scenescout-qa-results
+
+    - name: Post the results on the pull request
+      if: inputs.stage == 'report'
+      shell: bash
+      env:
+        INPUTS: ${{ toJSON(inputs) }}
+        RESULTS: ${{ runner.temp }}/scenescout-qa-results
+      run: node "$GITHUB_ACTION_PATH/../action/qa-action.mjs" report
+
+    - name: Unknown stage
+      if: inputs.stage != 'gate' && inputs.stage != 'report'
+      shell: bash
+      run: |
+        echo "::error title=SceneScout QA::the stage input must be gate or report"
+        exit 2

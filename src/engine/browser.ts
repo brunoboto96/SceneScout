@@ -124,6 +124,7 @@ import {
   sandboxedRedirectPage,
   allowsForeignWriteOnSignIn,
   isAuthExempt,
+  WriteRule,
 } from "./policy.js";
 import { scanProject } from "../scan.js";
 import type { RouteHealth } from "./check.js";
@@ -444,7 +445,13 @@ export class BrowserEngine {
   /** Set when the project's real path could not be resolved — named in fence refusals, which it may then cause. */
   private projectDirNote = "";
   memory: MemoryStore | null = null;
-  mode: WriteMode = "read-only";
+  private currentMode: WriteMode = "read-only";
+  /** The rule the write policy judges by: `mode`, and for a moment after a flow hands back, the flow's stricter one. */
+  private writeRule = new WriteRule("read-only");
+  /** The session's write mode. Read-only from outside: it changes only through `setMode`, which keeps `writeRule` in step. */
+  get mode(): WriteMode {
+    return this.currentMode;
+  }
   /** Origins named as trusted embeds (policy.ts trustsEmbedWrite decides when that counts). */
   trustedEmbeds = new Set<string>();
   private trustNotice = "";
@@ -943,7 +950,8 @@ export class BrowserEngine {
     if (opts.storageStatePath && !fs.existsSync(opts.storageStatePath)) {
       throw new Error(`storageStatePath does not exist: ${opts.storageStatePath}`);
     }
-    this.mode = opts.mode ?? "read-only";
+    this.currentMode = opts.mode ?? "read-only";
+    this.writeRule = new WriteRule(this.currentMode);
     const trust = trustedEmbedOrigins(opts.trustedEmbeds);
     this.trustedEmbeds = new Set(trust.origins);
     this.trustNotice =
@@ -1088,14 +1096,15 @@ export class BrowserEngine {
       // that was never submitted reading as tested, in read-only mode where by
       // definition nothing is.
       // Same test the route handler uses: in observe only an exempt auth request goes out.
-      if (this.mode === "observe" && !isAuthExempt(this.mode, method, pathnameOf(req.url()), isDestructiveWire(pathnameOf(req.url()), req.postData()))) return;
-      if (this.readOnly && isDestructiveWire(pathnameOf(req.url()), req.postData())) return;
+      const rule = this.writeRule.at();
+      if (rule === "observe" && !isAuthExempt(rule, method, pathnameOf(req.url()), isDestructiveWire(pathnameOf(req.url()), req.postData()))) return;
+      if ((rule === "read-only" || rule === "observe") && isDestructiveWire(pathnameOf(req.url()), req.postData())) return;
       // A foreign frame's write is refused in every mode the route handler runs in.
-      if (this.mode !== "destructive" && this.foreignWriteOf(req)) return;
+      if (rule !== "destructive" && this.foreignWriteOf(req)) return;
       if (
-        this.mode !== "destructive" &&
+        rule !== "destructive" &&
         offAppPageWrite(this.baseUrl, this.page?.url(), req.url(), this.embedMoves.movedTo) &&
-        !isAuthExempt(this.mode, method, pathnameOf(req.url()), isDestructiveWire(pathnameOf(req.url()), req.postData()))
+        !isAuthExempt(rule, method, pathnameOf(req.url()), isDestructiveWire(pathnameOf(req.url()), req.postData()))
       )
         return;
       const pageUrl = this.page?.url();
@@ -1113,6 +1122,8 @@ export class BrowserEngine {
       await this.context.route("**/*", async (route) => {
         const req = route.request();
         const method = req.method();
+        // Read once, as the request arrives: the rule the page sent it under (policy.ts WriteRule), not whatever holds after an await below.
+        const rule = this.writeRule.at();
         // A redirect is followed by the browser without asking, so its target
         // would load unsandboxed: a frame's redirect is answered with a
         // sandboxed page that navigates there itself, and the next hop comes
@@ -1199,7 +1210,7 @@ export class BrowserEngine {
           // A script's request is answered with a refusal, so the page's handling
           // of one actually runs; a navigation is dropped (policy.ts says why).
           // Caught: a request the page has already cancelled rejects these, and an unhandled rejection ends the process.
-          if (answered) return route.fulfill(policyRefusal(this.mode, method, pathname, req.headers()["origin"], why)).catch(() => {});
+          if (answered) return route.fulfill(policyRefusal(rule, method, pathname, req.headers()["origin"], why)).catch(() => {});
           return route.abort("blockedbyclient").catch(() => {});
         };
         // An embedded widget from another site writes to that site, not to the
@@ -1210,11 +1221,11 @@ export class BrowserEngine {
         const destructiveWire = isDestructiveWire(pathname, req.postData());
         // An embed moved the session's page off the app: its writes out are not the app's, a sign-in excepted.
         const offApp = offAppPageWrite(this.baseUrl, this.page?.url(), url, this.embedMoves.movedTo);
-        if (offApp && !isAuthExempt(this.mode, method, pathname, destructiveWire)) return refuse(`sent from a page of ${offApp}, outside the app`);
+        if (offApp && !isAuthExempt(rule, method, pathname, destructiveWire)) return refuse(`sent from a page of ${offApp}, outside the app`);
         // Auth/session flows must work in every mode — but never a destructive
         // one, and in observe only the requests a login itself needs.
-        if (isAuthExempt(this.mode, method, pathname, destructiveWire)) {
-          this.routedWrites.note(this.mode, method, url, bodyDigest(req.postDataBuffer()));
+        if (isAuthExempt(rule, method, pathname, destructiveWire)) {
+          this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
           return route.continue();
         }
 
@@ -1228,13 +1239,13 @@ export class BrowserEngine {
         // guaranteed visible — give it a bounded moment to land before the
         // mutation is judged not-owned, otherwise the session's own,
         // just-created resource gets wrongly blocked by a timing accident.
-        if (!owned && this.mode === "safe-write" && method !== "POST" && this.pendingCreations.size > 0) {
+        if (!owned && rule === "safe-write" && method !== "POST" && this.pendingCreations.size > 0) {
           await BrowserEngine.settleWithin(Promise.allSettled([...this.pendingCreations]), 1500);
           owned = this.isOwnedResource(pathname);
         }
         // POST: creation/RPC passes unless it smells destructive and isn't ours.
         // PUT/PATCH/DELETE: only in safe-write, only on our own resources.
-        const allow = allowsWrite(this.mode, method, destructiveWire, owned);
+        const allow = allowsWrite(rule, method, destructiveWire, owned);
         if (allow) {
           // Ownership tracking (safe-write): register the creation-tracking
           // task BEFORE the POST goes out. Registering from a context
@@ -1243,7 +1254,7 @@ export class BrowserEngine {
           // chained directly off the POST's json() could be judged before
           // the listener ever ran. Here the registration is synchronous with
           // request dispatch, which closes that window completely.
-          if (this.mode === "safe-write" && method === "POST" && !BENIGN_MUTATION_RE.test(url)) {
+          if (rule === "safe-write" && method === "POST" && !BENIGN_MUTATION_RE.test(url)) {
             const task: Promise<unknown> = req
               .response()
               .then((res) => (res && res.ok() ? this.recordCreation(res) : undefined))
@@ -1251,7 +1262,7 @@ export class BrowserEngine {
               .finally(() => this.pendingCreations.delete(task));
             this.pendingCreations.add(task);
           }
-          this.routedWrites.note(this.mode, method, url, bodyDigest(req.postDataBuffer()));
+          this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
           return route.continue();
         }
         return refuse();
@@ -2110,7 +2121,7 @@ export class BrowserEngine {
       return null;
     }
     if (frame === frame.page().mainFrame()) return null;
-    if (allowsForeignWriteOnSignIn(this.mode, this.page?.url() ?? "", this.baseUrl)) return null;
+    if (allowsForeignWriteOnSignIn(this.writeRule.at(), this.page?.url() ?? "", this.baseUrl)) return null;
     let url: URL;
     try {
       url = new URL(req.url());
@@ -2139,9 +2150,9 @@ export class BrowserEngine {
     const source = requestSource(req);
     const originHeader = req.headers()["origin"];
     const foreign = foreignWrite(this.baseUrl, { url: req.url(), originHeader, unadoptedPageUrl, pageHasForeignFrame, ...source });
-    if (foreign && allowsForeignWriteOnSignIn(this.mode, this.page?.url() ?? "", this.baseUrl)) return null;
+    if (foreign && allowsForeignWriteOnSignIn(this.writeRule.at(), this.page?.url() ?? "", this.baseUrl)) return null;
     // Frames of origins the user named as trusted, in safe-write, every one involved: the ordinary rules.
-    if (foreign && trustsForeignWrite(this.mode, this.trustedEmbeds, this.baseUrl, { frameChain: source.frameChain, originHeader, unadoptedPageUrl }))
+    if (foreign && trustsForeignWrite(this.writeRule.at(), this.trustedEmbeds, this.baseUrl, { frameChain: source.frameChain, originHeader, unadoptedPageUrl }))
       return null;
     return foreign;
   }
@@ -2180,17 +2191,19 @@ export class BrowserEngine {
       });
     };
     try {
+      // A request paused here was sent a moment ago, possibly by a page a flow has just left: WriteRule still holds the flow's rule.
+      const rule = this.writeRule.at();
       // Reads, and everything in destructive, go on. A later hop of a redirect is judged like any write: the route handler never sees one.
-      if (isReadMethod(method) || this.mode === "destructive") return await answer(true);
+      if (isReadMethod(method) || rule === "destructive") return await answer(true);
       const bytes = pausedRequestBytes(event.request);
-      if (this.routedWrites.claim(this.mode, method, url, bodyDigest(bytes))) return await answer(true);
+      if (this.routedWrites.claim(rule, method, url, bodyDigest(bytes))) return await answer(true);
       let verdict: UnseenWriteVerdict;
       let pathname = url;
       try {
         pathname = pathnameOf(url);
         const { foreign, offApp } = unseenWriteSource({
           appUrl: this.baseUrl,
-          mode: this.mode,
+          mode: rule,
           url,
           originHeader: headerOf(headers, "origin"),
           referer: headerOf(headers, "referer"),
@@ -2199,7 +2212,7 @@ export class BrowserEngine {
           movedByEmbed: this.embedMoves.movedTo,
         });
         verdict = judgeUnseenWrite({
-          mode: this.mode,
+          mode: rule,
           method,
           pathname,
           destructiveWire: isDestructiveWire(pathname, bytes?.toString("utf8")),
@@ -2280,8 +2293,10 @@ export class BrowserEngine {
     const escaped = reasons.delete(ESCAPE_REFUSAL);
     const foreign = [...reasons];
     this.blockedRequests = [];
+    // The rule that judged them, which just after a flow hands back is still the flow's (WriteRule).
+    const rule = this.writeRule.at();
     return (
-      `\n🛡 WRITE-POLICY blocked (${this.mode}): ${list}${extra}. ` +
+      `\n🛡 WRITE-POLICY blocked (${rule}): ${list}${extra}. ` +
       `This is the tester's safety policy, NOT an app bug — do not file a finding for the resulting error UI. ` +
       (foreign.length > 0
         ? `Refused because it was ${foreign.join("; ")}: it would reach a site embedded in the page rather than the app, which no mode but destructive allows. `
@@ -2292,9 +2307,9 @@ export class BrowserEngine {
       (answered
         ? `The page's own requests were answered with a 403 in the server's place, so the page's handling of a refusal is real: an error message is correct, and a success message is a false_success violation. `
         : "") +
-      (this.mode === "observe"
+      (rule === "observe"
         ? `observe mode blocks every request that is not a GET, so no form submission reaches the server. Re-attach with mode="read-only" ONLY if the user confirms that ordinary form submissions are acceptable on this target.`
-        : this.mode === "read-only"
+        : rule === "read-only"
           ? `Re-attach with mode="safe-write" to test create/edit flows, or "destructive" (user-approved disposable env only).`
           : `In safe-write, updates/deletes are only allowed on resources this session created (${this.createdResources.length} so far).`)
     );
@@ -3697,9 +3712,9 @@ export class BrowserEngine {
    */
   async replayFlow(steps: readonly FlowStep[], mode: "observe" | "read-only" = this.mode === "observe" ? "observe" : "read-only"): Promise<FlowReplay> {
     const page = this.requirePage();
-    // The write policy reads this.mode on every request, so the flow's rule holds for exactly as long as the flow runs.
+    // The write policy judges by writeRule, so the flow's rule holds from here until the flow has handed back (finally).
     const crawlMode = this.mode;
-    this.mode = mode;
+    this.setMode(mode);
     const context = this.context!;
     const violations: FlowReplay["violations"] = [];
     const here = (): string => {
@@ -3831,7 +3846,7 @@ export class BrowserEngine {
         await this.scanForContradictions().catch(() => {});
         // What the write policy refused of the app's own requests while this step ran is the step's, whatever caused it.
         const blocked = ownRefusals();
-        if (!refusal && blocked.length > 0) refusal = `the ${this.mode} write policy refused ${blocked.join(", ")}`;
+        if (!refusal && blocked.length > 0) refusal = `the ${this.writeRule.at()} write policy refused ${blocked.join(", ")}`;
         collect();
         if (refusal) return done({ status: "refused", step: n, did, reason: refusal.split("\n")[0], path: here() });
         if (failure) return done({ status: "failed", step: n, did, reason: failure, path: here() });
@@ -3852,23 +3867,35 @@ export class BrowserEngine {
           status: "refused",
           step: steps.length,
           did: describeStep(last),
-          reason: `after the last step, the ${this.mode} write policy refused ${late.join(", ")}`,
+          reason: `after the last step, the ${this.writeRule.at()} write policy refused ${late.join(", ")}`,
           path: here(),
         });
       }
       return done({ status: "passed" });
     } finally {
-      // Leave the flow's page before the crawl's rule comes back, so nothing it still sends goes out under a looser one.
-      await (this.page ?? page).goto("about:blank").catch(() => {});
+      // The hand-back, in order. Every page in the context is left while the flow's rule holds, the one a step opened
+      // a tab from included (a popup adopted as the session's page leaves it running), so nothing a page the flow used
+      // does runs on under the crawl's rule. Only then is the crawl's rule restored, and WriteRule keeps the flow's for
+      // a moment longer, for a write a page sent as it was left that the engine hears of late.
+      await BrowserEngine.settleWithin(Promise.allSettled(context.pages().map((p) => BrowserEngine.leave(p))), 5000);
       this.blockedRequests = [];
       this.oracles.drain(false);
-      this.mode = crawlMode;
+      this.setMode(crawlMode);
+      // Pages the session no longer drives are closed only now, at about:blank and under the held rule: in Firefox a
+      // page closed straight after it is left sent its leaving beacon unjudged about one time in forty.
+      await BrowserEngine.settleWithin(Promise.allSettled(context.pages().map((p) => (p === this.page ? undefined : p.close().catch(() => {})))), 5000);
       page.off("websocket", onSocket);
       context.off("response", onResponse);
       this.refs.clear();
       this.lastSnap = null;
       this.snapshotUrl = "";
     }
+  }
+
+  /** Change the write mode; a looser one takes over the judging only after WriteRule's hold (policy.ts). */
+  private setMode(mode: WriteMode): void {
+    this.currentMode = mode;
+    this.writeRule.set(mode);
   }
 
   /** Computed-style design audit of the current page — visual judgment material without pixels. */
@@ -4136,7 +4163,11 @@ export class BrowserEngine {
     await page.goto("about:blank", { timeout: 3000 }).catch(() => {});
   }
 
-  /** Close a page the engine will not drive, after leaving it (`leave`), so what it sends on its way out meets the policy. */
+  /**
+   * Close a page the engine will not drive, after leaving it (`leave`), so what it sends on its way out meets the policy.
+   * Known limit: in Firefox, a close straight after the leave has let the page's leaving beacon out unjudged (seen 2 times
+   * in 80 under load). replayFlow's hand-back closes pages only once every page is at about:blank; this and `close` do not yet.
+   */
   private static async leaveAndClose(page: Page): Promise<void> {
     await BrowserEngine.leave(page);
     await page.close().catch(() => {});

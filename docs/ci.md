@@ -4,7 +4,7 @@
 
 Whatever the CI system, the job has the same three parts: start the app, wait until it answers, run the check. The check never starts the app itself.
 
-The exploratory side can run in CI too, with a model's API in place of a person or coding agent: [an unattended exploratory run](#an-unattended-exploratory-run), below. It reports and never gates.
+The exploratory side can run in CI too, with a model's API in place of a person or coding agent: [an unattended exploratory run](#an-unattended-exploratory-run), below. It reports and never gates. An allowed account can also start one on a pull request's preview by commenting `/scenescout qa`: [a QA review from a pull-request comment](#a-qa-review-from-a-pull-request-comment).
 
 | Exit code | Meaning | What the job should do |
 |---|---|---|
@@ -394,3 +394,68 @@ npx --yes scenescout@3 ci http://127.0.0.1:3000 --out scenescout-ci
 ```
 
 with `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` set from the CI system's secret store.
+
+## A QA review from a pull-request comment
+
+An account the repository allows comments `/scenescout qa` on a pull request and gets an unattended exploratory run of that pull request's preview, with the results posted as a reply. Why it is shaped this way: [ADR 15](adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md).
+
+**It tests a deployed preview, never the pull request's code.** The job that holds the model's key checks out nothing, builds nothing and runs only SceneScout, from an exact release tag. So the project must already deploy each pull request somewhere reachable over https (a preview environment, a review app, a per-branch deployment). A project without previews can use the [unattended run](#an-unattended-exploratory-run) on pushes or a schedule instead.
+
+### The workflow
+
+Copy [examples/workflows/scenescout-qa.yml](../examples/workflows/scenescout-qa.yml) to `.github/workflows/` and add the key as a repository secret (`OPENAI_API_KEY` in the file; for Anthropic, change the name in the `qa` job's `env` to `ANTHROPIC_API_KEY`). It has three jobs:
+
+| Job | Holds the key | Permissions | What it does |
+|---|---|---|---|
+| `gate` | no | `pull-requests: write`, `deployments: read` | Reads the comment and the pull request, checks the commenter and where the pull request comes from, finds the preview's URL, and reacts to the comment. |
+| `qa` | yes | `contents: read` | Runs only when the gate says so. Runs `brunoboto96/SceneScout/ci` at an exact release against the preview's URL, with the caps below, and keeps the results as an artifact. |
+| `report` | no | `pull-requests: write`, `actions: read` | Posts the results on the pull request, with a link to the artifact, or says the run could not run. |
+
+Pin both actions (`brunoboto96/SceneScout/qa` and `brunoboto96/SceneScout/ci`) to the same exact release tag, from the first release that has them, or to that release's commit SHA; never to `@v3` or a branch. `issue_comment` runs the workflow file as it is on the default branch, so a pull request cannot change it. SceneScout's own code comes from that release; its npm dependencies are resolved when the action installs it, within the ranges that release declares, since the package ships no lockfile.
+
+### The command
+
+```
+/scenescout qa [preview URL] [focus]
+```
+
+Only the comment's first line is read, and the comment must begin with `/scenescout qa`, in any case, with nothing before it (the job's `startsWith` filter and the gate match it the same way). An optional https URL as the first word overrides where the preview is found; any other words become the run's `focus`, cut to 200 characters. Editing a comment starts nothing: only a new comment does.
+
+What the commenter sees:
+
+| Situation | Reaction | Reply |
+|---|---|---|
+| A run starts | 👀 | The results, when the run ends |
+| The commenter is not allowed | 😕 | None, so the command cannot make the workflow write on a pull request |
+| The pull request is closed, comes from a fork, has no preview, or its preview URL is not https | 😕 | One line saying why no run started, and how to change it |
+| The run is cancelled by hand or reaches the job's timeout | 👀 | One line saying so, with a link to the run |
+| A newer `/scenescout qa` on the same pull request cancels the run | 👀 | None from this run: the newer one replies |
+
+The reply names the pull request's head commit when the run was asked for. The preview may have been deployed from an earlier commit, so that is not a claim about what was tested.
+
+### What a project configures
+
+All optional, as repository variables (Settings → Secrets and variables → Actions → Variables):
+
+| Variable | Default | |
+|---|---|---|
+| `SCENESCOUT_QA_ALLOWED` | the repository's owners | The GitHub logins that may start a run, separated by commas or spaces. Unset, the owners may: the owner's login on a repository a user owns, and any commenter GitHub marks as `OWNER` (on a repository an organization owns, an owner of that organization). Set, it replaces that default, so include the owners' logins if they should keep the command. |
+| `SCENESCOUT_QA_PREVIEW_URL` | none | A template for the preview's URL, with `{pr}` (the pull request's number) and `{sha}` (its head commit) filled in, e.g. `https://pr-{pr}.preview.example.com`. |
+| `SCENESCOUT_QA_ENVIRONMENT` | any | Without a template, the preview is the newest successful deployment of the head commit, as the deployments API reports it; this limits it to one environment's deployments. |
+| `SCENESCOUT_QA_ALLOW_FORKS` | off | `true` runs on pull requests from forks. Off, a fork's pull request gets a reply saying why nothing ran. |
+
+The preview's URL is chosen in this order: the URL in the comment, the template, the deployment. It must be `https` and carry no credentials. The run explores the preview signed out: the `qa` job checks out nothing, so it has no saved session to read.
+
+### What it costs, and how much it runs
+
+- One run per comment. A new `/scenescout qa` on the same pull request cancels the run already going there, and only the newer one replies. The report job tells that apart from a run cancelled by hand or by its timeout by looking for a later run whose title (the workflow's `run-name`) names the same pull request and whose `qa` job started; keep both as the template has them.
+- The caps of [`scenescout ci`](#caps), set explicitly in the workflow: 40 turns, 1,500,000 tokens and 20 minutes, in `read-only` mode. Edit them there. The `qa` job's `timeout-minutes` must stay at least `max-minutes` plus 5, plus the install.
+- A comment from an account that is not allowed still starts the `gate` job, which ends in seconds without reading the pull request or reaching the key.
+
+### Forks
+
+The workflow refuses pull requests from forks by default, and `SCENESCOUT_QA_ALLOW_FORKS` turns that off. Even then, the key job never runs a fork's code: what reaches the model is the preview's pages, which the fork's author wrote. With forks allowed, the allowed commenter decides which previews are worth a model's time, and the run stays in `read-only` mode. Never replace the preview with a job that checks out and starts the pull request's code beside the key: under `issue_comment`, as under `pull_request_target`, that code would run with the repository's secrets.
+
+### This repository
+
+SceneScout has no deployed preview, so it does not run this workflow on its own pull requests. Its test suite (`qa-test`) holds the template to the rules above: the key only in the `qa` job, that job reached only through the gate, with read-only permissions and no checkout or script of its own, SceneScout from an exact release tag (the one that ships `qa/`), and one run per pull request. It also runs both keyless stages against a stand-in GitHub API.
