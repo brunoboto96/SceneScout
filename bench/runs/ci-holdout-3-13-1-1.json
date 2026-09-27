@@ -1,0 +1,57 @@
+{
+  "app": "holdout",
+  "run": "ci-holdout-3-13-1-1",
+  "date": "2026-09-27",
+  "note": "Unattended scenescout ci run (dispatched) of v3.13.1; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Home notices endpoint returns HTTP 500",
+      "severity": "high",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Fines page can present a refused list request as an empty list",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403 with empty fines-rows"
+    },
+    {
+      "title": "Book detail route requests book ID 0 and shows a not-found state",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/books/0 404; GET /api/books/0/reviews 404"
+    },
+    {
+      "title": "Home navigation links are visually indistinguishable from body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "home links no underline same color as body text"
+    },
+    {
+      "title": "Catalogue availability checkbox is below minimum target size",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "catalogue-available target 13x13px"
+    },
+    {
+      "title": "Catalogue offers no visually prominent next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "catalogue no visually dominant action"
+    },
+    {
+      "title": "Checkout reports success after server refuses loan creation",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/loans 403 followed by checkout-msg Checked out The Salt Road"
+    },
+    {
+      "title": "Joining an event lands on an actionless confirmation page",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "POST /api/events/1/join navigates to /events-joined.html with 0 interactables"
+    }
+  ],
+  "decisions": []
+}
