@@ -1138,7 +1138,7 @@ Without them the demo had 8,508 pairs (1,972 same), accuracy 81.1%, Brier 0.189
 | Held-out, all pairs | 181 | 49 / 132 | current rule | 86.2% | 0.138 (0.30) | 0.138 [n=153 stated 0 actual 0.15; n=28 stated 1 actual 0.93] | 2 | 23 |
 | Demo, sample | 100 | 21 / 79 | current rule | 81.0% | 0.190 (−0.15) | 0.190 [n=98 / n=2] | 0 | 19 |
 | Held-out, sample | 100 | 30 / 70 | current rule | 86.0% | 0.140 (0.33) | 0.140 [n=82 / n=18] | 1 | 13 |
-| Both samples | 200 | | model judge, efforts none and low | see [judge runs](#judge-run-1-refused-parse-no-usable-comparison) | | | | |
+| Both samples | 200 | | model judge, efforts none and low | see [judge run 1](#judge-run-1-refused-parse-no-usable-comparison) and [run 2](#judge-run-2-the-judge-beats-the-rule-on-both-apps) | | | | |
 
 The rule almost never merges wrongly and leaves most same-entry pairs apart.
 On the demo its Brier is slightly worse than always stating the base rate
@@ -1220,6 +1220,59 @@ confidence below 0.5 is still refused and counted as a contradiction, and each
 pair's judgement, the rule's verdict, the key's label and the call's output
 tokens are written to a per-pair file (ids only), so the judge and the rule
 can be compared pair by pair.
+
+### Judge run 2: the judge beats the rule on both apps
+
+One dispatch of the `dedup-bench` workflow on 2026-09-27 after the contract
+change above, same model, efforts, keys, archives and 200 sampled pairs as run
+1, so the rule's rows in run 1's table are this run's rule rows too. Every
+answer was usable: 0 unsure, 0 failed, 0 contradictions at either effort, so
+the judge is scored on all 100 pairs per app, the same pairs as the rule.
+
+| App | Decider | Scored | Unsure | Failed | Accuracy | Brier (skill vs base rate) | ECE [equal-count buckets over p_same] | Wrong merges | Missed merges |
+|---|---|---:|---:|---:|---:|---|---|---:|---:|
+| Demo, sample (21 / 79) | current rule | 100 | 0 | 0 | 82.0% | 0.180 (−0.08) | 0.180 [n=97 stated 0 actual 0.19; n=3 stated 1 actual 1.00] | 0 | 18 |
+| Demo, sample | judge, effort none | 100 | 0 | 0 | 98.0% | 0.019 (0.88) | 0.024 [n=58 stated 0.01 actual 0.00; n=20 stated 0.03 actual 0.10; n=20 stated 0.82 actual 0.85; n=2 stated 1.00 actual 1.00] | 0 | 2 |
+| Demo, sample | judge, effort low | 100 | 0 | 0 | 98.0% | 0.019 (0.88) | 0.025 [n=60 stated 0.01 actual 0.00; n=20 stated 0.04 actual 0.10; n=20 stated 0.91 actual 0.95] | 0 | 2 |
+| Held-out, sample (32 / 68) | current rule | 100 | 0 | 0 | 86.0% | 0.140 (0.36) | 0.140 [n=82 stated 0 actual 0.17; n=18 stated 1 actual 1.00] | 0 | 14 |
+| Held-out, sample | judge, effort none | 100 | 0 | 0 | 99.0% | 0.007 (0.97) | 0.012 [n=56 stated 0.01 actual 0.00; n=23 stated 0.45 actual 0.48; n=21 stated 0.99 actual 1.00] | 0 | 1 |
+| Held-out, sample | judge, effort low | 100 | 0 | 0 | 99.0% | 0.010 (0.95) | 0.010 [n=52 stated 0.01 actual 0.00; n=20 stated 0.18 actual 0.20; n=25 stated 0.99 actual 1.00; n=3 stated 1.00 actual 1.00] | 0 | 1 |
+
+**Pair by pair**, from the per-pair file: at each effort the judge is right
+on 16 demo pairs and 13 held-out pairs where the rule is wrong, and wrong on
+none where the rule is right. All 29 are missed merges the judge makes; the
+judge makes no wrong merge. Its three errors are the same three pairs at
+both efforts, each a "same" pair it calls different: two findings of
+off-grid spacing (the key entry spans pages, see above), two of invalid input
+accepted by the orders API, and two of a fine waived without confirmation on
+the held-out app. No pair's verdict differs between effort none and low.
+
+**Tokens.** 75,597 input (none cached) at each effort; 5,160 output at none
+and 5,172 at low. Every call's output was 24 to 26 tokens at both efforts, so
+effort low produced no more output than none: no reasoning tokens at either.
+That fits run 1's reading: 199 answers at about 27 tokens (its `p_same`
+values ran to three decimals) and one call per effort at the 16,000-token cap
+give 21,373. Run 1 kept no per-call counts, so this is consistent, not proven.
+No price is given; the per-call figure is what a cost estimate would use.
+
+**Decision: the judge passes #185's rule.** Its Brier beats the rule's on
+these pairs, at 100 pairs per app, on both apps and at both efforts (demo
+0.019 against 0.180, held-out 0.007 and 0.010 against 0.140), and in the
+paired comparison it never loses a pair the rule wins. Effort none is enough:
+low changed no verdict. The limits: one run per effort, so no run-to-run
+noise is measured; the pairs cluster by key entry, so 29 flips are fewer
+independent facts than 29; the labels come from the key, not a person; and
+the contract change was made after run 1, which covered both apps, so the
+held-out pairs were seen once before this run (their failures shaped the
+edit, not their labels).
+
+**Wiring it in is a separate change.** The store's dedup runs in the MCP
+server, which holds no model key, on every finding filed. A model judge
+there means a provider call per candidate duplicate, a key, and finding text
+sent to the provider. Where it belongs (the `scenescout ci` run, which already
+has a model, or an opt-in setting for the store with the rule as the default
+and the fallback) is a design decision for its own change. Until then the
+rule still decides in the store.
 
 ## Rejected and not-yet-tried
 
