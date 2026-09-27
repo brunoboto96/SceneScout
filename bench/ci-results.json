@@ -68,6 +68,38 @@
       "date": "2026-09-27",
       "app": "demo",
       "version": "3.13.0",
+      "commit": "6575b46",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 5,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 6,
+        "labelled": 6,
+        "low": "86%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 27,
+      "tokens": {
+        "input": 533110,
+        "cachedInput": 509907,
+        "output": 1730
+      },
+      "seconds": 65,
+      "costUsd": 0.00828437,
+      "archive": "ci-run-3"
+    },
+    {
+      "date": "2026-09-27",
+      "app": "demo",
+      "version": "3.13.0",
       "commit": "e13193a",
       "source": "manual",
       "provider": "openai",
