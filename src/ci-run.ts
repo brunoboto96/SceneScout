@@ -34,6 +34,7 @@ import {
   ciTools,
   describeStop,
   findingsThisRun,
+  MAX_TOOL_CALLS_PER_TURN,
   NO_USAGE,
   readFindings,
   redactKeys,
@@ -79,8 +80,7 @@ export const MAX_RETRIES = 3;
 export const FINISH_MS = 180_000;
 /** Attaching before the exploration, which counts towards the time cap. */
 const ATTACH_MS = 120_000;
-/** Tool calls run from one model reply; any beyond are answered as not run. Bounds what one turn can spend. Set here only. */
-export const MAX_TOOL_CALLS_PER_TURN = 16;
+export { MAX_TOOL_CALLS_PER_TURN };
 
 /** What the loop needs from a model: its next turn, and somewhere to put tool results. */
 export interface ModelClient {
