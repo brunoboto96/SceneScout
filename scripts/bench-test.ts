@@ -43,6 +43,23 @@ import {
   toArchive,
 } from "../src/engine/bench.ts";
 import type { RecordedDecision } from "../src/engine/calibration.ts";
+import { HttpModelClient } from "../src/ci-run.ts";
+import { NO_USAGE, redactKeys } from "../src/engine/ci.ts";
+import {
+  buildPairs,
+  decideDuplicate,
+  formatPairScore,
+  JUDGE_TOOL,
+  parseJudgement,
+  ruleJudgement,
+  samplePairs,
+  scorePairs,
+  type Ask,
+  type Judgement,
+  type LabelledPair,
+  type PairFinding,
+} from "../src/engine/dedup.ts";
+import { OpenAIConversation, type ModelTurn } from "../src/engine/provider.ts";
 import type { Finding } from "../src/engine/memory.ts";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -894,4 +911,238 @@ test("npm run bench scores an archive with its own app's key, and refuses anothe
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── finding dedup as a measured decision ────────────────────────────────────
+
+const pageKey = parseKey({
+  app: "pairs",
+  defects: [
+    { ...entry("export-500", ["POST /api/export 500", "export.{0,20}fails"]), route: "/reports" },
+    { ...entry("export-double", ["double.?submit"]), route: "/reports" },
+    { ...entry("chart-404", ["chart\\.png 404"]), route: "/" },
+    { ...entry("stale-total", ["stale total"]), route: "/list", alsoOn: ["/reports"] },
+  ],
+  nonDefects: [{ id: "slow", title: "slow export", why: "within budget", match: ["export is slow"] }],
+});
+const arch = (run: string, findings: Array<{ title: string; evidence?: string; category?: string }>, app = "pairs") => ({
+  app,
+  run,
+  date: "2026-09-27",
+  note: "",
+  decisions: [],
+  findings: findings.map((f) => ({ severity: "high" as const, category: "http-error", ...f })),
+});
+
+test("dedup pairs: one key entry is a same pair and two entries on one page a different pair; other pages are not paired", () => {
+  const set = buildPairs(
+    [
+      arch("r1", [
+        { title: "Export fails with a server error", evidence: "POST /api/export 500" },
+        { title: "Chart image missing", evidence: "GET /img/chart.png 404" },
+      ]),
+      arch("r2", [
+        { title: "Export button breaks: POST /api/export 500 on click", evidence: "testid=export click" },
+        { title: "Export sends a double submit", evidence: "POST /api/export x2" },
+      ]),
+    ],
+    { pairs: pageKey },
+  );
+  const describe = (p: LabelledPair) => `${p.a.keyId}~${p.b.keyId}@${p.route}:${p.same ? "same" : "different"}`;
+  assert.deepEqual(set.pairs.map(describe).sort(), [
+    "export-500~export-500@/reports:same",
+    "export-500~export-double@/reports:different",
+    "export-500~export-double@/reports:different",
+  ]);
+  assert.equal(set.findings, 4);
+});
+
+test("dedup pairs: alsoOn pages pair, and what cannot be labelled is counted, not paired", () => {
+  const set = buildPairs(
+    [
+      arch("r1", [
+        { title: "Export fails", evidence: "POST /api/export 500" },
+        { title: "stale total after an edit" },
+        { title: "Nothing the key knows" },
+        { title: "export fails and a double submit too" },
+        { title: "the export is slow" },
+      ]),
+      arch("r2", [{ title: "Export fails", evidence: "POST /api/export 500" }]),
+      arch("r3", [{ title: "Export fails", evidence: "POST /api/export 500" }], "no-such-app"),
+    ],
+    { pairs: pageKey },
+  );
+  assert.deepEqual(
+    set.pairs.map((p) => `${p.a.keyId}~${p.b.keyId}@${p.route}`),
+    ["export-500~stale-total@/reports"],
+    "stale-total names /reports in alsoOn; the repeat of identical text in r2 is not a second finding",
+  );
+  assert.deepEqual(
+    { identicalText: set.identicalText, unmatched: set.unmatched, ambiguous: set.ambiguous, nonDefect: set.nonDefect, withoutKey: set.archivesWithoutKey },
+    { identicalText: 1, unmatched: 1, ambiguous: 1, nonDefect: 1, withoutKey: 1 },
+  );
+});
+
+test("dedup pairs: the sample is capped, the same whatever order the pairs arrive in, and a bad cap is refused", () => {
+  const ps: LabelledPair[] = Array.from({ length: 30 }, (_, i) => ({
+    app: "pairs",
+    route: "/",
+    a: { title: `a${i}`, category: "visual", keyId: "x", run: "r1" },
+    b: { title: `b${i}`, category: "visual", keyId: "x", run: "r2" },
+    same: true,
+  }));
+  const one = samplePairs(ps, 10);
+  assert.equal(one.length, 10);
+  assert.deepEqual(samplePairs([...ps].reverse(), 10), one);
+  assert.equal(samplePairs(ps, 100).length, 30);
+  assert.throws(() => samplePairs(ps, 0), /positive whole number/);
+});
+
+const pf = (title: string, evidence: string | undefined, category = "http-error"): PairFinding => ({ title, evidence, category, keyId: "k", run: "r" });
+
+test("dedup rule: the benchmark scores the store's own rule — shared failing request merges, differing requests do not", () => {
+  // The contrastive pair: one fact differs, the endpoint the evidence names.
+  const merged = ruleJudgement({
+    route: "/r",
+    a: pf("Export fails", "POST /api/export 500"),
+    b: pf("Export is broken for everyone", "POST /api/export 500 on click"),
+  });
+  const kept = ruleJudgement({
+    route: "/r",
+    a: pf("Export fails", "POST /api/export 500"),
+    b: pf("Export is broken for everyone", "POST /api/import 500 on click"),
+  });
+  assert.deepEqual(merged, { verdict: "same", pSame: 1 });
+  assert.deepEqual(kept, { verdict: "different", pSame: 0 });
+});
+
+test("dedup scoring: accuracy, Brier and equal-count ECE, with unsure and failed judgements left out and counted", () => {
+  const labels = [true, true, true, true, false, false, false, false, true, false];
+  const js: Array<Judgement | null> = [
+    { verdict: "same", pSame: 0.9 },
+    { verdict: "same", pSame: 0.9 },
+    { verdict: "same", pSame: 0.8 },
+    { verdict: "different", pSame: 0.2 },
+    { verdict: "different", pSame: 0.1 },
+    { verdict: "different", pSame: 0.1 },
+    { verdict: "same", pSame: 0.6 },
+    { verdict: "different", pSame: 0.3 },
+    { verdict: "unsure", pSame: 0.5 },
+    null,
+  ];
+  const s = scorePairs(labels, js, 2);
+  assert.equal(s.judged, 8);
+  assert.equal(s.unsure, 1);
+  assert.equal(s.failed, 1);
+  assert.equal(s.correct, 6);
+  assert.equal(s.accuracy, 0.75);
+  // (0.01+0.01+0.04+0.64+0.01+0.01+0.36+0.09)/8
+  assert.ok(Math.abs(s.brier! - 1.17 / 8) < 1e-9);
+  assert.equal(s.brierRef, 0.25);
+  // Sorted p: .1 .1 .2 .3 | .6 .8 .9 .9 — actual 1/4 and 3/4.
+  assert.deepEqual(
+    s.buckets.map((b) => b.n),
+    [4, 4],
+  );
+  assert.ok(Math.abs(s.buckets[0].stated - 0.175) < 1e-9 && s.buckets[0].actual === 0.25);
+  assert.ok(Math.abs(s.ece! - (0.5 * 0.075 + 0.5 * 0.05)) < 1e-9);
+});
+
+test("dedup scoring: tied probabilities share a bucket, so a yes/no rule has two, and too few pairs publish no number", () => {
+  const labels = [true, false, false, false, false, false, true, true, true, false];
+  const rule: Judgement[] = labels.map((_, i) => (i < 6 ? { verdict: "different", pSame: 0 } : { verdict: "same", pSame: 1 }));
+  const s = scorePairs(labels, rule, 5);
+  assert.deepEqual(
+    s.buckets.map((b) => [b.n, b.stated, b.actual]),
+    [
+      [6, 0, 1 / 6],
+      [4, 1, 0.75],
+    ],
+  );
+  // A 0/1 decider's Brier is its error rate.
+  assert.equal(s.brier, 0.2);
+  const few = scorePairs(labels.slice(0, 7), rule.slice(0, 7));
+  assert.equal(few.accuracy, null);
+  assert.equal(few.brier, null);
+  assert.match(formatPairScore("rule", few), /fewer than 8 judged, no figures/);
+  assert.throws(() => scorePairs([true], []), /1 labels but 0 judgements/);
+});
+
+const turn = (input: unknown, name = JUDGE_TOOL.name): ModelTurn => ({
+  text: "",
+  calls: [{ id: "c1", name, input }],
+  usage: { input: 10, cachedInput: 0, cacheWrite: 0, output: 5 },
+});
+
+test("dedup judge: only a coherent judge_pair call is read; anything else is an error, never a guess", () => {
+  assert.deepEqual(parseJudgement(turn({ verdict: "same", p_same: 0.8 })), { ok: true, judgement: { verdict: "same", pSame: 0.8 } });
+  assert.deepEqual(parseJudgement(turn({ verdict: "unsure", p_same: 0.5 })), { ok: true, judgement: { verdict: "unsure", pSame: 0.5 } });
+  for (const [bad, why] of [
+    [turn({ verdict: "same", p_same: 0.3 }), /contradicts/],
+    [turn({ verdict: "different", p_same: 0.7 }), /contradicts/],
+    [turn({ verdict: "same", p_same: 1.2 }), /not a probability/],
+    [turn({ verdict: "same", p_same: "0.9" }), /not a probability/],
+    [turn({ verdict: "maybe", p_same: 0.5 }), /not same, different or unsure/],
+    [turn({ verdict: "same", p_same: 0.9 }, "other_tool"), /did not call judge_pair/],
+    [{ text: "They look the same.", calls: [], usage: NO_USAGE, note: "the model declined to continue" }, /declined/],
+  ] as const)
+    assert.match((parseJudgement(bad) as { error: string }).error, why);
+});
+
+test("dedup judge: off by default the rule decides; a failing or unsure judge falls back to the rule and says so", async () => {
+  const pair = { route: "/r", a: pf("Export fails", "POST /api/export 500"), b: pf("Export broken", "POST /api/export 500") };
+  assert.deepEqual(await decideDuplicate(pair), { duplicate: true, by: "rule" });
+  const differs = await decideDuplicate(pair, async () => turn({ verdict: "different", p_same: 0.1 }));
+  assert.deepEqual(differs, { duplicate: false, by: "model", judgement: { verdict: "different", pSame: 0.1 } });
+  const thrown = await decideDuplicate(pair, async () => {
+    throw new Error("HTTP 529: overloaded");
+  });
+  assert.equal(thrown.by, "rule");
+  assert.equal(thrown.duplicate, true);
+  assert.match(thrown.note!, /model judge failed \(HTTP 529: overloaded\); the current rule decided/);
+  const malformed = await decideDuplicate(pair, async () => turn({ verdict: "same", p_same: 0.2 }));
+  assert.equal(malformed.by, "rule");
+  assert.match(malformed.note!, /contradicts/);
+  const unsure = await decideDuplicate(pair, async () => turn({ verdict: "unsure", p_same: 0.5 }));
+  assert.equal(unsure.by, "rule");
+  assert.match(unsure.note!, /unsure; the current rule decided/);
+});
+
+test("dedup judge: through the real OpenAI adapter, a structured reply is read and a refused key falls back without printing it", async () => {
+  const KEY = "sk-judge-test-0123456789abcdef";
+  const pair = { route: "/r", a: pf("Export fails", "POST /api/export 500"), b: pf("Export broken", "POST /api/export 500") };
+  const sent: unknown[] = [];
+  const reply = (status: number, body: unknown): Response => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const ok = async (_url: string | URL | Request, init?: RequestInit) => {
+    sent.push(JSON.parse(String(init?.body)));
+    return reply(200, {
+      status: "completed",
+      output: [{ type: "function_call", call_id: "call_1", name: "judge_pair", arguments: JSON.stringify({ verdict: "different", p_same: 0.2 }) }],
+      usage: { input_tokens: 120, output_tokens: 9 },
+    });
+  };
+  const ask =
+    (f: typeof fetch): Ask =>
+    (system, tools, kickoff) =>
+      new HttpModelClient(new OpenAIConversation({ baseUrl: "http://model.test/v1", model: "m", effort: "none", system, tools }, kickoff), KEY, {
+        fetch: f,
+        sleep: async () => {},
+      }).next(60_000);
+  const d = await decideDuplicate(pair, ask(ok as typeof fetch));
+  assert.deepEqual(d, { duplicate: false, by: "model", judgement: { verdict: "different", pSame: 0.2 } });
+  const body = sent[0] as { reasoning: { effort: string }; tools: Array<{ name: string }>; input: Array<{ content: string }> };
+  assert.equal(body.reasoning.effort, "none");
+  assert.deepEqual(
+    body.tools.map((t) => t.name),
+    ["judge_pair"],
+  );
+  assert.match(body.input[0].content, /Finding A: .*POST \/api\/export 500/);
+  const refused = (async () => reply(401, { error: { message: `Incorrect API key provided: ${KEY}` } })) as typeof fetch;
+  const fell = await decideDuplicate(pair, ask(refused));
+  assert.equal(fell.by, "rule");
+  assert.match(fell.note!, /model judge failed \(HTTP 401/);
+  // The API's error text can quote the key, and the note carries it as given:
+  // whoever prints a note must redact it first, as dedup-bench does.
+  assert.ok(fell.note!.includes(KEY));
+  assert.ok(!redactKeys(fell.note!, [KEY]).includes(KEY));
 });
