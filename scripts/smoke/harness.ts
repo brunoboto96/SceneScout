@@ -82,11 +82,21 @@ export function check(name: string, cond: boolean, context?: string): void {
  * before the thing it was waiting for.
  */
 export async function until(label: string, cond: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
+  if (!(await eventually(cond, timeoutMs))) throw new Error(`timed out after ${timeoutMs}ms waiting for: ${label}`);
+}
+
+/**
+ * Poll like `until`, but answer whether the condition came to hold instead of
+ * throwing: for a check whose failure should be reported as that check, with
+ * its own context, rather than end the suite.
+ */
+export async function eventually(cond: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (!(await cond())) {
-    if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for: ${label}`);
+    if (Date.now() > deadline) return false;
     await new Promise((r) => setTimeout(r, 25));
   }
+  return true;
 }
 
 /**
