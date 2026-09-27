@@ -22,7 +22,7 @@ export type ProviderName = (typeof PROVIDERS)[number];
 /** Where each provider's key is read from. Nothing else is: no flag, no file, no input. */
 export const KEY_ENV: Record<ProviderName, string> = { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY" };
 
-export const DEFAULT_MODEL: Record<ProviderName, string> = { anthropic: "claude-sonnet-5", openai: "gpt-5.6-luna" };
+export const DEFAULT_MODEL: Record<ProviderName, string> = { anthropic: "claude-sonnet-5", openai: "gpt-6-luna" };
 
 /** The API root each request path is joined to. `--base-url` replaces it, for a compatible endpoint. */
 export const DEFAULT_BASE_URL: Record<ProviderName, string> = { anthropic: "https://api.anthropic.com/v1", openai: "https://api.openai.com/v1" };
@@ -396,6 +396,7 @@ export interface Price {
   output: number;
 }
 export const PRICES: Record<string, Price> = {
+  "gpt-6-luna": { input: 0.1, cachedInput: 0.01, output: 0.5 },
   "gpt-5.6-luna": { input: 0.2, cachedInput: 0.02, output: 1.2 },
   "claude-sonnet-5": { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 },
 };
@@ -528,7 +529,7 @@ export function guardToolArgs(
 ): { ok: true; args: Record<string, unknown> } | { ok: false; error: string } {
   if (name !== "scout_scan") return { ok: true, args };
   const given = args.projectPath;
-  if (given === undefined) return { ok: true, args: { ...args, projectPath: projectDir } };
+  if (given === undefined) return { ok: true, args: { ...args, projectPath: path.resolve(projectDir) } };
   if (typeof given !== "string" || path.resolve(projectDir, given) !== path.resolve(projectDir))
     return { ok: false, error: `scout_scan may scan only this run's project directory, ${projectDir}` };
   return { ok: true, args: { ...args, projectPath: path.resolve(projectDir) } };

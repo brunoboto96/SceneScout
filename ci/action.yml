@@ -27,7 +27,7 @@ inputs:
     required: false
     default: ""
   model:
-    description: The model id. Empty means the CLI's default for the provider (claude-sonnet-5, gpt-5.6-luna).
+    description: The model id. Empty means the CLI's default for the provider (claude-sonnet-5, gpt-6-luna).
     required: false
     default: ""
   effort:

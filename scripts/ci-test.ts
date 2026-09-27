@@ -183,7 +183,7 @@ test("provider: detected from the one key present; both keys need --provider; a 
   const detect = (env: Record<string, string>, provider?: "anthropic" | "openai") => detectProvider(env, provider ? { provider } : {});
   const openai = detect({ OPENAI_API_KEY: OPENAI_KEY });
   assert.ok(openai.ok);
-  assert.deepEqual(openai.resolved, { provider: "openai", model: "gpt-5.6-luna", effort: "low", baseUrl: "https://api.openai.com/v1" });
+  assert.deepEqual(openai.resolved, { provider: "openai", model: "gpt-6-luna", effort: "low", baseUrl: "https://api.openai.com/v1" });
   const anthropic = detect({ ANTHROPIC_API_KEY: ANTHROPIC_KEY });
   assert.ok(anthropic.ok);
   assert.deepEqual(anthropic.resolved, { provider: "anthropic", model: "claude-sonnet-5", effort: "low", baseUrl: "https://api.anthropic.com/v1" });
@@ -285,6 +285,17 @@ test("cost: a given price overrides the table's; an unknown model is costed only
   assert.match(ciSummaryMarkdown(RESULT({ model: "unknown-model" })), /cost not estimated/);
 });
 
+test("cost: the default OpenAI model is costed at its published price; the previous default still is", () => {
+  const u: Usage = { input: 1_000_000, cachedInput: 500_000, cacheWrite: 0, output: 100_000 };
+  assert.deepEqual(resolvePrice("gpt-6-luna"), { input: 0.1, cachedInput: 0.01, output: 0.5 });
+  // 500k plain at $0.10/M + 500k cached at $0.01/M + 100k out at $0.50/M = 0.05 + 0.005 + 0.05
+  assert.equal(estimateCost("gpt-6-luna", u)!.toFixed(4), "0.1050");
+  // The documented bounds at the 1.5M cap: all of it uncached with 60k out, and 80% cached with 20k out.
+  assert.equal(estimateCost("gpt-6-luna", { input: 1_500_000, cachedInput: 0, cacheWrite: 0, output: 60_000 })!.toFixed(2), "0.18");
+  assert.equal(estimateCost("gpt-6-luna", { input: 1_500_000, cachedInput: 1_200_000, cacheWrite: 0, output: 20_000 })!.toFixed(3), "0.052");
+  assert.notEqual(estimateCost("gpt-5.6-luna", u), null, "an explicit --model gpt-5.6-luna is still costed");
+});
+
 test("cost: estimated from the published price, cached input at its own rate; an unknown model is not guessed", () => {
   const u: Usage = { input: 1_000_000, cachedInput: 500_000, cacheWrite: 0, output: 100_000 };
   // 500k plain at $0.20/M + 500k cached at $0.02/M + 100k out at $1.20/M
@@ -327,9 +338,11 @@ test("tools: only the allowlist, in a fixed order, with no session and no $schem
 });
 
 test("scout_scan reads only the run's own project directory", () => {
-  assert.deepEqual(guardToolArgs("scout_scan", {}, "/work/site"), { ok: true, args: { projectPath: "/work/site" } });
-  assert.deepEqual(guardToolArgs("scout_scan", { projectPath: "/work/site/" }, "/work/site"), { ok: true, args: { projectPath: "/work/site" } });
-  assert.deepEqual(guardToolArgs("scout_scan", { projectPath: "." }, "/work/site"), { ok: true, args: { projectPath: "/work/site" } });
+  // Resolved the way the platform resolves it: on Windows "/work/site" is a path on the current drive.
+  const site = path.resolve("/work/site");
+  assert.deepEqual(guardToolArgs("scout_scan", {}, "/work/site"), { ok: true, args: { projectPath: site } });
+  assert.deepEqual(guardToolArgs("scout_scan", { projectPath: `${site}${path.sep}` }, "/work/site"), { ok: true, args: { projectPath: site } });
+  assert.deepEqual(guardToolArgs("scout_scan", { projectPath: "." }, "/work/site"), { ok: true, args: { projectPath: site } });
   for (const elsewhere of ["/", "/home/u", "/work", "../other", "/work/site/sub", 42])
     assert.match(
       (guardToolArgs("scout_scan", { projectPath: elsewhere }, "/work/site") as { error: string }).error,
@@ -813,7 +826,7 @@ test("loop: scout_scan runs on the run's project only", async () => {
     { text: "", calls: [], usage: use(1) },
   ]);
   await agentLoop({ client: model, host: h, tools, caps: BIG, log: () => {}, projectDir: "/work" });
-  assert.deepEqual(h.seen, [{ name: "scout_scan", args: { projectPath: "/work" } }]);
+  assert.deepEqual(h.seen, [{ name: "scout_scan", args: { projectPath: path.resolve("/work") } }]);
   assert.match(model.received[0][1].text, /scout_scan was not run: scout_scan may scan only this run's project directory/);
 });
 

@@ -309,7 +309,7 @@ The key is read from the environment and nowhere else: there is no option or act
 | Key set | Provider | API | Default model |
 |---|---|---|---|
 | `ANTHROPIC_API_KEY` | `anthropic` | Messages API | `claude-sonnet-5` |
-| `OPENAI_API_KEY` | `openai` | Responses API, with function calling | `gpt-5.6-luna` |
+| `OPENAI_API_KEY` | `openai` | Responses API, with function calling | `gpt-6-luna` |
 | both | the one `--provider` names; without it the run exits 2 | | |
 
 - `--model <id>` runs another model of the same provider.
@@ -331,7 +331,7 @@ The caps are checked before each model call. No model call, retry or wait betwee
 
 Each turn sends the conversation so far, so input tokens grow with every turn: the method and the tool descriptions alone are around 20,000 tokens, and each tool result adds to what every later turn sends. With the defaults a run usually reaches the token or the time cap before the turn cap. Tool results longer than 16,000 characters are cut before they reach the model; the report keeps everything.
 
-What a run costs follows from the token cap. At the defaults on `gpt-5.6-luna` ($0.20 per million input tokens, $0.02 cached, $1.20 output), a run that reaches the 1,500,000-token cap costs about $0.10 to $0.30, since most of each turn's input repeats the turn before and is read from the provider's cache; with nothing cached, the most it can cost is about $0.35. A run can end up to one turn over the cap, which adds a little. `--max-tokens` is the setting that bounds the cost.
+What a run costs follows from the token cap. At the defaults on `gpt-6-luna` ($0.10 per million input tokens, $0.01 cached, $0.50 output), a run that reaches the 1,500,000-token cap costs about $0.05 to $0.15, since most of each turn's input repeats the turn before and is read from the provider's cache; with nothing cached, the most it can cost is about $0.18. A run can end up to one turn over the cap, which adds a little. `--max-tokens` is the setting that bounds the cost.
 
 ### What the run may do
 
@@ -357,7 +357,7 @@ In `<project>/.scenescout/ci/`, or `--out`:
 - `ci.json`: the same, for a script: `stop`, `contractMet`, `usage` (`turns`, `inputTokens`, `cachedInputTokens`, `outputTokens`, `seconds`, `estimatedCostUsd`), `counts` and `findings`;
 - `ci.sarif`: the findings as SARIF 2.1.0, at `error`, `warning` or `note` by severity, and worth-a-look findings as notes.
 
-The usage line reads like `14 turn(s), 402,310 tokens in (301,200 cached), 18,400 out, 9m 12s, estimated cost $0.0628`. The cost is estimated from the token counts the API returns and the published price of the default models. `--price-in`, `--price-cached-in` and `--price-out` (US dollars per million tokens) replace those prices, or give one for any other model; cached input with no price of its own is charged at the input price. With neither a built-in price nor both `--price-in` and `--price-out`, the line says the cost was not estimated.
+The usage line reads like `14 turn(s), 402,310 tokens in (301,200 cached), 18,400 out, 9m 12s, estimated cost $0.0223`. The cost is estimated from the token counts the API returns and the published price of the default models. `--price-in`, `--price-cached-in` and `--price-out` (US dollars per million tokens) replace those prices, or give one for any other model; cached input with no price of its own is charged at the input price. With neither a built-in price nor both `--price-in` and `--price-out`, the line says the cost was not estimated.
 
 The project's `.scenescout/memory.json` is written as in any run, so a later run, or `scenescout check`'s re-tests, can build on what this one found. On a CI runner that memory is gone after the job unless the workflow keeps it, for example with `actions/cache` on `.scenescout/memory.json`.
 

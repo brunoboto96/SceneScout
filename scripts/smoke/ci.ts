@@ -23,7 +23,7 @@ export const title = "ci (unattended run)";
 const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "dist", "cli.js");
 // Invented; nothing shaped like a real service's key.
 const KEY = "fake-ci-key-0123456789abcdefghij";
-const RESOLVED: ResolvedProvider = { provider: "openai", model: "gpt-5.6-luna", effort: "low", baseUrl: "https://api.invalid/v1" };
+const RESOLVED: ResolvedProvider = { provider: "openai", model: "gpt-6-luna", effort: "low", baseUrl: "https://api.invalid/v1" };
 
 class Scripted implements ModelClient {
   readonly received: ToolOutcome[][] = [];

@@ -111,7 +111,7 @@ Usage:
                                     It reports and never gates. The key is read from ANTHROPIC_API_KEY or
                                     OPENAI_API_KEY only. Writes report.md, summary.md, ci.json and ci.sarif.
                                     (--provider anthropic|openai: needed only when both keys are set;
-                                     --model id (default claude-sonnet-5 / gpt-5.6-luna); --effort none|low|medium|
+                                     --model id (default claude-sonnet-5 / gpt-6-luna); --effort none|low|medium|
                                       high|xhigh|max (default low; none is OpenAI only); --base-url https://…/v1 for
                                       another endpoint that implements the same API;
                                      --max-turns N (default 40); --max-tokens N (default 1500000);

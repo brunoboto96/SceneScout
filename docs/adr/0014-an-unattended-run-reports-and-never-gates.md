@@ -99,8 +99,8 @@ may appear, and what its exit code means.
 - Each turn resends the conversation, so tokens grow with the run: the method
   and the tool descriptions alone are around 20,000 tokens. At the defaults the
   token cap or the time cap usually ends a run before the turn cap. On
-  `gpt-5.6-luna` a run at the token cap costs about $0.10 to $0.30 with prompt
-  caching, and at most about $0.35 with none.
+  `gpt-6-luna` a run at the token cap costs about $0.05 to $0.15 with prompt
+  caching, and at most about $0.18 with none.
 - The default level is `medium`. A run that a cap ends before its contract is
   met still writes the report, with the gap ledger listing what was left.
 - A tool result longer than 16,000 characters is cut before the model sees it.
