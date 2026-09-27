@@ -71,6 +71,47 @@ export interface Finding {
   verifiedAt?: string;
   /** What the re-tester saw, in their words. */
   verifyNote?: string;
+  /**
+   * "worth_a_look": the observation is real, and it is a defect only under a
+   * convention of the project that the run cannot see (a spacing scale, link
+   * styling in navigation, test ids on every control). Absent means a defect,
+   * which is every finding filed before the tier existed. The report lists
+   * these apart and does not count them as defects.
+   */
+  tier?: "worth_a_look";
+  /** For a worth_a_look: the convention that would make it a defect, as "a defect only if …" would finish it. */
+  convention?: string;
+}
+
+/**
+ * Whether a finding is in the "worth a look" tier. Anything else a file holds
+ * reads as a defect: a finding is never taken out of the defect count on a
+ * value this version does not know.
+ */
+export function isWorthALook(f: Pick<Finding, "tier">): boolean {
+  return f.tier === "worth_a_look";
+}
+
+/**
+ * The tier a finding keeps when it is found again. A defect wins: a finding
+ * someone filed as a defect is a decision about the project's convention, and
+ * a later "worth a look" for the same thing does not undo it. A worth-a-look
+ * filed again as a defect is promoted, and loses its convention. Two
+ * worth-a-looks keep the first convention unless it had none.
+ */
+/** Drops a finding's tier and convention in place, so a merged tier can be assigned onto it. */
+function withoutTier(f: Finding): Finding {
+  delete f.tier;
+  delete f.convention;
+  return f;
+}
+
+export function mergeTier(
+  existing: Pick<Finding, "tier" | "convention">,
+  incoming: Pick<Finding, "tier" | "convention">,
+): Pick<Finding, "tier" | "convention"> {
+  if (!isWorthALook(existing) || !isWorthALook(incoming)) return {};
+  return { tier: "worth_a_look", convention: existing.convention || incoming.convention };
 }
 
 /**
@@ -348,12 +389,18 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
     // the other side did not go on to re-find it as a regression.
     const newer = f.foundAt >= other.foundAt ? f : other;
     const older = newer === f ? other : f;
-    byId.set(f.id, {
+    const merged: Finding = {
       ...newer,
       runs: Math.max(f.runs, other.runs),
       evidence: newer.evidence ?? older.evidence,
       regressedAt: newer.regressedAt ?? older.regressedAt,
-    });
+    };
+    // The tier is not "later knowledge wins": a defect on either side is a decision
+    // about the convention, and a store still holding the worth-a-look must not undo it.
+    const tier = mergeTier(older, newer);
+    Object.assign(withoutTier(merged), tier);
+    if (!isWorthALook(merged) && isWorthALook(newer)) merged.severity = older.severity;
+    byId.set(f.id, merged);
   }
   out.findings = [...byId.values()];
 
@@ -1046,6 +1093,10 @@ export class MemoryStore {
         dupOf.runs += f.runs;
         if (!dupOf.evidence && f.evidence) dupOf.evidence = f.evidence;
         if (f.status === "resolved") dupOf.status = "resolved";
+        const promoted = isWorthALook(dupOf) && !isWorthALook(f);
+        const tier = mergeTier(dupOf, f);
+        Object.assign(withoutTier(dupOf), tier);
+        if (promoted) dupOf.severity = f.severity;
         merged += 1;
       } else {
         kept.push(f);
@@ -1577,7 +1628,8 @@ export class MemoryStore {
    *    across sessions rarely reuses the exact words — Jaccard catches it).
    * Returns [finding, isNew].
    */
-  addFinding(input: Omit<Finding, "id" | "foundAt" | "runs" | "repro">): [Finding, boolean] {
+  /** Returns the finding, whether it is new, and whether an existing worth-a-look was just promoted to a defect by it. */
+  addFinding(input: Omit<Finding, "id" | "foundAt" | "runs" | "repro">): [Finding, boolean, boolean] {
     // Redact BEFORE the id is derived, so a re-found finding whose quoted
     // secret differs by a character still hashes to the same id.
     const f = {
@@ -1596,6 +1648,11 @@ export class MemoryStore {
       existing.runs += 1;
       existing.foundAt = new Date().toISOString();
       if (!existing.evidence && f.evidence) existing.evidence = f.evidence;
+      // A worth-a-look filed again as a defect is promoted, at the severity the defect was filed at.
+      const promoted = isWorthALook(existing) && !isWorthALook(f);
+      const tier = mergeTier(existing, f);
+      Object.assign(withoutTier(existing), tier);
+      if (promoted) existing.severity = f.severity;
       // Re-finding a RESOLVED finding is a regression — reopen it loudly
       // rather than letting it hide in the report's completed section. But a
       // FUZZY match must never resurrect a fixed bug: telling someone a
@@ -1613,7 +1670,7 @@ export class MemoryStore {
         existing.regressedAt = existing.foundAt;
       }
       this.flush();
-      return [existing, false];
+      return [existing, false, promoted];
     }
 
     // Repro trace scoped to the finding's route: everything since the action
@@ -1650,7 +1707,7 @@ export class MemoryStore {
     };
     this.data.findings.push(finding);
     this.flush();
-    return [finding, true];
+    return [finding, true, false];
   }
 
   get findings(): Finding[] {

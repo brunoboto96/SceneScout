@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
   LANE_BLOCKED_BY_MAX,
   LANE_CATEGORIES,
+  LANE_CONVENTION_MAX,
   LANE_EVIDENCE_MAX,
   LANE_MAX_ITEMS,
   LANE_NAME_MAX,
@@ -29,6 +30,7 @@ import {
   LaneLedger,
   laneCloseGuard,
   decodedEntitiesNote,
+  ignoredConventionsNote,
   laneReportInstruction,
   parseLaneReport,
   requestsPair,
@@ -199,6 +201,12 @@ test("lane: every cap the parser enforces refuses at cap+1 and accepts at the ca
     ["blocked_by", LANE_BLOCKED_BY_MAX, (n) => laneReport({ status: "blocked", blocked_by: "b".repeat(n) }), /at blocked_by$/],
     ["lane", LANE_NAME_MAX, (n) => laneReport({ lane: "l".repeat(n) }), /at lane$/],
     ["route", LANE_ROUTE_MAX, (n) => laneReport({ routes: ["/" + "r".repeat(n - 1)] }), /at routes\.0$/],
+    [
+      "convention",
+      LANE_CONVENTION_MAX,
+      (n) => laneReport({}, { verdict: "worth_a_look", severity: null, category: "visual", convention: "c".repeat(n) }),
+      /at decisions\.0\.convention$/,
+    ],
   ];
   for (const [name, max, build, at] of caps) {
     assert.ok(parseLaneReport(build(max)).ok, `${name} at ${max} fits`);
@@ -221,6 +229,53 @@ test("lane: a defect without a severity or a category is not a decision yet; a n
     parseLaneReport(laneReport({}, { verdict: "unsure", severity: "low", category: "ux-polish", confidence: 0.5 })).ok,
     "an unsure with a tentative category tells the planner where to look",
   );
+});
+
+test("lane: a worth_a_look names the convention that would decide it; on any other verdict one is ignored, and the fold says so", () => {
+  const look = { verdict: "worth_a_look", severity: null, category: "visual", confidence: 0.8, evidence: "padding 13px off a 4px grid" };
+  const ok = parseLaneReport(laneReport({}, { ...look, convention: "a 4px spacing scale" }));
+  assert.ok(ok.ok, ok.ok ? "" : ok.reason);
+  assert.equal(ok.report.decisions[0].convention, "a 4px spacing scale");
+  // Required on the tier, whether the key is missing or null.
+  refused(laneReport({}, look), /must name the convention that would decide it at decisions\.0\.convention$/);
+  refused(laneReport({}, { ...look, convention: null }), /must name the convention/);
+  refused(laneReport({}, { ...look, convention: "" }), /at decisions\.0\.convention$/);
+  assert.deepEqual(ok.conventionsIgnored, []);
+  // Ignored elsewhere, not refused: the report is accepted, the convention is dropped from what is kept, and the fold names each verdict.
+  const onDefect = parseLaneReport(laneReport({}, { convention: "a 4px spacing scale" }));
+  assert.ok(onDefect.ok, onDefect.ok ? "" : onDefect.reason);
+  assert.equal("convention" in onDefect.report.decisions[0], false, "not kept on a defect");
+  assert.deepEqual(onDefect.conventionsIgnored, ["defect"]);
+  assert.equal(ignoredConventionsNote(onDefect.conventionsIgnored), "\n(convention ignored on a defect verdict: only a worth_a_look names a convention.)");
+  const mixed = parseLaneReport(
+    laneReport({
+      decisions: [
+        decision({ observation: "a", convention: "x" }),
+        decision({ observation: "b", convention: "y" }),
+        decision({ observation: "c", verdict: "unsure", severity: null, category: null, convention: "z" }),
+        decision({ observation: "d", verdict: "worth_a_look", severity: null, category: "visual", convention: "kept" }),
+      ],
+    }),
+  );
+  assert.ok(mixed.ok, mixed.ok ? "" : mixed.reason);
+  assert.equal(mixed.report.decisions[3].convention, "kept");
+  assert.equal(
+    ignoredConventionsNote(mixed.conventionsIgnored),
+    "\n(convention ignored on 2 defect verdicts; convention ignored on an unsure verdict: only a worth_a_look names a convention.)",
+  );
+  assert.equal(ignoredConventionsNote([]), "");
+  // Its length and emptiness are checked only where it counts: on a defect, an over-long or empty one is ignored like any other.
+  for (const convention of ["c".repeat(LANE_CONVENTION_MAX + 1), ""]) {
+    const r = parseLaneReport(laneReport({}, { convention }));
+    assert.ok(r.ok, r.ok ? "" : r.reason);
+    assert.deepEqual(r.conventionsIgnored, ["defect"], JSON.stringify(convention).slice(0, 20));
+    assert.equal("convention" in r.report.decisions[0], false);
+  }
+  refused(laneReport({}, { ...look, convention: "   " }), /must name the convention/);
+  // A reply written before the verdict existed carries no convention key at all, and still parses.
+  assert.ok(parseLaneReport(laneReport()).ok);
+  const nulled = parseLaneReport(laneReport({}, { convention: null }));
+  assert.ok(nulled.ok && nulled.conventionsIgnored.length === 0, "null is allowed on any verdict, and is nothing to note");
 });
 
 test("lane: blocked_by follows the status", () => {
@@ -265,6 +320,17 @@ test("lane: the fold counts what the planner decides on", () => {
     summarizeLaneReport(mixed.report),
     "orders: blocked, 4 judged, 2 defects (1 high), 1 unsure, mean confidence 0.70, 1 routes, blocked by sign-in 503",
   );
+  const looks = parseLaneReport(
+    laneReport({
+      decisions: [
+        decision({ observation: "a" }),
+        decision({ observation: "b", verdict: "worth_a_look", severity: null, category: "visual", confidence: 0.8, convention: "a 4px spacing scale" }),
+      ],
+    }),
+  );
+  assert.ok(looks.ok, looks.ok ? "" : looks.reason);
+  // Counted apart: a worth_a_look is not among the defects, and the planner sees how many there were.
+  assert.equal(summarizeLaneReport(looks.report), "orders: complete, 2 judged, 1 defects (1 high), 0 unsure, 1 worth a look, mean confidence 0.88, 1 routes");
   const empty = parseLaneReport(laneReport({ decisions: [], routes: [] }));
   assert.ok(empty.ok);
   assert.equal(summarizeLaneReport(empty.report), "orders: complete, 0 judged, 0 defects (0 high), 0 unsure, mean confidence 0.00, 0 routes");
@@ -289,11 +355,16 @@ test("lane: the instruction the planner sends names every value and every cap th
     ["blocked_by", LANE_BLOCKED_BY_MAX],
     ["lane name", LANE_NAME_MAX],
     ["route", LANE_ROUTE_MAX],
+    ["convention", LANE_CONVENTION_MAX],
   ] as const) {
     assert.ok(text.includes(`${cap} characters`), `the ${name} cap (${cap}) is stated, not discovered by refusal`);
   }
   assert.ok(text.includes(`${LANE_MAX_ITEMS} decisions`));
   assert.ok(text.includes('required when the status is "blocked"'), "the blocked rule is stated like the defect rule is");
+  assert.ok(text.includes('"convention"'), "the convention key is in the shape");
+  assert.ok(/"worth_a_look"[^.]*must name that convention in "convention"/.test(text), "the worth_a_look rule is stated");
+  assert.ok(text.includes('On every other verdict leave "convention" null or out: it is ignored there.'), "what happens on other verdicts is stated");
+  assert.ok(/not for "I could not tell": that is "unsure"/.test(text), "the line between worth_a_look and unsure is stated");
   assert.ok(text.includes('"orders"'), "the lane is told its own name");
   assert.ok(laneReportInstruction('a"b').includes('"a\\"b"'), "the lane name is escaped into the instruction");
 });

@@ -32,9 +32,9 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { BUCKET_EDGES, bucketLabel, bucketOf, type RecordedDecision } from "./calibration.js";
 import { laneRoutePaths, stripRouteQuery } from "./fingerprint.js";
+import { isWorthALook, type Finding } from "./memory.js";
 
 export { laneRoutePaths };
-import type { Finding } from "./memory.js";
 
 export const LEVELS = ["minimal", "medium", "extensive"] as const;
 export type Level = (typeof LEVELS)[number];
@@ -304,6 +304,12 @@ export interface Scorecard {
   falsePositives: Array<{ id: string; title: string; why: string; severity: string }>;
   /** Findings that are defects only under a convention the run cannot see. Outside precision entirely: neither right nor wrong. */
   contextual: Array<{ id: string; title: string }>;
+  /**
+   * Findings the run itself filed as worth a look (ADR 13): it did not claim a
+   * defect, so they are in neither recall nor precision, whatever the key says
+   * about them. Archives made before the tier existed hold none.
+   */
+  worthALook: Array<{ title: string; convention: string }>;
   /** Findings the key knows nothing about. They need a human label before precision can be final. */
   unknown: Array<{ title: string; severity: string; evidence: string }>;
   /** Findings two key entries both claim. Scored as neither, so the key can be sharpened. */
@@ -349,6 +355,8 @@ export interface KeyCalibration {
   setAsideByRoute: Array<{ lane: string; id: string; confidence: number }>;
   /** A verdict on something that is a defect only under a convention the run cannot see: either answer is defensible. */
   contextual: number;
+  /** A lane's own "worth_a_look": it says the answer depends on a convention, which is not a claim the key can mark right or wrong. */
+  worthALook: number;
   buckets: Array<{ label: string; decisions: number; stated: number; correct: number }>;
   ece: number;
   /**
@@ -366,12 +374,12 @@ export interface KeyCalibration {
  *
  * "defect" on a planted or also-real defect is right, and on a known
  * non-defect is wrong. "not_a_defect" is the reverse. An "unsure" verdict, a
- * dismissal as another lane's, a decision the key does not name, one it
- * names ambiguously, and one about a contextual entry are not scored — the same rule the in-product calibration
+ * "worth_a_look", a dismissal as another lane's, a decision the key does not
+ * name, one it names ambiguously, and one about a contextual entry are not scored — the same rule the in-product calibration
  * follows, for the same reason.
  */
 export function judgeDecision(d: RecordedDecision, key: AnswerKey, laneRoutes?: LaneRoutes): boolean | null {
-  if (d.verdict === "unsure") return null;
+  if (d.verdict === "unsure" || d.verdict === "worth_a_look") return null;
   if (isOwnershipRemark(d, key, laneRoutes)) return null;
   const m = classify(decisionText(d), key);
   if (!m || m.kind === "ambiguous" || m.kind === "contextual") return null;
@@ -471,6 +479,7 @@ export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key:
     ownership: known === 0 ? "wording" : known === lanes.length ? "routes" : "mixed",
     setAsideByRoute: [],
     contextual: 0,
+    worthALook: 0,
     buckets: [],
     ece: 0,
     brier: 0,
@@ -478,6 +487,10 @@ export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key:
   for (const d of decisions) {
     if (d.verdict === "unsure") {
       out.unsure += 1;
+      continue;
+    }
+    if (d.verdict === "worth_a_look") {
+      out.worthALook += 1;
       continue;
     }
     const remark = ownershipRemark(d, key, laneRoutes);
@@ -523,7 +536,7 @@ export function calibrateAgainstKey(decisions: readonly RecordedDecision[], key:
 }
 
 /** What scoring needs of a finding. A run archive keeps only this much. */
-export type ScoredFinding = Pick<Finding, "title" | "severity"> & { evidence?: string; category?: string };
+export type ScoredFinding = Pick<Finding, "title" | "severity"> & { evidence?: string; category?: string; tier?: Finding["tier"]; convention?: string };
 
 /**
  * Score one run.
@@ -544,9 +557,14 @@ export function score(
   const unknown: Scorecard["unknown"] = [];
   const ambiguous: Scorecard["ambiguous"] = [];
   const contextual: Scorecard["contextual"] = [];
+  const worthALook: Scorecard["worthALook"] = [];
   let correct = 0;
 
   for (const f of findings) {
+    if (isWorthALook(f)) {
+      worthALook.push({ title: f.title, convention: f.convention ?? "" });
+      continue;
+    }
     const m = classify(findingText(f), key);
     if (!m) {
       unknown.push({ title: f.title, severity: f.severity, evidence: f.evidence ?? "" });
@@ -613,6 +631,7 @@ export function score(
     correct,
     falsePositives,
     contextual,
+    worthALook,
     unknown,
     ambiguous,
     duplicates,
@@ -629,16 +648,24 @@ const pct = (n: number, d: number): string => (d === 0 ? "—" : `${Math.round((
  * false claims nobody has judged yet. The bounds can: the lower one counts
  * every open finding as wrong, the upper one as right. Findings set aside as
  * contextual are in neither: they are not claims the run could get right.
+ * Nor are findings the run filed as worth a look: it did not claim them.
  */
-export function precisionBounds(c: Pick<Scorecard, "correct" | "falsePositives" | "unknown" | "ambiguous" | "findings" | "contextual">): {
+export function precisionBounds(
+  c: Pick<Scorecard, "correct" | "falsePositives" | "unknown" | "ambiguous" | "findings" | "contextual"> & Partial<Pick<Scorecard, "worthALook">>,
+): {
   labelled: string;
   low: string;
   high: string;
 } {
   const labelled = c.correct + c.falsePositives.length;
   const open = c.unknown.length + c.ambiguous.length;
-  const scored = c.findings - c.contextual.length;
+  const scored = c.findings - setAside(c);
   return { labelled: `${c.correct}/${labelled} (${pct(c.correct, labelled)})`, low: pct(c.correct, scored), high: pct(c.correct + open, scored) };
+}
+
+/** Findings in neither precision count: contextual ones, and the run's own worth-a-looks. */
+function setAside(c: Pick<Scorecard, "contextual"> & Partial<Pick<Scorecard, "worthALook">>): number {
+  return c.contextual.length + (c.worthALook?.length ?? 0);
 }
 
 /** The scorecard as a person reads it. Leads with the two numbers, then says what each is made of. */
@@ -651,11 +678,15 @@ export function formatScorecard(c: Scorecard): string {
     `Recall     ${c.found.length}/${c.expected} (${pct(c.found.length, c.expected)}) of the planted defects expected at this level`,
     `Precision  ${p.labelled} of the findings the key can label` +
       (open
-        ? ` — ${open} of ${c.findings - c.contextual.length} unlabelled, so between ${p.low} and ${p.high} of ${c.contextual.length ? "the findings not set aside" : "all findings"}`
+        ? ` — ${open} of ${c.findings - setAside(c)} unlabelled, so between ${p.low} and ${p.high} of ${setAside(c) ? "the findings not set aside" : "all findings"}`
         : ""),
   ];
   if (c.contextual.length)
     lines.push(`Set aside  ${c.contextual.length} of ${c.findings} finding(s): defects only under a convention the run cannot see, so in neither count`);
+  if (c.worthALook.length)
+    lines.push(
+      `Set aside  ${c.worthALook.length} of ${c.findings} finding(s) the run filed as worth a look: not claimed as defects, so in neither recall nor precision`,
+    );
   lines.push(``);
   if (c.missed.length) lines.push(`Missed: ${c.missed.join(", ")}`);
   if (c.judgedNotFiled.length) lines.push(`Judged a defect in a lane report, never filed: ${c.judgedNotFiled.join(", ")}`);
@@ -667,6 +698,10 @@ export function formatScorecard(c: Scorecard): string {
   if (c.contextual.length) {
     lines.push(``, `Set aside as contextual (${c.contextual.length}):`);
     for (const x of c.contextual) lines.push(`  ${x.title} (${x.id})`);
+  }
+  if (c.worthALook.length) {
+    lines.push(``, `Filed as worth a look (${c.worthALook.length}):`);
+    for (const x of c.worthALook) lines.push(`  ${x.title}${x.convention ? ` — a defect only if the project uses ${x.convention}` : ""}`);
   }
   if (c.ambiguous.length) {
     lines.push(``, `Ambiguous (${c.ambiguous.length}) — the key claims each twice; sharpen it:`);
@@ -698,6 +733,7 @@ export function formatScorecard(c: Scorecard): string {
       k.outOfScope &&
         `${k.outOfScope} dismissed as another lane's (${k.ownership === "routes" ? "by the lanes' routes" : k.ownership === "wording" ? "by wording: no lane routes archived" : "by the lanes' routes where archived, else by wording"})`,
       k.contextual && `${k.contextual} about things that are defects only under a convention the run cannot see`,
+      k.worthALook && `${k.worthALook} the lane marked worth a look`,
     ].filter(Boolean);
     lines.push(
       ``,
@@ -803,6 +839,7 @@ export function toArchive(
       severity: f.severity,
       ...(f.category ? { category: f.category } : {}),
       ...(f.evidence ? { evidence: sanitize(f.evidence) } : {}),
+      ...(isWorthALook(f) ? { tier: "worth_a_look" as const, ...(f.convention ? { convention: sanitize(f.convention) } : {}) } : {}),
     })),
     decisions: decisions.map((d) => ({ ...d, observation: sanitize(d.observation), evidence: d.evidence === null ? null : sanitize(d.evidence) })),
   };

@@ -34,8 +34,18 @@ import { ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, McpError }
 import { z } from "zod";
 import { BrowserEngine } from "./engine/browser.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
-import { FINDING_CATEGORIES, MemoryStore, mergeableCategories, redactSecrets } from "./engine/memory.js";
-import { decodedEntitiesNote, LANE_NAME_MAX, LaneLedger, laneCloseGuard, laneReportInstruction, parseLaneReport, summarizeLaneReport } from "./engine/lane.js";
+import { FINDING_CATEGORIES, isWorthALook, MemoryStore, mergeableCategories, redactSecrets } from "./engine/memory.js";
+import {
+  decodedEntitiesNote,
+  ignoredConventionsNote,
+  LANE_CONVENTION_MAX,
+  LANE_NAME_MAX,
+  LaneLedger,
+  laneCloseGuard,
+  laneReportInstruction,
+  parseLaneReport,
+  summarizeLaneReport,
+} from "./engine/lane.js";
 import { MAX_UNFILED_NAMED, unfiledDefects } from "./engine/calibration.js";
 import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
 import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
@@ -661,7 +671,7 @@ server.registerTool(
           : "";
       laneLedger.fold(lane, engines.get(lane)?.attached === true);
       const around = parsed.aroundIgnored ? `\n(The text around the report's JSON block was discarded unread.)` : "";
-      const decoded = decodedEntitiesNote(parsed.entitiesDecoded);
+      const decoded = decodedEntitiesNote(parsed.entitiesDecoded) + ignoredConventionsNote(parsed.conventionsIgnored);
       return {
         content: [{ type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}${around}${decoded}${followUp}` }],
       };
@@ -1405,6 +1415,14 @@ server.registerTool(
         .describe(
           "Canonical machine signature for dedup, e.g. 'GET /api/reports/dashboard 403' or 'widget dashboard-summary-widget shows 0'. Same bug re-found later should produce the same string.",
         ),
+      convention: z
+        .string()
+        .min(1)
+        .max(LANE_CONVENTION_MAX)
+        .optional()
+        .describe(
+          "Only for a WORTH-A-LOOK finding: the observation is real, and it is a defect only under a convention of this project you cannot see. Name that convention, e.g. 'a 4px spacing scale' or 'test ids on every control'. The report lists it under \"Worth a look\", apart from the defects, and does not count it as one. Not for \"I could not tell\": leave that unfiled or look closer. Omit for a defect.",
+        ),
       session: sessionParam,
     },
   },
@@ -1417,34 +1435,41 @@ server.registerTool(
         title,
         detail,
         evidence,
+        convention,
       }: {
         severity: "high" | "medium" | "low";
         category: string;
         title: string;
         detail: string;
         evidence?: string;
+        convention?: string;
       },
       session,
     ) => {
       try {
         const eng = engineFor(session);
         if (!eng.memory) throw new Error("Not attached — findings need an active session.");
-        const [finding, isNew] = eng.memory.addFinding({
+        const [finding, isNew, promoted] = eng.memory.addFinding({
           severity,
           category: category as Parameters<typeof eng.memory.addFinding>[0]["category"],
           title,
           detail,
           evidence,
+          ...(convention ? { tier: "worth_a_look" as const, convention } : {}),
           url: eng.currentUrl,
           state: eng.currentState || "(unknown)",
           session: eng.sessionKey,
         });
         return text(
           isNew
-            ? `Finding recorded: [${finding.severity}] ${finding.title} (id ${finding.id})`
-            : finding.regressedAt
-              ? `⟳ REOPENED as a REGRESSION: finding ${finding.id} was previously resolved but the evidence reproduces again (seen in ${finding.runs} runs). Worth calling out to the user.`
-              : `Not recorded as new: merged into existing finding ${finding.id} — [${finding.severity}] ${finding.title}${finding.evidence ? ` (evidence: ${finding.evidence.slice(0, 160)})` : " (no evidence)"}, filed as ${finding.category}, seen in ${finding.runs} runs. If yours is a different bug, file it again: under the category that says what is wrong if it is another kind of defect (a finding filed as ${category} merges only with one filed as ${mergeableCategories(category).join(" or ")}), or with evidence naming the request that failed for you (method and path) — two findings are kept apart when both name requests and none is shared.`,
+            ? isWorthALook(finding)
+              ? `Recorded as worth a look (not a defect in the report's totals): ${finding.title} (id ${finding.id}) — a defect only if your project uses ${finding.convention}`
+              : `Finding recorded: [${finding.severity}] ${finding.title} (id ${finding.id})`
+            : promoted
+              ? `Merged into finding ${finding.id}, which was worth a look, and promoted to a defect: [${finding.severity}] ${finding.title}. It now counts among the report's findings.`
+              : finding.regressedAt
+                ? `⟳ REOPENED as a REGRESSION: finding ${finding.id} was previously resolved but the evidence reproduces again (seen in ${finding.runs} runs). Worth calling out to the user.`
+                : `Not recorded as new: merged into existing finding ${finding.id} — [${finding.severity}] ${finding.title}${finding.evidence ? ` (evidence: ${finding.evidence.slice(0, 160)})` : " (no evidence)"}, filed as ${finding.category}, seen in ${finding.runs} runs. If yours is a different bug, file it again: under the category that says what is wrong if it is another kind of defect (a finding filed as ${category} merges only with one filed as ${mergeableCategories(category).join(" or ")}), or with evidence naming the request that failed for you (method and path) — two findings are kept apart when both name requests and none is shared.`,
           session,
         );
       } catch (err) {

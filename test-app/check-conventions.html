@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Check: conventions</title>
+  <style>
+    body { font-family: system-ui, sans-serif; color: #111111; background: #ffffff; margin: 0; padding: 16px; }
+    nav { display: flex; gap: 16px; margin-bottom: 16px; }
+    nav a { text-decoration: none; color: inherit; }
+    .card { padding: 13px 7px; margin-bottom: 8px; border: 1px solid #d0d4da; border-radius: 4px; }
+    button { padding: 8px 16px; min-height: 32px; }
+  </style>
+</head>
+<body>
+  <!-- For `scenescout check`'s worth-a-look tier. check-conventions.html and
+       check-conventions-plain.html are identical except that here the cards'
+       paddings are off a 4px grid, and navigation links styled like body text.
+       Whether either is a defect depends on the project's conventions, so the
+       two pages must get the same gate verdict and the same issues; only the
+       worth-a-look list differs. -->
+  <nav>
+    <a href="#things" data-testid="conventions-nav-things">Things</a>
+    <a href="#reports" data-testid="conventions-nav-reports">Reports</a>
+    <a href="#settings" data-testid="conventions-nav-settings">Settings</a>
+  </nav>
+  <h1>Things</h1>
+  <p>This list shows every thing in the workspace, newest first, with its owner and its state.</p>
+  <div class="card">The first thing in the list, created this morning by the first owner.</div>
+  <div class="card">The second thing in the list, waiting for someone to review it.</div>
+  <div class="card">The third thing in the list, archived last week and kept for reference.</div>
+  <div class="card">The fourth thing in the list, shared with every member of the team.</div>
+  <button type="button" data-testid="conventions-add">Add a thing</button>
+</body>
+</html>

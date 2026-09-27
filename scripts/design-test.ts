@@ -235,6 +235,29 @@ test("every defect is also in the prose report, so check and scout_design_audit 
   assert.match(report, /page scrolls horizontally — content 1600px/);
 });
 
+test("off-grid spacing and body-coloured links are measured facts the check can list, from pages that differ in only that", () => {
+  // Twelve cards and three links, identical but for the padding values and whether the links are underlined.
+  const body = Array.from({ length: 3 }, (_, i) => rec({ text: `Paragraph ${i} with enough words`, textLen: 60, color: "rgb(17, 17, 17)" }));
+  const page = (padding: [number, number, number, number], underline: boolean) =>
+    payload([
+      ...body,
+      ...Array.from({ length: 12 }, () => rec({ padding })),
+      ...["Home", "Orders", "Help"].map((text) => rec({ tag: "a", text, textLen: text.length, color: "rgb(17, 17, 17)", underline })),
+    ]);
+  const drifting = analyzeDesign(page([13, 7, 13, 7], false), VIEWPORT);
+  const tidy = analyzeDesign(page([12, 8, 12, 8], true), VIEWPORT);
+  const rules = (d: typeof drifting) => d.defects.map((x) => x.rule).filter((r) => r === "off-grid-spacing" || r === "indistinct-link");
+  assert.deepEqual(rules(drifting), ["off-grid-spacing", "indistinct-link"]);
+  assert.deepEqual(rules(tidy), []);
+  const spacing = drifting.defects.find((d) => d.rule === "off-grid-spacing")!;
+  // No counts or percentages: the same values on another page are the same fact, with the same fingerprint.
+  assert.equal(spacing.detail, "paddings off a 4px grid: 7px, 13px");
+  assert.match(drifting.report, /SPACING: \d+% of paddings are off a 4px grid/, "the audit's own line says the same");
+  const link = drifting.defects.find((d) => d.rule === "indistinct-link")!;
+  assert.equal(link.detail, "links with no underline in the body-text colour rgb(17, 17, 17)");
+  assert.match(drifting.report, /3 link\(s\) with no underline AND the same color as body text/);
+});
+
 test("a control is one fact whether or not the shell is known yet: same rule, same wording", () => {
   const small = rec({ tag: "button", testid: "nav-x", interactive: true, text: "x", rect: { x: 0, y: 0, w: 14.4, h: 14.4 } });
   const before = analyzeDesign(payload([small, rec({ text: "Body" })]), VIEWPORT).defects.find((d) => d.rule === "tiny-target")!;

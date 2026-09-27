@@ -78,6 +78,41 @@ test("only a defect carrying a signature has a checkable outcome", () => {
   assert.equal(calibrate(decisions, []), null);
 });
 
+test("a worth_a_look is not scored, filed or not, and is counted under its own reason", () => {
+  // Same evidence, same confidence, one filed and one not: neither moves the
+  // figure, because whether a convention-dependent observation was filed says
+  // nothing about whether the lane was right.
+  const look = (evidence: string): RecordedDecision =>
+    decision({ verdict: "worth_a_look", severity: null, category: "visual", evidence, convention: "a 4px spacing scale", confidence: 0.3 });
+  const { decisions, findings } = run(0.9, MIN_FOR_A_VERDICT, 0);
+  const base = calibrate(decisions, findings);
+  const filedLook = look("GET /api/look/1 500");
+  const withLooks = calibrate([...decisions, filedLook, look("GET /api/look/2 500")], [...findings, finding("GET /api/look/1 500")]);
+  assert.equal(withLooks?.checkable, base?.checkable, "not checkable, even when it names a failing endpoint");
+  assert.equal(withLooks?.ece, base?.ece);
+  assert.equal(withLooks?.unjoinable, 0, "not unjoinable either: that reason is about defects");
+  assert.equal(withLooks?.worthALook, 2);
+  const said = formatCalibration(withLooks).join("\n");
+  assert.match(said, /2 decision\(s\) were marked worth a look/);
+  assert.match(said, /not scored/);
+  // A run whose only decisions are worth a look still says why it has no figure, rather than vanishing.
+  const only = calibrate([look("x")], []);
+  assert.equal(only?.worthALook, 1);
+  assert.match(formatCalibration(only).join("\n"), /Not enough to say yet[\s\S]*1 decision\(s\) were marked worth a look/);
+});
+
+test("a defect filed only as worth a look is not filed: the fold flags it, and calibration does not count it as agreed", () => {
+  const d = decision({ evidence: "GET /api/things 500" });
+  const asLook = finding("GET /api/things 500", { tier: "worth_a_look", convention: "a 4px spacing scale" });
+  assert.deepEqual(unfiledDefects([d], [asLook]), [`${d.observation} — GET /api/things 500`]);
+  assert.deepEqual(unfiledDefects([d], [finding("GET /api/things 500")]), [], "the same finding filed as a defect covers it");
+  // Text-matched evidence too, not only failing signatures.
+  const text = decision({ evidence: "testid=things-table-row shows 0 rows" });
+  assert.equal(unfiledDefects([text], [finding("testid=things-table-row shows 0 rows", { tier: "worth_a_look", convention: "x" })]).length, 1);
+  assert.equal(calibrate([d], [asLook])?.filed, 0);
+  assert.equal(calibrate([d], [finding("GET /api/things 500")])?.filed, 1);
+});
+
 test("a run that used no lanes produces nothing at all", () => {
   assert.equal(calibrate([], []), null);
   assert.deepEqual(formatCalibration(null), []);
