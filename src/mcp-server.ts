@@ -674,11 +674,16 @@ server.registerTool(
       // says so here, where the planner folds it, not only in the lane's own calls.
       const reattach = engines.get(lane)?.reattachSummary() ?? "";
       const reattached = reattach ? `\n↻ Session ${JSON.stringify(lane)}: ${reattach}.` : "";
+      const refreshed = engines.get(lane)?.refreshSummary() ?? "";
+      const brokered = refreshed ? `\n↻ Session ${JSON.stringify(lane)}: ${refreshed}.` : "";
       const around = parsed.aroundIgnored ? `\n(The text around the report's JSON block was discarded unread.)` : "";
       const decoded = decodedEntitiesNote(parsed.entitiesDecoded) + ignoredConventionsNote(parsed.conventionsIgnored);
       return {
         content: [
-          { type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}${reattached}${around}${decoded}${followUp}` },
+          {
+            type: "text" as const,
+            text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}${reattached}${brokered}${around}${decoded}${followUp}`,
+          },
         ],
       };
     } catch (err) {

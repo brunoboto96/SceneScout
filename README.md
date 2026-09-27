@@ -193,6 +193,8 @@ A browser window opens at the URL. Sign in however the app asks, then come back 
 
 Then `/scenescout --role admin`, or `scout_attach { role: "admin" }` from any agent. Every session attached with the same role gets its own browser built from that one login, so parallel lanes can all run as `admin`. A role with no saved login is refused with the command to run. `role` and `storageStatePath` are alternatives: pass one.
 
+Sessions of one role share one saved login, so they share its refresh token too. An app that rotates refresh tokens and treats a second use of a spent one as theft would revoke the whole token family, and sign every session of that role out, the moment two of them refreshed with the same token. SceneScout stops that for a session attached by role. When the page is about to send a refresh token from the role's profile, the session first takes a lock beside the profile (`.scenescout/auth/<role>.json.lock`, owner-only, taken over if its holder has not touched it in 30 seconds). Holding the lock, it re-reads the profile: if another session has rotated the token in the meantime, it loads that profile into its own browser and sends the current token in place of the spent one. Once the page has stored the rotated token, the session writes its state back over the profile and releases the lock. Sessions in separate processes share the lock through the file. A refresh token is recognised by name (a cookie, a storage key, or a field inside a JSON storage value whose name contains `refresh`) and is never printed or logged. An app whose sign-in renews through the identity provider's own session cookie needs none of this, since no refresh token is shared. `SCENESCOUT_REFRESH_BROKER=off` turns the broker off.
+
 ---
 
 ## 📺 Watching a run live
@@ -661,6 +663,7 @@ src/
     design.ts       the design audit + page scoring
     memory.ts       cross-run storage + finding dedup
     profiles.ts     saved sign-ins: role names, where a profile lives, owner-only files, attach by role
+    refresh.ts      the refresh broker: which values are a role's refresh tokens, the lock beside the profile, swapping a spent token
     report.ts       the gap ledger + report generation
     check.ts        the check's rules, gate, report and SARIF
     ci.ts           a CI run's options, provider choice, caps, key redaction, tools and files
