@@ -6,9 +6,10 @@
 # Its own workflow rather than a job in test.yml: adding or removing a label
 # re-runs this, and a label change must not re-run the whole test matrix.
 #
-# workflow_dispatch covers the "Version Packages" pull request. GitHub starts no
-# pull_request workflow for a pull request opened with the Actions token, so the
-# release workflow dispatches this on that branch, as it does test.yml. A
+# workflow_dispatch covers the "Version Packages" pull request and the weekly
+# benchmark's results pull requests. GitHub starts no pull_request workflow for
+# a pull request opened with the Actions token, so the release and bench-weekly
+# workflows dispatch this on those branches, as they do test.yml. A
 # dispatched run has no pull request to read, and that pull request is never held.
 #
 # "Re-run" replays the original event, labels included: after removing the hold
@@ -31,14 +32,16 @@ jobs:
     steps:
       - name: Dispatched run
         if: github.event_name == 'workflow_dispatch'
+        shell: bash
         env:
           REF: ${{ github.ref_name }}
         run: |
-          # Only the release workflow's version branch is dispatched here. A
-          # dispatch anywhere else would put a passing "wave hold" on a held
-          # pull request's commit and hide the failing one, so it fails.
-          if [ "$REF" != "changeset-release/main" ]; then
-            echo "::error::wave hold is only dispatched on changeset-release/main; on $REF it runs from pull request events."
+          # Only the bot-opened branches are dispatched here: the release
+          # workflow's version branch and the weekly benchmark's results
+          # branches. A dispatch anywhere else would put a passing "wave hold"
+          # on a held pull request's commit and hide the failing one, so it fails.
+          if [ "$REF" != "changeset-release/main" ] && ! [[ "$REF" =~ ^bench/ci-results-[0-9]+$ ]]; then
+            echo "::error::wave hold is only dispatched on changeset-release/main and bench/ci-results-<run id>; on $REF it runs from pull request events."
             exit 1
           fi
           echo "Dispatched on $REF; no pull request labels to read, so nothing is held."
