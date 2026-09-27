@@ -292,11 +292,19 @@ export function renderTable(rows: readonly CiResultRow[]): string {
   return lines.join("\n");
 }
 
-/** The document with the generated table between its markers replaced. Throws when the markers are missing or out of order. */
-export function replaceTable(doc: string, table: string): string {
+/**
+ * The document with the generated table between its markers replaced, in the
+ * document's own line endings: a checkout with CRLF endings (git on Windows)
+ * compares equal to the same text with LF. Throws when the markers are missing
+ * or out of order.
+ */
+export function replaceTable(original: string, table: string): string {
+  const crlf = original.includes("\r\n");
+  const doc = original.replace(/\r\n/g, "\n");
   const start = doc.indexOf(TABLE_START);
   const end = doc.indexOf(TABLE_END);
   if (start < 0 || end < 0 || end < start || doc.indexOf(TABLE_START, start + 1) >= 0 || doc.indexOf(TABLE_END, end + 1) >= 0)
     throw new Error("docs/benchmark.md must hold the ci-results start and end markers exactly once each, in that order");
-  return `${doc.slice(0, start + TABLE_START.length)}\n\n${table}\n\n${doc.slice(end)}`;
+  const out = `${doc.slice(0, start + TABLE_START.length)}\n\n${table.replace(/\r\n/g, "\n")}\n\n${doc.slice(end)}`;
+  return crlf ? out.replace(/\n/g, "\r\n") : out;
 }

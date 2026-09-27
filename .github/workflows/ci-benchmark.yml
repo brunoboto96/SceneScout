@@ -81,6 +81,17 @@ jobs:
     outputs:
       commit: ${{ steps.commit.outputs.sha }}
     steps:
+      # The job holds a model's key, so it runs only a release tag, main or a
+      # full commit id: checked before anything is checked out.
+      - name: The ref is a release, main or a commit
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          if [ -n "$REF" ] && ! [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$|^main$|^[0-9a-f]{40}$ ]]; then
+            echo "::error::ref must be a release tag (vX.Y.Z), main or a full commit id, not $REF"; exit 1
+          fi
+      # No actions cache anywhere in this job (setup-node's included): what a
+      # job that checks out a chosen ref saves, later runs on main would restore.
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
@@ -89,7 +100,6 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: npm
       - run: npm ci
       - run: npm run build
 
@@ -128,6 +138,7 @@ jobs:
           project: ${{ steps.app.outputs.project }}
           upload-artifact: "false"
           upload-sarif: "false"
+          cache: "false"
 
       - name: No key in what will be uploaded
         env:

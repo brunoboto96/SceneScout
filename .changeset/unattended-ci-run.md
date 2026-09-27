@@ -8,4 +8,4 @@ Add `scenescout ci <url>`, an exploratory run with no person present: a model re
 - The run stops at the first of 40 turns, 1,500,000 tokens or 20 minutes (`--max-turns`, `--max-tokens`, `--max-minutes`), still writes the report, and says which cap ended it.
 - It runs in `read-only` mode by default (`--mode observe|read-only|safe-write`, or `destructive` together with `--allow-destructive`) at level `medium` (`--level`).
 - It writes `report.md`, `report.html`, `summary.md` (also on the GitHub job summary), `ci.json` and `ci.sarif`, with a usage line of turns, tokens, time and an estimated cost. `--price-in`, `--price-cached-in` and `--price-out` set the prices the estimate uses, for any model.
-- A second GitHub Action, `brunoboto96/SceneScout/ci`, runs it; its inputs are the command's options.
+- A second GitHub Action, `brunoboto96/SceneScout/ci`, runs it; its inputs are the command's options, and `cache: false` keeps the browser out of the actions cache.

@@ -1081,8 +1081,29 @@ test("benchmark workflow: started by hand or called, reads the repository and no
   assert.equal(steps[upload].with?.path, "${{ steps.app.outputs.project }}", "the project directory itself, so it unpacks to <dir>/.scenescout/memory.json");
   assert.equal(String(steps[upload].with?.["include-hidden-files"]), "true");
   for (const s of steps) assert.ok(!/^\s*(npm run bench|npx tsx scripts\/bench|git (commit|push))/m.test(s.run ?? ""), "it scores and commits nothing");
-  // A caller chooses the ref, so the weekly run can run a release tag.
-  assert.equal(steps[0].with?.ref, "${{ inputs.ref }}");
+  // A caller chooses the ref, so the weekly run can run a release tag: it is checked before anything is checked out.
+  const checkout = steps.findIndex((s) => /^actions\/checkout@/.test(s.uses ?? ""));
+  assert.equal(steps[checkout].with?.ref, "${{ inputs.ref }}");
+  const guard = steps.findIndex((s) => s.env?.REF === "${{ inputs.ref }}");
+  assert.ok(guard >= 0 && guard < checkout, "the ref is validated before the checkout");
+  const accepts = (ref: string) => spawnSync("bash", ["-eo", "pipefail", "-c", steps[guard].run!], { env: { PATH: process.env.PATH, REF: ref } }).status === 0;
+  for (const ref of ["", "v3.13.0", "main", "0123456789abcdef0123456789abcdef01234567"]) assert.ok(accepts(ref), `refuses ${JSON.stringify(ref)}`);
+  for (const ref of ["refs/pull/1/merge", "feature/x", "v3.13", "v3.13.0-rc.1", "main2", "0123456", "v3.13.0; echo hi"])
+    assert.ok(!accepts(ref), `accepts ${ref}`);
+  // No actions cache in a job that checks out a ref an input chose: a later run on main would restore what it saved.
+  for (const s of steps) {
+    assert.ok(!/^actions\/cache/.test(s.uses ?? ""), s.uses);
+    if (/^actions\/setup-node@/.test(s.uses ?? "")) assert.equal(s.with?.cache, undefined, "setup-node caches nothing here");
+  }
+  assert.equal(String(run.with?.cache), "false", "the ci action keeps the browser out of the cache");
+});
+
+test("ci action: cache false skips both the restore and the save of the browser", () => {
+  const steps = action.runs.steps as Array<{ name?: string; if?: string; uses?: string }>;
+  assert.equal(action.inputs.cache.default, "true");
+  const cacheSteps = steps.filter((s) => /^actions\/cache\//.test(s.uses ?? ""));
+  assert.equal(cacheSteps.length, 2);
+  for (const s of cacheSteps) assert.match(s.if ?? "", /inputs\.cache == 'true'/, s.name);
 });
 
 test("weekly benchmark: scheduled or dispatched, and the key and the write token never meet in one job", () => {
@@ -1404,6 +1425,11 @@ test("results table: one line per row, and it replaces only what is between its 
   assert.throws(() => replaceTable("no markers", "x"), /markers exactly once/);
   assert.throws(() => replaceTable(`${TABLE_END}\n${TABLE_START}`, "x"), /in that order/);
   assert.throws(() => replaceTable(`${TABLE_START}${TABLE_START}${TABLE_END}`, "x"), /exactly once/);
+  // A CRLF checkout (git on Windows): the same result in the document's own endings, and so equal to itself when current.
+  const crlf = doc.replace(/\n/g, "\r\n");
+  assert.equal(replaceTable(crlf, "NEW\nROW"), replaceTable(doc, "NEW\nROW").replace(/\n/g, "\r\n"));
+  assert.equal(replaceTable(replaceTable(crlf, "NEW"), "NEW"), replaceTable(crlf, "NEW"));
+  assert.ok(!/[^\r]\n/.test(replaceTable(crlf, "NEW\nROW")), "no bare LF in a CRLF document");
 });
 
 test("results: docs/benchmark.md shows exactly what bench/ci-results.json records, and each row has its archive", () => {
