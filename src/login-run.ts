@@ -16,6 +16,7 @@ import readline from "node:readline";
 import { chromium, firefox, webkit, type BrowserContext, type BrowserType } from "playwright";
 import { defaultEngine, type BrowserEngineName } from "./browsers.js";
 import { explainLaunchFailure } from "./engine/launch.js";
+import { describeLifetime, readLifetime, type ProfileLifetime } from "./engine/expiry.js";
 import { describeSaved, writeProfile, type LoginOptions, type ProfileSummary } from "./engine/profiles.js";
 
 /**
@@ -65,7 +66,10 @@ const NOT_SAVED: Record<Exclude<LoginEnd, "enter">, string> = {
   interrupted: "Interrupted, so nothing was saved.",
 };
 
-export async function runLogin(options: LoginOptions, log: (line: string) => void): Promise<{ path: string; summary: ProfileSummary }> {
+export async function runLogin(
+  options: LoginOptions,
+  log: (line: string) => void,
+): Promise<{ path: string; summary: ProfileSummary; lifetime: ProfileLifetime }> {
   const engine: BrowserEngineName = options.browser ?? defaultEngine(process.env);
   const types: Record<BrowserEngineName, BrowserType> = { chromium, firefox, webkit };
   let browser;
@@ -96,7 +100,8 @@ export async function runLogin(options: LoginOptions, log: (line: string) => voi
     const how = await end.done;
     if (how !== "enter") throw new Error(NOT_SAVED[how]);
     const state = await captureState(context);
-    return writeProfile(options.projectDir, options.role, state);
+    const saved = writeProfile(options.projectDir, options.role, state);
+    return { ...saved, lifetime: readLifetime(state, { url: options.url }) };
   } finally {
     end?.dispose();
     // Closing a browser the person already closed fails; nothing is left to clean up then.
@@ -104,10 +109,15 @@ export async function runLogin(options: LoginOptions, log: (line: string) => voi
   }
 }
 
-/** The line printed on success. Never the profile's contents. */
-export function savedLine(options: LoginOptions, saved: { path: string; summary: ProfileSummary }): string {
+/** The lines printed on success: where, how much, how long it lasts. Never the profile's contents. */
+export function savedLine(
+  options: LoginOptions,
+  saved: { path: string; summary: ProfileSummary; lifetime: ProfileLifetime },
+  now: number = Date.now(),
+): string {
   return (
     `${describeSaved(saved.path, saved.summary)}\n` +
+    `${describeLifetime(saved.lifetime, now)}\n` +
     `Attach as this role with scout_attach { role: "${options.role}" } — every session given it signs in from this one login.`
   );
 }

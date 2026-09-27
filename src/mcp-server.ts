@@ -66,6 +66,8 @@ import {
   type SessionStatus,
 } from "./engine/live.js";
 import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
+import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
+import { loginCommand } from "./engine/profiles.js";
 import { formatNeverSubmittedEmpty } from "./engine/forms.js";
 import { computeGaps, formatRouteCoverage, formatUnchosenOptions, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
@@ -578,23 +580,66 @@ server.registerTool(
       lanes: z.number().int().min(1).max(MAX_LANES).describe(`How many lanes to split across (1–${MAX_LANES})`),
       goal: z.string().max(200).optional().describe("What the whole run is for; each lane's objective is written against it"),
       routes: z.array(z.string()).max(500).optional().describe("Routes to split. Omit to split every route this project knows about."),
+      runMinutes: z
+        .number()
+        .int()
+        .min(1)
+        .max(1440)
+        .optional()
+        .describe(
+          `How long the lanes will run, in minutes (default ${DEFAULT_RUN_MINUTES}). When they attach by a saved role, the brief is refused if that login will not last this long plus the margin.`,
+        ),
+      expiryMarginMinutes: z
+        .number()
+        .int()
+        .min(0)
+        .max(240)
+        .optional()
+        .describe(`How long past the run a saved role's login must still last, in minutes (default ${DEFAULT_EXPIRY_MARGIN_MINUTES}).`),
       session: sessionParam,
     },
   },
-  serializedPerSession("scout_lane_brief", async ({ lanes, goal, routes }: { lanes: number; goal?: string; routes?: string[] }, session) => {
-    try {
-      const eng = engineFor(session);
-      const all = routes && routes.length > 0 ? routes : eng.allKnownRoutes();
-      const briefs = planLanes(all, lanes, { goal, mode: eng.mode, role: eng.role });
-      laneLedger.nameBriefed(
-        briefs.map((b) => b.lane),
-        (s) => engines.has(s),
-      );
-      return text(formatBriefs(briefs, { goal, mode: eng.mode, role: eng.role, roleProfile: eng.auth.kind === "role" }), session);
-    } catch (err) {
-      return errorText(err);
-    }
-  }),
+  serializedPerSession(
+    "scout_lane_brief",
+    async (
+      {
+        lanes,
+        goal,
+        routes,
+        runMinutes,
+        expiryMarginMinutes,
+      }: { lanes: number; goal?: string; routes?: string[]; runMinutes?: number; expiryMarginMinutes?: number },
+      session,
+    ) => {
+      try {
+        const eng = engineFor(session);
+        // Lanes that attach by a saved role all sign in from one file: check it
+        // lasts the run before handing out briefs that would die part-way.
+        let expiryNote = "";
+        if (eng.auth.kind === "role") {
+          const verdict = judgeProfileFile(eng.auth.storageStatePath, {
+            url: eng.baseUrl,
+            now: Date.now(),
+            runMs: (runMinutes ?? DEFAULT_RUN_MINUTES) * 60_000,
+            marginMs: (expiryMarginMinutes ?? DEFAULT_EXPIRY_MARGIN_MINUTES) * 60_000,
+            role: eng.auth.role,
+            rerun: loginCommand(eng.auth.role, eng.baseUrl),
+          });
+          if (verdict.kind === "refuse") return errorText(new Error(verdict.message));
+          if (verdict.kind !== "ok") expiryNote = `⚠ ${verdict.message}\n\n`;
+        }
+        const all = routes && routes.length > 0 ? routes : eng.allKnownRoutes();
+        const briefs = planLanes(all, lanes, { goal, mode: eng.mode, role: eng.role });
+        laneLedger.nameBriefed(
+          briefs.map((b) => b.lane),
+          (s) => engines.has(s),
+        );
+        return text(expiryNote + formatBriefs(briefs, { goal, mode: eng.mode, role: eng.role, roleProfile: eng.auth.kind === "role" }), session);
+      } catch (err) {
+        return errorText(err);
+      }
+    },
+  ),
 );
 
 server.registerTool(
