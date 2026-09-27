@@ -1155,7 +1155,9 @@ to the rule and is counted as failed. It needs `OPENAI_API_KEY` or
 `ANTHROPIC_API_KEY`: the Messages API has no effort `none`, so on Anthropic only
 `low` runs. Cost is one call per pair per effort, a few hundred input tokens
 each, printed at the end of a run. No key was available when this was built,
-so the judge rows are owed. The judge is not wired into the store: it replaces
+so the judge rows are owed; the `dedup-bench` workflow (dispatched by hand) runs
+the judge with the repository's `OPENAI_API_KEY` secret and puts the scorecard
+in its job summary and an artifact. The judge is not wired into the store: it replaces
 the rule only if its Brier beats the rule's on these pairs, at a pair count and
 on both apps, and until then the rule is the only thing that dedups.
 
