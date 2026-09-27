@@ -98,6 +98,7 @@
     {
       "id": "events-joined-dead-end",
       "route": "/events-joined.html",
+      "alsoOn": ["/events.html"],
       "title": "After joining an event the confirmation page is a dead end with no navigation",
       "category": "dead-end",
       "severity": "medium",
@@ -118,6 +119,7 @@
     {
       "id": "member-record-any-id",
       "route": "/account.html",
+      "everyPage": true,
       "title": "A member who calls /api/members/<id> directly can read any other member's record, contact details included",
       "category": "security",
       "severity": "high",
@@ -260,6 +262,7 @@
     {
       "id": "catalogue-stale-after-loan",
       "route": "/catalogue.html",
+      "alsoOn": ["/checkout.html", "/loans.html"],
       "title": "The catalogue shows stale availability: it keeps its first load in the tab even after a book is checked out or returned",
       "category": "data-inconsistency",
       "severity": "medium",
@@ -680,6 +683,7 @@
     {
       "id": "nav-links-unstyled",
       "route": "/",
+      "everyPage": true,
       "title": "Nav links have no underline and a colour close to the body text's",
       "category": "ux-polish",
       "reason": "Link styling depends on position. A link inside a navigation bar is recognisable as a link by where it is, and WCAG's distinguishable-links rule (1.4.1) is aimed at links in running text; whether nav links must also be underlined or coloured is the project's own convention. The same entry is contextual in the demo's key.",

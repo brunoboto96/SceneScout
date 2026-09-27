@@ -1,6 +1,6 @@
 {
   "app": "Harbor demo",
-  "_comment": "What this app contains, as data, so a run can be scored against it (npm run bench). `defects` are the ones planted on purpose and listed in README.md; recall is measured against those. `alsoReal` are genuine problems runs have found that nobody planted: they count as correct but not toward recall, so recall stays comparable between runs. `nonDefects` are things runs are known to report that are not defects: matching one is a false positive. `contextual` are observations that are defects only under a convention the run cannot see (each says which in `reason`): a finding matching one is set aside, in neither precision's numerator nor its denominator, and a lane's verdict on one is not scored for calibration. Severities are the key author's judgement. `match` holds case-insensitive regular expressions tried against a finding's evidence and title. Every entry carries `examples` it MUST match and `counterExamples` it must NOT — the key tests itself (bench-test), so widening a pattern cannot quietly steal another entry's findings. When you change the key, re-score every archived run: npm run bench -- --all.",
+  "_comment": "What this app contains, as data, so a run can be scored against it (npm run bench). `defects` are the ones planted on purpose and listed in README.md; recall is measured against those. `alsoReal` are genuine problems runs have found that nobody planted: they count as correct but not toward recall, so recall stays comparable between runs. `nonDefects` are things runs are known to report that are not defects: matching one is a false positive. `contextual` are observations that are defects only under a convention the run cannot see (each says which in `reason`): a finding matching one is set aside, in neither precision's numerator nor its denominator, and a lane's verdict on one is not scored for calibration. Severities are the key author's judgement. `route` is the page an entry is on, `alsoOn` any other pages it shows on, and `everyPage` marks chrome every page carries; where a run archived its lanes' routes, a lane's not-a-defect on a defect none of whose pages it covered is a remark about another lane's page and is not scored. `match` holds case-insensitive regular expressions tried against a finding's evidence and title. Every entry carries `examples` it MUST match and `counterExamples` it must NOT — the key tests itself (bench-test), so widening a pattern cannot quietly steal another entry's findings. When you change the key, re-score every archived run: npm run bench -- --all.",
   "defects": [
     {
       "id": "dashboard-chart-404",
@@ -187,6 +187,7 @@
     {
       "id": "scheduled-reports-dead-end",
       "route": "/reports-scheduled.html",
+      "alsoOn": ["/reports.html"],
       "title": "Scheduled reports has no navigation and no way back",
       "category": "dead-end",
       "severity": "high",
@@ -246,6 +247,7 @@
     {
       "id": "approve-endpoint-accepts-clerk",
       "route": "/approvals.html",
+      "everyPage": true,
       "title": "Approve is hidden from all but a manager, but the endpoint accepts a clerk",
       "category": "security",
       "severity": "high",
@@ -305,6 +307,7 @@
     {
       "id": "orders-stored-xss",
       "route": "/orders.html",
+      "alsoOn": ["/orders-new.html"],
       "title": "The customer name is rendered as HTML (stored XSS)",
       "category": "security",
       "severity": "high",
@@ -334,6 +337,7 @@
     {
       "id": "delete-reports-false-success",
       "route": "/settings.html",
+      "alsoOn": ["/order.html"],
       "title": "Delete order and Delete workspace report success without reading the response",
       "category": "data-inconsistency",
       "severity": "high",
@@ -415,6 +419,7 @@
     {
       "id": "orders-api-accepts-invalid-input",
       "route": "/orders-new.html",
+      "everyPage": true,
       "title": "The orders API accepts invalid input: zero or negative item counts and an empty customer",
       "category": "data-inconsistency",
       "severity": "high",
@@ -485,6 +490,7 @@
     {
       "id": "approvals-requested-column-shows-notes",
       "route": "/approvals.html",
+      "alsoOn": ["/order.html"],
       "title": "The Requested column shows the order's notes",
       "category": "data-inconsistency",
       "severity": "low",
@@ -599,6 +605,7 @@
     {
       "id": "created-orders-total-zero",
       "route": "/orders.html",
+      "alsoOn": ["/orders-new.html", "/approvals.html"],
       "title": "Orders created from the form always have a $0.00 total",
       "category": "data-inconsistency",
       "severity": "low",
@@ -697,6 +704,7 @@
     {
       "id": "line-items-link-no-editing",
       "route": "/order.html",
+      "alsoOn": ["/orders.html"],
       "title": "\"Line items are edited from the list\" points to a list with no way to edit line items",
       "category": "ux-confusing",
       "severity": "low",
@@ -1026,6 +1034,7 @@
     {
       "id": "nav-links-unstyled",
       "route": "/",
+      "everyPage": true,
       "title": "Nav links have no underline and the body text's colour",
       "category": "ux-polish",
       "reason": "Link styling depends on position. A link inside a navigation bar is recognisable as a link by where it is, and WCAG's distinguishable-links rule (1.4.1) is aimed at links in running text; whether nav links must also be underlined or coloured is the project's own convention.",

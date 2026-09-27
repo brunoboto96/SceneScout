@@ -226,6 +226,11 @@ ${late.slice(0, 400)}`);
     // It carries the lane's page, so the live feed and the replay show where the lane was when it was folded.
     if (!folds.some((l) => /"url":"http[^"]+"/.test(l))) fail(`the lane-report marker carries no page URL: ${folds[0]}`);
     console.log("✓ a lane report names what was judged and never filed, and accepts prose around one fenced object");
+    // The routes it covered are kept in the project's memory, where the benchmark's archive reads them.
+    const stored = JSON.parse(fs.readFileSync(path.join(projectDir, ".scenescout", "memory.json"), "utf8")) as { laneRoutes?: Record<string, string[]> };
+    if (JSON.stringify(stored.laneRoutes?.orders) !== JSON.stringify(["/"]))
+      fail(`a folded lane report's routes were not kept: ${JSON.stringify(stored.laneRoutes)}`);
+    console.log("✓ a folded lane report keeps the routes the lane covered");
     assertClosedAll(await call("scout_close", { all: true }));
 
     // The server keeps one store per project for its whole life. A second run

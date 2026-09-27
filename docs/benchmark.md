@@ -28,7 +28,8 @@ These score the demo, which is the default. The held-out app takes `--app
 holdout`; see [the held-out app](#the-held-out-app).
 
 Archive every run you intend to compare. An archive keeps only what scoring
-reads — findings and lane decisions, with local paths removed — so when the key
+reads — findings, lane decisions and the routes each lane's report said it
+covered, with local paths removed — so when the key
 changes, `--all` re-scores the old runs against the new key. Two scorecards
 from different keys are not comparable, and each one prints its key's hash.
 
@@ -46,7 +47,7 @@ one found.
 | **False positives** | Findings matching a known non-defect, with the reason it is not one. |
 | **Set aside** | Findings matching a *contextual* entry: something that is a defect only under a convention the run cannot see. They are in neither precision's numerator nor its denominator, and are not unlabelled; the scorecard lists them and says how many. So are findings the run itself filed as worth a look ([ADR 13](adr/0013-a-convention-is-the-projects-to-decide.md)): the run did not claim them as defects, so they are in neither recall nor precision, whatever the key says about them; the archive keeps a finding's tier, and the scorecard lists them and says how many. Archives made before the tier existed hold none. |
 | **Severity** | Each filed defect's severity against the key's. |
-| **Lane calibration** | Whether a lane's verdict was right *according to the key*, bucketed by the confidence it stated, with an expected calibration error and a Brier score. A "not a defect" whose reason is that the thing belongs to another lane is not scored: it is a verdict about ownership, not about whether the thing is broken. Nor is a verdict about a contextual entry, either way: both answers are defensible. Nor is a lane's own "worth a look", which says the answer depends on a convention and names it ([ADR 13](adr/0013-a-convention-is-the-projects-to-decide.md)). Each reason a verdict was not scored is counted and printed. |
+| **Lane calibration** | Whether a lane's verdict was right *according to the key*, bucketed by the confidence it stated, with an expected calibration error and a Brier score. A "not a defect" about something on another lane's page is not scored: it is a remark about ownership, not a verdict on whether the thing is broken. Where the run archived its lanes' routes, that is decided by where the thing is: the verdict matches a planted or also-real defect none of whose pages (`route`, `alsoOn`) the lane covered, and one marked `everyPage` (something every lane can reach) is every lane's. Where it did not — runs 0–11 and held-out runs 1–3, archived before routes were kept — it is decided by the verdict's wording, as before. Nor is a verdict about a contextual entry, either way: both answers are defensible. Nor is a lane's own "worth a look", which says the answer depends on a convention and names it ([ADR 13](adr/0013-a-convention-is-the-projects-to-decide.md)). Each reason a verdict was not scored is counted and printed. |
 
 The lane calibration here is the **real** one. The report's own calibration
 section can only join a decision to a finding on a failing-endpoint signature,
@@ -191,7 +192,9 @@ Its runs are reported in [Held-out results](#held-out-results).
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
 re-scored against **one** key by `npm run bench -- --all`. The table below is
-key `19cc8e67e8`, which adds what run 11 found (see
+key `c1786bc817`, which differs from `19cc8e67e8` only in saying which pages
+an entry is on (see [Ownership by route](#ownership-by-route-task-29)); no value
+moved. `19cc8e67e8` adds what run 11 found (see
 [Run 11 and held-out run 3](#run-11-and-held-out-run-3-wave-3s-engine-fixes)).
 Against the key before it, `83cb84211d`, only one earlier value moved: run 1's
 reports lane judged the report cards' fixed figures "not a defect", and the
@@ -234,6 +237,73 @@ ahead (0.113 → 0.035 under key `f8e0862a8b`; 0.109 → 0.033 now).
 The first version of this scorer counted the five "belongs to another lane"
 dismissals as wrong verdicts, which gave ECE 0.09 → 0.04 and read as an
 improvement; that one choice was enough to reverse the comparison.
+
+### Ownership by route (task 29)
+
+A scorer change, not a run. A lane's "not a defect" about another lane's defect
+is a remark about ownership, and the scorer used to recognise one only by its
+wording, which cannot tell a lane's own page from another's (see [Rejected and
+not-yet-tried](#rejected-and-not-yet-tried)). Runs 9–11 and held-out runs 2 and
+3 had such remarks worded in ways the rule misses ("dashboard asset, not
+/inventory.html", "raised on / before navigating", "owned by / lane",
+"home-page request in flight"), scored as wrong verdicts: 5 in run 11 alone.
+
+Once a lane's routes are known the rule can only take verdicts OUT of the
+score, so a page missing from a lane's routes makes its calibration look
+better than it is. Every choice below leans towards keeping a verdict scored.
+
+- **What is kept.** `scout_lane_report` now stores the routes a lane's
+  accepted report lists in the project's memory, and `npm run bench --
+  --archive` copies them into the archive as `laneRoutes`. Every run archived
+  from now on carries them; the archive command says so when a run has none,
+  which happens when a report is folded after its lane's session has closed.
+  Query strings and fragments are removed before a route is stored or
+  archived, since a route copied from the address bar can carry a token; a
+  hash route (`/#/things`) keeps its path. Two routes naming the same pages
+  are kept once, and past the cap of 255 a lane keeps its newest.
+- **How it is read.** Every page a route's text names counts, a note's
+  included: "/order.html?id=1042 (from /orders.html link)" is both pages,
+  "Orders (/orders.html)", "orders.html" and "127.0.0.1:4173/orders.html" are
+  /orders.html, a bare origin is "/", and lists split on commas, "and", "+",
+  "|", arrows and new lines. If ANY of a lane's routes names no page ("the
+  orders area"), the lane's routes are treated as unknown and the wording rule
+  decides for it: the unreadable route may be the page the verdict is about.
+  A not-a-defect is a remark about ownership when it matches a planted or
+  also-real defect none of whose pages the lane covered. The wording plays no
+  part then: the same "not my page" from the lane that owns the page is scored
+  as its own wrong verdict. A verdict that matches a known non-defect, a
+  contextual entry, several entries or none is judged as before. The
+  scorecard lists each verdict set aside this way, with its lane, the entry it
+  matched and its stated confidence, so a run can be audited.
+- **Pages in the key.** Every entry names its page in `route`; `alsoOn` names
+  further pages a lane can see it from or cause it on, and `everyPage` marks
+  one every lane can reach. The key refuses both on one entry, and a page
+  named twice. Entries given `alsoOn`: on the demo, the two deletes reporting
+  success (/order.html), the scheduled-reports dead end (/reports.html, where
+  its link is), the stored XSS (/orders-new.html, where the name is typed),
+  the $0.00 total of a created order (/orders-new.html and /approvals.html),
+  the Requested column showing notes (/order.html, where notes are written)
+  and the line-items link (/orders.html, where it points); on the held-out
+  app, the joined-event dead end (/events.html) and the stale catalogue
+  (/checkout.html and /loans.html, where the loan and return happen).
+  `everyPage`: the nav entry in each key, since the nav is on the lane's own
+  page too, and the endpoint defects any lane can reach with a direct request
+  (the approve endpoint accepting a clerk and the orders API accepting invalid
+  input on the demo, any member's record on the held-out app). Marking an
+  endpoint defect `everyPage` is the conservative choice: a verdict on it is
+  always scored, even from a lane that never opened its page. The nav entries
+  are contextual, so those marks move no score.
+- **What moved: nothing.** No archive before this one recorded its lanes'
+  routes, and the lane-to-route split for runs 0–11 and held-out runs 1–3
+  lived in briefs that are not in the repository, so those runs keep the
+  wording rule and score exactly as before. As a check of the rule, and not
+  a score: with routes read off the lane names (the orders lane on
+  /orders.html and so on), it takes out exactly the remarks counted by hand
+  under [Run 11 and held-out run 3](#run-11-and-held-out-run-3-wave-3s-engine-fixes)
+  and runs 9–10 — 3, 1 and 5 in runs 9–11, 1 and 3 in held-out runs 2 and 3 —
+  giving the Brier scores quoted there (0.070, 0.093 and 0.110; 0.099 and
+  0.107), and nothing else changes. That check was run against the key with
+  every `alsoOn` and `everyPage` above in place.
 
 ### Run 11 and held-out run 3: wave 3's engine fixes
 
@@ -351,7 +421,8 @@ made, and on the held-out app the same false positives as run 1. The scorer
 is unchanged: the follow-up recorded under runs 9 and 10 (archive each lane's
 routes, and count a not-a-defect as a dismissal when the matched entry's route
 is outside them) is what would take those remarks out, and widening the wording
-rule stays rejected.
+rule stays rejected. That follow-up has since been made, for runs archived
+after it (see [Ownership by route](#ownership-by-route-task-29)).
 
 **Dedup (task 32).** Findings, and extra findings for a planted defect that
 already had one, per run:
@@ -457,9 +528,10 @@ any run, and the 22 wrong verdicts break down as:
   /orders-new.html load, so fine"), and runs 2, 4, 6 and 7 used equivalent
   wordings that the old rule scored, so the runs would no longer be scored
   alike. Those own-page wordings are now table-tested as not dismissals. The
-  structural fix is follow-up work, not done here: archive each lane's
+  structural fix was follow-up work, not done here: archive each lane's
   routes from its lane report, and treat a not-a-defect as a dismissal only
-  when the matched key entry's route is outside that lane's routes.
+  when the matched key entry's route is outside that lane's routes. It has
+  since been made (see [Ownership by route](#ownership-by-route-task-29)).
 - **1 was a key mis-match.** "The page hides approve and reject from a clerk,
   not a defect" was classified as the planted defect that the approve
   *endpoint* accepts a clerk. The entry no longer matches a page hiding the
@@ -750,7 +822,9 @@ What the numbers do **not** show:
 
 Each row is one run of the [held-out app](#the-held-out-app) at `medium`, in
 `safe-write`, eight parallel lanes, re-scored by `npm run bench -- --all`
-against key `1bc84f1a04`, which adds what held-out run 3 found. Where a cell
+against key `b5a7933f32`, which differs from `1bc84f1a04` only in saying which
+pages an entry is on (see [Ownership by route](#ownership-by-route-task-29); no
+value moved); `1bc84f1a04` adds what held-out run 3 found. Where a cell
 has two struck values, the first is under `77ebf9b0d9`, the key runs 1 and 2
 were made against, and the second under `4ffabb6bd3`, the key completed from
 them; a single struck value in runs 1 and 2 is under `77ebf9b0d9`, and in run
@@ -943,5 +1017,7 @@ Edits considered and not kept, so they are not retried blind:
   "from the other page's load" are as likely to be the owning lane's verdict
   on its own page, which the rule cannot tell apart without knowing each
   lane's routes, and a wider rule would score new runs differently from old
-  runs that used the same words. The rule stays as it was; the follow-up is to
-  archive each lane's routes and decide by the matched entry's route.
+  runs that used the same words. The rule stays as it was, for runs archived
+  without lane routes. The follow-up, deciding by each lane's archived routes
+  and the matched entry's pages, is done: see
+  [Ownership by route](#ownership-by-route-task-29).
