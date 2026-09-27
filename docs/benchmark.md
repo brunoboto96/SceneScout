@@ -1036,12 +1036,27 @@ it, forced or not, and the first run it makes is of the release after it. Had
 it tried, the run would have stopped at the missing `./ci` action, before any
 model call.
 
+ci-run-3 was a prompt experiment on the engine at commit `6575b46`, with
+ci-run-1's provider, model, effort and caps. In ci-run-1 and ci-run-2 every
+turn carried exactly one tool call, although a turn may carry up to 16 and the
+40-turn cap is the budget that binds (ci-run-2 reached it; ci-run-1 stopped at
+36 turns after 70 seconds of a 20-minute allowance). The edit added two lines
+to the CI rules the model is given: turns, not tool calls, are the budget, so
+calls that do not need an earlier call's result share a turn; and before
+`scout_report`, check `scout_coverage`, visit what it lists as unvisited and
+file each judged defect. Recall stayed at 5/13 and precision was 6/6 labelled
+(86–100% with one unlabelled). The model put two calls in a turn 3 times in
+26 and finished at 27 turns in 65 seconds, earlier than ci-run-1. One run is
+noisy, but the edit did not move the behaviour it targeted, so it was
+rejected and the rules are unchanged.
+
 <!-- ci-results:start (generated from bench/ci-results.json by scripts/bench/ci-record.ts; do not edit by hand) -->
 
 | Date | App | Version | Source | Provider · model · effort | Key | Recall | Precision (bounds) | Brier | Ended | Turns | Tokens in (cached) / out | Wall | Cost |
 |---|---|---|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|
 | 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 7/8 (88%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |
 | 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · medium | c1786bc817 | 3/13 | 3/3 (100%) | — | turns | 40 | 885,574 (858,517) / 3,152 | 1m 38s | $0.013 |
+| 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 6/6 (86%–100%) | — | done | 27 | 533,110 (509,907) / 1,730 | 1m 05s | $0.008 |
 
 <!-- ci-results:end -->
 
