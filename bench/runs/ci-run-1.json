@@ -1,0 +1,65 @@
+{
+  "app": "demo",
+  "run": "ci-run-1",
+  "date": "2026-09-27",
+  "note": "Unattended scenescout ci run taken by hand with the benchmark workflow, engine 3.12.0 at 7280e29; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard order chart image fails to load",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard links overlap bulk-import badge",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "dashboard e16 All orders overlaps e17 New: bulk import badge 85%"
+    },
+    {
+      "title": "Order form helper text has insufficient contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new helper text contrast 1.73:1 #b8c0ca on #f6f8fa"
+    },
+    {
+      "title": "Order form spacing frequently misses a consistent grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "orders-new spacing audit 46% off 4px grid",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    },
+    {
+      "title": "Order detail route requests a null order",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/orders/null 404"
+    },
+    {
+      "title": "Pinned order detail bar covers Save notes button",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order.html Save notes covered by order-stickybar"
+    },
+    {
+      "title": "Scheduled reports page is an empty dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables"
+    },
+    {
+      "title": "Scheduled reports link opens a page with no way forward",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "reports-scheduled-link → /reports-scheduled.html (0 interactables)"
+    },
+    {
+      "title": "Reports page lacks a visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "reports page audit task-efficiency no dominant action"
+    }
+  ],
+  "decisions": []
+}

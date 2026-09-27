@@ -991,6 +991,60 @@ as `"checkbox"`, while the browser's accessibility tree names it "Available
 now only" from the label that wraps it. Where that name came from is not in the
 archive; it is recorded so it can be checked, not fixed against this app.
 
+## Unattended runs (scenescout ci)
+
+[`scenescout ci`](ci.md) runs the SceneScout method without an agent at the
+keyboard: one model, reached through its API, explores the app in `read-only`
+until it finishes or reaches a cap. Its rows are not comparable with the
+[Results](#results) above, which are eight parallel lanes in `safe-write`
+driven by an agent; compare them with each other.
+
+The [weekly benchmark workflow](../.github/workflows/bench-weekly.yml) records
+them. Once a week it compares the latest GitHub release with the newest
+version it has recorded on schedule for the provider it would use, and runs
+only when a release has come out since and no results pull request labelled
+`benchmark` is still open; otherwise it writes one line to the job summary and
+stops. Only scheduled rows count: a dispatched run may have used another model
+or effort, and a manual run may have been of a commit no release contains.
+When it runs, it checks out the release's tag, runs `scenescout ci` against
+the demo and the held-out app through the same
+[benchmark workflow](../.github/workflows/ci-benchmark.yml) a manual run uses,
+scores each with `npm run bench -- <dir> --app <app> --json`, archives it under
+`bench/runs/` as `ci-<app>-<version>-<run number>` and opens a pull request
+labelled `benchmark` that appends a row per app to
+[`bench/ci-results.json`](../bench/ci-results.json) and regenerates the table
+below. If one app's run fails, the other's is still recorded and the job
+summary names the one that failed. Dispatched by hand, it takes the provider,
+model and effort, and `force` to run with no new release or with a results
+pull request open.
+
+It uses one provider per run: OpenAI unless dispatched with another, so a
+repository holding both keys is not charged twice. Each provider has its own
+record of the last version it benchmarked. The job that calls the model can
+only read the repository, and the job that writes the results never holds the
+model's key.
+
+A row is one run, and a single run is noisy: ci-run-1 and ci-run-2 differ only
+in effort and moved recall by two defects. Precision is the labelled ratio
+with its bounds; Brier is lane calibration's, and is "—" because an unattended
+run has no lanes to state a confidence. Cost is the run's own estimate from
+the model's list price. The first two rows were taken by hand with the
+benchmark workflow on the engine at commit `7280e29`, before this workflow
+existed. That commit reports itself as 3.12.0, but the v3.12.0 tag predates
+`scenescout ci`: its tag has no `ci/action.yml`, so the workflow does not run
+it, forced or not, and the first run it makes is of the release after it. Had
+it tried, the run would have stopped at the missing `./ci` action, before any
+model call.
+
+<!-- ci-results:start (generated from bench/ci-results.json by scripts/bench/ci-record.ts; do not edit by hand) -->
+
+| Date | App | Version | Source | Provider · model · effort | Key | Recall | Precision (bounds) | Brier | Ended | Turns | Tokens in (cached) / out | Wall | Cost |
+|---|---|---|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|
+| 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 7/8 (88%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |
+| 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · medium | c1786bc817 | 3/13 | 3/3 (100%) | — | turns | 40 | 885,574 (858,517) / 3,152 | 1m 38s | $0.013 |
+
+<!-- ci-results:end -->
+
 ## Finding dedup as a measured decision (task 15)
 
 The store decides whether a newly filed finding is one it already records
@@ -1012,30 +1066,34 @@ can be broader than one fix: two "same" pairs here are the off-grid spacing on
 two different pages, and on the held-out app the rule's two "wrong merges"
 are one finding the key classifies as the double submit which also describes
 the renew button offered at its limit. Pairs also cluster: on the demo, one
-entry (invalid input accepted by the orders API) supplies 378 of the 1,972
+entry (invalid input accepted by the orders API) supplies 378 of the 2,113
 "same" pairs, so the pairs are not independent and no bootstrap interval is
 given. Brier and accuracy weigh a missed merge and a wrong merge equally,
 which the store does not: a wrong merge loses a finding, a missed one shows a
 duplicate ([ADR 4](adr/0004-dedup-on-machine-signals-not-prose.md) accepts the duplicate). Read the two error counts, not only
 the totals.
 
-Keys `c1786bc817` (demo) and `b5a7933f32` (held-out); 15 archives (12 demo, 3
+Keys `c1786bc817` (demo) and `b5a7933f32` (held-out); 17 archives (14 demo, 3
 held-out); one pass, and the rule is deterministic, so it has no run-to-run
-noise. 369 findings placed on a page by the key; left out: 14 identical text, 2 unmatched, 0
-ambiguous, 22 known non-defect.
+noise. 380 findings placed on a page by the key; left out: 14 identical text, 2 unmatched, 0
+ambiguous, 23 known non-defect. The demo's pairs include the two unattended
+runs, ci-run-1 and ci-run-2 (see [Unattended runs](#unattended-runs-scenescout-ci)):
+547 of its 9,055 pairs have a finding from one of them, 141 of those "same".
+Without them the demo had 8,508 pairs (1,972 same), accuracy 81.1%, Brier 0.189
+(−0.06) and 1,604 missed merges; the held-out figures are unchanged.
 
 | App | Pairs | Same / different | Decider | Accuracy | Brier (skill vs base rate) | ECE [equal-count buckets] | Wrong merges | Missed merges |
 |---|---:|---|---|---:|---|---|---:|---:|
-| Demo, all pairs | 8,508 | 1,972 / 6,536 | current rule | 81.1% | 0.189 (−0.06) | 0.189 [n=8,140 stated 0 actual 0.20; n=368 stated 1 actual 1.00] | 0 | 1,604 |
+| Demo, all pairs | 9,055 | 2,113 / 6,942 | current rule | 80.8% | 0.192 (−0.07) | 0.192 [n=8,682 stated 0 actual 0.20; n=373 stated 1 actual 1.00] | 0 | 1,740 |
 | Held-out, all pairs | 181 | 49 / 132 | current rule | 86.2% | 0.138 (0.30) | 0.138 [n=153 stated 0 actual 0.15; n=28 stated 1 actual 0.93] | 2 | 23 |
-| Demo, sample | 100 | 24 / 76 | current rule | 79.0% | 0.210 (−0.15) | 0.210 [n=97 / n=3] | 0 | 21 |
+| Demo, sample | 100 | 21 / 79 | current rule | 81.0% | 0.190 (−0.15) | 0.190 [n=98 / n=2] | 0 | 19 |
 | Held-out, sample | 100 | 30 / 70 | current rule | 86.0% | 0.140 (0.33) | 0.140 [n=82 / n=18] | 1 | 13 |
 | Both samples | 200 | | model judge, effort none | owed | owed | owed | | |
 | Both samples | 200 | | model judge, effort low | owed | owed | owed | | |
 
 The rule almost never merges wrongly and leaves most same-entry pairs apart.
 On the demo its Brier is slightly worse than always stating the base rate
-(skill −0.06): its 0/1 answers carry less than the base rate does, because it
+(skill −0.07): its 0/1 answers carry less than the base rate does, because it
 says "different" to four in five of the pairs the key calls "same". For a 0/1
 decider ECE equals Brier equals the error rate, so the two buckets are the
 useful part: stated 0 is right 80% of the time on the demo.
