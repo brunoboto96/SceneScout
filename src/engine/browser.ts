@@ -139,7 +139,7 @@ import {
   unseenWriteSource,
   type UnseenWriteVerdict,
 } from "./unload.js";
-import { loginCommand, permissionNote, resolveAttachAuth, roleLabel, type AttachAuth } from "./profiles.js";
+import { loginCommand, permissionNote, resolveAttachAuth, roleLabel, summarizeState, type AttachAuth } from "./profiles.js";
 
 export type { WriteMode } from "./policy.js";
 
@@ -926,6 +926,7 @@ export class BrowserEngine {
     await this.close();
     this.auth = auth;
     this.role = roleLabel(auth);
+    this.authLoss.beginSession(auth.kind, this.role);
     let profileNote = "";
     if (auth.kind === "role") {
       const note = permissionNote(auth.storageStatePath, fs.statSync(auth.storageStatePath).mode);
@@ -3127,7 +3128,60 @@ export class BrowserEngine {
       throw new Error(`${notice}${msg}`);
     }
     this.recordNavigationOutcome(url, await this.landedUrl(page));
-    return this.authLoss.take() + settled;
+    // Only after a navigation that finished: one that threw leaves its verdict standing.
+    const plan = this.authLoss.takeReattach();
+    if (!plan) return this.authLoss.take() + settled;
+    // The loss this navigation declared is answered once, from the role's latest
+    // saved profile, and the session goes back to the page it asked for.
+    const applied = await this.applyLatestProfile();
+    if (!applied.ok) {
+      this.authLoss.abortReattach(applied.why);
+      return this.authLoss.take() + settled;
+    }
+    const returnUrl = plan.returnTo;
+    let recovered: string;
+    try {
+      await page.goto(returnUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+      recovered = await this.afterAction("navigate", returnUrl);
+    } catch (err) {
+      this.recordNavigationOutcome(returnUrl, await this.landedUrl(page));
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`${this.authLoss.take()}${msg}`);
+    }
+    this.recordNavigationOutcome(returnUrl, await this.landedUrl(page));
+    return this.authLoss.take() + recovered;
+  }
+
+  /**
+   * Replace this session's cookies and storage with its role's saved profile,
+   * read from disk now: another process may have recorded it again since this
+   * session attached. Same context, same page, same listeners and write policy;
+   * only the sign-in changes. Never prints the profile's contents.
+   */
+  private async applyLatestProfile(): Promise<{ ok: true } | { ok: false; why: string }> {
+    if (this.auth.kind !== "role" || !this.context) return { ok: false, why: "this session was not attached by role" };
+    const file = this.auth.storageStatePath;
+    let state: unknown;
+    try {
+      state = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch (err) {
+      const reason = err instanceof SyntaxError ? "it is not valid JSON" : err instanceof Error ? err.message.split("\n")[0] : String(err);
+      return { ok: false, why: `its saved profile at ${file} could not be read (${reason})` };
+    }
+    const checked = summarizeState(state);
+    if (!checked.ok) return { ok: false, why: `its saved profile at ${file} is not a storage state (${checked.error})` };
+    try {
+      await this.context.setStorageState(state as Parameters<BrowserContext["setStorageState"]>[0]);
+    } catch (err) {
+      return { ok: false, why: `the browser refused its saved profile (${err instanceof Error ? err.message.split("\n")[0] : String(err)})` };
+    }
+    this.logAction({ action: "reattach", target: `role ${this.auth.role}`, url: this.page?.url() ?? "" });
+    return { ok: true };
+  }
+
+  /** What this session's one automatic re-attach did, or "" when it never re-attached. */
+  reattachSummary(): string {
+    return this.authLoss.reattachSummary();
   }
 
   /** Where did we ASK to go, where did we END UP, and does that count as coverage? */
@@ -3140,7 +3194,7 @@ export class BrowserEngine {
       this.memory?.markAttempted(requestedRoute, outcome, this.role);
       this.memory?.recordRoleAccess(this.role, requestedRoute, outcome);
     }
-    this.authLoss.record({ requestedRoute, landedRoute, bounced, role: this.role });
+    this.authLoss.record({ requestedRoute, landedRoute, bounced, role: this.role, target: requestedUrl });
   }
 
   async goBack(): Promise<string> {
@@ -3257,7 +3311,12 @@ export class BrowserEngine {
 
     const summary: string[] = [];
     const problems: string[] = [];
-    for (const path of targets) {
+    this.authLoss.beginBatch();
+    // A queue rather than the list itself: a session that re-attaches mid-sweep
+    // visits the routes its loss bounced again, straight after.
+    const queue = [...targets];
+    for (let i = 0; i < queue.length; i++) {
+      const path = queue[i];
       const url = `${this.baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
       if (!this.isSameOrigin(url)) {
         summary.push(`${path} — SKIPPED (off-origin)`);
@@ -3281,6 +3340,8 @@ export class BrowserEngine {
         // a browser that shows no error page simply lets the wait time out.
         await page.waitForEvent("framenavigated", { predicate: (f) => f === page.mainFrame(), timeout: 1500 }).catch(() => undefined);
         summary.push(`${path} — LOAD FAILED`);
+        // The page a re-attach went back to never loaded, so nothing says whether it worked.
+        if (this.authLoss.reattaching) this.authLoss.abortReattach(`the page it went back to, ${path}, did not load (${reason})`);
         problems.push(`${path}: ${reason}`);
         this.crawlHealth.push({
           path,
@@ -3328,7 +3389,7 @@ export class BrowserEngine {
       // Feeds the streak. The per-route notice is discarded — crawl already
       // flags AUTH-REDIRECT per route in its own summary, and the verdict for
       // the sweep as a whole is emitted once at the end via batchVerdict().
-      this.authLoss.record({ requestedRoute, landedRoute: route, bounced: loginRedirect, role: this.role });
+      this.authLoss.record({ requestedRoute, landedRoute: route, bounced: loginRedirect, role: this.role, target: path });
       this.authLoss.clear();
       // Error-status routes render but would otherwise be re-crawled forever —
       // an attempt with the status satisfies the contract.
@@ -3378,6 +3439,25 @@ export class BrowserEngine {
         problems.push(
           `${path}${loginRedirect ? " → redirected to login (auth missing/expired?)" : ""}${deadEnd ? " → dead end" : ""}${detail ? `\n${detail}` : ""}`,
         );
+      }
+      // A role session that lost its sign-in on this route re-attaches once
+      // and visits the routes the loss bounced again, next. Their bounced
+      // results leave the crawl's data, so a check reads the signed-in visit.
+      const plan = this.authLoss.takeReattach({ revisits: (t) => targets.includes(t) });
+      if (plan) {
+        const applied = await this.applyLatestProfile();
+        if (!applied.ok) {
+          this.authLoss.abortReattach(applied.why);
+        } else {
+          // Only this sweep's own paths: a streak that began with scout_navigate holds full URLs the sweep cannot join to its base.
+          const again = [plan.returnTo, ...plan.retry];
+          this.crawlHealth = this.crawlHealth.filter((h) => !(h.loginRedirect && again.includes(h.path)));
+          for (let k = problems.length - 1; k >= 0; k--) {
+            if (again.some((p) => problems[k].startsWith(`${p} → redirected to login`))) problems.splice(k, 1);
+          }
+          queue.splice(i + 1, 0, ...again);
+          summary.push(`↻ re-attached from role '${this.role}''s saved profile; visiting ${again.join(", ")} again`);
+        }
       }
     }
     // Crawl leaves the page wherever it ended — refs from before are gone.
