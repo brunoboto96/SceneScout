@@ -1075,6 +1075,8 @@ request's. The change was reverted and no second run was spent.
 | 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 6/6 (86%–100%) | — | done | 27 | 533,110 (509,907) / 1,730 | 1m 05s | $0.008 |
 | 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · medium | c1786bc817 | 4/13 | 5/5 (100%) | — | done | 65 | 1,657,036 (1,620,750) / 7,123 | 2m 55s | $0.023 |
 | 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | turns | 40 | 826,683 (802,609) / 1,597 | 1m 18s | $0.011 |
+| 2026-09-27 | demo | 3.13.1 | dispatched | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 5/5 (100%) | — | done | 33 | 670,885 (646,007) / 1,755 | 1m 14s | $0.010 |
+| 2026-09-27 | holdout | 3.13.1 | dispatched | openai · gpt-6-luna · low | b5a7933f32 | 3/10 | 3/5 (43%–71%) | — | turns | 40 | 870,166 (842,856) / 1,930 | 2m 34s | $0.012 |
 
 <!-- ci-results:end -->
 
