@@ -193,6 +193,8 @@ A browser window opens at the URL. Sign in however the app asks, then come back 
 
 Then `/scenescout --role admin`, or `scout_attach { role: "admin" }` from any agent. Every session attached with the same role gets its own browser built from that one login, so parallel lanes can all run as `admin`. A role with no saved login is refused with the command to run. `role` and `storageStatePath` are alternatives: pass one.
 
+In CI, where nobody can type, `--script` signs in headless as a test user from `SCENESCOUT_LOGIN_USERNAME`, `SCENESCOUT_LOGIN_PASSWORD` and, for a one-time code, `SCENESCOUT_LOGIN_TOTP_SECRET`, and saves the same profile. No credential value is ever printed. See [signing in from CI](docs/ci.md#signing-in-from-ci) for the options and the rules: a test tenant's user, never production or a real person's account.
+
 ---
 
 ## 📺 Watching a run live
@@ -641,7 +643,7 @@ src/
   cli.ts            scan · serve · install · doctor · check · ci · login · status · watch
   check-run.ts      drives a check: attach, crawl every route, collect what was measured
   ci-run.ts         drives a CI run: the MCP server as a child, the model's API, the agent loop
-  login-run.ts      drives `scenescout login`: a visible browser, Enter to save the role's profile
+  login-run.ts      drives `scenescout login`: a visible browser, Enter to save the role's profile; or --script, headless from the environment
   installer.ts      setup logic (skill link, MCP registration, diagnostics)
   engine/
     browser.ts      the engine class: attach, snapshot, actions, crawl, plans
@@ -663,6 +665,7 @@ src/
     design.ts       the design audit + page scoring
     memory.ts       cross-run storage + finding dedup
     profiles.ts     saved sign-ins: role names, where a profile lives, owner-only files, attach by role
+    scripted-login.ts  a CI sign-in: env and flags, TOTP (RFC 6238), which field is which, redaction
     report.ts       the gap ledger + report generation
     check.ts        the check's rules, gate, report and SARIF
     ci.ts           a CI run's options, provider choice, caps, key redaction, tools and files

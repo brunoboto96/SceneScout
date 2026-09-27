@@ -4,6 +4,8 @@
 
 Whatever the CI system, the job has the same three parts: start the app, wait until it answers, run the check. The check never starts the app itself.
 
+Checking or exploring the signed-in app needs a session in the job: [signing in from CI](#signing-in-from-ci) covers a scripted sign-in with a test user, and the rules for its credentials.
+
 The exploratory side can run in CI too, with a model's API in place of a person or coding agent: [an unattended exploratory run](#an-unattended-exploratory-run), below. It reports and never gates. An allowed account can also start one on a pull request's preview by commenting `/scenescout qa`: [a QA review from a pull-request comment](#a-qa-review-from-a-pull-request-comment).
 
 | Exit code | Meaning | What the job should do |
@@ -130,7 +132,79 @@ Save a Playwright storage state in an earlier step (for example your own Playwri
           storage-state: playwright/.auth/user.json
 ```
 
-If the session no longer signs in, the check exits 2 rather than checking the sign-in page and calling it the app.
+If the session no longer signs in, the check exits 2 rather than checking the sign-in page and calling it the app. To sign in within the job instead of keeping a storage state around, see [signing in from CI](#signing-in-from-ci).
+
+## Signing in from CI
+
+A job that checks or explores the signed-in app needs a session, and a CI runner has no one to type a password or a one-time code. There are three ways to give it one. Whichever you choose, the rules at the end of this section apply.
+
+### Ways to sign in
+
+| Option | How | Trade-off |
+|---|---|---|
+| A test user on a test tenant (recommended) | `scenescout login <url> --role <name> --script` fills the sign-in form from environment variables, including a TOTP code when the form asks for one, and saves the session as the role's profile | Tests the real sign-in on every run. Needs a test tenant where the test user's second factor is an authenticator-app secret you can store, and no CAPTCHA |
+| A test-only sign-in endpoint | The app, in its test environments only, exposes a route that sets a session for a named test user; a Playwright setup step visits it and saves a storage state | Fast and immune to changes in the sign-in page, but it is code that signs anyone in, so it must be compiled out of, or refused by, every production build |
+| A saved session as a secret | Record a session once with `scenescout login <url> --role <name>` on your machine, store the file's contents as an encrypted secret, and write it to a file at the start of the job | No credentials in CI at all, but the secret is a live session: it expires, and anyone who reads it is signed in until it does. Rotate it like a password |
+
+### A scripted sign-in
+
+```bash
+SCENESCOUT_LOGIN_USERNAME=… SCENESCOUT_LOGIN_PASSWORD=… SCENESCOUT_LOGIN_TOTP_SECRET=… \
+  npx --yes scenescout@3 login https://staging.example.com/signin --role member --script \
+    --project "$RUNNER_TEMP/scenescout" --success-url /dashboard
+```
+
+It runs headless, opens the URL and signs in as a person would: it finds the username (or email), the password and the one-time-code fields by their `autocomplete`, their type and the words that label them, fills what the page shows, and presses the button that moves the form on (Sign in, Next, Continue, Verify), never one that leads to another provider or a password reset. A form that asks for the password only after "Next", or for a code on a page of its own, is followed step by step. The saved profile is the same file the manual login writes, at `.scenescout/auth/<role>.json` under `--project`, owner-only, so `--storage-state` or `scout_attach { role }` loads it as it would any other.
+
+| Variable | |
+|---|---|
+| `SCENESCOUT_LOGIN_USERNAME` | Required. The test user's username or email |
+| `SCENESCOUT_LOGIN_PASSWORD` | Required. Used exactly as given |
+| `SCENESCOUT_LOGIN_TOTP_SECRET` | When the sign-in asks for a code: the base32 secret an authenticator app is set up with, or the whole `otpauth://totp/…` URI its QR code holds (its algorithm, digits and period are honoured). The code is generated per RFC 6238, so the runner's clock must be right |
+| `SCENESCOUT_LOGIN_SUCCESS_URL` / `--success-url` | What the URL's path contains once signed in (`/dashboard`; the query is not searched), or an absolute URL it starts with. Recommended: without it or the selector below, the sign-in counts as done when no username, password or code field is left on the page, which an error page with no form also satisfies |
+| `SCENESCOUT_LOGIN_SUCCESS_SELECTOR` / `--success-selector` | A CSS selector visible only when signed in. With both set, both must match |
+| `SCENESCOUT_LOGIN_USERNAME_SELECTOR`, `_PASSWORD_SELECTOR`, `_OTP_SELECTOR`, `_SUBMIT_SELECTOR` (or `--username-selector` and so on) | A CSS selector for a field or button the rules above do not find. Each is used where it matches and the rules fill in the rest |
+
+`--timeout <seconds>` bounds the whole sign-in (default 60, 5 to 600). Credentials have no flag, because a flag shows in the process list and the shell history.
+
+Missing or malformed configuration (a credential not set, a TOTP secret that is not base32, a timeout out of range) is reported before a browser starts, naming the variable and never its value; a selector that is not valid CSS is reported when the page is first read. The command exits 0 once signed in and saved, and 1 otherwise: a refused password or code, a code field with no secret set, or a form it could not move on. A refused sign-in quotes the page's error message. Every credential value, as typed and URL-encoded, the username in any case, and each code typed, is replaced by `[redacted]` in everything it prints, including that quoted message, so a page that echoes what was typed does not put the password in the job log.
+
+Not covered: a sign-in form inside an iframe, a code split across one input per digit, a CAPTCHA or other bot check, and push or SMS second factors. Use a test-only endpoint or a saved session for those.
+
+In GitHub Actions:
+
+```yaml
+jobs:
+  check-signed-in:
+    # Never for a pull request from a fork: this job holds the test user's password.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: test-tenant # holds the secrets below; restrict it to protected branches if you can
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx --yes scenescout@3 install --browser-only --browsers chromium-headless-shell
+      - name: Sign in as the test user
+        env:
+          SCENESCOUT_LOGIN_USERNAME: ${{ secrets.TEST_USER_USERNAME }}
+          SCENESCOUT_LOGIN_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
+          SCENESCOUT_LOGIN_TOTP_SECRET: ${{ secrets.TEST_USER_TOTP_SECRET }}
+        run: >
+          npx --yes scenescout@3 login https://staging.example.com/signin --role member --script
+          --project "$RUNNER_TEMP/scenescout" --success-url /dashboard
+      - uses: brunoboto96/SceneScout@v3.10.0
+        with:
+          url: https://staging.example.com/dashboard
+          storage-state: ${{ runner.temp }}/scenescout/.scenescout/auth/member.json
+```
+
+The secrets are set on the sign-in step only, so no later step, the check included, has them in its environment.
+
+### The rules
+
+- **A test user on a test tenant, never production and never a real person's account.** The account exists to be signed into by a machine; if its password leaks, nothing real is exposed. Give it the least access the tests need.
+- **Credentials come from the environment, filled from the CI system's secrets.** Never in the workflow file, a flag, a committed `.env` file or a script. GitHub also masks secret values in logs; the redaction above is a second layer, not a reason to skip the first.
+- **No code from a fork's pull request runs with these secrets.** A fork's pull request gets no secrets under `pull_request`; under `pull_request_target` or `workflow_run` it can, so never check out and run a fork's code in a job that sets them.
+- **The profile stays in the runner's temporary directory and is never uploaded.** `--project "$RUNNER_TEMP/scenescout"` keeps it out of the workspace, so no artifact upload, cache or `git add` picks it up. It is a live session for as long as the app lets it live.
 
 ## Saved flows
 
