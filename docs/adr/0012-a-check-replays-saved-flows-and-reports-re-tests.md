@@ -117,7 +117,10 @@ reviewer sees what a green check was allowed to do.
   at the refusals again, so a write the last step set off late (a debounced
   save) is charged to it rather than missed. The flow's page is then left for
   `about:blank` while the flow's rule still holds, and only then does the
-  crawl's rule come back.
+  crawl's rule come back. Every page in the context is left, a page a step opened a tab from
+  included, and the flow's rule goes on judging for five seconds after the
+  hand-back (`WriteRule`, ADR 2), so a write a page sent under the flow's rule
+  is never judged under the crawl's because it was heard of late.
 - **Flows share the browser.** Every flow runs in the crawl's browser context,
   one after another in file-name order, so cookies, storage and a signed-in
   session carry from the crawl to each flow and from one flow to the next.
