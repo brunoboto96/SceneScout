@@ -188,6 +188,11 @@ the body, claimed once: a harmless save let through never excuses a different
 body sent to the same URL, such as a delete command beaconed as the page is
 left. Any other write is one the route handler never saw, and is judged by the
 route handler's rules in the same order (`judgeUnseenWrite` in `unload.ts`).
+Both judges read the mode through `WriteRule` (`policy.ts`): a stricter mode
+applies at once, and a looser one only after five seconds, because a write is
+judged when the engine hears of it, which can be after the page sent it; a
+beacon a flow's page sent as it was left once reached the browser level 20 ms
+after the crawl's read-only rule came back, and went out.
 
 What is known of its sender comes from its headers (`unseenWriteSource`),
 since the frame that sent it may be gone:
