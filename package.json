@@ -97,7 +97,8 @@
     "brief-test": "tsx --test scripts/brief-test.ts",
     "calibration-test": "tsx --test scripts/calibration-test.ts",
     "bench": "tsx scripts/bench.ts",
-    "bench-test": "tsx --test scripts/bench-test.ts"
+    "bench-test": "tsx --test scripts/bench-test.ts",
+    "dedup-bench": "tsx scripts/dedup-bench.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
