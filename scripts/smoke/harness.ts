@@ -124,6 +124,20 @@ const PENDING_COOKIE = "fixture_pending";
 
 const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
+/** The cookie of the fixture's revocable sign-in: a fresh token per sign-in, valid until revoked. */
+export const TOKEN_COOKIE = "fixture_token";
+
+/** Tokens the revocable sign-in has issued and not yet revoked. */
+const liveTokens = new Set<string>();
+let tokenCounter = 0;
+
+/** Revoke every token the fixture has issued, as a server ending its sessions does. Returns how many were live. */
+export function revokeFixtureTokens(): number {
+  const n = liveTokens.size;
+  liveTokens.clear();
+  return n;
+}
+
 /** A loopback origin (the fixture server's other port), or "" for anything else: a redirect built from a query parameter goes nowhere else. */
 function loopbackOrigin(value: string | null): string {
   return value && /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(value) ? value : "";
@@ -454,6 +468,31 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     if (urlPath === "/scripted-signin/code" && req.method === "GET") {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(fs.readFileSync(path.join(appDir, "scripted-code.html"), "utf8").replace("<!--ERROR-->", ""));
+      return;
+    }
+    // A sign-in the server can revoke mid-run: /token-signin issues a new
+    // token, and every /token-* page serves the signed-in page to a live token
+    // and redirects anything else to /login, as a session guard does.
+    if (urlPath === "/token-signin") {
+      tokenCounter += 1;
+      const token = `t${tokenCounter}`;
+      liveTokens.add(token);
+      res.writeHead(302, { location: "/token-home", "set-cookie": `${TOKEN_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600` });
+      res.end();
+      return;
+    }
+    if (urlPath.startsWith("/token-")) {
+      const token = (req.headers.cookie ?? "")
+        .split(/;\s*/)
+        .find((c) => c.startsWith(`${TOKEN_COOKIE}=`))
+        ?.slice(TOKEN_COOKIE.length + 1);
+      if (!token || !liveTokens.has(token)) {
+        res.writeHead(302, { location: "/login", "cache-control": "no-store" });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "cookie-account.html")));
       return;
     }
     // Extensionless /login, because the engine's auth heuristic matches a path
