@@ -22,6 +22,7 @@ import * as safeWrite from "./smoke/safe-write.ts";
 import * as multiSession from "./smoke/multi-session.ts";
 import * as authLoss from "./smoke/auth-loss.ts";
 import * as loginProfiles from "./smoke/login-profiles.ts";
+import * as scriptedLogin from "./smoke/scripted-login.ts";
 import * as reattach from "./smoke/reattach.ts";
 import * as liveView from "./smoke/live-view.ts";
 import * as contradiction from "./smoke/contradiction.ts";
@@ -38,6 +39,7 @@ const suites = [
   multiSession,
   authLoss,
   loginProfiles,
+  scriptedLogin,
   reattach,
   liveView,
   injection,

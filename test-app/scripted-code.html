@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Verify it is you</title>
+  </head>
+  <body>
+    <!--
+      The second factor of the scripted sign-in: a code from an authenticator
+      app (RFC 6238), posted to /scripted-signin/code. A right code signs the
+      browser in and sends it to /cookie-account; a wrong one serves this page
+      again with an error.
+    -->
+    <main>
+      <h1>Verify it is you</h1>
+      <!--ERROR-->
+      <form method="post" action="/scripted-signin/code" data-testid="code-form">
+        <label for="code">Verification code</label>
+        <input id="code" name="code" inputmode="numeric" maxlength="8" autocomplete="one-time-code" data-testid="code-input" />
+        <button type="submit" data-testid="code-verify-button">Verify</button>
+      </form>
+    </main>
+  </body>
+</html>

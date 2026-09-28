@@ -21,6 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
 import { MEMORY_DIRNAME, writeSelfIgnore } from "./memory.js";
+import { SCRIPT_FLAGS } from "./scripted-login.js";
 
 /** The directory under .scenescout/ that holds one file per role. */
 export const AUTH_DIRNAME = "auth";
@@ -359,18 +360,29 @@ export interface LoginOptions {
   role: string;
   projectDir: string;
   browser?: BrowserEngineName;
+  /** `--script`: sign in headless from the environment's credentials (engine/scripted-login.ts), with these of its flags given. */
+  script?: Map<string, string>;
 }
 
 export const LOGIN_OPTION_NAMES = ["role", "project", "browser"] as const;
 
-/** Parse `scenescout login <url> --role <name> [--project dir] [--browser engine]`. */
+/**
+ * Parse `scenescout login <url> --role <name> [--project dir] [--browser engine]
+ * [--script [--success-url …] [--timeout s] …]`. `--script` takes no value; the
+ * flags only it reads are refused without it.
+ */
 export function parseLoginArgs(args: readonly string[], cwd: string): { ok: true; options: LoginOptions } | { ok: false; error: string } {
   const positional: string[] = [];
   const flags = new Map<string, string>();
+  let script = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (!a.startsWith("--")) {
       positional.push(a);
+      continue;
+    }
+    if (a === "--script") {
+      script = true;
       continue;
     }
     const eq = a.indexOf("=");
@@ -381,7 +393,11 @@ export function parseLoginArgs(args: readonly string[], cwd: string): { ok: true
     flags.set(name, value);
   }
   const known = new Set<string>(LOGIN_OPTION_NAMES);
-  for (const name of flags.keys()) if (!known.has(name)) return { ok: false, error: `unknown option --${name}` };
+  const scriptOnly = new Set<string>(SCRIPT_FLAGS);
+  for (const name of flags.keys()) {
+    if (scriptOnly.has(name) && !script) return { ok: false, error: `--${name} only applies with --script` };
+    if (!known.has(name) && !scriptOnly.has(name)) return { ok: false, error: `unknown option --${name}` };
+  }
   if (positional.length !== 1) return { ok: false, error: "give exactly one URL to sign in at, e.g. scenescout login http://127.0.0.1:3000 --role admin" };
   let url: URL;
   try {
@@ -404,6 +420,7 @@ export function parseLoginArgs(args: readonly string[], cwd: string): { ok: true
       role: role.role,
       projectDir: path.resolve(cwd, flags.get("project") ?? "."),
       ...(browser ? { browser: browser as BrowserEngineName } : {}),
+      ...(script ? { script: new Map([...flags].filter(([name]) => scriptOnly.has(name))) } : {}),
     },
   };
 }
