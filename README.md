@@ -12,7 +12,7 @@ Works with Claude Code · Cursor · VS Code (Copilot) · Codex CLI · Gemini CLI
 ![node >= 20](https://img.shields.io/badge/node-%E2%89%A5%2020-339933?logo=node.js&logoColor=white)
 ![MCP server](https://img.shields.io/badge/MCP-server-8A2BE2)
 
-[👀 See it work](#-see-it-work) · [✨ Why](#-why-its-different) · [🎯 Two ways to use it](#-two-ways-to-use-it) · [🚀 Quickstart](#-quickstart) · [🧰 Toolbox](#-the-toolbox) · [🔌 Other clients](#-other-mcp-clients) · [🔒 Safety](#-safety-model) · [🩺 Troubleshooting](#-troubleshooting)
+[📖 Guide](docs/guide/Home.md) · [👀 See it work](#-see-it-work) · [✨ Why](#-why-its-different) · [🎯 Two ways to use it](#-two-ways-to-use-it) · [🚀 Quickstart](#-quickstart) · [🧰 Toolbox](#-the-toolbox) · [🔌 Other clients](#-other-mcp-clients) · [🔒 Safety](#-safety-model) · [🩺 Troubleshooting](#-troubleshooting)
 
 </div>
 

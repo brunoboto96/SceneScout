@@ -41,18 +41,22 @@ test("two calls on the SAME session never interleave", async () => {
 });
 
 test("calls on DIFFERENT sessions overlap in wall-clock", async () => {
+  // Jobs are long enough that timer and scheduler noise on a loaded machine is
+  // small next to the gap being measured: overlapped runs take about one job,
+  // serialized runs take two. The bound sits halfway between.
+  const JOB_MS = 200;
   const q = new SessionQueue();
   const trace: string[] = [];
   const job = (name: string) => async () => {
     trace.push(`${name}:start`);
-    await tick(30);
+    await tick(JOB_MS);
     trace.push(`${name}:end`);
   };
   const started = Date.now();
   await Promise.all([q.run("admin", job("a")), q.run("qa", job("b"))]);
   const elapsed = Date.now() - started;
   assert.deepEqual(trace.slice(0, 2), ["a:start", "b:start"], "both started before either finished");
-  assert.ok(elapsed < 55, `two 30ms jobs on different sessions should not take ~60ms (took ${elapsed}ms)`);
+  assert.ok(elapsed < JOB_MS * 1.5, `two ${JOB_MS}ms jobs on different sessions should not take ~${JOB_MS * 2}ms (took ${elapsed}ms)`);
 });
 
 test("a REJECTED call does not wedge its session's queue", async () => {

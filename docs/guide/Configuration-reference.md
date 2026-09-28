@@ -1,0 +1,320 @@
+# Configuration reference
+
+Every command-line option, environment variable, GitHub Action input, `/scenescout qa` repository setting and `scout_attach` option, with its default. A test (`guide-test`, and `mcp-check` for `scout_attach`) compares these tables with the code, so an option added or removed in one place and not the other fails the build. `scenescout --help` prints the same options in short.
+
+An option takes its value after a space or an equals sign: `--fail-on high` or `--fail-on=high`. Relative paths are resolved from the directory the command runs in.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `scenescout install` | Installs the skill, downloads the browser, registers the MCP server and puts `scenescout` on your PATH |
+| `scenescout doctor` | Checks the setup and prints the fix for anything missing |
+| `scenescout serve` | Runs the MCP server on stdio; this is what a client starts |
+| `scenescout scan <path>` | Prints what the project scan finds: framework, routes, saved logins |
+| `scenescout check <url>` | The deterministic check; exit 0 passed, 1 failed the gate, 2 could not run |
+| `scenescout ci <url>` | An unattended exploratory run driven by a model's API; exit 0 ran, 2 could not run |
+| `scenescout login <url> --role <name>` | Saves a sign-in as a role's profile; exit 0 saved, 1 not |
+| `scenescout status [path]` | What every session of a running engine is doing, as text |
+| `scenescout watch [path]` | Opens the live view in a browser |
+
+`scenescout --version` prints the version, and `scenescout --help` the usage. Every command also prints the usage on `--help` or `-h` and exits 0 without doing anything else, so `scenescout install --help` installs nothing. `install`, `doctor`, `scan`, `status` and `watch` refuse an option or an extra argument they do not take, and exit 1 naming it.
+
+### `scenescout install`
+
+| Option | Default | |
+|---|---|---|
+| `--client`, `--clients` | `claude-code` | Which MCP clients to set up, comma-separated: `claude-code`, `cursor`, `vscode`, `codex`, `gemini`, `copilot`, `windsurf`. Name `claude-code` as well to keep it |
+| `--browsers` | `chromium` | What to download, comma-separated: `chromium` (the full browser and the headless shell, about 550 MB), `chromium-headless-shell` (about 200 MB; everything but headed runs), `firefox`, `webkit`, or `all` |
+| `--browser-only` | off | Download the browser and do nothing else. For a plugin install, or a client registered by hand |
+| `--skip-browser` | off | Skip the download |
+| `--no-register` | off | Skip registering the MCP server |
+| `--no-command` | off | Skip putting `scenescout` on the PATH |
+
+`--browser` is refused here with a hint, since it is easily typed for `--browsers`.
+
+### `scenescout doctor`
+
+| Option | Default | |
+|---|---|---|
+| `--engine` | off | Check only node, the build and the browser: for plugin installs and clients other than Claude Code |
+
+### `scenescout check`
+
+| Option | Default | |
+|---|---|---|
+| `--fail-on` | `high` | The severity that fails the gate: `high`, `medium`, `low` or `never` |
+| `--mode` | `read-only` | The write policy for the crawl, and for flows under `--flow-writes allow`: `observe` or `read-only` |
+| `--max-routes` | `50` | The most routes to visit, 1 to 150 |
+| `--paths` | every route found | Check only these paths, comma-separated, each starting with `/` |
+| `--ignore` | none | Rules to drop, comma-separated (see [check rules](#check-rules)) |
+| `--storage-state` | none | A Playwright storage-state file, to check while signed in |
+| `--browser` | `chromium` | `chromium`, `firefox` or `webkit` |
+| `--action-timeout-ms` | `5000` | How long one click, keystroke or pick may take, 1000 to 120000 |
+| `--nav-timeout-ms` | `20000` | How long a page may take to load, 1000 to 300000. Unset, crawled routes get 15000 |
+| `--project` | the current directory | The project whose `.scenescout/` holds flows and memory |
+| `--out` | `<project>/.scenescout/check` | Where `report.md`, `check.json` and `check.sarif` go |
+| `--flows` | `<project>/.scenescout/flows`, when it exists | A directory of saved flows to replay, or `off` |
+| `--retest` | `on` | `off` skips re-testing open findings from the project's memory |
+| `--flow-writes` | `never` | `never` replays flows under observe's rule; `allow` replays them under `--mode` |
+| `--on-refused-step` | `report` | `report` marks a flow whose step was refused "could not run" and exits 2 with every other verdict kept; `stop` exits 2 at that step with no results |
+| `--gate-retests` | `high` | Which still-reproducing re-tested findings fail the gate: `never`, `high` or `all` |
+
+### `scenescout ci`
+
+| Option | Default | |
+|---|---|---|
+| `--provider` | the one whose key is set | `anthropic` or `openai`. Required when both keys are set |
+| `--model` | `claude-sonnet-5` or `gpt-6-luna` | The model id |
+| `--effort` | `low` | `none` (OpenAI only), `low`, `medium`, `high`, `xhigh` or `max` |
+| `--base-url` | the provider's own API | Another endpoint implementing the same API. Must be https, or plain http to `127.0.0.1` or `localhost` |
+| `--max-turns` | `40` | The most model calls |
+| `--max-tokens` | `1500000` | The most tokens, input and output, over the run |
+| `--max-minutes` | `20` | The most minutes of exploration; the report is written after |
+| `--price-in` | the built-in price | US dollars per million input tokens, for the cost estimate |
+| `--price-cached-in` | the built-in price, else `--price-in` | US dollars per million cached input tokens |
+| `--price-out` | the built-in price | US dollars per million output tokens |
+| `--mode` | `read-only` | `observe`, `read-only`, `safe-write` or `destructive` |
+| `--allow-destructive` | off | A switch, required with `--mode destructive` |
+| `--level` | `medium` | `minimal`, `medium` or `extensive` |
+| `--focus` | none | An area or flow to spend the run on, at most 300 characters |
+| `--show` | none | Capture the element these words describe as a PNG instead of exploring, at most 200 characters |
+| `--compare-url` | none | With `--show`, capture the same element on this URL too and write a diff picture |
+| `--storage-state` | none | A Playwright storage-state file, to explore while signed in |
+| `--browser` | `chromium` | `chromium`, `firefox` or `webkit` |
+| `--action-timeout-ms` | `5000` | As for `check` |
+| `--nav-timeout-ms` | `20000` | As for `check` |
+| `--project` | the current directory | The project whose `.scenescout/` holds the memory |
+| `--out` | `<project>/.scenescout/ci` | Where the files go |
+
+The API key has no option: it is read from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` only.
+
+### `scenescout login`
+
+| Option | Default | |
+|---|---|---|
+| `--role` | (required) | The role's name; the profile is saved as `.scenescout/auth/<role>.json` |
+| `--project` | the current directory | The project to save into |
+| `--browser` | `chromium` | `chromium`, `firefox` or `webkit` |
+| `--script` | off | Sign in headless from the environment instead of in a visible window (for CI) |
+| `--success-url` | none | With `--script`: what the URL's path contains once signed in, or an absolute URL it starts with |
+| `--success-selector` | none | With `--script`: a CSS selector visible only when signed in |
+| `--username-selector` | found by the rules | With `--script`: the username field |
+| `--password-selector` | found by the rules | With `--script`: the password field |
+| `--otp-selector` | found by the rules | With `--script`: the one-time-code field |
+| `--submit-selector` | found by the rules | With `--script`: the button that moves the form on |
+| `--timeout` | `60` | With `--script`: seconds the whole sign-in may take, 5 to 600 |
+
+Each `--script` option can also come from an environment variable, below; the option wins.
+
+### `scenescout watch`
+
+| Option | Default | |
+|---|---|---|
+| `--no-open` | off | Print the live view's address without opening a browser |
+
+`scenescout scan`, `scenescout status` and `scenescout serve` take no options.
+
+### Check rules
+
+What `scenescout check` measures, with each rule's severity. `--ignore` takes these ids.
+
+| Rule | Severity | |
+|---|---|---|
+| `route-load-failed` | high | Page did not load |
+| `route-server-error` | high | Page answered with a server error |
+| `route-client-error` | medium | Page answered with a client error |
+| `page-error` | high | Uncaught exception |
+| `server-error` | high | Request failed with a server error |
+| `client-error` | medium | Request failed with a client error |
+| `request-failed` | medium | Request did not complete |
+| `console-error` | medium | Console error |
+| `refused-empty` | high | Failed request shown as an empty result |
+| `false-success` | high | Success shown for a failed request |
+| `dom-injection` | high | Markup rendered as an element |
+| `postmessage-token` | high | Credential posted to any origin |
+| `auth-redirect` | medium | Sent to sign-in |
+| `dead-end` | medium | Dead end |
+| `blocking-overlay` | high | Page blocked by an overlay |
+| `dialog-layout` | medium | Dialog badly placed |
+| `layout-issue` | low | Layout issue |
+| `covered-control` | medium | Control covered by pinned chrome |
+| `clipped-control` | medium | Control unreachable |
+| `offpage-control` | medium | Control outside the page |
+| `overlapping-controls` | low | Controls overlap |
+| `broken-image` | medium | Broken image |
+| `unnamed-control` | medium | Control with no accessible name |
+| `placeholder-only-label` | medium | Field labelled only by its placeholder |
+| `contrast` | low | Text contrast below WCAG |
+| `focus-indicator` | low | No visible focus indicator |
+| `horizontal-scroll` | medium | Page scrolls sideways |
+| `tiny-target` | low | Small click target |
+| `clipped-text` | low | Text clipped |
+| `image-aspect` | low | Image distorted |
+| `flow-step-failed` | high | Saved flow broke |
+| `off-grid-spacing` | worth a look | Spacing off a 4px grid |
+| `indistinct-link` | worth a look | Link styled like body text |
+
+## Environment variables
+
+| Variable | Read by | |
+|---|---|---|
+| `SCENESCOUT_BROWSER` | the server, `check`, `ci`, `login`, `doctor` | The default browser: `chromium` (default), `firefox` or `webkit` |
+| `SCENESCOUT_ACTION_TIMEOUT_MS` | the server, `check`, `ci`, `login` | How long one action may take, 1000 to 120000 (default 5000). An option wins over it |
+| `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login` | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
+| `SCENESCOUT_LIVE` | the server | `off` keeps the live view closed |
+| `SCENESCOUT_REFRESH_BROKER` | the server | `off` turns off the refresh broker for role sessions |
+| `ANTHROPIC_API_KEY` | `ci` | The Anthropic key. The only way to give one |
+| `OPENAI_API_KEY` | `ci` | The OpenAI key. The only way to give one |
+| `SCENESCOUT_LOGIN_USERNAME` | `login --script` | Required: the test user's username or email |
+| `SCENESCOUT_LOGIN_PASSWORD` | `login --script` | Required: the password |
+| `SCENESCOUT_LOGIN_TOTP_SECRET` | `login --script` | The base32 TOTP secret or `otpauth://` URI, when the form asks for a code |
+| `SCENESCOUT_LOGIN_SUCCESS_URL` | `login --script` | As `--success-url` |
+| `SCENESCOUT_LOGIN_SUCCESS_SELECTOR` | `login --script` | As `--success-selector` |
+| `SCENESCOUT_LOGIN_USERNAME_SELECTOR` | `login --script` | As `--username-selector` |
+| `SCENESCOUT_LOGIN_PASSWORD_SELECTOR` | `login --script` | As `--password-selector` |
+| `SCENESCOUT_LOGIN_OTP_SELECTOR` | `login --script` | As `--otp-selector` |
+| `SCENESCOUT_LOGIN_SUBMIT_SELECTOR` | `login --script` | As `--submit-selector` |
+| `CLAUDE_CONFIG_DIR` | `install`, `doctor` | Where Claude Code keeps its configuration; the skill goes into its `skills/` folder. Default `~/.claude` |
+| `GITHUB_STEP_SUMMARY` | `check`, `ci` | Set by GitHub Actions; the report or summary is appended to it |
+
+Variables the server reads belong in the MCP client's configuration for the server (an `env` entry), not only in your shell.
+
+## GitHub Action inputs
+
+A default of "empty" means the input is passed on only when set, so the CLI's own default applies.
+
+### Action: check
+
+`uses: brunoboto96/SceneScout@v3`. Outputs: `passed`, `exit-code`, `failing`, `retests-failing`, `could-not-run`, `worth-a-look`, `high`, `medium`, `low`, `report`, `json`, `sarif`, `artifact-name`.
+
+| Input | Default | |
+|---|---|---|
+| `url` | (required) | The address of the running app |
+| `fail-on` | `high` | As `--fail-on` |
+| `mode` | `read-only` | As `--mode` |
+| `max-routes` | empty | As `--max-routes` |
+| `paths` | empty | As `--paths` |
+| `ignore` | empty | As `--ignore` |
+| `storage-state` | empty | As `--storage-state`, relative to `working-directory` |
+| `browser` | `chromium` | As `--browser` |
+| `action-timeout-ms` | empty | As `--action-timeout-ms` |
+| `nav-timeout-ms` | empty | As `--nav-timeout-ms` |
+| `project` | empty | As `--project`; empty means `working-directory` |
+| `out` | empty | As `--out` |
+| `flows` | empty | As `--flows` |
+| `retest` | empty | As `--retest` |
+| `flow-writes` | empty | As `--flow-writes` |
+| `on-refused-step` | empty | As `--on-refused-step` |
+| `gate-retests` | empty | As `--gate-retests` |
+| `working-directory` | `.` | Where the check runs; other relative paths are resolved from here |
+| `version` | empty | The scenescout npm version to run; empty means the version of the action's ref |
+| `cli` | empty | A built `dist/cli.js` to run instead of the npm package, for testing the action itself |
+| `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
+| `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
+| `upload-artifact` | `true` | Keep the three files as an artifact |
+| `artifact-name` | empty | Empty means `scenescout-check-<job id>`; give each matrix cell its own |
+| `upload-sarif` | `false` | Upload `check.sarif` to code scanning; needs `security-events: write` |
+
+### Action: ci
+
+`uses: brunoboto96/SceneScout/ci@v3`, with the key in the step's `env`. Outputs: `exit-code`, `stop`, `high`, `medium`, `low`, `worth-a-look`, `turns`, `tokens`, `estimated-cost`, `report`, `summary`, `json`, `sarif`, `artifact-name`.
+
+| Input | Default | |
+|---|---|---|
+| `url` | (required) | The address of the running app |
+| `provider` | empty | As `--provider` |
+| `model` | empty | As `--model` |
+| `effort` | empty | As `--effort` |
+| `base-url` | empty | As `--base-url` |
+| `max-turns` | empty | As `--max-turns` |
+| `max-tokens` | empty | As `--max-tokens` |
+| `max-minutes` | empty | As `--max-minutes` |
+| `price-in` | empty | As `--price-in` |
+| `price-cached-in` | empty | As `--price-cached-in` |
+| `price-out` | empty | As `--price-out` |
+| `mode` | `read-only` | As `--mode` |
+| `allow-destructive` | empty | `true` as `--allow-destructive` |
+| `level` | empty | As `--level` |
+| `focus` | empty | As `--focus` |
+| `show` | empty | As `--show` |
+| `compare-url` | empty | As `--compare-url` |
+| `storage-state` | empty | As `--storage-state`, relative to `working-directory` |
+| `browser` | `chromium` | As `--browser` |
+| `action-timeout-ms` | empty | As `--action-timeout-ms` |
+| `nav-timeout-ms` | empty | As `--nav-timeout-ms` |
+| `project` | empty | As `--project`; empty means `working-directory` |
+| `out` | empty | As `--out` |
+| `working-directory` | `.` | Where the run happens |
+| `version` | empty | The scenescout npm version to run |
+| `cli` | empty | A built `dist/cli.js` to run instead, for testing the action itself |
+| `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
+| `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
+| `upload-artifact` | `true` | Keep the output folder as an artifact |
+| `artifact-name` | empty | Empty means `scenescout-ci-<job id>` |
+| `cache` | `true` | Keep the browser in the actions cache; `false` for a job that checks out a ref chosen by an input |
+| `upload-sarif` | `false` | Upload `ci.sarif` to code scanning under the category `scenescout-ci` |
+
+### Action: qa
+
+`uses: brunoboto96/SceneScout/qa@<exact tag>`, called by the [`/scenescout qa` workflow](../../examples/workflows/scenescout-qa.yml) in three stages. You normally configure it through the repository variables below rather than editing these inputs. Outputs: `run`, `pr`, `sha`, `url`, `focus`, `login`, `show`, `base`, `pushed`.
+
+| Input | Default | |
+|---|---|---|
+| `stage` | (required) | `gate`, `shots` or `report` |
+| `github-token` | `${{ github.token }}` | The token for the GitHub API |
+| `allowed` | empty | (gate) Logins that may start a run |
+| `allowed-roles` | empty | (gate) Author associations that may start a run |
+| `allowed-teams` | empty | (gate) Teams whose active members may start a run |
+| `team-token` | empty | (gate) A token that can read the organization's team membership |
+| `allow-forks` | empty | (gate) `true` runs on pull requests from forks |
+| `preview-url` | empty | (gate) A template for the preview's URL |
+| `environment` | empty | (gate) Only deployments to this environment count |
+| `base-url` | empty | (gate) What `compare` compares the preview with |
+| `result` | empty | (report) The result of the job that ran the model |
+| `artifact-name` | empty | (shots, report) The name the results were uploaded under |
+| `pr` | empty | (report) The pull request's number |
+| `sha` | empty | (report) The head commit the gate saw |
+| `url` | empty | (report) The preview URL the run tested |
+| `login` | empty | (report) Who asked for the run |
+| `shots` | empty | (report) The pictures the shots stage pushed |
+
+## Repository variables and secrets for `/scenescout qa`
+
+Set under Settings → Secrets and variables → Actions. All optional.
+
+| Name | Kind | Default | |
+|---|---|---|---|
+| `SCENESCOUT_QA_ALLOWED` | variable | the repository's owners | Logins that may start a run, separated by commas or spaces |
+| `SCENESCOUT_QA_ALLOWED_ROLES` | variable | none | `OWNER`, `MEMBER`, `COLLABORATOR` |
+| `SCENESCOUT_QA_ALLOWED_TEAMS` | variable | none | `org/team-slug` entries; needs `SCENESCOUT_QA_TEAM_TOKEN` |
+| `SCENESCOUT_QA_PREVIEW_URL` | variable | the head commit's newest deployment | A template with `{pr}` and `{sha}` |
+| `SCENESCOUT_QA_ENVIRONMENT` | variable | any | Limits which deployments count as the preview |
+| `SCENESCOUT_QA_ALLOW_FORKS` | variable | off | `true` runs on pull requests from forks |
+| `SCENESCOUT_QA_BASE_URL` | variable | the base branch's newest deployment | What `compare` compares with |
+| `SCENESCOUT_QA_TEAM_TOKEN` | secret | none | Reads team membership; passed to the gate job only |
+| `OPENAI_API_KEY` | secret | (required) | The model key, in the template; use `ANTHROPIC_API_KEY` in the `qa` job instead for Anthropic |
+
+## `scout_attach` options
+
+What an agent can pass when it attaches a session. You rarely set these by hand; ask for the behaviour in words and the agent passes them.
+
+| Option | Default | |
+|---|---|---|
+| `url` | (required) | The app's base URL |
+| `projectPath` | (required) | The project's absolute path; `.scenescout/` lives here |
+| `role` | none | Sign in with the login saved for this role. Not with `storageStatePath` |
+| `storageStatePath` | none | A Playwright storage-state file. Not with `role` |
+| `mode` | `read-only` | `observe`, `read-only`, `safe-write` or `destructive` ([Safety model](Safety-model.md)) |
+| `session` | `default` | The session's name, for several roles or lanes at once |
+| `browser` | `SCENESCOUT_BROWSER`, else `chromium` | `chromium`, `firefox` or `webkit` |
+| `headed` | `false` | Show the browser window |
+| `viewportWidth` | `1280` | 320 to 3840 |
+| `viewportHeight` | `900` | 480 to 2400 |
+| `objective` | none | The session's whole remit, shown in the live view |
+| `task` | a placeholder | What the session is doing right now |
+| `paceMs` | `0` | A floor between actions, 0 to 60000 |
+| `trustedEmbeds` | none | Origins of embedded frames whose writes may go out, in `safe-write` only |
+| `record` | `false` | Keep a frame after every action and write `report.html` |
+| `actionTimeoutMs` | `SCENESCOUT_ACTION_TIMEOUT_MS`, else `5000` | 1000 to 120000 |
+| `navTimeoutMs` | `SCENESCOUT_NAV_TIMEOUT_MS`, else `20000` | 1000 to 300000 |
