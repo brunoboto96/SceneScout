@@ -3,7 +3,7 @@ import type { Contradiction } from "./claims.js";
 import { redactSecrets } from "./memory.js";
 
 export interface OracleViolation {
-  kind: "console_error" | "page_error" | "request_failed" | "http_error" | "dom_injection" | "refused_empty" | "false_success";
+  kind: "console_error" | "page_error" | "request_failed" | "http_error" | "dom_injection" | "refused_empty" | "false_success" | "postmessage_token";
   severity: "high" | "medium";
   detail: string;
   url: string;
@@ -270,6 +270,15 @@ export class OracleMonitor {
    */
   noteContradiction(c: Contradiction, url: string): void {
     this.record({ kind: c.kind, severity: "high", detail: c.detail, url });
+  }
+
+  /**
+   * The page posted a token-shaped value with targetOrigin "*" (postmessage.ts).
+   * Reported through the capture script's binding, not a page event. `embed`
+   * is the receiving frame's site when that frame is another site's.
+   */
+  noteTokenPost(detail: string, url: string, embed: string | null): void {
+    this.record({ kind: "postmessage_token", severity: "high", detail, url, embed: embed ?? undefined });
   }
 
   private record(v: Omit<OracleViolation, "at" | "repeat">): void {

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Embedded accounts</title>
+  </head>
+  <body>
+    <!--
+      The same session-account.html twice: once from this origin and once from
+      the fixture server's second origin. A sessionStorage token saved for this
+      origin must reach the first frame and never the second.
+    -->
+    <iframe id="same" title="Account here" src="/session-account.html" width="400" height="120"></iframe>
+    <iframe id="foreign" title="Account elsewhere" width="400" height="120"></iframe>
+    <script>
+      // The second origin's address comes in the query string, since the page cannot know its port.
+      // Only a loopback origin is accepted, rebuilt from its port number so nothing else of the query reaches the page.
+      const raw = new URLSearchParams(location.search).get("foreign") || "";
+      const port = /^http:\/\/127\.0\.0\.1:(\d{2,5})$/.exec(raw);
+      if (port) document.getElementById("foreign").src = "http://127.0.0.1:" + Number(port[1]) + "/session-account.html";
+    </script>
+  </body>
+</html>

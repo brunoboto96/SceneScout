@@ -179,7 +179,25 @@ In Claude Code the skill gives you a command with flags for the same thing:
 
 The agent scans the project (if there is one), attaches read-only, explores, and writes findings to `.scenescout/report.md`. That's it.
 
-**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (a Playwright storage-state to explore as: a name found by the scan, or a path to the JSON file) · `--observe` / `--safe-write` / `--allow-destructive`.
+**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (who to explore as: a login saved with `scenescout login`, a storage state found by the scan, or a path to a Playwright storage-state JSON) · `--observe` / `--safe-write` / `--allow-destructive`.
+
+### 🔑 Signing in as a role
+
+For an app behind SSO or MFA, sign in once yourself and let every session reuse it:
+
+```bash
+scenescout login http://localhost:3000 --role admin
+```
+
+A browser window opens at the URL. Sign in however the app asks, then come back to the terminal and press **Enter**: the session is saved as `.scenescout/auth/admin.json` in the project. Closing the window or pressing Ctrl+C saves nothing. The file is readable by your account only, `.scenescout/` keeps itself out of git, and the command prints where it saved, how many cookies, origins and databases it holds, never what they are, and how long it will last: read from each cookie's expiry and the `exp` of any JWT in a cookie or in localStorage (the payload is decoded for that one claim, never verified, never printed). The profile keeps cookies, localStorage, IndexedDB and sessionStorage, so an app whose sign-in library keeps its token in sessionStorage or IndexedDB still comes back signed in; sessionStorage is put back only on the origin it came from, once per tab, so a lane that signs out stays signed out. A login saved by an earlier version has no sessionStorage or IndexedDB: record it again if the app keeps its token there. `--project <dir>` saves into another project; `--browser firefox|webkit` records in another browser.
+
+Then `/scenescout --role admin`, or `scout_attach { role: "admin" }` from any agent. Every session attached with the same role gets its own browser built from that one login, so parallel lanes can all run as `admin`. A role with no saved login is refused with the command to run. `role` and `storageStatePath` are alternatives: pass one.
+
+Sessions of one role share one saved login, so they share its refresh token too. An app that rotates refresh tokens and treats a second use of a spent one as theft would revoke the whole token family, and sign every session of that role out, the moment two of them refreshed with the same token. SceneScout stops that for a session attached by role. When the page is about to send a refresh token from the role's profile, the session first takes a lock beside the profile (`.scenescout/auth/<role>.json.lock`, owner-only, taken over if its holder has not touched it in 30 seconds). Holding the lock, it re-reads the profile: if another session has rotated the token in the meantime, it loads that profile into its own browser and sends the current token in place of the spent one. Once the page has stored the rotated token, the session writes its state back over the profile and releases the lock. Sessions in separate processes share the lock through the file. A refresh token is recognised by name (a cookie, a storage key, or a field inside a JSON storage value whose name contains `refresh`) and is never printed or logged. An app whose sign-in renews through the identity provider's own session cookie needs none of this, since no refresh token is shared. `SCENESCOUT_REFRESH_BROKER=off` turns the broker off.
+
+In CI, where nobody can type, `--script` signs in headless as a test user from `SCENESCOUT_LOGIN_USERNAME`, `SCENESCOUT_LOGIN_PASSWORD` and, for a one-time code, `SCENESCOUT_LOGIN_TOTP_SECRET`, and saves the same profile. No credential value is ever printed. See [signing in from CI](docs/ci.md#signing-in-from-ci) for the options and the rules: a test tenant's user, never production or a real person's account.
+
+Before a parallel run, `scout_lane_brief` checks that the planner's saved login will outlast it: `runMinutes` (default 60) plus `expiryMarginMinutes` (default 10). It refuses only when it is sure, meaning every credential in the profile has a date, none was set for another host, and the last of them ends before the run does, and then names the `scenescout login` command to run again. A profile holds cookies other than the sign-in (analytics, preferences), so the first one to expire is reported as a warning rather than a reason to refuse, and a profile with undated credentials in it (a session cookie, or a refresh token with no expiry) is a warning that its lifetime is unknown.
 
 ---
 
@@ -297,7 +315,7 @@ A few that punch above their weight:
 - **`scout_click {clicks: 2}`** — the impatient-user probe: states whether a double-click fired the same state-changing request twice (the classic double-submit bug).
 - **`scout_request`** — calls the app's own API as the session, so "the button is hidden" becomes "the server refuses it" (or doesn't).
 
-Beyond crashes and HTTP errors, two oracles catch a page **contradicting the server**: `refused_empty` (a list request was refused and the page shows its empty state with no error) and `false_success` (a save was refused and the page says it worked). A third, `dom_injection`, reports a typed markup value coming back as an element on any page any session opens.
+Beyond crashes and HTTP errors, two oracles catch a page **contradicting the server**: `refused_empty` (a list request was refused and the page shows its empty state with no error) and `false_success` (a save was refused and the page says it worked). A third, `dom_injection`, reports a typed markup value coming back as an element on any page any session opens. A fourth, `postmessage_token`, reports a page calling `postMessage` with targetOrigin `"*"` on a message that carries a token (a JWT, a `Bearer` value, or an opaque value under a key such as `access_token`): the report names where in the message it was, its shape and its first four characters, never the token.
 
 ---
 
@@ -432,7 +450,7 @@ Run `npx -y scenescout doctor` first — it checks every setup item below (every
 | Installed as a plugin, and the tools fail with *"Executable not found in $PATH: npx"* | A plugin starts the server with a bare `npx`, which Claude Code can only find if it was launched from an environment that has Node on its `PATH`. Under nvm or fnm that means starting Claude Code from a terminal, not from a dock or launcher. Or use `npx -y scenescout install` instead, which registers the absolute path of `npx`. |
 | *"… build has not been downloaded yet"* on attach | The browser download was skipped or failed, or the run asked for a browser you did not install. Run the command the message names, for example `npx -y scenescout install --browser-only --browsers firefox`. On Linux, system libraries may be missing too: `npx playwright install --with-deps chromium`. |
 | Tools broke after moving the folder or changing node version | The registration stores absolute paths. `npx -y scenescout install` refreshes them. |
-| Attach fails or every route lands on the login page | Your app isn't running at `--url`, or the `--role` storage state has expired — regenerate it the way your project's Playwright setup does. |
+| Attach fails or every route lands on the login page | Your app isn't running at `--url`, or the `--role` session has expired. For a saved login, run `scenescout login <url> --role <name>` again; for a storage-state file, regenerate it the way your project's Playwright setup does. |
 
 ### ⬆️ Upgrading from an older version
 
@@ -615,6 +633,7 @@ The CLI is also useful on its own:
 npx -y scenescout scan <path>       # project discovery: framework, routes, saved logins
 npx -y scenescout status <path>     # what every session of a running engine is doing right now
 npx -y scenescout watch <path>      # the same, live in your browser, with each session's page
+npx -y scenescout login <url> --role admin   # sign in once in a visible browser; sessions attach with role: "admin"
 ```
 
 ---
@@ -625,9 +644,10 @@ npx -y scenescout watch <path>      # the same, live in your browser, with each 
 src/
   mcp-server.ts     the 29 tools + per-session dispatch
   scan.ts           project discovery (framework, routes, auth)
-  cli.ts            scan · serve · install · doctor · check · ci · status
+  cli.ts            scan · serve · install · doctor · check · ci · login · status · watch
   check-run.ts      drives a check: attach, crawl every route, collect what was measured
   ci-run.ts         drives a CI run: the MCP server as a child, the model's API, the agent loop
+  login-run.ts      drives `scenescout login`: a visible browser, Enter to save the role's profile; or --script, headless from the environment
   installer.ts      setup logic (skill link, MCP registration, diagnostics)
   engine/
     browser.ts      the engine class: attach, snapshot, actions, crawl, plans
@@ -648,6 +668,10 @@ src/
     journey.ts      task-ease measurement from the action log
     design.ts       the design audit + page scoring
     memory.ts       cross-run storage + finding dedup
+    profiles.ts     saved sign-ins: role names, where a profile lives, owner-only files, attach by role, sessionStorage restore
+    refresh.ts      the refresh broker: which values are a role's refresh tokens, the lock beside the profile, swapping a spent token
+    scripted-login.ts  a CI sign-in: env and flags, TOTP (RFC 6238), which field is which, redaction
+    expiry.ts       how long a saved sign-in lasts: cookie dates and JWT exp, checked before lanes start
     report.ts       the gap ledger + report generation
     check.ts        the check's rules, gate, report and SARIF
     ci.ts           a CI run's options, provider choice, caps, key redaction, tools and files
@@ -726,7 +750,7 @@ Found a way past the write policy, or another security problem? Please report it
 - **Design audit with page scores.** Two tiers (⚠ measurable defects / → craft suggestions incl. AI-slop tells), per-page 0–100 score persisted per route, plus an automatic overlay/modal probe on every snapshot. Shared shell scored once, separately.
 - **Scrolls like a user — and notices when it can't.** Reports `SCROLL LOCKED` for a leaked modal scroll-lock, finds the real inner scroll pane on app-shell layouts, and flags `UNREACHABLE` controls clipped inside `overflow:hidden`.
 - **Uploads like a user.** Answers a styled file-chooser or sets a hidden input directly, with a valid in-memory fixture; `filePath` is fenced to the project under test; files violating `accept` are flagged at selection.
-- **Auth via Playwright storage states.** Expired tokens caught at attach; repeated login-bounces raise `SESSION AUTH LOST`; a bounced route is recorded as *not* covered — a dead session can't certify routes it never reached.
+- **Auth via Playwright storage states.** Expired tokens caught at attach; repeated login-bounces raise `SESSION AUTH LOST` (a session attached by role first re-attaches once from its role's latest saved profile and carries on); a bounced route is recorded as *not* covered — a dead session can't certify routes it never reached.
 - **A trustworthy gap ledger.** Entries must be actionable (a search box or wizard sub-step isn't "form filled but never submitted"); API/download URLs never enter the route contract.
 - **Honest reporting.** Shared chrome counted once, stale scores marked, role matrix compares only roles that actually attempted a route.
 - **Cross-run written knowledge.** `scout_note` curates `.scenescout/ASSUMPTIONS.md` — app model, personas, constraints, risks — in prose.

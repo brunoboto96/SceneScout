@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Signed in</title>
+  </head>
+  <body>
+    <!--
+      A message posted with targetOrigin "*" that carries no credential: a
+      token_type naming the scheme, an expiry, a long plain sentence. "*" on
+      its own is common and harmless; the postmessage_token oracle fires only
+      when the message holds a token-shaped value, so it must stay quiet here.
+    -->
+    <h1>Signed in</h1>
+    <p data-testid="signin-status">You can close this window.</p>
+    <a href="/index.html" data-testid="signin-home-link">Back to the app</a>
+    <script>
+      // An invented token, assembled here so no JWT-shaped literal sits in the repository.
+      const part = (o) => btoa(JSON.stringify(o)).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+      const token = [part({ alg: "HS256", typ: "JWT" }), part({ sub: "demo-user", scope: "read write", exp: 4102444800 }), "c2lnbmF0dXJlLWludmVudGVkLWZvci10ZXN0cw"].join(".");
+      // A sign-in callback handing its result to whoever opened it (itself, when opened directly).
+      const target = window.opener || window.parent;
+      target.postMessage({ type: "signed-in", token_type: "Bearer", expires_in: 3600, note: "the session is ready to use now" }, "*");
+    </script>
+  </body>
+</html>

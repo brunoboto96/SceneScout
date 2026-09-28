@@ -66,6 +66,8 @@ import {
   type SessionStatus,
 } from "./engine/live.js";
 import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
+import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
+import { loginCommand } from "./engine/profiles.js";
 import { formatNeverSubmittedEmpty } from "./engine/forms.js";
 import { computeGaps, formatRouteCoverage, formatUnchosenOptions, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
@@ -322,7 +324,7 @@ async function ensureLive(dir: string): Promise<void> {
   if (!liveAddress) return;
   publishLiveToken(dir);
   // The port is new, so a reader polling status.json needs it rewritten.
-  flushStatus(dir);
+  void flushStatus(dir);
 }
 
 function startLiveServer(): Promise<void> {
@@ -356,12 +358,12 @@ function liveLine(): string {
   );
 }
 
-function flushStatus(dir: string): void {
-  // Fire-and-forget: status is best-effort observability on every tool call's
-  // hot path and must never add blocking filesystem latency. The writer
-  // queues writes per directory and lands each by rename, so a reader never
-  // sees a torn file.
-  void writeStatusFile(
+function flushStatus(dir: string): Promise<void> {
+  // Not awaited on a tool call's hot path: status is best-effort observability
+  // and must never add blocking filesystem latency there. The writer queues
+  // writes per directory and lands each by rename, so a reader never sees a
+  // torn file. scout_close awaits it through settleProjectWrites.
+  return writeStatusFile(
     dir,
     JSON.stringify(
       {
@@ -381,6 +383,23 @@ function flushStatus(dir: string): void {
       2,
     ),
   );
+}
+
+/** The latest ensureLive per project, so a close can wait for the token and status writes it starts. */
+const liveStarts = new Map<string, Promise<void>>();
+
+/**
+ * Everything the server has started writing into a project, landed: the live
+ * view's start (it writes the token file and rewrites status once its port is
+ * known), the token file, then this status write, queued behind any earlier
+ * one. scout_close awaits it, so once a close has answered nothing more is
+ * written into the project, which may then be removed. None of these reject.
+ */
+async function settleProjectWrites(dir: string): Promise<void> {
+  await liveStarts.get(dir);
+  liveStarts.delete(dir);
+  await liveTokenWrites.get(dir);
+  await flushStatus(dir);
 }
 
 /**
@@ -404,8 +423,8 @@ function writeStatus(session: string, phase: "running" | "idle", tool: string, b
     ...(objective ? { objective: redactSecrets(objective) } : {}),
     ...(task ? { task: redactSecrets(task) } : {}),
   });
-  void ensureLive(dir);
-  flushStatus(dir);
+  liveStarts.set(dir, ensureLive(dir));
+  void flushStatus(dir);
 }
 
 /** The watchdog's timeout answer — a diagnosable result, not a hang. */
@@ -578,23 +597,66 @@ server.registerTool(
       lanes: z.number().int().min(1).max(MAX_LANES).describe(`How many lanes to split across (1–${MAX_LANES})`),
       goal: z.string().max(200).optional().describe("What the whole run is for; each lane's objective is written against it"),
       routes: z.array(z.string()).max(500).optional().describe("Routes to split. Omit to split every route this project knows about."),
+      runMinutes: z
+        .number()
+        .int()
+        .min(1)
+        .max(1440)
+        .optional()
+        .describe(
+          `How long the lanes will run, in minutes (default ${DEFAULT_RUN_MINUTES}). When they attach by a saved role, the brief is refused if that login will not last this long plus the margin.`,
+        ),
+      expiryMarginMinutes: z
+        .number()
+        .int()
+        .min(0)
+        .max(240)
+        .optional()
+        .describe(`How long past the run a saved role's login must still last, in minutes (default ${DEFAULT_EXPIRY_MARGIN_MINUTES}).`),
       session: sessionParam,
     },
   },
-  serializedPerSession("scout_lane_brief", async ({ lanes, goal, routes }: { lanes: number; goal?: string; routes?: string[] }, session) => {
-    try {
-      const eng = engineFor(session);
-      const all = routes && routes.length > 0 ? routes : eng.allKnownRoutes();
-      const briefs = planLanes(all, lanes, { goal, mode: eng.mode, role: eng.role });
-      laneLedger.nameBriefed(
-        briefs.map((b) => b.lane),
-        (s) => engines.has(s),
-      );
-      return text(formatBriefs(briefs, { goal, mode: eng.mode, role: eng.role }), session);
-    } catch (err) {
-      return errorText(err);
-    }
-  }),
+  serializedPerSession(
+    "scout_lane_brief",
+    async (
+      {
+        lanes,
+        goal,
+        routes,
+        runMinutes,
+        expiryMarginMinutes,
+      }: { lanes: number; goal?: string; routes?: string[]; runMinutes?: number; expiryMarginMinutes?: number },
+      session,
+    ) => {
+      try {
+        const eng = engineFor(session);
+        // Lanes that attach by a saved role all sign in from one file: check it
+        // lasts the run before handing out briefs that would die part-way.
+        let expiryNote = "";
+        if (eng.auth.kind === "role") {
+          const verdict = judgeProfileFile(eng.auth.storageStatePath, {
+            url: eng.baseUrl,
+            now: Date.now(),
+            runMs: (runMinutes ?? DEFAULT_RUN_MINUTES) * 60_000,
+            marginMs: (expiryMarginMinutes ?? DEFAULT_EXPIRY_MARGIN_MINUTES) * 60_000,
+            role: eng.auth.role,
+            rerun: loginCommand(eng.auth.role, eng.baseUrl),
+          });
+          if (verdict.kind === "refuse") return errorText(new Error(verdict.message));
+          if (verdict.kind !== "ok") expiryNote = `⚠ ${verdict.message}\n\n`;
+        }
+        const all = routes && routes.length > 0 ? routes : eng.allKnownRoutes();
+        const briefs = planLanes(all, lanes, { goal, mode: eng.mode, role: eng.role });
+        laneLedger.nameBriefed(
+          briefs.map((b) => b.lane),
+          (s) => engines.has(s),
+        );
+        return text(expiryNote + formatBriefs(briefs, { goal, mode: eng.mode, role: eng.role, roleProfile: eng.auth.kind === "role" }), session);
+      } catch (err) {
+        return errorText(err);
+      }
+    },
+  ),
 );
 
 server.registerTool(
@@ -670,10 +732,21 @@ server.registerTool(
             `\nFile each with scout_finding (the same evidence), or confirm which finding already covers it, before closing the lane's session. A judged defect that is never filed is not in the report.`
           : "";
       laneLedger.fold(lane, engines.get(lane)?.attached === true);
+      // A lane that lost its sign-in and re-attached from its role's profile
+      // says so here, where the planner folds it, not only in the lane's own calls.
+      const reattach = engines.get(lane)?.reattachSummary() ?? "";
+      const reattached = reattach ? `\n↻ Session ${JSON.stringify(lane)}: ${reattach}.` : "";
+      const refreshed = engines.get(lane)?.refreshSummary() ?? "";
+      const brokered = refreshed ? `\n↻ Session ${JSON.stringify(lane)}: ${refreshed}.` : "";
       const around = parsed.aroundIgnored ? `\n(The text around the report's JSON block was discarded unread.)` : "";
       const decoded = decodedEntitiesNote(parsed.entitiesDecoded) + ignoredConventionsNote(parsed.conventionsIgnored);
       return {
-        content: [{ type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}${around}${decoded}${followUp}` }],
+        content: [
+          {
+            type: "text" as const,
+            text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}${reattached}${brokered}${around}${decoded}${followUp}`,
+          },
+        ],
       };
     } catch (err) {
       return errorText(err);
@@ -701,11 +774,20 @@ server.registerTool(
   "scout_attach",
   {
     description:
-      "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass a Playwright storage-state JSON to explore as an authenticated role. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
+      "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass `role` to sign in with a login the user saved by `scenescout login <url> --role <name>`, or a Playwright storage-state JSON as storageStatePath. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
     inputSchema: {
       url: z.string().describe("Base URL of the running app, e.g. http://localhost:3000"),
       projectPath: z.string().describe("Absolute path to the project (memory + report live in .scenescout/ here)"),
-      storageStatePath: z.string().optional().describe("Optional Playwright storage-state JSON path for authenticated exploration"),
+      storageStatePath: z.string().optional().describe("Optional Playwright storage-state JSON path for authenticated exploration. Not with `role`."),
+      role: z
+        .string()
+        .max(40)
+        .optional()
+        .describe(
+          "Sign in as a role whose login was saved with `scenescout login <url> --role <name>` (kept in the project's .scenescout/auth/). " +
+            "Every session given the same role gets its own browser built from that one login. Not with storageStatePath. " +
+            "No saved login for the role: the attach is refused and names the command to run — ask the user to run it, since it opens a window for them to sign in.",
+        ),
       mode: z
         .enum(["observe", "read-only", "safe-write", "destructive"])
         .default("read-only")
@@ -773,6 +855,7 @@ server.registerTool(
       url,
       projectPath,
       storageStatePath,
+      role,
       mode,
       headed,
       browser,
@@ -788,6 +871,7 @@ server.registerTool(
       url: string;
       projectPath: string;
       storageStatePath?: string;
+      role?: string;
       mode?: "observe" | "read-only" | "safe-write" | "destructive";
       headed?: boolean;
       browser?: "chromium" | "firefox" | "webkit";
@@ -866,6 +950,7 @@ server.registerTool(
           url,
           projectDir: projectPath,
           storageStatePath,
+          role,
           mode,
           headed,
           browser,
@@ -881,7 +966,6 @@ server.registerTool(
           trustedEmbeds,
           memoryStore: store,
         });
-        eng.role = storageStatePath ? path.basename(storageStatePath).replace(/\.json$/i, "") : "anonymous";
         // Put the session on the board now, so the live view shows it before its
         // first tool call. liveLine() needs the port, so the server is awaited
         // here rather than started in the background by writeStatus.
@@ -1717,7 +1801,7 @@ server.registerTool(
         board.clear();
         laneLedger.clear();
         lastWriter = null;
-        for (const dir of dirs) flushStatus(dir);
+        await Promise.all([...dirs].map((dir) => settleProjectWrites(dir)));
         return text(`All sessions closed (${names.join(", ") || "none were live"}). Memory and reports remain in .scenescout/.`, activeName);
       }
       const name = session ?? activeName;
@@ -1739,7 +1823,7 @@ server.registerTool(
       // names that never attached must not make a later run's session a lane.
       if (engines.size === 0) laneLedger.clear();
       if (lastWriter?.session === name) lastWriter = null;
-      if (eng.memory?.dir) flushStatus(eng.memory.dir);
+      if (eng.memory?.dir) await settleProjectWrites(eng.memory.dir);
       if (activeName === name) activeName = engines.keys().next().value ?? "default";
       return text(
         `Session "${name}" closed. Memory and report remain in .scenescout/.` +
