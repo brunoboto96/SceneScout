@@ -189,7 +189,7 @@ For an app behind SSO or MFA, sign in once yourself and let every session reuse 
 scenescout login http://localhost:3000 --role admin
 ```
 
-A browser window opens at the URL. Sign in however the app asks, then come back to the terminal and press **Enter**: the session is saved as `.scenescout/auth/admin.json` in the project. Closing the window or pressing Ctrl+C saves nothing. The file is readable by your account only, `.scenescout/` keeps itself out of git, and the command prints where it saved, how many cookies and origins it holds, never what they are, and how long it will last: read from each cookie's expiry and the `exp` of any JWT in a cookie or in localStorage (the payload is decoded for that one claim, never verified, never printed). `--project <dir>` saves into another project; `--browser firefox|webkit` records in another browser.
+A browser window opens at the URL. Sign in however the app asks, then come back to the terminal and press **Enter**: the session is saved as `.scenescout/auth/admin.json` in the project. Closing the window or pressing Ctrl+C saves nothing. The file is readable by your account only, `.scenescout/` keeps itself out of git, and the command prints where it saved, how many cookies, origins and databases it holds, never what they are, and how long it will last: read from each cookie's expiry and the `exp` of any JWT in a cookie or in localStorage (the payload is decoded for that one claim, never verified, never printed). The profile keeps cookies, localStorage, IndexedDB and sessionStorage, so an app whose sign-in library keeps its token in sessionStorage or IndexedDB still comes back signed in; sessionStorage is put back only on the origin it came from, once per tab, so a lane that signs out stays signed out. A login saved by an earlier version has no sessionStorage or IndexedDB: record it again if the app keeps its token there. `--project <dir>` saves into another project; `--browser firefox|webkit` records in another browser.
 
 Then `/scenescout --role admin`, or `scout_attach { role: "admin" }` from any agent. Every session attached with the same role gets its own browser built from that one login, so parallel lanes can all run as `admin`. A role with no saved login is refused with the command to run. `role` and `storageStatePath` are alternatives: pass one.
 
@@ -666,7 +666,7 @@ src/
     journey.ts      task-ease measurement from the action log
     design.ts       the design audit + page scoring
     memory.ts       cross-run storage + finding dedup
-    profiles.ts     saved sign-ins: role names, where a profile lives, owner-only files, attach by role
+    profiles.ts     saved sign-ins: role names, where a profile lives, owner-only files, attach by role, sessionStorage restore
     scripted-login.ts  a CI sign-in: env and flags, TOTP (RFC 6238), which field is which, redaction
     expiry.ts       how long a saved sign-in lasts: cookie dates and JWT exp, checked before lanes start
     report.ts       the gap ledger + report generation
