@@ -601,7 +601,7 @@ async function main(): Promise<void> {
   const guideGaps: string[] = [];
   const schemaOf = new Map(tools.map((t) => [t.name, Object.keys((t.inputSchema as { properties?: Record<string, unknown> }).properties ?? {})]));
   for (const file of fs.readdirSync(guideDir).filter((f) => f.endsWith(".md"))) {
-    const text = fs.readFileSync(path.join(guideDir, file), "utf8");
+    const text = fs.readFileSync(path.join(guideDir, file), "utf8").replace(/\r\n?/g, "\n");
     for (const m of text.matchAll(/\b(scout_[a-z_]+)\b/g)) if (!m[1].endsWith("_") && !names.includes(m[1])) guideGaps.push(`${file}: no tool ${m[1]}`);
     // `scout_attach {role: "admin"}`, `scout_verify {id, verdict, note}`: each key must be a parameter.
     for (const m of text.matchAll(/\b(scout_[a-z_]+)\s*\{([^}]*)\}/g)) {
@@ -612,7 +612,7 @@ async function main(): Promise<void> {
       }
     }
   }
-  const reference = fs.readFileSync(path.join(guideDir, "Configuration-reference.md"), "utf8");
+  const reference = fs.readFileSync(path.join(guideDir, "Configuration-reference.md"), "utf8").replace(/\r\n?/g, "\n");
   const attachSection = reference.split("\n## `scout_attach` options\n")[1] ?? "";
   const listed = [...attachSection.matchAll(/^\| `([A-Za-z]+)` \|/gm)].map((m) => m[1]).sort();
   const attachParams = [...(schemaOf.get("scout_attach") ?? [])].sort();

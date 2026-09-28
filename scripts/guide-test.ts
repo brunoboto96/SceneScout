@@ -33,7 +33,9 @@ import { SCRIPT_FLAGS } from "../src/engine/scripted-login.ts";
 import { GUIDE_DIR, toWikiPage } from "./guide-wiki.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), "utf8");
+/** Line endings as a Windows checkout may have them (\r\n) become \n, so every parser below sees one shape. */
+const lf = (text: string): string => text.replace(/\r\n?/g, "\n");
+const read = (rel: string): string => lf(fs.readFileSync(path.join(REPO, rel), "utf8"));
 const readYaml = (rel: string) => parseYaml(read(rel)) as Record<string, any>;
 
 const PAGE_NAMES = [
@@ -56,18 +58,20 @@ const REFERENCE = pages.get("Configuration-reference.md")!;
 /** The page's lines, each marked as prose or inside a fenced code block. */
 function lines(text: string): Array<{ text: string; code: boolean; n: number }> {
   let fence: string | null = null;
-  return text.split("\n").map((line, i) => {
-    const opener = line.match(/^\s*(`{3,}|~{3,})/);
-    if (fence) {
-      if (opener && opener[1][0] === fence[0] && opener[1].length >= fence.length && line.trim() === opener[1]) fence = null;
-      return { text: line, code: true, n: i + 1 };
-    }
-    if (opener) {
-      fence = opener[1];
-      return { text: line, code: true, n: i + 1 };
-    }
-    return { text: line, code: false, n: i + 1 };
-  });
+  return lf(text)
+    .split("\n")
+    .map((line, i) => {
+      const opener = line.match(/^\s*(`{3,}|~{3,})/);
+      if (fence) {
+        if (opener && opener[1][0] === fence[0] && opener[1].length >= fence.length && line.trim() === opener[1]) fence = null;
+        return { text: line, code: true, n: i + 1 };
+      }
+      if (opener) {
+        fence = opener[1];
+        return { text: line, code: true, n: i + 1 };
+      }
+      return { text: line, code: false, n: i + 1 };
+    });
 }
 
 /** Prose with inline code spans blanked out: where links and headings live. */
@@ -165,7 +169,7 @@ function tables(text: string): { tables: Table[]; problems: string[] } {
 
 /** The body of the section under a heading, up to the next heading of the same or a higher level. */
 function section(text: string, heading: string): string {
-  const all = text.split("\n");
+  const all = lf(text).split("\n");
   const start = all.findIndex((l) => l.trim() === heading);
   assert.ok(start >= 0, `the configuration reference has no "${heading}" heading`);
   const level = heading.match(/^#+/)![0].length;
@@ -178,6 +182,13 @@ function tableIn(text: string, heading: string): string[][] {
   const t = tables(section(text, heading)).tables[0];
   assert.ok(t, `no table under "${heading}"`);
   return t.rows;
+}
+
+/** The outputs a section names on its "Outputs: `a`, `b`." line. */
+function outputsIn(text: string, heading: string): string[] {
+  const line = section(text, heading).match(/Outputs: (.+?)\.\n/);
+  assert.ok(line, `${heading} lists its outputs`);
+  return sorted([...line[1].matchAll(/`([a-z-]+)`/g)].map((m) => m[1]));
 }
 
 /** Backticked `--options` in a cell. */
@@ -216,7 +227,7 @@ test("every page renders as GitHub Markdown: whole tables, closed code fences", 
 /** Whether the page ends inside a fenced code block. */
 function unclosedFence(text: string): boolean {
   let fence: string | null = null;
-  for (const line of text.split("\n")) {
+  for (const line of lf(text).split("\n")) {
     const marker = line.match(/^\s*(`{3,}|~{3,})/)?.[1];
     if (!marker) continue;
     if (!fence) fence = marker;
@@ -235,6 +246,17 @@ test("the table checker catches the mistakes that break a GitHub table", () => {
   assert.equal(unclosedFence("```bash\nnpm test\n```\n"), false);
   assert.equal(unclosedFence("```bash\nnpm test\n"), true);
   assert.equal(unclosedFence("````md\n```\n````\n"), false, "a shorter fence inside a longer one does not close it");
+});
+
+test("a page checked out with Windows line endings parses the same", () => {
+  const page = "# Title\n\n### Action: x\n\n`uses: x`. Outputs: `a`, `b`.\n\n| Input | Default |\n|---|---|\n| `url` | (required) |\n\n## Next\n";
+  const crlf = page.replace(/\n/g, "\r\n");
+  assert.deepEqual(outputsIn(crlf, "### Action: x"), ["a", "b"]);
+  assert.deepEqual(tableIn(crlf, "### Action: x"), [["`url`", "(required)"]]);
+  assert.deepEqual(tables(crlf).problems, []);
+  assert.deepEqual([...anchors(crlf)], ["title", "action-x", "next"]);
+  assert.equal(unclosedFence("```sh\r\nnpm test\r\n```\r\n"), false);
+  assert.equal(wiki("[a](Home.md)\r\n```\r\n[b](Home.md)\r\n```\r\n"), "[a](Home)\r\n```\r\n[b](Home.md)\r\n```\r\n", "the wiki transform keeps code as code");
 });
 
 test("slugs follow GitHub's rules for the headings the guide uses", () => {
@@ -474,9 +496,7 @@ test("the reference lists every action input with the action's default, and ever
       const expected = input.required ? "(required)" : input.default === undefined || input.default === "" ? "empty" : `\`${input.default}\``;
       assert.equal(row[1], expected, `${file} input ${row[0]}`);
     }
-    const outputs = section(REFERENCE, heading).match(/Outputs: (.+?)\.\n/);
-    assert.ok(outputs, `${heading} lists its outputs`);
-    assert.deepEqual(sorted([...outputs[1].matchAll(/`([a-z-]+)`/g)].map((m) => m[1])), sorted(Object.keys(action.outputs)), `${file} outputs`);
+    assert.deepEqual(outputsIn(REFERENCE, heading), sorted(Object.keys(action.outputs)), `${file} outputs`);
   }
 });
 
