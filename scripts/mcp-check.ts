@@ -135,7 +135,7 @@ async function liveViewCheck(client: Client): Promise<string> {
     console.log("✓ scout_attach hands over a working live view address, and status/watch read it back");
     console.log("✓ the report outlives the run's sessions, with the path it belongs at");
   } finally {
-    fixture.close();
+    await fixture.close();
   }
   return projectDir;
 }
@@ -200,7 +200,7 @@ async function expiryBriefCheck(client: Client): Promise<void> {
     console.log("✓ ...and warns, still briefing, when only one of several credentials ends inside it");
     assertClosedAll(await call("scout_close", { all: true }));
   } finally {
-    fixture.close();
+    await fixture.close();
     fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
@@ -325,7 +325,7 @@ ${late.slice(0, 400)}`);
     assertClosedAll(await call("scout_close", { all: true }));
     console.log("✓ a run's shared state ends with its last session");
   } finally {
-    fixture.close();
+    await fixture.close();
     // The engine may still be flushing its last status or log write into the
     // directory as it closes; retry rather than fail the suite on the race.
     fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -397,7 +397,7 @@ async function reattachLaneCheck(client: Client): Promise<void> {
     console.log("✓ a folded lane report names a lane that re-attached, or whose re-attach failed, and no other");
     assertClosedAll(await call("scout_close", { all: true }));
   } finally {
-    fixture.close();
+    await fixture.close();
     fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
@@ -453,7 +453,7 @@ async function liveViewOffCheck(): Promise<void> {
     console.log("✓ SCENESCOUT_LIVE=off opens no port and still writes per-session status");
   } finally {
     await client.close();
-    fixture.close();
+    await fixture.close();
     fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }

@@ -17,6 +17,7 @@ import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
 import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser } from "../src/engine/launch.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
+import { descendants, extraHandles } from "./smoke/leaks.ts";
 
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -203,6 +204,39 @@ test("the orphan reaper only ever selects browsers this tool launched and abando
   ].join("\n");
   assert.deepEqual(orphanPids(ps), [101, 102]);
   assert.deepEqual(orphanPids(""), []);
+});
+
+test("the smoke leak check sees everything under this process, and nothing else", () => {
+  // A browser a suite never closed is still node's child, so the orphan reaper
+  // above skips it by design, and its helpers hang under IT, not under node.
+  const ps = [
+    `  500     1 node smoke.ts`, // this process
+    `  501   500 /cache/ms-playwright/chromium/chrome --headless`, // a browser left open
+    `  502   501 /cache/ms-playwright/chromium/chrome --type=renderer`, // its helper, a grandchild
+    `  503   500 ps -A -o pid=,ppid=,command=`, // the listing itself
+    `  504   500 /bin/ps -A -o pid=,ppid=,command=`, // the listing, by full path
+    `  505     1 /cache/ms-playwright/chromium/chrome --headless`, // somebody else's browser
+    `  506   777 node other.js`, // an unrelated process
+    `  507   500 node dist/cli.js check`, // a CLI child still running is a leftover too
+    `  508   500 /repo/node_modules/@esbuild/darwin-arm64/bin/esbuild --service=0.28.2 --ping`, // tsx's transformer, not the suite's
+    `  509   501 /repo/node_modules/@esbuild/linux-x64/bin/esbuild --service=0.28.2 --ping`, // ...but only as node's own child
+    `garbage`,
+  ].join("\n");
+  assert.deepEqual(
+    descendants(ps, 500).map((p) => p.pid),
+    [501, 502, 507, 509],
+  );
+  assert.deepEqual(descendants(ps, 999), []);
+  assert.deepEqual(descendants("", 500), []);
+});
+
+test("the smoke open-handle check counts by type, so one more of a kind already open still counts", () => {
+  assert.deepEqual(extraHandles(["TTYWrap", "TTYWrap"], ["TTYWrap", "TTYWrap"]), []);
+  // A browser left open shows as a child process and the pipes to it, next to stdio pipes that were there all along.
+  assert.deepEqual(extraHandles(["PipeWrap", "PipeWrap"], ["PipeWrap", "PipeWrap", "ProcessWrap", "PipeWrap"]), ["ProcessWrap", "PipeWrap"]);
+  assert.deepEqual(extraHandles(["TTYWrap"], ["Timeout", "TCPServerWrap", "TTYWrap"]), ["Timeout", "TCPServerWrap"]);
+  // Closing something that was open at the start is not a leak.
+  assert.deepEqual(extraHandles(["TTYWrap", "Timeout"], ["TTYWrap"]), []);
 });
 
 test("a browser that was never downloaded gets one instruction, not a stack of text", () => {

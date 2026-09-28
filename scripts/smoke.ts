@@ -12,11 +12,18 @@
  * memory is one of the things under test. "cross-run memory, safe-write,
  * uploads" expects the coverage "read-only exploration" recorded, so running
  * it alone fails that one check by design.
+ *
+ * After each suite, a process still running under this one (a browser never
+ * closed, a CLI never waited for) fails that suite and is ended; after the
+ * last, anything still open that would keep node running fails the run. A
+ * browser left open used to pass every check and then hold `npm test` open.
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { failureCount, recordCrash, startFixtureServer, type SmokeContext } from "./smoke/harness.ts";
+import { execFileSync } from "node:child_process";
+import { check, eventually, failureCount, recordCrash, startFixtureServer, type SmokeContext } from "./smoke/harness.ts";
+import { descendants, extraHandles, type Leftover } from "./smoke/leaks.ts";
 import * as readOnly from "./smoke/read-only.ts";
 import * as safeWrite from "./smoke/safe-write.ts";
 import * as multiSession from "./smoke/multi-session.ts";
@@ -51,7 +58,35 @@ const suites = [
   ciRun,
 ];
 
+/** Processes still running under this one. `ps` is POSIX; on Windows the check is skipped and says so. */
+function leftovers(): Leftover[] {
+  return descendants(execFileSync("ps", ["-A", "-o", "pid=,ppid=,command="], { encoding: "utf8", timeout: 5000 }), process.pid);
+}
+
+/**
+ * Fail a suite that leaves a process running (a browser it never closed, a CLI
+ * it never waited for), then end what it left so the next suite starts clean
+ * and node can still exit. Every pid here is this process's own descendant.
+ */
+async function checkNothingLeft(suite: string): Promise<void> {
+  if (process.platform === "win32") return;
+  let left: Leftover[] = [];
+  // A close that was awaited has already ended its browser; the grace is for a helper process that exits a moment later.
+  await eventually(() => (left = leftovers()).length === 0, 5000);
+  check(`${suite}: leaves no process running`, left.length === 0, left.map((p) => `${p.pid} ${p.command.slice(0, 160)}`).join("\n    "));
+  for (const p of left) {
+    try {
+      process.kill(p.pid, "SIGKILL");
+    } catch (err) {
+      console.error(`    could not end ${p.pid}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
 async function main(): Promise<void> {
+  // What is open before anything runs (stdio), so what is open at the end can be compared with it.
+  const baseline = process.getActiveResourcesInfo();
+  if (process.platform === "win32") console.log("(leftover-process check skipped: no ps on Windows; open handles are still checked)");
   const server = await startFixtureServer();
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "scout-smoke-"));
   const ctx: SmokeContext = { baseUrl: server.baseUrl, foreignBaseUrl: server.foreignBaseUrl, projectDir, stats: server.stats };
@@ -68,11 +103,16 @@ async function main(): Promise<void> {
       } catch (err) {
         recordCrash(suite.title, err);
       }
+      await checkNothingLeft(suite.title);
     }
   } finally {
-    server.close();
+    await server.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
   }
+  // Anything still open would keep node running after the last line of output, and `npm test` with it.
+  let extra: string[] = [];
+  await eventually(() => (extra = extraHandles(baseline, process.getActiveResourcesInfo())).length === 0, 3000);
+  check("nothing is left open that would keep node running", extra.length === 0, `open: ${extra.join(", ")}`);
   if (ran === 0) {
     // A filter that matches nothing must not read as a pass.
     console.error(`\nNo suite matched "${only}". Suites: ${suites.map((s) => s.title).join(" | ")}`);
