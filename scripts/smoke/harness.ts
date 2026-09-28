@@ -9,6 +9,7 @@
  * like app behaviour ("scroll target not found"). `npm run smoke` rebuilds
  * first, so this still tests your edit, not the previous build.
  */
+import crypto from "node:crypto";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -136,6 +137,38 @@ export function revokeFixtureTokens(): number {
   const n = liveTokens.size;
   liveTokens.clear();
   return n;
+}
+
+/**
+ * The fixture's rotating refresh tokens, as an identity provider with reuse
+ * detection keeps them: each sign-in starts a token family; a refresh with the
+ * family's current token rotates it (a new refresh token and a new access
+ * token); a refresh with a token the family already spent revokes the whole
+ * family, every access token in it included.
+ */
+interface TokenFamily {
+  current: string;
+  spent: Set<string>;
+  access: Set<string>;
+  revoked: boolean;
+  rotations: number;
+}
+const families: TokenFamily[] = [];
+const newToken = (): string => crypto.randomBytes(24).toString("base64url");
+
+/** Expire every access token the rotating sign-in issued, so each page's next call has to refresh. */
+export function expireFixtureAccess(): void {
+  for (const f of families) f.access.clear();
+}
+
+/** How the rotating sign-in's families stand: how many, how many rotations, how many revoked for reuse. Never the tokens. */
+export function refreshFamilies(): { families: number; rotations: number; revoked: number } {
+  return { families: families.length, rotations: families.reduce((n, f) => n + f.rotations, 0), revoked: families.filter((f) => f.revoked).length };
+}
+
+/** Whether `token` is the current refresh token of a live family: what a profile written back should hold. */
+export function isCurrentRefreshToken(token: string): boolean {
+  return families.some((f) => !f.revoked && f.current === token);
 }
 
 /** A loopback origin (the fixture server's other port), or "" for anything else: a redirect built from a query parameter goes nowhere else. */
@@ -493,6 +526,64 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       }
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(fs.readFileSync(path.join(appDir, "cookie-account.html")));
+      return;
+    }
+    // The rotating sign-in. /rt-signin starts a family and hands the page its
+    // tokens to keep in localStorage; /rt-app is the app, which calls
+    // /rt-api/me with its access token and, on a 401, refreshes at
+    // /rt-auth/token with its refresh token.
+    if (urlPath === "/rt-signin") {
+      const family: TokenFamily = { current: newToken(), spent: new Set(), access: new Set([newToken()]), revoked: false, rotations: 0 };
+      families.push(family);
+      const session = JSON.stringify({ accessToken: [...family.access][0], refreshToken: family.current });
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(
+        `<!doctype html><title>Signing in</title><script>localStorage.setItem("session", ${JSON.stringify(session)}); location.replace("/rt-app");</script>`,
+      );
+      return;
+    }
+    if (urlPath === "/rt-app") {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "rotating-refresh.html")));
+      return;
+    }
+    if (urlPath === "/rt-api/me") {
+      const bearer = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+      const ok = families.some((f) => !f.revoked && f.access.has(bearer));
+      res.writeHead(ok ? 200 : 401, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(ok ? { name: "a member" } : { error: "unauthorized" }));
+      return;
+    }
+    if (urlPath === "/rt-auth/token" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        let presented = "";
+        try {
+          presented = String((JSON.parse(Buffer.concat(chunks).toString("utf8")) as { refresh_token?: unknown }).refresh_token ?? "");
+        } catch {
+          presented = "";
+        }
+        const family = families.find((f) => f.current === presented || f.spent.has(presented));
+        const refuse = () => {
+          res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: "invalid_grant" }));
+        };
+        if (!family || family.revoked) return refuse();
+        if (family.current !== presented) {
+          // A spent token presented again: taken as stolen, so the whole family ends.
+          family.revoked = true;
+          family.access.clear();
+          return refuse();
+        }
+        family.spent.add(presented);
+        family.current = newToken();
+        const access = newToken();
+        family.access.add(access);
+        family.rotations += 1;
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ access_token: access, refresh_token: family.current }));
+      });
       return;
     }
     // Extensionless /login, because the engine's auth heuristic matches a path
