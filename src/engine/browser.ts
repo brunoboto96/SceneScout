@@ -80,6 +80,7 @@ import {
   serviceWorkerPolicy,
   sharedWorkersAllowed,
   unloadWriteInterception,
+  closeWaitsForLeavingWrites,
   type BrowserEngineName,
 } from "../browsers.js";
 import { revealedLines } from "./hover.js";
@@ -824,6 +825,8 @@ export class BrowserEngine {
    * as long as the browser, so a page closed at the end still meets it.
    */
   private readonly routedWrites = new RoutedWrites();
+  /** Requests the route handler is still judging, by the page that sent them: a page is closed only once its own are answered. */
+  private readonly routesInFlight = new Map<Page, Set<Promise<unknown>>>();
   /** Writes refused at the browser level, so the driver's own report of them (a redirect hop failing) is known as the policy's doing. */
   private readonly unseenRefusals = new UnseenRefusals();
 
@@ -1208,7 +1211,7 @@ export class BrowserEngine {
 
     // Write policy — enforced on the wire, where the truth lives.
     if (this.mode !== "destructive") {
-      await this.context.route("**/*", async (route) => {
+      const judge = async (route: Route): Promise<unknown> => {
         const req = route.request();
         const method = req.method();
         // Read once, as the request arrives: the rule the page sent it under (policy.ts WriteRule), not whatever holds after an await below.
@@ -1355,7 +1358,8 @@ export class BrowserEngine {
           return route.continue();
         }
         return refuse();
-      });
+      };
+      await this.context.route("**/*", (route) => this.judgeTracked(route, judge));
       // Chromium never routes a write a page sends as it is being left; it is judged at the browser level instead.
       if (unloadWriteInterception(this.engineName) === "browser-fetch" && this.browser) {
         try {
@@ -1396,7 +1400,7 @@ export class BrowserEngine {
             this.snapshotUrl = "";
             this.lastSnap = null;
           } else {
-            void BrowserEngine.leaveAndClose(newPage);
+            void this.leaveAndClose(newPage);
           }
         })
         .catch(() => {});
@@ -4260,9 +4264,12 @@ export class BrowserEngine {
       this.blockedRequests = [];
       this.oracles.drain(false);
       this.setMode(crawlMode);
-      // Pages the session no longer drives are closed only now, at about:blank and under the held rule: in Firefox a
-      // page closed straight after it is left sent its leaving beacon unjudged about one time in forty.
-      await BrowserEngine.settleWithin(Promise.allSettled(context.pages().map((p) => (p === this.page ? undefined : p.close().catch(() => {})))), 5000);
+      // Pages the session no longer drives are closed only now, at about:blank and under the held rule, and each only
+      // once what it sent as it was left has been judged (leftSettled).
+      await BrowserEngine.settleWithin(
+        Promise.allSettled(context.pages().map(async (p) => (p === this.page ? undefined : (await this.leftSettled(p), await p.close().catch(() => {}))))),
+        5000,
+      );
       page.off("websocket", onSocket);
       context.off("response", onResponse);
       this.refs.clear();
@@ -4542,13 +4549,49 @@ export class BrowserEngine {
     await page.goto("about:blank", { timeout: 3000 }).catch(() => {});
   }
 
+  /** Run the route handler's judgement of one request, recorded against the page that sent it until it is answered. */
+  private async judgeTracked(route: Route, judge: (route: Route) => Promise<unknown>): Promise<void> {
+    let page: Page | null = null;
+    try {
+      page = route.request().frame().page();
+    } catch {
+      /* no frame: a service worker's request, which no page's close waits on */
+    }
+    const judging = judge(route);
+    if (!page) {
+      await judging;
+      return;
+    }
+    let pending = this.routesInFlight.get(page);
+    if (!pending) this.routesInFlight.set(page, (pending = new Set()));
+    pending.add(judging);
+    try {
+      await judging;
+    } finally {
+      pending.delete(judging);
+      if (pending.size === 0) this.routesInFlight.delete(page);
+    }
+  }
+
   /**
-   * Close a page the engine will not drive, after leaving it (`leave`), so what it sends on its way out meets the policy.
-   * Known limit: in Firefox, a close straight after the leave has let the page's leaving beacon out unjudged (seen 2 times
-   * in 80 under load). replayFlow's hand-back closes pages only once every page is at about:blank; this and `close` do not yet.
+   * Wait, after a page has been left, until the route handler has answered every request the page sent on its way out,
+   * where a close could otherwise let one out unjudged (browsers.ts closeWaitsForLeavingWrites). A round trip to the
+   * page first, so a request the browser reported before answering it has reached the route handler (0 of 80 escaped in
+   * the unload smoke loop with it). A page that cannot answer (closed, or crashed) has nothing more to send: the catch.
    */
-  private static async leaveAndClose(page: Page): Promise<void> {
+  private async leftSettled(page: Page): Promise<void> {
+    if (page.isClosed() || !closeWaitsForLeavingWrites(this.engineName)) return;
+    await BrowserEngine.settleWithin(
+      page.evaluate(() => 0).catch(() => {}),
+      2000,
+    );
+    await BrowserEngine.settleWithin(Promise.allSettled([...(this.routesInFlight.get(page) ?? [])]), 2000);
+  }
+
+  /** Close a page the engine will not drive, after leaving it (`leave`) and the policy has judged what it sent on its way out. */
+  private async leaveAndClose(page: Page): Promise<void> {
     await BrowserEngine.leave(page);
+    await this.leftSettled(page);
     await page.close().catch(() => {});
   }
 
@@ -4563,7 +4606,7 @@ export class BrowserEngine {
     // Every page is left before it is closed, while the write policy still holds, so what a page sends on its way out
     // is judged and its refusal logged before the flush below.
     const pages = this.context?.pages() ?? [];
-    await BrowserEngine.settleWithin(Promise.allSettled(pages.map((p) => BrowserEngine.leave(p))), 5000);
+    await BrowserEngine.settleWithin(Promise.allSettled(pages.map(async (p) => (await BrowserEngine.leave(p), await this.leftSettled(p)))), 5000);
     // Pending debounced coverage writes must land before the process can exit.
     try {
       this.memory?.flush();
