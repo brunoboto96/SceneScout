@@ -1,10 +1,12 @@
 /**
  * Unit tests for the QA review started by a `/scenescout qa` comment: the
  * command, the allowlist, the fork refusal, where the preview URL comes from,
- * the reply's inert rendering, both stages against a stand-in GitHub API over
- * real HTTP, and the shape of the workflow a project copies
- * (examples/workflows/scenescout-qa.yml): the key only in the model job, that
- * job reached only through the gate and never checking out or running code.
+ * the reply's inert rendering, show and compare (the base URL, the pictures'
+ * branch and the only images a reply renders), every stage against a
+ * stand-in GitHub API over real HTTP, and the shape of the workflow a project
+ * copies (examples/workflows/scenescout-qa.yml): the key only in the model
+ * job, that job reached only through the gate and never checking out or
+ * running code, and the one job that writes contents holding no key.
  *
  *   npx tsx --test --test-name-pattern "workflow" scripts/qa-test.ts
  */
@@ -20,7 +22,9 @@ import {
   ALLOWED_ROLES,
   allowlist,
   cancelledMarkdown,
+  captureMarkdown,
   checkPreviewUrl,
+  chooseBaseUrl,
   choosePreviewUrl,
   COMMENT_MARKER,
   deploymentUrl,
@@ -33,9 +37,15 @@ import {
   newerRunFor,
   parseQaCommand,
   previewUrlFromTemplate,
+  pushedShots,
   qaCommentMarkdown,
   runGate,
   runReport,
+  runShots,
+  SHOT_NAMES,
+  SHOTS_BRANCH,
+  shotsToPush,
+  shotUrl,
   teamMembership,
 } from "../action/qa-action.mjs";
 
@@ -503,7 +513,16 @@ test("gate stage: the owner on a same-repository pull request gets eyes and a ru
     },
     async (api, calls) => {
       const out = await runGate({ env: gateEnv(dir, api, "Owner"), inputs: { "github-token": "test-token", environment: "preview" }, log: quiet });
-      assert.deepEqual(out, { run: "true", pr: "7", sha, url: "https://pr-7.preview.example.com/", focus: "the sign-in form", login: "Owner" });
+      assert.deepEqual(out, {
+        run: "true",
+        pr: "7",
+        sha,
+        url: "https://pr-7.preview.example.com/",
+        focus: "the sign-in form",
+        login: "Owner",
+        show: "",
+        base: "",
+      });
       const posts = calls.filter((c) => c.method === "POST");
       assert.deepEqual(
         posts.map((c) => [c.url, c.body]),
@@ -771,6 +790,297 @@ test("github client: a server error is retried, a refusal is not, and no call wa
   assert.throws(() => githubClient({ token: "", apiUrl: "" }), /no GitHub token/);
 });
 
+// ── show and compare ────────────────────────────────────────────────────────
+
+test("command: show and compare name an element; a URL may come first; the plain form is unchanged", () => {
+  const rows: Array<[string, unknown]> = [
+    ["/scenescout qa show the Save button", { url: "", focus: "", capture: { kind: "show", what: "the Save button" } }],
+    ["/scenescout qa compare the Save button", { url: "", focus: "", capture: { kind: "compare", what: "the Save button" } }],
+    ["/scenescout qa COMPARE  the   Save button", { url: "", focus: "", capture: { kind: "compare", what: "the Save button" } }],
+    [
+      "/scenescout qa https://p.example.com show the header link",
+      { url: "https://p.example.com", focus: "", capture: { kind: "show", what: "the header link" } },
+    ],
+    ["/scenescout qa show", { url: "", focus: "", capture: { kind: "show", what: "" } }],
+    // Only as a word of its own, and only first: otherwise it is an ordinary focus.
+    ["/scenescout qa showcase page", { url: "", focus: "showcase page" }],
+    ["/scenescout qa the page to show", { url: "", focus: "the page to show" }],
+    ["/scenescout qa show-stoppers in checkout", { url: "", focus: "show-stoppers in checkout" }],
+  ];
+  for (const [body, expected] of rows) assert.deepEqual(parseQaCommand(body), expected, body);
+  const long = parseQaCommand(`/scenescout qa compare ${"x".repeat(500)}`)!;
+  assert.equal(long.capture.what.length, MAX_FOCUS);
+  assert.equal(parseQaCommand("/scenescout qa show the\u0007 button")!.capture.what, "the button", "control characters never reach the prompt");
+});
+
+test("gate: show needs words; compare needs an https base URL; each says how to fix it", () => {
+  const allowed = allowlist("", "owner");
+  const decide = (command: Record<string, unknown>, base?: { source: string; url: string }) =>
+    gateDecision({ command, login: "owner", association: "OWNER", allowed, pr: SAME, allowForks: false, preview: PREVIEW, ...(base ? { base } : {}) });
+  const show = decide({ url: "", focus: "", capture: { kind: "show", what: "the Save button" } });
+  assert.deepEqual([show.run, show.show, show.base], [true, "the Save button", ""]);
+  const plain = decide({ url: "", focus: "the form" });
+  assert.deepEqual([plain.run, plain.show, plain.base], [true, "", ""], "an ordinary run shows nothing");
+  const empty = decide({ url: "", focus: "", capture: { kind: "show", what: "" } });
+  assert.equal(empty.run, false);
+  assert.match(empty.reply ?? "", /say which element to show, e\.g\. `\/scenescout qa show the Save button`/);
+
+  const compare = { url: "", focus: "", capture: { kind: "compare", what: "the Save button" } };
+  const noBase = decide(compare);
+  assert.equal(noBase.run, false);
+  assert.match(noBase.reply ?? "", /nothing to compare/);
+  assert.match(noBase.reply ?? "", /SCENESCOUT_QA_BASE_URL/);
+  const plainHttp = decide(compare, { source: "variable", url: "http://www.example.com" });
+  assert.equal(plainHttp.run, false);
+  assert.match(plainHttp.reply ?? "", /the base URL must be https \(from the variable\)/);
+  assert.equal(decide(compare, { source: "variable", url: "https://u:p@www.example.com" }).run, false);
+  const ok = decide(compare, { source: "base branch's deployment", url: "https://www.example.com" });
+  assert.deepEqual([ok.run, ok.url, ok.show, ok.base], [true, "https://pr-7.preview.example.com/", "the Save button", "https://www.example.com/"]);
+
+  assert.deepEqual(chooseBaseUrl({ configured: " https://www.example.com ", deployment: "https://d.example.com" }), {
+    source: "variable",
+    url: "https://www.example.com",
+  });
+  assert.deepEqual(chooseBaseUrl({ configured: "", deployment: "https://d.example.com" }), {
+    source: "base branch's deployment",
+    url: "https://d.example.com",
+  });
+  assert.deepEqual(chooseBaseUrl({ configured: "", deployment: "" }), { source: "none", url: "" });
+});
+
+const SERVER = "https://github.com";
+const IMAGES = Object.fromEntries(SHOT_NAMES.map((name: string) => [name, shotUrl({ server: SERVER, repo: "owner/app", runId: "42", name })]));
+
+test("pictures: their URLs are built from the repository, the run and a fixed name, and nothing else", () => {
+  assert.equal(IMAGES["diff.png"], "https://github.com/owner/app/raw/scenescout-shots/42/diff.png");
+  assert.throws(() => shotUrl({ server: SERVER, repo: "owner/app", runId: "42", name: "../x.png" }), /not a picture/);
+  assert.throws(() => shotUrl({ server: SERVER, repo: "owner/app", runId: "42/../1", name: "diff.png" }), /not a run id/);
+  assert.throws(() => shotUrl({ server: "http://github.com", repo: "owner/app", runId: "42", name: "diff.png" }), /https origin/);
+  assert.throws(() => shotUrl({ server: SERVER, repo: "owner/app/x", runId: "42", name: "diff.png" }), /owner\/name/);
+  assert.deepEqual(pushedShots("preview.png, base.png,diff.png,evil.svg,../x.png"), ["preview.png", "base.png", "diff.png"]);
+  assert.deepEqual(pushedShots(""), []);
+});
+
+test("pictures: only the three names, only PNGs, only up to the size limit, are pushed", () => {
+  const dir = tempDir();
+  fs.mkdirSync(path.join(dir, "shots"));
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(16)]);
+  fs.writeFileSync(path.join(dir, "shots", "preview.png"), png);
+  fs.writeFileSync(path.join(dir, "shots", "base.png"), "<svg onload=alert(1)>");
+  fs.writeFileSync(path.join(dir, "shots", "other.png"), png);
+  fs.writeFileSync(path.join(dir, "shots", "diff.png"), Buffer.concat([png, Buffer.alloc(6_000_000)]));
+  assert.deepEqual(
+    shotsToPush(dir).map((s: { name: string }) => s.name),
+    ["preview.png"],
+  );
+});
+
+const CAPTURE = {
+  what: "the Save button",
+  status: "captured",
+  preview: { file: "shots/preview.png", key: "testid:save", label: "Save", path: "/things", width: 96, height: 46 },
+  base: { file: "shots/base.png", path: "/things", width: 90, height: 46 },
+  diff: { file: "shots/diff.png", changedPixels: 441, totalPixels: 4416, percent: 9.99, sizeChanged: true, box: null },
+};
+const CAPTURE_JSON = { ...CI_JSON, counts: { high: 0, medium: 0, low: 0, worthALook: 0 }, findings: [], capture: CAPTURE };
+const imageUrls = (md: string) => [...md.matchAll(/!\[[^\]]*\]\(([^)]*)\)/g)].map((m) => m[1]);
+
+test("reply: a comparison shows base and preview side by side and the diff, and every image is one the workflow built", () => {
+  const md = qaCommentMarkdown({
+    json: CAPTURE_JSON,
+    result: "success",
+    runUrl: "https://github.com/owner/app/actions/runs/42",
+    artifactUrl: "",
+    url: CI_JSON.url,
+    sha: "",
+    login: "owner",
+    images: IMAGES,
+  });
+  assert.match(md, /### Compared: the Save button/);
+  assert.match(
+    md,
+    /\| Base \| This pull request \|\n\|---\|---\|\n\| !\[base\]\(https:\/\/github\.com\/owner\/app\/raw\/scenescout-shots\/42\/base\.png\) \| !\[this pull request\]/,
+  );
+  assert.match(md, /\*\*9\.99%\*\* of pixels changed \(441 of 4416\)/);
+  assert.match(md, /size changed, from 90×46 to 96×46 pixels/);
+  assert.deepEqual(imageUrls(md), [IMAGES["base.png"], IMAGES["preview.png"], IMAGES["diff.png"]]);
+  assert.ok(!/Completion contract/.test(md), "a picture has no completion contract");
+
+  const unchanged = qaCommentMarkdown({
+    json: { ...CAPTURE_JSON, capture: { ...CAPTURE, diff: { ...CAPTURE.diff, changedPixels: 0, percent: 0, sizeChanged: false } } },
+    result: "success",
+    runUrl: "r",
+    artifactUrl: "",
+    url: CI_JSON.url,
+    sha: "",
+    login: "",
+    images: IMAGES,
+  });
+  assert.match(unchanged, /No pixels changed\./);
+  assert.ok(!imageUrls(unchanged).includes(IMAGES["diff.png"]), "an all-grey diff is not shown");
+
+  const show = qaCommentMarkdown({
+    json: { ...CAPTURE_JSON, capture: { what: "the Save button", status: "captured", preview: CAPTURE.preview } },
+    result: "success",
+    runUrl: "r",
+    artifactUrl: "",
+    url: CI_JSON.url,
+    sha: "",
+    login: "",
+    images: { "preview.png": IMAGES["preview.png"] },
+  });
+  assert.match(show, /### Shown: the Save button/);
+  assert.deepEqual(imageUrls(show), [IMAGES["preview.png"]]);
+
+  const noImages = qaCommentMarkdown({ json: CAPTURE_JSON, result: "success", runUrl: "r", artifactUrl: "", url: CI_JSON.url, sha: "", login: "", images: {} });
+  assert.deepEqual(imageUrls(noImages), []);
+  assert.match(noImages, /all of them are in the run's artifact/);
+});
+
+test("reply: markdown image syntax in anything a model or a comment wrote stays inert", () => {
+  const evil = "![x](https://evil.example/p.png) <img src=https://evil.example/q.png> @owner";
+  const json = {
+    ...CAPTURE_JSON,
+    stop: { reason: "done", text: evil },
+    findings: [{ id: "f1", severity: "high", category: "functional", title: evil, path: evil }],
+    capture: { ...CAPTURE, what: evil, detail: evil, preview: { ...CAPTURE.preview, label: evil } },
+  };
+  const md = qaCommentMarkdown({ json, result: "success", runUrl: "r", artifactUrl: "", url: evil, sha: "", login: evil, images: IMAGES });
+  assert.deepEqual(imageUrls(md), [IMAGES["base.png"], IMAGES["preview.png"], IMAGES["diff.png"]], "only the workflow's images");
+  assert.ok(!/https?:\/\/evil/.test(md), "no live link to anywhere else");
+  assert.ok(!/<img/i.test(md) && !/@owner/.test(md));
+  // Not captured: the model's explanation is inert too.
+  const lines = captureMarkdown({ what: evil, status: "not-found", detail: evil }, IMAGES).join("\n");
+  assert.deepEqual(imageUrls(lines), []);
+  assert.match(lines, /Nothing was captured/);
+});
+
+test("shots stage: refuses to run beside a key; otherwise pushes the pictures to the image branch, starting it with no history", async () => {
+  const dir = tempDir();
+  fs.mkdirSync(path.join(dir, "shots"));
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("pixels")]);
+  fs.writeFileSync(path.join(dir, "shots", "preview.png"), png);
+  fs.writeFileSync(path.join(dir, "shots", "diff.png"), png);
+  const out = path.join(dir, "out");
+  fs.writeFileSync(out, "");
+  process.env.GITHUB_OUTPUT = out;
+  const env = { GITHUB_REPOSITORY: "owner/app", GITHUB_RUN_ID: "42", RESULTS: dir };
+  await assert.rejects(
+    runShots({ env: { ...env, OPENAI_API_KEY: "fake-key-value-000000" }, inputs: { "github-token": "test-token" }, log: quiet }),
+    /never runs beside a model's key/,
+  );
+
+  let branch: string | null = null;
+  await withGitHub(
+    (method, url) => {
+      if (method === "POST" && url === "/repos/owner/app/git/blobs") return { sha: `blob${Math.random()}` };
+      if (method === "GET" && url === "/repos/owner/app/git/ref/heads/scenescout-shots") return branch ? { object: { sha: branch } } : undefined;
+      if (method === "GET" && url.startsWith("/repos/owner/app/git/commits/")) return { tree: { sha: "tree0" } };
+      if (method === "POST" && url === "/repos/owner/app/git/trees") return { sha: "tree1" };
+      if (method === "POST" && url === "/repos/owner/app/git/commits") return { sha: "commit1" };
+      if (method === "POST" && url === "/repos/owner/app/git/refs") {
+        branch = "commit1";
+        return {};
+      }
+      return undefined;
+    },
+    async (api, calls) => {
+      const first = await runShots({ env: { ...env, GITHUB_API_URL: api }, inputs: { "github-token": "test-token" }, log: quiet });
+      assert.deepEqual(first, { pushed: "preview.png,diff.png" });
+      const tree = calls.find((c) => c.url === "/repos/owner/app/git/trees")!;
+      assert.deepEqual(
+        tree.body.tree.map((t: { path: string }) => t.path),
+        ["42/preview.png", "42/diff.png"],
+      );
+      assert.equal(tree.body.base_tree, undefined, "a new branch: no base tree");
+      assert.deepEqual(calls.find((c) => c.url === "/repos/owner/app/git/commits")!.body.parents, [], "no history, so no code, on the branch");
+      assert.deepEqual(calls.find((c) => c.url === "/repos/owner/app/git/refs")!.body.ref, "refs/heads/scenescout-shots");
+      assert.match(fs.readFileSync(out, "utf8"), /^pushed=preview\.png,diff\.png$/m);
+      assert.ok(!calls.some((c) => c.method === "PATCH" || c.method === "DELETE"));
+    },
+  );
+});
+
+test("shots stage: on an existing branch, it builds on the tip and never forces; a moved tip is retried", async () => {
+  const dir = tempDir();
+  fs.mkdirSync(path.join(dir, "shots"));
+  fs.writeFileSync(path.join(dir, "shots", "preview.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]));
+  fs.writeFileSync(path.join(dir, "out"), "");
+  process.env.GITHUB_OUTPUT = path.join(dir, "out");
+  let patches = 0;
+  // A 422 for an update that is not a fast-forward is the API's answer when another run pushed first.
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      const send = (status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+      if (req.method === "PATCH") {
+        patches++;
+        assert.equal(JSON.parse(raw).force, false);
+        return patches === 1 ? send(422, { message: "Update is not a fast forward" }) : send(200, {});
+      }
+      if (req.url === "/repos/owner/app/git/ref/heads/scenescout-shots") return send(200, { object: { sha: `tip${patches}` } });
+      if (req.url!.startsWith("/repos/owner/app/git/commits/")) return send(200, { tree: { sha: "t" } });
+      return send(201, { sha: "x" });
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const api = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const outcome = await runShots({
+      env: { GITHUB_REPOSITORY: "owner/app", GITHUB_RUN_ID: "43", RESULTS: dir, GITHUB_API_URL: api },
+      inputs: { "github-token": "t" },
+      log: quiet,
+    });
+    assert.deepEqual(outcome, { pushed: "preview.png" });
+    assert.equal(patches, 2, "tried again on the new tip");
+  } finally {
+    server.close();
+  }
+});
+
+test("gate stage: compare finds the base in the base branch's newest successful deployment", async () => {
+  const dir = tempDir();
+  await withGitHub(
+    (method, url) => {
+      if (url === "/repos/owner/app/pulls/7") return { ...SAME, base: { ...SAME.base, ref: "main" } };
+      if (url.startsWith("/repos/owner/app/deployments?ref=main&per_page=5")) return [{ id: 9 }];
+      if (url.startsWith("/repos/owner/app/deployments/9/statuses")) return [{ state: "success", environment_url: "https://www.example.com" }];
+      return method === "POST" ? {} : undefined;
+    },
+    async (api) => {
+      const out = await runGate({
+        env: gateEnv(dir, api, "owner", "/scenescout qa compare the Save button"),
+        inputs: { "github-token": "test-token", "preview-url": "https://pr-{pr}.preview.example.com" },
+        log: quiet,
+      });
+      assert.deepEqual([out.run, out.show, out.base, out.focus], ["true", "the Save button", "https://www.example.com/", ""]);
+      const configured = await runGate({
+        env: gateEnv(dir, api, "owner", "/scenescout qa compare the Save button"),
+        inputs: { "github-token": "test-token", "preview-url": "https://pr-{pr}.preview.example.com", "base-url": "https://prod.example.com" },
+        log: quiet,
+      });
+      assert.equal(configured.base, "https://prod.example.com/", "the variable wins");
+    },
+  );
+});
+
+test("report stage: shows the pictures the shots job pushed, and no others", async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, "ci.json"), JSON.stringify(CAPTURE_JSON));
+  await withGitHub(
+    (method) => (method === "POST" ? {} : { artifacts: [] }),
+    async (api) => {
+      const body = await runReport({
+        env: { GITHUB_REPOSITORY: "owner/app", GITHUB_API_URL: api, GITHUB_SERVER_URL: SERVER, GITHUB_RUN_ID: "42", RESULTS: dir },
+        inputs: { "github-token": "test-token", result: "success", pr: "7", url: CI_JSON.url, shots: "preview.png,diff.png" },
+        log: quiet,
+      });
+      assert.deepEqual(imageUrls(body!), [IMAGES["preview.png"], IMAGES["diff.png"]]);
+    },
+  );
+});
+
 // ── the workflow a project copies ───────────────────────────────────────────
 
 type Step = { uses?: string; run?: string; env?: Record<string, string>; with?: Record<string, unknown> };
@@ -861,6 +1171,9 @@ function qaWorkflowProblems(wf: Record<string, any>): string[] {
       if (!/^\$\{\{ secrets\.[A-Z_]+ \}\}$/.test(Object.values(ci.env ?? {}).join("")) || Object.keys(ci.env ?? {}).length !== 1)
         problems.push("the key reaches the ci step through its env, from one secret");
       if (ci.with?.url !== "${{ needs.gate.outputs.url }}") problems.push("the run's URL comes from the gate");
+      if (ci.with?.show !== undefined && ci.with.show !== "${{ needs.gate.outputs.show }}") problems.push("the element to show comes from the gate");
+      if (ci.with?.["compare-url"] !== undefined && ci.with["compare-url"] !== "${{ needs.gate.outputs.base }}")
+        problems.push("the base URL comes from the gate, which checked it");
       if (ci.with?.cli !== undefined || ci.with?.version !== undefined) problems.push("the ci action runs the release its ref names");
       if (["destructive", "safe-write"].includes(String(ci.with?.mode))) problems.push("a QA run on a preview is read-only or observe");
       if (ci.with?.["allow-destructive"] !== undefined) problems.push("no allow-destructive");
@@ -871,10 +1184,31 @@ function qaWorkflowProblems(wf: Record<string, any>): string[] {
       problems.push("one run per pull request: a concurrency group on the pull request, cancelling the run in progress");
   }
 
+  // The only job that may write contents: it pushes the pictures, holds no key (checked above) and runs the qa action's shots stage only.
+  const writesContents = Object.entries(jobs)
+    .filter(([, j]) => (j.permissions ?? {}).contents === "write")
+    .map(([n]) => n);
+  if (JSON.stringify(writesContents) !== JSON.stringify(["shots"]))
+    problems.push(`only the shots job may write contents, not: ${writesContents.join(", ") || "none"}`);
+  const shots = jobs.shots;
+  if (!shots) problems.push("no shots job");
+  else {
+    if (JSON.stringify(shots.permissions) !== JSON.stringify({ contents: "write" })) problems.push("the shots job has contents: write and nothing else");
+    if (!needs(shots).includes("qa") || !/needs\.qa\.result == 'success'/.test(shots.if ?? "") || !/needs\.gate\.outputs\.run == 'true'/.test(shots.if ?? ""))
+      problems.push("the shots job runs only after a run the gate started has succeeded");
+    const steps = shots.steps ?? [];
+    if (steps.length !== 1 || !/^brunoboto96\/SceneScout\/qa@/.test(steps[0].uses ?? "") || steps[0].with?.stage !== "shots")
+      problems.push("the shots job runs the qa action's shots stage and nothing else");
+    else if (Object.keys(steps[0].with ?? {}).some((k) => !["stage", "artifact-name"].includes(k)))
+      problems.push("the shots stage takes no branch or path: they are fixed in the action");
+  }
+
   const report = jobs.report;
   if (!report) problems.push("no report job");
   else {
     if (!needs(report).includes("qa") || !needs(report).includes("gate")) problems.push("the report needs the gate and the qa job");
+    if (!needs(report).includes("shots") || report.steps?.[0]?.with?.shots !== "${{ needs.shots.outputs.pushed }}")
+      problems.push("the report waits for the pictures and shows only those the shots job pushed");
     if (!/always\(\)/.test(report.if ?? "") || !/needs\.gate\.outputs\.run == 'true'/.test(report.if ?? ""))
       problems.push("the report runs after any run that started, failed ones included");
     const writes = Object.entries(report.permissions ?? {})
@@ -892,7 +1226,8 @@ test("workflow: the template is sound", () => {
   // The team token is wired into the gate, and only there.
   const wf = template();
   assert.equal(wf.jobs.gate.steps[0].with["team-token"], TEAM_TOKEN_SECRET);
-  for (const job of ["qa", "report"]) assert.ok(!JSON.stringify(wf.jobs[job]).includes("SCENESCOUT_QA_TEAM_TOKEN"), `${job} never gets the team token`);
+  for (const job of ["qa", "shots", "report"])
+    assert.ok(!JSON.stringify(wf.jobs[job]).includes("SCENESCOUT_QA_TEAM_TOKEN"), `${job} never gets the team token`);
 });
 
 test("workflow: each unsafe change to the template is caught", () => {
@@ -941,6 +1276,29 @@ test("workflow: each unsafe change to the template is caught", () => {
     ["the event pasted into a script", (wf) => wf.jobs.gate.steps.unshift({ run: 'echo "${{ github.event.comment.body }}"' }), /pastes the event/],
     ["a gate that can push", (wf) => (wf.jobs.gate.permissions.contents = "write"), /gate may write to pull requests only/],
     ["a timeout the run outlasts", (wf) => (wf.jobs.qa["timeout-minutes"] = 20), /timeout/],
+    [
+      "the team token in the shots job",
+      (wf) => (wf.jobs.shots.steps[0].env = { GH_TOKEN: "${{ secrets.SCENESCOUT_QA_TEAM_TOKEN }}" }),
+      /only the qa job may reference a secret/,
+    ],
+    [
+      "the key in the shots job",
+      (wf) => (wf.jobs.shots.steps[0].env = { OPENAI_API_KEY: "${{ secrets.OPENAI_API_KEY }}" }),
+      /only the qa job may reference a secret/,
+    ],
+    [
+      "the key job pushing pictures",
+      (wf) => (wf.jobs.qa.permissions.contents = "write"),
+      /contents: read and nothing else|only the shots job may write contents/,
+    ],
+    ["the report pushing pictures", (wf) => (wf.jobs.report.permissions.contents = "write"), /only the shots job may write contents/],
+    ["a shots job that can write pull requests", (wf) => (wf.jobs.shots.permissions["pull-requests"] = "write"), /contents: write and nothing else/],
+    ["a shots job that pushes after a failed run", (wf) => (wf.jobs.shots.if = "always() && needs.gate.outputs.run == 'true'"), /has succeeded/],
+    ["a shots job with a script", (wf) => wf.jobs.shots.steps.push({ run: "git push" }), /shots stage and nothing else/],
+    ["a branch chosen in the workflow", (wf) => (wf.jobs.shots.steps[0].with.branch = "main"), /no branch or path/],
+    ["the element from the comment", (wf) => (wf.jobs.qa.steps[0].with.show = "${{ github.event.comment.body }}"), /element to show comes from the gate/],
+    ["an unchecked base URL", (wf) => (wf.jobs.qa.steps[0].with["compare-url"] = "${{ vars.SCENESCOUT_QA_BASE_URL }}"), /base URL comes from the gate/],
+    ["images from anywhere", (wf) => (wf.jobs.report.steps[0].with.shots = "preview.png,base.png,diff.png"), /only those the shots job pushed/],
   ];
   for (const [what, mutate, expected] of mutations) {
     const wf = template();
@@ -977,6 +1335,7 @@ test("workflow: the same SceneScout release in every job, and this repository do
 const TEMPLATE_NEEDS: Array<{ changeset: string; first: number[]; what: string }> = [
   { changeset: "qa-comment.md", first: [3, 13, 0], what: "qa/" },
   { changeset: "qa-allow-roles-teams.md", first: [3, 14, 0], what: "the gate's allowed-roles, allowed-teams and team-token inputs" },
+  { changeset: "qa-show-compare.md", first: [3, 14, 0], what: "show and compare (the ci action's show input, the qa action's shots stage)" },
 ];
 
 test("workflow: the release it pins ships qa/ and every input the template passes, whichever order the pull requests land in", () => {
@@ -1018,8 +1377,11 @@ test("qa action: pinned third-party steps, no input pasted into a script, no sec
   );
   // The template's inputs are the action's.
   const inputs = Object.keys(action.inputs);
-  for (const job of ["gate", "report"])
+  for (const job of ["gate", "shots", "report"])
     for (const k of Object.keys(template().jobs[job].steps[0].with)) assert.ok(inputs.includes(k), `${job}: ${k} is not an input`);
+  // The pictures' branch is not something a workflow can choose.
+  assert.ok(!inputs.some((k) => /branch|path/.test(k)), "no input names a branch or a path");
+  assert.equal(SHOTS_BRANCH, "scenescout-shots");
 });
 
 test("docs: every variable and secret the template reads is documented", () => {

@@ -78,6 +78,14 @@ inputs:
     description: An area or flow to concentrate on, in a few words.
     required: false
     default: ""
+  show:
+    description: Instead of exploring, find the element these words describe and save a PNG of it (its bounds plus a margin) under shots/ in the results. A few words, e.g. the Save button.
+    required: false
+    default: ""
+  compare-url:
+    description: With show, also capture the same element on the same page of this URL, and write a diff picture and the share of pixels changed.
+    required: false
+    default: ""
   storage-state:
     description: A Playwright storage-state file to explore while signed in, relative to working-directory.
     required: false

@@ -8,6 +8,8 @@
 #   stage: gate    read the comment, check who wrote it and where the pull
 #                  request comes from, find the preview's URL, react, and set
 #                  run=true only when every check passes
+#   stage: shots   put a show or compare run's pictures on the scenescout-shots
+#                  branch, under the run's id, so the reply can show them
 #   stage: report  download the run's results and post them on the pull request
 #
 # The logic is action/qa-action.mjs, table-tested by qa-test.
@@ -20,10 +22,10 @@ branding:
 
 inputs:
   stage:
-    description: gate or report.
+    description: gate, shots or report.
     required: true
   github-token:
-    description: The token for the GitHub API. The gate needs pull-requests write and deployments read; the report needs pull-requests write and actions read (to link the artifact, and to tell a run a newer one cancelled from one cancelled by hand or a timeout).
+    description: The token for the GitHub API. The gate needs pull-requests write and deployments read; the shots stage needs contents write, to push to the scenescout-shots branch; the report needs pull-requests write and actions read (to link the artifact, and to tell a run a newer one cancelled from one cancelled by hand or a timeout).
     required: false
     default: ${{ github.token }}
   allowed:
@@ -54,12 +56,16 @@ inputs:
     description: (gate) Only deployments to this environment count as the preview. Empty means any.
     required: false
     default: ""
+  base-url:
+    description: (gate) What `/scenescout qa compare` compares the preview with, e.g. https://www.example.com. Empty means the newest successful deployment of the pull request's base branch.
+    required: false
+    default: ""
   result:
     description: (report) The result of the job that ran the model - success, failure, cancelled or skipped.
     required: false
     default: ""
   artifact-name:
-    description: (report) The name the run's results were uploaded under.
+    description: (shots, report) The name the run's results were uploaded under.
     required: false
     default: ""
   pr:
@@ -76,6 +82,10 @@ inputs:
     default: ""
   login:
     description: (report) Who asked for the run.
+    required: false
+    default: ""
+  shots:
+    description: (report) The pictures the shots stage pushed, from its pushed output. Only these are shown.
     required: false
     default: ""
 
@@ -98,6 +108,15 @@ outputs:
   login:
     description: (gate) Who asked for the run.
     value: ${{ steps.gate.outputs.login }}
+  show:
+    description: (gate) The element a show or compare comment asked for; empty for an ordinary run.
+    value: ${{ steps.gate.outputs.show }}
+  base:
+    description: (gate) The base URL a compare comment compares with; empty otherwise.
+    value: ${{ steps.gate.outputs.base }}
+  pushed:
+    description: (shots) The pictures pushed, separated by commas.
+    value: ${{ steps.shots.outputs.pushed }}
 
 runs:
   using: composite
@@ -126,6 +145,22 @@ runs:
         INPUTS: ${{ toJSON(inputs) }}
       run: node "$GITHUB_ACTION_PATH/../action/qa-action.mjs" gate
 
+    - name: Download the run's pictures
+      if: inputs.stage == 'shots' && inputs.artifact-name != ''
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/scenescout-qa-shots
+
+    - name: Put the pictures on the image branch
+      id: shots
+      if: inputs.stage == 'shots'
+      shell: bash
+      env:
+        INPUTS: ${{ toJSON(inputs) }}
+        RESULTS: ${{ runner.temp }}/scenescout-qa-shots
+      run: node "$GITHUB_ACTION_PATH/../action/qa-action.mjs" shots
+
     - name: Download the run's results
       if: inputs.stage == 'report' && inputs.result != 'cancelled' && inputs.artifact-name != ''
       continue-on-error: true
@@ -143,8 +178,8 @@ runs:
       run: node "$GITHUB_ACTION_PATH/../action/qa-action.mjs" report
 
     - name: Unknown stage
-      if: inputs.stage != 'gate' && inputs.stage != 'report'
+      if: inputs.stage != 'gate' && inputs.stage != 'shots' && inputs.stage != 'report'
       shell: bash
       run: |
-        echo "::error title=SceneScout QA::the stage input must be gate or report"
+        echo "::error title=SceneScout QA::the stage input must be gate, shots or report"
         exit 2

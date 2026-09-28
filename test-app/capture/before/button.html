@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Edit a thing</title>
+  <!-- One of two deployments of the same page, for show and compare: capture/before/ and capture/after/
+       differ ONLY in the Save button's colours. The Cancel button is the same in both, so comparing it
+       must report 0% changed, and comparing Save must not. -->
+  <style>
+    body { font-family: sans-serif; margin: 40px; background: #ffffff; }
+    button { font: 16px/1 sans-serif; padding: 10px 18px; border: 1px solid #9ca3af; border-radius: 6px; margin-right: 12px; }
+    #save { background: #e5e7eb; color: #111827; }
+    #cancel { background: #ffffff; color: #111827; }
+  </style>
+</head>
+<body>
+  <h1>Edit a thing</h1>
+  <label>Name <input data-testid="thing-name" value="A thing"></label>
+  <p>
+    <button type="button" id="save" data-testid="thing-save">Save</button>
+    <button type="button" id="cancel" data-testid="thing-cancel">Cancel</button>
+  </p>
+</body>
+</html>

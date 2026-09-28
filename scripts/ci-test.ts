@@ -13,11 +13,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { CI_ACTION_ONLY_INPUTS, ciArgs, ciOutDirFor, ciSummaryOutputs, ciVerdict, hasCiCommand } from "../action/ci-action.mjs";
-import { agentLoop, HttpModelClient, MAX_RETRIES, MAX_TOOL_CALLS_PER_TURN, OutOfTime, ProviderError, type ModelClient } from "../src/ci-run.ts";
+import { agentLoop, captureShots, HttpModelClient, MAX_RETRIES, MAX_TOOL_CALLS_PER_TURN, OutOfTime, ProviderError, type ModelClient } from "../src/ci-run.ts";
+import { CAPTURE_MARGIN, captureClip, capturedName, captureFileName, captureResultText, parseCaptureResult, rebaseUrl } from "../src/engine/capture.ts";
+import { decodePng, diffImages, encodePng, isPng, type RgbaImage } from "../src/engine/png.ts";
 import {
+  CAPTURE_TOOLS,
+  CI_CAPTURE_NAME,
+  ciCaptureKickoff,
+  ciCaptureSystemPrompt,
   guardToolArgs,
   capReached,
   checkBaseUrl,
@@ -1544,4 +1551,312 @@ test("summary: a backslash and a pipe in a cell cannot break the table's columns
     // Every unescaped pipe is a column border: always five, whatever the title holds.
     assert.equal(row.replace(/\\\\/g, "").replace(/\\\|/g, "").split("|").length - 1, 5, JSON.stringify(title));
   }
+});
+
+// ── showing an element: --show, --compare-url, the capture, the diff ───────
+
+test("show: --show takes a few words, --compare-url needs --show and an http(s) URL without credentials", () => {
+  const ok = parseCiArgs(["https://pr-7.preview.example.com", "--show", "the  Save\u0007 button", "--compare-url=https://www.example.com/app/"], "/work");
+  assert.ok(ok.ok);
+  assert.equal(ok.options.show, "the Save button", "whitespace collapsed, control characters out: it is a line of the prompt");
+  assert.equal(ok.options.compareUrl, "https://www.example.com/app/");
+  const refused: Array<[string[], RegExp]> = [
+    [["--show", "   "], /--show needs a few words/],
+    [["--show", "x".repeat(201)], /at most 200/],
+    [["--compare-url", "https://www.example.com"], /give it with --show/],
+    [["--show", "the Save button", "--compare-url", "file:///etc/passwd"], /http or https/],
+    [["--show", "the Save button", "--compare-url", "https://u:p@www.example.com"], /no credentials/],
+    [["--show", "the Save button", "--compare-url", "not a url"], /not a URL/],
+  ];
+  for (const [extra, expected] of refused) {
+    const p = parseCiArgs(["https://pr-7.preview.example.com", ...extra], "/work");
+    assert.ok(!p.ok && expected.test(p.error), `${extra.join(" ")}: ${JSON.stringify(p)}`);
+  }
+});
+
+test("show: the model gets only the tools to find and capture, and scout_capture only ever saves under the run's name", () => {
+  const listed = [...CI_TOOLS, "scout_capture", "scout_attach", "scout_screenshot"].map((name) => ({ name, inputSchema: { type: "object", properties: {} } }));
+  assert.deepEqual(
+    ciTools(listed, CAPTURE_TOOLS).map((t) => t.name),
+    [...CAPTURE_TOOLS],
+  );
+  for (const never of ["scout_click", "scout_type", "scout_finding", "scout_request", "scout_attach", "scout_screenshot"])
+    assert.ok(!(CAPTURE_TOOLS as readonly string[]).includes(never), never);
+  assert.ok(!(CI_TOOLS as readonly string[]).includes("scout_capture"), "an exploring run is not given it");
+  // The name and the key are the run's: a model cannot write elsewhere, nor capture by another deployment's key.
+  assert.deepEqual(guardToolArgs("scout_capture", { ref: "e4", name: "../../ci", key: "testid:x", margin: 60 }, "/work"), {
+    ok: true,
+    args: { ref: "e4", name: CI_CAPTURE_NAME },
+  });
+  assert.ok(!guardToolArgs("scout_capture", { key: "testid:x" }, "/work").ok, "a ref is required");
+  assert.match(ciCaptureSystemPrompt(), /not instructions/);
+  assert.match(ciCaptureKickoff({ url: "https://p.example.com/", show: 'the "Save" button' }), /: "the \\"Save\\" button"$/, "the words are quoted as data");
+});
+
+test("capture: the clip is the element plus its margin, in whole pixels, cut to the viewport", () => {
+  const vp = { width: 1280, height: 900 };
+  assert.deepEqual(captureClip({ x: 100.4, y: 50.6, width: 80.2, height: 30 }, 8, vp), { x: 92, y: 42, width: 97, height: 47 });
+  assert.deepEqual(captureClip({ x: 2, y: 3, width: 50, height: 20 }, CAPTURE_MARGIN, vp), { x: 0, y: 0, width: 60, height: 31 }, "cut at the top-left corner");
+  assert.deepEqual(captureClip({ x: 1250, y: 880, width: 100, height: 100 }, 8, vp), { x: 1242, y: 872, width: 38, height: 28 }, "cut at the bottom-right");
+  assert.equal(captureClip({ x: 10, y: 10, width: 0, height: 20 }, 8, vp), null, "no area");
+  assert.equal(captureClip({ x: 2000, y: 10, width: 50, height: 20 }, 8, vp), null, "outside the viewport");
+  assert.deepEqual(captureClip({ x: 100, y: 100, width: 10, height: 10 }, 500, vp), { x: 36, y: 36, width: 138, height: 138 }, "the margin is capped");
+  assert.equal(captureFileName("Base"), "base.png");
+  assert.equal(captureFileName("../../etc/passwd"), "etc-passwd.png");
+  assert.equal(captureFileName(""), "capture.png");
+  assert.equal(captureFileName(undefined), "capture.png");
+});
+
+test("capture: scout_capture's result reads back; anything else, or a partial line, does not", () => {
+  const info = { file: "/p/.scenescout/captures/preview.png", key: "testid:save", label: "Save", url: "https://p.example.com/things", width: 96, height: 46 };
+  const text = captureResultText(info);
+  assert.match(text, /^Saved a 96×46 picture of "Save" on https:\/\/p\.example\.com\/things/);
+  assert.deepEqual(parseCaptureResult(text), info);
+  assert.equal(parseCaptureResult("ERROR: Unknown ref"), null);
+  assert.equal(parseCaptureResult('CAPTURED {"file":"/x"}'), null);
+  assert.equal(parseCaptureResult("CAPTURED {not json"), null);
+  // The name a capture was saved under, read from its path as each OS writes it.
+  const names: Array<[string, string | null]> = [
+    ["/work/site/.scenescout/captures/preview.png", "preview"],
+    ["D:\\a\\work\\site\\.scenescout\\captures\\preview.png", "preview"],
+    ["D:/a/work/site/.scenescout/captures/base.png", "base"],
+    ["\\\\server\\share\\.scenescout\\captures\\preview.png", "preview"],
+    ["/work/site/.scenescout/captures/../escape.png", null],
+    ["C:\\site\\.scenescout\\escape.png", null],
+    ["/work/site/.scenescout/captures/Preview.PNG", null],
+    ["preview.png", null],
+    ["", null],
+  ];
+  for (const [file, expected] of names) assert.equal(capturedName(file), expected, file);
+});
+
+test("capture: a page of the preview maps to the same page of the base URL", () => {
+  const rows: Array<[string, string, string, string | null]> = [
+    ["https://pr-7.preview.example.com/", "https://pr-7.preview.example.com/", "https://www.example.com/", "https://www.example.com/"],
+    [
+      "https://pr-7.preview.example.com/things/4?tab=a",
+      "https://pr-7.preview.example.com/",
+      "https://www.example.com/",
+      "https://www.example.com/things/4?tab=a",
+    ],
+    // Roots with a path: the page's path below the root carries over.
+    ["https://h.example.com/pr-7/settings", "https://h.example.com/pr-7/", "https://h.example.com/main/", "https://h.example.com/main/settings"],
+    [
+      "http://127.0.0.1:5/capture/after/button.html",
+      "http://127.0.0.1:5/capture/after/button.html",
+      "http://127.0.0.1:5/capture/before/",
+      "http://127.0.0.1:5/capture/before/",
+    ],
+    [
+      "http://127.0.0.1:5/capture/after/other.html",
+      "http://127.0.0.1:5/capture/after/button.html",
+      "http://127.0.0.1:5/capture/before/",
+      "http://127.0.0.1:5/capture/before/other.html",
+    ],
+    // Outside the root's directory: the same path on the base's origin.
+    ["https://h.example.com/help", "https://h.example.com/pr-7/", "https://www.example.com/app/", "https://www.example.com/help"],
+    ["https://elsewhere.example.com/", "https://pr-7.preview.example.com/", "https://www.example.com/", null],
+    ["not a url", "https://pr-7.preview.example.com/", "https://www.example.com/", null],
+  ];
+  for (const [page, from, to, expected] of rows) assert.equal(rebaseUrl(page, from, to), expected, page);
+});
+
+/** A picture of one colour, with an optional rectangle of another. */
+function picture(width: number, height: number, fill: number[], rect?: { x: number; y: number; w: number; h: number; rgba: number[] }): RgbaImage {
+  const data = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < width; x++) {
+      const inRect = rect && x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+      data.set(inRect ? rect!.rgba : fill, (y * width + x) * 4);
+    }
+  return { width, height, data };
+}
+
+/** A PNG of RGB rows, each written with the given filter, as a browser's encoder may: decodePng must undo all five. */
+function filteredRgbPng(img: RgbaImage, filters: number[]): Buffer {
+  const bpp = 3;
+  const stride = img.width * bpp;
+  const rows: Uint8Array[] = [];
+  for (let y = 0; y < img.height; y++) {
+    const row = new Uint8Array(stride);
+    for (let x = 0; x < img.width; x++) row.set(img.data.subarray((y * img.width + x) * 4, (y * img.width + x) * 4 + 3), x * bpp);
+    rows.push(row);
+  }
+  const paeth = (a: number, b: number, c: number) => {
+    const p = a + b - c;
+    const [pa, pb, pc] = [Math.abs(p - a), Math.abs(p - b), Math.abs(p - c)];
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+  };
+  const raw: number[] = [];
+  for (let y = 0; y < img.height; y++) {
+    const f = filters[y % filters.length];
+    raw.push(f);
+    for (let i = 0; i < stride; i++) {
+      const cur = rows[y][i];
+      const left = i >= bpp ? rows[y][i - bpp] : 0;
+      const up = y > 0 ? rows[y - 1][i] : 0;
+      const upLeft = y > 0 && i >= bpp ? rows[y - 1][i - bpp] : 0;
+      const pred = [0, left, up, (left + up) >> 1, paeth(left, up, upLeft)][f];
+      raw.push((cur - pred + 256) & 0xff);
+    }
+  }
+  const crcOf = (b: Buffer) => {
+    let c = 0xffffffff;
+    for (const byte of b) {
+      c ^= byte;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, body: Buffer) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(body.length, 0);
+    head.write(type, 4, "latin1");
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crcOf(Buffer.concat([head.subarray(4), body])), 0);
+    return Buffer.concat([head, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(img.width, 0);
+  ihdr.writeUInt32BE(img.height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", zlib.deflateSync(Buffer.from(raw))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+test("png: what is written reads back the same; every row filter is undone; what is not a readable PNG is refused", () => {
+  const img = picture(7, 5, [10, 20, 30, 255], { x: 2, y: 1, w: 3, h: 2, rgba: [200, 100, 50, 128] });
+  const png = encodePng(img);
+  assert.ok(isPng(png));
+  assert.deepEqual(decodePng(png), img);
+  // An RGB PNG with every filter type, as browsers write them.
+  const opaque = picture(9, 6, [5, 250, 90, 255], { x: 3, y: 2, w: 4, h: 3, rgba: [255, 0, 0, 255] });
+  for (let i = 0; i < opaque.data.length; i += 4) opaque.data[i] = (i * 7) & 0xff; // some variation for the predictors to work on
+  assert.deepEqual(decodePng(filteredRgbPng(opaque, [0, 1, 2, 3, 4])), opaque);
+  // The 1×1 fixture the test app serves, written by another encoder.
+  const pixel = decodePng(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "test-app", "pixel.png")));
+  assert.deepEqual([pixel.width, pixel.height, pixel.data.length], [1, 1, 4]);
+  assert.throws(() => decodePng(Buffer.from("GIF89a")), /not a PNG/);
+  const broken = Buffer.from(png);
+  broken[broken.length - 20] ^= 0xff;
+  assert.throws(() => decodePng(broken), /checksum|cut short/);
+  // A 1×1 header over pixel data that inflates to a megabyte: refused at the header's size, not inflated whole.
+  const bomb = filteredRgbPng(picture(1, 1, [0, 0, 0, 255]), [0]);
+  const idatAt = bomb.indexOf("IDAT") - 4;
+  const idatLength = bomb.readUInt32BE(idatAt);
+  const big = zlib.deflateSync(Buffer.alloc(1_000_000));
+  const body = Buffer.concat([Buffer.from("IDAT", "latin1"), big]);
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(big.length, 0);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(zlib.crc32(body), 0);
+  const inflated = Buffer.concat([bomb.subarray(0, idatAt), len, body, crc, bomb.subarray(idatAt + 12 + idatLength)]);
+  assert.throws(() => decodePng(inflated), /does not inflate to the size its header gives/);
+});
+
+test("diff: identical pictures change 0%, one changed region its share, and a size change is reported and counted", () => {
+  const before = picture(20, 10, [240, 240, 240, 255]);
+  const same = diffImages(before, picture(20, 10, [240, 240, 240, 255]));
+  assert.deepEqual([same.changed, same.percent, same.sizeChanged, same.box], [0, 0, false, null]);
+  // A difference under the threshold is not a change: colour rounded one step differently.
+  assert.equal(diffImages(before, picture(20, 10, [243, 240, 238, 255])).changed, 0);
+
+  const after = picture(20, 10, [240, 240, 240, 255], { x: 4, y: 2, w: 5, h: 4, rgba: [30, 90, 200, 255] });
+  const d = diffImages(before, after);
+  assert.equal(d.changed, 20);
+  assert.equal(d.total, 200);
+  assert.equal(d.percent, 10);
+  assert.deepEqual(d.box, { x: 4, y: 2, width: 5, height: 4 });
+  const at = (x: number, y: number) => [...d.image.data.subarray((y * 20 + x) * 4, (y * 20 + x) * 4 + 4)];
+  assert.deepEqual(at(5, 3), [255, 0, 80, 255], "a changed pixel is highlighted");
+  assert.notDeepEqual(at(0, 0), [255, 0, 80, 255], "an unchanged one is not");
+  // The diff picture is a PNG like any other.
+  assert.deepEqual(decodePng(encodePng(d.image)), d.image);
+
+  // Grown by 2 columns: the pictures are laid over each other from the top-left, and the new columns are changes.
+  const grown = diffImages(before, picture(22, 10, [240, 240, 240, 255]));
+  assert.equal(grown.sizeChanged, true);
+  assert.deepEqual([grown.before, grown.after, grown.width, grown.height], [{ width: 20, height: 10 }, { width: 22, height: 10 }, 22, 10]);
+  assert.equal(grown.changed, 20);
+  assert.deepEqual(grown.box, { x: 20, y: 0, width: 2, height: 10 });
+  assert.equal(
+    diffImages(picture(1000, 1000, [0, 0, 0, 255]), picture(1000, 1000, [0, 0, 0, 255], { x: 0, y: 0, w: 1, h: 1, rgba: [255, 255, 255, 255] })).percent,
+    0.01,
+    "one pixel in a million is not 0%",
+  );
+});
+
+test("summary: a capture run's summary and ci.json say what was shown and what changed, and the words stay redacted", () => {
+  const capture = {
+    what: `the Save button ${OPENAI_KEY}`,
+    status: "captured" as const,
+    preview: { file: "shots/preview.png", key: "testid:save", label: "Save", path: "/things", width: 96, height: 46 },
+    base: { file: "shots/base.png", path: "/things", width: 90, height: 46 },
+    diff: { file: "shots/diff.png", changedPixels: 441, totalPixels: 4416, percent: 9.99, sizeChanged: true, box: { x: 0, y: 0, width: 96, height: 46 } },
+  };
+  const md = ciSummaryMarkdown(RESULT({ capture }), [OPENAI_KEY]);
+  assert.match(md, /9\.99% of pixels changed, and the element's size changed: shots\/diff\.png/);
+  assert.ok(!md.includes(OPENAI_KEY));
+  const json = ciSummaryJson(RESULT({ capture }), "9.9.9", [OPENAI_KEY]) as { capture: typeof capture };
+  assert.equal(json.capture.diff.percent, 9.99);
+  assert.ok(!JSON.stringify(json).includes(OPENAI_KEY));
+  assert.ok(!("capture" in (ciSummaryJson(RESULT(), "9.9.9") as object)), "an exploring run has no capture");
+});
+
+test("loop: every tool call that ran is reported with the arguments it ran with", async () => {
+  const seen: string[] = [];
+  const model: ModelClient = {
+    turns: 0,
+    async next() {
+      return (this as { turns: number }).turns++ === 0
+        ? { text: "", calls: [{ id: "1", name: "scout_capture", input: { ref: "e2", name: "../x" } }], usage: NO_USAGE }
+        : { text: "Captured the Save button.", calls: [], usage: NO_USAGE };
+    },
+    addResults() {},
+  } as ModelClient & { turns: number };
+  const out = await agentLoop({
+    client: model,
+    host: { call: async (name, args) => ({ text: `${name} ${JSON.stringify(args)}`, isError: false }) },
+    tools: [{ name: "scout_capture", description: "", parameters: {} }],
+    caps: DEFAULT_CAPS,
+    log: () => {},
+    projectDir: "/work",
+    onResult: (name, args, r) => seen.push(`${name} ${JSON.stringify(args)} ${r.isError}`),
+  });
+  assert.deepEqual(seen, [`scout_capture {"ref":"e2","name":"${CI_CAPTURE_NAME}"} false`]);
+  assert.equal(out.finalText, "Captured the Save button.");
+});
+
+test("compare: a base that throws keeps the preview's picture and records why, and the result is still a capture", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-ci-capture-"));
+  const file = path.join(dir, "preview-src.png");
+  fs.writeFileSync(file, encodePng(picture(4, 3, [1, 2, 3, 255])));
+  const opts = parseCiArgs(["https://pr-7.preview.example.com/", "--show", "the Save button", "--compare-url", "https://www.example.com/"], dir);
+  assert.ok(opts.ok);
+  const host = {
+    tools: async () => [],
+    // The MCP client rejects on a timeout rather than returning isError.
+    call: async (name: string): Promise<{ text: string; isError: boolean }> => {
+      throw new Error(`${name} timed out`);
+    },
+    close: async () => {},
+  };
+  const outcome = await captureShots({
+    host,
+    options: opts.options,
+    captured: { file, key: "tid:save", label: "Save", url: "https://pr-7.preview.example.com/things", width: 4, height: 3 },
+    outDir: dir,
+    timeLeft: () => 5_000,
+    log: () => {},
+  });
+  assert.equal(outcome.status, "captured");
+  assert.equal(outcome.preview?.file, "shots/preview.png");
+  assert.ok(fs.existsSync(path.join(dir, "shots", "preview.png")), "the preview's picture is kept");
+  assert.match(outcome.detail ?? "", /the base URL could not be captured: scout_attach timed out/);
+  assert.equal(outcome.base, undefined);
 });

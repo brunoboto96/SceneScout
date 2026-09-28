@@ -24,6 +24,7 @@ import { CLAIM_SCAN_SCRIPT, findContradictions, type PageState, type WatchedRequ
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
+import { captureClip } from "./capture.js";
 import {
   COLLECT_INTERACTABLES_SCRIPT,
   VISIBLE_SRC,
@@ -4406,6 +4407,47 @@ export class BrowserEngine {
     const buf = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false });
     this.logAction({ action: "screenshot", url: page.url() });
     return { base64: buf.toString("base64"), mimeType: "image/jpeg" };
+  }
+
+  /**
+   * A PNG of one element: its bounds plus `margin`, scrolled into view, from a
+   * real screenshot. Found by `ref` from the latest snapshot, or by `key` (its
+   * identity, which the same element has on another deployment of the app),
+   * in which case the page is read afresh to find it. Reads only: nothing is
+   * clicked, and the write policy is not involved. The rectangle's rules are
+   * capture.ts.
+   */
+  async captureElement(target: { ref?: string; key?: string }, margin: number): Promise<{ png: Buffer; key: string; label: string; url: string }> {
+    const page = this.requirePage();
+    let el: SnapshotElement | undefined;
+    if (target.ref) {
+      el = this.refs.get(target.ref);
+      if (!el) throw new Error(`Unknown ref "${target.ref}". Refs are only valid from the latest scout_snapshot — take a new snapshot.`);
+      if (page.url() !== this.snapshotUrl) {
+        this.refs.clear();
+        throw new Error(`Page URL changed since the last snapshot (now ${page.url()}). Take a new scout_snapshot.`);
+      }
+    } else if (target.key) {
+      await this.settle();
+      // Keys carry an ordinal (collect), so the third of three same-named buttons is found as the third.
+      const { elements } = await this.collect();
+      el = elements.find((e) => e.key === target.key);
+      if (!el) throw new Error(`No element with the key "${target.key}" on ${page.url()}.`);
+    } else {
+      throw new Error("Give the ref of the element to capture, from the latest scout_snapshot.");
+    }
+    const locator = this.scopeOf(el).locator(`xpath=${el.xpath}`).first();
+    await locator.scrollIntoViewIfNeeded({ timeout: 5000 });
+    const box = await locator.boundingBox({ timeout: 5000 });
+    if (!box) throw new Error(`${el.name || el.key} is not displayed, so it has no picture.`);
+    const viewport = page.viewportSize() ?? ((await page.evaluate("({ width: innerWidth, height: innerHeight })")) as { width: number; height: number });
+    const clip = captureClip(box, margin, viewport);
+    if (!clip) throw new Error(`${el.name || el.key} is outside the viewport, so it has no picture.`);
+    const png = await page.screenshot({ type: "png", clip, animations: "disabled" });
+    this.logAction({ action: "capture", target: el.key.slice(0, 200), url: page.url() });
+    // Found by key, the refs were rebuilt without a snapshot: none of them may be acted on.
+    if (target.key) this.refs.clear();
+    return { png, key: el.key, label: el.name, url: page.url() };
   }
 
   /**

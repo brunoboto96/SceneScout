@@ -141,3 +141,43 @@ with all three unset is unchanged, and setting any of them replaces it.
   is the command, from someone the logins and roles have not already allowed.
   A commenter allowed by none of the lists still gets only a reaction, and
   their pull request is not read.
+
+## Addendum: show and compare, with pictures in the reply
+
+`/scenescout qa show <element>` and `/scenescout qa compare <element>` reply
+with pictures of one element: on the preview, and for `compare` on a base URL
+as well, with a diff. Pictures needed two things the three jobs above did not
+have: a way to take them that a model cannot fake, and somewhere a comment can
+link them from, since the comment API cannot attach files.
+
+- **The engine takes the picture; the model only points.** The key job runs
+  `scenescout ci --show "<words>"`, in which the model is given the tools to
+  find an element and `scout_capture`, which it may call with a ref and
+  nothing else. SceneScout screenshots the element's bounds plus a margin in
+  the browser. For `compare`, SceneScout itself, not the model, opens the same
+  page on the base URL in a second session, finds the element by its identity
+  and captures it, and computes the diff with no image package.
+- **The base URL is held to the preview's rules.** It comes from the
+  repository variable `SCENESCOUT_QA_BASE_URL` or the base branch's newest
+  successful deployment, never from the comment, and must be https without
+  credentials. The gate checks it before anything reaches the key.
+- **A fourth job writes the pictures, and holds no key.** `shots` has
+  `contents: write` and nothing else, runs only after the key job succeeded,
+  downloads the artifact, and pushes at most three PNGs by fixed names to the
+  `scenescout-shots` branch, under the run's id, through the Git Data API. The
+  branch starts with no history, so it never carries code, and its name is
+  fixed in the action rather than an input. The stage refuses to run where a
+  model's key is set. The key job keeps `contents: read`; `qa-test` holds the
+  template to `shots` being the only job that writes contents.
+- **Only the workflow's own image URLs are rendered.** The report builds each
+  image URL from the server, the repository, the run's id and one of the three
+  fixed names, and only for files the `shots` job reported pushing. Everything
+  from `ci.json`, the element's description included, stays inert as before.
+
+Consequences: a repository that uses `show` or `compare` gets a
+`scenescout-shots` branch that grows by a few small files a run; deleting it
+removes the pictures and leaves the older replies with broken images. Only an
+element a snapshot lists, on a page reachable by URL, can be captured: nothing
+is clicked, because a comparison has to reach the same state on the base
+deployment without the model, and a click there would be the model acting on a
+second deployment.
