@@ -74,6 +74,7 @@ import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { formatScan, scanProject } from "./scan.js";
+import { CAPTURE_MARGIN, captureFileName, captureResultText, MAX_CAPTURE_MARGIN } from "./engine/capture.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
 const engines = new Map<string, BrowserEngine>();
@@ -1404,6 +1405,40 @@ server.registerTool(
     try {
       const { base64, mimeType } = await engineFor(session).screenshot();
       return { content: [{ type: "image", data: base64, mimeType }] };
+    } catch (err) {
+      return errorText(err);
+    }
+  }),
+);
+
+server.registerTool(
+  "scout_capture",
+  {
+    description:
+      "Save a PNG of ONE element — its bounds plus a margin, from a real screenshot — under .scenescout/captures/, to show a person how it looks. Give the element's ref from the latest scout_snapshot. Not a way to judge design: scout_design_audit measures it.",
+    inputSchema: {
+      ref: z.string().max(20).optional().describe("The element's ref from the latest scout_snapshot"),
+      key: z
+        .string()
+        .max(300)
+        .optional()
+        .describe("Instead of a ref: the element's key from an earlier scout_capture result, to capture the same element on another deployment"),
+      name: z.string().max(40).optional().describe("The file's name: letters, digits and dashes. Default: capture"),
+      margin: z.number().int().min(0).max(MAX_CAPTURE_MARGIN).optional().describe(`CSS pixels kept around the element. Default ${CAPTURE_MARGIN}`),
+      session: sessionParam,
+    },
+  },
+  serializedPerSession("scout_capture", async ({ ref, key, name, margin }: { ref?: string; key?: string; name?: string; margin?: number }, session) => {
+    try {
+      const eng = engineFor(session);
+      const dir = eng.memory?.dir;
+      if (!dir) throw new Error("Not attached — call scout_attach first.");
+      const shot = await eng.captureElement({ ref, key }, margin ?? CAPTURE_MARGIN);
+      const file = path.join(dir, "captures", captureFileName(name));
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, shot.png);
+      const size = { width: shot.png.readUInt32BE(16), height: shot.png.readUInt32BE(20) };
+      return text(captureResultText({ file, key: shot.key, label: shot.label, url: shot.url, ...size }), session);
     } catch (err) {
       return errorText(err);
     }

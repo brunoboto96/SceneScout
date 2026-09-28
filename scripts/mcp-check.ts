@@ -35,6 +35,7 @@ const EXPECTED_TOOLS = [
   "scout_press",
   "scout_scroll",
   "scout_screenshot",
+  "scout_capture",
   "scout_finding",
   "scout_crawl",
   "scout_run_plan",

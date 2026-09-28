@@ -126,7 +126,10 @@ Usage:
                                       destructive only with --allow-destructive as well); --level minimal|medium|
                                       extensive (default medium); --focus "an area or flow";
                                      --storage-state file; --browser chromium|firefox|webkit;
-                                     --project dir (default: here); --out dir (default: .scenescout/ci))
+                                     --project dir (default: here); --out dir (default: .scenescout/ci);
+                                     --show "the Save button": instead of exploring, capture that element as a PNG
+                                      under shots/; --compare-url https://…: with --show, capture it there too and
+                                      write a diff picture)
                                     Exit code: 0 the run ran (findings never change it), 2 could not run.
   scenescout login <url> --role <name>
                                     Open a visible browser at the URL, sign in there (SSO, MFA, anything), then

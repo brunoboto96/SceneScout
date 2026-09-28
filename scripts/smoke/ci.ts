@@ -3,8 +3,10 @@
  * model drives the real MCP server and browser against the test app, and the
  * CLI is run against a fake API server on this machine that answers the way
  * each provider's API does. Checks the tool round trips, the report written
- * on an early stop and on a start that fails, the provider rule, and that the
- * key never reaches the output.
+ * on an early stop and on a start that fails, the provider rule, that the
+ * key never reaches the output, and a run asked to show or compare one element
+ * (--show, --compare-url) against two deployments of one page that differ in
+ * one button's colours.
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -15,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCi, type ModelClient } from "../../dist/ci-run.js";
 import { parseCiArgs, type ResolvedProvider } from "../../dist/engine/ci.js";
+import { decodePng } from "../../dist/engine/png.js";
 import type { ModelTurn, ToolOutcome } from "../../dist/engine/provider.js";
 import { check, type SmokeContext } from "./harness.ts";
 
@@ -57,6 +60,7 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     await roundTrip(baseUrl, path.join(work, "round-trip"));
     await earlyStop(baseUrl, path.join(work, "early-stop"));
     await cannotStart(path.join(work, "cannot-start"));
+    await showAndCompare(baseUrl, work);
     await overTheWire(baseUrl, work);
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
@@ -134,6 +138,100 @@ async function cannotStart(project: string): Promise<void> {
     `${result.stop} ${exitCode}`,
   );
   check("ci: it still writes a summary saying so, and no report", written.includes("summary.md") && !written.includes("report.md"), written.join());
+}
+
+// ── show and compare ────────────────────────────────────────────────────────
+
+/** A model that snapshots, then captures the button it was told to by its test id's label, as a real one would pick it by its words. */
+class Pointing implements ModelClient {
+  readonly received: ToolOutcome[][] = [];
+  constructor(private readonly label: string) {}
+  async next(): Promise<ModelTurn> {
+    if (this.received.length === 0) return turn([["s", "scout_snapshot", {}]]);
+    if (this.received.length === 1) {
+      const ref = new RegExp(`(e\\d+) button "${this.label}"`).exec(this.received[0][0].text)?.[1] ?? "e0";
+      // A name and a key the run must ignore: the file's name is the run's, and the key is not the model's to use.
+      return turn([["c", "scout_capture", { ref, name: "../../escape", key: "testid:elsewhere" }]]);
+    }
+    return turn([], `Captured the ${this.label} button.`);
+  }
+  addResults(results: readonly ToolOutcome[]): void {
+    this.received.push([...results]);
+  }
+}
+
+async function showAndCompare(baseUrl: string, work: string): Promise<void> {
+  const after = `${baseUrl}/capture/after/button.html`;
+  // The base equivalent of the target URL: the page is the target itself, so it maps to this.
+  const before = `${baseUrl}/capture/before/button.html`;
+  const compare = async (label: string, project: string) => {
+    fs.mkdirSync(project, { recursive: true });
+    const model = new Pointing(label);
+    const r = await runCi(options(after, project, ["--show", `the ${label} button`, "--compare-url", before]), RESOLVED, {
+      makeClient: () => model,
+      version: "0.0.0-test",
+    });
+    return { ...r, model, out: path.join(project, ".scenescout", "ci") };
+  };
+
+  const save = await compare("Save", path.join(work, "compare-save"));
+  const c = save.result.capture;
+  check(
+    "compare: the run exits 0 and captures the element on both deployments",
+    save.exitCode === 0 && c?.status === "captured" && !!c.base && !!c.diff,
+    JSON.stringify(c),
+  );
+  check(
+    "compare: the model's capture ran under the run's own name, not the one it asked for",
+    !save.model.received[1][0].isError && /captures\/preview\.png/.test(save.model.received[1][0].text) && !/escape/.test(save.model.received[1][0].text),
+    save.model.received[1]?.[0]?.text,
+  );
+  const shots = path.join(save.out, "shots");
+  const files = ["preview.png", "base.png", "diff.png"].map((f) => path.join(shots, f));
+  check(
+    "compare: the three pictures are written under shots/",
+    files.every((f) => fs.existsSync(f)),
+    fs.existsSync(shots) ? fs.readdirSync(shots).join() : "no shots/",
+  );
+  if (files.every((f) => fs.existsSync(f))) {
+    const [p, b] = files.slice(0, 2).map((f) => decodePng(fs.readFileSync(f)));
+    // A button of about 80×38 CSS pixels plus 8 on each side: a picture of the element, not of the page.
+    check(
+      "compare: each picture is the element and its margin, not the page",
+      p.width > 40 && p.width < 200 && p.height > 30 && p.height < 90,
+      `${p.width}×${p.height}`,
+    );
+    check(
+      "compare: the restyled button is the same size on both, and its pixels changed",
+      b.width === p.width && b.height === p.height && (c?.diff?.percent ?? 0) > 20,
+      JSON.stringify(c?.diff),
+    );
+  }
+  check(
+    "compare: ci.json records the capture, and no report is written",
+    (() => {
+      const json = JSON.parse(read(save.out, "ci.json") || "{}") as { capture?: { diff?: { percent: number } } };
+      return (json.capture?.diff?.percent ?? 0) > 0 && !fs.existsSync(path.join(save.out, "report.md"));
+    })(),
+  );
+
+  const cancel = await compare("Cancel", path.join(work, "compare-cancel"));
+  check(
+    "compare: the button that did not change reports 0% changed",
+    cancel.result.capture?.status === "captured" && cancel.result.capture.diff?.changedPixels === 0 && cancel.result.capture.diff.percent === 0,
+    JSON.stringify(cancel.result.capture),
+  );
+
+  // show: the preview alone, and a description the model cannot match captures nothing and says so.
+  const project = path.join(work, "show-missing");
+  fs.mkdirSync(project, { recursive: true });
+  const nothing = new Scripted([turn([["s", "scout_snapshot", {}]]), turn([], "No element on the page matches a delete button.")]);
+  const missing = await runCi(options(after, project, ["--show", "the delete button"]), RESOLVED, { makeClient: () => nothing, version: "0.0.0-test" });
+  check(
+    "show: a run that finds nothing to capture still exits 0, with not-found and the model's reason",
+    missing.exitCode === 0 && missing.result.capture?.status === "not-found" && /delete button/.test(missing.result.capture.detail ?? ""),
+    JSON.stringify(missing.result.capture),
+  );
 }
 
 // ── the CLI, against a fake API on this machine ────────────────────────────
