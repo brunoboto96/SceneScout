@@ -73,8 +73,10 @@ function leftovers(): Leftover[] {
 async function checkNothingLeft(suite: string): Promise<void> {
   if (process.platform === "win32") return;
   let left: Leftover[] = [];
-  // A close that was awaited has already ended its browser; the grace is for a helper process that exits a moment later.
-  await eventually(() => (left = leftovers()).length === 0, 5000);
+  // A browser that does not close gracefully is killed by Playwright 30s after its close began, which can be after the
+  // engine's own bounded close has returned. Only a process still running past that is left behind; the wait ends as
+  // soon as nothing is, so a suite that closes cleanly does not pay for it.
+  await eventually(() => (left = leftovers()).length === 0, 40_000);
   check(`${suite}: leaves no process running`, left.length === 0, left.map((p) => `${p.pid} ${p.command.slice(0, 160)}`).join("\n    "));
   for (const p of left) {
     try {

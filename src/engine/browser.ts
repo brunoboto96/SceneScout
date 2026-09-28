@@ -101,6 +101,7 @@ import {
 } from "./forms.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
+import { boundedTeardown } from "./teardown.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
 import {
@@ -4574,16 +4575,9 @@ export class BrowserEngine {
       if (this.memory) this.memory.lastSaveError = err instanceof Error ? err.message : String(err);
     }
     // Bounded teardown: a wedged renderer must not hang scout_close forever.
-    // If teardown overruns the cap, the leftover process is reaped by the
-    // orphan cleaner on the next attach (or server start).
-    await BrowserEngine.settleWithin(
-      (async () => {
-        for (const p of this.context?.pages() ?? []) await p.close().catch(() => {});
-        await this.context?.close().catch(() => {});
-        await this.browser?.close().catch(() => {});
-      })(),
-      8000,
-    );
+    // Past the cap the browser is still closed, on the objects taken here
+    // (teardown.ts): these fields are cleared below.
+    await boundedTeardown(this.context, this.browser, 8000);
     this.page = null;
     this.context = null;
     this.browser = null;

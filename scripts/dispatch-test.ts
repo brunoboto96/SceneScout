@@ -17,6 +17,7 @@ import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
 import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser } from "../src/engine/launch.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
+import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles } from "./smoke/leaks.ts";
 
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -204,6 +205,41 @@ test("the orphan reaper only ever selects browsers this tool launched and abando
   ].join("\n");
   assert.deepEqual(orphanPids(ps), [101, 102]);
   assert.deepEqual(orphanPids(""), []);
+});
+
+/** Stand-ins for a page, context and browser whose close takes `ms` (or never finishes), recording what was closed. */
+function standIns(ms: { context: number; browser: number }) {
+  const closed: string[] = [];
+  const closer = (name: string, delay: number) => ({
+    close: () => (delay === Infinity ? new Promise<void>(() => {}) : tick(delay).then(() => void closed.push(name))),
+  });
+  const page = closer("page", 0);
+  const context = { ...closer("context", ms.context), pages: () => [page] };
+  return { closed, context, browser: closer("browser", ms.browser) };
+}
+
+test("a teardown that outlasts its cap still closes the browser after the caller has moved on", async () => {
+  // The caller returns at the cap and clears its own fields; the browser must not depend on them.
+  const { closed, context, browser } = standIns({ context: 300, browser: 0 });
+  const started = Date.now();
+  await boundedTeardown(context, browser, 20);
+  assert.ok(Date.now() - started < 200, "returns at the cap, not when teardown ends");
+  await tick(400);
+  assert.ok(closed.includes("browser"), `closed: ${closed.join(", ")}`);
+});
+
+test("a context that never closes does not keep the browser running", async () => {
+  const { closed, context, browser } = standIns({ context: Infinity, browser: 0 });
+  await boundedTeardown(context, browser, 20);
+  await tick(30);
+  assert.deepEqual(closed, ["page", "browser"]);
+});
+
+test("a teardown within its cap closes in order, once each", async () => {
+  const { closed, context, browser } = standIns({ context: 0, browser: 0 });
+  await boundedTeardown(context, browser, 1000);
+  assert.deepEqual(closed, ["page", "context", "browser"]);
+  await boundedTeardown(null, null, 10);
 });
 
 test("the smoke leak check sees everything under this process, and nothing else", () => {
