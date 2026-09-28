@@ -135,3 +135,17 @@ test("the brief carries the rules a hand-written one drops", () => {
   assert.match(out, /── orders ──/);
   assert.match(out, /objective: Own \/orders — g/);
 });
+
+test("each lane is told to sign in the way the planner did", () => {
+  const lanes = planLanes(["/orders/a", "/stock/a"], 2);
+  const attachLine = (out: string) => out.split("\n").find((l) => l.includes("scout_attach {")) ?? "";
+  // A role saved by `scenescout login`: every lane attaches by its name, from the one login.
+  assert.match(attachLine(formatBriefs(lanes, { role: "admin", roleProfile: true })), /, role: "admin",/);
+  assert.doesNotMatch(attachLine(formatBriefs(lanes, { role: "admin", roleProfile: true })), /storageStatePath/);
+  // A storage-state file named by path: the lanes are told to pass that file.
+  assert.match(attachLine(formatBriefs(lanes, { role: "admin" })), /storageStatePath: "<admin>"/);
+  assert.doesNotMatch(attachLine(formatBriefs(lanes, { role: "admin" })), /role: "/);
+  // A session that never signed in hands its lanes nothing to sign in with.
+  const anonymous = attachLine(formatBriefs(lanes, { role: "anonymous" }));
+  assert.doesNotMatch(anonymous, /storageStatePath|role: "/);
+});

@@ -13,6 +13,7 @@ import {
   ACTION_TIMEOUT_ENV,
   DEFAULT_TIME_LIMITS,
   explainTimeout,
+  explicitLimits,
   isTimeoutMessage,
   limitHint,
   NAV_TIMEOUT_ENV,
@@ -137,4 +138,11 @@ test("a tool's watchdog grows with raised limits, so the limit and not the watch
   const slowActions = resolveTimeLimits({ actionTimeoutMs: 120_000 }, {});
   assert.equal(watchdogFor(60_000, slowActions), 60_000 + 2 * 115_000);
   assert.ok(watchdogFor(60_000, slowActions) > 2 * slowActions.actionMs);
+});
+
+test("explicitLimits: only what was set, for a command that keeps defaults of its own", () => {
+  assert.deepEqual(explicitLimits({}, {}), {});
+  assert.deepEqual(explicitLimits({}, { [NAV_TIMEOUT_ENV]: "45000" }), { navMs: 45000 });
+  assert.deepEqual(explicitLimits({ actionTimeoutMs: 8000 }, { [ACTION_TIMEOUT_ENV]: "9000" }), { actionMs: 8000 });
+  assert.throws(() => explicitLimits({}, { [ACTION_TIMEOUT_ENV]: "0" }), { message: new RegExp(`^${ACTION_TIMEOUT_ENV} must be`) });
 });

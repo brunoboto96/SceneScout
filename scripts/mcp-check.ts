@@ -10,7 +10,8 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawnSync } from "node:child_process";
-import { startFixtureServer } from "./smoke/harness.ts";
+import { writeProfile } from "../dist/engine/profiles.js";
+import { revokeFixtureTokens, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE } from "./smoke/harness.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverPath = path.join(here, "..", "dist", "mcp-server.js");
@@ -140,6 +141,71 @@ async function liveViewCheck(client: Client): Promise<string> {
 }
 
 /**
+ * Lane briefs for a session attached by a saved role check that login lasts
+ * the run first. The check and its two settings live in the server's
+ * scout_lane_brief, so they are driven over the wire: a login that ends
+ * inside the run is refused, the same login passes a shorter run or a smaller
+ * margin, and one credential ending early beside a long-lived one is a warning
+ * on top of the briefs.
+ */
+async function expiryBriefCheck(client: Client): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-expiry-"));
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
+  const nowS = Math.floor(Date.now() / 1000);
+  const cookie = (name: string, minutes: number) => ({
+    name,
+    value: "member",
+    domain: "127.0.0.1",
+    path: "/",
+    expires: nowS + minutes * 60,
+    httpOnly: true,
+    secure: false,
+    sameSite: "Lax",
+  });
+  // One login that ends in 30 minutes; one whose first cookie ends in 20 but whose other lasts 30 days.
+  writeProfile(projectDir, "short", { cookies: [cookie(SIGN_IN_COOKIE, 30)], origins: [] });
+  writeProfile(projectDir, "mixed", { cookies: [cookie(SIGN_IN_COOKIE, 20), cookie("remember_me", 30 * 24 * 60)], origins: [] });
+  const brief = (session: string, extra: Record<string, unknown> = {}): Promise<string> =>
+    call("scout_lane_brief", { session, lanes: 2, routes: ["/orders/a", "/reports/b"], ...extra });
+  const briefed = (reply: string): boolean => reply.includes("── orders ──") && reply.includes("── reports ──");
+  try {
+    for (const role of ["short", "mixed"]) {
+      await call("scout_attach", {
+        url: `${fixture.baseUrl}/cookie-account`,
+        projectPath: projectDir,
+        session: role,
+        mode: "read-only",
+        role,
+        objective: `${role} planner`,
+      });
+    }
+    const refused = await brief("short");
+    if (!/will not last the run: it ends in \d+m\d\ds \(cookie "fixture_session"\)/.test(refused) || briefed(refused))
+      fail(`a login ending inside the default run was not refused:\n${refused}`);
+    if (!refused.includes("scenescout login")) fail(`the refusal did not name the command that records the login again:\n${refused}`);
+    const shorter = await brief("short", { runMinutes: 15, expiryMarginMinutes: 5 });
+    if (!briefed(shorter) || shorter.includes("⚠")) fail(`a run that fits inside the login was not briefed plainly:\n${shorter}`);
+    const tightMargin = await brief("short", { runMinutes: 25, expiryMarginMinutes: 10 });
+    if (!/will not last the run/.test(tightMargin)) fail(`the margin was not counted: 25 + 10 minutes outlasts a 30-minute login:\n${tightMargin}`);
+    const noMargin = await brief("short", { runMinutes: 25, expiryMarginMinutes: 0 });
+    if (!briefed(noMargin)) fail(`a zero margin was not honoured:\n${noMargin}`);
+    console.log("✓ scout_lane_brief refuses a saved login that ends inside the run, counting runMinutes and expiryMarginMinutes");
+    const warned = await brief("mixed", { runMinutes: 30, expiryMarginMinutes: 0 });
+    if (
+      !/^⚠ In the saved sign-in for role "mixed", cookie "fixture_session" expires in \d+m\d\ds/.test(warned.replace(/^\[session [^\]]*\]\n/, "")) ||
+      !briefed(warned)
+    )
+      fail(`a credential ending inside the run beside a long-lived one was not a warning above the briefs:\n${warned}`);
+    console.log("✓ ...and warns, still briefing, when only one of several credentials ends inside it");
+    assertClosedAll(await call("scout_close", { all: true }));
+  } finally {
+    fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
+/**
  * A parallel run over the wire: the planner reports while a lane did the
  * auditing, and a lane's report is folded with what it judged and never filed.
  * Both live in the server (the gate and the fold), not in the engine the smoke
@@ -262,6 +328,95 @@ ${late.slice(0, 400)}`);
     fixture.close();
     // The engine may still be flushing its last status or log write into the
     // directory as it closes; retry rather than fail the suite on the race.
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
+/** Every file under a directory with its size and modification time, as one string to compare. */
+function treeState(dir: string): string {
+  return (fs.readdirSync(dir, { recursive: true }) as string[])
+    .sort()
+    .map((name) => {
+      const st = fs.statSync(path.join(dir, name));
+      return `${name}:${st.size}:${st.mtimeMs}`;
+    })
+    .join("\n");
+}
+
+/**
+ * A lane that lost its sign-in says so where the planner folds its report,
+ * not only in its own calls: the line is added by the server's scout_lane_report,
+ * so it is checked over the wire. One lane re-attaches from a refreshed
+ * profile, one finds its profile revoked too, and one never lost its sign-in
+ * and gets no line.
+ */
+async function reattachLaneCheck(client: Client): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-reattach-"));
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
+  // A saved login for a role, built from a fresh sign-in on the fixture's revocable
+  // token route, as `scenescout login` would save it.
+  const saveLogin = async (role: string): Promise<void> => {
+    const res = await fetch(`${fixture.baseUrl}/token-signin`, { redirect: "manual" });
+    const token = new RegExp(`${TOKEN_COOKIE}=([^;]+)`).exec(res.headers.get("set-cookie") ?? "")?.[1];
+    if (!token) fail("the fixture's revocable sign-in set no token cookie");
+    const cookie = { name: TOKEN_COOKIE, value: token, domain: "127.0.0.1", path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Lax" };
+    writeProfile(projectDir, role, { cookies: [cookie], origins: [] });
+  };
+  const report = (lane: string): string => JSON.stringify({ lane, status: "complete", decisions: [], routes: ["/token-orders"], blocked_by: null });
+  const loseSignIn = async (session: string): Promise<string> => {
+    let last = "";
+    for (const route of ["/token-orders", "/token-settings", "/token-profile"])
+      last = await call("scout_navigate", { session, target: route, task: "Walking the signed-in pages" });
+    return last;
+  };
+  try {
+    for (const role of ["member", "viewer"]) await saveLogin(role);
+    for (const [session, role] of [
+      ["orders", "member"],
+      ["billing", "viewer"],
+      ["steady", "member"],
+    ]) {
+      await call("scout_attach", {
+        url: `${fixture.baseUrl}/token-home`,
+        projectPath: projectDir,
+        session,
+        mode: "read-only",
+        role,
+        objective: `${session} lane`,
+      });
+      const home = await call("scout_snapshot", { session });
+      if (!home.includes("Signed in as a member")) fail(`a session attached by role did not start signed in:\n${home.slice(0, 400)}`);
+    }
+    // The server ends every session; member's login is saved again, viewer's is not.
+    revokeFixtureTokens();
+    await saveLogin("member");
+    const recovered = await loseSignIn("orders");
+    if (!recovered.includes("SESSION RE-ATTACHED")) fail(`the role session did not re-attach:\n${recovered}`);
+    // viewer's profile holds a token revoked with the rest: its re-attach lands on the login page too.
+    const lost = await loseSignIn("billing");
+    if (!lost.includes("SESSION AUTH LOST")) fail(`a re-attach from a revoked profile was not reported as lost:\n${lost}`);
+
+    const folded = await call("scout_lane_report", { lane: "orders", reply: report("orders") });
+    if (!folded.includes(`↻ Session "orders": its sign-in was lost and it re-attached once from role 'member''s saved profile`))
+      fail(`a folded lane report did not name the lane that re-attached:\n${folded}`);
+    const failed = await call("scout_lane_report", { lane: "billing", reply: report("billing") });
+    if (!failed.includes(`↻ Session "billing": its sign-in was lost and re-attaching from role 'viewer''s saved profile did not recover it`))
+      fail(`a folded lane report did not name the lane whose re-attach failed:\n${failed}`);
+    const quiet = await call("scout_lane_report", { lane: "steady", reply: report("steady") });
+    if (!/Lane report accepted/.test(quiet) || quiet.includes("↻")) fail(`a lane that never lost its sign-in was reported as re-attached:\n${quiet}`);
+    console.log("✓ a folded lane report names a lane that re-attached, or whose re-attach failed, and no other");
+    assertClosedAll(await call("scout_close", { all: true }));
+    // Once a close has answered, nothing more is written into the project: a
+    // caller may remove it straight away. A status write left in flight after
+    // the answer lands in a directory being removed (ENOTEMPTY on Node 20).
+    const settled = treeState(projectDir);
+    await new Promise((r) => setTimeout(r, 300));
+    if (treeState(projectDir) !== settled) fail("the project directory was still being written after scout_close answered");
+    fs.rmSync(projectDir, { recursive: true });
+    console.log("✓ scout_close answers only once its last write has landed");
+  } finally {
+    fixture.close();
     fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
@@ -446,7 +601,9 @@ async function main(): Promise<void> {
   }
   console.log("✓ scout_scan round-trip works");
 
+  await expiryBriefCheck(client);
   await laneCheck(client);
+  await reattachLaneCheck(client);
   const liveProject = await liveViewCheck(client);
   await client.close();
   await tokenGoneCheck(liveProject);

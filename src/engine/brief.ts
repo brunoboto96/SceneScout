@@ -111,6 +111,14 @@ export interface BriefOptions {
   mode?: string;
   /** The role each lane runs as, when the planner has decided one. */
   role?: string;
+  /** True when that role is a profile saved by `scenescout login`, so each lane can attach by name rather than by a file. */
+  roleProfile?: boolean;
+}
+
+/** How a lane signs in, as scout_attach arguments: by saved role, by a storage-state file, or not at all. */
+function signInArgument(opts: BriefOptions): string {
+  if (!opts.role || opts.role === "anonymous") return "";
+  return opts.roleProfile ? `, role: "${opts.role}"` : `, storageStatePath: "<${opts.role}>"`;
 }
 
 /** The lanes to run, each with the objective to attach with. */
@@ -154,7 +162,7 @@ export function formatBriefs(briefs: readonly LaneBrief[], opts: BriefOptions = 
     `LANE PLAN — ${briefs.length} lane(s) over ${briefs.reduce((n, b) => n + b.routes.length, 0)} route(s).`,
     ``,
     `Give each lane its own agent. Every lane attaches with its own session name, so the browsers run genuinely in parallel, and lands on its own first route rather than the home page:`,
-    `  scout_attach { session: "<lane>", url: "<origin><landing>", projectPath, mode: "${mode}"${opts.role ? `, storageStatePath: "<${opts.role}>"` : ""}, objective: "<objective>" }`,
+    `  scout_attach { session: "<lane>", url: "<origin><landing>", projectPath, mode: "${mode}"${signInArgument(opts)}, objective: "<objective>" }`,
     ``,
     `Rules to pass on, which a hand-written brief tends to drop:`,
     `  · A lane works ITS routes only. Two lanes auditing the same register while a third module is never opened is the failure this plan exists to prevent — and route coverage will look complete either way. A defect on a page it does not own is that page's lane's to file.`,

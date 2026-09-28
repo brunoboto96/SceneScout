@@ -5,12 +5,14 @@ import {
   type Browser,
   type BrowserType,
   type BrowserContext,
+  type BrowserContextOptions,
   type CDPSession,
   type FileChooser,
   type Frame,
   type Locator,
   type Page,
   type Request,
+  type Route,
 } from "playwright";
 import fs from "node:fs";
 import path from "node:path";
@@ -19,6 +21,7 @@ import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, redactSecret
 import type { SessionDescription } from "./live.js";
 import { normalizeTask } from "./task.js";
 import { CLAIM_SCAN_SCRIPT, findContradictions, type PageState, type WatchedRequest } from "./claims.js";
+import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
 import {
@@ -140,6 +143,33 @@ import {
   unseenWriteSource,
   type UnseenWriteVerdict,
 } from "./unload.js";
+import {
+  loginCommand,
+  permissionNote,
+  resolveAttachAuth,
+  roleLabel,
+  sessionStorageInitScript,
+  splitProfile,
+  summarizeState,
+  withSessionStorage,
+  writeProfile,
+  type AttachAuth,
+} from "./profiles.js";
+import {
+  acquireLock,
+  brokerEnabled,
+  lockPathFor,
+  planRefresh,
+  presentedToken,
+  REFRESH_BROKER_ENV,
+  refreshTokenSlots,
+  rotatedFromResponse,
+  rotationStored,
+  swapProfileToken,
+  swapRequest,
+  type HeldLock,
+  type TokenSlot,
+} from "./refresh.js";
 
 export type { WriteMode } from "./policy.js";
 
@@ -147,6 +177,19 @@ export interface AttachOptions {
   url: string;
   projectDir: string;
   storageStatePath?: string;
+  /**
+   * A role whose profile `scenescout login` saved under .scenescout/auth/.
+   * Each session that names it gets its own context built from that file.
+   * Refused together with storageStatePath.
+   */
+  role?: string;
+  /**
+   * For a session attached by role: whether its page's use of the role's
+   * stored refresh token goes through the refresh broker (refresh.ts), so
+   * sessions of one role never present the same token twice. Default: on,
+   * unless SCENESCOUT_REFRESH_BROKER=off.
+   */
+  refreshBroker?: boolean;
   mode?: WriteMode;
   headed?: boolean;
   /** Which browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else Chromium. */
@@ -464,14 +507,28 @@ export class BrowserEngine {
   /** Origins named as trusted embeds (policy.ts trustsEmbedWrite decides when that counts). */
   trustedEmbeds = new Set<string>();
   private trustNotice = "";
-  /** Human label for the auth identity driving this session (the server sets it from the storage-state filename). */
+  /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
   role = "anonymous";
+  /** How the attached session signed in: a role profile, a storage-state file, or not at all. */
+  auth: AttachAuth = { kind: "none" };
   /** Named-session id (the server sets it; every engine shares one MemoryStore, so
    *  per-session reads of the interleaved action log must filter by this). */
   sessionKey = "default";
 
   /** Login-bounce streak, the SESSION AUTH LOST verdict, and the per-call notice. */
   private readonly authLoss = new AuthLossTracker();
+
+  /**
+   * The refresh broker for a role session: the role's profile, and the
+   * refresh tokens this session last loaded from it (never printed). Null
+   * when the session is not attached by role, the broker is off, or the
+   * profile holds no refresh token.
+   */
+  private refresh: { projectDir: string; role: string; file: string; known: TokenSlot[]; spent: TokenSlot[] } | null = null;
+  /** Write-backs still waiting on a response, so close() lets them release their lock. */
+  private readonly refreshTasks = new Set<Promise<void>>();
+  /** What the broker did this session, for the lane report: counts only. */
+  private refreshCounts = { refreshed: 0, swapped: 0, failed: 0 };
 
   /** UI-label blocking applies only in read-only mode (safe-write enforces at the network layer instead). */
   get readOnly(): boolean {
@@ -890,6 +947,37 @@ export class BrowserEngine {
     }
   }
 
+  /** postMessage-token findings already reported this session, by route, receiving frame, path and shape. */
+  private tokenPostsReported = new Set<string>();
+
+  /**
+   * What the capture script handed back from a postMessage to "*": classified
+   * here (postmessage.ts) and dropped, so no value outlives this call. Only the
+   * path, shape and masked preview reach the oracle log.
+   */
+  private noteTokenPosts(frame: Frame, entries: unknown): void {
+    const hits = tokenHits(entries);
+    if (hits.length === 0) return;
+    let pageUrl: string;
+    let frameUrl: string;
+    let embed: string | null;
+    try {
+      const page = frame.page();
+      pageUrl = page.url();
+      frameUrl = frame.url();
+      embed = frame === page.mainFrame() ? null : this.foreignOriginOf(frame);
+    } catch {
+      // The frame went away between the call and its report: nothing left to attribute it to.
+      return;
+    }
+    for (const hit of hits) {
+      const key = tokenPostKey(hit, pageUrl, frameUrl);
+      if (this.tokenPostsReported.has(key)) continue;
+      this.tokenPostsReported.add(key);
+      this.oracles.noteTokenPost(describeTokenPost(hit, frameUrl), pageUrl, embed);
+    }
+  }
+
   /** Contradiction signatures already reported this session — the same refused endpoint on every page must not flood the run. */
   private contradictionsReported = new Set<string>();
 
@@ -924,12 +1012,42 @@ export class BrowserEngine {
   }
 
   async attach(opts: AttachOptions): Promise<string> {
-    // Before close(): a limit out of bounds refuses the attach without ending the session already running.
+    // Resolved before anything is closed, so a bad role, a missing profile or
+    // a time limit out of bounds leaves a live session as it was.
     const limits = resolveTimeLimits(opts, process.env);
+    const auth = resolveAttachAuth({ projectDir: opts.projectDir, url: opts.url, role: opts.role, storageStatePath: opts.storageStatePath });
+    const brokered = brokerEnabled({ roleSession: auth.kind === "role", option: opts.refreshBroker, env: process.env[REFRESH_BROKER_ENV] });
+    const storageStatePath = auth.kind === "none" ? undefined : auth.storageStatePath;
+    if (storageStatePath && !fs.existsSync(storageStatePath)) {
+      throw new Error(`storageStatePath does not exist: ${storageStatePath}`);
+    }
+    // Read and checked here, also before anything is closed. Playwright restores
+    // the storage state; sessionStorage, which it has no field for, is put back
+    // by an init script before the app's own code runs.
+    let profile: ReturnType<typeof splitProfile> | undefined;
+    if (storageStatePath) {
+      try {
+        profile = splitProfile(JSON.parse(fs.readFileSync(storageStatePath, "utf8")));
+      } catch (err) {
+        throw new Error(`could not load the storage state at ${storageStatePath}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     await this.close();
     this.limits = limits;
-    if (opts.storageStatePath && !fs.existsSync(opts.storageStatePath)) {
-      throw new Error(`storageStatePath does not exist: ${opts.storageStatePath}`);
+    this.auth = auth;
+    this.role = roleLabel(auth);
+    this.authLoss.beginSession(auth.kind, this.role);
+    let profileNote = "";
+    this.refresh = null;
+    this.refreshCounts = { refreshed: 0, swapped: 0, failed: 0 };
+    if (auth.kind === "role") {
+      const note = permissionNote(auth.storageStatePath, fs.statSync(auth.storageStatePath).mode);
+      if (note) profileNote = `\n⚠ ${note}`;
+      if (brokered) {
+        const read = this.readRoleProfile();
+        const known = read.ok ? refreshTokenSlots(read.state) : [];
+        if (known.length > 0) this.refresh = { projectDir: opts.projectDir, role: auth.role, file: auth.storageStatePath, known, spent: [] };
+      }
     }
     this.currentMode = opts.mode ?? "read-only";
     this.writeRule = new WriteRule(this.currentMode);
@@ -958,6 +1076,7 @@ export class BrowserEngine {
     this.blockedRequests = [];
     this.watchedResponses = [];
     this.contradictionsReported = new Set();
+    this.tokenPostsReported = new Set();
     this.pendingCreations = new Set();
     this.baseUrl = opts.url.replace(/\/$/, "");
     this.embedMoves = new EmbedMoveTracker(this.baseUrl);
@@ -1012,11 +1131,16 @@ export class BrowserEngine {
       this.engineName = opts.browser ?? defaultEngine(process.env);
       this.browser = await this.launchWithRecovery(this.engineName, opts.headed ?? false);
       this.context = await this.browser.newContext({
-        storageState: opts.storageStatePath,
+        storageState: profile?.storageState as BrowserContextOptions["storageState"],
         viewport: opts.viewport ?? { width: 1280, height: 900 },
         serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
+      const restoreSession = sessionStorageInitScript(profile?.sessionStorage ?? []);
+      if (restoreSession) await this.context.addInitScript(restoreSession);
       if (!sharedWorkersAllowed(this.mode)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
+      // The postMessage-token oracle: every frame's postMessage is wrapped, and a "*" call hands its longer strings here.
+      await this.context.exposeBinding(POSTMESSAGE_BINDING, (source, entries: unknown) => this.noteTokenPosts(source.frame, entries));
+      await this.context.addInitScript(postMessageCaptureScript());
       this.page = await this.context.newPage();
     } catch (err) {
       await this.close();
@@ -1256,6 +1380,11 @@ export class BrowserEngine {
       }
     }
 
+    // The refresh broker. Registered after the write policy so it runs first
+    // and hands every request on to it: a refresh it lets through is still
+    // judged by the policy like any other request.
+    if (this.refresh) await this.context.route("**/*", (route) => this.brokerRefresh(route));
+
     // Popups / target=_blank: adopt same-origin pages as the active page (with
     // oracles attached); close foreign-origin popups so exploration cannot
     // silently escape the app under test.
@@ -1306,16 +1435,19 @@ export class BrowserEngine {
     // Whether a bounce verdict can matter later: only a session carrying
     // credentials has any to lose, and only it pays for watching the URL on
     // every navigation. An anonymous crawl keeps its full speed.
-    this.watchesForBounce = Boolean(opts.storageStatePath);
+    this.watchesForBounce = Boolean(storageStatePath);
     const landed = await this.stableUrl();
-    const authFailed = Boolean(opts.storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), landed, this.baseUrl);
+    const authFailed = Boolean(storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), landed, this.baseUrl);
     // An earlier run may have written down how this app's login state is
     // regenerated. "Regenerate it" is advice the reader already had; the
     // command that worked last time is the part worth keeping.
     const recipe = authFailed ? this.memory.setupRecipe() : [];
     const authWarning = authFailed
-      ? `\n⚠ AUTH FAILED — the storage state at ${opts.storageStatePath} did not produce a signed-in session: ` +
-        `attaching landed on ${landed}, a login page. Regenerate it (its token has most likely expired) and re-attach. ` +
+      ? `\n⚠ AUTH FAILED — the storage state at ${storageStatePath} did not produce a signed-in session: ` +
+        `attaching landed on ${landed}, a login page. ` +
+        (auth.kind === "role"
+          ? `Record it again with \`${loginCommand(auth.role, this.baseUrl)}\` (its session has most likely expired) and re-attach. `
+          : `Regenerate it (its token has most likely expired) and re-attach. `) +
         `Continuing now tests a logged-out app.` +
         (recipe.length > 0
           ? `\n  Recorded by an earlier run under setup:\n${recipe.map((line) => `    · ${line}`).join("\n")}`
@@ -1325,11 +1457,12 @@ export class BrowserEngine {
       `Attached to ${this.page.url()} (mode=${this.mode}` +
       `${this.engineName === "chromium" ? "" : `, browser=${this.engineName}, service workers blocked because their requests cannot be intercepted here`}` +
       `${focusAdvanceKey(this.engineName, process.platform) === "Tab" ? "" : `, keyboard: Tab stops only at text fields in this browser — press Alt+Tab to reach buttons and links`}` +
-      `${opts.storageStatePath ? `, auth=${opts.storageStatePath}` : ""}). ` +
+      `${auth.kind === "role" ? `, role=${auth.role}` : auth.kind === "file" ? `, auth=${auth.storageStatePath}` : ""}). ` +
       `Memory: ${this.memory.dir}.${this.memory.loadWarning ? ` WARNING: ${this.memory.loadWarning}` : ""}` +
       (this.memory.prunedStates > 0 ? ` Trimmed ${this.memory.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
       `${this.memory.legacyDirNote ? ` ${this.memory.legacyDirNote}` : ""}` +
       `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""}${this.trustNotice} Call scout_snapshot to see the current state.` +
+      profileNote +
       authWarning
     );
   }
@@ -3165,7 +3298,262 @@ export class BrowserEngine {
       throw new Error(`${notice}${msg}`);
     }
     this.recordNavigationOutcome(url, await this.landedUrl(page));
-    return this.authLoss.take() + settled;
+    // Only after a navigation that finished: one that threw leaves its verdict standing.
+    const plan = this.authLoss.takeReattach();
+    if (!plan) return this.authLoss.take() + settled;
+    // The loss this navigation declared is answered once, from the role's latest
+    // saved profile, and the session goes back to the page it asked for.
+    const applied = await this.applyLatestProfile();
+    if (!applied.ok) {
+      this.authLoss.abortReattach(applied.why);
+      return this.authLoss.take() + settled;
+    }
+    const returnUrl = plan.returnTo;
+    let recovered: string;
+    try {
+      await this.withinLimit("nav", () => page.goto(returnUrl, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
+      recovered = await this.afterAction("navigate", returnUrl);
+    } catch (err) {
+      this.recordNavigationOutcome(returnUrl, await this.landedUrl(page));
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`${this.authLoss.take()}${msg}`);
+    }
+    this.recordNavigationOutcome(returnUrl, await this.landedUrl(page));
+    return this.authLoss.take() + recovered;
+  }
+
+  /**
+   * Replace this session's cookies and storage with its role's saved profile,
+   * read from disk now: another process may have recorded it again since this
+   * session attached. Same context, same page, same listeners and write policy;
+   * only the sign-in changes. Never prints the profile's contents.
+   */
+  private async applyLatestProfile(): Promise<{ ok: true } | { ok: false; why: string }> {
+    if (this.auth.kind !== "role" || !this.context) return { ok: false, why: "this session was not attached by role" };
+    const read = this.readRoleProfile();
+    if (!read.ok) return read;
+    const applied = await this.applyState(read.state);
+    if (!applied.ok) return applied;
+    this.logAction({ action: "reattach", target: `role ${this.auth.role}`, url: this.page?.url() ?? "" });
+    return { ok: true };
+  }
+
+  /** The role's saved profile as it is on disk now, checked to be a storage state. Never printed. */
+  private readRoleProfile(): { ok: true; state: unknown } | { ok: false; why: string } {
+    if (this.auth.kind !== "role") return { ok: false, why: "this session was not attached by role" };
+    const file = this.auth.storageStatePath;
+    let state: unknown;
+    try {
+      state = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch (err) {
+      const reason = err instanceof SyntaxError ? "it is not valid JSON" : err instanceof Error ? err.message.split("\n")[0] : String(err);
+      return { ok: false, why: `its saved profile at ${file} could not be read (${reason})` };
+    }
+    const checked = summarizeState(state);
+    if (!checked.ok) return { ok: false, why: `its saved profile at ${file} is not a storage state (${checked.error})` };
+    // A malformed sessionStorage list is refused here, before anything is applied.
+    try {
+      splitProfile(state);
+    } catch (err) {
+      return { ok: false, why: `its saved profile at ${file} could not be split (${err instanceof Error ? err.message : String(err)})` };
+    }
+    return { ok: true, state };
+  }
+
+  /**
+   * Replace this context's cookies and storage with a profile, in place: same
+   * pages, listeners and policy. Playwright is handed only what it restores;
+   * the profile's sessionStorage list is not part of its storage state.
+   */
+  private async applyState(state: unknown): Promise<{ ok: true } | { ok: false; why: string }> {
+    if (!this.context) return { ok: false, why: "no browser is open" };
+    let storageState: ReturnType<typeof splitProfile>["storageState"];
+    try {
+      storageState = splitProfile(state).storageState;
+    } catch (err) {
+      return { ok: false, why: `the saved profile could not be split (${err instanceof Error ? err.message : String(err)})` };
+    }
+    try {
+      await this.context.setStorageState(storageState as Parameters<BrowserContext["setStorageState"]>[0]);
+    } catch (err) {
+      return { ok: false, why: `the browser refused its saved profile (${err instanceof Error ? err.message.split("\n")[0] : String(err)})` };
+    }
+    // What the session now holds is what it knows as the role's tokens.
+    if (this.refresh) this.rememberTokens(refreshTokenSlots(state));
+    return { ok: true };
+  }
+
+  /**
+   * The refresh broker's route handler. A request carrying none of the role's
+   * refresh tokens is handed on untouched. One carrying one waits for the
+   * role's refresh lock; holding it, the session re-reads the profile, loads
+   * it and sends the current token in place of a spent one when another
+   * session rotated it meanwhile, and keeps the lock until the page has
+   * stored the rotation and it is written back. A lock that cannot be had is
+   * reported and the request dropped: sending a token another session may
+   * have spent is what revokes the family. Token values are never logged.
+   */
+  private async brokerRefresh(route: Route): Promise<void> {
+    const broker = this.refresh;
+    const req = route.request();
+    if (!broker) return route.fallback();
+    const headers = await req.allHeaders().catch(() => req.headers());
+    const wire = { url: req.url(), body: req.postData(), headers };
+    // Spent tokens too: a page still holding one would otherwise send it unbrokered.
+    const sent = presentedToken(wire, [...broker.known, ...broker.spent]);
+    if (!sent) return route.fallback();
+    const where = `${req.method()} ${pathnameOf(req.url())}`;
+    let lock: HeldLock;
+    try {
+      lock = await acquireLock(lockPathFor(broker.file));
+    } catch (err) {
+      this.refreshCounts.failed += 1;
+      this.logAction({
+        action: "refresh-broker:dropped",
+        target: `${where} (${err instanceof Error ? err.message : String(err)})`,
+        url: this.page?.url() ?? "",
+      });
+      await route.abort("blockedbyclient").catch(() => {});
+      return;
+    }
+    let handedOn = false;
+    try {
+      const read = this.readRoleProfile();
+      if (!read.ok) throw new Error(read.why);
+      const plan = planRefresh(sent, refreshTokenSlots(read.state));
+      let presented = sent;
+      let overrides: { url?: string; postData?: string; headers?: Record<string, string> } = {};
+      if (plan.kind === "swap") {
+        // Another session rotated the token while this one waited: load what it saved, and send the current token.
+        const applied = await this.applyState(read.state);
+        if (!applied.ok) throw new Error(applied.why);
+        const swapped = swapRequest(wire, sent.value, plan.to.value);
+        overrides = {
+          ...(swapped.url ? { url: swapped.url } : {}),
+          ...(swapped.body !== undefined ? { postData: swapped.body } : {}),
+          ...(swapped.headers ? { headers: swapped.headers } : {}),
+        };
+        presented = plan.to;
+        this.refreshCounts.swapped += 1;
+      }
+      this.logAction({
+        action: "refresh-broker",
+        target: `${where} with ${presented.slot}${plan.kind === "swap" ? " (rotated by another session; loaded its profile)" : plan.kind === "unknown" ? " (no longer in the profile; sent as is)" : ""}`,
+        url: this.page?.url() ?? "",
+      });
+      handedOn = true;
+      if (plan.kind === "unknown") {
+        // The profile holds another sign-in now: send this one on, and leave the profile alone.
+        lock.release();
+        await route.fallback(overrides);
+        return;
+      }
+      const task = this.writeBackAfter(req, presented, lock).finally(() => this.refreshTasks.delete(task));
+      this.refreshTasks.add(task);
+      await route.fallback(overrides);
+    } catch (err) {
+      if (!handedOn) {
+        lock.release();
+        this.refreshCounts.failed += 1;
+        this.logAction({
+          action: "refresh-broker:dropped",
+          target: `${where} (${err instanceof Error ? err.message.split("\n")[0] : String(err)})`,
+          url: this.page?.url() ?? "",
+        });
+        await route.abort("blockedbyclient").catch(() => {});
+      }
+    }
+  }
+
+  /**
+   * Once the refresh is answered, write the rotation back over the profile
+   * and release the lock. The page's own state is saved once it holds the
+   * rotated token, so the next session gets the access token with it; a page
+   * that has not stored it in time has the token read from the response
+   * instead. A refused or failed refresh changes nothing on disk.
+   */
+  private async writeBackAfter(req: Request, presented: TokenSlot, lock: HeldLock): Promise<void> {
+    const broker = this.refresh;
+    try {
+      let timer: NodeJS.Timeout | undefined;
+      const res = await Promise.race([
+        req.response().finally(() => clearTimeout(timer)),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), 30000);
+        }),
+      ]);
+      if (!broker) return;
+      if (!res || !res.ok()) {
+        const why = res ? `answered ${res.status()}` : "had no response";
+        this.logAction({
+          action: "refresh-broker:not-saved",
+          target: `${presented.slot}: the refresh ${why}; the profile was left as it was`,
+          url: this.page?.url() ?? "",
+        });
+        return;
+      }
+      let state: unknown = null;
+      for (let waited = 0; waited <= 5000; waited += 50) {
+        const now = await this.context?.storageState().catch(() => null);
+        if (now && rotationStored(now, presented)) {
+          // The page's state holds no sessionStorage: keep what the profile had.
+          const onDisk = this.readRoleProfile();
+          state = onDisk.ok ? withSessionStorage(now, splitProfile(onDisk.state).sessionStorage) : now;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (!state) {
+        const body = await res.text().catch(() => "");
+        const rotated = rotatedFromResponse(body, await res.headerValues("set-cookie").catch(() => []));
+        const read = this.readRoleProfile();
+        if (rotated && read.ok) state = swapProfileToken(read.state, presented.value, rotated);
+      }
+      if (!state) {
+        this.refreshCounts.failed += 1;
+        this.logAction({
+          action: "refresh-broker:not-saved",
+          target: `${presented.slot}: the page stored no rotated token and the response named none`,
+          url: this.page?.url() ?? "",
+        });
+        return;
+      }
+      writeProfile(broker.projectDir, broker.role, state);
+      this.rememberTokens(refreshTokenSlots(state));
+      this.refreshCounts.refreshed += 1;
+    } catch (err) {
+      this.refreshCounts.failed += 1;
+      this.logAction({
+        action: "refresh-broker:not-saved",
+        target: `${presented.slot}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`,
+        url: this.page?.url() ?? "",
+      });
+    } finally {
+      lock.release();
+    }
+  }
+
+  /** Take `now` as the role's current tokens; the ones it replaces are kept as spent, so a page that still sends one is caught. */
+  private rememberTokens(now: TokenSlot[]): void {
+    if (!this.refresh) return;
+    const replaced = this.refresh.known.filter((k) => !now.some((n) => n.value === k.value));
+    this.refresh.spent = [...replaced, ...this.refresh.spent].slice(0, 20);
+    this.refresh.known = now;
+  }
+
+  /** What the refresh broker did this session, or "" when it did nothing. Counts only. */
+  refreshSummary(): string {
+    const { refreshed, swapped, failed } = this.refreshCounts;
+    if (refreshed + swapped + failed === 0) return "";
+    const parts = [`refreshed role '${this.role}''s token ${refreshed} time${refreshed === 1 ? "" : "s"} under the role's lock`];
+    if (swapped > 0) parts.push(`${swapped} of them after another session had rotated it`);
+    if (failed > 0) parts.push(`${failed} refresh${failed === 1 ? "" : "es"} could not be brokered (see the action log)`);
+    return parts.join("; ");
+  }
+
+  /** What this session's one automatic re-attach did, or "" when it never re-attached. */
+  reattachSummary(): string {
+    return this.authLoss.reattachSummary();
   }
 
   /** Where did we ASK to go, where did we END UP, and does that count as coverage? */
@@ -3178,7 +3566,7 @@ export class BrowserEngine {
       this.memory?.markAttempted(requestedRoute, outcome, this.role);
       this.memory?.recordRoleAccess(this.role, requestedRoute, outcome);
     }
-    this.authLoss.record({ requestedRoute, landedRoute, bounced, role: this.role });
+    this.authLoss.record({ requestedRoute, landedRoute, bounced, role: this.role, target: requestedUrl });
   }
 
   async goBack(): Promise<string> {
@@ -3295,7 +3683,12 @@ export class BrowserEngine {
 
     const summary: string[] = [];
     const problems: string[] = [];
-    for (const path of targets) {
+    this.authLoss.beginBatch();
+    // A queue rather than the list itself: a session that re-attaches mid-sweep
+    // visits the routes its loss bounced again, straight after.
+    const queue = [...targets];
+    for (let i = 0; i < queue.length; i++) {
+      const path = queue[i];
       const url = `${this.baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
       if (!this.isSameOrigin(url)) {
         summary.push(`${path} — SKIPPED (off-origin)`);
@@ -3320,6 +3713,8 @@ export class BrowserEngine {
         // a browser that shows no error page simply lets the wait time out.
         await page.waitForEvent("framenavigated", { predicate: (f) => f === page.mainFrame(), timeout: 1500 }).catch(() => undefined);
         summary.push(`${path} — LOAD FAILED`);
+        // The page a re-attach went back to never loaded, so nothing says whether it worked.
+        if (this.authLoss.reattaching) this.authLoss.abortReattach(`the page it went back to, ${path}, did not load (${reason})`);
         problems.push(`${path}: ${reason}`);
         this.crawlHealth.push({
           path,
@@ -3367,7 +3762,7 @@ export class BrowserEngine {
       // Feeds the streak. The per-route notice is discarded — crawl already
       // flags AUTH-REDIRECT per route in its own summary, and the verdict for
       // the sweep as a whole is emitted once at the end via batchVerdict().
-      this.authLoss.record({ requestedRoute, landedRoute: route, bounced: loginRedirect, role: this.role });
+      this.authLoss.record({ requestedRoute, landedRoute: route, bounced: loginRedirect, role: this.role, target: path });
       this.authLoss.clear();
       // Error-status routes render but would otherwise be re-crawled forever —
       // an attempt with the status satisfies the contract.
@@ -3417,6 +3812,25 @@ export class BrowserEngine {
         problems.push(
           `${path}${loginRedirect ? " → redirected to login (auth missing/expired?)" : ""}${deadEnd ? " → dead end" : ""}${detail ? `\n${detail}` : ""}`,
         );
+      }
+      // A role session that lost its sign-in on this route re-attaches once
+      // and visits the routes the loss bounced again, next. Their bounced
+      // results leave the crawl's data, so a check reads the signed-in visit.
+      const plan = this.authLoss.takeReattach({ revisits: (t) => targets.includes(t) });
+      if (plan) {
+        const applied = await this.applyLatestProfile();
+        if (!applied.ok) {
+          this.authLoss.abortReattach(applied.why);
+        } else {
+          // Only this sweep's own paths: a streak that began with scout_navigate holds full URLs the sweep cannot join to its base.
+          const again = [plan.returnTo, ...plan.retry];
+          this.crawlHealth = this.crawlHealth.filter((h) => !(h.loginRedirect && again.includes(h.path)));
+          for (let k = problems.length - 1; k >= 0; k--) {
+            if (again.some((p) => problems[k].startsWith(`${p} → redirected to login`))) problems.splice(k, 1);
+          }
+          queue.splice(i + 1, 0, ...again);
+          summary.push(`↻ re-attached from role '${this.role}''s saved profile; visiting ${again.join(", ")} again`);
+        }
       }
     }
     // Crawl leaves the page wherever it ended — refs from before are gone.
@@ -4191,6 +4605,8 @@ export class BrowserEngine {
   }
 
   async close(): Promise<void> {
+    // A refresh write-back holds the role's lock: let it finish or give up, so no other session waits on a closed one.
+    if (this.refreshTasks.size > 0) await BrowserEngine.settleWithin(Promise.allSettled([...this.refreshTasks]), 10000);
     // Marks the end of the time this session held a browser, so the pace
     // section can say how long it was held with nothing happening. Only when a
     // browser is actually open: attach() closes first, and a close of nothing

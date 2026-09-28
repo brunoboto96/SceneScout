@@ -99,14 +99,28 @@ function pick(kind: LimitKind, option: number | undefined, env: Record<string, s
 }
 
 /**
+ * Only the limits that were set, by option or environment, each checked. For
+ * a command with defaults of its own (signing in to save a login profile
+ * waits longer than an exploring session), which applies a set limit and
+ * otherwise keeps its own.
+ */
+export function explicitLimits(
+  options: { actionTimeoutMs?: number; navTimeoutMs?: number },
+  env: Record<string, string | undefined>,
+): { actionMs?: number; navMs?: number } {
+  const action = pick("action", options.actionTimeoutMs, env);
+  const nav = pick("nav", options.navTimeoutMs, env);
+  return { ...(action !== undefined ? { actionMs: action } : {}), ...(nav !== undefined ? { navMs: nav } : {}) };
+}
+
+/**
  * The limits a session runs with: the option when given, else the
  * environment variable when set, else the default. A value out of bounds
  * throws, naming where it came from — an attach never starts on a limit it
  * would silently replace.
  */
 export function resolveTimeLimits(options: { actionTimeoutMs?: number; navTimeoutMs?: number }, env: Record<string, string | undefined>): TimeLimits {
-  const action = pick("action", options.actionTimeoutMs, env);
-  const nav = pick("nav", options.navTimeoutMs, env);
+  const { actionMs: action, navMs: nav } = explicitLimits(options, env);
   return {
     actionMs: action ?? DEFAULT_ACTION_TIMEOUT_MS,
     navMs: nav ?? DEFAULT_NAV_TIMEOUT_MS,

@@ -28,6 +28,17 @@ import {
   frameToPageRect,
 } from "../src/engine/collector.ts";
 import { EventEmitter } from "node:events";
+import vm from "node:vm";
+import {
+  POSTMESSAGE_BINDING,
+  describeTokenPost,
+  maskToken,
+  postMessageCaptureScript,
+  postsToAnyOrigin,
+  tokenHits,
+  tokenPostKey,
+  tokenShapeOf,
+} from "../src/engine/postmessage.ts";
 import type { Page } from "playwright";
 import {
   EmbedRequestLog,
@@ -642,4 +653,165 @@ test("OracleMonitor: an embed's failed load echoed to the console is the embed's
   assert.equal(fromApp.kind, "console_error");
   assert.equal(fromApp.embed, undefined);
   assert.equal(fromApp.severity, "high", "the app's own echo is unchanged");
+});
+
+// ---------------------------------------------------------------------------
+// postMessage to "*" carrying a token (postmessage.ts). Invented tokens only.
+// ---------------------------------------------------------------------------
+
+const b64url = (o: object): string => Buffer.from(JSON.stringify(o)).toString("base64url");
+const INVENTED_JWT = [b64url({ alg: "HS256", typ: "JWT" }), b64url({ sub: "someone", exp: 4102444800 }), "aW52ZW50ZWQtc2lnbmF0dXJl"].join(".");
+const OPAQUE = "q7X9rT2mLp4VzK8wB3nD5fH1";
+
+test("postMessage: token shapes are recognised, near misses are not", () => {
+  const cases: Array<[string, string, string | null]> = [
+    ["data.access_token", INVENTED_JWT, "jwt"],
+    ["data.anything", INVENTED_JWT, "jwt"],
+    ["data.anything", `  ${INVENTED_JWT}  `, "jwt"],
+    ["data.headers.Authorization", `Bearer ${OPAQUE}`, "bearer"],
+    ["data.access_token", OPAQUE, "credential-key"],
+    ["data.accessToken", OPAQUE, "credential-key"],
+    ["data.auth.ID-TOKEN", OPAQUE, "credential-key"],
+    ["data.list[0].refresh_token", OPAQUE, "credential-key"],
+    ["data.apiKey", OPAQUE, "credential-key"],
+    ["data.url", `https://app.example/cb#access_token=${OPAQUE}&token_type=Bearer`, "url-param"],
+    ["data", `?id_token=${OPAQUE}`, "url-param"],
+    // Near misses: the key without a credential, a credential shape without its value, a value under an ordinary key.
+    ["data.token_type", "Bearer", null],
+    ["data.token", "pending-confirmation", null],
+    ["data.token", "abcdefghijklmnopqrstuvwxyz", null],
+    ["data.note", OPAQUE, null],
+    ["data.note", "Bearer tokens are sent in the Authorization header", null],
+    ["data.note", "eyJ is how they start, but this is prose.", null],
+    ["data.note", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIx", null],
+    ["data.url", "https://app.example/cb?access_token=short", null],
+    ["data.expires_at", "2026-09-27T10:00:00.000Z", null],
+  ];
+  for (const [path, value, shape] of cases) assert.equal(tokenShapeOf(path, value)?.shape ?? null, shape, `${path} = ${value}`);
+});
+
+test("postMessage: a hit carries the path, the shape and a four-character preview, never the value", () => {
+  const hits = tokenHits([
+    ["data.access_token", INVENTED_JWT],
+    ["data.headers.Authorization", `Bearer ${OPAQUE}`],
+    ["data.note", "a plain sentence well over sixteen characters"],
+  ]);
+  assert.deepEqual(hits, [
+    { path: "data.access_token", shape: "jwt", preview: `"eyJh…" (${INVENTED_JWT.length} chars)` },
+    { path: "data.headers.Authorization", shape: "bearer", preview: `"${OPAQUE.slice(0, 4)}…" (${OPAQUE.length} chars)` },
+  ]);
+  const detail = describeTokenPost(hits[0], "http://127.0.0.1:4173/signin/callback");
+  assert.match(detail, /^jwt token at data\.access_token \("eyJh…" \(\d+ chars\)\) posted with targetOrigin "\*" to the window of \/signin\/callback/);
+  const [, claims, signature] = INVENTED_JWT.split(".");
+  for (const h of hits) {
+    const text = `${JSON.stringify(h)} ${describeTokenPost(h, "http://x/")}`;
+    for (const part of [INVENTED_JWT, claims, signature, OPAQUE.slice(4)]) assert.ok(!text.includes(part), `${h.shape} leaks ${part.slice(0, 8)}`);
+  }
+  assert.equal(maskToken("abcdefghijklmnop"), '"abcd…" (16 chars)');
+});
+
+test("postMessage: a string message that is JSON is walked like the object it encodes", () => {
+  const hits = tokenHits([["data", JSON.stringify({ type: "signed-in", session: { refresh_token: OPAQUE } })]]);
+  assert.deepEqual(
+    hits.map((h) => [h.path, h.shape]),
+    [["data(json).session.refresh_token", "credential-key"]],
+  );
+  assert.deepEqual(tokenHits([["data", "{ not json but long enough"]]), []);
+});
+
+test("postMessage: what the page hands back is untrusted, so malformed entries are skipped", () => {
+  assert.deepEqual(tokenHits(null), []);
+  assert.deepEqual(tokenHits("data.access_token"), []);
+  assert.deepEqual(tokenHits([["data.access_token"], [1, OPAQUE], "x", ["data.access_token", 42]]), []);
+  const long = `data.${"k".repeat(500)}.access_token`;
+  assert.ok(tokenHits([[long, INVENTED_JWT]])[0].path.length <= 120, "a hostile path is cut");
+});
+
+test("postMessage: one report per route, receiving frame, path and shape", () => {
+  const [hit] = tokenHits([["data.access_token", INVENTED_JWT]]);
+  const a = tokenPostKey(hit, "http://127.0.0.1:4173/items/12", "http://127.0.0.1:4173/items/12");
+  assert.equal(a, tokenPostKey(hit, "http://127.0.0.1:4173/items/34", "http://127.0.0.1:4173/items/34"), "the same route shape is one report");
+  assert.notEqual(a, tokenPostKey(hit, "http://127.0.0.1:4173/items/12", "https://widget.example/frame"), "another receiving frame is another report");
+  assert.ok(postsToAnyOrigin("*"));
+  for (const o of ["/", "https://app.example", "", undefined, { targetOrigin: "*" }]) assert.ok(!postsToAnyOrigin(o), String(o));
+});
+
+/** Run the capture script against a stand-in window, so its targetOrigin rule and its walk are tested without a browser. */
+function captureIn(): { win: Record<string, unknown>; reported: unknown[][]; delivered: unknown[][] } {
+  const reported: unknown[][] = [];
+  const delivered: unknown[][] = [];
+  const win: Record<string, unknown> = {
+    postMessage(...args: unknown[]) {
+      delivered.push(args);
+    },
+    [POSTMESSAGE_BINDING]: (entries: unknown[]) => {
+      // Arrays made in the script's realm; cloned so they compare as plain data.
+      reported.push(JSON.parse(JSON.stringify(entries)));
+      return Promise.resolve();
+    },
+  };
+  vm.runInNewContext(postMessageCaptureScript(), { window: win });
+  return { win, reported, delivered };
+}
+
+test('postMessage capture: only a "*" call is handed back, and every call still goes through unchanged', () => {
+  const { win, reported, delivered } = captureIn();
+  const post = win.postMessage as (...a: unknown[]) => void;
+  const msg = { type: "signed-in", access_token: OPAQUE, n: 1, nested: { list: ["short", `Bearer ${OPAQUE}`] } };
+  post(msg, "*");
+  post(msg, { targetOrigin: "*" });
+  post(msg, "https://app.example");
+  post(msg, { targetOrigin: "https://app.example" });
+  post(msg);
+  post(msg, {});
+  assert.equal(delivered.length, 6, "the app's calls all reach the real postMessage");
+  assert.deepEqual(delivered[0], [msg, "*"]);
+  assert.equal(reported.length, 2, 'only the two calls naming "*" are handed back');
+  assert.deepEqual(reported[0], [
+    ["data.access_token", OPAQUE],
+    ["data.nested.list[1]", `Bearer ${OPAQUE}`],
+  ]);
+});
+
+test("postMessage capture: a cyclic, deep or hostile message cannot break the app's call", () => {
+  const { win, reported, delivered } = captureIn();
+  const post = win.postMessage as (...a: unknown[]) => void;
+  const cyclic: Record<string, unknown> = { access_token: OPAQUE };
+  cyclic.self = cyclic;
+  post(cyclic, "*");
+  const hostile = Object.defineProperty({}, "boom", {
+    enumerable: true,
+    get() {
+      throw new Error("getter");
+    },
+  });
+  post(hostile, "*");
+  const broken = captureIn();
+  broken.win[POSTMESSAGE_BINDING] = () => {
+    throw new Error("binding gone");
+  };
+  (broken.win.postMessage as (...a: unknown[]) => void)({ access_token: OPAQUE }, "*");
+  assert.equal(delivered.length, 2);
+  assert.equal(broken.delivered.length, 1, "a failing report still lets the call through");
+  assert.deepEqual(reported[0], [["data.access_token", OPAQUE]], "the cycle is walked once");
+  assert.equal(reported.length, 1, "a message with nothing long enough is not handed back");
+});
+
+test("postMessage capture: binary buffers and huge arrays are not walked, and a long JSON string is sent whole", () => {
+  const { win, reported, delivered } = captureIn();
+  const post = win.postMessage as (...a: unknown[]) => void;
+  const message = { bytes: new Uint8Array(5_000_000), numbers: new Array(1_000_000).fill(7), access_token: OPAQUE };
+  const started = Date.now();
+  post(message, "*");
+  assert.ok(Date.now() - started < 500, "the walk is bounded");
+  assert.equal(delivered.length, 1);
+  assert.deepEqual(reported[0], [["data.access_token", OPAQUE]], "a token past a large array is still found");
+  const big = JSON.stringify({ padding: "x".repeat(20_000), session: { access_token: OPAQUE } });
+  post(big, "*");
+  const [sent] = reported[reported.length - 1] as Array<[string, string]>;
+  assert.equal(sent[1].length, big.length, "a JSON string past the plain-string cap is sent whole");
+  assert.deepEqual(
+    tokenHits([sent]).map((h) => h.path),
+    ["data(json).session.access_token"],
+  );
 });

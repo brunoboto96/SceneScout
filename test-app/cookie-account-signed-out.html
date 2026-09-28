@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Your account</title>
+  </head>
+  <body>
+    <!--
+      The pair of cookie-account.html: served at the same /cookie-account URL
+      when the sign-in cookie is absent. No redirect, so the only way to tell
+      the two apart is what the page says.
+    -->
+    <main>
+      <h1 data-testid="account-heading">You are signed out</h1>
+      <p data-testid="account-state">Sign in to see your account.</p>
+      <a data-testid="account-orders-link" href="/cookie-account">Your orders</a>
+    </main>
+  </body>
+</html>

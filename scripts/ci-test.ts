@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -1185,6 +1186,72 @@ test("weekly benchmark: scheduled or dispatched, and the key and the write token
   for (const job of Object.values(jobs))
     for (const s of job.steps ?? []) assert.ok(!/\$\{\{\s*(inputs|needs)\./.test(s.run ?? ""), `no input is pasted into a script: ${s.run}`);
   for (const job of [jobs.decide, jobs.record]) assert.ok(job.steps!.some((s) => s.run === "npm ci --ignore-scripts"));
+});
+
+test("dedup benchmark workflow: dispatched only, reads the repository, and the key is in the one step that calls the model", () => {
+  const wf = readWorkflow("dedup-bench.yml");
+  assert.deepEqual(Object.keys(wf.on), ["workflow_dispatch"], "never pull_request, pull_request_target or a schedule: the job holds the key");
+  assert.deepEqual(wf.permissions, { contents: "read" });
+  const inputs = wf.on.workflow_dispatch.inputs;
+  assert.equal(inputs.efforts.default, "none,low");
+  assert.deepEqual(inputs.provider.options, ["openai"]);
+  assert.equal(inputs.provider.default, "openai");
+  const jobs = Object.values(wf.jobs as Record<string, WorkflowJob>);
+  assert.equal(jobs.length, 1);
+  const [job] = jobs;
+  assert.equal(job.permissions, undefined, "the job does not widen the permissions");
+  assert.ok(!NAMES_A_KEY.test(JSON.stringify(job.env ?? {})), "no key in the job's env");
+  const steps = job.steps ?? [];
+  const judge = steps.find((s) =>
+    /npm run -s dedup-bench -- --judge --efforts "\$EFFORTS" --provider "\$PROVIDER" --pairs "\$OUT\/pairs\.jsonl"/.test(s.run ?? ""),
+  );
+  assert.ok(judge, "it runs the judge at the dispatched efforts");
+  assert.deepEqual(
+    steps.filter((s) => NAMES_A_KEY.test(JSON.stringify(s))),
+    [judge],
+    "the key is in the step that calls the model, and nowhere else",
+  );
+  assert.equal(judge.env?.OPENAI_API_KEY, "${{ inputs.provider == 'openai' && secrets.OPENAI_API_KEY || '' }}");
+  assert.equal(judge.env?.EFFORTS, "${{ inputs.efforts }}", "inputs reach the script through env");
+  for (const s of steps) assert.ok(!/\$\{\{\s*inputs\./.test(s.run ?? ""), `no input is pasted into a script: ${s.run}`);
+  assert.equal((judge as { shell?: string }).shell, "bash", "pipefail, so a failing benchmark is not hidden by tee");
+  assert.match(judge.run!, /if \[ -z "\$OPENAI_API_KEY" \]; then [^\n]*exit 1; fi/, "a missing key fails, rather than scoring the rule alone");
+  assert.match(judge.run!, />> "\$GITHUB_STEP_SUMMARY"/, "the scorecard goes to the job summary");
+  // The key check comes before the scorecard is written anywhere that leaves the runner.
+  assert.ok(judge.run!.indexOf('grep -qF -- "$OPENAI_API_KEY" "$OUT/scorecard.txt" "$OUT/pairs.jsonl"') >= 0, "both files are checked for the key");
+  assert.ok(judge.run!.indexOf('grep -qF -- "$OPENAI_API_KEY"') < judge.run!.indexOf("GITHUB_STEP_SUMMARY"));
+  const accepts = (efforts: string) =>
+    spawnSync("bash", ["-eo", "pipefail", "-c", judge.run!.split("\n")[0]], { env: { PATH: process.env.PATH, EFFORTS: efforts } }).status === 0;
+  for (const e of ["none,low", "low", "none,low,medium"]) assert.ok(accepts(e), `refuses ${e}`);
+  for (const e of ["", "none, low", "low;echo hi", "$(id)", "low,"]) assert.ok(!accepts(e), `accepts ${JSON.stringify(e)}`);
+  const upload = steps.findIndex((s) => /^actions\/upload-artifact@[0-9a-f]{40}$/.test((s.uses ?? "").split(" ")[0]));
+  assert.ok(upload > steps.indexOf(judge), "the scorecard is uploaded, after the key check, by an action pinned by commit");
+  assert.deepEqual(
+    String(steps[upload].with?.path).trim().split("\n"),
+    ["${{ runner.temp }}/dedup-bench/scorecard.txt", "${{ runner.temp }}/dedup-bench/pairs.jsonl"],
+    "the scorecard and the per-pair lines",
+  );
+  // A refused key does not stop the script: each failed call falls back to the rule and is counted, and it exits 0.
+  const answered = steps.findIndex((s) => /grep -q 'not run \('[^\n]*exit 1; fi/.test(s.run ?? ""));
+  assert.ok(answered > upload, "a judge that did not answer fails the run, after the scorecard is kept");
+  const gate = (card: string) => {
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dedup-card-")), "scorecard.txt");
+    fs.writeFileSync(file, card);
+    return spawnSync("bash", ["-eo", "pipefail", "-c", steps[answered].run!], { env: { PATH: process.env.PATH, CARD: file } }).status;
+  };
+  const rule = "[demo] sample: 100 pairs\n  rule: 100 judged (21 same in the key), 0 unsure, 0 failed; accuracy 81.0%, Brier 0.190\n";
+  assert.equal(gate(rule + "\n[demo] judge openai m effort none: 98 judged (21 same in the key), 0 unsure, 2 failed; accuracy 90.0%, Brier 0.080\n"), 0);
+  assert.equal(gate(rule + "\nJudge at effort low: not run (--provider openai needs OPENAI_API_KEY set in the environment).\n"), 1);
+  assert.equal(gate(rule + "\n[demo] judge openai m effort none: 0 judged (0 same in the key), 0 unsure, 100 failed; fewer than 8 judged, no figures\n"), 1);
+  assert.ok(
+    steps.some((s) => s.run === "npm ci --ignore-scripts"),
+    "no dependency's install script runs beside the key",
+  );
+  for (const s of steps) {
+    assert.ok(!/^actions\/cache/.test(s.uses ?? ""), s.uses);
+    if (/^actions\/setup-node@/.test(s.uses ?? "")) assert.equal(s.with?.cache, undefined, "setup-node caches nothing here");
+    assert.ok(!/git (commit|push)/.test(s.run ?? ""), "it commits nothing");
+  }
 });
 
 test("weekly benchmark: every check it dispatches on the results branch accepts that branch, and wave hold accepts no other", () => {

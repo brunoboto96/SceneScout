@@ -70,6 +70,11 @@ export const CHECK_RULES = {
   },
   "false-success": { severity: "high", title: "Success shown for a failed request", help: "The page reported success while the server refused the request." },
   "dom-injection": { severity: "high", title: "Markup rendered as an element", help: "Text the engine typed came back as live markup." },
+  "postmessage-token": {
+    severity: "high",
+    title: "Credential posted to any origin",
+    help: 'The page called postMessage with targetOrigin "*" and a token-shaped value in the message, so whatever origin the receiving window holds can read it. The value is never reported: its path in the message, its shape and its first four characters are.',
+  },
   "auth-redirect": { severity: "medium", title: "Sent to sign-in", help: "The route redirected to a sign-in page; the session is missing or expired." },
   "dead-end": { severity: "medium", title: "Dead end", help: "The page has no controls at all: no navigation and no way back." },
   "blocking-overlay": {
@@ -194,6 +199,8 @@ function violationRule(v: RouteHealth["violations"][number]): CheckRule {
       return "refused-empty";
     case "false_success":
       return "false-success";
+    case "postmessage_token":
+      return "postmessage-token";
     case "http_error": {
       const status = httpStatusOf(v.detail);
       // An http_error whose status cannot be read is still an error the page hit: the worse reading, not the milder one.

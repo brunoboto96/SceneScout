@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Your account</title>
+  </head>
+  <body>
+    <!-- Signed in or signed out by one fact: whether IndexedDB holds the token idb-signin.html wrote. -->
+    <main>
+      <h1 data-testid="idb-account-heading">Checking your session…</h1>
+    </main>
+    <script>
+      const show = (signedIn) => {
+        document.querySelector("h1").textContent = signedIn ? "Signed in with an IndexedDB token" : "No IndexedDB token: signed out";
+      };
+      const open = indexedDB.open("fixture-auth", 1);
+      open.onupgradeneeded = () => open.result.createObjectStore("tokens");
+      open.onerror = () => show(false);
+      open.onsuccess = () => {
+        const read = open.result.transaction("tokens").objectStore("tokens").get("token");
+        read.onsuccess = () => show(read.result === "member-token");
+        read.onerror = () => show(false);
+      };
+    </script>
+  </body>
+</html>

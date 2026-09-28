@@ -122,14 +122,18 @@ export function buildPairs(archives: readonly RunArchive[], keys: Readonly<Recor
  * time for the same archives, whatever order they were built in, and no
  * preference for the runs that happen to be listed first.
  */
+const pairHash = (p: LabelledPair): string =>
+  createHash("sha256")
+    .update([p.app, p.route, p.a.run, p.a.title, p.a.evidence ?? "", p.b.run, p.b.title, p.b.evidence ?? ""].join("\n"))
+    .digest("hex");
+
+/** A pair's stable id: the same pair gets the same id in every run, and the id carries none of the findings' text. */
+export const pairId = (p: LabelledPair): string => pairHash(p).slice(0, 12);
+
 export function samplePairs(pairs: readonly LabelledPair[], cap: number): LabelledPair[] {
   if (!Number.isInteger(cap) || cap < 1) throw new Error(`The pair cap must be a positive whole number, not ${cap}.`);
-  const h = (p: LabelledPair): string =>
-    createHash("sha256")
-      .update([p.app, p.route, p.a.run, p.a.title, p.a.evidence ?? "", p.b.run, p.b.title, p.b.evidence ?? ""].join("\n"))
-      .digest("hex");
   return pairs
-    .map((p) => ({ p, k: h(p) }))
+    .map((p) => ({ p, k: pairHash(p) }))
     .sort((x, y) => (x.k < y.k ? -1 : x.k > y.k ? 1 : 0))
     .slice(0, cap)
     .map((x) => x.p);
@@ -167,9 +171,14 @@ export const JUDGE_TOOL: ToolSpec = {
     type: "object",
     properties: {
       verdict: { type: "string", enum: ["same", "different", "unsure"] },
-      p_same: { type: "number", minimum: 0, maximum: 1, description: "Probability the two findings are one defect." },
+      confidence: {
+        type: "number",
+        minimum: 0.5,
+        maximum: 1,
+        description: "Probability that your verdict is right, from 0.5 (a coin flip) to 1 (certain). Ignored when the verdict is unsure.",
+      },
     },
-    required: ["verdict", "p_same"],
+    required: ["verdict", "confidence"],
     additionalProperties: false,
   },
 };
@@ -178,8 +187,9 @@ export const JUDGE_SYSTEM =
   "You decide whether two findings filed by exploratory testers of one web app describe the SAME defect or DIFFERENT defects. " +
   "Same: one root cause a single fix would close, however differently it is worded, categorised or evidenced. " +
   "Different: two things a developer would fix separately, even on one page, one control or one endpoint. " +
-  "Answer only by calling judge_pair once, with no prose. verdict is same, different or unsure; p_same is your calibrated probability that they are one defect: " +
-  "about 0.5 when the text cannot tell, and near 0 or 1 only when it plainly can. Use unsure only when the findings give too little to go on.";
+  "Answer only by calling judge_pair once, with no prose. verdict is same, different or unsure. confidence is your calibrated probability that your verdict is right, " +
+  "never below 0.5: near 0.5 when the text can barely tell, near 1 only when it plainly can. " +
+  "Example: verdict different with confidence 0.9 means a 10% chance they are one defect. Use unsure only when the findings give too little to go on.";
 
 /** What the judge is shown: the fields a tester filed, nothing from the key. */
 export function judgeKickoff(
@@ -191,23 +201,48 @@ export function judgeKickoff(
   return `Both findings were filed on the page ${route}.\n\nFinding A: ${JSON.stringify(show(a))}\nFinding B: ${JSON.stringify(show(b))}`;
 }
 
+/** Why a judge's answer was not used: it contradicted itself, or it was not a usable answer at all. */
+export type JudgeFailure = "contradiction" | "error";
+
+/** What a self-contradicting judge said, kept so a run can show the misreading rather than only count it. */
+export interface StatedAnswer {
+  verdict: "same" | "different";
+  confidence: number;
+}
+
 /**
- * Read the judge's one tool call. Anything else — no call, another tool, a
- * verdict outside the three, a probability outside 0–1 or one that
- * contradicts its own verdict — is an error, never a guess at what was meant.
+ * Read the judge's one tool call. The judge states its confidence in its own
+ * verdict, and the probability that the pair is one defect is derived from the
+ * two: same at confidence c is c, different at confidence c is 1 − c. A first
+ * run asked for that probability directly, and over half the answers were
+ * "different" with a probability of "same" near 1: the field was read as
+ * confidence in the verdict. Anything else — no call, another tool, a verdict
+ * outside the three, a confidence that is not a number from 0 to 1 — is an
+ * error, and a confidence below 0.5 contradicts the verdict it states; neither
+ * is a guess at what was meant.
  */
-export function parseJudgement(turn: Pick<ModelTurn, "calls" | "note">): { ok: true; judgement: Judgement } | { ok: false; error: string } {
+export function parseJudgement(
+  turn: Pick<ModelTurn, "calls" | "note">,
+): { ok: true; judgement: Judgement } | { ok: false; error: string; failure: JudgeFailure; stated?: StatedAnswer } {
   const call = turn.calls.find((c) => c.name === JUDGE_TOOL.name);
-  if (!call) return { ok: false, error: turn.note ?? `the model did not call ${JUDGE_TOOL.name}` };
-  if (call.argsError) return { ok: false, error: call.argsError };
-  const input = call.input as { verdict?: unknown; p_same?: unknown } | undefined;
+  const error = (e: string) => ({ ok: false as const, error: e, failure: "error" as const });
+  if (!call) return error(turn.note ?? `the model did not call ${JUDGE_TOOL.name}`);
+  if (call.argsError) return error(call.argsError);
+  const input = call.input as { verdict?: unknown; confidence?: unknown } | undefined;
   const verdict = input?.verdict;
-  const p = input?.p_same;
+  const c = input?.confidence;
   if (verdict !== "same" && verdict !== "different" && verdict !== "unsure")
-    return { ok: false, error: `the verdict ${JSON.stringify(verdict)} is not same, different or unsure` };
-  if (typeof p !== "number" || !Number.isFinite(p) || p < 0 || p > 1) return { ok: false, error: `p_same ${JSON.stringify(p)} is not a probability` };
-  if ((verdict === "same" && p < 0.5) || (verdict === "different" && p > 0.5)) return { ok: false, error: `the verdict ${verdict} contradicts p_same ${p}` };
-  return { ok: true, judgement: { verdict, pSame: p } };
+    return error(`the verdict ${JSON.stringify(verdict)} is not same, different or unsure`);
+  if (verdict === "unsure") return { ok: true, judgement: { verdict, pSame: 0.5 } };
+  if (typeof c !== "number" || !Number.isFinite(c) || c < 0 || c > 1) return error(`the confidence ${JSON.stringify(c)} is not a probability`);
+  if (c < 0.5)
+    return {
+      ok: false,
+      error: `the verdict ${verdict} contradicts its confidence ${c}, below 0.5`,
+      failure: "contradiction",
+      stated: { verdict, confidence: c },
+    };
+  return { ok: true, judgement: { verdict, pSame: verdict === "same" ? c : 1 - c } };
 }
 
 /** One model call: a system prompt, tools and a first message in, one turn out. The caller owns the network and the key. */
@@ -220,6 +255,10 @@ export interface Decision {
   judgement?: Judgement;
   /** Why the rule decided when a judge was asked: the judge failed, or was unsure. */
   note?: string;
+  /** Set when the judge's answer could not be used. */
+  failure?: JudgeFailure;
+  /** The verdict and confidence of an answer that contradicted itself. */
+  stated?: StatedAnswer;
 }
 
 /**
@@ -235,9 +274,16 @@ export async function decideDuplicate(p: Pick<LabelledPair, "a" | "b" | "route">
   try {
     parsed = parseJudgement(await ask(JUDGE_SYSTEM, [JUDGE_TOOL], judgeKickoff(p.route, p.a, p.b)));
   } catch (err) {
-    parsed = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    parsed = { ok: false, error: err instanceof Error ? err.message : String(err), failure: "error" };
   }
-  if (!parsed.ok) return { duplicate: rule(), by: "rule", note: `the model judge failed (${parsed.error}); the current rule decided` };
+  if (!parsed.ok)
+    return {
+      duplicate: rule(),
+      by: "rule",
+      failure: parsed.failure,
+      ...(parsed.stated ? { stated: parsed.stated } : {}),
+      note: `the model judge failed (${parsed.error}); the current rule decided`,
+    };
   if (parsed.judgement.verdict === "unsure")
     return { duplicate: rule(), by: "rule", judgement: parsed.judgement, note: "the model judge was unsure; the current rule decided" };
   return { duplicate: parsed.judgement.verdict === "same", by: "model", judgement: parsed.judgement };
