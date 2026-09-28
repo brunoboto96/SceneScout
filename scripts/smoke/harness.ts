@@ -180,7 +180,7 @@ function loopbackOrigin(value: string | null): string {
 }
 
 /** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
-export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBaseUrl: string; stats: ServerStats; close: () => void }> {
+export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBaseUrl: string; stats: ServerStats; close: () => Promise<void> }> {
   const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {} };
   const board: string[] = [];
   let codeCounter = 0;
@@ -541,6 +541,32 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end(fs.readFileSync(path.join(appDir, "cookie-account.html")));
       return;
     }
+    // The same revocable sign-in, kept ONLY in sessionStorage: /ss-signin
+    // hands the page a new token to store there, every other /ss-* page is
+    // an app that asks /ss-api/me whether its token is still live, and
+    // revokeFixtureTokens() ends it along with the cookie sign-in's.
+    if (urlPath === "/ss-signin") {
+      tokenCounter += 1;
+      const token = `s${tokenCounter}`;
+      liveTokens.add(token);
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(
+        `<!doctype html><title>Signing in</title><script>sessionStorage.setItem("fixture_token", ${JSON.stringify(token)}); location.replace("/ss-home");</script>`,
+      );
+      return;
+    }
+    if (urlPath === "/ss-api/me") {
+      const bearer = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+      const ok = liveTokens.has(bearer);
+      res.writeHead(ok ? 200 : 401, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(ok ? { name: "a member" } : { error: "unauthorized" }));
+      return;
+    }
+    if (urlPath.startsWith("/ss-")) {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "session-guarded.html")));
+      return;
+    }
     // The rotating sign-in. /rt-signin starts a family and hands the page its
     // tokens to keep in localStorage; /rt-app is the app, which calls
     // /rt-api/me with its access token and, on a 401, refreshes at
@@ -635,9 +661,14 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     baseUrl,
     foreignBaseUrl,
     stats,
-    close: () => {
-      server.close();
-      foreignServer.close();
+    /** Resolves once both servers have stopped listening and dropped their connections, so nothing of theirs keeps node running. */
+    close: async () => {
+      const stop = (s: http.Server) =>
+        new Promise<void>((resolve) => {
+          s.close(() => resolve());
+          s.closeAllConnections();
+        });
+      await Promise.all([stop(server), stop(foreignServer)]);
     },
   };
 }

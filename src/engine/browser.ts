@@ -154,7 +154,6 @@ import {
   sessionStorageInitScript,
   splitProfile,
   summarizeState,
-  withSessionStorage,
   writeProfile,
   type AttachAuth,
 } from "./profiles.js";
@@ -164,6 +163,7 @@ import {
   lockPathFor,
   planRefresh,
   presentedToken,
+  profileAfterRotation,
   REFRESH_BROKER_ENV,
   refreshTokenSlots,
   rotatedFromResponse,
@@ -3351,6 +3351,18 @@ export class BrowserEngine {
     if (!read.ok) return read;
     const applied = await this.applyState(read.state);
     if (!applied.ok) return applied;
+    // setStorageState has no sessionStorage: the latest profile's is seeded once more in each tab, as the page loads.
+    const reseed = sessionStorageInitScript(splitProfile(read.state).sessionStorage, { generation: `reattach-${Date.now()}` });
+    if (reseed) {
+      try {
+        await this.context.addInitScript(reseed);
+      } catch (err) {
+        return {
+          ok: false,
+          why: `the browser took its saved cookies and storage, but its session storage could not be put back (${err instanceof Error ? err.message.split("\n")[0] : String(err)})`,
+        };
+      }
+    }
     this.logAction({ action: "reattach", target: `role ${this.auth.role}`, url: this.page?.url() ?? "" });
     return { ok: true };
   }
@@ -3513,9 +3525,8 @@ export class BrowserEngine {
       for (let waited = 0; waited <= 5000; waited += 50) {
         const now = await this.context?.storageState().catch(() => null);
         if (now && rotationStored(now, presented)) {
-          // The page's state holds no sessionStorage: keep what the profile had.
           const onDisk = this.readRoleProfile();
-          state = onDisk.ok ? withSessionStorage(now, splitProfile(onDisk.state).sessionStorage) : now;
+          state = profileAfterRotation(now, onDisk.ok ? onDisk.state : null);
           break;
         }
         await new Promise((r) => setTimeout(r, 50));
@@ -4694,22 +4705,16 @@ export class BrowserEngine {
       if (this.memory) this.memory.lastSaveError = err instanceof Error ? err.message : String(err);
     }
     // Bounded teardown: a wedged renderer must not hang scout_close forever, and a teardown that overruns must not
-    // leave the browser running (teardown.ts). Captured here, so a teardown still running after a
-    // timeout can never close a browser a later attach() opened.
-    const { context, browser, server } = this;
+    // leave the browser running (teardown.ts). Taken here, because these fields are cleared below.
+    const server = this.server;
     const outcome = await boundedTeardown(
-      {
-        graceful: async () => {
-          for (const p of context?.pages() ?? []) await p.close().catch(() => {});
-          await context?.close().catch(() => {});
-          // A connected browser's close() only disconnects; the server's close() ends the browser.
-          await browser?.close().catch(() => {});
-          await server?.close();
-        },
-        closeBrowser: async () => server?.close(),
-        pid: server?.process().pid,
-        isAlive: () => !!server && serverRunning(server),
-        kill: async () => (await server?.kill(), !!server && !serverRunning(server)),
+      this.context,
+      this.browser,
+      server && {
+        close: () => server.close(),
+        kill: () => server.kill(),
+        running: () => serverRunning(server),
+        pid: server.process().pid,
       },
       this.teardown,
     );

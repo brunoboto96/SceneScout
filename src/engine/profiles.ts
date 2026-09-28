@@ -198,24 +198,36 @@ export function splitProfile(raw: unknown): { storageState: StorageStateShape; s
  * it and be signed back in on the next page, so in those frames clear() puts
  * the marker back after clearing. Values go in as JSON, so nothing in them is
  * ever run. No sessionStorage to restore: no script.
+ *
+ * A re-attach passes a `generation` of its own. Its script is added after the
+ * attach's, so it runs after it in every frame: it seeds a tab once more, from
+ * the latest profile, when the tab's marker is not yet that generation, and
+ * leaves the marker set to it, so from then on the app's own writes stand
+ * again. The attach's script, which seeds only a tab with no marker at all,
+ * never restores the older sign-in over it.
  */
-export function sessionStorageInitScript(sessionStorage: readonly SessionStorageOrigin[]): string | null {
+export function sessionStorageInitScript(sessionStorage: readonly SessionStorageOrigin[], opts: { generation?: string } = {}): string | null {
   if (sessionStorage.length === 0) return null;
   const seed: Record<string, [string, string][]> = {};
   for (const o of sessionStorage) seed[o.origin] = o.entries.map((e) => [e.name, e.value]);
+  const generation = opts.generation ?? null;
+  if (generation === "1") throw new Error('a re-attach generation must not be "1", the mark of the first restore');
   return `(() => {
   const seed = ${JSON.stringify(seed)};
   const marker = ${JSON.stringify(SESSION_RESTORED_MARKER)};
+  const generation = ${JSON.stringify(generation)};
+  const mark = generation ?? "1";
   if (!Object.prototype.hasOwnProperty.call(seed, location.origin)) return;
   const proto = Object.getPrototypeOf(sessionStorage);
   const clear = proto.clear;
   proto.clear = function () {
     clear.call(this);
-    if (this === sessionStorage) this.setItem(marker, "1");
+    if (this === sessionStorage) this.setItem(marker, mark);
   };
-  if (sessionStorage.getItem(marker) !== null) return;
+  const seen = sessionStorage.getItem(marker);
+  if (generation === null ? seen !== null : seen === generation) return;
   for (const [name, value] of seed[location.origin]) sessionStorage.setItem(name, value);
-  sessionStorage.setItem(marker, "1");
+  sessionStorage.setItem(marker, mark);
 })();`;
 }
 

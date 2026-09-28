@@ -14,10 +14,11 @@ import assert from "node:assert/strict";
 import { needsTask, normalizeTask, taskRefusal, TASK_MAX } from "../src/engine/task.ts";
 import test from "node:test";
 import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
-import { boundedTeardown, DEFAULT_TEARDOWN_BOUNDS, describeTeardown, settlesWithin, teardownBounds, type TeardownSteps } from "../src/engine/teardown.ts";
 import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser } from "../src/engine/launch.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
+import { boundedTeardown, DEFAULT_TEARDOWN_BOUNDS, describeTeardown, settlesWithin, teardownBounds, type BrowserProcess } from "../src/engine/teardown.ts";
+import { descendants, extraHandles } from "./smoke/leaks.ts";
 
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -206,81 +207,120 @@ test("the orphan reaper only ever selects browsers this tool launched and abando
   assert.deepEqual(orphanPids(""), []);
 });
 
-/** Teardown steps with each step's behaviour and the process's life scripted, recording what was called. */
-function scriptedTeardown(opts: { graceful: "done" | "hang"; browserClose: "done" | "reject" | "hang"; pid?: number; alive: boolean; killable?: boolean }) {
-  const calls: string[] = [];
-  const hang = new Promise<void>(() => {});
-  const steps: TeardownSteps = {
-    graceful: async () => (calls.push("graceful"), opts.graceful === "hang" ? hang : undefined),
-    closeBrowser: async () => {
-      calls.push("closeBrowser");
-      if (opts.browserClose === "hang") return hang;
-      if (opts.browserClose === "reject") throw new Error("Target closed");
-    },
-    pid: opts.pid,
-    isAlive: (pid) => (calls.push(`isAlive ${pid}`), opts.alive),
-    kill: (pid) => (calls.push(`kill ${pid}`), opts.killable ?? true),
-  };
-  return { steps, calls };
+/** Stand-ins for a page, context and browser whose close takes `ms` (or never finishes), recording what was closed. */
+function standIns(ms: { context: number; browser: number }) {
+  const closed: string[] = [];
+  const closer = (name: string, delay: number) => ({
+    close: () => (delay === Infinity ? new Promise<void>(() => {}) : tick(delay).then(() => void closed.push(name))),
+  });
+  const page = closer("page", 0);
+  const context = { ...closer("context", ms.context), pages: () => [page] };
+  return { closed, context, browser: closer("browser", ms.browser) };
 }
 
-const quick = { teardownMs: 40, browserCloseMs: 40 };
+/** A stand-in browser process: its close takes `closeMs` (or never finishes), and the kill ends it unless it `survives`. */
+function standInProcess(closed: string[], opts: { closeMs: number; killMs?: number; survives?: boolean }): BrowserProcess {
+  let running = true;
+  return {
+    pid: 42,
+    close: () =>
+      opts.closeMs === Infinity
+        ? new Promise<void>(() => {})
+        : tick(opts.closeMs).then(() => {
+            running = false;
+            closed.push("process");
+          }),
+    kill: () =>
+      opts.killMs === Infinity
+        ? new Promise<void>(() => {})
+        : tick(opts.killMs ?? 0).then(() => {
+            closed.push("kill");
+            if (!opts.survives) running = false;
+          }),
+    running: () => running,
+  };
+}
 
-test("a teardown that finishes in bound escalates to nothing, and says nothing", async () => {
-  const { steps, calls } = scriptedTeardown({ graceful: "done", browserClose: "done", pid: 42, alive: true });
-  const outcome = await boundedTeardown(steps, quick);
-  assert.deepEqual(outcome, { timedOut: false });
-  // Not even a liveness check: a pid looked at after its browser has exited may already be someone else's.
-  assert.deepEqual(calls, ["graceful"]);
-  assert.equal(describeTeardown(outcome, quick), null);
+const quick = { teardownMs: 20, browserCloseMs: 40 };
+
+test("a teardown that outlasts its cap still closes the browser after the caller has moved on", async () => {
+  // The caller returns at the cap and clears its own fields; the browser must not depend on them.
+  const { closed, context, browser } = standIns({ context: 300, browser: 0 });
+  const started = Date.now();
+  await boundedTeardown(context, browser, null, quick);
+  assert.ok(Date.now() - started < 200, "returns within the cap and the direct close's bound, not when teardown ends");
+  await tick(400);
+  assert.ok(closed.includes("browser"), `closed: ${closed.join(", ")}`);
 });
 
-test("a teardown that hangs still closes the browser, and kills it only if it is still running", async () => {
-  const table: Array<{ name: string; opts: Parameters<typeof scriptedTeardown>[0]; outcome: object; calls: string[]; says: RegExp }> = [
+test("a context that never closes does not keep the browser running", async () => {
+  const { closed, context, browser } = standIns({ context: Infinity, browser: 0 });
+  await boundedTeardown(context, browser, null, quick);
+  await tick(30);
+  assert.deepEqual(closed, ["page", "browser"]);
+});
+
+test("a teardown within its cap closes in order, once each, and escalates to nothing", async () => {
+  const { closed, context, browser } = standIns({ context: 0, browser: 0 });
+  const outcome = await boundedTeardown(context, browser, standInProcess(closed, { closeMs: 0 }), { teardownMs: 1000, browserCloseMs: 40 });
+  assert.deepEqual(closed, ["page", "context", "browser", "process"]);
+  assert.deepEqual(outcome, { timedOut: false });
+  assert.equal(describeTeardown(outcome), null);
+  assert.deepEqual(await boundedTeardown(null, null, null, quick), { timedOut: false });
+});
+
+test("a teardown that overruns closes the browser's process directly, and kills it only if it is still running", async () => {
+  const table: Array<{ name: string; context: number; process: Parameters<typeof standInProcess>[1] | null; outcome: object; last: string; says: RegExp }> = [
     {
-      name: "the browser closes once asked directly",
-      opts: { graceful: "hang", browserClose: "done", pid: 42, alive: false },
+      name: "the process closes once asked directly",
+      context: Infinity,
+      process: { closeMs: 0 },
       outcome: { timedOut: true, browserClosed: true },
-      calls: ["graceful", "closeBrowser", "isAlive 42"],
-      says: /timed out after 40ms; browser\.close\(\) then settled; browser process has exited/,
+      last: "process",
+      says: /timed out after 20ms; closing the browser directly then settled; browser process has exited/,
     },
     {
-      name: "browser.close() hangs too: the process is killed",
-      opts: { graceful: "hang", browserClose: "hang", pid: 42, alive: true },
+      name: "the process's close hangs too: it is killed",
+      context: Infinity,
+      process: { closeMs: Infinity },
       outcome: { timedOut: true, browserClosed: false, killed: 42 },
-      calls: ["graceful", "closeBrowser", "isAlive 42", "kill 42"],
+      last: "kill",
       says: /did not settle within 40ms; killed browser process 42/,
     },
     {
-      name: "browser.close() rejects and the process runs on: killed",
-      opts: { graceful: "hang", browserClose: "reject", pid: 42, alive: true },
-      outcome: { timedOut: true, browserClosed: true, killed: 42 },
-      calls: ["graceful", "closeBrowser", "isAlive 42", "kill 42"],
-      says: /killed browser process 42/,
-    },
-    {
-      name: "the kill fails: said, not hidden",
-      opts: { graceful: "hang", browserClose: "hang", pid: 42, alive: true, killable: false },
+      name: "the kill does not end it: said, not hidden",
+      context: Infinity,
+      process: { closeMs: Infinity, survives: true },
       outcome: { timedOut: true, browserClosed: false, left: 42 },
-      calls: ["graceful", "closeBrowser", "isAlive 42", "kill 42"],
+      last: "kill",
       says: /browser process 42 could not be killed and may still be running/,
     },
     {
-      name: "no pid known: nothing is killed, and that is said",
-      opts: { graceful: "hang", browserClose: "hang", alive: true },
-      outcome: { timedOut: true, browserClosed: false, left: "unknown" },
-      calls: ["graceful", "closeBrowser"],
-      says: /process id is unknown, so it may still be running/,
+      name: "a kill that never answers is bounded too",
+      context: Infinity,
+      process: { closeMs: Infinity, killMs: Infinity },
+      outcome: { timedOut: true, browserClosed: false, left: 42 },
+      last: "page",
+      says: /could not be killed/,
+    },
+    {
+      name: "no process to kill: said",
+      context: Infinity,
+      process: null,
+      outcome: { timedOut: true, browserClosed: true, left: "unknown" },
+      last: "browser",
+      says: /no process to kill, so it may still be running/,
     },
   ];
   for (const row of table) {
-    const { steps, calls } = scriptedTeardown(row.opts);
+    const { closed, context, browser } = standIns({ context: row.context, browser: 0 });
+    const proc = row.process ? standInProcess(closed, row.process) : null;
     const started = Date.now();
-    const outcome = await boundedTeardown(steps, quick);
+    const outcome = await boundedTeardown(context, browser, proc, quick);
     assert.deepEqual(outcome, row.outcome, row.name);
-    assert.deepEqual(calls, row.calls, row.name);
+    assert.equal(closed.at(-1), row.last, `${row.name}: ${closed.join(", ")}`);
     assert.match(describeTeardown(outcome, quick) ?? "", row.says, row.name);
-    assert.ok(Date.now() - started < 40 + 40 + 1000, `${row.name}: bounded, took ${Date.now() - started}ms`);
+    assert.ok(Date.now() - started < 20 + 40 + 40 + 1000, `${row.name}: bounded, took ${Date.now() - started}ms`);
   }
 });
 
@@ -289,28 +329,52 @@ test("the teardown bounds come from the environment when set, and a bad value is
   assert.deepEqual(teardownBounds({ SCENESCOUT_TEARDOWN_MS: "500", SCENESCOUT_BROWSER_CLOSE_MS: " 300 " }), { teardownMs: 500, browserCloseMs: 300 });
   assert.deepEqual(teardownBounds({ SCENESCOUT_TEARDOWN_MS: "" }), DEFAULT_TEARDOWN_BOUNDS);
   for (const bad of ["5s", "-1", "1e4", "99", "120001", "2.5"]) {
-    assert.throws(() => teardownBounds({ SCENESCOUT_TEARDOWN_MS: bad }), new RegExp(`SCENESCOUT_TEARDOWN_MS must be .*got "${bad.replace(".", "\\.")}"`), bad);
+    assert.throws(
+      () => teardownBounds({ SCENESCOUT_TEARDOWN_MS: bad }),
+      (err: Error) => err.message.includes(`SCENESCOUT_TEARDOWN_MS must be`) && err.message.includes(`"${bad}"`),
+      bad,
+    );
   }
   assert.throws(() => teardownBounds({ SCENESCOUT_BROWSER_CLOSE_MS: "fast" }), /SCENESCOUT_BROWSER_CLOSE_MS/);
-});
-
-test("a kill that never answers is bounded too, and reported as not done", async () => {
-  const steps: TeardownSteps = {
-    graceful: () => new Promise(() => {}),
-    closeBrowser: () => new Promise(() => {}),
-    pid: 42,
-    isAlive: () => true,
-    kill: () => new Promise<boolean>(() => {}),
-  };
-  const started = Date.now();
-  assert.deepEqual(await boundedTeardown(steps, quick), { timedOut: true, browserClosed: false, left: 42 });
-  assert.ok(Date.now() - started < 40 * 3 + 1000);
 });
 
 test("settlesWithin answers whether a promise settled in time, rejections included", async () => {
   assert.equal(await settlesWithin(Promise.resolve(), 50), true);
   assert.equal(await settlesWithin(Promise.reject(new Error("x")), 50), true);
   assert.equal(await settlesWithin(new Promise(() => {}), 20), false);
+});
+
+test("the smoke leak check sees everything under this process, and nothing else", () => {
+  // A browser a suite never closed is still node's child, so the orphan reaper
+  // above skips it by design, and its helpers hang under IT, not under node.
+  const ps = [
+    `  500     1 node smoke.ts`, // this process
+    `  501   500 /cache/ms-playwright/chromium/chrome --headless`, // a browser left open
+    `  502   501 /cache/ms-playwright/chromium/chrome --type=renderer`, // its helper, a grandchild
+    `  503   500 ps -A -o pid=,ppid=,command=`, // the listing itself
+    `  504   500 /bin/ps -A -o pid=,ppid=,command=`, // the listing, by full path
+    `  505     1 /cache/ms-playwright/chromium/chrome --headless`, // somebody else's browser
+    `  506   777 node other.js`, // an unrelated process
+    `  507   500 node dist/cli.js check`, // a CLI child still running is a leftover too
+    `  508   500 /repo/node_modules/@esbuild/darwin-arm64/bin/esbuild --service=0.28.2 --ping`, // tsx's transformer, not the suite's
+    `  509   501 /repo/node_modules/@esbuild/linux-x64/bin/esbuild --service=0.28.2 --ping`, // ...but only as node's own child
+    `garbage`,
+  ].join("\n");
+  assert.deepEqual(
+    descendants(ps, 500).map((p) => p.pid),
+    [501, 502, 507, 509],
+  );
+  assert.deepEqual(descendants(ps, 999), []);
+  assert.deepEqual(descendants("", 500), []);
+});
+
+test("the smoke open-handle check counts by type, so one more of a kind already open still counts", () => {
+  assert.deepEqual(extraHandles(["TTYWrap", "TTYWrap"], ["TTYWrap", "TTYWrap"]), []);
+  // A browser left open shows as a child process and the pipes to it, next to stdio pipes that were there all along.
+  assert.deepEqual(extraHandles(["PipeWrap", "PipeWrap"], ["PipeWrap", "PipeWrap", "ProcessWrap", "PipeWrap"]), ["ProcessWrap", "PipeWrap"]);
+  assert.deepEqual(extraHandles(["TTYWrap"], ["Timeout", "TCPServerWrap", "TTYWrap"]), ["Timeout", "TCPServerWrap"]);
+  // Closing something that was open at the start is not a leak.
+  assert.deepEqual(extraHandles(["TTYWrap", "Timeout"], ["TTYWrap"]), []);
 });
 
 test("a browser that was never downloaded gets one instruction, not a stack of text", () => {

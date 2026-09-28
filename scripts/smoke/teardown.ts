@@ -1,19 +1,19 @@
 /**
  * A close that hangs must not leave the browser running. The browser context's
- * close is made to hang (as a wedged renderer's does), and the browser server's
- * close too, so only the kill can end it; after close() returns, within its
- * bound, the browser's process and every process in its group must be gone.
- * The bounds are lowered through their environment variables so this takes
- * about a second; the other escalation paths are table-tested in dispatch-test. A tool call still waiting on the
- * page when close() starts (a navigation to a server that never answers) must
- * have settled by then too, so nothing of it can write into the project after
- * the close. The contrast is a plain close, which ends the browser without
- * reaching either escalation.
+ * close is made to hang (as a wedged renderer's does), and the browser's and
+ * its server's closes too, so only the kill can end it. After close() returns,
+ * within its bound, the browser's process and every process in its group must
+ * be gone, and a tool call still waiting on the page when close() started (a
+ * navigation to a server that never answers) must have settled, so nothing of
+ * it can write into the project after the close. The contrast is a plain close,
+ * which ends the browser without escalating. The bounds are lowered through
+ * their environment variables so this takes seconds; the other escalation
+ * paths are table-tested in dispatch-test.
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { BrowserContext, BrowserServer } from "playwright";
+import type { Browser, BrowserContext, BrowserServer } from "playwright";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { BROWSER_CLOSE_ENV, TEARDOWN_ENV } from "../../dist/engine/teardown.js";
 import { check, eventually, type SmokeContext } from "./harness.ts";
@@ -63,12 +63,13 @@ function folderState(dir: string): string {
 async function closeWith(baseUrl: string, projectDir: string, label: string, hanging: boolean): Promise<void> {
   const engine = new BrowserEngine();
   await engine.attach({ url: `${baseUrl}/index.html`, projectDir, mode: "read-only" });
-  const inner = engine as unknown as { context: BrowserContext; server: BrowserServer };
+  const inner = engine as unknown as { context: BrowserContext; browser: Browser; server: BrowserServer };
   const pid = inner.server.process().pid;
   check(`${label}: the launched browser's process id is known`, pid !== undefined && processAlive(pid), String(pid));
   if (pid === undefined) return void (await engine.close());
   if (hanging) {
     inner.context.close = hang;
+    inner.browser.close = hang;
     inner.server.close = hang;
   }
   // A tool call still waiting on the page as the close starts, as a call the watchdog cut off would be.

@@ -2,13 +2,27 @@
  * Closing a session's browser within a bound, and never walking away from a
  * running one.
  *
- * Kept out of browser.ts so the rule is table-tested (scripts/dispatch-test.ts)
- * with stand-in steps. The cost of getting it wrong is a browser left running
- * under the engine's process: it is not an orphan, so the reaper never takes
- * it, and its pipe keeps node from exiting.
+ * Kept out of browser.ts so the rule can be table-tested with stand-in objects
+ * (scripts/dispatch-test.ts). The cost of getting it wrong is a browser left
+ * running under the engine's process: it is not an orphan, so the reaper never
+ * takes it, and its pipe keeps node from exiting.
  */
 
-/** How long BrowserEngine.close() waits: for pages, context and browser to close in order, then for the escalation's own browser close. */
+/** The parts of a Playwright page, context and browser that teardown uses. */
+export interface Closable {
+  close(): Promise<unknown>;
+}
+export interface ContextLike extends Closable {
+  pages(): Closable[];
+}
+/** The browser's process, as a Playwright BrowserServer holds it: closed gracefully, or killed. */
+export interface BrowserProcess extends Closable {
+  kill(): Promise<unknown>;
+  running(): boolean;
+  pid?: number;
+}
+
+/** How long teardown waits: for pages, context and browser to close in order, then for each escalation step. */
 export interface TeardownBounds {
   teardownMs: number;
   browserCloseMs: number;
@@ -51,69 +65,67 @@ export async function settlesWithin(p: Promise<unknown>, ms: number): Promise<bo
   }
 }
 
-/** The steps of a browser teardown, passed in so the escalation below is tested without a browser. */
-export interface TeardownSteps {
-  /** Close pages, then the context, then the browser, in that order. */
-  graceful: () => Promise<unknown>;
-  /** Close the browser alone: what still has to happen when the ordered teardown hangs before reaching it. */
-  closeBrowser: () => Promise<unknown>;
-  /** The browser's process id, when it is known. */
-  pid?: number;
-  /** Whether that pid is still this process's browser, and not a pid reused since it exited: only then is it killed. */
-  isAlive: (pid: number) => boolean;
-  /** End that process; false when it could not be ended. Bounded like browser.close(). */
-  kill: (pid: number) => boolean | Promise<boolean>;
-}
-
 /** What a teardown had to do. */
 export interface TeardownOutcome {
   /** The ordered teardown overran its bound. */
   timedOut: boolean;
-  /** After a timeout: whether the escalated browser.close() settled within its own bound. */
+  /** After a timeout: whether closing the browser directly settled within its own bound. */
   browserClosed?: boolean;
-  /** After a timeout: the pid killed because it was still running, if any. */
+  /** After a timeout: the pid killed because the browser was still running. */
   killed?: number;
-  /** After a timeout: the pid still running because it could not be killed, or unknown when no pid was known. */
+  /** After a timeout: the pid still running because the kill did not end it, or unknown when there was no process to kill. */
   left?: number | "unknown";
 }
 
 /**
- * Tear a browser down within a bound, and never walk away from a running one.
+ * Close the context's pages, then the context, then the browser, then its
+ * process, and escalate when that overruns `bounds.teardownMs`: the browser is
+ * closed directly on a bound of its own, without waiting on a page or context
+ * that has not closed (closing the browser ends every context in it), and if
+ * its process is still running after that, the process is killed.
  *
- * A context whose close hangs (a wedged renderer, an unload handler that never
- * returns) used to end the teardown before browser.close() was reached; the
- * engine then dropped its reference and the browser ran on as node's child,
- * holding node open. It is not an orphan until node dies, so the reaper did not
- * take it either. Now a timeout escalates: browser.close() on its own bound,
- * then the process is killed by its pid if it is still running as this
- * process's browser. Only after a timeout: a teardown that finished has asked
- * the browser to close and heard back, and a pid looked at after its browser
- * has exited may already be someone else's.
+ * The objects are passed in rather than read from the caller's fields while
+ * teardown runs. A caller that returns at the bound clears those fields, and a
+ * teardown still running that then read them would find nothing to close and
+ * leave the browser running, or close one a later attach opened.
+ *
+ * `proc` is the browser's process. A browser that is connected to rather than
+ * launched only disconnects on close(), so the process's own close is what ends
+ * it. Without a process only the browser's close() is tried, and a browser that
+ * ignores it is reported as left running.
  */
-export async function boundedTeardown(steps: TeardownSteps, bounds: TeardownBounds = DEFAULT_TEARDOWN_BOUNDS): Promise<TeardownOutcome> {
-  if (await settlesWithin(steps.graceful(), bounds.teardownMs)) return { timedOut: false };
-  const browserClosed = await settlesWithin(steps.closeBrowser(), bounds.browserCloseMs);
-  if (steps.pid === undefined) return { timedOut: true, browserClosed, left: "unknown" };
-  if (!steps.isAlive(steps.pid)) return { timedOut: true, browserClosed };
-  let killed = false;
-  await settlesWithin(
-    (async () => {
-      killed = await steps.kill(steps.pid as number);
-    })(),
-    bounds.browserCloseMs,
-  );
-  return killed ? { timedOut: true, browserClosed, killed: steps.pid } : { timedOut: true, browserClosed, left: steps.pid };
+export async function boundedTeardown(
+  context: ContextLike | null,
+  browser: Closable | null,
+  proc: BrowserProcess | null,
+  bounds: TeardownBounds = DEFAULT_TEARDOWN_BOUNDS,
+): Promise<TeardownOutcome> {
+  const ordered = (async () => {
+    for (const p of context?.pages() ?? []) await p.close().catch(() => {});
+    await context?.close().catch(() => {});
+    await browser?.close().catch(() => {});
+    await proc?.close();
+  })();
+  if (await settlesWithin(ordered, bounds.teardownMs)) return { timedOut: false };
+  const browserClosed = await settlesWithin(proc ? proc.close() : (browser?.close() ?? Promise.resolve()), bounds.browserCloseMs);
+  if (!proc) return { timedOut: true, browserClosed, left: "unknown" };
+  if (!proc.running()) return { timedOut: true, browserClosed };
+  await settlesWithin(proc.kill(), bounds.browserCloseMs);
+  const pid = proc.pid ?? 0;
+  return proc.running() ? { timedOut: true, browserClosed, left: pid } : { timedOut: true, browserClosed, killed: pid };
 }
 
 /** The line a teardown that timed out is logged with, or null when it did not time out. */
 export function describeTeardown(outcome: TeardownOutcome, bounds: TeardownBounds = DEFAULT_TEARDOWN_BOUNDS): string | null {
   if (!outcome.timedOut) return null;
-  const close = outcome.browserClosed ? "browser.close() then settled" : `browser.close() did not settle within ${bounds.browserCloseMs}ms`;
+  const close = outcome.browserClosed
+    ? "closing the browser directly then settled"
+    : `closing the browser directly did not settle within ${bounds.browserCloseMs}ms`;
   const end =
     outcome.killed !== undefined
       ? `killed browser process ${outcome.killed}`
       : outcome.left === "unknown"
-        ? "its process id is unknown, so it may still be running"
+        ? "there is no process to kill, so it may still be running"
         : outcome.left !== undefined
           ? `browser process ${outcome.left} could not be killed and may still be running`
           : "browser process has exited";
