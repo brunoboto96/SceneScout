@@ -12,10 +12,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { chromium, firefox, webkit } from "playwright";
+import { chromium, firefox, webkit, type Page } from "playwright";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { profilePath, writeProfile } from "../../dist/engine/profiles.js";
-import { captureState } from "../../dist/login-run.js";
+import { saveLogin, savedLine } from "../../dist/login-run.js";
 import { BROWSER, check, SIGN_IN_COOKIE, type SmokeContext } from "./harness.ts";
 
 export const title = "login profiles";
@@ -26,7 +26,23 @@ const SIGNED_OUT = "You are signed out";
 /** The whole snapshot, never the diff: a revisited page with nothing changed would otherwise say nothing about what it shows. */
 const pageText = (engine: BrowserEngine): Promise<string> => engine.snapshot(true);
 
-export async function run({ baseUrl }: SmokeContext): Promise<void> {
+const SESSION_IN = "Signed in with a session token";
+const SESSION_OUT = "No session token: signed out";
+const IDB_IN = "Signed in with an IndexedDB token";
+const IDB_OUT = "No IndexedDB token: signed out";
+
+/** The page text once it has settled on one of two answers (the IndexedDB page answers asynchronously). */
+async function settledText(engine: BrowserEngine, answers: string[]): Promise<string> {
+  let text = "";
+  for (let i = 0; i < 20; i++) {
+    text = await pageText(engine);
+    if (answers.some((a) => text.includes(a))) return text;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return text;
+}
+
+export async function run({ baseUrl, foreignBaseUrl }: SmokeContext): Promise<void> {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-login-"));
   const opened: BrowserEngine[] = [];
   const track = (engine: BrowserEngine): BrowserEngine => {
@@ -41,9 +57,19 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       const page = await context.newPage();
       await page.goto(`${baseUrl}/cookie-signin`);
       check("the fixture's sign-in lands on the signed-in page", (await page.textContent("h1")) === SIGNED_IN, await page.content());
-      const saved = writeProfile(project, "member", await captureState(context));
+      const options = { url: `${baseUrl}/cookie-account`, role: "member", projectDir: project };
+      const saved = await saveLogin(context, options);
       check("the profile is saved under .scenescout/auth/<role>.json", saved.path === path.join(project, ".scenescout", "auth", "member.json"), saved.path);
       check("...holding the sign-in cookie", saved.summary.cookies >= 1, JSON.stringify(saved.summary));
+      // What `scenescout login` prints once saved: how long the login lasts, read
+      // from the cookie the fixture sets for an hour, by name and never by value.
+      const printed = savedLine(options, saved);
+      check(
+        "login's output says how long the saved sign-in lasts, from the cookie that dates it",
+        /\nLasts: about (59m\d\ds|1h00m) \(the last dated credential, cookie "fixture_session"\)\.\n/.test(printed),
+        printed,
+      );
+      check("...and never prints the cookie's value", !printed.includes("=member"), printed);
     } finally {
       await browser.close();
     }
@@ -130,6 +156,88 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     check("...and leaves that session attached and signed in", laneB.attached && (await pageText(laneB)).includes(SIGNED_IN));
 
     check(`the fixture's cookie is the one saved (${SIGN_IN_COOKIE})`, profileBefore.includes(SIGN_IN_COOKIE));
+
+    // ---- sessionStorage: a token nowhere but this tab's sessionStorage ------
+    // Recorded twice from one sign-in: by the capture `scenescout login` uses,
+    // and by a bare storageState() — what the capture saved before sessionStorage
+    // was kept. The one fact that differs between the two profiles is that.
+    const recorder = await { chromium, firefox, webkit }[BROWSER].launch({ headless: true });
+    try {
+      const context = await recorder.newContext();
+      const page = await context.newPage();
+      await page.goto(`${baseUrl}/session-signin.html`);
+      await page.waitForURL(`${baseUrl}/session-account.html`);
+      check("the fixture's session sign-in lands signed in", (await page.textContent("h1")) === SESSION_IN, await page.content());
+      const saved = await saveLogin(context, { url: baseUrl, role: "spa", projectDir: project });
+      check("the capture keeps the origin's sessionStorage", saved.summary.sessionOrigins === 1, JSON.stringify(saved.summary));
+      writeProfile(project, "spa-legacy", await context.storageState());
+      // The IndexedDB sign-in, recorded the same two ways.
+      await page.goto(`${baseUrl}/idb-signin.html`);
+      await page.waitForFunction(() => document.querySelector("p")?.textContent === "Stored the IndexedDB token");
+      const idb = await saveLogin(context, { url: baseUrl, role: "idb", projectDir: project });
+      check("the capture keeps IndexedDB", idb.summary.indexedDBs >= 1, JSON.stringify(idb.summary));
+      writeProfile(project, "idb-legacy", await context.storageState());
+    } finally {
+      await recorder.close();
+    }
+    const spaProfile = fs.readFileSync(profilePath(project, "spa"), "utf8");
+    check("the session token is in the saved profile", spaProfile.includes("member-token"));
+    check("...which stays owner-only", process.platform === "win32" || (fs.statSync(profilePath(project, "spa")).mode & 0o777) === 0o600);
+
+    const spa = track(new BrowserEngine());
+    const spaOut = await spa.attach({ url: `${baseUrl}/session-account.html`, projectDir: project, mode: "read-only", role: "spa" });
+    check("attach by a role saved with sessionStorage never prints the token", !spaOut.includes("member-token"), spaOut);
+    const spaSnap = await settledText(spa, [SESSION_IN, SESSION_OUT]);
+    check("a lane restored from the profile is signed in by its sessionStorage token", spaSnap.includes(SESSION_IN), spaSnap);
+    await spa.navigate(`${baseUrl}/session-account.html`);
+    check("...and stays signed in as it navigates", (await settledText(spa, [SESSION_IN, SESSION_OUT])).includes(SESSION_IN));
+    // The token belongs to the origin it was saved from: a frame from another origin gets nothing.
+    // White-box: the frames themselves, read through the engine's page.
+    await spa.navigate(`${baseUrl}/session-frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+    const spaPage = (spa as unknown as { page: Page }).page;
+    const frameHeading = async (origin: string): Promise<string> => {
+      for (let i = 0; i < 40; i++) {
+        const frame = spaPage.frames().find((f) => f.url().startsWith(`${origin}/session-account.html`));
+        const heading = frame ? await frame.textContent("h1").catch(() => null) : null;
+        if (heading === SESSION_IN || heading === SESSION_OUT) return heading;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return "(no answer)";
+    };
+    const sameFrame = await frameHeading(baseUrl);
+    const foreignFrame = await frameHeading(foreignBaseUrl);
+    check("a frame from the saved origin is signed in", sameFrame === SESSION_IN, sameFrame);
+    check("...and a frame from another origin gets nothing from the profile", foreignFrame === SESSION_OUT, foreignFrame);
+    // Signing out in the lane is the app's own write; the restore must not undo it on the next page.
+    await spa.navigate(`${baseUrl}/session-signout.html`);
+    await spa.navigate(`${baseUrl}/session-account.html`);
+    const afterOut = await settledText(spa, [SESSION_IN, SESSION_OUT]);
+    check("a lane that signs out stays signed out: the token is restored once per tab, not on every page", afterOut.includes(SESSION_OUT), afterOut);
+
+    // The same, for an app that signs out by clearing all of sessionStorage, in a fresh lane.
+    const clearing = track(new BrowserEngine());
+    await clearing.attach({ url: `${baseUrl}/session-account.html`, projectDir: project, mode: "read-only", role: "spa" });
+    const clearingIn = await settledText(clearing, [SESSION_IN, SESSION_OUT]);
+    check("a second lane from the profile starts signed in", clearingIn.includes(SESSION_IN), clearingIn);
+    await clearing.navigate(`${baseUrl}/session-signout.html?clear`);
+    await clearing.navigate(`${baseUrl}/session-account.html`);
+    const afterClear = await settledText(clearing, [SESSION_IN, SESSION_OUT]);
+    check("a lane whose sign-out clears all of sessionStorage stays signed out", afterClear.includes(SESSION_OUT), afterClear);
+
+    const legacy = track(new BrowserEngine());
+    await legacy.attach({ url: `${baseUrl}/session-account.html`, projectDir: project, mode: "read-only", role: "spa-legacy" });
+    const legacySnap = await settledText(legacy, [SESSION_IN, SESSION_OUT]);
+    check("the contrast: a profile saved without sessionStorage restores a signed-out lane", legacySnap.includes(SESSION_OUT), legacySnap);
+
+    // ---- IndexedDB: the same pair ---------------------------------------------
+    const idbLane = track(new BrowserEngine());
+    await idbLane.attach({ url: `${baseUrl}/idb-account.html`, projectDir: project, mode: "read-only", role: "idb" });
+    const idbSnap = await settledText(idbLane, [IDB_IN, IDB_OUT]);
+    check("a lane restored from a profile with IndexedDB is signed in by its IndexedDB token", idbSnap.includes(IDB_IN), idbSnap);
+    const idbLegacy = track(new BrowserEngine());
+    await idbLegacy.attach({ url: `${baseUrl}/idb-account.html`, projectDir: project, mode: "read-only", role: "idb-legacy" });
+    const idbLegacySnap = await settledText(idbLegacy, [IDB_IN, IDB_OUT]);
+    check("the contrast: a profile saved without IndexedDB restores a signed-out lane", idbLegacySnap.includes(IDB_OUT), idbLegacySnap);
   } finally {
     for (const engine of opened) await engine.close().catch(() => {});
     fs.rmSync(project, { recursive: true, force: true });

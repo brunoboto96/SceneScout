@@ -29,7 +29,19 @@ inputs:
     required: false
     default: ${{ github.token }}
   allowed:
-    description: (gate) The GitHub logins that may start a run, separated by commas or spaces. Empty means the repository's owner only.
+    description: (gate) The GitHub logins that may start a run, separated by commas or spaces. With allowed-roles and allowed-teams, a union; all three empty means the repository's owners only.
+    required: false
+    default: ""
+  allowed-roles:
+    description: (gate) Comment author associations that may start a run - OWNER, MEMBER, COLLABORATOR - separated by commas or spaces. Any other value fails the gate.
+    required: false
+    default: ""
+  allowed-teams:
+    description: (gate) Teams of the repository's organization whose active members may start a run, as org/team-slug, separated by commas or spaces. Needs team-token; a team of another organization allows no one.
+    required: false
+    default: ""
+  team-token:
+    description: (gate) A token that can read the organization's team membership (a GitHub App token, or a personal access token with read:org), used only for allowed-teams. Empty means no one is allowed by team. Pass it to the gate only.
     required: false
     default: ""
   allow-forks:

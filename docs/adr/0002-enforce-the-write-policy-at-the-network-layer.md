@@ -251,6 +251,15 @@ unload write the route handler lets through once the page has gone, so there a
 mode that allows the write does not promise it arrives
 (`allowedUnloadWritesMayBeLost`); nothing it refused is sent. Firefox, under load, can tear another site's frame down before the writes it sends on `pagehide` are issued at all, so nothing is sent and there is nothing to report (`frameUnloadWritesMayGoUnissued`).
 
+Leaving is not enough on its own in Firefox: it can hand a beacon sent on
+`pagehide` to the route handler after the navigation to `about:blank` has
+returned, and a request still waiting for its answer when its page is closed
+goes out unjudged (9 of 80 foreign popups left and closed at once). There a
+page is closed only once the route handler has answered every request it sent
+(`closeWaitsForLeavingWrites`); Chromium and WebKit close without waiting. The
+unload smoke suite leaves and closes 80 popups on Firefox and asserts none of
+their writes arrives.
+
 ## Consequences
 
 A refusal is a tool result the agent must respect and cannot route around, and

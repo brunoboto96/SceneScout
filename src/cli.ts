@@ -46,7 +46,8 @@ import {
 } from "./installer.js";
 import { defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
 import { httpClient, runCi } from "./ci-run.js";
-import { runLogin, savedLine } from "./login-run.js";
+import { runLogin, runScriptedLogin, savedLine } from "./login-run.js";
+import { credentialRedactor, LOGIN_ENV, readScriptedLogin } from "./engine/scripted-login.js";
 import { parseLoginArgs } from "./engine/profiles.js";
 import { detectProvider, EXIT_CI, KEY_ENV, parseCiArgs, redactKeys, secretValues } from "./engine/ci.js";
 import { EXIT, exitCodeOf, formatCheck, parseCheckArgs, refusedFlowReason, toSarif, toSummaryJson, unmeasuredReason } from "./engine/check.js";
@@ -99,6 +100,9 @@ Usage:
                                      --ignore rule,rule; --storage-state file to check signed in;
                                      --project dir (default: here); --out dir (default: .scenescout/check);
                                      --browser chromium|firefox|webkit;
+                                     --action-timeout-ms N (default 5000), --nav-timeout-ms N (default 20000;
+                                      15000 per crawled route): raise on a loaded runner, or set
+                                      SCENESCOUT_ACTION_TIMEOUT_MS / SCENESCOUT_NAV_TIMEOUT_MS;
                                      --flows dir|off: replay the flows saved there (default: .scenescout/flows);
                                      --retest on|off: re-test open findings a page load reproduces (default on);
                                      --flow-writes never|allow: never (default) replays flows under observe's
@@ -126,6 +130,7 @@ Usage:
                                       destructive only with --allow-destructive as well); --level minimal|medium|
                                       extensive (default medium); --focus "an area or flow";
                                      --storage-state file; --browser chromium|firefox|webkit;
+                                     --action-timeout-ms N, --nav-timeout-ms N: as for check;
                                      --project dir (default: here); --out dir (default: .scenescout/ci);
                                      --show "the Save button": instead of exploring, capture that element as a PNG
                                       under shots/; --compare-url https://…: with --show, capture it there too and
@@ -138,6 +143,15 @@ Usage:
                                     Closing the window or Ctrl+C saves nothing. Agents then attach with
                                     scout_attach { role: "<name>" }, as many sessions as they like from one login.
                                     (--project dir (default: here); --browser chromium|firefox|webkit)
+  scenescout login <url> --role <name> --script
+                                    For CI: sign in headless from SCENESCOUT_LOGIN_USERNAME, SCENESCOUT_LOGIN_PASSWORD
+                                    and, if the form asks for a code, SCENESCOUT_LOGIN_TOTP_SECRET (base32 or an
+                                    otpauth:// URI), then save the profile as above. A test user only. No value
+                                    is ever printed. Exit 0 signed in and saved, 1 not.
+                                    (--success-url text|url; --success-selector css; --username-selector,
+                                    --password-selector, --otp-selector, --submit-selector css; each of these also
+                                    from SCENESCOUT_LOGIN_<FLAG>, e.g. SCENESCOUT_LOGIN_SUCCESS_URL;
+                                    --timeout seconds (default 60))
   scenescout status [projectPath]   What is the engine doing right now? (every session + recent actions)
   scenescout watch [projectPath]    Open the live view in a browser: what each session is doing, a thumbnail
                                     of its page, and a live stream you can switch on per session
@@ -643,9 +657,28 @@ async function login(args: string[]): Promise<never> {
     console.error(`scenescout login: ${parsed.error}`);
     process.exit(1);
   }
+  const options = parsed.options;
+  if (options.script) {
+    // Everything is checked before a browser launches; each problem names a variable, never a value.
+    const read = readScriptedLogin(options.script, process.env);
+    if (!read.ok) {
+      for (const e of read.errors) console.error(`scenescout login: ${e}`);
+      process.exit(1);
+    }
+    const redactor = credentialRedactor(read.config, process.env[LOGIN_ENV.totpSecret]);
+    try {
+      const saved = await runScriptedLogin(options, read.config, redactor, (line) => console.log(line));
+      console.log(redactor.redact(savedLine(options, saved)));
+    } catch (err) {
+      // Redacted again here: an error thrown by the browser itself has not been through the run's redaction.
+      console.error(redactor.redact(`scenescout login: ${err instanceof Error ? err.message : String(err)}`));
+      process.exit(1);
+    }
+    process.exit(0);
+  }
   try {
-    const saved = await runLogin(parsed.options, (line) => console.log(line));
-    console.log(savedLine(parsed.options, saved));
+    const saved = await runLogin(options, (line) => console.log(line));
+    console.log(savedLine(options, saved));
   } catch (err) {
     console.error(`scenescout login: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);

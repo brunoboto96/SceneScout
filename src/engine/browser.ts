@@ -5,12 +5,14 @@ import {
   type Browser,
   type BrowserType,
   type BrowserContext,
+  type BrowserContextOptions,
   type CDPSession,
   type FileChooser,
   type Frame,
   type Locator,
   type Page,
   type Request,
+  type Route,
 } from "playwright";
 import fs from "node:fs";
 import path from "node:path";
@@ -56,7 +58,6 @@ import { formatJourney, measureJourney } from "./journey.js";
 import {
   describeStep,
   FLOW_AFTER_LAST_STEP_MS,
-  FLOW_STEP_TIMEOUT_MS,
   isAction,
   matchRequest,
   parseTarget,
@@ -79,6 +80,7 @@ import {
   serviceWorkerPolicy,
   sharedWorkersAllowed,
   unloadWriteInterception,
+  closeWaitsForLeavingWrites,
   type BrowserEngineName,
 } from "../browsers.js";
 import { revealedLines } from "./hover.js";
@@ -99,7 +101,8 @@ import {
   type FormProbe,
 } from "./forms.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
-import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
+import { DEFAULT_TIME_LIMITS, explainTimeout, limitHint, resolveTimeLimits, type LimitKind, type TimeLimits } from "./limits.js";
+import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
 import {
@@ -142,7 +145,33 @@ import {
   unseenWriteSource,
   type UnseenWriteVerdict,
 } from "./unload.js";
-import { loginCommand, permissionNote, resolveAttachAuth, roleLabel, type AttachAuth } from "./profiles.js";
+import {
+  loginCommand,
+  permissionNote,
+  resolveAttachAuth,
+  roleLabel,
+  sessionStorageInitScript,
+  splitProfile,
+  summarizeState,
+  withSessionStorage,
+  writeProfile,
+  type AttachAuth,
+} from "./profiles.js";
+import {
+  acquireLock,
+  brokerEnabled,
+  lockPathFor,
+  planRefresh,
+  presentedToken,
+  REFRESH_BROKER_ENV,
+  refreshTokenSlots,
+  rotatedFromResponse,
+  rotationStored,
+  swapProfileToken,
+  swapRequest,
+  type HeldLock,
+  type TokenSlot,
+} from "./refresh.js";
 
 export type { WriteMode } from "./policy.js";
 
@@ -156,6 +185,13 @@ export interface AttachOptions {
    * Refused together with storageStatePath.
    */
   role?: string;
+  /**
+   * For a session attached by role: whether its page's use of the role's
+   * stored refresh token goes through the refresh broker (refresh.ts), so
+   * sessions of one role never present the same token twice. Default: on,
+   * unless SCENESCOUT_REFRESH_BROKER=off.
+   */
+  refreshBroker?: boolean;
   mode?: WriteMode;
   headed?: boolean;
   /** Which browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else Chromium. */
@@ -179,6 +215,10 @@ export interface AttachOptions {
   task?: string;
   /** Keep a frame of the page after each action, under .scenescout/recordings/. Off by default; evidence for QA work. */
   record?: boolean;
+  /** How long one action on the page may take. Default: SCENESCOUT_ACTION_TIMEOUT_MS, else 5000 (see limits.ts). */
+  actionTimeoutMs?: number;
+  /** How long a page may take to load. Default: SCENESCOUT_NAV_TIMEOUT_MS, else 20000 (see limits.ts). */
+  navTimeoutMs?: number;
   /**
    * Origins of embedded frames whose writes out of the app may go out in
    * safe-write mode — a provider in test mode, named by the user. Hostile
@@ -436,6 +476,12 @@ const RECORD_SHOT_TIMEOUT_MS = 2500;
 
 export class BrowserEngine {
   private browser: Browser | null = null;
+  /** How long an action and a page load may take; set at attach (limits.ts). */
+  private limits: TimeLimits = DEFAULT_TIME_LIMITS;
+  /** The limits this session runs with, so the server can size its watchdogs to them. */
+  get timeLimits(): TimeLimits {
+    return this.limits;
+  }
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private oracles = new OracleMonitor();
@@ -473,6 +519,18 @@ export class BrowserEngine {
 
   /** Login-bounce streak, the SESSION AUTH LOST verdict, and the per-call notice. */
   private readonly authLoss = new AuthLossTracker();
+
+  /**
+   * The refresh broker for a role session: the role's profile, and the
+   * refresh tokens this session last loaded from it (never printed). Null
+   * when the session is not attached by role, the broker is off, or the
+   * profile holds no refresh token.
+   */
+  private refresh: { projectDir: string; role: string; file: string; known: TokenSlot[]; spent: TokenSlot[] } | null = null;
+  /** Write-backs still waiting on a response, so close() lets them release their lock. */
+  private readonly refreshTasks = new Set<Promise<void>>();
+  /** What the broker did this session, for the lane report: counts only. */
+  private refreshCounts = { refreshed: 0, swapped: 0, failed: 0 };
 
   /** UI-label blocking applies only in read-only mode (safe-write enforces at the network layer instead). */
   get readOnly(): boolean {
@@ -778,6 +836,8 @@ export class BrowserEngine {
    * as long as the browser, so a page closed at the end still meets it.
    */
   private readonly routedWrites = new RoutedWrites();
+  /** Requests the route handler is still judging, by the page that sent them: a page is closed only once its own are answered. */
+  private readonly routesInFlight = new Map<Page, Set<Promise<unknown>>>();
   /** Writes refused at the browser level, so the driver's own report of them (a redirect hop failing) is known as the policy's doing. */
   private readonly unseenRefusals = new UnseenRefusals();
 
@@ -956,20 +1016,42 @@ export class BrowserEngine {
   }
 
   async attach(opts: AttachOptions): Promise<string> {
-    // Resolved before anything is closed, so a bad role or a missing profile
-    // leaves a live session as it was.
+    // Resolved before anything is closed, so a bad role, a missing profile or
+    // a time limit out of bounds leaves a live session as it was.
+    const limits = resolveTimeLimits(opts, process.env);
     const auth = resolveAttachAuth({ projectDir: opts.projectDir, url: opts.url, role: opts.role, storageStatePath: opts.storageStatePath });
+    const brokered = brokerEnabled({ roleSession: auth.kind === "role", option: opts.refreshBroker, env: process.env[REFRESH_BROKER_ENV] });
     const storageStatePath = auth.kind === "none" ? undefined : auth.storageStatePath;
     if (storageStatePath && !fs.existsSync(storageStatePath)) {
       throw new Error(`storageStatePath does not exist: ${storageStatePath}`);
     }
+    // Read and checked here, also before anything is closed. Playwright restores
+    // the storage state; sessionStorage, which it has no field for, is put back
+    // by an init script before the app's own code runs.
+    let profile: ReturnType<typeof splitProfile> | undefined;
+    if (storageStatePath) {
+      try {
+        profile = splitProfile(JSON.parse(fs.readFileSync(storageStatePath, "utf8")));
+      } catch (err) {
+        throw new Error(`could not load the storage state at ${storageStatePath}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     await this.close();
+    this.limits = limits;
     this.auth = auth;
     this.role = roleLabel(auth);
+    this.authLoss.beginSession(auth.kind, this.role);
     let profileNote = "";
+    this.refresh = null;
+    this.refreshCounts = { refreshed: 0, swapped: 0, failed: 0 };
     if (auth.kind === "role") {
       const note = permissionNote(auth.storageStatePath, fs.statSync(auth.storageStatePath).mode);
       if (note) profileNote = `\n⚠ ${note}`;
+      if (brokered) {
+        const read = this.readRoleProfile();
+        const known = read.ok ? refreshTokenSlots(read.state) : [];
+        if (known.length > 0) this.refresh = { projectDir: opts.projectDir, role: auth.role, file: auth.storageStatePath, known, spent: [] };
+      }
     }
     this.currentMode = opts.mode ?? "read-only";
     this.writeRule = new WriteRule(this.currentMode);
@@ -1053,10 +1135,12 @@ export class BrowserEngine {
       this.engineName = opts.browser ?? defaultEngine(process.env);
       this.browser = await this.launchWithRecovery(this.engineName, opts.headed ?? false);
       this.context = await this.browser.newContext({
-        storageState: storageStatePath,
+        storageState: profile?.storageState as BrowserContextOptions["storageState"],
         viewport: opts.viewport ?? { width: 1280, height: 900 },
         serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
+      const restoreSession = sessionStorageInitScript(profile?.sessionStorage ?? []);
+      if (restoreSession) await this.context.addInitScript(restoreSession);
       if (!sharedWorkersAllowed(this.mode)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
       // The postMessage-token oracle: every frame's postMessage is wrapped, and a "*" call hands its longer strings here.
       await this.context.exposeBinding(POSTMESSAGE_BINDING, (source, entries: unknown) => this.noteTokenPosts(source.frame, entries));
@@ -1140,7 +1224,7 @@ export class BrowserEngine {
 
     // Write policy — enforced on the wire, where the truth lives.
     if (this.mode !== "destructive") {
-      await this.context.route("**/*", async (route) => {
+      const judge = async (route: Route): Promise<unknown> => {
         const req = route.request();
         const method = req.method();
         // Read once, as the request arrives: the rule the page sent it under (policy.ts WriteRule), not whatever holds after an await below.
@@ -1287,7 +1371,8 @@ export class BrowserEngine {
           return route.continue();
         }
         return refuse();
-      });
+      };
+      await this.context.route("**/*", (route) => this.judgeTracked(route, judge));
       // Chromium never routes a write a page sends as it is being left; it is judged at the browser level instead.
       if (unloadWriteInterception(this.engineName) === "browser-fetch" && this.browser) {
         try {
@@ -1300,12 +1385,17 @@ export class BrowserEngine {
       }
     }
 
+    // The refresh broker. Registered after the write policy so it runs first
+    // and hands every request on to it: a refresh it lets through is still
+    // judged by the policy like any other request.
+    if (this.refresh) await this.context.route("**/*", (route) => this.brokerRefresh(route));
+
     // Popups / target=_blank: adopt same-origin pages as the active page (with
     // oracles attached); close foreign-origin popups so exploration cannot
     // silently escape the app under test.
     this.context.on("page", (newPage) => {
       newPage
-        .waitForLoadState("domcontentloaded", { timeout: 10000 })
+        .waitForLoadState("domcontentloaded", { timeout: this.limits.backNavMs })
         .then(() => {
           if (newPage === this.page || newPage.isClosed()) return;
           const sameOrigin = this.isSameOrigin(newPage.url());
@@ -1323,7 +1413,7 @@ export class BrowserEngine {
             this.snapshotUrl = "";
             this.lastSnap = null;
           } else {
-            void BrowserEngine.leaveAndClose(newPage);
+            void this.leaveAndClose(newPage);
           }
         })
         .catch(() => {});
@@ -1333,11 +1423,12 @@ export class BrowserEngine {
     this.wireEmbedMoves(this.page);
 
     try {
-      await this.page.goto(opts.url, { waitUntil: "domcontentloaded", timeout: 20000 });
+      await this.page.goto(opts.url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs });
     } catch (err) {
       // Don't leave a half-attached engine (leaked browser, snapshots of about:blank).
       await this.close();
-      throw new Error(`Could not load ${opts.url} — is the app running? (${err instanceof Error ? err.message.split("\n")[0] : err})`);
+      const explained = explainTimeout(err, "nav", this.limits.navMs);
+      throw new Error(`Could not load ${opts.url} — is the app running? (${explained instanceof Error ? explained.message.split("\n")[0] : explained})`);
     }
     await this.settle();
     this.logAction({ action: "attach", url: this.page.url() });
@@ -1999,7 +2090,7 @@ export class BrowserEngine {
       const policyAbortedNavigation = url.startsWith("chrome-error://") && this.blockedRequests.length > 0;
       this.logAction({ action, target, url });
       this.logAction({ action: policyAbortedNavigation ? "write-policy:navigation-blocked" : "origin-fence:bounced", target: url.slice(0, 200), url });
-      await page.goBack({ waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+      await page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }).catch(() => {});
       url = page.url();
       this.refs.clear();
       const blocked = this.drainBlocked();
@@ -2381,6 +2472,15 @@ export class BrowserEngine {
       : `\n(state-changing requests: ${list}${extra})`;
   }
 
+  /** Run one action or page load; a timeout it throws names the limit that ran out and how to raise it. */
+  private async withinLimit<T>(kind: LimitKind, work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } catch (err) {
+      throw explainTimeout(err, kind, kind === "action" ? this.limits.actionMs : this.limits.navMs);
+    }
+  }
+
   /**
    * Click a locator the way a real user's click resolves, not the way
    * Playwright's strict actionability protocol insists on. `.click()` polls
@@ -2517,6 +2617,10 @@ export class BrowserEngine {
   }
 
   async click(ref: string, clicks = 1): Promise<string> {
+    return this.withinLimit("action", () => this.clickNow(ref, clicks));
+  }
+
+  private async clickNow(ref: string, clicks = 1): Promise<string> {
     const page = this.requirePage();
     const { el, liveLabel } = await this.resolveForAction(ref);
     const refusal = this.actionPolicyCheck(el, liveLabel);
@@ -2538,7 +2642,7 @@ export class BrowserEngine {
     // button or an input can submit a form; nothing else is asked.
     const form = !el.frame && (el.tag === "button" || el.tag === "input") ? await this.probeForm(clickTarget) : null;
     const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
-    const { forced } = await this.resilientClick(clickTarget, ACTION_TIMEOUT_MS, clicks);
+    const { forced } = await this.resilientClick(clickTarget, this.limits.actionMs, clicks);
     this.memory!.markExercised(this.currentFingerprint, el.key, clicks > 1 ? `click×${clicks}` : "click");
     this.noteFormSubmit(formState, "click", form);
     const result = await this.afterAction(clicks > 1 ? `click×${clicks}` : "click", `${el.role} "${el.name}"`);
@@ -2601,7 +2705,7 @@ export class BrowserEngine {
           return { existing: "", caretAppendable: false };
         },
         undefined,
-        { timeout: ACTION_TIMEOUT_MS },
+        { timeout: this.limits.actionMs },
       )) as { existing: string; caretAppendable: boolean };
     } catch (err) {
       throw new Error(
@@ -2610,14 +2714,14 @@ export class BrowserEngine {
     }
     const { existing, caretAppendable } = state;
     if (replace || !existing || text === "") {
-      await locator.fill(text, { timeout: ACTION_TIMEOUT_MS });
+      await locator.fill(text, { timeout: this.limits.actionMs });
       return existing && (replace || text === "") ? ` (replaced existing content ${JSON.stringify(existing.slice(0, 60))})` : "";
     }
     const appendNote = ` (APPENDED after existing content ${JSON.stringify(existing.slice(0, 60))} — pass replace=true to overwrite instead)`;
     if (!caretAppendable) {
       // Data-typed inputs (number, email, date): concatenate without a
       // separator — an injected space would invalidate the value.
-      await locator.fill(existing + text, { timeout: ACTION_TIMEOUT_MS });
+      await locator.fill(existing + text, { timeout: this.limits.actionMs });
       return appendNote;
     }
     // Native append: focus, move the caret to the end, insert via the
@@ -2640,7 +2744,7 @@ export class BrowserEngine {
         }
       },
       undefined,
-      { timeout: ACTION_TIMEOUT_MS },
+      { timeout: this.limits.actionMs },
     );
     // Space only at a word-to-word boundary: "@mention " + "hi" needs none,
     // "user@" + "x" must not become "user@ x".
@@ -2650,6 +2754,10 @@ export class BrowserEngine {
   }
 
   async type(ref: string, text: string, pressEnter = false, replace = false): Promise<string> {
+    return this.withinLimit("action", () => this.typeNow(ref, text, pressEnter, replace));
+  }
+
+  private async typeNow(ref: string, text: string, pressEnter = false, replace = false): Promise<string> {
     const page = this.requirePage();
     const { el, liveLabel } = await this.resolveForAction(ref);
     if (el.role === "file") {
@@ -2697,7 +2805,7 @@ export class BrowserEngine {
       // After the fill, before the key: the fields as they are when it submits.
       const form = !el.frame && el.tag === "input" ? await this.probeForm(locator) : null;
       const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
-      await locator.press("Enter", { timeout: ACTION_TIMEOUT_MS });
+      await locator.press("Enter", { timeout: this.limits.actionMs });
       this.noteFormSubmit(formState, "enter", form);
     }
     this.memory!.markExercised(this.currentFingerprint, el.key, "type");
@@ -2713,6 +2821,10 @@ export class BrowserEngine {
    * fixture unless `filePath` names one inside the attached project.
    */
   async upload(opts: UploadOptions): Promise<string> {
+    return this.withinLimit("action", () => this.uploadNow(opts));
+  }
+
+  private async uploadNow(opts: UploadOptions): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
     let el: SnapshotElement | null = null;
@@ -2767,7 +2879,7 @@ export class BrowserEngine {
     const { input, chooser, how } = target;
 
     const meta: FileInputMeta = await (
-      input ? input.evaluate(describeFileInput, undefined, { timeout: ACTION_TIMEOUT_MS }) : chooser!.element().evaluate(describeFileInput)
+      input ? input.evaluate(describeFileInput, undefined, { timeout: this.limits.actionMs }) : chooser!.element().evaluate(describeFileInput)
     ).catch(() => ({ accept: null, multiple: false, label: "", disabled: false, probed: false }));
     // setInputFiles never checks `disabled` — it would report success on a
     // control no user can operate.
@@ -2781,14 +2893,14 @@ export class BrowserEngine {
 
     const mutationsBefore = this.mutationRequests.length;
     const blockedBefore = this.blockedRequests.length;
-    if (chooser) await chooser.setFiles(file.payload, { timeout: ACTION_TIMEOUT_MS });
-    else await input!.setInputFiles(file.payload, { timeout: ACTION_TIMEOUT_MS });
+    if (chooser) await chooser.setFiles(file.payload, { timeout: this.limits.actionMs });
+    else await input!.setInputFiles(file.payload, { timeout: this.limits.actionMs });
     // The set call succeeding means the browser took the payload — not that
     // the app kept it. Read the input back: an app that rejects client-side
     // clears it, and then nothing would ever be sent on submit.
     const kept = await (
       input
-        ? input.evaluate((node) => (node as HTMLInputElement).files?.length ?? 0, undefined, { timeout: ACTION_TIMEOUT_MS })
+        ? input.evaluate((node) => (node as HTMLInputElement).files?.length ?? 0, undefined, { timeout: this.limits.actionMs })
         : chooser!.element().evaluate((node) => (node as HTMLInputElement).files?.length ?? 0)
     ).catch(() => -1);
 
@@ -2824,7 +2936,7 @@ export class BrowserEngine {
       return { input: fileInputs.first(), chooser: null, how: "set on the page's only file input" };
     }
     const isFileInput = await locator
-      .evaluate((node) => node instanceof HTMLInputElement && node.type === "file", undefined, { timeout: ACTION_TIMEOUT_MS })
+      .evaluate((node) => node instanceof HTMLInputElement && node.type === "file", undefined, { timeout: this.limits.actionMs })
       .catch(() => false);
     if (isFileInput) return { input: locator, chooser: null, how: "set directly on the file input" };
     // A styled control: click it and answer the chooser it opens. The listener
@@ -2832,8 +2944,8 @@ export class BrowserEngine {
     // outlasts the click's own — forced retry included — plus a grace period
     // after it, for apps that fetch an upload URL before opening the picker. A
     // wait shorter than the click reported such controls as "uploads nothing".
-    const opened = page.waitForEvent("filechooser", { timeout: ACTION_TIMEOUT_MS + FORCED_CLICK_TIMEOUT_MS + CHOOSER_GRACE_MS }).catch(() => null);
-    await this.resilientClick(locator, ACTION_TIMEOUT_MS);
+    const opened = page.waitForEvent("filechooser", { timeout: this.limits.actionMs + FORCED_CLICK_TIMEOUT_MS + CHOOSER_GRACE_MS }).catch(() => null);
+    await this.resilientClick(locator, this.limits.actionMs);
     const chooser = await Promise.race([opened, page.waitForTimeout(CHOOSER_GRACE_MS).then(() => null)]);
     if (chooser) return { input: null, chooser, how: "via the file chooser the click opened" };
     const n = await fileInputs.count();
@@ -2949,11 +3061,15 @@ export class BrowserEngine {
    * look, not an interaction, and the element still deserves a click.
    */
   async hover(ref: string): Promise<string> {
+    return this.withinLimit("action", () => this.hoverNow(ref));
+  }
+
+  private async hoverNow(ref: string): Promise<string> {
     const page = this.requirePage();
     const { el } = await this.resolveForAction(ref);
     const { before, bodyBefore, churning } = await this.hoverBaselines();
     const locator = this.scopeOf(el).locator(`xpath=${el.xpath}`);
-    await locator.hover({ timeout: ACTION_TIMEOUT_MS });
+    await locator.hover({ timeout: this.limits.actionMs });
     // Wiggle inside the element: pointer-tracking libraries distinguish real
     // movement from a single synthetic hover event.
     const box = await locator.boundingBox().catch(() => null);
@@ -2991,6 +3107,10 @@ export class BrowserEngine {
   }
 
   async select(ref: string, value: string): Promise<string> {
+    return this.withinLimit("action", () => this.selectNow(ref, value));
+  }
+
+  private async selectNow(ref: string, value: string): Promise<string> {
     const page = this.requirePage();
     const { el, liveLabel } = await this.resolveForAction(ref);
     const refusal = this.actionPolicyCheck(el, liveLabel);
@@ -3012,7 +3132,7 @@ export class BrowserEngine {
     }
     const loc = this.scopeOf(el).locator(`xpath=${el.xpath}`);
     const options = el.tag === "select" ? await readSelectOptions(loc) : null;
-    const picked = await loc.selectOption(value, { timeout: ACTION_TIMEOUT_MS });
+    const picked = await loc.selectOption(value, { timeout: this.limits.actionMs });
     this.memory!.markExercised(this.currentFingerprint, el.key, "select");
     if (options) this.recordSelectChoice(this.currentFingerprint, el.key, options, picked);
     return this.afterAction("select", `${el.role} "${el.name}" = ${value}`);
@@ -3083,6 +3203,10 @@ export class BrowserEngine {
   private static readonly ACTIVATION_KEY_RE = /^(Enter|NumpadEnter|Space| )$/i;
 
   async press(key: string): Promise<string> {
+    return this.withinLimit("action", () => this.pressNow(key));
+  }
+
+  private async pressNow(key: string): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
     const refusal = await this.vetFocusedActivation(key);
@@ -3157,7 +3281,7 @@ export class BrowserEngine {
     // A notice describes ONE navigation. Clearing up front means a notice left
     // undelivered by a previous throw can never prepend itself to this result.
     this.authLoss.clear();
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await this.withinLimit("nav", () => page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
     // Settle BEFORE judging where we landed. A client-side auth guard redirects
     // after hydration, not during goto, so reading page.url() here showed the
     // requested path and the bounce went unnoticed — which is precisely how a
@@ -3179,7 +3303,262 @@ export class BrowserEngine {
       throw new Error(`${notice}${msg}`);
     }
     this.recordNavigationOutcome(url, await this.landedUrl(page));
-    return this.authLoss.take() + settled;
+    // Only after a navigation that finished: one that threw leaves its verdict standing.
+    const plan = this.authLoss.takeReattach();
+    if (!plan) return this.authLoss.take() + settled;
+    // The loss this navigation declared is answered once, from the role's latest
+    // saved profile, and the session goes back to the page it asked for.
+    const applied = await this.applyLatestProfile();
+    if (!applied.ok) {
+      this.authLoss.abortReattach(applied.why);
+      return this.authLoss.take() + settled;
+    }
+    const returnUrl = plan.returnTo;
+    let recovered: string;
+    try {
+      await this.withinLimit("nav", () => page.goto(returnUrl, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
+      recovered = await this.afterAction("navigate", returnUrl);
+    } catch (err) {
+      this.recordNavigationOutcome(returnUrl, await this.landedUrl(page));
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`${this.authLoss.take()}${msg}`);
+    }
+    this.recordNavigationOutcome(returnUrl, await this.landedUrl(page));
+    return this.authLoss.take() + recovered;
+  }
+
+  /**
+   * Replace this session's cookies and storage with its role's saved profile,
+   * read from disk now: another process may have recorded it again since this
+   * session attached. Same context, same page, same listeners and write policy;
+   * only the sign-in changes. Never prints the profile's contents.
+   */
+  private async applyLatestProfile(): Promise<{ ok: true } | { ok: false; why: string }> {
+    if (this.auth.kind !== "role" || !this.context) return { ok: false, why: "this session was not attached by role" };
+    const read = this.readRoleProfile();
+    if (!read.ok) return read;
+    const applied = await this.applyState(read.state);
+    if (!applied.ok) return applied;
+    this.logAction({ action: "reattach", target: `role ${this.auth.role}`, url: this.page?.url() ?? "" });
+    return { ok: true };
+  }
+
+  /** The role's saved profile as it is on disk now, checked to be a storage state. Never printed. */
+  private readRoleProfile(): { ok: true; state: unknown } | { ok: false; why: string } {
+    if (this.auth.kind !== "role") return { ok: false, why: "this session was not attached by role" };
+    const file = this.auth.storageStatePath;
+    let state: unknown;
+    try {
+      state = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch (err) {
+      const reason = err instanceof SyntaxError ? "it is not valid JSON" : err instanceof Error ? err.message.split("\n")[0] : String(err);
+      return { ok: false, why: `its saved profile at ${file} could not be read (${reason})` };
+    }
+    const checked = summarizeState(state);
+    if (!checked.ok) return { ok: false, why: `its saved profile at ${file} is not a storage state (${checked.error})` };
+    // A malformed sessionStorage list is refused here, before anything is applied.
+    try {
+      splitProfile(state);
+    } catch (err) {
+      return { ok: false, why: `its saved profile at ${file} could not be split (${err instanceof Error ? err.message : String(err)})` };
+    }
+    return { ok: true, state };
+  }
+
+  /**
+   * Replace this context's cookies and storage with a profile, in place: same
+   * pages, listeners and policy. Playwright is handed only what it restores;
+   * the profile's sessionStorage list is not part of its storage state.
+   */
+  private async applyState(state: unknown): Promise<{ ok: true } | { ok: false; why: string }> {
+    if (!this.context) return { ok: false, why: "no browser is open" };
+    let storageState: ReturnType<typeof splitProfile>["storageState"];
+    try {
+      storageState = splitProfile(state).storageState;
+    } catch (err) {
+      return { ok: false, why: `the saved profile could not be split (${err instanceof Error ? err.message : String(err)})` };
+    }
+    try {
+      await this.context.setStorageState(storageState as Parameters<BrowserContext["setStorageState"]>[0]);
+    } catch (err) {
+      return { ok: false, why: `the browser refused its saved profile (${err instanceof Error ? err.message.split("\n")[0] : String(err)})` };
+    }
+    // What the session now holds is what it knows as the role's tokens.
+    if (this.refresh) this.rememberTokens(refreshTokenSlots(state));
+    return { ok: true };
+  }
+
+  /**
+   * The refresh broker's route handler. A request carrying none of the role's
+   * refresh tokens is handed on untouched. One carrying one waits for the
+   * role's refresh lock; holding it, the session re-reads the profile, loads
+   * it and sends the current token in place of a spent one when another
+   * session rotated it meanwhile, and keeps the lock until the page has
+   * stored the rotation and it is written back. A lock that cannot be had is
+   * reported and the request dropped: sending a token another session may
+   * have spent is what revokes the family. Token values are never logged.
+   */
+  private async brokerRefresh(route: Route): Promise<void> {
+    const broker = this.refresh;
+    const req = route.request();
+    if (!broker) return route.fallback();
+    const headers = await req.allHeaders().catch(() => req.headers());
+    const wire = { url: req.url(), body: req.postData(), headers };
+    // Spent tokens too: a page still holding one would otherwise send it unbrokered.
+    const sent = presentedToken(wire, [...broker.known, ...broker.spent]);
+    if (!sent) return route.fallback();
+    const where = `${req.method()} ${pathnameOf(req.url())}`;
+    let lock: HeldLock;
+    try {
+      lock = await acquireLock(lockPathFor(broker.file));
+    } catch (err) {
+      this.refreshCounts.failed += 1;
+      this.logAction({
+        action: "refresh-broker:dropped",
+        target: `${where} (${err instanceof Error ? err.message : String(err)})`,
+        url: this.page?.url() ?? "",
+      });
+      await route.abort("blockedbyclient").catch(() => {});
+      return;
+    }
+    let handedOn = false;
+    try {
+      const read = this.readRoleProfile();
+      if (!read.ok) throw new Error(read.why);
+      const plan = planRefresh(sent, refreshTokenSlots(read.state));
+      let presented = sent;
+      let overrides: { url?: string; postData?: string; headers?: Record<string, string> } = {};
+      if (plan.kind === "swap") {
+        // Another session rotated the token while this one waited: load what it saved, and send the current token.
+        const applied = await this.applyState(read.state);
+        if (!applied.ok) throw new Error(applied.why);
+        const swapped = swapRequest(wire, sent.value, plan.to.value);
+        overrides = {
+          ...(swapped.url ? { url: swapped.url } : {}),
+          ...(swapped.body !== undefined ? { postData: swapped.body } : {}),
+          ...(swapped.headers ? { headers: swapped.headers } : {}),
+        };
+        presented = plan.to;
+        this.refreshCounts.swapped += 1;
+      }
+      this.logAction({
+        action: "refresh-broker",
+        target: `${where} with ${presented.slot}${plan.kind === "swap" ? " (rotated by another session; loaded its profile)" : plan.kind === "unknown" ? " (no longer in the profile; sent as is)" : ""}`,
+        url: this.page?.url() ?? "",
+      });
+      handedOn = true;
+      if (plan.kind === "unknown") {
+        // The profile holds another sign-in now: send this one on, and leave the profile alone.
+        lock.release();
+        await route.fallback(overrides);
+        return;
+      }
+      const task = this.writeBackAfter(req, presented, lock).finally(() => this.refreshTasks.delete(task));
+      this.refreshTasks.add(task);
+      await route.fallback(overrides);
+    } catch (err) {
+      if (!handedOn) {
+        lock.release();
+        this.refreshCounts.failed += 1;
+        this.logAction({
+          action: "refresh-broker:dropped",
+          target: `${where} (${err instanceof Error ? err.message.split("\n")[0] : String(err)})`,
+          url: this.page?.url() ?? "",
+        });
+        await route.abort("blockedbyclient").catch(() => {});
+      }
+    }
+  }
+
+  /**
+   * Once the refresh is answered, write the rotation back over the profile
+   * and release the lock. The page's own state is saved once it holds the
+   * rotated token, so the next session gets the access token with it; a page
+   * that has not stored it in time has the token read from the response
+   * instead. A refused or failed refresh changes nothing on disk.
+   */
+  private async writeBackAfter(req: Request, presented: TokenSlot, lock: HeldLock): Promise<void> {
+    const broker = this.refresh;
+    try {
+      let timer: NodeJS.Timeout | undefined;
+      const res = await Promise.race([
+        req.response().finally(() => clearTimeout(timer)),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), 30000);
+        }),
+      ]);
+      if (!broker) return;
+      if (!res || !res.ok()) {
+        const why = res ? `answered ${res.status()}` : "had no response";
+        this.logAction({
+          action: "refresh-broker:not-saved",
+          target: `${presented.slot}: the refresh ${why}; the profile was left as it was`,
+          url: this.page?.url() ?? "",
+        });
+        return;
+      }
+      let state: unknown = null;
+      for (let waited = 0; waited <= 5000; waited += 50) {
+        const now = await this.context?.storageState().catch(() => null);
+        if (now && rotationStored(now, presented)) {
+          // The page's state holds no sessionStorage: keep what the profile had.
+          const onDisk = this.readRoleProfile();
+          state = onDisk.ok ? withSessionStorage(now, splitProfile(onDisk.state).sessionStorage) : now;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (!state) {
+        const body = await res.text().catch(() => "");
+        const rotated = rotatedFromResponse(body, await res.headerValues("set-cookie").catch(() => []));
+        const read = this.readRoleProfile();
+        if (rotated && read.ok) state = swapProfileToken(read.state, presented.value, rotated);
+      }
+      if (!state) {
+        this.refreshCounts.failed += 1;
+        this.logAction({
+          action: "refresh-broker:not-saved",
+          target: `${presented.slot}: the page stored no rotated token and the response named none`,
+          url: this.page?.url() ?? "",
+        });
+        return;
+      }
+      writeProfile(broker.projectDir, broker.role, state);
+      this.rememberTokens(refreshTokenSlots(state));
+      this.refreshCounts.refreshed += 1;
+    } catch (err) {
+      this.refreshCounts.failed += 1;
+      this.logAction({
+        action: "refresh-broker:not-saved",
+        target: `${presented.slot}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`,
+        url: this.page?.url() ?? "",
+      });
+    } finally {
+      lock.release();
+    }
+  }
+
+  /** Take `now` as the role's current tokens; the ones it replaces are kept as spent, so a page that still sends one is caught. */
+  private rememberTokens(now: TokenSlot[]): void {
+    if (!this.refresh) return;
+    const replaced = this.refresh.known.filter((k) => !now.some((n) => n.value === k.value));
+    this.refresh.spent = [...replaced, ...this.refresh.spent].slice(0, 20);
+    this.refresh.known = now;
+  }
+
+  /** What the refresh broker did this session, or "" when it did nothing. Counts only. */
+  refreshSummary(): string {
+    const { refreshed, swapped, failed } = this.refreshCounts;
+    if (refreshed + swapped + failed === 0) return "";
+    const parts = [`refreshed role '${this.role}''s token ${refreshed} time${refreshed === 1 ? "" : "s"} under the role's lock`];
+    if (swapped > 0) parts.push(`${swapped} of them after another session had rotated it`);
+    if (failed > 0) parts.push(`${failed} refresh${failed === 1 ? "" : "es"} could not be brokered (see the action log)`);
+    return parts.join("; ");
+  }
+
+  /** What this session's one automatic re-attach did, or "" when it never re-attached. */
+  reattachSummary(): string {
+    return this.authLoss.reattachSummary();
   }
 
   /** Where did we ASK to go, where did we END UP, and does that count as coverage? */
@@ -3192,13 +3571,13 @@ export class BrowserEngine {
       this.memory?.markAttempted(requestedRoute, outcome, this.role);
       this.memory?.recordRoleAccess(this.role, requestedRoute, outcome);
     }
-    this.authLoss.record({ requestedRoute, landedRoute, bounced, role: this.role });
+    this.authLoss.record({ requestedRoute, landedRoute, bounced, role: this.role, target: requestedUrl });
   }
 
   async goBack(): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
-    await page.goBack({ waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+    await page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }).catch(() => {});
     return this.afterAction("back", "");
   }
 
@@ -3309,7 +3688,12 @@ export class BrowserEngine {
 
     const summary: string[] = [];
     const problems: string[] = [];
-    for (const path of targets) {
+    this.authLoss.beginBatch();
+    // A queue rather than the list itself: a session that re-attaches mid-sweep
+    // visits the routes its loss bounced again, straight after.
+    const queue = [...targets];
+    for (let i = 0; i < queue.length; i++) {
+      const path = queue[i];
       const url = `${this.baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
       if (!this.isSameOrigin(url)) {
         summary.push(`${path} — SKIPPED (off-origin)`);
@@ -3319,10 +3703,11 @@ export class BrowserEngine {
       this.oracles.drain(false); // discard pre-route leftovers WITHOUT marking their signatures as reported
       let status: number | string = "ERR";
       try {
-        const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
+        const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
         status = resp?.status() ?? "no-response";
       } catch (err) {
-        const reason = err instanceof Error ? err.message.split("\n")[0] : String(err);
+        const explained = explainTimeout(err, "nav", this.limits.crawlNavMs);
+        const reason = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
         // Not retried by later crawls in this process (a check would otherwise try it
         // on every discovery round). Deliberately not written to memory: one outage
         // must not count a route as covered in every later run's gap ledger.
@@ -3333,6 +3718,8 @@ export class BrowserEngine {
         // a browser that shows no error page simply lets the wait time out.
         await page.waitForEvent("framenavigated", { predicate: (f) => f === page.mainFrame(), timeout: 1500 }).catch(() => undefined);
         summary.push(`${path} — LOAD FAILED`);
+        // The page a re-attach went back to never loaded, so nothing says whether it worked.
+        if (this.authLoss.reattaching) this.authLoss.abortReattach(`the page it went back to, ${path}, did not load (${reason})`);
         problems.push(`${path}: ${reason}`);
         this.crawlHealth.push({
           path,
@@ -3380,7 +3767,7 @@ export class BrowserEngine {
       // Feeds the streak. The per-route notice is discarded — crawl already
       // flags AUTH-REDIRECT per route in its own summary, and the verdict for
       // the sweep as a whole is emitted once at the end via batchVerdict().
-      this.authLoss.record({ requestedRoute, landedRoute: route, bounced: loginRedirect, role: this.role });
+      this.authLoss.record({ requestedRoute, landedRoute: route, bounced: loginRedirect, role: this.role, target: path });
       this.authLoss.clear();
       // Error-status routes render but would otherwise be re-crawled forever —
       // an attempt with the status satisfies the contract.
@@ -3430,6 +3817,25 @@ export class BrowserEngine {
         problems.push(
           `${path}${loginRedirect ? " → redirected to login (auth missing/expired?)" : ""}${deadEnd ? " → dead end" : ""}${detail ? `\n${detail}` : ""}`,
         );
+      }
+      // A role session that lost its sign-in on this route re-attaches once
+      // and visits the routes the loss bounced again, next. Their bounced
+      // results leave the crawl's data, so a check reads the signed-in visit.
+      const plan = this.authLoss.takeReattach({ revisits: (t) => targets.includes(t) });
+      if (plan) {
+        const applied = await this.applyLatestProfile();
+        if (!applied.ok) {
+          this.authLoss.abortReattach(applied.why);
+        } else {
+          // Only this sweep's own paths: a streak that began with scout_navigate holds full URLs the sweep cannot join to its base.
+          const again = [plan.returnTo, ...plan.retry];
+          this.crawlHealth = this.crawlHealth.filter((h) => !(h.loginRedirect && again.includes(h.path)));
+          for (let k = problems.length - 1; k >= 0; k--) {
+            if (again.some((p) => problems[k].startsWith(`${p} → redirected to login`))) problems.splice(k, 1);
+          }
+          queue.splice(i + 1, 0, ...again);
+          summary.push(`↻ re-attached from role '${this.role}''s saved profile; visiting ${again.join(", ")} again`);
+        }
       }
     }
     // Crawl leaves the page wherever it ended — refs from before are gone.
@@ -3570,10 +3976,10 @@ export class BrowserEngine {
               preState = await this.stateHolding(probe, preState, preState !== null && preState === lastCapture);
               form = { kind: "click", probe };
             }
-            forcedClick = (await this.resilientClick(loc, ACTION_TIMEOUT_MS)).forced;
+            forcedClick = (await this.resilientClick(loc, this.limits.actionMs)).forced;
           } else if (step.action === "hover") {
             const { before, bodyBefore, churning } = await this.hoverBaselines();
-            await loc.hover({ timeout: ACTION_TIMEOUT_MS });
+            await loc.hover({ timeout: this.limits.actionMs });
             const { revealed } = await this.detectHoverReveal(before, bodyBefore, churning);
             transcript.push(
               revealed.length > 0
@@ -3598,11 +4004,11 @@ export class BrowserEngine {
                 preState = await this.stateHolding(probe, preState, preState !== null && preState === lastCapture);
                 form = { kind: "enter", probe };
               }
-              await loc.press("Enter", { timeout: ACTION_TIMEOUT_MS });
+              await loc.press("Enter", { timeout: this.limits.actionMs });
             }
           } else if (step.action === "select") {
             const options = await readSelectOptions(loc);
-            const picked = await loc.selectOption(step.value ?? "", { timeout: ACTION_TIMEOUT_MS });
+            const picked = await loc.selectOption(step.value ?? "", { timeout: this.limits.actionMs });
             if (options) chose = { options, picked };
           } else if (step.action === "upload") {
             const r = await this.performUpload(loc, planUploadOptions(step.value));
@@ -3694,7 +4100,7 @@ export class BrowserEngine {
         const diagnosticLine = actionabilityDiagnostic(fullMsg);
         let hint = "";
         if (/Timeout/i.test(firstLine)) {
-          hint = ` (timeout${diagnosticLine ? ` — ${diagnosticLine}` : ""} — the target may no longer match: element relabeled, removed, or genuinely covered by an overlay; re-snapshot to see current state)`;
+          hint = ` (timeout${diagnosticLine ? ` — ${diagnosticLine}` : ""} — the target may no longer match: element relabeled, removed, or genuinely covered by an overlay; re-snapshot to see current state. Or ${limitHint("action", this.limits.actionMs)})`;
         } else if (/Input of type "file" cannot be filled/i.test(firstLine)) {
           hint = ` (this is a file input — use an {action:"upload"} step, or scout_upload)`;
         }
@@ -3778,7 +4184,7 @@ export class BrowserEngine {
           violations.push({ path, violation: { kind: v.kind, severity: v.severity, detail: v.detail, url: v.url, ...(v.embed ? { embed: v.embed } : {}) } });
     };
     const poll = async (done: () => boolean): Promise<boolean> => {
-      const until = Date.now() + FLOW_STEP_TIMEOUT_MS;
+      const until = Date.now() + this.limits.actionMs;
       for (;;) {
         if (done()) return true;
         if (Date.now() >= until) return false;
@@ -3802,7 +4208,9 @@ export class BrowserEngine {
           const current = this.requirePage();
           if (step.action === "navigate") {
             const url = `${this.baseUrl}${step.target}`;
-            const resp = await current.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
+            const resp = await current
+              .goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs })
+              .catch((err: unknown) => Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs)));
             await this.settle();
             const status = resp?.status() ?? null;
             if (status !== null && status >= 400) {
@@ -3820,11 +4228,11 @@ export class BrowserEngine {
           } else if (step.action === "click" || step.action === "type" || step.action === "select") {
             const loc = BrowserEngine.locatorFor(current, parseTarget(step.target)!).first();
             const found = await loc
-              .waitFor({ state: "visible", timeout: FLOW_STEP_TIMEOUT_MS })
+              .waitFor({ state: "visible", timeout: this.limits.actionMs })
               .then(() => true)
               .catch(() => false);
             if (!found) {
-              failure = `nothing visible matches ${step.target} within ${FLOW_STEP_TIMEOUT_MS / 1000}s`;
+              failure = `nothing visible matches ${step.target} within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
             } else {
               const label = (
                 (await loc.getAttribute("aria-label").catch(() => null)) ??
@@ -3834,9 +4242,9 @@ export class BrowserEngine {
               if (this.readOnly && step.action !== "type" && isDestructive(label, step.action === "select" ? step.value : undefined)) {
                 refusal = destructiveRefusal(label || step.target, this.mode);
               } else if (step.action === "click") {
-                await loc.click({ timeout: FLOW_STEP_TIMEOUT_MS });
+                await loc.click({ timeout: this.limits.actionMs });
               } else if (step.action === "select") {
-                await loc.selectOption(step.value, { timeout: FLOW_STEP_TIMEOUT_MS });
+                await loc.selectOption(step.value, { timeout: this.limits.actionMs });
               } else {
                 await this.noteProbe(step.value, step.target);
                 await this.fillOrAppend(loc, step.value, step.replace ?? false);
@@ -3844,7 +4252,7 @@ export class BrowserEngine {
                   const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
                   const submitLabel = ((await submit.textContent({ timeout: 1000 }).catch(() => "")) ?? "").trim();
                   if (this.readOnly && isDestructive(submitLabel)) refusal = destructiveRefusal(submitLabel, this.mode);
-                  else await loc.press("Enter", { timeout: FLOW_STEP_TIMEOUT_MS });
+                  else await loc.press("Enter", { timeout: this.limits.actionMs });
                 }
               }
               if (!refusal) await this.settle();
@@ -3852,10 +4260,11 @@ export class BrowserEngine {
           } else if (step.action === "expect-text") {
             const visible = current.getByText(step.text, { exact: false }).filter({ visible: true }).first();
             const ok = await visible
-              .waitFor({ state: "visible", timeout: FLOW_STEP_TIMEOUT_MS })
+              .waitFor({ state: "visible", timeout: this.limits.actionMs })
               .then(() => true)
               .catch(() => false);
-            if (!ok) failure = `no visible text ${JSON.stringify(step.text)} within ${FLOW_STEP_TIMEOUT_MS / 1000}s`;
+            if (!ok)
+              failure = `no visible text ${JSON.stringify(step.text)} within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
           } else if (step.action === "expect-url") {
             const ok = await poll(() => urlMatches(step.pattern, this.page?.url() ?? ""));
             if (!ok) failure = `the page is at ${here()}, which does not match /${step.pattern}/`;
@@ -3865,7 +4274,7 @@ export class BrowserEngine {
             if (!last.ok) failure = last.reason;
           }
         } catch (err) {
-          failure = firstLine(err);
+          failure = firstLine(explainTimeout(err, "action", this.limits.actionMs));
         }
         await this.scanForInjections().catch(() => {});
         await this.scanForContradictions().catch(() => {});
@@ -3906,9 +4315,12 @@ export class BrowserEngine {
       this.blockedRequests = [];
       this.oracles.drain(false);
       this.setMode(crawlMode);
-      // Pages the session no longer drives are closed only now, at about:blank and under the held rule: in Firefox a
-      // page closed straight after it is left sent its leaving beacon unjudged about one time in forty.
-      await BrowserEngine.settleWithin(Promise.allSettled(context.pages().map((p) => (p === this.page ? undefined : p.close().catch(() => {})))), 5000);
+      // Pages the session no longer drives are closed only now, at about:blank and under the held rule, and each only
+      // once what it sent as it was left has been judged (leftSettled).
+      await BrowserEngine.settleWithin(
+        Promise.allSettled(context.pages().map(async (p) => (p === this.page ? undefined : (await this.leftSettled(p), await p.close().catch(() => {}))))),
+        5000,
+      );
       page.off("websocket", onSocket);
       context.off("response", onResponse);
       this.refs.clear();
@@ -3968,7 +4380,9 @@ export class BrowserEngine {
    */
   async scroll(to?: "top" | "bottom", by?: number, target?: string): Promise<string> {
     this.actionStartedAt = Date.now();
-    const { refused, note } = target ? await scrollContainer(this.requirePage(), target, to, by) : await performScroll(this.requirePage(), to, by);
+    const { refused, note } = target
+      ? await scrollContainer(this.requirePage(), target, to, by, this.limits.actionMs)
+      : await performScroll(this.requirePage(), to, by);
     if (refused) return refused;
     const amount = Math.trunc(by ?? 600);
     const label = to ?? `${amount >= 0 ? "down" : "up"} ${Math.abs(amount)}px`;
@@ -4229,17 +4643,55 @@ export class BrowserEngine {
     await page.goto("about:blank", { timeout: 3000 }).catch(() => {});
   }
 
+  /** Run the route handler's judgement of one request, recorded against the page that sent it until it is answered. */
+  private async judgeTracked(route: Route, judge: (route: Route) => Promise<unknown>): Promise<void> {
+    let page: Page | null = null;
+    try {
+      page = route.request().frame().page();
+    } catch {
+      /* no frame: a service worker's request, which no page's close waits on */
+    }
+    const judging = judge(route);
+    if (!page) {
+      await judging;
+      return;
+    }
+    let pending = this.routesInFlight.get(page);
+    if (!pending) this.routesInFlight.set(page, (pending = new Set()));
+    pending.add(judging);
+    try {
+      await judging;
+    } finally {
+      pending.delete(judging);
+      if (pending.size === 0) this.routesInFlight.delete(page);
+    }
+  }
+
   /**
-   * Close a page the engine will not drive, after leaving it (`leave`), so what it sends on its way out meets the policy.
-   * Known limit: in Firefox, a close straight after the leave has let the page's leaving beacon out unjudged (seen 2 times
-   * in 80 under load). replayFlow's hand-back closes pages only once every page is at about:blank; this and `close` do not yet.
+   * Wait, after a page has been left, until the route handler has answered every request the page sent on its way out,
+   * where a close could otherwise let one out unjudged (browsers.ts closeWaitsForLeavingWrites). A round trip to the
+   * page first, so a request the browser reported before answering it has reached the route handler (0 of 80 escaped in
+   * the unload smoke loop with it). A page that cannot answer (closed, or crashed) has nothing more to send: the catch.
    */
-  private static async leaveAndClose(page: Page): Promise<void> {
+  private async leftSettled(page: Page): Promise<void> {
+    if (page.isClosed() || !closeWaitsForLeavingWrites(this.engineName)) return;
+    await BrowserEngine.settleWithin(
+      page.evaluate(() => 0).catch(() => {}),
+      2000,
+    );
+    await BrowserEngine.settleWithin(Promise.allSettled([...(this.routesInFlight.get(page) ?? [])]), 2000);
+  }
+
+  /** Close a page the engine will not drive, after leaving it (`leave`) and the policy has judged what it sent on its way out. */
+  private async leaveAndClose(page: Page): Promise<void> {
     await BrowserEngine.leave(page);
+    await this.leftSettled(page);
     await page.close().catch(() => {});
   }
 
   async close(): Promise<void> {
+    // A refresh write-back holds the role's lock: let it finish or give up, so no other session waits on a closed one.
+    if (this.refreshTasks.size > 0) await BrowserEngine.settleWithin(Promise.allSettled([...this.refreshTasks]), 10000);
     // Marks the end of the time this session held a browser, so the pace
     // section can say how long it was held with nothing happening. Only when a
     // browser is actually open: attach() closes first, and a close of nothing
@@ -4248,7 +4700,7 @@ export class BrowserEngine {
     // Every page is left before it is closed, while the write policy still holds, so what a page sends on its way out
     // is judged and its refusal logged before the flush below.
     const pages = this.context?.pages() ?? [];
-    await BrowserEngine.settleWithin(Promise.allSettled(pages.map((p) => BrowserEngine.leave(p))), 5000);
+    await BrowserEngine.settleWithin(Promise.allSettled(pages.map(async (p) => (await BrowserEngine.leave(p), await this.leftSettled(p)))), 5000);
     // Pending debounced coverage writes must land before the process can exit.
     try {
       this.memory?.flush();

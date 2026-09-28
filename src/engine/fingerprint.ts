@@ -103,12 +103,12 @@ export function elementKey(el: InteractableInfo): string {
 export function fingerprintState(url: string, elements: InteractableInfo[]): string {
   const route = normalizePath(url);
   const keys = [...new Set(elements.map(elementKey))].sort();
-  const hash = createHash("sha1").update(keys.join("|")).digest("hex").slice(0, 8);
+  const hash = createHash("sha256").update(keys.join("|")).digest("hex").slice(0, 8);
   return `${route}#${hash}`;
 }
 
 export function shortHash(input: string): string {
-  return createHash("sha1").update(input).digest("hex").slice(0, 10);
+  return createHash("sha256").update(input).digest("hex").slice(0, 10);
 }
 
 /**

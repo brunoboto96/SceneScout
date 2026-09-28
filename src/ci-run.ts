@@ -50,6 +50,7 @@ import {
   type StopReason,
   type ToolSpec,
 } from "./engine/ci.js";
+import { resolveTimeLimits } from "./engine/limits.js";
 import { MEMORY_DIRNAME, writeSelfIgnore, type Finding } from "./engine/memory.js";
 import { decodePng, diffImages, encodePng } from "./engine/png.js";
 import {
@@ -323,7 +324,7 @@ export async function agentLoop(o: {
  * session of its own, then diff the two. Only the engine takes pictures, and
  * the file names are fixed (SHOT_FILES).
  */
-async function captureShots(o: {
+export async function captureShots(o: {
   host: ToolHost;
   options: CiOptions;
   captured: CaptureInfo | null;
@@ -451,6 +452,8 @@ export async function runCi(
   let finishBy = 0;
   const finishLeft = (): number => Math.max(1_000, finishBy - now());
   try {
+    // The page-load limit may be longer than the usual attach budget; the attach gets that limit and a minute to launch.
+    const attachMs = Math.max(ATTACH_MS, resolveTimeLimits(options, process.env).navMs + 60_000);
     host = await startServer(log);
     const attached = await host.call(
       "scout_attach",
@@ -462,8 +465,10 @@ export async function runCi(
         task: "Starting the CI run",
         ...(options.storageStatePath ? { storageStatePath: options.storageStatePath } : {}),
         ...(options.browser ? { browser: options.browser } : {}),
+        ...(options.actionTimeoutMs !== undefined ? { actionTimeoutMs: options.actionTimeoutMs } : {}),
+        ...(options.navTimeoutMs !== undefined ? { navTimeoutMs: options.navTimeoutMs } : {}),
       },
-      Math.min(ATTACH_MS, options.caps.wallMs),
+      Math.min(attachMs, options.caps.wallMs),
     );
     const authFailed = attached.text.split("\n").find((l) => l.startsWith("⚠ AUTH FAILED"));
     if (attached.isError || /^ERROR:/.test(attached.text) || authFailed) {

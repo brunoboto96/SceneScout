@@ -27,9 +27,10 @@ on:
 permissions: {}
 
 jobs:
-  # No secrets, no checkout. Reads the comment and the pull request, checks the
-  # commenter against the allowlist and refuses forks, finds the preview URL and
-  # acknowledges the comment with a reaction.
+  # No model key, no checkout. Reads the comment and the pull request, checks the
+  # commenter against the allowlist (logins, roles, and teams through the
+  # optional team token, its only secret) and refuses forks, finds the preview
+  # URL and acknowledges the comment with a reaction.
   gate:
     # startsWith ignores case and does not skip leading whitespace; the gate's parser matches the same way.
     if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/scenescout qa')
@@ -53,6 +54,10 @@ jobs:
         with:
           stage: gate
           allowed: ${{ vars.SCENESCOUT_QA_ALLOWED }}
+          allowed-roles: ${{ vars.SCENESCOUT_QA_ALLOWED_ROLES }}
+          allowed-teams: ${{ vars.SCENESCOUT_QA_ALLOWED_TEAMS }}
+          # Read only when SCENESCOUT_QA_ALLOWED_TEAMS is set. The only secret outside the qa job: never pass it to another job.
+          team-token: ${{ secrets.SCENESCOUT_QA_TEAM_TOKEN }}
           allow-forks: ${{ vars.SCENESCOUT_QA_ALLOW_FORKS }}
           preview-url: ${{ vars.SCENESCOUT_QA_PREVIEW_URL }}
           environment: ${{ vars.SCENESCOUT_QA_ENVIRONMENT }}

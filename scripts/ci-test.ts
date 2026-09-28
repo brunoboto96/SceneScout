@@ -17,7 +17,7 @@ import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { CI_ACTION_ONLY_INPUTS, ciArgs, ciOutDirFor, ciSummaryOutputs, ciVerdict, hasCiCommand } from "../action/ci-action.mjs";
-import { agentLoop, HttpModelClient, MAX_RETRIES, MAX_TOOL_CALLS_PER_TURN, OutOfTime, ProviderError, type ModelClient } from "../src/ci-run.ts";
+import { agentLoop, captureShots, HttpModelClient, MAX_RETRIES, MAX_TOOL_CALLS_PER_TURN, OutOfTime, ProviderError, type ModelClient } from "../src/ci-run.ts";
 import { CAPTURE_MARGIN, captureClip, captureFileName, captureResultText, parseCaptureResult, rebaseUrl } from "../src/engine/capture.ts";
 import { decodePng, diffImages, encodePng, isPng, type RgbaImage } from "../src/engine/png.ts";
 import {
@@ -1817,4 +1817,33 @@ test("loop: every tool call that ran is reported with the arguments it ran with"
   });
   assert.deepEqual(seen, [`scout_capture {"ref":"e2","name":"${CI_CAPTURE_NAME}"} false`]);
   assert.equal(out.finalText, "Captured the Save button.");
+});
+
+test("compare: a base that throws keeps the preview's picture and records why, and the result is still a capture", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-ci-capture-"));
+  const file = path.join(dir, "preview-src.png");
+  fs.writeFileSync(file, encodePng(picture(4, 3, [1, 2, 3, 255])));
+  const opts = parseCiArgs(["https://pr-7.preview.example.com/", "--show", "the Save button", "--compare-url", "https://www.example.com/"], dir);
+  assert.ok(opts.ok);
+  const host = {
+    tools: async () => [],
+    // The MCP client rejects on a timeout rather than returning isError.
+    call: async (name: string): Promise<{ text: string; isError: boolean }> => {
+      throw new Error(`${name} timed out`);
+    },
+    close: async () => {},
+  };
+  const outcome = await captureShots({
+    host,
+    options: opts.options,
+    captured: { file, key: "tid:save", label: "Save", url: "https://pr-7.preview.example.com/things", width: 4, height: 3 },
+    outDir: dir,
+    timeLeft: () => 5_000,
+    log: () => {},
+  });
+  assert.equal(outcome.status, "captured");
+  assert.equal(outcome.preview?.file, "shots/preview.png");
+  assert.ok(fs.existsSync(path.join(dir, "shots", "preview.png")), "the preview's picture is kept");
+  assert.match(outcome.detail ?? "", /the base URL could not be captured: scout_attach timed out/);
+  assert.equal(outcome.base, undefined);
 });

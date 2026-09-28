@@ -6,7 +6,13 @@
  * every engine the verdict must be the policy's: sent where the mode allows
  * the write, and refused and reported where it does not.
  */
-import { allowedUnloadWritesMayBeLost, frameUnloadWritesMayGoUnissued, unloadWriteInterception, writeRedirectHopsJudged } from "../../dist/browsers.js";
+import {
+  allowedUnloadWritesMayBeLost,
+  closeWaitsForLeavingWrites,
+  frameUnloadWritesMayGoUnissued,
+  unloadWriteInterception,
+  writeRedirectHopsJudged,
+} from "../../dist/browsers.js";
 import { BrowserEngine, type WriteMode } from "../../dist/engine/browser.js";
 import { BROWSER, check, eventually, settle, until, type SmokeContext } from "./harness.ts";
 
@@ -191,4 +197,40 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     writes(BEACON) === before.beacon && writes(KEEPALIVE) === before.keepalive,
     JSON.stringify(stats.writes),
   );
+
+  // Left and closed at once, a page in Firefox let the delete it beaconed on its way out reach the server about one time in
+  // nine (closeWaitsForLeavingWrites). A loop, since one run proves little: 80 where the wait applies, a few elsewhere.
+  const runs = closeWaitsForLeavingWrites(BROWSER) ? 80 : 10;
+  console.log(`a foreign popup, left and closed by the engine, ${runs} times`);
+  const popups = new BrowserEngine();
+  const popupBefore = { beacon: writes(BEACON), keepalive: writes(KEEPALIVE) };
+  let refusedEveryTime = 0;
+  try {
+    await popups.attach({ url: `${baseUrl}/index.html`, projectDir, mode: "read-only" });
+    const inner = popups as unknown as { page: import("playwright").Page; blockedRequests: Array<{ sig: string }> };
+    const context = inner.page.context();
+    for (let i = 0; i < runs; i++) {
+      inner.blockedRequests = [];
+      const opened = context.waitForEvent("page", { timeout: 15000 });
+      await inner.page.evaluate((u) => void window.open(u), `${foreignBaseUrl}/unload-writes.html?intent=delete`);
+      await (await opened).waitForEvent("close", { timeout: 15000 });
+      // Where the engine waits for the verdict, the refusal is recorded by the time the popup has closed.
+      if (inner.blockedRequests.some((b) => /POST \S*\/api\/unload\/beacon/.test(b.sig))) refusedEveryTime += 1;
+    }
+  } finally {
+    await popups.close();
+  }
+  await settle(500);
+  const escaped = writes(BEACON) - popupBefore.beacon + (writes(KEEPALIVE) - popupBefore.keepalive);
+  check(
+    `read-only (${how}): in ${runs} foreign popups closed by the engine, no delete beaconed or kept alive as the popup was left reaches the server`,
+    escaped === 0,
+    `${escaped} arrived; ${JSON.stringify(stats.writes)}`,
+  );
+  if (closeWaitsForLeavingWrites(BROWSER))
+    check(
+      `read-only (${how}): each popup's beacon was refused before the popup was closed, in every one of the ${runs}`,
+      refusedEveryTime === runs,
+      `${refusedEveryTime}/${runs}`,
+    );
 }

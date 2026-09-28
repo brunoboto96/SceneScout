@@ -13,6 +13,7 @@ import path from "node:path";
 import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
 import type { CaptureOutcome } from "./capture.js";
 import { markdownCell } from "./check.js";
+import { parseLimitFlag } from "./limits.js";
 import { isWorthALook, redactSecrets, type Finding } from "./memory.js";
 
 // ── options ─────────────────────────────────────────────────────────────────
@@ -77,6 +78,8 @@ export const CI_OPTION_NAMES = [
   "focus",
   "storage-state",
   "browser",
+  "action-timeout-ms",
+  "nav-timeout-ms",
   "project",
   "out",
   "show",
@@ -107,6 +110,10 @@ export interface CiOptions {
   show?: string;
   /** With `show`: capture the same element on this deployment too, and compare the two pictures. */
   compareUrl?: string;
+  /** How long one action may take; absent means the environment variable, else the default (limits.ts). */
+  actionTimeoutMs?: number;
+  /** How long a page may take to load; absent means the environment variable, else the default (limits.ts). */
+  navTimeoutMs?: number;
 }
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
@@ -240,6 +247,10 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
     if (c.username || c.password) return { ok: false, error: "--compare-url must carry no credentials: they would be written into the results" };
     compareUrl = c.toString();
   }
+  const actionTimeout = parseLimitFlag("action", flags.get("action-timeout-ms"));
+  if (!actionTimeout.ok) return actionTimeout;
+  const navTimeout = parseLimitFlag("nav", flags.get("nav-timeout-ms"));
+  if (!navTimeout.ok) return navTimeout;
 
   const resolve = (p: string): string => (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) ? p : `${cwd.replace(/[\\/]$/, "")}/${p}`);
   return {
@@ -261,6 +272,8 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
       ...(browser ? { browser: browser as BrowserEngineName } : {}),
       ...(show ? { show } : {}),
       ...(compareUrl ? { compareUrl } : {}),
+      ...(actionTimeout.value !== undefined ? { actionTimeoutMs: actionTimeout.value } : {}),
+      ...(navTimeout.value !== undefined ? { navTimeoutMs: navTimeout.value } : {}),
     },
   };
 }

@@ -32,9 +32,9 @@ Generated: (by `npm run demo`)
 
 ### 🔴 [HIGH] Filtering orders by Archived fails, and the page shows an empty table instead of an error
 
-- **Id:** `c50c538255` · **Category:** http-error
+- **Id:** `3a2ff88caa` · **Category:** http-error
 - **Evidence:** `GET /api/orders?status=archived → HTTP 500`
-- **Where:** `/orders.html#0889e04e` (http://127.0.0.1:4173/orders.html)
+- **Where:** `/orders.html#27836947` (http://127.0.0.1:4173/orders.html)
 - **Seen in runs:** 1
 
 Choosing Status → Archived makes the orders request fail with a 500. The table is then drawn empty with no message, so the user reads "there are no archived orders" when the truth is "the request failed". The other filter values work.
@@ -64,9 +64,9 @@ test("regression: Filtering orders by Archived fails, and the page shows an empt
 
 ### 🔴 [HIGH] Export CSV throws and nothing is downloaded
 
-- **Id:** `ac9d3c1ba2` · **Category:** page-error
+- **Id:** `b7d6ac97d5` · **Category:** page-error
 - **Evidence:** `Cannot read properties of undefined (reading 'rows')`
-- **Where:** `/reports.html#fa7ea8fc` (http://127.0.0.1:4173/reports.html)
+- **Where:** `/reports.html#f54fce55` (http://127.0.0.1:4173/reports.html)
 - **Seen in runs:** 1
 
 Clicking Export CSV raises an uncaught exception. No file is produced and the page gives no feedback, so the button appears to do nothing.
@@ -94,9 +94,9 @@ test("regression: Export CSV throws and nothing is downloaded", async ({ page })
 
 ### 🔴 [HIGH] A double-click on Create order creates two orders
 
-- **Id:** `a6fedc941a` · **Category:** data-inconsistency
+- **Id:** `d6c0292dc5` · **Category:** data-inconsistency
 - **Evidence:** `2× click fired the same state-changing request 2× (POST /api/orders)`
-- **Where:** `/orders-new.html#86e55ecc` (http://127.0.0.1:4173/orders-new.html)
+- **Where:** `/orders-new.html#18f9a265` (http://127.0.0.1:4173/orders-new.html)
 - **Seen in runs:** 1
 
 The submit button stays enabled while the request is in flight, and the endpoint accepts the repeat. One impatient double-click produced two identical POSTs and two orders. Disable the button during submit, and make the create idempotent.
@@ -134,9 +134,9 @@ test("regression: A double-click on Create order creates two orders", async ({ p
 
 ### 🔴 [HIGH] The Save notes button is covered by the bar at the bottom of the order page
 
-- **Id:** `367f382861` · **Category:** visual
+- **Id:** `4b4653ff43` · **Category:** visual
 - **Evidence:** `"Save notes" is COVERED by pinned chrome [order-stickybar]`
-- **Where:** `/order.html#9fd83abf` (http://127.0.0.1:4173/order.html?id=1042)
+- **Where:** `/order.html#a849e7f9` (http://127.0.0.1:4173/order.html?id=1042)
 - **Seen in runs:** 1
 
 The save row is sticky at the bottom of the viewport, and a fixed bar added later sits on top of it. The button is present, labelled and enabled, but it cannot be seen, and a click aimed at it lands on the bar. It only becomes reachable after scrolling to the very end of the page. Found by hit-testing the button's centre, since box overlap cannot tell which of two pinned elements is on top.
@@ -164,9 +164,9 @@ test("regression: The Save notes button is covered by the bar at the bottom of t
 
 ### 🔴 [HIGH] A clerk can approve an order by calling the endpoint the page hides from them
 
-- **Id:** `176f4c472b` · **Category:** permission-leak
+- **Id:** `77d8b89e0d` · **Category:** permission-leak
 - **Evidence:** `POST /api/orders/1037/approve 200 as clerk; POST /api/orders/1038/reject 403 as clerk`
-- **Where:** `/approvals.html#b0b57d70` (http://127.0.0.1:4173/approvals.html)
+- **Where:** `/approvals.html#d873a260` (http://127.0.0.1:4173/approvals.html)
 - **Seen in runs:** 1
 
 The Approvals page shows Approve and Reject only to a manager. Reject is also refused by the server for anyone else, but Approve is not: a clerk who posts to it directly gets the order approved, and the audit log records a clerk approving. Hiding the button was the only control. The two sibling endpoints disagree, which is also the fix: give approve the check reject already has.
@@ -192,9 +192,9 @@ test("regression: A clerk can approve an order by calling the endpoint the page 
 
 ### 🟠 [MEDIUM] The "New: bulk import" badge sits on top of the All orders button
 
-- **Id:** `c6abf89bce` · **Category:** visual
+- **Id:** `771dfd963f` · **Category:** visual
 - **Evidence:** `"All orders" overlaps "New: bulk import" (81%)`
-- **Where:** `/#79b51ffd` (http://127.0.0.1:4173/)
+- **Where:** `/#225cf81c` (http://127.0.0.1:4173/)
 - **Seen in runs:** 1
 
 On the dashboard the badge overlaps most of the All orders button, hiding its label and taking the clicks aimed at it. The geometry oracle measured the overlap from layout boxes; no screenshot was needed to find it.
@@ -220,9 +220,9 @@ test("regression: The \"New: bulk import\" badge sits on top of the All orders b
 
 ### 🟠 [MEDIUM] Scheduled reports is a dead end: no navigation and no way back
 
-- **Id:** `6781d3cd32` · **Category:** dead-end
+- **Id:** `feaaf4fc43` · **Category:** dead-end
 - **Evidence:** `/reports-scheduled.html — 200 · 0 el · DEAD-END`
-- **Where:** `/reports-scheduled.html#da39a3ee` (http://127.0.0.1:4173/reports-scheduled.html)
+- **Where:** `/reports-scheduled.html#e3b0c442` (http://127.0.0.1:4173/reports-scheduled.html)
 - **Seen in runs:** 1
 
 The page reached from Reports → Scheduled reports has no header, no links and no controls. The only way out is the browser's back button. The crawl flagged it as a dead end with 0 interactable elements.
@@ -248,9 +248,9 @@ test("regression: Scheduled reports is a dead end: no navigation and no way back
 
 ### 🟠 [MEDIUM] Submitting the new-order form without a customer does nothing and says nothing
 
-- **Id:** `0fbc83205d` · **Category:** ux-confusing
+- **Id:** `8a1dba9d2c` · **Category:** ux-confusing
 - **Evidence:** `submit-style click fired ZERO network requests and no navigation`
-- **Where:** `/orders-new.html#86e55ecc` (http://127.0.0.1:4173/orders-new.html)
+- **Where:** `/orders-new.html#18f9a265` (http://127.0.0.1:4173/orders-new.html)
 - **Seen in runs:** 1
 
 With Customer empty, Create order sends no request, shows no validation message and does not move focus to the field. A first-time user cannot tell whether the click registered.
@@ -278,9 +278,9 @@ test("regression: Submitting the new-order form without a customer does nothing 
 
 ### 🟠 [MEDIUM] Sorting inventory by quantity puts 10 before 9
 
-- **Id:** `faf0de6cd1` · **Category:** data-inconsistency
+- **Id:** `5bb7d90080` · **Category:** data-inconsistency
 - **Evidence:** `sorted by quantity: 10, 120, 250, 3, 64, 9`
-- **Where:** `/inventory.html#ec47ebb1` (http://127.0.0.1:4173/inventory.html)
+- **Where:** `/inventory.html#dce38639` (http://127.0.0.1:4173/inventory.html)
 - **Seen in runs:** 1
 
 Quantity is compared as text, so the column orders by first digit. Pallet wrap (3 on hand) and Shipping labels (9) land at the bottom of an ascending sort, which is exactly where someone scanning for low stock does not look.
@@ -308,9 +308,9 @@ test("regression: Sorting inventory by quantity puts 10 before 9", async ({ page
 
 ### 🟡 [LOW] The dashboard chart image is missing
 
-- **Id:** `aa8e56e60d` · **Category:** network
+- **Id:** `22bbb66b5a` · **Category:** network
 - **Evidence:** `GET /img/weekly-chart.png → HTTP 404`
-- **Where:** `/#79b51ffd` (http://127.0.0.1:4173/)
+- **Where:** `/#225cf81c` (http://127.0.0.1:4173/)
 - **Seen in runs:** 1
 
 The "This week" chart never loads. The page still works, but the largest element above the fold is a broken image, and the 404 adds a console error to every dashboard visit.
@@ -336,9 +336,9 @@ test("regression: The dashboard chart image is missing", async ({ page }) => {
 
 ### 🟡 [LOW] Helper text under Customer is too faint to read
 
-- **Id:** `376788a5bf` · **Category:** visual
+- **Id:** `648a490ad6` · **Category:** visual
 - **Evidence:** `1.73:1 (needs 4.5:1) rgba(184, 192, 202, 1) on rgb(246, 248, 250)`
-- **Where:** `/orders-new.html#86e55ecc` (http://127.0.0.1:4173/orders-new.html)
+- **Where:** `/orders-new.html#18f9a265` (http://127.0.0.1:4173/orders-new.html)
 - **Seen in runs:** 1
 
 The hint below the Customer field fails WCAG contrast by a wide margin. The same .hint style is likely used on other forms.
@@ -382,9 +382,9 @@ test("regression: Helper text under Customer is too faint to read", async ({ pag
 
 ### 🟡 [LOW] The confirmation email field has no label, only a placeholder
 
-- **Id:** `cc6bc0da51` · **Category:** ux-polish
+- **Id:** `ddaf4b74cd` · **Category:** ux-polish
 - **Evidence:** `/orders-new.html — 200 · 12 el · 1 unnamed`
-- **Where:** `/orders-new.html#86e55ecc` (http://127.0.0.1:4173/orders-new.html)
+- **Where:** `/orders-new.html#18f9a265` (http://127.0.0.1:4173/orders-new.html)
 - **Seen in runs:** 1
 
 The field is announced to assistive technology without a name, and the placeholder disappears as soon as the user types. The crawl counted it as the one unnamed control on this page.
