@@ -85,7 +85,7 @@ import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { formatScan, scanProject } from "./scan.js";
-import { CAPTURE_MARGIN, captureFileName, captureResultText, MAX_CAPTURE_MARGIN } from "./engine/capture.js";
+import { CAPTURE_MARGIN, CAPTURES_DIRNAME, captureFileName, captureResultText, MAX_CAPTURE_MARGIN } from "./engine/capture.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
 const engines = new Map<string, BrowserEngine>();
@@ -1543,7 +1543,7 @@ server.registerTool(
       const dir = eng.memory?.dir;
       if (!dir) throw new Error("Not attached — call scout_attach first.");
       const shot = await eng.captureElement({ ref, key }, margin ?? CAPTURE_MARGIN);
-      const file = path.join(dir, "captures", captureFileName(name));
+      const file = path.join(dir, CAPTURES_DIRNAME, captureFileName(name));
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, shot.png);
       const size = { width: shot.png.readUInt32BE(16), height: shot.png.readUInt32BE(20) };

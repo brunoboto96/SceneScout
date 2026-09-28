@@ -44,6 +44,22 @@ export function captureFileName(name: string | undefined): string {
   return `${base || "capture"}.png`;
 }
 
+/** The folder, under the project's .scenescout/, that scout_capture saves into. */
+export const CAPTURES_DIRNAME = "captures";
+
+/**
+ * The name a capture was saved under, read back from its file's path: the
+ * file must be directly in a captures folder. Either separator is read, so a
+ * path written on Windows (C:\…\captures\preview.png) reads the same as
+ * one written elsewhere. Null for any other path.
+ */
+export function capturedName(file: string): string | null {
+  const parts = String(file).split(/[\\/]+/);
+  const name = parts.at(-1) ?? "";
+  if (parts.length < 2 || parts.at(-2) !== CAPTURES_DIRNAME || !/^[a-z0-9-]{1,40}\.png$/.test(name)) return null;
+  return name.slice(0, -".png".length);
+}
+
 /** What scout_capture saved, as its result's last line carries it for a program to read. */
 export interface CaptureInfo {
   /** The PNG's absolute path. */

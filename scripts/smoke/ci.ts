@@ -17,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCi, type ModelClient } from "../../dist/ci-run.js";
 import { parseCiArgs, type ResolvedProvider } from "../../dist/engine/ci.js";
+import { capturedName, parseCaptureResult } from "../../dist/engine/capture.js";
 import { decodePng } from "../../dist/engine/png.js";
 import type { ModelTurn, ToolOutcome } from "../../dist/engine/provider.js";
 import { check, type SmokeContext } from "./harness.ts";
@@ -183,7 +184,8 @@ async function showAndCompare(baseUrl: string, work: string): Promise<void> {
   );
   check(
     "compare: the model's capture ran under the run's own name, not the one it asked for",
-    !save.model.received[1][0].isError && /captures\/preview\.png/.test(save.model.received[1][0].text) && !/escape/.test(save.model.received[1][0].text),
+    // Read from the structured result, so the path is compared as the OS wrote it.
+    !save.model.received[1][0].isError && capturedName(parseCaptureResult(save.model.received[1][0].text)?.file ?? "") === "preview",
     save.model.received[1]?.[0]?.text,
   );
   const shots = path.join(save.out, "shots");

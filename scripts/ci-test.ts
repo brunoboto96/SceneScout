@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { CI_ACTION_ONLY_INPUTS, ciArgs, ciOutDirFor, ciSummaryOutputs, ciVerdict, hasCiCommand } from "../action/ci-action.mjs";
 import { agentLoop, captureShots, HttpModelClient, MAX_RETRIES, MAX_TOOL_CALLS_PER_TURN, OutOfTime, ProviderError, type ModelClient } from "../src/ci-run.ts";
-import { CAPTURE_MARGIN, captureClip, captureFileName, captureResultText, parseCaptureResult, rebaseUrl } from "../src/engine/capture.ts";
+import { CAPTURE_MARGIN, captureClip, capturedName, captureFileName, captureResultText, parseCaptureResult, rebaseUrl } from "../src/engine/capture.ts";
 import { decodePng, diffImages, encodePng, isPng, type RgbaImage } from "../src/engine/png.ts";
 import {
   CAPTURE_TOOLS,
@@ -1615,6 +1615,19 @@ test("capture: scout_capture's result reads back; anything else, or a partial li
   assert.equal(parseCaptureResult("ERROR: Unknown ref"), null);
   assert.equal(parseCaptureResult('CAPTURED {"file":"/x"}'), null);
   assert.equal(parseCaptureResult("CAPTURED {not json"), null);
+  // The name a capture was saved under, read from its path as each OS writes it.
+  const names: Array<[string, string | null]> = [
+    ["/work/site/.scenescout/captures/preview.png", "preview"],
+    ["D:\\a\\work\\site\\.scenescout\\captures\\preview.png", "preview"],
+    ["D:/a/work/site/.scenescout/captures/base.png", "base"],
+    ["\\\\server\\share\\.scenescout\\captures\\preview.png", "preview"],
+    ["/work/site/.scenescout/captures/../escape.png", null],
+    ["C:\\site\\.scenescout\\escape.png", null],
+    ["/work/site/.scenescout/captures/Preview.PNG", null],
+    ["preview.png", null],
+    ["", null],
+  ];
+  for (const [file, expected] of names) assert.equal(capturedName(file), expected, file);
 });
 
 test("capture: a page of the preview maps to the same page of the base URL", () => {
