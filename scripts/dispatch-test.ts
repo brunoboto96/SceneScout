@@ -17,6 +17,8 @@ import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
 import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser } from "../src/engine/launch.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
+import { boundedTeardown } from "../src/engine/teardown.ts";
+import { descendants, extraHandles } from "./smoke/leaks.ts";
 
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -203,6 +205,74 @@ test("the orphan reaper only ever selects browsers this tool launched and abando
   ].join("\n");
   assert.deepEqual(orphanPids(ps), [101, 102]);
   assert.deepEqual(orphanPids(""), []);
+});
+
+/** Stand-ins for a page, context and browser whose close takes `ms` (or never finishes), recording what was closed. */
+function standIns(ms: { context: number; browser: number }) {
+  const closed: string[] = [];
+  const closer = (name: string, delay: number) => ({
+    close: () => (delay === Infinity ? new Promise<void>(() => {}) : tick(delay).then(() => void closed.push(name))),
+  });
+  const page = closer("page", 0);
+  const context = { ...closer("context", ms.context), pages: () => [page] };
+  return { closed, context, browser: closer("browser", ms.browser) };
+}
+
+test("a teardown that outlasts its cap still closes the browser after the caller has moved on", async () => {
+  // The caller returns at the cap and clears its own fields; the browser must not depend on them.
+  const { closed, context, browser } = standIns({ context: 300, browser: 0 });
+  const started = Date.now();
+  await boundedTeardown(context, browser, 20);
+  assert.ok(Date.now() - started < 200, "returns at the cap, not when teardown ends");
+  await tick(400);
+  assert.ok(closed.includes("browser"), `closed: ${closed.join(", ")}`);
+});
+
+test("a context that never closes does not keep the browser running", async () => {
+  const { closed, context, browser } = standIns({ context: Infinity, browser: 0 });
+  await boundedTeardown(context, browser, 20);
+  await tick(30);
+  assert.deepEqual(closed, ["page", "browser"]);
+});
+
+test("a teardown within its cap closes in order, once each", async () => {
+  const { closed, context, browser } = standIns({ context: 0, browser: 0 });
+  await boundedTeardown(context, browser, 1000);
+  assert.deepEqual(closed, ["page", "context", "browser"]);
+  await boundedTeardown(null, null, 10);
+});
+
+test("the smoke leak check sees everything under this process, and nothing else", () => {
+  // A browser a suite never closed is still node's child, so the orphan reaper
+  // above skips it by design, and its helpers hang under IT, not under node.
+  const ps = [
+    `  500     1 node smoke.ts`, // this process
+    `  501   500 /cache/ms-playwright/chromium/chrome --headless`, // a browser left open
+    `  502   501 /cache/ms-playwright/chromium/chrome --type=renderer`, // its helper, a grandchild
+    `  503   500 ps -A -o pid=,ppid=,command=`, // the listing itself
+    `  504   500 /bin/ps -A -o pid=,ppid=,command=`, // the listing, by full path
+    `  505     1 /cache/ms-playwright/chromium/chrome --headless`, // somebody else's browser
+    `  506   777 node other.js`, // an unrelated process
+    `  507   500 node dist/cli.js check`, // a CLI child still running is a leftover too
+    `  508   500 /repo/node_modules/@esbuild/darwin-arm64/bin/esbuild --service=0.28.2 --ping`, // tsx's transformer, not the suite's
+    `  509   501 /repo/node_modules/@esbuild/linux-x64/bin/esbuild --service=0.28.2 --ping`, // ...but only as node's own child
+    `garbage`,
+  ].join("\n");
+  assert.deepEqual(
+    descendants(ps, 500).map((p) => p.pid),
+    [501, 502, 507, 509],
+  );
+  assert.deepEqual(descendants(ps, 999), []);
+  assert.deepEqual(descendants("", 500), []);
+});
+
+test("the smoke open-handle check counts by type, so one more of a kind already open still counts", () => {
+  assert.deepEqual(extraHandles(["TTYWrap", "TTYWrap"], ["TTYWrap", "TTYWrap"]), []);
+  // A browser left open shows as a child process and the pipes to it, next to stdio pipes that were there all along.
+  assert.deepEqual(extraHandles(["PipeWrap", "PipeWrap"], ["PipeWrap", "PipeWrap", "ProcessWrap", "PipeWrap"]), ["ProcessWrap", "PipeWrap"]);
+  assert.deepEqual(extraHandles(["TTYWrap"], ["Timeout", "TCPServerWrap", "TTYWrap"]), ["Timeout", "TCPServerWrap"]);
+  // Closing something that was open at the start is not a leak.
+  assert.deepEqual(extraHandles(["TTYWrap", "Timeout"], ["TTYWrap"]), []);
 });
 
 test("a browser that was never downloaded gets one instruction, not a stack of text", () => {

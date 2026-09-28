@@ -180,7 +180,7 @@ function loopbackOrigin(value: string | null): string {
 }
 
 /** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
-export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBaseUrl: string; stats: ServerStats; close: () => void }> {
+export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBaseUrl: string; stats: ServerStats; close: () => Promise<void> }> {
   const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {} };
   const board: string[] = [];
   let codeCounter = 0;
@@ -659,9 +659,14 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     baseUrl,
     foreignBaseUrl,
     stats,
-    close: () => {
-      server.close();
-      foreignServer.close();
+    /** Resolves once both servers have stopped listening and dropped their connections, so nothing of theirs keeps node running. */
+    close: async () => {
+      const stop = (s: http.Server) =>
+        new Promise<void>((resolve) => {
+          s.close(() => resolve());
+          s.closeAllConnections();
+        });
+      await Promise.all([stop(server), stop(foreignServer)]);
     },
   };
 }
