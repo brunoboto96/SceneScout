@@ -3,6 +3,7 @@ import {
   firefox,
   webkit,
   type Browser,
+  type BrowserServer,
   type BrowserType,
   type BrowserContext,
   type BrowserContextOptions,
@@ -102,8 +103,8 @@ import {
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { DEFAULT_TIME_LIMITS, explainTimeout, limitHint, resolveTimeLimits, type LimitKind, type TimeLimits } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
-import { BROWSER_MARKER, browserPsListing, killBrowserProcess, launchedBrowserPid, ownBrowserRunning, reapOrphanBrowsers } from "./reaper.js";
-import { boundedTeardown, describeTeardown, SessionQueue } from "./dispatch.js";
+import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
+import { boundedTeardown, DEFAULT_TEARDOWN_BOUNDS, describeTeardown, teardownBounds, type TeardownBounds } from "./teardown.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
 import {
   AUTH_FLOW_RE,
@@ -474,12 +475,18 @@ const SCREENCAST_PAGELESS_TICKS = 20;
 /** A frame for the record is worth a moment, not a stall: the action has already happened. */
 const RECORD_SHOT_TIMEOUT_MS = 2500;
 
+/** Whether a browser server's process has not exited. */
+function serverRunning(server: BrowserServer): boolean {
+  const child = server.process();
+  return child.exitCode === null && child.signalCode === null;
+}
+
 export class BrowserEngine {
   private browser: Browser | null = null;
-  /** The launched browser's process id, when it could be found: what close() kills if the browser will not close. */
-  private browserPid: number | undefined;
-  /** Launches run one at a time in this process, so each launch's new child process is known to be its own browser. */
-  private static readonly launches = new SessionQueue();
+  /** The server the browser runs in: its process is what close() ends, and kills if the browser will not close. */
+  private server: BrowserServer | null = null;
+  /** How long close() waits before escalating; read at attach, so a bad setting fails the attach, not a close. */
+  private teardown: TeardownBounds = DEFAULT_TEARDOWN_BOUNDS;
   /** How long an action and a page load may take; set at attach (limits.ts). */
   private limits: TimeLimits = DEFAULT_TIME_LIMITS;
   /** The limits this session runs with, so the server can size its watchdogs to them. */
@@ -1136,8 +1143,9 @@ export class BrowserEngine {
     }
 
     try {
+      this.teardown = teardownBounds(process.env);
       this.engineName = opts.browser ?? defaultEngine(process.env);
-      ({ browser: this.browser, pid: this.browserPid } = await this.launchWithRecovery(this.engineName, opts.headed ?? false));
+      ({ browser: this.browser, server: this.server } = await this.launchWithRecovery(this.engineName, opts.headed ?? false));
       this.context = await this.browser.newContext({
         storageState: profile?.storageState as BrowserContextOptions["storageState"],
         viewport: opts.viewport ?? { width: 1280, height: 900 },
@@ -4535,11 +4543,6 @@ export class BrowserEngine {
     return this.currentFingerprint;
   }
 
-  /** The open browser's process id, when it could be found at launch; undefined once closed. */
-  get browserProcessId(): number | undefined {
-    return this.browser ? this.browserPid : undefined;
-  }
-
   get currentUrl(): string {
     return this.page?.url() ?? "";
   }
@@ -4555,28 +4558,31 @@ export class BrowserEngine {
    * On the first failure or timeout, reap orphaned Playwright processes and
    * try once more before giving up with a diagnosable error.
    */
-  private async launchWithRecovery(engine: BrowserEngineName, headed: boolean): Promise<{ browser: Browser; pid: number | undefined }> {
+  private async launchWithRecovery(engine: BrowserEngineName, headed: boolean): Promise<{ browser: Browser; server: BrowserServer }> {
     const types: Record<BrowserEngineName, BrowserType> = { chromium, firefox, webkit };
-    // Serialised, and the process listed on either side, so the one new browser child is this launch's (launchedBrowserPid).
-    const attempt = (): Promise<{ browser: Browser; pid: number | undefined }> =>
-      BrowserEngine.launches.run("launch", async () => {
-        const before = browserPsListing();
-        const browser = await launchOnce();
-        const pid = before ? launchedBrowserPid(before, browserPsListing(), process.pid) : undefined;
-        if (pid === undefined && before) console.error("[scenescout] could not tell the launched browser's process id; a close that hangs cannot kill it");
-        return { browser, pid };
-      });
-    const launchOnce = async (): Promise<Browser> => {
+    const attempt = async (): Promise<{ browser: Browser; server: BrowserServer }> => {
       // The marker is what makes reapOrphanBrowsers safe to run at startup:
       // it appears in the child's command line, so the sweep can tell a browser
       // WE leaked from one belonging to somebody else's Playwright run.
       // `--enable-features` takes arbitrary names and ignores unknown ones.
       // It is a Chromium switch: Firefox and WebKit are launched without it,
       // so a leaked one of those is not reaped and has to be closed by hand.
-      const launch = types[engine].launch({
-        headless: !headed,
-        args: engine === "chromium" ? [`--enable-features=${BROWSER_MARKER}`] : [],
-      });
+      // Launched as a server so the engine holds the browser's process (BrowserServer.process()), which close()
+      // ends even when the browser will not close. The client connects over a WebSocket bound to loopback only, at a
+      // path Playwright makes unguessable.
+      const launch = (async () => {
+        const server = await types[engine].launchServer({
+          host: "127.0.0.1",
+          headless: !headed,
+          args: engine === "chromium" ? [`--enable-features=${BROWSER_MARKER}`] : [],
+        });
+        try {
+          return { server, browser: await types[engine].connect(server.wsEndpoint()) };
+        } catch (err) {
+          await server.kill().catch(() => {});
+          throw err;
+        }
+      })();
       let timer: NodeJS.Timeout | undefined;
       try {
         return await Promise.race([
@@ -4586,8 +4592,8 @@ export class BrowserEngine {
           }),
         ]);
       } catch (err) {
-        // If the launch resolves late, close that browser instead of leaking it.
-        void launch.then((b) => b.close().catch(() => {})).catch(() => {});
+        // If the launch resolves late, end that browser instead of leaking it.
+        void launch.then(({ server }) => server.kill()).catch(() => {});
         throw err;
       } finally {
         clearTimeout(timer);
@@ -4688,26 +4694,31 @@ export class BrowserEngine {
       if (this.memory) this.memory.lastSaveError = err instanceof Error ? err.message : String(err);
     }
     // Bounded teardown: a wedged renderer must not hang scout_close forever, and a teardown that overruns must not
-    // leave the browser running (dispatch.ts boundedTeardown). Captured here, so a teardown still running after a
+    // leave the browser running (teardown.ts). Captured here, so a teardown still running after a
     // timeout can never close a browser a later attach() opened.
-    const { context, browser, browserPid } = this;
-    const outcome = await boundedTeardown({
-      graceful: async () => {
-        for (const p of context?.pages() ?? []) await p.close().catch(() => {});
-        await context?.close().catch(() => {});
-        await browser?.close().catch(() => {});
+    const { context, browser, server } = this;
+    const outcome = await boundedTeardown(
+      {
+        graceful: async () => {
+          for (const p of context?.pages() ?? []) await p.close().catch(() => {});
+          await context?.close().catch(() => {});
+          // A connected browser's close() only disconnects; the server's close() ends the browser.
+          await browser?.close().catch(() => {});
+          await server?.close();
+        },
+        closeBrowser: async () => server?.close(),
+        pid: server?.process().pid,
+        isAlive: () => !!server && serverRunning(server),
+        kill: async () => (await server?.kill(), !!server && !serverRunning(server)),
       },
-      closeBrowser: async () => browser?.close(),
-      pid: browser ? browserPid : undefined,
-      isAlive: ownBrowserRunning,
-      kill: killBrowserProcess,
-    });
-    const timedOut = describeTeardown(outcome);
+      this.teardown,
+    );
+    const timedOut = describeTeardown(outcome, this.teardown);
     if (timedOut) console.error(`[scenescout] ${timedOut}`);
     this.page = null;
     this.context = null;
     this.browser = null;
-    this.browserPid = undefined;
+    this.server = null;
     this.routedWrites.clear();
     this.unseenRefusals.clear();
     this.refs.clear();

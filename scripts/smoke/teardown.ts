@@ -1,8 +1,10 @@
 /**
  * A close that hangs must not leave the browser running. The browser context's
- * close is made to hang (as a wedged renderer's does), and then the browser's
- * own close too; after close() returns, within its bound, the browser's process
- * and every process in its group must be gone. A tool call still waiting on the
+ * close is made to hang (as a wedged renderer's does), and the browser server's
+ * close too, so only the kill can end it; after close() returns, within its
+ * bound, the browser's process and every process in its group must be gone.
+ * The bounds are lowered through their environment variables so this takes
+ * about a second; the other escalation paths are table-tested in dispatch-test. A tool call still waiting on the
  * page when close() starts (a navigation to a server that never answers) must
  * have settled by then too, so nothing of it can write into the project after
  * the close. The contrast is a plain close, which ends the browser without
@@ -11,10 +13,9 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { Browser, BrowserContext } from "playwright";
+import type { BrowserContext, BrowserServer } from "playwright";
 import { BrowserEngine } from "../../dist/engine/browser.js";
-import { BROWSER_CLOSE_MS, TEARDOWN_MS } from "../../dist/engine/dispatch.js";
-import { processAlive } from "../../dist/engine/reaper.js";
+import { BROWSER_CLOSE_ENV, TEARDOWN_ENV } from "../../dist/engine/teardown.js";
 import { check, eventually, type SmokeContext } from "./harness.ts";
 
 export const title = "teardown bound";
@@ -29,7 +30,20 @@ function inGroup(pgid: number): number[] {
     .map(([pid]) => pid);
 }
 
+/** Whether a process is running (EPERM: running, but not ours to signal). */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 const hang = (): Promise<void> => new Promise<void>(() => {});
+
+/** 500 ms teardown + 300 ms browser close + 300 ms kill, and slack for a loaded machine. */
+const BOUND_MS = 500 + 300 + 300 + 1500;
 
 /** Every file under `dir` with its size and modification time: what "the project folder is unchanged" compares. */
 function folderState(dir: string): string {
@@ -46,15 +60,17 @@ function folderState(dir: string): string {
 }
 
 /** Attach, make the named closes hang, close, and check that close() returned in bound and nothing of the browser is left. */
-async function closeWith(baseUrl: string, projectDir: string, label: string, hanging: Array<"context" | "browser">, boundMs: number): Promise<void> {
+async function closeWith(baseUrl: string, projectDir: string, label: string, hanging: boolean): Promise<void> {
   const engine = new BrowserEngine();
   await engine.attach({ url: `${baseUrl}/index.html`, projectDir, mode: "read-only" });
-  const pid = engine.browserProcessId;
+  const inner = engine as unknown as { context: BrowserContext; server: BrowserServer };
+  const pid = inner.server.process().pid;
   check(`${label}: the launched browser's process id is known`, pid !== undefined && processAlive(pid), String(pid));
   if (pid === undefined) return void (await engine.close());
-  const inner = engine as unknown as { context: BrowserContext; browser: Browser };
-  if (hanging.includes("context")) inner.context.close = hang;
-  if (hanging.includes("browser")) inner.browser.close = hang;
+  if (hanging) {
+    inner.context.close = hang;
+    inner.server.close = hang;
+  }
   // A tool call still waiting on the page as the close starts, as a call the watchdog cut off would be.
   let settled = false;
   const pending = engine.navigate(`${baseUrl}/never-answers`).then(
@@ -64,7 +80,7 @@ async function closeWith(baseUrl: string, projectDir: string, label: string, han
   const started = Date.now();
   await engine.close();
   const took = Date.now() - started;
-  check(`${label}: close() returns within its bound`, took < boundMs + 2000, `${took}ms`);
+  check(`${label}: close() returns within its bound`, took < BOUND_MS, `${took}ms`);
   const gone = await eventually(() => !processAlive(pid) && inGroup(pid).length === 0, 3000);
   check(`${label}: the browser's process and its helpers are gone once close() returns`, gone, `still running: ${inGroup(pid).join(", ")}`);
   check(
@@ -83,7 +99,19 @@ export async function run({ baseUrl, projectDir }: SmokeContext): Promise<void> 
     console.log("  (skipped: the process checks use ps)");
     return;
   }
-  await closeWith(baseUrl, projectDir, "a plain close", [], TEARDOWN_MS);
-  await closeWith(baseUrl, projectDir, "a context close that hangs", ["context"], TEARDOWN_MS + BROWSER_CLOSE_MS);
-  await closeWith(baseUrl, projectDir, "a context and browser close that hang", ["context", "browser"], TEARDOWN_MS + BROWSER_CLOSE_MS);
+  const saved = { teardown: process.env[TEARDOWN_ENV], browserClose: process.env[BROWSER_CLOSE_ENV] };
+  process.env[TEARDOWN_ENV] = "500";
+  process.env[BROWSER_CLOSE_ENV] = "300";
+  try {
+    await closeWith(baseUrl, projectDir, "a plain close", false);
+    await closeWith(baseUrl, projectDir, "a close whose context and browser both hang", true);
+  } finally {
+    for (const [name, value] of [
+      [TEARDOWN_ENV, saved.teardown],
+      [BROWSER_CLOSE_ENV, saved.browserClose],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 }

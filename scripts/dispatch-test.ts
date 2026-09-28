@@ -13,10 +13,11 @@
 import assert from "node:assert/strict";
 import { needsTask, normalizeTask, taskRefusal, TASK_MAX } from "../src/engine/task.ts";
 import test from "node:test";
-import { boundedTeardown, describeTeardown, SessionQueue, settlesWithin, withWatchdog, type TeardownSteps } from "../src/engine/dispatch.ts";
+import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
+import { boundedTeardown, DEFAULT_TEARDOWN_BOUNDS, describeTeardown, settlesWithin, teardownBounds, type TeardownSteps } from "../src/engine/teardown.ts";
 import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser } from "../src/engine/launch.ts";
-import { isBrowserChild, launchedBrowserPid, orphanPids } from "../src/engine/reaper.ts";
+import { orphanPids } from "../src/engine/reaper.ts";
 
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -205,45 +206,6 @@ test("the orphan reaper only ever selects browsers this tool launched and abando
   assert.deepEqual(orphanPids(""), []);
 });
 
-test("the launched browser's pid is the one new Playwright browser child of this process, or unknown", () => {
-  const before = [
-    `  500     1 node server.js`,
-    `  601   500 /cache/ms-playwright/chromium/chrome --enable-features=scenescout-session`, // another session's browser
-    `  700     1 /cache/ms-playwright/firefox/firefox -headless`, // somebody else's browser
-  ].join("\n");
-  const withNew = (line: string): string => `${before}\n${line}`;
-  assert.equal(launchedBrowserPid(before, withNew(`  602   500 /cache/ms-playwright/chromium_headless_shell/chrome-headless-shell --headless`), 500), 602);
-  // WebKit runs under a shell wrapper; that wrapper, node's child and its group leader, is the pid.
-  assert.equal(launchedBrowserPid(before, withNew(`  603   500 bash /cache/ms-playwright/webkit/pw_run.sh --headless`), 500), 603);
-  // Browsers installed outside the default cache (PLAYWRIGHT_BROWSERS_PATH) are found by name.
-  assert.equal(launchedBrowserPid(before, withNew(`  609   500 /opt/pw/firefox-1543/firefox/firefox -no-remote -headless`), 500), 609);
-  // A helper of the new browser is its child, not node's; a new browser under another parent is not ours.
-  assert.equal(launchedBrowserPid(before, withNew(`  604   601 /cache/ms-playwright/chromium/chrome --type=renderer`), 500), undefined);
-  assert.equal(launchedBrowserPid(before, withNew(`  605   777 /cache/ms-playwright/chromium/chrome`), 500), undefined);
-  // A new child that is not a Playwright browser is not a browser.
-  assert.equal(launchedBrowserPid(before, withNew(`  606   500 ps -eo pid=,ppid=,command=`), 500), undefined);
-  // Two new browsers: which one this launch started cannot be told, so neither is named (and neither is ever killed).
-  assert.equal(
-    launchedBrowserPid(before, withNew(`  607   500 /cache/ms-playwright/firefox/firefox\n  608   500 /cache/ms-playwright/webkit/pw_run.sh`), 500),
-    undefined,
-  );
-  assert.equal(launchedBrowserPid(before, before, 500), undefined);
-});
-
-test("a pid is killed only while it is still this process's browser, never after it has been reused", () => {
-  const ps = [
-    `  602   500 /cache/ms-playwright/chromium/chrome --headless`,
-    `  603   500 node dist/cli.js check`,
-    `  604     1 /cache/ms-playwright/firefox/firefox`,
-  ].join("\n");
-  assert.equal(isBrowserChild(ps, 602, 500), true);
-  // The pid now belongs to something that is not a browser, or to a browser that is not ours.
-  assert.equal(isBrowserChild(ps, 603, 500), false);
-  assert.equal(isBrowserChild(ps, 604, 500), false);
-  assert.equal(isBrowserChild(ps, 605, 500), false);
-  assert.equal(isBrowserChild("", 602, 500), false);
-});
-
 /** Teardown steps with each step's behaviour and the process's life scripted, recording what was called. */
 function scriptedTeardown(opts: { graceful: "done" | "hang"; browserClose: "done" | "reject" | "hang"; pid?: number; alive: boolean; killable?: boolean }) {
   const calls: string[] = [];
@@ -320,6 +282,29 @@ test("a teardown that hangs still closes the browser, and kills it only if it is
     assert.match(describeTeardown(outcome, quick) ?? "", row.says, row.name);
     assert.ok(Date.now() - started < 40 + 40 + 1000, `${row.name}: bounded, took ${Date.now() - started}ms`);
   }
+});
+
+test("the teardown bounds come from the environment when set, and a bad value is refused by name", () => {
+  assert.deepEqual(teardownBounds({}), DEFAULT_TEARDOWN_BOUNDS);
+  assert.deepEqual(teardownBounds({ SCENESCOUT_TEARDOWN_MS: "500", SCENESCOUT_BROWSER_CLOSE_MS: " 300 " }), { teardownMs: 500, browserCloseMs: 300 });
+  assert.deepEqual(teardownBounds({ SCENESCOUT_TEARDOWN_MS: "" }), DEFAULT_TEARDOWN_BOUNDS);
+  for (const bad of ["5s", "-1", "1e4", "99", "120001", "2.5"]) {
+    assert.throws(() => teardownBounds({ SCENESCOUT_TEARDOWN_MS: bad }), new RegExp(`SCENESCOUT_TEARDOWN_MS must be .*got "${bad.replace(".", "\\.")}"`), bad);
+  }
+  assert.throws(() => teardownBounds({ SCENESCOUT_BROWSER_CLOSE_MS: "fast" }), /SCENESCOUT_BROWSER_CLOSE_MS/);
+});
+
+test("a kill that never answers is bounded too, and reported as not done", async () => {
+  const steps: TeardownSteps = {
+    graceful: () => new Promise(() => {}),
+    closeBrowser: () => new Promise(() => {}),
+    pid: 42,
+    isAlive: () => true,
+    kill: () => new Promise<boolean>(() => {}),
+  };
+  const started = Date.now();
+  assert.deepEqual(await boundedTeardown(steps, quick), { timedOut: true, browserClosed: false, left: 42 });
+  assert.ok(Date.now() - started < 40 * 3 + 1000);
 });
 
 test("settlesWithin answers whether a promise settled in time, rejections included", async () => {

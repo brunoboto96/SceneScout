@@ -503,6 +503,8 @@ In every browser, pages are not given shared workers unless the mode is `destruc
 
 An action on the page (a click, typing, a hover, a pick from a list) may take 5 s, and a page 20 s to load (15 s for a page the crawl opens). On a loaded machine these can run out while the app is fine; the timeout then says which limit ran out and how to raise it. Raise them per session with `scout_attach { actionTimeoutMs: 15000, navTimeoutMs: 60000 }`, for every session with `SCENESCOUT_ACTION_TIMEOUT_MS` and `SCENESCOUT_NAV_TIMEOUT_MS` in the server's environment, or on `scenescout check` and `scenescout ci` with `--action-timeout-ms` and `--nav-timeout-ms`. An option wins over the variable, and the variable over the default. The action limit takes 1000 to 120000 ms and the page-load limit 1000 to 300000 ms; anything else refuses the attach with a sentence naming the value to fix. Saving a login profile with `scenescout login` honours the two variables as well, and otherwise keeps its own longer waits (30 s for the page, 10 s for a field or the submit).
 
+Closing a session gives its pages, context and browser 8 s to close. If that runs out, the browser is closed on a 3 s bound of its own, and if it is still running after that its process is killed, so a wedged page never leaves a browser running under the server. `SCENESCOUT_TEARDOWN_MS` and `SCENESCOUT_BROWSER_CLOSE_MS` change the two bounds (100 to 120000 ms); a value outside that refuses the attach.
+
 ## 🔌 Other MCP clients
 
 The engine is a plain MCP server over stdio, so any client can drive it, and the testing method reaches the agent through the server itself (see the end of this section). `install` can register it for you:
