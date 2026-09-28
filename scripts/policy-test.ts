@@ -49,7 +49,7 @@ import {
   type CreationEvidence,
   type OwnedIds,
 } from "../src/engine/ownership.ts";
-import { AUTH_LOSS_STREAK, AuthLossTracker, LOGIN_ROUTE_RE } from "../src/engine/authloss.ts";
+import { AUTH_LOSS_STREAK, AuthLossTracker, LOGIN_ROUTE_RE, shouldReattach } from "../src/engine/authloss.ts";
 import {
   bodyDigest,
   headerOf,
@@ -335,6 +335,182 @@ test("a clean sweep produces no batch verdict", () => {
   t.record({ requestedRoute: "/a", landedRoute: "/a", bounced: false, role: "admin" });
   t.clear();
   assert.equal(t.batchVerdict(), "", "nothing went wrong, so nothing is claimed");
+});
+
+// ---------------------------------------------------------------------------
+// Re-attaching a role session once on SESSION AUTH LOST
+// ---------------------------------------------------------------------------
+
+test("only a role session re-attaches, only at the verdict, and only once", () => {
+  const cases: Array<[Parameters<typeof shouldReattach>[0], boolean, string]> = [
+    [{ streak: AUTH_LOSS_STREAK, signIn: "role", alreadyReattached: false }, true, "a role session at the verdict"],
+    [{ streak: AUTH_LOSS_STREAK + 4, signIn: "role", alreadyReattached: false }, true, "past the verdict still counts"],
+    [{ streak: AUTH_LOSS_STREAK - 1, signIn: "role", alreadyReattached: false }, false, "a bounce short of the verdict may be a permission wall"],
+    [{ streak: AUTH_LOSS_STREAK, signIn: "role", alreadyReattached: true }, false, "the second loss of a session"],
+    [{ streak: AUTH_LOSS_STREAK, signIn: "file", alreadyReattached: false }, false, "a storage-state file has no profile to re-read"],
+    [{ streak: AUTH_LOSS_STREAK, signIn: "none", alreadyReattached: false }, false, "an anonymous session has no sign-in to restore"],
+  ];
+  for (const [input, want, why] of cases) assert.equal(shouldReattach(input), want, why);
+});
+
+/** Bounce a tracker to the verdict on /a, /b, /c (targets with their real ids), returning the last notice. */
+function loseSignIn(t: AuthLossTracker): string {
+  let notice = "";
+  for (const [route, target] of [
+    ["/things/:id", "/things/7"],
+    ["/b", "/b"],
+    ["/c", "/c?tab=2"],
+  ].slice(0, AUTH_LOSS_STREAK)) {
+    t.record({ requestedRoute: route, landedRoute: "/login", bounced: true, role: "member", target });
+    notice = t.take();
+  }
+  return notice;
+}
+
+test("a role session's loss earns one re-attach back to what it asked for", () => {
+  const t = new AuthLossTracker();
+  t.beginSession("role", "member");
+  loseSignIn(t);
+  const plan = t.takeReattach();
+  assert.deepEqual(plan, { returnTo: "/c?tab=2", retry: [] }, "back to the real target; a navigation revisits nothing else itself");
+  assert.equal(t.takeReattach(), null, "the plan is consumed once");
+
+  t.record({ requestedRoute: "/c", landedRoute: "/c", bounced: false, role: "member", target: "/c?tab=2" });
+  const notice = t.take();
+  assert.ok(notice.includes("SESSION RE-ATTACHED"), notice);
+  assert.ok(notice.includes("role 'member'"), "names the role whose profile it used");
+  assert.ok(notice.includes("/things/7, /b") && notice.includes("NOT covered"), "the other bounced routes are still gaps to visit");
+  assert.ok(!notice.includes("SESSION AUTH LOST"), "a recovered session is not reported dead");
+  assert.ok(!t.batchVerdict().includes("SESSION AUTH LOST"), "nor by a later batch verdict");
+  assert.ok(t.reattachSummary().includes("re-attached once") && t.reattachSummary().includes("/c"), t.reattachSummary());
+});
+
+test("a second loss is reported, not retried, and says the one re-attach is spent", () => {
+  const t = new AuthLossTracker();
+  t.beginSession("role", "member");
+  loseSignIn(t);
+  t.takeReattach();
+  t.record({ requestedRoute: "/c", landedRoute: "/c", bounced: false, role: "member" });
+  t.take();
+  const second = loseSignIn(t);
+  assert.equal(t.takeReattach(), null, "no second re-attach");
+  assert.ok(second.includes("SESSION AUTH LOST"), second);
+  assert.ok(second.includes("already re-attached once") && second.includes("scenescout login"), "says why it is not retried and what to do");
+});
+
+test("a session not attached by role reports the loss exactly as before", () => {
+  for (const kind of ["file", "none"] as const) {
+    const plain = new AuthLossTracker();
+    const begun = new AuthLossTracker();
+    begun.beginSession(kind, "someone");
+    const before = loseSignIn(plain);
+    const after = loseSignIn(begun);
+    assert.equal(begun.takeReattach({ requeued: false }), null, `${kind}: never re-attaches`);
+    assert.equal(after, before, `${kind}: the same verdict text`);
+    assert.equal(begun.reattachSummary(), "", `${kind}: nothing to say about a re-attach`);
+  }
+});
+
+test("a latest profile that is dead too is reported, with why, and not retried", () => {
+  const t = new AuthLossTracker();
+  t.beginSession("role", "member");
+  loseSignIn(t);
+  t.takeReattach();
+  t.record({ requestedRoute: "/c", landedRoute: "/login", bounced: true, role: "member" });
+  const notice = t.take();
+  assert.ok(notice.includes("SESSION AUTH LOST"), notice);
+  assert.ok(notice.includes("expired too") && notice.includes("not retried"), notice);
+  assert.ok(!notice.includes("SESSION RE-ATTACHED"), "not claimed as recovered");
+  loseSignIn(t);
+  assert.equal(t.takeReattach(), null, "the once is spent");
+  assert.ok(t.reattachSummary().includes("did not recover"), t.reattachSummary());
+});
+
+test("a profile that cannot be applied reports the loss and the reason", () => {
+  const t = new AuthLossTracker();
+  t.beginSession("role", "member");
+  loseSignIn(t);
+  t.takeReattach();
+  t.abortReattach("its saved profile could not be read (missing)");
+  const notice = t.take();
+  assert.ok(notice.includes("SESSION AUTH LOST") && notice.includes("could not be read (missing)"), notice);
+  assert.ok(t.batchVerdict().includes("SESSION AUTH LOST"), "a later batch still says the session is dead");
+});
+
+test("a verdict whose call threw keeps the once for the next loss", () => {
+  const t = new AuthLossTracker();
+  t.beginSession("role", "member");
+  loseSignIn(t);
+  // The engine never took the plan; the next navigation clears it.
+  t.record({ requestedRoute: "/d", landedRoute: "/login", bounced: true, role: "member" });
+  assert.notEqual(t.takeReattach(), null, "the still-dead session earns the re-attach on its next bounce");
+});
+
+test("attaching again gives the session its one re-attach back", () => {
+  const t = new AuthLossTracker();
+  t.beginSession("role", "member");
+  loseSignIn(t);
+  t.takeReattach();
+  t.abortReattach("x");
+  t.beginSession("role", "member");
+  t.record({ requestedRoute: "/e", landedRoute: "/e", bounced: false, role: "member" });
+  loseSignIn(t);
+  assert.notEqual(t.takeReattach(), null);
+});
+
+test("a sweep revisits only its own paths, and the notice asks for the rest", () => {
+  // A streak that began with scout_navigate holds a full URL the sweep will not visit.
+  const t = new AuthLossTracker();
+  t.beginSession("role", "member");
+  t.record({ requestedRoute: "/x", landedRoute: "/login", bounced: true, role: "member", target: "http://app.test/x" });
+  for (const r of ["/a", "/b"]) t.record({ requestedRoute: r, landedRoute: "/login", bounced: true, role: "member" });
+  const plan = t.takeReattach({ revisits: (p) => p.startsWith("/") });
+  assert.deepEqual(plan, { returnTo: "/b", retry: ["/a"] }, "only the sweep's own paths come back to it");
+  t.record({ requestedRoute: "/b", landedRoute: "/b", bounced: false, role: "member" });
+  const notice = t.take();
+  assert.ok(notice.includes("(/a) are visited again in this sweep"), notice);
+  assert.ok(notice.includes("(http://app.test/x) are still NOT covered"), notice);
+});
+
+test("a re-attach whose return page never loaded is reported, not decided by a later navigation", () => {
+  const t = new AuthLossTracker();
+  t.beginSession("role", "member");
+  loseSignIn(t);
+  t.takeReattach({ revisits: () => true });
+  assert.equal(t.reattaching, true);
+  t.abortReattach("the page it went back to, /c, did not load (refused)");
+  assert.equal(t.reattaching, false);
+  t.record({ requestedRoute: "/public", landedRoute: "/public", bounced: false, role: "member" });
+  assert.ok(!t.take().includes("RE-ATTACHED"), "a later public page is not claimed as the recovery");
+  assert.ok(t.reattachSummary().includes("did not load"), t.reattachSummary());
+});
+
+test("a new attach does not inherit the last session's bounces", () => {
+  const t = new AuthLossTracker();
+  t.beginSession("role", "member");
+  for (let i = 1; i < AUTH_LOSS_STREAK; i++) t.record({ requestedRoute: `/old${i}`, landedRoute: "/login", bounced: true, role: "member" });
+  t.beginSession("role", "member");
+  t.record({ requestedRoute: "/new", landedRoute: "/login", bounced: true, role: "member" });
+  assert.equal(t.takeReattach(), null, "one bounce of the new session is not a verdict");
+  assert.equal(t.batchVerdict(), "", "nor is the last session's verdict carried over");
+});
+
+test("a sweep's re-attach is said at the end of that sweep only", () => {
+  const t = new AuthLossTracker();
+  t.beginSession("role", "member");
+  t.beginBatch();
+  for (const r of ["/a", "/b", "/c"]) {
+    t.record({ requestedRoute: r, landedRoute: "/login", bounced: true, role: "member" });
+    t.clear();
+  }
+  assert.deepEqual(t.takeReattach({ revisits: () => true }), { returnTo: "/c", retry: ["/a", "/b"] });
+  t.record({ requestedRoute: "/c", landedRoute: "/c", bounced: false, role: "member" });
+  t.clear();
+  const verdict = t.batchVerdict();
+  assert.ok(verdict.includes("SESSION RE-ATTACHED") && verdict.includes("visited again in this sweep"), verdict);
+  assert.ok(!verdict.includes("SESSION AUTH LOST"), verdict);
+  t.beginBatch();
+  assert.equal(t.batchVerdict(), "", "the next sweep does not repeat it");
 });
 
 test("the login pattern matches a segment, not a substring", () => {

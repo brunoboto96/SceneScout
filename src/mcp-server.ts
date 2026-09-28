@@ -715,10 +715,16 @@ server.registerTool(
             `\nFile each with scout_finding (the same evidence), or confirm which finding already covers it, before closing the lane's session. A judged defect that is never filed is not in the report.`
           : "";
       laneLedger.fold(lane, engines.get(lane)?.attached === true);
+      // A lane that lost its sign-in and re-attached from its role's profile
+      // says so here, where the planner folds it, not only in the lane's own calls.
+      const reattach = engines.get(lane)?.reattachSummary() ?? "";
+      const reattached = reattach ? `\n↻ Session ${JSON.stringify(lane)}: ${reattach}.` : "";
       const around = parsed.aroundIgnored ? `\n(The text around the report's JSON block was discarded unread.)` : "";
       const decoded = decodedEntitiesNote(parsed.entitiesDecoded) + ignoredConventionsNote(parsed.conventionsIgnored);
       return {
-        content: [{ type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}${around}${decoded}${followUp}` }],
+        content: [
+          { type: "text" as const, text: `Lane report accepted — ${summarizeLaneReport(parsed.report)}${note}${reattached}${around}${decoded}${followUp}` },
+        ],
       };
     } catch (err) {
       return errorText(err);
