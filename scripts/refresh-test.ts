@@ -23,6 +23,7 @@ import {
   MIN_TOKEN_LENGTH,
   planRefresh,
   presentedToken,
+  profileAfterRotation,
   refreshTokenSlots,
   rotatedFromResponse,
   rotationStored,
@@ -132,6 +133,20 @@ test("the write-back waits until the page has stored a rotation in the slot it s
   assert.equal(rotationStored(stateWith(R1), sent), false, "still the spent token");
   assert.equal(rotationStored(stateWith(R2), sent), true);
   assert.equal(rotationStored({ cookies: [], origins: [] }, sent), false, "the slot is gone: nothing to save");
+});
+
+test("the write-back keeps the profile's sessionStorage, which the page's storage state never holds", () => {
+  const session = [{ origin: ORIGIN, entries: [{ name: "id_token", value: "session-half-of-the-sign-in" }] }];
+  const onDisk = { ...stateWith(R1), sessionStorage: session };
+  const written = profileAfterRotation(stateWith(R2), onDisk) as { sessionStorage?: unknown; origins: unknown };
+  assert.deepEqual(written.sessionStorage, session, "the sign-in's sessionStorage half survives a brokered refresh");
+  assert.deepEqual(written.origins, stateWith(R2).origins, "everything else is the page's rotated state");
+  assert.equal(refreshTokenSlots(written).find((t) => t.slot.includes("session"))?.value, R2);
+  // A profile with no sessionStorage, or one that could not be read, leaves the page's state as it is.
+  assert.deepEqual(profileAfterRotation(stateWith(R2), stateWith(R1)), stateWith(R2));
+  assert.deepEqual(profileAfterRotation(stateWith(R2), null), stateWith(R2));
+  // The fallback that swaps the token in the profile itself keeps it too.
+  assert.deepEqual((swapProfileToken(onDisk, R1, R2) as { sessionStorage?: unknown }).sessionStorage, session);
 });
 
 test("a response names its rotated token in a JSON field or a Set-Cookie, and two candidates are not guessed between", () => {
