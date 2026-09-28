@@ -54,6 +54,7 @@ import {
 
 import { explorePrompt, loadPlaybook, PLAYBOOK_RELATIVE_PATH, SERVER_INSTRUCTIONS, stripFrontMatter } from "../src/playbook.ts";
 
+import { dispatch, HAND_PARSED, SUBCOMMANDS, type CliHandlers, type Subcommand } from "../src/commands.ts";
 import { firstMessageHint, manualFor, parseClients, registerInFile, registerWithClient, vscodeAddArgs, vscodeBinary } from "../src/clients.ts";
 
 function tmp(prefix: string): string {
@@ -1109,4 +1110,137 @@ test("a beacon is a ping in Chromium and a beacon elsewhere; only Chromium needs
       ["webkit", "beacon", "route", true, false, false, false],
     ],
   );
+});
+
+// ── The command line: help and unknown flags are settled before a command runs ──
+
+/** A dispatch whose handlers only record what reached them; usage and refusal end the run as the real ones do. */
+async function dispatched(argv: string[]): Promise<{ ran: string[]; exit: number | null; said: string[] }> {
+  const ran: string[] = [];
+  const said: string[] = [];
+  class Exit {
+    constructor(readonly code: number) {}
+  }
+  const record = (name: Subcommand) => (args: string[]) => {
+    ran.push([name, ...args].join(" "));
+  };
+  const commands = Object.fromEntries(SUBCOMMANDS.map((c) => [c, record(c)])) as CliHandlers["commands"];
+  try {
+    await dispatch(argv[0], argv.slice(1), {
+      usage: (code) => {
+        said.push("usage");
+        throw new Exit(code);
+      },
+      version: () => {
+        said.push("version");
+      },
+      refuse: (message) => {
+        said.push(message);
+        throw new Exit(1);
+      },
+      commands,
+    });
+  } catch (err) {
+    if (err instanceof Exit) return { ran, exit: err.code, said };
+    throw err;
+  }
+  return { ran, exit: null, said };
+}
+
+test("`--help` and `-h` print the usage and exit 0 for EVERY subcommand, and the command itself never runs", async () => {
+  for (const command of SUBCOMMANDS) {
+    for (const help of ["--help", "-h"]) {
+      for (const argv of [
+        [command, help],
+        [command, "--skip-browser", help],
+        [command, "http://127.0.0.1:3000", help],
+      ]) {
+        const out = await dispatched(argv);
+        assert.deepEqual(out, { ran: [], exit: 0, said: ["usage"] }, argv.join(" "));
+      }
+    }
+  }
+});
+
+test("`install --help` does nothing: no skill, no browser download, no registration, no command on PATH", async () => {
+  // The install handler is the only way to any of those steps; it is never reached.
+  const out = await dispatched(["install", "--help"]);
+  assert.deepEqual(out.ran, []);
+  assert.equal(out.exit, 0);
+});
+
+test("install, doctor, scan, status and watch refuse an argument they do not know instead of ignoring it", async () => {
+  const cases: [string[], string][] = [
+    [["install", "--dry-run"], "unknown option --dry-run"],
+    [["install", "--browser", "firefox"], "unknown option --browser — did you mean --browsers?"],
+    [["install", "--browser=firefox"], "unknown option --browser — did you mean --browsers?"],
+    [["install", "--skip-browser=yes"], "unknown option --skip-browser"],
+    [["install", "firefox"], "unexpected argument firefox"],
+    [["install", "-x"], "unknown option -x"],
+    [["doctor", "--verbose"], "unknown option --verbose"],
+    [["doctor", "extra"], "unexpected argument extra"],
+    [["scan", ".", "--json"], "unknown option --json"],
+    [["scan", "a", "b"], "unexpected argument b"],
+    [["status", "--all"], "unknown option --all"],
+    [["watch", "--no-opn"], "unknown option --no-opn"],
+    [["watch", "a", "b"], "unexpected argument b"],
+  ];
+  for (const [argv, message] of cases) {
+    assert.deepEqual(await dispatched(argv), { ran: [], exit: 1, said: [message] }, argv.join(" "));
+  }
+});
+
+test("the flags each hand-parsed command documents still reach it", async () => {
+  const cases: string[][] = [
+    ["install"],
+    ["install", "--skip-browser", "--no-register", "--no-command"],
+    ["install", "--browser-only", "--browsers", "firefox,webkit"],
+    ["install", "--browsers=all", "--client", "cursor", "--clients=vscode"],
+    // A valued flag's value is not read as a flag of its own.
+    ["install", "--client", "-weird"],
+    ["doctor"],
+    ["doctor", "--engine"],
+    ["scan", "."],
+    ["status"],
+    ["status", "some/project"],
+    ["watch", "--no-open"],
+    ["watch", "some/project", "--no-open"],
+  ];
+  for (const argv of cases) assert.deepEqual(await dispatched(argv), { ran: [argv.join(" ")], exit: null, said: [] }, argv.join(" "));
+});
+
+test("check, ci and login keep their own option parsing, and serve starts whatever else it is given", async () => {
+  // Their parsers refuse unknown options with their own exit codes (check and ci exit 2), so the preflight leaves them be.
+  for (const argv of [
+    ["check", "http://127.0.0.1:3000", "--nope"],
+    ["ci", "http://127.0.0.1:3000", "--nope"],
+    ["login", "http://127.0.0.1:3000", "--nope"],
+    ["serve", "--stray"],
+  ]) {
+    assert.deepEqual((await dispatched(argv)).ran, [argv.join(" ")], argv.join(" "));
+  }
+});
+
+test("the top level: help, version, and an unknown or missing command", async () => {
+  for (const help of ["--help", "-h", "help"]) assert.deepEqual(await dispatched([help]), { ran: [], exit: 0, said: ["usage"] });
+  for (const v of ["--version", "-v"]) assert.deepEqual(await dispatched([v]), { ran: [], exit: null, said: ["version"] });
+  assert.deepEqual(await dispatched(["instal"]), { ran: [], exit: 1, said: ["usage"] });
+  assert.deepEqual(await dispatched([]), { ran: [], exit: 1, said: ["usage"] });
+  // An inherited property is not a command.
+  assert.deepEqual(await dispatched(["constructor"]), { ran: [], exit: 1, said: ["usage"] });
+});
+
+test("every flag install and doctor read in cli.ts is one the preflight accepts", () => {
+  const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts"), "utf8");
+  for (const command of ["install", "doctor"] as const) {
+    const start = source.indexOf(`async function ${command}(flags: string[])`);
+    assert.ok(start >= 0, `cli.ts has no ${command}(flags) function`);
+    const body = source.slice(start, source.indexOf("\n}\n", start));
+    const read = new Set(
+      [...body.matchAll(/flags(?:\.includes\(|, )"(--[a-z-]+)"|\["(--[a-z-]+)", "(--[a-z-]+)"\]/g)].flatMap((m) => m.slice(1).filter(Boolean)),
+    );
+    assert.ok(read.size > 0, `found no flags in ${command}()`);
+    const spec = HAND_PARSED[command];
+    for (const flag of read) assert.ok([...spec.switches, ...spec.valued].includes(flag), `${command} reads ${flag}, which the preflight would refuse`);
+  }
 });
