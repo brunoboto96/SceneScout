@@ -237,12 +237,14 @@ test("the lock holds across real processes: concurrent read-modify-write loses n
     const children = 4;
     const rounds = 10;
     const child = path.join(here, "refresh-lock-child.ts");
-    const tsx = path.join(here, "..", "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
+    // Node itself with tsx's loader, never the npx/tsx shim: Windows refuses to
+    // spawn a .cmd without a shell (EINVAL), and a shell is not wanted here.
+    const loader = import.meta.resolve("tsx");
     const runs = Array.from(
       { length: children },
       () =>
         new Promise<number>((resolve, reject) => {
-          const p = spawn(tsx, [child, lock, counter, String(rounds)], { stdio: ["ignore", "ignore", "pipe"] });
+          const p = spawn(process.execPath, ["--import", loader, child, lock, counter, String(rounds)], { stdio: ["ignore", "ignore", "pipe"] });
           let err = "";
           p.stderr.on("data", (d: Buffer) => (err += d.toString()));
           p.on("error", reject);

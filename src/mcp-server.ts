@@ -324,7 +324,7 @@ async function ensureLive(dir: string): Promise<void> {
   if (!liveAddress) return;
   publishLiveToken(dir);
   // The port is new, so a reader polling status.json needs it rewritten.
-  flushStatus(dir);
+  void flushStatus(dir);
 }
 
 function startLiveServer(): Promise<void> {
@@ -358,12 +358,12 @@ function liveLine(): string {
   );
 }
 
-function flushStatus(dir: string): void {
-  // Fire-and-forget: status is best-effort observability on every tool call's
-  // hot path and must never add blocking filesystem latency. The writer
-  // queues writes per directory and lands each by rename, so a reader never
-  // sees a torn file.
-  void writeStatusFile(
+function flushStatus(dir: string): Promise<void> {
+  // Not awaited on a tool call's hot path: status is best-effort observability
+  // and must never add blocking filesystem latency there. The writer queues
+  // writes per directory and lands each by rename, so a reader never sees a
+  // torn file. scout_close awaits it through settleProjectWrites.
+  return writeStatusFile(
     dir,
     JSON.stringify(
       {
@@ -383,6 +383,23 @@ function flushStatus(dir: string): void {
       2,
     ),
   );
+}
+
+/** The latest ensureLive per project, so a close can wait for the token and status writes it starts. */
+const liveStarts = new Map<string, Promise<void>>();
+
+/**
+ * Everything the server has started writing into a project, landed: the live
+ * view's start (it writes the token file and rewrites status once its port is
+ * known), the token file, then this status write, queued behind any earlier
+ * one. scout_close awaits it, so once a close has answered nothing more is
+ * written into the project, which may then be removed. None of these reject.
+ */
+async function settleProjectWrites(dir: string): Promise<void> {
+  await liveStarts.get(dir);
+  liveStarts.delete(dir);
+  await liveTokenWrites.get(dir);
+  await flushStatus(dir);
 }
 
 /**
@@ -406,8 +423,8 @@ function writeStatus(session: string, phase: "running" | "idle", tool: string, b
     ...(objective ? { objective: redactSecrets(objective) } : {}),
     ...(task ? { task: redactSecrets(task) } : {}),
   });
-  void ensureLive(dir);
-  flushStatus(dir);
+  liveStarts.set(dir, ensureLive(dir));
+  void flushStatus(dir);
 }
 
 /** The watchdog's timeout answer — a diagnosable result, not a hang. */
@@ -1784,7 +1801,7 @@ server.registerTool(
         board.clear();
         laneLedger.clear();
         lastWriter = null;
-        for (const dir of dirs) flushStatus(dir);
+        await Promise.all([...dirs].map((dir) => settleProjectWrites(dir)));
         return text(`All sessions closed (${names.join(", ") || "none were live"}). Memory and reports remain in .scenescout/.`, activeName);
       }
       const name = session ?? activeName;
@@ -1806,7 +1823,7 @@ server.registerTool(
       // names that never attached must not make a later run's session a lane.
       if (engines.size === 0) laneLedger.clear();
       if (lastWriter?.session === name) lastWriter = null;
-      if (eng.memory?.dir) flushStatus(eng.memory.dir);
+      if (eng.memory?.dir) await settleProjectWrites(eng.memory.dir);
       if (activeName === name) activeName = engines.keys().next().value ?? "default";
       return text(
         `Session "${name}" closed. Memory and report remain in .scenescout/.` +

@@ -332,6 +332,17 @@ ${late.slice(0, 400)}`);
   }
 }
 
+/** Every file under a directory with its size and modification time, as one string to compare. */
+function treeState(dir: string): string {
+  return (fs.readdirSync(dir, { recursive: true }) as string[])
+    .sort()
+    .map((name) => {
+      const st = fs.statSync(path.join(dir, name));
+      return `${name}:${st.size}:${st.mtimeMs}`;
+    })
+    .join("\n");
+}
+
 /**
  * A lane that lost its sign-in says so where the planner folds its report,
  * not only in its own calls: the line is added by the server's scout_lane_report,
@@ -396,6 +407,14 @@ async function reattachLaneCheck(client: Client): Promise<void> {
     if (!/Lane report accepted/.test(quiet) || quiet.includes("↻")) fail(`a lane that never lost its sign-in was reported as re-attached:\n${quiet}`);
     console.log("✓ a folded lane report names a lane that re-attached, or whose re-attach failed, and no other");
     assertClosedAll(await call("scout_close", { all: true }));
+    // Once a close has answered, nothing more is written into the project: a
+    // caller may remove it straight away. A status write left in flight after
+    // the answer lands in a directory being removed (ENOTEMPTY on Node 20).
+    const settled = treeState(projectDir);
+    await new Promise((r) => setTimeout(r, 300));
+    if (treeState(projectDir) !== settled) fail("the project directory was still being written after scout_close answered");
+    fs.rmSync(projectDir, { recursive: true });
+    console.log("✓ scout_close answers only once its last write has landed");
   } finally {
     fixture.close();
     fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
