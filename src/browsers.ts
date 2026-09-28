@@ -240,6 +240,20 @@ export function frameUnloadWritesMayGoUnissued(engine: BrowserEngineName): boole
 }
 
 /**
+ * Whether a page must wait, after it is left, for the write policy to answer
+ * what it sent on its way out before it is closed. Firefox can hand a beacon
+ * sent on pagehide to the route handler after the navigation away has
+ * returned, and a request still waiting for its answer when its page closes
+ * goes out unjudged: 9 of 80 foreign popups left and closed at once let their
+ * refused beacon reach the server. Chromium's browser-level interception
+ * judges it whatever the page's state, and WebKit met none in the same loop,
+ * so neither pays for the wait.
+ */
+export function closeWaitsForLeavingWrites(engine: BrowserEngineName): boolean {
+  return engine === "firefox";
+}
+
+/**
  * Whether a write carried on by a redirect (a 307 or 308 keeps the method and
  * the body) is judged at its new address. The route handler sees only the
  * first request of a redirect in every engine. In Chromium the browser-level
