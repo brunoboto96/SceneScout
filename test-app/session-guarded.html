@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Your account</title>
+  </head>
+  <body>
+    <!--
+      Served at every /ss-* page. A single-page app that keeps its sign-in ONLY
+      in sessionStorage and asks the server whether it still holds: a live
+      token shows the signed-in page; a token the server revoked is dropped
+      from sessionStorage and the tab is sent to /login, as a client-side
+      session guard does after a 401. /ss-signin issues the token.
+    -->
+    <main>
+      <h1 data-testid="session-guarded-heading">Checking your session</h1>
+    </main>
+    <script>
+      const token = sessionStorage.getItem("fixture_token") || "";
+      fetch("/ss-api/me", { headers: { authorization: `Bearer ${token}` } }).then((res) => {
+        if (res.ok) {
+          document.querySelector("h1").textContent = "Signed in as a member";
+          return;
+        }
+        sessionStorage.removeItem("fixture_token");
+        location.replace("/login");
+      });
+    </script>
+  </body>
+</html>
