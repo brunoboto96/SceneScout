@@ -11,7 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawnSync } from "node:child_process";
 import { writeProfile } from "../dist/engine/profiles.js";
-import { revokeFixtureTokens, startFixtureServer, TOKEN_COOKIE } from "./smoke/harness.ts";
+import { revokeFixtureTokens, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE } from "./smoke/harness.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverPath = path.join(here, "..", "dist", "mcp-server.js");
@@ -138,6 +138,71 @@ async function liveViewCheck(client: Client): Promise<string> {
     fixture.close();
   }
   return projectDir;
+}
+
+/**
+ * Lane briefs for a session attached by a saved role check that login lasts
+ * the run first. The check and its two settings live in the server's
+ * scout_lane_brief, so they are driven over the wire: a login that ends
+ * inside the run is refused, the same login passes a shorter run or a smaller
+ * margin, and one credential ending early beside a long-lived one is a warning
+ * on top of the briefs.
+ */
+async function expiryBriefCheck(client: Client): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-expiry-"));
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
+  const nowS = Math.floor(Date.now() / 1000);
+  const cookie = (name: string, minutes: number) => ({
+    name,
+    value: "member",
+    domain: "127.0.0.1",
+    path: "/",
+    expires: nowS + minutes * 60,
+    httpOnly: true,
+    secure: false,
+    sameSite: "Lax",
+  });
+  // One login that ends in 30 minutes; one whose first cookie ends in 20 but whose other lasts 30 days.
+  writeProfile(projectDir, "short", { cookies: [cookie(SIGN_IN_COOKIE, 30)], origins: [] });
+  writeProfile(projectDir, "mixed", { cookies: [cookie(SIGN_IN_COOKIE, 20), cookie("remember_me", 30 * 24 * 60)], origins: [] });
+  const brief = (session: string, extra: Record<string, unknown> = {}): Promise<string> =>
+    call("scout_lane_brief", { session, lanes: 2, routes: ["/orders/a", "/reports/b"], ...extra });
+  const briefed = (reply: string): boolean => reply.includes("── orders ──") && reply.includes("── reports ──");
+  try {
+    for (const role of ["short", "mixed"]) {
+      await call("scout_attach", {
+        url: `${fixture.baseUrl}/cookie-account`,
+        projectPath: projectDir,
+        session: role,
+        mode: "read-only",
+        role,
+        objective: `${role} planner`,
+      });
+    }
+    const refused = await brief("short");
+    if (!/will not last the run: it ends in \d+m\d\ds \(cookie "fixture_session"\)/.test(refused) || briefed(refused))
+      fail(`a login ending inside the default run was not refused:\n${refused}`);
+    if (!refused.includes("scenescout login")) fail(`the refusal did not name the command that records the login again:\n${refused}`);
+    const shorter = await brief("short", { runMinutes: 15, expiryMarginMinutes: 5 });
+    if (!briefed(shorter) || shorter.includes("⚠")) fail(`a run that fits inside the login was not briefed plainly:\n${shorter}`);
+    const tightMargin = await brief("short", { runMinutes: 25, expiryMarginMinutes: 10 });
+    if (!/will not last the run/.test(tightMargin)) fail(`the margin was not counted: 25 + 10 minutes outlasts a 30-minute login:\n${tightMargin}`);
+    const noMargin = await brief("short", { runMinutes: 25, expiryMarginMinutes: 0 });
+    if (!briefed(noMargin)) fail(`a zero margin was not honoured:\n${noMargin}`);
+    console.log("✓ scout_lane_brief refuses a saved login that ends inside the run, counting runMinutes and expiryMarginMinutes");
+    const warned = await brief("mixed", { runMinutes: 30, expiryMarginMinutes: 0 });
+    if (
+      !/^⚠ In the saved sign-in for role "mixed", cookie "fixture_session" expires in \d+m\d\ds/.test(warned.replace(/^\[session [^\]]*\]\n/, "")) ||
+      !briefed(warned)
+    )
+      fail(`a credential ending inside the run beside a long-lived one was not a warning above the briefs:\n${warned}`);
+    console.log("✓ ...and warns, still briefing, when only one of several credentials ends inside it");
+    assertClosedAll(await call("scout_close", { all: true }));
+  } finally {
+    fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 }
 
 /**
@@ -517,6 +582,7 @@ async function main(): Promise<void> {
   }
   console.log("✓ scout_scan round-trip works");
 
+  await expiryBriefCheck(client);
   await laneCheck(client);
   await reattachLaneCheck(client);
   const liveProject = await liveViewCheck(client);

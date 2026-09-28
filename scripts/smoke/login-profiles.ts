@@ -15,7 +15,7 @@ import path from "node:path";
 import { chromium, firefox, webkit, type Page } from "playwright";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { profilePath, writeProfile } from "../../dist/engine/profiles.js";
-import { captureState } from "../../dist/login-run.js";
+import { saveLogin, savedLine } from "../../dist/login-run.js";
 import { BROWSER, check, SIGN_IN_COOKIE, type SmokeContext } from "./harness.ts";
 
 export const title = "login profiles";
@@ -57,9 +57,19 @@ export async function run({ baseUrl, foreignBaseUrl }: SmokeContext): Promise<vo
       const page = await context.newPage();
       await page.goto(`${baseUrl}/cookie-signin`);
       check("the fixture's sign-in lands on the signed-in page", (await page.textContent("h1")) === SIGNED_IN, await page.content());
-      const saved = writeProfile(project, "member", await captureState(context));
+      const options = { url: `${baseUrl}/cookie-account`, role: "member", projectDir: project };
+      const saved = await saveLogin(context, options);
       check("the profile is saved under .scenescout/auth/<role>.json", saved.path === path.join(project, ".scenescout", "auth", "member.json"), saved.path);
       check("...holding the sign-in cookie", saved.summary.cookies >= 1, JSON.stringify(saved.summary));
+      // What `scenescout login` prints once saved: how long the login lasts, read
+      // from the cookie the fixture sets for an hour, by name and never by value.
+      const printed = savedLine(options, saved);
+      check(
+        "login's output says how long the saved sign-in lasts, from the cookie that dates it",
+        /\nLasts: about (59m\d\ds|1h00m) \(the last dated credential, cookie "fixture_session"\)\.\n/.test(printed),
+        printed,
+      );
+      check("...and never prints the cookie's value", !printed.includes("=member"), printed);
     } finally {
       await browser.close();
     }
@@ -158,13 +168,13 @@ export async function run({ baseUrl, foreignBaseUrl }: SmokeContext): Promise<vo
       await page.goto(`${baseUrl}/session-signin.html`);
       await page.waitForURL(`${baseUrl}/session-account.html`);
       check("the fixture's session sign-in lands signed in", (await page.textContent("h1")) === SESSION_IN, await page.content());
-      const saved = writeProfile(project, "spa", await captureState(context));
+      const saved = await saveLogin(context, { url: baseUrl, role: "spa", projectDir: project });
       check("the capture keeps the origin's sessionStorage", saved.summary.sessionOrigins === 1, JSON.stringify(saved.summary));
       writeProfile(project, "spa-legacy", await context.storageState());
       // The IndexedDB sign-in, recorded the same two ways.
       await page.goto(`${baseUrl}/idb-signin.html`);
       await page.waitForFunction(() => document.querySelector("p")?.textContent === "Stored the IndexedDB token");
-      const idb = writeProfile(project, "idb", await captureState(context));
+      const idb = await saveLogin(context, { url: baseUrl, role: "idb", projectDir: project });
       check("the capture keeps IndexedDB", idb.summary.indexedDBs >= 1, JSON.stringify(idb.summary));
       writeProfile(project, "idb-legacy", await context.storageState());
     } finally {
