@@ -63,6 +63,8 @@ jobs:
       id-token: write # npm trusted publishing + provenance
     outputs:
       pr-number: ${{ steps.changesets.outputs.pr-number }}
+      published: ${{ steps.changesets.outputs.published }}
+      tag: ${{ steps.major.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -105,6 +107,7 @@ jobs:
       # setting ever refuses it, the refusal becomes a warning rather than a red
       # release.
       - name: Point the major tag at this release
+        id: major
         if: steps.changesets.outputs.published == 'true'
         # The version comes from package.json, not the action's publishedPackages
         # output: @changesets/cli 3 prints its publish summary in a format the
@@ -112,6 +115,8 @@ jobs:
         # still set, and publishing only ever releases this commit's version.
         run: |
           version=$(node -p 'require("./package.json").version')
+          # The exact tag, for publish-guide: prereleases included, which "latest release" would skip.
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
           if ! git rev-parse --verify --quiet "refs/tags/v$version" > /dev/null; then
             echo "::warning title=Major tag not updated::No v$version tag was created by the publish, so the major tag stays where it is."
             exit 0
@@ -150,5 +155,24 @@ jobs:
       - name: Run the wave hold check on the version pull request
         run: gh workflow run wave-hold.yml --ref changeset-release/main
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+
+  # The GitHub Release above is made with this workflow's own token, and events
+  # made with that token start no workflows, so guide-wiki's `release` trigger
+  # does not fire for it. This dispatches it instead, for the release just
+  # made. A separate job, for the same reason as test-version-pr.
+  publish-guide:
+    needs: release
+    if: needs.release.outputs.published == 'true' && needs.release.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Publish the guide to the wiki
+        run: gh workflow run guide-wiki.yml --ref main -f ref="$TAG"
+        env:
+          TAG: ${{ needs.release.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

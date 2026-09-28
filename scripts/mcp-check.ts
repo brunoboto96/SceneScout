@@ -594,6 +594,37 @@ async function main(): Promise<void> {
   }
   console.log(`✓ skill documents every non-exempt tool parameter`);
 
+  // The guide (docs/guide/) names tools and their parameters for people, and
+  // its configuration reference lists scout_attach's options. Both are held
+  // to the schemas the server actually serves; guide-test covers the rest.
+  const guideDir = path.join(packageRoot, "docs", "guide");
+  const guideGaps: string[] = [];
+  const schemaOf = new Map(tools.map((t) => [t.name, Object.keys((t.inputSchema as { properties?: Record<string, unknown> }).properties ?? {})]));
+  for (const file of fs.readdirSync(guideDir).filter((f) => f.endsWith(".md"))) {
+    const text = fs.readFileSync(path.join(guideDir, file), "utf8").replace(/\r\n?/g, "\n");
+    for (const m of text.matchAll(/\b(scout_[a-z_]+)\b/g)) if (!m[1].endsWith("_") && !names.includes(m[1])) guideGaps.push(`${file}: no tool ${m[1]}`);
+    // `scout_attach {role: "admin"}`, `scout_verify {id, verdict, note}`: each key must be a parameter.
+    for (const m of text.matchAll(/\b(scout_[a-z_]+)\s*\{([^}]*)\}/g)) {
+      const params = schemaOf.get(m[1]) ?? [];
+      for (const item of m[2].split(",")) {
+        const key = item.match(/^\s*([A-Za-z]+)\s*(?::|$)/)?.[1];
+        if (key && !params.includes(key)) guideGaps.push(`${file}: ${m[1]} has no parameter ${key}`);
+      }
+    }
+  }
+  const reference = fs.readFileSync(path.join(guideDir, "Configuration-reference.md"), "utf8").replace(/\r\n?/g, "\n");
+  const attachSection = reference.split("\n## `scout_attach` options\n")[1] ?? "";
+  const listed = [...attachSection.matchAll(/^\| `([A-Za-z]+)` \|/gm)].map((m) => m[1]).sort();
+  const attachParams = [...(schemaOf.get("scout_attach") ?? [])].sort();
+  if (JSON.stringify(listed) !== JSON.stringify(attachParams)) {
+    guideGaps.push(`Configuration-reference.md lists scout_attach options [${listed.join(", ")}], the server has [${attachParams.join(", ")}]`);
+  }
+  if (guideGaps.length > 0) {
+    console.error(`MCP CHECK FAILED — the guide disagrees with the server's tools:\n  ${guideGaps.join("\n  ")}`);
+    process.exit(1);
+  }
+  console.log("✓ the guide names only tools and parameters the server has, and lists every scout_attach option");
+
   const result = await client.callTool({ name: "scout_scan", arguments: { projectPath: packageRoot } });
   const text = (result.content as Array<{ type: string; text?: string }>).map((c) => c.text ?? "").join("");
   if (!text.includes("Project:")) {
