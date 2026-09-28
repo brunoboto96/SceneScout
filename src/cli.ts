@@ -65,6 +65,7 @@ import {
   type StatusFile,
 } from "./engine/live.js";
 import { formatScan, scanProject } from "./scan.js";
+import { dispatch } from "./commands.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(here, "..");
@@ -334,13 +335,6 @@ function flagValue(flags: string[], name: string): string | undefined {
   return next === undefined || next.startsWith("--") ? "" : next;
 }
 
-function browsersFlag(flags: string[]): string | undefined {
-  // `--browser-only` is a different flag; a bare `--browser` is a slip that would otherwise be ignored and download Chromium.
-  const slip = flags.find((f) => f === "--browser" || f.startsWith("--browser="));
-  if (slip) throw new Error(`unknown flag ${slip.split("=")[0]} — did you mean --browsers?`);
-  return flagValue(flags, "--browsers");
-}
-
 /** The `code` command on PATH, with its real path: the real path is what tells VS Code from a fork. */
 function codeOnPath(): CodeOnPath | null {
   const names = process.platform === "win32" ? ["code.cmd", "code.exe"] : ["code"];
@@ -387,7 +381,7 @@ async function install(flags: string[]): Promise<void> {
   // only thing it cannot bring is the browser download.
   const browserOnly = flags.includes("--browser-only");
   // Read the choice before doing anything, so a typo costs nothing.
-  const selection = parseBrowserSelection(browsersFlag(flags));
+  const selection = parseBrowserSelection(flagValue(flags, "--browsers"));
   if ("error" in selection) throw new Error(selection.error);
   const chosen = parseClients(flagValues(flags, ["--client", "--clients"]));
   if ("error" in chosen) throw new Error(chosen.error);
@@ -553,7 +547,6 @@ async function doctor(flags: string[]): Promise<void> {
 
 /** `scenescout check`: exit 0 passed, 1 failed the gate, 2 could not run. */
 async function check(args: string[]): Promise<never> {
-  if (args.includes("--help") || args.includes("-h")) usage(0);
   const parsed = parseCheckArgs(args, process.cwd());
   if (!parsed.ok) {
     console.error(`scenescout check: ${parsed.error}`);
@@ -611,7 +604,6 @@ async function check(args: string[]): Promise<never> {
 
 /** `scenescout ci`: exit 0 when the run ran, 2 when it could not. Findings never change the exit code. */
 async function ci(args: string[]): Promise<never> {
-  if (args.includes("--help") || args.includes("-h")) usage(0);
   const secrets = secretValues(process.env);
   const say = (line: string): void => console.log(redactKeys(line, secrets));
   const fail = (message: string): never => {
@@ -651,7 +643,6 @@ async function ci(args: string[]): Promise<never> {
 
 /** `scenescout login`: exit 0 saved, 1 nothing saved. */
 async function login(args: string[]): Promise<never> {
-  if (args.includes("--help") || args.includes("-h")) usage(0);
   const parsed = parseLoginArgs(args, process.cwd());
   if (!parsed.ok) {
     console.error(`scenescout login: ${parsed.error}`);
@@ -694,60 +685,34 @@ const [, , command, ...args] = process.argv;
 // one line the user needs. `serve` is deliberately outside this: it hands off
 // to the MCP server, whose own transport owns error reporting from then on.
 try {
-  switch (command) {
-    // Asking for help is not an error; scripts and shells treat a non-zero
-    // exit as one.
-    case "--help":
-    case "-h":
-    case "help":
-      usage(0);
-    case "--version":
-    case "-v": {
-      console.log(packageVersion());
-      break;
-    }
-    case "scan": {
-      const target = args[0];
-      if (!target) usage();
-      console.log(formatScan(scanProject(target)));
-      break;
-    }
-    case "serve": {
-      await import("./mcp-server.js");
-      break;
-    }
-    case "install": {
-      await install(args);
-      break;
-    }
-    case "doctor": {
-      await doctor(args);
-      break;
-    }
-    case "check": {
-      await check(args);
-      break;
-    }
-    case "ci": {
-      await ci(args);
-      break;
-    }
-    case "login": {
-      await login(args);
-      break;
-    }
-    case "status": {
-      status(path.resolve(args[0] ?? process.cwd()));
-      break;
-    }
-    case "watch": {
-      const positional = args.filter((a) => !a.startsWith("--"));
-      watch(path.resolve(positional[0] ?? process.cwd()), !args.includes("--no-open"));
-      break;
-    }
-    default:
-      usage();
-  }
+  await dispatch(command, args, {
+    usage,
+    version: () => console.log(packageVersion()),
+    refuse: (message) => {
+      console.error(`scenescout ${command}: ${message}`);
+      console.error("Run `scenescout --help` for the options.");
+      process.exit(1);
+    },
+    commands: {
+      scan: (a) => {
+        if (!a[0]) usage();
+        console.log(formatScan(scanProject(a[0])));
+      },
+      serve: async () => {
+        await import("./mcp-server.js");
+      },
+      install,
+      doctor,
+      check,
+      ci,
+      login,
+      status: (a) => status(path.resolve(a[0] ?? process.cwd())),
+      watch: (a) => {
+        const positional = a.filter((x) => !x.startsWith("--"));
+        watch(path.resolve(positional[0] ?? process.cwd()), !a.includes("--no-open"));
+      },
+    },
+  });
 } catch (err) {
   console.error(`scenescout ${command ?? ""}: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
