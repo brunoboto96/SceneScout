@@ -12,9 +12,6 @@ import { DIALOG_LIKE_SEL } from "./collector.js";
 import { focusAdvanceKey, isBrowserEngine } from "../browsers.js";
 import type { FocusSample } from "./design.js";
 
-/** Per-action Playwright timeout, shared with the engine so a scroll into view fails as fast as a click would. */
-export const ACTION_TIMEOUT_MS = 5000;
-
 /**
  * Scroll ONE named region rather than the page. The page-level heuristic
  * picks the largest scrollable pane, so a smaller independently-scrolling
@@ -23,7 +20,14 @@ export const ACTION_TIMEOUT_MS = 5000;
  * away. Resolves the element, then scrolls the nearest scrollable ancestor
  * (the target itself is usually the content, not the scroll port).
  */
-export async function scrollContainer(page: Page, target: string, to?: "top" | "bottom", by?: number): Promise<{ refused?: string; note: string }> {
+export async function scrollContainer(
+  page: Page,
+  target: string,
+  to: "top" | "bottom" | undefined,
+  by: number | undefined,
+  /** The session's action limit, so a scroll into view fails as fast as a click would. */
+  timeoutMs: number,
+): Promise<{ refused?: string; note: string }> {
   let locator;
   if (target.startsWith("testid=")) locator = page.locator(`[data-testid=${JSON.stringify(target.slice(7))}]`).first();
   else if (target.startsWith("text=")) locator = page.getByText(target.slice(5), { exact: false }).first();
@@ -56,7 +60,7 @@ export async function scrollContainer(page: Page, target: string, to?: "top" | "
         };
       },
       { edge: to ?? null, delta: amount },
-      { timeout: ACTION_TIMEOUT_MS },
+      { timeout: timeoutMs },
     )
     .catch(() => undefined);
   if (outcome === undefined) return { refused: `Scroll target not found: ${target}`, note: "" };

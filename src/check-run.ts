@@ -81,6 +81,8 @@ export async function runCheck(
       mode: options.mode,
       storageStatePath: options.storageStatePath,
       ...(options.browser ? { browser: options.browser } : {}),
+      actionTimeoutMs: options.actionTimeoutMs,
+      navTimeoutMs: options.navTimeoutMs,
       objective: "Deterministic check: visit every route and measure it",
       task: "Checking every route",
     });

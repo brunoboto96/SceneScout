@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Slow page</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="slow-heading">Slow page</h1>
+      <p>The server holds this page back before answering, and "Go" stays disabled for a while after "Start" is pressed.</p>
+      <button type="button" data-testid="slow-start">Start</button>
+      <button type="button" data-testid="slow-go">Go</button>
+      <p data-testid="slow-status">Idle</p>
+    </main>
+    <script>
+      // A control that becomes usable some time after it appears, as one does
+      // while the app finishes loading its data. How long a click may wait for
+      // it decides whether the click fails or lands.
+      var go = document.querySelector('[data-testid="slow-go"]');
+      var status = document.querySelector('[data-testid="slow-status"]');
+      document.querySelector('[data-testid="slow-start"]').addEventListener("click", function () {
+        go.disabled = true;
+        status.textContent = "Waiting";
+        setTimeout(function () {
+          go.disabled = false;
+        }, 6000);
+      });
+      go.addEventListener("click", function () {
+        status.textContent = "Went";
+        document.title = "Slow page: went";
+      });
+    </script>
+  </body>
+</html>

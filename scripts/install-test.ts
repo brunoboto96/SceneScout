@@ -49,6 +49,7 @@ import {
   allowedUnloadWritesMayBeLost,
   writeRedirectHopsJudged,
   frameUnloadWritesMayGoUnissued,
+  closeWaitsForLeavingWrites,
 } from "../src/browsers.ts";
 
 import { explorePrompt, loadPlaybook, PLAYBOOK_RELATIVE_PATH, SERVER_INSTRUCTIONS, stripFrontMatter } from "../src/playbook.ts";
@@ -1091,7 +1092,7 @@ test("npm failing with nothing on stderr is still given a reason", () => {
   assert.equal(killed.status === "failed" ? killed.detail : "", "npm exited without finishing");
 });
 
-test("a beacon is a ping in Chromium and a beacon elsewhere; only Chromium needs its unload writes caught at the browser level and judges a redirect's later hops, and only WebKit may lose an unload write it lets through", () => {
+test("a beacon is a ping in Chromium and a beacon elsewhere; only Chromium needs its unload writes caught at the browser level and judges a redirect's later hops, only WebKit may lose an unload write it lets through, and only Firefox must wait for a left page's writes to be judged before closing it", () => {
   assert.deepEqual(
     (["chromium", "firefox", "webkit"] as const).map((e) => [
       e,
@@ -1100,11 +1101,12 @@ test("a beacon is a ping in Chromium and a beacon elsewhere; only Chromium needs
       allowedUnloadWritesMayBeLost(e),
       writeRedirectHopsJudged(e),
       frameUnloadWritesMayGoUnissued(e),
+      closeWaitsForLeavingWrites(e),
     ]),
     [
-      ["chromium", "ping", "browser-fetch", false, true, false],
-      ["firefox", "beacon", "route", false, false, true],
-      ["webkit", "beacon", "route", true, false, false],
+      ["chromium", "ping", "browser-fetch", false, true, false, false],
+      ["firefox", "beacon", "route", false, false, true, true],
+      ["webkit", "beacon", "route", true, false, false, false],
     ],
   );
 });

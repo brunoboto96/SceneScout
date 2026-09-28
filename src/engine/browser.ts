@@ -57,7 +57,6 @@ import { formatJourney, measureJourney } from "./journey.js";
 import {
   describeStep,
   FLOW_AFTER_LAST_STEP_MS,
-  FLOW_STEP_TIMEOUT_MS,
   isAction,
   matchRequest,
   parseTarget,
@@ -80,6 +79,7 @@ import {
   serviceWorkerPolicy,
   sharedWorkersAllowed,
   unloadWriteInterception,
+  closeWaitsForLeavingWrites,
   type BrowserEngineName,
 } from "../browsers.js";
 import { revealedLines } from "./hover.js";
@@ -100,7 +100,8 @@ import {
   type FormProbe,
 } from "./forms.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
-import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
+import { DEFAULT_TIME_LIMITS, explainTimeout, limitHint, resolveTimeLimits, type LimitKind, type TimeLimits } from "./limits.js";
+import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
 import {
@@ -213,6 +214,10 @@ export interface AttachOptions {
   task?: string;
   /** Keep a frame of the page after each action, under .scenescout/recordings/. Off by default; evidence for QA work. */
   record?: boolean;
+  /** How long one action on the page may take. Default: SCENESCOUT_ACTION_TIMEOUT_MS, else 5000 (see limits.ts). */
+  actionTimeoutMs?: number;
+  /** How long a page may take to load. Default: SCENESCOUT_NAV_TIMEOUT_MS, else 20000 (see limits.ts). */
+  navTimeoutMs?: number;
   /**
    * Origins of embedded frames whose writes out of the app may go out in
    * safe-write mode — a provider in test mode, named by the user. Hostile
@@ -470,6 +475,12 @@ const RECORD_SHOT_TIMEOUT_MS = 2500;
 
 export class BrowserEngine {
   private browser: Browser | null = null;
+  /** How long an action and a page load may take; set at attach (limits.ts). */
+  private limits: TimeLimits = DEFAULT_TIME_LIMITS;
+  /** The limits this session runs with, so the server can size its watchdogs to them. */
+  get timeLimits(): TimeLimits {
+    return this.limits;
+  }
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private oracles = new OracleMonitor();
@@ -824,6 +835,8 @@ export class BrowserEngine {
    * as long as the browser, so a page closed at the end still meets it.
    */
   private readonly routedWrites = new RoutedWrites();
+  /** Requests the route handler is still judging, by the page that sent them: a page is closed only once its own are answered. */
+  private readonly routesInFlight = new Map<Page, Set<Promise<unknown>>>();
   /** Writes refused at the browser level, so the driver's own report of them (a redirect hop failing) is known as the policy's doing. */
   private readonly unseenRefusals = new UnseenRefusals();
 
@@ -1002,8 +1015,9 @@ export class BrowserEngine {
   }
 
   async attach(opts: AttachOptions): Promise<string> {
-    // Resolved before anything is closed, so a bad role or a missing profile
-    // leaves a live session as it was.
+    // Resolved before anything is closed, so a bad role, a missing profile or
+    // a time limit out of bounds leaves a live session as it was.
+    const limits = resolveTimeLimits(opts, process.env);
     const auth = resolveAttachAuth({ projectDir: opts.projectDir, url: opts.url, role: opts.role, storageStatePath: opts.storageStatePath });
     const brokered = brokerEnabled({ roleSession: auth.kind === "role", option: opts.refreshBroker, env: process.env[REFRESH_BROKER_ENV] });
     const storageStatePath = auth.kind === "none" ? undefined : auth.storageStatePath;
@@ -1022,6 +1036,7 @@ export class BrowserEngine {
       }
     }
     await this.close();
+    this.limits = limits;
     this.auth = auth;
     this.role = roleLabel(auth);
     this.authLoss.beginSession(auth.kind, this.role);
@@ -1208,7 +1223,7 @@ export class BrowserEngine {
 
     // Write policy — enforced on the wire, where the truth lives.
     if (this.mode !== "destructive") {
-      await this.context.route("**/*", async (route) => {
+      const judge = async (route: Route): Promise<unknown> => {
         const req = route.request();
         const method = req.method();
         // Read once, as the request arrives: the rule the page sent it under (policy.ts WriteRule), not whatever holds after an await below.
@@ -1355,7 +1370,8 @@ export class BrowserEngine {
           return route.continue();
         }
         return refuse();
-      });
+      };
+      await this.context.route("**/*", (route) => this.judgeTracked(route, judge));
       // Chromium never routes a write a page sends as it is being left; it is judged at the browser level instead.
       if (unloadWriteInterception(this.engineName) === "browser-fetch" && this.browser) {
         try {
@@ -1378,7 +1394,7 @@ export class BrowserEngine {
     // silently escape the app under test.
     this.context.on("page", (newPage) => {
       newPage
-        .waitForLoadState("domcontentloaded", { timeout: 10000 })
+        .waitForLoadState("domcontentloaded", { timeout: this.limits.backNavMs })
         .then(() => {
           if (newPage === this.page || newPage.isClosed()) return;
           const sameOrigin = this.isSameOrigin(newPage.url());
@@ -1396,7 +1412,7 @@ export class BrowserEngine {
             this.snapshotUrl = "";
             this.lastSnap = null;
           } else {
-            void BrowserEngine.leaveAndClose(newPage);
+            void this.leaveAndClose(newPage);
           }
         })
         .catch(() => {});
@@ -1406,11 +1422,12 @@ export class BrowserEngine {
     this.wireEmbedMoves(this.page);
 
     try {
-      await this.page.goto(opts.url, { waitUntil: "domcontentloaded", timeout: 20000 });
+      await this.page.goto(opts.url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs });
     } catch (err) {
       // Don't leave a half-attached engine (leaked browser, snapshots of about:blank).
       await this.close();
-      throw new Error(`Could not load ${opts.url} — is the app running? (${err instanceof Error ? err.message.split("\n")[0] : err})`);
+      const explained = explainTimeout(err, "nav", this.limits.navMs);
+      throw new Error(`Could not load ${opts.url} — is the app running? (${explained instanceof Error ? explained.message.split("\n")[0] : explained})`);
     }
     await this.settle();
     this.logAction({ action: "attach", url: this.page.url() });
@@ -2072,7 +2089,7 @@ export class BrowserEngine {
       const policyAbortedNavigation = url.startsWith("chrome-error://") && this.blockedRequests.length > 0;
       this.logAction({ action, target, url });
       this.logAction({ action: policyAbortedNavigation ? "write-policy:navigation-blocked" : "origin-fence:bounced", target: url.slice(0, 200), url });
-      await page.goBack({ waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+      await page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }).catch(() => {});
       url = page.url();
       this.refs.clear();
       const blocked = this.drainBlocked();
@@ -2454,6 +2471,15 @@ export class BrowserEngine {
       : `\n(state-changing requests: ${list}${extra})`;
   }
 
+  /** Run one action or page load; a timeout it throws names the limit that ran out and how to raise it. */
+  private async withinLimit<T>(kind: LimitKind, work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } catch (err) {
+      throw explainTimeout(err, kind, kind === "action" ? this.limits.actionMs : this.limits.navMs);
+    }
+  }
+
   /**
    * Click a locator the way a real user's click resolves, not the way
    * Playwright's strict actionability protocol insists on. `.click()` polls
@@ -2590,6 +2616,10 @@ export class BrowserEngine {
   }
 
   async click(ref: string, clicks = 1): Promise<string> {
+    return this.withinLimit("action", () => this.clickNow(ref, clicks));
+  }
+
+  private async clickNow(ref: string, clicks = 1): Promise<string> {
     const page = this.requirePage();
     const { el, liveLabel } = await this.resolveForAction(ref);
     const refusal = this.actionPolicyCheck(el, liveLabel);
@@ -2611,7 +2641,7 @@ export class BrowserEngine {
     // button or an input can submit a form; nothing else is asked.
     const form = !el.frame && (el.tag === "button" || el.tag === "input") ? await this.probeForm(clickTarget) : null;
     const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
-    const { forced } = await this.resilientClick(clickTarget, ACTION_TIMEOUT_MS, clicks);
+    const { forced } = await this.resilientClick(clickTarget, this.limits.actionMs, clicks);
     this.memory!.markExercised(this.currentFingerprint, el.key, clicks > 1 ? `click×${clicks}` : "click");
     this.noteFormSubmit(formState, "click", form);
     const result = await this.afterAction(clicks > 1 ? `click×${clicks}` : "click", `${el.role} "${el.name}"`);
@@ -2674,7 +2704,7 @@ export class BrowserEngine {
           return { existing: "", caretAppendable: false };
         },
         undefined,
-        { timeout: ACTION_TIMEOUT_MS },
+        { timeout: this.limits.actionMs },
       )) as { existing: string; caretAppendable: boolean };
     } catch (err) {
       throw new Error(
@@ -2683,14 +2713,14 @@ export class BrowserEngine {
     }
     const { existing, caretAppendable } = state;
     if (replace || !existing || text === "") {
-      await locator.fill(text, { timeout: ACTION_TIMEOUT_MS });
+      await locator.fill(text, { timeout: this.limits.actionMs });
       return existing && (replace || text === "") ? ` (replaced existing content ${JSON.stringify(existing.slice(0, 60))})` : "";
     }
     const appendNote = ` (APPENDED after existing content ${JSON.stringify(existing.slice(0, 60))} — pass replace=true to overwrite instead)`;
     if (!caretAppendable) {
       // Data-typed inputs (number, email, date): concatenate without a
       // separator — an injected space would invalidate the value.
-      await locator.fill(existing + text, { timeout: ACTION_TIMEOUT_MS });
+      await locator.fill(existing + text, { timeout: this.limits.actionMs });
       return appendNote;
     }
     // Native append: focus, move the caret to the end, insert via the
@@ -2713,7 +2743,7 @@ export class BrowserEngine {
         }
       },
       undefined,
-      { timeout: ACTION_TIMEOUT_MS },
+      { timeout: this.limits.actionMs },
     );
     // Space only at a word-to-word boundary: "@mention " + "hi" needs none,
     // "user@" + "x" must not become "user@ x".
@@ -2723,6 +2753,10 @@ export class BrowserEngine {
   }
 
   async type(ref: string, text: string, pressEnter = false, replace = false): Promise<string> {
+    return this.withinLimit("action", () => this.typeNow(ref, text, pressEnter, replace));
+  }
+
+  private async typeNow(ref: string, text: string, pressEnter = false, replace = false): Promise<string> {
     const page = this.requirePage();
     const { el, liveLabel } = await this.resolveForAction(ref);
     if (el.role === "file") {
@@ -2770,7 +2804,7 @@ export class BrowserEngine {
       // After the fill, before the key: the fields as they are when it submits.
       const form = !el.frame && el.tag === "input" ? await this.probeForm(locator) : null;
       const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
-      await locator.press("Enter", { timeout: ACTION_TIMEOUT_MS });
+      await locator.press("Enter", { timeout: this.limits.actionMs });
       this.noteFormSubmit(formState, "enter", form);
     }
     this.memory!.markExercised(this.currentFingerprint, el.key, "type");
@@ -2786,6 +2820,10 @@ export class BrowserEngine {
    * fixture unless `filePath` names one inside the attached project.
    */
   async upload(opts: UploadOptions): Promise<string> {
+    return this.withinLimit("action", () => this.uploadNow(opts));
+  }
+
+  private async uploadNow(opts: UploadOptions): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
     let el: SnapshotElement | null = null;
@@ -2840,7 +2878,7 @@ export class BrowserEngine {
     const { input, chooser, how } = target;
 
     const meta: FileInputMeta = await (
-      input ? input.evaluate(describeFileInput, undefined, { timeout: ACTION_TIMEOUT_MS }) : chooser!.element().evaluate(describeFileInput)
+      input ? input.evaluate(describeFileInput, undefined, { timeout: this.limits.actionMs }) : chooser!.element().evaluate(describeFileInput)
     ).catch(() => ({ accept: null, multiple: false, label: "", disabled: false, probed: false }));
     // setInputFiles never checks `disabled` — it would report success on a
     // control no user can operate.
@@ -2854,14 +2892,14 @@ export class BrowserEngine {
 
     const mutationsBefore = this.mutationRequests.length;
     const blockedBefore = this.blockedRequests.length;
-    if (chooser) await chooser.setFiles(file.payload, { timeout: ACTION_TIMEOUT_MS });
-    else await input!.setInputFiles(file.payload, { timeout: ACTION_TIMEOUT_MS });
+    if (chooser) await chooser.setFiles(file.payload, { timeout: this.limits.actionMs });
+    else await input!.setInputFiles(file.payload, { timeout: this.limits.actionMs });
     // The set call succeeding means the browser took the payload — not that
     // the app kept it. Read the input back: an app that rejects client-side
     // clears it, and then nothing would ever be sent on submit.
     const kept = await (
       input
-        ? input.evaluate((node) => (node as HTMLInputElement).files?.length ?? 0, undefined, { timeout: ACTION_TIMEOUT_MS })
+        ? input.evaluate((node) => (node as HTMLInputElement).files?.length ?? 0, undefined, { timeout: this.limits.actionMs })
         : chooser!.element().evaluate((node) => (node as HTMLInputElement).files?.length ?? 0)
     ).catch(() => -1);
 
@@ -2897,7 +2935,7 @@ export class BrowserEngine {
       return { input: fileInputs.first(), chooser: null, how: "set on the page's only file input" };
     }
     const isFileInput = await locator
-      .evaluate((node) => node instanceof HTMLInputElement && node.type === "file", undefined, { timeout: ACTION_TIMEOUT_MS })
+      .evaluate((node) => node instanceof HTMLInputElement && node.type === "file", undefined, { timeout: this.limits.actionMs })
       .catch(() => false);
     if (isFileInput) return { input: locator, chooser: null, how: "set directly on the file input" };
     // A styled control: click it and answer the chooser it opens. The listener
@@ -2905,8 +2943,8 @@ export class BrowserEngine {
     // outlasts the click's own — forced retry included — plus a grace period
     // after it, for apps that fetch an upload URL before opening the picker. A
     // wait shorter than the click reported such controls as "uploads nothing".
-    const opened = page.waitForEvent("filechooser", { timeout: ACTION_TIMEOUT_MS + FORCED_CLICK_TIMEOUT_MS + CHOOSER_GRACE_MS }).catch(() => null);
-    await this.resilientClick(locator, ACTION_TIMEOUT_MS);
+    const opened = page.waitForEvent("filechooser", { timeout: this.limits.actionMs + FORCED_CLICK_TIMEOUT_MS + CHOOSER_GRACE_MS }).catch(() => null);
+    await this.resilientClick(locator, this.limits.actionMs);
     const chooser = await Promise.race([opened, page.waitForTimeout(CHOOSER_GRACE_MS).then(() => null)]);
     if (chooser) return { input: null, chooser, how: "via the file chooser the click opened" };
     const n = await fileInputs.count();
@@ -3022,11 +3060,15 @@ export class BrowserEngine {
    * look, not an interaction, and the element still deserves a click.
    */
   async hover(ref: string): Promise<string> {
+    return this.withinLimit("action", () => this.hoverNow(ref));
+  }
+
+  private async hoverNow(ref: string): Promise<string> {
     const page = this.requirePage();
     const { el } = await this.resolveForAction(ref);
     const { before, bodyBefore, churning } = await this.hoverBaselines();
     const locator = this.scopeOf(el).locator(`xpath=${el.xpath}`);
-    await locator.hover({ timeout: ACTION_TIMEOUT_MS });
+    await locator.hover({ timeout: this.limits.actionMs });
     // Wiggle inside the element: pointer-tracking libraries distinguish real
     // movement from a single synthetic hover event.
     const box = await locator.boundingBox().catch(() => null);
@@ -3064,6 +3106,10 @@ export class BrowserEngine {
   }
 
   async select(ref: string, value: string): Promise<string> {
+    return this.withinLimit("action", () => this.selectNow(ref, value));
+  }
+
+  private async selectNow(ref: string, value: string): Promise<string> {
     const page = this.requirePage();
     const { el, liveLabel } = await this.resolveForAction(ref);
     const refusal = this.actionPolicyCheck(el, liveLabel);
@@ -3085,7 +3131,7 @@ export class BrowserEngine {
     }
     const loc = this.scopeOf(el).locator(`xpath=${el.xpath}`);
     const options = el.tag === "select" ? await readSelectOptions(loc) : null;
-    const picked = await loc.selectOption(value, { timeout: ACTION_TIMEOUT_MS });
+    const picked = await loc.selectOption(value, { timeout: this.limits.actionMs });
     this.memory!.markExercised(this.currentFingerprint, el.key, "select");
     if (options) this.recordSelectChoice(this.currentFingerprint, el.key, options, picked);
     return this.afterAction("select", `${el.role} "${el.name}" = ${value}`);
@@ -3156,6 +3202,10 @@ export class BrowserEngine {
   private static readonly ACTIVATION_KEY_RE = /^(Enter|NumpadEnter|Space| )$/i;
 
   async press(key: string): Promise<string> {
+    return this.withinLimit("action", () => this.pressNow(key));
+  }
+
+  private async pressNow(key: string): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
     const refusal = await this.vetFocusedActivation(key);
@@ -3230,7 +3280,7 @@ export class BrowserEngine {
     // A notice describes ONE navigation. Clearing up front means a notice left
     // undelivered by a previous throw can never prepend itself to this result.
     this.authLoss.clear();
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await this.withinLimit("nav", () => page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
     // Settle BEFORE judging where we landed. A client-side auth guard redirects
     // after hydration, not during goto, so reading page.url() here showed the
     // requested path and the bounce went unnoticed — which is precisely how a
@@ -3265,7 +3315,7 @@ export class BrowserEngine {
     const returnUrl = plan.returnTo;
     let recovered: string;
     try {
-      await page.goto(returnUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+      await this.withinLimit("nav", () => page.goto(returnUrl, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
       recovered = await this.afterAction("navigate", returnUrl);
     } catch (err) {
       this.recordNavigationOutcome(returnUrl, await this.landedUrl(page));
@@ -3537,7 +3587,7 @@ export class BrowserEngine {
   async goBack(): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
-    await page.goBack({ waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+    await page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }).catch(() => {});
     return this.afterAction("back", "");
   }
 
@@ -3663,10 +3713,11 @@ export class BrowserEngine {
       this.oracles.drain(false); // discard pre-route leftovers WITHOUT marking their signatures as reported
       let status: number | string = "ERR";
       try {
-        const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
+        const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
         status = resp?.status() ?? "no-response";
       } catch (err) {
-        const reason = err instanceof Error ? err.message.split("\n")[0] : String(err);
+        const explained = explainTimeout(err, "nav", this.limits.crawlNavMs);
+        const reason = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
         // Not retried by later crawls in this process (a check would otherwise try it
         // on every discovery round). Deliberately not written to memory: one outage
         // must not count a route as covered in every later run's gap ledger.
@@ -3935,10 +3986,10 @@ export class BrowserEngine {
               preState = await this.stateHolding(probe, preState, preState !== null && preState === lastCapture);
               form = { kind: "click", probe };
             }
-            forcedClick = (await this.resilientClick(loc, ACTION_TIMEOUT_MS)).forced;
+            forcedClick = (await this.resilientClick(loc, this.limits.actionMs)).forced;
           } else if (step.action === "hover") {
             const { before, bodyBefore, churning } = await this.hoverBaselines();
-            await loc.hover({ timeout: ACTION_TIMEOUT_MS });
+            await loc.hover({ timeout: this.limits.actionMs });
             const { revealed } = await this.detectHoverReveal(before, bodyBefore, churning);
             transcript.push(
               revealed.length > 0
@@ -3963,11 +4014,11 @@ export class BrowserEngine {
                 preState = await this.stateHolding(probe, preState, preState !== null && preState === lastCapture);
                 form = { kind: "enter", probe };
               }
-              await loc.press("Enter", { timeout: ACTION_TIMEOUT_MS });
+              await loc.press("Enter", { timeout: this.limits.actionMs });
             }
           } else if (step.action === "select") {
             const options = await readSelectOptions(loc);
-            const picked = await loc.selectOption(step.value ?? "", { timeout: ACTION_TIMEOUT_MS });
+            const picked = await loc.selectOption(step.value ?? "", { timeout: this.limits.actionMs });
             if (options) chose = { options, picked };
           } else if (step.action === "upload") {
             const r = await this.performUpload(loc, planUploadOptions(step.value));
@@ -4059,7 +4110,7 @@ export class BrowserEngine {
         const diagnosticLine = actionabilityDiagnostic(fullMsg);
         let hint = "";
         if (/Timeout/i.test(firstLine)) {
-          hint = ` (timeout${diagnosticLine ? ` — ${diagnosticLine}` : ""} — the target may no longer match: element relabeled, removed, or genuinely covered by an overlay; re-snapshot to see current state)`;
+          hint = ` (timeout${diagnosticLine ? ` — ${diagnosticLine}` : ""} — the target may no longer match: element relabeled, removed, or genuinely covered by an overlay; re-snapshot to see current state. Or ${limitHint("action", this.limits.actionMs)})`;
         } else if (/Input of type "file" cannot be filled/i.test(firstLine)) {
           hint = ` (this is a file input — use an {action:"upload"} step, or scout_upload)`;
         }
@@ -4143,7 +4194,7 @@ export class BrowserEngine {
           violations.push({ path, violation: { kind: v.kind, severity: v.severity, detail: v.detail, url: v.url, ...(v.embed ? { embed: v.embed } : {}) } });
     };
     const poll = async (done: () => boolean): Promise<boolean> => {
-      const until = Date.now() + FLOW_STEP_TIMEOUT_MS;
+      const until = Date.now() + this.limits.actionMs;
       for (;;) {
         if (done()) return true;
         if (Date.now() >= until) return false;
@@ -4167,7 +4218,9 @@ export class BrowserEngine {
           const current = this.requirePage();
           if (step.action === "navigate") {
             const url = `${this.baseUrl}${step.target}`;
-            const resp = await current.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
+            const resp = await current
+              .goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs })
+              .catch((err: unknown) => Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs)));
             await this.settle();
             const status = resp?.status() ?? null;
             if (status !== null && status >= 400) {
@@ -4185,11 +4238,11 @@ export class BrowserEngine {
           } else if (step.action === "click" || step.action === "type" || step.action === "select") {
             const loc = BrowserEngine.locatorFor(current, parseTarget(step.target)!).first();
             const found = await loc
-              .waitFor({ state: "visible", timeout: FLOW_STEP_TIMEOUT_MS })
+              .waitFor({ state: "visible", timeout: this.limits.actionMs })
               .then(() => true)
               .catch(() => false);
             if (!found) {
-              failure = `nothing visible matches ${step.target} within ${FLOW_STEP_TIMEOUT_MS / 1000}s`;
+              failure = `nothing visible matches ${step.target} within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
             } else {
               const label = (
                 (await loc.getAttribute("aria-label").catch(() => null)) ??
@@ -4199,9 +4252,9 @@ export class BrowserEngine {
               if (this.readOnly && step.action !== "type" && isDestructive(label, step.action === "select" ? step.value : undefined)) {
                 refusal = destructiveRefusal(label || step.target, this.mode);
               } else if (step.action === "click") {
-                await loc.click({ timeout: FLOW_STEP_TIMEOUT_MS });
+                await loc.click({ timeout: this.limits.actionMs });
               } else if (step.action === "select") {
-                await loc.selectOption(step.value, { timeout: FLOW_STEP_TIMEOUT_MS });
+                await loc.selectOption(step.value, { timeout: this.limits.actionMs });
               } else {
                 await this.noteProbe(step.value, step.target);
                 await this.fillOrAppend(loc, step.value, step.replace ?? false);
@@ -4209,7 +4262,7 @@ export class BrowserEngine {
                   const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
                   const submitLabel = ((await submit.textContent({ timeout: 1000 }).catch(() => "")) ?? "").trim();
                   if (this.readOnly && isDestructive(submitLabel)) refusal = destructiveRefusal(submitLabel, this.mode);
-                  else await loc.press("Enter", { timeout: FLOW_STEP_TIMEOUT_MS });
+                  else await loc.press("Enter", { timeout: this.limits.actionMs });
                 }
               }
               if (!refusal) await this.settle();
@@ -4217,10 +4270,11 @@ export class BrowserEngine {
           } else if (step.action === "expect-text") {
             const visible = current.getByText(step.text, { exact: false }).filter({ visible: true }).first();
             const ok = await visible
-              .waitFor({ state: "visible", timeout: FLOW_STEP_TIMEOUT_MS })
+              .waitFor({ state: "visible", timeout: this.limits.actionMs })
               .then(() => true)
               .catch(() => false);
-            if (!ok) failure = `no visible text ${JSON.stringify(step.text)} within ${FLOW_STEP_TIMEOUT_MS / 1000}s`;
+            if (!ok)
+              failure = `no visible text ${JSON.stringify(step.text)} within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
           } else if (step.action === "expect-url") {
             const ok = await poll(() => urlMatches(step.pattern, this.page?.url() ?? ""));
             if (!ok) failure = `the page is at ${here()}, which does not match /${step.pattern}/`;
@@ -4230,7 +4284,7 @@ export class BrowserEngine {
             if (!last.ok) failure = last.reason;
           }
         } catch (err) {
-          failure = firstLine(err);
+          failure = firstLine(explainTimeout(err, "action", this.limits.actionMs));
         }
         await this.scanForInjections().catch(() => {});
         await this.scanForContradictions().catch(() => {});
@@ -4271,9 +4325,12 @@ export class BrowserEngine {
       this.blockedRequests = [];
       this.oracles.drain(false);
       this.setMode(crawlMode);
-      // Pages the session no longer drives are closed only now, at about:blank and under the held rule: in Firefox a
-      // page closed straight after it is left sent its leaving beacon unjudged about one time in forty.
-      await BrowserEngine.settleWithin(Promise.allSettled(context.pages().map((p) => (p === this.page ? undefined : p.close().catch(() => {})))), 5000);
+      // Pages the session no longer drives are closed only now, at about:blank and under the held rule, and each only
+      // once what it sent as it was left has been judged (leftSettled).
+      await BrowserEngine.settleWithin(
+        Promise.allSettled(context.pages().map(async (p) => (p === this.page ? undefined : (await this.leftSettled(p), await p.close().catch(() => {}))))),
+        5000,
+      );
       page.off("websocket", onSocket);
       context.off("response", onResponse);
       this.refs.clear();
@@ -4333,7 +4390,9 @@ export class BrowserEngine {
    */
   async scroll(to?: "top" | "bottom", by?: number, target?: string): Promise<string> {
     this.actionStartedAt = Date.now();
-    const { refused, note } = target ? await scrollContainer(this.requirePage(), target, to, by) : await performScroll(this.requirePage(), to, by);
+    const { refused, note } = target
+      ? await scrollContainer(this.requirePage(), target, to, by, this.limits.actionMs)
+      : await performScroll(this.requirePage(), to, by);
     if (refused) return refused;
     const amount = Math.trunc(by ?? 600);
     const label = to ?? `${amount >= 0 ? "down" : "up"} ${Math.abs(amount)}px`;
@@ -4553,13 +4612,49 @@ export class BrowserEngine {
     await page.goto("about:blank", { timeout: 3000 }).catch(() => {});
   }
 
+  /** Run the route handler's judgement of one request, recorded against the page that sent it until it is answered. */
+  private async judgeTracked(route: Route, judge: (route: Route) => Promise<unknown>): Promise<void> {
+    let page: Page | null = null;
+    try {
+      page = route.request().frame().page();
+    } catch {
+      /* no frame: a service worker's request, which no page's close waits on */
+    }
+    const judging = judge(route);
+    if (!page) {
+      await judging;
+      return;
+    }
+    let pending = this.routesInFlight.get(page);
+    if (!pending) this.routesInFlight.set(page, (pending = new Set()));
+    pending.add(judging);
+    try {
+      await judging;
+    } finally {
+      pending.delete(judging);
+      if (pending.size === 0) this.routesInFlight.delete(page);
+    }
+  }
+
   /**
-   * Close a page the engine will not drive, after leaving it (`leave`), so what it sends on its way out meets the policy.
-   * Known limit: in Firefox, a close straight after the leave has let the page's leaving beacon out unjudged (seen 2 times
-   * in 80 under load). replayFlow's hand-back closes pages only once every page is at about:blank; this and `close` do not yet.
+   * Wait, after a page has been left, until the route handler has answered every request the page sent on its way out,
+   * where a close could otherwise let one out unjudged (browsers.ts closeWaitsForLeavingWrites). A round trip to the
+   * page first, so a request the browser reported before answering it has reached the route handler (0 of 80 escaped in
+   * the unload smoke loop with it). A page that cannot answer (closed, or crashed) has nothing more to send: the catch.
    */
-  private static async leaveAndClose(page: Page): Promise<void> {
+  private async leftSettled(page: Page): Promise<void> {
+    if (page.isClosed() || !closeWaitsForLeavingWrites(this.engineName)) return;
+    await BrowserEngine.settleWithin(
+      page.evaluate(() => 0).catch(() => {}),
+      2000,
+    );
+    await BrowserEngine.settleWithin(Promise.allSettled([...(this.routesInFlight.get(page) ?? [])]), 2000);
+  }
+
+  /** Close a page the engine will not drive, after leaving it (`leave`) and the policy has judged what it sent on its way out. */
+  private async leaveAndClose(page: Page): Promise<void> {
     await BrowserEngine.leave(page);
+    await this.leftSettled(page);
     await page.close().catch(() => {});
   }
 
@@ -4574,7 +4669,7 @@ export class BrowserEngine {
     // Every page is left before it is closed, while the write policy still holds, so what a page sends on its way out
     // is judged and its refusal logged before the flush below.
     const pages = this.context?.pages() ?? [];
-    await BrowserEngine.settleWithin(Promise.allSettled(pages.map((p) => BrowserEngine.leave(p))), 5000);
+    await BrowserEngine.settleWithin(Promise.allSettled(pages.map(async (p) => (await BrowserEngine.leave(p), await this.leftSettled(p)))), 5000);
     // Pending debounced coverage writes must land before the process can exit.
     try {
       this.memory?.flush();
