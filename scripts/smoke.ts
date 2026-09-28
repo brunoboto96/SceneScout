@@ -33,6 +33,7 @@ import * as postmessage from "./smoke/postmessage.ts";
 import * as checkGate from "./smoke/check.ts";
 import * as unload from "./smoke/unload.ts";
 import * as ciRun from "./smoke/ci.ts";
+import * as teardown from "./smoke/teardown.ts";
 
 const suites = [
   readOnly,
@@ -51,6 +52,7 @@ const suites = [
   unload,
   checkGate,
   ciRun,
+  teardown,
 ];
 
 async function main(): Promise<void> {

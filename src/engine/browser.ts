@@ -102,7 +102,8 @@ import {
 } from "./forms.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { ACTION_TIMEOUT_MS, performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
-import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
+import { BROWSER_MARKER, browserPsListing, killBrowserProcess, launchedBrowserPid, ownBrowserRunning, reapOrphanBrowsers } from "./reaper.js";
+import { boundedTeardown, describeTeardown, SessionQueue } from "./dispatch.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
 import {
   AUTH_FLOW_RE,
@@ -471,6 +472,10 @@ const RECORD_SHOT_TIMEOUT_MS = 2500;
 
 export class BrowserEngine {
   private browser: Browser | null = null;
+  /** The launched browser's process id, when it could be found: what close() kills if the browser will not close. */
+  private browserPid: number | undefined;
+  /** Launches run one at a time in this process, so each launch's new child process is known to be its own browser. */
+  private static readonly launches = new SessionQueue();
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private oracles = new OracleMonitor();
@@ -1120,7 +1125,7 @@ export class BrowserEngine {
 
     try {
       this.engineName = opts.browser ?? defaultEngine(process.env);
-      this.browser = await this.launchWithRecovery(this.engineName, opts.headed ?? false);
+      ({ browser: this.browser, pid: this.browserPid } = await this.launchWithRecovery(this.engineName, opts.headed ?? false));
       this.context = await this.browser.newContext({
         storageState: profile?.storageState as BrowserContextOptions["storageState"],
         viewport: opts.viewport ?? { width: 1280, height: 900 },
@@ -4478,6 +4483,11 @@ export class BrowserEngine {
     return this.currentFingerprint;
   }
 
+  /** The open browser's process id, when it could be found at launch; undefined once closed. */
+  get browserProcessId(): number | undefined {
+    return this.browser ? this.browserPid : undefined;
+  }
+
   get currentUrl(): string {
     return this.page?.url() ?? "";
   }
@@ -4493,9 +4503,18 @@ export class BrowserEngine {
    * On the first failure or timeout, reap orphaned Playwright processes and
    * try once more before giving up with a diagnosable error.
    */
-  private async launchWithRecovery(engine: BrowserEngineName, headed: boolean): Promise<Browser> {
+  private async launchWithRecovery(engine: BrowserEngineName, headed: boolean): Promise<{ browser: Browser; pid: number | undefined }> {
     const types: Record<BrowserEngineName, BrowserType> = { chromium, firefox, webkit };
-    const attempt = async (): Promise<Browser> => {
+    // Serialised, and the process listed on either side, so the one new browser child is this launch's (launchedBrowserPid).
+    const attempt = (): Promise<{ browser: Browser; pid: number | undefined }> =>
+      BrowserEngine.launches.run("launch", async () => {
+        const before = browserPsListing();
+        const browser = await launchOnce();
+        const pid = before ? launchedBrowserPid(before, browserPsListing(), process.pid) : undefined;
+        if (pid === undefined && before) console.error("[scenescout] could not tell the launched browser's process id; a close that hangs cannot kill it");
+        return { browser, pid };
+      });
+    const launchOnce = async (): Promise<Browser> => {
       // The marker is what makes reapOrphanBrowsers safe to run at startup:
       // it appears in the child's command line, so the sweep can tell a browser
       // WE leaked from one belonging to somebody else's Playwright run.
@@ -4616,20 +4635,27 @@ export class BrowserEngine {
       // very last save may not have landed.
       if (this.memory) this.memory.lastSaveError = err instanceof Error ? err.message : String(err);
     }
-    // Bounded teardown: a wedged renderer must not hang scout_close forever.
-    // If teardown overruns the cap, the leftover process is reaped by the
-    // orphan cleaner on the next attach (or server start).
-    await BrowserEngine.settleWithin(
-      (async () => {
-        for (const p of this.context?.pages() ?? []) await p.close().catch(() => {});
-        await this.context?.close().catch(() => {});
-        await this.browser?.close().catch(() => {});
-      })(),
-      8000,
-    );
+    // Bounded teardown: a wedged renderer must not hang scout_close forever, and a teardown that overruns must not
+    // leave the browser running (dispatch.ts boundedTeardown). Captured here, so a teardown still running after a
+    // timeout can never close a browser a later attach() opened.
+    const { context, browser, browserPid } = this;
+    const outcome = await boundedTeardown({
+      graceful: async () => {
+        for (const p of context?.pages() ?? []) await p.close().catch(() => {});
+        await context?.close().catch(() => {});
+        await browser?.close().catch(() => {});
+      },
+      closeBrowser: async () => browser?.close(),
+      pid: browser ? browserPid : undefined,
+      isAlive: ownBrowserRunning,
+      kill: killBrowserProcess,
+    });
+    const timedOut = describeTeardown(outcome);
+    if (timedOut) console.error(`[scenescout] ${timedOut}`);
     this.page = null;
     this.context = null;
     this.browser = null;
+    this.browserPid = undefined;
     this.routedWrites.clear();
     this.unseenRefusals.clear();
     this.refs.clear();

@@ -193,6 +193,8 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end("boom");
       return;
     }
+    // A server that never answers: a navigation to it stays pending until its timeout, or until its browser goes.
+    if (urlPath === "/never-answers") return;
     // A server that hangs up without answering: the navigation fails at once (no timeout to wait out).
     if (urlPath === "/drop-connection") {
       req.socket.destroy();
