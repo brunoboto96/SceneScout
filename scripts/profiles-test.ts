@@ -1,7 +1,8 @@
 /**
  * Named sign-in profiles: which role names are allowed, where a profile lives,
  * that it is written owner-only and ignored by git, what may be printed about
- * it, and how scout_attach turns `role` into the file it loads.
+ * it, how scout_attach turns `role` into the file it loads, and how long a
+ * profile will last (cookie dates and JWT `exp`) against a run's length.
  *
  *   npx tsx --test scripts/profiles-test.ts
  */
@@ -27,6 +28,7 @@ import {
   validateRoleName,
   writeProfile,
 } from "../src/engine/profiles.ts";
+import { cookieMatchesHost, describeLifetime, judgeLifetime, judgeProfileFile, jwtExpiry, readLifetime } from "../src/engine/expiry.ts";
 
 const POSIX = process.platform !== "win32";
 const tempProject = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-profiles-"));
@@ -211,4 +213,180 @@ test("scenescout login takes one URL and a valid role, and nothing that would le
   refused(["file:///etc/passwd", "--role", "admin"], /only http and https/);
   refused(["http://user:pw@127.0.0.1:3000", "--role", "admin"], /no credentials in the URL/);
   refused(["http://127.0.0.1:3000", "--role", "admin", "--browser", "edge"], /--browser must be one of/);
+});
+
+// ── How long a profile lasts ────────────────────────────────────────────────
+
+const NOW = Date.UTC(2030, 0, 1, 12, 0, 0);
+const MIN = 60_000;
+const APP = "http://127.0.0.1:3000";
+/** An unsigned JWT with the given `exp` in epoch ms (or no exp); only the payload matters here. */
+const jwt = (expMs?: number, extra: Record<string, unknown> = {}): string =>
+  [
+    Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
+    Buffer.from(JSON.stringify({ sub: "user-1", ...extra, ...(expMs === undefined ? {} : { exp: Math.floor(expMs / 1000) }) })).toString("base64url"),
+    "c2lnbmF0dXJl",
+  ].join(".");
+const cookie = (name: string, expiresMs: number | -1, value = "opaque-cookie-value", domain = "127.0.0.1") => ({
+  name,
+  value,
+  domain,
+  path: "/",
+  expires: expiresMs === -1 ? -1 : expiresMs / 1000,
+  httpOnly: true,
+  secure: false,
+  sameSite: "Lax",
+});
+const stateOf = (cookies: unknown[], storage: { name: string; value: string }[] = []) => ({
+  cookies,
+  origins: storage.length ? [{ origin: APP, localStorage: storage }] : [],
+});
+const judge = (state: unknown, runMin = 60, marginMin = 10) =>
+  judgeLifetime(readLifetime(state, { url: APP }), {
+    now: NOW,
+    runMs: runMin * MIN,
+    marginMs: marginMin * MIN,
+    role: "admin",
+    rerun: "scenescout login http://127.0.0.1:3000 --role admin",
+  });
+
+test("session cookies carry no date: the lifetime is unknown, warned, never refused", () => {
+  const life = readLifetime(stateOf([cookie("sid", -1)]), { url: APP });
+  assert.equal(life.dated.length, 0);
+  assert.equal(life.undated, 1);
+  const v = judge(stateOf([cookie("sid", -1)]));
+  assert.equal(v.kind, "unknown");
+  if (v.kind === "unknown") assert.match(v.message, /only credentials with no date.*scenescout login http:\/\/127\.0\.0\.1:3000 --role admin/);
+  assert.match(describeLifetime(life, NOW), /^Lasts: unknown — no expiry found, only 1 credential with no date \(a session cookie/);
+});
+
+test("a profile whose every cookie has expired is refused, and names the command that records it again", () => {
+  const v = judge(stateOf([cookie("sid", NOW - 5 * MIN)]));
+  assert.equal(v.kind, "refuse");
+  if (v.kind === "refuse") assert.match(v.message, /role "admin" has expired.*5m00s ago.*Run `scenescout login http:\/\/127\.0\.0\.1:3000 --role admin` again/);
+  assert.match(describeLifetime(readLifetime(stateOf([cookie("sid", NOW - 5 * MIN)])), NOW), /already expired/);
+});
+
+test("a JWT's exp in localStorage dates the profile; the run's length plus the margin decides", () => {
+  const token = jwt(NOW + 45 * MIN);
+  const state = stateOf([], [{ name: "auth", value: JSON.stringify({ accessToken: token }) }]);
+  const life = readLifetime(state, { url: APP });
+  assert.deepEqual(life.dated, [{ source: "local-storage-jwt", name: "auth", expiresAt: Math.floor((NOW + 45 * MIN) / 1000) * 1000 }]);
+  const short = judge(state, 60, 10);
+  assert.equal(short.kind, "refuse", "45 minutes cannot cover a 60-minute run");
+  if (short.kind === "refuse") {
+    assert.match(short.message, /will not last the run: it ends in 45m00s \(token in localStorage "auth"\).*1h00m.*10m00s margin/);
+    assert.ok(!short.message.includes(token) && !short.message.includes(token.split(".")[1]), "never the token itself");
+  }
+  assert.equal(judge(state, 30, 10).kind, "ok", "a 30-minute run with 10 minutes to spare fits in 45");
+  assert.equal(judge(state, 40, 0).kind, "ok", "the margin is the caller's: zero lets a 40-minute run through");
+  assert.equal(judge(state, 40, 10).kind, "refuse", "the same run with the default margin does not fit");
+  const said = describeLifetime(life, NOW);
+  assert.match(said, /^Lasts: about 45m00s \(the last dated credential, token in localStorage "auth"\)\.$/);
+  assert.ok(!said.includes(token));
+});
+
+test("a JWT inside a cookie ends the cookie at whichever comes first, URL-encoded or not", () => {
+  const encoded = encodeURIComponent(`Bearer ${jwt(NOW + 20 * MIN)}`);
+  const life = readLifetime(stateOf([cookie("session", NOW + 7 * 86_400_000, encoded)]), { url: APP });
+  assert.equal(life.dated[0].source, "cookie-jwt");
+  assert.equal(life.dated[0].expiresAt, Math.floor((NOW + 20 * MIN) / 1000) * 1000);
+  const laterToken = readLifetime(stateOf([cookie("session", NOW + 20 * MIN, jwt(NOW + 7 * 86_400_000))]), { url: APP });
+  assert.equal(laterToken.dated[0].source, "cookie", "the cookie's own date is sooner");
+});
+
+test("a malformed JWT is counted as unreadable and dates nothing", () => {
+  // Built, not written out: a literal JWT-shaped string in a tracked file is refused by hygiene-test.
+  const b64 = (text: string) => Buffer.from(text).toString("base64url");
+  const bad = `${b64('{"alg":"none"}')}.${b64('{"not json')}.sig`;
+  const noExp = jwt(undefined);
+  const life = readLifetime(
+    stateOf(
+      [],
+      [
+        { name: "a", value: bad },
+        { name: "b", value: noExp },
+        { name: "c", value: jwt(undefined, { exp: "tomorrow" }) },
+      ],
+    ),
+    { url: APP },
+  );
+  assert.equal(life.dated.length, 0);
+  assert.equal(life.unreadableTokens, 3);
+  assert.equal(jwtExpiry("not.a.token"), null);
+  assert.equal(jwtExpiry(bad), null);
+  assert.equal(jwtExpiry(jwt(NOW)), Math.floor(NOW / 1000) * 1000);
+  assert.equal(judge(stateOf([], [{ name: "a", value: bad }])).kind, "unknown");
+});
+
+test("a profile with no cookie and no token is unknown", () => {
+  for (const state of [{ cookies: [], origins: [] }, stateOf([], [{ name: "theme", value: "dark" }]), null, "not a state"]) {
+    const life = readLifetime(state, { url: APP });
+    assert.equal(life.credentials.length, 0, JSON.stringify(state));
+    assert.equal(judge(state).kind, "unknown");
+    assert.match(describeLifetime(life, NOW), /no cookie or token with an expiry/);
+  }
+});
+
+test("the profile lasts until its LAST dated credential: a short cookie beside a long one warns, alone it refuses", () => {
+  const shortOnly = stateOf([cookie("sid", NOW + 15 * MIN)]);
+  const shortBesideLong = stateOf([cookie("sid", NOW + 15 * MIN), cookie("prefs", NOW + 30 * 86_400_000)]);
+  assert.equal(judge(shortOnly).kind, "refuse");
+  const v = judge(shortBesideLong);
+  assert.equal(v.kind, "warn", "a minute-long analytics cookie must not block every run");
+  if (v.kind === "warn") assert.match(v.message, /cookie "sid" expires in 15m00s/);
+  const shortBesideSession = judge(stateOf([cookie("sid", NOW + 15 * MIN), cookie("s", -1)]));
+  assert.equal(shortBesideSession.kind, "warn", "a session cookie may keep it alive, so it is not certain");
+  assert.match(describeLifetime(readLifetime(shortBesideLong), NOW), /about 30 days .*The first to expire is cookie "sid", in 15m00s\./);
+  const expiredBesideLong = judge(stateOf([cookie("sid", NOW - 5 * MIN), cookie("prefs", NOW + 30 * 86_400_000)]));
+  assert.equal(expiredBesideLong.kind, "warn");
+  if (expiredBesideLong.kind === "warn") assert.match(expiredBesideLong.message, /cookie "sid" expired 5m00s ago/);
+});
+
+test("a token with no expiry beside a short one keeps the verdict uncertain: warned, not refused", () => {
+  const access = { name: "access", value: jwt(NOW + 15 * MIN) };
+  assert.equal(judge(stateOf([], [access])).kind, "refuse", "the short token alone cannot last the run");
+  const withRefresh = stateOf([], [access, { name: "refresh", value: jwt(undefined) }]);
+  const life = readLifetime(withRefresh, { url: APP });
+  assert.equal(life.undated, 1, "a JWT with no exp is an undated credential");
+  assert.equal(judge(withRefresh).kind, "warn", "the refresh token may keep the sign-in alive");
+  assert.match(
+    describeLifetime(life, NOW),
+    /^Lasts: unknown — the last dated credential, token in localStorage "access", ends in 15m00s, but it also holds 1 credential with no date/,
+  );
+});
+
+test("a cookie for another host left out keeps the verdict uncertain: warned, not refused", () => {
+  const access = { name: "access", value: jwt(NOW + 15 * MIN) };
+  const withApiCookie = stateOf([cookie("refresh", NOW + 30 * 86_400_000, "x", "api.example.test")], [access]);
+  assert.equal(readLifetime(withApiCookie, { url: APP }).elsewhere, 1);
+  assert.equal(judge(withApiCookie).kind, "warn", "a cookie the check cannot place may still keep the sign-in alive");
+  assert.equal(judge(stateOf([], [access])).kind, "refuse", "the same token with nothing left out is refused");
+});
+
+test("with a URL, only cookies sent to its host and storage of its origin count", () => {
+  assert.equal(cookieMatchesHost(".example.test", "app.example.test"), true);
+  assert.equal(cookieMatchesHost("example.test", "example.test"), true);
+  assert.equal(cookieMatchesHost("example.test", "badexample.test"), false);
+  const idp = stateOf([cookie("idp", NOW + 5 * MIN, "x", "login.other.test"), cookie("sid", NOW + 5 * 86_400_000)]);
+  assert.equal(readLifetime(idp, { url: APP }).dated.length, 1);
+  assert.equal(readLifetime(idp).dated.length, 2, "no URL: everything counts");
+  const otherOrigin = { cookies: [], origins: [{ origin: "http://127.0.0.1:4000", localStorage: [{ name: "t", value: jwt(NOW + MIN) }] }] };
+  assert.equal(readLifetime(otherOrigin, { url: APP }).credentials.length, 0);
+});
+
+test("reading a profile file: a bad file is refused without quoting its contents", () => {
+  const opts = { url: APP, now: NOW, runMs: 60 * MIN, marginMs: 10 * MIN, role: "admin", rerun: "scenescout login <url> --role admin" };
+  assert.throws(
+    () => judgeProfileFile("/p/admin.json", opts, () => '{"cookies": [{"value": "s3cret-cookie-value"'),
+    (err: Error) => /not valid JSON; run `scenescout login <url> --role admin` again/.test(err.message) && !err.message.includes("s3cret"),
+  );
+  assert.throws(
+    () =>
+      judgeProfileFile("/p/admin.json", opts, () => {
+        throw Object.assign(new Error("gone"), { code: "ENOENT" });
+      }),
+    /could not be read \(ENOENT\)/,
+  );
+  assert.equal(judgeProfileFile("/p/admin.json", opts, () => JSON.stringify(stateOf([cookie("sid", NOW + 2 * 60 * MIN)]))).kind, "ok");
 });
