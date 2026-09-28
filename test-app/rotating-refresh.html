@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Your account</title>
+  </head>
+  <body>
+    <!--
+      Served at /rt-app. Keeps its access and refresh tokens in localStorage
+      under "session", as many single-page apps do. It asks /rt-api/me who is
+      signed in; on a 401 it refreshes once at /rt-auth/token, stores the
+      rotated pair, and asks again. The fixture server revokes the whole token
+      family when a refresh token is presented a second time.
+    -->
+    <main>
+      <h1 data-testid="account-heading">Checking your session</h1>
+    </main>
+    <script>
+      const heading = document.querySelector("h1");
+      const load = () => JSON.parse(localStorage.getItem("session") || "{}");
+      const me = (s) => fetch("/rt-api/me", { headers: { authorization: `Bearer ${s.accessToken || ""}` } });
+      (async () => {
+        let session = load();
+        let res = await me(session);
+        if (res.status === 401 && session.refreshToken) {
+          const refreshed = await fetch("/rt-auth/token", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ refresh_token: session.refreshToken }),
+          });
+          if (refreshed.ok) {
+            const body = await refreshed.json();
+            session = { accessToken: body.access_token, refreshToken: body.refresh_token };
+            localStorage.setItem("session", JSON.stringify(session));
+            res = await me(session);
+          }
+        }
+        heading.textContent = res.ok ? "Signed in as a member" : "You are signed out";
+      })();
+    </script>
+  </body>
+</html>
