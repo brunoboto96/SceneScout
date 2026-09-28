@@ -218,6 +218,19 @@ test("request failures: a 5xx is a high server error, a 4xx a medium client erro
   );
 });
 
+test("a token posted to any origin is its own high rule and fails the default gate", () => {
+  const detail = 'jwt token at data.access_token ("eyJh…" 212 chars) posted with targetOrigin "*" to the window of /signin';
+  const issues = issuesFromRoutes([route({ violations: [{ kind: "postmessage_token", severity: "high", detail, url: ORIGIN }] })], ORIGIN);
+  assert.deepEqual(
+    issues.map((i) => [i.rule, i.severity]),
+    [["postmessage-token", "high"]],
+  );
+  assert.deepEqual(
+    gateFailures(issues, "high").map((i) => i.rule),
+    ["postmessage-token"],
+  );
+});
+
 test("a console error does not fail the default gate; the page error beside it does", () => {
   const issues = issuesFromRoutes(
     [
