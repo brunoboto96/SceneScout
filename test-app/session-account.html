@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Your account</title>
+  </head>
+  <body>
+    <!--
+      Signed in or signed out by one fact: whether this tab's sessionStorage
+      holds the token session-signin.html wrote. The heading is decided as the
+      page's own script first runs, so a token put back any later than that
+      would not count. session-signout.html clears it and comes back here.
+    -->
+    <main>
+      <h1 data-testid="session-account-heading">Checking your session…</h1>
+      <a data-testid="session-account-signout-link" href="/session-signout.html">Sign out</a>
+    </main>
+    <script>
+      const signedIn = sessionStorage.getItem("fixture_token") === "member-token";
+      document.querySelector("h1").textContent = signedIn ? "Signed in with a session token" : "No session token: signed out";
+    </script>
+  </body>
+</html>

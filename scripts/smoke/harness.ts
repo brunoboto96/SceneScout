@@ -9,11 +9,13 @@
  * like app behaviour ("scroll target not found"). `npm run smoke` rebuilds
  * first, so this still tests your edit, not the previous build.
  */
+import crypto from "node:crypto";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultEngine } from "../../dist/browsers.js";
+import { parseTotpSecret, totp } from "../../dist/engine/scripted-login.js";
 
 /** The browser this run drives: SCENESCOUT_BROWSER, else Chromium. Checks that depend on the browser read it. */
 export const BROWSER = defaultEngine(process.env);
@@ -34,6 +36,9 @@ export interface ServerStats {
   /** Every non-GET request that reached the server, as "METHOD /path" → count. What the write policy let through, seen from the other side. */
   writes: Record<string, number>;
 }
+
+/** How long the fixture server holds /slow-page back. */
+export const SLOW_PAGE_MS = 2500;
 
 /** Everything a suite needs. `projectDir` is shared on purpose: later suites assert on memory earlier ones wrote. */
 export interface SmokeContext {
@@ -109,6 +114,66 @@ export function settle(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** The session cookie the fixture's cookie sign-in sets. */
+export const SIGN_IN_COOKIE = "fixture_session";
+
+/**
+ * The scripted sign-in fixture's test user. Invented values: a reserved
+ * example domain, a password with the characters URL encoding changes, and a
+ * base32 TOTP secret.
+ */
+export const SCRIPTED_USER = { username: "member@example.test", password: "correct horse+battery&staple", totpSecret: "JBSW Y3DP EHPK 3PXP" };
+/** The cookie that carries a right password on to the code step. */
+const PENDING_COOKIE = "fixture_pending";
+
+const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** The cookie of the fixture's revocable sign-in: a fresh token per sign-in, valid until revoked. */
+export const TOKEN_COOKIE = "fixture_token";
+
+/** Tokens the revocable sign-in has issued and not yet revoked. */
+const liveTokens = new Set<string>();
+let tokenCounter = 0;
+
+/** Revoke every token the fixture has issued, as a server ending its sessions does. Returns how many were live. */
+export function revokeFixtureTokens(): number {
+  const n = liveTokens.size;
+  liveTokens.clear();
+  return n;
+}
+
+/**
+ * The fixture's rotating refresh tokens, as an identity provider with reuse
+ * detection keeps them: each sign-in starts a token family; a refresh with the
+ * family's current token rotates it (a new refresh token and a new access
+ * token); a refresh with a token the family already spent revokes the whole
+ * family, every access token in it included.
+ */
+interface TokenFamily {
+  current: string;
+  spent: Set<string>;
+  access: Set<string>;
+  revoked: boolean;
+  rotations: number;
+}
+const families: TokenFamily[] = [];
+const newToken = (): string => crypto.randomBytes(24).toString("base64url");
+
+/** Expire every access token the rotating sign-in issued, so each page's next call has to refresh. */
+export function expireFixtureAccess(): void {
+  for (const f of families) f.access.clear();
+}
+
+/** How the rotating sign-in's families stand: how many, how many rotations, how many revoked for reuse. Never the tokens. */
+export function refreshFamilies(): { families: number; rotations: number; revoked: number } {
+  return { families: families.length, rotations: families.reduce((n, f) => n + f.rotations, 0), revoked: families.filter((f) => f.revoked).length };
+}
+
+/** Whether `token` is the current refresh token of a live family: what a profile written back should hold. */
+export function isCurrentRefreshToken(token: string): boolean {
+  return families.some((f) => !f.revoked && f.current === token);
+}
+
 /** A loopback origin (the fixture server's other port), or "" for anything else: a redirect built from a query parameter goes nowhere else. */
 function loopbackOrigin(value: string | null): string {
   return value && /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(value) ? value : "";
@@ -129,6 +194,14 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     if (urlPath === "/api/fail-500") {
       res.writeHead(500, { "content-type": "text/plain" });
       res.end("boom");
+      return;
+    }
+    // A page the server holds back before answering: slower than a lowered page-load limit, faster than the default.
+    if (urlPath === "/slow-page") {
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end(fs.readFileSync(path.join(appDir, "slow.html")));
+      }, SLOW_PAGE_MS);
       return;
     }
     // A server that hangs up without answering: the navigation fails at once (no timeout to wait out).
@@ -367,6 +440,161 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     if (urlPath.startsWith("/api/documents/") && req.method === "PUT") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    // A cookie sign-in, as an SSO callback ends: one GET sets a session cookie
+    // and sends the browser on to the account page. /cookie-account then serves
+    // the signed-in page or its signed-out pair by that cookie alone, and
+    // /cookie-signout clears it.
+    if (urlPath === "/cookie-signin") {
+      res.writeHead(302, { location: "/cookie-account", "set-cookie": `${SIGN_IN_COOKIE}=member; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600` });
+      res.end();
+      return;
+    }
+    if (urlPath === "/cookie-signout") {
+      res.writeHead(302, { location: "/cookie-account", "set-cookie": `${SIGN_IN_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0` });
+      res.end();
+      return;
+    }
+    if (urlPath === "/cookie-account") {
+      const signedIn = (req.headers.cookie ?? "").split(/;\s*/).includes(`${SIGN_IN_COOKIE}=member`);
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, signedIn ? "cookie-account.html" : "cookie-account-signed-out.html")));
+      return;
+    }
+    // The scripted sign-in: email, then password on the same page, then a
+    // TOTP code, then the cookie /cookie-account reads. A wrong password or
+    // code serves the step again with an error; the password error repeats
+    // what was typed.
+    if (urlPath === "/scripted-signin" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "scripted-signin.html"), "utf8").replace("<!--ERROR-->", ""));
+      return;
+    }
+    if ((urlPath === "/scripted-signin/session" || urlPath === "/scripted-signin/code") && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+        const again = (file: string, error: string): void => {
+          res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+          res.end(fs.readFileSync(path.join(appDir, file), "utf8").replace("<!--ERROR-->", `<p role="alert">${escapeHtml(error)}</p>`));
+        };
+        if (urlPath === "/scripted-signin/session") {
+          const email = form.get("email") ?? "";
+          const password = form.get("password") ?? "";
+          if (email !== SCRIPTED_USER.username || password !== SCRIPTED_USER.password) {
+            again("scripted-signin.html", `No account matches ${email} with the password ${password}.`);
+            return;
+          }
+          res.writeHead(303, { location: "/scripted-signin/code", "set-cookie": `${PENDING_COOKIE}=1; Path=/; HttpOnly; SameSite=Lax` });
+          res.end();
+          return;
+        }
+        const pending = (req.headers.cookie ?? "").split(/;\s*/).includes(`${PENDING_COOKIE}=1`);
+        const params = parseTotpSecret(SCRIPTED_USER.totpSecret);
+        if (!params.ok) throw new Error("the fixture's TOTP secret does not parse");
+        const now = Date.now() / 1000;
+        // The current code or the one before it, as providers allow for a code typed at a boundary.
+        const valid = [totp(params.params, now), totp(params.params, now - 30)];
+        if (!pending || !valid.includes(form.get("code") ?? "")) {
+          again("scripted-code.html", "That code is not right. Try the one your app shows now.");
+          return;
+        }
+        res.writeHead(303, {
+          location: "/cookie-account",
+          "set-cookie": [`${SIGN_IN_COOKIE}=member; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600`, `${PENDING_COOKIE}=; Path=/; Max-Age=0`],
+        });
+        res.end();
+      });
+      return;
+    }
+    if (urlPath === "/scripted-signin/code" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "scripted-code.html"), "utf8").replace("<!--ERROR-->", ""));
+      return;
+    }
+    // A sign-in the server can revoke mid-run: /token-signin issues a new
+    // token, and every /token-* page serves the signed-in page to a live token
+    // and redirects anything else to /login, as a session guard does.
+    if (urlPath === "/token-signin") {
+      tokenCounter += 1;
+      const token = `t${tokenCounter}`;
+      liveTokens.add(token);
+      res.writeHead(302, { location: "/token-home", "set-cookie": `${TOKEN_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600` });
+      res.end();
+      return;
+    }
+    if (urlPath.startsWith("/token-")) {
+      const token = (req.headers.cookie ?? "")
+        .split(/;\s*/)
+        .find((c) => c.startsWith(`${TOKEN_COOKIE}=`))
+        ?.slice(TOKEN_COOKIE.length + 1);
+      if (!token || !liveTokens.has(token)) {
+        res.writeHead(302, { location: "/login", "cache-control": "no-store" });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "cookie-account.html")));
+      return;
+    }
+    // The rotating sign-in. /rt-signin starts a family and hands the page its
+    // tokens to keep in localStorage; /rt-app is the app, which calls
+    // /rt-api/me with its access token and, on a 401, refreshes at
+    // /rt-auth/token with its refresh token.
+    if (urlPath === "/rt-signin") {
+      const family: TokenFamily = { current: newToken(), spent: new Set(), access: new Set([newToken()]), revoked: false, rotations: 0 };
+      families.push(family);
+      const session = JSON.stringify({ accessToken: [...family.access][0], refreshToken: family.current });
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(
+        `<!doctype html><title>Signing in</title><script>localStorage.setItem("session", ${JSON.stringify(session)}); location.replace("/rt-app");</script>`,
+      );
+      return;
+    }
+    if (urlPath === "/rt-app") {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "rotating-refresh.html")));
+      return;
+    }
+    if (urlPath === "/rt-api/me") {
+      const bearer = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+      const ok = families.some((f) => !f.revoked && f.access.has(bearer));
+      res.writeHead(ok ? 200 : 401, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(ok ? { name: "a member" } : { error: "unauthorized" }));
+      return;
+    }
+    if (urlPath === "/rt-auth/token" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        let presented = "";
+        try {
+          presented = String((JSON.parse(Buffer.concat(chunks).toString("utf8")) as { refresh_token?: unknown }).refresh_token ?? "");
+        } catch {
+          presented = "";
+        }
+        const family = families.find((f) => f.current === presented || f.spent.has(presented));
+        const refuse = () => {
+          res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: "invalid_grant" }));
+        };
+        if (!family || family.revoked) return refuse();
+        if (family.current !== presented) {
+          // A spent token presented again: taken as stolen, so the whole family ends.
+          family.revoked = true;
+          family.access.clear();
+          return refuse();
+        }
+        family.spent.add(presented);
+        family.current = newToken();
+        const access = newToken();
+        family.access.add(access);
+        family.rotations += 1;
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ access_token: access, refresh_token: family.current }));
+      });
       return;
     }
     // Extensionless /login, because the engine's auth heuristic matches a path

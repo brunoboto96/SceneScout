@@ -86,6 +86,14 @@ inputs:
     description: chromium, firefox or webkit.
     required: false
     default: chromium
+  action-timeout-ms:
+    description: How long one click, keystroke or pick may take, in milliseconds (1000 to 120000). Empty means the CLI's default (5000). Raise it on a loaded runner.
+    required: false
+    default: ""
+  nav-timeout-ms:
+    description: How long a page may take to load, in milliseconds (1000 to 300000). Empty means the CLI's default (20000; 15000 per crawled route). Raise it on a loaded runner.
+    required: false
+    default: ""
   project:
     description: The project directory, relative to working-directory. Empty means working-directory itself.
     required: false
