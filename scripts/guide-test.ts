@@ -30,6 +30,7 @@ import { CHECK_OPTION_NAMES, CHECK_RULES, parseCheckArgs, WORTH_A_LOOK_RULES } f
 import { CI_OPTION_NAMES, KEY_ENV, parseCiArgs } from "../src/engine/ci.ts";
 import { LOGIN_OPTION_NAMES } from "../src/engine/profiles.ts";
 import { SCRIPT_FLAGS } from "../src/engine/scripted-login.ts";
+import { SUBCOMMANDS } from "../src/commands.ts";
 import { GUIDE_DIR, toWikiPage } from "./guide-wiki.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -320,12 +321,13 @@ test("the local-path rule catches what it is for and passes placeholders", () =>
 
 // ── The CLI ──────────────────────────────────────────────────────────────────
 
-const CLI_SOURCE = read("src/cli.ts");
-/** Flags the CLI reads by name in cli.ts itself: install, doctor and watch parse their own. */
+/** The CLI's own source: cli.ts, and commands.ts, which settles help and each hand-parsed command's flags before it runs. */
+const CLI_SOURCE = read("src/cli.ts") + "\n" + read("src/commands.ts");
+/** Flags the CLI names itself: install, doctor and watch parse their own. */
 const CLI_LITERAL_FLAGS = sorted([...CLI_SOURCE.matchAll(/"--([a-z][a-z0-9-]*)"/g)].map((m) => m[1]));
 /**
- * Literals in cli.ts that are not options of install, doctor or watch, each
- * with why. Every one must still be in cli.ts, so the list cannot go stale.
+ * Literals in the CLI's source that are not options of install, doctor or watch,
+ * each with why. Every one must still be there, so the list cannot go stale.
  */
 const NOT_THEIR_OPTIONS: Record<string, string> = {
   help: "a request for the usage, not an option",
@@ -333,10 +335,8 @@ const NOT_THEIR_OPTIONS: Record<string, string> = {
   browser: "install refuses it as a slip for --browsers",
 };
 const SCRIPT_ONLY = ["script", ...SCRIPT_FLAGS];
-/** The subcommands: the cases of the dispatch at the end of cli.ts. */
-const COMMANDS = sorted(
-  [...CLI_SOURCE.slice(CLI_SOURCE.indexOf("switch (command)")).matchAll(/^\s*case "([a-z]+)":/gm)].map((m) => m[1]).filter((c) => c !== "help"),
-);
+/** The subcommands the CLI dispatches. */
+const COMMANDS = sorted([...SUBCOMMANDS]);
 
 test("the reference lists every command the CLI dispatches", () => {
   const listed = sorted(tableIn(REFERENCE, "## Commands").map((r) => r[0].match(/^`scenescout ([a-z]+)/)?.[1] ?? ""));
@@ -352,7 +352,7 @@ test("the reference lists exactly the options of check, ci and login", () => {
 
 test("the reference lists exactly the flags install, doctor and watch read", () => {
   for (const flag of Object.keys(NOT_THEIR_OPTIONS))
-    assert.ok(CLI_LITERAL_FLAGS.includes(flag), `--${flag} is no longer in cli.ts; drop it from NOT_THEIR_OPTIONS`);
+    assert.ok(CLI_LITERAL_FLAGS.includes(flag), `--${flag} is no longer in the CLI's source; drop it from NOT_THEIR_OPTIONS`);
   const inCode = CLI_LITERAL_FLAGS.filter((f) => !(f in NOT_THEIR_OPTIONS) && !SCRIPT_ONLY.includes(f));
   const listed = sorted(["install", "doctor", "watch"].flatMap((c) => tableIn(REFERENCE, `### \`scenescout ${c}\``).flatMap((r) => optionsIn(r[0]))));
   assert.deepEqual(listed, sorted(inCode));

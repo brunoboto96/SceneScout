@@ -18,7 +18,7 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `scenescout status [path]` | What every session of a running engine is doing, as text |
 | `scenescout watch [path]` | Opens the live view in a browser |
 
-`scenescout --version` prints the version, and `scenescout --help` the usage.
+`scenescout --version` prints the version, and `scenescout --help` the usage. Every command also prints the usage on `--help` or `-h` and exits 0 without doing anything else, so `scenescout install --help` installs nothing. `install`, `doctor`, `scan`, `status` and `watch` refuse an option or an extra argument they do not take, and exit 1 naming it.
 
 ### `scenescout install`
 
