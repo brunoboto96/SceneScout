@@ -5,6 +5,7 @@ import {
   type Browser,
   type BrowserType,
   type BrowserContext,
+  type BrowserContextOptions,
   type CDPSession,
   type FileChooser,
   type Frame,
@@ -142,7 +143,18 @@ import {
   unseenWriteSource,
   type UnseenWriteVerdict,
 } from "./unload.js";
-import { loginCommand, permissionNote, resolveAttachAuth, roleLabel, summarizeState, writeProfile, type AttachAuth } from "./profiles.js";
+import {
+  loginCommand,
+  permissionNote,
+  resolveAttachAuth,
+  roleLabel,
+  sessionStorageInitScript,
+  splitProfile,
+  summarizeState,
+  withSessionStorage,
+  writeProfile,
+  type AttachAuth,
+} from "./profiles.js";
 import {
   acquireLock,
   brokerEnabled,
@@ -998,6 +1010,17 @@ export class BrowserEngine {
     if (storageStatePath && !fs.existsSync(storageStatePath)) {
       throw new Error(`storageStatePath does not exist: ${storageStatePath}`);
     }
+    // Read and checked here, also before anything is closed. Playwright restores
+    // the storage state; sessionStorage, which it has no field for, is put back
+    // by an init script before the app's own code runs.
+    let profile: ReturnType<typeof splitProfile> | undefined;
+    if (storageStatePath) {
+      try {
+        profile = splitProfile(JSON.parse(fs.readFileSync(storageStatePath, "utf8")));
+      } catch (err) {
+        throw new Error(`could not load the storage state at ${storageStatePath}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     await this.close();
     this.auth = auth;
     this.role = roleLabel(auth);
@@ -1096,10 +1119,12 @@ export class BrowserEngine {
       this.engineName = opts.browser ?? defaultEngine(process.env);
       this.browser = await this.launchWithRecovery(this.engineName, opts.headed ?? false);
       this.context = await this.browser.newContext({
-        storageState: storageStatePath,
+        storageState: profile?.storageState as BrowserContextOptions["storageState"],
         viewport: opts.viewport ?? { width: 1280, height: 900 },
         serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
+      const restoreSession = sessionStorageInitScript(profile?.sessionStorage ?? []);
+      if (restoreSession) await this.context.addInitScript(restoreSession);
       if (!sharedWorkersAllowed(this.mode)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
       // The postMessage-token oracle: every frame's postMessage is wrapped, and a "*" call hands its longer strings here.
       await this.context.exposeBinding(POSTMESSAGE_BINDING, (source, entries: unknown) => this.noteTokenPosts(source.frame, entries));
@@ -3280,14 +3305,30 @@ export class BrowserEngine {
     }
     const checked = summarizeState(state);
     if (!checked.ok) return { ok: false, why: `its saved profile at ${file} is not a storage state (${checked.error})` };
+    // A malformed sessionStorage list is refused here, before anything is applied.
+    try {
+      splitProfile(state);
+    } catch (err) {
+      return { ok: false, why: `its saved profile at ${file} could not be split (${err instanceof Error ? err.message : String(err)})` };
+    }
     return { ok: true, state };
   }
 
-  /** Replace this context's cookies and storage with a storage state, in place: same pages, listeners and policy. */
+  /**
+   * Replace this context's cookies and storage with a profile, in place: same
+   * pages, listeners and policy. Playwright is handed only what it restores;
+   * the profile's sessionStorage list is not part of its storage state.
+   */
   private async applyState(state: unknown): Promise<{ ok: true } | { ok: false; why: string }> {
     if (!this.context) return { ok: false, why: "no browser is open" };
+    let storageState: ReturnType<typeof splitProfile>["storageState"];
     try {
-      await this.context.setStorageState(state as Parameters<BrowserContext["setStorageState"]>[0]);
+      storageState = splitProfile(state).storageState;
+    } catch (err) {
+      return { ok: false, why: `the saved profile could not be split (${err instanceof Error ? err.message : String(err)})` };
+    }
+    try {
+      await this.context.setStorageState(storageState as Parameters<BrowserContext["setStorageState"]>[0]);
     } catch (err) {
       return { ok: false, why: `the browser refused its saved profile (${err instanceof Error ? err.message.split("\n")[0] : String(err)})` };
     }
@@ -3409,7 +3450,9 @@ export class BrowserEngine {
       for (let waited = 0; waited <= 5000; waited += 50) {
         const now = await this.context?.storageState().catch(() => null);
         if (now && rotationStored(now, presented)) {
-          state = now;
+          // The page's state holds no sessionStorage: keep what the profile had.
+          const onDisk = this.readRoleProfile();
+          state = onDisk.ok ? withSessionStorage(now, splitProfile(onDisk.state).sessionStorage) : now;
           break;
         }
         await new Promise((r) => setTimeout(r, 50));

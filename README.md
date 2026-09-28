@@ -189,11 +189,13 @@ For an app behind SSO or MFA, sign in once yourself and let every session reuse 
 scenescout login http://localhost:3000 --role admin
 ```
 
-A browser window opens at the URL. Sign in however the app asks, then come back to the terminal and press **Enter**: the session is saved as `.scenescout/auth/admin.json` in the project. Closing the window or pressing Ctrl+C saves nothing. The file is readable by your account only, `.scenescout/` keeps itself out of git, and the command prints where it saved, how many cookies and origins it holds, never what they are, and how long it will last: read from each cookie's expiry and the `exp` of any JWT in a cookie or in localStorage (the payload is decoded for that one claim, never verified, never printed). `--project <dir>` saves into another project; `--browser firefox|webkit` records in another browser.
+A browser window opens at the URL. Sign in however the app asks, then come back to the terminal and press **Enter**: the session is saved as `.scenescout/auth/admin.json` in the project. Closing the window or pressing Ctrl+C saves nothing. The file is readable by your account only, `.scenescout/` keeps itself out of git, and the command prints where it saved, how many cookies, origins and databases it holds, never what they are, and how long it will last: read from each cookie's expiry and the `exp` of any JWT in a cookie or in localStorage (the payload is decoded for that one claim, never verified, never printed). The profile keeps cookies, localStorage, IndexedDB and sessionStorage, so an app whose sign-in library keeps its token in sessionStorage or IndexedDB still comes back signed in; sessionStorage is put back only on the origin it came from, once per tab, so a lane that signs out stays signed out. A login saved by an earlier version has no sessionStorage or IndexedDB: record it again if the app keeps its token there. `--project <dir>` saves into another project; `--browser firefox|webkit` records in another browser.
 
 Then `/scenescout --role admin`, or `scout_attach { role: "admin" }` from any agent. Every session attached with the same role gets its own browser built from that one login, so parallel lanes can all run as `admin`. A role with no saved login is refused with the command to run. `role` and `storageStatePath` are alternatives: pass one.
 
 Sessions of one role share one saved login, so they share its refresh token too. An app that rotates refresh tokens and treats a second use of a spent one as theft would revoke the whole token family, and sign every session of that role out, the moment two of them refreshed with the same token. SceneScout stops that for a session attached by role. When the page is about to send a refresh token from the role's profile, the session first takes a lock beside the profile (`.scenescout/auth/<role>.json.lock`, owner-only, taken over if its holder has not touched it in 30 seconds). Holding the lock, it re-reads the profile: if another session has rotated the token in the meantime, it loads that profile into its own browser and sends the current token in place of the spent one. Once the page has stored the rotated token, the session writes its state back over the profile and releases the lock. Sessions in separate processes share the lock through the file. A refresh token is recognised by name (a cookie, a storage key, or a field inside a JSON storage value whose name contains `refresh`) and is never printed or logged. An app whose sign-in renews through the identity provider's own session cookie needs none of this, since no refresh token is shared. `SCENESCOUT_REFRESH_BROKER=off` turns the broker off.
+
+In CI, where nobody can type, `--script` signs in headless as a test user from `SCENESCOUT_LOGIN_USERNAME`, `SCENESCOUT_LOGIN_PASSWORD` and, for a one-time code, `SCENESCOUT_LOGIN_TOTP_SECRET`, and saves the same profile. No credential value is ever printed. See [signing in from CI](docs/ci.md#signing-in-from-ci) for the options and the rules: a test tenant's user, never production or a real person's account.
 
 Before a parallel run, `scout_lane_brief` checks that the planner's saved login will outlast it: `runMinutes` (default 60) plus `expiryMarginMinutes` (default 10). It refuses only when it is sure, meaning every credential in the profile has a date, none was set for another host, and the last of them ends before the run does, and then names the `scenescout login` command to run again. A profile holds cookies other than the sign-in (analytics, preferences), so the first one to expire is reported as a warning rather than a reason to refuse, and a profile with undated credentials in it (a session cookie, or a refresh token with no expiry) is a warning that its lifetime is unknown.
 
@@ -645,7 +647,7 @@ src/
   cli.ts            scan · serve · install · doctor · check · ci · login · status · watch
   check-run.ts      drives a check: attach, crawl every route, collect what was measured
   ci-run.ts         drives a CI run: the MCP server as a child, the model's API, the agent loop
-  login-run.ts      drives `scenescout login`: a visible browser, Enter to save the role's profile
+  login-run.ts      drives `scenescout login`: a visible browser, Enter to save the role's profile; or --script, headless from the environment
   installer.ts      setup logic (skill link, MCP registration, diagnostics)
   engine/
     browser.ts      the engine class: attach, snapshot, actions, crawl, plans
@@ -666,8 +668,9 @@ src/
     journey.ts      task-ease measurement from the action log
     design.ts       the design audit + page scoring
     memory.ts       cross-run storage + finding dedup
-    profiles.ts     saved sign-ins: role names, where a profile lives, owner-only files, attach by role
+    profiles.ts     saved sign-ins: role names, where a profile lives, owner-only files, attach by role, sessionStorage restore
     refresh.ts      the refresh broker: which values are a role's refresh tokens, the lock beside the profile, swapping a spent token
+    scripted-login.ts  a CI sign-in: env and flags, TOTP (RFC 6238), which field is which, redaction
     expiry.ts       how long a saved sign-in lasts: cookie dates and JWT exp, checked before lanes start
     report.ts       the gap ledger + report generation
     check.ts        the check's rules, gate, report and SARIF

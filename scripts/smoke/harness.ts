@@ -15,6 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultEngine } from "../../dist/browsers.js";
+import { parseTotpSecret, totp } from "../../dist/engine/scripted-login.js";
 
 /** The browser this run drives: SCENESCOUT_BROWSER, else Chromium. Checks that depend on the browser read it. */
 export const BROWSER = defaultEngine(process.env);
@@ -112,6 +113,17 @@ export function settle(ms: number): Promise<void> {
 
 /** The session cookie the fixture's cookie sign-in sets. */
 export const SIGN_IN_COOKIE = "fixture_session";
+
+/**
+ * The scripted sign-in fixture's test user. Invented values: a reserved
+ * example domain, a password with the characters URL encoding changes, and a
+ * base32 TOTP secret.
+ */
+export const SCRIPTED_USER = { username: "member@example.test", password: "correct horse+battery&staple", totpSecret: "JBSW Y3DP EHPK 3PXP" };
+/** The cookie that carries a right password on to the code step. */
+const PENDING_COOKIE = "fixture_pending";
+
+const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 /** The cookie of the fixture's revocable sign-in: a fresh token per sign-in, valid until revoked. */
 export const TOKEN_COOKIE = "fixture_token";
@@ -437,6 +449,58 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       const signedIn = (req.headers.cookie ?? "").split(/;\s*/).includes(`${SIGN_IN_COOKIE}=member`);
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(fs.readFileSync(path.join(appDir, signedIn ? "cookie-account.html" : "cookie-account-signed-out.html")));
+      return;
+    }
+    // The scripted sign-in: email, then password on the same page, then a
+    // TOTP code, then the cookie /cookie-account reads. A wrong password or
+    // code serves the step again with an error; the password error repeats
+    // what was typed.
+    if (urlPath === "/scripted-signin" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "scripted-signin.html"), "utf8").replace("<!--ERROR-->", ""));
+      return;
+    }
+    if ((urlPath === "/scripted-signin/session" || urlPath === "/scripted-signin/code") && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+        const again = (file: string, error: string): void => {
+          res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+          res.end(fs.readFileSync(path.join(appDir, file), "utf8").replace("<!--ERROR-->", `<p role="alert">${escapeHtml(error)}</p>`));
+        };
+        if (urlPath === "/scripted-signin/session") {
+          const email = form.get("email") ?? "";
+          const password = form.get("password") ?? "";
+          if (email !== SCRIPTED_USER.username || password !== SCRIPTED_USER.password) {
+            again("scripted-signin.html", `No account matches ${email} with the password ${password}.`);
+            return;
+          }
+          res.writeHead(303, { location: "/scripted-signin/code", "set-cookie": `${PENDING_COOKIE}=1; Path=/; HttpOnly; SameSite=Lax` });
+          res.end();
+          return;
+        }
+        const pending = (req.headers.cookie ?? "").split(/;\s*/).includes(`${PENDING_COOKIE}=1`);
+        const params = parseTotpSecret(SCRIPTED_USER.totpSecret);
+        if (!params.ok) throw new Error("the fixture's TOTP secret does not parse");
+        const now = Date.now() / 1000;
+        // The current code or the one before it, as providers allow for a code typed at a boundary.
+        const valid = [totp(params.params, now), totp(params.params, now - 30)];
+        if (!pending || !valid.includes(form.get("code") ?? "")) {
+          again("scripted-code.html", "That code is not right. Try the one your app shows now.");
+          return;
+        }
+        res.writeHead(303, {
+          location: "/cookie-account",
+          "set-cookie": [`${SIGN_IN_COOKIE}=member; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600`, `${PENDING_COOKIE}=; Path=/; Max-Age=0`],
+        });
+        res.end();
+      });
+      return;
+    }
+    if (urlPath === "/scripted-signin/code" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "scripted-code.html"), "utf8").replace("<!--ERROR-->", ""));
       return;
     }
     // A sign-in the server can revoke mid-run: /token-signin issues a new
