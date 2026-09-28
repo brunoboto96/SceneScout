@@ -37,6 +37,9 @@ export interface ServerStats {
   writes: Record<string, number>;
 }
 
+/** How long the fixture server holds /slow-page back. */
+export const SLOW_PAGE_MS = 2500;
+
 /** Everything a suite needs. `projectDir` is shared on purpose: later suites assert on memory earlier ones wrote. */
 export interface SmokeContext {
   baseUrl: string;
@@ -191,6 +194,14 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     if (urlPath === "/api/fail-500") {
       res.writeHead(500, { "content-type": "text/plain" });
       res.end("boom");
+      return;
+    }
+    // A page the server holds back before answering: slower than a lowered page-load limit, faster than the default.
+    if (urlPath === "/slow-page") {
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end(fs.readFileSync(path.join(appDir, "slow.html")));
+      }, SLOW_PAGE_MS);
       return;
     }
     // A server that hangs up without answering: the navigation fails at once (no timeout to wait out).
@@ -526,6 +537,32 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       }
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(fs.readFileSync(path.join(appDir, "cookie-account.html")));
+      return;
+    }
+    // The same revocable sign-in, kept ONLY in sessionStorage: /ss-signin
+    // hands the page a new token to store there, every other /ss-* page is
+    // an app that asks /ss-api/me whether its token is still live, and
+    // revokeFixtureTokens() ends it along with the cookie sign-in's.
+    if (urlPath === "/ss-signin") {
+      tokenCounter += 1;
+      const token = `s${tokenCounter}`;
+      liveTokens.add(token);
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(
+        `<!doctype html><title>Signing in</title><script>sessionStorage.setItem("fixture_token", ${JSON.stringify(token)}); location.replace("/ss-home");</script>`,
+      );
+      return;
+    }
+    if (urlPath === "/ss-api/me") {
+      const bearer = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+      const ok = liveTokens.has(bearer);
+      res.writeHead(ok ? 200 : 401, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(ok ? { name: "a member" } : { error: "unauthorized" }));
+      return;
+    }
+    if (urlPath.startsWith("/ss-")) {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "session-guarded.html")));
       return;
     }
     // The rotating sign-in. /rt-signin starts a family and hands the page its

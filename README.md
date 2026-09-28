@@ -499,6 +499,10 @@ To drive another browser, pass `browser` when attaching (`scout_attach { browser
 
 In every browser, pages are not given shared workers unless the mode is `destructive`: a request a shared worker sends cannot be intercepted anywhere, so the app is made to do that work on the page, where the policy sees it.
 
+### Time limits
+
+An action on the page (a click, typing, a hover, a pick from a list) may take 5 s, and a page 20 s to load (15 s for a page the crawl opens). On a loaded machine these can run out while the app is fine; the timeout then says which limit ran out and how to raise it. Raise them per session with `scout_attach { actionTimeoutMs: 15000, navTimeoutMs: 60000 }`, for every session with `SCENESCOUT_ACTION_TIMEOUT_MS` and `SCENESCOUT_NAV_TIMEOUT_MS` in the server's environment, or on `scenescout check` and `scenescout ci` with `--action-timeout-ms` and `--nav-timeout-ms`. An option wins over the variable, and the variable over the default. The action limit takes 1000 to 120000 ms and the page-load limit 1000 to 300000 ms; anything else refuses the attach with a sentence naming the value to fix. Saving a login profile with `scenescout login` honours the two variables as well, and otherwise keeps its own longer waits (30 s for the page, 10 s for a field or the submit).
+
 ## 🔌 Other MCP clients
 
 The engine is a plain MCP server over stdio, so any client can drive it, and the testing method reaches the agent through the server itself (see the end of this section). `install` can register it for you:

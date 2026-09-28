@@ -16,6 +16,7 @@ import readline from "node:readline";
 import { chromium, firefox, webkit, type BrowserContext, type BrowserType, type Page } from "playwright";
 import { defaultEngine, type BrowserEngineName } from "./browsers.js";
 import { explainLaunchFailure } from "./engine/launch.js";
+import { explicitLimits, isTimeoutMessage, LIMIT_NAMES, type LimitKind } from "./engine/limits.js";
 import { redactRoute } from "./engine/check.js";
 import { describeLifetime, readLifetime, type ProfileLifetime } from "./engine/expiry.js";
 import { describeSaved, mergeSessionStorage, withSessionStorage, writeProfile, type LoginOptions, type ProfileSummary } from "./engine/profiles.js";
@@ -119,6 +120,8 @@ export async function runLogin(
 ): Promise<{ path: string; summary: ProfileSummary; lifetime: ProfileLifetime }> {
   const engine: BrowserEngineName = options.browser ?? defaultEngine(process.env);
   const types: Record<BrowserEngineName, BrowserType> = { chromium, firefox, webkit };
+  // Checked before a window opens: a limit out of bounds is a sentence, not a browser left behind.
+  const navMs = explicitLimits({}, process.env).navMs ?? LOGIN_NAV_MS;
   let browser;
   try {
     browser = await types[engine].launch({ headless: false });
@@ -134,9 +137,10 @@ export async function runLogin(
     // same. The browser may already be closing, and either way it ends up closed.
     page.once("close", () => void browser.close().catch(() => {}));
     try {
-      await page.goto(options.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await page.goto(options.url, { waitUntil: "domcontentloaded", timeout: navMs });
     } catch (err) {
-      throw new Error(`could not open ${options.url}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      const explained = loginTimeout(err, "nav", navMs);
+      throw new Error(`could not open ${options.url}: ${explained instanceof Error ? explained.message.split("\n")[0] : String(explained)}`);
     }
     log(`A ${engine} window is open at ${options.url}.`);
     log(`Sign in as "${options.role}" there — SSO, MFA, whatever the app asks — then come back here and press Enter to save.`);
@@ -188,6 +192,24 @@ const TAG = "data-scenescout-login";
 
 /** How often the page is read while waiting for the form to move on. */
 const POLL_MS = 250;
+/**
+ * The error with what to raise when it is a timeout. Signing in reads only the
+ * environment variable, so the hint names only that, or `--timeout` when the
+ * sign-in's own overall limit was the shorter one and ran out.
+ */
+function loginTimeout(err: unknown, kind: LimitKind, ms: number, overallCapped = false): unknown {
+  if (!(err instanceof Error) || !isTimeoutMessage(err.message)) return err;
+  const [first, ...rest] = err.message.split("\n");
+  const raise = overallCapped ? "raise --timeout, the sign-in's overall limit" : `raise it with ${LIMIT_NAMES[kind].env} in the environment`;
+  return new Error(
+    [`${first} — the ${LIMIT_NAMES[kind].what} (${ms} ms) ran out; if the machine is loaded rather than the app slow, ${raise}.`, ...rest].join("\n"),
+  );
+}
+
+/** How long a login page may take to load, unless SCENESCOUT_NAV_TIMEOUT_MS says otherwise (engine/limits.ts). */
+const LOGIN_NAV_MS = 30_000;
+/** How long filling a sign-in field or submitting may take, unless SCENESCOUT_ACTION_TIMEOUT_MS says otherwise. */
+const LOGIN_ACTION_MS = 10_000;
 /** How many times the form may be submitted before the run gives up: username, password and a code, with room for an interstitial. */
 const MAX_SUBMITS = 5;
 
@@ -286,6 +308,9 @@ export async function runScriptedLogin(
   const fail = (message: string): Error => new Error(redact(message));
   const engine: BrowserEngineName = options.browser ?? defaultEngine(process.env);
   const types: Record<BrowserEngineName, BrowserType> = { chromium, firefox, webkit };
+  // A limit set in the environment applies here too; unset, signing in keeps its own longer waits.
+  const set = explicitLimits({}, process.env);
+  const limits = { navMs: set.navMs ?? LOGIN_NAV_MS, actionMs: set.actionMs ?? LOGIN_ACTION_MS };
   let browser;
   try {
     browser = await types[engine].launch({ headless: true });
@@ -297,9 +322,10 @@ export async function runScriptedLogin(
     const context = await browser.newContext();
     const page = await context.newPage();
     try {
-      await page.goto(options.url, { waitUntil: "domcontentloaded", timeout: Math.min(30_000, config.timeoutMs) });
+      await page.goto(options.url, { waitUntil: "domcontentloaded", timeout: Math.min(limits.navMs, config.timeoutMs) });
     } catch (err) {
-      throw fail(`could not open ${options.url}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      const explained = loginTimeout(err, "nav", Math.min(limits.navMs, config.timeoutMs), config.timeoutMs < limits.navMs);
+      throw fail(`could not open ${options.url}: ${explained instanceof Error ? explained.message.split("\n")[0] : String(explained)}`);
     }
     say(`Signing in as "${options.role}" at ${options.url} (${engine}, headless).`);
     if (!config.success.url && !config.success.selector) {
@@ -362,7 +388,7 @@ export async function runScriptedLogin(
         if (config.success.url || config.success.selector) break;
         // No sign-in field left is the signal only once the page has settled:
         // a page between a redirect and its first render shows no fields either.
-        await page.waitForLoadState("load", { timeout: 10_000 }).catch((err: Error) => {
+        await page.waitForLoadState("load", { timeout: limits.actionMs }).catch((err: Error) => {
           if (!/timeout/i.test(err.message) && !midNavigation(err)) throw err;
         });
         await page.waitForTimeout(POLL_MS * 2);
@@ -394,14 +420,20 @@ export async function runScriptedLogin(
           value = totpCode(totp, now());
           redactor.add(value);
         } else value = kind === "username" ? config.username : config.password;
-        await page.locator(`[${TAG}="${field.index}"]`).fill(value, { timeout: 10_000 });
+        await page
+          .locator(`[${TAG}="${field.index}"]`)
+          .fill(value, { timeout: limits.actionMs })
+          .catch((err: unknown) => Promise.reject(loginTimeout(err, "action", limits.actionMs)));
         progress.submitted.set(kind, fieldIdentity(field));
         last = field;
       }
       const button = chooseSubmit(fields);
       const before = signature(fields);
-      if (button) await page.locator(`[${TAG}="${button.index}"]`).click({ timeout: 10_000 });
-      else await page.locator(`[${TAG}="${last!.index}"]`).press("Enter", { timeout: 10_000 });
+      await (
+        button
+          ? page.locator(`[${TAG}="${button.index}"]`).click({ timeout: limits.actionMs })
+          : page.locator(`[${TAG}="${last!.index}"]`).press("Enter", { timeout: limits.actionMs })
+      ).catch((err: unknown) => Promise.reject(loginTimeout(err, "action", limits.actionMs)));
       progress.submits += 1;
       const did = describeStep(step.fill, button ? button.text || button.label || "the submit button" : null);
       say(did);

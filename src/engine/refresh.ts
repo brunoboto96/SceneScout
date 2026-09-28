@@ -26,6 +26,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
+import { splitProfile, withSessionStorage } from "./profiles.js";
 
 // ── Where a refresh token lives in a profile ─────────────────────────────────
 
@@ -205,6 +206,18 @@ export function swapRequest(req: WireRequest, from: string, to: string): { url?:
 export function rotationStored(state: unknown, sent: TokenSlot): boolean {
   const now = refreshTokenSlots(state).find((t) => t.slot === sent.slot);
   return now !== undefined && now.value !== sent.value;
+}
+
+/**
+ * The profile the broker writes back once the page has stored a rotation: the
+ * page's storage state, which has no sessionStorage, with the sessionStorage
+ * of the profile on disk kept beside it. Without it, an app whose sign-in also
+ * lives in sessionStorage would lose that half on every brokered refresh.
+ * A profile that could not be read (null) leaves the page's state as it is.
+ */
+export function profileAfterRotation(pageState: unknown, profileOnDisk: unknown): unknown {
+  if (profileOnDisk === null) return pageState;
+  return withSessionStorage(pageState, splitProfile(profileOnDisk).sessionStorage);
 }
 
 /**

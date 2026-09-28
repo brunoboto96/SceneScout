@@ -6,6 +6,11 @@
  * and carries on; a second revoke is reported. The contrast is a session
  * attached with the same file as a plain storage state, which reports the loss
  * as it always has.
+ *
+ * The same recovery for an app that keeps its sign-in only in sessionStorage,
+ * which Playwright's storage state leaves out: the re-attach seeds the latest
+ * profile's sessionStorage into the tab. Its contrast is a latest profile saved
+ * without sessionStorage, from which the same session does not recover.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -32,6 +37,42 @@ async function recordProfile(baseUrl: string, project: string): Promise<void> {
   } finally {
     await browser.close();
   }
+}
+
+/** Sign in through the sessionStorage-only fixture and save the role's profile, with the sessionStorage captured or (the contrast) left out. */
+async function recordSessionProfile(baseUrl: string, project: string, withSessionStorage: boolean): Promise<void> {
+  const browser = await { chromium, firefox, webkit }[BROWSER].launch({ headless: true });
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(`${baseUrl}/ss-signin`);
+    await page.waitForFunction((want) => document.querySelector("h1")?.textContent === want, SIGNED_IN, { timeout: 10000 });
+    writeProfile(project, "member", withSessionStorage ? await captureState(context) : await context.storageState());
+  } finally {
+    await browser.close();
+  }
+}
+
+/** Whether the page shows the signed-in heading once its session check has answered. */
+async function showsSignedIn(engine: BrowserEngine): Promise<boolean> {
+  for (let i = 0; i < 30; i++) {
+    if ((await engine.snapshot(true)).includes(SIGNED_IN)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+
+/** A role session on the sessionStorage-only app loses its sign-in; returns what the navigation that decides the re-attach said. */
+async function sessionLoss(baseUrl: string, project: string, latestHasSessionStorage: boolean, track: (e: BrowserEngine) => BrowserEngine) {
+  await recordSessionProfile(baseUrl, project, true);
+  const engine = track(new BrowserEngine());
+  await engine.attach({ url: `${baseUrl}/ss-home`, projectDir: project, mode: "read-only", role: "member" });
+  const startedIn = await showsSignedIn(engine);
+  revokeFixtureTokens();
+  await recordSessionProfile(baseUrl, project, latestHasSessionStorage);
+  const out: string[] = [];
+  for (const route of ["/ss-orders", "/ss-settings", "/ss-profile"]) out.push(await engine.navigate(`${baseUrl}${route}`));
+  return { engine, startedIn, decided: out[2] };
 }
 
 /** Navigate to three guarded routes in turn; returns the third navigation's result. */
@@ -99,6 +140,28 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       health.every((h) => !h.loginRedirect) &&
         ["/token-orders", "/token-settings", "/token-profile", "/token-home"].every((p) => health.some((h) => h.path === p)),
       JSON.stringify(health.map((h) => [h.path, h.loginRedirect])),
+    );
+
+    // ---- A sign-in kept only in sessionStorage is put back too -------------
+    const kept = await sessionLoss(baseUrl, project, true, track);
+    check("the sessionStorage-only role session starts signed in", kept.startedIn);
+    check(
+      "when its token is revoked it re-attaches from the latest profile",
+      kept.decided.includes("SESSION RE-ATTACHED") && !kept.decided.includes("SESSION AUTH LOST"),
+      kept.decided,
+    );
+    check("...back on the page it asked for", kept.engine.currentUrl.endsWith("/ss-profile"), kept.engine.currentUrl);
+    check("...signed in with the latest profile's sessionStorage", await showsSignedIn(kept.engine));
+    const next = await kept.engine.navigate(`${baseUrl}/ss-orders`);
+    check("...and a later page in the same tab stays signed in", !next.includes("REDIRECTED") && (await showsSignedIn(kept.engine)), next);
+
+    // ---- The contrast: the latest profile has no sessionStorage ------------
+    const bare = await sessionLoss(baseUrl, project, false, track);
+    check("the contrast session starts signed in", bare.startedIn);
+    check(
+      "with no sessionStorage in the latest profile the re-attach does not recover, and says so",
+      bare.decided.includes("SESSION AUTH LOST") && !bare.decided.includes("SESSION RE-ATTACHED"),
+      bare.decided,
     );
   } finally {
     for (const engine of opened) await engine.close().catch(() => {});
