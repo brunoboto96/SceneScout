@@ -297,7 +297,7 @@ Snapshots are cheap: re-snapshotting a route returns only *what changed*, with s
 |---|---|---|
 | **Set up** | `scout_playbook` `scout_scan` `scout_attach` `scout_session` | Hand the testing method to an agent that has no skill loaded; discover routes; launch a browser in a write-mode; keep several authenticated roles alive at once |
 | **Explore** | `scout_crawl` `scout_coverage` | Sweep every route in one call; ask what's still untested |
-| **Look** | `scout_snapshot` `scout_hover` `scout_screenshot` | Read the structured scene (diffed); reveal tooltips/hover cards; capture pixels only when needed |
+| **Look** | `scout_snapshot` `scout_hover` `scout_screenshot` `scout_capture` | Read the structured scene (diffed); reveal tooltips/hover cards; capture pixels only when needed; save one element as a PNG to show someone |
 | **Ask the server** | `scout_request` | Call the app's own API as this session, with the UI bypassed — the check that turns a hidden button into a proven refusal |
 | **Act** | `scout_click` `scout_type` `scout_select` `scout_upload` `scout_press` `scout_scroll` `scout_navigate` `scout_back` `scout_run_plan` | Drive the UI like a user; `scout_run_plan` batches a whole mechanical sequence into one call |
 | **Assess** | `scout_design_audit` `scout_journey` | Score a page's craft/a11y/consistency; measure how hard a task is to complete |

@@ -421,12 +421,22 @@ What a run costs follows from the token cap. At the defaults on `gpt-6-luna` ($0
 | `--allow-destructive` | a switch | off | Needed with `--mode destructive`, which without it exits 2. On its own it changes nothing. |
 | `--level` | `minimal`, `medium`, `extensive` | `medium` | The completion contract the run works towards. When a cap ends the run first, the report is generated anyway and its gap ledger lists what was not done; the summary says whether the contract was met. |
 | `--focus` | a few words | none | An area or flow to spend the run on. |
+| `--show` | a few words, at most 200 characters | none | Instead of exploring, find the element these words describe and save a PNG of it. See [Showing one element](#showing-one-element). |
+| `--compare-url` | an http(s) URL | none | With `--show`, capture the same element on this deployment too and compare the two pictures. |
 
 In `destructive` mode the model may send any request the app accepts, including deleting or changing records the run did not create, with nobody watching; it takes two options together so that a mode value copied from another workflow, or chosen by an agent, never enables it. The defaults follow the same rule as the check's: an unconfigured run does the least harm on an app it knows nothing about, and anything more is an option away. Which mode a project's CI uses is the project's decision.
 
-The run attaches once, to the URL it is given, in the mode it is given; the model cannot attach elsewhere or change the mode. It gets the scout_* tools a single agent uses to explore, find and report, and not those for attaching, closing, parallel lanes or screenshots. It is one agent rather than several lanes: see ADR 14.
+The run attaches once, to the URL it is given, in the mode it is given (with `--compare-url`, the run itself attaches a second session there after the model is done); the model cannot attach elsewhere or change the mode. It gets the scout_* tools a single agent uses to explore, find and report, and not those for attaching, closing, parallel lanes or screenshots. It is one agent rather than several lanes: see ADR 14.
 
 `--storage-state <file>` explores while signed in; a session that no longer signs in exits 2 before the model is called. `--browser`, `--action-timeout-ms`, `--nav-timeout-ms`, `--project` and `--out` are as for `check`.
+
+### Showing one element
+
+`scenescout ci <url> --show "the Save button"` does not explore. The model is given only `scout_snapshot`, `scout_crawl`, `scout_navigate`, `scout_back`, `scout_scroll` and `scout_capture`, and is told to find the element the words describe and capture it; the words are passed as data, quoted. The picture is SceneScout's, not the model's: `scout_capture` scrolls the element into view and takes a browser screenshot of its bounds plus an 8-pixel margin, cut to the viewport. The model chooses which element by its ref and nothing else; the file's name is fixed. The picture is `shots/preview.png` in the output directory.
+
+With `--compare-url <url>`, SceneScout then opens the same page on that URL (the page's path below the target URL, carried over to the other one) in a second browser session, finds the same element by its identity (its test id, else its role and name, as coverage keys it), and captures it the same way as `shots/base.png`. `shots/diff.png` is the new picture faded to grey with every changed pixel in red, and `ci.json` records the share of pixels changed. Two pictures of different sizes are laid over each other from the top-left corner, and pixels only one of them covers count as changed; the size change is reported as well. A channel difference of up to 8 out of 255 is not counted as a change.
+
+What can be shown is limited on purpose. Only an element a snapshot lists (a control, a link, a field) on a page opened by its URL can be captured: nothing is clicked, so an element inside a closed menu, a tab or a dialog is out of reach, and a comparison has to be able to reach the same page on the other deployment by its URL alone. An element whose test id or accessible name changed between the two deployments is not found on the base, and the result says so. Neither run writes a report: `ci.json` and the job summary say what was captured, and a run whose model found nothing to capture still exits 0, saying so.
 
 ### What it writes
 
@@ -489,6 +499,7 @@ Copy [examples/workflows/scenescout-qa.yml](../examples/workflows/scenescout-qa.
 |---|---|---|---|
 | `gate` | no | `pull-requests: write`, `deployments: read` | Reads the comment and the pull request, checks the commenter and where the pull request comes from, finds the preview's URL, and reacts to the comment. The only job that may receive the optional team token (below). |
 | `qa` | yes | `contents: read` | Runs only when the gate says so. Runs `brunoboto96/SceneScout/ci` at an exact release against the preview's URL, with the caps below, and keeps the results as an artifact. |
+| `shots` | no | `contents: write` | Only after a `show` or `compare` run succeeded. Puts its pictures on the `scenescout-shots` branch so the reply can show them. |
 | `report` | no | `pull-requests: write`, `actions: read` | Posts the results on the pull request, with a link to the artifact, or says the run could not run. |
 
 Pin both actions (`brunoboto96/SceneScout/qa` and `brunoboto96/SceneScout/ci`) to the same exact release tag, from the first release that has them, or to that release's commit SHA; never to `@v3` or a branch. `issue_comment` runs the workflow file as it is on the default branch, so a pull request cannot change it. SceneScout's own code comes from that release; its npm dependencies are resolved when the action installs it, within the ranges that release declares, since the package ships no lockfile.
@@ -497,9 +508,19 @@ Pin both actions (`brunoboto96/SceneScout/qa` and `brunoboto96/SceneScout/ci`) t
 
 ```
 /scenescout qa [preview URL] [focus]
+/scenescout qa [preview URL] show <element>
+/scenescout qa [preview URL] compare <element>
 ```
 
 Only the comment's first line is read, and the comment must begin with `/scenescout qa`, in any case, with nothing before it (the job's `startsWith` filter and the gate match it the same way). An optional https URL as the first word overrides where the preview is found; any other words become the run's `focus`, cut to 200 characters. Editing a comment starts nothing: only a new comment does.
+
+When the words after the URL begin with `show` or `compare` (a word of its own, in any case), the rest describes one element, e.g. `/scenescout qa compare the Save button`. `show` replies with a picture of that element on the preview. `compare` also captures it on a base URL and replies with the two side by side, a diff picture with the changed pixels in red, and the share of pixels changed. The base URL is the variable `SCENESCOUT_QA_BASE_URL` when it is set (the production site, say), else the newest successful deployment of the pull request's base branch; it is held to the same rules as the preview's URL. What can be captured, and how, is [Showing one element](#showing-one-element).
+
+### The pictures in the reply
+
+A comment cannot carry files, so the `shots` job pushes the pictures to the branch `scenescout-shots`, under a folder named after the workflow run, and the reply links them from there. The branch starts with no history of its own, so it never holds code, and the job pushes at most three files, by fixed names (`preview.png`, `base.png`, `diff.png`), each checked to be a PNG under 5 MB. It holds no model key, and refuses to run where one is set; it checks nothing out and runs nothing from the artifact. The branch name is fixed in the action, not an input. Two runs pushing at once do not force: the later one builds on the new tip.
+
+The reply renders only images whose URLs the report stage builds itself, from the server, the repository, the run's id and those three names, and only for the files the `shots` job says it pushed. Everything else in the reply comes from `ci.json` and stays inert, so image syntax in a finding's title or in the element's description is shown as text. The images are served from the repository, so they show to whoever can read it. The pictures are also in the run's artifact. Deleting the `scenescout-shots` branch removes them; the replies that linked them then show broken images.
 
 What the commenter sees:
 
@@ -508,6 +529,7 @@ What the commenter sees:
 | A run starts | 👀 | The results, when the run ends |
 | The commenter is not allowed | 😕 | None, so the command cannot make the workflow write on a pull request |
 | The pull request is closed, comes from a fork, has no preview, or its preview URL is not https | 😕 | One line saying why no run started, and how to change it |
+| `show` or `compare` with no element named, or `compare` with no https base URL | 😕 | One line saying why no run started, and how to change it |
 | The run is cancelled by hand or reaches the job's timeout | 👀 | One line saying so, with a link to the run |
 | A newer `/scenescout qa` on the same pull request cancels the run | 👀 | None from this run: the newer one replies |
 
@@ -525,6 +547,7 @@ All optional, as repository variables (Settings → Secrets and variables → Ac
 | `SCENESCOUT_QA_PREVIEW_URL` | none | A template for the preview's URL, with `{pr}` (the pull request's number) and `{sha}` (its head commit) filled in, e.g. `https://pr-{pr}.preview.example.com`. |
 | `SCENESCOUT_QA_ENVIRONMENT` | any | Without a template, the preview is the newest successful deployment of the head commit, as the deployments API reports it; this limits it to one environment's deployments. |
 | `SCENESCOUT_QA_ALLOW_FORKS` | off | `true` runs on pull requests from forks. Off, a fork's pull request gets a reply saying why nothing ran. |
+| `SCENESCOUT_QA_BASE_URL` | the base branch's deployment | What `compare` compares the preview with, e.g. `https://www.example.com`. Unset, the newest successful deployment of the pull request's base branch; with neither, `compare` replies saying so. |
 
 And one optional repository secret (Settings → Secrets and variables → Actions → Secrets):
 
@@ -557,4 +580,4 @@ The workflow refuses pull requests from forks by default, and `SCENESCOUT_QA_ALL
 
 ### This repository
 
-SceneScout has no deployed preview, so it does not run this workflow on its own pull requests. Its test suite (`qa-test`) holds the template to the rules above: the key only in the `qa` job, the team token only in the `gate` job's `team-token` input, that job reached only through the gate, with read-only permissions and no checkout or script of its own, SceneScout from an exact release tag (the one that ships `qa/`), and one run per pull request. It also runs both keyless stages against a stand-in GitHub API.
+SceneScout has no deployed preview, so it does not run this workflow on its own pull requests. Its test suite (`qa-test`) holds the template to the rules above: the key only in the `qa` job, the team token only in the `gate` job's `team-token` input, that job reached only through the gate, with read-only permissions and no checkout or script of its own, SceneScout from an exact release tag (one that ships `qa/` and the `shots` stage), one run per pull request, and the `shots` job the only one that writes contents, running only the shots stage with no branch of its own choosing. It also runs every keyless stage against a stand-in GitHub API.

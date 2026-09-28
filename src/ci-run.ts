@@ -17,12 +17,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { CAPTURE_MARGIN, parseCaptureResult, rebaseUrl, SHOT_FILES, SHOTS_DIRNAME, type CaptureInfo, type CaptureOutcome } from "./engine/capture.js";
 import {
   addUsage,
   wallLeftMs,
   guardToolArgs,
   capReached,
+  CAPTURE_TOOLS,
   childEnv,
+  ciCaptureKickoff,
+  ciCaptureSystemPrompt,
   CI_DIRNAME,
   ciExitCode,
   ciKickoff,
@@ -48,6 +52,7 @@ import {
 } from "./engine/ci.js";
 import { resolveTimeLimits } from "./engine/limits.js";
 import { MEMORY_DIRNAME, writeSelfIgnore, type Finding } from "./engine/memory.js";
+import { decodePng, diffImages, encodePng } from "./engine/png.js";
 import {
   AnthropicConversation,
   backoffMs,
@@ -225,6 +230,8 @@ export interface LoopOutcome {
   stop: StopReason;
   stopDetail?: string;
   spend: Spend;
+  /** What the model said when it ended the run, if it did. */
+  finalText?: string;
 }
 
 /**
@@ -246,6 +253,8 @@ export async function agentLoop(o: {
   startedAt?: number;
   /** The run's project directory: the only one scout_scan may read. */
   projectDir: string;
+  /** Told of every tool call that ran, with the arguments it ran with. */
+  onResult?: (name: string, args: Record<string, unknown>, result: { text: string; isError: boolean }) => void;
 }): Promise<LoopOutcome> {
   const now = o.now ?? Date.now;
   const spend: Spend = { turns: 0, usage: { ...NO_USAGE }, startedAt: o.startedAt ?? now() };
@@ -264,8 +273,9 @@ export async function agentLoop(o: {
     spend.usage = addUsage(spend.usage, turn.usage);
     if (turn.resume) continue;
     if (turn.calls.length === 0) {
-      if (turn.text.trim()) o.log(`  model: ${turn.text.trim().slice(0, 600)}`);
-      return { stop: "done", ...(turn.note ? { stopDetail: turn.note } : {}), spend };
+      const said = turn.text.trim();
+      if (said) o.log(`  model: ${said.slice(0, 600)}`);
+      return { stop: "done", ...(turn.note ? { stopDetail: turn.note } : {}), spend, ...(said ? { finalText: said.slice(0, 600) } : {}) };
     }
     o.log(
       `  turn ${spend.turns}: ${turn.calls.map((c) => c.name || "(unnamed)").join(", ")} — ${(spend.usage.input + spend.usage.output).toLocaleString("en-US")} tokens so far`,
@@ -298,11 +308,108 @@ export async function agentLoop(o: {
       try {
         const r = await o.host.call(call.name, guarded.args, Math.min(600_000, left));
         results.push({ id: call.id, isError: r.isError, text: r.text });
+        o.onResult?.(call.name, guarded.args, r);
       } catch (err) {
         results.push({ id: call.id, isError: true, text: `${call.name} failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }
     o.client.addResults(results);
+  }
+}
+
+/**
+ * After the model has picked and captured the element: copy its picture into
+ * the run's output, and for a comparison capture the same element (by its
+ * key, not a ref the model chose) on the same page of the base URL, in a
+ * session of its own, then diff the two. Only the engine takes pictures, and
+ * the file names are fixed (SHOT_FILES).
+ */
+export async function captureShots(o: {
+  host: ToolHost;
+  options: CiOptions;
+  captured: CaptureInfo | null;
+  finalText?: string;
+  outDir: string;
+  timeLeft: () => number;
+  log: (line: string) => void;
+}): Promise<CaptureOutcome> {
+  const what = o.options.show ?? "";
+  const shots = path.join(o.outDir, SHOTS_DIRNAME);
+  if (!o.captured) return { what, status: "not-found", ...(o.finalText ? { detail: o.finalText.slice(0, 300) } : {}) };
+  const pathOf = (url: string): string => {
+    try {
+      const u = new URL(url);
+      return `${u.pathname}${u.search}`;
+    } catch {
+      return url;
+    }
+  };
+  let previewPng: Buffer;
+  try {
+    previewPng = fs.readFileSync(o.captured.file);
+    fs.mkdirSync(shots, { recursive: true });
+    fs.writeFileSync(path.join(shots, SHOT_FILES.preview), previewPng);
+  } catch (err) {
+    return { what, status: "failed", detail: `the picture could not be kept: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const outcome: CaptureOutcome = {
+    what,
+    status: "captured",
+    preview: {
+      file: `${SHOTS_DIRNAME}/${SHOT_FILES.preview}`,
+      key: o.captured.key,
+      label: o.captured.label,
+      path: pathOf(o.captured.url),
+      width: o.captured.width,
+      height: o.captured.height,
+    },
+  };
+  o.log(`Captured ${o.captured.label || o.captured.key} on ${o.captured.url}.`);
+  if (!o.options.compareUrl) return outcome;
+  try {
+    const target = rebaseUrl(o.captured.url, o.options.url, o.options.compareUrl);
+    if (!target) return { ...outcome, detail: `the page it is on (${pathOf(o.captured.url)}) has no place on the base URL, so it was not compared` };
+    const attached = await o.host.call(
+      "scout_attach",
+      {
+        url: target,
+        projectPath: o.options.projectDir,
+        mode: o.options.mode,
+        session: "base",
+        objective: "CI run: capture the same element on the base URL",
+        ...(o.options.browser ? { browser: o.options.browser } : {}),
+      },
+      Math.min(ATTACH_MS, o.timeLeft()),
+    );
+    if (attached.isError || /^ERROR:/.test(attached.text))
+      return { ...outcome, detail: `the base URL could not be opened: ${attached.text.replace(/^ERROR:\s*/, "").slice(0, 200)}` };
+    const base = await o.host.call("scout_capture", { key: o.captured.key, name: "base", margin: CAPTURE_MARGIN, session: "base" }, o.timeLeft());
+    const baseInfo = base.isError ? null : parseCaptureResult(base.text);
+    if (!baseInfo) return { ...outcome, detail: `the same element was not captured on the base URL: ${base.text.replace(/^ERROR:\s*/, "").slice(0, 200)}` };
+    try {
+      const basePng = fs.readFileSync(baseInfo.file);
+      fs.writeFileSync(path.join(shots, SHOT_FILES.base), basePng);
+      const diff = diffImages(decodePng(basePng), decodePng(previewPng));
+      fs.writeFileSync(path.join(shots, SHOT_FILES.diff), encodePng(diff.image));
+      o.log(`Compared with ${target}: ${diff.percent}% of pixels changed${diff.sizeChanged ? ", and the size changed" : ""}.`);
+      return {
+        ...outcome,
+        base: { file: `${SHOTS_DIRNAME}/${SHOT_FILES.base}`, path: pathOf(baseInfo.url), width: baseInfo.width, height: baseInfo.height },
+        diff: {
+          file: `${SHOTS_DIRNAME}/${SHOT_FILES.diff}`,
+          changedPixels: diff.changed,
+          totalPixels: diff.total,
+          percent: diff.percent,
+          sizeChanged: diff.sizeChanged,
+          box: diff.box,
+        },
+      };
+    } catch (err) {
+      return { ...outcome, detail: `the two pictures could not be compared: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  } catch (err) {
+    // A slow or failing base must not cost the preview's picture, nor turn the reply into an exploration's.
+    return { ...outcome, detail: `the base URL could not be captured: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 
@@ -334,9 +441,12 @@ export async function runCi(
   const startedAt = now();
   const outDir = options.outDir ?? path.join(options.projectDir, MEMORY_DIRNAME, CI_DIRNAME);
   const before = readMemoryFindings(options.projectDir);
+  // Pictures an earlier run left in the same output are not this run's: they must never be uploaded as its.
+  fs.rmSync(path.join(outDir, SHOTS_DIRNAME), { recursive: true, force: true });
   let outcome: LoopOutcome = { stop: "could-not-start", spend: { turns: 0, usage: { ...NO_USAGE }, startedAt } };
   let contractMet = false;
   let reportWritten = false;
+  let capture: CaptureOutcome | undefined;
   let host: ToolHost | null = null;
   // Set when the exploration ends (or never starts): the report and the close share FINISH_MS from then.
   let finishBy = 0;
@@ -365,9 +475,10 @@ export async function runCi(
       outcome = { ...outcome, stopDetail: (authFailed ?? attached.text).replace(/^ERROR:\s*/, "").slice(0, 400) };
     } else {
       log(`Attached to ${options.url} in ${options.mode} mode.`);
-      const tools = ciTools(await host.tools());
-      const system = ciSystemPrompt(loadPlaybook(packageRoot), options);
-      const kickoff = ciKickoff(options);
+      const tools = ciTools(await host.tools(), options.show ? CAPTURE_TOOLS : undefined);
+      const system = options.show ? ciCaptureSystemPrompt() : ciSystemPrompt(loadPlaybook(packageRoot), options);
+      const kickoff = options.show ? ciCaptureKickoff({ url: options.url, show: options.show }) : ciKickoff(options);
+      let captured: CaptureInfo | null = null;
       outcome = await agentLoop({
         client: deps.makeClient(system, tools, kickoff),
         host,
@@ -377,15 +488,23 @@ export async function runCi(
         now,
         startedAt,
         projectDir: options.projectDir,
+        onResult: (name, _args, r) => {
+          if (name === "scout_capture" && !r.isError) captured = parseCaptureResult(r.text) ?? captured;
+        },
       });
       log(`Run ended: ${describeStop(outcome.stop, options.caps, outcome.stopDetail)}.`);
       finishBy = now() + FINISH_MS;
-      // The report is written whatever ended the run. A forced report still prints its gaps.
-      let report = await host.call("scout_report", { level: options.level }, finishLeft());
-      contractMet = !report.isError && !/NOT GENERATED/.test(report.text);
-      if (!contractMet && !report.isError) report = await host.call("scout_report", { level: options.level, force: true }, finishLeft());
-      reportWritten = !report.isError && !/^ERROR:/.test(report.text) && fs.existsSync(path.join(options.projectDir, MEMORY_DIRNAME, "report.md"));
-      if (!reportWritten) log(`The report could not be generated: ${report.text.slice(0, 400)}`);
+      if (options.show) {
+        // A run asked to show an element writes pictures, not a report: it did not explore.
+        capture = await captureShots({ host, options, captured, finalText: outcome.finalText, outDir, timeLeft: finishLeft, log });
+      } else {
+        // The report is written whatever ended the run. A forced report still prints its gaps.
+        let report = await host.call("scout_report", { level: options.level }, finishLeft());
+        contractMet = !report.isError && !/NOT GENERATED/.test(report.text);
+        if (!contractMet && !report.isError) report = await host.call("scout_report", { level: options.level, force: true }, finishLeft());
+        reportWritten = !report.isError && !/^ERROR:/.test(report.text) && fs.existsSync(path.join(options.projectDir, MEMORY_DIRNAME, "report.md"));
+        if (!reportWritten) log(`The report could not be generated: ${report.text.slice(0, 400)}`);
+      }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -417,6 +536,7 @@ export async function runCi(
     spend: outcome.spend,
     endedAt,
     findings: findingsThisRun(before, readMemoryFindings(options.projectDir)),
+    ...(capture ? { capture } : {}),
   };
   const written: string[] = [];
   try {
@@ -435,6 +555,8 @@ export async function runCi(
     write("summary.md", summary);
     write("ci.json", JSON.stringify(ciSummaryJson(result, deps.version, secrets), null, 2) + "\n");
     write("ci.sarif", JSON.stringify(ciSarif(result, deps.version, secrets), null, 2) + "\n");
+    // A capture run's outcome is its pictures and ci.json: it wrote no report by design.
+    if (options.show) reportWritten = true;
     if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, redactKeys(summary, secrets));
   } catch (err) {
     log(`Could not write the results to ${outDir}: ${err instanceof Error ? err.message : String(err)}`);

@@ -1,7 +1,9 @@
 # A QA review from a pull-request comment. Copy this file to
 # .github/workflows/ in the repository whose app is tested. An allowed account
 # comments `/scenescout qa` on a pull request (optionally followed by a preview
-# URL and a few words of focus) and gets a SceneScout report on it.
+# URL and a few words of focus) and gets a SceneScout report on it, or
+# `/scenescout qa show the Save button` / `compare the Save button` and gets a
+# picture of that element, before and after with the changed pixels marked.
 #
 # It tests the pull request's DEPLOYED PREVIEW and never builds or runs the pull
 # request's code: the job that holds the model's key checks out nothing and runs
@@ -44,6 +46,8 @@ jobs:
       url: ${{ steps.gate.outputs.url }}
       focus: ${{ steps.gate.outputs.focus }}
       login: ${{ steps.gate.outputs.login }}
+      show: ${{ steps.gate.outputs.show }}
+      base: ${{ steps.gate.outputs.base }}
     steps:
       - id: gate
         uses: brunoboto96/SceneScout/qa@v3.14.0
@@ -57,6 +61,7 @@ jobs:
           allow-forks: ${{ vars.SCENESCOUT_QA_ALLOW_FORKS }}
           preview-url: ${{ vars.SCENESCOUT_QA_PREVIEW_URL }}
           environment: ${{ vars.SCENESCOUT_QA_ENVIRONMENT }}
+          base-url: ${{ vars.SCENESCOUT_QA_BASE_URL }}
 
   # The only job that holds the key. It reads nothing but the preview's URL
   # from the gate, checks out nothing, and runs SceneScout from an exact release.
@@ -79,6 +84,9 @@ jobs:
         with:
           url: ${{ needs.gate.outputs.url }}
           focus: ${{ needs.gate.outputs.focus }}
+          # show / compare: capture that element instead of exploring, and compare it with the base URL.
+          show: ${{ needs.gate.outputs.show }}
+          compare-url: ${{ needs.gate.outputs.base }}
           mode: read-only
           max-turns: "40"
           max-tokens: "1500000"
@@ -86,9 +94,29 @@ jobs:
           artifact-name: scenescout-qa-${{ needs.gate.outputs.pr }}
           upload-sarif: "false"
 
+  # No key, and nothing checked out. For a show or compare run, puts the pictures
+  # on the scenescout-shots branch (one folder per run) so the reply can show
+  # them inline: a comment cannot carry files. The only job that may write
+  # contents, and the branch it writes is fixed in the action.
+  shots:
+    needs: [gate, qa]
+    if: needs.gate.outputs.run == 'true' && needs.gate.outputs.show != '' && needs.qa.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # push the pictures to the scenescout-shots branch
+    outputs:
+      pushed: ${{ steps.shots.outputs.pushed }}
+    steps:
+      - id: shots
+        uses: brunoboto96/SceneScout/qa@v3.14.0
+        with:
+          stage: shots
+          artifact-name: scenescout-qa-${{ needs.gate.outputs.pr }}
+
   # No key. Posts the results on the pull request, or says the run could not run.
   report:
-    needs: [gate, qa]
+    needs: [gate, qa, shots]
     if: always() && needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -105,3 +133,4 @@ jobs:
           sha: ${{ needs.gate.outputs.sha }}
           url: ${{ needs.gate.outputs.url }}
           login: ${{ needs.gate.outputs.login }}
+          shots: ${{ needs.shots.outputs.pushed }}
