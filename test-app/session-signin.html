@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Signing in</title>
+  </head>
+  <body>
+    <!--
+      A single-page-app sign-in that keeps its token ONLY in sessionStorage: no
+      cookie, no localStorage. It stores the token, as a sign-in library would
+      after its callback, and sends the tab on to session-account.html.
+    -->
+    <p data-testid="session-signin-status">Signing in…</p>
+    <script>
+      sessionStorage.setItem("fixture_token", "member-token");
+      location.replace("/session-account.html");
+    </script>
+  </body>
+</html>

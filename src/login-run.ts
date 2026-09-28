@@ -18,7 +18,7 @@ import { defaultEngine, type BrowserEngineName } from "./browsers.js";
 import { explainLaunchFailure } from "./engine/launch.js";
 import { redactRoute } from "./engine/check.js";
 import { describeLifetime, readLifetime, type ProfileLifetime } from "./engine/expiry.js";
-import { describeSaved, writeProfile, type LoginOptions, type ProfileSummary } from "./engine/profiles.js";
+import { describeSaved, mergeSessionStorage, withSessionStorage, writeProfile, type LoginOptions, type ProfileSummary } from "./engine/profiles.js";
 import {
   chooseFields,
   chooseSubmit,
@@ -38,12 +38,41 @@ import {
 } from "./engine/scripted-login.js";
 
 /**
- * Read what the profile keeps from a signed-in context. One place on purpose:
- * capturing more than cookies and localStorage (sessionStorage, IndexedDB) is
- * a change here and in what attach restores, and nowhere else.
+ * Read what the profile keeps from a signed-in context: cookies, localStorage
+ * and IndexedDB through Playwright's storage state, and sessionStorage, which
+ * the storage state has no field for, read from every frame of every open
+ * tab. One place on purpose: attach restores exactly what this captures (see
+ * splitProfile and sessionStorageInitScript in engine/profiles.ts).
  */
 export async function captureState(context: BrowserContext): Promise<unknown> {
-  return context.storageState();
+  const state = await context.storageState({ indexedDB: true });
+  const frames: { origin: unknown; entries: unknown }[] = [];
+  for (const page of context.pages()) {
+    for (const frame of page.frames()) {
+      try {
+        frames.push(
+          await frame.evaluate(() => {
+            // A sandboxed or opaque-origin frame throws on access; it has nothing to keep.
+            try {
+              const entries: [string, string][] = [];
+              for (let i = 0; i < sessionStorage.length; i++) {
+                const name = sessionStorage.key(i);
+                if (name !== null) entries.push([name, sessionStorage.getItem(name) ?? ""]);
+              }
+              return { origin: location.origin, entries };
+            } catch {
+              return { origin: location.origin, entries: [] };
+            }
+          }),
+        );
+      } catch (err) {
+        // A child frame that went away between listing and reading has nothing
+        // left to keep; the tab's own document failing to answer is a real error.
+        if (frame === page.mainFrame()) throw err;
+      }
+    }
+  }
+  return withSessionStorage(state, mergeSessionStorage(frames));
 }
 
 /** How the person signalled they were done: Enter saves; everything else does not. */
