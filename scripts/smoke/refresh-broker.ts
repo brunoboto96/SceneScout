@@ -73,6 +73,9 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
   try {
     // ---- Broker on: one family, four lanes, never revoked ------------------
     await recordProfile(baseUrl, project);
+    // The sign-in's other half kept in sessionStorage, which the pages' storage state never holds: the write-back must keep it.
+    const sessionHalf = [{ origin: new URL(baseUrl).origin, entries: [{ name: "id_token", value: "the-session-half" }] }];
+    writeProfile(project, "member", { ...JSON.parse(fs.readFileSync(profilePath(project, "member"), "utf8")), sessionStorage: sessionHalf });
     const start = refreshFamilies();
     const brokered = await fourLanes(baseUrl, project, true, opened);
     const after = refreshFamilies();
@@ -91,6 +94,7 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       `${slots.length} slot(s)`,
     );
     check("...and no lock is left behind", !fs.existsSync(lockPathFor(profilePath(project, "member"))));
+    check("...and it still holds the profile's sessionStorage", JSON.stringify(saved.sessionStorage) === JSON.stringify(sessionHalf));
     check("...and the profile is still owner-only", process.platform === "win32" || (fs.statSync(profilePath(project, "member")).mode & 0o077) === 0);
     const summaries = opened.map((e) => e.refreshSummary());
     check(

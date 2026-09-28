@@ -372,6 +372,49 @@ test("the restore script seeds only the matching origin, once per tab, and keeps
   assert.equal(proto.size, 0);
 });
 
+test("a re-attach seeds each tab once more from the latest profile, after the attach's script", () => {
+  const origin = "http://127.0.0.1:3000";
+  const attach = sessionStorageInitScript([{ origin, entries: [{ name: "auth_token", value: "old" }] }])!;
+  const reattach = sessionStorageInitScript([{ origin, entries: [{ name: "auth_token", value: "new" }] }], { generation: "reattach-1" })!;
+  assert.ok(attach && reattach);
+  /** One page load after the re-attach: both scripts run, the attach's first, as Playwright runs them in the order added. */
+  const load = (tab: Map<string, string>) => {
+    runRestore(attach, origin, tab);
+    return runRestore(reattach, origin, tab);
+  };
+
+  // The tab the attach seeded, whose sign-in the app then dropped on a revoked token.
+  const tab = new Map<string, string>([[SESSION_RESTORED_MARKER, "1"]]);
+  load(tab);
+  assert.equal(tab.get("auth_token"), "new", "the latest profile's token is put back in a tab the attach already seeded");
+  assert.equal(tab.get(SESSION_RESTORED_MARKER), "reattach-1");
+
+  // Once per tab again: the app signs out after the re-attach and stays signed out, by removeItem or by clear().
+  tab.delete("auth_token");
+  load(tab);
+  assert.equal(tab.has("auth_token"), false, "a sign-out after the re-attach stands");
+  const cleared = new Map<string, string>([[SESSION_RESTORED_MARKER, "1"]]);
+  load(cleared).clear();
+  assert.equal(cleared.get(SESSION_RESTORED_MARKER), "reattach-1", "clear() leaves the re-attach's mark, not the attach's");
+  load(cleared);
+  assert.equal(cleared.has("auth_token"), false);
+
+  // A tab opened after the re-attach ends on the latest sign-in, never the older one.
+  const fresh = new Map<string, string>();
+  load(fresh);
+  assert.equal(fresh.get("auth_token"), "new");
+  load(fresh);
+  assert.equal(fresh.get("auth_token"), "new");
+
+  // The origin rule holds for the re-attach too.
+  const elsewhere = new Map<string, string>([[SESSION_RESTORED_MARKER, "1"]]);
+  runRestore(reattach, "http://127.0.0.1:4000", elsewhere);
+  assert.equal(elsewhere.has("auth_token"), false);
+
+  // "1" is the attach's own mark: a re-attach using it would never seed a tab the attach had seeded.
+  assert.throws(() => sessionStorageInitScript([{ origin, entries: [] }], { generation: "1" }), /must not be "1"/);
+});
+
 // ── How long a profile lasts ────────────────────────────────────────────────
 
 const NOW = Date.UTC(2030, 0, 1, 12, 0, 0);
