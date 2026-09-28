@@ -27,8 +27,6 @@ import { MEMORY_DIRNAME, SELF_IGNORE_KEEP } from "./memory.js";
 export const MAX_FLOW_STEPS = 50;
 /** Most flows one check replays. */
 export const MAX_FLOWS = 50;
-/** How long a step waits for its target, text, URL or request before it counts as broken. */
-export const FLOW_STEP_TIMEOUT_MS = 5000;
 /**
  * How long a flow waits after its last step for a write that step set off
  * late (a save on a timer, a debounced autosave), before it counts as passed.

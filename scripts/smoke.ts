@@ -33,6 +33,7 @@ import * as postmessage from "./smoke/postmessage.ts";
 import * as checkGate from "./smoke/check.ts";
 import * as unload from "./smoke/unload.ts";
 import * as ciRun from "./smoke/ci.ts";
+import * as timeLimits from "./smoke/time-limits.ts";
 import * as teardown from "./smoke/teardown.ts";
 
 const suites = [
@@ -50,6 +51,7 @@ const suites = [
   contradiction,
   frames,
   unload,
+  timeLimits,
   checkGate,
   ciRun,
   teardown,
