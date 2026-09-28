@@ -17,6 +17,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
+  ALLOWED_ROLES,
   allowlist,
   cancelledMarkdown,
   checkPreviewUrl,
@@ -35,6 +36,7 @@ import {
   qaCommentMarkdown,
   runGate,
   runReport,
+  teamMembership,
 } from "../action/qa-action.mjs";
 
 const REPO = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -74,10 +76,18 @@ test("command: only a first line that is the command, then an optional URL and f
 });
 
 test("allowlist: the configured logins, else the repository's owners, compared without case", () => {
-  assert.deepEqual(allowlist("", "Owner"), { logins: ["owner"], owners: true });
-  assert.deepEqual(allowlist("  ", "owner"), { logins: ["owner"], owners: true });
-  assert.deepEqual(allowlist(undefined, "owner"), { logins: ["owner"], owners: true });
-  assert.deepEqual(allowlist("@alice, Bob\ncarol  alice", "owner"), { logins: ["alice", "bob", "carol"], owners: false });
+  const ownersOnly = { logins: ["owner"], roles: ["OWNER"], teams: [], otherOrgTeams: [], owners: true };
+  assert.deepEqual(allowlist("", "Owner"), ownersOnly);
+  assert.deepEqual(allowlist("  ", "owner"), ownersOnly);
+  assert.deepEqual(allowlist(undefined, "owner"), ownersOnly);
+  assert.deepEqual(allowlist("", "owner", { roles: " ", teams: "" }), ownersOnly, "empty role and team lists keep the default");
+  assert.deepEqual(allowlist("@alice, Bob\ncarol  alice", "owner"), {
+    logins: ["alice", "bob", "carol"],
+    roles: [],
+    teams: [],
+    otherOrgTeams: [],
+    owners: false,
+  });
   const owners = allowlist("", "owner");
   assert.ok(isAllowed("OWNER", "", owners), "a user-owned repository: the owner's login");
   assert.ok(!isAllowed("owner-bot", "NONE", owners));
@@ -91,6 +101,134 @@ test("allowlist: the configured logins, else the repository's owners, compared w
   const listed = allowlist("alice", "owner");
   assert.ok(isAllowed("Alice", "NONE", listed));
   assert.ok(!isAllowed("owner", "OWNER", listed), "a configured list replaces the owner default, association included");
+});
+
+test("allowlist by role: OWNER, MEMBER, COLLABORATOR, a union with the logins; any other value is refused as configuration", () => {
+  assert.deepEqual(ALLOWED_ROLES, ["OWNER", "MEMBER", "COLLABORATOR"]);
+  const members = allowlist("", "some-org", { roles: "member, Collaborator MEMBER" });
+  assert.deepEqual([members.logins, members.roles, members.owners], [[], ["MEMBER", "COLLABORATOR"], false]);
+  // Role allowed.
+  assert.ok(isAllowed("someone", "MEMBER", members));
+  assert.ok(isAllowed("someone", "COLLABORATOR", members));
+  // Role not in the set: the default's OWNER is replaced too, so a project lists it to keep it.
+  for (const association of ["OWNER", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE", "", undefined])
+    assert.ok(!isAllowed("someone", association, members), `${association} is not in the set`);
+  assert.ok(!isAllowed("some-org", "NONE", members), "the organization's own login is not added once a list is set");
+  // A union with the username list.
+  const both = allowlist("alice", "owner", { roles: "OWNER" });
+  assert.ok(isAllowed("alice", "NONE", both));
+  assert.ok(isAllowed("owner", "OWNER", both));
+  assert.ok(!isAllowed("bob", "MEMBER", both));
+  // An unknown value fails the gate rather than being skipped: a typo must not quietly narrow or widen who may run.
+  for (const bad of ["ADMIN", "MEMBER, contributor", "NONE", "FIRST_TIMER", "OWNER;MEMBER"])
+    assert.throws(
+      () => allowlist("", "owner", { roles: bad }),
+      /SCENESCOUT_QA_ALLOWED_ROLES has .*the roles that may be allowed are OWNER, MEMBER, COLLABORATOR/,
+      bad,
+    );
+});
+
+test("allowlist by team: org/team-slug of the repository's organization; another organization's team is set apart, a malformed one refused", () => {
+  const teams = allowlist("", "Some-Org", { teams: "some-org/qa-team, Some-Org/Release_Team\nsome-org/qa-team other-org/admins" });
+  assert.deepEqual(teams.teams, [
+    { org: "some-org", slug: "qa-team" },
+    { org: "some-org", slug: "release_team" },
+  ]);
+  assert.deepEqual(teams.otherOrgTeams, ["other-org/admins"]);
+  assert.equal(teams.owners, false, "a team list replaces the owner default");
+  assert.ok(!isAllowed("org-admin", "OWNER", teams), "teams are read from the API, never assumed from the payload");
+  assert.equal(allowlist("", "some-org", { teams: "other-org/admins" }).owners, false, "even a team that allows no one replaces the default");
+  // A slug of dots would resolve out of the teams route (`teams/..` is the organization's own membership), so it is not a slug.
+  for (const bad of [
+    "qa-team",
+    "some-org/",
+    "/qa-team",
+    "some-org/qa/team",
+    "some-org/qa team?",
+    "https://github.com/orgs/some-org/teams/qa",
+    "some-org/..",
+    "some-org/.",
+    "some-org/.hidden",
+  ])
+    assert.throws(() => allowlist("", "some-org", { teams: bad }), /SCENESCOUT_QA_ALLOWED_TEAMS has .*not org\/team-slug/, bad);
+});
+
+/** A GitHub client for team lookups: `answers` maps a membership route to a status and body. Records the routes it was asked for. */
+function teamCall(answers: Record<string, [number, unknown]>) {
+  const routes: string[] = [];
+  const call = async (_method: string, route: string) => {
+    routes.push(route);
+    const [status, body] = answers[route] ?? [404, {}];
+    if (status >= 400) throw Object.assign(new Error(`GET ${route} failed: HTTP ${status}`), { status });
+    return body;
+  };
+  return { call, routes };
+}
+
+test("team membership: an active member is allowed; every answer that cannot confirm it refuses and says why", async () => {
+  const allowed = allowlist("", "some-org", { teams: "some-org/qa-team some-org/release" });
+  const QA = "/orgs/some-org/teams/qa-team/memberships/someone";
+  const RELEASE = "/orgs/some-org/teams/release/memberships/someone";
+
+  // Team member: the second team allows, after the first said not a member.
+  const member = teamCall({ [QA]: [404, {}], [RELEASE]: [200, { state: "active", role: "member" }] });
+  const yes = await teamMembership(member.call, allowed, "someone");
+  assert.deepEqual([yes.member, yes.team], [true, "some-org/release"]);
+  assert.deepEqual(member.routes, [QA, RELEASE]);
+
+  // Non-member: 404 on every team.
+  const no = await teamMembership(teamCall({}).call, allowed, "someone");
+  assert.equal(no.member, false);
+  assert.deepEqual(
+    no.notes.map((n) => n.level),
+    ["notice", "notice"],
+  );
+  assert.match(no.notes[0].text, /not a member of some-org\/qa-team.*HTTP 404/);
+
+  // An invitation not yet accepted.
+  const pending = await teamMembership(teamCall({ [QA]: [200, { state: "pending" }] }).call, allowed, "someone");
+  assert.equal(pending.member, false);
+  assert.match(pending.notes[0].text, /"pending", not active/);
+
+  // No token: nothing is looked up, and the log says what is missing.
+  const none = await teamMembership(null, allowed, "someone");
+  assert.equal(none.member, false);
+  assert.equal(none.notes[0].level, "error");
+  assert.match(none.notes[0].text, /no team-token.*read:org/);
+
+  // A refused token (401, 403): an error, not a quiet no.
+  for (const status of [401, 403]) {
+    const refused = await teamMembership(teamCall({ [QA]: [status, {}], [RELEASE]: [status, {}] }).call, allowed, "someone");
+    assert.equal(refused.member, false);
+    assert.deepEqual(
+      refused.notes.map((n) => n.level),
+      ["error", "error"],
+    );
+    assert.match(refused.notes[0].text, new RegExp(`refused reading some-org/qa-team \\(HTTP ${status}\\).*read:org`));
+  }
+
+  // A call that fails outright refuses too.
+  const broken = await teamMembership(
+    async () => {
+      throw new Error("GET /orgs/x failed: timeout");
+    },
+    allowlist("", "some-org", { teams: "some-org/qa-team" }),
+    "someone",
+  );
+  assert.equal(broken.member, false);
+  assert.match(broken.notes[0].text, /could not be read: .*timeout/);
+
+  // A team of another organization is never looked up, token or not.
+  const cross = teamCall({ "/orgs/other-org/teams/admins/memberships/someone": [200, { state: "active" }] });
+  const crossOrg = await teamMembership(cross.call, allowlist("", "some-org", { teams: "other-org/admins" }), "someone");
+  assert.equal(crossOrg.member, false);
+  assert.deepEqual(cross.routes, [], "the token is never sent about another organization");
+  assert.match(crossOrg.notes[0].text, /other-org\/admins is not a team of this repository's organization/);
+
+  // The login is a path segment, encoded.
+  const odd = teamCall({});
+  await teamMembership(odd.call, allowlist("", "some-org", { teams: "some-org/qa-team" }), "a/../b");
+  assert.deepEqual(odd.routes, ["/orgs/some-org/teams/qa-team/memberships/a%2F..%2Fb"]);
 });
 
 test("fork: another head repository, a deleted one, or one that cannot be read", () => {
@@ -175,6 +313,7 @@ test("gate: runs only for an allowed account, on an open pull request from this 
   assert.equal(stranger.run, false);
   assert.equal(stranger.reaction, "confused");
   assert.equal(stranger.reply, null, "no reply to an account that may not start a run: the command cannot make the bot write");
+  assert.equal(decide({ login: "someone", association: "NONE", teamMember: true }).run, true, "a confirmed team member may start a run");
 
   const closed = decide({ pr: { ...SAME, state: "closed" } });
   assert.equal(closed.run, false);
@@ -272,7 +411,10 @@ interface Call {
   method: string;
   url: string;
   body: any;
+  auth: string;
 }
+
+const TEAM_TOKEN = "team-secret";
 
 async function withGitHub(routes: (method: string, url: string) => unknown, fn: (apiUrl: string, calls: Call[]) => Promise<void>): Promise<void> {
   const calls: Call[] = [];
@@ -280,11 +422,17 @@ async function withGitHub(routes: (method: string, url: string) => unknown, fn: 
     let raw = "";
     req.on("data", (c) => (raw += c));
     req.on("end", () => {
-      assert.equal(req.headers.authorization, "Bearer test-token", "the job's token is sent");
-      calls.push({ method: req.method!, url: req.url!, body: raw ? JSON.parse(raw) : null });
+      const auth = String(req.headers.authorization);
+      // The team token is sent to the team membership route and nowhere else; the job's token everywhere else.
+      assert.equal(auth, req.url!.startsWith("/orgs/") ? `Bearer ${TEAM_TOKEN}` : "Bearer test-token", `the right token for ${req.url}`);
+      calls.push({ method: req.method!, url: req.url!, body: raw ? JSON.parse(raw) : null, auth });
       const answer = routes(req.method!, req.url!);
       if (answer === undefined) {
         res.writeHead(404).end("{}");
+        return;
+      }
+      if (typeof answer === "number") {
+        res.writeHead(answer).end("{}");
         return;
       }
       res.writeHead(req.method === "POST" ? 201 : 200, { "content-type": "application/json" }).end(JSON.stringify(answer));
@@ -393,17 +541,126 @@ test("gate stage: on an organization's repository, an owner of the organization 
     const inputs = { "github-token": "test-token", "preview-url": "https://pr-{pr}.preview.example.com" };
     const env = (login: string, association: string) => ({ ...gateEnv(dir, api, login, undefined, association), GITHUB_REPOSITORY: "owner/app" });
     // The payload's repository owner is the organization; neither commenter is it.
-    const org = (e: NodeJS.ProcessEnv) => {
-      const file = String(e.GITHUB_EVENT_PATH);
-      const ev = JSON.parse(fs.readFileSync(file, "utf8"));
-      ev.repository.owner.login = "some-org";
-      fs.writeFileSync(file, JSON.stringify(ev));
-      return e;
-    };
+    const org = orgEvent;
     assert.equal((await runGate({ env: org(env("org-admin", "OWNER")), inputs, log: quiet })).run, "true");
     calls.length = 0;
     assert.equal((await runGate({ env: org(env("org-member", "MEMBER")), inputs, log: quiet })).run, "false");
     assert.ok(!calls.some((c) => c.url === "/repos/owner/app/pulls/7"), "a member is decided on the payload alone");
+  });
+});
+
+/** An organization's repository: the payload's owner is the organization. */
+function orgEvent(e: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const file = String(e.GITHUB_EVENT_PATH);
+  const ev = JSON.parse(fs.readFileSync(file, "utf8"));
+  ev.repository.owner.login = "some-org";
+  fs.writeFileSync(file, JSON.stringify(ev));
+  return e;
+}
+
+const MEMBERSHIP = "/orgs/some-org/teams/qa-team/memberships/teammate";
+
+test("gate stage: a commenter allowed by role starts a run; a role outside the set gets only the reaction; an unknown role fails the gate", async () => {
+  const dir = tempDir();
+  const routes = (method: string, url: string) => (url === "/repos/owner/app/pulls/7" ? SAME : method === "POST" ? {} : undefined);
+  await withGitHub(routes, async (api, calls) => {
+    const inputs = { "github-token": "test-token", "preview-url": "https://pr-{pr}.preview.example.com", "allowed-roles": "MEMBER, COLLABORATOR" };
+    const allowedRun = await runGate({ env: orgEvent(gateEnv(dir, api, "collab", undefined, "COLLABORATOR")), inputs, log: quiet });
+    assert.equal(allowedRun.run, "true");
+    assert.equal(allowedRun.url, "https://pr-7.preview.example.com/");
+    assert.ok(!calls.some((c) => c.url.startsWith("/orgs/")), "a role is read from the payload: no team lookup");
+    calls.length = 0;
+    const outside = await runGate({ env: orgEvent(gateEnv(dir, api, "org-admin", undefined, "OWNER")), inputs, log: quiet });
+    assert.equal(outside.run, "false", "the role list replaces the owner default");
+    assert.deepEqual(
+      calls.map((c) => `${c.method} ${c.url}`),
+      ["POST /repos/owner/app/issues/comments/55/reactions"],
+      "only the reaction; the pull request is not read",
+    );
+    calls.length = 0;
+    await assert.rejects(
+      runGate({ env: gateEnv(dir, api, "collab", undefined, "COLLABORATOR"), inputs: { ...inputs, "allowed-roles": "MEMBER, MAINTAINER" }, log: quiet }),
+      /SCENESCOUT_QA_ALLOWED_ROLES has "MAINTAINER"/,
+    );
+    assert.deepEqual(calls, [], "a list that cannot be read decides nothing");
+  });
+});
+
+test("gate stage: an active team member starts a run, the team token going only to the membership lookup; a non-member only gets the reaction", async () => {
+  const dir = tempDir();
+  const routes = (method: string, url: string) => {
+    if (url === MEMBERSHIP) return { state: "active", role: "member" };
+    if (url === "/repos/owner/app/pulls/7") return SAME;
+    return method === "POST" ? {} : undefined;
+  };
+  await withGitHub(routes, async (api, calls) => {
+    const inputs = {
+      "github-token": "test-token",
+      "team-token": TEAM_TOKEN,
+      "preview-url": "https://pr-{pr}.preview.example.com",
+      "allowed-teams": "some-org/qa-team",
+    };
+    const lines: string[] = [];
+    const run = await runGate({ env: orgEvent(gateEnv(dir, api, "teammate", undefined, "NONE")), inputs, log: (l: string) => lines.push(l) });
+    assert.equal(run.run, "true");
+    assert.deepEqual(
+      calls.map((c) => `${c.method} ${c.url}`),
+      [`GET ${MEMBERSHIP}`, "GET /repos/owner/app/pulls/7", "POST /repos/owner/app/issues/comments/55/reactions"],
+    );
+    assert.ok(!lines.join("\n").includes(TEAM_TOKEN), "the token is never logged");
+
+    calls.length = 0;
+    const stranger = await runGate({ env: orgEvent(gateEnv(dir, api, "someone", undefined, "MEMBER")), inputs, log: quiet });
+    assert.equal(stranger.run, "false");
+    assert.deepEqual(
+      calls.map((c) => `${c.method} ${c.url}`),
+      ["GET /orgs/some-org/teams/qa-team/memberships/someone", "POST /repos/owner/app/issues/comments/55/reactions"],
+      "a non-member: the lookup, then only the reaction",
+    );
+    assert.deepEqual(calls.at(-1)!.body, { content: "confused" });
+
+    calls.length = 0;
+    const chat = await runGate({ env: orgEvent(gateEnv(dir, api, "teammate", "looks good to me", "NONE")), inputs, log: quiet });
+    assert.equal(chat.run, "false");
+    assert.deepEqual(calls, [], "no team lookup for a comment that is not the command");
+  });
+});
+
+test("gate stage: teams allowed but no team token, or a token the API refuses: refused with an error annotation, never allowed by fallback", async () => {
+  const dir = tempDir();
+  let membership: unknown = { state: "active" };
+  const routes = (method: string, url: string) =>
+    url === MEMBERSHIP ? membership : url === "/repos/owner/app/pulls/7" ? SAME : method === "POST" ? {} : undefined;
+  await withGitHub(routes, async (api, calls) => {
+    const inputs = { "github-token": "test-token", "preview-url": "https://pr-{pr}.preview.example.com", "allowed-teams": "some-org/qa-team" };
+    const lines: string[] = [];
+    const out = await runGate({ env: orgEvent(gateEnv(dir, api, "teammate", undefined, "NONE")), inputs, log: (l: string) => lines.push(l) });
+    assert.equal(out.run, "false");
+    assert.deepEqual(
+      calls.map((c) => `${c.method} ${c.url}`),
+      ["POST /repos/owner/app/issues/comments/55/reactions"],
+      "no lookup with the job's token, and the pull request is not read",
+    );
+    assert.deepEqual(calls[0].body, { content: "confused" });
+    assert.ok(
+      lines.some((l) => /^::error title=SceneScout QA::SCENESCOUT_QA_ALLOWED_TEAMS is set but the gate has no team-token/.test(l)),
+      lines.join("\n"),
+    );
+
+    calls.length = 0;
+    lines.length = 0;
+    membership = 403;
+    const refused = await runGate({
+      env: orgEvent(gateEnv(dir, api, "teammate", undefined, "NONE")),
+      inputs: { ...inputs, "team-token": TEAM_TOKEN },
+      log: (l: string) => lines.push(l),
+    });
+    assert.equal(refused.run, "false");
+    assert.ok(
+      lines.some((l) => /^::error .*refused reading some-org\/qa-team \(HTTP 403\)/.test(l)),
+      lines.join("\n"),
+    );
+    assert.ok(!calls.some((c) => c.url === "/repos/owner/app/pulls/7"));
   });
 });
 
@@ -529,6 +786,8 @@ type Job = {
 
 const SCENESCOUT_PINNED = /^brunoboto96\/SceneScout\/(ci|qa)@(v\d+\.\d+\.\d+|[0-9a-f]{40})$/;
 const THIRD_PARTY_PINNED = /^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/;
+/** The one secret outside the qa job: the gate's token for reading team membership. */
+const TEAM_TOKEN_SECRET = "${{ secrets.SCENESCOUT_QA_TEAM_TOKEN }}";
 const CHECKS_OUT = /(^|\s)(git\s+(clone|fetch|checkout|switch|worktree)|gh\s+(pr|repo)\s+(checkout|clone))\b/m;
 
 /**
@@ -546,10 +805,24 @@ function qaWorkflowProblems(wf: Record<string, any>): string[] {
   const jobs = (wf.jobs ?? {}) as Record<string, Job>;
   const needs = (j: Job) => (Array.isArray(j.needs) ? j.needs : j.needs ? [j.needs] : []);
 
+  // The team token is allowed in one place only: the gate's qa step, as its team-token input. Blank it there, then every
+  // other secret reference, the team token's included, must be in the qa job, and the qa job must not name the team token.
+  const secretsOf = (name: string, job: Job): string[] => {
+    const copy = JSON.parse(JSON.stringify(job)) as Job;
+    if (name === "gate")
+      for (const st of copy.steps ?? [])
+        if (/^brunoboto96\/SceneScout\/qa@/.test(st.uses ?? "") && st.with?.stage === "gate" && st.with["team-token"] === TEAM_TOKEN_SECRET)
+          delete st.with["team-token"];
+    return [...JSON.stringify(copy).matchAll(/secrets\.[A-Za-z_][A-Za-z0-9_]*/g)].map((m) => m[0]);
+  };
   const withKey = Object.entries(jobs)
-    .filter(([, j]) => /secrets\./.test(JSON.stringify(j)))
+    .filter(([n, j]) => secretsOf(n, j).length > 0)
     .map(([n]) => n);
-  if (JSON.stringify(withKey) !== JSON.stringify(["qa"])) problems.push(`only the qa job may reference a secret, not: ${withKey.join(", ") || "none"}`);
+  if (JSON.stringify(withKey) !== JSON.stringify(["qa"]))
+    problems.push(
+      `only the qa job may reference a secret, besides the gate's team-token input; not: ${withKey.filter((n) => n !== "qa").join(", ") || "none"}`,
+    );
+  if (jobs.qa && secretsOf("qa", jobs.qa).includes("secrets.SCENESCOUT_QA_TEAM_TOKEN")) problems.push("the team token must never reach the qa job");
 
   for (const [name, job] of Object.entries(jobs)) {
     for (const s of job.steps ?? []) {
@@ -616,6 +889,10 @@ const template = (): Record<string, any> => parseYaml(fs.readFileSync(TEMPLATE, 
 
 test("workflow: the template is sound", () => {
   assert.deepEqual(qaWorkflowProblems(template()), []);
+  // The team token is wired into the gate, and only there.
+  const wf = template();
+  assert.equal(wf.jobs.gate.steps[0].with["team-token"], TEAM_TOKEN_SECRET);
+  for (const job of ["qa", "report"]) assert.ok(!JSON.stringify(wf.jobs[job]).includes("SCENESCOUT_QA_TEAM_TOKEN"), `${job} never gets the team token`);
 });
 
 test("workflow: each unsafe change to the template is caught", () => {
@@ -631,6 +908,23 @@ test("workflow: each unsafe change to the template is caught", () => {
     ["gh pr checkout in the report", (wf) => wf.jobs.report.steps.unshift({ run: "gh pr checkout 7" }), /report: fetches code/],
     ["the key in the gate", (wf) => (wf.jobs.gate.env = { OPENAI_API_KEY: "${{ secrets.OPENAI_API_KEY }}" }), /only the qa job may reference a secret/],
     ["the key in the report", (wf) => (wf.jobs.report.steps[0].env = { OPENAI_API_KEY: "${{ secrets.OPENAI_API_KEY }}" }), /only the qa job/],
+    [
+      "the key as the gate's team token",
+      (wf) => (wf.jobs.gate.steps[0].with["team-token"] = "${{ secrets.OPENAI_API_KEY }}"),
+      /only the qa job may reference a secret/,
+    ],
+    [
+      "the team token in the gate's env",
+      (wf) => (wf.jobs.gate.env = { TEAM: "${{ secrets.SCENESCOUT_QA_TEAM_TOKEN }}" }),
+      /only the qa job may reference a secret/,
+    ],
+    ["the team token in the qa job", (wf) => (wf.jobs.qa.steps[0].env.GH_TOKEN = "${{ secrets.SCENESCOUT_QA_TEAM_TOKEN }}"), /never reach the qa job/],
+    [
+      "the team token passed to the run",
+      (wf) => (wf.jobs.qa.steps[0].with["github-token"] = "${{ secrets.SCENESCOUT_QA_TEAM_TOKEN }}"),
+      /never reach the qa job/,
+    ],
+    ["the team token in the report", (wf) => (wf.jobs.report.steps[0].with["team-token"] = "${{ secrets.SCENESCOUT_QA_TEAM_TOKEN }}"), /only the qa job/],
     ["the key job without the gate", (wf) => delete wf.jobs.qa.needs, /must need the gate/],
     ["the key job not waiting for the gate's yes", (wf) => delete wf.jobs.qa.if, /only when the gate said so/],
     ["the key job with a write token", (wf) => (wf.jobs.qa.permissions["pull-requests"] = "write"), /contents: read and nothing else/],
@@ -676,10 +970,16 @@ test("workflow: the same SceneScout release in every job, and this repository do
   }
 });
 
-/** The first release with qa/: the template may never pin an earlier one. */
-const FIRST_QA_RELEASE = [3, 13, 0];
+/**
+ * What the template uses, and the first release that has it: the template may never pin an earlier one. While a
+ * feature's changeset is still pending, the template must pin a release after package.json's version.
+ */
+const TEMPLATE_NEEDS: Array<{ changeset: string; first: number[]; what: string }> = [
+  { changeset: "qa-comment.md", first: [3, 13, 0], what: "qa/" },
+  { changeset: "qa-allow-roles-teams.md", first: [3, 14, 0], what: "the gate's allowed-roles, allowed-teams and team-token inputs" },
+];
 
-test("workflow: the release it pins ships qa/, whichever order the pull requests land in", () => {
+test("workflow: the release it pins ships qa/ and every input the template passes, whichever order the pull requests land in", () => {
   const pinned = [...fs.readFileSync(TEMPLATE, "utf8").matchAll(/brunoboto96\/SceneScout\/(?:ci|qa)@v(\d+)\.(\d+)\.(\d+)/g)].map((m) =>
     m.slice(1, 4).map(Number),
   );
@@ -689,12 +989,13 @@ test("workflow: the release it pins ships qa/, whichever order the pull requests
     .split(".")
     .map(Number);
   const cmp = (a: number[], b: number[]) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
-  const pending = fs.existsSync(path.join(REPO, ".changeset", "qa-comment.md"));
+  const pending = TEMPLATE_NEEDS.filter((n) => fs.existsSync(path.join(REPO, ".changeset", n.changeset)));
   for (const p of pinned) {
-    if (pending) assert.ok(cmp(p, version) > 0, `qa/ is unreleased, so the template must pin a release after ${version.join(".")}, not ${p.join(".")}`);
-    else {
-      // Released: any release from the first that has qa/ up to this one, so a later Version Packages pull request never has to move it.
-      assert.ok(cmp(p, FIRST_QA_RELEASE) >= 0, `qa/ first shipped in ${FIRST_QA_RELEASE.join(".")}; ${p.join(".")} has no qa/`);
+    for (const n of pending)
+      assert.ok(cmp(p, version) > 0, `${n.what} is unreleased, so the template must pin a release after ${version.join(".")}, not ${p.join(".")}`);
+    if (pending.length === 0) {
+      // Released: any release from the first that has everything up to this one, so a later Version Packages pull request never has to move it.
+      for (const n of TEMPLATE_NEEDS) assert.ok(cmp(p, n.first) >= 0, `${n.what} first shipped in ${n.first.join(".")}; ${p.join(".")} does not have it`);
       assert.ok(cmp(p, version) <= 0, `the template pins ${p.join(".")}, which is not released yet (package.json is ${version.join(".")})`);
     }
   }
@@ -721,8 +1022,8 @@ test("qa action: pinned third-party steps, no input pasted into a script, no sec
     for (const k of Object.keys(template().jobs[job].steps[0].with)) assert.ok(inputs.includes(k), `${job}: ${k} is not an input`);
 });
 
-test("docs: every variable the template reads is documented", () => {
-  const vars = [...fs.readFileSync(TEMPLATE, "utf8").matchAll(/vars\.([A-Z_]+)/g)].map((m) => m[1]);
+test("docs: every variable and secret the template reads is documented", () => {
+  const vars = [...fs.readFileSync(TEMPLATE, "utf8").matchAll(/(?:vars|secrets)\.([A-Z_]+)/g)].map((m) => m[1]);
   assert.ok(vars.length >= 3);
   const doc = fs.readFileSync(path.join(REPO, "docs", "ci.md"), "utf8");
   for (const v of new Set(vars)) assert.ok(doc.includes(v), `${v} is not in docs/ci.md`);
