@@ -1230,17 +1230,45 @@ test("the top level: help, version, and an unknown or missing command", async ()
   assert.deepEqual(await dispatched(["constructor"]), { ran: [], exit: 1, said: ["usage"] });
 });
 
+/**
+ * The flags a hand-parsed command's function in cli.ts reads. Line endings are
+ * normalised first: a Windows checkout has CRLF, and a body that never finds
+ * its closing brace would run on into the next function and borrow its flags.
+ */
+function flagsReadBy(source: string, command: string): Set<string> {
+  const text = source.replace(/\r\n/g, "\n");
+  const start = text.indexOf(`async function ${command}(flags: string[])`);
+  assert.ok(start >= 0, `cli.ts has no ${command}(flags) function`);
+  const end = text.indexOf("\n}\n", start);
+  assert.ok(end >= 0, `found no end to ${command}() in cli.ts`);
+  const body = text.slice(start, end);
+  return new Set([...body.matchAll(/flags(?:\.includes\(|, )"(--[a-z-]+)"|\["(--[a-z-]+)", "(--[a-z-]+)"\]/g)].flatMap((m) => m.slice(1).filter(Boolean)));
+}
+
 test("every flag install and doctor read in cli.ts is one the preflight accepts", () => {
   const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts"), "utf8");
   for (const command of ["install", "doctor"] as const) {
-    const start = source.indexOf(`async function ${command}(flags: string[])`);
-    assert.ok(start >= 0, `cli.ts has no ${command}(flags) function`);
-    const body = source.slice(start, source.indexOf("\n}\n", start));
-    const read = new Set(
-      [...body.matchAll(/flags(?:\.includes\(|, )"(--[a-z-]+)"|\["(--[a-z-]+)", "(--[a-z-]+)"\]/g)].flatMap((m) => m.slice(1).filter(Boolean)),
-    );
+    const read = flagsReadBy(source, command);
     assert.ok(read.size > 0, `found no flags in ${command}()`);
     const spec = HAND_PARSED[command];
     for (const flag of read) assert.ok([...spec.switches, ...spec.valued].includes(flag), `${command} reads ${flag}, which the preflight would refuse`);
+  }
+});
+
+test("reading a command's flags from cli.ts gives the same answer with CRLF line endings", () => {
+  const lf = [
+    "async function install(flags: string[]): Promise<void> {",
+    '  if (flags.includes("--skip-browser")) return;',
+    "}",
+    "",
+    "async function doctor(flags: string[]): Promise<void> {",
+    '  if (flags.includes("--engine")) return;',
+    "}",
+    "",
+  ].join("\n");
+  const crlf = lf.replace(/\n/g, "\r\n");
+  for (const source of [lf, crlf]) {
+    assert.deepEqual([...flagsReadBy(source, "install")], ["--skip-browser"]);
+    assert.deepEqual([...flagsReadBy(source, "doctor")], ["--engine"]);
   }
 });
