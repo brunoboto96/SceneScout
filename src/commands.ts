@@ -12,7 +12,7 @@
  */
 
 /** Every subcommand, each run by a handler cli.ts supplies. */
-export type Subcommand = "scan" | "serve" | "install" | "doctor" | "check" | "ci" | "login" | "status" | "watch";
+export type Subcommand = "scan" | "serve" | "install" | "doctor" | "check" | "ci" | "login" | "export" | "status" | "watch";
 const HANDLERS_OF: Readonly<Record<Subcommand, true>> = {
   scan: true,
   serve: true,
@@ -21,6 +21,7 @@ const HANDLERS_OF: Readonly<Record<Subcommand, true>> = {
   check: true,
   ci: true,
   login: true,
+  export: true,
   status: true,
   watch: true,
 };
@@ -39,8 +40,8 @@ interface FlagSpec {
 }
 
 /**
- * Commands that read their arguments by hand. `check`, `ci` and `login` are
- * absent: their own parsers refuse unknown options. `serve` is absent on
+ * Commands that read their arguments by hand. `check`, `ci`, `login` and
+ * `export` are absent: their own parsers refuse unknown options. `serve` is absent on
  * purpose: it is the line an MCP client launches, and a stray argument there
  * should not stop the server from starting.
  */
