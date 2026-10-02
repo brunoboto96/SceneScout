@@ -11,8 +11,10 @@
  *   1. the `projectPath` the attach names, always;
  *   2. the client's workspace folder, when it offers one (MCP roots);
  *   3. the per-site default, unless PROJECTS_DIR_ENV is `off`.
- * The default is never placed inside a git repository: a folder of recordings
- * and saved logins does not belong in somebody's commits unless they chose it.
+ * The default is never placed inside a git repository below the home folder: a
+ * folder of recordings and saved logins does not belong in somebody's commits
+ * unless they chose it. A home folder that is itself a repository (dotfiles)
+ * does not count.
  *
  * Everything here is pure (the filesystem is passed in), so it is table-tested
  * in memory-test.
@@ -112,10 +114,18 @@ export function projectsRoot(home: Home): string | null {
  * The git repository a folder would sit inside: the nearest folder, the folder
  * itself included, holding a `.git` (a directory, or a file in a worktree).
  * `exists` is fs.existsSync in use; the folder need not exist yet.
+ *
+ * With `stopAt` (the home folder), the walk ends below it: a home folder that
+ * is itself a repository, as a dotfiles setup makes it, does not count, since
+ * refusing every default folder there is worse than one untracked folder in
+ * it. A folder outside `stopAt` is walked to the root.
  */
-export function enclosingRepo(dir: string, exists: (p: string) => boolean, platform: NodeJS.Platform = process.platform): string | null {
+export function enclosingRepo(dir: string, exists: (p: string) => boolean, platform: NodeJS.Platform = process.platform, stopAt?: string): string | null {
   const p = platform === "win32" ? path.win32 : path.posix;
+  const same = (a: string, b: string) => (platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
+  const stop = stopAt === undefined ? undefined : p.resolve(stopAt);
   for (let at = p.resolve(dir); ;) {
+    if (stop !== undefined && same(at, stop)) return null;
     if (exists(p.join(at, ".git"))) return at;
     const up = p.dirname(at);
     if (up === at) return null;
@@ -171,7 +181,7 @@ export function chooseProjectFolder(input: {
     };
   const p = input.home.platform === "win32" ? path.win32 : path.posix;
   const dir = p.join(root, name);
-  const repo = enclosingRepo(dir, input.exists, input.home.platform);
+  const repo = enclosingRepo(dir, input.exists, input.home.platform, input.home.homedir);
   if (repo)
     return {
       refused:

@@ -373,7 +373,7 @@ What an agent can pass when it attaches a session. You rarely set these by hand;
 | Option | Default | |
 |---|---|---|
 | `url` | (required) | The app's base URL |
-| `projectPath` | the client's workspace folder, else a folder for the site | The project's absolute path; `.scenescout/` lives here. Given, it always wins. Left out, a client that offers a workspace folder gets that; otherwise each tested site gets its own folder under `SCENESCOUT_PROJECTS_DIR`, by default `Documents/SceneScout/<host>/` (`localhost-3000` for `http://localhost:3000`), created on first use and named in the attach's result. That default is refused when it would sit inside a git repository |
+| `projectPath` | the client's workspace folder, else a folder for the site | The project's absolute path; `.scenescout/` lives here. Given, it always wins. Left out, a client that offers a workspace folder gets that; otherwise each tested site gets its own folder under `SCENESCOUT_PROJECTS_DIR`, by default `Documents/SceneScout/<host>/` (`localhost-3000` for `http://localhost:3000`), created on first use and named in the attach's result. That default is refused when it would sit inside a git repository below your home folder; a home folder that is itself a repository does not count |
 | `role` | none | Sign in with the login saved for this role. Not with `storageStatePath` |
 | `storageStatePath` | none | A Playwright storage-state file. Not with `role` |
 | `mode` | `read-only` | `observe`, `read-only`, `safe-write` or `destructive` ([Safety model](Safety-model.md)) |

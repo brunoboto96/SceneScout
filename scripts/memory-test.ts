@@ -2537,6 +2537,12 @@ test("the default folder is never placed inside a git repository; a given one ma
   const inRepo = chooseProjectFolder({ url: "http://localhost:3000", home: macHome, exists: repoAt("/Users/u/Documents") });
   assert.ok("refused" in inRepo, JSON.stringify(inRepo));
   assert.ok(inRepo.refused.includes("/Users/u/Documents") && inRepo.refused.includes(PROJECTS_DIR_ENV));
+  // Home itself a repository (a dotfiles setup): the default is still accepted.
+  const dotfiles = chooseProjectFolder({ url: "http://localhost:3000", home: macHome, exists: repoAt("/Users/u") });
+  assert.ok(!("refused" in dotfiles) && dotfiles.dir === "/Users/u/Documents/SceneScout/localhost-3000", JSON.stringify(dotfiles));
+  // A setting outside home is walked to the root, so a repository above it still refuses.
+  const outside = chooseProjectFolder({ url: "http://localhost:3000", home: { ...macHome, env: { [PROJECTS_DIR_ENV]: "/srv/qa" } }, exists: repoAt("/srv") });
+  assert.ok("refused" in outside);
   // The contrast: the same repository somewhere the default does not reach.
   const beside = chooseProjectFolder({ url: "http://localhost:3000", home: macHome, exists: repoAt("/Users/u/code") });
   assert.ok(!("refused" in beside) && beside.source === "default");
@@ -2553,6 +2559,13 @@ test("the default folder is never placed inside a git repository; a given one ma
   assert.equal(enclosingRepo("/a/b/c", repoAt("/a")), "/a");
   assert.equal(enclosingRepo("/a/b/c", repoAt("/a/b/c")), "/a/b/c", "the folder itself");
   assert.equal(enclosingRepo("/a/b/c", noRepo), null);
+  assert.equal(enclosingRepo("/h/d/x", repoAt("/h"), "darwin", "/h"), null, "the walk ends below stopAt");
+  assert.equal(enclosingRepo("/h/d/x", repoAt("/h/d"), "darwin", "/h/"), "/h/d", "a repository strictly below stopAt still counts");
+  assert.equal(
+    enclosingRepo("C:\\Users\\u\\Documents\\x", (p) => p === "C:\\Users\\u\\.git", "win32", "c:\\users\\U"),
+    null,
+    "Windows compares without case",
+  );
   assert.equal(
     enclosingRepo("C:\\Users\\u\\Documents\\SceneScout\\x", (p) => p === "C:\\Users\\u\\.git", "win32"),
     "C:\\Users\\u",
