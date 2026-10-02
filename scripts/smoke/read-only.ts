@@ -157,7 +157,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     await engine.navigate("/");
     const snap3 = await engine.snapshot();
     check("home revisited (memory works)", snap3.includes("(revisited)"), snap3);
-    check("exercised elements marked done", /Compute report.*done/.test(snap3), snap3);
+    check("exercised elements marked exercised", /Compute report.*\bexercised\]/.test(snap3), snap3);
 
     console.log("design audit (computed styles, no pixels)");
     await engine.navigate("/");

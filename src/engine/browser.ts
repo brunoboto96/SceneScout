@@ -51,6 +51,15 @@ import {
   describeControl,
   labelFlag,
   type NameFrom,
+  type ElementState,
+  stateFlags,
+  stateChange,
+  trackedElements,
+  inertKeys,
+  MAIN_REGION_SCRIPT,
+  mainRegionLine,
+  mainRegionTag,
+  type MainRegion,
 } from "./collector.js";
 import { OracleMonitor, formatViolations, httpErrorDetail } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
@@ -295,6 +304,16 @@ interface SnapshotElement extends InteractableInfo {
   coveredBy?: string | null;
   /** Set when a field's name is its placeholder, name attribute or type rather than a label. */
   nameFrom?: NameFrom | null;
+  /** A user can act on it (collector isInteractive); false for what is listed only for its test id or its text. */
+  interactive?: boolean;
+  /** Inside an aria-hidden subtree. */
+  ariaHidden?: boolean;
+  /** A live region listed only for what it says: kept out of the state's identity and its coverage (trackedElements). */
+  liveOnly?: boolean;
+  /** Pressed, selected, checked, expanded, current (stateFlags). */
+  state?: ElementState;
+  /** The horizontally scrolling container it sits outside the visible width of, when it does. */
+  scrolledOutIn?: string | null;
 }
 
 const SETTLE_MS = 400;
@@ -492,7 +511,7 @@ export class BrowserEngine {
   /** URL at the time of the last snapshot — refs are valid only while it matches. */
   private snapshotUrl = "";
   /** Last snapshot's identity map (per route) — enables stable refs + diff snapshots. */
-  private lastSnap: { route: string; byKey: Map<string, { ref: string; label: string; disabled: boolean }> } | null = null;
+  private lastSnap: { route: string; byKey: Map<string, { ref: string; label: string; disabled: boolean; state: string[] }> } | null = null;
   /** Non-parameterized routes discovered by the project scan — the objective completion contract. */
   knownRoutes: string[] = [];
   /** Real path of the attached project — the fence for scout_upload's filePath. */
@@ -1631,6 +1650,11 @@ export class BrowserEngine {
       chrome?: boolean;
       coveredBy?: string | null;
       nameFrom?: NameFrom | null;
+      interactive?: boolean;
+      ariaHidden?: boolean;
+      liveOnly?: boolean;
+      state?: ElementState;
+      scrolledOutIn?: string | null;
     };
     // SPAs (and dev servers mid-recompile) can present an empty shell for a
     // few seconds — and a shell that already renders its chrome (sidebar,
@@ -1668,7 +1692,9 @@ export class BrowserEngine {
       ...framed.flatMap((g) => g.raws.map((raw) => ({ raw: raw as RawElement, frame: g.frame, tag: g.tag }))),
     ];
     const elements: SnapshotElement[] = all.map(({ raw: el, frame, tag }) => {
-      const baseKey = frameElementKey(elementKey(el), tag);
+      // A live region listed for what it says is known by its role, not its
+      // text, so a new message reads as the same region saying something else.
+      const baseKey = frameElementKey(el.liveOnly ? `live:${el.role}` : elementKey(el), tag);
       const count = keyCounts.get(baseKey) ?? 0;
       keyCounts.set(baseKey, count + 1);
       const key = count === 0 ? baseKey : `${baseKey}~${count}`;
@@ -1677,7 +1703,8 @@ export class BrowserEngine {
         ...el,
         ...(tag ? { frame: tag } : {}),
         // Judged on the real label, then masked: the policy must see what a click would press.
-        destructive: isDestructive(el.name, el.testid),
+        // A message is not a control: "Could not delete" in an alert is not a Delete button.
+        destructive: el.liveOnly ? false : isDestructive(el.name, el.testid),
         ...(tag?.foreign ? { name: masksForeignName(el.tag, el.role) ? MASKED_NAME : capForeignName(el.name) } : {}),
         ...(tag?.foreign && el.href ? { href: stripForeignHref(el.href) } : {}),
         ref,
@@ -1826,12 +1853,13 @@ export class BrowserEngine {
     const page = this.requirePage();
     const { elements, forms } = await this.collect();
     const url = page.url();
-    const fp = fingerprintState(url, elements);
+    const fp = fingerprintState(url, trackedElements(elements));
     this.memory?.visitState(
       fp,
       url,
       normalizePath(url),
-      elements.map((el) => el.key),
+      trackedElements(elements).map((el) => el.key),
+      inertKeys(elements),
     );
     for (const f of forms) this.memory?.recordForm(fp, f.key, f.guarded);
     return { fp, elements, url };
@@ -1867,6 +1895,16 @@ export class BrowserEngine {
       found.push({ route: normalizePath(abs.toString()), example: abs.pathname + abs.search + abs.hash });
     }
     if (found.length > 0) this.memory.addDiscoveredRoutes(found);
+  }
+
+  /** What the main region holds besides controls (MAIN_REGION_SCRIPT). A failed read is logged and gives no line, not "EMPTY". */
+  private async readMainRegion(page: Page): Promise<MainRegion | null> {
+    try {
+      return (await page.evaluate(MAIN_REGION_SCRIPT)) as MainRegion;
+    } catch (err) {
+      console.error(`[scenescout] main-region read failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
   }
 
   /** Every file input on the page. A failed probe is logged, not passed off as "none". */
@@ -1905,13 +1943,14 @@ export class BrowserEngine {
     const url = page.url();
     this.snapshotUrl = url;
     const route = normalizePath(url);
-    const fp = fingerprintState(url, elements);
+    const fp = fingerprintState(url, trackedElements(elements));
     this.currentFingerprint = fp;
     const isNew = memory.visitState(
       fp,
       url,
       route,
-      elements.map((el) => el.key),
+      trackedElements(elements).map((el) => el.key),
+      inertKeys(elements),
     );
     for (const f of forms) memory.recordForm(fp, f.key, f.guarded);
     memory.recordRoleAccess(this.role, route, "reached");
@@ -1926,12 +1965,14 @@ export class BrowserEngine {
     const line = (el: SnapshotElement): string => {
       const dup = el.key.match(/~(\d+)$/);
       const flags = [
+        ...stateFlags(el.state),
         el.testid ? `testid=${el.testid}` : null,
         dup ? `copy#${Number(dup[1]) + 1}` : null,
         el.disabled ? "disabled" : null,
         el.destructive ? "DESTRUCTIVE" : null,
         labelFlag(el),
-        memory.wasExercised(fp, el.key) ? "done" : null,
+        // "exercised", not "done": it says an earlier action or run acted on it, and "done" read as the control's own state.
+        memory.wasExercised(fp, el.key) ? "exercised" : null,
         el.href ? `href=${el.href.slice(0, 60)}` : null,
       ].filter(Boolean);
       return `${el.ref} ${el.role} "${displayName(el)}"${flags.length ? ` [${flags.join(", ")}]` : ""}${el.frame ? ` ⟨in ${frameLabel(el.frame)}⟩` : ""}`;
@@ -1940,7 +1981,10 @@ export class BrowserEngine {
     // Diff mode: when re-snapshotting the same route, report only what
     // changed — same idea as UI reconciliation, applied to agent context.
     const prev = this.lastSnap?.route === route ? this.lastSnap : null;
-    this.lastSnap = { route, byKey: new Map(elements.map((el) => [el.key, { ref: el.ref, label: el.name, disabled: el.disabled }])) };
+    this.lastSnap = {
+      route,
+      byKey: new Map(elements.map((el) => [el.key, { ref: el.ref, label: el.name, disabled: el.disabled, state: stateFlags(el.state) }])),
+    };
 
     let body: string;
     if (!full && prev) {
@@ -1963,9 +2007,16 @@ export class BrowserEngine {
         const old = prev.byKey.get(el.key);
         return old !== undefined && old.disabled !== el.disabled;
       });
-      const changedKeys = new Set([...relabeled, ...retoggled].map((el) => el.key));
+      // A filter pill that became the active one, a tab now selected, a
+      // section now open: the same element, in a different state.
+      const restated = elements.flatMap((el) => {
+        const old = prev.byKey.get(el.key);
+        const change = old ? stateChange(old.state, stateFlags(el.state)) : null;
+        return change ? [{ el, change }] : [];
+      });
+      const changedKeys = new Set([...relabeled, ...retoggled, ...restated.map((r) => r.el)].map((el) => el.key));
       const unchanged = elements.length - added.length - changedKeys.size;
-      if (added.length === 0 && removed.length === 0 && relabeled.length === 0 && retoggled.length === 0) {
+      if (added.length === 0 && removed.length === 0 && relabeled.length === 0 && retoggled.length === 0 && restated.length === 0) {
         body = `No element changes since the last snapshot (${unchanged} interactables, refs unchanged).`;
       } else {
         body =
@@ -1973,12 +2024,18 @@ export class BrowserEngine {
           [
             ...added.map((el) => `+ ${line(el)}`),
             ...removed.map(([key, v]) => `- ${v.ref} "${v.label}" (gone: ${key})`),
-            ...relabeled.map((el) => `~ ${el.ref} relabeled → "${el.name}"`),
+            // A live region saying something new is the message itself, so it is shown in full like a new element.
+            ...relabeled.map((el) =>
+              el.liveOnly
+                ? `~ ${el.ref} ${el.role} "${displayName(el)}" (was ${prev.byKey.get(el.key)?.label ? `"${prev.byKey.get(el.key)?.label}"` : "empty"})`
+                : `~ ${el.ref} relabeled → "${el.name}"`,
+            ),
             ...retoggled.map((el) => `~ ${el.ref} "${el.name}" is now ${el.disabled ? "DISABLED" : "ENABLED"}`),
+            ...restated.map(({ el, change }) => `~ ${el.ref} "${displayName(el)}" ${change}`),
           ].join("\n");
       }
     } else {
-      const missingTestids = elements.filter((el) => !el.testid && !el.disabled).length;
+      const missingTestids = trackedElements(elements).filter((el) => !el.testid && !el.disabled).length;
       body =
         `Interactables (${elements.length}${truncated ? "+ — TRUNCATED at 150, dense page" : ""}${missingTestids ? `, ${missingTestids} missing data-testid` : ""}):\n` +
         elements.map(line).join("\n");
@@ -1992,11 +2049,13 @@ export class BrowserEngine {
     const cov = memory.coverage();
     const unvisited = this.unvisitedKnownRoutes();
     const title = await page.title();
+    const main = await this.readMainRegion(page);
     return (
       `URL: ${url}\nTitle: ${title}\nState: ${fp} ${isNew ? "(NEW state)" : "(revisited)"}\n` +
       `Coverage: ${cov.states} states known · ${cov.elementsExercised}/${cov.elementsTotal} elements exercised` +
       (this.allKnownRoutes().length > 0 ? ` · routes ${this.allKnownRoutes().length - unvisited.length}/${this.allKnownRoutes().length} visited` : "") +
       `\n` +
+      (main ? `${mainRegionLine(main)}\n` : "") +
       body +
       (geometry.length > 0 ? `\nGEOMETRY issues:\n` + geometry.map((g) => `  ⚠ ${g}`).join("\n") : "") +
       (brokenImages.length > 0 ? `\nBROKEN IMAGES:\n` + brokenImages.map((b) => `  ⚠ ${b}`).join("\n") : "") +
@@ -2015,7 +2074,7 @@ export class BrowserEngine {
         : "") +
       this.socketNotice() +
       formatViolations(this.oracles.drain()) +
-      (elements.length === 0
+      (trackedElements(elements).length === 0
         ? hasVisibleFrame(frames)
           ? "\n⚠ No interactable elements in the page itself: what it shows is inside the frames listed above, which were not explored."
           : "\n⚠ DEAD END: no interactable elements found on this page."
@@ -2977,7 +3036,8 @@ export class BrowserEngine {
   private async measureLayout(page: Page, elements: SnapshotElement[], url: string): Promise<{ geometry: string[]; brokenImages: string[] }> {
     const viewport = page.viewportSize() ?? { width: 1280, height: 900 };
     const byDocument = new Map<string, SnapshotElement[]>();
-    for (const el of elements) {
+    // A live region is a message, not a control: its box overlapping a control is not a collision.
+    for (const el of trackedElements(elements)) {
       const doc = el.frame ? el.key.slice(0, el.key.indexOf("|") + 1) : "";
       byDocument.set(doc, [...(byDocument.get(doc) ?? []), el]);
     }
@@ -3754,13 +3814,14 @@ export class BrowserEngine {
       const { elements, forms } = await this.collect().finally(() => (this.harvestPaused = false));
       const finalUrl = page.url();
       const route = normalizePath(finalUrl);
-      const fp = fingerprintState(finalUrl, elements);
+      const fp = fingerprintState(finalUrl, trackedElements(elements));
       if (!opts.measureOnly) {
         memory.visitState(
           fp,
           finalUrl,
           route,
-          elements.map((el) => el.key),
+          trackedElements(elements).map((el) => el.key),
+          inertKeys(elements),
         );
         for (const f of forms) memory.recordForm(fp, f.key, f.guarded);
         memory.recordRoleAccess(this.role, route, "reached");
@@ -3797,7 +3858,7 @@ export class BrowserEngine {
         url: finalUrl,
         status: typeof status === "number" ? status : null,
         loginRedirect,
-        elements: elements.length,
+        elements: trackedElements(elements).length,
         unnamed: own.filter(missingName).map(describeControl),
         placeholderOnly: own.filter(placeholderOnly).map(placeholderEvidence),
         violations: violations.map(({ kind, severity, detail, url, embed }) => ({ kind, severity, detail, url, ...(embed ? { embed } : {}) })),
@@ -3806,17 +3867,21 @@ export class BrowserEngine {
         design: inspected?.design ?? [],
         ...(inspected?.auditError ? { auditError: inspected.auditError } : {}),
       });
-      const deadEnd = elements.length === 0;
+      const deadEnd = trackedElements(elements).length === 0;
       // A field labelled only by its placeholder counts here too: to someone reading the crawl, it has no label.
       // Counted over the page's own controls, as the check's lists are: another site's frame is not this app's to fix.
       const unnamed = own.filter((el) => missingName(el) || placeholderOnly(el)).length;
-      const missingTestid = elements.filter((el) => !el.testid && !el.disabled).length;
+      const missingTestid = trackedElements(elements).filter((el) => !el.testid && !el.disabled).length;
+      // What the page's main area holds besides controls: "41 el" alone cannot tell a page
+      // of text from a main area that rendered nothing.
+      const main = await this.readMainRegion(page);
 
       const flags = [loginRedirect ? "AUTH-REDIRECT" : null, deadEnd ? "DEAD-END" : null, violations.length > 0 ? `${violations.length}⚠` : null].filter(
         Boolean,
       );
       summary.push(
-        `${path} — ${status} · ${elements.length} el` +
+        `${path} — ${status} · ${trackedElements(elements).length} el` +
+          (main ? ` · ${mainRegionTag(main)}` : "") +
           (missingTestid ? ` · ${missingTestid} no-testid` : "") +
           (unnamed ? ` · ${unnamed} unnamed` : "") +
           (flags.length ? ` · ${flags.join(" ")}` : ""),
@@ -4049,12 +4114,13 @@ export class BrowserEngine {
             // this plan just reached, and it deserves coverage of its own)…
             const { elements, forms } = await this.collect();
             const url = page.url();
-            const fp = fingerprintState(url, elements);
+            const fp = fingerprintState(url, trackedElements(elements));
             this.memory!.visitState(
               fp,
               url,
               normalizePath(url),
-              elements.map((el) => el.key),
+              trackedElements(elements).map((el) => el.key),
+              inertKeys(elements),
             );
             for (const f of forms) this.memory!.recordForm(fp, f.key, f.guarded);
             this.memory!.recordRoleAccess(this.role, normalizePath(url), "reached");

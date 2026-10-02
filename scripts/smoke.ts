@@ -42,6 +42,7 @@ import * as checkGate from "./smoke/check.ts";
 import * as unload from "./smoke/unload.ts";
 import * as ciRun from "./smoke/ci.ts";
 import * as timeLimits from "./smoke/time-limits.ts";
+import * as snapshotContents from "./smoke/snapshot.ts";
 
 const suites = [
   readOnly,
@@ -58,6 +59,7 @@ const suites = [
   postmessage,
   contradiction,
   frames,
+  snapshotContents,
   unload,
   timeLimits,
   checkGate,

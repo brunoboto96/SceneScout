@@ -120,11 +120,27 @@ test("every line the real geometry oracle writes maps to its rule, and its '…a
       ["a", "b", "c", "d", "e"].map((n, i) => box(`e${10 + i}`, n, { clipped: true, xpath: `/x${i}`, rect: { x: i * 100, y: 0, w: 50, h: 20 } })),
       vp,
     ),
+    ...geometryIssues(
+      ["a", "b", "c"].map((n, i) => box(`e${20 + i}`, n, { scrolledOutIn: `[wrap-${i}]`, xpath: `/y${i}`, rect: { x: i * 100, y: 300, w: 50, h: 20 } })),
+      vp,
+    ),
   ];
   const rules = lines.map((l) => geometryRule(l));
   assert.deepEqual(
     rules,
-    ["covered-control", "clipped-control", "offpage-control", "overlapping-controls", "clipped-control", "clipped-control", "clipped-control", null],
+    [
+      "covered-control",
+      "clipped-control",
+      "offpage-control",
+      "overlapping-controls",
+      "clipped-control",
+      "clipped-control",
+      "clipped-control",
+      null,
+      "scrolled-out-controls",
+      "scrolled-out-controls",
+      null,
+    ],
     lines.join("\n"),
   );
 });
@@ -147,6 +163,16 @@ test("every OVERLAY line the probe can write is classified: the certain ones blo
   assert.equal(
     geometryRule('OVERLAY: dialog "Edit" is far off-centre — 300px empty band above it while the page is grayed out (broken centering)'),
     "dialog-layout",
+  );
+});
+
+test("controls scrolled out of view sideways are worth a look, never an issue the gate counts", () => {
+  const [line] = geometryIssues([box("e7", "Edit", { scrolledOutIn: "[orders-wrap]" })], { width: 1280, height: 900 });
+  const { issues, worthALook } = checkFindings([route({ geometry: [line] })], ORIGIN);
+  assert.deepEqual(issues, []);
+  assert.deepEqual(
+    worthALook.map((o) => [o.rule, o.evidence]),
+    [["scrolled-out-controls", line]],
   );
 });
 
@@ -509,7 +535,8 @@ test("worth a look: SARIF level note with the convention, the report's own secti
     assert.equal(r.properties?.tier, "worth-a-look");
     assert.match(r.message.text, /^Worth a look — .*A defect only if your project uses /);
   }
-  for (const id of Object.keys(WORTH_A_LOOK_RULES)) {
+  // The rules this run reported, each declared at level note (SARIF declares only the rules a run used).
+  for (const id of new Set(lookResults.map((r) => r.ruleId))) {
     const rule = run.tool.driver.rules.find((r) => r.id === id)!;
     assert.equal(rule.defaultConfiguration.level, "note", id);
     assert.deepEqual(rule.properties?.tags, ["worth-a-look"]);
