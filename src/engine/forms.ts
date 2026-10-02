@@ -267,7 +267,9 @@ const FORM_HELPERS_SRC = `
   // pre-fills those with "now" on a create form, while a pre-filled text
   // field is an edit form's record, and saving that unchanged is not the
   // empty submit.
-  const pickerTypes = ${JSON.stringify([...APP_FILLED_TYPES])};
+  // Held equal to APP_FILLED_TYPES by memory-test; a literal, not a
+  // JSON.stringify, so this script is built from constants alone.
+  const pickerTypes = ["date", "datetime-local", "month", "week", "time"];
   const facts = (f, remember) => {
     const value = typeof f.value === "string" ? f.value : "";
     const type = f.tagName.toLowerCase() === "input" ? String(f.type || "text").toLowerCase() : "";
@@ -363,10 +365,8 @@ export const FORM_PROBE_BODY = `
   };
 `;
 
-/** The probe as an expression over a node expression, for a page-level evaluate. */
-export function formProbeExpression(nodeExpression: string): string {
-  return `((node) => {${FORM_PROBE_BODY}})(${nodeExpression})`;
-}
+/** The probe over the focused element, as an expression for a page-level evaluate. */
+export const FORM_PROBE_OF_ACTIVE_ELEMENT = `((node) => {${FORM_PROBE_BODY}})(document.activeElement)`;
 
 /**
  * The scout_coverage lines for forms no session has submitted empty this

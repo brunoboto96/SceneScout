@@ -52,6 +52,8 @@ import {
   formIdentity,
   formStatus,
   isEmptySubmit,
+  APP_FILLED_TYPES,
+  FORM_PROBE_BODY,
   isFormBookkeeping,
   isNavigationTeardown,
   isTextEntry,
@@ -2085,4 +2087,11 @@ test("dedup judge: a judged merge read back malformed is dropped, not printed or
   assert.deepEqual(judgedMergesOf(f), [good]);
   assert.deepEqual(judgedMergesOf({ judgedMerges: "not a list" } as unknown as Pick<Finding, "judgedMerges">), []);
   assert.deepEqual(judgedMergesOf({}), []);
+});
+
+test("the form probe's date and time types are the same list as APP_FILLED_TYPES", () => {
+  const line = FORM_PROBE_BODY.split("\n").find((l) => l.includes("const pickerTypes ="));
+  assert.ok(line, "the probe declares pickerTypes");
+  const listed = JSON.parse(line.slice(line.indexOf("["), line.lastIndexOf("]") + 1)) as string[];
+  assert.deepEqual([...listed].sort(), [...APP_FILLED_TYPES].sort());
 });

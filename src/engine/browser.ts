@@ -101,7 +101,7 @@ import { revealedLines } from "./hover.js";
 import {
   FORMS_INVENTORY_SCRIPT,
   FORM_PROBE_BODY,
-  formProbeExpression,
+  FORM_PROBE_OF_ACTIVE_ELEMENT,
   formIdentity,
   formStatus,
   FORMS_READ_FAILED,
@@ -2621,7 +2621,7 @@ export class BrowserEngine {
 
   /** The form the focused element belongs to, for a key press that may submit through it. */
   private probeFocusedForm(): Promise<FormProbe | null> {
-    return this.formRead("form probe", this.requirePage().evaluate(formProbeExpression("document.activeElement")) as Promise<FormProbe | null>);
+    return this.formRead("form probe", this.requirePage().evaluate(FORM_PROBE_OF_ACTIVE_ELEMENT) as Promise<FormProbe | null>);
   }
 
   /**
