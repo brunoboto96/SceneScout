@@ -147,31 +147,48 @@ export interface ReplayResult {
 }
 
 /**
- * The path to call, resolved against the attached origin and fenced to it.
- * Navigation is fenced the same way: a run attached to one app must not be
- * able to make its browser talk to another host just because a path was
- * spelled as a full URL.
+ * Where a page, a crawl path, a plan step or a replayed call goes, given the
+ * URL the session was attached on. One rule for every tool:
+ *
+ * - A path resolves against the attached ORIGIN, never the attach URL's path.
+ *   `/widgets` is `/widgets` whether the session attached on `/` or on
+ *   `/things`, as URL rules and every browser read it; a bare `widgets` is
+ *   read as `/widgets` too, so the page the session happens to be on never
+ *   changes where a target goes.
+ * - A full URL on the attached origin is used as given.
+ * - Anything on another origin, or a scheme other than http(s), is refused:
+ *   a run attached to one app must not be able to make its browser talk to
+ *   another host just because a target was spelled as a full URL.
+ *
+ * `offOrigin` marks the refusal that is the fence, so a caller can word it as one.
  */
-export function resolveRequestUrl(baseUrl: string, path: string): { url: string } | { problem: string } {
-  const trimmed = path.trim();
-  if (!trimmed) return { problem: "No path given. Pass a path such as /api/things, or a full URL on the attached origin." };
-  let target: URL;
-  let base: URL;
+export function resolveTarget(attachUrl: string, target: string): { url: string } | { problem: string; offOrigin: boolean } {
+  const trimmed = target.trim();
+  if (!trimmed) return { problem: "No path given. Pass a path such as /api/things, or a full URL on the attached origin.", offOrigin: false };
+  let resolved: URL;
+  let origin: string;
   try {
-    base = new URL(baseUrl);
-    target = new URL(trimmed, base);
+    origin = new URL(attachUrl).origin;
+    resolved = new URL(trimmed, `${origin}/`);
   } catch {
-    return { problem: `Could not read ${JSON.stringify(trimmed)} as a path or a URL.` };
+    return { problem: `Could not read ${JSON.stringify(trimmed)} as a path or a URL.`, offOrigin: false };
   }
-  if (target.protocol !== "http:" && target.protocol !== "https:") {
-    return { problem: `Only http and https can be requested; ${target.protocol} cannot.` };
+  if (resolved.protocol !== "http:" && resolved.protocol !== "https:") {
+    return { problem: `Only http and https can be reached; ${resolved.protocol} cannot.`, offOrigin: false };
   }
-  if (target.origin !== base.origin) {
+  if (resolved.origin !== origin) {
     return {
-      problem: `${target.origin} is not the origin this session is attached to (${base.origin}). A session talks to its own app only; attach another session to test another host.`,
+      problem: `${resolved.origin} is not the origin this session is attached to (${origin}). A session talks to its own app only; attach another session to test another host.`,
+      offOrigin: true,
     };
   }
-  return { url: target.toString() };
+  return { url: resolved.toString() };
+}
+
+/** The URL scout_request calls: resolveTarget's rule, so a call and a page load never disagree on where a path goes. */
+export function resolveRequestUrl(attachUrl: string, path: string): { url: string } | { problem: string } {
+  const out = resolveTarget(attachUrl, path);
+  return "url" in out ? out : { problem: out.problem };
 }
 
 /** The method, upper-cased, or the reason it cannot be replayed. */
