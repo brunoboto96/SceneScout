@@ -1,6 +1,6 @@
 # 14. An unattended run reports and never gates
 
-Status: accepted
+Status: accepted. The "one agent, not lanes" point is revisited by [ADR 20](0020-an-unattended-run-may-split-into-lanes-that-share-its-caps.md), which adds `--lanes`.
 
 ## Context
 

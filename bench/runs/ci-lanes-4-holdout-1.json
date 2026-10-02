@@ -1,0 +1,47 @@
+{
+  "app": "holdout",
+  "run": "ci-lanes-4-holdout-1",
+  "date": "2026-10-02",
+  "note": "Unattended run with --lanes 4 on the engine at eba7aea; gpt-6-luna, effort low, default caps shared by the lanes. See Unattended runs.",
+  "findings": [
+    {
+      "title": "Home notices fail to load with HTTP 500",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Availability checkbox has a 13×13 px target",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "catalogue-available target 13x13px"
+    },
+    {
+      "title": "Overdue status text has insufficient contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "loans overdue status contrast 1.84:1"
+    },
+    {
+      "title": "Catalogue offers no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "catalogue.html no visually dominant action",
+      "tier": "worth_a_look",
+      "convention": "a primary action should be visually emphasized"
+    },
+    {
+      "title": "Loans page has no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "loans page no dominant action"
+    },
+    {
+      "title": "Fines page can show an empty list when access is refused",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403 rendered as empty list"
+    }
+  ],
+  "decisions": []
+}
