@@ -5,7 +5,8 @@
  *   - a scout_request probe's refusal is the tester's, the same refusal
  *     fetched by the page is the page's (replay-target*.html);
  *   - a "Save" whose router moves the page late is not a silent submit, one
- *     that does nothing is (late-route*.html);
+ *     that does nothing is (late-route*.html), and so is one the page
+ *     answers with validation errors or a dialog (silent-submit.html);
  *   - a link click that throws while its page puts up a confirmation is a
  *     router cancelling the route change, the same throw with nothing on
  *     screen is a crash (route-cancel*.html).
@@ -72,6 +73,26 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     snap = await engine.snapshot();
     const idle = await engine.click(refFor(snap, "Save"));
     check("a Save that does nothing at all still gets the silent-submit note", SILENT_NOTE.test(idle), idle.slice(0, 500));
+    // The same kind of silent click, answered on the page instead of by a request.
+    await engine.navigate("/silent-submit.html");
+    snap = await engine.snapshot();
+    const invalid = await engine.click(refFor(snap, "Save"));
+    check("a Save answered by validation errors is not called a silent submit", !SILENT_NOTE.test(invalid), invalid.slice(0, 500));
+    check("...and the result says validation answered", /Client-side validation answered/.test(invalid), invalid.slice(0, 500));
+    const draft = await engine.click(refFor(snap, "Save draft"));
+    check("a Save draft on the same page that does nothing still gets the silent-submit note", SILENT_NOTE.test(draft), draft.slice(0, 500));
+    const sign = await engine.click(refFor(snap, "Complete and sign"));
+    check(
+      "a submit-shaped button that opens a dialog is not called a silent submit",
+      !SILENT_NOTE.test(sign) && /opened a dialog/.test(sign),
+      sign.slice(0, 500),
+    );
+    const told = await engine.click(refFor(snap, "Send note"));
+    check('...but one that only puts up a native alert("Saved!") still gets the note', SILENT_NOTE.test(told), told.slice(0, 500));
+
+    await engine.navigate("/late-route-idle.html");
+    // In full: a revisited route is otherwise a diff, which lists no unchanged control.
+    snap = await engine.snapshot(true);
     const verify = await engine.click(refFor(snap, "Verify"));
     check('a button whose test id holds "sign" inside "assignee" is not submit-style', !SILENT_NOTE.test(verify), verify.slice(0, 500));
 

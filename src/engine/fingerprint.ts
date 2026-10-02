@@ -7,15 +7,39 @@ const NUM_RE = /^\d+$/;
 /** Query params that name a UI state (a different screen), not transient data. */
 const UI_STATE_PARAM_RE = /^(tab|view|mode|step|panel|section)$/i;
 
+/** Letters, digits and single `-`/`_` separators: the alphabet a code-shaped record id is written in. */
+const CODE_ALPHABET_RE = /^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$/;
+/** An upper-case prefix, then digits: `WID-2025-001`, `INV2024`, `PO_77`. */
+const CODE_PREFIX_RE = /^[A-Z]{1,6}[-_]?\d[A-Za-z0-9_-]*$/;
+
+/**
+ * Whether a segment reads as a code-shaped record id (`WID-2025-001`,
+ * `A1B2C3`) rather than a word or a slug. Every record such an id addresses
+ * would otherwise be its own route. Words are kept: a slug whose digits are a
+ * small part of it (`how-to-2024-guide`, `iphone-15-pro`), a short one with a
+ * digit or two (`v2`, `2fa`, `q3`), and anything outside the id alphabet.
+ * An upper-case prefix followed by digits is an id with two digits or more;
+ * otherwise it takes three digits making up at least half the characters.
+ */
+function isCodeId(seg: string): boolean {
+  if (!CODE_ALPHABET_RE.test(seg)) return false;
+  const digits = (seg.match(/\d/g) ?? []).length;
+  if (CODE_PREFIX_RE.test(seg) && digits >= 2) return true;
+  const chars = seg.replace(/[-_]/g, "").length;
+  return digits >= 3 && digits * 2 >= chars;
+}
+
 /**
  * Whether a path segment is an id that route identity collapses to `:id`: a
- * UUID or long hex string anywhere, a number from the second real segment on.
- * `index` counts as `path.split("/")` does, so the first real segment of a
- * leading-slash path is 1 (see the note on numeric first segments below).
+ * UUID or long hex string anywhere, and from the second real segment on, a
+ * number or a code-shaped id (isCodeId). `index` counts as `path.split("/")`
+ * does, so the first real segment of a leading-slash path is 1 (see the note
+ * on numeric first segments below).
  */
 export function isIdSegment(seg: string, index: number): boolean {
   if (UUID_RE.test(seg) || HEX_RE.test(seg)) return true;
-  return NUM_RE.test(seg) && index > 1;
+  if (index <= 1) return false;
+  return NUM_RE.test(seg) || isCodeId(seg);
 }
 
 /**

@@ -256,6 +256,7 @@ async function main(): Promise<void> {
       designAudits: engine.designAuditCount,
       createdResources: engine.createdResources,
       unvisitedRoutes: unvisited,
+      knownRoutes: all,
       policyAttributed: engine.oracleLog.policyAttributed,
     };
     show("gap ledger", computeGaps(engine.memory!, extras).join("\n") || "(empty)");
