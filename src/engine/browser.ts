@@ -207,6 +207,7 @@ import {
   lockPathFor,
   planRefresh,
   profileAfterRotation,
+  profileLoadWhileHeld,
   readLearnedEndpoints,
   REFRESH_BROKER_ENV,
   refreshNotice,
@@ -218,9 +219,11 @@ import {
   swapRequest,
   swapToken,
   withLearnedEndpoint,
+  writeBackStorageFrom,
   writeLearnedEndpoints,
   type BrokerDecision,
   type HeldLock,
+  type ProfileLoad,
   type RefreshEvent,
   type TokenSlot,
 } from "./refresh.js";
@@ -3804,8 +3807,9 @@ export class BrowserEngine {
    * Replace this context's cookies and storage with a profile, in place: same
    * pages, listeners and policy. Playwright is handed only what it restores;
    * the profile's sessionStorage list is not part of its storage state.
+   * With `load` "cookies" only the cookie jar is replaced (profileLoadWhileHeld, refresh.ts).
    */
-  private async applyState(state: unknown): Promise<{ ok: true } | { ok: false; why: string }> {
+  private async applyState(state: unknown, load: ProfileLoad = "storage"): Promise<{ ok: true } | { ok: false; why: string }> {
     if (!this.context) return { ok: false, why: "no browser is open" };
     let storageState: ReturnType<typeof splitProfile>["storageState"];
     try {
@@ -3813,8 +3817,14 @@ export class BrowserEngine {
     } catch (err) {
       return { ok: false, why: `the saved profile could not be split (${err instanceof Error ? err.message : String(err)})` };
     }
+    const playwrightState = storageState as Exclude<Parameters<BrowserContext["setStorageState"]>[0], string>;
     try {
-      await this.context.setStorageState(storageState as Parameters<BrowserContext["setStorageState"]>[0]);
+      if (load === "cookies") {
+        await this.context.clearCookies();
+        await this.context.addCookies(playwrightState.cookies ?? []);
+      } else {
+        await this.context.setStorageState(playwrightState);
+      }
     } catch (err) {
       return { ok: false, why: `the browser refused its saved profile (${err instanceof Error ? err.message.split("\n")[0] : String(err)})` };
     }
@@ -3885,7 +3895,8 @@ export class BrowserEngine {
         return this.passOn(route);
       }
       // Another session rotated the token while this one waited: load what it saved, and send the current token.
-      const applied = await this.applyState(read.state);
+      const loaded = profileLoadWhileHeld(req.isNavigationRequest());
+      const applied = await this.applyState(read.state, loaded);
       if (!applied.ok) throw new Error(applied.why);
       this.refreshCounts.swapped += 1;
       const all = await req.allHeaders();
@@ -3903,7 +3914,7 @@ export class BrowserEngine {
         handedOn = true;
         // Reported once the request goes out with the current token, so a swap that then fails is reported only as a failure.
         this.refreshEvents.push("swapped");
-        this.trackRefreshTask(this.writeBackAfter(this.pageAnswer(req), plan.to, lock, true));
+        this.trackRefreshTask(this.writeBackAfter(this.pageAnswer(req), plan.to, lock, true, writeBackStorageFrom(loaded, plan.to)));
         return this.passOn(route, {
           ...(swapped.url ? { url: swapped.url } : {}),
           ...(swapped.body !== undefined ? { postData: swapped.body } : {}),
@@ -4151,9 +4162,16 @@ export class BrowserEngine {
    * that has not stored it in time has the token read from the response
    * instead. A refused or failed refresh changes nothing on disk, and nor does
    * one whose response left a refresh cookie as it was (a server that does
-   * not rotate refresh tokens).
+   * not rotate refresh tokens). `storageFrom` says whether the origins'
+   * storage written back is the page's or stays the profile's (writeBackStorageFrom, refresh.ts).
    */
-  private async writeBackAfter(answer: Promise<RefreshAnswer | null>, presented: TokenSlot, lock: HeldLock, swapped: boolean): Promise<void> {
+  private async writeBackAfter(
+    answer: Promise<RefreshAnswer | null>,
+    presented: TokenSlot,
+    lock: HeldLock,
+    swapped: boolean,
+    storageFrom: "page" | "disk" = "page",
+  ): Promise<void> {
     const broker = this.refresh;
     try {
       const res = await answer;
@@ -4175,7 +4193,7 @@ export class BrowserEngine {
         if (now && rotationStored(now, presented)) {
           const full = await this.withPageIndexedDB(now, (read) => rotationStored(read, presented));
           const onDisk = this.readRoleProfile();
-          state = profileAfterRotation(full, onDisk.ok ? onDisk.state : null);
+          state = profileAfterRotation(full, onDisk.ok ? onDisk.state : null, storageFrom);
           break;
         }
         await new Promise((r) => setTimeout(r, 50));

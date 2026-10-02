@@ -31,6 +31,8 @@ import {
   lockCreateError,
   MAX_LEARNED_ENDPOINTS,
   planRefresh,
+  profileLoadWhileHeld,
+  writeBackStorageFrom,
   profileAfterRotation,
   readLearnedEndpoints,
   refreshLikePath,
@@ -295,6 +297,30 @@ test("holding the lock: send the token when the profile still holds it, swap it 
   assert.deepEqual(planRefresh(sent, []), { kind: "unknown" });
   // The value is what decides "send": the same token under another slot is still current.
   assert.deepEqual(planRefresh({ slot: "elsewhere", value: R1 }, refreshTokenSlots(stateWith(R1))), { kind: "send" });
+});
+
+test("a swap that holds a navigation loads only the cookies, which need no page; a script's request loads the whole profile", () => {
+  assert.equal(profileLoadWhileHeld(true), "cookies");
+  assert.equal(profileLoadWhileHeld(false), "storage");
+});
+
+test("after a cookies-only swap of a cookie token, the write-back keeps the profile's storage and takes only the page's cookies", () => {
+  const cookieSlot = { slot: "cookie refresh_token (127.0.0.1/auth)", value: `${R2}c`, cookie: "refresh_token" };
+  const storageSlot = { slot: `storage ${ORIGIN} session → refreshToken`, value: R2 };
+  assert.equal(writeBackStorageFrom("cookies", cookieSlot), "disk");
+  assert.equal(writeBackStorageFrom("cookies", storageSlot), "page", "a token presented from storage is the page's to store");
+  assert.equal(writeBackStorageFrom("storage", cookieSlot), "page", "a whole-profile load left the page's storage current");
+  // The page rotated its cookie (R3) but its storage still holds what it had before the other session's rotation (R1).
+  const R3 = "r3-refresh-token-value-0123456789";
+  const page = { cookies: stateWith(R3).cookies, origins: stateWith(R1).origins };
+  const session = [{ origin: ORIGIN, entries: [{ name: "id_token", value: "session-half-of-the-sign-in" }] }];
+  const onDisk = { ...stateWith(R2), sessionStorage: session };
+  const written = profileAfterRotation(page, onDisk, "disk") as { cookies: unknown; origins: unknown; sessionStorage?: unknown };
+  assert.deepEqual(written.cookies, stateWith(R3).cookies, "the page's rotated cookies are saved");
+  assert.deepEqual(written.origins, stateWith(R2).origins, "the profile's current storage is not overwritten with the spent one");
+  assert.deepEqual(written.sessionStorage, session);
+  // The default is unchanged: the page's storage, as before.
+  assert.deepEqual((profileAfterRotation(page, onDisk) as { origins: unknown }).origins, stateWith(R1).origins);
 });
 
 test("a swap replaces the spent token everywhere it is sent, in the form it was sent, and nothing else", () => {
