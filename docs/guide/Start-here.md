@@ -67,7 +67,13 @@ npx -y scenescout install --client cursor     # or vscode, codex, gemini, copilo
 /plugin install scenescout@scenescout-marketplace
 ```
 
-Then download the browser once with `npx -y scenescout install --browser-only`. The command becomes `/scenescout:scenescout`.
+Then start a new chat to use SceneScout; the test browser downloads on first use (to have it ready beforehand: `npx -y scenescout install --browser-only`). The command becomes `/scenescout:scenescout`.
+
+### As a Claude Desktop extension
+
+Download `scenescout-X.Y.Z.mcpb` from the [latest release](https://github.com/brunoboto96/SceneScout/releases/latest) and open it, or in Claude Desktop choose Settings > Extensions > Advanced settings > Install Extension and pick the file. It is ready as soon as it is installed: start a new chat and ask *"Use SceneScout to test http://localhost:3000"*. Tell it which folder to keep its notes and report in, for example a new folder in Documents.
+
+The extension carries the engine, and the test browser downloads on first use: the first test says "Getting the test browser ready", downloads it once (about 200 MB) and carries on. No terminal step is needed. If the download fails, SceneScout says why and gives the command to run by hand, `npx -y scenescout install --browser-only`. `npx -y scenescout doctor` recognises the extension and checks it.
 
 ### A client that `install` does not know
 
@@ -88,7 +94,7 @@ npx -y scenescout doctor            # Claude Code: node, build, browser, skill, 
 npx -y scenescout doctor --engine   # any other client: node, build, browser
 ```
 
-Every line should be a tick; any other line prints the command that fixes it. Then start a new session in your client so it loads the tools.
+Every line should be a tick; any other line prints the command that fixes it. With the Claude Desktop extension installed, `doctor` also checks the extension, and does not ask for the Claude Code skill or registration unless you have set those up too. Then start a new chat in your client.
 
 ## A first run against the demo app
 
