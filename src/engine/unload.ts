@@ -74,7 +74,8 @@ export function unseenWriteSource(input: {
  * interception can know about it. Same rules in the same order: a write
  * another site's frame sends outside the app is refused; so is one sent from
  * a page an embed moved off the app, a sign-in excepted; a sign-in passes;
- * then the mode decides. `foreign` and `offApp` come from
+ * then a POST the user named as a read (observe only), then the mode
+ * decides. `foreign` and `offApp` come from
  * `unseenWriteSource`, since the sending frame may no longer exist.
  * The one step it does not take is safe-write's short wait for a creation
  * still in flight: a page being left has nothing more to wait for.
@@ -87,13 +88,15 @@ export function judgeUnseenWrite(input: {
   foreign: string | null;
   offApp: string | null;
   owned: boolean;
+  /** policy.ts readPostAllowed: a POST the user named as a read, let out of observe. */
+  readPost?: boolean;
 }): UnseenWriteVerdict {
   const { mode, method, pathname, destructiveWire } = input;
   if (mode === "destructive" || isReadMethod(method)) return { allow: true };
   if (input.foreign) return { allow: false, why: `sent from a frame of ${input.foreign}` };
   const authExempt = isAuthExempt(mode, method, pathname, destructiveWire);
   if (input.offApp && !authExempt) return { allow: false, why: `sent from a page of ${input.offApp}, outside the app` };
-  if (authExempt) return { allow: true };
+  if (authExempt || input.readPost) return { allow: true };
   return allowsWrite(mode, method, destructiveWire, input.owned) ? { allow: true } : { allow: false };
 }
 

@@ -171,6 +171,13 @@ import {
   hostileForEmbed,
   trustedEmbedOrigins,
   MAX_TRUSTED_EMBEDS,
+  MAX_READ_POSTS,
+  READ_POSTS_ENV,
+  readPostAllowed,
+  matchReadPost,
+  readPostEntries,
+  readPostsSetting,
+  type ReadPost,
   trustsForeignWrite,
   embedProbeRefusal,
   EmbedMoveTracker,
@@ -296,6 +303,12 @@ export interface AttachOptions {
    * input, repeated-click probes and uploads stay refused in them.
    */
   trustedEmbeds?: string[];
+  /**
+   * POST endpoints that only read ("POST /api/search"), let out in observe
+   * mode — ONLY when the user named them. Default: SCENESCOUT_READ_POSTS, else
+   * none (policy.ts readPostsSetting).
+   */
+  readPosts?: string[];
   /**
    * Share one MemoryStore across engines attached to the same project
    * (multi-session/multi-role runs): coverage and findings from every role
@@ -604,6 +617,9 @@ export class BrowserEngine {
   /** Origins named as trusted embeds (policy.ts trustsEmbedWrite decides when that counts). */
   trustedEmbeds = new Set<string>();
   private trustNotice = "";
+  /** POST endpoints the user named as reads (policy.ts readPostAllowed decides when that counts). */
+  readPosts: ReadPost[] = [];
+  private readPostNotice = "";
   /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
   role = "anonymous";
   /** How the attached session signed in: a role profile, a storage-state file, or not at all. */
@@ -1342,6 +1358,16 @@ export class BrowserEngine {
         : "") +
       (trust.rejected.length > 0 ? ` Not a plain http(s) origin, so not trusted: ${trust.rejected.join(", ")}.` : "") +
       (trust.overflow.length > 0 ? ` More than ${MAX_TRUSTED_EMBEDS} trusted embeds; not trusted: ${trust.overflow.join(", ")}.` : "");
+    const reads = readPostEntries(readPostsSetting(opts.readPosts, process.env[READ_POSTS_ENV]));
+    this.readPosts = reads.entries;
+    this.readPostNotice =
+      (reads.entries.length > 0
+        ? this.mode === "observe"
+          ? ` Read POSTs: ${reads.entries.map((e) => e.entry).join(", ")} — named as reads, so observe lets them out unless the path or body looks destructive or the body is a GraphQL mutation; each one is logged.`
+          : ` Read POSTs (${reads.entries.map((e) => e.entry).join(", ")}) apply in observe mode only; ${this.mode} judges POSTs by its own rule.`
+        : "") +
+      (reads.rejected.length > 0 ? ` Not a "POST /path" or "POST https://host/path" entry, so not a read: ${reads.rejected.join(", ")}.` : "") +
+      (reads.overflow.length > 0 ? ` More than ${MAX_READ_POSTS} read POSTs; not reads: ${reads.overflow.join(", ")}.` : "");
     this.sessionObjective = (opts.objective ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
     // An agent-supplied task counts as stated; the placeholder does not.
     this.setTask(opts.task ?? "Attaching and taking stock", opts.task !== undefined);
@@ -1366,6 +1392,14 @@ export class BrowserEngine {
     // role must not discard what another role already created — otherwise
     // every multi-role handoff would be blocked as "not yours".
     this.memory = opts.memoryStore ?? new MemoryStore(opts.projectDir);
+    // A page refused before an endpoint was named as a read is no longer a gap for it.
+    if (this.readPosts.length > 0 && this.mode === "observe") {
+      const appOrigin = URL.canParse(this.baseUrl) ? new URL(this.baseUrl).origin : "";
+      this.memory.clearObserveRefusedPosts((endpoint) => {
+        const target = endpoint.replace(/^POST /, "");
+        return matchReadPost(this.readPosts, this.baseUrl, target.startsWith("/") ? appOrigin + target : target) !== null;
+      });
+    }
     // The REAL path, not merely the resolved one: on macOS the temp tree is a
     // symlink, and a fence comparing a real path against an unreal one would
     // refuse every upload from inside the project.
@@ -1494,6 +1528,8 @@ export class BrowserEngine {
       }
       const method = req.method();
       if (method === "GET" || method === "HEAD" || method === "OPTIONS") return;
+      // A POST the user named as a read is not state the tester mutated, nor a form exercised.
+      if (this.readPostOf(this.writeRule.at(), method, req.url(), req.postData())) return;
       // Infrastructure POSTs (token refresh, telemetry) are not state the
       // tester mutated — reporting them trains the driver to ignore the notice.
       if (BENIGN_MUTATION_RE.test(req.url())) return;
@@ -1625,6 +1661,7 @@ export class BrowserEngine {
         const pathname = pathnameOf(url);
         const refuse = (why?: string) => {
           const answered = answersWithRefusal(req.resourceType());
+          if (rule === "observe" && method === "POST" && !why && answered && !BENIGN_MUTATION_RE.test(url)) this.noteObserveRefusedPost(url, req.postData());
           this.noteBlocked({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered, why, type: req.resourceType() });
           this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}${why ? ` (${why})` : ""}`, url: this.page?.url() ?? "" });
           this.refusedByPolicy.add(req);
@@ -1648,6 +1685,18 @@ export class BrowserEngine {
         // one, and in observe only the requests a login itself needs.
         if (isAuthExempt(rule, method, pathname, destructiveWire)) {
           this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+          return route.fallback();
+        }
+        // A POST the user named as a read (observe only, never one that looks destructive): out, and logged.
+        const readPost = this.readPostOf(rule, method, url, req.postData(), destructiveWire);
+        if (readPost) {
+          this.logAction({
+            action: "write-policy:read-post",
+            target: `${method} ${pathname} (named as a read: ${readPost.entry})`,
+            url: this.page?.url() ?? "",
+          });
+          this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+          this.clearRefusedPost(url);
           return route.fallback();
         }
 
@@ -1685,6 +1734,7 @@ export class BrowserEngine {
             this.pendingCreations.add(task);
           }
           this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+          if (method === "POST") this.clearRefusedPost(url);
           return route.fallback();
         }
         return refuse();
@@ -1778,7 +1828,7 @@ export class BrowserEngine {
       `Memory: ${this.memory.dir}.${this.memory.loadWarning ? ` WARNING: ${this.memory.loadWarning}` : ""}` +
       (this.memory.prunedStates > 0 ? ` Trimmed ${this.memory.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
       `${this.memory.legacyDirNote ? ` ${this.memory.legacyDirNote}` : ""}` +
-      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""}${this.trustNotice} Call scout_snapshot to see the current state.` +
+      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice} Call scout_snapshot to see the current state.` +
       profileNote +
       authWarning
     );
@@ -2468,6 +2518,50 @@ export class BrowserEngine {
     return { el, liveLabel: live.label, live: { ownText: live.ownText, centre: live.centre } };
   }
 
+  /** The read-POST entry that lets this request out under `rule`, or null (policy.ts readPostAllowed). */
+  private readPostOf(rule: WriteMode, method: string, url: string, body: string | null | undefined, destructiveWire?: boolean): ReadPost | null {
+    if (this.readPosts.length === 0 || rule !== "observe" || method !== "POST") return null;
+    const pathname = pathnameOf(url);
+    return readPostAllowed({
+      mode: rule,
+      method,
+      url,
+      appUrl: this.baseUrl,
+      body,
+      destructiveWire: destructiveWire ?? isDestructiveWire(pathname, body),
+      entries: this.readPosts,
+    });
+  }
+
+  /** How the gap ledger names a POST's endpoint: "POST /path" on the app's origin, "POST https://host/path" elsewhere; null when unreadable. */
+  private refusedPostEndpoint(url: string): string | null {
+    try {
+      const u = new URL(url);
+      return `POST ${u.origin === new URL(this.baseUrl).origin ? "" : u.origin}${u.pathname}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Remember in project memory, for the gap ledger, a script's POST that
+   * observe refused on the page the session is on. Not one that looks
+   * destructive, nor one to an endpoint already named as a read (its body was
+   * a mutation): naming it would change nothing.
+   */
+  private noteObserveRefusedPost(url: string, body: string | null): void {
+    const pageUrl = this.page?.url();
+    if (!pageUrl || !this.memory || isDestructiveWire(pathnameOf(url), body) || matchReadPost(this.readPosts, this.baseUrl, url)) return;
+    const endpoint = this.refusedPostEndpoint(url);
+    if (endpoint) this.memory.noteObserveRefusedPost(normalizePath(pageUrl), endpoint);
+  }
+
+  /** A POST to this endpoint went out, so the pages observe refused it on are no longer a gap for it. */
+  private clearRefusedPost(url: string): void {
+    const endpoint = this.refusedPostEndpoint(url);
+    if (endpoint && this.memory) this.memory.clearObserveRefusedPosts((e) => e === endpoint);
+  }
+
   private actionPolicyCheck(el: SnapshotElement, liveLabel: string, live: { ownText?: string; centre?: string[] } = {}): string | null {
     if (!this.readOnly) return null;
     // Same-origin navigation links are exempt: navigation is non-destructive
@@ -2480,7 +2574,15 @@ export class BrowserEngine {
     // same holds for choosing a file: selection is not the send.
     if (el.role === "textbox" || el.role === "file") return null;
     // Judged as the snapshot judged it, and again on what is there now (policy.ts destructiveLabelOf).
-    const now = destructiveLabelOf({ tag: el.tag, role: el.role, name: liveLabel, testid: el.testid, ownText: live.ownText, centre: live.centre });
+    const now = destructiveLabelOf({
+      tag: el.tag,
+      role: el.role,
+      name: liveLabel,
+      testid: el.testid,
+      ownText: live.ownText,
+      centre: live.centre,
+      interactive: el.interactive,
+    });
     if (el.destructive || now !== null) {
       return destructiveRefusal(now ?? (liveLabel || el.name || el.testid || el.ref), this.mode);
     }
@@ -2758,6 +2860,7 @@ export class BrowserEngine {
       let pathname = url;
       try {
         pathname = pathnameOf(url);
+        const readPost = this.readPostOf(rule, method, url, bytes?.toString("utf8"));
         const { foreign, offApp } = unseenWriteSource({
           appUrl: this.baseUrl,
           mode: rule,
@@ -2776,7 +2879,14 @@ export class BrowserEngine {
           foreign,
           offApp,
           owned: this.isOwnedResource(pathname),
+          readPost: readPost !== null,
         });
+        if (readPost && verdict.allow)
+          this.logAction({
+            action: "write-policy:read-post",
+            target: `${method} ${pathname} (named as a read: ${readPost.entry})`,
+            url: this.page?.url() ?? "",
+          });
       } catch (err) {
         // Fail closed: a write that cannot be judged is refused, and reported as refused below.
         console.error(
