@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { BrowserEngine } from "../dist/engine/browser.js";
 import { computeGaps, generateReport } from "../dist/engine/report.js";
+import { judgeCriterion, parseTickets, type CriterionInput } from "../dist/engine/tickets.js";
 // @ts-expect-error — plain .mjs, no types; it exports createDemoServer().
 import { createDemoServer } from "../demo-app/server.mjs";
 
@@ -44,8 +45,35 @@ async function shot(name: string): Promise<void> {
   fs.writeFileSync(path.join(outDir, "screenshots", `${name}.png`), Buffer.from(base64, "base64"));
 }
 type FindingInput = Parameters<NonNullable<BrowserEngine["memory"]>["addFinding"]>[0];
-function finding(f: Omit<FindingInput, "url" | "state">): void {
-  engine.memory!.addFinding({ ...f, url: engine.currentUrl, state: engine.currentState || "(unknown)" });
+/** Files a finding and returns its id, for a criterion to link. */
+function finding(f: Omit<FindingInput, "url" | "state">): string {
+  return engine.memory!.addFinding({ ...f, url: engine.currentUrl, state: engine.currentState || "(unknown)" })[0].id;
+}
+
+/**
+ * The ticket the sample run is given. In a real run the person pastes or
+ * uploads it and the agent reads it with scout_tickets; the verdicts below are
+ * the agent's judgement, scripted here like the findings' wording.
+ */
+const TICKET = `# HAR-12: Find, export and approve orders
+
+## Description
+Clerks and managers work the order desk from the orders list and the approvals queue.
+
+## Acceptance criteria
+- Given I am on the orders page, when I choose Archived in the status filter, then the archived orders are listed
+- Export CSV on the reports page downloads the report as a file
+- A clerk cannot approve an order
+- A manager can approve an order from the approvals queue
+- The order page shows each order's notes
+`;
+function criterion(c: Omit<CriterionInput, "ticket">): void {
+  const judged = judgeCriterion(
+    { ticket: "HAR-12", ...c },
+    { tickets: engine.memory!.tickets, findings: engine.memory!.findings, mode: engine.mode, session: engine.sessionKey, at: new Date().toISOString() },
+  );
+  if (!judged.ok) throw new Error(`the demo's verdict on ${c.criterion} was refused: ${judged.reason}`);
+  engine.memory!.addCriterionVerdict(judged.record);
 }
 
 async function main(): Promise<void> {
@@ -60,6 +88,7 @@ async function main(): Promise<void> {
 
   try {
     show("attach", await engine.attach({ url: baseUrl, projectDir, mode: "read-only" }));
+    engine.memory!.addTickets(parseTickets(TICKET, "HAR-12.md"));
     show("snapshot /", await engine.snapshot());
     await shot("dashboard");
     finding({
@@ -88,7 +117,7 @@ async function main(): Promise<void> {
     let snap = await engine.snapshot(true);
     show("select Archived", await engine.select(refOf(snap, "orders-status-filter"), "archived"));
     await shot("orders-archived");
-    finding({
+    const archivedFails = finding({
       severity: "high",
       category: "http-error",
       title: "Filtering orders by Archived fails, and the page shows an empty table instead of an error",
@@ -101,7 +130,7 @@ async function main(): Promise<void> {
     await engine.navigate("/reports.html");
     snap = await engine.snapshot(true);
     show("click Export CSV", await engine.click(refOf(snap, "reports-export-csv")));
-    finding({
+    const exportThrows = finding({
       severity: "high",
       category: "page-error",
       title: "Export CSV throws and nothing is downloaded",
@@ -196,7 +225,7 @@ async function main(): Promise<void> {
     const rejected = await asClerk("/api/orders/1038/reject");
     const approved = await asClerk("/api/orders/1037/approve");
     show("a clerk calls reject, then approve, directly", `reject → ${rejected} · approve → ${approved}`);
-    finding({
+    const clerkApproves = finding({
       severity: "high",
       category: "permission-leak",
       title: "A clerk can approve an order by calling the endpoint the page hides from them",
@@ -218,6 +247,31 @@ async function main(): Promise<void> {
         "Quantity is compared as text, so the column orders by first digit. Pallet wrap (3 on hand) and Shipping labels (9) land at the bottom of an ascending sort, which is exactly where someone scanning for low stock does not look.",
       evidence: `sorted by quantity: ${quantities.join(", ")}`,
     });
+
+    // The ticket, criterion by criterion: which findings show a criterion failing is the agent's call.
+    criterion({
+      criterion: "AC1",
+      verdict: "fail",
+      findings: [archivedFails],
+      confidence: 0.95,
+      reason: "Choosing Archived fails with a 500 and the table is drawn empty.",
+    });
+    criterion({ criterion: "AC2", verdict: "fail", findings: [exportThrows], confidence: 0.9, reason: "Export CSV throws and no file is downloaded." });
+    criterion({
+      criterion: "AC3",
+      verdict: "fail",
+      findings: [clerkApproves],
+      confidence: 0.9,
+      reason: "The button is hidden, but the approve endpoint accepts a clerk.",
+    });
+    criterion({
+      criterion: "AC4",
+      verdict: "not-tested",
+      untestedBecause: "no-access",
+      confidence: 1,
+      reason: "The run was signed in as a clerk, and approving needs a manager.",
+    });
+    criterion({ criterion: "AC5", verdict: "pass", confidence: 0.8, reason: "Order 1042 shows its notes; saving them is a separate finding." });
 
     // The remaining areas, so the sample report covers every page.
     for (const route of ["/customers.html", "/audit.html", "/signin.html"]) {

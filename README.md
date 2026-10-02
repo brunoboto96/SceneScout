@@ -329,7 +329,7 @@ Snapshots are cheap: re-snapshotting a route returns only *what changed*, with s
 
 ## 🧰 The toolbox
 
-31 deterministic tools. The agent picks; you rarely call these by hand.
+34 deterministic tools. The agent picks; you rarely call these by hand.
 
 | Phase | Tools | What they do |
 |---|---|---|
@@ -340,6 +340,7 @@ Snapshots are cheap: re-snapshotting a route returns only *what changed*, with s
 | **Act** | `scout_click` `scout_type` `scout_select` `scout_upload` `scout_press` `scout_scroll` `scout_navigate` `scout_back` `scout_run_plan` | Drive the UI like a user; `scout_run_plan` batches a whole mechanical sequence into one call |
 | **Assess** | `scout_design_audit` `scout_journey` | Score a page's craft/a11y/consistency; measure how hard a task is to complete |
 | **Record** | `scout_note` `scout_finding` `scout_resolve` `scout_report` | Curate durable notes; file deduped findings; mark fixes; write the report, and on a recorded run the whole run as one page |
+| **Answer tickets** | `scout_tickets` `scout_criterion` | Read the acceptance criteria in pasted or uploaded tickets; record each criterion as passed, failed (with the findings that show it) or not tested (and why), with a confidence |
 | **Re-test** | `scout_verify` | List the findings earlier runs left open, worst route first, and record whether each is gone, still present, or changed |
 | **Split the work** | `scout_lane_brief` `scout_lane_report` | Divide the app between parallel agents by whole module, each with its own landing route and rules; fold what each hands back as one typed JSON object, and name any defect it judged but never filed |
 | **Close** | `scout_close` | Tear down one session or all |

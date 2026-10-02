@@ -16,6 +16,20 @@ While it worked, the automatic checks noticed:
 
 The run left 3 things unchecked. The gap ledger below says which.
 
+### The tickets
+
+This run was given 1 ticket with 5 acceptance criteria: 1 passed, 3 failed and 1 was not tested.
+
+#### HAR-12: Find, export and approve orders
+
+| | Acceptance criterion | Result |
+|---|---|---|
+| AC1 | Given I am on the orders page, when I choose Archived in the status filter, then the archived orders are listed | Failed: "Filtering orders by Archived fails, and the page shows an empty table instead of an error" (problem 1 below) |
+| AC2 | Export CSV on the reports page downloads the report as a file | Failed: "Export CSV throws and nothing is downloaded" (problem 2 below) |
+| AC3 | A clerk cannot approve an order | Failed: "A clerk can approve an order by calling the endpoint the page hides from them" (problem 5 below) |
+| AC4 | A manager can approve an order from the approvals queue | Not tested: the account the run used could not reach this part of the site |
+| AC5 | The order page shows each order's notes | Passed |
+
 ### 1. Filtering orders by Archived fails, and the page shows an empty table instead of an error
 
 **Blocks users** · The server refused or failed a request · on http://127.0.0.1:4173/orders.html
@@ -292,6 +306,22 @@ Everything below is for developers: requests, oracles, routes and ids, the gap l
 | Oracle violations this session | 11 |
 | Errors caused by the tester's own write-policy blocks (not counted above) | 2 |
 | Elements exercised (informational — denominator grows with every state) | 7/44 |
+
+## Acceptance criteria
+
+Each verdict is the agent's judgement, recorded with `scout_criterion` and its confidence; the link from a criterion to a finding is that judgement, not a match on words. A fail from any session decides a criterion, and a criterion no session judged is listed as not judged.
+
+### HAR-12: Find, export and approve orders
+
+Read from HAR-12.md.
+
+| Id | Criterion | Verdict | Confidence | Findings | Why | Judged by |
+|---|---|---|---:|---|---|---|
+| AC1 | Given I am on the orders page, when I choose Archived in the status filter, then the archived orders are listed | fail | 0.95 | `3a2ff88caa` | Choosing Archived fails with a 500 and the table is drawn empty. | default |
+| AC2 | Export CSV on the reports page downloads the report as a file | fail | 0.90 | `b7d6ac97d5` | Export CSV throws and no file is downloaded. | default |
+| AC3 | A clerk cannot approve an order | fail | 0.90 | `77d8b89e0d` | The button is hidden, but the approve endpoint accepts a clerk. | default |
+| AC4 | A manager can approve an order from the approvals queue | not tested (no-access) | 1.00 | — | The run was signed in as a clerk, and approving needs a manager. | default |
+| AC5 | The order page shows each order's notes | pass | 0.80 | — | Order 1042 shows its notes; saving them is a separate finding. | default |
 
 ## Page quality scores (worst first)
 

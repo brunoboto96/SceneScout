@@ -210,6 +210,8 @@ export interface PlainInput {
   lastFrames?: ReadonlyMap<string, string>;
   /** Which parts the document carries; decides where the technical detail is said to be. */
   audience: ReportAudience;
+  /** The answer to each ticket the run was given, already in plain words; it comes before the problems. */
+  tickets?: readonly string[];
 }
 
 const count = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
@@ -302,7 +304,7 @@ export function plainFinding(f: Finding, index: number, input: Pick<PlainInput, 
 
 /** The whole plain section: the summary, then each problem this run found, worst first. */
 export function formatPlainSection(input: PlainInput): string[] {
-  const lines = [`## In plain words`, ``, ...plainSummary(input), ``];
+  const lines = [`## In plain words`, ``, ...plainSummary(input), ``, ...(input.tickets ?? [])];
   input.current.forEach((f, i) => lines.push(...plainFinding(f, i + 1, input)));
   return lines;
 }

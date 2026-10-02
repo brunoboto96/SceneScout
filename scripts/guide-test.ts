@@ -677,6 +677,12 @@ test("each plain question chooses its setting", () => {
   const tickets = settingsFromAnswers({ ...base, whatToCheck: { tickets: ["#12 Export button does nothing", " ", "#14 Filters reset"] } });
   assert.equal(tickets.attach.objective, "Check the tickets: #12 Export button does nothing; #14 Filters reset");
   assert.equal(tickets.focus, "#12 Export button does nothing; #14 Filters reset");
+  assert.deepEqual(
+    tickets.readTickets,
+    { tool: "scout_tickets", text: "#12 Export button does nothing\n\n---\n\n#14 Filters reset" },
+    "tickets are read so the report answers them",
+  );
+  assert.equal(settingsFromAnswers(base).readTickets, undefined);
   assert.throws(() => settingsFromAnswers({ ...base, whatToCheck: { tickets: [" "] } }), /no tickets/);
   const described = settingsFromAnswers({ ...base, whatToCheck: { description: " the checkout flow " } });
   assert.deepEqual([described.attach.objective, described.focus], ["the checkout flow", "the checkout flow"]);
@@ -729,6 +735,7 @@ test("the skill and the guide ask the same questions, map them the same way and 
   const wholeObjective = settingsFromAnswers({ ...answers, whatToCheck: "everything" }).attach.objective;
   assert.ok(row("What to check").includes(`objective: "${wholeObjective}"`), "the skill's whole-site objective is the code's");
   assert.match(row("What to check"), /`objective`/);
+  assert.match(row("What to check"), /scout_tickets \{text\}/, "the skill reads tickets with the tool the code names");
   assert.match(row("Real data"), /Yes, or not sure: `mode: "observe"`\. No: `mode: "read-only"`/);
   assert.match(intro, /\*\*Flags given:\*\* ask nothing\./);
   // The questions never name a mode: choosing one is what they are for.
