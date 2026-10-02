@@ -686,6 +686,23 @@ test("replay: the header says when, on a clock it names, and says nothing about 
   assert.ok(!bare.includes("· v<"));
 });
 
+test("a finding with its own picture and no recorded frames still gets a report, with no last frame", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-report-"));
+  const store = new MemoryStore(dir);
+  const [finding] = store.addFinding({
+    severity: "medium",
+    category: "ux-confusing",
+    title: "Save shows no feedback",
+    detail: "…",
+    url: "http://app.test/x",
+    state: "/x#abc",
+  });
+  // As a finding filed on a run that is not recording: a picture, and no frames.
+  (finding as { picture?: string }).picture = `recordings/default/finding-${finding.id}.png`;
+  const report = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 1 }, { write: false });
+  assert.match(report.markdown, /Save shows no feedback/);
+});
+
 test("the report's summary names the one-page version only when it is really there", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-report-"));
   const store = new MemoryStore(dir);

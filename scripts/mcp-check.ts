@@ -23,6 +23,7 @@ const EXPECTED_TOOLS = [
   "scout_lane_report",
   "scout_scan",
   "scout_attach",
+  "scout_login",
   "scout_session",
   "scout_journey",
   "scout_note",
@@ -746,10 +747,7 @@ async function main(): Promise<void> {
   // not register. The skill's first step stops the run when its probe tool is
   // missing, so one stale name there halts every run at setup.
   const mentioned = new Set([...skill.matchAll(/\b(?:mcp__[a-z_]+__)?((?:scout|ft)_[a-z_]+)\b/g)].map((m) => m[1]).filter((n) => !n.endsWith("_")));
-  // scout_login is added by the change that lets a person sign in from the conversation; the skill
-  // names it already, with the `scenescout login` command as the fallback for a server without it.
-  const NAMED_BEFORE_REGISTERED = new Set(["scout_login"]);
-  const unknown = [...mentioned].filter((n) => !names.includes(n) && !NAMED_BEFORE_REGISTERED.has(n));
+  const unknown = [...mentioned].filter((n) => !names.includes(n));
   if (unknown.length > 0) {
     console.error(`MCP CHECK FAILED — the skill refers to tools the server does not register: ${unknown.join(", ")}`);
     process.exit(1);
