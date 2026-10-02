@@ -176,3 +176,52 @@ jobs:
           TAG: ${{ needs.release.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+
+  # The desktop extension bundle (.mcpb) for the release just made, attached
+  # to its GitHub Release so it can be downloaded and installed in Claude
+  # Desktop. Built in a job that can write nothing, from the release tag, and
+  # checked against the MCPB manifest schema with the pinned MCPB tool.
+  desktop-extension:
+    needs: release
+    if: needs.release.outputs.published == 'true' && needs.release.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm run mcpb
+      - name: Check the manifest against the MCPB schema
+        run: npx -y @anthropic-ai/mcpb@2.1.2 validate .mcpb-build/stage/manifest.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-extension
+          path: .mcpb-build/*.mcpb
+          if-no-files-found: error
+
+  # A separate job holds the permission to change the release, and runs no
+  # repository code: it only uploads the file the job above built.
+  attach-desktop-extension:
+    needs: [release, desktop-extension]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-extension
+      - name: Attach the bundle to the release
+        run: gh release upload "$TAG" *.mcpb --clobber
+        env:
+          TAG: ${{ needs.release.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

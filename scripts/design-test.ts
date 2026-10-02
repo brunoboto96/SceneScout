@@ -652,9 +652,10 @@ test("an unnamed control hidden from assistive technology needs no name; the sam
   assert.ok((page(false).score?.a11y ?? 100) < (page(true).score?.a11y ?? 0), page(false).report);
 });
 
-test("an icon button named by its image's alt text is not listed; the same button with an empty alt is", () => {
-  const page = (contentName: string) =>
-    analyzeDesign(payload([rec({ text: "Notice" }), button("", { name: "", contentName, bg: "rgb(255, 255, 255)", color: "rgb(30, 30, 30)" })]), VIEWPORT);
+test("an icon button the snapshot names by its image's alt text is not listed; the same button with an empty alt is", () => {
+  // The audit reads the snapshot's name (collector.ts PICK_NAME_SRC), which names a control by its image content.
+  const page = (name: string) =>
+    analyzeDesign(payload([rec({ text: "Notice" }), button("", { name, bg: "rgb(255, 255, 255)", color: "rgb(30, 30, 30)" })]), VIEWPORT);
   const search = page("Search");
   assert.ok(!search.report.includes("NAMES"), search.report);
   assert.equal(search.score?.a11y, 100, search.report);

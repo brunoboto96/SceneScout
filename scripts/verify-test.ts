@@ -119,3 +119,16 @@ test("the report says nothing about verification until somebody has verified", (
   assert.match(sayVerification({ verdict: "present", verifiedAt: "2026-09-21T08:00:00.000Z" }), /confirmed still present on 2026-09-21/);
   assert.match(sayVerification({ verdict: "changed", verifiedAt: "2026-09-21T08:00:00.000Z" }), /behaviour has changed/);
 });
+
+test("a finding filed before a control's coverage key changed is re-tested on the same route as one filed after", () => {
+  // Naming an image-only button changes its key and so the state fingerprint; a re-test target is the route, never the fingerprint.
+  const list = [
+    finding({ id: "before", url: "http://app.test/things?tab=1", state: "/things#a1b2c3d4" }),
+    finding({ id: "elsewhere", url: "http://app.test/other", state: "/other#00000000" }),
+    finding({ id: "after", url: "http://app.test/things?tab=1", state: "/things#e5f6a7b8" }),
+  ];
+  const items = verifyWorklist(list);
+  const at = (id: string) => items.findIndex((i) => i.id === id);
+  assert.equal(Math.abs(at("before") - at("after")), 1, "walked together");
+  assert.equal(items[at("before")].route, items[at("after")].route);
+});

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Stay signed in</title>
+  </head>
+  <body>
+    <!--
+      A native form that posts to the cookie-refresh endpoint, so the refresh
+      is a document navigation rather than a script's request. The browser
+      builds its Cookie header itself, so a route override cannot swap a spent
+      refresh cookie in it, and the broker does not answer a navigation itself.
+    -->
+    <main>
+      <h1 data-testid="refresh-form-heading">Stay signed in</h1>
+      <form method="post" action="/rc-auth/refresh">
+        <button type="submit" data-testid="refresh-form-submit">Refresh by form</button>
+      </form>
+    </main>
+  </body>
+</html>
