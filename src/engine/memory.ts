@@ -383,6 +383,16 @@ export function redactSecrets(text: string): string {
   return hits > 0 ? `${out} [${hits} secret${hits === 1 ? "" : "s"} redacted]` : out;
 }
 
+/**
+ * Routes are links the app printed, and a link can carry a token
+ * (`?reset=…`, `?api_key=…`). Evidence is redacted where issues are built;
+ * this does the same for every route string before anything is written.
+ */
+export function redactRoute(route: string): string {
+  // The trailing "[n secrets redacted]" note belongs to prose; in a route it would read as part of the path.
+  return redactSecrets(route).replace(/ \[\d+ secrets? redacted\]$/, "");
+}
+
 /** The action-log lines that open and close a journey (scout_journey). The feed reads them to tell which goal an action served. */
 export const JOURNEY_START = "journey:start";
 export const JOURNEY_END = "journey:end";

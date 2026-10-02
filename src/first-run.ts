@@ -19,6 +19,7 @@
  * and scripts/smoke/first-run.ts runs the built CLI against the demo app with
  * a throwaway home directory.
  */
+import { DEFAULT_BASELINE_THRESHOLD } from "./engine/baseline.js";
 import fs from "node:fs";
 import path from "node:path";
 import { APPROX_DISK_MB, launchTarget, type BrowserPresence, type InstallTarget } from "./browsers.js";
@@ -180,6 +181,9 @@ export function firstRunCheckOptions(o: FirstRunOptions, projectDir: string): Ch
     flowWrites: "never",
     onRefusedStep: "report",
     gateRetests: "never",
+    // A first look pictures nothing: baselines are a project's own list.
+    baseline: "off",
+    baselineThreshold: DEFAULT_BASELINE_THRESHOLD,
   };
 }
 

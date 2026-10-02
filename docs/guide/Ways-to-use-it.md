@@ -114,6 +114,44 @@ A step that breaks fails the gate (`flow-step-failed`, high) naming the flow and
 
 **SARIF.** `check.sarif` is SARIF 2.1.0. With the GitHub Action, `upload-sarif: true` sends it to code scanning; the job then needs `security-events: write`.
 
+### Visual baselines
+
+A baseline is an approved picture of a page or of one element on it. With `--baseline compare` the check takes the same picture again and compares the two pixel by pixel; with `--baseline update` it writes new baselines. Nothing is pictured unless you ask for it.
+
+1. List what to keep in `targets.json`, in the baselines folder (`.scenescout/baselines/` unless `--baselines` names another):
+
+   ```json
+   {
+     "targets": [
+       { "path": "/" },
+       { "path": "/settings", "element": "testid=profile-card" },
+       { "path": "/orders", "element": "role=button[name=\"New order\"]" }
+     ]
+   }
+   ```
+
+   `element` is `page`, the default (the window from the top of the page), or a target written the way a saved flow writes one: `testid=…`, `text=…`, `label=…` or `role=<role>[name="…"]`. An element's picture is its box and 8px around it.
+2. Take the baselines once: `npx -y scenescout check http://127.0.0.1:3000 --baseline update`. Each baseline is a PNG with a JSON beside it that says how it was taken, under `<browser>/<route>/` in the folder.
+3. Compare on every run with `--baseline compare`.
+
+| What the check finds | What it reports | Gate |
+|---|---|---|
+| The same picture, or one within `--baseline-threshold` (default 0.1%) | It matches, with the share of pixels changed | Passes |
+| More pixels changed than the threshold allows, or a change of size | `visual-change` (high), with the share changed; the baseline, the picture now and a diff with the changed pixels in red go under `visual/` beside the report | Fails at the default `--fail-on high` |
+| The page or element could not be pictured | `visual-change` (high), saying why | Fails |
+| A baseline it cannot use: half there, unreadable, or taken with other settings | `visual-change` (high), saying why; take it again with `--baseline update` | Fails |
+| No baseline yet | Listed, and counted beside the verdict as not compared | Passes |
+
+An intended change is approved by running the check with `--baseline update` and committing what it writes, on the same operating system the check runs on. Nothing else writes a baseline. An update rewrites what compare would not accept and leaves a baseline within `--baseline-threshold` exactly as it was, except one taken on another operating system, which it always replaces: run on a laptop, an update replaces every baseline taken on a Linux runner. Targets are pictured whatever `--paths` says, since each names its own page.
+
+**Where baselines live.** `.scenescout/baselines/` is ignored by git, so baselines kept there stay on the machine that took them. To share them, name a folder the project commits: `--baselines tests/visual` (the action's `baselines` input).
+
+**What keeps a picture repeatable.** Every picture is taken in a 1280×900 window at one picture pixel per CSS pixel, after a fresh page load from a blank page, with the page told to reduce motion, once its fonts have loaded, with CSS animations and transitions stopped before anything is measured and the text caret hidden. Baselines are kept per browser: Chromium's are never compared with WebKit's. An element larger than the window is pictured where it is inside the window, and the report says so.
+
+**Why 0.1% and not 0.** Two pictures of an unchanged page taken by one browser build on one machine compare at 0%, but a run on another machine, or after a browser or font update, can anti-alias text and curved edges a pixel differently, and a gate that fails on that noise teaches a team to ignore it. 0.1% is 1,152 pixels of a 1280×900 page and 64 of a 320×200 picture, so a smaller change, such as a character of small text on a large element, passes unless you lower the threshold: `--baseline-threshold 0` counts every changed pixel (one whose colour differs by more than 8 in 255 on a channel), and a change of size always counts.
+
+**What can still differ.** Each operating system draws text differently, so a baseline taken on a laptop seldom matches a picture taken on a Linux runner: take baselines where the check runs (the report says when one was taken on another system). Content that changes by itself, such as dates, counters, random images, video or animation driven by script, changes the picture: keep a baseline of a steadier element, or raise `--baseline-threshold`. [Running it in CI](../ci.md#visual-baselines) shows how to take baselines on the runner.
+
 ### SARIF locations
 
 Code scanning keeps a result only when its location is a file in the repository, so the results in `check.sarif` and `ci.sarif` point at repository files, and the page each one was seen on goes beside the file: in the message, as a logical location of kind `resource`, and in `properties.routes` (`properties.route` in `ci.sarif`).
