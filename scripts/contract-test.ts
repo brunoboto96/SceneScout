@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
 import { isNonPageRoute, normalizePath } from "../src/engine/fingerprint.ts";
+import { crawledRoute, crawlLine } from "../src/engine/crawl.ts";
 import { MemoryStore } from "../src/engine/memory.ts";
 import { formatNeverSubmittedEmpty } from "../src/engine/forms.ts";
 import {
@@ -910,4 +911,47 @@ test("classifyFilledStates: typing into another site's frame leaves no app form 
   own.visitState("/support#a", "http://app.test/support", "/support", ["textbox:message", "button:send"]);
   own.markExercised("/support#a", "textbox:message", "type");
   assert.deepEqual(classifyFilledStates(own, own.routeFacts).unsubmitted, ["/support"]);
+});
+
+test("crawl: an explicitly crawled path that answered as a page joins the route contract; a redirect, a failure or an API path does not", () => {
+  const page = { path: "/reports/archive", status: 200, requestedRoute: "/reports/archive", landedRoute: "/reports/archive", loginRedirect: false };
+  assert.equal(crawledRoute(page), "/reports/archive");
+  assert.equal(crawledRoute({ ...page, landedRoute: "/reports" }), null, "redirected: the page it landed on is the route that exists");
+  assert.equal(crawledRoute({ ...page, landedRoute: "/login", loginRedirect: true }), null);
+  assert.equal(crawledRoute({ ...page, status: 404 }), null);
+  assert.equal(crawledRoute({ ...page, deadEnd: true }), null, "the same 200 with nothing on the page: an app answering every path, not a route");
+  assert.equal(crawledRoute({ ...page, status: "no-response" }), null);
+  assert.equal(crawledRoute({ ...page, path: "/api/things", requestedRoute: "/api/things", landedRoute: "/api/things" }), null);
+
+  // Through the store: the known-route count rises by exactly one.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-crawl-"));
+  try {
+    const store = new MemoryStore(dir);
+    store.addDiscoveredRoutes([{ route: "/", example: "/" }]);
+    const before = Object.keys(store.discoveredRoutes).length;
+    const joined = crawledRoute(page);
+    if (joined) store.addDiscoveredRoutes([{ route: joined, example: page.path }]);
+    assert.equal(Object.keys(store.discoveredRoutes).length, before + 1);
+    store.flush();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("crawl: a path that ended on another route says REDIRECTED in its line, and one that stayed does not", () => {
+  const counts = { elements: 94, missingTestid: 0, unnamed: 0 };
+  const stayed = { path: "/settings", status: 200, requestedRoute: "/settings", landedRoute: "/settings", loginRedirect: false };
+  assert.equal(crawlLine(stayed, counts, []), "/settings — 200 · 94 el");
+  assert.equal(crawlLine({ ...stayed, landedRoute: "/settings/profile" }, counts, []), "/settings — 200 · 94 el · REDIRECTED → /settings/profile");
+  assert.equal(
+    crawlLine({ ...stayed, landedRoute: "/login", loginRedirect: true }, counts, ["AUTH-REDIRECT"]),
+    "/settings — 200 · 94 el · AUTH-REDIRECT",
+    "the sign-in bounce keeps its own flag, not both",
+  );
+  assert.equal(crawlLine(stayed, { elements: 3, missingTestid: 2, unnamed: 1 }, ["1⚠"]), "/settings — 200 · 3 el · 2 no-testid · 1 unnamed · 1⚠");
+  assert.equal(
+    crawlLine({ ...stayed, landedRoute: "/settings/profile" }, { ...counts, main: "main EMPTY" }, []),
+    "/settings — 200 · 94 el · main EMPTY · REDIRECTED → /settings/profile",
+    "what the main area holds sits beside the element count",
+  );
 });

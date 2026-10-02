@@ -215,9 +215,52 @@ interface TokenFamily {
   access: Set<string>;
   revoked: boolean;
   rotations: number;
+  /** For a family whose refresh token is a cookie: the Path the cookie is scoped to. */
+  cookiePath?: string;
 }
 const families: TokenFamily[] = [];
 const newToken = (): string => crypto.randomBytes(24).toString("base64url");
+
+/**
+ * Present a refresh token to the fixture's identity provider. The family's
+ * current token rotates it and gets a new access token back; a token the
+ * family already spent revokes the whole family, as reuse detection does;
+ * anything else is refused.
+ */
+function presentRefreshToken(presented: string): { family: TokenFamily; access: string } | null {
+  const family = families.find((f) => f.current === presented || f.spent.has(presented));
+  if (!family || family.revoked) return null;
+  if (family.current !== presented) {
+    // A spent token presented again: taken as stolen, so the whole family ends.
+    family.revoked = true;
+    family.access.clear();
+    return null;
+  }
+  family.spent.add(presented);
+  family.current = newToken();
+  const access = newToken();
+  family.access.add(access);
+  family.rotations += 1;
+  return { family, access };
+}
+
+/** The cookie the fixture's cookie-held refresh token lives in. */
+export const RC_REFRESH_COOKIE = "rc_refresh";
+
+/** The Set-Cookie line that hands a family's current refresh token to the browser, scoped as the family's sign-in chose. */
+function refreshCookieLine(family: TokenFamily): string {
+  return `${RC_REFRESH_COOKIE}=${family.current}; Path=${family.cookiePath ?? "/"}; HttpOnly; SameSite=Lax; Max-Age=3600`;
+}
+
+/** The static assets of the cookie-refresh app: four scripts, a stylesheet and an image, served to anyone. */
+const RC_STATIC: Record<string, { type: string; body: string }> = {
+  ...Object.fromEntries([1, 2, 3, 4].map((n) => [`/rc-static/s${n}.js`, { type: "text/javascript", body: "window.rcScripts = (window.rcScripts || 0) + 1;" }])),
+  "/rc-static/app.css": { type: "text/css", body: "#rc-styled { color: rgb(10, 20, 30); }" },
+  "/rc-static/mark.svg": {
+    type: "image/svg+xml",
+    body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#123456"/></svg>',
+  },
+};
 
 /** Expire every access token the rotating sign-in issued, so each page's next call has to refresh. */
 export function expireFixtureAccess(): void {
@@ -716,26 +759,81 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
         } catch {
           presented = "";
         }
-        const family = families.find((f) => f.current === presented || f.spent.has(presented));
-        const refuse = () => {
+        const rotated = presentRefreshToken(presented);
+        if (!rotated) {
           res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify({ error: "invalid_grant" }));
-        };
-        if (!family || family.revoked) return refuse();
-        if (family.current !== presented) {
-          // A spent token presented again: taken as stolen, so the whole family ends.
-          family.revoked = true;
-          family.access.clear();
-          return refuse();
+          return;
         }
-        family.spent.add(presented);
-        family.current = newToken();
-        const access = newToken();
-        family.access.add(access);
-        family.rotations += 1;
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ access_token: access, refresh_token: family.current }));
+        res.end(JSON.stringify({ access_token: rotated.access, refresh_token: rotated.family.current }));
       });
+      return;
+    }
+    // The rotating sign-in with its refresh token in an HttpOnly cookie and its
+    // access token in localStorage, as many single-page apps keep them.
+    // /rc-signin?scope=root scopes the cookie to "/", so it rides on every
+    // request the app makes, its scripts and images included; scope=endpoint
+    // scopes it to /rc-auth, so only the refresh call carries it. The app at
+    // /rc-app refreshes with a POST that carries nothing but the cookie: to
+    // /rc-auth/refresh, or with refresh=odd to /rc-api/keepalive, a path that
+    // does not say it refreshes.
+    if (urlPath === "/rc-signin") {
+      const query = new URL(req.url ?? "/", "http://127.0.0.1").searchParams;
+      const refreshUrl = query.get("refresh") === "odd" ? "/rc-api/keepalive" : "/rc-auth/refresh";
+      const family: TokenFamily = {
+        current: newToken(),
+        spent: new Set(),
+        access: new Set([newToken()]),
+        revoked: false,
+        rotations: 0,
+        cookiePath: query.get("scope") === "endpoint" ? "/rc-auth" : "/",
+      };
+      families.push(family);
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store", "set-cookie": refreshCookieLine(family) });
+      res.end(
+        `<!doctype html><title>Signing in</title><script>localStorage.setItem("rc_access", ${JSON.stringify([...family.access][0])}); ` +
+          `localStorage.setItem("rc_refresh_url", ${JSON.stringify(refreshUrl)}); location.replace("/rc-app");</script>`,
+      );
+      return;
+    }
+    if (urlPath === "/rc-app") {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "refresh-cookie.html")));
+      return;
+    }
+    if (RC_STATIC[urlPath]) {
+      res.writeHead(200, { "content-type": RC_STATIC[urlPath].type, "cache-control": "no-store" });
+      res.end(RC_STATIC[urlPath].body);
+      return;
+    }
+    if (urlPath === "/rc-api/items") {
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ items: [] }));
+      return;
+    }
+    if (urlPath === "/rc-api/me") {
+      const bearer = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+      const ok = families.some((f) => !f.revoked && f.access.has(bearer));
+      res.writeHead(ok ? 200 : 401, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(ok ? { name: "a member" } : { error: "unauthorized" }));
+      return;
+    }
+    if ((urlPath === "/rc-auth/refresh" || urlPath === "/rc-api/keepalive") && req.method === "POST") {
+      req.resume();
+      const presented =
+        (req.headers.cookie ?? "")
+          .split(/;\s*/)
+          .find((c) => c.startsWith(`${RC_REFRESH_COOKIE}=`))
+          ?.slice(RC_REFRESH_COOKIE.length + 1) ?? "";
+      const rotated = presentRefreshToken(presented);
+      if (!rotated) {
+        res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "invalid_grant" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store", "set-cookie": refreshCookieLine(rotated.family) });
+      res.end(JSON.stringify({ access_token: rotated.access }));
       return;
     }
     // Extensionless /login, because the engine's auth heuristic matches a path

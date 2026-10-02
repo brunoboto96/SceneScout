@@ -157,7 +157,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     await engine.navigate("/");
     const snap3 = await engine.snapshot();
     check("home revisited (memory works)", snap3.includes("(revisited)"), snap3);
-    check("exercised elements marked done", /Compute report.*done/.test(snap3), snap3);
+    check("exercised elements marked exercised", /Compute report.*\bexercised\]/.test(snap3), snap3);
 
     console.log("design audit (computed styles, no pixels)");
     await engine.navigate("/");
@@ -858,9 +858,12 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
           "form:POST /things",
           "form:POST /things/:id/comments",
           "form:name=pay",
+          "tid:event-create",
           "tid:feedback-send",
           "tid:items-save",
+          "tid:meeting-create",
           "tid:message-send",
+          "tid:record-save",
           "tid:rename-submit",
           "tid:signup-submit",
         ]),
@@ -913,6 +916,24 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     await engine.type(esRef("items-name"), "");
     await engine.press("Enter");
     check("scout_press Enter in a blank field submits it empty", !listed("tid:items-save"), JSON.stringify(untried()));
+
+    // The contrastive pair: a date the page filled in on load. Left as the
+    // page set it, the submit is the empty one; changed by the session, it is not.
+    await engine.click(esRef("event-create"));
+    check(
+      "a submit that leaves a page-filled date as it was, and every typed field blank, is the empty submit",
+      !listed("tid:event-create"),
+      JSON.stringify(untried()),
+    );
+    await engine.type(esRef("meeting-starts"), "2030-01-02T03:04", false, true);
+    await engine.click(esRef("meeting-create"));
+    check("...and the same form with the date changed by the session stays listed", listed("tid:meeting-create"), JSON.stringify(untried()));
+    await engine.click(esRef("record-save"));
+    check(
+      "an edit form saved with its page-filled text unchanged is not the empty submit: it stays listed",
+      listed("tid:record-save"),
+      JSON.stringify(untried()),
+    );
 
     const lookupClick = await engine.click(esRef("lookup-go"));
     check("scout_click on a form's submit with its field blank submits it empty", !listed("form:POST /things"), JSON.stringify(untried()));
@@ -984,6 +1005,31 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       JSON.stringify(entries()),
     );
 
+    console.log("network: the requests a page made since it loaded");
+    await engine.navigate("/tab-requests.html");
+    let tabSnap = await engine.snapshot(true);
+    const tabRef = (testid: string): string => {
+      const m = tabSnap.match(new RegExp(`(e\\d+) [^\\n]*testid=${testid}\\b`));
+      if (!m) throw new Error(`ref not found for ${testid} in:\n${tabSnap}`);
+      return m[1];
+    };
+    await engine.click(tabRef("tab-archived"));
+    await eventually(() => /GET \/api\/allow\?tab=archived → 200/.test(engine.listPageRequests()));
+    const afterFetch = engine.listPageRequests();
+    check("a client-side tab switch's fetch is listed with its status", /GET \/api\/allow\?tab=archived → 200 · \d+ ms/.test(afterFetch), afterFetch);
+    await engine.navigate("/tab-requests.html");
+    tabSnap = await engine.snapshot(true);
+    await engine.click(tabRef("tab-drafts"));
+    const noFetch = engine.listPageRequests();
+    check("...and the tab that fetched nothing leaves no entry, on a list a fresh load started again", !/api\/allow/.test(noFetch), noFetch);
+    const picked = await engine.apiRequest({ path: "/api/allow", view: { select: "items" } });
+    check("scout_request select returns only the value at the path", /\(select "items": all 2 characters\)\n\n\[\]$/.test(picked), picked);
+    check(
+      "...and the listing marks scout_request's own call",
+      /GET \/api\/allow → 200[^\n]*sent by scout_request/.test(engine.listPageRequests()),
+      engine.listPageRequests(),
+    );
+
     console.log("coverage: the form inventory is cheap on a long form");
     await engine.navigate("/many-rows.html");
     const rowsPage = (engine as unknown as { page: import("playwright").Page }).page;
@@ -1028,5 +1074,132 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     );
   } finally {
     await engine.close().catch(() => {});
+  }
+  await labelsAndLeaving({ baseUrl, projectDir, stats } as SmokeContext);
+}
+
+/**
+ * The label policy judges a control by its own name, a page's leave
+ * confirmation is reported and left to the caller, and a blocked endpoint is
+ * explained once. Each against its contrast: the destructive control beside
+ * the harmless one is still refused, and its request never reaches the server.
+ */
+async function labelsAndLeaving({ baseUrl, projectDir, stats }: SmokeContext): Promise<void> {
+  const writesTo = (key: string): number => stats.writes[key] ?? 0;
+  const engine = new BrowserEngine();
+  try {
+    console.log("observe: a control is judged by its own label");
+    await engine.attach({ url: baseUrl, projectDir, mode: "observe" });
+    await engine.navigate("/leave-guard.html");
+    const snap = await engine.snapshot(true);
+    const lineOf = (testid: string): { ref: string; line: string } => {
+      const m = snap.match(new RegExp(`(e\\d+) [^\\n]*\\[testid=${testid}[,\\]][^\\n]*`));
+      if (!m) throw new Error(`leave-guard fixture: no element with testid ${testid} in:\n${snap}`);
+      return { ref: m[1], line: m[0] };
+    };
+    const filter = lineOf("log-filter");
+    check("a filter whose options include Delete is not marked destructive", !filter.line.includes("DESTRUCTIVE"), filter.line);
+    const row = lineOf("record-row");
+    check("a row holding a Delete button off its centre is not marked destructive", !row.line.includes("DESTRUCTIVE"), row.line);
+    check("...the Delete button inside it is", lineOf("record-row-delete").line.includes("DESTRUCTIVE"), lineOf("record-row-delete").line);
+    const icon = lineOf("record-icon-action");
+    check("an icon-only control named Delete by its aria-label is marked destructive", icon.line.includes("DESTRUCTIVE"), icon.line);
+    const iconClick = await engine.click(icon.ref);
+    check("...and clicking it is refused", iconClick.includes("REFUSED"), iconClick);
+    check("...and a row whose centre is a Remove button is", lineOf("record-row-centred").line.includes("DESTRUCTIVE"), lineOf("record-row-centred").line);
+    check(
+      "an in-app Discard changes is not marked destructive",
+      !lineOf("guard-discard-changes").line.includes("DESTRUCTIVE"),
+      lineOf("guard-discard-changes").line,
+    );
+    check("...Discard record is", lineOf("guard-discard-record").line.includes("DESTRUCTIVE"), lineOf("guard-discard-record").line);
+
+    const pickCreate = await engine.select(filter.ref, "create");
+    check("choosing Create in the filter is allowed", !pickCreate.includes("REFUSED"), pickCreate);
+    const pickDelete = await engine.select(filter.ref, "delete");
+    check("choosing Delete in the filter is refused", pickDelete.includes("REFUSED"), pickDelete);
+    const rowClick = await engine.click(row.ref);
+    check("clicking the row is allowed", !rowClick.includes("REFUSED"), rowClick);
+    const deleteClick = await engine.click(lineOf("record-row-delete").ref);
+    const centredClick = await engine.click(lineOf("record-row-centred").ref);
+    check("clicking the Delete button is refused", deleteClick.includes("REFUSED"), deleteClick);
+    check("clicking the row whose centre is Remove is refused", centredClick.includes("REFUSED"), centredClick);
+    const recordClick = await engine.click(lineOf("guard-discard-record").ref);
+    check("Discard record is refused", recordClick.includes("REFUSED"), recordClick);
+    await settle(300);
+    check(
+      "no delete or discard of a record reached the server",
+      writesTo("DELETE /api/records/7") + writesTo("DELETE /api/records/8") + writesTo("DELETE /api/records/9") + writesTo("POST /api/records/7") === 0,
+      JSON.stringify(stats.writes),
+    );
+
+    console.log("observe: a background beacon blocked on every load is explained once");
+    const firstLoad = await engine.navigate("/leave-guard.html");
+    const secondLoad = await engine.navigate("/leave-guard.html");
+    check("the beacon's endpoint was already explained in this session", !firstLoad.includes("NOT an app bug"), firstLoad);
+    check(
+      "a repeat is counted on one line, without the paragraph",
+      /WRITE-POLICY blocked \(observe\): 1 repeat block of 1 known endpoint \(POST \S*\/api\/monitor\/tunnel ×1\)/.test(secondLoad) &&
+        !secondLoad.includes("observe mode blocks every request"),
+      secondLoad,
+    );
+    check("the beacon never reached the server", writesTo("POST /api/monitor/tunnel") === 0, JSON.stringify(stats.writes));
+
+    console.log("observe: a page that asks to confirm leaving");
+    await engine.navigate("/page2.html");
+    const clean = await engine.navigate("/leave-guard.html");
+    check("leaving a page with nothing typed raises no leave confirmation", !clean.includes("LEAVE CONFIRMATION"), clean);
+    let snapG = await engine.snapshot(true);
+    const refIn = (s: string, testid: string): string => {
+      const m = s.match(new RegExp(`(e\\d+) [^\\n]*\\[testid=${testid}[,\\]]`));
+      if (!m) throw new Error(`leave-guard fixture: no element with testid ${testid} in:\n${s}`);
+      return m[1];
+    };
+    await engine.type(refIn(snapG, "guard-title"), "unsent title");
+    const stayed = await engine.navigate("/page2.html");
+    check(
+      "a navigation the page asks to confirm is reported by name, not as ERR_ABORTED",
+      stayed.startsWith("NOT NAVIGATED") && stayed.includes("LEAVE CONFIRMATION") && !stayed.includes("ERR_ABORTED"),
+      stayed,
+    );
+    check("...and the session stayed on the form", stayed.includes("leave-guard.html") && !/URL now: \S*page2/.test(stayed), stayed);
+    snapG = await engine.snapshot(true);
+    const cancel = await engine.click(refIn(snapG, "guard-cancel"));
+    check("a Cancel that goes back across documents says the page asked to confirm leaving", cancel.includes("LEAVE CONFIRMATION"), cancel);
+
+    console.log("observe: discarding unsent changes in the app's own confirm");
+    snapG = await engine.snapshot(true);
+    const discard = await engine.click(refIn(snapG, "guard-discard-changes"));
+    check("Discard changes that sends nothing is allowed in observe", !discard.includes("REFUSED") && !discard.includes("WRITE-POLICY blocked"), discard);
+    const afterDiscard = await engine.navigate("/page2.html");
+    check("...and the page then leaves without asking", afterDiscard.startsWith("OK") && !afterDiscard.includes("LEAVE CONFIRMATION"), afterDiscard);
+
+    await engine.navigate("/leave-guard.html");
+    snapG = await engine.snapshot(true);
+    await engine.type(refIn(snapG, "guard-title"), "unsent again");
+    const left = await engine.navigate("/page2.html", true);
+    check("leave: true leaves, and says the unsent input was discarded", /URL now: \S*page2\.html/.test(left) && /answered "leave" as asked/.test(left), left);
+  } finally {
+    await engine.close().catch(() => {});
+  }
+
+  console.log("read-only: a Discard changes that sends a write is refused on the wire");
+  const ro = new BrowserEngine();
+  try {
+    await ro.attach({ url: baseUrl, projectDir, mode: "read-only" });
+    await ro.navigate("/leave-guard.html");
+    const snap = await ro.snapshot(true);
+    const ref = snap.match(/(e\d+) [^\n]*\[testid=guard-discard-changes-remote[,\]]/)?.[1];
+    if (!ref) throw new Error(`leave-guard fixture: no guard-discard-changes-remote in:\n${snap}`);
+    const result = await ro.click(ref);
+    await settle(300);
+    check("the label does not refuse it", !result.includes("REFUSED by"), result);
+    check(
+      "...the policy blocks its discard request and it never reaches the server",
+      result.includes("WRITE-POLICY blocked (read-only)") && result.includes("/api/drafts/7/discard") && writesTo("POST /api/drafts/7/discard") === 0,
+      `${result}\n${JSON.stringify(stats.writes)}`,
+    );
+  } finally {
+    await ro.close().catch(() => {});
   }
 }

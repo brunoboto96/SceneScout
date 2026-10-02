@@ -148,6 +148,11 @@ export const WORTH_A_LOOK_RULES = {
     help: "Links with no underline, in the same colour as the page's body text. In running text a reader cannot tell them from the text around them; in navigation this styling is common, and the check cannot tell the two apart.",
     convention: "a visible link style (an underline or a distinct colour) wherever links appear, navigation included",
   },
+  "scrolled-out-controls": {
+    title: "Controls scrolled out of view sideways",
+    help: "Controls inside a horizontally scrolling container (a wide table's last column, say) lie outside its visible width at this viewport, so only a sideways scroll of the container shows them. A wide table that scrolls is a common, deliberate layout; it matters where a project keeps every row's actions in view.",
+    convention: "row actions and other controls that stay in view without a sideways scroll of their container at this viewport width",
+  },
 } as const satisfies Record<string, { title: string; help: string; convention: string }>;
 
 export type DefectRule = keyof typeof CHECK_RULES;
@@ -237,6 +242,7 @@ export function geometryRule(line: string): CheckRule | null {
   if (/ is UNREACHABLE /.test(line)) return "clipped-control";
   if (/ is rendered outside the reachable page area/.test(line)) return "offpage-control";
   if (/ overlaps /.test(line)) return "overlapping-controls";
+  if (/ scrolled out of view inside a horizontally scrolling container /.test(line)) return "scrolled-out-controls";
   return "layout-issue";
 }
 

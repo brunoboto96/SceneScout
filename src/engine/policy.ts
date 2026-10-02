@@ -20,7 +20,15 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
   // view/form senses; everything else ("Reset workspace", "Factory reset",
   // "Reset all data") still counts.
   /\breset\b(?!\s+(filters?|zoom|search|view|sort|order|form|password|layout|columns?|selection|preferences?|defaults?))/i,
-  /\bdiscard\b/i,
+  // "Discard" names two different things. "Discard changes", "Discard your
+  // edits" and "Discard unsaved changes" drop what the tester typed and has not
+  // sent: no record exists to lose, and refusing it left a session stuck on a
+  // dirty form behind the app's own leave-confirmation. Those senses are
+  // exempt, written as words or as a test id ("discard-changes"); "Discard
+  // draft", "Discard record" and a bare "Discard" still count.
+  // If the confirm does send a write, the wire policy judges that request as it
+  // judges any other, and `discard` is a destructive verb in a path there.
+  /\bdiscard\b(?![\s_-]+(?:(?:your|my|all|the|any)[\s_-]+)?(?:unsaved[\s_-]+|pending[\s_-]+|local[\s_-]+|draft[\s_-]+)?(?:changes|edits)\b)/i,
   /\bcancel subscription\b/i,
   // The verb: a control that signs the user off, alone or after another verb
   // ("Save and sign off"). The noun is how approval apps label things, and it
@@ -57,7 +65,7 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
  */
 
 /** A destructive verb occupying a URL PATH segment. Bare keywords are meaningful here — a path is not prose. */
-const DESTRUCTIVE_URL_RE = /(\/|\b|_)(delete|remove|purge|destroy|archive|revoke|deactivate|wipe|bulk[-_]?delete|force[-_]?delete)(\/|\b|_)/i;
+const DESTRUCTIVE_URL_RE = /(\/|\b|_)(delete|remove|purge|destroy|archive|revoke|deactivate|wipe|discard|bulk[-_]?delete|force[-_]?delete)(\/|\b|_)/i;
 
 /**
  * Structured destructive intent inside a body — never a bare keyword.
@@ -76,7 +84,7 @@ const DESTRUCTIVE_URL_RE = /(\/|\b|_)(delete|remove|purge|destroy|archive|revoke
  * than as command fields.
  */
 const DESTRUCTIVE_BODY_RE =
-  /\bmutation\b[\s\S]{0,200}?\b(?:delete|remove|archive|destroy|purge|revoke)[A-Za-z_]|(?:^|[{,[\s]*["']|[?&])\s*(?:action|operation|op|method|_method|command|cmd)["']?\s*[:=]\s*["']?(?:delete|remove|purge|destroy|archive|revoke|deactivate|wipe)\b/i;
+  /\bmutation\b[\s\S]{0,200}?\b(?:delete|remove|archive|destroy|purge|revoke)[A-Za-z_]|(?:^|[{,[\s]*["']|[?&])\s*(?:action|operation|op|method|_method|command|cmd)["']?\s*[:=]\s*["']?(?:delete|remove|purge|destroy|archive|revoke|deactivate|wipe|discard)\b/i;
 
 export function isDestructiveWire(url: string, body?: string | null): boolean {
   return DESTRUCTIVE_URL_RE.test(url) || (!!body && DESTRUCTIVE_BODY_RE.test(body.slice(0, 2000)));
@@ -136,12 +144,256 @@ export function isDestructive(...labels: Array<string | null | undefined>): bool
   });
 }
 
+/**
+ * A listed element as the label policy judges it. `name` is its accessible
+ * name, which for an element with no label of its own is all its text,
+ * descendants included. `ownText` is the label it is given (aria-label,
+ * aria-labelledby) and its text without what belongs to the controls inside it, and `centre` the labels and test ids of the controls
+ * inside it that cover its centre point, the spot a click on it lands; both
+ * are read in the page and absent when they could not be.
+ */
+export interface JudgedControl {
+  tag: string;
+  role: string;
+  name: string;
+  testid?: string | null;
+  ownText?: string | null;
+  centre?: readonly string[] | null;
+}
+
+/** Roles whose accessible name is the label of the one thing a click does. */
+const LABELLED_CONTROL_ROLES = new Set([
+  "button",
+  "link",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "tab",
+  "option",
+  "checkbox",
+  "radio",
+  "switch",
+  "treeitem",
+  "image",
+]);
+
+/**
+ * The label that makes a listed element destructive, or null. A control is
+ * judged by its OWN name, never by what it merely contains:
+ *
+ * - A button, link, menu item, tab or option is named by what it does, and
+ *   that name is judged whole, as before.
+ * - A dropdown (a `<select>`, a combobox, a listbox) is named by its options,
+ *   all of them, so a filter offering "All, Create, Update, Delete" read as a
+ *   delete control and choosing "Create" was refused. Choosing is judged where
+ *   the value is known: scout_select vets the chosen option, and an option
+ *   clicked in a custom list is a control of its own. Only its test id, and a
+ *   control covering its centre, are judged here.
+ * - Anything else (a row, a card, a panel listed for its test id or a click
+ *   handler) is judged by its own text, not the text of the buttons inside
+ *   it, so a row holding a "Delete" button is not itself a delete control.
+ *   The button is listed, and refused, on its own. A click on the row lands
+ *   on its centre, so the control under that point is judged with the row:
+ *   a row whose middle IS a delete button is still refused.
+ *
+ * When the page could not say what the own text is, the whole name stands in,
+ * so a reading that failed can only refuse more, never less.
+ */
+export function destructiveLabelOf(c: JudgedControl): string | null {
+  const first = (...labels: Array<string | null | undefined>): string | null =>
+    labels.find((l): l is string => typeof l === "string" && l.length > 0 && isDestructive(l)) ?? null;
+  const centre = c.centre ?? [];
+  if (c.tag === "select" || c.role === "combobox" || c.role === "listbox") return first(c.testid, ...centre);
+  if (LABELLED_CONTROL_ROLES.has(c.role) || c.tag === "button" || c.tag === "a") return first(c.name, c.testid);
+  return first(c.ownText ?? c.name, c.testid, ...centre);
+}
+
+/**
+ * A dropdown pick, judged by the value asked for, the dropdown's test id and
+ * the label of the option it matches. The dropdown's own name is not judged
+ * (destructiveLabelOf), so this is the check, and a label that could not be
+ * read (null) refuses: an unvetted pick could be "Delete".
+ */
+export function pickIsDestructive(value: string | undefined, testid: string | null | undefined, optionLabel: string | null): boolean {
+  return optionLabel === null || isDestructive(value, testid, optionLabel);
+}
+
 export function destructiveRefusal(label: string, mode: string = "read-only"): string {
   return (
     `REFUSED by ${mode} policy: "${label}" matches a destructive-action pattern. ` +
     `This run is ${mode}; do not attempt this element again. If destructive flows must be tested, ` +
     `the user has to re-attach with mode="destructive" against a disposable/seeded environment.`
   );
+}
+
+/** One write the policy refused, as the block notice reports it. */
+export interface BlockedWrite {
+  /** "POST https://host/path?query", or "navigation to …" for a refused page move. */
+  sig: string;
+  /** It started before the action now reporting it: background traffic, or a previous action's. */
+  late: boolean;
+  /** The page's own request was answered with a 403 in the server's place. */
+  answered?: boolean;
+  /** A reason beyond the mode's rule: a foreign embed, or ESCAPE_REFUSAL. */
+  why?: string;
+}
+
+/** The `why` of a page move refused as a possible escape from a foreign frame's sandbox. */
+export const ESCAPE_REFUSAL = "a possible frame escape";
+
+/** New blocked endpoints listed by name in one notice; the rest are counted. */
+export const BLOCK_NOTICE_LIST = 5;
+
+/** What a blocked write is remembered by: its method and URL, without query or fragment. */
+export function blockSignature(sig: string): string {
+  return sig.replace(/[?#].*$/, "");
+}
+
+const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The write-policy block notice, said once. A page that beacons to a
+ * monitoring endpoint on every load had every tool result open with the same
+ * blocked request five times over and the whole explanation after it, which
+ * buried the action's own result and the blocks that mattered.
+ *
+ * So a session remembers what it has been told. Each endpoint (by
+ * blockSignature, per write rule) is named in full the first time it is
+ * blocked; after that it is counted on one line. The explanation is given in
+ * full once per rule, and later notices for a new endpoint refer back to it.
+ * Nothing about the blocking changes: every request is still refused, and
+ * every refusal is still reported, if only as a count.
+ */
+export class BlockNotices {
+  private seen = new Set<string>();
+  private explained = new Set<WriteMode>();
+
+  /** Forget everything said: a re-attached session starts a new conversation. */
+  reset(): void {
+    this.seen.clear();
+    this.explained.clear();
+  }
+
+  /**
+   * The notice for the writes refused since the last action, or "" when there
+   * were none. `createdCount` is how many records this run has created, which
+   * the safe-write advice names.
+   */
+  notice(rule: WriteMode, blocked: readonly BlockedWrite[], createdCount = 0): string {
+    if (blocked.length === 0) return "";
+    type Group = { first: BlockedWrite; count: number; allLate: boolean; answered: boolean; whys: Set<string> };
+    const groups = new Map<string, Group>();
+    for (const b of blocked) {
+      const key = blockSignature(b.sig);
+      const g = groups.get(key);
+      if (g) {
+        g.count += 1;
+        g.allLate &&= b.late;
+        g.answered ||= !!b.answered;
+        if (b.why) g.whys.add(b.why);
+      } else groups.set(key, { first: b, count: 1, allLate: b.late, answered: !!b.answered, whys: new Set(b.why ? [b.why] : []) });
+    }
+    const fresh: Array<[string, Group]> = [];
+    const repeats: Array<[string, Group]> = [];
+    for (const [key, g] of groups) {
+      const memo = `${rule} ${key}`;
+      if (this.seen.has(memo)) repeats.push([key, g]);
+      else {
+        this.seen.add(memo);
+        fresh.push([key, g]);
+      }
+    }
+    const late = (g: Group): string => (g.allLate ? " (late — likely from a previous action or background traffic)" : "");
+    const times = (g: Group): string => (g.count > 1 ? ` ×${g.count}` : "");
+    const repeatCount = repeats.reduce((n, [, g]) => n + g.count, 0);
+    const repeatLine =
+      repeats.length === 0
+        ? ""
+        : `${plural(repeatCount, "repeat block")} of ${plural(repeats.length, "known endpoint")} (` +
+          repeats
+            .slice(0, 3)
+            .map(([key, g]) => `${key} ×${g.count}${g.allLate ? ", background" : ""}`)
+            .join("; ") +
+          (repeats.length > 3 ? `; +${repeats.length - 3} more` : "") +
+          `)`;
+    const head = `\n🛡 WRITE-POLICY blocked (${rule}): `;
+    if (fresh.length === 0) return `${head}${repeatLine}, refused as before. The tester's safety policy, not an app bug.`;
+
+    const list = fresh
+      .slice(0, BLOCK_NOTICE_LIST)
+      .map(([, g]) => `${g.first.sig}${times(g)}${late(g)}`)
+      .join("; ");
+    const more = fresh.length > BLOCK_NOTICE_LIST ? ` (+${fresh.length - BLOCK_NOTICE_LIST} more new)` : "";
+    const also = repeatLine ? `; also ${repeatLine}` : "";
+    const whys = new Set(fresh.flatMap(([, g]) => [...g.whys]));
+    const escaped = whys.delete(ESCAPE_REFUSAL);
+    const foreign = [...whys];
+    const answered = fresh.some(([, g]) => g.answered);
+    const reasons =
+      (foreign.length > 0
+        ? `Refused because it was ${foreign.join("; ")}: it would reach a site embedded in the page rather than the app, which no mode but destructive allows. `
+        : "") +
+      (escaped
+        ? `A move of the whole page off the app, with no Referer, was refused: a frame that held another site now sits on a data: or blob: URL, where WebKit drops the frame's sandbox, so the move may be that frame's. No mode but destructive allows it. `
+        : "");
+    if (this.explained.has(rule)) {
+      return (
+        `${head}${list}${more}${also}. The tester's safety policy, not an app bug (explained in full earlier in this session). ` +
+        reasons +
+        (answered ? `The page's request was answered with a 403 in the server's place, as before. ` : "")
+      ).trimEnd();
+    }
+    this.explained.add(rule);
+    return (
+      `${head}${list}${more}${also}. ` +
+      `This is the tester's safety policy, NOT an app bug — do not file a finding for the resulting error UI. ` +
+      reasons +
+      (answered
+        ? `The page's own requests were answered with a 403 in the server's place, so the page's handling of a refusal is real: an error message is correct, and a success message is a false_success violation. `
+        : "") +
+      (rule === "observe"
+        ? `observe mode blocks every request that is not a GET, so no form submission reaches the server. Re-attach with mode="read-only" ONLY if the user confirms that ordinary form submissions are acceptable on this target.`
+        : rule === "read-only"
+          ? `Re-attach with mode="safe-write" to test create/edit flows, or "destructive" (user-approved disposable env only).`
+          : `In safe-write, updates/deletes are only allowed on resources this session created (${createdCount} so far).`)
+    );
+  }
+}
+
+/** How the engine answers a native dialog the page opens. */
+export type DialogResponse = "accept" | "dismiss";
+
+/**
+ * The answer to a native dialog. alert, confirm and prompt are dismissed in
+ * the modes that protect data (observe, read-only) and accepted otherwise, as
+ * before: a confirm can stand between a click and a delete.
+ *
+ * `beforeunload` is the page asking whether to leave while it holds unsent
+ * input. Leaving sends no write of its own, and whatever the page sends as it
+ * goes is judged by the wire policy like any other request, but leaving does
+ * throw away what the tester typed. So it is the caller's choice: `leave: true`
+ * leaves, `leave: false` stays, and with no choice the mode decides, staying
+ * in observe and read-only. Either way the result says what happened (see
+ * dialogNote), because a dismissed one surfaced only as a bare ERR_ABORTED.
+ */
+export function dialogResponse(type: string, readOnly: boolean, leave?: boolean): DialogResponse {
+  if (type === "beforeunload") return (leave ?? !readOnly) ? "accept" : "dismiss";
+  return readOnly ? "dismiss" : "accept";
+}
+
+/** The line an action's result carries for a native dialog the page opened during it. */
+export function dialogNote(d: { type: string; message: string; response: DialogResponse; leave?: boolean }): string {
+  const message = d.message.trim().replace(/\s+/g, " ").slice(0, 120);
+  if (d.type === "beforeunload") {
+    return d.response === "dismiss"
+      ? `\n⚠ LEAVE CONFIRMATION: the page asked to confirm leaving (it holds input that was never sent), and the engine answered "stay"` +
+          `${d.leave === false ? " as asked (leave: false)" : ""}, so the navigation was cancelled and the page is unchanged. ` +
+          `This is not an app bug, and nothing was sent. To leave and discard that unsent input, repeat the action with leave: true.`
+      : `\nℹ LEAVE CONFIRMATION: the page asked to confirm leaving (it held input that was never sent), and the engine answered "leave"` +
+          `${d.leave === true ? " as asked (leave: true)" : ""}, so that unsent input is discarded. ` +
+          `Any request the page sends as it is left is judged by the write policy like any other.`;
+  }
+  return `\nℹ DIALOG (${d.type})${message ? `: "${message}"` : ""} — ${d.response === "accept" ? "accepted" : "dismissed"} by the engine.`;
 }
 
 /**

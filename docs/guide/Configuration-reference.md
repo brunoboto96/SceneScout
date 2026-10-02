@@ -85,6 +85,7 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--max-turns` | `40` | The most model calls |
 | `--max-tokens` | `1500000` | The most tokens, input and output, over the run |
 | `--max-minutes` | `20` | The most minutes of exploration; the report is written after |
+| `--lanes` | `1` | Model loops that explore at once, each in its own browser and part of the app, sharing the three caps above; at most `8` |
 | `--price-in` | the built-in price | US dollars per million input tokens, for the cost estimate |
 | `--price-cached-in` | the built-in price, else `--price-in` | US dollars per million cached input tokens |
 | `--price-out` | the built-in price | US dollars per million output tokens |
@@ -169,6 +170,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `flow-step-failed` | high | Saved flow broke |
 | `off-grid-spacing` | worth a look | Spacing off a 4px grid |
 | `indistinct-link` | worth a look | Link styled like body text |
+| `scrolled-out-controls` | worth a look | Controls scrolled out of view sideways |
 
 ## Environment variables
 
@@ -248,6 +250,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `max-turns` | empty | As `--max-turns` |
 | `max-tokens` | empty | As `--max-tokens` |
 | `max-minutes` | empty | As `--max-minutes` |
+| `lanes` | empty | As `--lanes` |
 | `price-in` | empty | As `--price-in` |
 | `price-cached-in` | empty | As `--price-cached-in` |
 | `price-out` | empty | As `--price-out` |

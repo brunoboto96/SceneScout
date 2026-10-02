@@ -32,6 +32,13 @@ import {
   isAuthExempt,
   isDestructive,
   isDestructiveWire,
+  BlockNotices,
+  blockSignature,
+  destructiveLabelOf,
+  dialogNote,
+  dialogResponse,
+  ESCAPE_REFUSAL,
+  pickIsDestructive,
   LABEL_HEAD_WORDS,
   POLICY_REFUSAL_HEADER,
   policyRefusal,
@@ -1139,4 +1146,118 @@ test("a write refused at the browser level is recognised when the driver reports
   assert.equal(refused.has("PUT", "http://app.test/api/things/7/delete", 1001), false);
   assert.equal(refused.has("POST", "http://app.test/api/things/8/delete", 1001), false, "the contrast: another request");
   assert.equal(refused.has("POST", "http://app.test/api/things/7/delete", 1000 + UNSEEN_REFUSAL_TTL_MS + 1), false, "stale");
+});
+
+test("discarding unsent edits is not destructive; discarding a record still is, and a discard on the wire is refused", () => {
+  // The app's own leave-confirmation drops what was typed and never sent.
+  for (const label of [
+    "Discard changes",
+    "Discard your changes",
+    "Discard unsaved changes",
+    "Discard all edits",
+    "Discard draft changes",
+    "discard changes",
+    "discard-changes-button",
+    "discard_unsaved_changes",
+  ])
+    assert.equal(isDestructive(label), false, label);
+  // The other half: a discard that names a record, or nothing at all.
+  for (const label of ["Discard draft", "Discard record", "Discard", "Discard changes and delete record", "Discard the order", "discard-draft", "row-discard"])
+    assert.equal(isDestructive(label), true, label);
+  // Whatever the label, a confirm that sends a discard is judged on the wire.
+  assert.equal(isDestructiveWire("/api/drafts/5/discard"), true);
+  assert.equal(isDestructiveWire("/api/things/5", '{"action":"discard"}'), true);
+  assert.equal(isDestructiveWire("/api/things/5", '{"note":"discard this later"}'), false, "a word in content is not a command");
+});
+
+test("a control is judged by its own label: a dropdown by the pick, a row by its own text and what covers its centre", () => {
+  const filter = { tag: "select", role: "combobox", name: "All Create Update Delete Archive", testid: "changelog-filter" };
+  assert.equal(destructiveLabelOf(filter), null, "a filter is not destructive because one of its options is");
+  assert.equal(pickIsDestructive("Create", filter.testid, "Create"), false, "choosing a harmless option is allowed");
+  assert.equal(pickIsDestructive("Delete", filter.testid, "Delete"), true, "choosing Delete is refused");
+  assert.equal(pickIsDestructive("3", filter.testid, "Delete"), true, "by its label when the value is opaque");
+  assert.equal(pickIsDestructive("3", filter.testid, null), true, "an option label that could not be read refuses");
+  assert.equal(destructiveLabelOf({ ...filter, testid: "bulk-delete" }), "bulk-delete", "a dropdown's own test id still counts");
+  assert.equal(destructiveLabelOf({ tag: "div", role: "combobox", name: "Delete", testid: null }), null, "a custom combobox shows its value, not a command");
+
+  // A row listed for its test id: its text includes the buttons inside it.
+  const row = { tag: "div", role: "generic", name: "Order 3 Archived Edit Delete", testid: "order-row-3", ownText: "Order 3 Archived", centre: [] };
+  assert.equal(destructiveLabelOf(row), null, "a row holding a Delete button is not itself a delete control");
+  assert.equal(destructiveLabelOf({ ...row, centre: ["Delete"] }), "Delete", "a row whose centre is a Delete button is");
+  assert.equal(destructiveLabelOf({ ...row, ownText: undefined }), row.name, "no own text read: the whole name stands in");
+  assert.equal(
+    destructiveLabelOf({ tag: "div", role: "generic", name: "Delete", testid: null, ownText: "Delete", centre: [] }),
+    "Delete",
+    "a clickable div saying Delete still is",
+  );
+  // An icon-only control: the page puts its given label (aria-label) first in its own text.
+  assert.equal(destructiveLabelOf({ tag: "div", role: "none", name: "Delete row", testid: null, ownText: "Delete row", centre: [] }), "Delete row");
+  assert.equal(
+    destructiveLabelOf({ tag: "div", role: "tabpanel", name: "History All Create Delete", testid: "history-panel", ownText: "History", centre: [] }),
+    null,
+  );
+
+  // A labelled control is judged whole, as before.
+  assert.equal(destructiveLabelOf({ tag: "button", role: "button", name: "Archive", testid: null }), "Archive");
+  assert.equal(destructiveLabelOf({ tag: "a", role: "link", name: "Remove member", testid: null, ownText: "" }), "Remove member");
+  assert.equal(destructiveLabelOf({ tag: "button", role: "button", name: "Open", testid: "row-delete" }), "row-delete");
+  assert.equal(destructiveLabelOf({ tag: "button", role: "button", name: "Discard changes", testid: null }), null);
+});
+
+test("a blocked endpoint is explained once per session; repeats are counted on one line", () => {
+  const notices = new BlockNotices();
+  const beacon = { sig: "POST https://app.test/monitoring/tunnel?key=1", late: true, answered: true };
+  const first = notices.notice("observe", [beacon, { ...beacon, sig: "POST https://app.test/monitoring/tunnel?key=2" }]);
+  assert.match(first, /WRITE-POLICY blocked \(observe\): POST https:\/\/app\.test\/monitoring\/tunnel\?key=1 ×2 \(late/);
+  assert.match(first, /NOT an app bug/);
+  assert.match(first, /observe mode blocks every request/);
+  assert.match(first, /answered with a 403/);
+
+  const second = notices.notice("observe", [beacon, beacon, beacon]);
+  assert.match(second, /WRITE-POLICY blocked \(observe\): 3 repeat blocks of 1 known endpoint \(POST https:\/\/app\.test\/monitoring\/tunnel ×3, background\)/);
+  assert.doesNotMatch(second, /NOT an app bug|observe mode blocks|answered with a 403/, "the paragraph is not repeated");
+  assert.equal(second.trim().split("\n").length, 1, "one line");
+
+  const third = notices.notice("observe", [beacon, { sig: "POST https://app.test/api/things", late: false, answered: true }]);
+  assert.match(third, /POST https:\/\/app\.test\/api\/things[.;]/, "a new endpoint is named in full");
+  assert.doesNotMatch(third, /api\/things \(late/, "the action's own block is not marked late");
+  assert.match(third, /also 1 repeat block of 1 known endpoint/);
+  assert.match(third, /explained in full earlier/);
+  assert.doesNotMatch(third, /observe mode blocks/, "the full paragraph is once per rule");
+
+  // Nothing blocked, nothing said; a new rule is explained again; a reset starts over.
+  assert.equal(notices.notice("observe", []), "");
+  assert.match(notices.notice("read-only", [beacon]), /NOT an app bug.*safe-write/);
+  notices.reset();
+  assert.match(notices.notice("observe", [beacon]), /NOT an app bug/);
+
+  // A reason beyond the mode's rule is said whenever the endpoint is new.
+  const foreign = new BlockNotices().notice("read-only", [
+    { sig: "POST https://pay.example/charge", late: false, why: "sent by an embedded frame of https://pay.example" },
+    { sig: "navigation to data:text/html,x", late: false, why: ESCAPE_REFUSAL },
+  ]);
+  assert.match(foreign, /Refused because it was sent by an embedded frame/);
+  assert.match(foreign, /WebKit drops the frame's sandbox/);
+  assert.equal(blockSignature("POST https://a.test/x?y=1#z"), "POST https://a.test/x");
+});
+
+test("a leave confirmation is the caller's choice, the mode's when unsaid; other dialogs keep the mode's answer", () => {
+  assert.equal(dialogResponse("beforeunload", true), "dismiss", "observe and read-only stay by default");
+  assert.equal(dialogResponse("beforeunload", true, true), "accept", "leave: true leaves");
+  assert.equal(dialogResponse("beforeunload", false), "accept", "write modes leave by default");
+  assert.equal(dialogResponse("beforeunload", false, false), "dismiss", "leave: false stays");
+  // A confirm can stand between a click and a delete: leave never answers it.
+  assert.equal(dialogResponse("confirm", true, true), "dismiss");
+  assert.equal(dialogResponse("confirm", false), "accept");
+  assert.equal(dialogResponse("alert", true), "dismiss");
+
+  const stayed = dialogNote({ type: "beforeunload", message: "", response: "dismiss" });
+  assert.match(stayed, /LEAVE CONFIRMATION: the page asked to confirm leaving/);
+  assert.match(stayed, /navigation was cancelled/);
+  assert.match(stayed, /leave: true/);
+  assert.match(dialogNote({ type: "beforeunload", message: "", response: "accept", leave: true }), /answered "leave" as asked \(leave: true\).*discarded/);
+  assert.equal(
+    dialogNote({ type: "confirm", message: "Remove  this\nitem?", response: "dismiss" }),
+    '\nℹ DIALOG (confirm): "Remove this item?" — dismissed by the engine.',
+  );
 });

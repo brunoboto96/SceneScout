@@ -21,9 +21,23 @@ import {
   lockPathFor,
   LOCK_FILE_MODE,
   MIN_TOKEN_LENGTH,
+  brokerDecision,
+  cookieMayCount,
+  endpointKey,
+  endpointsPathFor,
+  headersForResend,
+  isStaticAsset,
+  learnableEndpoint,
+  lockCreateError,
+  MAX_LEARNED_ENDPOINTS,
   planRefresh,
-  presentedToken,
   profileAfterRotation,
+  readLearnedEndpoints,
+  refreshLikePath,
+  rotatedCookies,
+  tokenPresence,
+  withLearnedEndpoint,
+  writeLearnedEndpoints,
   refreshTokenSlots,
   rotatedFromResponse,
   rotationStored,
@@ -88,21 +102,189 @@ test("short values, whitespace, access tokens and non-states are not refresh tok
   const brokenJson = { cookies: [], origins: [{ origin: ORIGIN, localStorage: [{ name: "session", value: "{not json" }] }] };
   assert.deepEqual(refreshTokenSlots(brokenJson), []);
   for (const bad of [null, undefined, 42, "state", { cookies: "x" }]) assert.deepEqual(refreshTokenSlots(bad), []);
+  // An address kept under a refresh-named key is where the app refreshes, not a token: every request to it would seem to carry it.
+  const addresses = {
+    cookies: [],
+    origins: [
+      {
+        origin: ORIGIN,
+        localStorage: [
+          { name: "refresh_url", value: "/api/auth/refresh" },
+          { name: "refreshEndpoint", value: "https://id.example.test/oauth/token" },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(refreshTokenSlots(addresses), []);
 });
 
-test("a request carries a known token in its body, a header, a cookie or its URL, raw or percent-encoded", () => {
+test("a request carries a known token in its body, its URL, a header the page set, or only its Cookie header", () => {
   const known = refreshTokenSlots(stateWith(R1));
   const bare = { url: `${ORIGIN}/auth/token`, body: null, headers: {} };
-  assert.equal(presentedToken({ ...bare, body: JSON.stringify({ refresh_token: R1 }) }, known)?.value, R1);
-  assert.equal(presentedToken({ ...bare, headers: { cookie: `sid=x; refresh_token=${R1}c` } }, known)?.value, `${R1}c`);
-  assert.equal(presentedToken({ ...bare, url: `${ORIGIN}/auth/token?rt=${R1}` }, known)?.value, R1);
+  const where = (req: { url: string; body: string | null; headers: Record<string, string> }) => {
+    const found = tokenPresence(req, known);
+    return found && { value: found.slot.value, via: found.via };
+  };
+  assert.deepEqual(where({ ...bare, body: JSON.stringify({ refresh_token: R1 }) }), { value: R1, via: "body" });
+  assert.deepEqual(where({ ...bare, url: `${ORIGIN}/auth/token?rt=${R1}` }), { value: R1, via: "url" });
+  assert.deepEqual(where({ ...bare, headers: { "x-refresh-token": R1 } }), { value: R1, via: "header" });
+  assert.deepEqual(where({ ...bare, headers: { Cookie: `sid=x; refresh_token=${R1}c` } }), { value: `${R1}c`, via: "cookie" });
+  // The browser adds Cookie, Referer and Origin itself: a token in them was not sent by the page.
+  assert.deepEqual(where({ ...bare, headers: { referer: `${ORIGIN}/cb?rt=${R1}`, cookie: "sid=x" } }), null);
+  // Explicit wins over the cookie riding along.
+  assert.deepEqual(where({ ...bare, body: `t=${R1}`, headers: { cookie: `refresh_token=${R1}c` } }), { value: R1, via: "body" });
   const odd = "rt+with/slashes=and+plus==";
-  const oddKnown = [{ slot: "s", value: odd }];
-  assert.equal(presentedToken({ ...bare, body: `grant_type=refresh_token&refresh_token=${encodeURIComponent(odd)}` }, oddKnown)?.value, odd);
+  const oddFound = tokenPresence({ ...bare, body: `grant_type=refresh_token&refresh_token=${encodeURIComponent(odd)}` }, [{ slot: "s", value: odd }]);
+  assert.equal(oddFound?.slot.value, odd);
   // Nothing known, or a request carrying something else: not a refresh.
-  assert.equal(presentedToken({ ...bare, body: JSON.stringify({ refresh_token: R2 }) }, known), null);
-  assert.equal(presentedToken({ ...bare, body: JSON.stringify({ refresh_token: R1 }) }, []), null);
-  assert.equal(presentedToken({ ...bare, headers: { authorization: `Bearer ${A1}` } }, known), null);
+  assert.equal(tokenPresence({ ...bare, body: JSON.stringify({ refresh_token: R2 }) }, known), null);
+  assert.equal(tokenPresence({ ...bare, body: JSON.stringify({ refresh_token: R1 }) }, []), null);
+  assert.equal(tokenPresence({ ...bare, headers: { authorization: `Bearer ${A1}` } }, known), null);
+});
+
+/** A role whose refresh token is only a cookie scoped to "/", as many single-page apps keep it. */
+const ROOT_COOKIE = [{ slot: "cookie rt (app.example.test/)", value: R1, cookie: "rt" }];
+const withCookie = { cookie: `sid=abc; rt=${R1}` };
+const decide = (
+  method: string,
+  url: string,
+  resourceType: string,
+  opts: { body?: string | null; headers?: Record<string, string>; learned?: string[] } = {},
+) => {
+  const d = brokerDecision(
+    { method, url: `${ORIGIN}${url}`, resourceType, body: opts.body ?? null, headers: opts.headers ?? withCookie },
+    ROOT_COOKIE,
+    new Set(opts.learned ?? []),
+  );
+  return d.kind === "broker" ? `broker via ${d.via}` : `pass: ${d.why}`;
+};
+
+test("a refresh cookie scoped to '/' alone never makes a request a refresh: scripts, styles, images, pages and API GETs pass", () => {
+  for (const [method, url, type] of [
+    ["GET", "/assets/app.js", "script"],
+    ["GET", "/assets/app.css", "stylesheet"],
+    ["GET", "/logo.png", "image"],
+    ["GET", "/fonts/a.woff2", "font"],
+    ["GET", "/dashboard", "document"],
+    ["GET", "/api/items", "fetch"],
+    ["GET", "/api/auth/refresh", "fetch"],
+    ["POST", "/api/items", "fetch"],
+    ["POST", "/api/auth/login", "fetch"],
+    ["DELETE", "/api/token", "fetch"],
+  ] as const) {
+    assert.equal(
+      decide(method, url, type),
+      "pass: " + (type === "fetch" || type === "document" ? "only in a cookie" : "static asset"),
+      `${method} ${url} (${type})`,
+    );
+  }
+});
+
+test("a cookie-only request counts when it is plausibly the refresh call: a POST to a path named for one, or a learned endpoint", () => {
+  for (const url of ["/auth/refresh", "/api/token/refresh", "/oauth/token", "/api/v1/auth/token", "/session/refresh/", "/auth/refresh-token", "/api/renew"]) {
+    assert.equal(decide("POST", url, "fetch"), "broker via cookie", url);
+  }
+  assert.equal(decide("PUT", "/auth/refresh", "xhr"), "broker via cookie");
+  // Whole segments only, near the end: these are not refresh calls.
+  for (const url of ["/api/tokens", "/refreshments/order", "/auth/refresh/history/export", "/api/token-usage"]) {
+    assert.equal(decide("POST", url, "fetch"), "pass: only in a cookie", url);
+  }
+  // A body asking for another grant is a sign-in, whatever cookie rides along.
+  assert.equal(decide("POST", "/oauth/token", "fetch", { body: "grant_type=password&username=a" }), "pass: another grant");
+  assert.equal(decide("POST", "/oauth/token", "fetch", { body: "grant_type=refresh_token" }), "broker via cookie");
+  // An endpoint seen to rotate the cookie counts by method and path, query aside, even as a GET.
+  assert.equal(decide("POST", "/api/keepalive?x=1", "fetch", { learned: ["POST /api/keepalive"] }), "broker via cookie");
+  assert.equal(decide("GET", "/api/whoami", "fetch", { learned: ["GET /api/whoami"] }), "broker via cookie");
+  assert.equal(decide("GET", "/api/keepalive", "fetch", { learned: ["POST /api/keepalive"] }), "pass: only in a cookie");
+  // ...but never a static asset, learned or not.
+  assert.equal(decide("GET", "/app.js", "script", { learned: ["GET /app.js"], body: R1 }), "pass: static asset");
+  // Without the cookie there is nothing to broker.
+  assert.equal(decide("POST", "/auth/refresh", "fetch", { headers: { cookie: "sid=abc" } }), "pass: no known token");
+});
+
+test("a token the page put in a body, URL or header is a refresh whatever the path; a static asset never is", () => {
+  assert.equal(decide("POST", "/api/session", "fetch", { body: JSON.stringify({ refresh_token: R1 }) }), "broker via body");
+  assert.equal(decide("GET", `/api/renew?rt=${R1}`, "fetch"), "broker via url");
+  assert.equal(decide("POST", "/api/x", "fetch", { headers: { ...withCookie, "x-refresh": R1 } }), "broker via header");
+  assert.equal(decide("GET", `/app.js?rt=${R1}`, "script"), "pass: static asset");
+  assert.equal(decide("HEAD", "/logo.png", "image"), "pass: static asset");
+  assert.equal(isStaticAsset("POST", "image"), false, "only a GET or HEAD is an asset load");
+});
+
+test("which paths are named for a refresh, which endpoints may be learned, and how an endpoint is keyed", () => {
+  assert.equal(refreshLikePath("/auth/refresh"), true);
+  assert.equal(refreshLikePath("/token/refresh/v2"), true, "the last two segments");
+  assert.equal(refreshLikePath("/refresh/a/b"), false, "deeper than that is not");
+  assert.equal(refreshLikePath("/"), false);
+  assert.equal(cookieMayCount("GET", `${ORIGIN}/auth/refresh`, new Set()), false, "a GET counts only once learned");
+  assert.equal(cookieMayCount("GET", `${ORIGIN}/auth/refresh`, new Set(["GET /auth/refresh"])), true);
+  assert.equal(endpointKey("post", `${ORIGIN}/a/b?c=d#e`), "POST /a/b");
+  for (const url of ["/api/auth/login", "/signin", "/auth/logout/", "/oauth/callback", "/api/otp/verify"])
+    assert.equal(learnableEndpoint(`${ORIGIN}${url}`), false, url);
+  for (const url of ["/api/keepalive", "/api/session", "/auth/refresh"]) assert.equal(learnableEndpoint(`${ORIGIN}${url}`), true, url);
+});
+
+test("a Set-Cookie that replaces a known cookie token with a new one is a rotation; clearing it or resending it is not", () => {
+  const R3 = "rt_DDDDDDDDDDDDDDDDDDDDDDDD3";
+  assert.deepEqual(
+    rotatedCookies([`rt=${R3}; Path=/; HttpOnly`], ROOT_COOKIE).map((t) => t.slot),
+    [ROOT_COOKIE[0].slot],
+  );
+  assert.deepEqual(rotatedCookies([`other=x; Path=/\nrt=${R3}; Path=/`], ROOT_COOKIE).length, 1, "several cookies joined in one header value");
+  assert.deepEqual(rotatedCookies([`rt=${R1}; Path=/`], ROOT_COOKIE), [], "the same token again");
+  assert.deepEqual(rotatedCookies(["rt=; Max-Age=0; Path=/"], ROOT_COOKIE), [], "cleared on sign-out");
+  assert.deepEqual(rotatedCookies([`sid=${R3}`], ROOT_COOKIE), [], "another cookie");
+  assert.deepEqual(
+    rotatedCookies([`refreshToken=${R3}`], [{ slot: `storage ${ORIGIN} refreshToken`, value: R1 }]),
+    [],
+    "a token held in storage is not a cookie",
+  );
+});
+
+test("learned endpoints live beside the profile, owner-only, newest first and capped; a foreign file teaches nothing", () => {
+  const dir = tempDir();
+  try {
+    const file = endpointsPathFor(path.join(dir, "member.json"));
+    assert.equal(file, path.join(dir, "member.json.endpoints"));
+    assert.deepEqual(readLearnedEndpoints(file), []);
+    let list: string[] = [];
+    for (let i = 0; i < MAX_LEARNED_ENDPOINTS + 5; i++) list = withLearnedEndpoint(list, `POST /api/e${i}`);
+    list = withLearnedEndpoint(list, "POST /api/e10");
+    writeLearnedEndpoints(file, list);
+    if (POSIX) assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    const read = readLearnedEndpoints(file);
+    assert.equal(read.length, MAX_LEARNED_ENDPOINTS);
+    assert.equal(read[0], "POST /api/e10");
+    assert.equal(read.filter((e) => e === "POST /api/e10").length, 1);
+    assert.deepEqual(withLearnedEndpoint([], "DELETE /api/x"), [], "only methods a refresh uses");
+    assert.deepEqual(withLearnedEndpoint([], "POST not-a-path"), []);
+    fs.writeFileSync(file, JSON.stringify({ endpoints: ["POST /ok", 5, "rm -rf /", "GET /also ok"] }));
+    assert.deepEqual(readLearnedEndpoints(file), ["POST /ok"]);
+    fs.writeFileSync(file, "not json");
+    assert.deepEqual(readLearnedEndpoints(file), []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a request the broker resends itself keeps the page's headers, drops the ones the client sets, and carries the cookie line given", () => {
+  assert.deepEqual(
+    headersForResend(
+      {
+        ":authority": "x",
+        Host: "app",
+        "Content-Type": "application/json",
+        "content-length": "9",
+        cookie: `rt=${R1}`,
+        "x-csrf": "t",
+        "accept-encoding": "br",
+        connection: "keep-alive",
+      },
+      `rt=${R2}`,
+    ),
+    { "content-type": "application/json", "x-csrf": "t", cookie: `rt=${R2}` },
+  );
+  assert.deepEqual(headersForResend({ cookie: `rt=${R1}`, accept: "*/*" }, null), { accept: "*/*" });
 });
 
 test("holding the lock: send the token when the profile still holds it, swap it when another session rotated it", () => {
@@ -241,6 +423,17 @@ test("a waiter that judged a lock stale gives back a fresh lock another waiter t
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("creating the lock: EEXIST is a held lock everywhere; on Windows a file still being deleted is waited out, not a failure", () => {
+  assert.equal(lockCreateError("EEXIST", "linux"), "held");
+  assert.equal(lockCreateError("EEXIST", "win32"), "held");
+  for (const code of ["EPERM", "EBUSY", "EACCES"]) {
+    assert.equal(lockCreateError(code, "win32"), "busy", code);
+    assert.equal(lockCreateError(code, "darwin"), "error", `${code} elsewhere is a real error`);
+  }
+  assert.equal(lockCreateError("ENOSPC", "win32"), "error");
+  assert.equal(lockCreateError(undefined, "win32"), "error");
 });
 
 test("the lock holds across real processes: concurrent read-modify-write loses no update", async () => {

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Edit a record</title>
+    <style>
+      .row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        width: 600px;
+        padding: 8px;
+        border: 1px solid #ccc;
+        margin: 8px 0;
+      }
+      .row.centred {
+        justify-content: center;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Edit a record</h1>
+      <!-- A form that asks the browser to confirm leaving once something is typed into it. -->
+      <form data-testid="guard-form" onsubmit="return false">
+        <label for="title">Title</label>
+        <input id="title" data-testid="guard-title" />
+      </form>
+      <button type="button" data-testid="guard-cancel" onclick="history.back()">Cancel</button>
+      <p data-testid="guard-status" aria-live="polite"></p>
+
+      <!-- The app's own leave confirmation: one discard drops only what was typed, the others reach the server. -->
+      <div role="alertdialog" aria-label="Unsaved changes" data-testid="guard-confirm">
+        <p>Leave without saving?</p>
+        <button type="button" data-testid="guard-discard-changes" onclick="discardLocal()">Discard changes</button>
+        <button type="button" data-testid="guard-discard-changes-remote" onclick="fetch('/api/drafts/7/discard', { method: 'POST', body: '{}' })">
+          Discard changes
+        </button>
+        <button type="button" data-testid="guard-discard-record" onclick="fetch('/api/records/7', { method: 'POST', body: '{}' })">Discard record</button>
+      </div>
+
+      <!-- A filter whose options name a destructive verb, over a read-only list. -->
+      <label for="filter">Change log</label>
+      <select id="filter" data-testid="log-filter" onchange="filterLog(this.value)">
+        <option value="all">All</option>
+        <option value="create">Create</option>
+        <option value="update">Update</option>
+        <option value="delete">Delete</option>
+      </select>
+      <ul data-testid="log-list">
+        <li data-kind="create">Created</li>
+        <li data-kind="update">Updated</li>
+        <li data-kind="delete">Deleted</li>
+      </ul>
+
+      <!-- A row holding a delete button off its centre, and one whose centre IS a delete button. -->
+      <div class="row" data-testid="record-row">
+        <span>Record 7</span><span>Archived</span>
+        <button type="button" data-testid="record-row-delete" onclick="fetch('/api/records/7', { method: 'DELETE' })">Delete</button>
+      </div>
+      <!-- An icon-only control named only by its aria-label. -->
+      <div class="row" data-testid="record-row-icon">
+        <span>Record 9</span>
+        <div role="none" onclick="fetch('/api/records/9', { method: 'DELETE' })" aria-label="Delete record 9" data-testid="record-icon-action">
+          <svg width="16" height="16" aria-hidden="true"><rect width="16" height="16" /></svg>
+        </div>
+      </div>
+      <div class="row centred" data-testid="record-row-centred">
+        <button type="button" onclick="fetch('/api/records/8', { method: 'DELETE' })">Remove</button>
+      </div>
+    </main>
+    <script>
+      // A background beacon on every load, as monitoring scripts send.
+      // A refused one is answered or dropped; either way it is not the page's concern.
+      fetch("/api/monitor/tunnel", { method: "POST", body: "{}" }).catch(function () {});
+      var dirty = false;
+      document.getElementById("title").addEventListener("input", function () {
+        dirty = true;
+      });
+      window.addEventListener("beforeunload", function (e) {
+        if (!dirty) return;
+        e.preventDefault();
+        e.returnValue = "";
+      });
+      function discardLocal() {
+        document.getElementById("title").value = "";
+        dirty = false;
+        document.getElementById("guard-status").textContent = "Changes discarded";
+      }
+      function filterLog(kind) {
+        document.querySelectorAll("[data-kind]").forEach(function (li) {
+          li.hidden = kind !== "all" && li.getAttribute("data-kind") !== kind;
+        });
+      }
+    </script>
+  </body>
+</html>

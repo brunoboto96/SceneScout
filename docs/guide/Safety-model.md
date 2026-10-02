@@ -23,9 +23,24 @@ Only test apps you own or are authorised to test.
 
 A refused request is logged as `🛡 WRITE-POLICY blocked` in the tool result. That is the safety net working, not a defect in the app, and it is not filed as one: the errors it causes are counted separately in the report's summary.
 
+Each refused endpoint is named in full, with the explanation, the first time a session meets it. After that it is counted on one line (`3 repeat blocks of 1 known endpoint (POST …/beacon ×3, background)`), so a page that beacons to a monitoring endpoint on every load does not bury each result. Every request is still refused and still counted.
+
+## How a control's label is judged
+
+In `observe` and `read-only` a click is also refused before it happens when the control's own label is destructive (delete, revoke, archive and the like). Only the control's own name counts:
+
+- A button, link, menu item, tab or option is judged by its name.
+- A dropdown is not judged by its options: a filter offering "All, Create, Delete" can be set to "Create", and choosing "Delete" is refused.
+- A row, card or panel is judged by its own text, not by the buttons inside it, which are listed and judged on their own. A control covering the row's centre, where a click on it would land, is judged with it.
+- "Discard changes", "Discard your edits" and the like drop only what was typed and never sent, so they are allowed. "Discard draft", "Discard record" and a bare "Discard" are refused, and a write the confirm sends is judged on the network like any other: `discard` in a request path is treated as destructive.
+
+## Leaving a page with unsent input
+
+A page holding unsent input can ask the browser to confirm leaving (`beforeunload`). The result says so by name, with what the engine answered. In `observe` and `read-only` it answers "stay" unless told otherwise, so the navigation is cancelled and nothing is lost; pass `leave: true` to `scout_navigate`, `scout_click` or `scout_back` to leave and discard the input. Other modes leave unless given `leave: false`. Leaving sends no write of its own, and any request the page sends as it goes is judged by the policy like any other. Other native dialogs (alert, confirm, prompt) are dismissed in `observe` and `read-only`, accepted otherwise, and named in the result too.
+
 The server never sees a refused request, but the page's own `fetch` or XHR is answered with a `403` in the server's place rather than dropped. The page's handling of a refusal then really runs, which is useful: a page that shows an error is behaving correctly, and a page that claims "Saved" is lying to its user. That second case is reported as `false_success`, a high finding ([ADR 9](../adr/0009-a-refused-write-is-answered-not-dropped.md)).
 
-`scout_request`, which calls the app's API directly as the session, meets the same policy. A refused call returns `REFUSED by the write policy` instead of a status, because the server was never asked and the result proves nothing either way.
+`scout_request`, which calls the app's API directly as the session, meets the same policy. A refused call returns `REFUSED by the write policy` instead of a status, because the server was never asked and the result proves nothing either way. Whatever a `scout_request` call meets, its answer is in that tool's result and nowhere else: a probe the server refuses is not reported as an `http_error` or `console_error` of the page the session visits next.
 
 ## How `safe-write` knows what the run created
 

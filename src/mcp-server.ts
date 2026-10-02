@@ -38,7 +38,7 @@ import { ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, McpError }
 import { z } from "zod";
 import { BrowserEngine } from "./engine/browser.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
-import { FINDING_CATEGORIES, isWorthALook, MemoryStore, mergeableCategories, redactSecrets, type FiledFinding } from "./engine/memory.js";
+import { describeMerge, FINDING_CATEGORIES, isWorthALook, MemoryStore, mergeableCategories, redactSecrets, type FiledFinding } from "./engine/memory.js";
 import { DEDUP_ENV, DEDUP_MODES, redactKeys, secretValues, type DedupMode } from "./engine/ci.js";
 import { DedupJudge, planDedup, samplingAsk } from "./engine/dedup.js";
 import { httpJudgeAsk } from "./ci-run.js";
@@ -75,8 +75,7 @@ import {
 import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
 import { loginCommand } from "./engine/profiles.js";
-import { formatNeverSubmittedEmpty } from "./engine/forms.js";
-import { computeGaps, formatRouteCoverage, formatUnchosenOptions, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
+import { computeGaps, coverageView, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
 import {
   ACTION_TIMEOUT_ENV,
@@ -1098,7 +1097,7 @@ function filedText(filed: FiledFinding, category: string): string {
     return `Merged into finding ${finding.id}, which was worth a look, and promoted to a defect: [${finding.severity}] ${finding.title}. It now counts among the report's findings.`;
   if (finding.regressedAt)
     return `⟳ REOPENED as a REGRESSION: finding ${finding.id} was previously resolved but the evidence reproduces again (seen in ${finding.runs} runs). Worth calling out to the user.`;
-  return `Not recorded as new: merged into existing finding ${finding.id} — [${finding.severity}] ${finding.title}${finding.evidence ? ` (evidence: ${finding.evidence.slice(0, 160)})` : " (no evidence)"}, filed as ${finding.category}, seen in ${finding.runs} runs. If yours is a different bug, file it again: under the category that says what is wrong if it is another kind of defect (a finding filed as ${category} merges only with one filed as ${mergeableCategories(category).join(" or ")}), or with evidence naming the request that failed for you (method and path) — two findings are kept apart when both name requests and none is shared.`;
+  return `Not recorded as new: merged into existing finding ${finding.id} — [${finding.severity}] ${finding.title}${finding.evidence ? ` (evidence: ${finding.evidence.slice(0, 160)})` : " (no evidence)"}, filed as ${finding.category}, seen in ${finding.runs} run${finding.runs === 1 ? "" : "s"}${filed.merge?.sameRun ? " (already filed this run, so the count did not change)" : ""}.${filed.merge ? describeMerge(filed.merge, finding.convention) : ""} If yours is a different bug, file it again: under the category that says what is wrong if it is another kind of defect (a finding filed as ${category} merges only with one filed as ${mergeableCategories(category).join(" or ")}), or with evidence naming the request that failed for you (method and path) — two findings are kept apart when both name requests and none is shared.`;
 }
 
 function sessionLines(): string {
@@ -1175,7 +1174,7 @@ server.registerTool(
   "scout_snapshot",
   {
     description:
-      "Capture the current page state: URL, state fingerprint, interactable elements with refs (e1, e2, …), geometry issues, coverage, and oracle violations since the last action. Re-snapshotting the same route returns a DIFF (refs stay stable). Cheap — prefer this over screenshots.",
+      "Capture the current page state: URL, state fingerprint, a one-line summary of the main area's heading and text, interactable elements with refs (e1, e2, …) and their state (pressed, selected, checked, expanded, current), what the page announces (alert and status regions, by their text), geometry issues, coverage, and oracle violations since the last action. Re-snapshotting the same route returns a DIFF (refs stay stable). Cheap — prefer this over screenshots.",
     inputSchema: {
       full: z.boolean().default(false).describe("Force a full element list instead of a diff"),
       session: sessionParam,
@@ -1259,6 +1258,13 @@ server.registerTool(
   ),
 );
 
+const leaveParam = z
+  .boolean()
+  .optional()
+  .describe(
+    "How to answer if the page asks to confirm leaving (a beforeunload prompt over unsent input): true leaves and discards that input, false stays. Omitted, observe and read-only stay and other modes leave. The result says when the page asked.",
+  );
+
 server.registerTool(
   "scout_click",
   {
@@ -1267,14 +1273,15 @@ server.registerTool(
     inputSchema: {
       ref: z.string().describe("Element ref, e.g. e12"),
       clicks: z.number().int().min(1).max(3).default(1).describe("1 = normal; 2-3 = rapid repeated clicks (double-submit probe)"),
+      leave: leaveParam,
       task: taskParam,
       objective: legacyObjectiveParam,
       session: sessionParam,
     },
   },
-  serializedPerSession("scout_click", async ({ ref, clicks }: { ref: string; clicks?: number }, session) => {
+  serializedPerSession("scout_click", async ({ ref, clicks, leave }: { ref: string; clicks?: number; leave?: boolean }, session) => {
     try {
-      return text(await engineFor(session).click(ref, clicks ?? 1), session);
+      return text(await engineFor(session).click(ref, clicks ?? 1, leave), session);
     } catch (err) {
       return errorText(err);
     }
@@ -1401,14 +1408,15 @@ server.registerTool(
     description: "Navigate to a URL or a path relative to the attached base URL (e.g. '/orders'). Also supports 'back' via scout_back.",
     inputSchema: {
       target: z.string().describe("Absolute URL or path like /settings"),
+      leave: leaveParam,
       task: taskParam,
       objective: legacyObjectiveParam,
       session: sessionParam,
     },
   },
-  serializedPerSession("scout_navigate", async ({ target }: { target: string }, session) => {
+  serializedPerSession("scout_navigate", async ({ target, leave }: { target: string; leave?: boolean }, session) => {
     try {
-      return text(await engineFor(session).navigate(target), session);
+      return text(await engineFor(session).navigate(target, leave), session);
     } catch (err) {
       return errorText(err);
     }
@@ -1419,7 +1427,7 @@ server.registerTool(
   "scout_request",
   {
     description:
-      "Call the app's own API as this session, with the UI bypassed — the check that turns a hidden or disabled control into a proven refusal. A button that is not shown proves nothing; the same action refused by the server does. The fetch runs IN the page, so it carries the session's cookies and replays the Authorization header the app itself last sent, and it passes through the same interception the write policy is enforced on: in safe-write a mutation on a record this session did not create is refused here exactly as it would be for a click, and that refusal is the engine's safety net, not a finding. Returns the status line, the timing, the headers that decide whether two responses are truly identical (content-type, location, www-authenticate, retry-after, cache-control), and the body. Unlike a shell call, every request is recorded in the run's trail and its signature is what a finding should quote. Paths are fenced to the attached origin: use another session to reach another host.",
+      "Call the app's own API as this session, with the UI bypassed — the check that turns a hidden or disabled control into a proven refusal. A button that is not shown proves nothing; the same action refused by the server does. The fetch runs IN the page, so it carries the session's cookies and replays the Authorization header the app itself last sent, and it passes through the same interception the write policy is enforced on: in safe-write a mutation on a record this session did not create is refused here exactly as it would be for a click, and that refusal is the engine's safety net, not a finding. Returns the status line, the timing, the headers that decide whether two responses are truly identical (content-type, location, www-authenticate, retry-after, cache-control), and the body — its first 2000 characters, or the part named by select (one JSON value by path) or offset/limit (a window of characters). Unlike a shell call, every request is recorded in the run's trail and its signature is what a finding should quote. Paths are fenced to the attached origin: use another session to reach another host.",
     inputSchema: {
       path: z.string().min(1).max(2000).describe("Path on the attached origin, e.g. /api/things/12, or a full URL on that same origin"),
       method: z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]).optional().describe("Default GET"),
@@ -1428,6 +1436,29 @@ server.registerTool(
         .record(z.string().max(2000))
         .optional()
         .describe("Extra headers. One given here wins over the app's own, which is how a session tests a different or absent credential."),
+      select: z
+        .string()
+        .max(500)
+        .optional()
+        .describe(
+          'Return one value of a JSON response body by its dotted path, e.g. "stats.open" or "items.0.name", pretty-printed and up to 8000 characters. A path that is not there says which keys are.',
+        ),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .max(1_000_000)
+        .optional()
+        .describe(
+          "Return the body (or the selected value) from this character on. The body is cut at 2000 characters by default; the result names the next offset.",
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(8000)
+        .optional()
+        .describe("How many characters to return with offset or select. Default 2000, or 8000 for a select with no offset."),
       task: taskParam,
       objective: legacyObjectiveParam,
       session: sessionParam,
@@ -1435,9 +1466,22 @@ server.registerTool(
   },
   serializedPerSession(
     "scout_request",
-    async (args: { path: string; method?: string; body?: string; headers?: Record<string, string>; session?: string }, session) => {
+    async (
+      args: {
+        path: string;
+        method?: string;
+        body?: string;
+        headers?: Record<string, string>;
+        select?: string;
+        offset?: number;
+        limit?: number;
+        session?: string;
+      },
+      session,
+    ) => {
       try {
-        return text(await engineFor(session).apiRequest({ method: args.method, path: args.path, body: args.body, headers: args.headers }), session);
+        const view = { select: args.select, offset: args.offset, limit: args.limit };
+        return text(await engineFor(session).apiRequest({ method: args.method, path: args.path, body: args.body, headers: args.headers, view }), session);
       } catch (err) {
         return errorText(err);
       }
@@ -1446,14 +1490,34 @@ server.registerTool(
 );
 
 server.registerTool(
+  "scout_network",
+  {
+    description:
+      "List the data requests (fetch and XHR) the current page made since its document loaded: method, path, status and time, oldest first, each marked with the route it was sent from when a client-side route change moved the page since. Use it when the page and the server seem to disagree — an empty list where the API has data, a stale value after a save — to tell a request that failed, one still pending and one that never ran apart. Read-only: it lists what the browser already saw and sends nothing. Credentials in query strings are redacted. A full page load starts a new list; scout_request's own calls are marked.",
+    inputSchema: {
+      contains: z.string().max(200).optional().describe("Only requests whose path contains this text, e.g. /api/things"),
+      limit: z.number().int().min(1).max(200).optional().describe("How many of the newest to list. Default 40."),
+      session: sessionParam,
+    },
+  },
+  serializedPerSession("scout_network", async (args: { contains?: string; limit?: number; session?: string }, session) => {
+    try {
+      return text(engineFor(session).listPageRequests({ contains: args.contains, limit: args.limit }), session);
+    } catch (err) {
+      return errorText(err);
+    }
+  }),
+);
+
+server.registerTool(
   "scout_back",
   {
     description: "Go back in browser history (tests back-button resilience).",
-    inputSchema: { task: taskParam, objective: legacyObjectiveParam, session: sessionParam },
+    inputSchema: { leave: leaveParam, task: taskParam, objective: legacyObjectiveParam, session: sessionParam },
   },
-  serializedPerSession("scout_back", async (_args: { session?: string }, session) => {
+  serializedPerSession("scout_back", async ({ leave }: { leave?: boolean; session?: string }, session) => {
     try {
-      return text(await engineFor(session).goBack(), session);
+      return text(await engineFor(session).goBack(leave), session);
     } catch (err) {
       return errorText(err);
     }
@@ -1704,27 +1768,31 @@ server.registerTool(
   "scout_coverage",
   {
     description:
-      "Show exploration coverage: states visited across all runs, which elements remain unexercised, which options of a dropdown used this run no session has chosen yet, and which forms seen this run no session has submitted with every text field blank. Use to decide where to explore next and when the level's budget is satisfied.",
-    inputSchema: { session: sessionParam },
+      "Show exploration coverage: states visited, which elements remain unexercised, which options of a dropdown used this run no session has chosen yet, and which forms seen this run no session has submitted with every text field blank. Use to decide where to explore next and when the level's budget is satisfied. In a parallel run it shows this session's own work by default — the routes it reached this run and the forms it saw — so one lane is not handed another's gaps; scope:\"project\" shows every session's, each form and route tagged with the sessions that saw it.",
+    inputSchema: {
+      scope: z
+        .enum(["session", "project"])
+        .optional()
+        .describe(
+          "'session': only the routes this session reached this run and the forms it saw. 'project': every route in the memory, across runs and sessions. Default: 'session' when other sessions share this project, else 'project'.",
+        ),
+      session: sessionParam,
+    },
   },
-  serializedPerSession("scout_coverage", async (_args: { session?: string }, session) => {
+  serializedPerSession("scout_coverage", async (args: { scope?: "session" | "project"; session?: string }, session) => {
     try {
       const eng = engineFor(session);
-      if (!eng.memory) throw new Error("Not attached.");
-      const cov = eng.memory.coverage();
+      const memory = eng.memory;
+      if (!memory) throw new Error("Not attached.");
+      const shared = [...engines.values()].some((e) => e !== eng && e.memory === memory);
       const unvisited = eng.unvisitedKnownRoutes();
       const lines = [
-        ...(eng.memory.lastSaveError
+        ...(memory.lastSaveError
           ? [
-              `⚠ MEMORY WRITE FAILING: ${eng.memory.lastSaveError} — coverage/findings since the last successful write are NOT persisted to disk. If this doesn't clear on its own, check the project directory still exists and is writable.`,
+              `⚠ MEMORY WRITE FAILING: ${memory.lastSaveError} — coverage/findings since the last successful write are NOT persisted to disk. If this doesn't clear on its own, check the project directory still exists and is writable.`,
             ]
           : []),
-        `States known: ${cov.states} · Elements exercised: ${cov.elementsExercised}/${cov.elementsTotal}${cov.embeds.total > 0 ? ` (plus ${cov.embeds.exercised}/${cov.embeds.total} inside other sites' frames, not counted)` : ""}`,
-        formatRouteCoverage(eng.allKnownRoutes(), unvisited),
-        `Unexercised elements by route:`,
-        ...cov.unexercised.slice(0, 25).map((u) => `  ${u.state}: ${u.keys.slice(0, 6).join(", ")}${u.keys.length > 6 ? ` … +${u.keys.length - 6}` : ""}`),
-        ...formatUnchosenOptions(eng.memory.unchosenOptions()),
-        ...formatNeverSubmittedEmpty(eng.memory.formsNeverSubmittedEmpty()),
+        ...coverageView(memory, eng.sessionKey, args.scope ?? (shared ? "session" : "project"), formatRouteCoverage(eng.allKnownRoutes(), unvisited)),
       ];
       return text(lines.join("\n"), session);
     } catch (err) {
