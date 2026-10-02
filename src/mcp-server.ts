@@ -30,6 +30,7 @@
  *   (`scenescout watch <project>`, engine/live.ts, ADR 7).
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -74,7 +75,7 @@ import {
 } from "./engine/live.js";
 import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
-import { loginCommand, parseLoginArgs } from "./engine/profiles.js";
+import { parseLoginArgs } from "./engine/profiles.js";
 import type { BrowserEngineName } from "./browsers.js";
 import { LOGIN_WINDOW_MAX_MS, savedLine, startLoginWindow, type PendingLogin } from "./login-run.js";
 import { LoginWindows, WAIT_SAYS } from "./engine/signed-in.js";
@@ -109,6 +110,7 @@ import {
   watchdogFor,
 } from "./engine/limits.js";
 import { MAX_READ_POSTS, READ_POSTS_ENV } from "./engine/policy.js";
+import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "./engine/project-folder.js";
 import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
@@ -704,7 +706,7 @@ server.registerTool(
             runMs: (runMinutes ?? DEFAULT_RUN_MINUTES) * 60_000,
             marginMs: (expiryMarginMinutes ?? DEFAULT_EXPIRY_MARGIN_MINUTES) * 60_000,
             role: eng.auth.role,
-            rerun: loginCommand(eng.auth.role, eng.baseUrl),
+            rerun: eng.reloginCommand(eng.auth.role),
           });
           if (verdict.kind === "refuse") return errorText(new Error(verdict.message));
           if (verdict.kind !== "ok") expiryNote = `⚠ ${verdict.message}\n\n`;
@@ -848,7 +850,13 @@ server.registerTool(
       "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted, and POSTs the user named in readPosts) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass `role` to sign in with a login the user saved by `scenescout login <url> --role <name>`, or a Playwright storage-state JSON as storageStatePath. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
     inputSchema: {
       url: z.string().describe("Base URL of the running app, e.g. http://localhost:3000"),
-      projectPath: z.string().describe("Absolute path to the project (memory + report live in .scenescout/ here)"),
+      projectPath: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute path to the project (memory + report live in .scenescout/ here). Pass it whenever you have a project or working folder. " +
+            `Omitted: the client's workspace folder, else a folder per tested site under the user's documents folder (Documents/SceneScout/<host>/, or ${PROJECTS_DIR_ENV}), which the result names — tell the user where it is.`,
+        ),
       storageStatePath: z.string().optional().describe("Optional Playwright storage-state JSON path for authenticated exploration. Not with `role`."),
       role: z
         .string()
@@ -987,7 +995,7 @@ server.registerTool(
       dedup,
     }: {
       url: string;
-      projectPath: string;
+      projectPath?: string;
       storageStatePath?: string;
       role?: string;
       mode?: "observe" | "read-only" | "safe-write" | "destructive";
@@ -1008,6 +1016,10 @@ server.registerTool(
       dedup?: DedupMode;
     }) => {
       try {
+        // Settled first: a refusal leaves the default session as it was.
+        const folder = await projectFolderFor(url, projectPath);
+        if ("refused" in folder) return errorText(new Error(folder.refused));
+        projectPath = folder.dir;
         const target = session ?? activeName;
         if (session) {
           activeName = session;
@@ -1076,6 +1088,7 @@ server.registerTool(
         const out = await eng.attach({
           url,
           projectDir: projectPath,
+          projectChosen: folder.source === "default",
           storageStatePath,
           role,
           mode,
@@ -1117,7 +1130,15 @@ server.registerTool(
             ? `\n📷 FINDING PICTURES: ${pictures.mode} (${pictures.source}): each scout_finding keeps a picture of what it names under ${path.join(eng.memory.dir, "recordings")}/ for report.html${pictures.mode === "inline" ? `, and returns the first ${pictures.inlineMax} in its result` : ""}.`
             : "";
         return text(
-          out + conflictNote + recordNote + picturesNote + dedupNote + describePace(eng.pace) + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine(),
+          out +
+            (folder.note ? `\n\n${folder.note}` : "") +
+            conflictNote +
+            recordNote +
+            picturesNote +
+            dedupNote +
+            describePace(eng.pace) +
+            (engines.size > 1 ? `\n${sessionLines()}` : "") +
+            liveLine(),
           target,
         );
       } catch (err) {
@@ -1126,6 +1147,31 @@ server.registerTool(
     },
   ),
 );
+
+/**
+ * The folder an attach keeps its files in (engine/project-folder.ts): the
+ * projectPath given, else the client's workspace folder, else a folder per
+ * tested site. Only a client that offers roots is asked for them.
+ */
+async function projectFolderFor(url: string, given: string | undefined) {
+  let workspace: string | null = null;
+  if (given === undefined && server.server.getClientCapabilities()?.roots) {
+    try {
+      workspace = workspaceFromRoots((await server.server.listRoots(undefined, { timeout: 3000 })).roots);
+    } catch (err) {
+      logLine(`the client offers a workspace but did not list it (${(err as Error).message}); using the default folder`);
+    }
+  }
+  const userDirsFile = path.join(os.homedir(), ".config", "user-dirs.dirs");
+  const userDirs = process.platform === "linux" && fs.existsSync(userDirsFile) ? fs.readFileSync(userDirsFile, "utf8") : undefined;
+  return chooseProjectFolder({
+    given,
+    workspace,
+    url,
+    home: { platform: process.platform, homedir: os.homedir(), env: process.env, userDirs },
+    exists: fs.existsSync,
+  });
+}
 
 /** Keys in this process's environment, and anything shaped like one, taken out of a line before it is shown. */
 const withoutKeys = (text: string): string => redactKeys(text, secretValues(process.env));
@@ -1269,7 +1315,12 @@ server.registerTool(
     inputSchema: {
       url: z.string().describe("Where to sign in: the app's address or its sign-in page, e.g. http://localhost:3000/login"),
       role: z.string().max(40).describe("The name to save the sign-in under, e.g. admin; scout_attach { role } signs in with it"),
-      projectPath: z.string().describe("Absolute path to the project (the sign-in is saved in .scenescout/auth/ here), as for scout_attach"),
+      projectPath: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute path to the project (the sign-in is saved in .scenescout/auth/ here), as for scout_attach. Omitted: the same folder an attach with no projectPath uses for this site, which the result names.",
+        ),
       browser: z
         .enum(["chromium", "firefox", "webkit"])
         .optional()
@@ -1290,14 +1341,19 @@ server.registerTool(
         .describe(`How long this call waits for the user before returning with the window still open (default ${LOGIN_WAIT_DEFAULT_S})`),
     },
   },
-  async (args: { url: string; role: string; projectPath: string; browser?: BrowserEngineName; successUrl?: string; waitSeconds?: number }, extra) => {
+  async (args: { url: string; role: string; projectPath?: string; browser?: BrowserEngineName; successUrl?: string; waitSeconds?: number }, extra) => {
     try {
+      // The folder an attach with no projectPath would use, so the attach after this finds the sign-in.
+      const folder = await projectFolderFor(args.url, args.projectPath);
+      if ("refused" in folder) return errorText(new Error(folder.refused));
+      const projectDir = path.resolve(folder.dir);
+      const where = folder.note ? `\n\n${folder.note}` : "";
       const parsed = parseLoginArgs(
         [args.url, "--role", args.role, ...(args.browser ? ["--browser", args.browser] : []), ...(args.successUrl ? ["--success-url", args.successUrl] : [])],
-        path.resolve(args.projectPath),
+        projectDir,
       );
       if (!parsed.ok) return errorText(new Error(parsed.error));
-      const options = { ...parsed.options, projectDir: path.resolve(args.projectPath) };
+      const options = { ...parsed.options, projectDir };
       const key = `${options.projectDir}\0${options.role}`;
       const { window: pending, resumed } = await pendingLogins.get(key, () => startLoginWindow(options));
       const waitMs = (args.waitSeconds ?? LOGIN_WAIT_DEFAULT_S) * 1000;
@@ -1342,14 +1398,15 @@ server.registerTool(
         const p = pending.progress();
         return text(
           `Still waiting for the user to sign in as "${options.role}"${differs}: ${p.reason === "starting" ? "the window is opening" : WAIT_SAYS[p.reason]}. ` +
-            `The window stays open for up to ${LOGIN_WINDOW_MAX_MS / 60_000} minutes from when it opened. Call scout_login again with the same role to keep waiting, once the user says they are done or to check.`,
+            `The window stays open for up to ${LOGIN_WINDOW_MAX_MS / 60_000} minutes from when it opened. Call scout_login again with the same role to keep waiting, once the user says they are done or to check.` +
+            where,
           activeName,
         );
       }
       // This call reports the outcome; the next call for the role opens a new window.
       pendingLogins.reported(key, pending);
       if (!outcome.ok) return errorText(new Error(`nothing was saved for role "${options.role}": ${outcome.error}`));
-      return text(`${outcome.detected}\n${savedLine(options, outcome.saved)}`, activeName);
+      return text(`${outcome.detected}\n${savedLine(options, outcome.saved)}${where}`, activeName);
     } catch (err) {
       return errorText(err);
     }

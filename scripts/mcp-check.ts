@@ -6,12 +6,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { spawnSync } from "node:child_process";
 import { introQuestions } from "../dist/intake.js";
-import { writeProfile } from "../dist/engine/profiles.js";
+import { shellQuote, writeProfile } from "../dist/engine/profiles.js";
+import { siteFolderName } from "../dist/engine/project-folder.js";
 import { revokeFixtureTokens, settle, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE, WAIT_MS } from "./smoke/harness.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -740,6 +742,73 @@ async function dedupJudgeEnvCheck(): Promise<void> {
   }
 }
 
+/**
+ * An attach with no projectPath: a client that offers a workspace folder (MCP
+ * roots) gets that folder, and one that offers none gets a folder for the
+ * tested site under SCENESCOUT_PROJECTS_DIR, which the result names.
+ */
+async function defaultFolderCheck(): Promise<void> {
+  const fixture = await startFixtureServer();
+  const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-folder-")));
+  const projects = path.join(scratch, "projects");
+  const workspace = path.join(scratch, "workspace");
+  fs.mkdirSync(workspace);
+  const env = Object.fromEntries(
+    Object.entries({ ...process.env, SCENESCOUT_LIVE: "off", SCENESCOUT_PROJECTS_DIR: projects }).filter(
+      (e): e is [string, string] => typeof e[1] === "string",
+    ),
+  );
+  /** Attach once with no projectPath, from a client offering `roots` (or none), and return the reply. */
+  const attachWithout = async (roots?: string[], extraEnv: Record<string, string> = {}, extraArgs: Record<string, unknown> = {}): Promise<string> => {
+    const client = new Client({ name: "ft-check-folder", version: "0.0.1" }, roots ? { capabilities: { roots: {} } } : undefined);
+    if (roots) client.setRequestHandler(ListRootsRequestSchema, async () => ({ roots: roots.map((r) => ({ uri: pathToFileURL(r).href })) }));
+    await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env: { ...env, ...extraEnv } }));
+    try {
+      const reply = textOf(await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, ...extraArgs } }));
+      assertClosedAll(textOf(await client.callTool({ name: "scout_close", arguments: { all: true } })));
+      return reply;
+    } finally {
+      await client.close();
+    }
+  };
+  try {
+    const site = path.join(projects, siteFolderName(fixture.baseUrl));
+    const plain = await attachWithout();
+    if (!plain.includes(`kept in ${site}`) || !plain.includes(path.join(site, ".scenescout", "report.md")))
+      fail(`an attach with no projectPath and no workspace did not name the site's folder ${site}:\n${plain}`);
+    if (!fs.existsSync(path.join(site, ".scenescout"))) fail(`the default folder ${site} was not created on first use`);
+    // scout_login with no projectPath saves into the same site folder (one resolver, keyed by host and port,
+    // so its sign-in page and the app's address agree). A sign-in saved there is found by an attach that
+    // names no folder; the contrast is a role saved nowhere, which is refused.
+    writeProfile(site, "member", {
+      cookies: [{ name: "member_session", value: "x", domain: "127.0.0.1", path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Lax" }],
+      origins: [],
+    });
+    if (siteFolderName(`${fixture.baseUrl}/sso/signin?next=%2F`) !== siteFolderName(fixture.baseUrl))
+      fail("a sign-in page and its app resolve to different folders");
+    const withRole = await attachWithout(undefined, {}, { role: "member" });
+    if (/no sign-in is saved/.test(withRole) || !withRole.includes(`kept in ${site}`))
+      fail(`an attach with no projectPath did not find the sign-in saved in ${site}:\n${withRole}`);
+    const noRole = await attachWithout(undefined, {}, { role: "nobody" });
+    if (!/no sign-in is saved for role "nobody"/.test(noRole)) fail(`an attach for a role saved nowhere was not refused:\n${noRole}`);
+    if (!noRole.includes(`--role nobody --project ${shellQuote(site)}\``))
+      fail(`the refusal in a folder SceneScout chose does not name it with --project, so the command would save elsewhere:\n${noRole}`);
+    const fromRoots = await attachWithout([workspace]);
+    if (!fromRoots.includes(`workspace folder, under ${workspace}`))
+      fail(`an attach with no projectPath did not use the client's workspace ${workspace}:\n${fromRoots}`);
+    if (!fs.existsSync(path.join(workspace, ".scenescout"))) fail(`the workspace ${workspace} holds no .scenescout after the attach`);
+    const off = await attachWithout(undefined, { SCENESCOUT_PROJECTS_DIR: "off" });
+    if (!/SCENESCOUT_PROJECTS_DIR is "off"[\s\S]*Pass projectPath/.test(off))
+      fail(`SCENESCOUT_PROJECTS_DIR=off with no projectPath did not refuse the attach:\n${off}`);
+    console.log(
+      "✓ scout_attach with no projectPath uses the client's workspace, else a folder for the site that the result names and where a saved sign-in is found, and none when the setting is off",
+    );
+  } finally {
+    await fixture.close();
+    fs.rmSync(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
 async function main(): Promise<void> {
   const transport = new StdioClientTransport({ command: "node", args: [serverPath] });
   const client = new Client({ name: "ft-check", version: "0.0.1" });
@@ -881,11 +950,22 @@ async function main(): Promise<void> {
   if (JSON.stringify(listed) !== JSON.stringify(attachParams)) {
     guideGaps.push(`Configuration-reference.md lists scout_attach options [${listed.join(", ")}], the server has [${attachParams.join(", ")}]`);
   }
+  // The Default column says "(required)" for exactly the options the schema requires, for each tool the reference tables.
+  for (const tool of ["scout_attach", "scout_login"]) {
+    const section = (reference.split(`\n## \`${tool}\` options\n`)[1] ?? "").split("\n## ")[0];
+    const listedRequired = [...section.matchAll(/^\| `([A-Za-z]+)` \| \(required\) \|/gm)].map((m) => m[1]).sort();
+    const required = [...((tools.find((t) => t.name === tool)?.inputSchema as { required?: string[] } | undefined)?.required ?? [])].sort();
+    if (!section) guideGaps.push(`Configuration-reference.md has no ${tool} options table`);
+    else if (JSON.stringify(listedRequired) !== JSON.stringify(required))
+      guideGaps.push(`Configuration-reference.md marks ${tool} options [${listedRequired.join(", ")}] required, the server requires [${required.join(", ")}]`);
+  }
   if (guideGaps.length > 0) {
     console.error(`MCP CHECK FAILED — the guide disagrees with the server's tools:\n  ${guideGaps.join("\n  ")}`);
     process.exit(1);
   }
-  console.log("✓ the guide names only tools and parameters the server has, and lists every scout_attach option");
+  console.log(
+    "✓ the guide names only tools and parameters the server has, and lists every scout_attach option, and which scout_attach and scout_login options are required",
+  );
 
   const result = await client.callTool({ name: "scout_scan", arguments: { projectPath: packageRoot } });
   const text = (result.content as Array<{ type: string; text?: string }>).map((c) => c.text ?? "").join("");
@@ -905,6 +985,7 @@ async function main(): Promise<void> {
   await tokenGoneCheck(liveProject);
   await liveViewOffCheck();
   await dedupJudgeEnvCheck();
+  await defaultFolderCheck();
   await findingPictureCapCheck();
   console.log("\nMCP CHECK PASSED");
 }

@@ -224,7 +224,7 @@ import {
   type UnseenWriteVerdict,
 } from "./unload.js";
 import {
-  loginCommand,
+  reloginCommand,
   permissionNote,
   resolveAttachAuth,
   roleLabel,
@@ -281,6 +281,8 @@ export type { WriteMode } from "./policy.js";
 export interface AttachOptions {
   url: string;
   projectDir: string;
+  /** projectDir is a per-site folder SceneScout chose, not one the agent or client named. */
+  projectChosen?: boolean;
   storageStatePath?: string;
   /**
    * A role whose profile `scenescout login` saved under .scenescout/auth/.
@@ -678,6 +680,8 @@ export class BrowserEngine {
   knownRoutes: string[] = [];
   /** Real path of the attached project — the fence for scout_upload's filePath. */
   private projectDir = "";
+  /** The folder a login command must name with --project (a folder SceneScout chose), else undefined. */
+  private loginProject: { projectDir: string; projectChosen: boolean } = { projectDir: "", projectChosen: false };
   /** Set when the project's real path could not be resolved — named in fence refusals, which it may then cause. */
   private projectDirNote = "";
   memory: MemoryStore | null = null;
@@ -1390,6 +1394,11 @@ export class BrowserEngine {
   private lastActionBlocked = 0;
   baseUrl = "";
 
+  /** The command that records `role` again so this session's next attach finds it (profiles.reloginCommand). */
+  reloginCommand(role: string): string {
+    return reloginCommand({ role, url: this.baseUrl, ...this.loginProject });
+  }
+
   get attached(): boolean {
     return this.page !== null;
   }
@@ -1398,7 +1407,13 @@ export class BrowserEngine {
     // Resolved before anything is closed, so a bad role, a missing profile or
     // a time limit out of bounds leaves a live session as it was.
     const limits = resolveTimeLimits(opts, process.env);
-    const auth = resolveAttachAuth({ projectDir: opts.projectDir, url: opts.url, role: opts.role, storageStatePath: opts.storageStatePath });
+    const auth = resolveAttachAuth({
+      projectDir: opts.projectDir,
+      url: opts.url,
+      role: opts.role,
+      storageStatePath: opts.storageStatePath,
+      projectChosen: opts.projectChosen,
+    });
     const brokered = brokerEnabled({ roleSession: auth.kind === "role", option: opts.refreshBroker, env: process.env[REFRESH_BROKER_ENV] });
     const storageStatePath = auth.kind === "none" ? undefined : auth.storageStatePath;
     if (storageStatePath && !fs.existsSync(storageStatePath)) {
@@ -1518,6 +1533,7 @@ export class BrowserEngine {
       this.projectDir = path.resolve(opts.projectDir);
       this.projectDirNote = ` (its real path could not be resolved: ${err instanceof Error ? err.message : String(err)} — a symlinked project path may be wrongly refused)`;
     }
+    this.loginProject = { projectDir: opts.projectDir, projectChosen: Boolean(opts.projectChosen) };
     this.oracles = new OracleMonitor();
     this.oracles.setPolicyRefusalCheck((req) => this.refusedByAnyPolicy(req));
     this.oracles.setReplayCheck((req) => this.replayRequests.has(req));
@@ -1920,7 +1936,7 @@ export class BrowserEngine {
       ? `\n⚠ AUTH FAILED — the storage state at ${storageStatePath} did not produce a signed-in session: ` +
         `attaching landed on ${landed}, a login page. ` +
         (auth.kind === "role"
-          ? `Record it again with \`${loginCommand(auth.role, this.baseUrl)}\` (its session has most likely expired) and re-attach. `
+          ? `Record it again with \`${this.reloginCommand(auth.role)}\` (its session has most likely expired) and re-attach. `
           : `Regenerate it (its token has most likely expired) and re-attach. `) +
         `Continuing now tests a logged-out app.` +
         (recipe.length > 0
