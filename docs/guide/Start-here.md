@@ -143,7 +143,11 @@ The level is a contract that `scout_report` enforces for what the engine can see
 
 ## Reading the report
 
-`.scenescout/report.md` is written worst first:
+`.scenescout/report.md` and `report.html` open **In plain words**, for anyone who does not read request signatures: a short summary, then each problem this run found, worst first, with its impact (blocks users, annoying or cosmetic), the steps that led to it, what was expected, what happened and, when there is one, a picture of the page. Each problem keeps its technical detail (id, category, evidence, route) folded beneath it, one click away.
+
+`scout_report {report}` chooses which parts a report carries: `both` (default) the plain section and then the technical report, `qa` the plain section alone, `dev` the technical report alone. It applies to the files `scout_report` writes; the live view's report always shows both.
+
+The technical report follows, worst first:
 
 - **Summary**: open findings, route coverage, design audits, oracle violations, and how many errors the write policy itself caused (these are not counted as the app's).
 - **Page quality scores**: 0 to 100 per audited route, for accessibility, craft, consistency and task clarity, worst first.
