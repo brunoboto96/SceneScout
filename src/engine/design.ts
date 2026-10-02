@@ -72,6 +72,15 @@ export interface StyleRecord {
   nameFrom?: NameFrom | null;
   /** Inside an aria-hidden subtree: nothing announces it, so it needs no name. */
   ariaHidden?: boolean;
+  /**
+   * The name a control's image content gives it, read only when `name` is
+   * empty: an <img> with alt text, or an <svg> or role="img" with an
+   * aria-label or <title>, not hidden from assistive technology. The
+   * accessible-name computation names a control from its content this way;
+   * the snapshot's rule (`name`) reads its text alone, so an image-only link
+   * or button would otherwise count as unnamed.
+   */
+  contentName?: string;
   /** Lowercased `type` of an <input>, "" for any other element: a checkbox, a search box and a submit button are all <input>. */
   inputType: string;
   /** The element's own `role` attribute, "" when it has none. */
@@ -205,6 +214,18 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     return false;
   };
   const nameOf = ${NAME_SRC};
+  // What a control's image content names it (StyleRecord.contentName). An
+  // image inside an aria-hidden part of the control contributes nothing.
+  const contentNameOf = (el) => {
+    for (const d of el.querySelectorAll("img, svg, [role='img']")) {
+      const hidden = d.closest('[aria-hidden="true"]');
+      if (hidden && el.contains(hidden)) continue;
+      const title = d.tagName.toLowerCase() === "svg" ? d.querySelector(":scope > title") : null;
+      const said = (d.tagName === "IMG" ? d.getAttribute("alt") : d.getAttribute("aria-label") || (title ? title.textContent : "")) || "";
+      if (said.trim()) return said.trim().replace(/\\s+/g, " ").slice(0, 80);
+    }
+    return "";
+  };
   const namesFilter = ${FILTER_WORDS_SRC};
   // A filter panel names itself one somewhere on the way up: its test id, id,
   // label, the element its aria-labelledby points at, or a fieldset's legend.
@@ -352,6 +373,7 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
       required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true",
       submitish: el.matches('button[type="submit"], input[type="submit"]') || /\\b(save|submit|create|send|confirm|apply|continue|next|finish|approve|sign)\\b/i.test(fullText),
       ...(named ? { name: named.name, nameFrom: named.from, ariaHidden: el.closest('[aria-hidden="true"]') !== null } : {}),
+      ...(named && !named.name ? { contentName: contentNameOf(el) } : {}),
       inputType: el.tagName === "INPUT" ? (el.getAttribute("type") || "text").toLowerCase() : "",
       role: (el.getAttribute("role") || "").toLowerCase(),
       filled: ownFill(s),
@@ -435,7 +457,7 @@ function hueOf([r, g, b]: [number, number, number]): number | null {
  */
 const label = (r: StyleRecord): string => {
   if (r.testid) return `[${r.testid}]`;
-  const heard = r.name && r.nameFrom !== "fallback" ? r.name : r.text;
+  const heard = r.name && r.nameFrom !== "fallback" ? r.name : r.contentName || r.text;
   return `<${r.tag}> "${heard.slice(0, 30) || "(no text)"}"`;
 };
 /** One wording for a small target, page or shell alike: the shell section's, so its prose is unchanged. */
@@ -632,14 +654,16 @@ const GRAY_STEP = 4;
  * The page's controls a screen-reader user cannot tell apart: fields and
  * controls with no name, and fields whose only label is the placeholder. The
  * snapshot's own predicates (collector.ts), over the snapshot's own name, so
- * the audit and the snapshot agree on a page. Records with no name read are
+ * the audit and the snapshot agree on a page, except that a control the
+ * snapshot's rule leaves empty is named by its image content (contentName),
+ * as the accessible-name computation names it. Records with no name read are
  * left out rather than guessed.
  */
 export function unnamedControls(records: readonly StyleRecord[]): { unnamed: StyleRecord[]; placeholder: StyleRecord[] } {
   const named = records.filter((r) => r.interactive && typeof r.name === "string");
   const asSnapshot = (r: StyleRecord) => ({
     role: r.role,
-    name: r.name ?? "",
+    name: r.name || r.contentName || "",
     nameFrom: r.nameFrom ?? null,
     interactive: true,
     ariaHidden: r.ariaHidden === true,

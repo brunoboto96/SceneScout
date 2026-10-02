@@ -25,7 +25,10 @@
        as it changes, though it has typed fields and no <form>. Its user field
        is labelled only by its placeholder, which the audit reports and scores;
        design-form.html labels every field and is the contrast. The icon button
-       is named by its aria-label and must be listed by that name. -->
+       is named by its aria-label and must be listed by that name. The image
+       button is named by its image's alt text, which the accessible-name
+       computation reads, so it is not listed as unnamed; the one beside it
+       has an empty alt and nothing else, and is. -->
   <aside aria-label="Sections">
     <nav>
       <a href="#s1" data-testid="design-ctx-shell-1">Section one</a>
@@ -43,6 +46,8 @@
       <button type="button" data-testid="design-ctx-new">New thing</button>
     </header>
     <button type="button" class="icon" aria-label="Dismiss"><svg width="16" height="16" aria-hidden="true"><path d="M2 2L14 14M14 2L2 14" stroke="currentColor"/></svg></button>
+    <button type="button" class="icon"><img alt="Search" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2216%22 height=%2216%22/%3E" width="16" height="16"></button>
+    <button type="button" class="icon"><img alt="" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2216%22 height=%2216%22/%3E" width="16" height="16"></button>
     <section aria-labelledby="design-ctx-filters-title">
       <h2 id="design-ctx-filters-title">Filters</h2>
       <input type="date" aria-label="From">

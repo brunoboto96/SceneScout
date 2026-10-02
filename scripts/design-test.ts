@@ -651,3 +651,14 @@ test("an unnamed control hidden from assistive technology needs no name; the sam
   assert.ok(!page(true).report.includes("NAMES"), page(true).report);
   assert.ok((page(false).score?.a11y ?? 100) < (page(true).score?.a11y ?? 0), page(false).report);
 });
+
+test("an icon button named by its image's alt text is not listed; the same button with an empty alt is", () => {
+  const page = (contentName: string) =>
+    analyzeDesign(payload([rec({ text: "Notice" }), button("", { name: "", contentName, bg: "rgb(255, 255, 255)", color: "rgb(30, 30, 30)" })]), VIEWPORT);
+  const search = page("Search");
+  assert.ok(!search.report.includes("NAMES"), search.report);
+  assert.equal(search.score?.a11y, 100, search.report);
+  const blank = page("");
+  assert.ok(blank.report.includes(`<button> "(no text)" — control with no accessible name`), blank.report);
+  assert.ok((blank.score?.a11y ?? 100) < 100, blank.report);
+});

@@ -251,9 +251,14 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     const { DESIGN_COLLECT_SCRIPT: collect } = await import("../../dist/engine/design.js");
     const ctxRecords = (
       (await (engine as any).page.evaluate(collect)) as {
-        records: Array<{ tag: string; name?: string; inFilter?: boolean; inRow: boolean; inputType: string }>;
+        records: Array<{ tag: string; name?: string; contentName?: string; inFilter?: boolean; inRow: boolean; inputType: string }>;
       }
     ).records;
+    check(
+      "a button named by its image's alt text is not unnamed; the one with an empty alt is, once",
+      ctxRecords.some((r) => r.tag === "button" && r.contentName === "Search") && (context.match(/control with no accessible name/g) ?? []).length === 1,
+      context,
+    );
     check(
       "the audit names an icon button by its aria-label, as the snapshot does",
       ctxRecords.some((r) => r.tag === "button" && r.name === "Dismiss"),
