@@ -1,15 +1,17 @@
 /**
  * `scenescout <url>`: a first look, with no setup.
  *
- * It is `scenescout check`'s engine (check-run.ts) run read-only, with a cap
- * on pages and one on time, and presented as a first look rather than a gate:
+ * It is `scenescout check`'s engine (check-run.ts) run in observe mode unless
+ * told otherwise, with a cap on pages and one on time, and presented as a
+ * first look rather than a gate:
  * once it has looked it exits 0 whatever it found, and its summary and report
  * open with the three issues to look at first.
  *
  * It installs nothing but the one browser build a headless check launches, and
  * only when that is missing: no skill, no MCP registration, no command on
  * PATH. It reads nothing from the folder it runs in and writes only its report
- * folder there.
+ * folder there, and only into a folder that is new, empty or an earlier first
+ * look's.
  *
  * The rules live here so they can be table-tested: install-test covers the
  * command line, the browser download and where the report is written,
@@ -44,9 +46,20 @@ import {
 import { httpStatusOf } from "./engine/oracles.js";
 
 /** Every `--option` a first look accepts. Anything more is `scenescout check`'s. */
-export const FIRST_RUN_OPTION_NAMES = ["max-routes", "max-minutes", "out"] as const;
+export const FIRST_RUN_OPTION_NAMES = ["max-routes", "max-minutes", "mode", "out"] as const;
+/**
+ * The write modes a first look runs in. Observe by default: a first look is
+ * often pointed at a live app nobody has said may be written to, and observe
+ * lets nothing but reads leave the page, where read-only lets plain POSTs through.
+ */
+const FIRST_RUN_MODES = ["observe", "read-only"] as const;
+export type FirstRunMode = (typeof FIRST_RUN_MODES)[number];
 /** Small enough to finish in a few minutes on most apps, large enough to reach past the start page's own links. */
-export const FIRST_RUN_DEFAULTS = { maxRoutes: 20, maxMinutes: 3 } as const;
+export const FIRST_RUN_DEFAULTS = { maxRoutes: 20, maxMinutes: 3, mode: "observe" } as const satisfies {
+  maxRoutes: number;
+  maxMinutes: number;
+  mode: FirstRunMode;
+};
 export const MAX_FIRST_RUN_MINUTES = 30;
 /** The folder the report goes to, in the directory the command runs in. */
 export const FIRST_RUN_DIRNAME = "scenescout-report";
@@ -61,6 +74,7 @@ export interface FirstRunOptions {
   url: string;
   maxRoutes: number;
   maxMinutes: number;
+  mode: FirstRunMode;
   /** Where the report goes. Absent: ./scenescout-report, or a temporary folder when that cannot be written. */
   outDir?: string;
 }
@@ -135,12 +149,19 @@ export function parseFirstRunArgs(args: readonly string[], cwd: string): { ok: t
   if (typeof maxRoutes === "string") return { ok: false, error: maxRoutes };
   const maxMinutes = whole("max-minutes", 1, MAX_FIRST_RUN_MINUTES, FIRST_RUN_DEFAULTS.maxMinutes);
   if (typeof maxMinutes === "string") return { ok: false, error: maxMinutes };
+  const mode = flags.get("mode") ?? FIRST_RUN_DEFAULTS.mode;
+  if (!(FIRST_RUN_MODES as readonly string[]).includes(mode)) {
+    return { ok: false, error: `--mode must be observe (the default) or read-only: a first look never writes on purpose, whatever the mode` };
+  }
   const out = flags.get("out");
-  return { ok: true, options: { url: url.toString(), maxRoutes, maxMinutes, ...(out !== undefined ? { outDir: resolveArgPath(cwd, out) } : {}) } };
+  return {
+    ok: true,
+    options: { url: url.toString(), maxRoutes, maxMinutes, mode: mode as FirstRunMode, ...(out !== undefined ? { outDir: resolveArgPath(cwd, out) } : {}) },
+  };
 }
 
 /**
- * The check a first look is: read-only, never gated, its caps, and nothing
+ * The check a first look is: in its mode, never gated, its caps, and nothing
  * read from a project. `projectDir` is an empty folder of its own, so no saved
  * flow, memory or source route of whatever folder it runs in is used.
  */
@@ -149,7 +170,7 @@ export function firstRunCheckOptions(o: FirstRunOptions, projectDir: string): Ch
     url: o.url,
     projectDir,
     failOn: "never",
-    mode: "read-only",
+    mode: o.mode,
     browser: FIRST_RUN_ENGINE,
     maxRoutes: o.maxRoutes,
     timeBudgetMs: o.maxMinutes * 60_000,
@@ -180,30 +201,150 @@ export function unreachableReason(routes: readonly RouteHealth[]): string | null
   return routes[0]?.loadError ?? "no page loaded";
 }
 
+/** What each mode lets out of the page, in one sentence: for the line before a look and for the report. */
+export function modeSentence(mode: FirstRunMode): string {
+  return mode === "observe"
+    ? "In observe mode nothing but GET, HEAD and OPTIONS requests leaves the page, apart from signing in, signing out and refreshing a token: every other request a page sends is refused."
+    : "In read-only mode a PUT, PATCH or DELETE a page sends, or a POST that looks destructive, is refused, while a plain POST the page's own scripts send goes through.";
+}
+
 const SELF_IGNORE = "# A SceneScout first-look report. It ignores itself, so a `git add -A` here never commits it.\n*\n";
+
+/** The file that makes a folder a first look's: a folder is written into again only when it holds this, is empty or is new. */
+export const FIRST_LOOK_MARKER = ".scenescout-first-look";
+const MARKER_TEXT = "This folder holds a SceneScout first-look report. A later `scenescout <url>` replaces report.md and check.json here, and nothing else.\n";
+
+/**
+ * How each file a first look writes begins. A file is replaced only when it is
+ * a regular file that begins this way: its name proves nothing on a file
+ * system that ignores case, where someone's Report.md answers to report.md,
+ * and a link would carry the write somewhere else.
+ */
+const OWN_FILE_START = {
+  "report.md": "# SceneScout first look\n",
+  "check.json": '{\n  "tool": "scenescout-check",',
+} as const;
+type FirstLookFile = keyof typeof OWN_FILE_START;
+const FIRST_LOOK_FILES = Object.keys(OWN_FILE_START) as FirstLookFile[];
+
+/** Whether `text`, the start of a file named `name`, is how a first look writes that file. */
+export function writtenByFirstLook(name: FirstLookFile, text: string): boolean {
+  return text.startsWith(OWN_FILE_START[name]);
+}
 
 /** Why a write failed, in a word where the system gives one. */
 const writeFailure = (err: unknown): string => (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
 
+/** What is at `p`, its last part not followed if it is a link: nothing, a regular file, a folder, or something else (a link, a device). */
+function entryAt(p: string): "none" | "file" | "folder" | "other" {
+  let stat: fs.Stats | undefined;
+  try {
+    stat = fs.lstatSync(p, { throwIfNoEntry: false });
+  } catch (err) {
+    // A path under a file has no entry: the file above it is what is there, and the caller names it.
+    if ((err as NodeJS.ErrnoException).code === "ENOTDIR") return "none";
+    throw err;
+  }
+  if (!stat) return "none";
+  return stat.isFile() ? "file" : stat.isDirectory() ? "folder" : "other";
+}
+
+/** How a file begins: enough of it to tell whether a first look wrote it. */
+function startOf(p: string): string {
+  const fd = fs.openSync(p, "r");
+  try {
+    const buf = Buffer.alloc(64);
+    return buf.toString("utf8", 0, fs.readSync(fd, buf, 0, buf.length, 0));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** The names a first look writes under which `dir` holds something it did not write: another kind of entry, or a file that begins otherwise. */
+function entriesNotItsOwn(dir: string): string[] {
+  const theirs: string[] = FIRST_LOOK_FILES.filter((name) => {
+    const at = entryAt(path.join(dir, name));
+    return at !== "none" && !(at === "file" && writtenByFirstLook(name, startOf(path.join(dir, name))));
+  });
+  const marker = entryAt(path.join(dir, FIRST_LOOK_MARKER));
+  if (marker !== "none" && marker !== "file") theirs.push(FIRST_LOOK_MARKER);
+  return theirs;
+}
+
 /**
- * Write a first look's report files. Without `outDir` they go to
- * `scenescout-report/` in `cwd`, whose `.gitignore` is written first, so a
- * write that fails partway leaves nothing git would pick up; when that folder
+ * Why a first look may not write its report to `dir`, or null when it may.
+ * Nothing is created or changed here, so it can be asked before the look, and
+ * it is asked again just before writing.
+ *
+ * - The default folder (`chosen` false) is written only when it is new, empty
+ *   or holds the marker of an earlier first look: anything else there is
+ *   someone's, and nothing in it is replaced. A default folder that cannot be
+ *   written is not a reason: the report then goes to a temporary folder.
+ * - A folder named with --out (`chosen` true) may hold other files.
+ * - In either, a report.md or check.json is replaced only when a first look
+ *   wrote it, and the folder must be a folder, not a link to one. An --out
+ *   folder must be writable, or creatable under a folder that is; a
+ *   permission this cannot see shows when the report is written.
+ */
+export function reportFolderProblem(dir: string, chosen: boolean): string | null {
+  const elsewhere = chosen ? "Name another folder with --out" : "Pass --out <folder> to put the report somewhere else";
+  const named = chosen ? `--out ${dir}` : dir;
+  try {
+    const at = entryAt(dir);
+    if (at === "file" || at === "other") {
+      return chosen
+        ? `--out ${dir} is ${at === "file" ? "a file" : "a link or a special file"}, not a folder.`
+        : `${dir} already exists and is not a folder, so it is left alone. ${elsewhere}.`;
+    }
+    if (at === "folder") {
+      const marked = entryAt(path.join(dir, FIRST_LOOK_MARKER)) === "file";
+      if (!chosen && !marked && fs.readdirSync(dir).length > 0) {
+        return `${dir} already exists and holds files a first look did not write, so nothing in it is touched. ${elsewhere}.`;
+      }
+      const theirs = entriesNotItsOwn(dir);
+      if (theirs.length > 0) return `${named} holds a ${theirs.join(" and ")} a first look did not write, so nothing there is replaced. ${elsewhere}.`;
+    }
+  } catch (err) {
+    return `${named} cannot be read (${writeFailure(err)}), so nothing is written there. ${elsewhere}.`;
+  }
+  if (!chosen) return null;
+  // The folder itself when it exists, else the nearest folder above it that does: the one the new folders go under.
+  let existing = dir;
+  while (!fs.existsSync(existing) && path.dirname(existing) !== existing) existing = path.dirname(existing);
+  try {
+    if (!fs.statSync(existing).isDirectory()) return `--out ${dir} cannot be created: ${existing} is a file.`;
+    fs.accessSync(existing, fs.constants.W_OK);
+  } catch (err) {
+    return `--out ${dir} cannot be written (${writeFailure(err)}).`;
+  }
+  return null;
+}
+
+/**
+ * Write a first look's report files, each folder's marker first, so a write
+ * that fails partway still leaves a folder a later look may write into.
+ * Without `outDir` they go to `scenescout-report/` in `cwd`, whose `.gitignore`
+ * comes next, so nothing there is left for git to pick up; when that folder
  * cannot be written they go to a new folder under `tmpdir`, and `note` says
  * why. A folder named with --out is used as given or not at all. Throws with
- * every reason when nowhere could be written.
+ * the reason when the folder is someone else's (`reportFolderProblem`), and
+ * with every reason when nowhere could be written.
  */
 export function writeFirstRunReport(
-  files: Readonly<Record<string, string>>,
+  files: Readonly<Record<FirstLookFile, string>>,
   where: { cwd: string; tmpdir: string; outDir?: string },
 ): { dir: string; note?: string } {
   const write = (dir: string, selfIgnore: boolean): void => {
     fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, FIRST_LOOK_MARKER), MARKER_TEXT);
     const ignore = path.join(dir, ".gitignore");
-    if (selfIgnore && !fs.existsSync(ignore)) fs.writeFileSync(ignore, SELF_IGNORE);
-    for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text);
+    // Never over anything already there, a link included: a .gitignore someone wrote stays theirs.
+    if (selfIgnore && entryAt(ignore) === "none") fs.writeFileSync(ignore, SELF_IGNORE);
+    for (const name of FIRST_LOOK_FILES) fs.writeFileSync(path.join(dir, name), files[name]);
   };
   if (where.outDir !== undefined) {
+    const problem = reportFolderProblem(where.outDir, true);
+    if (problem) throw new Error(problem);
     try {
       write(where.outDir, false);
     } catch (err) {
@@ -212,6 +353,9 @@ export function writeFirstRunReport(
     return { dir: where.outDir };
   }
   const here = path.join(where.cwd, FIRST_RUN_DIRNAME);
+  // Someone else's folder is never written into, and never swapped for a temporary one: the person decides with --out.
+  const problem = reportFolderProblem(here, false);
+  if (problem) throw new Error(problem);
   let first: string;
   try {
     write(here, true);
@@ -454,7 +598,7 @@ export function firstRunSummary(facts: FirstRunFacts, report: string): string[] 
     lines.push("Look at these first:");
     top.forEach((i, n) => lines.push(`  ${n + 1}. [${i.severity}] ${CHECK_RULES[i.rule].title}: ${clip(oneLine(i.evidence), 160)} (${seenOn(i, pages)})`));
   }
-  lines.push("", `${plural(pages, "page")} looked at in ${seconds(elapsedMs)}, read-only: ${countsText(result)}.`);
+  lines.push("", `${plural(pages, "page")} looked at in ${seconds(elapsedMs)} in ${result.mode} mode: ${countsText(result)}.`);
   lines.push(...notes(facts, (s) => s));
   lines.push(`Report: ${report}`, "", NEXT_LINE);
   return lines;
@@ -469,7 +613,7 @@ export function formatFirstRun(facts: FirstRunFacts): string {
   const lines = [
     "# SceneScout first look",
     "",
-    `${result.url} · ${plural(pages, "page")} looked at in ${seconds(elapsedMs)} · read-only · ${result.generatedAt}`,
+    `${result.url} · ${plural(pages, "page")} looked at in ${seconds(elapsedMs)} · ${result.mode} mode · ${result.generatedAt}`,
   ];
   lines.push("", "## Look at these first", "");
   if (top.length === 0) lines.push(`No issues found on the ${plural(pages, "page")} looked at.`);
@@ -491,7 +635,7 @@ export function formatFirstRun(facts: FirstRunFacts): string {
     "",
     `The guide: ${GUIDE_URL}`,
     "",
-    `_A first look opens pages and measures what loads. It fills and submits no form, and it runs in read-only mode: a \`PUT\`, \`PATCH\` or \`DELETE\` a page sends, or a \`POST\` that looks destructive, is refused, while a plain \`POST\` the page's own scripts send goes through (${SAFETY_URL}). It does not click through flows or compare roles; an exploratory run does that._`,
+    `_A first look opens pages and measures what loads, and fills and submits no form. ${modeSentence(result.mode)} (${SAFETY_URL}) It does not click through flows or compare roles; an exploratory run does that._`,
   );
   return lines.join("\n") + "\n";
 }

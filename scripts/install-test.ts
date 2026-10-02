@@ -58,11 +58,13 @@ import { dispatch, HAND_PARSED, looksLikeUrl, SUBCOMMANDS, type CliHandlers, typ
 import {
   downloadLine,
   FIRST_RUN_DEFAULTS,
+  FIRST_LOOK_MARKER,
   FIRST_RUN_DIRNAME,
   firstRunCheckOptions,
   firstRunDownloads,
   MAX_FIRST_RUN_MINUTES,
   parseFirstRunArgs,
+  reportFolderProblem,
   writeFirstRunReport,
 } from "../src/first-run.ts";
 import { MAX_CHECK_ROUTES } from "../src/engine/check.ts";
@@ -1342,15 +1344,39 @@ test("what reads as an address: a scheme, or a host with a dot, a port or the na
 
 test("a first run's options: the defaults, both spellings, and an out folder resolved from where it runs", () => {
   const plain = parseFirstRunArgs(["http://127.0.0.1:3000"], "/p");
-  assert.deepEqual(plain, { ok: true, options: { url: "http://127.0.0.1:3000/", maxRoutes: 20, maxMinutes: 3 } });
-  assert.deepEqual(FIRST_RUN_DEFAULTS, { maxRoutes: 20, maxMinutes: 3 });
-  const given = parseFirstRunArgs(["https://app.example.com/start", "--max-routes", "5", "--max-minutes=10", "--out", "reports/first"], "/p");
-  assert.deepEqual(given, { ok: true, options: { url: "https://app.example.com/start", maxRoutes: 5, maxMinutes: 10, outDir: "/p/reports/first" } });
+  assert.deepEqual(plain, { ok: true, options: { url: "http://127.0.0.1:3000/", maxRoutes: 20, maxMinutes: 3, mode: "observe" } });
+  assert.deepEqual(FIRST_RUN_DEFAULTS, { maxRoutes: 20, maxMinutes: 3, mode: "observe" });
+  const given = parseFirstRunArgs(
+    ["https://app.example.com/start", "--max-routes", "5", "--max-minutes=10", "--mode", "read-only", "--out", "reports/first"],
+    "/p",
+  );
+  assert.deepEqual(given, {
+    ok: true,
+    options: { url: "https://app.example.com/start", maxRoutes: 5, maxMinutes: 10, mode: "read-only", outDir: "/p/reports/first" },
+  });
   // An absolute --out is kept as given.
   assert.deepEqual(parseFirstRunArgs(["http://127.0.0.1:3000", "--out=/abs/out"], "/p"), {
     ok: true,
-    options: { url: "http://127.0.0.1:3000/", maxRoutes: 20, maxMinutes: 3, outDir: "/abs/out" },
+    options: { url: "http://127.0.0.1:3000/", maxRoutes: 20, maxMinutes: 3, mode: "observe", outDir: "/abs/out" },
   });
+});
+
+test("a first look runs in observe mode unless read-only is asked for, and in no mode that writes", () => {
+  const modeOf = (args: string[]) => {
+    const r = parseFirstRunArgs(["http://127.0.0.1:3000", ...args], "/p");
+    return r.ok ? r.options.mode : r.error;
+  };
+  assert.equal(modeOf([]), "observe");
+  assert.equal(modeOf(["--mode", "observe"]), "observe");
+  assert.equal(modeOf(["--mode=read-only"]), "read-only");
+  for (const writes of ["safe-write", "destructive", "READ-ONLY", "readonly"]) {
+    assert.equal(
+      modeOf(["--mode", writes]),
+      "--mode must be observe (the default) or read-only: a first look never writes on purpose, whatever the mode",
+      writes,
+    );
+  }
+  assert.match(String(modeOf(["--mode"])), /--mode needs a value/);
 });
 
 test("a first run's caps have bounds, and each mistake is a sentence naming the option", () => {
@@ -1380,7 +1406,7 @@ test("a first run's caps have bounds, and each mistake is a sentence naming the 
   }
   assert.match(error(["--max-routes"]), /--max-routes needs a value/);
   assert.match(error(["--out", "--max-routes", "3"]), /--out needs a value/);
-  assert.match(error(["--verbose"]), /unknown option --verbose: a first look takes only --max-routes, --max-minutes, --out/);
+  assert.match(error(["--verbose"]), /unknown option --verbose: a first look takes only --max-routes, --max-minutes, --mode, --out/);
   assert.match(error(["-v"]), /unknown option -v/);
   // An option of check is pointed at check, which has it.
   assert.match(error(["--storage-state", "s.json"]), /--storage-state is an option of scenescout check/);
@@ -1407,13 +1433,13 @@ test("a first run takes a whole http or https address, and says how to write one
   assert.match((parseFirstRunArgs([], "/p") as { error: string }).error, /give the address to look at/);
 });
 
-test("a first run is a check that is read-only, never gated, in Chromium, with its caps and nothing read from a project", () => {
-  const options = firstRunCheckOptions({ url: "http://127.0.0.1:3000/", maxRoutes: 7, maxMinutes: 2 }, "/empty-project");
+test("a first run is a check in its mode, never gated, in Chromium, with its caps and nothing read from a project", () => {
+  const options = firstRunCheckOptions({ url: "http://127.0.0.1:3000/", maxRoutes: 7, maxMinutes: 2, mode: "observe" }, "/empty-project");
   assert.deepEqual(options, {
     url: "http://127.0.0.1:3000/",
     projectDir: "/empty-project",
     failOn: "never",
-    mode: "read-only",
+    mode: "observe",
     browser: "chromium",
     maxRoutes: 7,
     timeBudgetMs: 120_000,
@@ -1424,6 +1450,7 @@ test("a first run is a check that is read-only, never gated, in Chromium, with i
     onRefusedStep: "report",
     gateRetests: "never",
   });
+  assert.equal(firstRunCheckOptions({ url: "http://127.0.0.1:3000/", maxRoutes: 7, maxMinutes: 2, mode: "read-only" }, "/p").mode, "read-only");
 });
 
 test("a first run downloads only the headless Chromium build a check launches, and only when it is missing", () => {
@@ -1440,56 +1467,221 @@ test("a first run downloads only the headless Chromium build a check launches, a
   assert.match(downloadLine(["chromium-headless-shell"]), /Downloading it once \(chromium-headless-shell, about 200 MB on disk\)/);
 });
 
-test("a first look's report goes to scenescout-report/ where it runs, its .gitignore written first, and a second look replaces only its own files", () => {
+/** Report files as a first look writes them: each begins the way a first look's own does. */
+const REPORT_FILES = {
+  "report.md": "# SceneScout first look\n\nhttp://127.0.0.1:3000/ · 1 page looked at\n",
+  "check.json": '{\n  "tool": "scenescout-check",\n  "version": "0.0.0"\n}\n',
+};
+/** Every file under `dir` with its content, so a test can say nothing in it changed. */
+const contents = (dir: string): Record<string, string> =>
+  Object.fromEntries(
+    (fs.readdirSync(dir, { recursive: true, encoding: "utf8" }) as string[])
+      .filter((f) => fs.statSync(path.join(dir, f)).isFile())
+      .sort()
+      .map((f) => [f, fs.readFileSync(path.join(dir, f), "utf8")]),
+  );
+/** Links need privileges on Windows; root ignores permission bits. The cases that need either say so where they are skipped. */
+const canLink = process.platform !== "win32";
+const permissionsHold = process.platform !== "win32" && process.getuid?.() !== 0;
+
+test("a first look's report goes to scenescout-report/ where it runs, marked as a first look's, its .gitignore written before the report", () => {
   const cwd = tmp("sc-first-cwd-");
-  const files = { "report.md": "# SceneScout first look\n", "check.json": "{}\n" };
-  const where = writeFirstRunReport(files, { cwd, tmpdir: tmp("sc-first-tmp-") });
+  const where = writeFirstRunReport(REPORT_FILES, { cwd, tmpdir: tmp("sc-first-tmp-") });
   const dir = path.join(cwd, FIRST_RUN_DIRNAME);
   assert.deepEqual(where, { dir });
-  assert.deepEqual(fs.readdirSync(dir).sort(), [".gitignore", "check.json", "report.md"]);
+  assert.deepEqual(fs.readdirSync(dir).sort(), [".gitignore", FIRST_LOOK_MARKER, "check.json", "report.md"]);
   assert.ok(fs.readFileSync(path.join(dir, ".gitignore"), "utf8").split("\n").includes("*"), "the folder ignores itself");
-  // A second look: its two files are replaced, anything else in the folder, its own .gitignore included, is left as it was.
+  // An empty folder of that name is as good as none.
+  const emptyCwd = tmp("sc-first-cwd-");
+  fs.mkdirSync(path.join(emptyCwd, FIRST_RUN_DIRNAME));
+  assert.equal(reportFolderProblem(path.join(emptyCwd, FIRST_RUN_DIRNAME), false), null);
+  writeFirstRunReport(REPORT_FILES, { cwd: emptyCwd, tmpdir: tmp("sc-first-tmp-") });
+  assert.ok(fs.existsSync(path.join(emptyCwd, FIRST_RUN_DIRNAME, FIRST_LOOK_MARKER)));
+});
+
+test("a later first look replaces only its own two files in a folder an earlier one marked", () => {
+  const cwd = tmp("sc-first-cwd-");
+  const dir = path.join(cwd, FIRST_RUN_DIRNAME);
+  writeFirstRunReport(REPORT_FILES, { cwd, tmpdir: tmp("sc-first-tmp-") });
   fs.writeFileSync(path.join(dir, "notes.txt"), "mine");
   fs.writeFileSync(path.join(dir, ".gitignore"), "# kept\n");
-  writeFirstRunReport({ "report.md": "second\n", "check.json": "{}\n" }, { cwd, tmpdir: tmp("sc-first-tmp-") });
-  assert.equal(fs.readFileSync(path.join(dir, "report.md"), "utf8"), "second\n");
+  assert.equal(reportFolderProblem(dir, false), null);
+  const second = { ...REPORT_FILES, "report.md": "# SceneScout first look\n\nthe second\n" };
+  writeFirstRunReport(second, { cwd, tmpdir: tmp("sc-first-tmp-") });
+  assert.equal(fs.readFileSync(path.join(dir, "report.md"), "utf8"), second["report.md"]);
   assert.equal(fs.readFileSync(path.join(dir, "notes.txt"), "utf8"), "mine");
   assert.equal(fs.readFileSync(path.join(dir, ".gitignore"), "utf8"), "# kept\n");
 });
 
-test("a first look that cannot write where it runs writes to a temporary folder and says why; --out is used as given or not at all", () => {
-  const files = { "report.md": "r\n", "check.json": "{}\n" };
-  // A file where the folder would go: it fails the same way on every platform, as root too.
-  const cwd = tmp("sc-first-cwd-");
-  fs.writeFileSync(path.join(cwd, FIRST_RUN_DIRNAME), "not a folder");
-  const tmpdir = tmp("sc-first-tmp-");
-  const fallback = writeFirstRunReport(files, { cwd, tmpdir });
-  assert.equal(path.dirname(fallback.dir), tmpdir);
-  assert.deepEqual(fs.readdirSync(fallback.dir).sort(), ["check.json", "report.md"]);
-  assert.match(fallback.note ?? "", /could not be written \((EEXIST|ENOTDIR)\), so the report is in a temporary folder/);
-  assert.equal(fs.readFileSync(path.join(cwd, FIRST_RUN_DIRNAME), "utf8"), "not a folder", "what was there is left alone");
-  // --out: written as given, with no .gitignore, and no other place tried.
-  const out = path.join(tmp("sc-first-out-"), "looks", "today");
-  assert.deepEqual(writeFirstRunReport(files, { cwd: tmp("sc-first-cwd-"), tmpdir, outDir: out }), { dir: out });
-  assert.deepEqual(fs.readdirSync(out).sort(), ["check.json", "report.md"]);
-  const blocked = path.join(tmp("sc-first-out-"), "taken");
-  fs.writeFileSync(blocked, "a file");
-  assert.throws(() => writeFirstRunReport(files, { cwd: tmp("sc-first-cwd-"), tmpdir, outDir: blocked }), /taken could not be written \((EEXIST|ENOTDIR)\)/);
-  // Nowhere at all: both reasons, so neither is lost.
-  const noTmp = path.join(tmp("sc-first-tmp-"), "a-file");
-  fs.writeFileSync(noTmp, "x");
-  assert.throws(
-    () => writeFirstRunReport(files, { cwd, tmpdir: noTmp }),
-    /could not be written \((EEXIST|ENOTDIR)\), and neither could a temporary folder \(ENOTDIR\)/,
-  );
-});
-
-test("a first look whose report fails partway has still written the .gitignore that keeps the folder out of commits", () => {
+test("a scenescout-report/ a first look did not mark is never written into, nor swapped for a temporary folder", () => {
+  // The same folder a first look leaves, with everything in it but the marker.
   const cwd = tmp("sc-first-cwd-");
   const dir = path.join(cwd, FIRST_RUN_DIRNAME);
-  // A folder where report.md would go: the folder and its .gitignore can be made, the report cannot.
-  fs.mkdirSync(path.join(dir, "report.md"), { recursive: true });
-  const fallback = writeFirstRunReport({ "report.md": "r\n", "check.json": "{}\n" }, { cwd, tmpdir: tmp("sc-first-tmp-") });
-  assert.notEqual(fallback.dir, dir);
-  assert.ok(fs.readFileSync(path.join(dir, ".gitignore"), "utf8").split("\n").includes("*"), "written before the files that failed");
+  writeFirstRunReport(REPORT_FILES, { cwd, tmpdir: tmp("sc-first-tmp-") });
+  fs.rmSync(path.join(dir, FIRST_LOOK_MARKER));
+  const before = contents(dir);
+  const tmpdir = tmp("sc-first-tmp-");
+  const problem = reportFolderProblem(dir, false);
+  assert.equal(
+    problem,
+    `${dir} already exists and holds files a first look did not write, so nothing in it is touched. Pass --out <folder> to put the report somewhere else.`,
+  );
+  assert.throws(() => writeFirstRunReport(REPORT_FILES, { cwd, tmpdir }), { message: problem });
+  assert.deepEqual(contents(dir), before, "nothing in it changed");
+  assert.deepEqual(fs.readdirSync(tmpdir), [], "and no temporary folder stood in for it");
+  // A hidden file counts: the folder is not empty.
+  const hidden = tmp("sc-first-cwd-");
+  fs.mkdirSync(path.join(hidden, FIRST_RUN_DIRNAME));
+  fs.writeFileSync(path.join(hidden, FIRST_RUN_DIRNAME, ".keep"), "");
+  assert.match(reportFolderProblem(path.join(hidden, FIRST_RUN_DIRNAME), false) ?? "", /holds files a first look did not write/);
+  // A file of that name is left alone too.
+  const file = tmp("sc-first-cwd-");
+  fs.writeFileSync(path.join(file, FIRST_RUN_DIRNAME), "not a folder");
+  assert.match(
+    reportFolderProblem(path.join(file, FIRST_RUN_DIRNAME), false) ?? "",
+    /already exists and is not a folder, so it is left alone\. Pass --out <folder>/,
+  );
+  assert.throws(() => writeFirstRunReport(REPORT_FILES, { cwd: file, tmpdir }), /is not a folder/);
+  assert.equal(fs.readFileSync(path.join(file, FIRST_RUN_DIRNAME), "utf8"), "not a folder");
+  // A marker that is a folder marks nothing.
+  const fake = tmp("sc-first-cwd-");
+  fs.mkdirSync(path.join(fake, FIRST_RUN_DIRNAME, FIRST_LOOK_MARKER), { recursive: true });
+  assert.match(reportFolderProblem(path.join(fake, FIRST_RUN_DIRNAME), false) ?? "", /holds files a first look did not write/);
+});
+
+test("a report.md or check.json is replaced only when a first look wrote it, whatever the folder and however the name is cased", () => {
+  // A marked folder where someone has since put their own report.md: it stays theirs.
+  const cwd = tmp("sc-first-cwd-");
+  const dir = path.join(cwd, FIRST_RUN_DIRNAME);
+  writeFirstRunReport(REPORT_FILES, { cwd, tmpdir: tmp("sc-first-tmp-") });
+  fs.writeFileSync(path.join(dir, "report.md"), "my own notes");
+  assert.equal(
+    reportFolderProblem(dir, false),
+    `${dir} holds a report.md a first look did not write, so nothing there is replaced. Pass --out <folder> to put the report somewhere else.`,
+  );
+  assert.throws(() => writeFirstRunReport(REPORT_FILES, { cwd, tmpdir: tmp("sc-first-tmp-") }), /holds a report\.md a first look did not write/);
+  assert.equal(fs.readFileSync(path.join(dir, "report.md"), "utf8"), "my own notes");
+  // --out: other files are fine, a report the first look did not write is not, marked or not.
+  const out = tmp("sc-first-out-");
+  fs.writeFileSync(path.join(out, "check.json"), '{"mine": true}');
+  assert.equal(
+    reportFolderProblem(out, true),
+    `--out ${out} holds a check.json a first look did not write, so nothing there is replaced. Name another folder with --out.`,
+  );
+  fs.writeFileSync(path.join(out, FIRST_LOOK_MARKER), "");
+  assert.match(reportFolderProblem(out, true) ?? "", /holds a check\.json a first look did not write/);
+  // Another case of the same name: on a file system that ignores case it answers to report.md, and is refused; where
+  // case matters it is another file. Either way it is never overwritten.
+  const cased = tmp("sc-first-out-");
+  fs.writeFileSync(path.join(cased, "Report.md"), "my own report");
+  const ignoresCase = fs.existsSync(path.join(cased, "report.md"));
+  const problem = reportFolderProblem(cased, true);
+  if (ignoresCase) assert.match(problem ?? "", /holds a report\.md a first look did not write/);
+  else {
+    assert.equal(problem, null);
+    writeFirstRunReport(REPORT_FILES, { cwd: tmp("sc-first-cwd-"), tmpdir: tmp("sc-first-tmp-"), outDir: cased });
+  }
+  assert.equal(fs.readFileSync(path.join(cased, "Report.md"), "utf8"), "my own report");
+  // A link where report.md goes would carry the write elsewhere: refused, and its target untouched.
+  if (canLink) {
+    const linked = tmp("sc-first-out-");
+    const target = path.join(tmp("sc-first-elsewhere-"), "precious.md");
+    fs.writeFileSync(target, "precious");
+    writeFirstRunReport(REPORT_FILES, { cwd: tmp("sc-first-cwd-"), tmpdir: tmp("sc-first-tmp-"), outDir: linked });
+    fs.rmSync(path.join(linked, "report.md"));
+    fs.symlinkSync(target, path.join(linked, "report.md"));
+    assert.match(reportFolderProblem(linked, true) ?? "", /holds a report\.md a first look did not write/);
+    assert.equal(fs.readFileSync(target, "utf8"), "precious");
+  }
+});
+
+test(
+  "a first look that cannot write its own folder writes to a temporary folder and says why",
+  { skip: !permissionsHold && process.platform !== "win32" ? "running as root, which no file permission stops" : false },
+  () => {
+    // An earlier look's folder whose marker cannot be written: the folder passes every check and the write fails.
+    const cwd = tmp("sc-first-cwd-");
+    const dir = path.join(cwd, FIRST_RUN_DIRNAME);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, FIRST_LOOK_MARKER), "");
+    fs.chmodSync(path.join(dir, FIRST_LOOK_MARKER), 0o444);
+    assert.equal(reportFolderProblem(dir, false), null);
+    const tmpdir = tmp("sc-first-tmp-");
+    const fallback = writeFirstRunReport(REPORT_FILES, { cwd, tmpdir });
+    assert.equal(path.dirname(fallback.dir), tmpdir);
+    assert.deepEqual(fs.readdirSync(fallback.dir).sort(), [FIRST_LOOK_MARKER, "check.json", "report.md"]);
+    assert.match(fallback.note ?? "", /could not be written \((EACCES|EPERM)\), so the report is in a temporary folder/);
+    // Nowhere at all: both reasons, so neither is lost.
+    const noTmp = path.join(tmp("sc-first-tmp-"), "a-file");
+    fs.writeFileSync(noTmp, "x");
+    assert.throws(
+      () => writeFirstRunReport(REPORT_FILES, { cwd, tmpdir: noTmp }),
+      /could not be written \((EACCES|EPERM)\), and neither could a temporary folder \(ENOTDIR\)/,
+    );
+    fs.chmodSync(path.join(dir, FIRST_LOOK_MARKER), 0o644);
+  },
+);
+
+test("a first look's .gitignore goes in before its report, and never over one that is already there", () => {
+  const cwd = tmp("sc-first-cwd-");
+  const dir = path.join(cwd, FIRST_RUN_DIRNAME);
+  // A write that fails on the report itself, after the marker and the .gitignore: report.md is a file nobody may write.
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, FIRST_LOOK_MARKER), "");
+  fs.writeFileSync(path.join(dir, "report.md"), REPORT_FILES["report.md"]);
+  fs.chmodSync(path.join(dir, "report.md"), 0o444);
+  if (permissionsHold || process.platform === "win32") {
+    const fallback = writeFirstRunReport(REPORT_FILES, { cwd, tmpdir: tmp("sc-first-tmp-") });
+    assert.notEqual(fallback.dir, dir);
+    assert.ok(fs.readFileSync(path.join(dir, ".gitignore"), "utf8").split("\n").includes("*"), "written before the file that failed");
+  }
+  fs.chmodSync(path.join(dir, "report.md"), 0o644);
+  // One already there, or a link in its place, is left as it is.
+  fs.writeFileSync(path.join(dir, ".gitignore"), "# theirs\n");
+  writeFirstRunReport(REPORT_FILES, { cwd, tmpdir: tmp("sc-first-tmp-") });
+  assert.equal(fs.readFileSync(path.join(dir, ".gitignore"), "utf8"), "# theirs\n");
+  if (canLink) {
+    const linkCwd = tmp("sc-first-cwd-");
+    const linkDir = path.join(linkCwd, FIRST_RUN_DIRNAME);
+    fs.mkdirSync(linkDir);
+    const away = path.join(tmp("sc-first-elsewhere-"), "never-created");
+    fs.symlinkSync(away, path.join(linkDir, ".gitignore"));
+    fs.writeFileSync(path.join(linkDir, FIRST_LOOK_MARKER), "");
+    writeFirstRunReport(REPORT_FILES, { cwd: linkCwd, tmpdir: tmp("sc-first-tmp-") });
+    assert.equal(fs.existsSync(away), false, "the dangling link's target was not created");
+  }
+});
+
+test("--out is used as given: created only when written, marked, no .gitignore, other files kept, and it must be a folder that can be written", () => {
+  const tmpdir = tmp("sc-first-tmp-");
+  // New, and nested: created when the report is written, not before.
+  const out = path.join(tmp("sc-first-out-"), "looks", "today");
+  assert.equal(reportFolderProblem(out, true), null);
+  assert.equal(fs.existsSync(path.join(out, "..")), false, "asking creates nothing");
+  assert.deepEqual(writeFirstRunReport(REPORT_FILES, { cwd: tmp("sc-first-cwd-"), tmpdir, outDir: out }), { dir: out });
+  assert.deepEqual(fs.readdirSync(out).sort(), [FIRST_LOOK_MARKER, "check.json", "report.md"]);
+  // A folder holding other files is fine, and they are kept; so is replacing a report an earlier look wrote there.
+  const shared = tmp("sc-first-out-");
+  fs.writeFileSync(path.join(shared, "notes.txt"), "mine");
+  assert.equal(reportFolderProblem(shared, true), null);
+  writeFirstRunReport(REPORT_FILES, { cwd: tmp("sc-first-cwd-"), tmpdir, outDir: shared });
+  writeFirstRunReport(REPORT_FILES, { cwd: tmp("sc-first-cwd-"), tmpdir, outDir: shared });
+  assert.equal(fs.readFileSync(path.join(shared, "notes.txt"), "utf8"), "mine");
+  // A file, a path under a file, a link and a folder nobody may write cannot be the folder.
+  const blocked = path.join(tmp("sc-first-out-"), "taken");
+  fs.writeFileSync(blocked, "a file");
+  assert.equal(reportFolderProblem(blocked, true), `--out ${blocked} is a file, not a folder.`);
+  assert.equal(reportFolderProblem(path.join(blocked, "inside"), true), `--out ${path.join(blocked, "inside")} cannot be created: ${blocked} is a file.`);
+  assert.equal(fs.readFileSync(blocked, "utf8"), "a file");
+  if (canLink) {
+    const dangling = path.join(tmp("sc-first-out-"), "gone");
+    fs.symlinkSync(path.join(tmp("sc-first-out-"), "missing"), dangling);
+    assert.equal(reportFolderProblem(dangling, true), `--out ${dangling} is a link or a special file, not a folder.`);
+  }
+  if (permissionsHold) {
+    const locked = tmp("sc-first-out-");
+    fs.chmodSync(locked, 0o555);
+    assert.equal(reportFolderProblem(path.join(locked, "report"), true), `--out ${path.join(locked, "report")} cannot be written (EACCES).`);
+    fs.chmodSync(locked, 0o755);
+  }
 });

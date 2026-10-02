@@ -52,12 +52,14 @@ import {
   firstRunSummary,
   formatFirstRun,
   GUIDE_URL,
+  modeSentence,
   pagesAffected,
   resourceOf,
   sameAddress,
   shellArg,
   stopReason,
   unreachableReason,
+  writtenByFirstLook,
   type FirstRunFacts,
 } from "../src/first-run.ts";
 import { checkRetestPlan, retestResults, wellFormedFindings, type MeasuredPage } from "../src/engine/verify.ts";
@@ -1807,11 +1809,12 @@ test("first look: the app's shared shell counts as every page", () => {
   assert.deepEqual(rules(firstLook(issues, 3)), ["tiny-target", "contrast"]);
 });
 
-/** A first run's result: never gated, read-only, a 3-minute budget not reached, with what a case needs. */
+/** A first run's result: never gated, in observe mode, a 3-minute budget not reached, with what a case needs. */
 function firstRunFacts(over: Partial<CheckResult> = {}, maxRoutes = 20): FirstRunFacts {
   return {
     result: {
       ...result([], "never"),
+      mode: "observe",
       settings: { flowWrites: "never", onRefusedStep: "report", gateRetests: "never", retest: false },
       timeBudget: { ms: 180_000, reached: false },
       ...over,
@@ -1840,7 +1843,7 @@ test("the summary opens with the three issues to look at first, then the counts,
   assert.match(lines[2], /^ {2}2\. \[medium\] Dead end: \/done: 0 controls \(on \/done\)$/);
   assert.match(lines[3], /^ {2}3\. \[medium\] Field labelled only by its placeholder: .*\(on \/new\)$/);
   assert.equal(lines[4], "");
-  assert.equal(lines[5], "3 pages looked at in 41 s, read-only: 0 high · 4 medium · 1 low.");
+  assert.equal(lines[5], "3 pages looked at in 41 s in observe mode: 0 high · 4 medium · 1 low.");
   assert.equal(lines[6], "Report: scenescout-report/report.md");
   assert.match(lines.at(-1)!, /^Next: .*npx -y scenescout install.*scenescout check.*scenescout login <url> --role <name>.*Guide: https:\/\/github\.com\//);
   assert.ok(lines.at(-1)!.endsWith(GUIDE_URL));
@@ -1860,7 +1863,7 @@ test("the summary's counts name what is never counted and what was not measured"
   ];
   const lines = firstRunSummary(firstRunFacts({ routes: [route({ auditError: "no visible styled elements to measure" })], worthALook }), "r");
   assert.ok(
-    lines.includes("1 page looked at in 41 s, read-only: 0 high · 0 medium · 0 low · 1 worth a look, never counted · design not measured on 1 page."),
+    lines.includes("1 page looked at in 41 s in observe mode: 0 high · 0 medium · 0 low · 1 worth a look, never counted · design not measured on 1 page."),
     lines.join("\n"),
   );
 });
@@ -1889,7 +1892,7 @@ test("the summary on an app with nothing to report says so, and still says where
 
 test("the time a look took is read in whole seconds, then minutes and seconds, never 60 seconds", () => {
   const took = (ms: number): string =>
-    firstRunSummary({ ...firstRunFacts({ routes: [route()] }), elapsedMs: ms }, "r")[2].replace(/^1 page looked at in (.+), read-only.*$/, "$1");
+    firstRunSummary({ ...firstRunFacts({ routes: [route()] }), elapsedMs: ms }, "r")[2].replace(/^1 page looked at in (.+) in observe mode.*$/, "$1");
   assert.equal(took(41_000), "41 s");
   assert.equal(took(200), "1 s");
   assert.equal(took(59_600), "1 min 0 s");
@@ -1967,12 +1970,34 @@ test("the report opens with what to look at first and ends with what to try next
   assert.ok(at("## Routes") < at("Not visited (past the link steps followed): `/later`"));
   assert.ok(at("## What to try next") > at("## Routes"));
   assert.ok(report.includes(`The guide: ${GUIDE_URL}`));
-  // What read-only refuses, said as the safety model says it: not "nothing is sent".
-  assert.ok(report.includes("a `PUT`, `PATCH` or `DELETE` a page sends, or a `POST` that looks destructive, is refused, while a plain `POST`"), report);
+  // The mode it ran in, and what that mode lets out of the page, said as the safety model says it.
+  assert.ok(report.includes(" · observe mode · "), report);
+  assert.ok(report.includes(modeSentence("observe")), report);
   // A look, not a gate: no verdict, no settings line, and the worth-a-look note says nothing about failing a gate.
   assert.ok(!/\*\*PASSED\*\*|\*\*FAILED\*\*|gate:|--fail-on|Settings —/.test(report), report);
   // The check's own report keeps its gate wording.
   assert.match(formatCheck({ ...result([]), worthALook }), /never fail the gate, at any --fail-on/);
+});
+
+test("the summary and the report say which mode the look ran in, and what that mode lets out of the page", () => {
+  const observe = firstRunFacts({ routes: [route()] });
+  const readOnly = firstRunFacts({ routes: [route()], mode: "read-only" });
+  assert.equal(firstRunSummary(observe, "r")[2], "1 page looked at in 41 s in observe mode: 0 high · 0 medium · 0 low.");
+  assert.equal(firstRunSummary(readOnly, "r")[2], "1 page looked at in 41 s in read-only mode: 0 high · 0 medium · 0 low.");
+  // Observe lets nothing but reads out, sign-in and token refresh apart; read-only lets a plain POST through, and says so.
+  assert.equal(
+    modeSentence("observe"),
+    "In observe mode nothing but GET, HEAD and OPTIONS requests leaves the page, apart from signing in, signing out and refreshing a token: every other request a page sends is refused.",
+  );
+  assert.match(modeSentence("read-only"), /a plain POST the page's own scripts send goes through/);
+  const observeReport = formatFirstRun(observe);
+  const readOnlyReport = formatFirstRun(readOnly);
+  assert.ok(
+    observeReport.includes(" · observe mode · ") && observeReport.includes(modeSentence("observe")) && !observeReport.includes(modeSentence("read-only")),
+  );
+  assert.ok(
+    readOnlyReport.includes(" · read-only mode · ") && readOnlyReport.includes(modeSentence("read-only")) && !readOnlyReport.includes(modeSentence("observe")),
+  );
 });
 
 test("the commands the report suggests can be pasted into a shell: an address with ? or & in it is quoted, a plain one is not", () => {
@@ -1993,6 +2018,17 @@ test("a first run that loaded no page could not reach the address; one page load
   assert.equal(unreachableReason([route({ status: null, loadError: "timeout" }), route({ path: "/b" })]), null);
   // A page that answers with an error loaded: that is a finding, not an unreachable address.
   assert.equal(unreachableReason([route({ status: 500 })]), null);
+});
+
+test("the report and the JSON a first look writes begin the way a later look recognises as its own; anything else does not", () => {
+  const facts = firstRunFacts({ issues: threeIssues(), routes: [route()] });
+  assert.equal(writtenByFirstLook("report.md", formatFirstRun(facts)), true);
+  assert.equal(writtenByFirstLook("check.json", JSON.stringify(toSummaryJson(facts.result, "1.0.0"), null, 2) + "\n"), true);
+  // The near misses: a check's report, someone's notes, a JSON object of another shape.
+  assert.equal(writtenByFirstLook("report.md", formatCheck(result([]))), false);
+  assert.equal(writtenByFirstLook("report.md", "# My report\n"), false);
+  assert.equal(writtenByFirstLook("check.json", '{\n  "mine": true\n}\n'), false);
+  assert.equal(writtenByFirstLook("check.json", JSON.stringify(toSummaryJson(facts.result, "1.0.0"))), false, "not as a first look writes it");
 });
 
 test("a check's JSON records a time budget only when it had one", () => {

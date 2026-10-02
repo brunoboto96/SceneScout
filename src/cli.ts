@@ -2,7 +2,7 @@
 /**
  * SceneScout CLI.
  *
- *   scenescout <url>                A first look with no setup: read-only, capped, never a gate
+ *   scenescout <url>                A first look with no setup: observe mode, capped, never a gate
  *   scenescout scan <projectPath>   Print project discovery results
  *   scenescout serve                Run the MCP server on stdio
  *   scenescout install              Install the skill, download the browser, register the MCP server
@@ -70,7 +70,9 @@ import {
   firstRunDownloads,
   firstRunSummary,
   formatFirstRun,
+  modeSentence,
   parseFirstRunArgs,
+  reportFolderProblem,
   unreachableReason,
   writeFirstRunReport,
   type FirstRunFacts,
@@ -104,13 +106,16 @@ function usage(exitCode = 1): never {
   console.log(`SceneScout ${packageVersion()} — AI exploratory UI testing engine (MCP)
 
 Usage:
-  scenescout <url> [options]        A first look, with no setup: visits the app's pages read-only and measures
-                                    them (no model, no API key), writes ${FIRST_RUN_DIRNAME}/ in this folder and
-                                    prints the three issues to look at first. Downloads Chromium if it is missing
-                                    and changes nothing else: no skill, no MCP registration, nothing on PATH.
+  scenescout <url> [options]        A first look, with no setup: visits the app's pages and measures them (no
+                                    model, no API key), writes ${FIRST_RUN_DIRNAME}/ in this folder and prints
+                                    the three issues to look at first. Downloads Chromium if it is missing and
+                                    changes nothing else: no skill, no MCP registration, nothing on PATH.
                                     The address comes first, its options after it.
                                     (--max-routes N (default 20), --max-minutes N (default 3): no page is started
-                                     past either; --out dir: where the report goes)
+                                     past either; --mode observe|read-only (default observe: nothing but reads
+                                     leaves the page, sign-in and token refresh apart; read-only lets a plain POST
+                                     through); --out dir: where the report goes. ${FIRST_RUN_DIRNAME}/ is written
+                                     only when it is new, empty or an earlier first look's)
                                     Exit code: 0 it looked, whatever it found; 2 could not run (the URL could
                                     not be reached, a bad argument, no browser) or could not write the report.
   scenescout scan <projectPath>     Discover framework, routes, auth states
@@ -644,19 +649,14 @@ async function firstRun(args: string[]): Promise<never> {
   const parsed = parseFirstRunArgs(args, process.cwd());
   if (!parsed.ok) return fail(parsed.error);
   const options = parsed.options;
-  // A folder named with --out is used as given or not at all: found out now, not after the look.
-  if (options.outDir !== undefined) {
-    try {
-      fs.mkdirSync(options.outDir, { recursive: true });
-      fs.accessSync(options.outDir, fs.constants.W_OK);
-    } catch (err) {
-      return fail(`--out ${options.outDir} cannot be written: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+  // Found out now, not after the look; and nothing is created until the look has something to write.
+  const folderProblem = reportFolderProblem(options.outDir ?? path.join(process.cwd(), FIRST_RUN_DIRNAME), options.outDir !== undefined);
+  if (folderProblem) return fail(folderProblem);
   console.log(`SceneScout ${packageVersion()} — a first look at ${options.url}`);
   console.log(
-    `It opens pages and measures them, submits no form and runs read-only: up to ${options.maxRoutes} pages, starting none after ${options.maxMinutes} minute(s). No model, no API key.`,
+    `It opens pages and measures them and submits no form: up to ${options.maxRoutes} pages, starting none after ${options.maxMinutes} minute(s). No model, no API key.`,
   );
+  console.log(modeSentence(options.mode));
   // Only the build a headless Chromium launch needs. Nothing else install does happens here: no skill, no registration, nothing on PATH.
   const downloads = firstRunDownloads(await presentBrowsers());
   if (downloads.length > 0) {

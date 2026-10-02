@@ -11,8 +11,8 @@ npx -y scenescout http://localhost:3000
 No model, no API key, no MCP client and no setup step:
 
 1. **The browser, if it is missing.** It downloads the headless Chromium build once (about 200 MB) and changes nothing else on the machine: no skill, no MCP server registration, no command on your PATH.
-2. **A read-only look.** It visits the start page and the pages it finds by following links, up to 20 pages and starting none after 3 minutes, and measures each one by the [check rules](Configuration-reference.md#check-rules): failed requests, uncaught errors, dead ends, controls covered or out of reach, fields with no label, contrast and more. It fills in no form and reads nothing from the folder it runs in.
-3. **A report.** It writes `scenescout-report/report.md` (and `check.json`) in the current folder, then prints a summary that opens with the three issues to look at first. On the demo app below:
+2. **A look that sends nothing.** It runs in `observe` mode, so nothing but reads leaves the page, signing in and refreshing a token apart. It visits the start page and the pages it finds by following links, up to 20 pages and starting none after 3 minutes, and measures each one by the [check rules](Configuration-reference.md#check-rules): failed requests, uncaught errors, dead ends, controls covered or out of reach, fields with no label, contrast and more. It fills in no form and reads nothing from the folder it runs in.
+3. **A report.** It writes `scenescout-report/report.md` (and `check.json`) in the current folder, then prints a summary that opens with the three issues to look at first. It writes only into a `scenescout-report/` that is new, empty or an earlier first look's; any other folder of that name is left alone, and `--out` names another. On the demo app below:
 
 ```text
 Look at these first:
@@ -20,11 +20,11 @@ Look at these first:
   2. [medium] Dead end: /reports-scheduled.html: 0 controls (on /reports-scheduled.html)
   3. [medium] Control covered by pinned chrome: button "Save notes" is COVERED by pinned chrome [order-stickybar] at this scroll position — a click aimed at it lands on that element instead (on /order.html?id=1042)
 
-12 pages looked at in 12 s, read-only: 0 high · 6 medium · 2 low · 5 worth a look, never counted.
+12 pages looked at in 12 s in observe mode: 0 high · 6 medium · 2 low · 5 worth a look, never counted.
 Report: scenescout-report/report.md
 ```
 
-The three are chosen by severity, then by how many pages show the issue, and one failure seen several ways takes one of the three places: a missing image is a failed request, a broken image and the browser's console line about it. The counts and the report list every issue, the pages it looked at and what it found but did not reach. It exits 0 whatever it finds, because it is a look and not a gate, and 2 when the address cannot be reached or the report cannot be written. `--max-routes` and `--max-minutes`, after the address, raise the limits ([its options](Configuration-reference.md#scenescout-url)).
+The three are chosen by severity, then by how many pages show the issue, and one failure seen several ways takes one of the three places: a missing image is a failed request, a broken image and the browser's console line about it. The counts and the report list every issue, the pages it looked at and what it found but did not reach. It exits 0 whatever it finds, because it is a look and not a gate, and 2 when the address cannot be reached or the report cannot be written. After the address, `--max-routes` and `--max-minutes` raise the limits, and `--mode read-only` lets through the plain POSTs a page sends as it loads ([its options](Configuration-reference.md#scenescout-url)).
 
 A first look only opens pages. Everything below is the full setup: your coding agent drives SceneScout to click, fill forms, compare roles and remember what it learned, and [`scenescout check`](Ways-to-use-it.md#scenescout-check-a-gate-in-ci) gates pull requests with the same measurements.
 

@@ -392,11 +392,12 @@ test("the defaults the reference gives for check and ci are the parsers' default
   const first = parseFirstRunArgs(["http://127.0.0.1:3000"], "/p");
   assert.ok(first.ok);
   assert.deepEqual(
-    { maxRoutes: first.options.maxRoutes, maxMinutes: first.options.maxMinutes },
-    { maxRoutes: FIRST_RUN_DEFAULTS.maxRoutes, maxMinutes: FIRST_RUN_DEFAULTS.maxMinutes },
+    { maxRoutes: first.options.maxRoutes, maxMinutes: first.options.maxMinutes, mode: first.options.mode },
+    { maxRoutes: FIRST_RUN_DEFAULTS.maxRoutes, maxMinutes: FIRST_RUN_DEFAULTS.maxMinutes, mode: FIRST_RUN_DEFAULTS.mode },
   );
   assert.equal(defaults("<url>").get("max-routes"), `\`${first.options.maxRoutes}\``, "first run --max-routes");
   assert.equal(defaults("<url>").get("max-minutes"), `\`${first.options.maxMinutes}\``, "first run --max-minutes");
+  assert.equal(defaults("<url>").get("mode"), `\`${first.options.mode}\``, "first run --mode");
 });
 
 test("the check rules table is every rule with its severity", () => {

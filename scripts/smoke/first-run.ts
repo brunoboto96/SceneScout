@@ -7,7 +7,8 @@
  * must look at the demo app, write its report in the folder it ran in, lead
  * with the three issues to look at first, and change nothing else: no skill,
  * no MCP registration, nothing installed globally, nothing of its own left in
- * the temp directory.
+ * the temp directory. It runs in observe mode unless asked for read-only, and
+ * a report folder it did not write is never written into.
  *
  * The browser is the one already on this machine (PLAYWRIGHT_BROWSERS_PATH
  * points at it), so the suite never downloads; which build a clean machine
@@ -27,7 +28,7 @@ import { browsersPath } from "../../action/check-action.mjs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { MemoryStore } from "../../dist/engine/memory.js";
 import { runCheck } from "../../dist/check-run.js";
-import { firstRunCheckOptions, GUIDE_URL } from "../../dist/first-run.js";
+import { FIRST_LOOK_MARKER, firstRunCheckOptions, GUIDE_URL } from "../../dist/first-run.js";
 import { BROWSER, check, type SmokeContext } from "./harness.ts";
 
 export const title = "first run (scenescout <url>)";
@@ -86,7 +87,7 @@ function runFirst(args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<
   });
 }
 
-export async function run(_ctx: SmokeContext): Promise<void> {
+export async function run(ctx: SmokeContext): Promise<void> {
   if (BROWSER !== "chromium") {
     // The jobs that run this suite under another browser do not install Chromium, and a first run drives nothing else.
     console.log(`  (skipped under ${BROWSER}: a first run always drives Chromium; its rules are table-tested in install-test)`);
@@ -100,6 +101,8 @@ export async function run(_ctx: SmokeContext): Promise<void> {
     await firstLookAtTheDemo(base, root);
     await timeBudget(base, root);
     await outNotWritable(base, root);
+    await someoneElsesFolder(base, root);
+    await observeByDefault(ctx, root);
   } finally {
     server.closeAllConnections();
     server.close();
@@ -135,7 +138,7 @@ async function firstLookAtTheDemo(base: string, root: string): Promise<void> {
   check(
     "...then the counts, where the report is, and one line on what to try next with the guide's address",
     // A loaded runner can pass the minute, which the summary writes as "1 min 5 s".
-    lines.some((l) => /^12 pages looked at in (?:\d+ min )?\d+ s, read-only: 0 high · 6 medium · 2 low/.test(l)) &&
+    lines.some((l) => /^12 pages looked at in (?:\d+ min )?\d+ s in observe mode: 0 high · 6 medium · 2 low/.test(l)) &&
       lines.includes(`Report: ${path.join("scenescout-report", "report.md")}`) &&
       lines.some((l) => l.startsWith("Next: ") && l.endsWith(GUIDE_URL)),
     out.stdout.slice(-1500),
@@ -152,8 +155,8 @@ async function firstLookAtTheDemo(base: string, root: string): Promise<void> {
     report.slice(0, 1200),
   );
   check(
-    "...beside its JSON summary and a .gitignore that keeps the folder out of commits",
-    JSON.stringify(tree(reportDir)) === JSON.stringify([".gitignore", "check.json", "report.md"]) &&
+    "...beside its JSON summary, a .gitignore that keeps the folder out of commits and the marker that makes it a first look's",
+    JSON.stringify(tree(reportDir)) === JSON.stringify([".gitignore", FIRST_LOOK_MARKER, "check.json", "report.md"]) &&
       fs.readFileSync(path.join(reportDir, ".gitignore"), "utf8").split("\n").includes("*"),
     JSON.stringify(tree(reportDir)),
   );
@@ -206,7 +209,7 @@ async function timeBudget(base: string, root: string): Promise<void> {
     await engine.close();
   }
   const options = (budgetMs: number, maxRoutes = 20) => ({
-    ...firstRunCheckOptions({ url: `${base}/`, maxRoutes, maxMinutes: 3 }, project),
+    ...firstRunCheckOptions({ url: `${base}/`, maxRoutes, maxMinutes: 3, mode: "observe" }, project),
     timeBudgetMs: budgetMs,
   });
   const spent = await runCheck(options(1));
@@ -229,7 +232,7 @@ async function timeBudget(base: string, root: string): Promise<void> {
   );
 }
 
-/** A --out that cannot be written ends the run before any page is opened, not after the look. */
+/** A --out that cannot be the report's folder ends the run before any page is opened, not after the look. */
 async function outNotWritable(base: string, root: string): Promise<void> {
   const machine = cleanMachine(path.join(root, "out"));
   const work = path.join(root, "out", "work");
@@ -237,20 +240,92 @@ async function outNotWritable(base: string, root: string): Promise<void> {
   fs.writeFileSync(path.join(work, "taken"), "a file where the folder would go");
   const out = await runFirst([`${base}/`, "--out", "taken"], work, machine.env);
   check(
-    "a --out that cannot be written exits 2 before the look starts",
-    out.status === 2 && /--out .*taken cannot be written/.test(out.stderr) && !out.stdout.includes("Looking at"),
+    "a --out that is a file exits 2 before the look starts",
+    out.status === 2 && /--out .*taken is a file, not a folder/.test(out.stderr) && !out.stdout.includes("Looking at"),
     `${out.status}\n${out.stdout.slice(-400)}\n${out.stderr.slice(-400)}`,
   );
 }
 
-/** An address nothing answers on: exit 2, a sentence saying so, and no report folder. */
+/**
+ * A scenescout-report/ already here that a first look did not write: exit 2
+ * before the look, pointing at --out, with everything in it as it was.
+ */
+async function someoneElsesFolder(base: string, root: string): Promise<void> {
+  const machine = cleanMachine(path.join(root, "theirs"));
+  const work = path.join(root, "theirs", "work");
+  const folder = path.join(work, "scenescout-report");
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(path.join(folder, "report.md"), "my own report");
+  const out = await runFirst([`${base}/`], work, machine.env);
+  check(
+    "a scenescout-report/ a first look did not write exits 2 before the look, suggests --out, and is left as it was",
+    out.status === 2 &&
+      /scenescout-report already exists and holds files a first look did not write, so nothing in it is touched\. Pass --out <folder>/.test(out.stderr) &&
+      !out.stdout.includes("Looking at") &&
+      JSON.stringify(tree(folder)) === JSON.stringify(["report.md"]) &&
+      fs.readFileSync(path.join(folder, "report.md"), "utf8") === "my own report",
+    `${out.status}\n${out.stdout.slice(-400)}\n${out.stderr.slice(-400)}\n${JSON.stringify(tree(folder))}`,
+  );
+}
+
+/**
+ * The write mode, against a page that records each visit with a plain POST as
+ * it loads. Observe, the default, refuses it before it leaves the page;
+ * --mode read-only lets it through. Same page, same command, the one option
+ * apart, and the server's own count of what reached it is the evidence.
+ */
+async function observeByDefault({ baseUrl, stats }: SmokeContext, root: string): Promise<void> {
+  const page = `${baseUrl}/first-look-post.html`;
+  const visits = (): number => stats.writes["POST /api/visits"] ?? 0;
+  const machine = cleanMachine(path.join(root, "modes"));
+  const observeDir = path.join(root, "modes", "observe");
+  fs.mkdirSync(observeDir);
+  const before = visits();
+  const observed = await runFirst([page], observeDir, machine.env);
+  const afterObserve = visits();
+  const observedJson = path.join(observeDir, "scenescout-report", "check.json");
+  const observedIssues = fs.existsSync(observedJson)
+    ? JSON.stringify((JSON.parse(fs.readFileSync(observedJson, "utf8")) as { issues?: unknown }).issues ?? null)
+    : "";
+  check(
+    "observe, the default: the POST a page sends as it loads never reaches the server, and the summary and its first lines say observe",
+    observed.status === 0 &&
+      afterObserve === before &&
+      /^1 page looked at in \d+ s in observe mode: /m.test(observed.stdout) &&
+      /^In observe mode nothing but GET, HEAD and OPTIONS requests leaves the page/m.test(observed.stdout),
+    `${observed.status} visits ${before} → ${afterObserve}\n${observed.stdout.slice(-600)}\n${observed.stderr.slice(-300)}`,
+  );
+  check(
+    "...and the refusal is not reported as the app's: no issue names the refused request",
+    observedIssues !== "" && !observedIssues.includes("/api/visits"),
+    observedIssues,
+  );
+  // Read-only, with an --out folder that does not exist yet: it is created once the page has answered.
+  const readOnlyDir = path.join(root, "modes", "read-only");
+  fs.mkdirSync(readOnlyDir);
+  const ro = await runFirst([page, "--mode", "read-only", "--out", "looks/ro"], readOnlyDir, machine.env);
+  const afterReadOnly = visits();
+  check(
+    "...and with --mode read-only the same POST reaches it, and the summary says read-only",
+    ro.status === 0 && afterReadOnly > afterObserve && /^1 page looked at in \d+ s in read-only mode: /m.test(ro.stdout),
+    `${ro.status} visits ${afterObserve} → ${afterReadOnly}\n${ro.stdout.slice(-600)}\n${ro.stderr.slice(-300)}`,
+  );
+  check(
+    "...its --out folder holding the report and the marker, and nothing else written beside it",
+    JSON.stringify(tree(path.join(readOnlyDir, "looks", "ro"))) === JSON.stringify([FIRST_LOOK_MARKER, "check.json", "report.md"]) &&
+      JSON.stringify(fs.readdirSync(readOnlyDir)) === JSON.stringify(["looks"]),
+    JSON.stringify(tree(readOnlyDir)),
+  );
+}
+
+/** An address nothing answers on: exit 2, a sentence saying so, no report, and the --out folder never created. */
 async function unreachable(closedBase: string, root: string): Promise<void> {
   const machine = cleanMachine(path.join(root, "down"));
   const work = path.join(root, "down", "work");
   fs.mkdirSync(work);
-  const out = await runFirst([`${closedBase}/`], work, machine.env);
+  const out = await runFirst([`${closedBase}/`, "--out", "later/report"], work, machine.env);
   check(
-    "an address that cannot be reached exits 2, says so, and writes no report",
+    "an address that cannot be reached exits 2, says so, writes no report and creates no --out folder",
     // Attach loads the start page first, so the refusal usually comes from there; a crawl that loaded nothing says it after.
     out.status === 2 &&
       /could not reach http:\/\/127\.0\.0\.1:\d+\/|Could not load http:\/\/127\.0\.0\.1:\d+ — is the app running\?/.test(out.stderr) &&
