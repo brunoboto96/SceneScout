@@ -11,6 +11,7 @@
  *   npx tsx --test scripts/dispatch-test.ts
  */
 import assert from "node:assert/strict";
+import path from "node:path";
 import { needsTask, normalizeTask, taskRefusal, TASK_MAX } from "../src/engine/task.ts";
 import test from "node:test";
 import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
@@ -407,7 +408,8 @@ function fakeBrowsers(env: NodeJS.ProcessEnv, on: InstallTarget[], download: { o
   const disk = new Set<string>();
   const exe = { chromium: "/c/chromium-1200/chrome", firefox: "/c/firefox-1500/firefox", webkit: "/c/webkit-2200/pw_run.sh" };
   const put = (t: InstallTarget): void => {
-    if (t === "chromium" || t === "chromium-headless-shell") disk.add("/c/chromium_headless_shell-1200/INSTALLATION_COMPLETE");
+    // Joined the way browserPresence joins it, so the marker matches on Windows too.
+    if (t === "chromium" || t === "chromium-headless-shell") disk.add(path.join("/c/chromium_headless_shell-1200", "INSTALLATION_COMPLETE"));
     if (t === "chromium") disk.add(exe.chromium);
     if (t === "firefox" || t === "webkit") disk.add(exe[t]);
   };
