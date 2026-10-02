@@ -82,6 +82,24 @@ import { computeGaps, coverageView, formatRouteCoverage, generateReport, replayD
 import { DEFAULT_REPORT_AUDIENCE, REPORT_AUDIENCES, type ReportAudience } from "./engine/plain.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
 import {
+  CRITERION_VERDICTS,
+  findCriterion,
+  formatCriteriaForLanes,
+  formatReading,
+  isTicketFileName,
+  judgeCriterion,
+  MAX_CRITERION_FINDINGS,
+  MAX_REASON,
+  MAX_TICKET_FILE_BYTES,
+  MAX_TICKET_TEXT,
+  MAX_TICKETS,
+  NOT_TESTED_REASONS,
+  parseTickets,
+  TICKET_FILE_EXTENSIONS,
+  type CriterionVerdictKind,
+  type NotTestedReason,
+} from "./engine/tickets.js";
+import {
   ACTION_TIMEOUT_ENV,
   DEFAULT_ACTION_TIMEOUT_MS,
   DEFAULT_CRAWL_NAV_TIMEOUT_MS,
@@ -697,7 +715,14 @@ server.registerTool(
           briefs.map((b) => b.lane),
           (s) => engines.has(s),
         );
-        return text(expiryNote + formatBriefs(briefs, { goal, mode: eng.mode, role: eng.role, roleProfile: eng.auth.kind === "role" }), session);
+        // A run given tickets tells every lane which criteria it answers.
+        const criteria = eng.memory ? formatCriteriaForLanes(eng.memory.ticketsThisRun().tickets) : "";
+        return text(
+          expiryNote +
+            formatBriefs(briefs, { goal, mode: eng.mode, role: eng.role, roleProfile: eng.auth.kind === "role" }) +
+            (criteria ? `\n${criteria}` : ""),
+          session,
+        );
       } catch (err) {
         return errorText(err);
       }
@@ -2220,6 +2245,130 @@ server.registerTool(
       return errorText(err);
     }
   }),
+);
+
+// Answering the tickets: read their acceptance criteria, then record a verdict on each.
+server.registerTool(
+  "scout_tickets",
+  {
+    description:
+      "Read the tickets or acceptance criteria the person gave this run, pasted (`text`) or from a file (`path`), and keep them so the report answers each criterion: passed, failed or not tested. " +
+      'Recognises Given/When/Then scenarios, checklists, numbered and "AC1:" criteria, and lists under an "Acceptance criteria" heading; several tickets may be given at once. ' +
+      "A ticket with no recognisable criteria is reported as such, never guessed at. Returns each criterion's id (AC1, AC2, …) to judge it by with scout_criterion. Touches no browser.",
+    inputSchema: {
+      text: z.string().max(MAX_TICKET_TEXT).optional().describe("The tickets as pasted. Pass this or `path`."),
+      path: z
+        .string()
+        .optional()
+        .describe(`A ticket file to read (${TICKET_FILE_EXTENSIONS.join(", ")}), absolute or relative to the project folder. Pass this or \`text\`.`),
+      session: sessionParam,
+    },
+  },
+  serializedPerSession("scout_tickets", async ({ text: pasted, path: file }: { text?: string; path?: string }, session) => {
+    try {
+      const eng = engineFor(session);
+      if (!eng.memory) throw new Error("Not attached — attach first, so the tickets are kept with the project.");
+      if ((pasted === undefined) === (file === undefined)) return text("Pass the tickets as `text`, or a file as `path`: one of the two.", session);
+      let body = pasted ?? "";
+      let source = "pasted text";
+      if (file !== undefined) {
+        // The file a link points at is what is read, so its name is what is checked: a "notes.md" link to a key file is refused.
+        const full = fs.realpathSync(path.isAbsolute(file) ? file : path.resolve(path.dirname(eng.memory.dir), file));
+        if (!isTicketFileName(full))
+          return text(`Not read: a ticket file is one of ${TICKET_FILE_EXTENSIONS.join(", ")}. Paste anything else as \`text\`.`, session);
+        const stat = fs.statSync(full);
+        if (!stat.isFile()) return text(`Not read: ${full} is not a file.`, session);
+        if (stat.size > MAX_TICKET_FILE_BYTES) return text(`Not read: ${full} is larger than ${MAX_TICKET_FILE_BYTES} bytes.`, session);
+        body = fs.readFileSync(full, "utf8");
+        source = path.basename(full);
+      }
+      if (!body.trim()) return text("Nothing to read: the tickets are empty.", session);
+      const parsed = parseTickets(body, source);
+      const kept = eng.memory.addTickets(parsed);
+      // Say what a bound left out, so a long backlog is never answered in part without a word.
+      const cuts = [
+        ...(body.length > MAX_TICKET_TEXT ? [`only the first ${MAX_TICKET_TEXT} characters were read`] : []),
+        ...(parsed.length >= MAX_TICKETS ? [`at most ${MAX_TICKETS} tickets are read at once`] : []),
+      ];
+      return text(formatReading(kept) + (cuts.length ? `\n\n⚠ Not everything was read: ${cuts.join("; ")}. Read the rest in another call.` : ""), session);
+    } catch (err) {
+      return errorText(err);
+    }
+  }),
+);
+
+server.registerTool(
+  "scout_criterion",
+  {
+    description:
+      "Record whether one acceptance criterion of a ticket read with scout_tickets passed, failed or was not tested, with how sure you are. " +
+      "The link from a criterion to the findings that show it is YOUR judgement, stated with a confidence — never matched on words. " +
+      'A "fail" names the findings that show it (file them with scout_finding first); "not-tested" says why in untestedBecause. Recording the same criterion again from the same session replaces your earlier verdict. Touches no browser.',
+    inputSchema: {
+      ticket: z.string().min(1).describe('The ticket\'s id as scout_tickets gave it, e.g. "PROJ-12" or "T1"'),
+      criterion: z.string().min(1).describe('The criterion\'s id, e.g. "AC2" (or just "2")'),
+      verdict: z.enum(CRITERION_VERDICTS).describe('"pass", "fail" or "not-tested"'),
+      findings: z
+        .array(z.string())
+        .max(MAX_CRITERION_FINDINGS)
+        .optional()
+        .describe("Ids of the findings that show this criterion failing (required for a fail; may be given for a pass, none for not-tested)"),
+      confidence: z.number().min(0).max(1).describe("How sure you are of this verdict and of the findings linked to it, from 0 to 1. State it honestly"),
+      reason: z.string().min(1).max(MAX_REASON).describe("What you saw, or why it could not be tried, in a sentence"),
+      untestedBecause: z
+        .enum(NOT_TESTED_REASONS)
+        .optional()
+        .describe(
+          'Only with verdict "not-tested": "no-access" (the role this run used could not reach it), "observe-blocked" (it needs a change sent and this session is in observe mode), "out-of-scope" (it is outside what this run could check, such as an email or another system)',
+        ),
+      session: sessionParam,
+    },
+  },
+  serializedPerSession(
+    "scout_criterion",
+    async (
+      args: {
+        ticket: string;
+        criterion: string;
+        verdict: CriterionVerdictKind;
+        findings?: string[];
+        confidence: number;
+        reason: string;
+        untestedBecause?: NotTestedReason;
+      },
+      session,
+    ) => {
+      try {
+        const eng = engineFor(session);
+        const memory = eng.memory;
+        if (!memory) throw new Error("Not attached.");
+        const judged = judgeCriterion(args, {
+          tickets: memory.tickets,
+          findings: memory.findings,
+          mode: eng.mode,
+          session: eng.sessionKey,
+          at: new Date().toISOString(),
+        });
+        if (!judged.ok) return text(`Not recorded: ${judged.reason}.`, session);
+        memory.addCriterionVerdict(judged.record);
+        const r = judged.record;
+        const ticket = memory.tickets.find((t) => t.id === r.ticket);
+        const criterion = ticket ? findCriterion(ticket, r.criterion) : undefined;
+        const linked = r.findings.map((id) => memory.findings.find((f) => f.id === id)).filter((f) => f !== undefined);
+        const said = r.verdict === "pass" ? "passes" : r.verdict === "fail" ? "fails" : `was not tested (${r.untestedBecause})`;
+        return text(
+          [
+            `Recorded: ${r.ticket} ${r.criterion} ${said}, confidence ${r.confidence.toFixed(2)}.`,
+            ...(criterion ? [`  ${criterion.text}`] : []),
+            ...linked.map((f) => `  linked: [${f.severity}] ${f.title} (${f.id})`),
+          ].join("\n"),
+          session,
+        );
+      } catch (err) {
+        return errorText(err);
+      }
+    },
+  ),
 );
 
 server.registerTool(
