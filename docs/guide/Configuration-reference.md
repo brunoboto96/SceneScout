@@ -208,6 +208,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | Variable | Read by | |
 |---|---|---|
 | `SCENESCOUT_BROWSER` | the server, `check`, `ci`, `login`, `doctor` | The default browser: `chromium` (default), `firefox` or `webkit` |
+| `SCENESCOUT_BROWSER_DOWNLOAD` | the server | Whether an attach downloads the browser build it needs when it is missing: `auto` (default) downloads it once, except in CI, where `CI` or `GITHUB_ACTIONS` is set; `on` downloads in CI too; `off` never downloads and names the command to run instead |
 | `SCENESCOUT_ACTION_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long one action may take, 1000 to 120000 (default 5000). An option wins over it |
 | `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
 | `SCENESCOUT_LIVE` | the server | `off` keeps the live view closed |
@@ -222,7 +223,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_EVIDENCE_MAX_KB` | the server | The most a finding's picture may take, in kilobytes, 16 to 2048 (default 200). A larger one is shrunk until it fits |
 | `SCENESCOUT_EVIDENCE_INLINE` | the server | How many pictures one session returns in its `scout_finding` results, 0 to 500 (default 10). Later ones are still kept and in the report |
 | `SCENESCOUT_RECORD` | the server | `on` keeps a frame after every action in every session, for teams that want each QA run recorded; `off` (default) does not. A `scout_attach` `record` wins over it |
-| `CI` | the server | Set by CI services. When it is set (and not `false` or `0`), finding pictures default to `file` and nothing opens in a browser by default |
+| `CI` | the server | Set by CI services. When it is set (and not empty, `false` or `0`), finding pictures default to `file`, nothing opens in a browser by default, and an attach does not download a missing browser unless `SCENESCOUT_BROWSER_DOWNLOAD=on` |
 | `GITHUB_ACTIONS` | the server | Set by GitHub Actions. `true` counts as a CI job, as `CI` does |
 | `SCENESCOUT_READ_POSTS` | the server, `check`, `ci`, a first look | POST endpoints that only read, let out in `observe`: entries such as `POST /api/search`, separated by commas or new lines. Unset: none. A `scout_attach` `readPosts` wins over it |
 | `SCENESCOUT_PROJECTS_DIR` | the server | The absolute folder that holds one folder per tested site, for an attach with no `projectPath` and a client with no workspace folder. Default: `SceneScout` in the documents folder (`~/Documents` on macOS, `%USERPROFILE%\Documents` on Windows, `XDG_DOCUMENTS_DIR` else `~/Documents` on Linux). `off` makes `projectPath` required. A `scout_attach` `projectPath` wins over it |

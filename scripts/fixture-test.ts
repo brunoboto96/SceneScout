@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { planUploadOptions, resolveDiskUpload } from "../src/engine/uploads.ts";
+import { matchOption, normaliseDateValue, type SelectOption } from "../src/engine/forms.ts";
 
 test("generatedUpload says honestly where the kind came from", () => {
   assert.match(generatedUpload(".pdf").source, /generated pdf fixture \(inferred from accept\)/);
@@ -176,4 +177,106 @@ test("a plan's upload value is a fixture kind, a path, or nothing", () => {
   assert.deepEqual(planUploadOptions("  "), {});
   assert.deepEqual(planUploadOptions("PDF"), { fixture: "pdf" });
   assert.deepEqual(planUploadOptions("fixtures/scan.pdf"), { filePath: "fixtures/scan.pdf" });
+});
+
+const severity: SelectOption[] = [
+  { value: "", label: "Choose…", disabled: false },
+  { value: "low", label: "Low — minor impact", disabled: false },
+  { value: "medium", label: "Medium — some impact", disabled: false },
+  { value: "high", label: "High", disabled: false },
+  { value: "retired", label: "Retired", disabled: true },
+];
+
+test("a select value is matched to one option before the pick: value, label, then either ignoring case, then a label it starts with", () => {
+  const picked = (v: string) => {
+    const m = matchOption(severity, v);
+    return "refused" in m ? `refused: ${m.refused}` : m.index;
+  };
+  assert.equal(picked("low"), 1, "exact value");
+  assert.equal(picked("Low — minor impact"), 1, "exact label");
+  assert.equal(picked("HIGH"), 3, "value or label ignoring case");
+  assert.equal(picked("  high "), 3, "...and surrounding space");
+  assert.equal(picked("Low"), 1, "a label it starts with");
+  assert.equal(picked("medium — SOME"), 2);
+  assert.equal(picked(""), 0, "the empty placeholder by its value");
+  // An exact value beats a label that merely starts with it.
+  const shadow: SelectOption[] = [
+    { value: "a", label: "Alpha", disabled: false },
+    { value: "Al", label: "Other", disabled: false },
+  ];
+  assert.equal((matchOption(shadow, "Al") as { index: number }).index, 1);
+});
+
+test("a select value matching no option, several, or only a disabled one is refused with the options listed", () => {
+  const none = matchOption(severity, "Critical");
+  assert.ok("refused" in none);
+  assert.equal(
+    none.refused,
+    'no option matches "Critical"; options: "" ("Choose…"), low ("Low — minor impact"), medium ("Medium — some impact"), high ("High"), retired ("Retired") [disabled].',
+  );
+  const two = matchOption(
+    [
+      { value: "1", label: "Pat Lee", disabled: false },
+      { value: "2", label: "Pat Long", disabled: false },
+    ],
+    "Pat",
+  );
+  assert.ok("refused" in two && /^"Pat" matches more than one option: 1 \("Pat Lee"\), 2 \("Pat Long"\)/.test(two.refused), JSON.stringify(two));
+  const off = matchOption(severity, "retired");
+  assert.ok("refused" in off && /disabled/.test(off.refused), JSON.stringify(off));
+  const many = matchOption(
+    Array.from({ length: 20 }, (_, i) => ({ value: `v${i}`, label: `Label ${i}`, disabled: false })),
+    "zzz",
+  );
+  assert.ok("refused" in many && many.refused.endsWith(", … +5 more."), JSON.stringify(many));
+  // A long label is matched whole, and shortened only where a refusal lists it.
+  const longLabel = `Escalate to ${"the regional review board ".repeat(4)}`.trim();
+  const long: SelectOption[] = [{ value: "esc", label: longLabel, disabled: false }];
+  assert.equal((matchOption(long, longLabel) as { index: number }).index, 0);
+  const listed = matchOption(long, "nope");
+  assert.ok("refused" in listed && listed.refused.includes('esc ("Escalate to the regional') && listed.refused.includes('…")'), JSON.stringify(listed));
+});
+
+test("a date or time value is put in the field's format, or refused naming that format", () => {
+  const typed = (type: string, v: string) => {
+    const r = normaliseDateValue(type, v);
+    return "refused" in r ? "refused" : r.value;
+  };
+  // A plain date into a date-and-time field: the near miss that fails as "Malformed value".
+  assert.equal(typed("datetime-local", "2026-09-20"), "2026-09-20T00:00");
+  assert.equal(typed("datetime-local", "2026-09-20 10:00"), "2026-09-20T10:00");
+  assert.equal(typed("datetime-local", "2026-09-20T10:00"), "2026-09-20T10:00");
+  assert.equal(typed("datetime-local", "2026-9-2T7:05:09"), "2026-09-02T07:05:09");
+  assert.equal(typed("date", "2026-09-20"), "2026-09-20");
+  assert.equal(typed("date", "2026-09-20T10:00"), "2026-09-20");
+  assert.equal(typed("month", "2026-09-20"), "2026-09");
+  assert.equal(typed("month", "2026-9"), "2026-09");
+  assert.equal(typed("week", "2026-w5"), "2026-W05");
+  assert.equal(typed("week", "2026-09-20"), "2026-W38");
+  assert.equal(typed("week", "2027-01-01"), "2026-W53", "an ISO week can belong to the year before");
+  assert.equal(typed("time", "9:30"), "09:30");
+  assert.equal(typed("time", "14:30:05.250"), "14:30:05.250");
+  for (const [type, v] of [
+    ["date", "20/09/2026"],
+    ["date", "2026-02-30"],
+    ["datetime-local", "tomorrow"],
+    ["datetime-local", "2026-09-20T25:00"],
+    ["time", "2pm"],
+    ["month", "2026-13"],
+    ["week", "2026-W60"],
+  ]) {
+    assert.equal(typed(type, v), "refused", `${type} ${v}`);
+  }
+  const refusal = normaliseDateValue("datetime-local", "20/09/2026");
+  assert.ok("refused" in refusal && refusal.refused.includes("YYYY-MM-DDTHH:MM (e.g. 2026-09-20T10:00)"), JSON.stringify(refusal));
+  // What was changed is said; a value already in form is not remarked on.
+  assert.deepEqual(normaliseDateValue("datetime-local", "2026-09-20"), {
+    value: "2026-09-20T00:00",
+    note: "entered as 2026-09-20T00:00, the form a datetime-local field takes",
+  });
+  assert.deepEqual(normaliseDateValue("date", "2026-09-20"), { value: "2026-09-20" });
+  // An empty value clears the field, and other types pass through.
+  assert.deepEqual(normaliseDateValue("date", ""), { value: "" });
+  assert.deepEqual(normaliseDateValue("text", "2026-09-20"), { value: "2026-09-20" });
+  assert.deepEqual(normaliseDateValue("number", "12"), { value: "12" });
 });

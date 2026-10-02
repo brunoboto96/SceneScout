@@ -497,6 +497,26 @@ export class OracleMonitor {
   }
 }
 
+/** What a plan does at a new oracle violation: stop there (the default), or note it and go on. */
+export type PlanViolationRule = "stop" | "continue";
+
+/**
+ * Violations a plan run with onViolation "continue" goes on past: an error
+ * status, and the console's echo of one. They say a step's page answered
+ * badly, which in a sweep of independent steps (tabs, filters, pages) is a
+ * result to list, not a reason the next step cannot run. Anything else (an
+ * uncaught exception, a failed request, typed markup coming back, a page
+ * contradicting the server, a token posted to any origin) stops a plan either way.
+ */
+export const CONTINUABLE_KINDS: ReadonlySet<OracleViolation["kind"]> = new Set(["http_error", "console_error"]);
+
+/** Whether these violations, drained after one plan step, end the plan. Repeats of already-reported violations never do. */
+export function planStopsAt(violations: readonly Pick<OracleViolation, "kind" | "repeat">[], rule: PlanViolationRule): boolean {
+  const fresh = violations.filter((v) => !v.repeat);
+  if (fresh.length === 0) return false;
+  return rule === "stop" || fresh.some((v) => !CONTINUABLE_KINDS.has(v.kind));
+}
+
 export function formatViolations(violations: OracleViolation[]): string {
   if (violations.length === 0) return "";
   const fresh = violations.filter((v) => !v.repeat);

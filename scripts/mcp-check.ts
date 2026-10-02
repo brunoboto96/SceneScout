@@ -772,12 +772,16 @@ async function openCheck(): Promise<void> {
   const opened = path.join(bin, "opened.txt");
   const opener = path.join(bin, process.platform === "darwin" ? "open" : "xdg-open");
   fs.writeFileSync(opener, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${opened}'\n`, { mode: 0o755 });
+  // A local desktop session, built explicitly so the check means the same on a CI runner: no CI or
+  // GITHUB_ACTIONS, no SSH, a display on Linux, and the stand-in opener first on PATH.
   const base = Object.fromEntries(
     Object.entries(process.env).filter(
-      (e): e is [string, string] => typeof e[1] === "string" && !["CI", "SSH_CONNECTION", "SSH_TTY", "SCENESCOUT_OPEN"].includes(e[0]),
+      (e): e is [string, string] =>
+        typeof e[1] === "string" && !["CI", "GITHUB_ACTIONS", "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT", "SCENESCOUT_OPEN"].includes(e[0]),
     ),
   );
-  const env = { ...base, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`, DISPLAY: ":99" };
+  const env: Record<string, string> = { ...base, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` };
+  if (process.platform !== "darwin") env.DISPLAY = ":99";
   const read = (): string[] => (fs.existsSync(opened) ? fs.readFileSync(opened, "utf8").trim().split("\n") : []);
   const lines = async (expected: number): Promise<string[]> => {
     // The opener runs detached and is not waited for.

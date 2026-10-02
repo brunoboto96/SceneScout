@@ -29,6 +29,7 @@
  *   a loopback-only live view shows what each one is looking at
  *   (`scenescout watch <project>`, engine/live.ts, ADR 7).
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -39,6 +40,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { BrowserEngine } from "./engine/browser.js";
+import { readyBrowser, type LaunchNeed } from "./engine/launch.js";
+import { defaultEngine } from "./browsers.js";
+import { downloadBrowsers, presentBrowsers } from "./installer.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
 import { describeMerge, FINDING_CATEGORIES, isWorthALook, MemoryStore, mergeableCategories, redactSecrets, type FiledFinding } from "./engine/memory.js";
 import { DEDUP_ENV, DEDUP_MODES, redactKeys, secretValues, type DedupMode } from "./engine/ci.js";
@@ -581,14 +585,23 @@ function serializedPerSession<A>(
   };
 }
 
+/** What the SDK hands a tool handler beside its arguments that the server uses: the client's progress token, and a way to notify it. */
+type RequestExtra = {
+  _meta?: { progressToken?: string | number };
+  sendNotification: (n: { method: "notifications/progress"; params: { progressToken: string | number; progress: number; message?: string } }) => Promise<void>;
+};
+const requestExtra = new AsyncLocalStorage<RequestExtra | undefined>();
+function asRequestExtra(value: unknown): RequestExtra | undefined {
+  return value && typeof (value as RequestExtra).sendNotification === "function" ? (value as RequestExtra) : undefined;
+}
+
 /** Control-plane tools (scout_scan/scout_session/scout_close-all) don't target one browser — their own tiny chain keeps them off session queues without racing each other. */
 let controlChain: Promise<unknown> = Promise.resolve();
 function serializedControl<A extends unknown[]>(fn: (...args: A) => Promise<ToolResult>): (...args: A) => Promise<ToolResult> {
   return (...args: A) => {
-    const run = controlChain.then(
-      () => fn(...args),
-      () => fn(...args),
-    );
+    // The SDK passes the request's extra (progress token, notifications) after the arguments; it is kept for the call, as requestExtra.
+    const call = (): Promise<ToolResult> => requestExtra.run(asRequestExtra(args[1]), () => fn(...args));
+    const run = controlChain.then(call, call);
     controlChain = run.catch(() => {});
     return run;
   };
@@ -900,7 +913,7 @@ server.registerTool(
         .enum(["chromium", "firefox", "webkit"])
         .optional()
         .describe(
-          "Browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else chromium. firefox and webkit must be downloaded first (scenescout install --browser-only --browsers firefox). Use them for a cross-browser pass; stay on chromium otherwise.",
+          "Browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else chromium. A build that is not on disk is downloaded on this attach, once, except in CI or with SCENESCOUT_BROWSER_DOWNLOAD=off, where the attach names the command to run. Use firefox or webkit for a cross-browser pass; stay on chromium otherwise.",
         ),
       viewportWidth: z.number().int().min(320).max(3840).optional().describe("Viewport width (default 1280); use e.g. 390 for a mobile pass"),
       viewportHeight: z.number().int().min(480).max(2400).optional().describe("Viewport height (default 900)"),
@@ -1124,6 +1137,8 @@ server.registerTool(
         const recording = recordChoice(record, process.env);
         const pictures = evidenceSettings(evidence, process.env);
         const viewport = viewportWidth && viewportHeight ? { width: viewportWidth, height: viewportHeight } : undefined;
+        // The first attach on a machine without the browser downloads it here, once, rather than failing with a command to run.
+        const browserNote = await readyBrowserFor({ engine: browser ?? defaultEngine(process.env), headed: headed ?? false }, requestExtra.getStore());
         const out = await eng.attach({
           url,
           projectDir: projectPath,
@@ -1180,7 +1195,8 @@ server.registerTool(
             ? `\n📷 FINDING PICTURES: ${pictures.mode} (${pictures.source}): each scout_finding keeps a picture of what it names under ${path.join(eng.memory.dir, "recordings")}/ for report.html${pictures.mode === "inline" ? `, and returns the first ${pictures.inlineMax} in its result` : ""}.`
             : "";
         return text(
-          out +
+          browserNote +
+            out +
             (folder.note ? `\n\n${folder.note}` : "") +
             conflictNote +
             recordNote +
@@ -1198,6 +1214,44 @@ server.registerTool(
     },
   ),
 );
+
+/**
+ * readyBrowser with the real download, returning the line that opens the
+ * attach's answer when it downloaded (empty when it did not). Each line goes
+ * to stderr and, when the client asked for progress, as a progress
+ * notification; the last one is repeated while the download runs, so a client
+ * that extends its timeout on progress keeps waiting.
+ */
+async function readyBrowserFor(need: LaunchNeed, extra?: RequestExtra): Promise<string> {
+  const token = extra?._meta?.progressToken;
+  let progress = 0;
+  let last = "";
+  const notify = (message: string): void => {
+    if (token === undefined || !extra) return;
+    extra.sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: ++progress, message } }).catch((err: unknown) => {
+      logLine(`progress notification failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+  const say = (line: string): void => {
+    last = line;
+    logLine(line);
+    notify(line);
+  };
+  const note = await readyBrowser(need, {
+    env: process.env,
+    present: presentBrowsers,
+    say,
+    download: async (targets) => {
+      const heartbeat = setInterval(() => notify(last), 10_000);
+      try {
+        return await downloadBrowsers(targets, "stderr");
+      } finally {
+        clearInterval(heartbeat);
+      }
+    },
+  });
+  return note ? `${note}\n\n` : "";
+}
 
 /**
  * The folder an attach keeps its files in (engine/project-folder.ts): the
@@ -1576,7 +1630,7 @@ server.registerTool(
   "scout_run_plan",
   {
     description:
-      "Execute up to 20 actions in ONE call — use for mechanical sequences (fill a form, walk a wizard) so each step doesn't cost a round-trip. Targets resolve at execution time by semantic locator: 'testid=…', 'text=…', 'label=…' or 'role=button[name=Save]' (never snapshot refs). The same steps, saved to .scenescout/flows/<name>.json with expect-text / expect-url / expect-request steps added, are replayed by `scenescout check` on every pull request. An `upload` step attaches a file as scout_upload does (target required — the file input or the control that opens its chooser; value = a fixture kind or a project-relative path). The plan ABORTS at the first NEW oracle violation, policy refusal, or failed step, returning a transcript of how far it got; repeats of already-reported violations do not abort (they stay logged for the report).",
+      "Execute up to 20 actions in ONE call — use for mechanical sequences (fill a form, walk a wizard) so each step doesn't cost a round-trip. Targets resolve at execution time by semantic locator: 'testid=…', 'text=…', 'label=…' or 'role=button[name=Save]' (never snapshot refs). The same steps, saved to .scenescout/flows/<name>.json with expect-text / expect-url / expect-request steps added, are replayed by `scenescout check` on every pull request. An `upload` step attaches a file as scout_upload does (target required — the file input or the control that opens its chooser; value = a fixture kind or a project-relative path). The plan ABORTS at the first NEW oracle violation, policy refusal, or failed step, returning a transcript of how far it got; repeats of already-reported violations do not abort (they stay logged for the report). For a sweep of independent steps (tabs, filters, pages) pass onViolation \"continue\": a new error status or its console echo is listed on its step's line and the plan goes on; a failed step, a policy refusal or any other violation still stops it. A select step whose value names no option fails at once, listing the options.",
     inputSchema: {
       steps: z
         .array(
@@ -1600,6 +1654,12 @@ server.registerTool(
         )
         .min(1)
         .max(20),
+      onViolation: z
+        .enum(["stop", "continue"])
+        .default("stop")
+        .describe(
+          "stop (default): end the plan at the first new oracle violation, right for a form flow whose steps depend on each other. continue: list a new http_error or console_error on its step's line and run the next step, for a sweep of independent steps",
+        ),
       task: taskParam,
       objective: legacyObjectiveParam,
       session: sessionParam,
@@ -1607,9 +1667,9 @@ server.registerTool(
   },
   serializedPerSession(
     "scout_run_plan",
-    async ({ steps }: { steps: Parameters<BrowserEngine["runPlan"]>[0] }, session) => {
+    async ({ steps, onViolation }: { steps: Parameters<BrowserEngine["runPlan"]>[0]; onViolation?: "stop" | "continue" }, session) => {
       try {
-        return text(await engineFor(session).runPlan(steps), session);
+        return text(await engineFor(session).runPlan(steps, onViolation ?? "stop"), session);
       } catch (err) {
         return errorText(err);
       }
@@ -1744,10 +1804,11 @@ server.registerTool(
 server.registerTool(
   "scout_select",
   {
-    description: "Select an option in a <select> by ref.",
+    description:
+      "Select an option in a <select> by ref. The value is matched against the options before anything is picked: an exact value, an exact label, either ignoring case, then a label it starts with. A value matching no option, or several, is refused at once with the options listed.",
     inputSchema: {
       ref: z.string(),
-      value: z.string().describe("Option value or label"),
+      value: z.string().describe("Option value or label (or the start of a label, when only one option has it)"),
       task: taskParam,
       objective: legacyObjectiveParam,
       session: sessionParam,
