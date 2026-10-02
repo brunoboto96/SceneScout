@@ -176,6 +176,8 @@ export const LIVE_PAGE = `<!doctype html>
   #report .doc details.evidence { margin: 10px 0 16px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
   #report .doc details.evidence[open] summary { margin-bottom: 10px; }
   #report .doc details.evidence figure { margin: 0 0 12px; }
+  #report .doc figure.picture { margin: 8px 0 14px; max-width: 640px; }
+  #report .doc figure.picture img { display: block; width: auto; max-width: 100%; max-height: 360px; border: 1px solid var(--line); border-radius: 6px; }
   #report .doc details.evidence .shots { display: flex; flex-wrap: wrap; gap: 14px; }
   #report .doc details.evidence figure { flex: 1 1 320px; max-width: 440px; }
   #report .doc details.evidence img { display: block; width: 100%; max-height: 280px; object-fit: cover; object-position: top;
@@ -566,6 +568,20 @@ export const LIVE_PAGE = `<!doctype html>
         var h = el('h' + Math.min(6, m[1].length + 1));
         inline(h, m[2]);
         container.appendChild(h);
+        i += 1;
+      } else if ((m = /^!\\[([^\\]]*)\\]\\((recordings\\/[A-Za-z0-9._\\/-]+)\\)$/.exec(line)) && m[2].indexOf('..') < 0) {
+        // A finding's picture from the run's recording, served by the frame
+        // route. Any other picture is a file this view cannot serve.
+        flush();
+        var fig = el('figure', 'picture');
+        var pic = el('img');
+        pic.loading = 'lazy';
+        pic.src = 'record/' + m[2];
+        pic.alt = m[1];
+        fig.appendChild(pic);
+        container.appendChild(fig);
+        i += 1;
+      } else if (/^!\\[[^\\]]*\\]\\([^)]*\\)$/.test(line)) {
         i += 1;
       } else if ((m = /^<details><summary>(.*)<\\/summary>$/.exec(line))) {
         flush();
