@@ -21,7 +21,8 @@ import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { profilePath } from "../../dist/engine/profiles.js";
 import { check, eventually, FIXED_OTP_CODE, OTP_SESSION_COOKIE, SCRIPTED_USER, type SmokeContext } from "./harness.ts";
-import { filesUnder, leaked, login } from "./scripted-login.ts";
+import { dirtyFiles, filesUnder, login } from "./scripted-login.ts";
+import { leaked } from "./secrets.ts";
 
 export const title = "passwordless scripted login";
 
@@ -49,8 +50,8 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     check("...and saved the role's profile", fs.existsSync(profilePath(project, "member")), ok.out);
     check("no code or username reaches stdout or stderr", leaked(ok.out + ok.err, secrets).length === 0, leaked(ok.out + ok.err, secrets).join(", "));
     const files = filesUnder(path.join(project, ".scenescout"));
-    const dirty = files.filter((f) => leaked(f.text, secrets).length > 0).map((f) => f.file);
-    check("no code or username is in any file under .scenescout/, the profile included", files.length > 0 && dirty.length === 0, dirty.join(", "));
+    const dirty = dirtyFiles(path.join(project, ".scenescout"), secrets);
+    check("no code or username is in any file under .scenescout/, the profile included", files.length > 0 && dirty.length === 0, dirty.join("\n"));
 
     if (fs.existsSync(profilePath(project, "member"))) {
       const saved = JSON.parse(fs.readFileSync(profilePath(project, "member"), "utf8")) as {
@@ -140,9 +141,8 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     check("...and quoting neither", leaked(both.out + both.err, [...secrets, SCRIPTED_USER.totpSecret]).length === 0, both.err);
 
     // ---- Every run done, the ones whose page echoed the code included ------------
-    const allFiles = filesUnder(path.join(project, ".scenescout"));
-    const anyDirty = allFiles.filter((f) => leaked(f.text, secrets).length > 0).map((f) => f.file);
-    check("after every run, no file under .scenescout/ holds a code or the username", anyDirty.length === 0, anyDirty.join(", "));
+    const anyDirty = dirtyFiles(path.join(project, ".scenescout"), secrets);
+    check("after every run, no file under .scenescout/ holds a code or the username", anyDirty.length === 0, anyDirty.join("\n"));
   } finally {
     await engine?.close().catch(() => {});
     fs.rmSync(project, { recursive: true, force: true });
