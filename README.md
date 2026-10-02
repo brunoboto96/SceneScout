@@ -203,7 +203,9 @@ In Claude Code the skill gives you a command with flags for the same thing:
 
 The agent scans the project (if there is one), attaches read-only, explores, and writes findings to `.scenescout/report.md`. That's it.
 
-**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (who to explore as: a login saved with `scenescout login`, a storage state found by the scan, or a path to a Playwright storage-state JSON) · `--observe` / `--safe-write` / `--allow-destructive`.
+**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (who to explore as: a login saved with `scenescout login`, a storage state found by the scan, or a path to a Playwright storage-state JSON) · `--focus <text>` (a ticket or a sentence to check) · `--observe` / `--read-only` / `--safe-write` / `--allow-destructive`.
+
+**No flags at all** (`/scenescout` on its own) and the agent asks four plain questions instead: the address, whether and how you sign in, what to check (tickets or a description), and whether the site holds real data. Real data, or not being sure, means nothing but `GET` requests leave the page; you are never asked to pick a mode. Any flag skips the questions. See [Plain questions instead of flags](docs/guide/Ways-to-use-it.md#plain-questions-instead-of-flags).
 
 ### 🔑 Signing in as a role
 
@@ -270,7 +272,9 @@ Then `scout_report` writes two files side by side in `.scenescout/`:
 page. It opens from the file system with nothing running, needs no network, and
 holds:
 
-- **The report**, rendered from the same Markdown.
+- **The report**, rendered from the same Markdown: the plain-language view
+  first (each problem's steps, what was expected, what happened and its
+  picture), with each problem's technical detail one click away.
 - **The screenshots around each finding**, in an accordion under it, from the
   session that filed it.
 - **Every session's trail**, in the blocks its tasks made, each step with the

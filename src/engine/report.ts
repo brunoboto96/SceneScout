@@ -20,6 +20,7 @@ import { buildReplayHtml, evidenceFor, type FindingEvidence, type ReplaySession 
 import { calibrate, formatCalibration } from "./calibration.js";
 import { formatPace, measurePace } from "./pace.js";
 import { formatNeverSubmittedEmpty } from "./forms.js";
+import { DEFAULT_REPORT_AUDIENCE, formatPlainSection, type ReportAudience } from "./plain.js";
 import { COLLECTOR_CAP } from "./collector.js";
 
 function playwrightSkeleton(f: Finding): string {
@@ -269,6 +270,12 @@ export interface ReportExtras {
    * between runs of the same machine, and a sample carrying it can never match.
    */
   pace?: boolean;
+  /**
+   * Which parts the document carries: "both" (the default) the plain-language
+   * view first and the technical report after it, "qa" the plain view alone,
+   * "dev" the technical report alone, as it was before the plain view existed.
+   */
+  report?: ReportAudience;
 }
 
 /**
@@ -663,6 +670,36 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
   return gaps;
 }
 
+/** The last frame on screen before each finding was filed, by id: its picture on a recorded run. */
+function lastFrames(memory: MemoryStore): Map<string, string> {
+  return new Map(findingEvidence(memory, replaySessions(memory)).map((e) => [e.id, e.frames[e.frames.length - 1].frame]));
+}
+
+/**
+ * The document for an audience. `technical` is the report's lines, its title
+ * and date before the first section. The plain section is built only when it
+ * is printed: "both" puts it between the date and the technical report, which
+ * gets a heading of its own, and "qa" prints it alone.
+ */
+export function withAudience(technical: readonly string[], audience: ReportAudience, plain: () => string[]): string {
+  if (audience === "dev") return technical.join("\n");
+  // The title and date are everything before the first section.
+  const first = technical.findIndex((l) => l.startsWith("## "));
+  const split = first < 0 ? technical.length : first;
+  const head = technical.slice(0, split);
+  const body = technical.slice(split);
+  if (audience === "qa") return [...head, ...plain()].join("\n");
+  return [
+    ...head,
+    ...plain(),
+    `## Technical detail`,
+    ``,
+    `Everything below is for developers: requests, oracles, routes and ids, the gap ledger and a test skeleton for each finding.`,
+    ``,
+    ...body,
+  ].join("\n");
+}
+
 /**
  * The report as the run stands now. `write` is what scout_report does at the
  * end; the live view renders the same document on request without touching
@@ -974,7 +1011,18 @@ export function generateReport(
   // judged for the number to mean anything; formatCalibration decides both.
   lines.push(...formatCalibration(calibrate(memory.laneDecisions, memory.findings)));
 
-  const markdown = lines.join("\n");
+  const markdown = withAudience(lines, extras?.report ?? DEFAULT_REPORT_AUDIENCE, () =>
+    formatPlainSection({
+      current,
+      historical: historical.length,
+      worthALook: worthALook.length,
+      violations: oracleLog.filter((v) => !v.embed),
+      routes: extras && extras.routesTotal > 0 ? { visited: extras.routesVisited, total: extras.routesTotal } : undefined,
+      gaps,
+      lastFrames: lastFrames(memory),
+      audience: extras?.report ?? DEFAULT_REPORT_AUDIENCE,
+    }),
+  );
   const outPath = path.join(memory.dir, "report.md");
   const htmlPath = path.join(memory.dir, "report.html");
   let htmlWritten = false;

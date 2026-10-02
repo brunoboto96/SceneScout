@@ -76,6 +76,7 @@ import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
 import { loginCommand } from "./engine/profiles.js";
 import { computeGaps, coverageView, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
+import { DEFAULT_REPORT_AUDIENCE, REPORT_AUDIENCES, type ReportAudience } from "./engine/plain.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
 import {
   ACTION_TIMEOUT_ENV,
@@ -1846,12 +1847,21 @@ server.registerTool(
         .describe(
           "How much of the history to print. 'index' lists findings from earlier runs, and resolved ones, as a row each: id, severity, age, title. 'full' prints every one in full as before — on one project that was 1.75 MB against 113 KB, nearly half of it findings already fixed. Use 'full' when handing the document to someone who has no access to the memory.",
         ),
+      report: z
+        .enum(REPORT_AUDIENCES)
+        .default(DEFAULT_REPORT_AUDIENCE)
+        .describe(
+          "Which parts the report carries. 'both' (default): a plain-language section first — a short summary, then each problem with numbered steps, what was expected, what happened, its picture and its impact (blocks users, annoying, cosmetic), each with its technical detail folded beneath — followed by the technical report. 'qa': the plain section alone, for a tester or anyone not technical. 'dev': the technical report alone, as before the plain section existed. It applies to the files this call writes; the live view always shows both.",
+        ),
       session: sessionParam,
     },
   },
   serializedPerSession(
     "scout_report",
-    async ({ force, level, history }: { force?: boolean; level?: "minimal" | "medium" | "extensive"; history?: "index" | "full" }, session) => {
+    async (
+      { force, level, history, report }: { force?: boolean; level?: "minimal" | "medium" | "extensive"; history?: "index" | "full"; report?: ReportAudience },
+      session,
+    ) => {
       try {
         const eng = engineFor(session);
         if (!eng.memory) throw new Error("Not attached.");
@@ -1915,6 +1925,7 @@ server.registerTool(
         }
         const { path: p, summary } = generateReport(eng.memory, eng.oracleLog.all, {
           history,
+          report,
           routesVisited: all.length - unvisited.length,
           routesTotal: all.length,
           designAudits: auditsThisRun,

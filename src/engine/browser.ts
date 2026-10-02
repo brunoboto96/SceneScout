@@ -109,6 +109,7 @@ import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { describePace, InFlightRequests, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
 import { crawledRoute, crawlLine, mainStateFlag } from "./crawl.js";
 import {
+  authToRemember,
   BODY_FETCH_MAX,
   buildRequestScript,
   formatPageRequests,
@@ -119,6 +120,7 @@ import {
   resolveMethod,
   resolveRequestUrl,
   resolveTarget,
+  staleCredentialNote,
   toReplayResult,
   wantsView,
   type BodyView,
@@ -241,8 +243,10 @@ import {
   lockPathFor,
   planRefresh,
   profileAfterRotation,
+  profileLoadWhileHeld,
   readLearnedEndpoints,
   REFRESH_BROKER_ENV,
+  refreshNotice,
   refreshTokenSlots,
   rotatedCookies,
   rotatedFromResponse,
@@ -251,9 +255,12 @@ import {
   swapRequest,
   swapToken,
   withLearnedEndpoint,
+  writeBackStorageFrom,
   writeLearnedEndpoints,
   type BrokerDecision,
   type HeldLock,
+  type ProfileLoad,
+  type RefreshEvent,
   type TokenSlot,
 } from "./refresh.js";
 
@@ -779,6 +786,8 @@ export class BrowserEngine {
   private readonly refreshTasks = new Set<Promise<void>>();
   /** What the broker did this session, for the lane report: counts only. */
   private refreshCounts = { refreshed: 0, swapped: 0, failed: 0, learned: 0 };
+  /** What the broker did since the last action result, reported (and cleared) by drainRefresh. */
+  private refreshEvents: RefreshEvent[] = [];
 
   /** UI-label blocking applies only in read-only mode (safe-write enforces at the network layer instead). */
   get readOnly(): boolean {
@@ -907,16 +916,38 @@ export class BrowserEngine {
   private framesFailed = 0;
 
   /**
-   * The Authorization header the app itself last sent, replayed by
-   * scout_request so a call with the UI bypassed carries the same credential
-   * as a click. Nothing here parses it: whatever scheme the app uses is
-   * whatever gets replayed.
+   * The Authorization header the app itself last sent to its own origin, on
+   * any request (authToRemember says which), replayed by scout_request so a
+   * call with the UI bypassed carries the same credential as a click. Nothing
+   * here parses it: whatever scheme the app uses is whatever gets replayed.
    */
   private lastAuthHeader: string | null = null;
+  /** The status of the page's latest authorised script request to its own origin, for staleCredentialNote. */
+  private lastAuthAnswer: { status: number } | null = null;
 
-  private rememberAuthHeader(headers: Record<string, string>): void {
-    const value = headers["authorization"] ?? headers["Authorization"];
-    if (value && value.trim()) this.lastAuthHeader = value;
+  private rememberAuthHeader(req: import("playwright").Request): void {
+    const value = this.authOf(req);
+    if (value) this.lastAuthHeader = value;
+  }
+
+  /** The Authorization header a request carries that counts as the app's own (authToRemember), or null. */
+  private authOf(req: import("playwright").Request): string | null {
+    let frameUrl: string | undefined;
+    try {
+      frameUrl = req.frame().url();
+    } catch {
+      /* a worker's request has no frame */
+    }
+    return authToRemember({ url: req.url(), baseUrl: this.baseUrl, headers: req.headers(), replay: this.replayRequests.has(req), frameUrl });
+  }
+
+  /** Note the status of the page's own authorised script request to its origin; a replay's is not the page's. */
+  private noteAuthAnswer(res: import("playwright").Response): void {
+    const req = res.request();
+    const type = req.resourceType();
+    if (type !== "fetch" && type !== "xhr") return;
+    if (this.authOf(req) === null) return;
+    this.lastAuthAnswer = { status: res.status() };
   }
 
   /**
@@ -935,11 +966,14 @@ export class BrowserEngine {
     const target = resolveRequestUrl(this.baseUrl, input.path);
     if ("problem" in target) return `REFUSED: ${target.problem}`;
 
+    const headers = requestHeaders({ given: input.headers, auth: this.lastAuthHeader, body: input.body });
+    // Whether the credential sent is the one replayed from the page, not one the caller chose.
+    const replayedAuth = this.lastAuthHeader !== null && headers["authorization"] === this.lastAuthHeader;
     const script = buildRequestScript({
       url: target.url,
       method: method.method,
       body: input.body,
-      headers: requestHeaders({ given: input.headers, auth: this.lastAuthHeader, body: input.body }),
+      headers,
       ...(wantsView(input.view) ? { keep: BODY_FETCH_MAX } : {}),
     });
     let raw: Parameters<typeof toReplayResult>[0];
@@ -969,7 +1003,7 @@ export class BrowserEngine {
       // Not a status signature: the trail must not record the stand-in as the server's answer.
       result: result.refusedByPolicy ? `blocked: write policy (${result.refusedByPolicy})` : replaySignature(method.method, result.url, result.status),
     });
-    return formatReplay(method.method, result);
+    return formatReplay(method.method, result) + (result.refusedByPolicy ? "" : staleCredentialNote(result.status, replayedAuth, this.lastAuthAnswer));
   }
 
   /** The scout_request call in flight, until the page's request for it is seen. */
@@ -1447,7 +1481,11 @@ export class BrowserEngine {
     let profileNote = "";
     this.refresh = null;
     this.refreshCounts = { refreshed: 0, swapped: 0, failed: 0, learned: 0 };
+    this.refreshEvents = [];
     this.brokeredRequests = new WeakSet();
+    // Another attach is another sign-in: the last one's credential is not this one's.
+    this.lastAuthHeader = null;
+    this.lastAuthAnswer = null;
     if (auth.kind === "role") {
       const note = permissionNote(auth.storageStatePath, fs.statSync(auth.storageStatePath).mode);
       if (note) profileNote = `\n⚠ ${note}`;
@@ -1618,6 +1656,7 @@ export class BrowserEngine {
       this.pageRequests.failed(req, req.failure()?.errorText ?? "", Date.now(), this.refusedByAnyPolicy(req));
     });
     this.context.on("response", (res) => {
+      this.noteAuthAnswer(res);
       this.watchResponse(res.request(), res.status());
       this.pageRequests.answered(res.request(), res.status(), Date.now(), this.refusedByAnyPolicy(res.request()));
     });
@@ -1646,6 +1685,8 @@ export class BrowserEngine {
       this.lastRequestStart = Date.now();
       this.requestStartedAt.set(req, this.lastRequestStart);
       this.claimReplay(req);
+      // After claimReplay, so a scout_request call's own header is not taken for the app's.
+      this.rememberAuthHeader(req);
       const type = req.resourceType();
       if (type === "xhr" || type === "fetch") {
         this.xhrCount += 1;
@@ -1801,7 +1842,6 @@ export class BrowserEngine {
         // app under test: refused before any other rule, login included.
         const foreign = this.foreignWriteOf(req);
         if (foreign) return refuse(`sent from a frame of ${foreign}`);
-        this.rememberAuthHeader(req.headers());
         const destructiveWire = isDestructiveWire(pathname, req.postData());
         // An embed moved the session's page off the app: its writes out are not the app's, a sign-in excepted.
         const offApp = offAppPageWrite(this.baseUrl, this.page?.url(), url, this.embedMoves.movedTo);
@@ -2867,7 +2907,7 @@ export class BrowserEngine {
       await page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }).catch(() => {});
       url = page.url();
       this.dropRefs("the page left the app's origin");
-      const blocked = this.drainBlocked();
+      const blocked = this.drainBlocked() + this.drainRefresh();
       return (
         (policyAbortedNavigation
           ? `OK: ${action} ${target}\nThe page tried to navigate with a request the write policy blocked, so the browser showed an error page; returned to ${url}.`
@@ -2883,7 +2923,7 @@ export class BrowserEngine {
     await this.scanForContradictions();
     if (click) await this.rankRouteCancellations(click, url);
     const violations = this.oracles.drain();
-    const mutations = this.drainMutations() + this.drainBlocked() + this.drainCreated();
+    const mutations = this.drainMutations() + this.drainBlocked() + this.drainRefresh() + this.drainCreated();
     const moved = this.snapshotUrl !== "" && url !== this.snapshotUrl;
     // A query that is not UI state (a search, a filter) leaves the same screen: its refs still work.
     const navigated = moved && !refsSurviveUrlChange(this.snapshotUrl, url);
@@ -4303,8 +4343,9 @@ export class BrowserEngine {
    * Replace this context's cookies and storage with a profile, in place: same
    * pages, listeners and policy. Playwright is handed only what it restores;
    * the profile's sessionStorage list is not part of its storage state.
+   * With `load` "cookies" only the cookie jar is replaced (profileLoadWhileHeld, refresh.ts).
    */
-  private async applyState(state: unknown): Promise<{ ok: true } | { ok: false; why: string }> {
+  private async applyState(state: unknown, load: ProfileLoad = "storage"): Promise<{ ok: true } | { ok: false; why: string }> {
     if (!this.context) return { ok: false, why: "no browser is open" };
     let storageState: ReturnType<typeof splitProfile>["storageState"];
     try {
@@ -4312,8 +4353,14 @@ export class BrowserEngine {
     } catch (err) {
       return { ok: false, why: `the saved profile could not be split (${err instanceof Error ? err.message : String(err)})` };
     }
+    const playwrightState = storageState as Exclude<Parameters<BrowserContext["setStorageState"]>[0], string>;
     try {
-      await this.context.setStorageState(storageState as Parameters<BrowserContext["setStorageState"]>[0]);
+      if (load === "cookies") {
+        await this.context.clearCookies();
+        await this.context.addCookies(playwrightState.cookies ?? []);
+      } else {
+        await this.context.setStorageState(playwrightState);
+      }
     } catch (err) {
       return { ok: false, why: `the browser refused its saved profile (${err instanceof Error ? err.message.split("\n")[0] : String(err)})` };
     }
@@ -4380,11 +4427,12 @@ export class BrowserEngine {
       if (plan.kind === "send") {
         this.logAction({ action: "refresh-broker", target: `${where} with ${sent.slot}`, url: this.page?.url() ?? "" });
         handedOn = true;
-        this.trackRefreshTask(this.writeBackAfter(this.pageAnswer(req), sent, lock));
+        this.trackRefreshTask(this.writeBackAfter(this.pageAnswer(req), sent, lock, false));
         return this.passOn(route);
       }
       // Another session rotated the token while this one waited: load what it saved, and send the current token.
-      const applied = await this.applyState(read.state);
+      const loaded = profileLoadWhileHeld(req.isNavigationRequest());
+      const applied = await this.applyState(read.state, loaded);
       if (!applied.ok) throw new Error(applied.why);
       this.refreshCounts.swapped += 1;
       const all = await req.allHeaders();
@@ -4400,7 +4448,9 @@ export class BrowserEngine {
           url: this.page?.url() ?? "",
         });
         handedOn = true;
-        this.trackRefreshTask(this.writeBackAfter(this.pageAnswer(req), plan.to, lock));
+        // Reported once the request goes out with the current token, so a swap that then fails is reported only as a failure.
+        this.refreshEvents.push("swapped");
+        this.trackRefreshTask(this.writeBackAfter(this.pageAnswer(req), plan.to, lock, true, writeBackStorageFrom(loaded, plan.to)));
         return this.passOn(route, {
           ...(swapped.url ? { url: swapped.url } : {}),
           ...(swapped.body !== undefined ? { postData: swapped.body } : {}),
@@ -4434,8 +4484,9 @@ export class BrowserEngine {
         target: `${where} with ${plan.to.slot} (rotated by another session; loaded its profile and sent the current cookie)`,
         url: this.page?.url() ?? "",
       });
+      this.refreshEvents.push("swapped");
       // The response's cookies are already in the browser's jar, so the write-back does not wait on the page.
-      this.trackRefreshTask(this.writeBackAfter(Promise.resolve(BrowserEngine.fetchedAnswer(response)), plan.to, lock));
+      this.trackRefreshTask(this.writeBackAfter(Promise.resolve(BrowserEngine.fetchedAnswer(response)), plan.to, lock, true));
       await route.fulfill({ response }).catch(() => {
         /* the page went away before its answer: the rotation is still saved */
       });
@@ -4474,6 +4525,7 @@ export class BrowserEngine {
   /** The broker could not do its job for this request: it goes on as the page sent it, and the action log says why. */
   private async unbrokered(route: Route, where: string, err: unknown): Promise<void> {
     this.refreshCounts.failed += 1;
+    this.refreshEvents.push("failed");
     // Unbrokered after all: if its response rotates the cookie, the rotation watcher saves it.
     this.brokeredRequests.delete(route.request());
     this.logAction({
@@ -4583,7 +4635,10 @@ export class BrowserEngine {
     if (!broker) return;
     const isNew = !broker.learned.has(key);
     broker.learned.add(key);
-    if (isNew) this.refreshCounts.learned += 1;
+    if (isNew) {
+      this.refreshCounts.learned += 1;
+      this.refreshEvents.push("learned");
+    }
     const names = rotated.map((r) => r.slot).join(", ");
     let lock: HeldLock;
     try {
@@ -4610,7 +4665,7 @@ export class BrowserEngine {
       for (let waited = 0; stillSpent && waited <= 1000; waited += 50) {
         const state = await this.context?.storageState().catch(() => undefined);
         if (state && rotated.every((r) => rotationStored(state, r))) {
-          now = state;
+          now = await this.withPageIndexedDB(state, (full) => rotated.every((r) => rotationStored(full, r)));
           break;
         }
         await new Promise((r) => setTimeout(r, 50));
@@ -4643,9 +4698,16 @@ export class BrowserEngine {
    * that has not stored it in time has the token read from the response
    * instead. A refused or failed refresh changes nothing on disk, and nor does
    * one whose response left a refresh cookie as it was (a server that does
-   * not rotate refresh tokens).
+   * not rotate refresh tokens). `storageFrom` says whether the origins'
+   * storage written back is the page's or stays the profile's (writeBackStorageFrom, refresh.ts).
    */
-  private async writeBackAfter(answer: Promise<RefreshAnswer | null>, presented: TokenSlot, lock: HeldLock): Promise<void> {
+  private async writeBackAfter(
+    answer: Promise<RefreshAnswer | null>,
+    presented: TokenSlot,
+    lock: HeldLock,
+    swapped: boolean,
+    storageFrom: "page" | "disk" = "page",
+  ): Promise<void> {
     const broker = this.refresh;
     try {
       const res = await answer;
@@ -4665,8 +4727,9 @@ export class BrowserEngine {
       for (let waited = 0; waited <= patienceMs; waited += 50) {
         const now = await this.context?.storageState().catch(() => null);
         if (now && rotationStored(now, presented)) {
+          const full = await this.withPageIndexedDB(now, (read) => rotationStored(read, presented));
           const onDisk = this.readRoleProfile();
-          state = profileAfterRotation(now, onDisk.ok ? onDisk.state : null);
+          state = profileAfterRotation(full, onDisk.ok ? onDisk.state : null, storageFrom);
           break;
         }
         await new Promise((r) => setTimeout(r, 50));
@@ -4687,6 +4750,7 @@ export class BrowserEngine {
       }
       if (!state) {
         this.refreshCounts.failed += 1;
+        this.refreshEvents.push("failed");
         this.logAction({
           action: "refresh-broker:not-saved",
           target: `${presented.slot}: the page stored no rotated token and the response named none`,
@@ -4697,8 +4761,11 @@ export class BrowserEngine {
       writeProfile(broker.projectDir, broker.role, state);
       this.rememberTokens(refreshTokenSlots(state));
       this.refreshCounts.refreshed += 1;
+      // A swap was reported as it happened; this is the session's own refresh.
+      if (!swapped) this.refreshEvents.push("refreshed");
     } catch (err) {
       this.refreshCounts.failed += 1;
+      this.refreshEvents.push("failed");
       this.logAction({
         action: "refresh-broker:not-saved",
         target: `${presented.slot}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`,
@@ -4707,6 +4774,25 @@ export class BrowserEngine {
     } finally {
       lock.release();
     }
+  }
+
+  /**
+   * The page's storage state read again with its IndexedDB, which a plain read
+   * leaves out and a saved profile keeps. The plain state when that read fails
+   * or no longer shows the rotation; profileAfterRotation then keeps the
+   * profile's own IndexedDB, so nothing is dropped either way.
+   */
+  private async withPageIndexedDB(plain: unknown, holds: (state: unknown) => boolean): Promise<unknown> {
+    const full = await this.context?.storageState({ indexedDB: true }).catch(() => null);
+    return full && holds(full) ? full : plain;
+  }
+
+  /** Report (and clear) what the refresh broker did since the last action: counts only (refreshNotice). */
+  private drainRefresh(): string {
+    if (this.refreshEvents.length === 0) return "";
+    const events = this.refreshEvents;
+    this.refreshEvents = [];
+    return refreshNotice(events);
   }
 
   /** Take `now` as the role's current tokens; the ones it replaces are kept as spent, so a page that still sends one is caught. */
@@ -5313,7 +5399,7 @@ export class BrowserEngine {
         await this.scanForInjections();
         await this.scanForContradictions();
         const violations = this.oracles.drain();
-        const mutations = this.drainDialogs() + this.drainMutations() + this.drainBlocked() + this.drainCreated();
+        const mutations = this.drainDialogs() + this.drainMutations() + this.drainBlocked() + this.drainRefresh() + this.drainCreated();
         const forcedNote = !forcedClick
           ? ""
           : cover
