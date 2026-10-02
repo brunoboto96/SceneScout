@@ -379,6 +379,12 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       const key = `${req.method} ${urlPath}`;
       stats.writes[key] = (stats.writes[key] ?? 0) + 1;
     }
+    // A visit a page records as it loads (first-look-post.html): counted in `writes` above, and answered as a real endpoint would.
+    if (urlPath === "/api/visits" && req.method === "POST") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     // Plain saves and a delete command share this URL: the delete-bearing ones are counted apart, so a suite can prove none arrived.
     if (urlPath === "/api/unload/race" && req.method === "POST") {
       const chunks: Buffer[] = [];

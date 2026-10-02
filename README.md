@@ -104,6 +104,28 @@ SceneScout needs only a URL. Give it the source code as well and it gets noticea
 
 ## 🚀 Quickstart
 
+### ⚡ A first look, nothing to set up
+
+Node 20 or newer and the address of an app you are allowed to test:
+
+```bash
+npx -y scenescout http://localhost:3000
+```
+
+It needs no model, no API key and no MCP client. It downloads the headless Chromium build if the machine has none (once, about 200 MB) and changes nothing else: no skill, no MCP registration, nothing on your PATH. Then it opens up to 20 pages in `observe` mode, where nothing but reads leaves the page (signing in and refreshing a token apart), starting none after 3 minutes. It measures each one the way [`scenescout check`](docs/guide/Ways-to-use-it.md#scenescout-check-a-gate-in-ci) does, writes `scenescout-report/report.md` in the current folder and prints the three issues to look at first:
+
+```
+Look at these first:
+  1. [medium] Request failed with a client error: GET /img/weekly-chart.png → HTTP 404 (on /)
+  2. [medium] Dead end: /reports-scheduled.html: 0 controls (on /reports-scheduled.html)
+  3. [medium] Control covered by pinned chrome: button "Save notes" is COVERED by pinned chrome [order-stickybar] at this scroll position — a click aimed at it lands on that element instead (on /order.html?id=1042)
+
+12 pages looked at in 12 s in observe mode: 0 high · 6 medium · 2 low · 5 worth a look, never counted.
+Report: scenescout-report/report.md
+```
+
+That is the [demo app](demo-app/). It exits 0 whatever it finds (a look, not a gate), and 2 when the address cannot be reached or the report cannot be written. After the address, `--max-routes` and `--max-minutes` raise the limits, `--mode read-only` lets a plain POST through, and `--out` names another folder. A `scenescout-report/` holding files a first look did not write is left alone, and no report it did not write is ever replaced. A first look only opens pages. To have your agent click, fill forms, compare roles and remember what it learned, set SceneScout up as below.
+
 ### 📦 Prerequisites
 
 | | |

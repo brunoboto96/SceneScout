@@ -40,6 +40,7 @@ import * as frames from "./smoke/frames.ts";
 import * as injection from "./smoke/injection.ts";
 import * as postmessage from "./smoke/postmessage.ts";
 import * as checkGate from "./smoke/check.ts";
+import * as firstRun from "./smoke/first-run.ts";
 import * as unload from "./smoke/unload.ts";
 import * as ciRun from "./smoke/ci.ts";
 import * as timeLimits from "./smoke/time-limits.ts";
@@ -63,6 +64,7 @@ const suites = [
   unload,
   timeLimits,
   checkGate,
+  firstRun,
   ciRun,
 ];
 
