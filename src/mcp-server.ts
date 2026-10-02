@@ -1259,6 +1259,13 @@ server.registerTool(
   ),
 );
 
+const leaveParam = z
+  .boolean()
+  .optional()
+  .describe(
+    "How to answer if the page asks to confirm leaving (a beforeunload prompt over unsent input): true leaves and discards that input, false stays. Omitted, observe and read-only stay and other modes leave. The result says when the page asked.",
+  );
+
 server.registerTool(
   "scout_click",
   {
@@ -1267,14 +1274,15 @@ server.registerTool(
     inputSchema: {
       ref: z.string().describe("Element ref, e.g. e12"),
       clicks: z.number().int().min(1).max(3).default(1).describe("1 = normal; 2-3 = rapid repeated clicks (double-submit probe)"),
+      leave: leaveParam,
       task: taskParam,
       objective: legacyObjectiveParam,
       session: sessionParam,
     },
   },
-  serializedPerSession("scout_click", async ({ ref, clicks }: { ref: string; clicks?: number }, session) => {
+  serializedPerSession("scout_click", async ({ ref, clicks, leave }: { ref: string; clicks?: number; leave?: boolean }, session) => {
     try {
-      return text(await engineFor(session).click(ref, clicks ?? 1), session);
+      return text(await engineFor(session).click(ref, clicks ?? 1, leave), session);
     } catch (err) {
       return errorText(err);
     }
@@ -1401,14 +1409,15 @@ server.registerTool(
     description: "Navigate to a URL or a path relative to the attached base URL (e.g. '/orders'). Also supports 'back' via scout_back.",
     inputSchema: {
       target: z.string().describe("Absolute URL or path like /settings"),
+      leave: leaveParam,
       task: taskParam,
       objective: legacyObjectiveParam,
       session: sessionParam,
     },
   },
-  serializedPerSession("scout_navigate", async ({ target }: { target: string }, session) => {
+  serializedPerSession("scout_navigate", async ({ target, leave }: { target: string; leave?: boolean }, session) => {
     try {
-      return text(await engineFor(session).navigate(target), session);
+      return text(await engineFor(session).navigate(target, leave), session);
     } catch (err) {
       return errorText(err);
     }
@@ -1449,11 +1458,11 @@ server.registerTool(
   "scout_back",
   {
     description: "Go back in browser history (tests back-button resilience).",
-    inputSchema: { task: taskParam, objective: legacyObjectiveParam, session: sessionParam },
+    inputSchema: { leave: leaveParam, task: taskParam, objective: legacyObjectiveParam, session: sessionParam },
   },
-  serializedPerSession("scout_back", async (_args: { session?: string }, session) => {
+  serializedPerSession("scout_back", async ({ leave }: { leave?: boolean; session?: string }, session) => {
     try {
-      return text(await engineFor(session).goBack(), session);
+      return text(await engineFor(session).goBack(leave), session);
     } catch (err) {
       return errorText(err);
     }

@@ -1,0 +1,39 @@
+{
+  "app": "demo",
+  "run": "ci-lanes-1-demo-1",
+  "date": "2026-10-02",
+  "note": "Unattended run, one loop (the default), on the engine at eba7aea with --lanes built in; gpt-6-luna, effort low, default caps. The baseline for the lanes comparison; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard links overlap bulk-import badge",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "dashboard All orders link overlaps New: bulk import badge 85%"
+    },
+    {
+      "title": "New-order form accepts zero items and creates an order",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/orders accepted items=0"
+    },
+    {
+      "title": "Scheduled reports route is a blank dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables"
+    },
+    {
+      "title": "Order detail without ID requests /api/orders/null",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/orders/null 404"
+    }
+  ],
+  "decisions": []
+}

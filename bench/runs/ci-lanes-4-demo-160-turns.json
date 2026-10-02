@@ -1,0 +1,77 @@
+{
+  "app": "demo",
+  "run": "ci-lanes-4-demo-160-turns",
+  "date": "2026-10-02",
+  "note": "Unattended run with --lanes 4 and the caps raised to a single loop's per lane (--max-turns 160, --max-tokens 6000000) on the engine at eba7aea; gpt-6-luna, effort low. Direction only: one run. See Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard chart image fails to load",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard action links overlap the bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard e16 All orders overlaps e17 New: bulk import 85%"
+    },
+    {
+      "title": "Sticky order bar covers the Save notes button",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order detail: order-save covered by order-stickybar"
+    },
+    {
+      "title": "Export CSV throws when report rows are unavailable",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports-export-csv: Cannot read properties of undefined (reading 'rows')"
+    },
+    {
+      "title": "Order detail line-items link lacks a test id",
+      "severity": "low",
+      "category": "missing-testid",
+      "evidence": "order detail link /orders.html label Line items are edited from the list"
+    },
+    {
+      "title": "Scheduled reports page is an empty dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactable elements after reports-scheduled-link click"
+    },
+    {
+      "title": "New-order helper text fails WCAG contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new helper text contrast 1.73:1 (#b8c0ca on #f6f8fa)"
+    },
+    {
+      "title": "Inventory page padding largely misses a 4px spacing grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "inventory design audit spacing 96% off-grid; 14px×50, 10px×46",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    },
+    {
+      "title": "Customer name is rendered as markup in the orders list",
+      "severity": "high",
+      "category": "security",
+      "evidence": "customer <img src=x onerror=alert(1)> rendered as img on /orders.html"
+    },
+    {
+      "title": "Rapid double-click creates duplicate orders",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/orders double-click created duplicate QA Sample orders"
+    },
+    {
+      "title": "Optional confirmation email field has no label",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "textbox new-order-email has placeholder only; no accessible label"
+    }
+  ],
+  "decisions": []
+}
