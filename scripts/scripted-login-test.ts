@@ -1,13 +1,15 @@
 /**
  * `scenescout login --script`: its configuration from the environment and
  * flags, the RFC 6238 one-time code, which field is which, when the form has
- * signed in or been refused, and the redaction every line goes through.
+ * signed in or been refused, the redaction every line goes through, and how
+ * the smoke suites find a credential left in a file under .scenescout/.
  *
  *   npx tsx --test scripts/scripted-login-test.ts
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseLoginArgs } from "../src/engine/profiles.ts";
+import { leaked, leakedInFile } from "./smoke/secrets.ts";
 import {
   afterTyping,
   base32Decode,
@@ -871,4 +873,31 @@ test("page text is redacted before it is shortened, so a credential cut in half 
   assert.equal(quotable(label, r.redact, 40), "Send a code to the address [redacted]");
   assert.ok(r.redact(label.slice(0, 40)).includes("member+ci"), "shortened first, the cut address no longer matches the redaction");
   assert.equal(quotable("  The code\n 482916   is not right ", r.redact, 200), "The code [redacted] is not right");
+});
+
+test("the smoke leak check: a credential kept anywhere in a saved file is found, a cookie expiry whose fraction spells the code is not", () => {
+  const secrets = ["member@example.test", "482916"];
+  const profile = (cookie: object, storage: object[] = []) =>
+    JSON.stringify({
+      cookies: [{ name: "session", value: "Ocju__4VRrpmJV7KvJJY2BEW6rFdd_a3", path: "/", ...cookie }],
+      origins: [{ origin: "http://127.0.0.1:3000", localStorage: storage }],
+    });
+  // The pair: the same expiry, once as a number the browser chose and once as a value the page kept.
+  const chance = profile({ expires: 1790946905.482916 });
+  assert.deepEqual(leaked(chance, secrets), ["482916"], "searched as raw text, the expiry's microseconds read as the code");
+  assert.deepEqual(leakedInFile(chance, secrets), []);
+  assert.deepEqual(leakedInFile(profile({ expires: 1790946905.5 }, [{ name: "expiry", value: "1790946905.482916" }]), secrets), ["482916"]);
+  // A credential kept in any shape a run could keep it is still found.
+  for (const [kept, want] of [
+    [profile({ value: "482916" }), "482916"],
+    [profile({}, [{ name: "otp", value: "code=482916&step=2" }]), "482916"],
+    [profile({}, [{ name: "otp", value: 482916 }]), "482916"],
+    [profile({}, [{ name: "482916", value: "1" }]), "482916"],
+    [profile({}, [{ name: "login", value: JSON.stringify({ email: "Member@Example.test" }) }]), "member@example.test"],
+    [profile({}, [{ name: "login", value: "email=member%40example.test" }]), "member%40example.test"],
+  ] as const) {
+    assert.ok(leakedInFile(kept, secrets).includes(want), kept);
+  }
+  // A file that is not JSON is searched whole.
+  assert.deepEqual(leakedInFile("signed in as member@example.test\n", secrets), ["member@example.test"]);
 });
