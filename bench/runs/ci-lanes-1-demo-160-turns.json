@@ -1,0 +1,39 @@
+{
+  "app": "demo",
+  "run": "ci-lanes-1-demo-160-turns",
+  "date": "2026-10-02",
+  "note": "Control: one loop with the caps raised to 160 turns and 6,000,000 tokens, engine at 0b709b2; gpt-6-luna, effort low. See Unattended runs, lanes.",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard navigation actions overlap",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "dashboard All orders overlaps New: bulk import 85%"
+    },
+    {
+      "title": "Order form helper text has insufficient contrast",
+      "severity": "high",
+      "category": "a11y",
+      "evidence": "orders-new helper text contrast 1.73:1 #b8c0ca on #f6f8fa"
+    },
+    {
+      "title": "Save notes control is covered by sticky bar",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order detail Save notes covered by order-stickybar"
+    },
+    {
+      "title": "Scheduled reports page is a dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html page has 0 interactables"
+    }
+  ],
+  "decisions": []
+}

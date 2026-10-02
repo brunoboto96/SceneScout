@@ -1,8 +1,9 @@
 /**
  * Runs `scenescout ci`: starts the SceneScout MCP server as a child process,
  * attaches it to the app, lets a model drive the scout_* tools until it is
- * done or a cap ends the run, then has the report written and writes the CI
- * files. The rules (options, caps, redaction, which tools, the files) are in
+ * done or a cap ends the run (with --lanes, several conversations with the
+ * model at once, one per part of the app, each in its own session), then has
+ * the report written and writes the CI files. The rules (options, caps, redaction, which tools, the files) are in
  * engine/ci.ts and the message shapes in engine/provider.ts; this file only
  * moves bytes between the model, the server and the disk.
  *
@@ -32,9 +33,10 @@ import {
 import { CAPTURE_MARGIN, parseCaptureResult, rebaseUrl, SHOT_FILES, SHOTS_DIRNAME, type CaptureInfo, type CaptureOutcome } from "./engine/capture.js";
 import {
   addUsage,
+  attachFailure,
+  budgetSpend,
   wallLeftMs,
   guardToolArgs,
-  capReached,
   CAPTURE_TOOLS,
   childEnv,
   ciCaptureKickoff,
@@ -50,19 +52,37 @@ import {
   ciTools,
   describeStop,
   findingsThisRun,
+  newBudget,
   NO_USAGE,
   readFindings,
   redactKeys,
+  settleTurn,
+  takeTurn,
   toolResultText,
   usageLine,
+  type Budget,
+  type CiLanes,
   type CiOptions,
   type CiResult,
+  type LaneResult,
   type JudgeCalls,
   type ResolvedProvider,
   type Spend,
   type StopReason,
   type ToolSpec,
 } from "./engine/ci.js";
+import {
+  ciLaneKickoff,
+  ciLaneSystemPrompt,
+  crawlFoundNothing,
+  crawlNotes,
+  LANE_TOOLS,
+  mergeLaneStops,
+  PLAN_CRAWL_ROUNDS,
+  planCiLanes,
+  PLANNER_SESSION,
+  type CiLane,
+} from "./engine/ci-lanes.js";
 import { resolveTimeLimits } from "./engine/limits.js";
 import { MEMORY_DIRNAME, writeSelfIgnore, type Finding } from "./engine/memory.js";
 import { decodePng, diffImages, encodePng } from "./engine/png.js";
@@ -343,13 +363,14 @@ export interface LoopOutcome {
 }
 
 /**
- * The agent loop. Before each model call the caps are checked; the call runs
- * with at most the time that is left; each tool call it asks for is run in
- * order, on the one session, and none runs past the time cap: a call reached
- * after it is answered as not run, as is any beyond MAX_TOOL_CALLS_PER_TURN.
- * A call the loop cannot run (a tool it was not given, arguments that are not
- * JSON, a scan of another directory) goes back to the model as an error
- * result, so a malformed reply costs a turn, never the run.
+ * The agent loop. Before each model call a turn is taken from the budget, or
+ * the cap that refuses it ends the loop; the call runs with at most the time
+ * that is left; each tool call it asks for is run in order, on the loop's one
+ * session, and none runs past the time cap: a call reached after it is
+ * answered as not run, as is any beyond MAX_TOOL_CALLS_PER_TURN. A call the
+ * loop cannot run (a tool it was not given, arguments that are not JSON, a
+ * scan of another directory) goes back to the model as an error result, so a
+ * malformed reply costs a turn, never the run.
  */
 export async function agentLoop(o: {
   client: ModelClient;
@@ -363,22 +384,33 @@ export async function agentLoop(o: {
   projectDir: string;
   /** Told of every tool call that ran, with the arguments it ran with. */
   onResult?: (name: string, args: Record<string, unknown>, result: { text: string; isError: boolean }) => void;
-  /** The run's spend, when something besides the loop adds to it (the dedup judge's calls); else the loop starts its own. */
-  spend?: Spend;
+  /**
+   * Where the loop's turns come from: the run's budget, which every lane of a
+   * run split into lanes shares. Absent, the loop has one of its own, from
+   * `caps` and `startedAt`.
+   */
+  budget?: Budget;
+  /** A lane's session: every call to a tool that takes `session` is sent to it. Absent, calls go to the default session. */
+  session?: { name: string; tools: ReadonlySet<string> };
 }): Promise<LoopOutcome> {
   const now = o.now ?? Date.now;
-  const spend: Spend = o.spend ?? { turns: 0, usage: { ...NO_USAGE }, startedAt: o.startedAt ?? now() };
+  const budget = o.budget ?? newBudget(o.caps, o.startedAt ?? now());
+  // This loop's own turns and tokens; the budget holds every loop's.
+  const spend: Spend = { turns: 0, usage: { ...NO_USAGE }, startedAt: budget.startedAt };
+  const timeLeft = (): number => wallLeftMs(spend, budget.caps, now());
   const allowed = new Set(o.tools.map((t) => t.name));
   for (;;) {
-    const cap = capReached(spend, o.caps, now());
+    const cap = takeTurn(budget, now());
     if (cap) return { stop: cap, spend };
     let turn: ModelTurn;
     try {
-      turn = await o.client.next(wallLeftMs(spend, o.caps, now()));
+      turn = await o.client.next(timeLeft());
     } catch (err) {
+      settleTurn(budget);
       if (err instanceof OutOfTime) return { stop: "time", spend };
       return { stop: "provider-error", stopDetail: err instanceof Error ? err.message : String(err), spend };
     }
+    settleTurn(budget, turn.usage);
     spend.turns += 1;
     spend.usage = addUsage(spend.usage, turn.usage);
     if (turn.resume) continue;
@@ -410,15 +442,16 @@ export async function agentLoop(o: {
         results.push({ id: call.id, isError: true, text: `${call.name} was not run: ${guarded.error}.` });
         continue;
       }
-      const left = wallLeftMs(spend, o.caps, now());
+      const left = timeLeft();
       if (left <= 0) {
         results.push({ id: call.id, isError: true, text: `${call.name} was not run: the time cap was reached.` });
         continue;
       }
+      const sent = o.session && o.session.tools.has(call.name) ? { ...guarded.args, session: o.session.name } : guarded.args;
       try {
-        const r = await o.host.call(call.name, guarded.args, Math.min(600_000, left));
+        const r = await o.host.call(call.name, sent, Math.min(600_000, left));
         results.push({ id: call.id, isError: r.isError, text: r.text });
-        o.onResult?.(call.name, guarded.args, r);
+        o.onResult?.(call.name, sent, r);
       } catch (err) {
         results.push({ id: call.id, isError: true, text: `${call.name} failed: ${err instanceof Error ? err.message : String(err)}` });
       }
@@ -523,6 +556,199 @@ export async function captureShots(o: {
   }
 }
 
+/** Whether a listed tool takes `session`: a lane's calls to it are sent to the lane's own. */
+function takesSession(t: { inputSchema?: unknown }): boolean {
+  const props = (t.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  return !!props && "session" in props;
+}
+
+const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * A run split into lanes (--lanes): plan, then run every lane at once, then
+ * fold what they did. The plan is a snapshot and a crawl from the planner's
+ * session (no model call: only their time counts), the crawl repeated while it
+ * finds routes, and the split brief.ts makes of them. Each lane attaches its
+ * own session on the run's target URL, as the planner did (the engine resolves
+ * every path against the URL a session attached with), opens its first route,
+ * runs the agent loop there with its own conversation, draws its turns from
+ * the run's one budget, and is closed when it ends. Their findings are already
+ * one: every session files into the project's one memory, whose dedup folds a
+ * defect two lanes filed. `outcome` is absent when there was nothing to split,
+ * and the run explores in one loop instead.
+ */
+async function exploreInLanes(o: {
+  host: ToolHost;
+  listed: ReadonlyArray<{ name: string; description?: string; inputSchema?: unknown }>;
+  options: CiOptions;
+  makeClient: (system: string, tools: readonly ToolSpec[], kickoff: string) => ModelClient;
+  log: (line: string) => void;
+  now: () => number;
+  /** The run's budget: the lanes take their turns from it, beside whatever the dedup judge adds. */
+  budget: Budget;
+  attachArgs: (a: { url: string; objective: string; task: string; session: string }) => Record<string, unknown>;
+  attachMs: number;
+}): Promise<{ lanes: CiLanes; outcome?: LoopOutcome }> {
+  const { host, options, log, now, budget } = o;
+  const timeLeft = (): number => wallLeftMs(budgetSpend(budget), options.caps, now());
+
+  // ── plan ──
+  // What went wrong while planning, so a plan left with nothing to split says why rather than blaming the app.
+  let planningFailed: string | undefined;
+  /** One planner call: its text, or undefined after saying why it failed. */
+  const plannerCall = async (tool: string, maxMs: number, what: string): Promise<string | undefined> => {
+    try {
+      const r = await host.call(tool, { session: PLANNER_SESSION }, Math.min(maxMs, timeLeft()));
+      if (r.isError) throw new Error(r.text.replace(/^ERROR:\s*/, ""));
+      return r.text;
+    } catch (err) {
+      planningFailed = `the planning ${what} failed: ${messageOf(err).slice(0, 300)}`;
+      log(`Lanes: ${planningFailed}.`);
+      return undefined;
+    }
+  };
+  // Attaching harvests no links; a snapshot of the page it landed on does, so the first crawl has routes to visit.
+  if (timeLeft() > 0) await plannerCall("scout_snapshot", 120_000, "snapshot");
+  const notes = new Map<string, string[]>();
+  for (let round = 0; round < PLAN_CRAWL_ROUNDS && timeLeft() > 0; round += 1) {
+    const text = await plannerCall("scout_crawl", 600_000, "crawl");
+    if (text === undefined) break;
+    const known = notes.size;
+    for (const [route, lines] of crawlNotes(text)) if (!notes.has(route)) notes.set(route, lines);
+    if (crawlFoundNothing(text) || notes.size === known) break;
+  }
+  const plan = planCiLanes({
+    target: options.url,
+    notes,
+    count: options.lanes,
+    focus: options.focus,
+    mode: options.mode,
+    ...(planningFailed ? { planningFailed } : {}),
+  });
+  if (plan.oneLoop) {
+    log(`Lanes: ${plan.oneLoop}. Exploring in one loop.`);
+    return { lanes: { asked: options.lanes, sessions: [], oneLoop: plan.oneLoop } };
+  }
+  log(
+    `Lanes: ${plan.lanes.length} of ${options.lanes} asked, sharing the caps: ` +
+      plan.lanes.map((l) => `${l.session} (${l.modules.join(", ")}; ${l.routes.length} route(s))`).join("; "),
+  );
+
+  // ── run ──
+  const tools = ciTools(o.listed, LANE_TOOLS);
+  const sessionTools = new Set(o.listed.filter(takesSession).map((t) => t.name));
+  const system = ciLaneSystemPrompt(loadPlaybook(packageRoot), options);
+
+  const runLane = async (lane: CiLane): Promise<LaneResult> => {
+    const say = (line: string): void => log(line.replace(/^(\s*)/, `$1[${lane.session}] `));
+    const result: LaneResult = {
+      session: lane.session,
+      modules: lane.modules,
+      routes: lane.routes.length,
+      attached: false,
+      stop: "could-not-start",
+      turns: 0,
+      usage: { ...NO_USAGE },
+    };
+    let attached = false;
+    try {
+      if (timeLeft() <= 0) {
+        say("the time cap was reached before it attached.");
+        return { ...result, stop: "time", stopDetail: "the time cap was reached before it attached" };
+      }
+      const r = await host
+        .call(
+          "scout_attach",
+          o.attachArgs({ session: lane.session, url: options.url, objective: lane.objective, task: `Starting lane ${lane.session}` }),
+          Math.min(o.attachMs, timeLeft()),
+        )
+        .catch((err: unknown) => ({ text: `ERROR: ${messageOf(err)}`, isError: true }));
+      const failed = attachFailure(r);
+      if (failed !== null) {
+        say(`could not attach: ${failed.slice(0, 300)}`);
+        return { ...result, stopDetail: failed.slice(0, 300) };
+      }
+      attached = true;
+      // Its own first route, by its full URL. A landing that does not open costs the lane nothing but the detour: it starts from the target.
+      let on = options.url;
+      if (lane.url !== options.url && timeLeft() > 0) {
+        const opened = await host
+          .call(
+            "scout_navigate",
+            { session: lane.session, target: lane.url, task: `Opening lane ${lane.session}'s first route` },
+            Math.min(o.attachMs, timeLeft()),
+          )
+          .catch((err: unknown) => ({ text: `ERROR: ${messageOf(err)}`, isError: true }));
+        // With several sessions live the server puts a "[session …]" line first; the verdict is on the line after it.
+        const said = opened.text.replace(/^\[session [^\]\n]*\]\n/, "");
+        if (opened.isError || /^(ERROR|REFUSED):/.test(said))
+          say(`could not open ${lane.landing} (${said.replace(/^ERROR:\s*/, "").slice(0, 200)}); starting from the target instead.`);
+        else on = lane.url;
+      }
+      say(`attached on ${new URL(on).pathname}, owning ${lane.modules.join(", ")}.`);
+      return await exploreLane(lane, on, say, { ...result, attached: true });
+    } catch (err) {
+      // Not a cap and not the model's API: the lane itself broke. Reported as the lane's, and the run's (mergeLaneStops), never dropped.
+      const why = `the lane failed: ${messageOf(err).slice(0, 300)}`;
+      say(why);
+      return { ...result, attached, stop: "could-not-start", stopDetail: why };
+    }
+  };
+
+  const exploreLane = async (lane: CiLane, on: string, say: (line: string) => void, result: LaneResult): Promise<LaneResult> => {
+    const outcome = await agentLoop({
+      client: o.makeClient(
+        system,
+        tools,
+        ciLaneKickoff({
+          lane: { ...lane, url: on },
+          laneCount: plan.lanes.length,
+          url: options.url,
+          projectDir: options.projectDir,
+          mode: options.mode,
+          level: options.level,
+          focus: options.focus,
+          caps: options.caps,
+        }),
+      ),
+      host,
+      tools,
+      caps: options.caps,
+      budget,
+      log: say,
+      now,
+      projectDir: options.projectDir,
+      session: { name: lane.session, tools: sessionTools },
+    });
+    say(`ended: ${outcome.stop === "done" ? "the model finished the lane" : describeStop(outcome.stop, options.caps, outcome.stopDetail)}.`);
+    // Closed as soon as it is done, so a lane that finished early holds no browser while the others work.
+    // Past the time cap nothing more runs here: the run's own close, within FINISH_MS, collects it.
+    if (timeLeft() > 0)
+      await host
+        .call("scout_close", { session: lane.session }, Math.min(30_000, timeLeft()))
+        .catch((err: unknown) => say(`closing its browser failed: ${messageOf(err)}`));
+    return {
+      ...result,
+      stop: outcome.stop,
+      ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}),
+      turns: outcome.spend.turns,
+      usage: outcome.spend.usage,
+    };
+  };
+
+  // ── merge ──
+  // Settled, not raced: every lane is waited out before the run moves on. runLane reports its own failures, so none rejects.
+  const settled = await Promise.allSettled(plan.lanes.map(runLane));
+  const broken = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
+  if (broken) throw new Error(`a lane failed outside its own handling: ${messageOf(broken.reason)}`);
+  const sessions = settled.map((s) => (s as PromiseFulfilledResult<LaneResult>).value);
+  const merged = mergeLaneStops(sessions);
+  return {
+    lanes: { asked: options.lanes, sessions },
+    outcome: { stop: merged.stop, ...(merged.stopDetail ? { stopDetail: merged.stopDetail } : {}), spend: budgetSpend(budget) },
+  };
+}
+
 export interface CiRunResult {
   result: CiResult;
   exitCode: number;
@@ -531,8 +757,9 @@ export interface CiRunResult {
 
 /**
  * The whole run. `makeClient` is how the model is reached: the HTTP client in
- * the CLI, a scripted one in the tests. Everything logged or written passes
- * through the key redaction first.
+ * the CLI, a scripted one in the tests. It is called once per conversation:
+ * once, or once per lane. Everything logged or written passes through the key
+ * redaction first.
  */
 export async function runCi(
   options: CiOptions,
@@ -550,6 +777,8 @@ export async function runCi(
     secrets?: readonly string[];
     version: string;
     now?: () => number;
+    /** How the MCP server is reached: started in a child process, unless a test hands in another. */
+    startHost?: (log: (line: string) => void, judge?: ReturnType<typeof judgeHandler>) => Promise<ToolHost>;
   },
 ): Promise<CiRunResult> {
   const secrets = deps.secrets ?? [];
@@ -560,17 +789,18 @@ export async function runCi(
   const before = readMemoryFindings(options.projectDir);
   // Pictures an earlier run left in the same output are not this run's: they must never be uploaded as its.
   fs.rmSync(path.join(outDir, SHOTS_DIRNAME), { recursive: true, force: true });
-  // One spend for the run: the loop adds its turns, and the dedup judge's calls add their tokens, which the caps count.
-  const spend: Spend = { turns: 0, usage: { ...NO_USAGE }, startedAt };
+  // One budget for the run: every loop (one, or each lane) takes its turns from it, and the dedup judge's calls add their tokens, which the caps count.
+  const budget = newBudget(options.caps, startedAt);
   // A run asked to show an element files no findings, so it has nothing to deduplicate.
   const wantsJudge = options.dedup === "judge" && !options.show;
   if (wantsJudge && !deps.judge) log("No model was given for the dedup judge; the rule decides duplicates.");
   const judgeAsk = wantsJudge ? deps.judge : undefined;
   const judgeCalls: JudgeCalls = { calls: 0, failed: 0, usage: { ...NO_USAGE }, ms: 0 };
-  let outcome: LoopOutcome = { stop: "could-not-start", spend };
+  let outcome: LoopOutcome = { stop: "could-not-start", spend: budgetSpend(budget) };
   let contractMet = false;
   let reportWritten = false;
   let capture: CaptureOutcome | undefined;
+  let lanes: CiLanes | undefined;
   let host: ToolHost | null = null;
   // Set when the exploration ends (or never starts): the report and the close share FINISH_MS from then.
   let finishBy = 0;
@@ -578,49 +808,68 @@ export async function runCi(
   try {
     // The page-load limit may be longer than the usual attach budget; the attach gets that limit and a minute to launch.
     const attachMs = Math.max(ATTACH_MS, resolveTimeLimits(options, process.env).navMs + 60_000);
-    host = await startServer(
-      log,
-      judgeAsk ? judgeHandler({ ask: judgeAsk, model: resolved.model, spend, caps: options.caps, calls: judgeCalls, secrets, now }) : undefined,
-    );
+    // One judge handler for the run's client: it answers the server's dedup questions and adds their tokens to the run's budget.
+    const judge = judgeAsk
+      ? judgeHandler({ ask: judgeAsk, model: resolved.model, spend: budget, caps: options.caps, calls: judgeCalls, secrets, now })
+      : undefined;
+    host = await (deps.startHost ?? startServer)(log, judge);
+    // What every session of the run attaches with: the planner's here, and each lane's when the run is split.
+    const attachArgs = (a: { url: string; objective: string; task: string; session?: string }): Record<string, unknown> => ({
+      url: a.url,
+      projectPath: options.projectDir,
+      mode: options.mode,
+      // Named either way, so a SCENESCOUT_DEDUP in the job's environment never decides for the option. Every session alike: they share one memory.
+      dedup: judgeAsk ? "judge" : "rule",
+      objective: a.objective.slice(0, 300),
+      task: a.task,
+      ...(a.session ? { session: a.session } : {}),
+      ...(options.storageStatePath ? { storageStatePath: options.storageStatePath } : {}),
+      ...(options.browser ? { browser: options.browser } : {}),
+      ...(options.actionTimeoutMs !== undefined ? { actionTimeoutMs: options.actionTimeoutMs } : {}),
+      ...(options.navTimeoutMs !== undefined ? { navTimeoutMs: options.navTimeoutMs } : {}),
+    });
     const attached = await host.call(
       "scout_attach",
-      {
+      attachArgs({
         url: options.url,
-        projectPath: options.projectDir,
-        mode: options.mode,
-        // Named either way, so a SCENESCOUT_DEDUP in the job's environment never decides for the option.
-        dedup: judgeAsk ? "judge" : "rule",
-        objective: `CI run: explore at level ${options.level}${options.focus ? `, focusing on ${options.focus}` : ""}`.slice(0, 300),
+        objective: `CI run: explore at level ${options.level}${options.focus ? `, focusing on ${options.focus}` : ""}`,
         task: "Starting the CI run",
-        ...(options.storageStatePath ? { storageStatePath: options.storageStatePath } : {}),
-        ...(options.browser ? { browser: options.browser } : {}),
-        ...(options.actionTimeoutMs !== undefined ? { actionTimeoutMs: options.actionTimeoutMs } : {}),
-        ...(options.navTimeoutMs !== undefined ? { navTimeoutMs: options.navTimeoutMs } : {}),
-      },
+      }),
       Math.min(attachMs, options.caps.wallMs),
     );
-    const authFailed = attached.text.split("\n").find((l) => l.startsWith("⚠ AUTH FAILED"));
-    if (attached.isError || /^ERROR:/.test(attached.text) || authFailed) {
-      outcome = { ...outcome, stopDetail: (authFailed ?? attached.text).replace(/^ERROR:\s*/, "").slice(0, 400) };
+    const failed = attachFailure(attached);
+    if (failed !== null) {
+      outcome = { ...outcome, stopDetail: failed.slice(0, 400) };
     } else {
       log(`Attached to ${options.url} in ${options.mode} mode.`);
-      const tools = ciTools(await host.tools(), options.show ? CAPTURE_TOOLS : undefined);
-      const system = options.show ? ciCaptureSystemPrompt() : ciSystemPrompt(loadPlaybook(packageRoot), options);
-      const kickoff = options.show ? ciCaptureKickoff({ url: options.url, show: options.show }) : ciKickoff(options);
+      const listed = await host.tools();
+      const toolHost = host;
       let captured: CaptureInfo | null = null;
-      outcome = await agentLoop({
-        client: deps.makeClient(system, tools, kickoff),
-        host,
-        tools,
-        caps: options.caps,
-        log,
-        now,
-        spend,
-        projectDir: options.projectDir,
-        onResult: (name, _args, r) => {
-          if (name === "scout_capture" && !r.isError) captured = parseCaptureResult(r.text) ?? captured;
-        },
-      });
+      const oneLoop = (): Promise<LoopOutcome> => {
+        const tools = ciTools(listed, options.show ? CAPTURE_TOOLS : undefined);
+        const system = options.show ? ciCaptureSystemPrompt() : ciSystemPrompt(loadPlaybook(packageRoot), options);
+        const kickoff = options.show ? ciCaptureKickoff({ url: options.url, show: options.show }) : ciKickoff(options);
+        return agentLoop({
+          client: deps.makeClient(system, tools, kickoff),
+          host: toolHost,
+          tools,
+          caps: options.caps,
+          log,
+          now,
+          budget,
+          projectDir: options.projectDir,
+          onResult: (name, _args, r) => {
+            if (name === "scout_capture" && !r.isError) captured = parseCaptureResult(r.text) ?? captured;
+          },
+        });
+      };
+      if (options.lanes > 1 && !options.show) {
+        const split = await exploreInLanes({ host, listed, options, makeClient: deps.makeClient, log, now, budget, attachArgs, attachMs });
+        lanes = split.lanes;
+        outcome = split.outcome ?? (await oneLoop());
+      } else {
+        outcome = await oneLoop();
+      }
       log(`Run ended: ${describeStop(outcome.stop, options.caps, outcome.stopDetail)}.`);
       finishBy = now() + FINISH_MS;
       if (options.show) {
@@ -628,9 +877,11 @@ export async function runCi(
         capture = await captureShots({ host, options, captured, finalText: outcome.finalText, outDir, timeLeft: finishLeft, log });
       } else {
         // The report is written whatever ended the run. A forced report still prints its gaps.
-        let report = await host.call("scout_report", { level: options.level }, finishLeft());
+        // From the planner's session by name: a lane attaching made itself the server's default.
+        let report = await host.call("scout_report", { level: options.level, session: PLANNER_SESSION }, finishLeft());
         contractMet = !report.isError && !/NOT GENERATED/.test(report.text);
-        if (!contractMet && !report.isError) report = await host.call("scout_report", { level: options.level, force: true }, finishLeft());
+        if (!contractMet && !report.isError)
+          report = await host.call("scout_report", { level: options.level, force: true, session: PLANNER_SESSION }, finishLeft());
         reportWritten = !report.isError && !/^ERROR:/.test(report.text) && fs.existsSync(path.join(options.projectDir, MEMORY_DIRNAME, "report.md"));
         if (!reportWritten) log(`The report could not be generated: ${report.text.slice(0, 400)}`);
       }
@@ -662,10 +913,12 @@ export async function runCi(
     stop: outcome.stop,
     ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}),
     contractMet,
-    spend: outcome.spend,
+    // The run's, not the last loop's: every lane's turns, and the judge's tokens.
+    spend: budgetSpend(budget),
     endedAt,
     findings: findingsThisRun(before, readMemoryFindings(options.projectDir)),
     ...(capture ? { capture } : {}),
+    ...(lanes ? { lanes } : {}),
     ...(options.show
       ? {}
       : {
