@@ -1193,9 +1193,15 @@ server.registerTool(
   "scout_crawl",
   {
     description:
-      "Engine-side route sweep in ONE call: visits each path (default: all known routes not yet visited), records states into coverage memory, and returns a per-route health summary (HTTP status, element count, oracle violations, dead-ends, auth-redirects). Navigation-only — safe in read-only mode. Use this FIRST for broad coverage; explore interactively only where it flags problems or where journeys matter.",
+      "Engine-side route sweep in ONE call: visits each path (default: all known routes not yet visited), records states into coverage memory, and returns a per-route health summary (HTTP status, element count, what the main area holds, oracle violations, dead-ends, auth-redirects, and ERROR-VIEW or STILL-LOADING for a main area showing only an alert or a loading placeholder). Navigation-only — safe in read-only mode. Use this FIRST for broad coverage; explore interactively only where it flags problems or where journeys matter.",
     inputSchema: {
-      paths: z.array(z.string()).max(150).optional().describe("Paths to visit, e.g. ['/orders','/settings']. Omit to crawl all unvisited known routes."),
+      paths: z
+        .array(z.string())
+        .max(150)
+        .optional()
+        .describe(
+          "Paths to visit, e.g. ['/orders','/settings'], or full URLs on the attached origin. A path resolves from the origin's root, whatever page the session attached on. Omit to crawl all unvisited known routes.",
+        ),
       session: sessionParam,
     },
   },
@@ -1405,7 +1411,8 @@ server.registerTool(
 server.registerTool(
   "scout_navigate",
   {
-    description: "Navigate to a URL or a path relative to the attached base URL (e.g. '/orders'). Also supports 'back' via scout_back.",
+    description:
+      "Navigate to a path on the attached origin (e.g. '/orders') or a full URL on it. A path resolves from the origin's root, whatever page the session attached on. Also supports 'back' via scout_back.",
     inputSchema: {
       target: z.string().describe("Absolute URL or path like /settings"),
       leave: leaveParam,

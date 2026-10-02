@@ -19,6 +19,17 @@ export interface CrawlOutcome {
   loginRedirect: boolean;
   /** Whether the page had no controls at all (DEAD-END): an app that answers 200 for any path shows that for a path it does not have. */
   deadEnd?: boolean;
+  /**
+   * What the main area showed when it held nothing but its state (collector
+   * mainState): the app's error or not-found view, or a loading placeholder
+   * still up after the page settled. Flagged ERROR-VIEW or STILL-LOADING.
+   */
+  mainState?: "error" | "loading" | null;
+}
+
+/** The crawl flag for a main area showing only its state, or null. */
+export function mainStateFlag(state: CrawlOutcome["mainState"]): "ERROR-VIEW" | "STILL-LOADING" | null {
+  return state === "error" ? "ERROR-VIEW" : state === "loading" ? "STILL-LOADING" : null;
 }
 
 /**
@@ -29,11 +40,13 @@ export interface CrawlOutcome {
  * unchanged and the report understated what was checked. A path that
  * redirected is not added (the page it landed on is the route that exists),
  * nor one that failed, nor a dead end (an app that answers 200 for every
- * path), nor an API or download path. Added routes are remembered across
+ * path), nor one whose main area showed only an error view or a loading
+ * placeholder (a client-rendered app answers 200 and draws its not-found
+ * view), nor an API or download path. Added routes are remembered across
  * runs, so a probe of made-up paths must not become part of the contract.
  */
 export function crawledRoute(o: CrawlOutcome): string | null {
-  if (typeof o.status !== "number" || o.status >= 400 || o.deadEnd) return null;
+  if (typeof o.status !== "number" || o.status >= 400 || o.deadEnd || o.mainState) return null;
   if (o.loginRedirect || o.landedRoute !== o.requestedRoute) return null;
   if (isNonPageRoute(o.requestedRoute)) return null;
   return o.requestedRoute;
