@@ -2213,8 +2213,16 @@ test("dedup: no judge call runs past the run's time cap; one asked before it get
 });
 
 test("dedup: a judge call that outlasts its limit fails as the judge's limit, not the run's time cap", async () => {
+  // A request that never answers. A real one holds its socket open, which keeps the process running until the abort;
+  // AbortSignal.timeout's timer does not (it is unref'd), so the stand-in holds a timer of its own until then.
   const hung = (async (_url: string | URL | Request, init?: RequestInit) =>
-    new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal!.reason)))) as typeof fetch;
+    new Promise<Response>((_, reject) => {
+      const socket = setTimeout(() => {}, 60_000);
+      init?.signal?.addEventListener("abort", () => {
+        clearTimeout(socket);
+        reject(init.signal!.reason);
+      });
+    })) as typeof fetch;
   const ask = httpJudgeAsk({ provider: "openai", model: "m", effort: "none", baseUrl: "http://model.test/v1" }, OPENAI_KEY, { fetch: hung, callMs: 50 });
   await assert.rejects(ask("s", [], "q"), (err: Error) => /^no answer within 50ms/.test(err.message) && !(err instanceof OutOfTime));
 });
