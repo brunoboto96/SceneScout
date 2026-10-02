@@ -1271,6 +1271,24 @@ test("an element that is not a control is not judged by the record text it shows
   assert.equal(destructiveLabelOf({ tag: "div", role: "generic", name: "", testid: null, ownText: words(COMMAND_TEXT_WORDS) }), words(COMMAND_TEXT_WORDS));
   assert.equal(destructiveLabelOf({ tag: "div", role: "generic", name: "", testid: null, ownText: words(COMMAND_TEXT_WORDS + 1) }), null);
   assert.equal(destructiveLabelOf({ tag: "div", role: "generic", name: "", testid: null, ownText: "Delete. It." }), null, "a sentence is not a command");
+  // A real control is judged by its whole name, whatever its length; the cap is for containers showing record text.
+  for (const control of [
+    { tag: "button", role: "button" },
+    { tag: "a", role: "link" },
+    { tag: "div", role: "button" },
+    { tag: "li", role: "menuitem" },
+    { tag: "div", role: "tab" },
+  ])
+    assert.equal(
+      destructiveLabelOf({ ...control, name: "Delete all my saved data", testid: null, ownText: "Delete all my saved data", interactive: true }),
+      "Delete all my saved data",
+      `${control.tag} ${control.role}`,
+    );
+  assert.equal(
+    destructiveLabelOf({ ...row, ownText: "Delete all my saved data from the archive was requested by Sam" }),
+    null,
+    "a clickable row whose text is a record saying so",
+  );
   // A heading is never judged by its text, however short; its test id and centre still are.
   for (const h of [
     { tag: "h1", role: "generic" },

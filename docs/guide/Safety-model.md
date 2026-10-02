@@ -29,7 +29,7 @@ Each refused endpoint is named in full, with the explanation, the first time a s
 
 In `observe` and `read-only` a click is also refused before it happens when the control's own label is destructive (delete, revoke, archive and the like). Only the control's own name counts:
 
-- A button, link, menu item, tab or option is judged by its name.
+- A button, link, menu item, tab or option is judged by its whole name, however long.
 - A dropdown is not judged by its options: a filter offering "All, Create, Delete" can be set to "Create", and choosing "Delete" is refused.
 - A row, card, heading or panel is judged by its test id and by the control covering its centre, where a click on it would land. Its text is the record it shows ("Archive Test Widget", "Final sign-off recorded"), so it counts only for a clickable element whose own text is a short command of at most four words and no sentence, such as a clickable box reading "Delete". A heading is never judged by its text. The buttons inside a row are listed and judged on their own.
 - Removing a filter chip ("Remove Status: Open filter") drops a condition from the view, so it is allowed. "Remove member" is refused.

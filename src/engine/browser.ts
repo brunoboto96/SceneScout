@@ -601,8 +601,6 @@ export class BrowserEngine {
   /** POST endpoints the user named as reads (policy.ts readPostAllowed decides when that counts). */
   readPosts: ReadPost[] = [];
   private readPostNotice = "";
-  /** In observe: page route → the POST endpoints its scripts sent that observe refused. The gap ledger names them. */
-  readonly observeRefusedPosts = new Map<string, Set<string>>();
   /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
   role = "anonymous";
   /** How the attached session signed in: a role profile, a storage-state file, or not at all. */
@@ -1313,21 +1311,20 @@ export class BrowserEngine {
     this.tokenPostsReported = new Set();
     this.pendingCreations = new Set();
     this.baseUrl = opts.url.replace(/\/$/, "");
-    // A page refused before an endpoint was named as a read is no longer a gap for it.
-    const appOrigin = URL.canParse(this.baseUrl) ? new URL(this.baseUrl).origin : "";
-    for (const [route, endpoints] of this.observeRefusedPosts) {
-      for (const endpoint of endpoints) {
-        const target = endpoint.replace(/^POST /, "");
-        if (matchReadPost(this.readPosts, this.baseUrl, target.startsWith("/") ? appOrigin + target : target)) endpoints.delete(endpoint);
-      }
-      if (endpoints.size === 0) this.observeRefusedPosts.delete(route);
-    }
     this.embedMoves = new EmbedMoveTracker(this.baseUrl);
     // Ownership (ownedIds/createdResources) deliberately NOT reset here: it
     // lives on the shared MemoryStore for the whole run, so re-attaching one
     // role must not discard what another role already created — otherwise
     // every multi-role handoff would be blocked as "not yours".
     this.memory = opts.memoryStore ?? new MemoryStore(opts.projectDir);
+    // A page refused before an endpoint was named as a read is no longer a gap for it.
+    if (this.readPosts.length > 0 && this.mode === "observe") {
+      const appOrigin = URL.canParse(this.baseUrl) ? new URL(this.baseUrl).origin : "";
+      this.memory.clearObserveRefusedPosts((endpoint) => {
+        const target = endpoint.replace(/^POST /, "");
+        return matchReadPost(this.readPosts, this.baseUrl, target.startsWith("/") ? appOrigin + target : target) !== null;
+      });
+    }
     // The REAL path, not merely the resolved one: on macOS the temp tree is a
     // symlink, and a fence comparing a real path against an unreal one would
     // refuse every upload from inside the project.
@@ -1621,6 +1618,7 @@ export class BrowserEngine {
             url: this.page?.url() ?? "",
           });
           this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+          this.clearRefusedPost(url);
           return route.fallback();
         }
 
@@ -1658,6 +1656,7 @@ export class BrowserEngine {
             this.pendingCreations.add(task);
           }
           this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+          if (method === "POST") this.clearRefusedPost(url);
           return route.fallback();
         }
         return refuse();
@@ -2444,26 +2443,33 @@ export class BrowserEngine {
     });
   }
 
+  /** How the gap ledger names a POST's endpoint: "POST /path" on the app's origin, "POST https://host/path" elsewhere; null when unreadable. */
+  private refusedPostEndpoint(url: string): string | null {
+    try {
+      const u = new URL(url);
+      return `POST ${u.origin === new URL(this.baseUrl).origin ? "" : u.origin}${u.pathname}`;
+    } catch {
+      return null;
+    }
+  }
+
   /**
-   * Remember, for the gap ledger, a script's POST that observe refused on the
-   * page the session is on. Not one that looks destructive, nor one to an
-   * endpoint already named as a read (its body was a mutation): naming it
-   * would change nothing.
+   * Remember in project memory, for the gap ledger, a script's POST that
+   * observe refused on the page the session is on. Not one that looks
+   * destructive, nor one to an endpoint already named as a read (its body was
+   * a mutation): naming it would change nothing.
    */
   private noteObserveRefusedPost(url: string, body: string | null): void {
     const pageUrl = this.page?.url();
-    if (!pageUrl || isDestructiveWire(pathnameOf(url), body) || matchReadPost(this.readPosts, this.baseUrl, url)) return;
-    let endpoint: string;
-    try {
-      const u = new URL(url);
-      endpoint = `POST ${u.origin === new URL(this.baseUrl).origin ? "" : u.origin}${u.pathname}`;
-    } catch {
-      return;
-    }
-    const route = normalizePath(pageUrl);
-    const set = this.observeRefusedPosts.get(route) ?? new Set<string>();
-    if (set.size < 5) set.add(endpoint);
-    this.observeRefusedPosts.set(route, set);
+    if (!pageUrl || !this.memory || isDestructiveWire(pathnameOf(url), body) || matchReadPost(this.readPosts, this.baseUrl, url)) return;
+    const endpoint = this.refusedPostEndpoint(url);
+    if (endpoint) this.memory.noteObserveRefusedPost(normalizePath(pageUrl), endpoint);
+  }
+
+  /** A POST to this endpoint went out, so the pages observe refused it on are no longer a gap for it. */
+  private clearRefusedPost(url: string): void {
+    const endpoint = this.refusedPostEndpoint(url);
+    if (endpoint && this.memory) this.memory.clearObserveRefusedPosts((e) => e === endpoint);
   }
 
   private actionPolicyCheck(el: SnapshotElement, liveLabel: string, live: { ownText?: string; centre?: string[] } = {}): string | null {

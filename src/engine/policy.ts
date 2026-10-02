@@ -199,8 +199,10 @@ const LABELLED_CONTROL_ROLES = new Set([
  * The label that makes a listed element destructive, or null. A control is
  * judged by its OWN name, never by what it merely contains:
  *
- * - A button, link, menu item, tab or option is named by what it does, and
- *   that name is judged whole, as before.
+ * - A button, link, menu item, tab or option (by tag or by role) is named
+ *   by what it does, and that name is judged whole, however long: a button
+ *   "Delete all my saved data" is refused. The word cap below is only for
+ *   containers, whose text is the record they show.
  * - A dropdown (a `<select>`, a combobox, a listbox) is named by its options,
  *   all of them, so a filter offering "All, Create, Update, Delete" read as a
  *   delete control and choosing "Create" was refused. Choosing is judged where

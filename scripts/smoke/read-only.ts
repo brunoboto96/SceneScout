@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { feedForSession } from "../../dist/engine/live.js";
-import { generateReport } from "../../dist/engine/report.js";
+import { computeGaps, generateReport } from "../../dist/engine/report.js";
 import { FORMS_INVENTORY_SCRIPT } from "../../dist/engine/forms.js";
 import { focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
 import { BROWSER, check, eventually, settle, WAIT_MS, type SmokeContext } from "./harness.ts";
@@ -1113,14 +1113,16 @@ async function readPosts({ baseUrl, projectDir, stats }: SmokeContext): Promise<
     const snap = await loaded(plain);
     check("unnamed, the search POST never reaches the server", writesTo("POST /api/search") === before, JSON.stringify(stats.writes));
     check("...and the page shows the refusal as its error", lineOf(snap, "search-results").includes("Search failed: status 403"), snap);
-    check(
-      "...and the page is kept for the gap ledger with its endpoint",
-      plain.observeRefusedPosts.get("/read-posts.html")?.has("POST /api/search") === true,
-      JSON.stringify([...plain.observeRefusedPosts].map(([r, e]) => [r, [...e]])),
-    );
   } finally {
     await plain.close().catch(() => {});
   }
+  // Lanes close their sessions before the planner writes the report: the page must outlive the session.
+  const closedGaps = computeGaps(plain.memory!);
+  check(
+    "after the session closed, the report's gap ledger still names the page and its endpoint",
+    closedGaps.some((g) => g.includes("observe refused") && /\/read-posts\.html \([^)]*POST \/api\/search[,)]/.test(g)),
+    JSON.stringify(closedGaps),
+  );
 
   console.log("observe: the same page with POST /api/search named as a read");
   const named = new BrowserEngine();
@@ -1151,8 +1153,10 @@ async function readPosts({ baseUrl, projectDir, stats }: SmokeContext): Promise<
     const logged = named.memory!.actionLog.filter((e) => e.action === "write-policy:read-post");
     check("each read POST let out is logged", logged.length >= 1 && logged.every((e) => (e.target ?? "").includes("POST /api/search")), JSON.stringify(logged));
     check(
-      "the page is not kept for the gap ledger once its search is a named read",
-      !named.observeRefusedPosts.get("/read-posts.html")?.has("POST /api/search"),
+      "the page's search leaves the gap ledger once it is a named read, and the unnamed POST stays",
+      computeGaps(named.memory!).some((g) => /\/read-posts\.html \(POST \/api\/notes\)/.test(g)) &&
+        !computeGaps(named.memory!).some((g) => /\/read-posts\.html \([^)]*POST \/api\/search[,)]/.test(g)),
+      JSON.stringify(computeGaps(named.memory!)),
     );
   } finally {
     await named.close().catch(() => {});

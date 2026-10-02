@@ -152,14 +152,37 @@ test("ledger: touching one control clears the nothing-exercised gap for that rou
 test("ledger: a page whose POST observe refused is named, with the endpoint and how to name it as a read", () => {
   const store = freshStore();
   store.visitState("/search#a", "http://x/search", "/search", ["textbox:query"]);
-  const refused = [{ route: "/search", endpoints: ["POST /api/search"] }];
-  const gaps = computeGaps(store, { routesVisited: 1, routesTotal: 1, designAudits: 0, mode: "observe", observeRefusedPosts: refused });
-  const line = gaps.find((g) => g.includes("observe refused"));
-  assert.ok(line, `expected the refused POST in the ledger, got: ${JSON.stringify(gaps)}`);
+  store.noteObserveRefusedPost("/search", "POST /api/search");
+  store.noteObserveRefusedPost("/search", "POST /api/search");
+  assert.deepEqual(store.observeRefusedPosts, [{ route: "/search", endpoints: ["POST /api/search"] }], "deduplicated");
+  const line = computeGaps(store).find((g) => g.includes("observe refused"));
+  assert.ok(line, `expected the refused POST in the ledger, got: ${JSON.stringify(computeGaps(store))}`);
   assert.ok(line.includes("/search (POST /api/search)") && line.includes("readPosts"), line);
-  // The contrast: nothing refused (or the endpoint named as a read, so never refused), no line.
-  assert.ok(!computeGaps(store, { routesVisited: 1, routesTotal: 1, designAudits: 0, mode: "observe" }).some((g) => g.includes("observe refused")));
+  // The contrast: once a POST to it went out (named as a read, or sent in a looser mode), no line.
+  store.clearObserveRefusedPosts((e) => e === "POST /api/search");
+  assert.ok(!computeGaps(store).some((g) => g.includes("observe refused")));
   assert.equal(observeRefusedPostsGap([{ route: "/search", endpoints: [] }]), null);
+});
+
+test("ledger: a closed lane's refused POSTs are kept in project memory for the planner's report", () => {
+  // Lanes close their sessions before the planner writes the report, so the record lives in memory, on disk.
+  const lane = freshStore();
+  lane.noteObserveRefusedPost("/reports", "POST /api/reports/query", 1000);
+  lane.flush();
+  const planner = new MemoryStore(lane.dir.replace(/[\\/]\.scenescout$/, ""));
+  stores.push(planner);
+  assert.ok(
+    computeGaps(planner).some((g) => g.includes("/reports (POST /api/reports/query)")),
+    JSON.stringify(computeGaps(planner)),
+  );
+  // Two processes: the later of a refusal and a clear wins in the merge, whichever saves last.
+  planner.clearObserveRefusedPosts((e) => e === "POST /api/reports/query", 2000);
+  planner.flush();
+  lane.noteObserveRefusedPost("/other", "POST /api/other", 1500);
+  lane.flush();
+  const after = new MemoryStore(lane.dir.replace(/[\\/]\.scenescout$/, ""));
+  stores.push(after);
+  assert.deepEqual(after.observeRefusedPosts, [{ route: "/other", endpoints: ["POST /api/other"] }], JSON.stringify(after.observeRefusedPosts));
 });
 
 test("ledger: an abandoned journey does not count as task ease being measured", () => {

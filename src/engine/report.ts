@@ -224,8 +224,6 @@ export interface ReportExtras {
   trustedEmbeds?: string[];
   /** POST endpoints the user named as reads; they only count in observe. */
   readPosts?: string[];
-  /** In observe: pages whose scripts sent a POST observe refused, and the endpoints. */
-  observeRefusedPosts?: Array<{ route: string; endpoints: string[] }>;
   /** The engine's version, for the HTML's header. */
   version?: string;
   /** Sessions attached right now. Only these can be holding a browser, so only these are warned about. */
@@ -576,7 +574,8 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
           : ""),
     );
   }
-  const refusedPosts = observeRefusedPostsGap(extras?.observeRefusedPosts);
+  // From project memory, not a session: lanes close theirs before the report is written.
+  const refusedPosts = observeRefusedPostsGap(memory.observeRefusedPosts);
   if (refusedPosts) gaps.push(refusedPosts);
   const journeyTotal = Object.values(facts).reduce((a, f) => a + (f.journeysCompleted ?? 0), 0);
   if (journeyTotal === 0) {

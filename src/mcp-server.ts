@@ -284,18 +284,6 @@ const liveProvider: LiveProvider = {
   startStream: async (session, onFrame, onEnd) => (await engines.get(session)?.startScreencast(onFrame, onEnd)) ?? null,
 };
 
-/** The pages any live session saw observe refuse a script's POST on, merged across sessions (the gap ledger names them). */
-function observeRefusedPosts(): Array<{ route: string; endpoints: string[] }> {
-  const merged = new Map<string, Set<string>>();
-  for (const e of engines.values())
-    for (const [route, endpoints] of e.observeRefusedPosts) {
-      const set = merged.get(route) ?? new Set<string>();
-      for (const endpoint of endpoints) set.add(endpoint);
-      merged.set(route, set);
-    }
-  return [...merged].map(([route, endpoints]) => ({ route, endpoints: [...endpoints] }));
-}
-
 /** What the report needs to know beyond memory: the one place it is built, so the live view and scout_report cannot drift apart. */
 function reportExtras(eng: BrowserEngine): ReportExtras {
   const unvisited = eng.unvisitedKnownRoutes();
@@ -309,7 +297,6 @@ function reportExtras(eng: BrowserEngine): ReportExtras {
     mode: eng.mode,
     trustedEmbeds: [...eng.trustedEmbeds],
     readPosts: eng.readPosts.map((e) => e.entry),
-    observeRefusedPosts: observeRefusedPosts(),
     policyAttributed: eng.oracleLog.policyAttributed,
     version: PKG_VERSION,
     attachedSessions: [...engines.keys()],
@@ -1892,7 +1879,6 @@ server.registerTool(
           designAudits: auditsThisRun,
           unvisitedRoutes: unvisited,
           mode: eng.mode,
-          observeRefusedPosts: observeRefusedPosts(),
         });
         if (lvl === "extensive" && gapList.length > 0) {
           gates.push(
@@ -1921,7 +1907,6 @@ server.registerTool(
           mode: eng.mode,
           trustedEmbeds: [...eng.trustedEmbeds],
           readPosts: eng.readPosts.map((e) => e.entry),
-          observeRefusedPosts: observeRefusedPosts(),
           policyAttributed: eng.oracleLog.policyAttributed,
           // Which sessions are still open decides whether a quiet one is holding a browser, and how long its trailing idle runs.
           attachedSessions: [...engines.keys()],
