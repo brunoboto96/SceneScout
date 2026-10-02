@@ -513,9 +513,7 @@ async function flowWriteEdges({
     fs.mkdirSync(path.join(dir, ".scenescout", "flows"), { recursive: true });
     for (const [file, flow] of Object.entries(flows)) fs.writeFileSync(path.join(dir, ".scenescout", "flows", file), JSON.stringify(flow));
     const out = path.join(dir, "out");
-    // These flows test which writes the flow's rule refuses, and no step is meant to time out, so the action limit is
-    // raised past the default: a step held up by a loaded machine must not stand in for a refusal.
-    const r = await runCli([`${baseUrl}/check-flow.html`, "--project", dir, "--out", out, "--paths", "/check-flow.html", "--action-timeout-ms", "30000"]);
+    const r = await runCli([`${baseUrl}/check-flow.html`, "--project", dir, "--out", out, "--paths", "/check-flow.html"]);
     const file = path.join(out, "check.json");
     type Row = { file: string; status: string; step?: number; reason?: string; refusedBackground?: string[] };
     const json = fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, "utf8")) as { flows: Row[]; issues: Summary["issues"] }) : null;
