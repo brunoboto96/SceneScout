@@ -708,6 +708,15 @@ test("the report's summary names the one-page version only when it is really the
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("a finding with its own picture and no recorded frames does not stop the report", () => {
+  const store = freshStore();
+  const [f] = store.addFinding({ severity: "high", category: "page-error", title: "Export throws", detail: "d", url: "http://app.test/r", state: "/r#1" });
+  // As a finding filed with a picture on a run that records no frames carries it.
+  Object.assign(f, { picture: "recordings/default/finding-0123abcd.png" });
+  const r = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 1 }, { write: false });
+  assert.ok(r.markdown.includes("![What the page showed](recordings/default/finding-0123abcd.png)"));
+});
+
 test("replay: a finding's evidence comes from the session that filed it, not from whoever acted last", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-ev-"));
   const store = new MemoryStore(dir);

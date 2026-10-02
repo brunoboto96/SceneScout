@@ -329,7 +329,7 @@ Snapshots are cheap: re-snapshotting a route returns only *what changed*, with s
 
 ## 🧰 The toolbox
 
-33 deterministic tools. The agent picks; you rarely call these by hand.
+34 deterministic tools. The agent picks; you rarely call these by hand.
 
 | Phase | Tools | What they do |
 |---|---|---|
