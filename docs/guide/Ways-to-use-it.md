@@ -27,7 +27,27 @@ Use SceneScout to test http://localhost:3000 as the admin role, focusing on chec
 | `--level minimal`, `medium` or `extensive` | The completion contract ([levels](Start-here.md#levels)) |
 | `--url <app>` | Where the app runs |
 | `--role <name or path>` | Who to test as: a login saved with `scenescout login`, a storage state the scan found, or a path to a Playwright storage-state file ([Signing in](Signing-in.md)) |
-| `--observe`, `--safe-write`, `--allow-destructive` | A write mode other than the default ([Safety model](Safety-model.md)) |
+| `--focus <text>` | What to check: a ticket or a sentence. It becomes the session's objective |
+| `--observe`, `--read-only`, `--safe-write`, `--allow-destructive` | A write mode other than the default ([Safety model](Safety-model.md)) |
+
+### Plain questions instead of flags
+
+Invoke the skill with no flags (`/scenescout`, or the `explore` prompt with no arguments in another client) and the agent asks four questions before it starts:
+
+1. What is the address of the site?
+2. Do you need to sign in to use it? If so, how: Google or Microsoft single sign-on, an email and password, or a one-time code?
+3. What should I check? Upload or paste the tickets, or describe it in a sentence. Say "everything" to look at the whole site.
+4. Does the site hold real data, such as real customers, orders or records?
+
+| Answer | What it sets |
+|---|---|
+| The address | The URL the session attaches to |
+| A way of signing in | A browser window opens, you sign in as you normally would, and the session attaches with the saved login (role `user`). No sign-in: the session attaches signed out |
+| Tickets or a description | The session's objective, and the area it keeps to. "Everything" explores the whole site |
+| Real data: yes, or not sure | `observe`: nothing but `GET` requests leave the page, so nothing is created or changed |
+| Real data: no | `read-only`: ordinary forms are submitted, deletes and other destructive requests are blocked |
+
+You are never asked to choose a write mode. `safe-write` and `destructive` are used only when you ask for them. Any flag skips the questions, and what the flags leave out takes its default.
 
 ### Next to the code, or against a URL
 

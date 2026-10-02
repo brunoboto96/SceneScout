@@ -33,6 +33,7 @@ import { LOGIN_OPTION_NAMES } from "../src/engine/profiles.ts";
 import { SCRIPT_FLAGS } from "../src/engine/scripted-login.ts";
 import { looksLikeUrl, SUBCOMMANDS } from "../src/commands.ts";
 import { FIRST_RUN_DEFAULTS, FIRST_RUN_OPTION_NAMES, parseFirstRunArgs } from "../src/first-run.ts";
+import { flagsGiven, INTAKE_QUESTIONS, introQuestions, questionsToAsk, settingsFromAnswers, SKILL_FLAGS as INTAKE_FLAGS } from "../src/intake.ts";
 import { GUIDE_DIR, toWikiPage } from "./guide-wiki.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -637,6 +638,90 @@ test("the release workflow dispatches the wiki publish for the exact tag it rele
   assert.ok(!steps.some((s) => s.uses), "no checkout, no action: it only dispatches");
   assert.equal(steps[0].env?.TAG, "${{ needs.release.outputs.tag }}");
   assert.equal(steps[0].run, 'gh workflow run guide-wiki.yml --ref main -f ref="$TAG"');
+});
+
+// ── Plain questions at the start of a run ────────────────────────────────────
+
+test("each plain question chooses its setting", () => {
+  const base = { address: " https://app.example.com ", signIn: "none", whatToCheck: "everything", realData: "no" } as const;
+  // The address is the URL attached to.
+  assert.equal(settingsFromAnswers(base).attach.url, "https://app.example.com");
+  assert.throws(() => settingsFromAnswers({ ...base, address: "  " }), /address is empty/);
+  // Sign-in: none attaches signed out; every way of signing in goes through scout_login and attaches by its role.
+  assert.equal(settingsFromAnswers(base).login, null);
+  assert.equal(settingsFromAnswers(base).attach.role, undefined);
+  for (const [signIn, hint] of [
+    ["sso", /Google or Microsoft/],
+    ["password", /email and password/],
+    ["one-time-code", /code when it arrives/],
+  ] as const) {
+    const s = settingsFromAnswers({ ...base, signIn });
+    assert.deepEqual({ ...s.login, tellUser: undefined }, { tool: "scout_login", url: "https://app.example.com", role: "user", tellUser: undefined }, signIn);
+    assert.match(s.login!.tellUser, hint);
+    assert.equal(s.attach.role, "user", `${signIn} attaches with the role scout_login saved`);
+  }
+  // What to check: the objective, and the area to keep to.
+  assert.deepEqual(settingsFromAnswers(base), {
+    login: null,
+    attach: { url: "https://app.example.com", mode: "read-only", objective: "Explore the whole site" },
+  });
+  const tickets = settingsFromAnswers({ ...base, whatToCheck: { tickets: ["#12 Export button does nothing", " ", "#14 Filters reset"] } });
+  assert.equal(tickets.attach.objective, "Check the tickets: #12 Export button does nothing; #14 Filters reset");
+  assert.equal(tickets.focus, "#12 Export button does nothing; #14 Filters reset");
+  assert.throws(() => settingsFromAnswers({ ...base, whatToCheck: { tickets: [" "] } }), /no tickets/);
+  const described = settingsFromAnswers({ ...base, whatToCheck: { description: " the checkout flow " } });
+  assert.deepEqual([described.attach.objective, described.focus], ["the checkout flow", "the checkout flow"]);
+  assert.throws(() => settingsFromAnswers({ ...base, whatToCheck: { description: "" } }), /description is empty/);
+  // Real data: yes and not sure are observe, only a plain no is read-only, and no answer reaches a laxer mode.
+  assert.equal(settingsFromAnswers({ ...base, realData: "yes" }).attach.mode, "observe");
+  assert.equal(settingsFromAnswers({ ...base, realData: "unsure" }).attach.mode, "observe");
+  assert.equal(settingsFromAnswers({ ...base, realData: "no" }).attach.mode, "read-only");
+});
+
+test("no flags asks all four questions; any one flag skips them", () => {
+  assert.deepEqual(
+    INTAKE_QUESTIONS.map((q) => q.sets),
+    ["url", "role", "objective", "mode"],
+  );
+  assert.deepEqual(questionsToAsk(""), [...INTAKE_QUESTIONS]);
+  assert.deepEqual(questionsToAsk("please look at the new settings page"), [...INTAKE_QUESTIONS], "words are not flags");
+  // Every flag belongs to the one question it answers, and each one alone skips them all.
+  assert.deepEqual(INTAKE_QUESTIONS.flatMap((q) => q.flags).sort(), [...INTAKE_FLAGS].sort());
+  for (const flag of INTAKE_FLAGS) assert.deepEqual(questionsToAsk(`--${flag}`), [], `--${flag} skips the questions`);
+  assert.deepEqual(questionsToAsk("--url=http://localhost:3000"), []);
+  assert.deepEqual(flagsGiven("--level medium --url http://localhost:3000 --role admin --observe"), ["url", "role", "level", "observe"]);
+  // A longer word, a flag of another command, or a dash inside a value is not one of the skill's flags.
+  assert.deepEqual(flagsGiven("--urls --max-minutes 5 re--observe --read-only-ish"), []);
+  assert.deepEqual(questionsToAsk("--max-minutes 5"), [...INTAKE_QUESTIONS]);
+});
+
+test("the skill and the guide ask the same questions, map them the same way and name the same flags", () => {
+  const skill = read("skills/scenescout/SKILL.md");
+  const intro = section(skill, "## Starting a run: plain questions, or flags");
+  assert.ok(intro.includes(introQuestions()), "the skill lists the four questions, word for word, in order");
+  assert.ok(skill.indexOf("## Starting a run") < skill.indexOf("## Setup (in order)"), "the questions come before setup");
+  const hint = /Argument hint: `([^`]*)`/.exec(skill)?.[1] ?? "";
+  assert.deepEqual(flagsGiven(hint), [...INTAKE_FLAGS], "the argument hint names every flag");
+  const noFlags = intro.split("\n").find((l) => l.startsWith("**No flags given**")) ?? "";
+  assert.deepEqual(flagsGiven(noFlags), [...INTAKE_FLAGS], "the skill says which flags skip the questions");
+  // Each question's setting is in its row of the skill's table.
+  const rows = tableIn(skill, "## Starting a run: plain questions, or flags");
+  const row = (name: string) => rows.find((r) => r[0] === name)?.[1] ?? "";
+  assert.match(row("The address"), /scout_attach \{url\}/);
+  assert.match(row("Sign-in"), /scout_login \{url, role: "user"\}/);
+  assert.match(row("Sign-in"), /attach with `role: "user"`/);
+  assert.match(row("What to check"), /`objective`/);
+  assert.match(row("Real data"), /Yes, or not sure: `mode: "observe"`\. No: `mode: "read-only"`/);
+  assert.match(intro, /\*\*Flags given:\*\* ask nothing\./);
+  // The questions never name a mode: choosing one is what they are for.
+  for (const q of INTAKE_QUESTIONS) assert.doesNotMatch(q.ask, /observe|read-only|safe-write|destructive|role|mode/i, q.id);
+
+  const guide = section(pages.get("Ways-to-use-it.md")!, "### Plain questions instead of flags");
+  assert.ok(guide.includes(introQuestions()), "the guide lists the same questions");
+  const flagRows = tableIn(pages.get("Ways-to-use-it.md")!, "## An interactive run")
+    .map((r) => r[0])
+    .join(" ");
+  assert.deepEqual(flagsGiven(flagRows), [...INTAKE_FLAGS], "the guide's flag table names every flag");
 });
 
 test("the suite is wired into npm test and listed in AGENTS.md", () => {
