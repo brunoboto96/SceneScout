@@ -19,6 +19,10 @@ import {
   hasVisibleFrame,
   isFieldAdornment,
   isPassThroughOverlay,
+  COLLECT_INTERACTABLES_SCRIPT,
+  FOCUS_MOVES_PROPS,
+  IN_PAGE_ANCHOR,
+  PAGER_NAME,
   isPagerName,
   revealedOnFocus,
   masksForeignName,
@@ -226,6 +230,13 @@ test("a button in a text field's reserved padding is an adornment; one reaching 
   // Not a text field: no padding is reserved for anything.
   assert.equal(overlaps({ role: "button", fieldPad: null }, {}).length, 1);
   assert.equal(isFieldAdornment({ rect: field.rect, fieldPad: { l: 8, r: 36 } }, clear), true);
+});
+
+test("the collector's literal copies of the shared patterns match the exported ones", () => {
+  // The page script carries them as text rather than splicing values into code; this keeps the copies equal.
+  assert.ok(COLLECT_INTERACTABLES_SCRIPT.includes(`const PAGER = ${String(PAGER_NAME)};`), "PAGER_NAME");
+  assert.ok(COLLECT_INTERACTABLES_SCRIPT.includes(`${String(IN_PAGE_ANCHOR)}.test(`), "IN_PAGE_ANCHOR");
+  assert.ok(COLLECT_INTERACTABLES_SCRIPT.includes(`const FOCUS_MOVES = ${JSON.stringify(FOCUS_MOVES_PROPS).replace(/,/g, ", ")};`), "FOCUS_MOVES_PROPS");
 });
 
 test("a pager control's name is told from ordinary buttons", () => {

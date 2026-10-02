@@ -96,8 +96,9 @@ export const DIALOG_LIKE_SEL = '[role="dialog"], [role="alertdialog"], dialog[op
  * The accessible name of a control that pages a clipping container: next and
  * previous arrows, numbered slide or page buttons, scroll-left and
  * scroll-right. Content clipped inside a container such a control sits beside
- * is revealed by it, so it is not unreachable. Exported so the page-side walk
- * and its table test read the same pattern.
+ * is revealed by it, so it is not unreachable. The page-side walk carries a
+ * literal copy (no value is spliced into page code); oracle-test holds the two
+ * equal.
  */
 export const PAGER_NAME =
   /^(?:[‹›«»<>←→⟨⟩❮❯]|(?:go to |show )?(?:next|previous|prev)(?:\s+\w+)?|(?:go to |show )?(?:slide|page|image|item|step)\s*\d+.*|scroll (?:left|right|up|down)\b.*)$/i;
@@ -110,13 +111,15 @@ export function isPagerName(name: string): boolean {
 /**
  * An href that points at a place in this same document: "#main". Not a bare
  * "#", and not a hash route ("#/reports", "#!/reports"), which is navigation.
+ * The collector carries a literal copy; oracle-test holds the two equal.
  */
 export const IN_PAGE_ANCHOR = /^#(?![/!])./;
 
 /**
  * Style properties that can bring a box parked off the page back into it. A
  * :focus rule that sets one of these is how a skip link is revealed; a :focus
- * rule that only draws an outline is not.
+ * rule that only draws an outline is not. The collector carries a literal
+ * copy; oracle-test holds the two equal.
  */
 export const FOCUS_MOVES_PROPS = [
   "position",
@@ -271,12 +274,12 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
     return "<" + node.tagName.toLowerCase() + ">" + (text ? ' "' + text + '"' : "");
   };
   /** A link to a place in this same document (a skip link's shape): "#main", never a bare "#" or a hash route ("#/reports"). */
-  const inPageAnchor = (node) => node.tagName === "A" && ${IN_PAGE_ANCHOR}.test(node.getAttribute("href") || "");
+  const inPageAnchor = (node) => node.tagName === "A" && /^#(?![/!])./.test(node.getAttribute("href") || "");
   // The page's :focus rules that move a box (FOCUS_MOVES_PROPS), as selectors
   // with the :focus part removed: an element they match is shown when it takes
   // focus. Read once, only when an element sits off the page.
   let focusMoveSelectors = null;
-  const FOCUS_MOVES = ${JSON.stringify(FOCUS_MOVES_PROPS)};
+  const FOCUS_MOVES = ["position", "top", "left", "right", "bottom", "inset", "transform", "translate", "clip", "clip-path", "margin", "margin-top", "margin-left", "width", "height"];
   const readFocusRules = (rules, out) => {
     for (const rule of Array.from(rules || [])) {
       if (out.length >= 500) return;
@@ -327,7 +330,7 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
     return describe(coverRoot);
   };
 
-  const PAGER = new RegExp(${JSON.stringify(PAGER_NAME.source)}, "i");
+  const PAGER = /^(?:[‹›«»<>←→⟨⟩❮❯]|(?:go to |show )?(?:next|previous|prev)(?:\\s+\\w+)?|(?:go to |show )?(?:slide|page|image|item|step)\\s*\\d+.*|scroll (?:left|right|up|down)\\b.*)$/i;
   // Per container and axis: a carousel clips every slide but one, and they share the answer.
   const pagedClips = new Map();
   const revealedByControl = (clip, axis) => {
