@@ -635,11 +635,55 @@ function decisionKey(d: RecordedDecision): string {
   return [d.lane, d.observation, d.verdict, d.severity ?? "", d.category ?? "", d.confidence, d.evidence ?? ""].join("|");
 }
 
+/** Route identity of a stored route, memoised: states written before an id shape collapsed fold into today's form. */
+const routeIdentityCache = new Map<string, string>();
+export function routeIdentity(route: string): string {
+  let out = routeIdentityCache.get(route);
+  if (out === undefined) {
+    out = normalizePath(route);
+    if (routeIdentityCache.size > 10_000) routeIdentityCache.clear();
+    routeIdentityCache.set(route, out);
+  }
+  return out;
+}
+
+/** A route's base: its path, without the UI-state query naming a tab or section of it. */
+export function baseRoute(route: string): string {
+  return route.split("?")[0] || "/";
+}
+
 /**
- * Most lane decisions kept. Calibration wants a few dozen; a long-lived
- * project would otherwise accumulate every decision ever made and re-serialise
- * them on each save, which is what made an old history slow to open.
+ * Whether a contract route was reached, given the routes states were recorded
+ * on: the route itself, by today's route identity, or, for a base path, one of
+ * its tabs or sections (`/things/:id?section=history` reaches `/things/:id`).
+ * One rule for the "never visited" list and the gap ledger, so a route is not
+ * both reached and never visited.
  */
+export function reachedRoutes(stateRoutes: Iterable<string>): (route: string) => boolean {
+  const visited = new Set<string>();
+  for (const r of stateRoutes) visited.add(routeIdentity(r));
+  const bases = new Set([...visited].map(baseRoute));
+  return (route: string): boolean => {
+    const n = routeIdentity(route);
+    return visited.has(n) || (!n.includes("?") && bases.has(n));
+  };
+}
+
+/**
+ * Link-discovered routes re-keyed by today's route identity. A memory written
+ * before an id shape collapsed holds one route per record (`/things/AB-1001`,
+ * `/things/AB-1002`); folded, they are the one route they always were, and
+ * the first example seen stays its navigable path.
+ */
+export function renormalizeRoutes(map: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [route, example] of Object.entries(map)) {
+    const key = routeIdentity(route);
+    if (!(key in out)) out[key] = example;
+  }
+  return out;
+}
+
 /**
  * Whether a coverage key belongs to a control inside another site's frame:
  * those keys carry the frame's origin (collector.ts frameElementKey), where
@@ -649,6 +693,11 @@ export function isEmbedKey(key: string): boolean {
   return /^frame:https?:\/\//.test(key);
 }
 
+/**
+ * Most lane decisions kept. Calibration wants a few dozen; a long-lived
+ * project would otherwise accumulate every decision ever made and re-serialise
+ * them on each save, which is what made an old history slow to open.
+ */
 export const MAX_LANE_DECISIONS = 1000;
 
 /**
@@ -1128,6 +1177,8 @@ export class MemoryStore {
     this.dedupChoice = undefined;
     this.dedupOff = undefined;
     this.sessionRoutes.clear();
+    this.sessionStates.clear();
+    this.runStates.clear();
     this.runId = newRunId();
   }
 
@@ -1145,6 +1196,22 @@ export class MemoryStore {
    * Per run, like the other per-run tallies.
    */
   readonly sessionRoutes = new Map<string, Set<string>>();
+
+  /**
+   * The state fingerprints each session recorded this run. A route's states
+   * differ by who looked: an admin's table and a viewer's access-denied alert
+   * are two states of one route, and a session's own coverage lists only the
+   * controls on the states it saw.
+   */
+  readonly sessionStates = new Map<string, Set<string>>();
+
+  /** Every state fingerprint recorded this run, by any session: the gap ledger's default scope. */
+  readonly runStates = new Set<string>();
+
+  /** The states this session recorded this run. */
+  statesVisitedBy(session: string): ReadonlySet<string> {
+    return this.sessionStates.get(session) ?? new Set();
+  }
 
   /** Routes this session reached this run, in the order first reached. */
   routesVisitedBy(session: string): ReadonlySet<string> {
@@ -1179,7 +1246,12 @@ export class MemoryStore {
    */
   readonly selectChoices = new Map<string, { route: string; key: string; options: string[]; chosen: Set<string> }>();
 
-  recordSelectChoice(fingerprint: string, key: string, options: readonly string[], chosen: string): void {
+  /**
+   * `loaded` names the options already selected before the choice: the value
+   * the page loaded with has already been asked of the server, so it is not
+   * owed a choice.
+   */
+  recordSelectChoice(fingerprint: string, key: string, options: readonly string[], chosen: string, loaded: readonly string[] = []): void {
     const route = fingerprint.split("#")[0];
     const id = `${route}\u0000${key}`;
     const distinct = [...new Set(options)];
@@ -1191,6 +1263,7 @@ export class MemoryStore {
     // The latest list wins: options a page added or removed since are not owed.
     if (distinct.length > 0) entry.options = distinct;
     if (chosen) entry.chosen.add(chosen);
+    for (const label of loaded) if (label) entry.chosen.add(label);
     this.selectChoices.set(id, entry);
   }
 
@@ -1630,6 +1703,7 @@ export class MemoryStore {
           raw.states = kept;
           this.prunedStates = dropped;
         }
+        if (raw.discoveredRoutes) raw.discoveredRoutes = renormalizeRoutes(raw.discoveredRoutes);
         return raw;
       }
       this.loadWarning = `memory.json has unknown version ${String((raw as { version?: unknown }).version)} — starting fresh.`;
@@ -1809,10 +1883,14 @@ export class MemoryStore {
    * `session` names who visited, for this run's per-session coverage.
    */
   visitState(fingerprint: string, url: string, route: string, elementKeys: string[], inertKeys: readonly string[] = [], session?: string): boolean {
+    this.runStates.add(fingerprint);
     if (session) {
       const routes = this.sessionRoutes.get(session) ?? new Set<string>();
       routes.add(route);
       this.sessionRoutes.set(session, routes);
+      const states = this.sessionStates.get(session) ?? new Set<string>();
+      states.add(fingerprint);
+      this.sessionStates.set(session, states);
     }
     let rec = this.data.states[fingerprint];
     const isNew = !rec;
@@ -2064,16 +2142,24 @@ export class MemoryStore {
    * rendered in 30 states of one route is one set of elements, not 30. An
    * element counts as exercised when it was exercised in ANY state of the
    * route. (`state` in the result therefore holds a route.)
+   *
+   * `scope.routes` narrows the routes counted; `scope.states` narrows the
+   * elements listed to the ones those states hold (a session's own states, or
+   * this run's), while whether one was exercised still comes from every state
+   * of the route.
    */
-  coverage(scope?: { routes: ReadonlySet<string> }): {
+  coverage(scope?: { routes?: ReadonlySet<string>; states?: ReadonlySet<string> }): {
     states: number;
     elementsTotal: number;
     elementsExercised: number;
     unexercised: Array<{ state: string; keys: string[]; total: number }>;
+    /** Each route's own controls (chrome and other sites' frames left out) and how many were exercised. */
+    perRoute: Map<string, { total: number; exercised: number }>;
     /** Controls inside other sites' frames: counted apart, never in the app's totals or its gap ledger. */
     embeds: { total: number; exercised: number };
   } {
     const byRoute = this.elementsByRoute();
+    const listed = scope?.states ? this.elementsByRoute(scope.states) : byRoute;
     // Shared layout CHROME (sidebar nav, header, breadcrumbs) is one set of
     // components, not one set per route — clicking "nav-documents" on /admin is
     // the same click as on /. Counting it per route inflated the denominator by
@@ -2087,12 +2173,13 @@ export class MemoryStore {
     let elementsTotal = 0;
     let elementsExercised = 0;
     const unexercised: Array<{ state: string; keys: string[]; total: number }> = [];
+    const perRoute = new Map<string, { total: number; exercised: number }>();
     const embeds = { total: 0, exercised: 0 };
-    for (const [route, elements] of byRoute) {
+    for (const [route, elements] of listed) {
       // A scope narrows what is counted, never what counts as chrome: that is
       // decided over every route, so a lane on two pages does not see the
       // project's sidebar as those pages' own controls.
-      if (scope && !scope.routes.has(route)) continue;
+      if (scope?.routes && !scope.routes.has(route)) continue;
       const own: string[] = [];
       // The route's OWN element count — deduped across states and with shared
       // chrome removed, i.e. exactly the denominator `own` is a subset of.
@@ -2116,6 +2203,7 @@ export class MemoryStore {
         if (done) elementsExercised += 1;
         else own.push(key);
       }
+      perRoute.set(route, { total: ownTotal, exercised: ownTotal - own.length });
       if (own.length > 0) unexercised.push({ state: route, keys: own, total: ownTotal });
     }
     // Chrome counted once, at the end, as its own pseudo-route.
@@ -2128,8 +2216,12 @@ export class MemoryStore {
     if (chromeLeft.length > 0) {
       unexercised.push({ state: SHARED_CHROME_ROUTE, keys: chromeLeft, total: chrome.size });
     }
-    const states = scope ? Object.values(this.data.states).filter((st) => scope.routes.has(st.route)).length : Object.keys(this.data.states).length;
-    return { states, elementsTotal, elementsExercised, unexercised, embeds };
+    const states = scope
+      ? Object.entries(this.data.states).filter(
+          ([fp, st]) => (!scope.routes || scope.routes.has(routeIdentity(st.route))) && (!scope.states || scope.states.has(fp)),
+        ).length
+      : Object.keys(this.data.states).length;
+    return { states, elementsTotal, elementsExercised, unexercised, perRoute, embeds };
   }
 
   /**
@@ -2162,20 +2254,50 @@ export class MemoryStore {
     return keys;
   }
 
-  /** Element keys folded per route, exercised-in-any-state. */
-  private elementsByRoute(): Map<string, Map<string, boolean>> {
-    const byRoute = new Map<string, Map<string, boolean>>();
-    for (const rec of Object.values(this.data.states)) {
-      let route = byRoute.get(rec.route);
-      if (!route) {
-        route = new Map();
-        byRoute.set(rec.route, route);
+  /**
+   * Element keys folded per route, exercised-in-any-state. With `only`, the
+   * keys listed are the ones those states hold; exercised still reads every
+   * state of the route.
+   *
+   * A key is not a control when ANY state of the route recorded it as inert.
+   * Whether a user can act on an element depends on the element, not on the
+   * state it was seen in, and states recorded before the flag existed carry
+   * an unflagged copy that would otherwise keep a wrapper in the count until
+   * that exact state is visited again.
+   *
+   * Routes are re-read through route identity, so states recorded under an
+   * older form of a route (before an id shape collapsed) fold into it.
+   */
+  private elementsByRoute(only?: ReadonlySet<string>): Map<string, Map<string, boolean>> {
+    const inert = new Map<string, Set<string>>();
+    const exercised = new Map<string, Set<string>>();
+    const listed = new Map<string, Set<string>>();
+    const bucket = (map: Map<string, Set<string>>, route: string): Set<string> => {
+      let set = map.get(route);
+      if (!set) {
+        set = new Set();
+        map.set(route, set);
       }
+      return set;
+    };
+    for (const [fp, rec] of Object.entries(this.data.states)) {
+      const route = routeIdentity(rec.route);
+      const keys = only && !only.has(fp) ? null : bucket(listed, route);
       for (const [key, v] of Object.entries(rec.elements)) {
-        // Not a control: nothing to exercise, so not counted as a gap or a total.
-        if (v.inert) continue;
-        route.set(key, (route.get(key) ?? false) || v.exercised);
+        if (v.inert) bucket(inert, route).add(key);
+        if (v.exercised) bucket(exercised, route).add(key);
+        keys?.add(key);
       }
+    }
+    const byRoute = new Map<string, Map<string, boolean>>();
+    for (const [route, keys] of listed) {
+      const elements = new Map<string, boolean>();
+      for (const key of keys) {
+        // Not a control: nothing to exercise, so not counted as a gap or a total.
+        if (inert.get(route)?.has(key)) continue;
+        elements.set(key, exercised.get(route)?.has(key) ?? false);
+      }
+      byRoute.set(route, elements);
     }
     return byRoute;
   }

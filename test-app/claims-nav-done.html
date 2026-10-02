@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Entries</title>
+  </head>
+  <body>
+    <!--
+      The page claims-nav-start.html leads to. As it loads it sends a write of
+      its own, refused, with no user input on it yet: a visit or error beacon.
+      Its subtitle and status column hold success words that are always there.
+    -->
+    <h1>Entries</h1>
+    <p data-testid="entries-subtitle">Saved entries and what happened to them</p>
+    <table data-testid="entries-table">
+      <thead>
+        <tr>
+          <th>Entry</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Entry 4</td>
+          <td>Completed</td>
+        </tr>
+      </tbody>
+    </table>
+    <script>
+      fetch("/api/refuse/403?nav=beacon", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => {});
+    </script>
+  </body>
+</html>
