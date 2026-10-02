@@ -210,7 +210,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_ACTION_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long one action may take, 1000 to 120000 (default 5000). An option wins over it |
 | `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
 | `SCENESCOUT_LIVE` | the server | `off` keeps the live view closed |
-| `SCENESCOUT_OPEN` | the server | What opens in the default browser: `live` (the live view, on attach), `report` (`report.html`, when `scout_report` writes it), `both` or `none`. Unset: `both` on a local desktop session, headed or headless; `none` in CI, over SSH, or on Linux with no display. `none` for a developer who wants no tabs. A `scout_attach` `open` wins over it. `ci` always runs its server with `none` |
+| `SCENESCOUT_OPEN` | the server | What opens in the default browser: `live` (the live view, on attach), `report` (`report.html`, when `scout_report` writes it), `both` or `none`. Unset: `both` on a local desktop session, headed or headless; `none` in CI, over SSH, or on Linux with no display. `none` for a developer who wants no tabs. A `scout_attach` `open` wins over it. `ci` runs its server with `none` unless this is set |
 | `CI` | the server | Set by CI providers; unless it is empty, `0` or `false`, nothing opens in a browser by default |
 | `SSH_CONNECTION` | the server | Set by SSH; nothing opens in a browser by default over SSH |
 | `SSH_TTY` | the server | Set by SSH, as `SSH_CONNECTION` |
