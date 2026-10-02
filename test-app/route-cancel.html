@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Edit record</title>
+  </head>
+  <body>
+    <!--
+      A dirty form whose router cancels a route change by throwing from its
+      route-change handler, after putting up its own confirmation: the user
+      sees the dialog, not the error. Its counterpart, route-cancel-crash.html,
+      is identical except that no confirmation opens, so the same uncaught
+      error is all that happens and stays a high page_error.
+    -->
+    <h1>Edit record</h1>
+    <label for="title">Title</label>
+    <input id="title" data-testid="record-title-input" value="edited" />
+    <a href="/page2.html" data-testid="record-next-link" onclick="leave(event)">Next record</a>
+    <div role="alertdialog" aria-label="Unsaved changes" data-testid="record-unsaved-dialog" hidden>
+      <p>You have unsaved changes.</p>
+      <button data-testid="record-unsaved-stay">Stay</button>
+    </div>
+    <script>
+      const CONFIRMS = true;
+      function leave(event) {
+        event.preventDefault();
+        if (CONFIRMS) document.querySelector("[data-testid=record-unsaved-dialog]").hidden = false;
+        throw new Error("Navigation cancelled: unsaved changes");
+      }
+    </script>
+  </body>
+</html>

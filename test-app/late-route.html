@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Record</title>
+  </head>
+  <body>
+    <!--
+      A "Save" button whose client-side router moves the page a moment after
+      the click, with no request for the engine's settle to wait on. It is not
+      a silent submit. Its counterpart, late-route-idle.html, is identical
+      except that its "Save" does nothing at all, which is.
+    -->
+    <h1>Record</h1>
+    <button data-testid="record-save-button" onclick="save()">Save</button>
+    <!-- "sign" inside "assignee" is not the word "sign": this button is not submit-style. -->
+    <button data-testid="assignee-verify" onclick="void 0">Verify</button>
+    <script>
+      function save() {
+        setTimeout(() => history.pushState({}, "", "?step=next"), 300);
+      }
+    </script>
+  </body>
+</html>

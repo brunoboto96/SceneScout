@@ -44,9 +44,12 @@ import {
   EmbedRequestLog,
   OracleMonitor,
   POLICY_BLOCK_WINDOW_MS,
+  REPLAY_ECHO_WINDOW_MS,
+  ReplayLog,
   failedLoadEchoOf,
   formatViolations,
   isPolicyInduced,
+  isRouteCancellation,
   redactViolation,
 } from "../src/engine/oracles.ts";
 import {
@@ -813,5 +816,127 @@ test("postMessage capture: binary buffers and huge arrays are not walked, and a 
   assert.deepEqual(
     tokenHits([sent]).map((h) => h.path),
     ["data(json).session.access_token"],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The tester's own scout_request probes are not the page's violations.
+// ---------------------------------------------------------------------------
+
+/** A fake page and a monitor on it; requests carry a `replay` flag the engine's identity check reads. */
+function monitored(): { page: EventEmitter & { url: () => string }; monitor: OracleMonitor } {
+  const page = Object.assign(new EventEmitter(), { url: () => "http://app.test/things" });
+  const monitor = new OracleMonitor();
+  monitor.setReplayCheck((r) => (r as unknown as { replay: boolean }).replay);
+  monitor.attach(page as unknown as Page);
+  return { page, monitor };
+}
+const fakeResponse = (url: string, status: number, replay: boolean) => {
+  const request = { url: () => url, method: () => "GET", replay };
+  return { status: () => status, url: () => url, request: () => request };
+};
+const failedLoad = (url: string) => ({
+  type: () => "error",
+  text: () => "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+  location: () => ({ url, lineNumber: 0, columnNumber: 0 }),
+});
+
+test("OracleMonitor: a refused scout_request probe and its console echo are not the page's violations", () => {
+  const { page, monitor } = monitored();
+  const url = "http://app.test/api/things/9";
+  monitor.replayStarted(url);
+  page.emit("response", fakeResponse(url, 403, true));
+  page.emit("console", failedLoad(url));
+  monitor.replayEnded(url);
+  assert.deepEqual(monitor.drain(), []);
+  assert.equal(monitor.replayAttributed, 2, "counted, not silently dropped");
+});
+
+test("OracleMonitor: the same 403 fetched by the page itself is still reported", () => {
+  const { page, monitor } = monitored();
+  const url = "http://app.test/api/things/9";
+  page.emit("response", fakeResponse(url, 403, false));
+  page.emit("console", failedLoad(url));
+  assert.deepEqual(
+    monitor.drain().map((v) => `${v.severity} ${v.kind}`),
+    ["medium http_error", "high console_error"],
+  );
+  assert.equal(monitor.replayAttributed, 0);
+});
+
+test("ReplayLog: a replay's echo is matched by address while in flight and for a short window after", () => {
+  const log = new ReplayLog();
+  const page = "http://app.test/things";
+  const echo = "Failed to load resource: the server responded with a status of 404 (Not Found)";
+  const url = "http://app.test/api/things/9";
+  assert.equal(log.echoes(echo, url, page, 0), false, "nothing replayed yet");
+  log.begin(url);
+  assert.equal(log.echoes(echo, url, page, 10_000), true, "in flight, however long it takes");
+  log.end(url, 1000);
+  assert.equal(log.echoes(echo, `${url}#frag`, page, 1000 + REPLAY_ECHO_WINDOW_MS), true, "the fragment is never sent");
+  assert.equal(log.echoes(echo, "http://app.test/api/things/10", page, 1001), false, "another address is the page's");
+  assert.equal(log.echoes("Uncaught TypeError: x is undefined", url, page, 1001), false, "only the failed-load echo");
+  assert.equal(log.echoes(echo, url, page, 1001 + REPLAY_ECHO_WINDOW_MS), false, "past the window the address is the page's again");
+  // A redirect hop is begun and ended like the call itself, so it does not stay the replay's for the session.
+  const hop = "http://app.test/login";
+  log.begin(hop);
+  log.end(hop, 5000);
+  assert.equal(log.echoes(echo, hop, page, 5000 + REPLAY_ECHO_WINDOW_MS + 1), false);
+});
+
+// ---------------------------------------------------------------------------
+// A router cancelling a route change on purpose (isRouteCancellation).
+// ---------------------------------------------------------------------------
+
+test("isRouteCancellation: a click that stayed put and opened a confirmation, or says it cancelled a route", () => {
+  const click = { byClick: true, viaLink: true, urlChanged: false, dialogOpened: true };
+  const plain = "Navigation cancelled: unsaved changes";
+  const cases: Array<[string, typeof click, boolean, string]> = [
+    [plain, click, true, "a link click that opened a confirmation instead of moving"],
+    [plain, { ...click, dialogOpened: false }, false, "the same throw with no dialog"],
+    [plain, { ...click, viaLink: false }, false, "a button with no route asked for"],
+    [plain, { ...click, urlChanged: true }, false, "the URL moved: not a cancellation"],
+    [plain, { ...click, byClick: false }, false, "not raised by a click"],
+    ["Route change aborted", { ...click, viaLink: false, dialogOpened: false }, true, "the wording names a cancelled route"],
+    ["Abort fetching component for route: /things", { ...click, viaLink: false, dialogOpened: false }, true, "either order"],
+    ["Route change aborted", { ...click, urlChanged: true }, false, "but never when the URL moved"],
+    ["Cannot read properties of undefined (reading 'route')", { ...click, viaLink: false, dialogOpened: false }, false, "a crash that mentions a route"],
+    ["Request aborted", { ...click, viaLink: false, dialogOpened: false }, false, "an abort with no route"],
+  ];
+  for (const [message, c, want, why] of cases) assert.equal(isRouteCancellation(message, c), want, why);
+});
+
+test("OracleMonitor: a route-change cancellation is re-ranked medium with a note; a crash stays high", () => {
+  const { page, monitor } = monitored();
+  const since = Date.now();
+  page.emit("pageerror", new Error("Navigation cancelled: unsaved changes"));
+  monitor.downgradeRouteCancellations(since, { byClick: true, viaLink: true, urlChanged: false, dialogOpened: true });
+  const [cancel] = monitor.drain();
+  assert.equal(cancel.severity, "medium");
+  assert.match(cancel.detail, /router cancelling the route change/);
+  assert.match(cancel.detail, /opened a dialog/, "the note names the evidence it was read on");
+
+  page.emit("pageerror", new Error("Route change aborted"));
+  monitor.downgradeRouteCancellations(since, { byClick: true, viaLink: false, urlChanged: false, dialogOpened: false });
+  const [worded] = monitor.drain();
+  assert.equal(worded.severity, "medium");
+  assert.match(worded.detail, /says the route change was cancelled/);
+  assert.doesNotMatch(worded.detail, /dialog/, "no dialog is claimed when none was seen");
+  assert.equal(monitor.all[0].severity, "medium", "the session log holds the same verdict");
+
+  page.emit("pageerror", new Error("Navigation cancelled: unsaved changes"));
+  monitor.downgradeRouteCancellations(since, { byClick: true, viaLink: true, urlChanged: false, dialogOpened: false });
+  const [crash] = monitor.drain();
+  assert.equal(crash.severity, "high");
+  assert.doesNotMatch(crash.detail, /router/);
+});
+
+test("OracleMonitor: a contradiction keeps the severity its rule gave it", () => {
+  const monitor = new OracleMonitor();
+  monitor.noteContradiction({ kind: "false_success", detail: "partial: 1 of 2", evidence: "x", severity: "medium" }, "http://app.test/");
+  monitor.noteContradiction({ kind: "false_success", detail: "all refused", evidence: "y" }, "http://app.test/");
+  assert.deepEqual(
+    monitor.drain().map((v) => v.severity),
+    ["medium", "high"],
   );
 });

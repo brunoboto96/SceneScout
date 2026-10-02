@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Edit record</title>
+  </head>
+  <body>
+    <!--
+      route-cancel.html with one difference: no confirmation opens. The click
+      throws and nothing the user can see explains it, so the uncaught error
+      stays a high page_error.
+    -->
+    <h1>Edit record</h1>
+    <label for="title">Title</label>
+    <input id="title" data-testid="record-title-input" value="edited" />
+    <a href="/page2.html" data-testid="record-next-link" onclick="leave(event)">Next record</a>
+    <div role="alertdialog" aria-label="Unsaved changes" data-testid="record-unsaved-dialog" hidden>
+      <p>You have unsaved changes.</p>
+      <button data-testid="record-unsaved-stay">Stay</button>
+    </div>
+    <script>
+      const CONFIRMS = false;
+      function leave(event) {
+        event.preventDefault();
+        if (CONFIRMS) document.querySelector("[data-testid=record-unsaved-dialog]").hidden = false;
+        throw new Error("Navigation cancelled: unsaved changes");
+      }
+    </script>
+  </body>
+</html>
