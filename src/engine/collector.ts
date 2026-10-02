@@ -50,6 +50,11 @@ export const XPATH_OF_SRC = `(el) => {
  * A label's text is read without the control's own text: a wrapping label
  * holds the control, and a select's options or a textarea's contents are not
  * its label.
+ *
+ * `content` is what the element's image content says, which the text cannot
+ * hold: the alt text of the first descendant <img>, else the aria-label or
+ * <title> of a descendant <svg> or role="img", in document order, skipping
+ * anything inside an aria-hidden part of the element.
  */
 export const NAME_FACTS_SRC = `(el) => {
     const tag = el.tagName.toLowerCase();
@@ -60,6 +65,17 @@ export const NAME_FACTS_SRC = `(el) => {
     for (const label of Array.from(el.labels || [])) {
       const own = label.contains(el) ? el.textContent || "" : "";
       labels.push((label.textContent || "").replace(own, ""));
+    }
+    let content = "";
+    for (const d of el.querySelectorAll("img, svg, [role='img']")) {
+      const hidden = d.closest('[aria-hidden="true"]');
+      if (hidden && el.contains(hidden)) continue;
+      const title = d.tagName.toLowerCase() === "svg" ? d.querySelector(":scope > title") : null;
+      const said = (d.tagName === "IMG" ? d.getAttribute("alt") : d.getAttribute("aria-label") || (title ? title.textContent : "")) || "";
+      if (said.trim()) {
+        content = said;
+        break;
+      }
     }
     const live = /^(status|alert|log|timer|marquee)$/.test(role) || tag === "output" ||
       (el.hasAttribute("aria-live") && el.getAttribute("aria-live") !== "off");
@@ -77,6 +93,7 @@ export const NAME_FACTS_SRC = `(el) => {
       alt: el.getAttribute("alt") || "",
       live,
       text: el.innerText || el.textContent || "",
+      content,
     };
   }`;
 
@@ -92,8 +109,15 @@ export const NAME_FACTS_SRC = `(el) => {
  * fallback stays.
  *
  * - A select is never named by its options: their text is its value, not its name.
- * - Other elements are named by their text, and by title when they have none
- *   (an icon-only button with a tooltip).
+ * - Other elements are named by their text; with none, by their image content
+ *   (a link holding only a logo with alt text, a button holding only an svg
+ *   with a <title>); and with neither, by title (an icon-only button with a
+ *   tooltip). Text and image content are not joined: a control with both is
+ *   named by its text, as it was before image content counted.
+ * - A name taken from image content carries `prior`, the name the rule gave
+ *   before image content counted (the title, or nothing). The name is half of
+ *   the coverage key, so the key under the earlier rule is kept beside the new
+ *   one and coverage recorded under it carries over (memory.ts keyAliases).
  * - A live region (status, alert, log, timer, an aria-live region, <output>)
  *   is named by the text it announces, which is what matters after an action.
  * - A whitespace-only aria-label ends the name with nothing, as it always has
@@ -125,6 +149,7 @@ export const PICK_NAME_SRC = `(f) => {
       return { name: (clean(f.nameAttr) || t || f.tag).slice(0, 80), from: "fallback" };
     }
     if (clean(f.text)) return named(clean(f.text));
+    if (clean(f.content)) return { ...named(clean(f.content)), prior: clean(f.title).slice(0, 80) };
     return named(clean(f.title));
   }`;
 
@@ -142,14 +167,23 @@ export interface NameFacts {
   alt: string;
   live: boolean;
   text: string;
+  content: string;
+}
+
+/** A name PICK_NAME_SRC chose, and the name the earlier rule gave when the two can differ. */
+export interface PickedName {
+  name: string;
+  from: NameFrom | null;
+  /** Present only when image content named the element: the name before image content counted. */
+  prior?: string;
 }
 
 /**
  * PICK_NAME_SRC run outside a page, from the same source the page runs, so a
  * table test exercises exactly the rule the collector ships.
  */
-export function pickName(facts: NameFacts): { name: string; from: NameFrom | null } {
-  return (new Function(`return (${PICK_NAME_SRC});`)() as (f: NameFacts) => { name: string; from: NameFrom | null })(facts);
+export function pickName(facts: NameFacts): PickedName {
+  return (new Function(`return (${PICK_NAME_SRC});`)() as (f: NameFacts) => PickedName)(facts);
 }
 
 /** The element's name and where a field's came from, as page-side source. */
@@ -626,6 +660,7 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
       name: named.name,
       ...policyText(el),
       nameFrom: named.from,
+      ...(named.prior !== undefined ? { priorName: named.prior } : {}),
       testid: el.getAttribute("data-testid"),
       interactive,
       ariaHidden: el.closest('[aria-hidden="true"]') !== null,
