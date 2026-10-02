@@ -1324,6 +1324,8 @@ test("versions: compared by number, and anything but a plain X.Y.Z refused", () 
 });
 
 test("weekly decision: runs only when a release came out since the schedule last benchmarked it with this provider, or when forced", () => {
+  // Every record here is made by the test, not read from bench/ci-results.json: a scheduled row the weekly workflow
+  // appends there can turn the verdict for its release, and for every earlier one, from run to skip.
   const rows = [
     ROW({ version: "1.1.0", date: "2025-12-01", archive: "a" }),
     ROW({ version: "1.2.0", date: "2026-01-05", archive: "b" }),
@@ -1335,8 +1337,31 @@ test("weekly decision: runs only when a release came out since the schedule last
     ROW({ version: "1.3.0", source: "dispatched", effort: "high", date: "2026-03-02", archive: "e" }),
     ROW({ version: "1.3.0", source: "manual", date: "2026-03-03", archive: "f" }),
   ];
+  // Records unlike the one above: empty, with no scheduled row, and with versions that sort differently as text.
+  // A case names one, or uses the one above.
+  const records = {
+    empty: [],
+    // Runs taken by hand and dispatched runs, of 1.2.0 to 1.3.1, and none on the schedule.
+    unscheduled: [
+      ROW({ version: "1.2.0", source: "manual", archive: "g" }),
+      ROW({ version: "1.3.0", source: "manual", archive: "h" }),
+      ROW({ version: "1.3.0", source: "dispatched", effort: "high", archive: "i" }),
+      ROW({ version: "1.3.1", source: "dispatched", archive: "j" }),
+    ],
+    "1.9.0": [ROW({ version: "1.9.0", archive: "k" })],
+    "1.10.0 and 1.9.0": [ROW({ version: "1.10.0", archive: "l" }), ROW({ version: "1.9.0", archive: "m" })],
+  };
   const base = { force: false, openResultsPrs: 0, releaseHasCi: true };
-  const cases: Array<{ latest: string; provider: string; force?: boolean; openResultsPrs?: number; releaseHasCi?: boolean; run: boolean; reason: RegExp }> = [
+  const cases: Array<{
+    record?: keyof typeof records;
+    latest: string;
+    provider: string;
+    force?: boolean;
+    openResultsPrs?: number;
+    releaseHasCi?: boolean;
+    run: boolean;
+    reason: RegExp;
+  }> = [
     {
       latest: "1.2.0",
       provider: "openai",
@@ -1358,19 +1383,33 @@ test("weekly decision: runs only when a release came out since the schedule last
     // A release from before scenescout ci: nothing to run, forced or not.
     { latest: "1.3.0", provider: "openai", releaseHasCi: false, run: false, reason: /v1\.3\.0 predates scenescout ci/ },
     { latest: "1.3.0", provider: "openai", releaseHasCi: false, force: true, run: false, reason: /predates scenescout ci/ },
+    // Nothing recorded yet: the schedule's first run.
+    { record: "empty", latest: "1.0.0", provider: "openai", run: true, reason: /Nothing benchmarked on schedule with openai yet: benchmarking v1\.0\.0/ },
+    { record: "empty", latest: "1.0.0", provider: "openai", force: true, run: true, reason: /Forced/ },
+    // Runs taken by hand or dispatched, of the latest release or a later version, never make the schedule skip it.
+    { record: "unscheduled", latest: "1.3.0", provider: "openai", run: true, reason: /Nothing benchmarked on schedule with openai yet: benchmarking v1\.3\.0/ },
+    { record: "unscheduled", latest: "1.3.1", provider: "openai", run: true, reason: /Nothing benchmarked on schedule with openai yet/ },
+    // The schedule's first results pull request still open: main's record has no scheduled row yet, and the run still skips.
+    {
+      record: "unscheduled",
+      latest: "1.3.1",
+      provider: "openai",
+      openResultsPrs: 1,
+      run: false,
+      reason: /1 results pull request\(s\) labelled benchmark are still open/,
+    },
+    // Versions compare as numbers, not text: 1.10.0 is newer than 1.9.0.
+    { record: "1.9.0", latest: "1.10.0", provider: "openai", run: true, reason: /v1\.10\.0 was released since v1\.9\.0/ },
+    { record: "1.10.0 and 1.9.0", latest: "1.10.0", provider: "openai", run: false, reason: /No SceneScout release since v1\.10\.0/ },
   ];
   for (const c of cases) {
-    const d = decideRun({ ...base, ...c, rows });
+    const d = decideRun({ ...base, ...c, rows: c.record ? records[c.record] : rows });
     assert.equal(d.run, c.run, JSON.stringify(c));
     assert.match(d.reason, c.reason, JSON.stringify(c));
   }
-  assert.equal(decideRun({ ...base, latest: "1.0.0", rows: [], provider: "openai" }).run, true, "an empty record runs");
   assert.throws(() => decideRun({ ...base, latest: "", rows, provider: "openai" }), /Not a version/, "a release that is not a version fails the job");
   assert.throws(() => decideRun({ ...base, latest: "nightly", rows, provider: "openai", force: true }), /Not a version/, "even when forced");
   assert.throws(() => decideRun({ ...base, latest: "1.3.0", rows, provider: "openai", openResultsPrs: -1 }), /openResultsPrs/);
-  // The committed record: the two manual rows do not make the schedule skip the release after them.
-  const committed = parseResults(JSON.parse(fs.readFileSync(path.join(REPO, "bench", "ci-results.json"), "utf8"))).rows;
-  assert.equal(decideRun({ ...base, latest: "3.13.0", rows: committed, provider: "openai" }).run, true);
 });
 
 const CI_JSON = {
