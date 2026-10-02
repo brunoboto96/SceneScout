@@ -18,7 +18,17 @@ import {
 } from "playwright";
 import fs from "node:fs";
 import path from "node:path";
-import { elementKey, fingerprintState, isNonPageRoute, normalizePath, refsSurviveUrlChange, routeBase, type InteractableInfo } from "./fingerprint.js";
+import {
+  elementKey,
+  fingerprintState,
+  isNonPageRoute,
+  keyAliases,
+  normalizePath,
+  ordinalKeys,
+  refsSurviveUrlChange,
+  routeBase,
+  type InteractableInfo,
+} from "./fingerprint.js";
 import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, reachedRoutes, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
 import { normalizeTask } from "./task.js";
@@ -2154,6 +2164,8 @@ export class BrowserEngine {
     prev: PrevSnap | null;
     /** For each element, its key in `prev`, or null when it is new since (collector.ts matchPrevious). */
     matched: Array<string | null>;
+    /** Each listed key the earlier name rule made differently, current → earlier (fingerprint.ts keyAliases). */
+    aliases: Record<string, string>;
   }> {
     const page = this.requirePage();
     type RawElement = {
@@ -2170,6 +2182,8 @@ export class BrowserEngine {
       chrome?: boolean;
       coveredBy?: string | null;
       nameFrom?: NameFrom | null;
+      /** The name before image content counted, when image content named it (collector.ts PICK_NAME_SRC); not kept on the listed element. */
+      priorName?: string;
       focusable?: boolean;
       focusMoves?: boolean;
       passThrough?: boolean;
@@ -2217,19 +2231,23 @@ export class BrowserEngine {
     const prev = this.prevSnapFor(route);
     this.refs.clear();
     this.refFrames.clear();
-    const keyCounts = new Map<string, number>();
     const all: Array<{ raw: RawElement; frame?: Frame; tag?: FrameTag }> = [
       ...rawElements.map((raw) => ({ raw })),
       ...framed.flatMap((g) => g.raws.map((raw) => ({ raw: raw as RawElement, frame: g.frame, tag: g.tag }))),
     ];
-    const built = all.map(({ raw: el, frame, tag }) => {
-      // A live region listed for what it says is known by its role, not its
-      // text, so a new message reads as the same region saying something else.
-      const baseKey = frameElementKey(el.liveOnly ? `live:${el.role}` : elementKey(el), tag);
-      const count = keyCounts.get(baseKey) ?? 0;
-      keyCounts.set(baseKey, count + 1);
-      const key = count === 0 ? baseKey : `${baseKey}~${count}`;
-      const { ownText: _ownText, centre: _centre, cut: _cut, ...listed } = el;
+    // A live region listed for what it says is known by its role, not its
+    // text, so a new message reads as the same region saying something else.
+    const baseKeyOf = (el: RawElement, name: string, tag?: FrameTag) => frameElementKey(el.liveOnly ? `live:${el.role}` : elementKey({ ...el, name }), tag);
+    const bases = all.map(({ raw: el, tag }) => ({
+      base: baseKeyOf(el, el.name, tag),
+      prior: baseKeyOf(el, el.priorName ?? el.name, tag),
+      tracked: !el.liveOnly,
+    }));
+    const keys = ordinalKeys(bases.map((b) => b.base));
+    const aliases = keyAliases(bases);
+    const built = all.map(({ raw: el, frame, tag }, i) => {
+      const key = keys[i];
+      const { ownText: _ownText, centre: _centre, cut: _cut, priorName: _priorName, ...listed } = el;
       const full: SnapshotElement = {
         ...listed,
         ...(tag ? { frame: tag } : {}),
@@ -2266,7 +2284,7 @@ export class BrowserEngine {
       return key ? [{ key, guarded: status === "guarded" }] : [];
     });
     this.lastCollectTruncated = cut.length > 0;
-    return { elements, truncated: cut.length > 0, forms, cut, prev, matched };
+    return { elements, truncated: cut.length > 0, forms, cut, prev, matched, aliases };
   }
 
   /** Whether the latest collect stopped at the element cap, so some controls have no key at all. */
@@ -2395,7 +2413,7 @@ export class BrowserEngine {
    */
   private async captureCoverageState(): Promise<{ fp: string; elements: SnapshotElement[]; url: string }> {
     const page = this.requirePage();
-    const { elements, forms } = await this.collect();
+    const { elements, forms, aliases } = await this.collect();
     const url = page.url();
     const fp = fingerprintState(url, trackedElements(elements));
     this.memory?.visitState(
@@ -2405,6 +2423,7 @@ export class BrowserEngine {
       trackedElements(elements).map((el) => el.key),
       inertKeys(elements),
       this.sessionKey,
+      aliases,
     );
     for (const f of forms) this.memory?.recordForm(fp, f.key, f.guarded, this.sessionKey);
     return { fp, elements, url };
@@ -2484,7 +2503,7 @@ export class BrowserEngine {
     const memory = this.memory!;
     await this.settle();
 
-    const { elements, truncated, forms, cut, prev: prevSnap, matched } = await this.collect();
+    const { elements, truncated, forms, cut, prev: prevSnap, matched, aliases } = await this.collect();
     const url = page.url();
     this.snapshotUrl = url;
     const route = normalizePath(url);
@@ -2497,6 +2516,7 @@ export class BrowserEngine {
       trackedElements(elements).map((el) => el.key),
       inertKeys(elements),
       this.sessionKey,
+      aliases,
     );
     for (const f of forms) memory.recordForm(fp, f.key, f.guarded, this.sessionKey);
     memory.recordRoleAccess(this.role, route, "reached");
@@ -4895,7 +4915,7 @@ export class BrowserEngine {
       }
       await this.settle();
       this.harvestPaused = opts.measureOnly === true;
-      const { elements, forms } = await this.collect().finally(() => (this.harvestPaused = false));
+      const { elements, forms, aliases } = await this.collect().finally(() => (this.harvestPaused = false));
       const finalUrl = page.url();
       const route = normalizePath(finalUrl);
       const fp = fingerprintState(finalUrl, trackedElements(elements));
@@ -4907,6 +4927,7 @@ export class BrowserEngine {
           trackedElements(elements).map((el) => el.key),
           inertKeys(elements),
           this.sessionKey,
+          aliases,
         );
         for (const f of forms) memory.recordForm(fp, f.key, f.guarded, this.sessionKey);
         memory.recordRoleAccess(this.role, route, "reached");
@@ -5215,7 +5236,7 @@ export class BrowserEngine {
           try {
             // Record the state the action LANDED on (it may be a new screen
             // this plan just reached, and it deserves coverage of its own)…
-            const { elements, forms } = await this.collect();
+            const { elements, forms, aliases } = await this.collect();
             const url = page.url();
             const fp = fingerprintState(url, trackedElements(elements));
             this.memory!.visitState(
@@ -5225,6 +5246,7 @@ export class BrowserEngine {
               trackedElements(elements).map((el) => el.key),
               inertKeys(elements),
               this.sessionKey,
+              aliases,
             );
             for (const f of forms) this.memory!.recordForm(fp, f.key, f.guarded, this.sessionKey);
             this.memory!.recordRoleAccess(this.role, normalizePath(url), "reached");
