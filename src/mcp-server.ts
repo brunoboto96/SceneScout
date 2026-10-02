@@ -1174,7 +1174,7 @@ server.registerTool(
   "scout_snapshot",
   {
     description:
-      "Capture the current page state: URL, state fingerprint, a one-line summary of the main area's heading and text, interactable elements with refs (e1, e2, …) and their state (pressed, selected, checked, expanded, current), what the page announces (alert and status regions, by their text), geometry issues, coverage, and oracle violations since the last action. Re-snapshotting the same route returns a DIFF (refs stay stable). Cheap — prefer this over screenshots.",
+      "Capture the current page state: URL, state fingerprint, a one-line summary of the main area's heading and text, interactable elements with refs (e1, e2, …) and their state (pressed, selected, checked, expanded, current), what the page announces (alert and status regions, by their text), geometry issues, coverage, and oracle violations since the last action. Re-snapshotting a route returns a DIFF against its last snapshot, even after visiting elsewhere, and another tab of the same screen diffs against that screen's last tab; refs stay stable, including across a search or filter that rewrites only the query string. On a dense page, says what past the element cap was cut. Cheap — prefer this over screenshots.",
     inputSchema: {
       full: z.boolean().default(false).describe("Force a full element list instead of a diff"),
       session: sessionParam,
