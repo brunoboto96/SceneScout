@@ -210,6 +210,12 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_ACTION_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long one action may take, 1000 to 120000 (default 5000). An option wins over it |
 | `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
 | `SCENESCOUT_LIVE` | the server | `off` keeps the live view closed |
+| `SCENESCOUT_OPEN` | the server | What opens in the default browser: `live` (the live view, on attach), `report` (`report.html`, when `scout_report` writes it), `both` or `none`. Unset: `both` when the browser window is visible or the MCP client is interactive, `none` in CI, with no display, or in a headless run with no interactive client. A `scout_attach` `open` wins over it |
+| `CI` | the server | Set by CI providers; unless it is empty, `0` or `false`, nothing opens in a browser by default |
+| `SSH_CONNECTION` | the server | Set by SSH; nothing opens in a browser by default over SSH |
+| `SSH_TTY` | the server | Set by SSH, as `SSH_CONNECTION` |
+| `DISPLAY` | the server | On Linux and other Unix systems, with neither this nor `WAYLAND_DISPLAY` set there is no display, and nothing opens in a browser by default |
+| `WAYLAND_DISPLAY` | the server | As `DISPLAY` |
 | `SCENESCOUT_REFRESH_BROKER` | the server | `off` turns off the refresh broker for role sessions |
 | `SCENESCOUT_DEDUP` | the server | `judge` asks a model, with a key below, whether a filing the dedup rule keeps apart from everything recorded is one of the open findings on its page; `rule` (default) does not. A `scout_attach` `dedup` wins over it |
 | `SCENESCOUT_DEDUP_PROVIDER` | the server | `anthropic` or `openai`: which key the dedup judge uses when both are set |
@@ -386,3 +392,4 @@ What an agent can pass when it attaches a session. You rarely set these by hand;
 | `actionTimeoutMs` | `SCENESCOUT_ACTION_TIMEOUT_MS`, else `5000` | 1000 to 120000 |
 | `navTimeoutMs` | `SCENESCOUT_NAV_TIMEOUT_MS`, else `20000` | 1000 to 300000 |
 | `dedup` | `SCENESCOUT_DEDUP`, else `rule` | `judge` asks a model whether a filing the rule keeps apart from everything recorded is one of the open findings on its page; it needs a key in the server's environment and sends the findings' titles, categories and evidence, and the page's path, to the provider. For the whole run |
+| `open` | `SCENESCOUT_OPEN`, else by context | `live`, `report`, `both` or `none`: open the live view on this attach and `report.html` when `scout_report` writes it. Unset, both open when the window is visible or the client is interactive (it can ask its user a question), and nothing opens in CI, with no display, or in a headless run with no interactive client |

@@ -29,6 +29,7 @@
  *   a loopback-only live view shows what each one is looking at
  *   (`scenescout watch <project>`, engine/live.ts, ADR 7).
  */
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,6 +74,16 @@ import {
   type SessionStatus,
 } from "./engine/live.js";
 import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
+import {
+  clientIsInteractive,
+  decideOpen,
+  OPEN_CHOICES,
+  OPEN_ENV,
+  openChoiceFromEnv,
+  openInBrowser,
+  type OpenChoice,
+  type OpenDecision,
+} from "./engine/open.js";
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
 import { loginCommand } from "./engine/profiles.js";
 import { computeGaps, coverageView, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
@@ -373,6 +384,23 @@ function liveLine(): string {
     `\nLive view: http://127.0.0.1:${liveAddress.port}/${liveAddress.token}/ — give this address to the user so they can watch every session ` +
     `(current tool, page thumbnail, optional live stream). It opens on this machine only and cannot act on the run.`
   );
+}
+
+/** What each session's attach decided to open (engine/open.ts). scout_report reads it for the report. */
+const openDecisions = new Map<string, OpenDecision>();
+/** The live view is one address for every session, so it is opened once per server. */
+let liveOpened = false;
+/** Whether an attach has said why the live view was not opened; said once. */
+let openWhySaid = false;
+
+/** Open a target in the default browser and say so in a line for the tool result; a failure is said, never thrown. */
+function openForUser(what: string, target: string): string {
+  const outcome = openInBrowser(target, {
+    platform: process.platform,
+    spawn: (command, args, options) => spawn(command, args, options),
+    onError: (why) => logLine(`could not open ${what}: ${why}`),
+  });
+  return outcome.ok ? `\nOpened ${what} in the default browser.` : `\nCould not open ${what}: ${outcome.why}.`;
 }
 
 function flushStatus(dir: string): Promise<void> {
@@ -895,6 +923,14 @@ server.registerTool(
             "It needs ANTHROPIC_API_KEY or OPENAI_API_KEY in the server's environment, and sends each pair's titles, categories and evidence, and the page's path, to that provider — ONLY when the user asked for it. " +
             "Applies to every session of the project until the run ends.",
         ),
+      open: z
+        .enum(OPEN_CHOICES)
+        .optional()
+        .describe(
+          `Open the live view (on this attach) and/or report.html (when scout_report writes it) in the user's default browser: 'live', 'report', 'both' or 'none'. ` +
+            `Default: the ${OPEN_ENV} environment variable, else 'both' when the browser window is visible or the client is interactive, and 'none' in CI, with no display, or in a headless run with no interactive client. ` +
+            "Pass it only when the user asked for something other than the default.",
+        ),
     },
   },
   serializedControl(
@@ -917,6 +953,7 @@ server.registerTool(
       navTimeoutMs,
       session,
       dedup,
+      open,
     }: {
       url: string;
       projectPath: string;
@@ -936,6 +973,7 @@ server.registerTool(
       navTimeoutMs?: number;
       session?: string;
       dedup?: DedupMode;
+      open?: OpenChoice;
     }) => {
       try {
         const target = session ?? activeName;
@@ -996,6 +1034,13 @@ server.registerTool(
         // Moving this session to another project leaves its old one; if it was
         // the last session there, that run is over. Re-attaching to the SAME
         // project is the same run, and keeps what the run has learned.
+        // Before anything changes: a SCENESCOUT_OPEN the server cannot use refuses the attach.
+        const opening = decideOpen(open ?? openChoiceFromEnv(process.env), {
+          headed: !!headed,
+          interactive: clientIsInteractive(server.server.getClientCapabilities()),
+          env: process.env,
+          platform: process.platform,
+        });
         const previous = eng.memory;
         if (previous && previous !== store && ![...engines.values()].some((e) => e !== eng && e.memory === previous)) previous.endRun();
         // Before the browser starts: a value it cannot use refuses the attach rather than being replaced.
@@ -1030,6 +1075,17 @@ server.registerTool(
           await ensureLive(eng.memory.dir);
           writeStatus(target, "idle", "scout_attach");
         }
+        openDecisions.set(target, opening);
+        // The address holds the token, and goes only to this machine's opener: the live view's loopback and token rules are unchanged.
+        let openNote = "";
+        if (opening.live && liveAddress && !liveOpened) {
+          liveOpened = true;
+          openNote = openForUser("the live view", `http://127.0.0.1:${liveAddress.port}/${liveAddress.token}/`);
+        } else if (!opening.live && liveAddress && !openWhySaid) {
+          // Once per server, so a person wondering why no window appeared is told how to change it.
+          openWhySaid = true;
+          openNote = `\nNot opened in a browser (${opening.why}); scout_attach {open} or ${OPEN_ENV} changes that.`;
+        }
         // Recording writes pictures of the app under test into the project, so
         // a run doing it says where they go rather than leaving the person to
         // find a folder of screenshots later.
@@ -1038,7 +1094,7 @@ server.registerTool(
             ? `\n\n📸 RECORDING: a frame of the page after each action, under ${path.join(eng.memory.dir, "recordings", target)}/ (at most ${RECORD_MAX_FRAMES}). scout_report writes them into report.html beside report.md.`
             : "";
         return text(
-          out + conflictNote + recordNote + dedupNote + describePace(eng.pace) + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine(),
+          out + conflictNote + recordNote + dedupNote + describePace(eng.pace) + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine() + openNote,
           target,
         );
       } catch (err) {
@@ -1886,7 +1942,11 @@ server.registerTool(
             session,
           );
         }
-        const { path: p, summary } = generateReport(eng.memory, eng.oracleLog.all, {
+        const {
+          path: p,
+          summary,
+          html,
+        } = generateReport(eng.memory, eng.oracleLog.all, {
           history,
           routesVisited: all.length - unvisited.length,
           routesTotal: all.length,
@@ -1901,7 +1961,8 @@ server.registerTool(
           attachedSessions: [...engines.keys()],
         });
         void p;
-        return text(summary, session);
+        const openNote = html && openDecisions.get(session)?.report ? openForUser("the report", html) : "";
+        return text(summary + openNote, session);
       } catch (err) {
         return errorText(err);
       }
@@ -2022,6 +2083,7 @@ server.registerTool(
       await eng.close();
       const saveError = eng.memory?.lastSaveError;
       engines.delete(name);
+      openDecisions.delete(name);
       // The last session on this project ends its run.
       if (eng.memory && ![...engines.values()].some((e) => e.memory === eng.memory)) eng.memory.endRun();
       sessionQueue.forget(name);

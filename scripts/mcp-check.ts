@@ -528,6 +528,82 @@ async function dedupJudgeEnvCheck(): Promise<void> {
   }
 }
 
+/**
+ * The open setting, over the wire: an interactive client (one that declares
+ * elicitation) on a machine with a display gets the live view opened on
+ * attach and the report when it is written, once each; a client that is not
+ * interactive gets neither. The platform opener is a stand-in script first on
+ * PATH that writes down what it was handed, so no browser is launched.
+ */
+async function openCheck(): Promise<void> {
+  if (process.platform === "win32") {
+    console.log("- the open check needs a stand-in opener on PATH, which Windows' rundll32 cannot be; skipped on Windows");
+    return;
+  }
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-open-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-opener-"));
+  const opened = path.join(bin, "opened.txt");
+  const opener = path.join(bin, process.platform === "darwin" ? "open" : "xdg-open");
+  fs.writeFileSync(opener, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${opened}'\n`, { mode: 0o755 });
+  const base = Object.fromEntries(
+    Object.entries(process.env).filter(
+      (e): e is [string, string] => typeof e[1] === "string" && !["CI", "SSH_CONNECTION", "SSH_TTY", "SCENESCOUT_OPEN"].includes(e[0]),
+    ),
+  );
+  const env = { ...base, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`, DISPLAY: ":99" };
+  const read = (): string[] => (fs.existsSync(opened) ? fs.readFileSync(opened, "utf8").trim().split("\n") : []);
+  const lines = async (expected: number): Promise<string[]> => {
+    // The opener runs detached and is not waited for.
+    for (let i = 0; i < 50 && read().length < expected; i++) await new Promise((r) => setTimeout(r, 100));
+    return read();
+  };
+  try {
+    const plain = new Client({ name: "ft-check-open-plain", version: "0.0.1" });
+    await plain.connect(new StdioClientTransport({ command: "node", args: [serverPath], env }));
+    try {
+      const attached = textOf(await plain.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir } }));
+      if (attached.includes("Opened the live view") || !attached.includes("Not opened in a browser (a headless run with no interactive client)"))
+        fail(`a headless attach from a client that is not interactive opened the live view, or did not say why not:\n${attached}`);
+      await plain.callTool({ name: "scout_close", arguments: { all: true } });
+    } finally {
+      await plain.close();
+    }
+
+    const client = new Client({ name: "ft-check-open", version: "0.0.1" }, { capabilities: { elicitation: {} } });
+    await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env }));
+    try {
+      const attached = textOf(await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir, session: "first" } }));
+      const url = attached.match(LIVE_LINE)?.[1];
+      if (!url || !attached.includes("Opened the live view in the default browser."))
+        fail(`an interactive client's attach did not open the live view:\n${attached}`);
+      const second = textOf(await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir, session: "second" } }));
+      if (second.includes("Opened the live view")) fail(`a second attach opened the live view again:\n${second}`);
+      const reported = textOf(await client.callTool({ name: "scout_report", arguments: { force: true, level: "minimal", session: "first" } }));
+      if (!reported.includes("Opened the report in the default browser."))
+        fail(`scout_report from an interactive client did not open the report:\n${reported}`);
+      const quiet = textOf(
+        await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir, session: "quiet", open: "none" } }),
+      );
+      const quietReport = textOf(await client.callTool({ name: "scout_report", arguments: { force: true, level: "minimal", session: "quiet" } }));
+      if (quiet.includes("Opened") || quietReport.includes("Opened")) fail(`open: "none" still opened something:\n${quiet}\n${quietReport}`);
+      const handed = await lines(2);
+      const html = path.join(fs.realpathSync(projectDir), ".scenescout", "report.html");
+      const htmlRaw = path.join(projectDir, ".scenescout", "report.html");
+      if (handed.length !== 2 || handed[0] !== url || (handed[1] !== html && handed[1] !== htmlRaw))
+        fail(`the opener was not handed exactly the live view's address, then report.html:\n${handed.join("\n")}`);
+      assertClosedAll(textOf(await client.callTool({ name: "scout_close", arguments: { all: true } })));
+    } finally {
+      await client.close();
+    }
+    console.log("✓ an interactive client gets the live view opened once and the report when written; a client that is not, or open: none, gets neither");
+  } finally {
+    await fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   const transport = new StdioClientTransport({ command: "node", args: [serverPath] });
   const client = new Client({ name: "ft-check", version: "0.0.1" });
@@ -691,6 +767,7 @@ async function main(): Promise<void> {
   await tokenGoneCheck(liveProject);
   await liveViewOffCheck();
   await dedupJudgeEnvCheck();
+  await openCheck();
   console.log("\nMCP CHECK PASSED");
 }
 
