@@ -139,13 +139,15 @@ Each `--script` option can also come from an environment variable, below; the op
 | `--jira-url` | `JIRA_BASE_URL` | The Jira Cloud site, such as `https://your-site.atlassian.net`. Must be https, or plain http to `127.0.0.1`, `localhost` or `[::1]`, with no credentials, query or fragment |
 | `--jira-project` | `JIRA_PROJECT_KEY` | The Jira project's key, such as `QA` |
 | `--jira-issue-type` | `Bug` | The Jira issue type to create; also from `JIRA_ISSUE_TYPE` |
+| `--jira-link-type` | `Relates` | The issue link type from a Jira issue to each ticket whose acceptance criterion the finding fails (`scout_criterion`), when the ticket's id is a Jira key. `none` links nothing; also from `JIRA_LINK_TYPE` |
+| `--jira-update` | `on` | `on` brings each open Jira issue filed earlier up to date: its summary and description while nobody has edited them in Jira since, and the picture, frames and ticket links it lacks. `off` only lists it |
 | `--project` | the current directory | The project whose `.scenescout/memory.json` holds the findings |
 | `--min-severity` | `low` | The least severe finding to file: `high`, `medium` or `low` |
 | `--only` | every finding the other options let through | Only these finding ids, comma-separated |
 | `--max-issues` | `20` | The most issues one export files, 1 to 100. The next export files the rest |
 | `--severity-map` | labels `severity: high`, `severity: medium` and `severity: low` on GitHub; priorities `High`, `Medium` and `Low` in Jira | What each severity becomes, as `high=…,medium=…,low=…`. A severity left out keeps its default, an empty name sets none, and `none` sets none at all |
 | `--labels` | none | Labels added to every issue, comma-separated, at most 10. Jira labels cannot hold a space |
-| `--screenshots` | `on` | `off` leaves the run's frames out: Jira attaches them, GitHub names them |
+| `--screenshots` | `on` | `off` leaves the finding's picture and the run's frames out: Jira attaches them, GitHub names them |
 | `--refile-closed` | off | File a finding again when the issue carrying its marker is closed. Off, an issue open or closed counts as filed, so a won't-fix is not filed again |
 | `--include-worth-a-look` | off | Export worth-a-look findings as well as defects |
 | `--dry-run` | on, unless `--yes` | List what would be filed and send nothing but reads. Given only to say so |
@@ -246,6 +248,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `JIRA_BASE_URL` | `export --to jira` | As `--jira-url` |
 | `JIRA_PROJECT_KEY` | `export --to jira` | As `--jira-project` |
 | `JIRA_ISSUE_TYPE` | `export --to jira` | As `--jira-issue-type` |
+| `JIRA_LINK_TYPE` | `export --to jira` | As `--jira-link-type` |
 | `CLAUDE_CONFIG_DIR` | `install`, `doctor` | Where Claude Code keeps its configuration; the skill goes into its `skills/` folder. Default `~/.claude` |
 | `APPDATA` | `doctor` | On Windows, where Claude Desktop keeps its installed extensions (`Claude\Claude Extensions` inside it). Set by Windows |
 | `LOCALAPPDATA` | `doctor` | On Windows, where the Microsoft Store build of Claude Desktop keeps its data (`Packages\Claude_…`). Set by Windows |

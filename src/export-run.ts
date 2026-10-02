@@ -12,27 +12,35 @@ import { redactKeys } from "./engine/ci.js";
 import {
   credentialSecrets,
   EXIT_EXPORT,
+  failedCriteriaByFinding,
   findingIdsInGithubBody,
   findingIdsInJiraDescription,
   findingLine,
+  findingPicture,
   frameIsOriginal,
   framesFor,
   githubIssue,
+  jiraEditFields,
   jiraIssueFields,
   MARKER_LABEL,
   MAX_RATE_WAIT_MS,
   oneLine,
   planExport,
+  planJiraUpdate,
   rateLimit,
   rememberFiled,
   selectFindings,
+  ticketsToLink,
   trackerCredentials,
   trackerMessage,
   TRACKER_LABEL,
+  uploadName,
   type ExportOptions,
+  type FailedCriterion,
   type FiledIssue,
   type GithubTarget,
   type JiraTarget,
+  type JiraUpdatePlan,
   type IssueContext,
   type PlanEntry,
 } from "./engine/export.js";
@@ -77,6 +85,8 @@ export interface ExportOutcome {
   plan: PlanEntry[];
   /** The issues this export created, in order. */
   filed: Array<{ id: string; issue: FiledIssue }>;
+  /** The issues filed earlier that this export changed: a rewritten description, a file attached or a ticket linked. */
+  updated: Array<{ id: string; issue: FiledIssue }>;
 }
 
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -89,7 +99,7 @@ const MAX_FRAME_BYTES = 10_000_000;
 // ── HTTP ────────────────────────────────────────────────────────────────────
 
 interface HttpRequest {
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "PUT";
   /** Joined to the base address; starts with `/`. */
   path: string;
   json?: unknown;
@@ -201,9 +211,27 @@ function client(base: string, headers: Record<string, string>, h: Http): Send {
 // ── the trackers ────────────────────────────────────────────────────────────
 
 interface Frame {
-  /** Relative to `.scenescout/`, as the session log names it. */
+  /** Relative to `.scenescout/`, as the session log or the finding names it. */
   rel: string;
   file: string;
+  /** When it was taken: the step's time, or the picture's. */
+  at?: string;
+  /** The name Jira gets it under (uploadName). */
+  upload: string;
+}
+
+/** What an update did, and what it could not do. */
+interface Updated {
+  rewrote: boolean;
+  attached: string[];
+  linked: string[];
+  problems: string[];
+}
+
+/** What goes onto a Jira issue beside its fields: the finding's picture first, then the frames, and the tickets to link it to. */
+interface Extras {
+  files: readonly Frame[];
+  tickets: readonly string[];
 }
 
 interface Created {
@@ -234,7 +262,9 @@ interface TrackerApi {
   consistentListing: boolean;
   /** The labelled issues and the findings their markers name: closed issues too, unless `includeClosed` is false. */
   existing(includeClosed: boolean): Promise<Listing>;
-  create(f: Finding, ctx: IssueContext, frames: readonly Frame[]): Promise<Created>;
+  create(f: Finding, ctx: IssueContext, extras: Extras): Promise<Created>;
+  /** Bring an issue filed earlier up to date, as `plan` says. Jira only. */
+  update?(f: Finding, ctx: IssueContext, issue: FiledIssue, plan: JiraUpdatePlan, extras: Extras): Promise<Updated>;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -296,11 +326,70 @@ function githubApi({ repo }: GithubTarget, send: Send): TrackerApi {
   };
 }
 
-function jiraApi({ baseUrl, projectKey, issueType }: JiraTarget, send: Send): TrackerApi {
+function jiraApi({ baseUrl, projectKey, issueType, linkType }: JiraTarget, send: Send): TrackerApi {
   const keyNumber = (key: string): number | null => {
     const m = /^[A-Z][A-Z0-9_]*-(\d+)$/.exec(key);
     return m ? Number(m[1]) : null;
   };
+  const issuePath = (key: string): string => `/rest/api/3/issue/${encodeURIComponent(key)}`;
+  /** Attach each file; what could not be attached is returned, not thrown, since the issue itself stands. */
+  const attach = async (key: string, files: readonly Frame[], again: string): Promise<{ done: string[]; problems: string[] }> => {
+    const done: string[] = [];
+    const problems: string[] = [];
+    for (const frame of files) {
+      const name = frame.upload;
+      try {
+        const form = new FormData();
+        form.append("file", new Blob([fs.readFileSync(frame.file)], { type: name.endsWith(".png") ? "image/png" : "image/jpeg" }), name);
+        await send({
+          method: "POST",
+          path: `${issuePath(key)}/attachments`,
+          form,
+          // Jira refuses an upload without it, as protection against cross-site requests.
+          headers: { "x-atlassian-token": "no-check" },
+          idempotent: true,
+        });
+        done.push(name);
+      } catch (err) {
+        problems.push(`${name} was not attached (${err instanceof Error ? err.message : String(err)}). It is at ${frame.file}; ${again}`);
+      }
+    }
+    return { done, problems };
+  };
+  /**
+   * Link the issue to each ticket whose criterion it fails, so the issue reads
+   * as the subject of the link type's outward words ("blocks", "relates to")
+   * and the ticket as their object. Jira's API gives those words to the issue
+   * sent as `inwardIssue`, the reverse of what the field names suggest. Jira
+   * answers a link that already exists as made, so sending one twice is harmless.
+   */
+  const link = async (key: string, tickets: readonly string[]): Promise<{ done: string[]; problems: string[] }> => {
+    const done: string[] = [];
+    const problems: string[] = [];
+    if (!linkType) return { done, problems };
+    for (const ticket of tickets) {
+      try {
+        await send({
+          method: "POST",
+          path: "/rest/api/3/issueLink",
+          json: { type: { name: linkType }, inwardIssue: { key }, outwardIssue: { key: ticket } },
+          idempotent: true,
+        });
+        done.push(ticket);
+      } catch (err) {
+        problems.push(
+          `not linked to ${ticket} (${err instanceof Error ? err.message : String(err)}); check that ${ticket} is an issue on this site and that "${linkType}" is a link type it has (--jira-link-type), and a later export links it`,
+        );
+      }
+    }
+    return { done, problems };
+  };
+  const keysOf = (links: unknown): string[] =>
+    (Array.isArray(links) ? links : []).flatMap((l) =>
+      isRecord(l) ? [l.inwardIssue, l.outwardIssue].flatMap((i) => (isRecord(i) && typeof i.key === "string" ? [i.key] : [])) : [],
+    );
+  const namesOf = (attachments: unknown): string[] =>
+    (Array.isArray(attachments) ? attachments : []).flatMap((a) => (isRecord(a) && typeof a.filename === "string" ? [a.filename] : []));
   return {
     label: `Jira ${projectKey}`,
     consistentListing: false,
@@ -315,7 +404,7 @@ function jiraApi({ baseUrl, projectKey, issueType }: JiraTarget, send: Send): Tr
         const body = await send({
           method: "POST",
           path: "/rest/api/3/search/jql",
-          json: { jql, fields: ["description", "status"], maxResults: 100, ...(nextPageToken ? { nextPageToken } : {}) },
+          json: { jql, fields: ["summary", "description", "status", "attachment", "issuelinks"], maxResults: 100, ...(nextPageToken ? { nextPageToken } : {}) },
           idempotent: true,
         });
         if (!isRecord(body) || !Array.isArray(body.issues)) throw new ExportError("Jira's search answered without a list of issues");
@@ -330,7 +419,8 @@ function jiraApi({ baseUrl, projectKey, issueType }: JiraTarget, send: Send): Tr
           const status = isRecord(fields.status) && isRecord(fields.status.statusCategory) ? fields.status.statusCategory.key : undefined;
           const ids = findingIdsInJiraDescription(fields.description);
           if (ids.length === 0) unmarked++;
-          for (const id of ids) rememberFiled(map, id, { ref: key, number, url: `${baseUrl}/browse/${key}`, open: status !== "done" });
+          const jira = { summary: fields.summary, description: fields.description, attachments: namesOf(fields.attachment), links: keysOf(fields.issuelinks) };
+          for (const id of ids) rememberFiled(map, id, { ref: key, number, url: `${baseUrl}/browse/${key}`, open: status !== "done", jira });
         }
         nextPageToken = typeof body.nextPageToken === "string" && body.nextPageToken ? body.nextPageToken : undefined;
         if (!nextPageToken || body.isLast === true) return { map, issues, unmarked };
@@ -339,7 +429,7 @@ function jiraApi({ baseUrl, projectKey, issueType }: JiraTarget, send: Send): Tr
         `more than ${MAX_PAGES} pages of issues in ${projectKey} carry the ${MARKER_LABEL} label, too many to check them all for this export's findings`,
       );
     },
-    async create(f, ctx, frames) {
+    async create(f, ctx, extras) {
       const body = await send({
         method: "POST",
         path: "/rest/api/3/issue",
@@ -350,27 +440,23 @@ function jiraApi({ baseUrl, projectKey, issueType }: JiraTarget, send: Send): Tr
       const number = keyNumber(key);
       if (number === null) throw new ExportError("Jira answered the create without an issue key", true);
       const issue: FiledIssue = { ref: key, number, url: `${baseUrl}/browse/${key}`, open: true };
-      const problems: string[] = [];
-      for (const frame of frames) {
-        const name = path.basename(frame.file);
-        try {
-          const form = new FormData();
-          form.append("file", new Blob([fs.readFileSync(frame.file)], { type: "image/jpeg" }), name);
-          await send({
-            method: "POST",
-            path: `/rest/api/3/issue/${encodeURIComponent(key)}/attachments`,
-            form,
-            // Jira refuses an upload without it, as protection against cross-site requests.
-            headers: { "x-atlassian-token": "no-check" },
-            idempotent: true,
-          });
-        } catch (err) {
-          problems.push(
-            `${name} was not attached (${err instanceof Error ? err.message : String(err)}). It is at ${frame.file}; attach it by hand, since a later export does not add files to an issue it already filed`,
-          );
-        }
-      }
-      return { issue, problems };
+      const attached = await attach(key, extras.files, "a later export attaches it while the issue is open, unless --jira-update is off");
+      const linked = await link(key, extras.tickets);
+      return { issue, problems: [...attached.problems, ...linked.problems] };
+    },
+    async update(f, ctx, issue, plan, extras) {
+      const rewrote = plan.fields === "change";
+      if (rewrote)
+        // Summary and description only: an edit, so Jira notifies the issue's watchers as it does for any other.
+        await send({ method: "PUT", path: issuePath(issue.ref), json: { fields: jiraEditFields(f, ctx) }, idempotent: true });
+      const wanted = new Set(plan.attach);
+      const attached = await attach(
+        issue.ref,
+        extras.files.filter((x) => wanted.has(x.upload)),
+        "a later export tries again",
+      );
+      const linked = await link(issue.ref, plan.link);
+      return { rewrote, attached: attached.done, linked: linked.done, problems: [...attached.problems, ...linked.problems] };
     },
   };
 }
@@ -447,9 +533,17 @@ function framesOf(f: Finding, steps: ReturnType<typeof framedSteps>["steps"], me
       dropped++;
       continue;
     }
-    frames.push({ rel: frame, file: found.file });
+    frames.push({ rel: frame, file: found.file, at, upload: uploadName(frame, at) });
   }
   return { frames, dropped };
+}
+
+/** The finding's own picture, when its path is one the engine writes and the file is inside the recordings folder and small enough. */
+function pictureOf(f: Finding, memoryDir: string): Frame | null {
+  const picture = findingPicture(f);
+  if (!picture) return null;
+  const found = frameFile(path.join(memoryDir, "recordings"), picture.rel);
+  return found && found.stat.size <= MAX_FRAME_BYTES ? { ...picture, file: found.file, upload: uploadName(picture.rel, picture.at) } : null;
 }
 
 // ── the export ──────────────────────────────────────────────────────────────
@@ -473,6 +567,7 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
   const pauseMs = deps.pauseMs ?? (o.to === "github" ? 1000 : 250);
   const where = o.to === "github" ? `GitHub ${o.github.repo}` : `Jira ${o.jira.projectKey} at ${o.jira.baseUrl}`;
   const filed: ExportOutcome["filed"] = [];
+  const updated: ExportOutcome["updated"] = [];
   let plan: PlanEntry[] = [];
   // Kept outside the try, so an export that stops part-way still says what went wrong before it stopped.
   const problems: string[] = [];
@@ -483,7 +578,9 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
   try {
     const memoryDir = path.join(o.projectDir, MEMORY_DIRNAME);
     const memoryPath = path.join(memoryDir, "memory.json");
-    const selection = selectFindings(readMemory(memoryPath), o);
+    const memory = readMemory(memoryPath);
+    const selection = selectFindings(memory, o);
+    const criteria = failedCriteriaByFinding(memory);
     if (selection.unknownOnly.length > 0) throw new ExportError(`--only names no finding of this project: ${selection.unknownOnly.join(", ")}`);
     say(o.dryRun ? `SceneScout export to ${where}: a dry run, so nothing is filed. Pass --yes to file.` : `SceneScout export to ${where}.`);
     const c = selection.counts;
@@ -500,7 +597,7 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
     for (const { id, reason } of selection.leftOut) say(`  not exported  ${id}: ${reason}`);
     if (selection.candidates.length === 0) {
       say("Nothing to export.");
-      return { exitCode: EXIT_EXPORT.done, plan, filed };
+      return { exitCode: EXIT_EXPORT.done, plan, filed, updated };
     }
 
     if (!credentials.ok && !o.dryRun) throw new ExportError(credentials.error);
@@ -527,37 +624,89 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
     plan = planExport(selection.candidates, existing, o.maxIssues);
     const steps = o.screenshots ? framedSteps(memoryDir) : { steps: [], unreadable: 0 };
     if (steps.unreadable > 0) say(`Skipped ${steps.unreadable} session-log line(s) or file(s) that could not be read while looking for screenshots.`);
-    const contextOf = (f: Finding): { ctx: IssueContext; frames: Frame[] } => {
+    const contextOf = (f: Finding): { ctx: IssueContext; extras: Extras } => {
       const found = o.screenshots ? framesOf(f, steps.steps, memoryDir) : { frames: [], dropped: 0 };
       droppedFrames += found.dropped;
+      const picture = o.screenshots ? pictureOf(f, memoryDir) : null;
+      const failed: FailedCriterion[] = criteria.get(f.id) ?? [];
       return {
         ctx: {
           severityName: o.severityMap[f.severity],
           labels: o.labels,
           screenshots: o.screenshots ? found.frames.map((x) => x.rel) : "off",
           framesLeftOut: found.dropped,
+          picture: picture?.rel ?? null,
+          ...(picture?.at ? { pictureAt: picture.at } : {}),
+          screenshotTimes: found.frames.map((x) => x.at ?? ""),
+          criteria: failed,
         },
-        frames: found.frames,
+        // GitHub takes no uploads and has no links between trackers: its body names both instead.
+        extras:
+          o.to === "jira"
+            ? { files: [...(picture ? [picture] : []), ...found.frames], tickets: o.jira.linkType ? ticketsToLink(failed) : [] }
+            : { files: [], tickets: [] },
       };
     };
+    let writes = 0;
 
-    let created = 0;
     for (const entry of plan) {
       const f = entry.finding;
       if (entry.outcome === "already-filed") {
-        say(`  ${OUTCOME_WORDS[entry.outcome].padEnd(13)}  ${findingLine(f)}  as ${entry.issue.ref}${entry.issue.open ? "" : " (closed)"}`);
+        const issue = entry.issue;
+        const already = `  ${OUTCOME_WORDS[entry.outcome].padEnd(13)}  ${findingLine(f)}  as ${issue.ref}${issue.open ? "" : " (closed)"}`;
+        // Only an open Jira issue filed earlier is brought up to date; a closed one is the team's decision and left alone.
+        if (o.to !== "jira" || !o.jira.update || !issue.open || !issue.jira || !tracker?.update) {
+          say(already);
+          continue;
+        }
+        const { ctx, extras } = contextOf(f);
+        const wanted = jiraEditFields(f, ctx);
+        const upd = planJiraUpdate(f, issue.jira, {
+          ...wanted,
+          files: extras.files.map((x) => x.upload),
+          tickets: extras.tickets,
+        });
+        const changesOf = (rewrite: boolean, attach: readonly string[], link: readonly string[], tense: "would" | "did"): string[] =>
+          [
+            rewrite ? (tense === "would" ? "rewrite its summary and description" : "rewrote its summary and description") : "",
+            attach.length ? `${tense === "would" ? "attach" : "attached"} ${attach.join(", ")}` : "",
+            link.length ? `${tense === "would" ? "link it to" : "linked it to"} ${link.join(", ")}` : "",
+          ].filter(Boolean);
+        const changes = changesOf(upd.fields === "change", upd.attach, upd.link, "would");
+        const kept =
+          upd.fields === "edited"
+            ? "; its summary or description was edited in Jira, so it is left as written"
+            : upd.fields === "no-revision"
+              ? "; it was filed by an earlier version, so its summary and description are left as they are"
+              : "";
+        if (changes.length === 0 || o.dryRun) {
+          const would = changes.length ? `; would ${changes.join(", ")}` : upd.fields === "same" ? ", up to date" : "";
+          say(`${already}${would}${kept}`);
+          continue;
+        }
+        if (writes > 0 && pauseMs > 0) await http.wait(pauseMs);
+        writes++;
+        const did = await tracker.update(f, ctx, issue, upd, extras);
+        const done = changesOf(did.rewrote, did.attached, did.linked, "did");
+        // Said only of what Jira took: an update whose every attachment and link failed changed nothing.
+        if (done.length > 0) {
+          updated.push({ id: f.id, issue });
+          say(`  ${`updated ${issue.ref}`.padEnd(13)}  ${findingLine(f)}  ${issue.url}: ${done.join(", ")}${kept}`);
+        } else say(`${already}; nothing could be updated${kept}`);
+        for (const p of did.problems) problems.push(`${issue.ref}: ${p}`);
         continue;
       }
       // Listed, not filed: over the cap, or a dry run (the only way to be here with no tracker, as --yes needs credentials).
       if (entry.outcome === "over-cap" || o.dryRun || !tracker) {
-        const shots = entry.outcome === "file" && o.screenshots ? contextOf(f).frames.length : 0;
+        const shown = entry.outcome === "file" && o.screenshots ? contextOf(f).ctx : null;
+        const shots = shown && shown.screenshots !== "off" ? shown.screenshots.length + (shown.picture ? 1 : 0) : 0;
         say(`  ${OUTCOME_WORDS[entry.outcome].padEnd(13)}  ${findingLine(f)}${shots ? `  with ${shots} screenshot(s)` : ""}`);
         continue;
       }
-      if (created > 0 && pauseMs > 0) await http.wait(pauseMs);
-      const { ctx, frames } = contextOf(f);
-      const done = await fileOne(tracker, f, ctx, o.to === "jira" ? frames : [], includeClosed, http);
-      created++;
+      if (writes > 0 && pauseMs > 0) await http.wait(pauseMs);
+      const { ctx, extras } = contextOf(f);
+      const done = await fileOne(tracker, f, ctx, extras, includeClosed, http);
+      writes++;
       filed.push({ id: f.id, issue: done.issue });
       say(
         `  ${`filed ${done.issue.ref}`.padEnd(13)}  ${findingLine(f)}  ${done.issue.url}${done.confirmed ? " (found by its marker after the tracker's error)" : ""}`,
@@ -573,13 +722,13 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
     say(
       o.dryRun
         ? `Would file ${count("file")}; ${count("already-filed")} already filed${overText}.`
-        : `Filed ${filed.length}; ${count("already-filed")} already filed${overText}.`,
+        : `Filed ${filed.length}; ${count("already-filed")} already filed${updated.length ? `, ${updated.length} of them updated` : ""}${overText}.`,
     );
     if (problems.length > 0) {
       for (const p of problems) complain(`scenescout export: ${p}`);
-      return { exitCode: EXIT_EXPORT.couldNotExport, plan, filed };
+      return { exitCode: EXIT_EXPORT.couldNotExport, plan, filed, updated };
     }
-    return { exitCode: EXIT_EXPORT.done, plan, filed };
+    return { exitCode: EXIT_EXPORT.done, plan, filed, updated };
   } catch (err) {
     reportFrames();
     complain(`scenescout export: ${err instanceof Error ? err.message : String(err)}`);
@@ -591,7 +740,8 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
       );
     for (const p of problems) complain(`scenescout export: ${p}`);
     if (filed.length > 0) complain(`Filed before it stopped: ${filed.map((x) => x.issue.ref).join(", ")}.`);
-    return { exitCode: EXIT_EXPORT.couldNotExport, plan, filed };
+    if (updated.length > 0) complain(`Updated before it stopped: ${updated.map((x) => x.issue.ref).join(", ")}.`);
+    return { exitCode: EXIT_EXPORT.couldNotExport, plan, filed, updated };
   }
 }
 
@@ -609,13 +759,13 @@ async function fileOne(
   tracker: TrackerApi,
   f: Finding,
   ctx: IssueContext,
-  frames: readonly Frame[],
+  extras: Extras,
   includeClosed: boolean,
   http: Http,
 ): Promise<Created & { confirmed?: boolean }> {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await tracker.create(f, ctx, frames);
+      return await tracker.create(f, ctx, extras);
     } catch (err) {
       if (!(err instanceof ExportError) || !err.uncertain) throw err;
       const which = `the issue for finding ${f.id} (${oneLine(f.title, 80)})`;

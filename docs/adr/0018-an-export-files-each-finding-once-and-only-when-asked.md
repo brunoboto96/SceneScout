@@ -55,11 +55,42 @@ render.
   The escaping is the `/scenescout qa` reply's, which a test holds it to, plus
   `$`.
 - **GitHub gets no uploads.** GitHub's REST API cannot attach a file to an
-  issue, and SceneScout hosts nothing, so a GitHub issue names the run's frames
-  in its `.scenescout/` folder. Jira gets them as attachments: the frames of
+  issue, and SceneScout hosts nothing, so a GitHub issue names the finding's
+  picture and the run's frames in its `.scenescout/` folder. Jira gets them as
+  attachments: the picture `scout_finding` took first, then the frames of
   the session that filed the finding, from the steps just before it was last
-  found, and only while the file is inside the recordings folder and still the
-  picture written at that step.
+  found, and only while the file is inside the recordings folder (and, for a
+  frame, still the picture written at that step).
+- **A Jira issue is updated only where nobody has written since.** A later
+  export brings an open Jira issue it filed up to date rather than leaving it
+  as first filed, since the finding moves on (found again, a new picture, a
+  ticket it now fails). It rewrites only the summary and description, which
+  SceneScout wrote, and only while they are as it wrote them: the marker
+  records a revision, a hash of their text with white space and the marker
+  left out, plus any node or mark SceneScout never writes (a pasted picture,
+  a mention, a link), and an issue whose revision no longer matches has been
+  edited in Jira and is left as that person wrote it. The whole document is
+  not hashed because Jira stores it with attributes of its own and may split
+  its text nodes; if it ever changes the text itself, issues read as edited
+  and are left alone, which is the safe side. An issue filed before the revision existed
+  cannot be told apart from an edited one and is left alone too. Priority,
+  labels and every other field a team sets in triage are never sent, a closed
+  issue is the team's decision and is not touched, and nothing is removed:
+  only a missing picture, frame or ticket link is added. A file is attached
+  under the time it was taken before its own name, since frame names repeat
+  when a later run reuses a session's name and a retaken picture keeps its
+  name. `--jira-update off` turns it off. GitHub issues are not updated.
+- **An issue is linked to the ticket it fails.** When a run answered tickets
+  and a finding is what fails a criterion (`scout_criterion`, answered as the
+  report answers it), the issue lists the criterion, and in Jira it is linked
+  to the ticket when the ticket's id is a Jira key, with `--jira-link-type`
+  (default `Relates`, which every Jira Cloud site has) read as "the issue
+  relates to (or blocks) the ticket". Jira's API gives a type's outward words
+  to the issue sent as `inwardIssue`, the reverse of what the names suggest,
+  so the new issue is sent as `inwardIssue`. Jira answers a link that already
+  exists as made, so a link is safe to send again. A link that fails
+  is reported and fails the export, as an attachment that fails does; the
+  issue stays filed once, and the next export makes the link.
 - **Credentials from the environment only, never printed, never redirected.**
   Every printed line, refusals of the command line included, is redacted
   against every credential variable that is set and the encoded header. A
@@ -89,6 +120,12 @@ render.
 - Escaped text reads with backslashes in the raw Markdown and zero-width spaces
   inside addresses, so an address copied out of an issue may need retyping.
 - Jira Cloud's REST API v3 is supported; Server and Data Center are not.
+- A rewrite is an edit, so Jira notifies the issue's watchers; an export of a
+  run that found nothing new sends no edit, since the revision is unchanged.
+  Turning notifications off needs a project administrator's permission, which
+  an export's token should not need, so it is not asked for.
+- A ticket id that is not a Jira key (`#12`, or `T1` for a ticket that carried
+  none) is listed in the issue but never linked.
 
 ## Failure direction
 
