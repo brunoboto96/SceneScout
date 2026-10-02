@@ -29,6 +29,7 @@ import {
   EXIT_EXPORT,
   findingIdsInGithubBody,
   findingIdsInJiraDescription,
+  failedCriteriaByFinding,
   findingLine,
   frameIsOriginal,
   framesFor,
@@ -36,16 +37,23 @@ import {
   githubMarker,
   inertMarkdown,
   inertPlain,
+  isJiraKey,
   jiraDescription,
+  jiraEditFields,
   jiraIssueFields,
+  jiraMarkerRevision,
+  jiraRevision,
   MARKER_LABEL,
   parseExportArgs,
   planExport,
+  planJiraUpdate,
   rateLimit,
   rememberFiled,
   selectFindings,
+  ticketsToLink,
   trackerCredentials,
   trackerMessage,
+  uploadName,
   type ExportOptions,
   type FiledIssue,
   type IssueContext,
@@ -127,13 +135,21 @@ test("options: only --yes files; --dry-run says the default out loud, and the tw
 });
 
 test("options: Jira from flags or from the environment, a flag winning over its variable", () => {
-  assert.deepEqual(jiraOf(options(JIRA)), { baseUrl: "https://example.atlassian.net", projectKey: "QA", issueType: "Bug" });
-  const env = { JIRA_BASE_URL: "https://env.atlassian.net/", JIRA_PROJECT_KEY: "OPS", JIRA_ISSUE_TYPE: "Task" };
-  assert.deepEqual(jiraOf(options(["--to", "jira"], env)), { baseUrl: "https://env.atlassian.net", projectKey: "OPS", issueType: "Task" });
-  assert.deepEqual(jiraOf(options([...JIRA, "--jira-issue-type", "Defect"], env)), {
+  assert.deepEqual(jiraOf(options(JIRA)), { baseUrl: "https://example.atlassian.net", projectKey: "QA", issueType: "Bug", linkType: "Relates", update: true });
+  const env = { JIRA_BASE_URL: "https://env.atlassian.net/", JIRA_PROJECT_KEY: "OPS", JIRA_ISSUE_TYPE: "Task", JIRA_LINK_TYPE: "Blocks" };
+  assert.deepEqual(jiraOf(options(["--to", "jira"], env)), {
+    baseUrl: "https://env.atlassian.net",
+    projectKey: "OPS",
+    issueType: "Task",
+    linkType: "Blocks",
+    update: true,
+  });
+  assert.deepEqual(jiraOf(options([...JIRA, "--jira-issue-type", "Defect", "--jira-link-type", "none", "--jira-update", "off"], env)), {
     baseUrl: "https://example.atlassian.net",
     projectKey: "QA",
     issueType: "Defect",
+    linkType: null,
+    update: false,
   });
   assert.deepEqual(options(JIRA).severityMap, { high: "High", medium: "Medium", low: "Low" });
   // A GitHub Enterprise Server API, and a stand-in on this machine.
@@ -580,7 +596,7 @@ test("Jira issue: the fields, a priority from the map or none, labels, and a doc
   };
   walk(fields.description as Record<string, unknown>);
   assert.ok(texts.includes("Attached: 0003-click.jpg, the frames of the steps before it was last found."));
-  assert.ok(texts.includes("scenescout-finding: a1b2c3d4e5"));
+  assert.ok(texts.some((t) => /^scenescout-finding: a1b2c3d4e5 rev [0-9a-f]{16}$/.test(t)));
 });
 
 test("title: within the 255 characters both trackers take, however many triggers it breaks", () => {
@@ -812,10 +828,24 @@ interface JiraIssue {
   fields: Record<string, unknown>;
   done: boolean;
   attachments: string[];
+  /** Keys of the issues it is linked to, as `${type}:${key}`. */
+  links?: string[];
+  /** How many times it was edited. */
+  edits?: number;
 }
 
-async function standInJira(opts: { omitDescription?: boolean } = {}): Promise<StandIn & { issues: JiraIssue[] }> {
+interface JiraOptions {
+  omitDescription?: boolean;
+  /** Issues on the site outside the project, such as the tickets a run was given. */
+  tickets?: string[];
+  /** The link types the site has. */
+  linkTypes?: string[];
+}
+
+async function standInJira(opts: JiraOptions = {}): Promise<StandIn & { issues: JiraIssue[] }> {
   const issues: JiraIssue[] = [];
+  const tickets = new Set(opts.tickets ?? []);
+  const linkTypes = new Set(opts.linkTypes ?? ["Relates", "Blocks"]);
   const stand = await serve((s, send, violations) => {
     if (s.headers.authorization !== `Basic ${JIRA_BASIC}`)
       return send(401, { errorMessages: [`Client must be authenticated: ${String(s.headers.authorization)}`] });
@@ -834,7 +864,20 @@ async function standInJira(opts: { omitDescription?: boolean } = {}): Promise<St
       return send(200, {
         issues: page.map((i) => ({
           key: i.key,
-          fields: { ...(opts.omitDescription ? {} : { description: i.fields.description }), status: { statusCategory: { key: i.done ? "done" : "new" } } },
+          fields: {
+            ...(input.fields.includes("summary") ? { summary: i.fields.summary } : {}),
+            ...(opts.omitDescription ? {} : { description: i.fields.description }),
+            status: { statusCategory: { key: i.done ? "done" : "new" } },
+            ...(input.fields.includes("attachment") ? { attachment: i.attachments.map((filename, n) => ({ id: String(n + 1), filename })) } : {}),
+            ...(input.fields.includes("issuelinks")
+              ? {
+                  issuelinks: (i.links ?? []).map((l) => {
+                    const [type, key] = l.split(":");
+                    return { type: { name: type }, inwardIssue: { key, fields: {} } };
+                  }),
+                }
+              : {}),
+          },
         })),
         ...(more ? { nextPageToken: String(from + input.maxResults) } : {}),
         isLast: !more,
@@ -849,6 +892,31 @@ async function standInJira(opts: { omitDescription?: boolean } = {}): Promise<St
       const key = `QA-${issues.length + 1}`;
       issues.push({ key, fields, done: false, attachments: [] });
       return send(201, { id: String(10000 + issues.length), key, self: `https://example.atlassian.net/rest/api/3/issue/${key}` });
+    }
+    const edit = /^\/rest\/api\/3\/issue\/(QA-\d+)$/.exec(p);
+    if (s.method === "PUT" && edit) {
+      const issue = issues.find((i) => i.key === edit[1]);
+      if (!issue) return send(404, { errorMessages: ["Issue does not exist or you do not have permission to see it."] });
+      const { fields, ...rest } = JSON.parse(s.raw.toString("utf8")) as { fields: Record<string, unknown> };
+      const touched = Object.keys(fields).filter((k) => k !== "summary" && k !== "description");
+      if (touched.length || Object.keys(rest).length)
+        violations.push(`an edit beyond the summary and description: ${[...touched, ...Object.keys(rest)].join(", ")}`);
+      Object.assign(issue.fields, fields);
+      issue.edits = (issue.edits ?? 0) + 1;
+      return send(204);
+    }
+    if (s.method === "POST" && p === "/rest/api/3/issueLink") {
+      const input = JSON.parse(s.raw.toString("utf8")) as { type?: { name?: string }; inwardIssue?: { key?: string }; outwardIssue?: { key?: string } };
+      // Jira gives the type's outward words ("blocks") to the issue sent as inwardIssue: the issue filed here.
+      const from = issues.find((i) => i.key === input.inwardIssue?.key);
+      const to = input.outwardIssue?.key ?? "";
+      if (!linkTypes.has(input.type?.name ?? "")) return send(404, { errorMessages: [`No issue link type with name '${input.type?.name}' found.`] });
+      if (!from || !(tickets.has(to) || issues.some((i) => i.key === to)))
+        return send(404, { errorMessages: ["Issue does not exist or you do not have permission to see it."] });
+      // A link that already exists is answered as made, as Jira does.
+      const tag = `${input.type!.name}:${to}`;
+      if (!(from.links ?? []).includes(tag)) from.links = [...(from.links ?? []), tag];
+      return send(201);
     }
     const attach = /^\/rest\/api\/3\/issue\/(QA-\d+)\/attachments$/.exec(p);
     if (s.method === "POST" && attach) {
@@ -1250,6 +1318,11 @@ test("GitHub: the body names the run's frames, since GitHub cannot take an uploa
   try {
     const dir = projectWith([THREE[0]]);
     recordFrame(dir, "0007-click.jpg", "2026-09-30T09:59:30.000Z");
+    const dry = await exportOnce(GH, { GH_TOKEN, GITHUB_API_URL: gh.url }, dir);
+    assert.ok(
+      dry.out.some((l) => l.includes("would file") && l.endsWith("with 1 screenshot(s)")),
+      "a dry run says what a GitHub issue would name too",
+    );
     const run = await exportOnce([...GH, "--yes"], { GH_TOKEN, GITHUB_API_URL: gh.url }, dir);
     assert.equal(run.exitCode, EXIT_EXPORT.done, run.err.join("\n"));
     assert.match(gh.issues[0].body, /- recordings\/default\/0007-click\.jpg/);
@@ -1284,7 +1357,8 @@ test("Jira: an export files each finding with its screenshots attached, and a se
     assert.deepEqual(created.fields.labels, ["scenescout", "ui"]);
     assert.deepEqual(created.fields.issuetype, { name: "Bug" });
     assert.deepEqual(findingIdsInJiraDescription(created.fields.description), ["aaa0000001"]);
-    assert.deepEqual(created.attachments, ["0003-click.jpg", "0004-click.jpg"]);
+    // Named after the step's time: a later run reusing the session's name numbers its frames from one again.
+    assert.deepEqual(created.attachments, ["20260930T095900Z-0003-click.jpg", "20260930T095940Z-0004-click.jpg"]);
     assert.ok(
       first.out.some((l) => l.includes("Left out 3 frame(s)")),
       "the rewritten frame, once per finding",
@@ -1295,7 +1369,8 @@ test("Jira: an export files each finding with its screenshots attached, and a se
     const second = await exportOnce(["--to", "jira", "--yes"], env, dir);
     assert.deepEqual(second.filed, []);
     assert.equal(jira.issues.length, 3);
-    assert.equal(second.out.filter((l) => /already filed .* as QA-\d$/.test(l)).length, 3);
+    assert.equal(second.out.filter((l) => /already filed .* as QA-\d, up to date$/.test(l)).length, 3, second.out.join("\n"));
+    assert.equal(jira.seen.filter((x) => x.method === "PUT").length, 0, "an issue whose finding has not changed is not edited, so its watchers hear nothing");
   } finally {
     await jira.close();
   }
@@ -1420,7 +1495,10 @@ test("Jira: a screenshot the tracker refuses is reported and fails the export; t
     const run = await exportOnce(["--to", "jira", "--yes"], JIRA_ENV(jira.url), dir);
     assert.equal(run.exitCode, EXIT_EXPORT.couldNotExport);
     assert.deepEqual(run.filed, ["QA-1"]);
-    assert.match(run.err.join("\n"), /QA-1: 0003-click\.jpg was not attached \(.*HTTP 413: Too large\)\. It is at .*0003-click\.jpg; attach it by hand/);
+    assert.match(
+      run.err.join("\n"),
+      /QA-1: 20260930T095900Z-0003-click\.jpg was not attached \(.*HTTP 413: Too large\)\. It is at .*0003-click\.jpg; a later export attaches it/,
+    );
     const again = await exportOnce(["--to", "jira", "--yes"], JIRA_ENV(jira.url), dir);
     assert.deepEqual(again.filed, [], "the next export does not file it again");
   } finally {
@@ -1609,13 +1687,13 @@ test("Jira: issues past the first page of 100 are read, closed ones counted unle
     const env = JIRA_ENV(jira.url);
     const dir = projectWith(THREE);
     const any = await exportOnce(["--to", "jira"], env, dir);
-    assert.ok(any.out.some((l) => l.includes("aaa0000001") && l.endsWith("as QA-130")));
+    assert.ok(any.out.some((l) => l.includes("aaa0000001") && / as QA-130\b(?! \(closed\))/.test(l)));
     assert.ok(
       any.out.some((l) => l.includes("bbb0000002") && l.endsWith("as QA-151 (closed)")),
       "a closed issue counts as filed by default",
     );
     const open = await exportOnce(["--to", "jira", "--refile-closed"], env, dir);
-    assert.ok(open.out.some((l) => l.includes("aaa0000001") && l.endsWith("as QA-130")));
+    assert.ok(open.out.some((l) => l.includes("aaa0000001") && / as QA-130\b(?! \(closed\))/.test(l)));
     assert.ok(open.out.some((l) => l.includes("would file") && l.includes("bbb0000002")));
     assert.deepEqual(jira.violations, []);
   } finally {
@@ -1696,7 +1774,7 @@ test("Jira: a screenshot that was not attached is still reported when a later cr
     const run = await exportOnce(["--to", "jira", "--yes"], JIRA_ENV(jira.url), dir);
     assert.equal(run.exitCode, EXIT_EXPORT.couldNotExport);
     const said = run.err.join("\n");
-    assert.match(said, /QA-1: 0003-click\.jpg was not attached/);
+    assert.match(said, /QA-1: 20260930T095900Z-0003-click\.jpg was not attached/);
     assert.match(said, /HTTP 400 .*issuetype: Specify a valid issue type/);
     assert.match(said, /Filed before it stopped: QA-1\./);
   } finally {
@@ -1746,5 +1824,379 @@ test("the CLI: `scenescout export` files through the stand-in, prints no token, 
     });
   } finally {
     await gh.close();
+  }
+});
+
+// ── tickets, pictures and updates (Jira) ───────────────────────────────────
+
+const TICKET = {
+  id: "PROJ-12",
+  title: "Save a thing",
+  source: "pasted text",
+  loadedAt: "2026-09-30T09:00:00.000Z",
+  criteria: [
+    { id: "AC1", text: "Saving a thing shows it in the list", shape: "numbered" },
+    { id: "AC2", text: "A failed save says why", shape: "numbered" },
+  ],
+};
+const verdict = (over: Record<string, unknown>) => ({
+  ticket: "PROJ-12",
+  criterion: "AC2",
+  verdict: "fail",
+  findings: ["aaa0000001"],
+  confidence: 0.9,
+  reason: "the page shows nothing after a 500",
+  session: "default",
+  at: "2026-09-30T10:00:00.000Z",
+  ...over,
+});
+
+test("tickets: a finding fails the criteria whose answer is a fail naming it, as the report answers them", () => {
+  const memory = {
+    tickets: [
+      TICKET,
+      { id: "#7", title: "A GitHub issue", source: "pasted text", loadedAt: TICKET.loadedAt, criteria: [{ id: "AC1", text: "It loads", shape: "numbered" }] },
+      { id: "T1", title: "No key", source: "pasted text", loadedAt: TICKET.loadedAt, criteria: [{ id: "AC1", text: "It saves", shape: "numbered" }] },
+      { id: "broken" },
+    ],
+    criterionVerdicts: [
+      verdict({}),
+      // A pass in another session does not undo a fail: any fail decides the criterion.
+      verdict({ verdict: "pass", findings: [], session: "lane-2" }),
+      // A pass names no failing finding.
+      verdict({ criterion: "AC1", verdict: "pass", findings: ["bbb0000002"] }),
+      verdict({ ticket: "#7", criterion: "AC1", findings: ["aaa0000001"] }),
+      verdict({ ticket: "T1", criterion: "AC1", findings: ["aaa0000001"] }),
+      // A verdict on a criterion that has since been reworded was about something else.
+      verdict({ criterion: "AC1", findings: ["ccc0000003"], text: "Saving shows a toast" }),
+      "not a verdict",
+    ],
+  };
+  const byFinding = failedCriteriaByFinding(memory);
+  assert.deepEqual(byFinding.get("aaa0000001"), [
+    { ticket: "PROJ-12", criterion: "AC2", text: "A failed save says why" },
+    { ticket: "#7", criterion: "AC1", text: "It loads" },
+    { ticket: "T1", criterion: "AC1", text: "It saves" },
+  ]);
+  assert.equal(byFinding.has("bbb0000002"), false);
+  assert.equal(byFinding.has("ccc0000003"), false);
+  assert.deepEqual(ticketsToLink(byFinding.get("aaa0000001")!), ["PROJ-12"], "only a Jira key can be linked to");
+  assert.equal(failedCriteriaByFinding({ findings: [] }).size, 0);
+  assert.equal(failedCriteriaByFinding(null).size, 0);
+  for (const key of ["PROJ-12", "QA_2-1"]) assert.equal(isJiraKey(key), true, key);
+  for (const key of ["#12", "T1", "proj-12", "PROJ-0", "PROJ-", "P-1"]) assert.equal(isJiraKey(key), false, key);
+});
+
+test("options: --jira-link-type and --jira-update are Jira's, and say what they take", () => {
+  assert.deepEqual(parse([...GH, "--jira-update", "off"]), { ok: false, error: "--jira-update is not an option of --to github" });
+  assert.deepEqual(parse([...GH, "--jira-link-type", "Blocks"]), { ok: false, error: "--jira-link-type is not an option of --to github" });
+  assert.deepEqual(parse([...JIRA, "--jira-update", "yes"]), { ok: false, error: "--jira-update must be on or off" });
+  assert.deepEqual(parse([...JIRA, "--jira-link-type", " "]), { ok: false, error: "the Jira link type is empty" });
+  assert.equal(jiraOf(options([...JIRA, "--jira-link-type", "NONE"])).linkType, null);
+});
+
+/**
+ * Jira gives back a stored document with attributes it adds (a local id on
+ * each node, a code block's language) and may split one text node into two.
+ * None of that is an edit; a word added, removed or reworded is.
+ */
+function roundTrip(doc: unknown, change?: (texts: Array<{ text: string }>) => void): unknown {
+  const copy = JSON.parse(JSON.stringify(doc)) as Record<string, unknown>;
+  const texts: Array<{ text: string }> = [];
+  let n = 0;
+  const walk = (node: Record<string, unknown>): void => {
+    node.attrs = { ...((node.attrs as object) ?? {}), localId: `id-${n++}` };
+    const content = node.content as Array<Record<string, unknown>> | undefined;
+    if (!content) return;
+    const split = content.flatMap((child) =>
+      child.type === "text" && typeof child.text === "string" && child.text.length > 6 && !child.marks
+        ? [
+            { type: "text", text: child.text.slice(0, 3) },
+            { type: "text", text: child.text.slice(3) },
+          ]
+        : [child],
+    );
+    node.content = split;
+    for (const child of split) {
+      if (child.type === "text") texts.push(child as { text: string });
+      else walk(child);
+    }
+  };
+  walk(copy);
+  change?.(texts);
+  return copy;
+}
+
+test("revision: Jira's round trip leaves it as it was, and a word a person changes moves it", () => {
+  const f = finding();
+  const { summary, description } = jiraEditFields(f, CTX);
+  const recorded = jiraMarkerRevision(description, f.id);
+  assert.match(String(recorded), /^[0-9a-f]{16}$/);
+  assert.equal(jiraRevision(summary, roundTrip(description)), recorded, "attributes Jira adds and a text node it splits are not an edit");
+  assert.equal(jiraMarkerRevision(roundTrip(description), f.id), recorded, "the marker survives the round trip");
+  const reworded = roundTrip(description, (t) => {
+    t[0].text = `${t[0].text} (triaged: frontend)`;
+  });
+  assert.notEqual(jiraRevision(summary, reworded), recorded, "a note a person added is an edit");
+  assert.notEqual(jiraRevision(`${summary}!`, roundTrip(description)), recorded, "a summary a person reworded is an edit");
+  // Things a person pastes that carry no text are edits too: a picture, a mention, a link on existing words.
+  const withNode = (node: Record<string, unknown>) => {
+    const doc = roundTrip(description) as { content: unknown[] };
+    doc.content.splice(1, 0, node);
+    return doc;
+  };
+  assert.notEqual(jiraRevision(summary, withNode({ type: "mediaSingle", content: [{ type: "media", attrs: { id: "x", type: "file" } }] })), recorded);
+  assert.notEqual(jiraRevision(summary, withNode({ type: "paragraph", content: [{ type: "mention", attrs: { id: "abc", text: "@Sam" } }] })), recorded);
+  const linked = roundTrip(description) as { content: Array<{ content?: Array<Record<string, unknown>> }> };
+  linked.content[0].content![0].marks = [{ type: "link", attrs: { href: "https://example.com" } }];
+  assert.notEqual(jiraRevision(summary, linked), recorded, "a link a person put on existing words is an edit");
+  assert.equal(jiraRevision(summary, withNode({ type: "paragraph", content: [] })), recorded, "an empty line is not");
+  assert.equal(jiraMarkerRevision(description, "otherid123"), null, "another finding's marker records nothing for this one");
+  // Quoted text cannot pose as a marker carrying a revision, any more than as one without.
+  const quoted = jiraDescription(finding({ detail: "scenescout-finding: a1b2c3d4e5 rev 0123456789abcdef" }), CTX);
+  assert.notEqual(jiraMarkerRevision(quoted, "a1b2c3d4e5"), "0123456789abcdef");
+});
+
+test("upload names: a file is attached under the time it was taken, so a retaken picture or a later run's frame is a new file", () => {
+  assert.equal(uploadName("recordings/default/0003-click.jpg", "2026-09-30T09:59:00.123Z"), "20260930T095900Z-0003-click.jpg");
+  assert.notEqual(
+    uploadName("recordings/default/finding-a1b2c3d4e5.png", "2026-09-30T10:00:00.000Z"),
+    uploadName("recordings/default/finding-a1b2c3d4e5.png", "2026-10-02T10:00:00.000Z"),
+  );
+  assert.equal(uploadName("recordings/default/finding-a1b2c3d4e5.png", undefined), "finding-a1b2c3d4e5.png", "with no time, the file's own name");
+});
+
+test("update plan: rewrite only what SceneScout last wrote and has changed; attach and link only what is missing", () => {
+  const f = finding();
+  const filedCtx: IssueContext = { ...CTX, screenshots: [] };
+  const filed = jiraEditFields(f, filedCtx);
+  const state = { summary: filed.summary, description: roundTrip(filed.description), attachments: ["finding-a1b2c3d4e5.png"], links: ["PROJ-12"] };
+  const same = { ...filed, files: ["finding-a1b2c3d4e5.png"], tickets: ["PROJ-12"] };
+  assert.deepEqual(planJiraUpdate(f, state, same), { fields: "same", attach: [], link: [] });
+
+  const later = jiraEditFields(finding({ runs: 3, foundAt: "2026-10-01T10:00:00.000Z" }), filedCtx);
+  assert.deepEqual(planJiraUpdate(f, state, { ...later, files: ["finding-a1b2c3d4e5.png", "0003-click.jpg"], tickets: ["PROJ-12", "PROJ-14"] }), {
+    fields: "change",
+    attach: ["0003-click.jpg"],
+    link: ["PROJ-14"],
+  });
+
+  const edited = {
+    ...state,
+    description: roundTrip(filed.description, (t) => {
+      t[1].text = "frontend owns this";
+    }),
+  };
+  assert.equal(planJiraUpdate(f, edited, { ...later, files: [], tickets: [] }).fields, "edited");
+  assert.equal(planJiraUpdate(f, { ...state, summary: "Renamed in triage" }, { ...later, files: [], tickets: [] }).fields, "edited");
+  // Someone pointed this issue at a second finding too: a rewrite would drop that finding's marker.
+  const merged = JSON.parse(JSON.stringify(state.description)) as { content: unknown[] };
+  merged.content.push({ type: "paragraph", content: [{ type: "text", text: "scenescout-finding: otherid123" }] });
+  assert.equal(planJiraUpdate(f, { ...state, description: merged }, { ...later, files: [], tickets: [] }).fields, "edited");
+
+  // An issue filed before markers carried a revision: whether it was edited cannot be told.
+  const old = JSON.parse(JSON.stringify(filed.description).replace(/ rev [0-9a-f]{16}/, ""));
+  assert.equal(planJiraUpdate(f, { ...state, description: old }, { ...later, files: [], tickets: [] }).fields, "no-revision");
+});
+
+test("GitHub issue: the picture and the failed criteria are named, since GitHub takes no upload and no link", () => {
+  const body = githubIssue(finding(), {
+    ...CTX,
+    picture: "recordings/default/finding-a1b2c3d4e5.png",
+    criteria: [{ ticket: "PROJ-12", criterion: "AC2", text: "A failed save says why" }],
+  }).body;
+  assert.match(body, /### Acceptance criteria it fails\n\n- PROJ-12 AC2: A failed save says why/);
+  assert.match(body, /The picture taken when it was filed is in the run's `\.scenescout\/` folder, not attached .*finding-a1b2c3d4e5\.png/);
+  assert.match(body, /No frames of the steps before it were kept\./);
+  assert.doesNotMatch(githubIssue(finding(), CTX).body, /Acceptance criteria|picture taken/);
+});
+
+/** A project whose memory holds tickets and verdicts beside its findings. */
+function projectWithTickets(findings: Finding[], tickets: unknown[], verdicts: unknown[]): string {
+  const dir = projectWith(findings);
+  const file = path.join(dir, ".scenescout", "memory.json");
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), tickets, criterionVerdicts: verdicts }));
+  return dir;
+}
+
+/** The finding's own picture, where scout_finding writes it. */
+function writePicture(dir: string, id: string): string {
+  const rel = `recordings/default/finding-${id}.png`;
+  const file = path.join(dir, ".scenescout", rel);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  return rel;
+}
+
+test("Jira: the finding's picture is attached first, and the issue is linked to the ticket whose criterion it fails", async () => {
+  const jira = await standInJira({ tickets: ["PROJ-12"] });
+  try {
+    const dir = projectWithTickets([{ ...THREE[0] }, THREE[1]], [TICKET], [verdict({})]);
+    const picture = writePicture(dir, "aaa0000001");
+    const memory = path.join(dir, ".scenescout", "memory.json");
+    const m = JSON.parse(fs.readFileSync(memory, "utf8"));
+    m.findings[0].picture = picture;
+    fs.writeFileSync(memory, JSON.stringify(m));
+    recordFrame(dir, "0003-click.jpg", "2026-09-30T09:59:00.000Z");
+    const env = JIRA_ENV(jira.url);
+
+    const dry = await exportOnce(["--to", "jira"], env, dir);
+    assert.ok(dry.out.some((l) => l.includes("would file") && l.includes("aaa0000001") && l.includes("with 2 screenshot(s)")));
+    assert.equal(posts(jira).filter((x) => x.url !== "/rest/api/3/search/jql").length, 0, "a dry run sends nothing but reads");
+
+    const run = await exportOnce(["--to", "jira", "--yes"], env, dir);
+    assert.equal(run.exitCode, EXIT_EXPORT.done, run.err.join("\n"));
+    assert.deepEqual(run.filed, ["QA-1", "QA-2"]);
+    const [qa1, qa2] = jira.issues;
+    assert.deepEqual(qa1.attachments, ["finding-aaa0000001.png", "20260930T095900Z-0003-click.jpg"]);
+    assert.deepEqual(qa1.links, ["Relates:PROJ-12"]);
+    assert.equal(qa2.links, undefined, "a finding that fails no criterion links nothing");
+    const text = JSON.stringify(qa1.fields.description);
+    assert.match(text, /Acceptance criteria it fails/);
+    assert.match(text, /PROJ-12 AC2: A failed save says why/);
+    assert.match(text, /Attached: finding-aaa0000001\.png, the picture taken when it was filed\./);
+    const link = jira.seen.find((x) => x.url === "/rest/api/3/issueLink")!;
+    assert.deepEqual(JSON.parse(link.raw.toString("utf8")), { type: { name: "Relates" }, inwardIssue: { key: "QA-1" }, outwardIssue: { key: "PROJ-12" } });
+    assert.ok(!`${run.out.join("\n")}${run.err.join("\n")}`.includes(JIRA_TOKEN));
+    assert.deepEqual(jira.violations, []);
+
+    // --jira-link-type none links nothing, and --screenshots off attaches nothing.
+    const other = await standInJira({ tickets: ["PROJ-12"] });
+    try {
+      const quiet = await exportOnce(["--to", "jira", "--yes", "--jira-link-type", "none", "--screenshots", "off"], JIRA_ENV(other.url), dir);
+      assert.equal(quiet.exitCode, EXIT_EXPORT.done, quiet.err.join("\n"));
+      assert.equal(other.issues[0].links, undefined);
+      assert.deepEqual(other.issues[0].attachments, []);
+      assert.equal(other.seen.filter((x) => x.url === "/rest/api/3/issueLink").length, 0);
+    } finally {
+      await other.close();
+    }
+  } finally {
+    await jira.close();
+  }
+});
+
+test("Jira: a ticket the site does not have is reported and fails the export; the issue stays filed once", async () => {
+  const jira = await standInJira();
+  try {
+    const dir = projectWithTickets([THREE[0]], [TICKET], [verdict({})]);
+    const env = JIRA_ENV(jira.url);
+    const run = await exportOnce(["--to", "jira", "--yes"], env, dir);
+    assert.equal(run.exitCode, EXIT_EXPORT.couldNotExport);
+    assert.deepEqual(run.filed, ["QA-1"]);
+    assert.match(run.err.join("\n"), /QA-1: not linked to PROJ-12 \(.*HTTP 404.*\); check that PROJ-12 is an issue on this site/);
+    const again = await exportOnce(["--to", "jira", "--yes"], env, dir);
+    assert.deepEqual(again.filed, [], "the next export does not file it again");
+    assert.equal(jira.issues.length, 1);
+  } finally {
+    await jira.close();
+  }
+});
+
+test("Jira: a later export updates an open issue in place: new text, the picture and the link it lacks; never a second issue", async () => {
+  const jira = await standInJira({ tickets: ["PROJ-12"] });
+  try {
+    const dir = projectWith([THREE[0], THREE[1]]);
+    const env = JIRA_ENV(jira.url);
+    const first = await exportOnce(["--to", "jira", "--yes"], env, dir);
+    assert.deepEqual(first.filed, ["QA-1", "QA-2"]);
+
+    // A later run finds the first defect again, takes its picture, and judges it against a ticket.
+    const memory = path.join(dir, ".scenescout", "memory.json");
+    const m = JSON.parse(fs.readFileSync(memory, "utf8"));
+    m.findings[0] = { ...m.findings[0], runs: 3, foundAt: "2026-10-01T10:00:00.000Z", picture: writePicture(dir, "aaa0000001") };
+    m.tickets = [TICKET];
+    m.criterionVerdicts = [verdict({})];
+    fs.writeFileSync(memory, JSON.stringify(m));
+    // Someone triaging the second issue adds a note to its description.
+    const desc = jira.issues[1].fields.description as { content: Array<Record<string, unknown>> };
+    desc.content.splice(1, 0, { type: "paragraph", content: [{ type: "text", text: "Frontend owns this." }] });
+
+    const dry = await exportOnce(["--to", "jira"], env, dir);
+    assert.ok(
+      dry.out.some((l) => / as QA-1; would rewrite its summary and description, attach finding-aaa0000001\.png, link it to PROJ-12$/.test(l)),
+      dry.out.join("\n"),
+    );
+    assert.equal(jira.seen.filter((x) => x.method === "PUT" || x.url.endsWith("/attachments") || x.url.endsWith("/issueLink")).length, 0);
+
+    const second = await exportOnce(["--to", "jira", "--yes"], env, dir);
+    assert.equal(second.exitCode, EXIT_EXPORT.done, second.err.join("\n"));
+    assert.deepEqual(second.filed, []);
+    assert.equal(jira.issues.length, 2, "updated, never filed again");
+    const [qa1, qa2] = jira.issues;
+    assert.equal(qa1.edits, 1);
+    assert.match(JSON.stringify(qa1.fields.description), /Runs that found it: 3/);
+    assert.match(JSON.stringify(qa1.fields.description), /PROJ-12 AC2/);
+    assert.deepEqual(qa1.attachments, ["finding-aaa0000001.png"]);
+    assert.deepEqual(qa1.links, ["Relates:PROJ-12"]);
+    assert.equal(qa2.edits, undefined, "a description someone edited is left as they wrote it");
+    assert.match(JSON.stringify(qa2.fields.description), /Frontend owns this\./);
+    assert.ok(second.out.some((l) => l.includes("updated QA-1")));
+    assert.ok(second.out.some((l) => / as QA-2; its summary or description was edited in Jira, so it is left as written$/.test(l)));
+    assert.ok(second.out.some((l) => l.startsWith("Filed 0; 2 already filed, 1 of them updated")));
+    assert.deepEqual(jira.violations, []);
+
+    // Nothing has changed since: the third export writes nothing.
+    const third = await exportOnce(["--to", "jira", "--yes"], env, dir);
+    assert.equal(jira.seen.filter((x) => x.method === "PUT").length, 1);
+    assert.ok(third.out.some((l) => / as QA-1, up to date$/.test(l)));
+  } finally {
+    await jira.close();
+  }
+});
+
+test("Jira: --jira-update off, a closed issue and an issue from an earlier version are listed and never edited", async () => {
+  const jira = await standInJira({ tickets: ["PROJ-12"] });
+  try {
+    const dir = projectWithTickets([THREE[0], THREE[1], THREE[2]], [TICKET], [verdict({})]);
+    const env = JIRA_ENV(jira.url);
+    await exportOnce(["--to", "jira", "--yes", "--jira-link-type", "none"], env, dir);
+    jira.issues[1].done = true;
+    jira.issues[2].fields.description = JSON.parse(JSON.stringify(jira.issues[2].fields.description).replace(/ rev [0-9a-f]{16}/, ""));
+    const memory = path.join(dir, ".scenescout", "memory.json");
+    const m = JSON.parse(fs.readFileSync(memory, "utf8"));
+    for (const f of m.findings) f.runs = 5;
+    fs.writeFileSync(memory, JSON.stringify(m));
+
+    const off = await exportOnce(["--to", "jira", "--yes", "--jira-update", "off"], env, dir);
+    assert.equal(off.exitCode, EXIT_EXPORT.done, off.err.join("\n"));
+    assert.equal(jira.seen.filter((x) => x.method === "PUT" || x.url.endsWith("/issueLink")).length, 0);
+    assert.ok(off.out.some((l) => /already filed .* as QA-1$/.test(l)));
+
+    const on = await exportOnce(["--to", "jira", "--yes"], env, dir);
+    assert.equal(on.exitCode, EXIT_EXPORT.done, on.err.join("\n"));
+    assert.equal(jira.issues[0].edits, 1);
+    assert.deepEqual(jira.issues[0].links, ["Relates:PROJ-12"], "the link an earlier export left out is made now");
+    assert.equal(jira.issues[1].edits, undefined, "a closed issue is the team's decision");
+    assert.ok(on.out.some((l) => /already filed .* as QA-2 \(closed\)$/.test(l)));
+    assert.equal(jira.issues[2].edits, undefined);
+    assert.ok(on.out.some((l) => / as QA-3; it was filed by an earlier version, so its summary and description are left as they are$/.test(l)));
+  } finally {
+    await jira.close();
+  }
+});
+
+test("Jira: an update whose every link fails says nothing was updated, and fails the export", async () => {
+  const jira = await standInJira();
+  try {
+    const dir = projectWith([THREE[0]]);
+    const env = JIRA_ENV(jira.url);
+    await exportOnce(["--to", "jira", "--yes"], env, dir);
+    // Someone edits the issue, so its text is theirs; then a run finds the defect fails a ticket the site does not have.
+    jira.issues[0].fields.summary = "Saving fails (triaged)";
+    const memory = path.join(dir, ".scenescout", "memory.json");
+    fs.writeFileSync(memory, JSON.stringify({ ...JSON.parse(fs.readFileSync(memory, "utf8")), tickets: [TICKET], criterionVerdicts: [verdict({})] }));
+    const run = await exportOnce(["--to", "jira", "--yes"], env, dir);
+    assert.equal(run.exitCode, EXIT_EXPORT.couldNotExport);
+    assert.ok(
+      run.out.some((l) => / as QA-1; nothing could be updated; its summary or description was edited in Jira/.test(l)),
+      run.out.join("\n"),
+    );
+    assert.ok(!run.out.some((l) => l.includes("updated QA-1")));
+    assert.ok(run.out.some((l) => l.startsWith("Filed 0; 1 already filed.")));
+    assert.match(run.err.join("\n"), /QA-1: not linked to PROJ-12/);
+    assert.equal(jira.issues[0].edits, undefined);
+  } finally {
+    await jira.close();
   }
 });

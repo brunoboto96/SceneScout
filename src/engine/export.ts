@@ -11,9 +11,12 @@
  * cross-reference and an address into a link. Every piece of that text is
  * made inert before it goes into an issue.
  */
+import { createHash } from "node:crypto";
+import { readFindingPicture } from "./capture.js";
 import { readFindings } from "./ci.js";
 import { isWorthALook, redactSecrets, type ActionLogEntry, type Finding } from "./memory.js";
 import { retryAfterMs } from "./provider.js";
+import { answerTicket, type CriterionVerdict, type Ticket } from "./tickets.js";
 
 const TRACKERS = ["github", "jira"] as const;
 export type Tracker = (typeof TRACKERS)[number];
@@ -30,6 +33,8 @@ export const EXPORT_OPTION_NAMES = [
   "jira-url",
   "jira-project",
   "jira-issue-type",
+  "jira-link-type",
+  "jira-update",
   "project",
   "min-severity",
   "only",
@@ -51,6 +56,8 @@ export const MARKER_LABEL = "scenescout";
 const DEFAULT_MAX_ISSUES = 20;
 const MAX_ISSUES_BOUNDS = [1, 100] as const;
 const DEFAULT_JIRA_ISSUE_TYPE = "Bug";
+/** The link from a Jira issue to the ticket whose criterion it fails. Every Jira Cloud site has it; `none` links nothing. */
+const DEFAULT_JIRA_LINK_TYPE = "Relates";
 const DEFAULT_GITHUB_API_URL = "https://api.github.com";
 /** What a severity becomes: a label on GitHub, a priority in Jira. `--severity-map` replaces any of them. */
 export const DEFAULT_SEVERITY_MAP: Record<Tracker, Record<Severity, string>> = {
@@ -81,6 +88,14 @@ export interface JiraTarget {
   baseUrl: string;
   projectKey: string;
   issueType: string;
+  /** The issue link type to a failed criterion's ticket, or null to link none. */
+  linkType: string | null;
+  /**
+   * Bring an open issue filed earlier up to date: its summary and description
+   * when nobody has edited them in Jira since, and the picture and ticket
+   * links it lacks. Off, an issue once filed is only listed.
+   */
+  update: boolean;
 }
 /** The tracker an export files into, with exactly that tracker's settings. */
 export type ExportTarget = { to: "github"; github: GithubTarget } | { to: "jira"; jira: JiraTarget };
@@ -214,7 +229,7 @@ export function parseExportArgs(args: readonly string[], cwd: string, env: Reado
   if (to === undefined) return { ok: false, error: "say where the issues go: --to github or --to jira" };
   if (!(TRACKERS as readonly string[]).includes(to)) return { ok: false, error: `--to must be one of ${TRACKERS.join(", ")}` };
   const tracker = to as Tracker;
-  const otherTrackers: Record<Tracker, string[]> = { github: ["jira-url", "jira-project", "jira-issue-type"], jira: ["repo"] };
+  const otherTrackers: Record<Tracker, string[]> = { github: ["jira-url", "jira-project", "jira-issue-type", "jira-link-type", "jira-update"], jira: ["repo"] };
   for (const name of otherTrackers[tracker]) if (flags.has(name)) return { ok: false, error: `--${name} is not an option of --to ${tracker}` };
 
   let target: ExportTarget;
@@ -240,7 +255,15 @@ export function parseExportArgs(args: readonly string[], cwd: string, env: Reado
       };
     const issueType = plainName(flags.get("jira-issue-type") ?? env.JIRA_ISSUE_TYPE ?? DEFAULT_JIRA_ISSUE_TYPE, "the Jira issue type", 60);
     if (!issueType.ok) return issueType;
-    target = { to: "jira", jira: { baseUrl: baseUrl.value, projectKey, issueType: issueType.value } };
+    const rawLinkType = flags.get("jira-link-type") ?? env.JIRA_LINK_TYPE ?? DEFAULT_JIRA_LINK_TYPE;
+    const linkType = rawLinkType.trim().toLowerCase() === "none" ? null : plainName(rawLinkType, "the Jira link type", 60);
+    if (linkType && !linkType.ok) return linkType;
+    const update = flags.get("jira-update") ?? "on";
+    if (update !== "on" && update !== "off") return { ok: false, error: "--jira-update must be on or off" };
+    target = {
+      to: "jira",
+      jira: { baseUrl: baseUrl.value, projectKey, issueType: issueType.value, linkType: linkType ? linkType.value : null, update: update === "on" },
+    };
   }
 
   const minSeverity = flags.get("min-severity") ?? "low";
@@ -385,6 +408,76 @@ function timeOf(iso: unknown): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
+// ── the tickets a finding fails ─────────────────────────────────────────────
+
+/** A ticket's acceptance criterion that a finding shows failing (scout_criterion). */
+export interface FailedCriterion {
+  /** The ticket's id as the run read it: "PROJ-12", "#12", or "T1" for a ticket that carried no key. */
+  ticket: string;
+  /** "AC2". */
+  criterion: string;
+  text: string;
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const MAX_CRITERIA_PER_ISSUE = 10;
+
+/**
+ * Which criteria each finding shows failing, from the tickets and verdicts in
+ * memory.json, answered as the report answers them (tickets.ts answerTicket):
+ * a fail from any session decides a criterion, and a verdict on a criterion
+ * reworded since is left behind. Entries that do not read are skipped: a
+ * ticket is context for an issue, never a reason to refuse an export.
+ */
+export function failedCriteriaByFinding(memory: unknown): Map<string, FailedCriterion[]> {
+  const out = new Map<string, FailedCriterion[]>();
+  if (!isObject(memory)) return out;
+  const tickets = (Array.isArray(memory.tickets) ? memory.tickets : []).filter(
+    (t): t is Ticket =>
+      isObject(t) &&
+      typeof t.id === "string" &&
+      Array.isArray(t.criteria) &&
+      t.criteria.every((c) => isObject(c) && typeof c.id === "string" && typeof c.text === "string"),
+  );
+  const verdicts = (Array.isArray(memory.criterionVerdicts) ? memory.criterionVerdicts : []).filter(
+    (v): v is CriterionVerdict =>
+      isObject(v) &&
+      typeof v.ticket === "string" &&
+      typeof v.criterion === "string" &&
+      typeof v.verdict === "string" &&
+      Array.isArray(v.findings) &&
+      v.findings.every((id) => typeof id === "string") &&
+      typeof v.confidence === "number" &&
+      typeof v.session === "string",
+  );
+  for (const ticket of tickets)
+    for (const answer of answerTicket(ticket, verdicts)) {
+      if (answer.verdict !== "fail") continue;
+      for (const id of answer.findings) {
+        const list = out.get(id) ?? [];
+        if (list.length < MAX_CRITERIA_PER_ISSUE) list.push({ ticket: ticket.id, criterion: answer.criterion.id, text: answer.criterion.text });
+        out.set(id, list);
+      }
+    }
+  return out;
+}
+
+/** A ticket id that is a Jira issue key, so the issue can be linked to it: "PROJ-12", not "#12" or "T1". */
+export function isJiraKey(id: string): boolean {
+  return /^[A-Z][A-Z0-9_]{1,49}-[1-9]\d{0,9}$/.test(id);
+}
+
+/** The Jira tickets an issue is linked to: each failed criterion's ticket that is a Jira key, once. */
+export function ticketsToLink(criteria: readonly FailedCriterion[]): string[] {
+  return [...new Set(criteria.map((c) => c.ticket).filter(isJiraKey))];
+}
+
+/** The finding's own picture (scout_finding, #347), as a path under `.scenescout/`, when the path is one the engine writes. */
+export function findingPicture(f: Pick<Finding, "picture" | "pictureShot">): { rel: string; at?: string } | null {
+  const p = readFindingPicture(f);
+  return p ? { rel: p.file, ...(p.at ? { at: p.at } : {}) } : null;
+}
+
 // ── the marker ──────────────────────────────────────────────────────────────
 
 /** The first line of a GitHub issue's body: an HTML comment, so it is not shown. */
@@ -398,9 +491,13 @@ export function findingIdsInGithubBody(body: unknown): string[] {
   return [...body.matchAll(/<!-- scenescout-finding: ([A-Za-z0-9_-]{1,64}) -->/g)].map((m) => m[1]);
 }
 
-/** A Jira description cannot hide text, so the marker is a last, short line. */
-function jiraMarkerText(id: string): string {
-  return `scenescout-finding: ${id}`;
+/**
+ * A Jira description cannot hide text, so the marker is a last, short line.
+ * It carries the revision of the summary and description it was written
+ * with, so a later export can tell whether anyone has edited them since.
+ */
+function jiraMarkerText(id: string, revision: string): string {
+  return `scenescout-finding: ${id} rev ${revision}`;
 }
 
 /**
@@ -413,6 +510,51 @@ export function findingIdsInJiraDescription(description: unknown): string[] {
   if (description === null || description === undefined) return [];
   const text = typeof description === "string" ? description : JSON.stringify(description);
   return [...text.matchAll(/scenescout-finding: ([A-Za-z0-9_-]{1,64})/g)].map((m) => m[1]);
+}
+
+/** The revision a Jira issue's marker for this finding records, or null when it records none (an issue filed before revisions were kept). */
+export function jiraMarkerRevision(description: unknown, id: string): string | null {
+  const text = typeof description === "string" ? description : JSON.stringify(description ?? "");
+  // An id is letters, digits, "_" and "-" (FINDING_ID_RE), none of which is special in a pattern.
+  if (!FINDING_ID_RE.test(id)) return null;
+  return new RegExp(`scenescout-finding: ${id} rev ([0-9a-f]{16})\\b`).exec(text)?.[1] ?? null;
+}
+
+/** The node types and marks a description SceneScout writes is made of (jiraDescription). */
+const OWN_NODES = new Set(["doc", "paragraph", "text", "heading", "bulletList", "orderedList", "listItem", "codeBlock", "rule"]);
+const OWN_MARKS = new Set(["code"]);
+
+/**
+ * Every text node of a document, in order, leaving out the marker's
+ * paragraph, and a token for every node or mark SceneScout never writes: a
+ * picture, a mention, a link card or emoji a person pasted carries no text,
+ * and must still count as an edit.
+ */
+function textsOf(node: unknown, out: string[] = []): string[] {
+  if (Array.isArray(node)) {
+    for (const n of node) textsOf(n, out);
+    return out;
+  }
+  if (!isObject(node)) return out;
+  if (node.type === "paragraph" && /scenescout-finding: /.test(JSON.stringify(node.content ?? ""))) return out;
+  if (!OWN_NODES.has(String(node.type))) out.push(`\u0001node:${String(node.type)}:${JSON.stringify(node.attrs ?? null)}`);
+  for (const mark of Array.isArray(node.marks) ? node.marks : [])
+    if (!isObject(mark) || !OWN_MARKS.has(String(mark.type))) out.push(`\u0001mark:${JSON.stringify(mark)}`);
+  if (node.type === "text" && typeof node.text === "string") out.push(node.text);
+  textsOf(node.content, out);
+  return out;
+}
+
+/**
+ * The revision of an issue's summary and description: a hash of their text,
+ * with the marker's paragraph and all white space left out, and of anything
+ * in them SceneScout does not write. Not the whole document, so the
+ * attributes Jira adds to the nodes SceneScout wrote do not change it, while
+ * any word, picture, mention or link a person adds, removes or rewords does.
+ */
+export function jiraRevision(summary: unknown, description: unknown): string {
+  const text = [typeof summary === "string" ? summary : "", ...textsOf(description)].join("").replace(/\s+/g, "");
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
 
 // ── inert text ──────────────────────────────────────────────────────────────
@@ -483,6 +625,13 @@ export interface IssueContext {
   screenshots: "off" | readonly string[];
   /** Frames the run logged for this finding that were left out: missing, too large, or rewritten since. */
   framesLeftOut?: number;
+  /** The finding's own picture, relative to `.scenescout/`, when screenshots are on and the file is there: Jira attaches it, GitHub names it. */
+  picture?: string | null;
+  /** When the picture was taken, and when each of `screenshots` was: the names Jira gets them under carry it (uploadName). */
+  pictureAt?: string;
+  screenshotTimes?: readonly string[];
+  /** The tickets' acceptance criteria this finding shows failing. */
+  criteria?: readonly FailedCriterion[];
 }
 
 /** A finding's fields as they are rendered: redacted again on the way out, and of the right type whatever the file held. */
@@ -522,6 +671,11 @@ function dateOf(iso: unknown): string {
 
 function frameName(rel: string): string {
   return rel.split("/").pop() || rel;
+}
+
+/** The line saying which criteria a finding fails, one per criterion. */
+function criterionLine(c: FailedCriterion, inert: (t: unknown, max: number) => string): string {
+  return `${inert(c.ticket, 60)} ${inert(c.criterion, 20)}: ${inert(c.text, 300)}`;
 }
 
 /** Why an issue has no screenshots: the run recorded none, or the ones it recorded are gone. */
@@ -578,9 +732,15 @@ export function githubIssue(f: Finding, ctx: IssueContext): { title: string; bod
     x.evidence ? inertMarkdown(x.evidence, MAX_EVIDENCE) : "No machine evidence was recorded with this finding.",
     "",
   ];
+  if (ctx.criteria?.length) lines.push("### Acceptance criteria it fails", "", ...ctx.criteria.map((c) => `- ${criterionLine(c, inertMarkdown)}`), "");
   if (ctx.screenshots !== "off") {
     lines.push("### Screenshots", "");
-    if (ctx.screenshots.length === 0) lines.push(noFramesSentence(ctx));
+    if (ctx.picture)
+      lines.push(
+        `The picture taken when it was filed is in the run's \`.scenescout/\` folder, not attached (GitHub's API cannot upload a file to an issue): ${inertMarkdown(ctx.picture, 200)}`,
+        "",
+      );
+    if (ctx.screenshots.length === 0) lines.push(ctx.picture ? "No frames of the steps before it were kept." : noFramesSentence(ctx));
     else
       lines.push(
         "Not attached: GitHub's API cannot upload a file to an issue. The run kept these frames of the steps before it was last found, in its `.scenescout/` folder:",
@@ -604,8 +764,16 @@ const paragraph = (...content: AdfNode[]): AdfNode => ({ type: "paragraph", cont
 const heading = (t: string): AdfNode => ({ type: "heading", attrs: { level: 3 }, content: [text(t)] });
 const listItems = (items: string[]): AdfNode[] => items.map((t) => ({ type: "listItem", content: [paragraph(text(t))] }));
 
-/** The description of a Jira issue for a finding, in Atlassian Document Format. Every text node holds plain text, so nothing in it is markup. */
-export function jiraDescription(f: Finding, ctx: Pick<IssueContext, "screenshots" | "framesLeftOut">): AdfNode {
+/**
+ * The description of a Jira issue for a finding, in Atlassian Document Format.
+ * Every text node holds plain text, so nothing in it is markup. Its last line
+ * is the marker, which records the revision of the summary and the rest of
+ * the description (jiraRevision).
+ */
+export function jiraDescription(
+  f: Finding,
+  ctx: Pick<IssueContext, "screenshots" | "framesLeftOut" | "picture" | "pictureAt" | "screenshotTimes" | "criteria">,
+): AdfNode {
   const x = fieldsOf(f);
   const facts = [
     `Severity: ${f.severity}`,
@@ -629,26 +797,34 @@ export function jiraDescription(f: Finding, ctx: Pick<IssueContext, "screenshots
       ? { type: "codeBlock", content: [text(inertPlain(x.evidence, MAX_EVIDENCE))] }
       : paragraph(text("No machine evidence was recorded with this finding.")),
   ];
+  if (ctx.criteria?.length)
+    content.push(heading("Acceptance criteria it fails"), { type: "bulletList", content: listItems(ctx.criteria.map((c) => criterionLine(c, inertPlain))) });
   if (ctx.screenshots !== "off") {
     content.push(heading("Screenshots"));
-    content.push(
-      paragraph(
-        text(
-          ctx.screenshots.length === 0
-            ? noFramesSentence(ctx)
-            : `Attached: ${ctx.screenshots.map((s) => inertPlain(frameName(s), 100)).join(", ")}, the frames of the steps before it was last found.`,
+    if (ctx.picture)
+      content.push(paragraph(text(`Attached: ${inertPlain(uploadName(ctx.picture, ctx.pictureAt), 100)}, the picture taken when it was filed.`)));
+    if (ctx.screenshots.length > 0)
+      content.push(
+        paragraph(
+          text(
+            `Attached: ${ctx.screenshots.map((s, i) => inertPlain(uploadName(s, ctx.screenshotTimes?.[i]), 100)).join(", ")}, the frames of the steps before it was last found.`,
+          ),
         ),
-      ),
-    );
+      );
+    else content.push(paragraph(text(ctx.picture ? "No frames of the steps before it were kept." : noFramesSentence(ctx))));
   }
+  const revision = jiraRevision(issueTitle(f), content);
   content.push(
     { type: "rule" },
-    paragraph(text("Filed by SceneScout. A later export finds this issue by this line: "), text(jiraMarkerText(f.id), [{ type: "code" }])),
+    paragraph(
+      text("Filed by SceneScout. A later export finds this issue by this line, and updates it while nobody has edited its summary or description: "),
+      text(jiraMarkerText(f.id, revision), [{ type: "code" }]),
+    ),
   );
   return { type: "doc", version: 1, content };
 }
 
-/** The fields of a Jira issue for a finding. */
+/** The fields of a new Jira issue for a finding. An update sets only `summary` and `description` (jiraEditFields). */
 export function jiraIssueFields(f: Finding, ctx: IssueContext & { projectKey: string; issueType: string }): Record<string, unknown> {
   return {
     project: { key: ctx.projectKey },
@@ -658,6 +834,58 @@ export function jiraIssueFields(f: Finding, ctx: IssueContext & { projectKey: st
     labels: issueLabels({ severityName: null, labels: ctx.labels }),
     ...(ctx.severityName ? { priority: { name: ctx.severityName } } : {}),
   };
+}
+
+/** The fields an update of a Jira issue sets: the summary and description SceneScout writes, and nothing a team sets in triage (priority, labels, assignee). */
+export function jiraEditFields(f: Finding, ctx: IssueContext): { summary: string; description: AdfNode } {
+  return { summary: issueTitle(f), description: jiraDescription(f, ctx) };
+}
+
+/** What a Jira issue filed earlier holds, as the export's search read it. */
+export interface JiraIssueState {
+  summary: unknown;
+  description: unknown;
+  /** The names of the files attached to it. */
+  attachments: readonly string[];
+  /** The keys of the issues it is linked to, either way round. */
+  links: readonly string[];
+}
+
+/**
+ * Whether an issue's summary and description are rewritten: `change` when
+ * they are as SceneScout last wrote them and the finding now reads
+ * differently; `same` when nothing would change; `edited` when someone has
+ * edited them in Jira since (their revision no longer matches the marker's),
+ * so they are left as that person wrote them; `no-revision` when the marker
+ * records none (an issue filed by an earlier version), so whether they were
+ * edited cannot be told and they are left as they are.
+ */
+export type JiraFieldsUpdate = "change" | "same" | "edited" | "no-revision";
+
+export interface JiraUpdatePlan {
+  fields: JiraFieldsUpdate;
+  /** Files to attach: the ones it should carry that it does not hold under their name. */
+  attach: string[];
+  /** Tickets to link it to that it is not linked to yet. */
+  link: string[];
+}
+
+/** What an update does to an open issue filed earlier. Nothing is ever removed: a file or link someone took off is added again only while the finding still calls for it. */
+export function planJiraUpdate(
+  f: Pick<Finding, "id">,
+  state: JiraIssueState,
+  wanted: { summary: string; description: unknown; files: readonly string[]; tickets: readonly string[] },
+): JiraUpdatePlan {
+  const recorded = jiraMarkerRevision(state.description, f.id);
+  let fields: JiraFieldsUpdate;
+  if (recorded === null) fields = "no-revision";
+  // A second finding's marker was put there by a person (the marker's paragraph is not hashed), and a rewrite would drop it.
+  else if (jiraRevision(state.summary, state.description) !== recorded || findingIdsInJiraDescription(state.description).some((id) => id !== f.id))
+    fields = "edited";
+  else fields = jiraMarkerRevision(wanted.description, f.id) === recorded ? "same" : "change";
+  const held = new Set(state.attachments);
+  const linked = new Set(state.links);
+  return { fields, attach: [...new Set(wanted.files)].filter((n) => !held.has(n)), link: wanted.tickets.filter((k) => !linked.has(k)) };
 }
 
 // ── screenshots ─────────────────────────────────────────────────────────────
@@ -707,6 +935,8 @@ export interface FiledIssue {
   number: number;
   url: string;
   open: boolean;
+  /** For a Jira issue, what it holds, so an export can bring it up to date. */
+  jira?: JiraIssueState;
 }
 
 export type PlanEntry =
@@ -791,6 +1021,24 @@ export function trackerMessage(body: unknown): string {
   else if (b.errors && typeof b.errors === "object")
     for (const [field, message] of Object.entries(b.errors as Record<string, unknown>)) if (typeof message === "string") parts.push(`${field}: ${message}`);
   return oneLine(parts.join("; "), 300);
+}
+
+/**
+ * The name a picture or frame is attached to a Jira issue under: its file
+ * name after the time it was taken. File names repeat (a session's frames
+ * are numbered from one again when a later run reuses its name, and a
+ * finding's picture keeps its name when it is retaken), so the name alone
+ * cannot say whether an issue already holds this picture.
+ */
+export function uploadName(rel: string, at: string | undefined): string {
+  const t = timeOf(at);
+  const name = frameName(rel);
+  return t
+    ? `${new Date(t)
+        .toISOString()
+        .replace(/[-:]/g, "")
+        .replace(/\.\d+Z$/, "Z")}-${name}`
+    : name;
 }
 
 /** A line about a finding for the terminal: its severity, its title (no control characters, so no terminal escapes) and its id. */

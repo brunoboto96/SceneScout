@@ -235,17 +235,23 @@ Usage:
                                     environment only: GH_TOKEN or GITHUB_TOKEN; JIRA_EMAIL and JIRA_API_TOKEN.
                                     (--repo owner/name for GitHub (GITHUB_API_URL for GitHub Enterprise Server);
                                      --jira-url https://…, --jira-project KEY, --jira-issue-type name (default Bug),
-                                      or JIRA_BASE_URL, JIRA_PROJECT_KEY, JIRA_ISSUE_TYPE, for Jira Cloud;
+                                      --jira-link-type name|none (default Relates), or JIRA_BASE_URL,
+                                      JIRA_PROJECT_KEY, JIRA_ISSUE_TYPE, JIRA_LINK_TYPE, for Jira Cloud: an issue
+                                      is linked to each ticket whose criterion its finding fails;
+                                     --jira-update on|off (default on): update an open Jira issue filed earlier,
+                                      leaving a summary or description edited in Jira as it is;
                                      --min-severity high|medium|low (default low); --only id,id;
                                      --max-issues N (default 20, at most 100): the most one export files;
                                      --refile-closed: file a finding again when its issue was closed (by default
                                       an issue open or closed counts as filed); --include-worth-a-look;
                                      --severity-map high=…,medium=…,low=… or none: a label on GitHub, a priority
                                       in Jira (default severity: high… / High, Medium, Low); --labels a,b;
-                                     --screenshots on|off (default on: attached in Jira, named on GitHub);
+                                     --screenshots on|off (default on: the finding's picture and the run's frames,
+                                      attached in Jira, named on GitHub);
                                      --project dir (default: here); --dry-run; --yes)
                                     Exit code: 0 done (findings over the cap wait for the next export), 2 could not
-                                    export (it lists what it filed before it stopped) or a screenshot was not attached.
+                                    export (it lists what it filed before it stopped), or a screenshot was not
+                                    attached or a ticket not linked.
   scenescout status [projectPath]   What is the engine doing right now? (every session + recent actions)
   scenescout watch [projectPath]    Open the live view in a browser: what each session is doing, a thumbnail
                                     of its page, and a live stream you can switch on per session
