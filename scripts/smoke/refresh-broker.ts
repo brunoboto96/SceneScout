@@ -18,7 +18,7 @@ import { BrowserEngine } from "../../dist/engine/browser.js";
 import { profilePath, writeProfile } from "../../dist/engine/profiles.js";
 import { lockPathFor, refreshTokenSlots } from "../../dist/engine/refresh.js";
 import { captureState } from "../../dist/login-run.js";
-import { BROWSER, check, expireFixtureAccess, isCurrentRefreshToken, refreshFamilies, type SmokeContext } from "./harness.ts";
+import { BROWSER, check, eventually, expireFixtureAccess, isCurrentRefreshToken, refreshFamilies, WAIT_MS, type SmokeContext } from "./harness.ts";
 
 export const title = "refresh broker";
 
@@ -33,7 +33,7 @@ async function recordProfile(baseUrl: string, project: string): Promise<void> {
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.goto(`${baseUrl}/rt-signin`);
-    await page.waitForFunction((want) => document.querySelector("h1")?.textContent === want, SIGNED_IN, { timeout: 10000 });
+    await page.waitForFunction((want) => document.querySelector("h1")?.textContent === want, SIGNED_IN, { timeout: WAIT_MS });
     writeProfile(project, "member", await captureState(context));
   } finally {
     await browser.close();
@@ -42,13 +42,18 @@ async function recordProfile(baseUrl: string, project: string): Promise<void> {
 
 /** What a session's page settles on: signed in, signed out, or still checking after the wait. */
 async function verdict(engine: BrowserEngine): Promise<"in" | "out" | "pending"> {
-  for (let i = 0; i < 100; i++) {
-    const text = await engine.snapshot(true);
-    if (text.includes(SIGNED_IN)) return "in";
-    if (text.includes(SIGNED_OUT)) return "out";
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  return "pending";
+  let seen: "in" | "out" | "pending" = "pending";
+  // Spaced out, since each look is a snapshot, and several sessions look at once. Twice the usual bound for that.
+  await eventually(
+    async () => {
+      const text = await engine.snapshot(true);
+      seen = text.includes(SIGNED_IN) ? "in" : text.includes(SIGNED_OUT) ? "out" : "pending";
+      return seen !== "pending";
+    },
+    2 * WAIT_MS,
+    100,
+  );
+  return seen;
 }
 
 /** Attach LANES sessions by role, expire every access token, and load the app in all of them at once. */

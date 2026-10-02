@@ -10,9 +10,15 @@ import { BrowserEngine } from "../../dist/engine/browser.js";
 import { feedForSession, FEED_LINES, LiveServer, StatusBoard, type LiveProvider } from "../../dist/engine/live.js";
 import { buildReplayHtml, resolveFrame } from "../../dist/engine/replay.js";
 import { chromium, firefox, webkit, type Page } from "playwright";
-import { BROWSER, check, until, type SmokeContext } from "./harness.ts";
+import { BROWSER, check, eventually, settle, until, WAIT_MS, type SmokeContext } from "./harness.ts";
 
 export const title = "live view";
+
+/**
+ * Absence has no event to wait for: how long a stream that should stay as it is gets to change before a check says it
+ * did not. A slow machine can only make it miss a late change, never fail a check that should pass.
+ */
+const ABSENT_MS = 1200;
 
 const isJpeg = (buf: Buffer | null | undefined): boolean => !!buf && buf.length > 100 && buf[0] === 0xff && buf[1] === 0xd8;
 
@@ -112,7 +118,8 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     await stop();
     const atStop = frames.length;
     await engine.navigate("/");
-    await new Promise((r) => setTimeout(r, 1200));
+    // A repaint has just happened: a stream still running would deliver it inside the window.
+    await settle(ABSENT_MS);
     check("...and none after it is stopped", frames.length === atStop, `${atStop} -> ${frames.length}`);
     check("stopping a stream logs no action either", !(engine.memory?.actionLog ?? []).some((e) => /screencast|liveShot/i.test(e.action)));
 
@@ -233,12 +240,13 @@ async function closeUpFollowUps(
   // "Stream all" left it, not switch it back off.
   check("before: Stream all is on and agent-0 is not streaming", (await all.getAttribute("aria-pressed")) === "true" && !(await streaming("agent-0")));
   await page.getByTestId("live-card-image-agent-0").click();
-  await until("the close-up to stream agent-0", async () => pushes.has("agent-0"), 5000);
+  await until("the close-up to stream agent-0", async () => pushes.has("agent-0"));
   await press("live-all-toggle");
   await press("live-all-toggle");
-  await until("Stream all to be back on", async () => (await all.getAttribute("aria-pressed")) === "true", 5000);
+  await until("Stream all to be back on", async () => (await all.getAttribute("aria-pressed")) === "true");
   await page.getByTestId("live-focus-close").click();
-  await page.waitForTimeout(600);
+  // The check is that closing the close-up does NOT stop the stream: there is nothing to wait for.
+  await settle(ABSENT_MS);
   check(
     "Stream all pressed from the keyboard while a close-up is open still holds for that card once it closes",
     (await streaming("agent-0")) && pushes.has("agent-0"),
@@ -248,48 +256,47 @@ async function closeUpFollowUps(
   // Another card's close-up opened from the keyboard while one is open hands
   // the first session back as it was.
   await all.click();
-  await until("every stream to stop", async () => pushes.size === 0, 5000);
+  await until("every stream to stop", async () => pushes.size === 0);
   await page.getByTestId("live-card-image-agent-1").click();
-  await until("the close-up to stream agent-1", async () => pushes.has("agent-1"), 5000);
+  await until("the close-up to stream agent-1", async () => pushes.has("agent-1"));
   await press("live-card-image-agent-2");
-  await until("the second close-up to stream agent-2", async () => pushes.has("agent-2"), 5000);
-  await until("agent-1's stream to stop", async () => !pushes.has("agent-1"), 5000).catch(() => {});
+  await until("the second close-up to stream agent-2", async () => pushes.has("agent-2"));
+  await until("agent-1's stream to stop", async () => !pushes.has("agent-1")).catch(() => {});
   check(
     "opening a second close-up from the keyboard stops the stream the first one started",
     !pushes.has("agent-1") && !(await streaming("agent-1")) && (await page.locator("#focus-name").textContent()) === "agent-2",
     `agent-1 stream open ${pushes.has("agent-1")}, card streaming ${await streaming("agent-1")}`,
   );
   await page.getByTestId("live-focus-close").click();
-  await until("closing it to stop agent-2's stream", async () => !pushes.has("agent-2"), 5000);
+  await until("closing it to stop agent-2's stream", async () => !pushes.has("agent-2"));
 
   // The open close-up's own card, reached from the keyboard: opening it again
   // changes nothing, and its Stream toggle is a choice that outlasts the close-up.
   await page.getByTestId("live-card-image-agent-4").click();
-  await until("the close-up to stream agent-4", async () => pushes.has("agent-4"), 5000);
+  await until("the close-up to stream agent-4", async () => pushes.has("agent-4"));
   await press("live-card-image-agent-4");
   await page.getByTestId("live-focus-close").click();
-  await until("closing it to stop agent-4's stream", async () => !pushes.has("agent-4"), 5000).catch(() => {});
+  await until("closing it to stop agent-4's stream", async () => !pushes.has("agent-4")).catch(() => {});
   check("opening the same close-up again from the keyboard still hands the card back on close", !pushes.has("agent-4") && !(await streaming("agent-4")));
   await page.getByTestId("live-card-image-agent-4").click();
-  await until("the close-up to stream agent-4 again", async () => pushes.has("agent-4"), 5000);
+  await until("the close-up to stream agent-4 again", async () => pushes.has("agent-4"));
   await press("live-card-toggle-agent-4");
   await press("live-card-toggle-agent-4");
   await page.getByTestId("live-focus-close").click();
-  await page.waitForTimeout(600);
+  // The check is that closing the close-up does NOT stop the stream: there is nothing to wait for.
+  await settle(ABSENT_MS);
   check("the card's own toggle pressed behind the close-up is a choice that outlasts it", pushes.has("agent-4") && (await streaming("agent-4")));
   await page.getByTestId("live-card-toggle-agent-4").click();
-  await until("agent-4's stream to stop", async () => !pushes.has("agent-4"), 5000);
+  await until("agent-4's stream to stop", async () => !pushes.has("agent-4"));
 
   // A still that fails to capture once keeps the picture up. Watched with a
   // MutationObserver because the old blank lasted only until the next poll.
   await page.getByTestId("live-card-image-agent-3").click();
-  await until("the close-up to stream agent-3", async () => pushes.has("agent-3"), 5000);
+  await until("the close-up to stream agent-3", async () => pushes.has("agent-3"));
   await focusToggle.click();
-  await until("agent-3's stream to stop", async () => !pushes.has("agent-3"), 5000);
-  await until(
-    "the close-up to show a still",
-    () => page.locator("#focus-img").evaluate((i: HTMLImageElement) => /^.*\/shot\/agent-3\.jpg\?ts=/.test(i.src) && i.complete && i.naturalWidth > 0),
-    5000,
+  await until("agent-3's stream to stop", async () => !pushes.has("agent-3"));
+  await until("the close-up to show a still", () =>
+    page.locator("#focus-img").evaluate((i: HTMLImageElement) => /^.*\/shot\/agent-3\.jpg\?ts=/.test(i.src) && i.complete && i.naturalWidth > 0),
   );
   // The card behind the close-up polls the same still. Standing in for a
   // hidden tab stops its poll (and only its poll), so the failed capture below
@@ -302,41 +309,38 @@ async function closeUpFollowUps(
     new MutationObserver(() => { if (stage.classList.contains("empty")) stage.blanked = true; })
       .observe(stage, { attributes: true, attributeFilter: ["class"] });
   })()`);
-  const before = await page.locator("#focus-img").getAttribute("src");
-  // Past the server's shot cache, so the next capture is really asked for.
-  await page.waitForTimeout(1600);
+  // The capture fails when the server next asks for one, once its shot cache has aged out: that is waited for.
   failShots.set("agent-3", 1);
-  await until("the failing capture to be asked for", async () => !failShots.get("agent-3"), 5000);
-  await page.waitForTimeout(2500);
+  await until("the failing capture to be asked for", async () => !failShots.get("agent-3"));
+  const before = await page.locator("#focus-img").getAttribute("src");
+  // The still changes only when a capture loads, so a new one means the failed capture has been handled and passed.
+  await eventually(async () => (await page.locator("#focus-img").getAttribute("src")) !== before);
   const blanked = await page.locator("#focus-stage").evaluate((n: HTMLElement & { blanked?: boolean }) => !!n.blanked);
   const after = await page.locator("#focus-img").getAttribute("src");
   check("one failed capture leaves the close-up's still on screen", !blanked, `stage went empty: ${blanked}`);
   check("...and the still carries on refreshing after it", !!after && after !== before, `${before} -> ${after}`);
   // Two in a row is a session with nothing to show, and the close-up says so.
   failShots.set("agent-3", 2);
-  await until("both failing captures to be asked for", async () => !failShots.get("agent-3"), 8000);
-  await until("the stage to say there is no frame", () => page.locator("#focus-stage").evaluate((n) => n.classList.contains("empty")), 5000).catch(() => {});
+  await until("both failing captures to be asked for", async () => !failShots.get("agent-3"));
+  await until("the stage to say there is no frame", () => page.locator("#focus-stage").evaluate((n) => n.classList.contains("empty"))).catch(() => {});
   check("...while two failed captures in a row say there is no frame", await page.locator("#focus-stage").evaluate((n) => n.classList.contains("empty")));
   await page.evaluate(() => delete (document as { hidden?: boolean }).hidden);
   await page.getByTestId("live-focus-close").click();
 
   // The session closes while its close-up is open: its Stream button goes with it.
   await page.getByTestId("live-card-image-agent-7").click();
-  await until("the close-up on agent-7", () => focusToggle.isVisible(), 5000);
+  await until("the close-up on agent-7", () => focusToggle.isVisible());
   setNames(names.filter((n) => n !== "agent-7"));
-  await until(
-    "the close-up to say the session has closed",
-    () =>
-      page
-        .locator("#focus-line")
-        .textContent()
-        .then((t) => t === "This session has closed."),
-    5000,
+  await until("the close-up to say the session has closed", () =>
+    page
+      .locator("#focus-line")
+      .textContent()
+      .then((t) => t === "This session has closed."),
   );
   check("a session that closes under its close-up takes the Stream button with it", !(await focusToggle.isVisible()));
   await page.getByTestId("live-focus-close").click();
   setNames(names);
-  await until("agent-7 to come back", () => page.getByTestId("live-card-agent-7").isVisible(), 5000);
+  await until("agent-7 to come back", () => page.getByTestId("live-card-agent-7").isVisible());
 }
 
 /**
@@ -465,31 +469,29 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${port}/${token}/`);
     await page.getByTestId("live-all-toggle").click();
-    await until("every session's stream to open", () => pushes.size === names.length, 8000);
+    await until("every session's stream to open", () => pushes.size === names.length);
     const pollsBefore = polls;
     const ticker = setInterval(() => {
       for (const push of pushes.values()) if (jpeg) push(jpeg);
     }, 100);
+    let kept = false;
     try {
-      await new Promise((r) => setTimeout(r, 2500));
+      kept = await eventually(() => polls - pollsBefore >= 2);
     } finally {
       clearInterval(ticker);
     }
-    check(`with ${names.length} streams open the status poll keeps arriving`, polls - pollsBefore >= 2, `${polls - pollsBefore} poll(s) in 2.5s`);
+    check(`with ${names.length} streams open the status poll keeps arriving`, kept, `${polls - pollsBefore} poll(s) in ${WAIT_MS} ms`);
     const src = await page.getByTestId("live-card-image-agent-7").locator("img").getAttribute("src");
     check("a streamed frame is shown from the shared connection", !!src && src.startsWith("data:image/jpeg;base64,"), String(src).slice(0, 40));
     check("one connection carries them all: no stream per image", (await page.locator("img[src*='.mjpg']").count()) === 0);
 
     await page.getByTestId("live-card-image-agent-0").click();
     const focusFeed = page.getByTestId("live-focus-feed");
-    await until(
-      "the close-up's feed to render",
-      () =>
-        focusFeed
-          .locator(".group")
-          .count()
-          .then((n) => n >= 2),
-      5000,
+    await until("the close-up's feed to render", () =>
+      focusFeed
+        .locator(".group")
+        .count()
+        .then((n) => n >= 2),
     );
     const groups = await focusFeed.locator(".group").count();
     check("the close-up's feed is grouped by journey", groups === 2, `${groups} group(s)`);
@@ -506,10 +508,10 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     // The timeline is drawn from the close-up's long feed, not from the six
     // lines the status poll carries — and picking a step must not shrink it.
     const ticks = page.locator("#timeline button");
-    await until("the timeline to fill from the long feed", () => ticks.count().then((n) => n > FEED_LINES), 8000);
+    await until("the timeline to fill from the long feed", () => ticks.count().then((n) => n > FEED_LINES));
     const drawn = await ticks.count();
     await ticks.nth(drawn - 1).click();
-    await page.waitForTimeout(500);
+    await eventually(async () => (await ticks.nth(drawn - 1).getAttribute("aria-pressed")) === "true");
     check("picking a step leaves the whole run on the timeline", (await ticks.count()) === drawn, `${drawn} ticks, then ${await ticks.count()}`);
     check(
       "...and the step it picked is the one marked",
@@ -517,7 +519,7 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
       String(await ticks.nth(drawn - 1).getAttribute("aria-pressed")),
     );
     await page.getByTestId("live-scrub-live").click();
-    await page.waitForTimeout(400);
+    await eventually(async () => (await page.locator('#timeline button[aria-pressed="true"]').count()) === 0);
     check("going back to live leaves no step marked", (await page.locator('#timeline button[aria-pressed="true"]').count()) === 0);
 
     // The close-up's Stream button is the card's: switching it off there stops
@@ -526,65 +528,57 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     const cardToggle = page.getByTestId("live-card-toggle-agent-0");
     check("the close-up shows its session streaming", (await focusToggle.getAttribute("aria-pressed")) === "true");
     await focusToggle.click();
-    await until("the close-up's stream to stop", async () => !pushes.has("agent-0"), 5000);
+    await until("the close-up's stream to stop", async () => !pushes.has("agent-0"));
     check("switching it off in the close-up switches the card off too", (await cardToggle.getAttribute("aria-pressed")) === "false");
     await page.getByTestId("live-focus-close").click();
-    await page.waitForTimeout(400);
+    // The check is that closing the close-up does NOT start the stream again: there is nothing to wait for.
+    await settle(ABSENT_MS);
     check("...and the choice outlasts the close-up", (await cardToggle.getAttribute("aria-pressed")) === "false" && !pushes.has("agent-0"));
     // Opening a close-up streams its session; closing it without touching the
     // button hands the card back as it was.
     await page.getByTestId("live-card-image-agent-0").click();
-    await until("opening the close-up to stream it", async () => pushes.has("agent-0"), 5000);
+    await until("opening the close-up to stream it", async () => pushes.has("agent-0"));
     check("opening a close-up streams its session", (await focusToggle.getAttribute("aria-pressed")) === "true");
     await page.getByTestId("live-focus-close").click();
-    await until("closing it to stop the stream it started", async () => !pushes.has("agent-0"), 5000);
+    await until("closing it to stop the stream it started", async () => !pushes.has("agent-0"));
     check("closing it untouched leaves the card as it was", (await cardToggle.getAttribute("aria-pressed")) === "false");
 
     await closeUpFollowUps(page, pushes, failShots, (next) => (names = next), names);
 
     // The run ends: the browsers are gone, so the page must hand over the report itself.
     names = [];
-    await until("the finished panel", () => page.getByTestId("live-finished-state").isVisible(), 8000);
+    await until("the finished panel", () => page.getByTestId("live-finished-state").isVisible());
     // The panel now asks whether the run has a page of its own before falling
     // back to the report, so the report follows it by a round trip rather than
     // arriving in the same tick.
-    await until("the report to open itself", () => page.getByTestId("live-report-dialog").isVisible(), 8000);
+    await until("the report to open itself", () => page.getByTestId("live-report-dialog").isVisible());
     check("the report opens by itself when the run finishes", true);
-    await until(
-      "the report's file line",
-      () =>
-        page
-          .getByTestId("live-report-meta")
-          .textContent()
-          .then((t) => /NOT saved: \/tmp\/demo\/\.scenescout\/report\.md/.test(t ?? "")),
-      8000,
+    await until("the report's file line", () =>
+      page
+        .getByTestId("live-report-meta")
+        .textContent()
+        .then((t) => /NOT saved: \/tmp\/demo\/\.scenescout\/report\.md/.test(t ?? "")),
     );
     check("...and says the report is not on disk, naming where it belongs", true, (await page.getByTestId("live-report-meta").textContent()) ?? "");
-    const download = await Promise.all([page.waitForEvent("download", { timeout: 8000 }), page.getByTestId("live-report-save").click()]).then((r) => r[0]);
+    const download = await Promise.all([page.waitForEvent("download", { timeout: WAIT_MS }), page.getByTestId("live-report-save").click()]).then((r) => r[0]);
     check("a viewer can keep a copy: the browser saves it, nothing is asked of the engine", download.suggestedFilename() === "scenescout-report.md");
     written = true;
-    await until(
-      "the file line to follow scout_report writing it",
-      () =>
-        page
-          .getByTestId("live-finished-where")
-          .textContent()
-          .then((t) => /^saved at \/tmp\/demo/.test(t ?? "")),
-      8000,
+    await until("the file line to follow scout_report writing it", () =>
+      page
+        .getByTestId("live-finished-where")
+        .textContent()
+        .then((t) => /^saved at \/tmp\/demo/.test(t ?? "")),
     );
     check("...and once the agent has written it, the page says where it is instead", true);
     await page.getByTestId("live-report-close").click();
 
     await page.getByTestId("live-report-toggle").click();
     const doc = page.getByTestId("live-report-doc");
-    await until(
-      "the report to render",
-      () =>
-        doc
-          .locator("h4")
-          .count()
-          .then((n) => n > 0),
-      5000,
+    await until("the report to render", () =>
+      doc
+        .locator("h4")
+        .count()
+        .then((n) => n > 0),
     );
     const title = await doc.locator("h4").first().textContent();
     check(
@@ -611,14 +605,26 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     // on, and the run has a page of its own that a refresh cannot kill.
     recorded = true;
     const shots = doc.getByTestId("live-report-evidence-abc123");
-    await until("the frames under the finding", () => shots.count().then((n) => n > 0), 8000);
+    await until("the frames under the finding", () => shots.count().then((n) => n > 0));
     await shots.locator("summary").click();
     const shot = shots.locator("img").first();
-    await until("the frame to load", () => shot.evaluate((i: HTMLImageElement) => i.complete && i.naturalWidth > 0), 8000);
+    await until("the frame to load", () => shot.evaluate((i: HTMLImageElement) => i.complete && i.naturalWidth > 0));
     // The panel re-reads the report every few seconds. Re-rendering an
-    // unchanged document used to close whatever the reader had open.
+    // unchanged document used to close whatever the reader had open. Each
+    // re-read the panel has handled is counted, so the check waits for one.
+    // Strings, because the bundler wraps a named closure in a helper the page does not have.
+    await page.evaluate(`(() => {
+      const json = Response.prototype.json;
+      window.__reportReads = 0;
+      Response.prototype.json = function () {
+        const read = json.call(this);
+        // Counted before the panel's own handler runs, in the same turn: once the count moves, that handler has run.
+        if (new URL(this.url).pathname.endsWith("/api/report")) read.then(() => { window.__reportReads += 1; }, () => {});
+        return read;
+      };
+    })()`);
     const openBefore = await shots.evaluate((d: HTMLDetailsElement) => d.open);
-    await page.waitForTimeout(6000);
+    await until("the panel to re-read the report", async () => Number(await page.evaluate("window.__reportReads")) > 0);
     check(
       "an accordion the reader opened is still open after the panel re-reads the report",
       openBefore && (await shots.evaluate((d: HTMLDetailsElement) => d.open)),
@@ -632,7 +638,7 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
 
     const fresh = await browser.newPage();
     await fresh.goto(`http://127.0.0.1:${port}/${token}/`);
-    await until("the viewer to land on the run's own page", () => fresh.title().then((t) => /^SceneScout run/.test(t)), 8000);
+    await until("the viewer to land on the run's own page", () => fresh.title().then((t) => /^SceneScout run/.test(t)));
     check("a viewer arriving after the run ended is sent to the run's own page", fresh.url().endsWith("/run"), fresh.url());
     await fresh.reload();
     check("...and unlike a panel over a dead board, it is still there after a refresh", /^SceneScout run/.test(await fresh.title()), await fresh.title());
@@ -641,8 +647,19 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
     // The run's own page, once the engine behind it has exited: reloading the
     // address would get the browser's own error page and lose the tab.
     const run = await browser.newPage();
+    // Each answer the run page's watch on the engine has handled is counted, so the check waits for the first.
+    await run.addInitScript(`(() => {
+      const fetchFn = window.fetch;
+      window.__statusChecks = 0;
+      window.fetch = function (...args) {
+        const answer = fetchFn.apply(this, args);
+        // Counted before the page's own handler runs, in the same turn: once the count moves, that handler has run.
+        if (String(args[0]).endsWith("api/status")) answer.then(() => { window.__statusChecks += 1; }, () => { window.__statusChecks += 1; });
+        return answer;
+      };
+    })()`);
     await run.goto(`http://127.0.0.1:${port}/${token}/run`);
-    await run.waitForTimeout(1200);
+    await until("the run page to hear from the engine", async () => Number(await run.evaluate("window.__statusChecks")) > 0);
     check("the run's page says nothing about an exit while the engine is up", !(await run.getByTestId("run-engine-gone").isVisible()));
     let asked = false;
     run.on("dialog", async (d) => {
@@ -657,10 +674,12 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
       (await run.getByTestId("run-engine-gone").innerText()) ?? "",
     );
     await run.getByTestId("run-copy-path").click();
-    await run.reload({ timeout: 5000 }).catch(() => {});
-    await run.waitForTimeout(800);
+    // Dismissing the question cancels the reload, which then never finishes: wait for the question, not the reload.
+    const reloading = run.reload({ timeout: WAIT_MS }).catch(() => {});
+    await eventually(() => asked);
     check("a refresh from there asks before throwing the page away", asked);
     await run.close();
+    await reloading;
   } finally {
     await browser.close();
     await live.stop();

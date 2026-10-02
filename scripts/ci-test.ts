@@ -1723,11 +1723,35 @@ test("sarif: one result per finding at its severity's level, worth-a-look as a n
     ],
   );
   assert.equal(results[2].properties.tier, "worth-a-look");
-  assert.equal(results[0].locations[0].physicalLocation.artifactLocation.uri, "things?x=1");
+  // Code scanning keeps only results located in a repository file: the anchor, with the page beside it.
+  assert.deepEqual(results[0].locations[0].physicalLocation.artifactLocation, { uri: "package.json" });
+  assert.deepEqual(results[0].locations[0].logicalLocations, [{ kind: "resource", name: "/things?x=1", fullyQualifiedName: "/things?x=1" }]);
+  assert.equal(results[0].properties.route, "/things?x=1");
+  assert.match(results[0].message.text, / — on \/things\?x=1$/);
+  const anchored = ciSarif(RESULT(), "9.9.9", [], ".github/workflows/explore.yml") as any;
+  assert.equal(anchored.runs[0].results[1].locations[0].physicalLocation.artifactLocation.uri, ".github/workflows/explore.yml");
+  assert.deepEqual(
+    anchored.runs[0].results.map((r: any) => r.partialFingerprints),
+    results.map((r: any) => r.partialFingerprints),
+    "the anchor moves the location, never the alert's identity",
+  );
   assert.ok(!JSON.stringify(sarif).includes(OPENAI_KEY));
   assert.equal(sarif.runs[0].invocations[0].executionSuccessful, true);
-  assert.deepEqual(sarif.runs[0].originalUriBaseIds, { APP: { uri: "http://127.0.0.1:3000/" } }, "locations resolve against the app's origin");
+  assert.equal(sarif.runs[0].originalUriBaseIds, undefined, "no location is relative to the app any more");
+  assert.equal(sarif.runs[0].properties.app, "http://127.0.0.1:3000");
   assert.equal((ciSarif(RESULT({ stop: "provider-error" }), "9.9.9") as any).runs[0].invocations[0].executionSuccessful, false);
+});
+
+test("--sarif-file-anchor: a file relative to the repository root, never outside it", () => {
+  const parse = (v: string) => parseCiArgs(["http://127.0.0.1:3000", `--sarif-file-anchor=${v}`], "/work");
+  const ok = parse("./.github/workflows/explore.yml");
+  assert.ok(ok.ok && ok.options.sarifFileAnchor === ".github/workflows/explore.yml");
+  for (const bad of ["/etc/passwd", "../outside.md", "docs/"]) {
+    const r = parse(bad);
+    assert.ok(!r.ok && /--sarif-file-anchor/.test(r.error), bad);
+  }
+  const absent = parseCiArgs(["http://127.0.0.1:3000"], "/work");
+  assert.ok(absent.ok && absent.options.sarifFileAnchor === undefined);
 });
 
 // ── the GitHub Action (ci/action.yml + action/ci-action.mjs) ─────────────────
