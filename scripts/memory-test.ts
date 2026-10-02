@@ -54,6 +54,7 @@ import {
   isEmptySubmit,
   isFormBookkeeping,
   isNavigationTeardown,
+  isSubmitLike,
   isTextEntry,
   sameControl,
   submits,
@@ -1790,6 +1791,25 @@ test("coverage: controls inside another site's frame are counted apart from the 
     "an embed's controls never reach the gap ledger",
   );
   assert.equal(isEmbedKey("frame:about:srcdoc#Inner|button:x"), false);
+});
+
+test("isSubmitLike: submit words count as whole words of the name or test id", () => {
+  const cases: Array<[string, string, string | null, boolean]> = [
+    ["button", "Sign in", null, true],
+    ["button", "Continue", "sign-in", true],
+    ["button", "Sign", null, true],
+    ["button", "Go", "auth_signup_button", true],
+    ["button", "Save", null, true],
+    ["button", "Add", "rowAdd", true],
+    // The words inside other words are not the word.
+    ["button", "Verify", "assignee-verify", false],
+    ["button", "Lookup", "postcode-lookup", false],
+    ["button", "Design", null, false],
+    ["button", "Address book", "address-book", false],
+    // Only buttons.
+    ["link", "Sign in", null, false],
+  ];
+  for (const [role, name, testid, want] of cases) assert.equal(isSubmitLike(role, name, testid), want, `${role} ${name} ${testid}`);
 });
 
 // ---------------------------------------------------------------------------
