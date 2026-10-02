@@ -39,7 +39,7 @@ jobs:
   suite:
     name: ${{ matrix.os }} · node ${{ matrix.node }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -81,7 +81,7 @@ jobs:
   cross-browser:
     name: ubuntu-latest · ${{ matrix.browser }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:

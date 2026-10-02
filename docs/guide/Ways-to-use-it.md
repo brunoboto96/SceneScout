@@ -60,7 +60,7 @@ Use SceneScout to test http://127.0.0.1:4173 with four agents in parallel, one a
 The method the agent follows:
 
 1. The planner attaches, crawls once so route knowledge is complete, and calls `scout_lane_brief {lanes: 4, goal: "…"}`. It splits the routes into whole modules (everything under `/orders` goes to one lane), balances them by route count, and returns for each lane a session name, an objective, the routes it owns, a landing route and the rules every lane follows.
-2. Each lane agent attaches its own session when it starts, files defects with `scout_finding` as it judges them, and hands back one JSON object: the lane report. The instruction for that object comes from `scout_lane_report {lane}`. While other sessions share the project, `scout_coverage` shows a lane only the routes it reached, the controls on the pages it saw (not another role's on the same route) and the forms it saw this run; `scout_coverage {scope: "project"}` shows every lane's, tagged with who saw each. A lane that files the same finding again in the same run corrects its own convention and detail, and the "seen in N runs" count does not move.
+2. Each lane agent attaches its own session when it starts, files defects with `scout_finding` as it judges them, and hands back one JSON object: the lane report. The instruction for that object comes from `scout_lane_report {lane}`. While other sessions share the project, `scout_coverage` shows a lane only the routes it reached, the controls on the pages it saw (not another role's on the same route) and the forms it saw this run; `scout_coverage {scope: "project"}` shows every lane's, tagged with who saw each. A lane that files the same finding again in the same run corrects its own convention and detail, and the "seen in N runs" count does not move. A filing merged into a finding from another page adds that page to the finding's "also seen on" list in the report. Each decision in the lane report can name the finding id `scout_finding` returned for it, so the fold's check for judged defects nobody filed matches it exactly rather than by its evidence.
 3. The planner passes each reply to `scout_lane_report {lane, reply}`, which checks it and folds it, and only then closes that lane's session with `scout_close`. `scout_close` refuses to close a lane whose report has not been accepted, because the lane's decisions are kept against its session.
 4. The planner writes the report. On a parallel run it adds how the run was paced and whether each lane's stated confidence matched what the project filed.
 
@@ -114,6 +114,44 @@ A step that breaks fails the gate (`flow-step-failed`, high) naming the flow and
 **Re-tests.** Open findings in `.scenescout/memory.json` whose evidence is a failed `GET` are re-tested by loading their page, and reported as still reproducing, possibly fixed or not re-tested. By default a finding filed high that still reproduces fails the gate (`--gate-retests high`). The memory is ignored by git unless the project commits it, so re-tests happen where the memory lives.
 
 **SARIF.** `check.sarif` is SARIF 2.1.0. With the GitHub Action, `upload-sarif: true` sends it to code scanning; the job then needs `security-events: write`.
+
+### Visual baselines
+
+A baseline is an approved picture of a page or of one element on it. With `--baseline compare` the check takes the same picture again and compares the two pixel by pixel; with `--baseline update` it writes new baselines. Nothing is pictured unless you ask for it.
+
+1. List what to keep in `targets.json`, in the baselines folder (`.scenescout/baselines/` unless `--baselines` names another):
+
+   ```json
+   {
+     "targets": [
+       { "path": "/" },
+       { "path": "/settings", "element": "testid=profile-card" },
+       { "path": "/orders", "element": "role=button[name=\"New order\"]" }
+     ]
+   }
+   ```
+
+   `element` is `page`, the default (the window from the top of the page), or a target written the way a saved flow writes one: `testid=…`, `text=…`, `label=…` or `role=<role>[name="…"]`. An element's picture is its box and 8px around it.
+2. Take the baselines once: `npx -y scenescout check http://127.0.0.1:3000 --baseline update`. Each baseline is a PNG with a JSON beside it that says how it was taken, under `<browser>/<route>/` in the folder.
+3. Compare on every run with `--baseline compare`.
+
+| What the check finds | What it reports | Gate |
+|---|---|---|
+| The same picture, or one within `--baseline-threshold` (default 0.1%) | It matches, with the share of pixels changed | Passes |
+| More pixels changed than the threshold allows, or a change of size | `visual-change` (high), with the share changed; the baseline, the picture now and a diff with the changed pixels in red go under `visual/` beside the report | Fails at the default `--fail-on high` |
+| The page or element could not be pictured | `visual-change` (high), saying why | Fails |
+| A baseline it cannot use: half there, unreadable, or taken with other settings | `visual-change` (high), saying why; take it again with `--baseline update` | Fails |
+| No baseline yet | Listed, and counted beside the verdict as not compared | Passes |
+
+An intended change is approved by running the check with `--baseline update` and committing what it writes, on the same operating system the check runs on. Nothing else writes a baseline. An update rewrites what compare would not accept and leaves a baseline within `--baseline-threshold` exactly as it was, except one taken on another operating system, which it always replaces: run on a laptop, an update replaces every baseline taken on a Linux runner. Targets are pictured whatever `--paths` says, since each names its own page.
+
+**Where baselines live.** `.scenescout/baselines/` is ignored by git, so baselines kept there stay on the machine that took them. To share them, name a folder the project commits: `--baselines tests/visual` (the action's `baselines` input).
+
+**What keeps a picture repeatable.** Every picture is taken in a 1280×900 window at one picture pixel per CSS pixel, after a fresh page load from a blank page, with the page told to reduce motion, once its fonts have loaded, with CSS animations and transitions stopped before anything is measured and the text caret hidden. Baselines are kept per browser: Chromium's are never compared with WebKit's. An element larger than the window is pictured where it is inside the window, and the report says so.
+
+**Why 0.1% and not 0.** Two pictures of an unchanged page taken by one browser build on one machine compare at 0%, but a run on another machine, or after a browser or font update, can anti-alias text and curved edges a pixel differently, and a gate that fails on that noise teaches a team to ignore it. 0.1% is 1,152 pixels of a 1280×900 page and 64 of a 320×200 picture, so a smaller change, such as a character of small text on a large element, passes unless you lower the threshold: `--baseline-threshold 0` counts every changed pixel (one whose colour differs by more than 8 in 255 on a channel), and a change of size always counts.
+
+**What can still differ.** Each operating system draws text differently, so a baseline taken on a laptop seldom matches a picture taken on a Linux runner: take baselines where the check runs (the report says when one was taken on another system). Content that changes by itself, such as dates, counters, random images, video or animation driven by script, changes the picture: keep a baseline of a steadier element, or raise `--baseline-threshold`. [Running it in CI](../ci.md#visual-baselines) shows how to take baselines on the runner.
 
 ### SARIF locations
 

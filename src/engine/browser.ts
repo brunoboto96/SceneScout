@@ -38,7 +38,8 @@ import {
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
-import { captureClip } from "./capture.js";
+import { captureClip, cutByViewport } from "./capture.js";
+import { STOP_ANIMATIONS_SCRIPT, type PictureSettings } from "./baseline.js";
 import {
   COLLECT_INTERACTABLES_SCRIPT,
   POLICY_TEXT_SRC,
@@ -146,7 +147,7 @@ import {
   type SelectOption,
 } from "./forms.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
-import { DEFAULT_TIME_LIMITS, explainTimeout, limitHint, resolveTimeLimits, type LimitKind, type TimeLimits } from "./limits.js";
+import { DEFAULT_TIME_LIMITS, explainTimeout, firstLineOf, isTimeoutMessage, limitHint, resolveTimeLimits, type LimitKind, type TimeLimits } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { boundedTeardown } from "./teardown.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
@@ -176,6 +177,13 @@ import {
   hostileForEmbed,
   trustedEmbedOrigins,
   MAX_TRUSTED_EMBEDS,
+  MAX_READ_POSTS,
+  READ_POSTS_ENV,
+  readPostAllowed,
+  matchReadPost,
+  readPostEntries,
+  readPostsSetting,
+  type ReadPost,
   trustsForeignWrite,
   embedProbeRefusal,
   EmbedMoveTracker,
@@ -271,6 +279,8 @@ export interface AttachOptions {
   /** Which browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else Chromium. */
   browser?: BrowserEngineName;
   viewport?: { width: number; height: number };
+  /** CSS pixels to device pixels. Default: the browser's own (1). `scenescout check --baseline` names it, so its pictures are comparable. */
+  deviceScaleFactor?: number;
   /** The session's objective: the whole remit this session was given, shown to whoever is watching the run. */
   objective?: string;
   /**
@@ -299,6 +309,12 @@ export interface AttachOptions {
    * input, repeated-click probes and uploads stay refused in them.
    */
   trustedEmbeds?: string[];
+  /**
+   * POST endpoints that only read ("POST /api/search"), let out in observe
+   * mode — ONLY when the user named them. Default: SCENESCOUT_READ_POSTS, else
+   * none (policy.ts readPostsSetting).
+   */
+  readPosts?: string[];
   /**
    * Share one MemoryStore across engines attached to the same project
    * (multi-session/multi-role runs): coverage and findings from every role
@@ -669,6 +685,9 @@ export class BrowserEngine {
   /** Origins named as trusted embeds (policy.ts trustsEmbedWrite decides when that counts). */
   trustedEmbeds = new Set<string>();
   private trustNotice = "";
+  /** POST endpoints the user named as reads (policy.ts readPostAllowed decides when that counts). */
+  readPosts: ReadPost[] = [];
+  private readPostNotice = "";
   /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
   role = "anonymous";
   /** How the attached session signed in: a role profile, a storage-state file, or not at all. */
@@ -1407,6 +1426,16 @@ export class BrowserEngine {
         : "") +
       (trust.rejected.length > 0 ? ` Not a plain http(s) origin, so not trusted: ${trust.rejected.join(", ")}.` : "") +
       (trust.overflow.length > 0 ? ` More than ${MAX_TRUSTED_EMBEDS} trusted embeds; not trusted: ${trust.overflow.join(", ")}.` : "");
+    const reads = readPostEntries(readPostsSetting(opts.readPosts, process.env[READ_POSTS_ENV]));
+    this.readPosts = reads.entries;
+    this.readPostNotice =
+      (reads.entries.length > 0
+        ? this.mode === "observe"
+          ? ` Read POSTs: ${reads.entries.map((e) => e.entry).join(", ")} — named as reads, so observe lets them out unless the path or body looks destructive or the body is a GraphQL mutation; each one is logged.`
+          : ` Read POSTs (${reads.entries.map((e) => e.entry).join(", ")}) apply in observe mode only; ${this.mode} judges POSTs by its own rule.`
+        : "") +
+      (reads.rejected.length > 0 ? ` Not a "POST /path" or "POST https://host/path" entry, so not a read: ${reads.rejected.join(", ")}.` : "") +
+      (reads.overflow.length > 0 ? ` More than ${MAX_READ_POSTS} read POSTs; not reads: ${reads.overflow.join(", ")}.` : "");
     this.sessionObjective = (opts.objective ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
     // An agent-supplied task counts as stated; the placeholder does not.
     this.setTask(opts.task ?? "Attaching and taking stock", opts.task !== undefined);
@@ -1431,6 +1460,14 @@ export class BrowserEngine {
     // role must not discard what another role already created — otherwise
     // every multi-role handoff would be blocked as "not yours".
     this.memory = opts.memoryStore ?? new MemoryStore(opts.projectDir);
+    // A page refused before an endpoint was named as a read is no longer a gap for it.
+    if (this.readPosts.length > 0 && this.mode === "observe") {
+      const appOrigin = URL.canParse(this.baseUrl) ? new URL(this.baseUrl).origin : "";
+      this.memory.clearObserveRefusedPosts((endpoint) => {
+        const target = endpoint.replace(/^POST /, "");
+        return matchReadPost(this.readPosts, this.baseUrl, target.startsWith("/") ? appOrigin + target : target) !== null;
+      });
+    }
     // The REAL path, not merely the resolved one: on macOS the temp tree is a
     // symlink, and a fence comparing a real path against an unreal one would
     // refuse every upload from inside the project.
@@ -1480,6 +1517,7 @@ export class BrowserEngine {
       this.context = await this.browser.newContext({
         storageState: profile?.storageState as BrowserContextOptions["storageState"],
         viewport: opts.viewport ?? { width: 1280, height: 900 },
+        ...(opts.deviceScaleFactor !== undefined ? { deviceScaleFactor: opts.deviceScaleFactor } : {}),
         serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
       const restoreSession = sessionStorageInitScript(profile?.sessionStorage ?? []);
@@ -1558,6 +1596,8 @@ export class BrowserEngine {
       }
       const method = req.method();
       if (method === "GET" || method === "HEAD" || method === "OPTIONS") return;
+      // A POST the user named as a read is not state the tester mutated, nor a form exercised.
+      if (this.readPostOf(this.writeRule.at(), method, req.url(), req.postData())) return;
       // Infrastructure POSTs (token refresh, telemetry) are not state the
       // tester mutated — reporting them trains the driver to ignore the notice.
       if (BENIGN_MUTATION_RE.test(req.url())) return;
@@ -1689,6 +1729,7 @@ export class BrowserEngine {
         const pathname = pathnameOf(url);
         const refuse = (why?: string) => {
           const answered = answersWithRefusal(req.resourceType());
+          if (rule === "observe" && method === "POST" && !why && answered && !BENIGN_MUTATION_RE.test(url)) this.noteObserveRefusedPost(url, req.postData());
           this.noteBlocked({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered, why, type: req.resourceType() });
           this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}${why ? ` (${why})` : ""}`, url: this.page?.url() ?? "" });
           this.refusedByPolicy.add(req);
@@ -1712,6 +1753,18 @@ export class BrowserEngine {
         // one, and in observe only the requests a login itself needs.
         if (isAuthExempt(rule, method, pathname, destructiveWire)) {
           this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+          return route.fallback();
+        }
+        // A POST the user named as a read (observe only, never one that looks destructive): out, and logged.
+        const readPost = this.readPostOf(rule, method, url, req.postData(), destructiveWire);
+        if (readPost) {
+          this.logAction({
+            action: "write-policy:read-post",
+            target: `${method} ${pathname} (named as a read: ${readPost.entry})`,
+            url: this.page?.url() ?? "",
+          });
+          this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+          this.clearRefusedPost(url);
           return route.fallback();
         }
 
@@ -1749,6 +1802,7 @@ export class BrowserEngine {
             this.pendingCreations.add(task);
           }
           this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+          if (method === "POST") this.clearRefusedPost(url);
           return route.fallback();
         }
         return refuse();
@@ -1842,7 +1896,7 @@ export class BrowserEngine {
       `Memory: ${this.memory.dir}.${this.memory.loadWarning ? ` WARNING: ${this.memory.loadWarning}` : ""}` +
       (this.memory.prunedStates > 0 ? ` Trimmed ${this.memory.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
       `${this.memory.legacyDirNote ? ` ${this.memory.legacyDirNote}` : ""}` +
-      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""}${this.trustNotice} Call scout_snapshot to see the current state.` +
+      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice} Call scout_snapshot to see the current state.` +
       profileNote +
       authWarning
     );
@@ -2533,6 +2587,50 @@ export class BrowserEngine {
     return { el, liveLabel: live.label, live: { ownText: live.ownText, centre: live.centre } };
   }
 
+  /** The read-POST entry that lets this request out under `rule`, or null (policy.ts readPostAllowed). */
+  private readPostOf(rule: WriteMode, method: string, url: string, body: string | null | undefined, destructiveWire?: boolean): ReadPost | null {
+    if (this.readPosts.length === 0 || rule !== "observe" || method !== "POST") return null;
+    const pathname = pathnameOf(url);
+    return readPostAllowed({
+      mode: rule,
+      method,
+      url,
+      appUrl: this.baseUrl,
+      body,
+      destructiveWire: destructiveWire ?? isDestructiveWire(pathname, body),
+      entries: this.readPosts,
+    });
+  }
+
+  /** How the gap ledger names a POST's endpoint: "POST /path" on the app's origin, "POST https://host/path" elsewhere; null when unreadable. */
+  private refusedPostEndpoint(url: string): string | null {
+    try {
+      const u = new URL(url);
+      return `POST ${u.origin === new URL(this.baseUrl).origin ? "" : u.origin}${u.pathname}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Remember in project memory, for the gap ledger, a script's POST that
+   * observe refused on the page the session is on. Not one that looks
+   * destructive, nor one to an endpoint already named as a read (its body was
+   * a mutation): naming it would change nothing.
+   */
+  private noteObserveRefusedPost(url: string, body: string | null): void {
+    const pageUrl = this.page?.url();
+    if (!pageUrl || !this.memory || isDestructiveWire(pathnameOf(url), body) || matchReadPost(this.readPosts, this.baseUrl, url)) return;
+    const endpoint = this.refusedPostEndpoint(url);
+    if (endpoint) this.memory.noteObserveRefusedPost(normalizePath(pageUrl), endpoint);
+  }
+
+  /** A POST to this endpoint went out, so the pages observe refused it on are no longer a gap for it. */
+  private clearRefusedPost(url: string): void {
+    const endpoint = this.refusedPostEndpoint(url);
+    if (endpoint && this.memory) this.memory.clearObserveRefusedPosts((e) => e === endpoint);
+  }
+
   private actionPolicyCheck(el: SnapshotElement, liveLabel: string, live: { ownText?: string; centre?: string[] } = {}): string | null {
     if (!this.readOnly) return null;
     // Same-origin navigation links are exempt: navigation is non-destructive
@@ -2545,7 +2643,15 @@ export class BrowserEngine {
     // same holds for choosing a file: selection is not the send.
     if (el.role === "textbox" || el.role === "file") return null;
     // Judged as the snapshot judged it, and again on what is there now (policy.ts destructiveLabelOf).
-    const now = destructiveLabelOf({ tag: el.tag, role: el.role, name: liveLabel, testid: el.testid, ownText: live.ownText, centre: live.centre });
+    const now = destructiveLabelOf({
+      tag: el.tag,
+      role: el.role,
+      name: liveLabel,
+      testid: el.testid,
+      ownText: live.ownText,
+      centre: live.centre,
+      interactive: el.interactive,
+    });
     if (el.destructive || now !== null) {
       return destructiveRefusal(now ?? (liveLabel || el.name || el.testid || el.ref), this.mode);
     }
@@ -2823,6 +2929,7 @@ export class BrowserEngine {
       let pathname = url;
       try {
         pathname = pathnameOf(url);
+        const readPost = this.readPostOf(rule, method, url, bytes?.toString("utf8"));
         const { foreign, offApp } = unseenWriteSource({
           appUrl: this.baseUrl,
           mode: rule,
@@ -2841,7 +2948,14 @@ export class BrowserEngine {
           foreign,
           offApp,
           owned: this.isOwnedResource(pathname),
+          readPost: readPost !== null,
         });
+        if (readPost && verdict.allow)
+          this.logAction({
+            action: "write-policy:read-post",
+            target: `${method} ${pathname} (named as a read: ${readPost.entry})`,
+            url: this.page?.url() ?? "",
+          });
       } catch (err) {
         // Fail closed: a write that cannot be judged is refused, and reported as refused below.
         console.error(
@@ -4615,11 +4729,7 @@ export class BrowserEngine {
         // on every discovery round). Deliberately not written to memory: one outage
         // must not count a route as covered in every later run's gap ledger.
         if (!opts.measureOnly) this.loadFailedRoutes.add(normalizePath(url));
-        // The browser commits its own error page for this failure tens of
-        // milliseconds after goto has thrown, and that commit interrupts the next
-        // navigation, charging this route's failure to the next one. Wait for it;
-        // a browser that shows no error page simply lets the wait time out.
-        await page.waitForEvent("framenavigated", { predicate: (f) => f === page.mainFrame(), timeout: 1500 }).catch(() => undefined);
+        await this.errorPageCommitted(page);
         summary.push(`${path} — LOAD FAILED`);
         // The page a re-attach went back to never loaded, so nothing says whether it worked.
         if (this.authLoss.reattaching) this.authLoss.abortReattach(`the page it went back to, ${path}, did not load (${reason})`);
@@ -5137,11 +5247,6 @@ export class BrowserEngine {
         await (this.page ?? page).waitForTimeout(100).catch(() => {});
       }
     };
-    const firstLine = (err: unknown): string =>
-      (err instanceof Error ? err.message : String(err))
-        .split("\n")[0]
-        .replace(/^[a-z]+\.[a-zA-Z]+: /, "")
-        .trim();
     try {
       for (const [i, step] of steps.entries()) {
         const n = i + 1;
@@ -5230,7 +5335,7 @@ export class BrowserEngine {
             if (!last.ok) failure = last.reason;
           }
         } catch (err) {
-          failure = firstLine(explainTimeout(err, "action", this.limits.actionMs));
+          failure = firstLineOf(explainTimeout(err, "action", this.limits.actionMs));
         }
         await this.scanForInjections().catch(() => {});
         await this.scanForContradictions().catch(() => {});
@@ -5391,6 +5496,112 @@ export class BrowserEngine {
     // Found by key, the refs were rebuilt without a snapshot: none of them may be acted on.
     if (target.key) this.refs.clear();
     return { png, key: el.key, label: el.name, url: page.url() };
+  }
+
+  /**
+   * After a navigation threw. The browser commits its own error page for the
+   * failure tens of milliseconds after goto has thrown, and that commit
+   * interrupts the next navigation, charging this failure to the next page.
+   * Wait for it; a browser that shows no error page simply lets the wait time
+   * out, which is not an error.
+   */
+  private async errorPageCommitted(page: Page): Promise<void> {
+    await page.waitForEvent("framenavigated", { predicate: (f) => f === page.mainFrame(), timeout: 1500 }).catch(() => undefined);
+  }
+
+  /** The browser this session drives. */
+  get browserEngine(): BrowserEngineName {
+    return this.engineName;
+  }
+
+  /** Whether the page and its browser are still there: a failure after either is gone is the engine's, not the page's. */
+  get alive(): boolean {
+    return !!this.page && !this.page.isClosed() && !!this.browser?.isConnected();
+  }
+
+  /** True when `p` settles in time, false when it times out. Any other failure is thrown, so a closed page never reads as a slow one. */
+  private static async inTime(p: Promise<unknown>): Promise<boolean> {
+    try {
+      await p;
+      return true;
+    } catch (err) {
+      if (err instanceof Error && isTimeoutMessage(err.message)) return false;
+      throw err;
+    }
+  }
+
+  /**
+   * A picture for `scenescout check --baseline`: the page at `pathOnApp`
+   * loaded afresh (from a blank page, so a target that differs from the last
+   * only by its #fragment is still a new load), told the motion preference
+   * `how` names, read once its fonts have loaded and its animations are
+   * stopped, then either the viewport from the top (no target) or one element,
+   * found the way a saved flow finds its target, with `how.margin` around it.
+   * The screenshot is taken with `how`'s animation and caret settings, at one
+   * picture pixel per CSS pixel. Reads only. Throws a sentence when it cannot
+   * take the picture. `cut` says when an element reaches outside the window.
+   * What is compared and what it means is baseline.ts, which also holds the
+   * settings; the rectangle is capture.ts. Call endBaselineCaptures when done.
+   */
+  async captureForBaseline(
+    pathOnApp: string,
+    target: FlowTarget | null,
+    how: PictureSettings,
+  ): Promise<{ png: Buffer; viewport: { width: number; height: number }; deviceScaleFactor: number; cut: string | null }> {
+    const page = this.requirePage();
+    const action = <T>(p: Promise<T>): Promise<T> => p.catch((err: unknown) => Promise.reject(explainTimeout(err, "action", this.limits.actionMs)));
+    const within = `within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
+    // Before the load, so a page that reads the preference once, as it starts, reads it too.
+    await page.emulateMedia({ reducedMotion: how.reducedMotion });
+    let resp: import("playwright").Response | null;
+    try {
+      await page.goto("about:blank", { timeout: this.limits.crawlNavMs });
+      resp = await page.goto(`${this.baseUrl}${pathOnApp}`, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
+    } catch (err) {
+      await this.errorPageCommitted(page);
+      throw explainTimeout(err, "nav", this.limits.crawlNavMs);
+    }
+    const status = resp?.status() ?? null;
+    if (status !== null && status >= 400) throw new Error(`the page answered HTTP ${status}`);
+    await this.settle();
+    // A sign-in page pictured as the page's baseline would be written by an update and compared from then on.
+    const landed = await this.landedUrl(page);
+    if (this.authLoss.isLoginRedirect(pathOnApp, landed, this.baseUrl)) {
+      throw new Error(`the page sent the browser to sign-in (${new URL(landed).pathname}): the session is missing or expired`);
+    }
+    // Text drawn in a fallback font, then again when the web font arrives, would differ from one run to the next.
+    const fonts = page.waitForFunction("!document.fonts || document.fonts.status === 'loaded'", null, { timeout: this.limits.actionMs });
+    if (!(await BrowserEngine.inTime(fonts))) throw new Error(`its fonts were still loading, not done ${within}`);
+    // Stopped before anything is measured, not only for the screenshot: a target that itself moves would be cropped mid-movement.
+    if (how.animations === "disabled") await page.evaluate(STOP_ANIMATIONS_SCRIPT);
+    const viewport = page.viewportSize() ?? ((await page.evaluate("({ width: innerWidth, height: innerHeight })")) as { width: number; height: number });
+    const deviceScaleFactor = Number(await page.evaluate("window.devicePixelRatio"));
+    const settings = { type: "png", animations: how.animations, caret: how.caret, scale: "css", timeout: this.limits.actionMs } as const;
+    let png: Buffer;
+    let cut: string | null = null;
+    if (!target) {
+      await page.evaluate("window.scrollTo(0, 0)");
+      png = await action(page.screenshot(settings));
+    } else {
+      const locator = BrowserEngine.locatorFor(page, target).first();
+      if (!(await BrowserEngine.inTime(locator.waitFor({ state: "visible", timeout: this.limits.actionMs })))) {
+        throw new Error(`nothing visible matches it ${within}`);
+      }
+      await action(locator.scrollIntoViewIfNeeded({ timeout: this.limits.actionMs }));
+      const box = await action(locator.boundingBox({ timeout: this.limits.actionMs }));
+      if (!box) throw new Error("it is not displayed");
+      const clip = captureClip(box, how.margin, viewport);
+      if (!clip) throw new Error("it is outside the viewport");
+      cut = cutByViewport(box, viewport);
+      png = await action(page.screenshot({ ...settings, clip }));
+    }
+    this.logAction({ action: "capture", target: target ? `baseline ${pathOnApp}` : `baseline ${pathOnApp} (page)`, url: page.url() });
+    return { png, viewport, deviceScaleFactor, cut };
+  }
+
+  /** Stop telling the page to reduce motion, so what runs after the baselines (saved flows) sees the page as a user does. */
+  async endBaselineCaptures(): Promise<void> {
+    await this.requirePage().emulateMedia({ reducedMotion: null });
   }
 
   /**
