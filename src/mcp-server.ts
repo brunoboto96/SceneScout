@@ -1525,7 +1525,7 @@ server.registerTool(
   "scout_run_plan",
   {
     description:
-      "Execute up to 20 actions in ONE call — use for mechanical sequences (fill a form, walk a wizard) so each step doesn't cost a round-trip. Targets resolve at execution time by semantic locator: 'testid=…', 'text=…', 'label=…' or 'role=button[name=Save]' (never snapshot refs). The same steps, saved to .scenescout/flows/<name>.json with expect-text / expect-url / expect-request steps added, are replayed by `scenescout check` on every pull request. An `upload` step attaches a file as scout_upload does (target required — the file input or the control that opens its chooser; value = a fixture kind or a project-relative path). The plan ABORTS at the first NEW oracle violation, policy refusal, or failed step, returning a transcript of how far it got; repeats of already-reported violations do not abort (they stay logged for the report).",
+      "Execute up to 20 actions in ONE call — use for mechanical sequences (fill a form, walk a wizard) so each step doesn't cost a round-trip. Targets resolve at execution time by semantic locator: 'testid=…', 'text=…', 'label=…' or 'role=button[name=Save]' (never snapshot refs). The same steps, saved to .scenescout/flows/<name>.json with expect-text / expect-url / expect-request steps added, are replayed by `scenescout check` on every pull request. An `upload` step attaches a file as scout_upload does (target required — the file input or the control that opens its chooser; value = a fixture kind or a project-relative path). The plan ABORTS at the first NEW oracle violation, policy refusal, or failed step, returning a transcript of how far it got; repeats of already-reported violations do not abort (they stay logged for the report). For a sweep of independent steps (tabs, filters, pages) pass onViolation \"continue\": a new error status or its console echo is listed on its step's line and the plan goes on; a failed step, a policy refusal or any other violation still stops it. A select step whose value names no option fails at once, listing the options.",
     inputSchema: {
       steps: z
         .array(
@@ -1549,6 +1549,12 @@ server.registerTool(
         )
         .min(1)
         .max(20),
+      onViolation: z
+        .enum(["stop", "continue"])
+        .default("stop")
+        .describe(
+          "stop (default): end the plan at the first new oracle violation, right for a form flow whose steps depend on each other. continue: list a new http_error or console_error on its step's line and run the next step, for a sweep of independent steps",
+        ),
       task: taskParam,
       objective: legacyObjectiveParam,
       session: sessionParam,
@@ -1556,9 +1562,9 @@ server.registerTool(
   },
   serializedPerSession(
     "scout_run_plan",
-    async ({ steps }: { steps: Parameters<BrowserEngine["runPlan"]>[0] }, session) => {
+    async ({ steps, onViolation }: { steps: Parameters<BrowserEngine["runPlan"]>[0]; onViolation?: "stop" | "continue" }, session) => {
       try {
-        return text(await engineFor(session).runPlan(steps), session);
+        return text(await engineFor(session).runPlan(steps, onViolation ?? "stop"), session);
       } catch (err) {
         return errorText(err);
       }
@@ -1693,10 +1699,11 @@ server.registerTool(
 server.registerTool(
   "scout_select",
   {
-    description: "Select an option in a <select> by ref.",
+    description:
+      "Select an option in a <select> by ref. The value is matched against the options before anything is picked: an exact value, an exact label, either ignoring case, then a label it starts with. A value matching no option, or several, is refused at once with the options listed.",
     inputSchema: {
       ref: z.string(),
-      value: z.string().describe("Option value or label"),
+      value: z.string().describe("Option value or label (or the start of a label, when only one option has it)"),
       task: taskParam,
       objective: legacyObjectiveParam,
       session: sessionParam,
