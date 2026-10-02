@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  authToRemember,
   BODY_FETCH_MAX,
   BODY_MAX,
   formatPageRequests,
@@ -23,6 +24,7 @@ import {
   requestHeaders,
   resolveMethod,
   resolveRequestUrl,
+  staleCredentialNote,
   toReplayResult,
 } from "../src/engine/request.ts";
 
@@ -269,4 +271,37 @@ test("the listing redacts a query parameter named like a credential, whatever it
   const long = shownUrl(`http://localhost:3000/api/x?filter=${"a".repeat(400)}&session=zzzzzzzz`, origin);
   assert.doesNotMatch(long, /zzzzzzzz/, "redacted before it is cut, so a value at the cut cannot slip through");
   assert.ok(long.length <= 301);
+});
+
+test("the credential replayed is the one the app last sent to its own origin, on a read as much as a write", () => {
+  const remember = (url: string, headers: Record<string, string>, replay = false) => authToRemember({ url, baseUrl: BASE, headers, replay });
+  // A read counts: an app that rotates its token and then only reads must not leave the replay on the old one.
+  assert.equal(remember("http://localhost:3000/api/me", { authorization: "Bearer newest" }), "Bearer newest");
+  assert.equal(remember("http://localhost:3000/api/me", { Authorization: "Token abc" }), "Token abc", "any scheme, any case of the name");
+  // Nothing to take: the one remembered stays.
+  assert.equal(remember("http://localhost:3000/api/me", {}), null);
+  assert.equal(remember("http://localhost:3000/api/me", { authorization: "   " }), null);
+  // Another origin's bearer token (an embedded widget, a third-party API) is never replayed to the app.
+  for (const other of ["http://widget.test/api", "http://localhost:3001/api/me", "https://localhost:3000/api/me"]) {
+    assert.equal(remember(other, { authorization: "Bearer widget-token" }), null, other);
+  }
+  // Sent to the app, but from a frame of another site: that site's credential, not the app's.
+  const fromFrame = (frameUrl: string) =>
+    authToRemember({ url: "http://localhost:3000/api/me", baseUrl: BASE, headers: { authorization: "Bearer framed" }, replay: false, frameUrl });
+  assert.equal(fromFrame("http://widget.test/embed"), null);
+  assert.equal(fromFrame("http://localhost:3000/settings"), "Bearer framed");
+  assert.equal(fromFrame("about:blank"), "Bearer framed", "a blank frame runs as the page that made it");
+  // A scout_request call's own request: a credential chosen for one call does not become the session's.
+  assert.equal(remember("http://localhost:3000/api/me", { authorization: "Bearer forged" }, true), null);
+  assert.equal(remember("not a url", { authorization: "Bearer x" }), null);
+});
+
+test("a replay refused 401 while the page's own authorised call succeeded says its credential may be stale", () => {
+  assert.match(staleCredentialNote(401, true, { status: 200 }), /got 200, but this call got 401: the replayed credential may be stale/);
+  // The contrast: each fact that makes the 401 the server's own answer leaves the result as it was.
+  assert.equal(staleCredentialNote(401, true, { status: 401 }), "", "the page is refused too: the session is signed out");
+  assert.equal(staleCredentialNote(401, true, null), "", "no page call to compare with");
+  assert.equal(staleCredentialNote(401, false, { status: 200 }), "", "the caller chose the credential, or none was replayed");
+  assert.equal(staleCredentialNote(403, true, { status: 200 }), "", "a 403 is a permission answer, not a stale credential");
+  assert.equal(staleCredentialNote(200, true, { status: 200 }), "");
 });

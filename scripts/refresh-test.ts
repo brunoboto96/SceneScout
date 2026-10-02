@@ -34,6 +34,7 @@ import {
   profileAfterRotation,
   readLearnedEndpoints,
   refreshLikePath,
+  refreshNotice,
   rotatedCookies,
   tokenPresence,
   withLearnedEndpoint,
@@ -329,6 +330,55 @@ test("the write-back keeps the profile's sessionStorage, which the page's storag
   assert.deepEqual(profileAfterRotation(stateWith(R2), null), stateWith(R2));
   // The fallback that swaps the token in the profile itself keeps it too.
   assert.deepEqual((swapProfileToken(onDisk, R1, R2) as { sessionStorage?: unknown }).sessionStorage, session);
+});
+
+test("the write-back keeps the profile's IndexedDB where the page's state was read without it", () => {
+  const idb = [
+    { name: "fixture-auth", version: 1, stores: [{ name: "tokens", autoIncrement: false, records: [{ key: "token", value: "idb-half" }], indexes: [] }] },
+  ];
+  const other = "http://127.0.0.1:4000";
+  const onDisk = {
+    ...stateWith(R1),
+    origins: [
+      { ...stateWith(R1).origins[0], indexedDB: idb },
+      { origin: other, localStorage: [], indexedDB: idb },
+    ],
+  };
+  type Written = { origins: Array<{ origin: string; localStorage: unknown; indexedDB?: unknown }> };
+  // A plain storageState has no IndexedDB at all: the disk's is carried over, for every origin.
+  const plain = profileAfterRotation(stateWith(R2), onDisk) as Written;
+  assert.deepEqual(plain.origins.find((o) => o.origin === ORIGIN)?.indexedDB, idb, "an origin the page holds keeps the profile's IndexedDB");
+  assert.deepEqual(plain.origins.find((o) => o.origin === ORIGIN)?.localStorage, stateWith(R2).origins[0].localStorage, "...beside the page's rotated storage");
+  assert.deepEqual(
+    plain.origins.find((o) => o.origin === other),
+    { origin: other, localStorage: [], indexedDB: idb },
+    "an origin only the profile holds is kept",
+  );
+  assert.equal(refreshTokenSlots(plain).find((t) => t.slot.includes("session"))?.value, R2);
+  // A state read with IndexedDB is the page's as it is now, an empty list included.
+  const pageIdb = [{ name: "fixture-auth", version: 2, stores: [] }];
+  const read = { ...stateWith(R2), origins: [{ ...stateWith(R2).origins[0], indexedDB: pageIdb }] };
+  assert.deepEqual((profileAfterRotation(read, onDisk) as Written).origins.find((o) => o.origin === ORIGIN)?.indexedDB, pageIdb);
+  const cleared = { ...stateWith(R2), origins: [{ ...stateWith(R2).origins[0], indexedDB: [] }] };
+  assert.deepEqual((profileAfterRotation(cleared, onDisk) as Written).origins.find((o) => o.origin === ORIGIN)?.indexedDB, []);
+  // A profile with no IndexedDB adds none.
+  assert.deepEqual(profileAfterRotation(stateWith(R2), stateWith(R1)), stateWith(R2));
+});
+
+test("an action's result says what the broker did during it, counted, and never names a token", () => {
+  assert.equal(refreshNotice([]), "");
+  assert.equal(refreshNotice(["refreshed"]), "\n↻ token refreshed under the role's lock and stored in its profile");
+  assert.equal(refreshNotice(["swapped"]), "\n↻ another session had rotated the role's token; loaded its profile and sent the current one");
+  assert.equal(refreshNotice(["learned"]), "\n↻ learned 1 endpoint that rotates the role's token; brokered from now on");
+  assert.equal(refreshNotice(["failed"]), "\n⚠ a refresh could not be brokered (see the action log)");
+  assert.equal(
+    refreshNotice(["failed", "swapped", "refreshed", "refreshed", "failed", "learned", "learned"]),
+    "\n↻ token refreshed under the role's lock and stored in its profile (2 times)" +
+      "\n↻ another session had rotated the role's token; loaded its profile and sent the current one" +
+      "\n↻ learned 2 endpoints that rotate the role's token; brokered from now on" +
+      "\n⚠ 2 refreshes could not be brokered (see the action log)",
+    "one line per kind, in a fixed order, counted",
+  );
 });
 
 test("a response names its rotated token in a JSON field or a Set-Cookie, and two candidates are not guessed between", () => {

@@ -217,6 +217,46 @@ export function requestHeaders(input: { given?: Record<string, string>; auth?: s
   return out;
 }
 
+/**
+ * The Authorization header to remember from a request the browser is sending,
+ * or null to leave the remembered one as it is. Every request the app sends to
+ * its own origin counts, reads included: an app that rotates its access token
+ * and then only reads would otherwise leave scout_request replaying the token
+ * of its last write, long expired. A request to another origin, or one sent
+ * from a frame of another origin, is skipped, so an embedded widget's bearer
+ * token is never replayed to the app; and so is a scout_request call's own
+ * request, so a credential the caller chose for one call does not become the
+ * session's. `frameUrl` is the sending frame's address, when it has one (a
+ * worker's request has none; about:blank and the like count as the app's).
+ */
+export function authToRemember(input: { url: string; baseUrl: string; headers: Record<string, string>; replay: boolean; frameUrl?: string }): string | null {
+  if (input.replay) return null;
+  try {
+    const origin = new URL(input.baseUrl).origin;
+    if (new URL(input.url).origin !== origin) return null;
+    if (input.frameUrl && /^https?:/i.test(input.frameUrl) && new URL(input.frameUrl).origin !== origin) return null;
+  } catch {
+    return null;
+  }
+  const entry = Object.entries(input.headers).find(([name]) => name.toLowerCase() === "authorization");
+  const value = entry?.[1];
+  return value && value.trim() ? value : null;
+}
+
+/**
+ * A line for a replay the server answered 401 while the page's own latest
+ * authorised request to the origin succeeded: the replayed credential is the
+ * likely cause, not the server's permissions. Empty otherwise. Statuses only,
+ * never the credential.
+ */
+export function staleCredentialNote(replayStatus: number, sentAuth: boolean, pageLast: { status: number } | null): string {
+  if (replayStatus !== 401 || !sentAuth || !pageLast || pageLast.status < 200 || pageLast.status >= 300) return "";
+  return (
+    `\n⚠ The page's own latest authorised request to this origin got ${pageLast.status}, but this call got 401: ` +
+    `the replayed credential may be stale. Load a page that calls the API, then call again before reading this as a permission or sign-in problem.`
+  );
+}
+
 /** The raw result of the in-page fetch, reduced to what the agent and the report need. */
 export function toReplayResult(
   raw: {
