@@ -1332,6 +1332,7 @@ const ROW = (over: Partial<CiResultRow> = {}): CiResultRow => ({
   provider: "openai",
   model: "some-model-1",
   effort: "low",
+  dedup: "rule",
   key: "0123456789",
   recall: { found: 5, expected: 13 },
   precision: { correct: 7, labelled: 8, low: "70%", high: "90%" },
@@ -1419,6 +1420,7 @@ const CI_JSON = {
   effort: "low",
   stop: { reason: "turns", text: "stopped at the turn cap (40 model calls)" },
   usage: { turns: 40, inputTokens: 885_574, cachedInputTokens: 858_517, cacheWriteTokens: 0, outputTokens: 3_152, seconds: 98, estimatedCostUsd: 0.01286687 },
+  dedup: { by: "judge", effort: "none", calls: 3, failed: 0, inputTokens: 900, outputTokens: 75, seconds: 1.2 },
 };
 const CARD = {
   key: "0123456789",
@@ -1453,6 +1455,7 @@ test("result row: what the run reported about itself, and how the key scored it"
     provider: "openai",
     model: "some-model-1",
     effort: "low",
+    dedup: "judge",
     key: "0123456789",
     recall: { found: 3, expected: 13 },
     // 3 right of 4 labelled; of the 5 scored (6 less the contextual one), 3 are right at worst and 4 at best.
@@ -1501,6 +1504,12 @@ test("result row: what the run reported about itself, and how the key scored it"
   assert.throws(() => parseRunSummary({ ...CI_JSON, usage: { ...CI_JSON.usage, turns: -1 } }), /usage.turns must be a whole number/);
   assert.throws(() => parseRunSummary({ ...CI_JSON, usage: { ...CI_JSON.usage, estimatedCostUsd: "cheap" } }), /estimatedCostUsd/);
   assert.throws(() => resultRow({ ...base, run: parseRunSummary({ ...CI_JSON, version: "dev" }) }), /Not a version/);
+  // How the run deduplicated is the run's own record: a ci.json from before the judge has none, and deduplicated by the rule.
+  const { dedup: _judged, ...beforeJudge } = CI_JSON;
+  assert.equal(resultRow({ ...base, run: parseRunSummary(beforeJudge) }).dedup, "rule");
+  assert.equal(resultRow({ ...base, run: parseRunSummary({ ...CI_JSON, dedup: { by: "rule" } }) }).dedup, "rule");
+  assert.throws(() => parseRunSummary({ ...CI_JSON, dedup: { by: "model" } }), /dedup.by must be one of rule, judge, not "model"/);
+  assert.throws(() => parseRunSummary({ ...CI_JSON, dedup: "judge" }), /dedup.by must be one of rule, judge/);
 });
 
 test("results file: rows are appended in order and a recorded run is never replaced", () => {
@@ -1519,6 +1528,11 @@ test("results file: rows are appended in order and a recorded run is never repla
   assert.throws(() => appendRows(one, [ROW({ archive: "d" }), ROW({ archive: "d" })]), /d is already recorded/);
   assert.deepEqual(parseResults({ rows: [ROW()] }).rows, [ROW()]);
   assert.throws(() => parseResults({ rows: [{}] }), /row 0 is not a result row/);
+  // A row that does not say how it deduplicated could be read beside a row of the other mode as one configuration.
+  const { dedup: _mode, ...unmarked } = ROW({ archive: "unmarked" });
+  assert.throws(() => parseResults({ rows: [ROW(), unmarked] }), /row 1 \(unmarked\) has dedup undefined, not one of rule, judge/);
+  assert.throws(() => parseResults({ rows: [ROW({ dedup: "model" as never })] }), /has dedup "model"/);
+  assert.equal(parseResults({ rows: [ROW({ dedup: "judge" })] }).rows[0].dedup, "judge");
   assert.throws(() => parseResults([]), /rows array/);
 });
 
@@ -1531,8 +1545,10 @@ test("results table: one line per row, and it replaces only what is between its 
   assert.equal(lines.length, 4);
   assert.equal(
     lines[2],
-    "| 2026-01-05 | demo | 1.2.0 | scheduled | openai · some-model-1 · low | 0123456789 | 5/13 | 7/8 (70%–90%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |",
+    "| 2026-01-05 | demo | 1.2.0 | scheduled | openai · some-model-1 · low | rule | 0123456789 | 5/13 | 7/8 (70%–90%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |",
   );
+  assert.match(lines[0], /\| Provider · model · effort \| Dedup \| Key \|/);
+  assert.match(renderTable([ROW({ dedup: "judge" })]).split("\n")[2], /\| openai · some-model-1 · low \| judge \| 0123456789 \|/);
   assert.match(lines[3], /\| 3\/3 \(100%\) \| 0\.123 \| done \| 36 \| .* \| 45s \| — \|$/);
   for (const l of lines) assert.equal(l.split("|").length, lines[0].split("|").length, "every line has the header's columns");
 
@@ -1558,6 +1574,11 @@ test("results: docs/benchmark.md shows exactly what bench/ci-results.json record
     assert.ok(fs.existsSync(archive), `${r.archive} has no archive in bench/runs`);
     assert.equal((JSON.parse(fs.readFileSync(archive, "utf8")) as { app?: string }).app, r.app, `${r.archive} is archived as another app's run`);
   }
+  // Every run recorded before the model judge was wired in deduplicated by the rule alone, and says so.
+  assert.deepEqual(
+    results.rows.slice(0, 7).map((r) => [r.archive, r.dedup]),
+    ["ci-run-1", "ci-run-2", "ci-run-3", "ci-turns-1", "ci-parallel-1", "ci-demo-3-13-1-1", "ci-holdout-3-13-1-1"].map((a) => [a, "rule"]),
+  );
   // The two runs taken by hand before the workflow existed are the first rows.
   assert.deepEqual(
     results.rows

@@ -24,7 +24,7 @@ and which failure direction was chosen deliberately.
 | [0013](0013-a-convention-is-the-projects-to-decide.md) | What is a defect only under a project's convention is reported as "worth a look", naming the convention: never scored, counted as a defect or gated |
 | [0014](0014-an-unattended-run-reports-and-never-gates.md) | `scenescout ci` drives the MCP server with a model's API and no person present; it reports and never gates, stops at the first cap reached and still writes the report, never prints a key, and runs `destructive` only with `--allow-destructive` as well |
 | [0015](0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md) | A `/scenescout qa` comment tests the pull request's deployed preview: the job that holds the key checks out nothing and runs SceneScout from an exact release, reached only through a keyless gate that checks the commenter and refuses forks by default |
-| [0016](0016-a-model-judges-only-the-merges-the-rule-misses.md) | A model judges duplicates only for a filing the dedup rule keeps apart, against the open findings on its page; its merges are kept on the finding, it is on by default only in `scenescout ci`, which asks for it through the run so the server never holds the key, and off unless asked for everywhere else |
+| [0017](0017-a-model-judges-only-the-merges-the-rule-misses.md) | A model judges duplicates only for a filing the dedup rule keeps apart, against the open findings on its page; its merges are kept on the finding, it is on by default only in `scenescout ci`, which asks for it through the run so the server never holds the key, and off unless asked for everywhere else |
 
 ## Writing a new one
 

@@ -1,4 +1,4 @@
-# 16. A model judges only the merges the dedup rule misses, and only where it is asked for
+# 17. A model judges only the merges the dedup rule misses, and only where it is asked for
 
 Status: accepted
 
