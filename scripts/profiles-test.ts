@@ -28,6 +28,7 @@ import {
   profilePath,
   PROFILE_DIR_MODE,
   PROFILE_FILE_MODE,
+  reloginCommand,
   resolveAttachAuth,
   roleLabel,
   summarizeState,
@@ -223,6 +224,25 @@ test("a refusal for a missing role names --project only when SceneScout chose th
   ];
   for (const [name, opts, want] of cases) assert.ok(refusal(opts).includes(want), `${name}: ${refusal(opts)}`);
   assert.ok(!refusal({ projectDir: "/work/app" }).includes("--project"), "a given folder adds no --project");
+});
+
+test("the record-it-again command for an expired sign-in names --project only when SceneScout chose the folder", () => {
+  const base = { role: "admin", url: "http://localhost:3000" };
+  const cases: Array<[string, Parameters<typeof reloginCommand>[0], string]> = [
+    ["a given or workspace folder: as before", { ...base, projectDir: "/work/app" }, "scenescout login http://localhost:3000 --role admin"],
+    ["said explicitly", { ...base, projectDir: "/work/app", projectChosen: false }, "scenescout login http://localhost:3000 --role admin"],
+    [
+      "a chosen folder, POSIX",
+      { ...base, projectDir: "/home/u/Documents/SceneScout/localhost-3000", projectChosen: true, platform: "linux" },
+      "scenescout login http://localhost:3000 --role admin --project '/home/u/Documents/SceneScout/localhost-3000'",
+    ],
+    [
+      "a chosen folder, Windows",
+      { ...base, projectDir: "C:\\Users\\u\\My Documents\\SceneScout\\localhost-3000", projectChosen: true, platform: "win32" },
+      'scenescout login http://localhost:3000 --role admin --project "C:\\Users\\u\\My Documents\\SceneScout\\localhost-3000"',
+    ],
+  ];
+  for (const [name, opts, want] of cases) assert.equal(reloginCommand(opts), want, name);
 });
 
 test("a session is labelled by its role, its file's name, or anonymous", () => {

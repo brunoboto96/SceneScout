@@ -75,7 +75,7 @@ import {
 } from "./engine/live.js";
 import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
-import { loginCommand, parseLoginArgs } from "./engine/profiles.js";
+import { parseLoginArgs } from "./engine/profiles.js";
 import type { BrowserEngineName } from "./browsers.js";
 import { LOGIN_WINDOW_MAX_MS, savedLine, startLoginWindow, type PendingLogin } from "./login-run.js";
 import { LoginWindows, WAIT_SAYS } from "./engine/signed-in.js";
@@ -688,7 +688,7 @@ server.registerTool(
             runMs: (runMinutes ?? DEFAULT_RUN_MINUTES) * 60_000,
             marginMs: (expiryMarginMinutes ?? DEFAULT_EXPIRY_MARGIN_MINUTES) * 60_000,
             role: eng.auth.role,
-            rerun: loginCommand(eng.auth.role, eng.baseUrl),
+            rerun: eng.reloginCommand(eng.auth.role),
           });
           if (verdict.kind === "refuse") return errorText(new Error(verdict.message));
           if (verdict.kind !== "ok") expiryNote = `⚠ ${verdict.message}\n\n`;

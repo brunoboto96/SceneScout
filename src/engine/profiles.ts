@@ -331,6 +331,17 @@ export function loginCommand(role: string, url?: string, project?: string, platf
   return `scenescout login ${url ?? "<url>"} --role ${role}${project ? ` --project ${shellQuote(project, platform)}` : ""}`;
 }
 
+/**
+ * The command that records a role's profile again for a session: with
+ * `--project` only when SceneScout chose the session's folder itself
+ * (`projectChosen`), since the command otherwise saves into the folder it is
+ * run from and the next attach would not find it. Used by a refusal for a
+ * missing role and by every hint for an expired one.
+ */
+export function reloginCommand(opts: { role: string; url?: string; projectDir: string; projectChosen?: boolean; platform?: NodeJS.Platform }): string {
+  return loginCommand(opts.role, opts.url, opts.projectChosen ? opts.projectDir : undefined, opts.platform);
+}
+
 /** How a session signs in: a role profile, a storage-state file given by path, or not at all. */
 export type AttachAuth = { kind: "role"; role: string; storageStatePath: string } | { kind: "file"; storageStatePath: string } | { kind: "none" };
 
@@ -361,7 +372,7 @@ export function resolveAttachAuth(
         /* the list is a hint in the message; the refusal stands without it */
       }
       throw new Error(
-        `no sign-in is saved for role "${checked.role}" in this project. Run \`${loginCommand(checked.role, opts.url, opts.projectChosen ? opts.projectDir : undefined, opts.platform)}\` (or, from a conversation, scout_login { role: "${checked.role}" }), sign in in the window it opens, then attach again.` +
+        `no sign-in is saved for role "${checked.role}" in this project. Run \`${reloginCommand({ role: checked.role, url: opts.url, projectDir: opts.projectDir, projectChosen: opts.projectChosen, platform: opts.platform })}\` (or, from a conversation, scout_login { role: "${checked.role}" }), sign in in the window it opens, then attach again.` +
           (saved.length > 0 ? ` Saved roles: ${saved.join(", ")}.` : ""),
       );
     }
