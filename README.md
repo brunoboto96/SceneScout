@@ -365,6 +365,8 @@ That refusal *is* the guarantee: an extensive report can only exist when nothing
 
 A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app bug. The server never sees a blocked request, but a page's own `fetch` or XHR is answered with a `403` in its place rather than dropped, so the page's handling of a refusal really runs: a page that then claims success is reported as a `false_success` ([ADR 9](docs/adr/0009-a-refused-write-is-answered-not-dropped.md)).
 
+A control is judged by its own label: a dropdown by the option picked, a row by its own text rather than the buttons inside it, and "Discard changes" on an unsent form is allowed. When a page asks to confirm leaving unsent input, the result says so; `observe` and `read-only` stay unless the call passes `leave: true`. See the [safety model](docs/guide/Safety-model.md).
+
 ---
 
 ## 📋 What you get

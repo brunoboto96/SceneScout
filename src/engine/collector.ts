@@ -163,6 +163,50 @@ export const NAME_SRC = `(el) => (${PICK_NAME_SRC})((${NAME_FACTS_SRC})(el))`;
 export const ACCESSIBLE_NAME_SRC = `(el) => (${NAME_SRC})(el).name`;
 
 /**
+ * What the label policy reads of an element besides its name (policy.ts
+ * destructiveLabelOf), as page-side source shared by the snapshot and the
+ * live re-check before an action, so the two cannot judge differently.
+ *
+ * `ownText`: the label the element is given (aria-label, aria-labelledby),
+ * then its text without the text of the controls inside it.
+ * `centre`: the labels of the controls inside it whose boxes cover the
+ * element's centre point, which is where a click on the element lands. Boxes,
+ * not a hit test, so it reads the same whether or not the element is scrolled
+ * into view, and every covering control is named, not only the topmost.
+ */
+export const POLICY_TEXT_SRC = `(el) => {
+    const CONTROL = 'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="tab"], [role="menuitem"], ' +
+      '[role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="listbox"], [onclick]';
+    const parts = [];
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const owner = node.parentElement && node.parentElement.closest(CONTROL);
+      if (owner && owner !== el && el.contains(owner)) continue;
+      const t = (node.textContent || "").trim();
+      if (t) parts.push(t);
+      if (parts.join(" ").length > 400) break;
+    }
+    // A label the element is given (aria-label, aria-labelledby) is its own: an icon-only control's only name.
+    const given = [el.getAttribute("aria-label") || ""].concat((el.getAttribute("aria-labelledby") || "").split(/\\s+/).filter(Boolean).map((id) => {
+      const n = document.getElementById(id);
+      return n ? n.textContent || "" : "";
+    })).join(" ").trim();
+    const ownText = (given + " " + parts.join(" ")).replace(/\\s+/g, " ").trim().slice(0, 400);
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const centre = [];
+    for (const c of Array.from(el.querySelectorAll(CONTROL))) {
+      const b = c.getBoundingClientRect();
+      if (b.width === 0 || b.height === 0 || cx < b.left || cx > b.right || cy < b.top || cy > b.bottom) continue;
+      const label = (c.getAttribute("aria-label") || c.innerText || c.textContent || c.getAttribute("value") || "").trim().replace(/\\s+/g, " ").slice(0, 120);
+      if (label && centre.length < 10) centre.push(label);
+      const tid = c.getAttribute("data-testid");
+      if (tid && centre.length < 10) centre.push(tid);
+    }
+    return { ownText, centre };
+  }`;
+
+/**
  * Anything that plausibly presents as a modal/dialog panel. Deliberately wider
  * than the ARIA set: a hand-rolled role-less modal must still count as "an
  * overlay is up", or the scroll-lock oracle files a false leaked-lock finding
@@ -181,6 +225,7 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
   const xpathOf = ${XPATH_OF_SRC};
   const visible = ${VISIBLE_SRC};
   const nameOf = ${NAME_SRC};
+  const policyText = ${POLICY_TEXT_SRC};
   // What the collector lists before anything else: controls, and anything the
   // app tagged with a test id so it can be targeted.
   const controlSelector =
@@ -408,6 +453,7 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
       tag,
       role,
       name: named.name,
+      ...policyText(el),
       nameFrom: named.from,
       testid: el.getAttribute("data-testid"),
       interactive,
