@@ -133,14 +133,18 @@ export function enclosingRepo(dir: string, exists: (p: string) => boolean, platf
   }
 }
 
-/** The first workspace folder a client offers as MCP roots, or null. Only `file:` roots name a folder. */
-export function workspaceFromRoots(roots: Array<{ uri: string }> | undefined): string | null {
+/**
+ * The first workspace folder a client offers as MCP roots, or null. Only `file:`
+ * roots name a folder, read as `platform` reads them: `file:///C:/work/app` is
+ * `C:\\work\\app` on Windows, and a root with no drive letter is no folder there.
+ */
+export function workspaceFromRoots(roots: Array<{ uri: string }> | undefined, platform: NodeJS.Platform = process.platform): string | null {
   for (const root of roots ?? []) {
     if (!root.uri.startsWith("file:")) continue;
     try {
-      return fileURLToPath(root.uri);
+      return fileURLToPath(root.uri, { windows: platform === "win32" });
     } catch {
-      continue; // a file: URI naming another host, or malformed: not a folder here
+      continue; // a file: URI naming another host, or no absolute path on this platform: not a folder here
     }
   }
   return null;

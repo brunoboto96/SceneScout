@@ -2543,6 +2543,21 @@ test("the default folder is never placed inside a git repository; a given one ma
   // A setting outside home is walked to the root, so a repository above it still refuses.
   const outside = chooseProjectFolder({ url: "http://localhost:3000", home: { ...macHome, env: { [PROJECTS_DIR_ENV]: "/srv/qa" } }, exists: repoAt("/srv") });
   assert.ok("refused" in outside);
+  // The same rules on Windows paths.
+  const winHome: Home = { platform: "win32", homedir: "C:\\Users\\u", env: { USERPROFILE: "C:\\Users\\u" } };
+  const winRepoAt = (root: string) => (p: string) => p.toLowerCase() === path.win32.join(root, ".git").toLowerCase();
+  const winRefused = chooseProjectFolder({ url: "http://localhost:3000", home: winHome, exists: winRepoAt("C:\\Users\\u\\Documents") });
+  assert.ok("refused" in winRefused && winRefused.refused.includes("C:\\Users\\u\\Documents"), JSON.stringify(winRefused));
+  const winDotfiles = chooseProjectFolder({ url: "http://localhost:3000", home: winHome, exists: winRepoAt("C:\\Users\\u") });
+  assert.ok(!("refused" in winDotfiles) && winDotfiles.dir === "C:\\Users\\u\\Documents\\SceneScout\\localhost-3000", JSON.stringify(winDotfiles));
+  const winBeside = chooseProjectFolder({ url: "http://localhost:3000", home: winHome, exists: winRepoAt("C:\\Users\\u\\code") });
+  assert.ok(!("refused" in winBeside));
+  const winOtherDrive = chooseProjectFolder({
+    url: "http://localhost:3000",
+    home: { ...winHome, env: { ...winHome.env, [PROJECTS_DIR_ENV]: "D:\\qa" } },
+    exists: winRepoAt("D:\\"),
+  });
+  assert.ok("refused" in winOtherDrive, "a setting on another drive is walked to that drive's root");
   // The contrast: the same repository somewhere the default does not reach.
   const beside = chooseProjectFolder({ url: "http://localhost:3000", home: macHome, exists: repoAt("/Users/u/code") });
   assert.ok(!("refused" in beside) && beside.source === "default");
@@ -2556,9 +2571,9 @@ test("the default folder is never placed inside a git repository; a given one ma
   // A projectPath inside a repository is the user's choice.
   const given = chooseProjectFolder({ url: "http://localhost:3000", given: "/work/app", home: macHome, exists: repoAt("/work/app") });
   assert.ok(!("refused" in given) && given.dir === "/work/app");
-  assert.equal(enclosingRepo("/a/b/c", repoAt("/a")), "/a");
-  assert.equal(enclosingRepo("/a/b/c", repoAt("/a/b/c")), "/a/b/c", "the folder itself");
-  assert.equal(enclosingRepo("/a/b/c", noRepo), null);
+  assert.equal(enclosingRepo("/a/b/c", repoAt("/a"), "darwin"), "/a");
+  assert.equal(enclosingRepo("/a/b/c", repoAt("/a/b/c"), "darwin"), "/a/b/c", "the folder itself");
+  assert.equal(enclosingRepo("/a/b/c", noRepo, "darwin"), null);
   assert.equal(enclosingRepo("/h/d/x", repoAt("/h"), "darwin", "/h"), null, "the walk ends below stopAt");
   assert.equal(enclosingRepo("/h/d/x", repoAt("/h/d"), "darwin", "/h/"), "/h/d", "a repository strictly below stopAt still counts");
   assert.equal(
@@ -2572,10 +2587,17 @@ test("the default folder is never placed inside a git repository; a given one ma
   );
 });
 
-test("a workspace comes only from a file: root", () => {
-  assert.equal(workspaceFromRoots(undefined), null);
-  assert.equal(workspaceFromRoots([]), null);
-  assert.equal(workspaceFromRoots([{ uri: "https://example.com/repo" }]), null);
-  assert.equal(workspaceFromRoots([{ uri: "https://example.com/repo" }, { uri: "file:///work/app" }, { uri: "file:///work/b" }]), "/work/app");
-  assert.equal(workspaceFromRoots([{ uri: "file:///work/my%20app" }]), "/work/my app");
+test("a workspace comes only from a file: root, read as the platform reads it", () => {
+  const cases: Array<[string, NodeJS.Platform, Array<{ uri: string }> | undefined, string | null]> = [
+    ["no roots", "darwin", undefined, null],
+    ["an empty list", "win32", [], null],
+    ["not a file: root", "linux", [{ uri: "https://example.com/repo" }], null],
+    ["the first file: root", "darwin", [{ uri: "https://example.com/repo" }, { uri: "file:///work/app" }, { uri: "file:///work/b" }], "/work/app"],
+    ["an escaped space", "linux", [{ uri: "file:///work/my%20app" }], "/work/my app"],
+    ["Windows: a drive letter", "win32", [{ uri: "file:///C:/work/my%20app" }], "C:\\work\\my app"],
+    ["Windows: a root with no drive is skipped for the next", "win32", [{ uri: "file:///work/app" }, { uri: "file:///D:/qa" }], "D:\\qa"],
+    ["Windows: a share", "win32", [{ uri: "file://server/share/app" }], "\\\\server\\share\\app"],
+    ["POSIX: a root naming another host is skipped", "linux", [{ uri: "file://server/share/app" }], null],
+  ];
+  for (const [name, platform, roots, want] of cases) assert.equal(workspaceFromRoots(roots, platform), want, name);
 });
