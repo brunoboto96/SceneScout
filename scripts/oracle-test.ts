@@ -26,6 +26,14 @@ import {
   capForeignName,
   stripForeignHref,
   frameToPageRect,
+  pickName,
+  type NameFacts,
+  stateFlags,
+  stateChange,
+  trackedElements,
+  inertKeys,
+  mainRegionLine,
+  mainRegionTag,
 } from "../src/engine/collector.ts";
 import { EventEmitter } from "node:events";
 import vm from "node:vm";
@@ -457,6 +465,135 @@ test("an empty live region is not an unnamed control; an empty button still is",
   }
   assert.equal(missingName({ role: "status", name: "Saved." }), false);
   assert.equal(displayName({ role: "status", name: "Saved." }), "Saved.");
+});
+
+test("the accessible name follows the computation's order: aria-labelledby, aria-label, label, title, placeholder", () => {
+  const facts = (over: Partial<NameFacts>): NameFacts => ({
+    tag: "input",
+    inputType: "text",
+    labelledBy: "",
+    ariaLabel: null,
+    labels: [],
+    title: "",
+    placeholder: "",
+    nameAttr: "",
+    value: "",
+    alt: "",
+    live: false,
+    text: "",
+    ...over,
+  });
+  const cases: Array<[string, Partial<NameFacts>, { name: string; from: "placeholder" | "fallback" | null }]> = [
+    // Each source wins over every one after it.
+    ["aria-labelledby before aria-label", { labelledBy: "Caption", ariaLabel: "Aria", labels: ["Label"] }, { name: "Caption", from: null }],
+    ["aria-label before a label", { ariaLabel: "Aria", labels: ["Label"], title: "Title" }, { name: "Aria", from: null }],
+    ["a label before title", { labels: ["Label"], title: "Title", placeholder: "Hint" }, { name: "Label", from: null }],
+    ["title before placeholder", { title: "Title", placeholder: "Hint", nameAttr: "q" }, { name: "Title", from: null }],
+    ["placeholder before the name attribute", { placeholder: "Hint", nameAttr: "q" }, { name: "Hint", from: "placeholder" }],
+    ["then the name attribute", { nameAttr: "q" }, { name: "q", from: "fallback" }],
+    ["then the type", {}, { name: "text", from: "fallback" }],
+    // A radio wrapped in a label (NAME_FACTS_SRC strips the control's own text from it) against one with only a name.
+    ["a wrapped radio is named by its label", { inputType: "radio", nameAttr: "fmt", labels: ["  Alpha "] }, { name: "Alpha", from: null }],
+    ["an unwrapped radio falls back to its name attribute", { inputType: "radio", nameAttr: "fmt" }, { name: "fmt", from: "fallback" }],
+    // A select is named by its label, never by its options' text.
+    ["a labelled select", { tag: "select", inputType: "", labels: ["Country "], text: "France Spain" }, { name: "Country", from: null }],
+    ["an unlabelled select", { tag: "select", inputType: "", nameAttr: "country", text: "France Spain" }, { name: "country", from: "fallback" }],
+    ["a select ignores a placeholder attribute", { tag: "select", inputType: "", placeholder: "Pick" }, { name: "select", from: "fallback" }],
+    // A button-like input is named by its value, or the browser's own text.
+    ["a submit input by its value", { inputType: "submit", value: "Send", nameAttr: "go" }, { name: "Send", from: null }],
+    ["a submit input with no value", { inputType: "submit" }, { name: "Submit", from: null }],
+    // An icon-only button: its title, or nothing.
+    ["an icon button with a title", { tag: "button", inputType: "", title: "Download file" }, { name: "Download file", from: null }],
+    ["an icon button with neither text nor title", { tag: "button", inputType: "" }, { name: "", from: null }],
+    ["a button's text before its title", { tag: "button", inputType: "", text: "Save", title: "Save the draft" }, { name: "Save", from: null }],
+    // A live region is named by what it announces.
+    [
+      "a live region by its text",
+      { tag: "div", inputType: "", live: true, ariaLabel: null, labels: ["Result"], text: " Could not save " },
+      { name: "Could not save", from: null },
+    ],
+    ["an image by its alt", { tag: "img", inputType: "", alt: "Logo", title: "Home" }, { name: "Logo", from: null }],
+    // Kept as before: a whitespace-only aria-label ends the name, and the field reads as unnamed.
+    ["a blank aria-label hides the placeholder", { ariaLabel: "  ", placeholder: "Hint" }, { name: "", from: "fallback" }],
+    ["an empty aria-label is no aria-label", { ariaLabel: "", placeholder: "Hint" }, { name: "Hint", from: "placeholder" }],
+  ];
+  for (const [label, over, want] of cases) assert.deepEqual(pickName(facts(over)), want, label);
+  assert.equal(pickName(facts({ labels: ["x".repeat(200)] })).name.length, 80, "a name is capped");
+});
+
+test("an element listed for its test id is not an unnamed control; an icon button with no name still is", () => {
+  // The same empty name; only whether a user can act on it, or whether it is hidden from assistive technology, differs.
+  assert.equal(missingName({ role: "generic", name: "", interactive: false }), false, "a decorative badge");
+  assert.equal(missingName({ role: "generic", name: "", interactive: true, ariaHidden: true }), false, "an aria-hidden dot");
+  assert.equal(missingName({ role: "button", name: "", interactive: true, ariaHidden: false }), true, "an icon-only button");
+  assert.equal(missingName({ role: "textbox", name: "q", nameFrom: "fallback", interactive: true }), true, "a field named by its name attribute");
+});
+
+test("only the live regions listed for their text leave a state's identity, and only non-controls leave coverage", () => {
+  const els = [
+    { key: "button:save", interactive: true },
+    { key: "tid:wrapper", interactive: false },
+    { key: "live:alert", interactive: false, liveOnly: true },
+    { key: "button:old" },
+  ];
+  assert.deepEqual(
+    trackedElements(els).map((e) => e.key),
+    ["button:save", "tid:wrapper", "button:old"],
+  );
+  assert.deepEqual(inertKeys(els), ["tid:wrapper"], "an element collected before the collector said is counted, as before");
+});
+
+test("state markers show what is on, and the diff says how it moved", () => {
+  assert.deepEqual(stateFlags(undefined), []);
+  assert.deepEqual(stateFlags({ pressed: "false", selected: "false", checked: "false", expanded: "false", current: "false" }), []);
+  assert.deepEqual(stateFlags({ pressed: "true" }), ["pressed"]);
+  assert.deepEqual(stateFlags({ selected: "true", expanded: "true" }), ["selected", "expanded"]);
+  assert.deepEqual(stateFlags({ checked: "true" }), ["checked"]);
+  assert.deepEqual(stateFlags({ checked: "mixed", pressed: "mixed" }), ["partly pressed", "partly checked"]);
+  assert.deepEqual(stateFlags({ current: "page" }), ["current"]);
+  assert.deepEqual(stateFlags({ pressed: null, current: null }), []);
+  assert.equal(stateChange([], []), null);
+  assert.equal(stateChange(["pressed"], ["pressed"]), null);
+  assert.equal(stateChange([], ["pressed"]), "now [pressed]");
+  assert.equal(stateChange(["pressed"], []), "no longer [pressed]");
+  assert.equal(stateChange(["selected"], ["expanded"]), "now [expanded], no longer [selected]");
+});
+
+test("the main-region line tells a page of text from a main area that rendered nothing", () => {
+  const withText = { landmark: true, heading: { level: 1, text: "Title" }, paragraphs: 1, chars: 21, controls: 0, media: 0 };
+  const empty = { landmark: true, heading: null, paragraphs: 0, chars: 0, controls: 0, media: 0 };
+  assert.equal(mainRegionLine(withText), 'main: h1 "Title" · 1 paragraph · 21 chars of static text');
+  assert.equal(mainRegionLine(empty), "main: EMPTY");
+  assert.equal(mainRegionTag(withText), "main 21 chars");
+  assert.equal(mainRegionTag(empty), "main EMPTY");
+  // A main area holding only controls, or only an image or embed, is not empty.
+  assert.equal(mainRegionLine({ ...empty, controls: 3 }), "main: no static text");
+  assert.equal(mainRegionLine({ ...empty, media: 1 }), "main: no static text");
+  assert.equal(
+    mainRegionLine({ ...withText, paragraphs: 2, landmark: false }),
+    'content (no main landmark): h1 "Title" · 2 paragraphs · 21 chars of static text',
+  );
+  assert.equal(mainRegionTag({ ...empty, landmark: false }), "content EMPTY");
+});
+
+test("controls held outside a horizontally scrolling container's visible width are one worth-a-look line per container", () => {
+  const row = (i: number, scrolledOutIn: string | null) => ({
+    ref: `e${i}`,
+    name: "Edit",
+    role: "button",
+    xpath: `/html/body/div[1]/table[1]/tbody[1]/tr[${i}]/td[6]/button[1]`,
+    rect: { x: 900, y: 100 + i * 40, w: 60, h: 30 },
+    scrolledOutIn,
+  });
+  // A 600px wrapper around a 1200px table: its last column is out of view.
+  const wide = geometryIssues([row(1, "[table-wrap]"), row(2, "[table-wrap]"), row(3, "[table-wrap]")], { width: 1280, height: 900 });
+  assert.deepEqual(wide, [
+    "3 controls are scrolled out of view inside a horizontally scrolling container [table-wrap] — only a sideways scroll of it shows them; worth a look at this width, not necessarily a defect",
+  ]);
+  // The same table narrow enough to fit: the collector marks nothing, and nothing is said.
+  assert.deepEqual(geometryIssues([row(1, null), row(2, null), row(3, null)], { width: 1280, height: 900 }), []);
+  const one = geometryIssues([row(1, "<div#wrap>")], { width: 1280, height: 900 });
+  assert.match(one[0], /^1 control is scrolled out of view inside a horizontally scrolling container <div#wrap> — only a sideways scroll of it shows it;/);
 });
 
 test("a field's shown name is not a label when it came from its placeholder, name attribute or type", () => {

@@ -39,7 +39,7 @@ your agent  ──MCP──▶  SceneScout engine  ──▶  a real browser on 
 
 What the engine adds to an agent with a browser:
 
-- **A structured view instead of screenshots.** A snapshot lists every element with its role, name and layout box. Overlapping controls, a button pushed off-screen or an image that failed to load are computed from the page, not guessed from pixels.
+- **A structured view instead of screenshots.** A snapshot lists every element with its role, name, state (pressed, selected, checked, expanded) and layout box, what the page announces in its alert and status regions, and a line on what the main area holds. Overlapping controls, a button pushed off-screen or an image that failed to load are computed from the page, not guessed from pixels.
 - **Checks after every action.** Console errors, uncaught exceptions, failed requests and HTTP errors are reported with each tool result, along with checks for a page that contradicts the server (an empty list after a refused request, "Saved" after a refused save).
 - **A write policy on the network.** By default nothing existing is changed or deleted, whatever the agent clicks. See the [safety model](Safety-model.md).
 - **Memory across runs.** Pages, findings and notes are kept in `.scenescout/` in the project, so the next run starts from what the last one learned.
