@@ -788,6 +788,25 @@ test("the page renders the report without building markup, since a finding's tit
   assert.match(script, /fetch\('api\/report'/);
 });
 
+test("the report panel shows a recorded picture through the frame route and drops any other picture line", () => {
+  // The two regexes are written inside a template literal with doubled
+  // backslashes; read them back from the page as the browser gets them.
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
+  const shown = /\(m = (\/\^!\\\[.*?\$\/)\.exec\(line\)\) && m\[2\]\.indexOf\('\.\.'\) < 0/.exec(script);
+  const dropped = /\} else if \((\/\^!\\\[.*?\$\/)\.test\(line\)\) \{/.exec(script);
+  assert.ok(shown && dropped, "both picture branches are in the page");
+  const show = new Function(`return ${shown[1]};`)() as RegExp;
+  const drop = new Function(`return ${dropped[1]};`)() as RegExp;
+  const m = show.exec("![What the page showed](recordings/s/0001-click.jpg)");
+  assert.equal(m?.[2], "recordings/s/0001-click.jpg");
+  assert.match(script, /pic\.src = 'record\/' \+ m\[2\];/, "through the frame route");
+  for (const other of ["![x](findings/a.png)", "![x](https://evil.test/a.png)", "![x](recordings/a b.png)"]) {
+    assert.equal(show.exec(other), null, other);
+    assert.match(other, drop, `${other} is dropped, not printed as text`);
+  }
+  assert.ok(show.test("![x](recordings/../memory.json)") && script.includes("m[2].indexOf('..') < 0"), "a path with .. is refused after the match");
+});
+
 test("the page's script parses: a backslash or backtick lost to the template literal would break every viewer", () => {
   // The page is one TypeScript template literal. A regex written with single
   // backslashes reaches the browser without them, and a stray backtick ends

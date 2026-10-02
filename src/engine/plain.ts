@@ -180,9 +180,10 @@ export function isSafeRelativePath(p: string): boolean {
 
 /**
  * The picture of a finding, as a path relative to the run's folder, or
- * undefined. A finding's own picture (`picture`, set when it is filed) comes
- * first; on a recorded run the last frame on screen before it was filed stands
- * in. A value that is not a safe relative path is ignored, since the file is
+ * undefined. A finding's own picture comes first: `picture`, a path relative
+ * to the run's folder, is the slot a capture taken when a finding is filed
+ * fills, and no finding carries one yet. On a recorded run the last frame on
+ * screen before the finding was filed stands in. A value that is not a safe relative path is ignored, since the file is
  * read back without a schema and the path goes into a page.
  */
 export function pictureOf(f: Finding, lastFrame?: string): string | undefined {
