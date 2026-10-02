@@ -98,7 +98,11 @@ export const CHECK_RULES = {
     title: "Control covered by pinned chrome",
     help: "A fixed or sticky element sits on top of the control, so clicks land on it instead.",
   },
-  "clipped-control": { severity: "medium", title: "Control unreachable", help: "The control is clipped inside a container that cannot scroll." },
+  "clipped-control": {
+    severity: "medium",
+    title: "Control unreachable",
+    help: "The control is clipped inside a container that cannot scroll and has no control beside it to page it.",
+  },
   "offpage-control": { severity: "medium", title: "Control outside the page", help: "The control is laid out where no scrolling can reach it." },
   "overlapping-controls": { severity: "low", title: "Controls overlap", help: "Two controls in the same layer cover most of each other." },
   "broken-image": { severity: "medium", title: "Broken image", help: "The browser could not render the image." },
@@ -111,7 +115,11 @@ export const CHECK_RULES = {
   contrast: { severity: "low", title: "Text contrast below WCAG", help: "Text needs 4.5:1 (3:1 when large) against its background." },
   "focus-indicator": { severity: "low", title: "No visible focus indicator", help: "Tabbing to the control changes nothing on screen." },
   "horizontal-scroll": { severity: "medium", title: "Page scrolls sideways", help: "Content is wider than the viewport." },
-  "tiny-target": { severity: "low", title: "Small click target", help: "Below the 24px WCAG 2.2 target-size minimum." },
+  "tiny-target": {
+    severity: "low",
+    title: "Small click target",
+    help: "Below the 24px WCAG 2.2 target-size minimum, measured on what the user clicks (a native input's label or drop zone), with another target inside its 24px circle.",
+  },
   "clipped-text": { severity: "low", title: "Text clipped", help: "Text is wider than its box and cut off without an ellipsis." },
   "image-aspect": { severity: "low", title: "Image distorted", help: "The rendered box does not match the image's proportions." },
   "flow-step-failed": {
