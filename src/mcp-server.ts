@@ -74,7 +74,10 @@ import {
 } from "./engine/live.js";
 import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
-import { loginCommand } from "./engine/profiles.js";
+import { loginCommand, parseLoginArgs } from "./engine/profiles.js";
+import type { BrowserEngineName } from "./browsers.js";
+import { LOGIN_WINDOW_MAX_MS, savedLine, startLoginWindow, type PendingLogin } from "./login-run.js";
+import { LoginWindows, WAIT_SAYS } from "./engine/signed-in.js";
 import { computeGaps, coverageView, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
 import { DEFAULT_REPORT_AUDIENCE, REPORT_AUDIENCES, type ReportAudience } from "./engine/plain.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
@@ -1218,6 +1221,116 @@ function sessionLines(): string {
   return lines.join("\n");
 }
 
+// Signing in from the conversation: a window the person signs in in, watched
+// in the background, so a call need not last as long as the person takes and
+// a second call picks up the same window. One per project and role.
+const pendingLogins = new LoginWindows<PendingLogin>(LOGIN_WINDOW_MAX_MS);
+/** How long one scout_login call waits for the person, by default and at most, in seconds. */
+const LOGIN_WAIT_DEFAULT_S = 120;
+const LOGIN_WAIT_MAX_S = 600;
+/** How often a waiting call tells a client that asked for progress that it is still going, in ms. */
+const LOGIN_PROGRESS_EVERY_MS = 10_000;
+
+server.registerTool(
+  "scout_login",
+  {
+    description:
+      "Open a visible browser window for the USER to sign in to the app as a role, and save that sign-in for scout_attach { role }. " +
+      "Use it when an attach is refused because no sign-in is saved for the role, or the saved one has expired. " +
+      'Tell the user first, in plain words: "A browser window is opening. Sign in there as you normally would; it closes by itself once you are in." ' +
+      "The window saves once the user is back on the app with a new session (a round trip through a single sign-on provider is followed, not taken for the end) and closes. " +
+      "Never type credentials into it yourself. Returns once signed in and saved, or after waitSeconds with the window still open: then call scout_login again with the same role to keep waiting. " +
+      "Closing the window saves nothing. Needs a desktop: on a machine with no display, ask the user to run `scenescout login <url> --role <name>` where they can see the window.",
+    inputSchema: {
+      url: z.string().describe("Where to sign in: the app's address or its sign-in page, e.g. http://localhost:3000/login"),
+      role: z.string().max(40).describe("The name to save the sign-in under, e.g. admin; scout_attach { role } signs in with it"),
+      projectPath: z.string().describe("Absolute path to the project (the sign-in is saved in .scenescout/auth/ here), as for scout_attach"),
+      browser: z
+        .enum(["chromium", "firefox", "webkit"])
+        .optional()
+        .describe("Browser to open. Default: the SCENESCOUT_BROWSER environment variable, else chromium"),
+      successUrl: z
+        .string()
+        .max(500)
+        .optional()
+        .describe(
+          "Only when the user says how to tell: signed in once the URL's path contains this, or the URL starts with it (an absolute URL), instead of when a new session appears",
+        ),
+      waitSeconds: z
+        .number()
+        .int()
+        .min(1)
+        .max(LOGIN_WAIT_MAX_S)
+        .optional()
+        .describe(`How long this call waits for the user before returning with the window still open (default ${LOGIN_WAIT_DEFAULT_S})`),
+    },
+  },
+  async (args: { url: string; role: string; projectPath: string; browser?: BrowserEngineName; successUrl?: string; waitSeconds?: number }, extra) => {
+    try {
+      const parsed = parseLoginArgs(
+        [args.url, "--role", args.role, ...(args.browser ? ["--browser", args.browser] : []), ...(args.successUrl ? ["--success-url", args.successUrl] : [])],
+        path.resolve(args.projectPath),
+      );
+      if (!parsed.ok) return errorText(new Error(parsed.error));
+      const options = { ...parsed.options, projectDir: path.resolve(args.projectPath) };
+      const key = `${options.projectDir}\0${options.role}`;
+      const { window: pending, resumed } = await pendingLogins.get(key, () => startLoginWindow(options));
+      const waitMs = (args.waitSeconds ?? LOGIN_WAIT_DEFAULT_S) * 1000;
+      const progressToken = extra._meta?.progressToken;
+      let ticks = 0;
+      const ticker =
+        progressToken !== undefined
+          ? setInterval(() => {
+              ticks += 1;
+              const p = pending.progress();
+              void extra
+                .sendNotification({
+                  method: "notifications/progress",
+                  params: {
+                    progressToken,
+                    progress: ticks,
+                    message: `Waiting for the sign-in as "${options.role}": ${p.reason === "starting" ? "the window is opening" : WAIT_SAYS[p.reason]}`,
+                  },
+                })
+                .catch((err: unknown) => console.error(`[scenescout] scout_login progress: ${err instanceof Error ? err.message : String(err)}`));
+            }, LOGIN_PROGRESS_EVERY_MS)
+          : undefined;
+      let timer: NodeJS.Timeout | undefined;
+      let onAbort: (() => void) | undefined;
+      const outcome = await Promise.race([
+        pending.done,
+        new Promise<"waiting">((resolve) => {
+          timer = setTimeout(() => resolve("waiting"), waitMs);
+        }),
+        new Promise<"cancelled">((resolve) => {
+          onAbort = () => resolve("cancelled");
+          extra.signal.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]).finally(() => {
+        clearTimeout(timer);
+        if (ticker) clearInterval(ticker);
+        if (onAbort) extra.signal.removeEventListener("abort", onAbort);
+      });
+      const differs =
+        resumed && pending.url !== options.url ? ` (the window was opened at ${pending.url} by an earlier call; that one is still the one being watched)` : "";
+      if (outcome === "waiting" || outcome === "cancelled") {
+        const p = pending.progress();
+        return text(
+          `Still waiting for the user to sign in as "${options.role}"${differs}: ${p.reason === "starting" ? "the window is opening" : WAIT_SAYS[p.reason]}. ` +
+            `The window stays open for up to ${LOGIN_WINDOW_MAX_MS / 60_000} minutes from when it opened. Call scout_login again with the same role to keep waiting, once the user says they are done or to check.`,
+          activeName,
+        );
+      }
+      // This call reports the outcome; the next call for the role opens a new window.
+      pendingLogins.reported(key, pending);
+      if (!outcome.ok) return errorText(new Error(`nothing was saved for role "${options.role}": ${outcome.error}`));
+      return text(`${outcome.detected}\n${savedLine(options, outcome.saved)}`, activeName);
+    } catch (err) {
+      return errorText(err);
+    }
+  },
+);
+
 server.registerTool(
   "scout_session",
   {
@@ -2218,7 +2331,7 @@ async function shutdown(): Promise<void> {
       console.error(`[scenescout] could not remove the live view's token file in ${dir}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  await Promise.allSettled([live?.stop(), ...[...engines.values()].map((e) => e.close())]);
+  await Promise.allSettled([live?.stop(), ...[...engines.values()].map((e) => e.close()), ...pendingLogins.all().map((p) => p.cancel())]);
 }
 
 process.on("SIGINT", () => {

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Identity provider</title>
+  </head>
+  <body>
+    <!--
+      The stand-in identity provider's sign-in page, served on the second
+      origin at /sso-provider/authorize. Any username and password are
+      accepted; the provider then sends the browser back to the app with a
+      code and the state it was given.
+    -->
+    <main>
+      <h1>Sign in to continue</h1>
+      <form method="post" action="/sso-provider/authorize">
+        <input type="hidden" name="return" value="<!--RETURN-->" />
+        <input type="hidden" name="state" value="<!--STATE-->" />
+        <label>Email <input data-testid="provider-email-input" type="email" name="email" autocomplete="username" /></label>
+        <label>Password <input data-testid="provider-password-input" type="password" name="password" autocomplete="current-password" /></label>
+        <button data-testid="provider-signin-submit" type="submit">Sign in</button>
+      </form>
+    </main>
+  </body>
+</html>

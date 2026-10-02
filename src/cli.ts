@@ -206,12 +206,17 @@ Usage:
                                       as for check)
                                     Exit code: 0 the run ran (findings never change it), 2 could not run.
   scenescout login <url> --role <name>
-                                    Open a visible browser at the URL, sign in there (SSO, MFA, anything), then
-                                    press Enter in this terminal to save the session as that role's profile, in
-                                    .scenescout/auth/<name>.json (owner-only; never printed, never committed).
-                                    Closing the window or Ctrl+C saves nothing. Agents then attach with
-                                    scout_attach { role: "<name>" }, as many sessions as they like from one login.
-                                    (--project dir (default: here); --browser chromium|firefox|webkit)
+                                    Open a visible browser at the URL and sign in there (SSO, MFA, anything). Once
+                                    you are back on the app with a new session, the window saves it as that role's
+                                    profile, in .scenescout/auth/<name>.json (owner-only; never printed, never
+                                    committed), and closes. Enter in this terminal saves at once. Closing the window
+                                    or Ctrl+C saves nothing. Agents then attach with scout_attach { role: "<name>" },
+                                    as many sessions as they like from one login. From a conversation, scout_login
+                                    opens the same window.
+                                    (--project dir (default: here); --browser chromium|firefox|webkit;
+                                    --save auto|enter (default auto; enter: save on Enter only, as before);
+                                    --success-url text|url: signed in once the URL's path contains this, or the URL
+                                    starts with it, instead of when a new session appears)
   scenescout login <url> --role <name> --script
                                     For CI: sign in headless from SCENESCOUT_LOGIN_USERNAME, SCENESCOUT_LOGIN_PASSWORD
                                     and, if the form asks for a code, SCENESCOUT_LOGIN_TOTP_SECRET (base32 or an
