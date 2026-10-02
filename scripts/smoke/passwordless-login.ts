@@ -20,7 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { profilePath } from "../../dist/engine/profiles.js";
-import { check, eventually, FIXED_OTP_CODE, OTP_SESSION_COOKIE, SCRIPTED_USER, type SmokeContext } from "./harness.ts";
+import { check, eventually, FIXED_OTP_CODE, OTP_SESSION_COOKIE, SCRIPTED_USER, WAIT_MS, type SmokeContext } from "./harness.ts";
 import { dirtyFiles, filesUnder, login } from "./scripted-login.ts";
 import { leaked } from "./secrets.ts";
 
@@ -72,7 +72,8 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     const out = await engine.attach({ url: `${baseUrl}/otp-account`, projectDir: project, mode: "read-only", role: "member" });
     check("the saved profile attaches by role", out.includes("role=member") && !out.includes("AUTH FAILED"), out);
     const attached = engine;
-    const signedIn = await eventually(async () => (await attached.snapshot(true)).includes(SIGNED_IN), 10_000);
+    // Spaced out, since each look is a snapshot.
+    const signedIn = await eventually(async () => (await attached.snapshot(true)).includes(SIGNED_IN), WAIT_MS, 100);
     check("...signed in: the app's API took the token from localStorage and the session cookie", signedIn, await attached.snapshot(true));
     await engine.close();
     engine = undefined;

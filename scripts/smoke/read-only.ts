@@ -7,7 +7,7 @@ import { feedForSession } from "../../dist/engine/live.js";
 import { generateReport } from "../../dist/engine/report.js";
 import { FORMS_INVENTORY_SCRIPT } from "../../dist/engine/forms.js";
 import { focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
-import { BROWSER, check, eventually, settle, type SmokeContext } from "./harness.ts";
+import { BROWSER, check, eventually, settle, WAIT_MS, type SmokeContext } from "./harness.ts";
 
 export const title = "read-only exploration";
 
@@ -664,12 +664,9 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     // the one guarantee the safety model makes, silently void. The worker must
     // be ACTIVE for this to prove anything, so that is asserted too.
     await engine.navigate("/worker-sync.html");
-    let workerSnap = await engine.snapshot(true);
-    const workerDeadline = Date.now() + 5000;
-    while (workerSnap.includes("worker: starting") && Date.now() < workerDeadline) {
-      await settle(100);
-      workerSnap = await engine.snapshot(true);
-    }
+    let workerSnap = "";
+    // Spaced out, since each look is a snapshot. If the worker never leaves "starting", the checks below say so.
+    await eventually(async () => !(workerSnap = await engine.snapshot(true)).includes("worker: starting"), WAIT_MS, 100);
     const syncRef = workerSnap.match(/(e\d+) button "Sync now"/)?.[1];
     if (!syncRef) throw new Error("Sync now button not found");
     if (serviceWorkerPolicy(BROWSER) === "allow") {
@@ -681,7 +678,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       // So wait for the policy to have refused it, then take that next action.
       const deleteRefusal = /WRITE-POLICY blocked[^\n]*\/api\/items\/999/;
       const internals = engine as unknown as { blockedRequests: Array<{ sig: string }> };
-      await eventually(() => deleteRefusal.test(syncResult) || internals.blockedRequests.some((e) => e.sig.includes("/api/items/999")), 15000);
+      await eventually(() => deleteRefusal.test(syncResult) || internals.blockedRequests.some((e) => e.sig.includes("/api/items/999")));
       // The next action's result carries a refusal that came in after the click's own result was written.
       const nextResult = await engine.navigate("/shared-worker.html");
       check(
@@ -710,6 +707,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     const sharedRef = sharedSnap.match(/(e\d+) button "Sync through shared worker"/)?.[1];
     if (!sharedRef) throw new Error("shared worker sync button not found");
     await engine.click(sharedRef);
+    // Absence has no event to wait for: give a DELETE that did escape time to land.
     await settle(600);
     check(
       "read-only: no DELETE from a shared worker reaches the server",
@@ -826,7 +824,9 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     const onceStarted = Date.now();
     await engine.select(ddRef("Pick once"), "a");
     const once = engine.memory!.unchosenOptions().find((d) => d.key.includes("once-select"));
-    check("a dropdown that removes itself on change does not stall the action", Date.now() - onceStarted < 10_000, `${Date.now() - onceStarted}ms`);
+    // Wall-clock on purpose, since a stall is what is under test: reading a dropdown that has removed itself waits out
+    // Playwright's 30 s timeout, and a working select takes well under a second. The bound sits between the two.
+    check("a dropdown that removes itself on change does not stall the action", Date.now() - onceStarted < 25_000, `${Date.now() - onceStarted}ms`);
     check("...and its options were still recorded", once?.unchosen.join("|") === "B", JSON.stringify(once));
 
     console.log("coverage: forms never submitted empty");
@@ -1042,7 +1042,9 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       timings.push(performance.now() - started);
     }
     const best = Math.min(...timings);
-    check("the inventory reads a form of 2000 text fields in well under 100 ms", best < 100, `${timings.map((t) => t.toFixed(1)).join(", ")} ms`);
+    // Wall-clock on purpose, since cost is what is under test: tens of milliseconds, against about 2 s for the first
+    // version on this form. The bound sits far from both, so a loaded machine cannot trip it.
+    check("the inventory reads a form of 2000 text fields in well under half a second", best < 500, `${timings.map((t) => t.toFixed(1)).join(", ")} ms`);
     // 2000 identical blank rows come back as one set of facts, not 2000 copies.
     check(
       "...and finds that one form, its identical rows read as one set of field facts, and nothing in the header's text box and 'Sign in'",

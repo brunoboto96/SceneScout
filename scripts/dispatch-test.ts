@@ -20,6 +20,7 @@ import { orphanPids } from "../src/engine/reaper.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles } from "./smoke/leaks.ts";
 
+/** Stands in for work that takes a while, or yields to the timer queue. No assertion depends on how long one takes. */
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------------------
@@ -40,23 +41,20 @@ test("two calls on the SAME session never interleave", async () => {
   assert.deepEqual(trace, ["a:start", "a:end", "b:start", "b:end"]);
 });
 
-test("calls on DIFFERENT sessions overlap in wall-clock", async () => {
-  // Jobs are long enough that timer and scheduler noise on a loaded machine is
-  // small next to the gap being measured: overlapped runs take about one job,
-  // serialized runs take two. The bound sits halfway between.
-  const JOB_MS = 200;
+test("calls on DIFFERENT sessions overlap", async () => {
+  // The trace is the proof: a job that awaits anything lets the other
+  // session's job start first, and a queue that serialized the two would put
+  // "a:end" second. How long the pair takes is not measured, since a loaded
+  // machine can stretch any wall-clock bound.
   const q = new SessionQueue();
   const trace: string[] = [];
   const job = (name: string) => async () => {
     trace.push(`${name}:start`);
-    await tick(JOB_MS);
+    await tick(20);
     trace.push(`${name}:end`);
   };
-  const started = Date.now();
   await Promise.all([q.run("admin", job("a")), q.run("qa", job("b"))]);
-  const elapsed = Date.now() - started;
   assert.deepEqual(trace.slice(0, 2), ["a:start", "b:start"], "both started before either finished");
-  assert.ok(elapsed < JOB_MS * 1.5, `two ${JOB_MS}ms jobs on different sessions should not take ~${JOB_MS * 2}ms (took ${elapsed}ms)`);
 });
 
 test("a REJECTED call does not wedge its session's queue", async () => {
@@ -176,10 +174,13 @@ test("a rejection ARRIVING AFTER the timeout does not become an unhandled reject
   };
   process.on("unhandledRejection", onUnhandled);
   try {
-    const late = new Promise<string>((_, reject) => setTimeout(() => reject(new Error("late failure")), 30));
+    let rejectLate!: (err: Error) => void;
+    const late = new Promise<string>((_, reject) => (rejectLate = reject));
     const out = await withWatchdog("scout_navigate", late, 10, () => "timed-out");
     assert.equal(out, "timed-out");
-    await tick(60); // let the late rejection land
+    rejectLate(new Error("late failure"));
+    // Node reports an unhandled rejection once the microtasks after it have run, before the next macrotask.
+    await new Promise((r) => setImmediate(r));
     assert.equal(unhandled, null, "the losing side of the race must be caught, or Node crashes the process");
   } finally {
     process.off("unhandledRejection", onUnhandled);
@@ -211,31 +212,55 @@ test("the orphan reaper only ever selects browsers this tool launched and abando
   assert.deepEqual(orphanPids(""), []);
 });
 
-/** Stand-ins for a page, context and browser whose close takes `ms` (or never finishes), recording what was closed. */
-function standIns(ms: { context: number; browser: number }) {
+/**
+ * Stand-ins for a page, context and browser whose close takes `ms`, never
+ * finishes (Infinity), or finishes when the test says ("held"), recording what
+ * was closed.
+ */
+function standIns(ms: { context: number | "held"; browser: number }) {
   const closed: string[] = [];
-  const closer = (name: string, delay: number) => ({
-    close: () => (delay === Infinity ? new Promise<void>(() => {}) : tick(delay).then(() => void closed.push(name))),
+  const waiting: Array<{ name: string; done: () => void }> = [];
+  const record = (name: string): void => {
+    closed.push(name);
+    for (const w of waiting.filter((w) => w.name === name)) w.done();
+  };
+  let finishContext = (): void => {};
+  const closer = (name: string, delay: number | "held") => ({
+    close: () => {
+      if (delay === Infinity) return new Promise<void>(() => {});
+      if (delay === "held") return new Promise<void>((r) => (finishContext = r)).then(() => record(name));
+      return tick(delay).then(() => record(name));
+    },
   });
   const page = closer("page", 0);
   const context = { ...closer("context", ms.context), pages: () => [page] };
-  return { closed, context, browser: closer("browser", ms.browser) };
+  /** Resolves once `name` has closed: the condition a test waits on, rather than a guess at how long closing takes. */
+  const whenClosed = (name: string): Promise<void> =>
+    closed.includes(name) ? Promise.resolve() : new Promise<void>((done) => void waiting.push({ name, done }));
+  return { closed, context, browser: closer("browser", ms.browser), whenClosed, finishContext: () => finishContext() };
+}
+
+/** Whether `p` settles within `ms`. The bound is far past anything a passing test takes: it turns a hang into a failure that says what hung. */
+async function settlesWithin(p: Promise<unknown>, ms = 5000): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const settled = await Promise.race([p.then(() => true), new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), ms)))]);
+  clearTimeout(timer);
+  return settled;
 }
 
 test("a teardown that outlasts its cap still closes the browser after the caller has moved on", async () => {
   // The caller returns at the cap and clears its own fields; the browser must not depend on them.
-  const { closed, context, browser } = standIns({ context: 300, browser: 0 });
-  const started = Date.now();
-  await boundedTeardown(context, browser, 20);
-  assert.ok(Date.now() - started < 200, "returns at the cap, not when teardown ends");
-  await tick(400);
-  assert.ok(closed.includes("browser"), `closed: ${closed.join(", ")}`);
+  const { closed, context, browser, whenClosed, finishContext } = standIns({ context: "held", browser: 0 });
+  // The context cannot finish closing until it is let go below, so a teardown that waited for it would never return.
+  assert.ok(await settlesWithin(boundedTeardown(context, browser, 20)), "returns at the cap, not when teardown ends");
+  finishContext();
+  assert.ok(await settlesWithin(whenClosed("browser")), `the browser is closed (closed: ${closed.join(", ")})`);
 });
 
 test("a context that never closes does not keep the browser running", async () => {
-  const { closed, context, browser } = standIns({ context: Infinity, browser: 0 });
+  const { closed, context, browser, whenClosed } = standIns({ context: Infinity, browser: 0 });
   await boundedTeardown(context, browser, 20);
-  await tick(30);
+  assert.ok(await settlesWithin(whenClosed("browser")), `the browser is closed (closed: ${closed.join(", ")})`);
   assert.deepEqual(closed, ["page", "browser"]);
 });
 
