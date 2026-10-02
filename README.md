@@ -703,6 +703,7 @@ src/
     expiry.ts       how long a saved sign-in lasts: cookie dates and JWT exp, checked before lanes start
     report.ts       the gap ledger + report generation
     check.ts        the check's rules, gate, report and SARIF
+    sarif.ts        which repository file a SARIF result points at, so code scanning keeps it
     ci.ts           a CI run's options, provider choice, caps, key redaction, tools and files
     provider.ts     the Anthropic and OpenAI message shapes, and retries
     replay.ts       the run as one page: steps, tasks, frames under each finding

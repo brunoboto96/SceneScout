@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Paged viewer fixtures</title>
+    <style>
+      body { margin: 0; font: 15px/1.4 system-ui, sans-serif; padding: 24px; }
+      .viewer { width: 300px; overflow: hidden; border: 1px solid #ccc; margin-bottom: 12px; }
+      .track { display: flex; width: 900px; }
+      .page { width: 300px; height: 80px; flex: none; padding: 16px; box-sizing: border-box; }
+      .table-card { width: 300px; overflow-x: hidden; border: 1px solid #ccc; margin-top: 24px; }
+      .table-card table { width: 800px; border-collapse: collapse; }
+      .table-card td { width: 400px; height: 36px; }
+    </style>
+  </head>
+  <body>
+    <h1>Paged viewers</h1>
+    <!-- NOT a defect: a "Next page" control beside a viewer of slides reveals each one. -->
+    <section>
+      <div class="viewer" data-testid="named-viewer">
+        <div class="track">
+          <div class="page"><button type="button">Named action 1</button></div>
+          <div class="page"><button type="button">Named action 2</button></div>
+          <div class="page"><button type="button">Named action 3</button></div>
+        </div>
+      </div>
+      <button type="button" data-testid="named-next">Next page</button>
+    </section>
+    <!-- NOT a defect: a control that names the viewer in aria-controls. -->
+    <section>
+      <div class="viewer" id="controlled-viewer" data-testid="controlled-viewer">
+        <div class="track">
+          <div class="page"><button type="button">Controlled action 1</button></div>
+          <div class="page"><button type="button">Controlled action 2</button></div>
+          <div class="page"><button type="button">Controlled action 3</button></div>
+        </div>
+      </div>
+      <button type="button" aria-controls="controlled-viewer" data-testid="controlled-shift">Shift view</button>
+    </section>
+    <!-- DEFECT: the same viewer with no way to page it. -->
+    <section>
+      <div class="viewer" data-testid="stuck-viewer">
+        <div class="track">
+          <div class="page"><button type="button">Stuck action 1</button></div>
+          <div class="page"><button type="button">Stuck action 2</button></div>
+        </div>
+      </div>
+    </section>
+    <!-- DEFECT: a table wider than its card clips its last column; the "Next page"
+         in the footer pages rows, it does not reveal the column. -->
+    <section>
+      <div class="table-card" data-testid="table-card">
+        <table>
+          <tr><td><button type="button">View row</button></td><td><button type="button">Archive row</button></td></tr>
+        </table>
+        <div><button type="button">Next page</button></div>
+      </div>
+    </section>
+    <script>
+      const pager = (button, viewer) => {
+        let page = 0;
+        document.querySelector(button).addEventListener("click", () => {
+          page = (page + 1) % 3;
+          document.querySelector(viewer + " .track").style.transform = "translateX(" + page * -300 + "px)";
+        });
+      };
+      pager('[data-testid="named-next"]', '[data-testid="named-viewer"]');
+      pager('[data-testid="controlled-shift"]', '[data-testid="controlled-viewer"]');
+    </script>
+  </body>
+</html>

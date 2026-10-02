@@ -82,6 +82,10 @@ inputs:
     description: never, high or all. Which re-tested findings that still reproduce fail the gate; high means those filed at high severity. Empty means high.
     required: false
     default: ""
+  sarif-file-anchor:
+    description: The repository file, relative to the repository root, that a check.sarif result points at when no saved flow raised it (code scanning keeps only results located in a repository file). Empty means the workflow file that is running.
+    required: false
+    default: ""
   working-directory:
     description: The directory the check runs in; relative paths in the other inputs are resolved against it.
     required: false

@@ -36,6 +36,7 @@ import * as refreshBroker from "./smoke/refresh-broker.ts";
 import * as refreshCookie from "./smoke/refresh-cookie.ts";
 import * as liveView from "./smoke/live-view.ts";
 import * as contradiction from "./smoke/contradiction.ts";
+import * as geometry from "./smoke/geometry.ts";
 import * as attribution from "./smoke/attribution.ts";
 import * as frames from "./smoke/frames.ts";
 import * as injection from "./smoke/injection.ts";
@@ -63,6 +64,7 @@ const suites = [
   injection,
   postmessage,
   contradiction,
+  geometry,
   attribution,
   frames,
   snapshotContents,
