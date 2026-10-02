@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
@@ -27,6 +28,7 @@ import {
   isVersionSpec,
   npmCommand,
   outDirFor,
+  picturesDir,
   SUMMARY_OUTPUT_NAMES,
   summaryOutputs,
   verdict,
@@ -47,6 +49,37 @@ import {
   type FlowRun,
 } from "../src/engine/flow.ts";
 import { writeSelfIgnore, type Finding } from "../src/engine/memory.ts";
+import {
+  BASELINE_CAPTURE,
+  baselineEvidence,
+  baselineFiles,
+  baselineFingerprint,
+  baselineMeta,
+  captureDifferences,
+  defaultBaselinesDir,
+  elementFile,
+  elementTarget,
+  isChange,
+  isVisualPicture,
+  judgeBaseline,
+  MAX_BASELINE_TARGETS,
+  missingTargetsMessage,
+  parseBaselineMeta,
+  parseBaselineTargets,
+  parseThreshold,
+  readStoredBaseline,
+  routeFolder,
+  STOP_ANIMATIONS_SCRIPT,
+  VISUAL_DIRNAME,
+  visualFiles,
+  type BaselineMeta,
+  type BaselineResult,
+  type BaselineRun,
+  type BaselineTarget,
+  type CaptureSettings,
+} from "../src/engine/baseline.ts";
+import { cutByViewport } from "../src/engine/capture.ts";
+import { encodePng, type RgbaImage } from "../src/engine/png.ts";
 import {
   echoesListedRequest,
   firstLook,
@@ -81,6 +114,7 @@ import {
   geometryRule,
   issuesFromRoutes,
   parseCheckArgs,
+  redactBaselineRun,
   redactFlowRuns,
   redactRoutes,
   refusedFlowReason,
@@ -815,6 +849,10 @@ test("arguments: the defaults", () => {
     flowWrites: "never",
     onRefusedStep: "report",
     gateRetests: "high",
+    // Off unless asked for: a check writes no picture and compares none by default.
+    baseline: "off",
+    // 0.1, not 0: a gate that fails on anti-aliasing noise between runs teaches a team to ignore it.
+    baselineThreshold: 0.1,
   });
 });
 
@@ -846,6 +884,11 @@ test("arguments: every option, in both spellings, with relative paths resolved a
       "--on-refused-step=stop",
       "--gate-retests",
       "all",
+      "--baseline",
+      "compare",
+      "--baselines=tests/visual",
+      "--baseline-threshold",
+      "0.5",
     ],
     "/work",
   );
@@ -866,6 +909,9 @@ test("arguments: every option, in both spellings, with relative paths resolved a
     flowWrites: "allow",
     onRefusedStep: "stop",
     gateRetests: "all",
+    baseline: "compare",
+    baselinesDir: "/work/tests/visual",
+    baselineThreshold: 0.5,
   });
 });
 
@@ -893,6 +939,14 @@ test("arguments: each mistake is refused with a sentence", () => {
     [["http://x", "--level", "high"], /unknown option --level/],
     [["http://x", "--fail-on"], /--fail-on needs a value/],
     [["http://x", "--fail-on", "--mode", "observe"], /--fail-on needs a value/],
+    [["http://x", "--baseline", "approve"], /--baseline must be one of off, compare, update/],
+    [["http://x", "--baseline", "compare", "--baseline-threshold", "101"], /--baseline-threshold must be a percentage from 0 to 100/],
+    [["http://x", "--baseline", "compare", "--baseline-threshold", "-1"], /--baseline-threshold must be a percentage/],
+    [["http://x", "--baseline", "compare", "--baseline-threshold", "a lot"], /--baseline-threshold must be a percentage/],
+    [["http://x", "--baseline", "update", "--baselines", " "], /--baselines needs a directory/],
+    // A setting that would do nothing without --baseline is pointed out, not ignored.
+    [["http://x", "--baselines", "tests/visual"], /apply only with --baseline compare or --baseline update/],
+    [["http://x", "--baseline", "off", "--baseline-threshold", "1"], /apply only with --baseline compare or --baseline update/],
   ];
   for (const [args, message] of refused) {
     const parsed = parseCheckArgs(args, "/work");
@@ -1052,6 +1106,9 @@ test("action: the arguments it builds are ones the CLI accepts, carrying every o
     "flow-writes": "allow",
     "on-refused-step": "stop",
     "gate-retests": "never",
+    baseline: "update",
+    baselines: "tests/visual",
+    "baseline-threshold": "0.25",
     cli: "dist/cli.js",
     "upload-sarif": "true",
   };
@@ -1075,6 +1132,9 @@ test("action: the arguments it builds are ones the CLI accepts, carrying every o
     flowWrites: "allow",
     onRefusedStep: "stop",
     gateRetests: "never",
+    baseline: "update",
+    baselinesDir: "/work/tests/visual",
+    baselineThreshold: 0.25,
   });
   for (const own of ACTION_ONLY_INPUTS.filter((n) => n !== "url")) assert.ok(!args.some((a) => a.startsWith(`--${own}`)), own);
 });
@@ -1086,6 +1146,12 @@ test("action: its defaults are the CLI's defaults, and an empty input is left to
   assert.ok(viaAction.ok && direct.ok);
   assert.deepEqual(viaAction.options, direct.options);
   assert.ok(!args.some((a) => a.startsWith("--max-routes") || a.startsWith("--paths") || a.startsWith("--out")));
+  // An input whose CLI default is not the empty string says what that default is, and it is the parser's.
+  const threshold = String((parseThreshold(undefined) as { value: number }).value);
+  assert.ok(
+    (action.inputs["baseline-threshold"].description as string).includes(`Empty means ${threshold},`),
+    `the baseline-threshold input should say "Empty means ${threshold},"`,
+  );
 });
 
 test("action: a missing url or an unknown browser stops it before anything is downloaded", () => {
@@ -1844,6 +1910,494 @@ test("SARIF: a gating re-test's level is the severity its finding was filed at",
     return (toSarif(r, "1") as { runs: Array<{ results: Array<{ level: string }> }> }).runs[0].results[0].level;
   };
   assert.deepEqual(["high", "medium", "low", "critical"].map(at), ["error", "warning", "note", "error"]);
+});
+
+// ---------------------------------------------------------------------------
+// Visual baselines (engine/baseline.ts): the targets file, where the files
+// go, what a baseline records, the verdict, and how an unmet baseline becomes
+// an issue. Taking the pictures is in the smoke suite (scripts/smoke/baselines.ts).
+// ---------------------------------------------------------------------------
+
+/** A picture of one colour, with pixels painted another where a case says. */
+function picture(width: number, height: number, paint: Array<[number, number]> = []): RgbaImage {
+  const data = new Uint8Array(width * height * 4).fill(255);
+  for (const [x, y] of paint) data.set([200, 30, 30, 255], (y * width + x) * 4);
+  return { width, height, data };
+}
+
+const PLAN: BaselineTarget = { path: "/plans", element: "testid=plan" };
+const capture = (over: Partial<CaptureSettings> = {}): CaptureSettings => ({ ...BASELINE_CAPTURE, ...over });
+const storedMeta = (over: Partial<BaselineMeta> = {}, image = picture(10, 10)): BaselineMeta => ({
+  ...baselineMeta({
+    target: PLAN,
+    engine: "chromium",
+    platform: "linux",
+    capture: capture(),
+    size: { width: image.width, height: image.height },
+    capturedAt: "2026-10-01T00:00:00.000Z",
+  }),
+  ...over,
+});
+
+test("baselines: a targets file lists a path and an element, and the element defaults to the page", () => {
+  const parsed = parseBaselineTargets(
+    JSON.stringify({ targets: [{ path: "/" }, { path: "/plans", element: "testid=plan" }, { path: "/plans", element: 'role=button[name="Change plan"]' }] }),
+    "targets.json",
+  );
+  assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+  assert.deepEqual(parsed.targets, [
+    { path: "/", element: "page" },
+    { path: "/plans", element: "testid=plan" },
+    { path: "/plans", element: 'role=button[name="Change plan"]' },
+  ]);
+  // An element is named the way a saved flow names its target; "page" is the viewport.
+  assert.equal(elementTarget("page"), null);
+  assert.deepEqual(elementTarget("testid=plan"), { by: "testid", value: "plan" });
+  assert.deepEqual(elementTarget("label=Email"), { by: "label", value: "Email" });
+  assert.equal(elementTarget("#plan"), undefined);
+});
+
+test("baselines: every mistake in the targets file names the file and the field", () => {
+  const bad = (json: unknown): string => {
+    const parsed = parseBaselineTargets(typeof json === "string" ? json : JSON.stringify(json), "targets.json");
+    assert.ok(!parsed.ok, JSON.stringify(json));
+    return parsed.error;
+  };
+  const cases: Array<[unknown, RegExp]> = [
+    ["{", /^targets\.json: not valid JSON/],
+    [{}, /^targets\.json: targets is required/],
+    [{ targets: [] }, /^targets\.json: targets lists nothing to keep a baseline of/],
+    [{ targets: [{ element: "page" }] }, /^targets\.json: targets\[0\]\.path is required/],
+    [{ targets: [{ path: "plans" }] }, /targets\[0\]\.path must be a path on the app, starting with \//],
+    [{ targets: [{ path: "/a b" }] }, /targets\[0\]\.path must be a path on the app/],
+    [{ targets: [{ path: "/", element: "#save" }] }, /targets\[0\]\.element must be page or testid=…, text=…, label=… or role=/],
+    [{ targets: [{ path: "/", element: "role=buton" }] }, /targets\[0\]\.element names the role "buton", which is not an ARIA role/],
+    [{ targets: [{ path: "/", elemnt: "page" }] }, /targets\[0\] unknown field\(s\) "elemnt"/],
+    [{ targets: [{ path: "/" }], threshold: 1 }, /^targets\.json: \(the whole file\) unknown field\(s\) "threshold"/],
+    [{ targets: [{ path: "/" }, { path: "/", element: "page" }] }, /targets\[1\] repeats targets\[0\]/],
+    [{ targets: Array.from({ length: MAX_BASELINE_TARGETS + 1 }, (_, i) => ({ path: `/p${i}` })) }, /targets holds at most 100 targets/],
+  ];
+  for (const [json, message] of cases) assert.match(bad(json), message);
+  assert.match(missingTargetsMessage("vis/targets.json"), /^there is no vis\/targets\.json: list the pages and elements .*"element": "testid=profile-card"/);
+});
+
+test("baselines: one folder per engine and per route; names that read alike never share a file, and nothing in a name leaves its folder", () => {
+  assert.match(routeFolder("/"), /^index-[0-9a-f]{8}$/);
+  assert.match(routeFolder("/settings/profile"), /^settings-profile-[0-9a-f]{8}$/);
+  assert.notEqual(routeFolder("/a-b"), routeFolder("/a/b"));
+  assert.notEqual(routeFolder("/a"), routeFolder("/A"));
+  assert.equal(elementFile("page"), "page");
+  assert.match(elementFile("testid=plan"), /^testid-plan-[0-9a-f]{8}$/);
+  assert.notEqual(elementFile("testid=Plan"), elementFile("testid=plan"), "test ids are case-sensitive");
+  for (const hostile of ["/../../etc/passwd", "/..", "/%2e%2e/x", "/" + "x".repeat(300)]) {
+    assert.match(routeFolder(hostile), /^[a-z0-9-]{1,57}$/, hostile);
+    assert.match(elementFile(`testid=${hostile}`), /^[a-z0-9-]{1,57}$/, hostile);
+  }
+  const files = baselineFiles("webkit", PLAN);
+  assert.equal(files.png, `webkit/${routeFolder("/plans")}/${elementFile("testid=plan")}.png`);
+  assert.equal(files.json, files.png.replace(/\.png$/, ".json"));
+  assert.notEqual(baselineFiles("chromium", PLAN).png, files.png, "a picture from one browser is never another's baseline");
+  assert.deepEqual(visualFiles(PLAN), {
+    expected: `visual/${routeFolder("/plans")}/${elementFile("testid=plan")}.expected.png`,
+    actual: `visual/${routeFolder("/plans")}/${elementFile("testid=plan")}.actual.png`,
+    diff: `visual/${routeFolder("/plans")}/${elementFile("testid=plan")}.diff.png`,
+  });
+  // Unless a folder is named, baselines stay inside .scenescout/, which git ignores.
+  assert.equal(defaultBaselinesDir("/work/app"), path.join("/work/app", ".scenescout", "baselines"));
+});
+
+test("baselines: a baseline's JSON says what it is of and how it was taken, and reads back", () => {
+  const meta = storedMeta();
+  const parsed = parseBaselineMeta(JSON.stringify(meta));
+  assert.ok(parsed.ok);
+  assert.deepEqual(parsed.meta, meta);
+  assert.deepEqual(Object.keys(meta.capture).sort(), ["animations", "caret", "deviceScaleFactor", "margin", "reducedMotion", "viewport"]);
+  assert.deepEqual(BASELINE_CAPTURE, {
+    viewport: { width: 1280, height: 900 },
+    deviceScaleFactor: 1,
+    margin: 8,
+    reducedMotion: "reduce",
+    animations: "disabled",
+    caret: "hide",
+  });
+  const bad = parseBaselineMeta(JSON.stringify({ ...meta, capture: { ...meta.capture, viewport: undefined } }));
+  assert.ok(!bad.ok && /capture\.viewport is required/.test(bad.error), bad.ok ? "" : bad.error);
+  assert.ok(!parseBaselineMeta("{").ok);
+});
+
+test("baselines: two pictures are compared only when taken alike; each setting that differs is named", () => {
+  assert.deepEqual(captureDifferences(capture(), capture()), []);
+  assert.deepEqual(captureDifferences(capture({ viewport: { width: 1440, height: 900 } }), capture()), ["viewport 1440×900 (now 1280×900)"]);
+  assert.deepEqual(captureDifferences(capture({ deviceScaleFactor: 2, margin: 0 }), capture()), ["device scale 2 (now 1)", "margin 0px (now 8px)"]);
+  assert.deepEqual(captureDifferences(capture({ animations: "allow", caret: "initial" }), capture()), [
+    "animations allow (now disabled)",
+    "caret initial (now hide)",
+  ]);
+});
+
+test("baselines: a stored baseline is usable, absent, or unusable with the reason — never silently either of the others", () => {
+  const image = picture(10, 10);
+  const png = encodePng(image);
+  const json = JSON.stringify(storedMeta());
+  assert.equal(readStoredBaseline(PLAN, "chromium", null, null), null);
+  const usable = readStoredBaseline(PLAN, "chromium", png, json);
+  assert.ok(usable && "image" in usable && usable.image.width === 10 && usable.meta.element === "testid=plan");
+  const problem = (stored: ReturnType<typeof readStoredBaseline>): string =>
+    stored && "problem" in stored ? stored.problem : `not a problem: ${JSON.stringify(stored)}`;
+  assert.match(problem(readStoredBaseline(PLAN, "chromium", null, json)), /its PNG is missing/);
+  assert.match(problem(readStoredBaseline(PLAN, "chromium", png, null)), /the JSON beside its PNG is missing/);
+  assert.match(problem(readStoredBaseline(PLAN, "chromium", png, "{")), /its JSON is not valid/);
+  assert.match(
+    problem(readStoredBaseline({ ...PLAN, element: "testid=other" }, "chromium", png, json)),
+    /describes testid=plan on \/plans in chromium, not this target/,
+  );
+  assert.match(problem(readStoredBaseline(PLAN, "firefox", png, json)), /in chromium, not this target/);
+  assert.match(problem(readStoredBaseline(PLAN, "chromium", Buffer.from("not a png"), json)), /its PNG cannot be read: not a PNG/);
+  assert.match(problem(readStoredBaseline(PLAN, "chromium", encodePng(picture(12, 10)), json)), /its PNG is 12×10 where its JSON says 10×10/);
+});
+
+test("baselines: compare — none yet is listed and never fails; the same picture matches at 0%; a change past the threshold is a change", () => {
+  const before = picture(10, 10);
+  const now = { capture: capture(), platform: "linux", image: picture(10, 10) };
+  const stored = { meta: storedMeta(), image: before };
+  assert.deepEqual(judgeBaseline({ mode: "compare", threshold: 0, stored: null, now }), { status: "no-baseline" });
+  const same = judgeBaseline({ mode: "compare", threshold: 0, stored, now });
+  assert.equal(same.status, "matches");
+  assert.equal(same.diff?.percent, 0);
+  assert.equal(same.diffImage, undefined, "no picture is kept for a match");
+  // One pixel of a hundred: a change at a threshold of 0, within a 1% one, a change again just under it.
+  const onePixel = { ...now, image: picture(10, 10, [[3, 4]]) };
+  const changed = judgeBaseline({ mode: "compare", threshold: 0, stored, now: onePixel });
+  assert.equal(changed.status, "changed");
+  assert.equal(changed.diff?.changedPixels, 1);
+  assert.equal(changed.diff?.percent, 1);
+  assert.ok(changed.diffImage && changed.diffImage.width === 10);
+  assert.equal(judgeBaseline({ mode: "compare", threshold: 1, stored, now: onePixel }).status, "matches", "exactly the threshold is allowed");
+  assert.equal(judgeBaseline({ mode: "compare", threshold: 0.99, stored, now: onePixel }).status, "changed");
+  // Exactly the threshold, where floating point puts the share a hair past it: 7 of 100 is 7.000000000000001%.
+  assert.ok(!isChange({ changed: 7, total: 100, sizeChanged: false }, 7));
+  assert.ok(!isChange({ changed: 8064, total: 1280 * 900, sizeChanged: false }, 0.7));
+  assert.ok(isChange({ changed: 8065, total: 1280 * 900, sizeChanged: false }, 0.7));
+  // A change of size always counts, whatever the threshold.
+  const taller = judgeBaseline({ mode: "compare", threshold: 100, stored, now: { ...now, image: picture(10, 11) } });
+  assert.equal(taller.status, "changed");
+  assert.deepEqual([taller.diff?.sizeChanged, taller.diff?.baseline, taller.diff?.now], [true, { width: 10, height: 10 }, { width: 10, height: 11 }]);
+  assert.ok(isChange({ changed: 0, total: 100, sizeChanged: true }, 100));
+  assert.ok(!isChange({ changed: 0, total: 100, sizeChanged: false }, 0));
+});
+
+test("baselines: compare — a baseline taken with other settings, or one that cannot be read, is unusable, never a comparison", () => {
+  const now = { capture: capture(), platform: "linux", image: picture(10, 10) };
+  const other = judgeBaseline({
+    mode: "compare",
+    threshold: 0,
+    stored: { meta: storedMeta({ capture: capture({ viewport: { width: 390, height: 844 } }) }), image: picture(10, 10) },
+    now,
+  });
+  assert.deepEqual(other, { status: "unusable", detail: "it was taken with other settings: viewport 390×844 (now 1280×900)" });
+  assert.deepEqual(judgeBaseline({ mode: "compare", threshold: 0, stored: { problem: "its PNG is missing" }, now }), {
+    status: "unusable",
+    detail: "its PNG is missing",
+  });
+});
+
+test("baselines: update — writes a missing, unusable or changed baseline, and leaves alone one compare would accept", () => {
+  const now = { capture: capture(), platform: "linux", image: picture(10, 10) };
+  const stored = { meta: storedMeta(), image: picture(10, 10) };
+  // `updated` is the status that writes the new picture as the baseline (check-run).
+  assert.deepEqual(judgeBaseline({ mode: "update", threshold: 0, stored: null, now }), { status: "updated", detail: "it had no baseline" });
+  assert.deepEqual(judgeBaseline({ mode: "update", threshold: 0, stored: { problem: "x" }, now }), {
+    status: "updated",
+    detail: "replaced one that could not be used: x",
+  });
+  assert.equal(
+    judgeBaseline({ mode: "update", threshold: 0, stored: { meta: storedMeta({ capture: capture({ margin: 0 }) }), image: picture(10, 10) }, now }).status,
+    "updated",
+  );
+  const same = judgeBaseline({ mode: "update", threshold: 0, stored, now });
+  assert.equal(same.status, "matches", "an update that changes nothing changes no file");
+  // As compare judges it: past the threshold is written, within it is left, so noise under the threshold changes no file.
+  const onePixel = { ...now, image: picture(10, 10, [[0, 0]]) };
+  const moved = judgeBaseline({ mode: "update", threshold: 0, stored, now: onePixel });
+  assert.deepEqual([moved.status, moved.detail, moved.diffImage], ["updated", "it was 1% different (1 of 100 pixels)", undefined]);
+  assert.equal(judgeBaseline({ mode: "update", threshold: 1, stored, now: onePixel }).status, "matches");
+  // A change of size is written whatever the threshold.
+  assert.equal(judgeBaseline({ mode: "update", threshold: 100, stored, now: { ...now, image: picture(11, 10) } }).status, "updated");
+  // Update never reports a target unusable or changed: it takes it again.
+  for (const stored2 of [{ problem: "x" }, { meta: storedMeta(), image: picture(10, 10, [[1, 1]]) }])
+    assert.ok(!["unusable", "changed"].includes(judgeBaseline({ mode: "update", threshold: 0, stored: stored2, now }).status));
+});
+
+test("baselines: only pictures named as a check names them are cleared from the output folder", () => {
+  for (const name of Object.values(visualFiles(PLAN))) {
+    const [, folder, file] = name.split("/");
+    assert.ok(isVisualPicture(folder, file), name);
+  }
+  const page = visualFiles({ path: "/", element: "page" }).diff.split("/");
+  assert.ok(isVisualPicture(page[1], page[2]));
+  for (const [folder, file] of [
+    ["plans-1a2b3c4d", "notes.png"],
+    ["plans-1a2b3c4d", "diff.png"],
+    ["plans-1a2b3c4d", "page.diff.png.bak"],
+    ["plans", "page.diff.png"],
+    ["my-screens", "home-1a2b3c4d.actual.png"],
+    ["plans-1a2b3c4d", "testid-plan-1a2b3c4d.baseline.png"],
+  ])
+    assert.ok(!isVisualPicture(folder, file), `${folder}/${file}`);
+});
+
+test("baselines: a baseline from another operating system is still compared, with a note that text is drawn differently there", () => {
+  const now = { capture: capture(), platform: "linux", image: picture(10, 10) };
+  const fromMac = { meta: storedMeta({ platform: "darwin" }), image: picture(10, 10) };
+  const fromHere = { meta: storedMeta(), image: picture(10, 10) };
+  const r = judgeBaseline({ mode: "compare", threshold: 0, stored: fromMac, now });
+  assert.equal(r.status, "matches");
+  assert.equal(r.platformNote, "its baseline was taken on darwin and this check ran on linux");
+  assert.equal(judgeBaseline({ mode: "compare", threshold: 0, stored: fromHere, now }).platformNote, undefined);
+  // Asked to update where the check runs, a baseline from another system is replaced however close it came;
+  // the same picture taken on this system, within the threshold, is left as it was.
+  const retaken = judgeBaseline({ mode: "update", threshold: 0.1, stored: fromMac, now });
+  assert.deepEqual([retaken.status, retaken.detail, retaken.platformNote], ["updated", "replaced one taken on darwin", undefined]);
+  assert.equal(judgeBaseline({ mode: "update", threshold: 0.1, stored: fromHere, now }).status, "matches");
+});
+
+test("baselines: --baseline-threshold is a percentage from 0 to 100, and 0.1 when not given", () => {
+  assert.deepEqual(parseThreshold(undefined), { ok: true, value: 0.1 });
+  assert.deepEqual(parseThreshold("0"), { ok: true, value: 0 }, "0 stays available: every changed pixel counts");
+  assert.deepEqual(parseThreshold("0.5"), { ok: true, value: 0.5 });
+  assert.deepEqual(parseThreshold("100"), { ok: true, value: 100 });
+  for (const bad of ["", " ", "-0.1", "100.1", "5%", "NaN", "Infinity"]) assert.ok(!parseThreshold(bad).ok, bad);
+});
+
+test("baselines: at the default threshold an unchanged picture reads 0%, a few anti-aliased pixels pass, and a restyle past 0.1% does not", () => {
+  const threshold = (parseThreshold(undefined) as { value: number }).value;
+  const stored = { meta: storedMeta({}, picture(100, 100)), image: picture(100, 100) };
+  const now = (paint: Array<[number, number]>) => ({ capture: capture(), platform: "linux", image: picture(100, 100, paint) });
+  const pixels = (n: number): Array<[number, number]> => Array.from({ length: n }, (_, i): [number, number] => [i, 0]);
+  const same = judgeBaseline({ mode: "compare", threshold, stored, now: now([]) });
+  assert.deepEqual([same.status, same.diff?.percent], ["matches", 0], "an unchanged picture still reads 0%");
+  // 10,000 pixels: 10 is exactly 0.1% and passes; 11 is past it.
+  assert.equal(judgeBaseline({ mode: "compare", threshold, stored, now: now(pixels(3)) }).status, "matches", "the odd anti-aliased pixel passes");
+  assert.equal(judgeBaseline({ mode: "compare", threshold, stored, now: now(pixels(10)) }).status, "matches");
+  const restyled = judgeBaseline({ mode: "compare", threshold, stored, now: now(pixels(11)) });
+  assert.deepEqual([restyled.status, restyled.diff?.percent], ["changed", 0.11]);
+  // The same three pixels at 0: every changed pixel counts.
+  assert.equal(judgeBaseline({ mode: "compare", threshold: 0, stored, now: now(pixels(3)) }).status, "changed");
+});
+
+/** A run of baselines as check-run hands it to the rules. */
+function baselineRun(results: BaselineResult[], over: Partial<BaselineRun> = {}): BaselineRun {
+  return { mode: "compare", engine: "chromium", threshold: 0, dir: "tests/visual", results, ...over };
+}
+const changedPlan: BaselineResult = {
+  path: "/plans",
+  element: "testid=plan",
+  status: "changed",
+  baseline: "chromium/plans-1/testid-plan-2.png",
+  diff: { percent: 4.21, changedPixels: 421, totalPixels: 10000, sizeChanged: false, baseline: { width: 100, height: 100 }, now: { width: 100, height: 100 } },
+  files: {
+    expected: "visual/plans-1/testid-plan-2.expected.png",
+    actual: "visual/plans-1/testid-plan-2.actual.png",
+    diff: "visual/plans-1/testid-plan-2.diff.png",
+  },
+};
+const missingPlan: BaselineResult = {
+  path: "/plans",
+  element: "testid=gone",
+  status: "not-captured",
+  detail: `page.goto: net::ERR_CONNECTION_REFUSED at ${ORIGIN}/plans`,
+  baseline: "chromium/plans-1/testid-gone-3.png",
+};
+const otherStatuses: BaselineResult[] = (["matches", "no-baseline", "updated"] as const).map((status) => ({
+  path: "/",
+  element: "page",
+  status,
+  baseline: "chromium/index-1/page.png",
+}));
+
+test("baselines: a change, and a target that could not be pictured, are each one high visual-change issue; nothing else is", () => {
+  const { issues } = checkFindings([route()], ORIGIN, [], [], baselineRun([changedPlan, missingPlan, ...otherStatuses]));
+  assert.deepEqual(
+    issues.map((i) => [i.rule, i.severity, i.routes]),
+    [
+      ["visual-change", "high", ["/plans"]],
+      ["visual-change", "high", ["/plans"]],
+    ],
+  );
+  assert.equal(
+    issues[0].evidence,
+    "testid=plan on /plans: 4.21% of its pixels changed (421 of 10000; allowed: 0%) — diff: visual/plans-1/testid-plan-2.diff.png",
+  );
+  // The app's origin is taken out, as from any evidence.
+  assert.equal(issues[1].evidence, "testid=gone on /plans could not be captured: page.goto: net::ERR_CONNECTION_REFUSED at /plans");
+  assert.ok(!checkFindings([route()], ORIGIN, [], [], baselineRun(otherStatuses)).issues.length, "no baseline yet, a match and an update are not issues");
+  assert.deepEqual(checkFindings([route()], ORIGIN, ["visual-change"], [], baselineRun([changedPlan])).issues, [], "--ignore takes it like any rule");
+  // Under update the sentence says the baseline was not written.
+  assert.match(
+    checkFindings([route()], ORIGIN, [], [], baselineRun([missingPlan], { mode: "update" })).issues[0].evidence,
+    /, so its baseline was not written$/,
+  );
+  const sized = { ...changedPlan, diff: { ...changedPlan.diff!, sizeChanged: true, now: { width: 100, height: 104 } } };
+  assert.match(
+    baselineEvidence(sized, { mode: "compare", threshold: 5 }) ?? "",
+    /its size changed from 100×100 to 100×104, which always counts \(4\.21% of its pixels differ\)/,
+  );
+});
+
+test("baselines: the same target changing by another amount is the same alert; another target or browser is another", () => {
+  const again = { ...changedPlan, diff: { ...changedPlan.diff!, percent: 9.5, changedPixels: 950 } };
+  const fp = (r: BaselineResult, engine: BaselineRun["engine"] = "chromium") =>
+    checkFindings([route()], ORIGIN, [], [], baselineRun([r], { engine })).issues[0].fingerprint;
+  assert.equal(fp(again), fp(changedPlan));
+  assert.notEqual(fp(changedPlan, "webkit"), fp(changedPlan));
+  assert.notEqual(fp({ ...changedPlan, element: "testid=other" }), fp(changedPlan));
+  assert.equal(fp(changedPlan), baselineFingerprint("chromium", changedPlan));
+});
+
+test("baselines: an unmet baseline fails the default gate; with --fail-on never it is reported and passes", () => {
+  const withBaselines = (failOn: CheckResult["failOn"]): CheckResult => {
+    const run = baselineRun([changedPlan]);
+    return { ...result(checkFindings([route()], ORIGIN, [], [], run).issues, failOn), baselines: run };
+  };
+  assert.deepEqual([summarise(withBaselines("high")).passed, exitCodeOf(withBaselines("high"))], [false, 1]);
+  assert.deepEqual([summarise(withBaselines("never")).passed, exitCodeOf(withBaselines("never"))], [true, 0]);
+  const sarif = toSarif(withBaselines("high"), "1", { anchor: ".github/workflows/check.yml", flowsDir: "flows" }) as {
+    runs: Array<{
+      results: Array<{
+        ruleId: string;
+        level: string;
+        message: { text: string };
+        partialFingerprints: Record<string, string>;
+        locations: Array<{ physicalLocation: { artifactLocation: { uri: string } }; logicalLocations: Array<{ name: string }> }>;
+      }>;
+    }>;
+  };
+  const [only] = sarif.runs[0].results;
+  assert.deepEqual([only.ruleId, only.level], ["visual-change", "error"]);
+  assert.match(
+    only.message.text,
+    /^Differs from its visual baseline: testid=plan on \/plans: 4\.21% .*diff: visual\/plans-1\/testid-plan-2\.diff\.png — on \/plans$/,
+  );
+  // No flow raised it, so it points at the anchor file code scanning keeps, with its page as the logical location.
+  assert.deepEqual(
+    only.locations.map((l) => [l.physicalLocation.artifactLocation.uri, l.logicalLocations[0].name]),
+    [[".github/workflows/check.yml", "/plans"]],
+  );
+  assert.equal(only.partialFingerprints["scenescoutCheck/v1"], baselineFingerprint("chromium", changedPlan));
+});
+
+test("baselines: the report lists every target with what became of it, and check.json carries the run", () => {
+  const run = baselineRun([changedPlan, missingPlan, ...otherStatuses]);
+  const r: CheckResult = { ...result(checkFindings([route()], ORIGIN, [], [], run).issues), baselines: run };
+  const report = formatCheck(r);
+  assert.match(
+    report,
+    /## Visual baselines \(5\)\n\nCompared in chromium, baselines in `tests\/visual` · 0% of a picture's pixels may change · 1 changed · 1 not captured · 1 no baseline yet · 1 updated · 1 match/,
+  );
+  assert.match(
+    report,
+    /- ✗ `testid=plan` on `\/plans`: 4\.21% of its pixels changed \(421 of 10000; allowed: 0%\) — expected `visual\/plans-1\/testid-plan-2\.expected\.png`, now `[^`]+\.actual\.png`, diff `[^`]+\.diff\.png`/,
+  );
+  // A target compared with nothing is named beside the verdict: nothing compared is not a match.
+  assert.match(report.split("\n").slice(0, 6).join("\n"), / · 1 visual target\(s\) not compared: no baseline yet/);
+  assert.doesNotMatch(formatCheck({ ...r, baselines: baselineRun([changedPlan]) }), /not compared: no baseline yet/);
+  assert.match(report, /- ⊘ `testid=gone` on `\/plans`: could not be captured: /);
+  assert.match(report, /- ✓ `page` on `\/`: matches \(0% changed\)/);
+  assert.match(report, /- ○ `page` on `\/`: no baseline yet/);
+  assert.match(
+    report,
+    /A target with no baseline yet is listed and never fails; one whose baseline cannot be used fails until it is taken again\. Run the check with `--baseline update`/,
+  );
+  assert.match(report, /the changed pixels in red/);
+  assert.doesNotMatch(report, /another operating system/);
+  const noted = formatCheck({
+    ...r,
+    baselines: baselineRun([{ ...changedPlan, platformNote: "its baseline was taken on darwin and this check ran on linux" }]),
+  });
+  assert.match(noted, /_\(its baseline was taken on darwin and this check ran on linux\)_/);
+  assert.match(noted, /Some baselines were taken on another operating system/);
+  const updated = formatCheck({ ...r, baselines: baselineRun([{ ...otherStatuses[2], detail: "it had no baseline" }, otherStatuses[0]], { mode: "update" }) });
+  assert.match(updated, /Updated in chromium, baselines in `tests\/visual` · 0% of a picture's pixels may change · 1 updated · 1 left as they were/);
+  assert.match(updated, /↻ `page` on `\/`: baseline written to `chromium\/index-1\/page\.png` \(it had no baseline\)/);
+  assert.match(updated, /✓ `page` on `\/`: within the threshold of its baseline \(0% changed\), which was left as it was/);
+  assert.doesNotMatch(formatCheck(result([])), /Visual baselines/);
+  const json = toSummaryJson(r, "1") as { baselines: BaselineRun | null };
+  assert.deepEqual(json.baselines, run);
+  assert.equal((toSummaryJson(result([]), "1") as { baselines: unknown }).baselines, null, "off reads as null");
+});
+
+test("baselines: a token in a target's path, or in the reason a picture was not taken, is redacted before anything is written", () => {
+  // Built the way check-run builds them: the file names come from the target's path.
+  const target: BaselineTarget = { path: "/reset?token=abc123def456ghi789", element: "page" };
+  const changedLeak: BaselineResult = { ...changedPlan, ...target, baseline: baselineFiles("chromium", target).png, files: visualFiles(target) };
+  // Assembled here so that no whole token sits in this file (hygiene-test allows them only in the redaction fixtures).
+  const jwt = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxIn0", "c2lnbmF0dXJl"].join(".");
+  const missingLeak: BaselineResult = {
+    ...target,
+    element: "testid=gone",
+    status: "not-captured",
+    detail: `page.goto: interrupted by another navigation to https://sso.example.com/cb?access_token=${jwt}`,
+    baseline: baselineFiles("chromium", { ...target, element: "testid=gone" }).png,
+  };
+  assert.doesNotMatch(routeFolder(target.path), /abc123/, "a token never becomes part of a file name");
+  assert.notEqual(routeFolder(target.path), routeFolder("/reset?token=zzz999yyy888xxx777"), "two targets that differ only by a token still have a file each");
+  const run = redactBaselineRun(baselineRun([changedLeak, missingLeak]));
+  const r: CheckResult = { ...result(checkFindings([route()], ORIGIN, [], [], run).issues), baselines: run };
+  for (const written of [formatCheck(r), JSON.stringify(toSummaryJson(r, "1")), JSON.stringify(toSarif(r, "1"))]) {
+    assert.doesNotMatch(written, /abc123def456ghi789|eyJhbGciOiJIUzI1NiJ9/);
+  }
+  assert.equal(r.issues.length, 2, "both are still filed");
+});
+
+test("baselines: an unusable baseline is filed, as a change is; a change with no comparison attached is still filed", () => {
+  const unusable: BaselineResult = { path: "/plans", element: "page", status: "unusable", detail: "its PNG is missing", baseline: "chromium/plans-1/page.png" };
+  const { issues } = checkFindings([route()], ORIGIN, [], [], baselineRun([unusable]));
+  assert.equal(issues.length, 1);
+  assert.match(issues[0].evidence, /^page on \/plans: its baseline cannot be used \(its PNG is missing\); run the check with --baseline update/);
+  assert.match(baselineEvidence({ ...changedPlan, diff: undefined }, { mode: "compare", threshold: 0 }) ?? "", /it no longer matches its baseline/);
+  assert.equal(
+    baselineEvidence({ ...unusable, status: "no-baseline", detail: undefined }, { mode: "compare", threshold: 0 }),
+    null,
+    "no baseline yet never fails",
+  );
+});
+
+test("baselines: an element that reaches outside the window is pictured only where it is inside, and says so", () => {
+  const vp = { width: 1280, height: 900 };
+  assert.equal(cutByViewport({ x: 32, y: 40, width: 320, height: 200 }, vp), null);
+  assert.equal(cutByViewport({ x: -0.5, y: 0, width: 1280.5, height: 900.4 }, vp), null, "a fractional edge is not a cut");
+  assert.equal(
+    cutByViewport({ x: 0, y: -300, width: 1280, height: 2400 }, vp),
+    "only the part inside the 1280×900 window is pictured: the element is 1280×2400",
+  );
+  assert.match(cutByViewport({ x: 900, y: 10, width: 600, height: 40 }, vp) ?? "", /the element is 600×40/);
+});
+
+test("baselines: the script that stops animations finishes the finite ones and cancels those that never end", () => {
+  const calls: string[] = [];
+  const animation = (name: string, endTime: number | null) => ({
+    effect: endTime === null ? null : { getComputedTiming: () => ({ endTime }) },
+    finish: () => calls.push(`finish ${name}`),
+    cancel: () => calls.push(`cancel ${name}`),
+  });
+  const document = { getAnimations: () => [animation("slide-in", 400), animation("spinner", Infinity), animation("detached", null)] };
+  assert.equal(vm.runInNewContext(STOP_ANIMATIONS_SCRIPT, { document }), true);
+  assert.deepEqual(calls, ["finish slide-in", "cancel spinner", "cancel detached"]);
+});
+
+test("action: the pictures of changed baselines are kept with the results, and only when this run wrote them", () => {
+  const changed = { baselines: { results: [{ status: "changed", files: { diff: "visual/a/b.diff.png" } }] } };
+  const there = () => true;
+  assert.equal(picturesDir(changed, "/out", there), path.join("/out", VISUAL_DIRNAME), "the folder the CLI writes its pictures to");
+  assert.equal(picturesDir({ baselines: { results: [{ status: "matches" }] } }, "/out", there), "", "a folder an earlier run left is not this run's");
+  assert.equal(picturesDir({ baselines: null }, "/out", there), "");
+  assert.equal(picturesDir(null, "/out", there), "");
+  assert.equal(
+    picturesDir(changed, "/out", () => false),
+    "",
+  );
+  const steps = action.runs.steps as Array<{ name: string; with?: { path?: string } }>;
+  assert.match(steps.find((s) => s.name === "Keep the results")?.with?.path ?? "", /\$\{\{ steps\.run\.outputs\.visual \}\}/);
 });
 
 // ── The first run (`scenescout <url>`): what it leads with, its summary and its report ──

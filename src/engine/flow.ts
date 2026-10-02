@@ -222,33 +222,45 @@ export interface Flow {
   steps: FlowStep[];
 }
 
-/** `steps[2].target`, the way a person would look for it in the file. */
-function fieldPath(p: ReadonlyArray<string | number>): string {
+/** `steps[2].target`, the way a person would look for it in the file. Shared with the baselines' targets file (baseline.ts). */
+export function fieldPath(p: ReadonlyArray<string | number>): string {
   if (p.length === 0) return "(the whole file)";
   return p.map((part, i) => (typeof part === "number" ? `[${part}]` : i === 0 ? part : `.${part}`)).join("");
 }
 
-function issueMessage(issue: z.ZodIssue): string {
+/** One schema problem as a person reads it. Shared with the baselines' targets file (baseline.ts). */
+export function issueMessage(issue: z.ZodIssue): string {
   if (issue.code === "unrecognized_keys") return `unknown field(s) ${issue.keys.map((k) => `"${k}"`).join(", ")}`;
   if (issue.code === "invalid_union_discriminator") return `must be one of ${FLOW_ACTIONS.join(", ")}`;
   if (issue.code === "invalid_type" && issue.received === "undefined") return "is required";
   return issue.message;
 }
 
-/** Validate one flow file's text. Every mistake names the file and the field. */
-export function parseFlow(text: string, file: string): { ok: true; flow: Flow } | { ok: false; error: string } {
+/**
+ * Parse a JSON file a person wrote against its schema. Every mistake names the
+ * file and the field, up to five of them. Shared by flows and the baselines'
+ * targets file (baseline.ts), so both read their errors the same way.
+ */
+export function parseJsonFile<T extends z.ZodTypeAny>(text: string, file: string, schema: T): { ok: true; data: z.infer<T> } | { ok: false; error: string } {
   let json: unknown;
   try {
     json = JSON.parse(text);
   } catch (err) {
     return { ok: false, error: `${file}: not valid JSON (${err instanceof Error ? err.message : String(err)})` };
   }
-  const parsed = flowSchema.safeParse(json);
+  const parsed = schema.safeParse(json);
   if (!parsed.success) {
     const issues = parsed.error.issues.slice(0, 5).map((i) => `${fieldPath(i.path)} ${issueMessage(i)}`);
     const more = parsed.error.issues.length > 5 ? ` (and ${parsed.error.issues.length - 5} more)` : "";
     return { ok: false, error: `${file}: ${issues.join("; ")}${more}` };
   }
+  return { ok: true, data: parsed.data };
+}
+
+/** Validate one flow file's text. Every mistake names the file and the field. */
+export function parseFlow(text: string, file: string): { ok: true; flow: Flow } | { ok: false; error: string } {
+  const parsed = parseJsonFile(text, file, flowSchema);
+  if (!parsed.ok) return parsed;
   return { ok: true, flow: { name: parsed.data.name ?? file.replace(/\.json$/i, ""), file, steps: parsed.data.steps } };
 }
 

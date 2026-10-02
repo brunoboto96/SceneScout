@@ -1450,6 +1450,9 @@ test("a first run is a check in its mode, never gated, in Chromium, with its cap
     flowWrites: "never",
     onRefusedStep: "report",
     gateRetests: "never",
+    // A first look pictures nothing for visual baselines.
+    baseline: "off",
+    baselineThreshold: 0.1,
   });
   assert.equal(firstRunCheckOptions({ url: "http://127.0.0.1:3000/", maxRoutes: 7, maxMinutes: 2, mode: "read-only" }, "/p").mode, "read-only");
 });

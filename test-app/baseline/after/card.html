@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>A plan</title>
+  <!-- One page served in two variants at the same path, for visual baselines: baseline/before/ and baseline/after/
+       differ ONLY in the plan card's colours and corners. The notes block beside it is the same in both, so its
+       baseline must still match at 0% when the card's does not. Its dot slides forever from a different point on
+       every load, so two pictures of it match only when animations are stopped for a baseline's picture. The
+       saved banner is itself still sliding into place when the page has loaded, so its picture holds only when
+       animations are stopped before it is measured. The tall block reaches below the window. -->
+  <style>
+    body { font: 16px/1.4 sans-serif; margin: 0; background: #ffffff; color: #1f2937; }
+    main { padding: 32px; }
+    .plan { width: 320px; padding: 16px; border: 2px solid #b91c1c; border-radius: 14px; background: #fef2f2; }
+    .plan h1 { font-size: 20px; margin: 0 0 8px; color: #7f1d1d; }
+    .notes { width: 320px; margin-top: 32px; padding: 16px; background: #f3f4f6; }
+    .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: #16a34a; animation: slide 2s linear infinite; }
+    @keyframes slide { from { transform: translateX(0); } to { transform: translateX(240px); } }
+    .saved { width: 320px; margin-top: 32px; padding: 12px 16px; background: #ecfdf5; color: #065f46; animation: arrive 30s linear; }
+    @keyframes arrive { from { transform: translateX(-200px); } to { transform: translateX(0); } }
+    .tall { width: 320px; height: 1400px; margin-top: 32px; background: linear-gradient(#f9fafb, #e5e7eb); }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="plan" data-testid="plan">
+      <h1>Team plan</h1>
+      <p>Three seats, billed monthly.</p>
+      <button type="button">Change plan</button>
+    </section>
+    <section class="notes" data-testid="notes">
+      <p><span class="dot"></span></p>
+      <p>Live</p>
+    </section>
+    <section class="saved" data-testid="saved">Saved</section>
+    <section class="tall" data-testid="tall"></section>
+  </main>
+  <script>
+    // Caught at a different point of its slide on every load, as a spinner or a carousel would be.
+    document.querySelector(".dot").style.animationDelay = "-" + (Math.random() * 2).toFixed(3) + "s";
+    document.querySelector(".saved").style.animationDelay = "-" + (Math.random() * 20).toFixed(3) + "s";
+  </script>
+</body>
+</html>
