@@ -16,8 +16,36 @@ import test from "node:test";
 import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { z } from "zod";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CI_ACTION_ONLY_INPUTS, ciArgs, ciOutDirFor, ciSummaryOutputs, ciVerdict, hasCiCommand } from "../action/ci-action.mjs";
-import { agentLoop, captureShots, HttpModelClient, MAX_RETRIES, MAX_TOOL_CALLS_PER_TURN, OutOfTime, ProviderError, type ModelClient } from "../src/ci-run.ts";
+import {
+  agentLoop,
+  captureShots,
+  ciClient,
+  HttpModelClient,
+  httpJudgeAsk,
+  judgeHandler,
+  MAX_RETRIES,
+  MAX_TOOL_CALLS_PER_TURN,
+  OutOfTime,
+  ProviderError,
+  toolHost,
+  type JudgeCalls,
+  type ModelClient,
+} from "../src/ci-run.ts";
+import {
+  clientAnswersJudge,
+  DedupJudge,
+  JUDGE_CALL_MS,
+  JUDGE_MAX_OUTPUT_TOKENS,
+  JUDGE_SYSTEM,
+  JUDGE_TOOL,
+  judgeSamplingParams,
+  samplingAsk,
+} from "../src/engine/dedup.ts";
+import { MemoryStore } from "../src/engine/memory.ts";
 import { CAPTURE_MARGIN, captureClip, capturedName, captureFileName, captureResultText, parseCaptureResult, rebaseUrl } from "../src/engine/capture.ts";
 import { decodePng, diffImages, encodePng, isPng, type RgbaImage } from "../src/engine/png.ts";
 import {
@@ -40,7 +68,10 @@ import {
   ciToolArgs,
   ciTools,
   DEFAULT_CAPS,
+  dedupModeFromEnv,
   detectProvider,
+  judgeEffort,
+  judgeKeyConfig,
   estimateCost,
   findingsThisRun,
   NO_USAGE,
@@ -55,6 +86,7 @@ import {
   wallLeftMs,
   type Caps,
   type CiResult,
+  type Spend,
   type ToolSpec,
   type Usage,
 } from "../src/engine/ci.ts";
@@ -90,7 +122,7 @@ const ANTHROPIC_KEY = "fake-anthropic-key-fedcba9876543210";
 
 // ── options ─────────────────────────────────────────────────────────────────
 
-test("options: the defaults are the agreed caps, read-only and medium", () => {
+test("options: the defaults are the agreed caps, read-only, medium, and the dedup judge", () => {
   const p = parseCiArgs(["http://127.0.0.1:3000"], "/work");
   assert.ok(p.ok);
   assert.deepEqual(p.options, {
@@ -99,6 +131,7 @@ test("options: the defaults are the agreed caps, read-only and medium", () => {
     caps: { turns: 40, tokens: 1_500_000, wallMs: 20 * 60_000 },
     mode: "read-only",
     level: "medium",
+    dedup: "judge",
   });
 });
 
@@ -128,6 +161,8 @@ test("options: every option is read, in both spellings", () => {
       "--browser=webkit",
       "--project=site",
       "--out=results",
+      "--dedup",
+      "rule",
     ],
     "/work",
   );
@@ -147,6 +182,7 @@ test("options: every option is read, in both spellings", () => {
     focus: "the order form",
     storageStatePath: "/work/auth/user.json",
     browser: "webkit",
+    dedup: "rule",
   });
 });
 
@@ -176,6 +212,7 @@ test("options: what is refused, and why", () => {
   assert.match(bad([u, "--price-in=-1"]), /--price-in must be US dollars per million tokens, from 0 to 1000/);
   assert.match(bad([u, "--price-out=cheap"]), /--price-out must be/);
   assert.match(bad([u, "--price-cached-in="]), /--price-cached-in must be/);
+  assert.match(bad([u, "--dedup=model"]), /--dedup must be one of rule, judge/);
 });
 
 test("destructive: only with --allow-destructive, which alone changes nothing", () => {
@@ -1295,6 +1332,7 @@ const ROW = (over: Partial<CiResultRow> = {}): CiResultRow => ({
   provider: "openai",
   model: "some-model-1",
   effort: "low",
+  dedup: "rule",
   key: "0123456789",
   recall: { found: 5, expected: 13 },
   precision: { correct: 7, labelled: 8, low: "70%", high: "90%" },
@@ -1324,6 +1362,8 @@ test("versions: compared by number, and anything but a plain X.Y.Z refused", () 
 });
 
 test("weekly decision: runs only when a release came out since the schedule last benchmarked it with this provider, or when forced", () => {
+  // Every record here is made by the test, not read from bench/ci-results.json: a scheduled row the weekly workflow
+  // appends there can turn the verdict for its release, and for every earlier one, from run to skip.
   const rows = [
     ROW({ version: "1.1.0", date: "2025-12-01", archive: "a" }),
     ROW({ version: "1.2.0", date: "2026-01-05", archive: "b" }),
@@ -1335,8 +1375,31 @@ test("weekly decision: runs only when a release came out since the schedule last
     ROW({ version: "1.3.0", source: "dispatched", effort: "high", date: "2026-03-02", archive: "e" }),
     ROW({ version: "1.3.0", source: "manual", date: "2026-03-03", archive: "f" }),
   ];
+  // Records unlike the one above: empty, with no scheduled row, and with versions that sort differently as text.
+  // A case names one, or uses the one above.
+  const records = {
+    empty: [],
+    // Runs taken by hand and dispatched runs, of 1.2.0 to 1.3.1, and none on the schedule.
+    unscheduled: [
+      ROW({ version: "1.2.0", source: "manual", archive: "g" }),
+      ROW({ version: "1.3.0", source: "manual", archive: "h" }),
+      ROW({ version: "1.3.0", source: "dispatched", effort: "high", archive: "i" }),
+      ROW({ version: "1.3.1", source: "dispatched", archive: "j" }),
+    ],
+    "1.9.0": [ROW({ version: "1.9.0", archive: "k" })],
+    "1.10.0 and 1.9.0": [ROW({ version: "1.10.0", archive: "l" }), ROW({ version: "1.9.0", archive: "m" })],
+  };
   const base = { force: false, openResultsPrs: 0, releaseHasCi: true };
-  const cases: Array<{ latest: string; provider: string; force?: boolean; openResultsPrs?: number; releaseHasCi?: boolean; run: boolean; reason: RegExp }> = [
+  const cases: Array<{
+    record?: keyof typeof records;
+    latest: string;
+    provider: string;
+    force?: boolean;
+    openResultsPrs?: number;
+    releaseHasCi?: boolean;
+    run: boolean;
+    reason: RegExp;
+  }> = [
     {
       latest: "1.2.0",
       provider: "openai",
@@ -1358,19 +1421,33 @@ test("weekly decision: runs only when a release came out since the schedule last
     // A release from before scenescout ci: nothing to run, forced or not.
     { latest: "1.3.0", provider: "openai", releaseHasCi: false, run: false, reason: /v1\.3\.0 predates scenescout ci/ },
     { latest: "1.3.0", provider: "openai", releaseHasCi: false, force: true, run: false, reason: /predates scenescout ci/ },
+    // Nothing recorded yet: the schedule's first run.
+    { record: "empty", latest: "1.0.0", provider: "openai", run: true, reason: /Nothing benchmarked on schedule with openai yet: benchmarking v1\.0\.0/ },
+    { record: "empty", latest: "1.0.0", provider: "openai", force: true, run: true, reason: /Forced/ },
+    // Runs taken by hand or dispatched, of the latest release or a later version, never make the schedule skip it.
+    { record: "unscheduled", latest: "1.3.0", provider: "openai", run: true, reason: /Nothing benchmarked on schedule with openai yet: benchmarking v1\.3\.0/ },
+    { record: "unscheduled", latest: "1.3.1", provider: "openai", run: true, reason: /Nothing benchmarked on schedule with openai yet/ },
+    // The schedule's first results pull request still open: main's record has no scheduled row yet, and the run still skips.
+    {
+      record: "unscheduled",
+      latest: "1.3.1",
+      provider: "openai",
+      openResultsPrs: 1,
+      run: false,
+      reason: /1 results pull request\(s\) labelled benchmark are still open/,
+    },
+    // Versions compare as numbers, not text: 1.10.0 is newer than 1.9.0.
+    { record: "1.9.0", latest: "1.10.0", provider: "openai", run: true, reason: /v1\.10\.0 was released since v1\.9\.0/ },
+    { record: "1.10.0 and 1.9.0", latest: "1.10.0", provider: "openai", run: false, reason: /No SceneScout release since v1\.10\.0/ },
   ];
   for (const c of cases) {
-    const d = decideRun({ ...base, ...c, rows });
+    const d = decideRun({ ...base, ...c, rows: c.record ? records[c.record] : rows });
     assert.equal(d.run, c.run, JSON.stringify(c));
     assert.match(d.reason, c.reason, JSON.stringify(c));
   }
-  assert.equal(decideRun({ ...base, latest: "1.0.0", rows: [], provider: "openai" }).run, true, "an empty record runs");
   assert.throws(() => decideRun({ ...base, latest: "", rows, provider: "openai" }), /Not a version/, "a release that is not a version fails the job");
   assert.throws(() => decideRun({ ...base, latest: "nightly", rows, provider: "openai", force: true }), /Not a version/, "even when forced");
   assert.throws(() => decideRun({ ...base, latest: "1.3.0", rows, provider: "openai", openResultsPrs: -1 }), /openResultsPrs/);
-  // The committed record: the two manual rows do not make the schedule skip the release after them.
-  const committed = parseResults(JSON.parse(fs.readFileSync(path.join(REPO, "bench", "ci-results.json"), "utf8"))).rows;
-  assert.equal(decideRun({ ...base, latest: "3.13.0", rows: committed, provider: "openai" }).run, true);
 });
 
 const CI_JSON = {
@@ -1382,6 +1459,7 @@ const CI_JSON = {
   effort: "low",
   stop: { reason: "turns", text: "stopped at the turn cap (40 model calls)" },
   usage: { turns: 40, inputTokens: 885_574, cachedInputTokens: 858_517, cacheWriteTokens: 0, outputTokens: 3_152, seconds: 98, estimatedCostUsd: 0.01286687 },
+  dedup: { by: "judge", effort: "none", calls: 3, failed: 0, inputTokens: 900, outputTokens: 75, seconds: 1.2 },
 };
 const CARD = {
   key: "0123456789",
@@ -1416,6 +1494,7 @@ test("result row: what the run reported about itself, and how the key scored it"
     provider: "openai",
     model: "some-model-1",
     effort: "low",
+    dedup: "judge",
     key: "0123456789",
     recall: { found: 3, expected: 13 },
     // 3 right of 4 labelled; of the 5 scored (6 less the contextual one), 3 are right at worst and 4 at best.
@@ -1464,6 +1543,12 @@ test("result row: what the run reported about itself, and how the key scored it"
   assert.throws(() => parseRunSummary({ ...CI_JSON, usage: { ...CI_JSON.usage, turns: -1 } }), /usage.turns must be a whole number/);
   assert.throws(() => parseRunSummary({ ...CI_JSON, usage: { ...CI_JSON.usage, estimatedCostUsd: "cheap" } }), /estimatedCostUsd/);
   assert.throws(() => resultRow({ ...base, run: parseRunSummary({ ...CI_JSON, version: "dev" }) }), /Not a version/);
+  // How the run deduplicated is the run's own record: a ci.json from before the judge has none, and deduplicated by the rule.
+  const { dedup: _judged, ...beforeJudge } = CI_JSON;
+  assert.equal(resultRow({ ...base, run: parseRunSummary(beforeJudge) }).dedup, "rule");
+  assert.equal(resultRow({ ...base, run: parseRunSummary({ ...CI_JSON, dedup: { by: "rule" } }) }).dedup, "rule");
+  assert.throws(() => parseRunSummary({ ...CI_JSON, dedup: { by: "model" } }), /dedup.by must be one of rule, judge, not "model"/);
+  assert.throws(() => parseRunSummary({ ...CI_JSON, dedup: "judge" }), /dedup.by must be one of rule, judge/);
 });
 
 test("results file: rows are appended in order and a recorded run is never replaced", () => {
@@ -1482,6 +1567,11 @@ test("results file: rows are appended in order and a recorded run is never repla
   assert.throws(() => appendRows(one, [ROW({ archive: "d" }), ROW({ archive: "d" })]), /d is already recorded/);
   assert.deepEqual(parseResults({ rows: [ROW()] }).rows, [ROW()]);
   assert.throws(() => parseResults({ rows: [{}] }), /row 0 is not a result row/);
+  // A row that does not say how it deduplicated could be read beside a row of the other mode as one configuration.
+  const { dedup: _mode, ...unmarked } = ROW({ archive: "unmarked" });
+  assert.throws(() => parseResults({ rows: [ROW(), unmarked] }), /row 1 \(unmarked\) has dedup undefined, not one of rule, judge/);
+  assert.throws(() => parseResults({ rows: [ROW({ dedup: "model" as never })] }), /has dedup "model"/);
+  assert.equal(parseResults({ rows: [ROW({ dedup: "judge" })] }).rows[0].dedup, "judge");
   assert.throws(() => parseResults([]), /rows array/);
 });
 
@@ -1494,8 +1584,10 @@ test("results table: one line per row, and it replaces only what is between its 
   assert.equal(lines.length, 4);
   assert.equal(
     lines[2],
-    "| 2026-01-05 | demo | 1.2.0 | scheduled | openai · some-model-1 · low | 0123456789 | 5/13 | 7/8 (70%–90%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |",
+    "| 2026-01-05 | demo | 1.2.0 | scheduled | openai · some-model-1 · low | rule | 0123456789 | 5/13 | 7/8 (70%–90%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |",
   );
+  assert.match(lines[0], /\| Provider · model · effort \| Dedup \| Key \|/);
+  assert.match(renderTable([ROW({ dedup: "judge" })]).split("\n")[2], /\| openai · some-model-1 · low \| judge \| 0123456789 \|/);
   assert.match(lines[3], /\| 3\/3 \(100%\) \| 0\.123 \| done \| 36 \| .* \| 45s \| — \|$/);
   for (const l of lines) assert.equal(l.split("|").length, lines[0].split("|").length, "every line has the header's columns");
 
@@ -1521,6 +1613,13 @@ test("results: docs/benchmark.md shows exactly what bench/ci-results.json record
     assert.ok(fs.existsSync(archive), `${r.archive} has no archive in bench/runs`);
     assert.equal((JSON.parse(fs.readFileSync(archive, "utf8")) as { app?: string }).app, r.app, `${r.archive} is archived as another app's run`);
   }
+  // Every run of a version from before the model judge (3.14.1 and earlier) deduplicated by the rule alone, and says so.
+  const beforeJudge = results.rows.filter((r) => compareVersions(r.version, "3.14.1") <= 0);
+  assert.ok(beforeJudge.length >= 9, "the rows recorded before the judge are still there");
+  assert.deepEqual(
+    beforeJudge.filter((r) => r.dedup !== "rule").map((r) => r.archive),
+    [],
+  );
   // The two runs taken by hand before the workflow existed are the first rows.
   assert.deepEqual(
     results.rows
@@ -1859,4 +1958,271 @@ test("compare: a base that throws keeps the preview's picture and records why, a
   assert.ok(fs.existsSync(path.join(dir, "shots", "preview.png")), "the preview's picture is kept");
   assert.match(outcome.detail ?? "", /the base URL could not be captured: scout_attach timed out/);
   assert.equal(outcome.base, undefined);
+});
+
+// ── finding dedup: the model judge ──────────────────────────────────────────
+
+test("dedup: the judge asks at the lowest effort each API takes; the server's mode and key come from its environment", () => {
+  assert.equal(judgeEffort("openai"), "none");
+  assert.equal(judgeEffort("anthropic"), "low", "the Messages API has no none");
+  assert.equal(dedupModeFromEnv({}), "rule", "the MCP server judges only when told to");
+  assert.equal(dedupModeFromEnv({ SCENESCOUT_DEDUP: " judge " }), "judge");
+  assert.throws(() => dedupModeFromEnv({ SCENESCOUT_DEDUP: "model" }), /SCENESCOUT_DEDUP must be one of rule, judge, not "model"/);
+
+  const one = judgeKeyConfig({ OPENAI_API_KEY: OPENAI_KEY });
+  assert.ok(one.ok);
+  assert.deepEqual(one.resolved, { provider: "openai", model: "gpt-6-luna", effort: "none", baseUrl: "https://api.openai.com/v1" });
+  assert.equal(one.key, OPENAI_KEY);
+  const both = { OPENAI_API_KEY: OPENAI_KEY, ANTHROPIC_API_KEY: ANTHROPIC_KEY };
+  const ambiguous = judgeKeyConfig(both);
+  assert.ok(!ambiguous.ok && /both .* are set: set SCENESCOUT_DEDUP_PROVIDER/.test(ambiguous.error));
+  const named = judgeKeyConfig({ ...both, SCENESCOUT_DEDUP_PROVIDER: "anthropic" });
+  assert.ok(named.ok && named.resolved.provider === "anthropic" && named.resolved.effort === "low" && named.key === ANTHROPIC_KEY);
+  const none = judgeKeyConfig({});
+  assert.ok(!none.ok && /needs ANTHROPIC_API_KEY or OPENAI_API_KEY in the server's environment/.test(none.error));
+  const missing = judgeKeyConfig({ OPENAI_API_KEY: OPENAI_KEY, SCENESCOUT_DEDUP_PROVIDER: "anthropic" });
+  assert.ok(!missing.ok && /SCENESCOUT_DEDUP_PROVIDER=anthropic needs ANTHROPIC_API_KEY/.test(missing.error));
+  assert.throws(() => judgeKeyConfig({ OPENAI_API_KEY: OPENAI_KEY, SCENESCOUT_DEDUP_PROVIDER: "gemini" }), /must be one of anthropic, openai/);
+  for (const r of [one, ambiguous, named, none, missing]) assert.ok(!(r.ok ? "" : r.error).includes(OPENAI_KEY), "no message carries a key");
+});
+
+test("dedup: the summary and ci.json say how findings were deduplicated and what the judge's calls cost", () => {
+  const judged = RESULT({
+    dedup: { by: "judge", effort: "none", calls: 4, failed: 1, usage: { input: 1_200, cachedInput: 0, cacheWrite: 0, output: 100 }, ms: 3_400 },
+  });
+  const md = ciSummaryMarkdown(judged);
+  assert.match(
+    md,
+    /\| Finding dedup \| the rule, then the model judge at effort none for filings it kept apart: 4 call\(s\), 1 without an answer \(the rule decided those\), 1,300 tokens \(in the usage below\), 3\.4s \|/,
+  );
+  assert.deepEqual((ciSummaryJson(judged, "9.9.9") as { dedup: unknown }).dedup, {
+    by: "judge",
+    effort: "none",
+    calls: 4,
+    failed: 1,
+    inputTokens: 1_200,
+    outputTokens: 100,
+    seconds: 3.4,
+  });
+  const ruled = RESULT({ dedup: { by: "rule" } });
+  assert.match(ciSummaryMarkdown(ruled), /\| Finding dedup \| the rule alone \|/);
+  assert.deepEqual((ciSummaryJson(ruled, "9.9.9") as { dedup: unknown }).dedup, { by: "rule" });
+  assert.ok(!/Finding dedup/.test(ciSummaryMarkdown(RESULT())), "a capture run files nothing and says nothing about dedup");
+});
+
+/** Two filings on one page that the store's rule keeps apart: no evidence, nothing quoted, titles too unalike. */
+const SAVE_FILING = { severity: "medium", category: "ux-confusing", title: "The save button gives no feedback", detail: "Pressed it; nothing changed." };
+const SILENT_FILING = { severity: "high", category: "ux-confusing", title: "Clicking save shows nothing", detail: "No toast, no spinner." };
+const QUIET_FILING = { severity: "low", category: "ux-confusing", title: "Pressing save does nothing visible", detail: "Same page." };
+
+/** The judge's stand-in API: the Responses API's shape, a judge_pair call, and the usage a real call reports. */
+const judgeAnswers =
+  (verdict: string, confidence: number) =>
+  (body: { tools: Array<{ name: string }> }): { status: number; body: unknown } =>
+    body.tools.some((t) => t.name === "judge_pair")
+      ? {
+          status: 200,
+          body: {
+            status: "completed",
+            output: [{ type: "function_call", call_id: "j1", name: "judge_pair", arguments: JSON.stringify({ verdict, confidence }) }],
+            usage: { input_tokens: 300, input_tokens_details: { cached_tokens: 0 }, output_tokens: 25 },
+          },
+        }
+      : { status: 400, body: { error: { message: "only the judge calls this API in the test" } } };
+
+/**
+ * A CI run's dedup, end to end with no browser: the loop and a scripted model
+ * file findings through the run's own MCP client (ciClient, judgeHandler and
+ * httpJudgeAsk against a stand-in API) into a server whose store files them as
+ * the MCP server does (fileFinding), its judge asking through the client by
+ * sampling, as the MCP server's does when the client declares
+ * DEDUP_JUDGE_CAPABILITY. Only the transport is in memory instead of stdio.
+ */
+async function judgedRun(o: {
+  filings: Array<Record<string, unknown>>;
+  judge: boolean;
+  api: (body: any) => { status: number; body: unknown };
+  after?: (server: McpServer) => Promise<void>;
+}) {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ci-dedup-"));
+  const store = new MemoryStore(project);
+  const server = new McpServer({ name: "test-server", version: "1" });
+  server.registerTool(
+    "scout_finding",
+    {
+      description: "File a finding",
+      inputSchema: {
+        severity: z.enum(["high", "medium", "low"]),
+        category: z.string(),
+        title: z.string(),
+        detail: z.string(),
+        evidence: z.string().optional(),
+      },
+    },
+    async (args) => {
+      const filed = await store.fileFinding({ ...args, url: "http://app.test/orders", state: "/orders#s1" });
+      const said = filed.isNew
+        ? `recorded ${filed.finding.id}`
+        : `merged into ${filed.finding.id}${filed.judged ? ` by the judge at ${filed.judged.pSame}` : ""}`;
+      return { content: [{ type: "text" as const, text: said }] };
+    },
+  );
+  const requests: any[] = [];
+  const api = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    requests.push(body);
+    const r = o.api(body);
+    return new Response(JSON.stringify(r.body), { status: r.status, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  const spend: Spend = { turns: 0, usage: { ...NO_USAGE }, startedAt: Date.now() };
+  const calls: JudgeCalls = { calls: 0, failed: 0, usage: { ...NO_USAGE }, ms: 0 };
+  const resolved = { provider: "openai" as const, model: "gpt-6-luna", effort: "none", baseUrl: "http://model.test/v1" };
+  const ask = httpJudgeAsk(resolved, OPENAI_KEY, { fetch: api, sleep: async () => {} });
+  const client = ciClient(o.judge ? judgeHandler({ ask, model: resolved.model, spend, caps: BIG, calls, secrets: [OPENAI_KEY] }) : undefined);
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
+  const logs: string[] = [];
+  // What the MCP server does on attach with dedup "judge" (configureDedup, planDedup): ask through the client when it says it answers.
+  if (clientAnswersJudge(server.server.getClientCapabilities()))
+    store.dedupJudge = new DedupJudge(
+      samplingAsk((params, options) => server.server.createMessage(params, options)),
+      { label: "the CI run's model", log: (l) => logs.push(l) },
+    );
+  const model = new Scripted([
+    ...o.filings.map((f, i) => ({ text: "", calls: [call(`f${i}`, "scout_finding", f)], usage: use(100) })),
+    { text: "Done.", calls: [], usage: use(10) },
+  ]);
+  const tools: ToolSpec[] = [{ name: "scout_finding", description: "", parameters: { type: "object", properties: {} } }];
+  try {
+    const out = await agentLoop({ client: model, host: toolHost(client), tools, caps: BIG, log: () => {}, projectDir: project, spend });
+    await o.after?.(server);
+    return { out, findings: store.findings.map((f) => ({ ...f })), logs, requests, calls, results: model.received.flat() };
+  } finally {
+    await client.close();
+    store.flush();
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+}
+
+test("dedup end to end: two near-duplicate findings the rule keeps apart are merged by the judge, and its tokens count in the run's usage", async () => {
+  // The contrast first: the same two filings with the rule alone stay two findings, and no model is asked.
+  const ruled = await judgedRun({ filings: [SAVE_FILING, SILENT_FILING], judge: false, api: judgeAnswers("same", 0.92) });
+  assert.equal(ruled.findings.length, 2);
+  assert.equal(ruled.requests.length, 0);
+
+  const judged = await judgedRun({ filings: [SAVE_FILING, SILENT_FILING], judge: true, api: judgeAnswers("same", 0.92) });
+  assert.equal(judged.out.stop, "done");
+  assert.equal(judged.findings.length, 1, JSON.stringify(judged.findings.map((f) => f.title)));
+  const [kept] = judged.findings;
+  assert.equal(kept.title, SAVE_FILING.title);
+  assert.equal(kept.runs, 2);
+  assert.deepEqual(
+    kept.judgedMerges?.map((m) => [m.title, m.severity, m.pSame]),
+    [[SILENT_FILING.title, "high", 0.92]],
+  );
+  assert.match(judged.results[1].text, /merged into .* by the judge at 0\.92/);
+  // One call: the run's model, at effort none, offered only judge_pair, shown both findings and the page.
+  assert.equal(judged.requests.length, 1);
+  const [req] = judged.requests;
+  assert.equal(req.reasoning.effort, "none");
+  assert.equal(req.max_output_tokens, JUDGE_MAX_OUTPUT_TOKENS);
+  assert.deepEqual(
+    req.tools.map((t: { name: string }) => t.name),
+    ["judge_pair"],
+  );
+  assert.match(req.input[0].content, /page \/orders\.[\s\S]*Finding A: .*The save button gives no feedback[\s\S]*Finding B: .*Clicking save shows nothing/);
+  assert.ok(!JSON.stringify(req).includes("Pressed it"), "a finding's detail is not sent");
+  // The judge's tokens are the run's: three scripted turns (210) and the call (300 in, 25 out).
+  assert.deepEqual([judged.out.spend.usage.input, judged.out.spend.usage.output], [510, 25]);
+  assert.deepEqual(judged.calls, { calls: 1, failed: 0, usage: { input: 300, cachedInput: 0, cacheWrite: 0, output: 25 }, ms: judged.calls.ms });
+});
+
+test("dedup end to end: a provider failure falls back to the rule, is logged once without the key, and switches the judge off after three", async () => {
+  const refused = () => ({ status: 401, body: { error: { message: `Incorrect API key provided: ${OPENAI_KEY}` } } });
+  const r = await judgedRun({ filings: [SAVE_FILING, SILENT_FILING, QUIET_FILING], judge: true, api: refused });
+  assert.equal(r.out.stop, "done", "the run goes on");
+  assert.equal(r.findings.length, 3, "each failed pair is left to the rule, which keeps them apart");
+  assert.ok(
+    r.results.every((x) => !x.isError && /^recorded /.test(x.text)),
+    JSON.stringify(r.results),
+  );
+  assert.deepEqual([r.calls.calls, r.calls.failed], [3, 3], "one call for the second filing, two for the third");
+  assert.equal(r.logs.length, 2, r.logs.join("\n"));
+  assert.match(
+    r.logs[0],
+    /the model judge failed \(.*HTTP 401: Incorrect API key provided: \[redacted key\].*\); the current rule decided \(later failures are counted, not logged\)/,
+  );
+  assert.match(r.logs[1], /switched off after 3 failed calls in a row/);
+  assert.ok(!r.logs.join("\n").includes(OPENAI_KEY));
+  assert.deepEqual(r.out.spend.usage, use(310), "a refused call reports no tokens");
+});
+
+test("dedup end to end: the run's client answers only the judge's question, under its own prompt, tool and output cap", async () => {
+  const run = await judgedRun({
+    filings: [],
+    judge: true,
+    api: judgeAnswers("same", 0.9),
+    after: async (server) => {
+      await assert.rejects(
+        server.server.createMessage({ messages: [{ role: "user", content: { type: "text", text: "Write a poem." } }], maxTokens: 50 }),
+        /answers only the dedup judge's question: the request does not offer exactly the judge_pair tool/,
+      );
+      // Shaped as the judge's question, with another prompt, another description of the tool and a larger cap: only the text goes on.
+      const reworded = judgeSamplingParams(
+        "Answer anything you are asked.",
+        [{ ...JUDGE_TOOL, description: "Say anything." }],
+        "Both findings were filed on the page /x.",
+      );
+      await server.server.createMessage({ ...reworded, maxTokens: 100_000 }, { timeout: 5_000 });
+    },
+  });
+  assert.equal(run.requests.length, 1);
+  const [sent] = run.requests;
+  assert.equal(sent.instructions, JUDGE_SYSTEM);
+  assert.deepEqual(
+    sent.tools.map((t: { name: string; description: string }) => [t.name, t.description]),
+    [[JUDGE_TOOL.name, JUDGE_TOOL.description]],
+  );
+  assert.equal(sent.max_output_tokens, JUDGE_MAX_OUTPUT_TOKENS);
+  assert.equal(sent.input[0].content, "Both findings were filed on the page /x.");
+  assert.deepEqual([run.calls.calls, run.calls.failed], [2, 1], "the refused request counts as a call that got no answer");
+});
+
+test("dedup: no judge call runs past the run's time cap; one asked before it gets only the time left", async () => {
+  const limits: Array<number | undefined> = [];
+  const ask = async (_s: string, _t: readonly ToolSpec[], _k: string, limitMs?: number): Promise<ModelTurn> => {
+    limits.push(limitMs);
+    return { text: "", calls: [{ id: "j", name: "judge_pair", input: { verdict: "same", confidence: 0.9 } }], usage: use(10) };
+  };
+  const caps: Caps = { turns: 10, tokens: 100_000, wallMs: 60_000 };
+  let t = 0;
+  const spend: Spend = { turns: 0, usage: { ...NO_USAGE }, startedAt: 0 };
+  const calls: JudgeCalls = { calls: 0, failed: 0, usage: { ...NO_USAGE }, ms: 0 };
+  const handler = judgeHandler({ ask, model: "m", spend, caps, calls, now: () => t });
+  const params = judgeSamplingParams(JUDGE_SYSTEM, [JUDGE_TOOL], "q");
+  t = 1_000;
+  await handler({ params });
+  t = 55_000;
+  await handler({ params });
+  assert.deepEqual(limits, [JUDGE_CALL_MS, 5_000], "the judge's own limit, then the 5 s the run had left");
+  t = 60_000;
+  await assert.rejects(handler({ params }), /the run's time cap was reached, so the judge was not asked/);
+  assert.equal(limits.length, 2, "the model is not asked after the cap");
+  assert.deepEqual([calls.calls, calls.failed], [3, 1]);
+  assert.deepEqual(spend.usage, use(20), "the answered calls' tokens are the run's");
+});
+
+test("dedup: a judge call that outlasts its limit fails as the judge's limit, not the run's time cap", async () => {
+  // A request that never answers. A real one holds its socket open, which keeps the process running until the abort;
+  // AbortSignal.timeout's timer does not (it is unref'd), so the stand-in holds a timer of its own until then.
+  const hung = (async (_url: string | URL | Request, init?: RequestInit) =>
+    new Promise<Response>((_, reject) => {
+      const socket = setTimeout(() => {}, 60_000);
+      init?.signal?.addEventListener("abort", () => {
+        clearTimeout(socket);
+        reject(init.signal!.reason);
+      });
+    })) as typeof fetch;
+  const ask = httpJudgeAsk({ provider: "openai", model: "m", effort: "none", baseUrl: "http://model.test/v1" }, OPENAI_KEY, { fetch: hung, callMs: 50 });
+  await assert.rejects(ask("s", [], "q"), (err: Error) => /^no answer within 50ms/.test(err.message) && !(err instanceof OutOfTime));
 });

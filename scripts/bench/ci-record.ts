@@ -93,7 +93,7 @@ try {
     const results = appendRows(readResults(), [row]);
     fs.writeFileSync(RESULTS, JSON.stringify(results, null, 2) + "\n");
     writeTable(results);
-    console.log(`Recorded ${row.app} v${row.version} (${row.provider} ${row.model} ${row.effort}) as ${row.archive}.`);
+    console.log(`Recorded ${row.app} v${row.version} (${row.provider} ${row.model} ${row.effort}, dedup ${row.dedup}) as ${row.archive}.`);
   } else if (command === "render") {
     writeTable(readResults());
   } else {

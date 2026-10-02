@@ -126,6 +126,66 @@ export const SCRIPTED_USER = { username: "member@example.test", password: "corre
 /** The cookie that carries a right password on to the code step. */
 const PENDING_COOKIE = "fixture_pending";
 
+/** The one code the passwordless sign-in fixture accepts, as a test environment configures a fixed code. Invented. */
+export const FIXED_OTP_CODE = "482916";
+/** How long the passwordless sign-in takes to "email" a code: longer than a page takes to settle, so the wait in between shows no field. */
+const OTP_SEND_MS = 1200;
+/** The passwordless sign-in's cookies: the code step, the session, and the refresh token (sent only to its own path). */
+const OTP_PENDING_COOKIE = "fixture_otp_pending";
+export const OTP_SESSION_COOKIE = "fixture_otp_session";
+const OTP_REFRESH_COOKIE = "fixture_otp_refresh";
+/** Sessions the passwordless sign-in has issued. */
+const otpSessions = new Set<string>();
+/** The key the passwordless sign-in signs its access tokens with: a new one per run, so no token outlives the fixture. */
+const OTP_JWT_KEY = crypto.randomBytes(32);
+
+const jwtSignature = (unsigned: string): Buffer => crypto.createHmac("sha256", OTP_JWT_KEY).update(unsigned).digest();
+
+/** An HS256 access token for the member, valid for an hour. */
+function signAccessToken(): string {
+  const part = (o: object): string => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const unsigned = `${part({ alg: "HS256", typ: "JWT" })}.${part({ sub: "member", exp: Math.floor(Date.now() / 1000) + 3600 })}`;
+  return `${unsigned}.${jwtSignature(unsigned).toString("base64url")}`;
+}
+
+/** Whether a bearer token is one this fixture signed and has not expired. The signature is compared in constant time. */
+function accessTokenValid(token: string): boolean {
+  const [head, body, sig] = token.split(".");
+  if (!head || !body || !sig) return false;
+  const want = jwtSignature(`${head}.${body}`);
+  const got = Buffer.from(sig, "base64url");
+  if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) return false;
+  try {
+    const exp = (JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as { exp?: unknown }).exp;
+    return typeof exp === "number" && exp > Date.now() / 1000;
+  } catch {
+    return false; // A payload that is not JSON was never signed here.
+  }
+}
+
+/** A request's cookie by name. */
+function cookieOf(req: http.IncomingMessage, name: string): string | undefined {
+  return (req.headers.cookie ?? "")
+    .split(/;\s*/)
+    .find((c) => c.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
+}
+
+/** A request's JSON body, or {} for one that is not JSON. */
+function jsonBody(req: http.IncomingMessage, then: (body: Record<string, unknown>) => void): void {
+  const chunks: Buffer[] = [];
+  req.on("data", (c: Buffer) => chunks.push(c));
+  req.on("end", () => {
+    let body: unknown;
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      body = {};
+    }
+    then(body && typeof body === "object" ? (body as Record<string, unknown>) : {});
+  });
+}
+
 const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 /** The cookie of the fixture's revocable sign-in: a fresh token per sign-in, valid until revoked. */
@@ -275,6 +335,12 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     if (req.method && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
       const key = `${req.method} ${urlPath}`;
       stats.writes[key] = (stats.writes[key] ?? 0) + 1;
+    }
+    // A visit a page records as it loads (first-look-post.html): counted in `writes` above, and answered as a real endpoint would.
+    if (urlPath === "/api/visits" && req.method === "POST") {
+      res.writeHead(204);
+      res.end();
+      return;
     }
     // Plain saves and a delete command share this URL: the delete-bearing ones are counted apart, so a suite can prove none arrived.
     if (urlPath === "/api/unload/race" && req.method === "POST") {
@@ -512,6 +578,55 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     if (urlPath === "/scripted-signin/code" && req.method === "GET") {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(fs.readFileSync(path.join(appDir, "scripted-code.html"), "utf8").replace("<!--ERROR-->", ""));
+      return;
+    }
+    // The passwordless sign-in (otp-signin.html): /otp-signin/start "emails"
+    // a code after a moment, /otp-signin/verify accepts the one fixed code for
+    // the test user (a session cookie, a refresh-token cookie and an access
+    // token in the body) and refuses anything else repeating what was typed,
+    // and /otp-api/me answers only to the access token AND the session cookie.
+    if ((urlPath === "/otp-signin" || urlPath === "/otp-account") && req.method === "GET") {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, urlPath === "/otp-signin" ? "otp-signin.html" : "otp-account.html")));
+      return;
+    }
+    if (urlPath === "/otp-signin/start" && req.method === "POST") {
+      jsonBody(req, () => {
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json", "set-cookie": `${OTP_PENDING_COOKIE}=1; Path=/; HttpOnly; SameSite=Lax` });
+          res.end(JSON.stringify({ sent: true }));
+        }, OTP_SEND_MS);
+      });
+      return;
+    }
+    if (urlPath === "/otp-signin/verify" && req.method === "POST") {
+      jsonBody(req, (body) => {
+        const code = typeof body.code === "string" ? body.code : "";
+        if (cookieOf(req, OTP_PENDING_COOKIE) !== "1" || body.email !== SCRIPTED_USER.username || code !== FIXED_OTP_CODE) {
+          res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: `The code ${code} is not right. Check the email we sent you.` }));
+          return;
+        }
+        const session = newToken();
+        otpSessions.add(session);
+        res.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "set-cookie": [
+            `${OTP_SESSION_COOKIE}=${session}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600`,
+            `${OTP_REFRESH_COOKIE}=${newToken()}; Path=/otp-auth/refresh; HttpOnly; SameSite=Strict; Max-Age=86400`,
+            `${OTP_PENDING_COOKIE}=; Path=/; Max-Age=0`,
+          ],
+        });
+        res.end(JSON.stringify({ access_token: signAccessToken() }));
+      });
+      return;
+    }
+    if (urlPath === "/otp-api/me") {
+      const session = cookieOf(req, OTP_SESSION_COOKIE);
+      const ok = accessTokenValid((req.headers.authorization ?? "").replace(/^Bearer /, "")) && session !== undefined && otpSessions.has(session);
+      res.writeHead(ok ? 200 : 401, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(ok ? { name: "a member" } : { error: "unauthorized" }));
       return;
     }
     // A sign-in the server can revoke mid-run: /token-signin issues a new

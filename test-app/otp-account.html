@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Your account</title>
+  </head>
+  <body>
+    <!--
+      Where the passwordless sign-in (otp-signin.html) lands. A single-page
+      app that asks /otp-api/me who is signed in, sending the access token it
+      keeps in localStorage; the server also wants the session cookie it set.
+      Both live in a saved profile, so a profile that kept only one of them
+      shows the signed-out page.
+    -->
+    <main>
+      <h1 data-testid="otp-account-heading">Checking your session</h1>
+    </main>
+    <script>
+      const token = localStorage.getItem("access_token") || "";
+      fetch("/otp-api/me", { headers: { authorization: `Bearer ${token}` } }).then((res) => {
+        document.querySelector("h1").textContent = res.ok ? "Signed in as a member" : "You are signed out";
+      });
+    </script>
+  </body>
+</html>

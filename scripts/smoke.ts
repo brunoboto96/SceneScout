@@ -30,6 +30,7 @@ import * as multiSession from "./smoke/multi-session.ts";
 import * as authLoss from "./smoke/auth-loss.ts";
 import * as loginProfiles from "./smoke/login-profiles.ts";
 import * as scriptedLogin from "./smoke/scripted-login.ts";
+import * as passwordlessLogin from "./smoke/passwordless-login.ts";
 import * as reattach from "./smoke/reattach.ts";
 import * as refreshBroker from "./smoke/refresh-broker.ts";
 import * as liveView from "./smoke/live-view.ts";
@@ -38,6 +39,7 @@ import * as frames from "./smoke/frames.ts";
 import * as injection from "./smoke/injection.ts";
 import * as postmessage from "./smoke/postmessage.ts";
 import * as checkGate from "./smoke/check.ts";
+import * as firstRun from "./smoke/first-run.ts";
 import * as unload from "./smoke/unload.ts";
 import * as ciRun from "./smoke/ci.ts";
 import * as timeLimits from "./smoke/time-limits.ts";
@@ -49,6 +51,7 @@ const suites = [
   authLoss,
   loginProfiles,
   scriptedLogin,
+  passwordlessLogin,
   reattach,
   refreshBroker,
   liveView,
@@ -59,6 +62,7 @@ const suites = [
   unload,
   timeLimits,
   checkGate,
+  firstRun,
   ciRun,
 ];
 

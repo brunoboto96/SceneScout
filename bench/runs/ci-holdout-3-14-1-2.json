@@ -1,0 +1,35 @@
+{
+  "app": "holdout",
+  "run": "ci-holdout-3-14-1-2",
+  "date": "2026-09-28",
+  "note": "Unattended scenescout ci run (scheduled) of v3.14.1; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Fines permission failure is presented as an empty list",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; fines list shown empty"
+    },
+    {
+      "title": "Homepage notices endpoint returns HTTP 500",
+      "severity": "high",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Navigation links are visually indistinguishable from body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "fines page: 8 links no underline and body-text color",
+      "tier": "worth_a_look",
+      "convention": "navigation links should be visually distinct from body copy"
+    },
+    {
+      "title": "Catalogue availability checkbox is below minimum target size",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "catalogue-available target 13x13px"
+    }
+  ],
+  "decisions": []
+}

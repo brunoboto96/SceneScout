@@ -473,7 +473,9 @@ test("GitHub issue: no text from a finding can mention, link, reference or mark 
   // Everything after the marker line is the finding's text in our framing.
   const rendered = body.split("\n").slice(1).join("\n");
   assert.doesNotMatch(title, /@(?!\u200b)|https:\/\/|#\d/);
-  assert.doesNotMatch(rendered, /<script|<b>|<c>/);
+  // The renderer escapes every "<", so no tag of any spelling can open, and each one reads as text.
+  assert.ok(!rendered.includes("<"), "no markup can open in the rendered text");
+  assert.ok(rendered.includes("&lt;script&gt;") && rendered.includes("&lt;b&gt;"), "the markup is shown as text");
   assert.doesNotMatch(rendered, /@(?!\u200b)/);
   assert.doesNotMatch(rendered, /https:\/\/evil|www\.evil/i);
   assert.doesNotMatch(rendered, /(?<!\\)\]\(/);
@@ -922,6 +924,13 @@ async function exportOnce(args: string[], env: Record<string, string | undefined
 
 const posts = (s: StandIn) => s.seen.filter((x) => x.method === "POST");
 
+/** The address an export printed for the issue it filed as `ref`, parsed: the last word of that line. */
+function filedUrl(out: readonly string[], ref: string): string {
+  const line = out.find((l) => l.trimStart().startsWith(`filed ${ref} `));
+  assert.ok(line, `no line says filed ${ref}`);
+  return new URL(line.trim().split(/\s+/).at(-1)!).href;
+}
+
 test("GitHub: an export files one issue per finding, and a second export of the same run files nothing", async () => {
   const gh = await standInGitHub();
   try {
@@ -940,7 +949,7 @@ test("GitHub: an export files one issue per finding, and a second export of the 
       assert.equal(s.headers.authorization, `Bearer ${GH_TOKEN}`);
       assert.equal(s.headers["x-github-api-version"], "2022-11-28");
     }
-    assert.ok(first.out.some((l) => l.includes("filed #1") && l.includes("https://github.example/owner/app/issues/1")));
+    assert.equal(filedUrl(first.out, "#1"), "https://github.example/owner/app/issues/1");
 
     const second = await exportOnce([...GH, "--yes"], env, dir);
     assert.equal(second.exitCode, EXIT_EXPORT.done);
@@ -1281,7 +1290,7 @@ test("Jira: an export files each finding with its screenshots attached, and a se
       "the rewritten frame, once per finding",
     );
     assert.ok(first.out.some((l) => l.includes("Skipped 1 session-log line(s) or file(s)")));
-    assert.ok(first.out.some((l) => l.includes("filed QA-1") && l.includes(`${jira.url}/browse/QA-1`)));
+    assert.equal(filedUrl(first.out, "QA-1"), new URL("/browse/QA-1", jira.url).href);
 
     const second = await exportOnce(["--to", "jira", "--yes"], env, dir);
     assert.deepEqual(second.filed, []);

@@ -21,21 +21,29 @@ import { redactRoute } from "./engine/check.js";
 import { describeLifetime, readLifetime, type ProfileLifetime } from "./engine/expiry.js";
 import { describeSaved, mergeSessionStorage, withSessionStorage, writeProfile, type LoginOptions, type ProfileSummary } from "./engine/profiles.js";
 import {
+  afterTyping,
   chooseFields,
-  chooseSubmit,
   describeStep,
   fieldIdentity,
+  filledNames,
   nextStep,
+  otpBoxes,
+  quotable,
   secondsLeft,
+  splitCode,
   totp as totpCode,
   TOTP_MIN_SECONDS_LEFT,
   urlMatches,
+  type AfterTyping,
+  type CodeSource,
   type FieldInfo,
   type FieldKind,
   type Progress,
   type Redactor,
   type ScriptedLogin,
   type Selectors,
+  type StepOptions,
+  type SubmittedBy,
 } from "./engine/scripted-login.js";
 
 /**
@@ -277,16 +285,26 @@ function collectFields(selectors: Selectors): FieldInfo[] | { badSelector: strin
   return out;
 }
 
-/** A page's error or alert text, if it shows one: the reason a refused sign-in gives. Redacted before it is printed. */
+/**
+ * The error or alert a page shows, if any: the first one on screen with text
+ * in it (a hidden, pre-rendered alert says nothing about this run), whole.
+ * The caller redacts it before shortening it (quotable).
+ */
 async function alertText(page: Page): Promise<string> {
-  const text = await page
-    .evaluate(() => {
-      const el = document.querySelector('[role="alert"], [aria-live="assertive"], .error, .alert');
-      return (el?.textContent ?? "").replace(/\s+/g, " ").trim();
-    })
-    // The page's message only adds to the refusal being reported; a page navigating away as it is read leaves the refusal as it stands.
-    .catch(() => "");
-  return text.slice(0, 200);
+  return (
+    page
+      .evaluate(() => {
+        for (const el of Array.from(document.querySelectorAll('[role="alert"], [aria-live="assertive"], .error, .alert'))) {
+          const r = el.getBoundingClientRect();
+          const st = getComputedStyle(el);
+          const text = (el.textContent ?? "").trim();
+          if (text && r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none") return text;
+        }
+        return "";
+      })
+      // The page's message only adds to the error being reported; a page navigating away as it is read leaves that error as it stands.
+      .catch(() => "")
+  );
 }
 
 /**
@@ -294,6 +312,12 @@ async function alertText(page: Page): Promise<string> {
  * environment, the form found by engine/scripted-login.ts's rules. Every line
  * it logs and every error it throws goes through the credential redaction
  * first. Saves the profile exactly as the manual login does.
+ *
+ * Each step fills what the page asks for, then reads the page again until it
+ * is clear how to submit (engine/scripted-login.ts's afterTyping): a page that
+ * submitted the step itself is not submitted again, a button the page enables
+ * only once the form is complete is waited for, and a field the typing
+ * revealed is filled first.
  */
 export async function runScriptedLogin(
   options: LoginOptions,
@@ -357,7 +381,7 @@ export async function runScriptedLogin(
     const read = async (): Promise<FieldInfo[] | null> => {
       const got = await page.evaluate(collectFields, config.selectors).catch((err: Error) => {
         if (midNavigation(err)) return null;
-        throw err;
+        throw fail(err.message);
       });
       if (got === null) return null;
       if (!Array.isArray(got)) throw fail(`the ${got.badSelector} selector is not a valid CSS selector`);
@@ -369,19 +393,47 @@ export async function runScriptedLogin(
       const chosen = chooseFields(fields);
       return `${pageKey()}|${(Object.keys(chosen) as FieldKind[]).sort().join(",")}`;
     };
-    const stepOpts = (successMatchedNow: boolean) => ({
-      hasTotp: config.totp !== undefined,
+    const stepOpts = (successMatchedNow: boolean): StepOptions => ({
+      hasPassword: config.password !== undefined,
+      ...(config.code ? { code: config.code.kind } : {}),
       successConfigured: Boolean(config.success.url || config.success.selector),
       successMatched: successMatchedNow,
     });
+    /** The code to type now: the fixed one, or the TOTP code, waiting for the next one when this one is about to expire. */
+    const currentCode = async (source: CodeSource): Promise<string> => {
+      if (source.kind === "fixed") return source.code;
+      const params = source.params;
+      if (secondsLeft(params, now()) < TOTP_MIN_SECONDS_LEFT) await page.waitForTimeout(secondsLeft(params, now()) * 1000 + 200);
+      const code = totpCode(params, now());
+      redactor.add(code);
+      return code;
+    };
+    const at = (f: FieldInfo) => page.locator(`[${TAG}="${f.index}"]`);
+    /** A failed action as this run's error: the time limit explained, redacted like everything else it throws. */
+    const actionError = (err: unknown): Error => {
+      const explained = loginTimeout(err, "action", limits.actionMs);
+      return fail(explained instanceof Error ? explained.message : String(explained));
+    };
+    const actionFailed = (err: unknown): Promise<never> => Promise.reject(actionError(err));
+    /** What the page says, fit to quote. */
+    const pageSays = async (): Promise<string> => quotable(await alertText(page), redact, 200);
+    /** A button's text fit to quote, redacted before it is shortened. */
+    const buttonText = (f: FieldInfo): string => quotable(f.text || f.label || "the submit button", redact, 40);
+    /** The run's deadline passed: say what it was waiting for, and what the page says, if anything. */
+    const timedOut = async (waitingFor: string): Promise<Error> => {
+      const says = await pageSays();
+      return fail(`timed out after ${config.timeoutMs / 1000}s waiting for ${waitingFor} (at ${where()})${says ? `. The page says: "${says}"` : ""}`);
+    };
+    const submitOpts = { passwordless: config.password === undefined };
     let lastWait = "the sign-in form to appear";
     for (;;) {
-      if (Date.now() > deadline) throw fail(`timed out after ${config.timeoutMs / 1000}s waiting for ${lastWait} (at ${where()})`);
+      if (Date.now() > deadline) throw await timedOut(lastWait);
       const fields = await read();
       if (fields === null) {
         await page.waitForTimeout(POLL_MS);
         continue;
       }
+      const keyAtRead = pageKey();
       const chosen = chooseFields(fields);
       const step = nextStep(chosen, progress, stepOpts(await successMatched()));
       if (step.kind === "done") {
@@ -389,7 +441,7 @@ export async function runScriptedLogin(
         // No sign-in field left is the signal only once the page has settled:
         // a page between a redirect and its first render shows no fields either.
         await page.waitForLoadState("load", { timeout: limits.actionMs }).catch((err: Error) => {
-          if (!/timeout/i.test(err.message) && !midNavigation(err)) throw err;
+          if (!/timeout/i.test(err.message) && !midNavigation(err)) throw fail(err.message);
         });
         await page.waitForTimeout(POLL_MS * 2);
         const settled = await read();
@@ -397,45 +449,99 @@ export async function runScriptedLogin(
         continue;
       }
       if (step.kind === "refused") {
-        const says = await alertText(page);
+        const says = await pageSays();
         throw fail(`sign-in refused: ${step.reason}.${says ? ` The page says: "${says}"` : ""}`);
       }
       if (step.kind === "stuck") throw fail(`sign-in stuck: ${step.reason}.`);
       if (step.kind === "wait") {
+        const credentialSent = progress.submitted.has("password") || progress.submitted.has("otp");
         lastWait =
           progress.submits === 0
             ? "the sign-in form to appear (set the field selectors if the form is not found)"
-            : "the signed-in page (the success URL or selector, or the sign-in fields to go)";
+            : !credentialSent
+              ? "the page to ask for the password or the one-time code (set --password-selector or --otp-selector if the field is there but not found)"
+              : "the signed-in page (the success URL or selector, or the sign-in fields to go)";
         await page.waitForTimeout(POLL_MS);
         continue;
       }
       if (progress.submits >= MAX_SUBMITS) throw fail(`gave up after ${MAX_SUBMITS} submits without reaching the signed-in page`);
-      let last = null as FieldInfo | null;
+      let boxOpts: { codeBoxes?: number } = {};
+      // What this step typed, recorded as submitted only once the step is: a step the page holds back (fill-more) is typed again.
+      const typedIds = new Map<FieldKind, string>();
       for (const kind of step.fill) {
         const field = chosen[kind]!;
-        let value: string;
-        if (kind === "otp") {
-          const totp = config.totp!;
-          if (secondsLeft(totp, now()) < TOTP_MIN_SECONDS_LEFT) await page.waitForTimeout(secondsLeft(totp, now()) * 1000 + 200);
-          value = totpCode(totp, now());
-          redactor.add(value);
-        } else value = kind === "username" ? config.username : config.password;
-        await page
-          .locator(`[${TAG}="${field.index}"]`)
-          .fill(value, { timeout: limits.actionMs })
-          .catch((err: unknown) => Promise.reject(loginTimeout(err, "action", limits.actionMs)));
-        progress.submitted.set(kind, fieldIdentity(field));
-        last = field;
+        const boxes = kind === "otp" ? otpBoxes(fields, field) : null;
+        if (boxes) {
+          const split = splitCode(await currentCode(config.code!), boxes.length, config.code!.kind);
+          if (!split.ok) throw fail(`sign-in stuck: ${split.error}.`);
+          for (const [i, box] of boxes.entries()) {
+            try {
+              // A box is often enabled only once the one before it is filled.
+              await page.waitForFunction(
+                ([attr, index]) => {
+                  const el = document.querySelector(`[${attr}="${index}"]`) as HTMLInputElement | null;
+                  return el !== null && !el.disabled;
+                },
+                [TAG, String(box.index)] as const,
+                { timeout: limits.actionMs, polling: 50 },
+              );
+              // Cleared only when it holds something: clearing sends Delete, which some boxes take as a step back to the box before.
+              if ((await at(box).inputValue({ timeout: limits.actionMs })) !== "") await at(box).fill("", { timeout: limits.actionMs });
+              // Typed as keys: a box that moves on to the next by itself, or reads keys rather than its value, still gets its character.
+              await at(box).pressSequentially(split.chars[i], { timeout: limits.actionMs });
+            } catch (err) {
+              // The first line only: the call log after it names the character being typed, which no redaction of the whole code catches.
+              const explained = loginTimeout(err, "action", limits.actionMs);
+              const first = (explained instanceof Error ? explained.message : String(explained)).split("\n")[0];
+              throw fail(`could not type into box ${i + 1} of ${boxes.length} of the one-time code: ${first}`);
+            }
+          }
+          boxOpts = { codeBoxes: boxes.length };
+        } else {
+          const value = kind === "otp" ? await currentCode(config.code!) : kind === "username" ? config.username : config.password!;
+          await at(field).fill(value, { timeout: limits.actionMs }).catch(actionFailed);
+        }
+        typedIds.set(kind, fieldIdentity(field));
       }
-      const button = chooseSubmit(fields);
       const before = signature(fields);
-      await (
-        button
-          ? page.locator(`[${TAG}="${button.index}"]`).click({ timeout: limits.actionMs })
-          : page.locator(`[${TAG}="${last!.index}"]`).press("Enter", { timeout: limits.actionMs })
-      ).catch((err: unknown) => Promise.reject(loginTimeout(err, "action", limits.actionMs)));
+      const shownBefore = new Set(Object.keys(chosen) as FieldKind[]);
+      const readNow = async (): Promise<AfterTyping> => {
+        const now = await read();
+        return afterTyping(step.fill, { left: now === null || pageKey() !== keyAtRead, fields: now ?? [] }, shownBefore, submitOpts);
+      };
+      let next: AfterTyping;
+      for (;;) {
+        await page.waitForTimeout(POLL_MS);
+        next = await readNow();
+        if (next.kind !== "wait") break;
+        if (Date.now() > deadline) {
+          const control = next.button ? `the "${buttonText(next.button)}" button` : "the field just filled";
+          throw await timedOut(`${control} to be enabled, or the page to move on, after filling ${filledNames(step.fill, boxOpts)}`);
+        }
+      }
+      if (next.kind === "fill-more") {
+        say(describeStep(step.fill, "more", boxOpts));
+        continue;
+      }
+      let by: SubmittedBy = "page";
+      if (next.kind === "click" || next.kind === "enter") {
+        try {
+          if (next.kind === "click") await at(next.button).click({ timeout: limits.actionMs });
+          else await at(next.field).press("Enter", { timeout: limits.actionMs });
+        } catch (err) {
+          // The page moved on while the click waited (it took the step itself, or the click went through as it left): the step is
+          // done. Otherwise the click's own error is the one to report, also when reading the page to tell fails.
+          const moved = await readNow().then(
+            (after) => after.kind === "moved",
+            () => false,
+          );
+          if (!moved) throw actionError(err);
+        }
+        by = next.kind === "click" ? { button: buttonText(next.button) } : "enter";
+      }
+      for (const [kind, identity] of typedIds) progress.submitted.set(kind, identity);
       progress.submits += 1;
-      const did = describeStep(step.fill, button ? button.text || button.label || "the submit button" : null);
+      const did = describeStep(step.fill, by, boxOpts);
       say(did);
       lastWait = `the page to move on after that step (${did})`;
       // Wait for the form to move on: another page, or other fields on this one.
