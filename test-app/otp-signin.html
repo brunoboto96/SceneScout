@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Sign in</title>
+  </head>
+  <body>
+    <!--
+      A passwordless sign-in, as single-page apps commonly lay it out: the
+      email first, then "Send code" asks the server to email a one-time code
+      (it takes a moment, with no field on screen meanwhile) and the same page
+      shows the code step. "Send code" is enabled only a moment after a valid
+      email is typed, as a form that checks its input does, and a button that
+      leads to a password sits before it. /otp-signin shows one code field;
+      /otp-signin?boxes splits the code into one box per digit that moves on by
+      itself and submits once the last digit is in. Verify stays disabled
+      until the code is complete, and while it is being checked.
+
+      A right code gets back an access token (a JWT) the page keeps in
+      localStorage, while the server sets a session cookie and a refresh-token
+      cookie; the page then goes to /otp-account. A wrong code is refused with
+      a message that repeats it, the shape of a page that echoes its input,
+      and the code is cleared.
+    -->
+    <main>
+      <h1>Sign in</h1>
+      <p role="alert" id="error" hidden data-testid="otp-error"></p>
+      <p role="status" id="sending" hidden data-testid="otp-sending">Sending a code to your email…</p>
+      <form id="email-step" data-testid="otp-email-form">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" autocomplete="email" data-testid="otp-email-input" />
+        <button type="button" data-testid="otp-password-button">Sign in with a password</button>
+        <button type="submit" id="send" disabled data-testid="otp-send-button">Send code</button>
+        <button type="button" data-testid="otp-provider-button">Continue with another provider</button>
+      </form>
+      <form id="code-step" hidden data-testid="otp-code-form">
+        <p>We sent a code to your email.</p>
+        <div id="code-fields"></div>
+        <button type="submit" id="verify" disabled data-testid="otp-verify-button">Verify</button>
+        <button type="button" data-testid="otp-resend-button">Resend code</button>
+        <button type="button" data-testid="otp-change-email-button">Use a different email</button>
+      </form>
+    </main>
+    <script>
+      const DIGITS = 6;
+      const split = new URLSearchParams(location.search).has("boxes");
+      const email = document.getElementById("email");
+      const emailStep = document.getElementById("email-step");
+      const codeStep = document.getElementById("code-step");
+      const verifyButton = document.getElementById("verify");
+      const error = document.getElementById("error");
+      const sending = document.getElementById("sending");
+      const fields = document.getElementById("code-fields");
+      if (split) {
+        for (let i = 0; i < DIGITS; i++) {
+          const box = document.createElement("input");
+          box.inputMode = "numeric";
+          box.maxLength = 1;
+          box.setAttribute("aria-label", `Digit ${i + 1} of ${DIGITS}`);
+          box.dataset.testid = `otp-digit-${i + 1}-input`;
+          if (i === 0) box.autocomplete = "one-time-code";
+          fields.append(box);
+        }
+      } else {
+        fields.innerHTML =
+          '<label for="code">Enter the 6-digit code</label> <input id="code" name="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" data-testid="otp-code-input" />';
+      }
+      const inputs = Array.from(fields.querySelectorAll("input"));
+      const code = () => inputs.map((i) => i.value).join("");
+      let busy = false;
+      const update = () => (verifyButton.disabled = busy || code().length !== DIGITS);
+      const showError = (text) => {
+        error.textContent = text;
+        error.hidden = false;
+      };
+
+      async function verify() {
+        if (busy || code().length !== DIGITS) return;
+        busy = true;
+        update();
+        const res = await fetch("/otp-signin/verify", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ email: email.value, code: code() }),
+        });
+        const body = await res.json();
+        if (res.ok) {
+          // Still busy: the page is leaving, so nothing submits the code again.
+          localStorage.setItem("access_token", body.access_token);
+          location.assign("/otp-account");
+          return;
+        }
+        showError(body.error);
+        for (const input of inputs) input.value = "";
+        busy = false;
+        update();
+        inputs[0].focus();
+      }
+
+      inputs.forEach((input, i) => {
+        input.addEventListener("input", () => {
+          if (split) {
+            input.value = input.value.replace(/\D/g, "").slice(-1);
+            if (input.value && i < inputs.length - 1) inputs[i + 1].focus();
+          }
+          update();
+          if (split && code().length === DIGITS) verify();
+        });
+        input.addEventListener("keydown", (e) => {
+          if (split && e.key === "Backspace" && !input.value && i > 0) inputs[i - 1].focus();
+        });
+      });
+      codeStep.addEventListener("submit", (e) => {
+        e.preventDefault();
+        verify();
+      });
+
+      const send = document.getElementById("send");
+      let checking;
+      email.addEventListener("input", () => {
+        send.disabled = true;
+        clearTimeout(checking);
+        checking = setTimeout(() => (send.disabled = !/^[^@\s]+@[^@\s]+$/.test(email.value)), 600);
+      });
+
+      async function sendCode() {
+        if (send.disabled) return;
+        emailStep.hidden = true;
+        sending.hidden = false;
+        const res = await fetch("/otp-signin/start", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ email: email.value }),
+        });
+        sending.hidden = true;
+        if (!res.ok) {
+          emailStep.hidden = false;
+          showError("We could not send a code. Try again.");
+          return;
+        }
+        codeStep.hidden = false;
+        inputs[0].focus();
+      }
+      emailStep.addEventListener("submit", (e) => {
+        e.preventDefault();
+        sendCode();
+      });
+    </script>
+  </body>
+</html>
