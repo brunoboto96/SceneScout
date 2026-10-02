@@ -1,19 +1,21 @@
 /**
- * Runs `scenescout login <url> --role <name>`: opens a visible browser at the
- * URL, lets the person sign in however the app asks (SSO, MFA, a password
- * manager), and when they press Enter in the terminal saves the browser's
- * storage state as that role's profile.
+ * Runs `scenescout login <url> --role <name>` and scout_login: opens a
+ * visible browser at the URL, lets the person sign in however the app asks
+ * (SSO, MFA, a password manager), and once they are signed in saves the
+ * browser's storage state as that role's profile.
  *
- * Enter is the one way to save. Closing the window, Ctrl+C, or the terminal's
- * input ending saves nothing: by the time a window is closed its state can no
- * longer be read, and a profile saved by accident half-way through a sign-in
- * would be attached later as if it worked.
+ * The window saves by itself once engine/signed-in.ts says the sign-in has
+ * finished; Enter in the terminal saves at once, and `--save enter` makes it
+ * the only way, as before. Closing the window or Ctrl+C saves nothing: by the
+ * time a window is closed its state can no longer be read, and a profile saved
+ * by accident half-way through a sign-in would be attached later as if it
+ * worked.
  *
  * The rules (role names, where the file goes, its mode, what may be printed)
  * are in engine/profiles.ts; this file only drives the browser and the terminal.
  */
 import readline from "node:readline";
-import { chromium, firefox, webkit, type BrowserContext, type BrowserType, type Page } from "playwright";
+import { chromium, firefox, webkit, type Browser, type BrowserContext, type BrowserType, type Page } from "playwright";
 import { defaultEngine, type BrowserEngineName } from "./browsers.js";
 import { explainLaunchFailure } from "./engine/launch.js";
 import { explicitLimits, isTimeoutMessage, LIMIT_NAMES, type LimitKind } from "./engine/limits.js";
@@ -45,6 +47,19 @@ import {
   type StepOptions,
   type SubmittedBy,
 } from "./engine/scripted-login.js";
+import {
+  DEFAULT_SAVE_MODE,
+  judgeSignIn,
+  LOOK_EVERY_MS,
+  onApp,
+  startWatch,
+  type HeldValue,
+  type SaveMode,
+  type SignInLook,
+  type SignInVerdict,
+  type SignInWatch,
+  type WaitReason,
+} from "./engine/signed-in.js";
 
 /**
  * Read what the profile keeps from a signed-in context: cookies, localStorage
@@ -84,14 +99,19 @@ export async function captureState(context: BrowserContext): Promise<unknown> {
   return withSessionStorage(state, mergeSessionStorage(frames));
 }
 
-/** How the person signalled they were done: Enter saves; everything else does not. */
-export type LoginEnd = "enter" | "window-closed" | "input-ended" | "interrupted";
+/** How the interactive sign-in ended: signed in (seen, or Enter pressed), or not. */
+export type LoginEnd = "signed-in" | "enter" | "window-closed" | "input-ended" | "interrupted" | "timed-out";
 
 /** How long after the prompt input still counts as typed before it. */
 const EARLY_INPUT_MS = 300;
 
-/** Wait for Enter on the terminal, the window closing, the input ending or Ctrl+C, whichever comes first. */
-function waitForEnd(browserClosed: Promise<void>): { done: Promise<LoginEnd>; dispose: () => void } {
+/**
+ * Wait for Enter on the terminal, the input ending or Ctrl+C. With `keepOnEnd`
+ * (the window saves by itself), input that ends is not an answer: a client
+ * that starts the command with no terminal closes it at once, and the window
+ * is still the way to finish.
+ */
+function waitForEnter(keepOnEnd: boolean): { done: Promise<LoginEnd>; dispose: () => void } {
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
   // Lines typed before the prompt (while the browser launched or the page
   // loaded) arrive at once, buffered; they are not an answer to it.
@@ -101,10 +121,9 @@ function waitForEnd(browserClosed: Promise<void>): { done: Promise<LoginEnd>; di
     rl.on("line", () => {
       if (Date.now() >= listening) resolve("enter");
     });
-    rl.once("close", () => resolve("input-ended"));
+    if (!keepOnEnd) rl.once("close", () => resolve("input-ended"));
     onSigint = () => resolve("interrupted");
     process.once("SIGINT", onSigint);
-    void browserClosed.then(() => resolve("window-closed"));
   });
   return {
     done,
@@ -116,32 +135,41 @@ function waitForEnd(browserClosed: Promise<void>): { done: Promise<LoginEnd>; di
   };
 }
 
-const NOT_SAVED: Record<Exclude<LoginEnd, "enter">, string> = {
-  "window-closed": "The browser was closed before Enter was pressed, so nothing was saved. Run the command again and press Enter here once you are signed in.",
-  "input-ended": "The terminal's input ended before Enter was pressed, so nothing was saved. Run this command in an interactive terminal.",
+const NOT_SAVED: Record<Exclude<LoginEnd, "enter" | "signed-in">, string> = {
+  "window-closed": "The browser was closed before the sign-in finished, so nothing was saved. Run the command again and sign in in the window it opens.",
+  "input-ended":
+    "The terminal's input ended before Enter was pressed, so nothing was saved. Run this command in an interactive terminal, or leave out --save enter so the window saves by itself once you are signed in.",
   interrupted: "Interrupted, so nothing was saved.",
+  "timed-out": "The sign-in did not finish in time, so the window was closed and nothing was saved.",
 };
 
-export async function runLogin(
-  options: LoginOptions,
-  log: (line: string) => void,
-): Promise<{ path: string; summary: ProfileSummary; lifetime: ProfileLifetime }> {
+/** A visible browser opened at the sign-in URL, and a promise that settles when it closes. */
+export interface LoginWindow {
+  browser: Browser;
+  context: BrowserContext;
+  page: Page;
+  engine: BrowserEngineName;
+  closed: Promise<void>;
+}
+
+/** Open the window a person signs in in. Throws a sentence when the browser cannot start or the page cannot load. */
+export async function openLoginWindow(options: Pick<LoginOptions, "url" | "browser">, opts: { headless?: boolean } = {}): Promise<LoginWindow> {
   const engine: BrowserEngineName = options.browser ?? defaultEngine(process.env);
   const types: Record<BrowserEngineName, BrowserType> = { chromium, firefox, webkit };
   // Checked before a window opens: a limit out of bounds is a sentence, not a browser left behind.
   const navMs = explicitLimits({}, process.env).navMs ?? LOGIN_NAV_MS;
-  let browser;
+  const headless = opts.headless ?? false;
+  let browser: Browser;
   try {
-    browser = await types[engine].launch({ headless: false });
+    browser = await types[engine].launch({ headless });
   } catch (err) {
-    throw new Error(explainLaunchFailure(err instanceof Error ? err.message : String(err), 0, { engine, headed: true }));
+    throw new Error(explainLaunchFailure(err instanceof Error ? err.message : String(err), 0, { engine, headed: !headless }));
   }
-  const browserClosed = new Promise<void>((resolve) => browser.once("disconnected", () => resolve()));
-  let end: ReturnType<typeof waitForEnd> | undefined;
+  const closed = new Promise<void>((resolve) => browser.once("disconnected", () => resolve()));
   try {
     const context = await browser.newContext();
     const page = await context.newPage();
-    // Closing the only tab is how most people close the window; treat it the
+    // Closing the sign-in tab is how most people close the window; treat it the
     // same. The browser may already be closing, and either way it ends up closed.
     page.once("close", () => void browser.close().catch(() => {}));
     try {
@@ -150,20 +178,234 @@ export async function runLogin(
       const explained = loginTimeout(err, "nav", navMs);
       throw new Error(`could not open ${options.url}: ${explained instanceof Error ? explained.message.split("\n")[0] : String(explained)}`);
     }
-    log(`A ${engine} window is open at ${options.url}.`);
-    log(`Sign in as "${options.role}" there — SSO, MFA, whatever the app asks — then come back here and press Enter to save.`);
-    log(`(Closing the window or pressing Ctrl+C saves nothing.)`);
+    return { browser, context, page, engine, closed };
+  } catch (err) {
+    // The error being thrown is the one to report; a browser that fails to close as well adds nothing to it.
+    await browser.close().catch(() => {});
+    throw err;
+  }
+}
+
+/** Longest storage value read for a look; a longer one is compared by its start. */
+const MAX_HELD_VALUE = 64 * 1024;
+
+/** The cookies the browser would send to `url` and the top document's storage: what a look compares with the baseline. */
+async function readHeld(context: BrowserContext, page: Page, url: string): Promise<HeldValue[]> {
+  const held: HeldValue[] = (await context.cookies([url])).map((c) => ({
+    kind: "cookie" as const,
+    key: `cookie|${c.domain}|${c.path}|${c.name}`,
+    name: c.name,
+    value: c.value,
+  }));
+  const storage = await page.evaluate((max) => {
+    const out: { kind: "local" | "session"; name: string; value: string }[] = [];
+    for (const [kind, store] of [
+      ["local", localStorage],
+      ["session", sessionStorage],
+    ] as const) {
+      for (let i = 0; i < store.length; i++) {
+        const name = store.key(i);
+        if (name !== null) out.push({ kind, name, value: (store.getItem(name) ?? "").slice(0, max) });
+      }
+    }
+    return { origin: location.origin, out };
+  }, MAX_HELD_VALUE);
+  for (const e of storage.out) held.push({ kind: e.kind, key: `${e.kind}|${storage.origin}|${e.name}`, name: e.name, value: e.value });
+  return held;
+}
+
+/** A read the page's own navigation interrupted: the look is skipped and taken again. */
+const betweenPages = (err: Error): boolean => /context was destroyed|navigat|detached|target closed|has been closed/i.test(err.message);
+
+/** One look at the window, or null when the page was between documents and the look should be taken again. */
+async function lookAt(win: LoginWindow, watch: SignInWatch): Promise<SignInLook | null> {
+  const url = win.page.url();
+  const popupAway = win.context.pages().some((p) => p !== win.page && !p.isClosed() && /^https?:/i.test(p.url()) && !onApp(watch, p.url()));
+  // Off the app nothing is read, except at an absolute success URL, where a sign-in field still says it is not done.
+  const atSuccess = watch.successUrl !== undefined && /^https?:\/\//i.test(watch.successUrl) && urlMatches(url, watch.successUrl);
+  if (!onApp(watch, url) && !atSuccess) return { url, signInField: false, held: [], popupAway };
+  try {
+    const fields = await win.page.evaluate(collectFields, { selectors: {}, tag: false });
+    if (!Array.isArray(fields)) return null;
+    const chosen = chooseFields(fields);
+    const held = await readHeld(win.context, win.page, url);
+    // The page moved while it was read: what was read belongs to two pages.
+    if (win.page.url() !== url) return null;
+    return { url, signInField: Boolean(chosen.password || chosen.otp), held, popupAway };
+  } catch (err) {
+    if (err instanceof Error && betweenPages(err)) return null;
+    throw err;
+  }
+}
+
+/** What the watch said last, for whoever asks how the sign-in is going. */
+export interface WatchProgress {
+  reason: WaitReason | "starting";
+  url: string;
+}
+
+/**
+ * Watch the window until the person is signed in (engine/signed-in.ts says
+ * when), the window closes, or `signal` aborts. Resolves with how it ended;
+ * the caller saves and closes.
+ */
+export async function watchForSignIn(
+  win: LoginWindow,
+  options: { url: string; successUrl?: string },
+  opts: { signal?: AbortSignal; progress?: (p: WatchProgress) => void } = {},
+): Promise<{ kind: "signed-in"; verdict: Extract<SignInVerdict, { kind: "signed-in" }>; url: string } | { kind: "closed" } | { kind: "aborted" }> {
+  let closed = false;
+  void win.closed.then(() => {
+    closed = true;
+  });
+  // The baseline is what the window holds once the first page is there: whatever the app set before anyone signed in.
+  const firstUrl = win.page.url();
+  let watch = startWatch(options.url, [], options.successUrl, firstUrl);
+  const baseline: HeldValue[] = [];
+  try {
+    for (const c of await win.context.cookies()) baseline.push({ kind: "cookie", key: `cookie|${c.domain}|${c.path}|${c.name}`, name: c.name, value: c.value });
+    if (onApp(watch, firstUrl)) {
+      const first = await readHeld(win.context, win.page, firstUrl).catch((err: Error) => {
+        if (betweenPages(err)) return [];
+        throw err;
+      });
+      baseline.push(...first.filter((h) => h.kind !== "cookie"));
+    }
+  } catch (err) {
+    if (opts.signal?.aborted) return { kind: "aborted" };
+    if (closed || win.page.isClosed()) return { kind: "closed" };
+    throw err;
+  }
+  watch = startWatch(options.url, baseline, options.successUrl, firstUrl);
+  opts.progress?.({ reason: "starting", url: firstUrl });
+  for (;;) {
+    if (closed || win.page.isClosed()) return { kind: "closed" };
+    if (opts.signal?.aborted) return { kind: "aborted" };
+    let look: SignInLook | null;
+    try {
+      look = await lookAt(win, watch);
+    } catch (err) {
+      // The window closing under a look is the window closing, not an error; nor is a look the caller already stopped
+      // (Enter was pressed and the window is being closed to save).
+      if (opts.signal?.aborted) return { kind: "aborted" };
+      if (closed || win.page.isClosed()) return { kind: "closed" };
+      throw err;
+    }
+    if (look !== null) {
+      const judged = judgeSignIn(watch, look);
+      watch = judged.watch;
+      if (judged.verdict.kind === "signed-in") return { kind: "signed-in", verdict: judged.verdict, url: look.url };
+      opts.progress?.({ reason: judged.verdict.reason, url: look.url });
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, LOOK_EVERY_MS));
+  }
+}
+
+/** What the window says once the sign-in is seen: where, and by what. */
+function sayDetected(verdict: Extract<SignInVerdict, { kind: "signed-in" }>, url: string): string {
+  const how = verdict.via === "success-url" ? "reached the success URL" : `the app holds a new session (${verdict.credential})`;
+  return `Signed in: back on ${redactRoute(url)} and ${how}. Saving and closing the window.`;
+}
+
+export async function runLogin(
+  options: LoginOptions,
+  log: (line: string) => void,
+): Promise<{ path: string; summary: ProfileSummary; lifetime: ProfileLifetime }> {
+  const mode: SaveMode = options.save ?? DEFAULT_SAVE_MODE;
+  const win = await openLoginWindow(options);
+  let enter: ReturnType<typeof waitForEnter> | undefined;
+  const stop = new AbortController();
+  try {
+    log(`A ${win.engine} window is open at ${options.url}.`);
+    if (mode === "auto") {
+      log(`Sign in as "${options.role}" there — SSO, MFA, whatever the app asks. The window saves and closes by itself once you are signed in.`);
+      log(`(To save sooner, press Enter here. Closing the window or pressing Ctrl+C saves nothing.)`);
+    } else {
+      log(`Sign in as "${options.role}" there — SSO, MFA, whatever the app asks — then come back here and press Enter to save.`);
+      log(`(Closing the window or pressing Ctrl+C saves nothing.)`);
+    }
     // Listening starts only now, after the prompt: an Enter pressed while the
     // page was still loading must not save a signed-out profile.
-    end = waitForEnd(browserClosed);
-    const how = await end.done;
-    if (how !== "enter") throw new Error(NOT_SAVED[how]);
-    return await saveLogin(context, options);
+    enter = waitForEnter(mode === "auto");
+    const racers: Promise<LoginEnd>[] = [enter.done, win.closed.then((): LoginEnd => "window-closed")];
+    if (mode === "auto") {
+      racers.push(
+        watchForSignIn(win, options, { signal: stop.signal }).then((r): LoginEnd => {
+          if (r.kind === "signed-in") {
+            log(sayDetected(r.verdict, r.url));
+            return "signed-in";
+          }
+          return r.kind === "closed" ? "window-closed" : "interrupted";
+        }),
+      );
+    }
+    const how = await Promise.race(racers);
+    stop.abort();
+    if (how !== "enter" && how !== "signed-in") throw new Error(NOT_SAVED[how]);
+    return await saveLogin(win.context, options);
   } finally {
-    end?.dispose();
+    stop.abort();
+    enter?.dispose();
     // Closing a browser the person already closed fails; nothing is left to clean up then.
-    await browser.close().catch(() => {});
+    await win.browser.close().catch(() => {});
   }
+}
+
+/** How long a sign-in window opened from the conversation stays open, at most, before it closes saving nothing. */
+export const LOGIN_WINDOW_MAX_MS = 15 * 60_000;
+
+/** A sign-in window opened by scout_login, watched in the background so one tool call need not last as long as the person takes. */
+export interface PendingLogin {
+  role: string;
+  url: string;
+  /** The window itself: a smoke test acts in it as the person would. */
+  window: LoginWindow;
+  /** Settles once the window has saved a profile, or with why it did not. */
+  done: Promise<{ ok: true; saved: { path: string; summary: ProfileSummary; lifetime: ProfileLifetime }; detected: string } | { ok: false; error: string }>;
+  /** What the watch said last. */
+  progress(): WatchProgress;
+  /** Close the window, saving nothing. */
+  cancel(): Promise<void>;
+}
+
+/**
+ * Open a window for a person to sign in, watch it, and save the profile once
+ * they are signed in: what scout_login does. Never waits for Enter; the
+ * window closing, `cancel`, or LOGIN_WINDOW_MAX_MS passing saves nothing.
+ */
+export async function startLoginWindow(options: LoginOptions, opts: { headless?: boolean; maxMs?: number } = {}): Promise<PendingLogin> {
+  const win = await openLoginWindow(options, opts);
+  const stop = new AbortController();
+  let last: WatchProgress = { reason: "starting", url: options.url };
+  const timer = setTimeout(() => stop.abort(), opts.maxMs ?? LOGIN_WINDOW_MAX_MS);
+  const done = (async (): Promise<Awaited<PendingLogin["done"]>> => {
+    try {
+      const r = await watchForSignIn(win, options, { signal: stop.signal, progress: (p) => (last = p) });
+      if (r.kind === "closed") return { ok: false, error: NOT_SAVED["window-closed"] };
+      if (r.kind === "aborted") return { ok: false, error: NOT_SAVED["timed-out"] };
+      const saved = await saveLogin(win.context, options);
+      return { ok: true, saved, detected: sayDetected(r.verdict, r.url).replace(/ Saving and closing the window\.$/, "") };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      clearTimeout(timer);
+      // The outcome is decided; a window the person already closed fails to close again, and nothing is left then.
+      await win.browser.close().catch(() => {});
+    }
+  })();
+  return {
+    role: options.role,
+    url: options.url,
+    window: win,
+    done,
+    progress: () => last,
+    cancel: async () => {
+      stop.abort();
+      // Closed either way: a window already gone fails to close again. `done` settles once the watch sees it.
+      await win.browser.close().catch(() => {});
+      await done;
+    },
+  };
 }
 
 /**
@@ -223,10 +465,12 @@ const MAX_SUBMITS = 5;
 
 /**
  * Read every visible form control on the page (the top document only), tag
- * each with its index, and mark those matching a configured selector. Runs in
- * the page, so it may use only what the page has.
+ * each with its index when asked (a scripted sign-in acts on them; watching a
+ * person sign in only reads them, so leaves the page as it is), and mark those
+ * matching a configured selector. Runs in the page, so it may use only what
+ * the page has.
  */
-function collectFields(selectors: Selectors): FieldInfo[] | { badSelector: string } {
+function collectFields({ selectors, tag: tagging }: { selectors: Selectors; tag: boolean }): FieldInfo[] | { badSelector: string } {
   const visible = (el: Element): boolean => {
     const r = (el as HTMLElement).getBoundingClientRect();
     const st = getComputedStyle(el);
@@ -256,14 +500,14 @@ function collectFields(selectors: Selectors): FieldInfo[] | { badSelector: strin
     return parts.join(" ").replace(/\s+/g, " ").trim();
   };
   // Tags from an earlier read name other elements now: one index, one element.
-  for (const old of Array.from(document.querySelectorAll("[data-scenescout-login]"))) old.removeAttribute("data-scenescout-login");
+  if (tagging) for (const old of Array.from(document.querySelectorAll("[data-scenescout-login]"))) old.removeAttribute("data-scenescout-login");
   const out: FieldInfo[] = [];
   const all = Array.from(document.querySelectorAll("input, textarea, select, button"));
   for (const el of all) {
     const type = (el.getAttribute("type") ?? "").toLowerCase();
     if (type === "hidden" || !visible(el)) continue;
     const index = out.length;
-    el.setAttribute("data-scenescout-login", String(index));
+    if (tagging) el.setAttribute("data-scenescout-login", String(index));
     const tag = el.tagName.toLowerCase() as FieldInfo["tag"];
     const input = el as HTMLInputElement;
     out.push({
@@ -379,7 +623,7 @@ export async function runScriptedLogin(
       return true;
     };
     const read = async (): Promise<FieldInfo[] | null> => {
-      const got = await page.evaluate(collectFields, config.selectors).catch((err: Error) => {
+      const got = await page.evaluate(collectFields, { selectors: config.selectors, tag: true }).catch((err: Error) => {
         if (midNavigation(err)) return null;
         throw fail(err.message);
       });

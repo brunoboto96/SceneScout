@@ -8,12 +8,36 @@ Most apps worth testing are behind a sign-in. SceneScout never types your passwo
 scenescout login http://localhost:3000 --role admin
 ```
 
-A visible browser opens at the URL. Sign in however the app asks (a password, SSO, a second factor), then come back to the terminal and press **Enter**. The session is saved as `.scenescout/auth/admin.json` in the project. Closing the window or pressing Ctrl+C saves nothing.
+A visible browser opens at the URL. Sign in however the app asks (a password, SSO, a second factor). Once you are signed in, the window saves the session as `.scenescout/auth/admin.json` in the project and closes by itself. Pressing **Enter** in the terminal saves at once. Closing the window or pressing Ctrl+C saves nothing.
 
+- `--save enter` saves on Enter only, as earlier versions did. Use it when the window would close too early or too late for your app.
+- `--success-url <path or URL>` tells the window where signed in is: once a sign-in screen has been seen, it saves when the address's path contains this text, or the address starts with it, and no sign-in field is on the page. Use it when the app keeps its session somewhere the window cannot see.
 - `--project <dir>` saves into another project's `.scenescout/`.
 - `--browser firefox` or `webkit` records in that browser.
 - The file is readable by your account only, and `.scenescout/` keeps itself out of git.
 - The command prints where it saved, how many cookies, origins and databases the profile holds, and how long it will last. It never prints the values.
+
+### How the window knows you are signed in
+
+The window looks at the page twice a second. It saves when all of these hold on two looks in a row at the same address:
+
+- The page is back on the app: the origin you gave, or the same host over `https` or with `www.` when the first page went there. A page on another site, such as a single sign-on provider, is never the end, and neither is a sign-in popup still open on one.
+- The page shows no password or one-time-code field, and its path is not a sign-in path or step (`/login`, `/signin`, `/auth/…`, `/mfa`, `/2fa`, `/verify`, `/challenge`, an account picker).
+- The address is not a return from the provider that the app has yet to finish: a `code` with a `state`, a token in the fragment, or a SAML response.
+- The app holds a session it did not hold when the window opened: a cookie sent to the page, or a `localStorage` or `sessionStorage` entry of its origin, new or changed, whose name or value looks like a session. Anti-forgery tokens, a sign-in's `state` and `nonce`, and analytics cookies do not count.
+- You went through a sign-in screen first: a sign-in field, a sign-in path, or another site. A landing page that sets a cookie when a banner is dismissed is not a sign-in.
+
+The command prints which session it saw appear, by name. Values are never printed.
+
+### From a conversation
+
+An agent can open the same window with `scout_login`, so you never need a terminal:
+
+```
+scout_login { url: "http://localhost:3000/login", role: "admin", projectPath: "/path/to/project" }
+```
+
+The agent tells you a window has opened. You sign in as usual, and the window saves and closes by itself. The call returns once the sign-in is saved, or after `waitSeconds` (default 120) with the window still open. The agent then calls `scout_login` again with the same role to keep waiting. The window closes after 15 minutes without saving if nobody signs in. A window needs a desktop. On a machine with no display, run `scenescout login` where you can see the window.
 
 Then ask the agent to test as that role (`/scenescout --role admin`, or `scout_attach {role: "admin"}`). A role with no saved login is refused with the command to run. Record one login per role you want to compare:
 

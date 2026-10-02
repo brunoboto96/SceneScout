@@ -22,6 +22,7 @@ const EXPECTED_TOOLS = [
   "scout_lane_report",
   "scout_scan",
   "scout_attach",
+  "scout_login",
   "scout_session",
   "scout_journey",
   "scout_note",
