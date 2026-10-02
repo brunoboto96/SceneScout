@@ -49,6 +49,23 @@ export type CiMode = (typeof CI_MODES)[number];
 export const CI_LEVELS = ["minimal", "medium", "extensive"] as const;
 export type CiLevel = (typeof CI_LEVELS)[number];
 
+/**
+ * How a filed finding is told apart from one already stored. `rule`: the
+ * store's rule alone (memory.ts isDuplicateFinding). `judge`: the rule first,
+ * then, for a filing the rule keeps apart, a model asked about the open
+ * findings on the same page (engine/dedup.ts DedupJudge), with the rule's
+ * decision kept whenever the model cannot answer. A CI run already sends
+ * pages to a model and holds a key, so it judges by default; the MCP server
+ * judges only when asked to (DEDUP_ENV or scout_attach {dedup}).
+ */
+export const DEDUP_MODES = ["rule", "judge"] as const;
+export type DedupMode = (typeof DEDUP_MODES)[number];
+export const DEFAULT_CI_DEDUP: DedupMode = "judge";
+/** Turns the dedup judge on for the MCP server: `rule` (the default) or `judge`. An attach's `dedup` wins over it. */
+export const DEDUP_ENV = "SCENESCOUT_DEDUP";
+/** Which provider the MCP server's dedup judge uses when both keys are in its environment. */
+export const DEDUP_PROVIDER_ENV = "SCENESCOUT_DEDUP_PROVIDER";
+
 export interface Caps {
   /** Model calls. */
   turns: number;
@@ -84,6 +101,7 @@ export const CI_OPTION_NAMES = [
   "out",
   "show",
   "compare-url",
+  "dedup",
 ] as const;
 
 /** The longest --show description: it becomes a line of the model's prompt. */
@@ -114,6 +132,8 @@ export interface CiOptions {
   actionTimeoutMs?: number;
   /** How long a page may take to load; absent means the environment variable, else the default (limits.ts). */
   navTimeoutMs?: number;
+  /** How filed findings are deduplicated: by the rule alone, or with the model judge as well (DEDUP_MODES). */
+  dedup: DedupMode;
 }
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
@@ -251,6 +271,8 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
   if (!actionTimeout.ok) return actionTimeout;
   const navTimeout = parseLimitFlag("nav", flags.get("nav-timeout-ms"));
   if (!navTimeout.ok) return navTimeout;
+  const dedup = flags.get("dedup") ?? DEFAULT_CI_DEDUP;
+  if (!(DEDUP_MODES as readonly string[]).includes(dedup)) return { ok: false, error: `--dedup must be one of ${DEDUP_MODES.join(", ")}` };
 
   const resolve = (p: string): string => (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) ? p : `${cwd.replace(/[\\/]$/, "")}/${p}`);
   return {
@@ -274,6 +296,7 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
       ...(compareUrl ? { compareUrl } : {}),
       ...(actionTimeout.value !== undefined ? { actionTimeoutMs: actionTimeout.value } : {}),
       ...(navTimeout.value !== undefined ? { navTimeoutMs: navTimeout.value } : {}),
+      dedup: dedup as DedupMode,
     },
   };
 }
@@ -314,6 +337,55 @@ export function detectProvider(
   const effort = options.effort ?? DEFAULT_EFFORT;
   if (!EFFORTS[provider].includes(effort)) return { ok: false, error: `--effort must be one of ${EFFORTS[provider].join(", ")} for ${provider}` };
   return { ok: true, resolved: { provider, model: options.model ?? DEFAULT_MODEL[provider], effort, baseUrl: options.baseUrl ?? DEFAULT_BASE_URL[provider] } };
+}
+
+// ── the dedup judge's model ─────────────────────────────────────────────────
+
+/**
+ * The effort the dedup judge asks at: the lowest the provider's API takes.
+ * Measured, effort none judged as well as low and changed no verdict
+ * (docs/benchmark.md); the Messages API has no none, so Anthropic gets low.
+ */
+export function judgeEffort(provider: ProviderName): string {
+  return EFFORTS[provider][0];
+}
+
+/** The MCP server's dedup mode from its environment: `rule` when unset. A value that is neither is refused, naming the variable. */
+export function dedupModeFromEnv(env: Record<string, string | undefined>): DedupMode {
+  const raw = (env[DEDUP_ENV] ?? "").trim();
+  if (raw === "") return "rule";
+  if (!(DEDUP_MODES as readonly string[]).includes(raw)) throw new Error(`${DEDUP_ENV} must be one of ${DEDUP_MODES.join(", ")}, not ${JSON.stringify(raw)}`);
+  return raw as DedupMode;
+}
+
+/**
+ * The key and model the MCP server's dedup judge uses when no CI run answers
+ * for it: the provider whose key is in the server's environment (with both,
+ * the one DEDUP_PROVIDER_ENV names), its default model and its lowest effort.
+ * A missing key is an answer (`ok: false`, and the rule decides); a provider
+ * name that is neither is refused.
+ */
+export function judgeKeyConfig(env: Record<string, string | undefined>): { ok: true; resolved: ResolvedProvider; key: string } | { ok: false; error: string } {
+  const named = (env[DEDUP_PROVIDER_ENV] ?? "").trim();
+  if (named !== "" && !(PROVIDERS as readonly string[]).includes(named))
+    throw new Error(`${DEDUP_PROVIDER_ENV} must be one of ${PROVIDERS.join(", ")}, not ${JSON.stringify(named)}`);
+  const withKey = PROVIDERS.filter((p) => present(env, KEY_ENV[p]));
+  let provider: ProviderName;
+  if (named !== "") {
+    provider = named as ProviderName;
+    if (!withKey.includes(provider)) return { ok: false, error: `${DEDUP_PROVIDER_ENV}=${provider} needs ${KEY_ENV[provider]} in the server's environment` };
+  } else if (withKey.length === 0) {
+    return { ok: false, error: `the judge needs ${KEY_ENV.anthropic} or ${KEY_ENV.openai} in the server's environment` };
+  } else if (withKey.length > 1) {
+    return { ok: false, error: `both ${KEY_ENV.anthropic} and ${KEY_ENV.openai} are set: set ${DEDUP_PROVIDER_ENV} to anthropic or openai to choose` };
+  } else {
+    provider = withKey[0];
+  }
+  return {
+    ok: true,
+    resolved: { provider, model: DEFAULT_MODEL[provider], effort: judgeEffort(provider), baseUrl: DEFAULT_BASE_URL[provider] },
+    key: (env[KEY_ENV[provider]] ?? "").trim(),
+  };
 }
 
 /**
@@ -708,6 +780,31 @@ export interface CiResult {
   findings: Finding[];
   /** What a run asked to show an element (--show) captured. */
   capture?: CaptureOutcome;
+  /** How findings were deduplicated, and what the judge's calls cost. Absent on a capture run, which files none. */
+  dedup?: CiDedup;
+}
+
+/** The dedup judge's calls as the run's client saw them. Their tokens are in the run's usage as well. */
+export interface JudgeCalls {
+  /** Questions the server sent, answered or not. */
+  calls: number;
+  /** Questions the run's model did not answer, or the run refused: the rule decided those pairs. */
+  failed: number;
+  usage: Usage;
+  ms: number;
+}
+
+/** How a run deduplicated: by the rule alone, or with the model judge, and what the judge's calls cost. */
+export type CiDedup = { by: "rule" } | ({ by: "judge"; /** The effort the judge was asked at. */ effort?: string } & JudgeCalls);
+
+/** One line on how a run deduplicated, for the summary. */
+export function dedupLine(d: CiDedup): string {
+  if (d.by === "rule") return "the rule alone";
+  const tokens = d.usage.input + d.usage.output;
+  return (
+    `the rule, then the model judge${d.effort ? ` at effort ${d.effort}` : ""} for filings it kept apart: ${d.calls} call(s)` +
+    `${d.failed ? `, ${d.failed} without an answer (the rule decided those)` : ""}, ${n(tokens)} tokens (in the usage below), ${(d.ms / 1000).toFixed(1)}s`
+  );
 }
 
 const SEVERITY_ORDER = { high: 0, medium: 1, low: 2 } as const;
@@ -740,6 +837,7 @@ export function ciSummaryMarkdown(r: CiResult, secrets: readonly string[] = []):
     ...(r.capture ? [] : [`| Level | ${r.level} — completion contract ${r.contractMet ? "met" : "not met (the report's gap ledger says what is missing)"} |`]),
     `| Mode | ${r.mode} |`,
     `| Model | ${r.provider} ${cell(r.model, secrets)}, effort ${r.effort} |`,
+    ...(r.dedup ? [`| Finding dedup | ${dedupLine(r.dedup)} |`] : []),
     `| Usage | ${usageLine(r.spend, r.model, r.endedAt, r.price)} |`,
     ``,
   ];
@@ -799,6 +897,23 @@ export function ciSummaryJson(r: CiResult, version: string, secrets: readonly st
       seconds: Math.round((r.endedAt - r.spend.startedAt) / 1000),
       estimatedCostUsd: estimateCost(r.model, r.spend.usage, r.price),
     },
+    ...(r.dedup
+      ? {
+          dedup: {
+            by: r.dedup.by,
+            ...(r.dedup.by === "judge"
+              ? {
+                  effort: r.dedup.effort,
+                  calls: r.dedup.calls,
+                  failed: r.dedup.failed,
+                  inputTokens: r.dedup.usage.input,
+                  outputTokens: r.dedup.usage.output,
+                  seconds: Math.round(r.dedup.ms / 100) / 10,
+                }
+              : {}),
+          },
+        }
+      : {}),
     counts: {
       high: r.findings.filter((f) => !isWorthALook(f) && f.severity === "high").length,
       medium: r.findings.filter((f) => !isWorthALook(f) && f.severity === "medium").length,
