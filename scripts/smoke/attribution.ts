@@ -91,7 +91,8 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     check('...but one that only puts up a native alert("Saved!") still gets the note', SILENT_NOTE.test(told), told.slice(0, 500));
 
     await engine.navigate("/late-route-idle.html");
-    snap = await engine.snapshot();
+    // In full: a revisited route is otherwise a diff, which lists no unchanged control.
+    snap = await engine.snapshot(true);
     const verify = await engine.click(refFor(snap, "Verify"));
     check('a button whose test id holds "sign" inside "assignee" is not submit-style', !SILENT_NOTE.test(verify), verify.slice(0, 500));
 

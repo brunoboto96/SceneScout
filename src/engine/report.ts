@@ -21,6 +21,7 @@ import { calibrate, formatCalibration } from "./calibration.js";
 import { formatPace, measurePace } from "./pace.js";
 import { formatNeverSubmittedEmpty } from "./forms.js";
 import { DEFAULT_REPORT_AUDIENCE, formatPlainSection, type ReportAudience } from "./plain.js";
+import { COLLECTOR_CAP } from "./collector.js";
 
 function playwrightSkeleton(f: Finding): string {
   const routeClass = f.state.split("#")[0].split("?")[0];
@@ -361,13 +362,10 @@ function offersSubmit(elements: Record<string, unknown>): boolean {
   });
 }
 
-/**
- * The collector stops at 150 elements, so on a dense page the submit control
- * may simply not be in the element list. "No submit found" then means "we did
- * not look far enough", not "there is nothing to submit" — never suppress on
- * that basis.
- */
-const COLLECTOR_CAP = 150;
+// The collector stops at COLLECTOR_CAP elements, so on a dense page the
+// submit control may simply not be in the element list. "No submit found"
+// then means "we did not look far enough", not "there is nothing to submit" —
+// never suppress on that basis.
 
 /**
  * Make app-controlled text safe inside a Markdown table cell. The backslash

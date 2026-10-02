@@ -32,7 +32,7 @@ import {
   reportEvidence,
   withAudience,
 } from "../src/engine/report.ts";
-import { IMPACT, isSafeRelativePath, PLAIN_WORDING, pictureOf, plainStep, plainSteps, plainWording } from "../src/engine/plain.ts";
+import { IMPACT, isSafeRelativePath, PLAIN_WORDING, pictureOf, plainFinding, plainStep, plainSteps, plainWording } from "../src/engine/plain.ts";
 import { FINDING_CATEGORIES } from "../src/engine/memory.ts";
 import { ORACLE_KINDS } from "../src/engine/oracles.ts";
 import { buildReplayHtml, escapeHtml, evidenceFor, framePath, RECORD_MAX_FRAMES, renderMarkdown, resolveFrame, taskBlocks } from "../src/engine/replay.ts";
@@ -1220,6 +1220,9 @@ test("the report setting: both puts the plain section first, qa prints it alone,
   assert.match(both, /- The server refused or failed a request \(once\)/);
   assert.match(both, /\*\*Blocks users\*\* · The server refused or failed a request · on http:\/\/app\.test\/things\/new/);
   assert.match(both, /\*\*What was expected:\*\* The action completes/);
+  assert.doesNotMatch(both, /also seen on/, "a finding seen on one page names only that page");
+  const shared = { ...store.findings[0], seenOn: ["/other-things", "/more-things"] };
+  assert.match(plainFinding(shared, 1, { audience: "both" }).join("\n"), /on http:\/\/app\.test\/things\/new, and also seen on \/other-things, \/more-things/);
   assert.match(both, /\*\*What happened:\*\* The save request fails/);
   assert.match(
     both,

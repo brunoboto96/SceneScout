@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Refs: a dense list</title></head>
+<body>
+  <!-- More links than a snapshot lists, with the pager and a "Load more"
+       button after them in the page. The snapshot must keep both and say
+       what it cut. "Archive all" sits past the cap too and pages nothing, the
+       contrast: it is cut and counted. -->
+  <main>
+    <h1>Dense list</h1>
+    <ul id="list"></ul>
+    <button type="button" data-testid="list-archive">Archive all</button>
+    <button type="button" data-testid="list-load">Load more</button>
+    <nav><a href="?page=2" data-testid="pager-next">Next</a></nav>
+  </main>
+  <script>
+    const items = [];
+    for (let i = 1; i <= 200; i++) items.push('<li><a href="#item-' + i + '" data-testid="item-' + i + '">Item ' + i + '</a></li>');
+    document.getElementById('list').innerHTML = items.join('');
+  </script>
+</body>
+</html>

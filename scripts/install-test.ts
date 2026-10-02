@@ -15,8 +15,14 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  CLAUDE_CODE_NOT_NEEDED,
+  DESKTOP_EXTENSION_NAME,
+  desktopExtensionRoots,
   diagnose,
+  doctorAllGood,
   ensureCommand,
+  findDesktopExtension,
+  installClosing,
   findOnUserPath,
   installSkill,
   isEphemeralRoot,
@@ -28,9 +34,11 @@ import {
   registerMcp,
   repairCommands,
   resolveClaudeDir,
+  type DesktopExtension,
   type Runner,
   type RunResult,
 } from "../src/installer.ts";
+import { parse as parseYaml } from "yaml";
 import {
   browserPresence,
   defaultAttachNote,
@@ -479,6 +487,273 @@ test("the versioning step formats the files it rewrites", () => {
   const format = steps.findIndex((s) => s.startsWith("prettier --write") && s.includes(".claude-plugin/plugin.json") && s.includes("package.json"));
   assert.ok(sync >= 0, "version-packages must sync the plugin version");
   assert.ok(format > sync, "version-packages must run Prettier over plugin.json and package.json after the sync");
+  assert.ok(steps[format].includes("desktop-extension/manifest.json"), "and over the desktop extension's manifest, which the sync rewrites too");
+  const syncScript = fs.readFileSync(path.join(root, "scripts", "sync-plugin-version.mjs"), "utf8");
+  assert.match(syncScript, /path\.join\("desktop-extension", "manifest\.json"\)/, "the sync moves the desktop extension's version with the package");
+});
+
+// ── The desktop extension (.mcpb) ────────────────────────────────────────────
+// Spec: the MCPB manifest.json format, manifest_version 0.3.
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+type Manifest = {
+  manifest_version: string;
+  name: string;
+  display_name?: string;
+  version: string;
+  description: string;
+  author: { name: string };
+  server: { type: string; entry_point: string; mcp_config: { command: string; args: string[]; env?: Record<string, string> } };
+  compatibility?: { runtimes?: { node?: string } };
+  user_config?: Record<string, unknown>;
+};
+const readManifest = (): Manifest => JSON.parse(fs.readFileSync(path.join(repoRoot, "desktop-extension", "manifest.json"), "utf8")) as Manifest;
+
+test("the desktop extension's manifest has every required field, the package's version, and starts the built server", () => {
+  const manifest = readManifest();
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { version: string; main: string; engines: { node: string } };
+  assert.equal(manifest.manifest_version, "0.3");
+  assert.equal(manifest.name, DESKTOP_EXTENSION_NAME, "doctor finds the install by this name");
+  assert.equal(manifest.display_name, "SceneScout");
+  assert.equal(manifest.version, pkg.version, "a desktop extension shows its manifest's version; it must be the package's");
+  assert.ok(manifest.description.trim().length > 0);
+  assert.ok(manifest.author.name.trim().length > 0);
+  // A Node server: the desktop app runs the entry point with its own node, from the unpacked bundle.
+  assert.equal(manifest.server.type, "node");
+  assert.equal(manifest.server.entry_point, "dist/mcp-server.js");
+  assert.equal(manifest.server.entry_point, pkg.main, "the same server the npm package starts");
+  assert.ok(fs.existsSync(path.join(repoRoot, "src", "mcp-server.ts")), "which the build compiles from src/mcp-server.ts");
+  assert.equal(manifest.server.mcp_config.command, "node");
+  assert.deepEqual(
+    manifest.server.mcp_config.args,
+    ["${__dirname}/dist/mcp-server.js"],
+    "an absolute path inside the bundle, whatever folder the app starts it from",
+  );
+  assert.equal(manifest.compatibility?.runtimes?.node, `${pkg.engines.node}.0.0`, "the Node it needs is the package's");
+  // Nothing to configure and nothing secret: the bundle starts the engine as it is.
+  assert.deepEqual(manifest.server.mcp_config.env ?? {}, {});
+  assert.equal(manifest.user_config, undefined);
+});
+
+test("the bundle build ships what the server reads at runtime, and the release attaches it from a job that runs no repository code", () => {
+  const script = fs.readFileSync(path.join(repoRoot, "scripts", "build-mcpb.mjs"), "utf8");
+  const shipped =
+    /for \(const entry of \[([^\]]+)\]\)/
+      .exec(script)?.[1]
+      .match(/"([^"]+)"/g)
+      ?.map((s) => s.slice(1, -1)) ?? [];
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { files: string[]; scripts: Record<string, string> };
+  for (const entry of pkg.files.filter((f) => f !== "CHANGELOG.md")) assert.ok(shipped.includes(entry), `the bundle ships ${entry}, as the npm package does`);
+  assert.ok(shipped.includes(PLAYBOOK_RELATIVE_PATH.split(path.sep)[0]), "the server reads its playbook from skills/");
+  assert.match(script, /"ci", "--omit=dev", "--ignore-scripts"/, "production dependencies only, and no install scripts");
+  assert.equal(pkg.scripts.mcpb, "node scripts/build-mcpb.mjs");
+
+  type Step = { uses?: string; run?: string; with?: Record<string, string> };
+  type Job = { needs?: string | string[]; if?: string; permissions?: Record<string, string>; steps: Step[] };
+  const wf = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8")) as { jobs: Record<string, Job> };
+  const build = wf.jobs["desktop-extension"];
+  assert.ok(build, "release.yml builds the bundle");
+  assert.equal(build.if, "needs.release.outputs.published == 'true' && needs.release.outputs.tag != ''", "only for a release that was published");
+  assert.deepEqual(build.permissions, { contents: "read" }, "the job that runs repository code can change nothing");
+  assert.equal(build.steps.find((s) => s.uses?.startsWith("actions/checkout"))?.with?.ref, "${{ needs.release.outputs.tag }}", "built from the release's tag");
+  assert.ok(build.steps.some((s) => s.run === "npm run mcpb"));
+  assert.ok(
+    build.steps.some((s) => /npx -y @anthropic-ai\/mcpb@\d+\.\d+\.\d+ validate/.test(s.run ?? "")),
+    "validated against the manifest schema with a pinned MCPB tool",
+  );
+  const attach = wf.jobs["attach-desktop-extension"];
+  assert.ok(attach, "release.yml attaches the bundle");
+  assert.deepEqual(attach.permissions, { contents: "write" });
+  assert.ok(!attach.steps.some((s) => s.uses?.startsWith("actions/checkout")), "no checkout where the token can write");
+  assert.ok(!attach.steps.some((s) => /\b(node|npm|npx|tsx)\b/.test(s.run ?? "")), "and no repository code");
+  assert.ok(attach.steps.some((s) => /^gh release upload "\$TAG" \*\.mcpb\b/.test(s.run ?? "")));
+});
+
+/** A desktop extension folder as Claude Desktop unpacks one. */
+function fakeExtension(
+  root: string,
+  folder: string,
+  manifest: Record<string, unknown> | string,
+  opts: { entry?: boolean; shellRevision?: string } = {},
+): string {
+  const dir = path.join(root, folder);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "manifest.json"), typeof manifest === "string" ? manifest : JSON.stringify(manifest));
+  if (opts.entry !== false) {
+    fs.mkdirSync(path.join(dir, "dist"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "dist", "mcp-server.js"), "");
+  }
+  if (opts.shellRevision) {
+    // The shape of playwright-core's browsers.json, cut down to what is read.
+    const browsers = [
+      { name: "chromium", revision: opts.shellRevision },
+      { name: "chromium-headless-shell", revision: opts.shellRevision },
+    ];
+    fs.mkdirSync(path.join(dir, "node_modules", "playwright-core"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "node_modules", "playwright-core", "browsers.json"), JSON.stringify({ comment: "", browsers }));
+  }
+  return dir;
+}
+const ourManifest = (version = "3.15.0") => ({ name: DESKTOP_EXTENSION_NAME, version, server: { type: "node", entry_point: "dist/mcp-server.js" } });
+
+test("doctor looks for desktop extensions where Claude Desktop keeps them on each platform", () => {
+  const home = tmp("sc-home-");
+  assert.deepEqual(desktopExtensionRoots({ platform: "darwin", home, env: {} }), [
+    path.join(home, "Library", "Application Support", "Claude", "Claude Extensions"),
+  ]);
+  assert.deepEqual(desktopExtensionRoots({ platform: "linux", home, env: {} }), [path.join(home, ".config", "Claude", "Claude Extensions")]);
+  assert.deepEqual(desktopExtensionRoots({ platform: "linux", home, env: { XDG_CONFIG_HOME: path.join(home, "xdg") } }), [
+    path.join(home, "xdg", "Claude", "Claude Extensions"),
+  ]);
+  // Windows: the installer build under APPDATA, and the Store build in its package folder.
+  const appData = path.join(home, "AppData", "Roaming");
+  const local = path.join(home, "AppData", "Local");
+  fs.mkdirSync(path.join(local, "Packages", "Claude_abc123"), { recursive: true });
+  fs.mkdirSync(path.join(local, "Packages", "SomeOtherApp_xyz"), { recursive: true });
+  assert.deepEqual(desktopExtensionRoots({ platform: "win32", home, env: { APPDATA: appData, LOCALAPPDATA: local } }), [
+    path.join(appData, "Claude", "Claude Extensions"),
+    path.join(local, "Packages", "Claude_abc123", "LocalCache", "Roaming", "Claude", "Claude Extensions"),
+  ]);
+});
+
+test("the extension is found by its manifest's name, whatever its folder is called, and other extensions are left out", () => {
+  const root = tmp("sc-ext-");
+  assert.equal(findDesktopExtension([path.join(root, "missing")]), null, "no Claude Desktop, no extension");
+  fakeExtension(root, "a-broken-one", "{ not json");
+  fs.writeFileSync(path.join(root, ".DS_Store"), "");
+  fakeExtension(root, "another-tool", { name: "another-tool", version: "1.0.0", server: { type: "node", entry_point: "dist/mcp-server.js" } });
+  assert.equal(findDesktopExtension([root]), null, "another extension's manifest, or a broken one, is not SceneScout");
+  const dir = fakeExtension(root, "local.mcpb.someone.scenescout", ourManifest("3.15.0"), { shellRevision: "1243" });
+  assert.deepEqual(findDesktopExtension([path.join(root, "missing"), root]), {
+    dir,
+    version: "3.15.0",
+    entry: path.join(dir, "dist", "mcp-server.js"),
+    entryPresent: true,
+    headlessShellRevision: "1243",
+  } satisfies DesktopExtension);
+  // Unpacked without its server: found, and said to be incomplete.
+  const bare = tmp("sc-ext-");
+  fakeExtension(bare, "x", ourManifest(), { entry: false });
+  assert.equal(findDesktopExtension([bare])?.entryPresent, false);
+});
+
+test("doctor passes a Claude Desktop-only install, and still checks Claude Code where it is set up", () => {
+  const packageRoot = fakePackage();
+  const chromiumPath = path.join(packageRoot, "chromium");
+  fs.writeFileSync(chromiumPath, "");
+  const extRoot = tmp("sc-ext-");
+  fakeExtension(extRoot, "ext", ourManifest(), { shellRevision: "1243" });
+  const desktopExtension = findDesktopExtension([extRoot]);
+  assert.ok(desktopExtension);
+  const base = {
+    packageRoot,
+    nodeVersion: "v22.1.0",
+    defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath },
+    desktopExtension,
+    // The same revision as this copy's: the browser check above is the extension's too.
+    headlessShellDir: path.join(tmp("sc-cache-"), "chromium_headless_shell-1243"),
+  };
+
+  // No `claude`, no skill: before, this failed twice and sent a Claude Desktop user to set up Claude Code.
+  const desktopOnly = diagnose({ ...base, claudeDir: tmp("sc-claude-"), run: scripted([absent]).run });
+  assert.deepEqual(
+    desktopOnly.filter((c) => !c.ok),
+    [],
+  );
+  assert.deepEqual(
+    desktopOnly.map((c) => c.name),
+    ["node >= 20", "engine built", "browser downloaded (chromium-headless-shell)", "desktop extension installed", CLAUDE_CODE_NOT_NEEDED],
+  );
+  assert.match(desktopOnly[3].detail, /SceneScout 3\.15\.0 in Claude Desktop/);
+  assert.equal(
+    doctorAllGood({ engineOnly: false, desktopOnly: true }),
+    "All good. In Claude Desktop, start a new chat and ask:  Use SceneScout to test http://localhost:3000",
+  );
+  // `claude` present but nothing registered, no skill: still nothing to fix.
+  assert.deepEqual(
+    diagnose({ ...base, claudeDir: tmp("sc-claude-"), run: scripted([notRegistered]).run }).filter((c) => !c.ok),
+    [],
+  );
+
+  // Someone who set up Claude Code too is checked as before: here the registration is missing.
+  const claudeDir = tmp("sc-claude-");
+  installSkill({ packageRoot, claudeDir });
+  const both = diagnose({ ...base, claudeDir, run: scripted([notRegistered]).run });
+  assert.deepEqual(
+    both.filter((c) => !c.ok).map((c) => c.name),
+    ["MCP server registered"],
+  );
+  assert.ok(!both.some((c) => c.name === CLAUDE_CODE_NOT_NEEDED));
+
+  // Without an extension, the default doctor is unchanged: no skill and no `claude` are failures.
+  const none = diagnose({ ...base, desktopExtension: null, claudeDir: tmp("sc-claude-"), run: scripted([absent]).run });
+  assert.deepEqual(
+    none.filter((c) => !c.ok).map((c) => c.name),
+    ["skill installed", "claude CLI on PATH"],
+  );
+});
+
+test("doctor flags an extension missing its server, and one whose browser build is not downloaded", () => {
+  const packageRoot = fakePackage();
+  const chromiumPath = path.join(packageRoot, "chromium");
+  fs.writeFileSync(chromiumPath, "");
+  // A Playwright download folder holding this copy's headless build, revision 1243.
+  const cache = tmp("sc-cache-");
+  const ownShell = path.join(cache, "chromium_headless_shell-1243");
+  fs.mkdirSync(ownShell);
+  fs.writeFileSync(path.join(ownShell, "INSTALLATION_COMPLETE"), "");
+  const base = {
+    packageRoot,
+    claudeDir: tmp("sc-claude-"),
+    nodeVersion: "v22.1.0",
+    defaultBrowser: { target: "chromium-headless-shell" as const, path: ownShell },
+    scope: "engine" as const,
+    headlessShellDir: ownShell,
+    run: scripted([]).run,
+  };
+  const failing = (extensionRoot: string) => diagnose({ ...base, desktopExtension: findDesktopExtension([extensionRoot]) }).filter((c) => !c.ok);
+
+  const broken = tmp("sc-ext-");
+  fakeExtension(broken, "ext", ourManifest(), { entry: false, shellRevision: "1243" });
+  const missing = failing(broken);
+  assert.deepEqual(
+    missing.map((c) => c.name),
+    ["desktop extension installed"],
+  );
+  assert.match(missing[0].fix ?? "", /Settings > Extensions/);
+
+  // An older extension launches an older build, which this copy's download does not provide.
+  const older = tmp("sc-ext-");
+  fakeExtension(older, "ext", ourManifest("3.9.0"), { shellRevision: "1194" });
+  assert.deepEqual(
+    failing(older).map((c) => [c.name, c.fix]),
+    [["browser downloaded (desktop extension)", "npx -y scenescout@3.9.0 install --browser-only"]],
+  );
+  // Running that fix downloads the build beside this one, and the check clears.
+  fs.mkdirSync(path.join(cache, "chromium_headless_shell-1194"));
+  fs.writeFileSync(path.join(cache, "chromium_headless_shell-1194", "INSTALLATION_COMPLETE"), "");
+  assert.deepEqual(failing(older), []);
+  const passed = diagnose({ ...base, desktopExtension: findDesktopExtension([older]) });
+  assert.ok(passed.some((c) => c.name === "browser downloaded (desktop extension)" && c.ok));
+
+  // The same revision as this copy's adds no second check, and an unreadable revision skips it rather than guessing.
+  const same = tmp("sc-ext-");
+  fakeExtension(same, "ext", ourManifest(), { shellRevision: "1243" });
+  assert.ok(!diagnose({ ...base, desktopExtension: findDesktopExtension([same]) }).some((c) => c.name === "browser downloaded (desktop extension)"));
+  const unread = tmp("sc-ext-");
+  fakeExtension(unread, "ext", ourManifest("3.9.0"));
+  assert.deepEqual(failing(unread), []);
+});
+
+test("after a plugin install, install says to start a new chat, in plain words", () => {
+  const plugin = installClosing({ browserOnly: true, forClaude: true });
+  assert.ok(plugin?.includes("Start a new chat to use SceneScout."));
+  const claude = installClosing({ browserOnly: false, forClaude: true });
+  assert.ok(claude?.startsWith("Start a new chat in Claude Code to use SceneScout."));
+  for (const line of [plugin, claude]) {
+    assert.doesNotMatch(line ?? "", /\b(session|MCP|server|restart|reload|tools?)\b/i, "the mechanism stays out of it");
+  }
+  assert.equal(installClosing({ browserOnly: false, forClaude: false }), null, "another client gets its own hint instead");
 });
 
 test("an install run through npx registers the npx launcher, never a path inside npm's cache", () => {

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Refs: a record with tabs</title></head>
+<body>
+  <!-- One record screen with two tabs in the query (?tab=details,
+       ?tab=history). Each tab is its own route; both share the screen's
+       header, so going from one to the other is mostly the same controls. -->
+  <main>
+    <h1>Thing 7</h1>
+    <nav>
+      <a href="?tab=details" data-testid="tab-details">Details</a>
+      <a href="?tab=history" data-testid="tab-history">History</a>
+      <a href="/refs-other.html" data-testid="record-other">Another page</a>
+    </nav>
+    <button type="button" data-testid="record-edit">Edit</button>
+    <section id="pane"></section>
+  </main>
+  <script>
+    const tab = new URLSearchParams(location.search).get('tab') || 'details';
+    document.getElementById('pane').innerHTML = tab === 'history'
+      ? '<button type="button" data-testid="history-export">Export history</button>'
+      : '<button type="button" data-testid="details-copy">Copy details</button>';
+  </script>
+</body>
+</html>

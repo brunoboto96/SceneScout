@@ -8,7 +8,7 @@
  * `report` setting chooses which parts a document carries. Everything here is
  * pure string work, so the wording and the step translation are table-tested.
  */
-import type { Finding, FindingCategory } from "./memory.js";
+import { seenOnOf, type Finding, type FindingCategory } from "./memory.js";
 import type { OracleKind, OracleViolation } from "./oracles.js";
 
 /** Which parts a report carries: the plain view and the technical one ("both"), or one of them. */
@@ -272,7 +272,14 @@ export function plainSummary(input: PlainInput): string[] {
 /** One finding in plain words, with its technical detail folded beneath it. */
 export function plainFinding(f: Finding, index: number, input: Pick<PlainInput, "lastFrames" | "audience">): string[] {
   const words = plainWording(f.category);
-  const lines = [`### ${index}. ${f.title}`, ``, `**${IMPACT[f.severity]}** · ${words.problem} · on ${f.url}`, ``];
+  // One cause in a shared part of the app is seen on every page that shows it.
+  const also = seenOnOf(f);
+  const lines = [
+    `### ${index}. ${f.title}`,
+    ``,
+    `**${IMPACT[f.severity]}** · ${words.problem} · on ${f.url}${also.length > 0 ? `, and also seen on ${also.join(", ")}` : ""}`,
+    ``,
+  ];
   const picture = pictureOf(f, input.lastFrames?.get(f.id));
   if (picture) lines.push(`![What the page showed](${picture})`, ``);
   const steps = plainSteps(f.repro);
