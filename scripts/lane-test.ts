@@ -19,6 +19,7 @@ import {
   LANE_BLOCKED_BY_MAX,
   LANE_CATEGORIES,
   LANE_CONVENTION_MAX,
+  LANE_FINDING_MAX,
   LANE_EVIDENCE_MAX,
   LANE_MAX_ITEMS,
   LANE_NAME_MAX,
@@ -207,6 +208,7 @@ test("lane: every cap the parser enforces refuses at cap+1 and accepts at the ca
       (n) => laneReport({}, { verdict: "worth_a_look", severity: null, category: "visual", convention: "c".repeat(n) }),
       /at decisions\.0\.convention$/,
     ],
+    ["finding", LANE_FINDING_MAX, (n) => laneReport({}, { finding: "f".repeat(n) }), /at decisions\.0\.finding$/],
   ];
   for (const [name, max, build, at] of caps) {
     assert.ok(parseLaneReport(build(max)).ok, `${name} at ${max} fits`);
@@ -219,6 +221,16 @@ test("lane: every cap the parser enforces refuses at cap+1 and accepts at the ca
   refused(laneReport({ routes: Array.from({ length: LANE_MAX_ITEMS + 1 }, (_, i) => `/r${i}`) }), /at routes$/, "too many routes");
   // The regression the caps were sized from: a descriptive self-assigned id and a real signature both fit.
   assert.ok(parseLaneReport(laneReport({}, { observation: "order-detail-save-notes-covered-by-stickybar" })).ok);
+});
+
+test("lane: a decision may name the finding it was filed as, or leave it null or out; an empty one is refused", () => {
+  const named = parseLaneReport(laneReport({}, { finding: "a1b2c3d4e5" }));
+  assert.ok(named.ok);
+  assert.equal(named.report.decisions[0].finding, "a1b2c3d4e5", "kept, so the fold can match it to the project's finding");
+  assert.ok(parseLaneReport(laneReport({}, { finding: null })).ok);
+  assert.ok(parseLaneReport(laneReport({})).ok, "a reply written before the field existed still parses");
+  refused(laneReport({}, { finding: "" }), /at decisions\.0\.finding$/);
+  refused(laneReport({}, { finding: 12345 }), /at decisions\.0\.finding$/);
 });
 
 test("lane: a defect without a severity or a category is not a decision yet; a non-defect may carry either", () => {
@@ -356,6 +368,7 @@ test("lane: the instruction the planner sends names every value and every cap th
     ["lane name", LANE_NAME_MAX],
     ["route", LANE_ROUTE_MAX],
     ["convention", LANE_CONVENTION_MAX],
+    ["finding", LANE_FINDING_MAX],
   ] as const) {
     assert.ok(text.includes(`${cap} characters`), `the ${name} cap (${cap}) is stated, not discovered by refusal`);
   }
@@ -365,6 +378,8 @@ test("lane: the instruction the planner sends names every value and every cap th
   assert.ok(/"worth_a_look"[^.]*must name that convention in "convention"/.test(text), "the worth_a_look rule is stated");
   assert.ok(text.includes('On every other verdict leave "convention" null or out: it is ignored there.'), "what happens on other verdicts is stated");
   assert.ok(/not for "I could not tell": that is "unsure"/.test(text), "the line between worth_a_look and unsure is stated");
+  assert.ok(text.includes('"finding":<the id scout_finding returned for it, or null>'), "the finding key is in the shape");
+  assert.ok(/"finding" is the id scout_finding gave[^.]*name it on every defect you filed/.test(text), "what the finding id is for is stated");
   assert.ok(text.includes('"orders"'), "the lane is told its own name");
   assert.ok(laneReportInstruction('a"b').includes('"a\\"b"'), "the lane name is escaped into the instruction");
 });

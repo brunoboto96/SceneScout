@@ -8,7 +8,7 @@
  * lines of page scripts that made the engine class hard to read.
  */
 import type { Page } from "playwright";
-import { DIALOG_LIKE_SEL } from "./collector.js";
+import { ACCESSIBLE_NAME_SRC, DIALOG_LIKE_SEL } from "./collector.js";
 import { focusAdvanceKey, isBrowserEngine } from "../browsers.js";
 import type { FocusSample } from "./design.js";
 
@@ -279,7 +279,8 @@ export async function probeFocusIndicators(page: Page): Promise<FocusSample[]> {
         el.setAttribute("data-scout-focus-probe", "${i}");
         const s = getComputedStyle(el);
         const tid = el.getAttribute("data-testid");
-        const name = ((el.textContent || el.getAttribute("aria-label") || "").trim().replace(/\\s+/g, " ").slice(0, 30));
+        // Named as the snapshot names it, so an icon button reads by its aria-label here too.
+        const name = (${ACCESSIBLE_NAME_SRC})(el).slice(0, 30);
         return { label: tid ? "[" + tid + "]" : "<" + el.tagName.toLowerCase() + "> " + JSON.stringify(name), focused: ${styleSig} };
       })()`)) as { label: string; focused: string } | "wrapped" | null;
       if (info === null || info === "wrapped") break;

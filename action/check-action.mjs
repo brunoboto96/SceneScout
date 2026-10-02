@@ -106,6 +106,19 @@ export function summaryOutputs(json) {
   };
 }
 
+/**
+ * The folder of pictures kept beside the results: those of the visual
+ * baselines this run found changed (`--baseline compare`). The check removes
+ * the pictures an earlier run left there before it writes its own, and this is
+ * empty unless this run's check.json names pictures it wrote, so a folder only
+ * an earlier run filled is never kept as this run's.
+ */
+export function picturesDir(json, outDir, exists = fs.existsSync) {
+  const results = json && typeof json === "object" && json.baselines && Array.isArray(json.baselines.results) ? json.baselines.results : [];
+  const dir = path.join(outDir, "visual");
+  return results.some((r) => r && typeof r === "object" && r.files) && exists(dir) ? dir : "";
+}
+
 /** A workflow command's message must not break the line it is written on. */
 export function escapeAnnotation(text) {
   return String(text).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
@@ -295,13 +308,19 @@ function run() {
   const explained = explainError(error, process.env.SCENESCOUT_VERSION);
   const file = (name) => (fs.existsSync(path.join(outDir, name)) ? path.join(outDir, name) : "");
   let summary = null;
-  if (file("check.json")) summary = summaryOutputs(JSON.parse(fs.readFileSync(file("check.json"), "utf8")));
+  let pictures = "";
+  if (file("check.json")) {
+    const json = JSON.parse(fs.readFileSync(file("check.json"), "utf8"));
+    summary = summaryOutputs(json);
+    pictures = picturesDir(json, outDir);
+  }
   setOutputs({
     "exit-code": exitCode,
     error: explained,
     report: file("report.md"),
     json: file("check.json"),
     sarif: file("check.sarif"),
+    visual: pictures,
     ...(summary ?? Object.fromEntries(SUMMARY_OUTPUT_NAMES.map((name) => [name, ""]))),
   });
 }

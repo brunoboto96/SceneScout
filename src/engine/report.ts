@@ -1,6 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
-import { baseRoute, reachedRoutes, routeIdentity, isEmbedKey, isWorthALook, judgedMergesOf, type Finding, type MemoryStore, type PageScore } from "./memory.js";
+import {
+  baseRoute,
+  reachedRoutes,
+  routeIdentity,
+  isEmbedKey,
+  isWorthALook,
+  judgedMergesOf,
+  seenOnOf,
+  type Finding,
+  type MemoryStore,
+  type PageScore,
+} from "./memory.js";
 import type { OracleViolation } from "./oracles.js";
 import { sayVerification } from "./verify.js";
 import type { WriteMode } from "./policy.js";
@@ -134,10 +145,16 @@ export function formatWorthALook(items: readonly Finding[], sessionStart: string
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}${f.foundAt >= sessionStart ? "" : " · seen in an earlier run"}`);
     lines.push(`- **A defect only if** your project uses ${f.convention ?? "a convention the finding does not name"}`);
     if (f.evidence) lines.push(`- **Seen:** \`${f.evidence}\``);
-    lines.push(`- **Where:** \`${f.state}\` (${f.url})`);
+    lines.push(`- **Where:** \`${f.state}\` (${f.url})${alsoSeenOn(f)}`);
     lines.push(``, f.detail, ``);
   }
   return lines;
+}
+
+/** The other routes a merged finding was filed on, as the end of its Where line, or "". */
+function alsoSeenOn(f: Finding): string {
+  const routes = seenOnOf(f);
+  return routes.length > 0 ? `; also seen on ${routes.map((r) => `\`${r}\``).join(", ")}` : "";
 }
 
 /**
@@ -235,6 +252,8 @@ export interface ReportExtras {
   mode?: WriteMode;
   /** Origins trusted with their embeds' writes; they only counted in safe-write. */
   trustedEmbeds?: string[];
+  /** POST endpoints the user named as reads; they only count in observe. */
+  readPosts?: string[];
   /** The engine's version, for the HTML's header. */
   version?: string;
   /** Sessions attached right now. Only these can be holding a browser, so only these are warned about. */
@@ -499,6 +518,26 @@ export function coverageView(memory: MemoryStore, session: string, scope: "sessi
 }
 
 /**
+ * The gap-ledger line for pages whose scripts sent a POST that observe
+ * refused, or null. Some apps read through POST (a search, a report query); a
+ * page loading its data that way cannot be tested in observe until the user
+ * names the endpoint in `readPosts`. The engine cannot tell a read from a
+ * write, so it names the endpoints and leaves the choice to the user.
+ */
+export function observeRefusedPostsGap(pages: ReadonlyArray<{ route: string; endpoints: readonly string[] }> | undefined): string | null {
+  const list = (pages ?? []).filter((p) => p.endpoints.length > 0);
+  if (list.length === 0) return null;
+  const shown = list
+    .slice(0, 8)
+    .map((p) => `${p.route} (${p.endpoints.join(", ")})`)
+    .join("; ");
+  return (
+    `${list.length} page(s) sent a POST that observe refused, so whatever it loads is untested: ${shown}${list.length > 8 ? " …" : ""}. ` +
+    `If one of these only reads (a search or query sent as POST), the user can name it in readPosts ("POST /path") and the page can be tested in observe; anything that writes stays refused.`
+  );
+}
+
+/**
  * The route lines of the gap ledger: never visited, visited but nothing
  * exercised, never design-audited. All three count over ONE set, the route
  * contract (`knownRoutes`), and say so, so their figures can be compared with
@@ -610,6 +649,9 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
           : ""),
     );
   }
+  // From project memory, not a session: lanes close theirs before the report is written.
+  const refusedPosts = observeRefusedPostsGap(memory.observeRefusedPosts);
+  if (refusedPosts) gaps.push(refusedPosts);
   const journeyTotal = Object.values(facts).reduce((a, f) => a + (f.journeysCompleted ?? 0), 0);
   if (journeyTotal === 0) {
     gaps.push(
@@ -775,7 +817,7 @@ export function generateReport(
     if (!complete && f.regressedAt) lines.push(`- **⟳ REGRESSED:** previously marked resolved, re-found ${f.regressedAt} — the fix did not hold`);
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}`);
     if (f.evidence) lines.push(`- **Evidence:** \`${f.evidence}\``);
-    lines.push(`- **Where:** \`${f.state}\` (${f.url})`);
+    lines.push(`- **Where:** \`${f.state}\` (${f.url})${alsoSeenOn(f)}`);
     lines.push(`- **Seen in runs:** ${f.runs}`);
     // A merge the model made is shown with what was filed, so a wrong one can be seen, and refiled as its own defect (ADR 4).
     for (const m of judgedMergesOf(f)) {
@@ -885,6 +927,19 @@ export function generateReport(
     );
     lines.push(``);
     for (const o of extras.trustedEmbeds) lines.push(`- \`${o}\``);
+    lines.push(``);
+  }
+
+  if (extras?.readPosts && extras.readPosts.length > 0) {
+    lines.push(`## Read POSTs`);
+    lines.push(``);
+    lines.push(
+      extras.mode === "observe"
+        ? `Named by the user as endpoints that only read, so observe let them out unless the path or body looked destructive or the body was a GraphQL mutation:`
+        : `Named as reads, but not applied: they only count in observe mode, and this run was ${extras.mode ?? "read-only"}:`,
+    );
+    lines.push(``);
+    for (const e of extras.readPosts) lines.push(`- \`${e}\``);
     lines.push(``);
   }
 

@@ -74,6 +74,9 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--flow-writes` | `never` | `never` replays flows under observe's rule; `allow` replays them under `--mode` |
 | `--on-refused-step` | `report` | `report` marks a flow whose step was refused "could not run" and exits 2 with every other verdict kept; `stop` exits 2 at that step with no results |
 | `--gate-retests` | `high` | Which still-reproducing re-tested findings fail the gate: `never`, `high` or `all` |
+| `--baseline` | `off` | `compare` pictures each page or element listed in the baselines' `targets.json` and files `visual-change` when one no longer looks like its baseline; `update` writes new baselines ([visual baselines](Ways-to-use-it.md#visual-baselines)) |
+| `--baselines` | `<project>/.scenescout/baselines` | The folder holding `targets.json` and the baselines. The default is ignored by git; name a folder the project commits to share them |
+| `--baseline-threshold` | `0.1` | The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; `update` rewrites the baselines past it (and any taken on another operating system). Not 0 by default, so anti-aliasing noise between machines and browser builds does not fail the gate; `0` counts every changed pixel (a colour channel off by more than 8 in 255). A change of size always counts |
 | `--sarif-file-anchor` | the running workflow's file, else `package.json`, else `README.md` | The repository file, relative to the repository root, that a `check.sarif` result points at when no saved flow raised it. See [SARIF locations](Ways-to-use-it.md#sarif-locations) |
 
 ### `scenescout ci`
@@ -194,6 +197,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `clipped-text` | low | Text clipped |
 | `image-aspect` | low | Image distorted |
 | `flow-step-failed` | high | Saved flow broke |
+| `visual-change` | high | Differs from its visual baseline (only with `--baseline`) |
 | `off-grid-spacing` | worth a look | Spacing off a 4px grid |
 | `indistinct-link` | worth a look | Link styled like body text |
 | `scrolled-out-controls` | worth a look | Controls scrolled out of view sideways |
@@ -207,6 +211,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
 | `SCENESCOUT_LIVE` | the server | `off` keeps the live view closed |
 | `SCENESCOUT_REFRESH_BROKER` | the server | `off` turns off the refresh broker for role sessions |
+| `SCENESCOUT_READ_POSTS` | the server, `check`, `ci`, a first look | POST endpoints that only read, let out in `observe`: entries such as `POST /api/search`, separated by commas or new lines. Unset: none. A `scout_attach` `readPosts` wins over it |
 | `SCENESCOUT_DEDUP` | the server | `judge` asks a model, with a key below, whether a filing the dedup rule keeps apart from everything recorded is one of the open findings on its page; `rule` (default) does not. A `scout_attach` `dedup` wins over it |
 | `SCENESCOUT_DEDUP_PROVIDER` | the server | `anthropic` or `openai`: which key the dedup judge uses when both are set |
 | `ANTHROPIC_API_KEY` | `ci`; the server with the dedup judge on | The Anthropic key. The only way to give one |
@@ -263,13 +268,16 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `flow-writes` | empty | As `--flow-writes` |
 | `on-refused-step` | empty | As `--on-refused-step` |
 | `gate-retests` | empty | As `--gate-retests` |
+| `baseline` | empty | As `--baseline` |
+| `baselines` | empty | As `--baselines`, relative to `working-directory` |
+| `baseline-threshold` | empty | As `--baseline-threshold` |
 | `sarif-file-anchor` | empty | As `--sarif-file-anchor`, relative to the repository root; empty means the workflow file that is running |
 | `working-directory` | `.` | Where the check runs; other relative paths are resolved from here |
 | `version` | empty | The scenescout npm version to run; empty means the version of the action's ref |
 | `cli` | empty | A built `dist/cli.js` to run instead of the npm package, for testing the action itself |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
-| `upload-artifact` | `true` | Keep the three files as an artifact |
+| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met |
 | `artifact-name` | empty | Empty means `scenescout-check-<job id>`; give each matrix cell its own |
 | `upload-sarif` | `false` | Upload `check.sarif` to code scanning; needs `security-events: write` |
 
@@ -375,6 +383,7 @@ What an agent can pass when it attaches a session. You rarely set these by hand;
 | `task` | a placeholder | What the session is doing right now |
 | `paceMs` | `0` | A floor between actions, 0 to 60000 |
 | `trustedEmbeds` | none | Origins of embedded frames whose writes may go out, in `safe-write` only |
+| `readPosts` | `SCENESCOUT_READ_POSTS`, else none | POST endpoints that only read (`"POST /api/search"`, `"POST https://api.example.com/query"`), let out in `observe` only. Exact paths, `*` for one path segment, at most 20 ([Safety model](Safety-model.md#post-endpoints-that-only-read)) |
 | `record` | `false` | Keep a frame after every action and write `report.html` |
 | `actionTimeoutMs` | `SCENESCOUT_ACTION_TIMEOUT_MS`, else `5000` | 1000 to 120000 |
 | `navTimeoutMs` | `SCENESCOUT_NAV_TIMEOUT_MS`, else `20000` | 1000 to 300000 |

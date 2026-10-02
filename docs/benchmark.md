@@ -1440,6 +1440,18 @@ off); the MCP server judges only when `SCENESCOUT_DEDUP=judge` or
 wired, on pairs from runs made after this change, which is the check that the
 gain above holds in the store.
 
+**A literal in one title and the other's detail
+([#318](https://github.com/brunoboto96/SceneScout/issues/318)).** When both
+findings carry evidence, the quoted literal that bridges them must now be in
+the other finding's title or evidence, not only in its detail. Re-scored on
+2026-10-02 over the current archives (451 findings placed on a page): demo
+12,299 pairs and held-out 331, every figure the same before and after (demo
+accuracy 79.6%, Brier 0.204, 440 merges; held-out 85.8%, Brier 0.142, 66
+merges). The archives keep no finding's detail, so the pairs cannot see this
+rule either way; `memory-test` holds it with a contrastive pair. A variant
+that also stopped a title literal matching the other's evidence lost 4
+correct demo merges (440 to 436, no wrong merge avoided) and was not taken.
+
 ## Rejected and not-yet-tried
 
 Edits considered and not kept, so they are not retried blind:

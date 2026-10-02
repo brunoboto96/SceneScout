@@ -5,7 +5,12 @@
  */
 const DESTRUCTIVE_PATTERNS: RegExp[] = [
   /\bdelete\b/i,
-  /\bremove\b/i,
+  // "Remove" a filter chip drops a condition from the view: "Remove Status:
+  // Open filter" re-queries the list, the same sense the reset rule exempts.
+  // A label whose object, at its end, is a filter or a chip, or a test id with
+  // the chip before the verb ("filter-remove"), is exempt; "Remove member",
+  // and "Remove member. Use the filter to find others.", still count.
+  /(?<!\b(?:filters?|chips?)[\s-]{1,3})\bremove\b(?![^\n]{0,60}?\b(?:filters?|chips?)\W*$)/i,
   /\brevoke\b/i,
   /\bdestroy\b/i,
   /\bpurge\b/i,
@@ -30,11 +35,13 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
   // judges any other, and `discard` is a destructive verb in a path there.
   /\bdiscard\b(?![\s_-]+(?:(?:your|my|all|the|any)[\s_-]+)?(?:unsaved[\s_-]+|pending[\s_-]+|local[\s_-]+|draft[\s_-]+)?(?:changes|edits)\b)/i,
   /\bcancel subscription\b/i,
-  // The verb: a control that signs the user off, alone or after another verb
-  // ("Save and sign off"). The noun is how approval apps label things, and it
-  // is told by the word before it ("Needs sign-off", "Awaiting sign-off",
-  // "Send for sign-off"); those destroy nothing. Same shape as the reset rule.
-  /(?<!\b(?:needs?|awaiting|awaits|pending|requires?|required|for|before|after|without|of|the|a|an|its|their|your|my)\s)\bsign(?: |-)?off\b/i,
+  // The verb: a control that signs the user off, starting the label ("Sign
+  // off", "(Sign off)", a test id "sign-off-button") or joined to another verb
+  // ("Save and sign off", "Save & sign off"). Anywhere else it is the noun
+  // approval apps label things with ("Needs sign-off", "Manager sign-off",
+  // "Final sign-off recorded"), which destroys nothing. Told by position, not
+  // by a list of the words that may come before it: any modifier can.
+  /(?:^[^\p{L}\p{N}]*|\b(?:and|then)\s+|&\s*)sign(?: |-)?off\b/iu,
   // The tool is generic — destructive labels come in many languages.
   /\b(eliminar|borrar|suprimir)\b/i, // es
   /\b(excluir|apagar|remover)\b/i, // pt
@@ -159,6 +166,17 @@ export interface JudgedControl {
   testid?: string | null;
   ownText?: string | null;
   centre?: readonly string[] | null;
+  /** Whether a user can act on it (collector.ts isInteractive). False for an element listed only for its test id or text. */
+  interactive?: boolean;
+}
+
+/** The most words a click target's own text may have and still be read as its command. */
+export const COMMAND_TEXT_WORDS = 4;
+
+/** A short verb phrase, or null: at most COMMAND_TEXT_WORDS words and no sentence. */
+function commandText(text: string): string | null {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  return words.length > 0 && words.length <= COMMAND_TEXT_WORDS && !SENTENCE_RE.test(text) ? text : null;
 }
 
 /** Roles whose accessible name is the label of the one thing a click does. */
@@ -181,23 +199,28 @@ const LABELLED_CONTROL_ROLES = new Set([
  * The label that makes a listed element destructive, or null. A control is
  * judged by its OWN name, never by what it merely contains:
  *
- * - A button, link, menu item, tab or option is named by what it does, and
- *   that name is judged whole, as before.
+ * - A button, link, menu item, tab or option (by tag or by role) is named
+ *   by what it does, and that name is judged whole, however long: a button
+ *   "Delete all my saved data" is refused. The word cap below is only for
+ *   containers, whose text is the record they show.
  * - A dropdown (a `<select>`, a combobox, a listbox) is named by its options,
  *   all of them, so a filter offering "All, Create, Update, Delete" read as a
  *   delete control and choosing "Create" was refused. Choosing is judged where
  *   the value is known: scout_select vets the chosen option, and an option
  *   clicked in a custom list is a control of its own. Only its test id, and a
  *   control covering its centre, are judged here.
- * - Anything else (a row, a card, a panel listed for its test id or a click
- *   handler) is judged by its own text, not the text of the buttons inside
- *   it, so a row holding a "Delete" button is not itself a delete control.
- *   The button is listed, and refused, on its own. A click on the row lands
- *   on its centre, so the control under that point is judged with the row:
- *   a row whose middle IS a delete button is still refused.
+ * - Anything else (a row, a card, a heading, a panel listed for its test id
+ *   or a click handler) is judged by its test id and by the control covering
+ *   its centre, where a click on it lands: a row whose middle IS a delete
+ *   button is still refused, and the buttons inside it are listed, and
+ *   refused, on their own. Its text is the record it shows ("Archive Test
+ *   Widget", "Final sign-off recorded"), not a command, so the text counts
+ *   only for a click target whose own text is a short verb phrase
+ *   (COMMAND_TEXT_WORDS words, no sentence): a clickable div saying "Delete".
+ *   A heading is never judged by its text.
  *
- * When the page could not say what the own text is, the whole name stands in,
- * so a reading that failed can only refuse more, never less.
+ * When the page could not say what the own text is, the whole name stands in
+ * and is judged whole, so a reading that failed can only refuse more.
  */
 export function destructiveLabelOf(c: JudgedControl): string | null {
   const first = (...labels: Array<string | null | undefined>): string | null =>
@@ -205,7 +228,9 @@ export function destructiveLabelOf(c: JudgedControl): string | null {
   const centre = c.centre ?? [];
   if (c.tag === "select" || c.role === "combobox" || c.role === "listbox") return first(c.testid, ...centre);
   if (LABELLED_CONTROL_ROLES.has(c.role) || c.tag === "button" || c.tag === "a") return first(c.name, c.testid);
-  return first(c.ownText ?? c.name, c.testid, ...centre);
+  if (c.role === "heading" || /^h[1-6]$/i.test(c.tag)) return first(c.testid, ...centre);
+  const own = c.ownText == null ? c.name : c.interactive === false ? null : commandText(c.ownText);
+  return first(own, c.testid, ...centre);
 }
 
 /**
@@ -352,7 +377,7 @@ export class BlockNotices {
         ? `The page's own requests were answered with a 403 in the server's place, so the page's handling of a refusal is real: an error message is correct, and a success message is a false_success violation. `
         : "") +
       (rule === "observe"
-        ? `observe mode blocks every request that is not a GET, so no form submission reaches the server. Re-attach with mode="read-only" ONLY if the user confirms that ordinary form submissions are acceptable on this target.`
+        ? `observe mode blocks every request that is not a GET, so no form submission reaches the server. Re-attach with mode="read-only" ONLY if the user confirms that ordinary form submissions are acceptable on this target. If a refused POST only reads (a search or query sent as POST), the user can name it in readPosts instead; never add one yourself.`
         : rule === "read-only"
           ? `Re-attach with mode="safe-write" to test create/edit flows, or "destructive" (user-approved disposable env only).`
           : `In safe-write, updates/deletes are only allowed on resources this session created (${createdCount} so far).`)
@@ -848,6 +873,162 @@ export const FOREIGN_FRAME_SANDBOX = "sandbox allow-scripts allow-forms allow-sa
  */
 export function withForeignFrameSandbox(existing: string | undefined): string {
   return existing && existing.trim() ? `${existing}, ${FOREIGN_FRAME_SANDBOX}` : FOREIGN_FRAME_SANDBOX;
+}
+
+/** The most POST endpoints a session may name as reads. */
+export const MAX_READ_POSTS = 20;
+
+/** The environment variable naming POST endpoints that only read, for every surface that attaches. A `readPosts` option wins over it. */
+export const READ_POSTS_ENV = "SCENESCOUT_READ_POSTS";
+
+/** One POST endpoint the user named as a read: an origin (null for the app's own) and path segments, `*` standing for any one segment. */
+export interface ReadPost {
+  /** The entry as given, for the log and the report. */
+  entry: string;
+  origin: string | null;
+  segments: string[];
+}
+
+/**
+ * The POST endpoints a session was told only read, from the `readPosts`
+ * option, else the environment variable (entries separated by commas or new
+ * lines). Nothing by default: observe refuses every POST until the user names
+ * one, and the agent must never add one itself.
+ */
+export function readPostsSetting(option: readonly string[] | undefined, env: string | undefined): string[] {
+  if (option !== undefined) return [...option];
+  return (env ?? "")
+    .split(/[,\n]/)
+    .map((e) => e.trim())
+    .filter(Boolean);
+}
+
+/**
+ * The entries parsed, and what was given that is not one. An entry is
+ * `POST <path>` for the app's own origin, or `POST <http(s) URL>` for an API
+ * on another origin: the method must be POST, the path must start with `/`
+ * and carry no query or fragment, and `*` may stand only for one whole path
+ * segment, such as an id. Exact otherwise, so nothing is widened by accident;
+ * a trailing slash is ignored.
+ */
+export function readPostEntries(list: readonly string[]): { entries: ReadPost[]; rejected: string[]; overflow: string[] } {
+  const entries: ReadPost[] = [];
+  const rejected: string[] = [];
+  const overflow: string[] = [];
+  for (const raw of list) {
+    const m = /^\s*POST\s+(\S+)\s*$/i.exec(raw);
+    if (!m) {
+      rejected.push(raw);
+      continue;
+    }
+    let origin: string | null = null;
+    let pathname = m[1];
+    if (/^https?:\/\//i.test(pathname)) {
+      let u: URL;
+      try {
+        u = new URL(pathname);
+      } catch {
+        rejected.push(raw);
+        continue;
+      }
+      if (u.search || u.hash || u.username || u.password || /[?#]/.test(pathname)) {
+        rejected.push(raw);
+        continue;
+      }
+      origin = u.origin;
+      // The path as written: URL would percent-encode a `*`.
+      const slash = pathname.indexOf("/", pathname.indexOf("//") + 2);
+      pathname = slash === -1 ? "/" : pathname.slice(slash);
+    }
+    const segments = pathname.split("/").filter(Boolean);
+    if (!pathname.startsWith("/") || /[?#\s]/.test(pathname) || segments.some((seg) => seg.includes("*") && seg !== "*")) {
+      rejected.push(raw);
+      continue;
+    }
+    const entry = `POST ${origin ?? ""}${"/" + segments.join("/")}`;
+    if (entries.some((e) => e.entry === entry)) continue;
+    if (entries.length < MAX_READ_POSTS) entries.push({ entry, origin, segments });
+    else overflow.push(raw);
+  }
+  return { entries, rejected, overflow };
+}
+
+/** The entry a POST to `url` matches, or null. An entry with no origin matches the app's own origin only. */
+export function matchReadPost(entries: readonly ReadPost[], appUrl: string, url: string): ReadPost | null {
+  let target: URL;
+  let app: string;
+  try {
+    target = new URL(url);
+    app = new URL(appUrl).origin;
+  } catch {
+    return null;
+  }
+  const segments = target.pathname.split("/").filter(Boolean);
+  return (
+    entries.find(
+      (e) => (e.origin ?? app) === target.origin && e.segments.length === segments.length && e.segments.every((seg, i) => seg === "*" || seg === segments[i]),
+    ) ?? null
+  );
+}
+
+/** The longest body read for a GraphQL operation; a longer one cannot be vetted and is refused. */
+export const MAX_READ_POST_BODY = 100_000;
+
+/** A GraphQL operation that writes: `mutation` or `subscription`, then an optional name, then its variables, directives or selection. */
+const GRAPHQL_WRITE_OP_RE = /(?:^|[^A-Za-z0-9_$])(?:mutation|subscription)\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*)?[({@]/;
+
+/**
+ * Whether a body carries a GraphQL operation that is not a query, or one that
+ * cannot be read. Read from the body as sent, from every `query` string in a
+ * JSON body (or a batch of them), so an escaped newline cannot hide the
+ * keyword, and from a form-encoded `query` field. A persisted query (a hash
+ * and no text) counts, since its operation is unknown. A search box's text
+ * ("mutation testing") is not an operation and does not match.
+ */
+export function graphqlWriteOperation(body: string): boolean {
+  if (GRAPHQL_WRITE_OP_RE.test(body)) return true;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    // A form-encoded body: its `query` field, decoded.
+    const query = /(?:^|&)query=/.test(body) ? new URLSearchParams(body).get("query") : null;
+    return query !== null && GRAPHQL_WRITE_OP_RE.test(query);
+  }
+  const items = Array.isArray(parsed) ? parsed : [parsed];
+  return items.some((item) => {
+    if (typeof item !== "object" || item === null) return false;
+    const { query, extensions } = item as { query?: unknown; extensions?: { persistedQuery?: unknown } };
+    if (typeof query === "string") return GRAPHQL_WRITE_OP_RE.test(query);
+    // A persisted query names its operation by hash alone, so what it runs cannot be read: refused.
+    return typeof extensions === "object" && extensions !== null && extensions.persistedQuery !== undefined;
+  });
+}
+
+/**
+ * The entry that lets this POST out of observe, or null. Only in observe:
+ * read-only and safe-write already let a POST out unless it looks
+ * destructive, and destructive lets everything out. Even a listed endpoint is
+ * refused when its path or body looks destructive (the whole body is read),
+ * when its body is a GraphQL mutation, subscription or persisted query, or
+ * when the body is too long to vet.
+ */
+export function readPostAllowed(input: {
+  mode: WriteMode;
+  method: string;
+  url: string;
+  appUrl: string;
+  body: string | null | undefined;
+  destructiveWire: boolean;
+  entries: readonly ReadPost[];
+}): ReadPost | null {
+  if (input.mode !== "observe" || input.method !== "POST" || input.destructiveWire || input.entries.length === 0) return null;
+  const entry = matchReadPost(input.entries, input.appUrl, input.url);
+  if (!entry) return null;
+  const body = input.body ?? "";
+  // The whole body, not the first 2000 characters isDestructiveWire reads: a command after a long filter still counts.
+  if (body.length > MAX_READ_POST_BODY || DESTRUCTIVE_BODY_RE.test(body) || graphqlWriteOperation(body)) return null;
+  return entry;
 }
 
 export function allowsWrite(mode: WriteMode, method: string, destructiveWire: boolean, owned: boolean): boolean {

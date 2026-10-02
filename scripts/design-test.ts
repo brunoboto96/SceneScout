@@ -9,7 +9,16 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeDesign, contrastRatio, styleSignature } from "../src/engine/design.ts";
+import {
+  analyzeDesign,
+  contrastRatio,
+  distinguishingLayer,
+  elevationKey,
+  grayCensus,
+  namesFilter,
+  shadowLayers,
+  styleSignature,
+} from "../src/engine/design.ts";
 import { formatJourney, measureJourney } from "../src/engine/journey.ts";
 
 const VIEWPORT = { width: 1280, height: 900 };
@@ -490,4 +499,166 @@ test("body-coloured links in the shell are still measured, as the shell's; link-
   assert.ok(plain.report.includes(`→ ${flagged.detail}`), "and the prose says it as a convention, the way the page's own section does");
   const blue = analyzeDesign(payload([paragraph, paragraph, navLink("rgb(20, 80, 200)")]), VIEWPORT);
   assert.ok(!blue.defects.some((d) => d.rule === "indistinct-link"), "a link that looks like a link is not flagged");
+});
+
+// ---------------------------------------------------------------------------
+// Filter panels outside a form are not forms
+// ---------------------------------------------------------------------------
+
+test("twelve instant-apply checkboxes with no <form> ask for nothing; six text fields with no <form> still need a submit", () => {
+  const boxes = (over: Partial<Rec>): string =>
+    analyzeDesign(
+      payload([
+        rec({ text: "Things" }),
+        ...Array.from({ length: 12 }, (_, i) => field({ inputType: "checkbox", testid: `opt-${i}`, rect: { x: 10, y: 100 + i * 30, w: 120, h: 24 }, ...over })),
+      ]),
+      VIEWPORT,
+    ).report;
+  assert.ok(!BURDEN.test(boxes({})), `checkboxes outside a form apply as they change:\n${boxes({})}`);
+  assert.ok(!BURDEN.test(boxes({ inFilter: true })), "and in a panel that names itself a filter, plainly so");
+  const texts = analyzeDesign(payload([rec({ text: "New thing" }), ...Array.from({ length: 6 }, (_, i) => field({ testid: `t-${i}` }))]), VIEWPORT).report;
+  assert.ok(texts.includes("6 input fields but no obvious submit"), `six typed fields with no way to commit them are still flagged:\n${texts}`);
+  assert.ok(texts.includes("6 form fields and NONE marked required"), "and so is their missing required marking");
+});
+
+test("a filter bar of selects and dates applied on change is not a form; the same typed fields outside a filter are", () => {
+  const bar = (inFilter: boolean): string =>
+    analyzeDesign(
+      payload([
+        rec({ text: "History" }),
+        ...["action", "user", "order"].map((t) => field({ tag: "select", inputType: "", testid: t, inFilter })),
+        ...["from", "to", "after", "before"].map((t) => field({ inputType: "date", testid: t, inFilter })),
+      ]),
+      VIEWPORT,
+    ).report;
+  assert.ok(!BURDEN.test(bar(true)), `a panel that names itself a filter asks for nothing:\n${bar(true)}`);
+  assert.ok(bar(false).includes("4 input fields but no obvious submit"), `four loose date fields are judged, the selects are not:\n${bar(false)}`);
+});
+
+test("a filter is named by a whole word of a test id, id or label", () => {
+  for (const said of ["filter-panel", "productFilters", "Filter by status", "search-facets", "FILTERS"]) assert.ok(namesFilter(said), said);
+  for (const said of ["filterable-list", "unfiltered", "Profile", "Search", "", "backdrop"]) assert.ok(!namesFilter(said), said);
+});
+
+// ---------------------------------------------------------------------------
+// The shadow census counts drawn layers; tinted grays are grays
+// ---------------------------------------------------------------------------
+
+const RINGS = "rgb(255, 255, 255) 0px 0px 0px 0px inset, rgba(0, 0, 0, 0) 0px 0px 0px 0px";
+
+test("a box-shadow's empty ring layers draw nothing and are not an elevation", () => {
+  assert.deepEqual(shadowLayers(`${RINGS}, rgba(0, 0, 0, 0.1) 0px 1px 3px 0px, rgba(0, 0, 0, 0.1) 0px 1px 2px -1px`), [
+    "rgba(0, 0, 0, 0.1) 0px 1px 3px 0px",
+    "rgba(0, 0, 0, 0.1) 0px 1px 2px -1px",
+  ]);
+  assert.equal(elevationKey(RINGS), "", "only empty rings: no shadow");
+  assert.equal(elevationKey("transparent 0px 4px 8px 0px"), "", "a transparent layer draws nothing");
+  assert.equal(elevationKey("rgb(59, 130, 246) 0px 0px 0px 2px"), "rgb(59, 130, 246) 0px 0px 0px 2px", "a focus ring has a spread and is drawn");
+
+  const ringsOnly = analyzeDesign(
+    payload(Array.from({ length: 6 }, (_, i) => rec({ text: `Card ${i}`, shadow: `${RINGS.replace("255, 255, 255", `25${i}, 255, 255`)}` }))),
+    VIEWPORT,
+  ).report;
+  assert.ok(ringsOnly.includes("0 shadow styles"), `six spellings of an empty ring are no shadow:\n${ringsOnly}`);
+});
+
+test("shadows that differ only past the first forty characters are shown apart", () => {
+  const real = ["0px 1px 2px 0px", "0px 1px 3px 0px", "0px 4px 6px -1px", "0px 10px 15px -3px", "0px 20px 25px -5px"];
+  const records = real.map((r, i) => rec({ text: `Card ${i}`, shadow: `${RINGS}, rgba(0, 0, 0, 0.1) ${r}` }));
+  const { report } = analyzeDesign(payload(records), VIEWPORT);
+  const line = report.split("\n").find((l) => l.includes("distinct box-shadow styles")) ?? "";
+  assert.ok(line.includes("5 distinct box-shadow styles"), report);
+  const examples = [...line.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.equal(examples.length, 3, line);
+  assert.equal(new Set(examples).size, 3, `three different shadows print three different examples: ${line}`);
+  assert.ok(
+    examples.every((e) => !e.includes("inset")),
+    `and none is the empty ring they all start with: ${line}`,
+  );
+
+  const twoLayer = (second: string): string => `rgba(0, 0, 0, 0.1) 0px 1px 3px 0px, rgba(0, 0, 0, 0.1) ${second}`;
+  const keys = [elevationKey(twoLayer("0px 1px 2px -1px")), elevationKey(twoLayer("0px 2px 4px -2px"))];
+  assert.equal(distinguishingLayer(keys[0], keys), "rgba(0, 0, 0, 0.1) 0px 1px 2px -1px", "the layer the other lacks, not the shared first one");
+});
+
+test("tinted grays are counted as grays, near-duplicates as one step, and a blue as a hue", () => {
+  const steps = grayCensus([
+    [100, 116, 139],
+    [71, 85, 105],
+    [101, 116, 140],
+    [59, 130, 246],
+  ]);
+  assert.deepEqual(
+    steps.map((g) => [g.rgb, g.n]),
+    [
+      [[100, 116, 139], 2],
+      [[71, 85, 105], 1],
+    ],
+  );
+  const page = analyzeDesign(
+    payload([
+      rec({ text: "Muted", color: "rgb(100, 116, 139)" }),
+      rec({ text: "Muter", color: "rgb(71, 85, 105)" }),
+      rec({ text: "Link", color: "rgb(59, 130, 246)" }),
+    ]),
+    VIEWPORT,
+  ).report;
+  assert.ok(page.includes("2 grays (4–6)"), page);
+  assert.ok(page.includes("1 accent hue families"), page);
+});
+
+// ---------------------------------------------------------------------------
+// Elements are named as the snapshot names them, and unnamed fields cost a11y
+// ---------------------------------------------------------------------------
+
+test("a field labelled only by its placeholder costs the a11y score; the same field with a <label> does not", () => {
+  const email = (over: Partial<Rec>): Payload =>
+    payload([rec({ text: "Sign up" }), field({ inForm: true, ...over }), button("Save", { inForm: true, submitish: true })]);
+  const bare = analyzeDesign(email({ name: "you@example.test", nameFrom: "placeholder" }), VIEWPORT);
+  assert.ok((bare.score?.a11y ?? 100) < 100, bare.report);
+  assert.ok(bare.report.includes(`<input> "you@example.test" — labelled only by its placeholder`), bare.report);
+  const labelled = analyzeDesign(email({ name: "Email", nameFrom: null }), VIEWPORT);
+  assert.equal(labelled.score?.a11y, 100, labelled.report);
+  assert.ok(!labelled.report.includes("NAMES"), labelled.report);
+
+  const nameless = analyzeDesign(email({ name: "email", nameFrom: "fallback" }), VIEWPORT);
+  assert.ok(nameless.report.includes("field with no accessible name"), `a field named only by its name attribute is unnamed:\n${nameless.report}`);
+  assert.ok((nameless.score?.a11y ?? 100) < (bare.score?.a11y ?? 0), "and costs more than a placeholder, which is at least announced");
+});
+
+test("an icon button is named by its aria-label; the same button with no name is an unnamed control", () => {
+  const icon = (name: string): ReturnType<typeof analyzeDesign> =>
+    analyzeDesign(
+      payload([
+        rec({ text: "Notice" }),
+        button("", { name, bg: "rgb(255, 255, 255)", color: "rgb(30, 30, 30)", rect: { x: 300, y: 100, w: 22, h: 22 } }),
+        button("Undo", { bg: "rgb(255, 255, 255)", color: "rgb(30, 30, 30)", rect: { x: 322, y: 100, w: 22, h: 22 } }),
+      ]),
+      VIEWPORT,
+    );
+  const dismiss = icon("Dismiss");
+  assert.ok(dismiss.report.includes(`<button> "Dismiss" — 22×22px`), dismiss.report);
+  assert.ok(!dismiss.report.includes("(no text)"), dismiss.report);
+  assert.ok(!dismiss.report.includes("NAMES"), dismiss.report);
+  const unnamed = icon("");
+  assert.ok(unnamed.report.includes(`<button> "(no text)" — control with no accessible name`), unnamed.report);
+  assert.ok((unnamed.score?.a11y ?? 100) < (dismiss.score?.a11y ?? 0), "the unnamed one costs the page");
+});
+
+test("an unnamed control hidden from assistive technology needs no name; the same control exposed does", () => {
+  const page = (ariaHidden: boolean) =>
+    analyzeDesign(payload([rec({ text: "Notice" }), button("", { name: "", ariaHidden, bg: "rgb(255, 255, 255)", color: "rgb(30, 30, 30)" })]), VIEWPORT);
+  assert.ok(!page(true).report.includes("NAMES"), page(true).report);
+  assert.ok((page(false).score?.a11y ?? 100) < (page(true).score?.a11y ?? 0), page(false).report);
+});
+
+test("an icon button named by its image's alt text is not listed; the same button with an empty alt is", () => {
+  const page = (contentName: string) =>
+    analyzeDesign(payload([rec({ text: "Notice" }), button("", { name: "", contentName, bg: "rgb(255, 255, 255)", color: "rgb(30, 30, 30)" })]), VIEWPORT);
+  const search = page("Search");
+  assert.ok(!search.report.includes("NAMES"), search.report);
+  assert.equal(search.score?.a11y, 100, search.report);
+  const blank = page("");
+  assert.ok(blank.report.includes(`<button> "(no text)" — control with no accessible name`), blank.report);
+  assert.ok((blank.score?.a11y ?? 100) < 100, blank.report);
 });
