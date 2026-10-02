@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import type { RecordedDecision } from "./calibration.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
@@ -65,6 +66,12 @@ export interface Finding {
    * lane happened to act in the same second.
    */
   session?: string;
+  /**
+   * The run (MemoryStore.runId) that last filed it, so `runs` counts runs and
+   * not filings. Absent on findings written before it was kept: the next
+   * filing of one counts as a new run.
+   */
+  lastRun?: string;
   /** What the last re-test of this finding found. Absent means nobody has re-tested it. */
   verdict?: "gone" | "present" | "changed";
   /** When that re-test happened, so the report can date a confirmation rather than calling it unverified. */
@@ -97,8 +104,53 @@ export function isWorthALook(f: Pick<Finding, "tier">): boolean {
  * someone filed as a defect is a decision about the project's convention, and
  * a later "worth a look" for the same thing does not undo it. A worth-a-look
  * filed again as a defect is promoted, and loses its convention. Two
- * worth-a-looks keep the first convention unless it had none.
+ * worth-a-looks keep the first convention unless it had none, or unless the
+ * later filing is a correction (`prefer: "incoming"`: the same session filing
+ * it again in the same run), when the later convention is taken.
  */
+/**
+ * How a filing merged into an existing finding treated what the two disagree
+ * on: `updated` names the fields this filing replaced (a correction by the
+ * session that filed it, in the same run), `kept` the ones where the earlier
+ * wording stood. `sameRun` says the run counter did not move.
+ */
+export interface MergeNote {
+  sameRun: boolean;
+  updated: Array<"convention" | "detail">;
+  kept: Array<"convention" | "detail">;
+}
+
+/** The sentence a merged filing's result adds about what it changed, or "" when the two filings agreed. */
+export function describeMerge(note: MergeNote, convention: string | undefined): string {
+  const parts: string[] = [];
+  if (note.updated.length > 0) {
+    const what = note.updated.map((f) => (f === "convention" ? `its convention is now "${convention ?? ""}"` : "its detail is now yours")).join(" and ");
+    parts.push(` Taken as a correction of your own filing: ${what}.`);
+  }
+  if (note.kept.length > 0) {
+    const what = note.kept.map((f) => (f === "convention" ? `convention ("${convention ?? ""}")` : "detail")).join(" and ");
+    parts.push(
+      ` The first filing's ${what} ${note.kept.length === 1 ? "was" : "were"} kept: a re-filing replaces them only when it comes from the session that filed it, in the same run.`,
+    );
+  }
+  return parts.join("");
+}
+
+/** One form a session saw this run (MemoryStore.emptySubmits). */
+export interface FormEntry {
+  route: string;
+  key: string;
+  triedEmpty: boolean;
+  guarded?: boolean;
+  /** The sessions that saw it this run. */
+  seenBy: Set<string>;
+}
+
+/** A fresh run identity: unique per process and per run within it. */
+function newRunId(): string {
+  return `${process.pid}-${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
+}
+
 /** Drops a finding's tier and convention in place, so a merged tier can be assigned onto it. */
 function withoutTier(f: Finding): Finding {
   delete f.tier;
@@ -109,9 +161,11 @@ function withoutTier(f: Finding): Finding {
 export function mergeTier(
   existing: Pick<Finding, "tier" | "convention">,
   incoming: Pick<Finding, "tier" | "convention">,
+  prefer: "existing" | "incoming" = "existing",
 ): Pick<Finding, "tier" | "convention"> {
   if (!isWorthALook(existing) || !isWorthALook(incoming)) return {};
-  return { tier: "worth_a_look", convention: existing.convention || incoming.convention };
+  const convention = prefer === "incoming" ? incoming.convention || existing.convention : existing.convention || incoming.convention;
+  return { tier: "worth_a_look", convention };
 }
 
 /**
@@ -972,6 +1026,33 @@ export class MemoryStore {
     this.auditsThisRun = 0;
     this.selectChoices.clear();
     this.emptySubmits.clear();
+    this.sessionRoutes.clear();
+    this.runId = newRunId();
+  }
+
+  /**
+   * This run's identity. A finding remembers the last run that filed it, so
+   * "seen in N runs" counts runs and not filings: a lane re-filing the same
+   * finding minutes later in the same run is one run. A new store (a new
+   * process) and every endRun start a new one.
+   */
+  runId = newRunId();
+
+  /**
+   * The routes each session reached this run, so scout_coverage can give a
+   * lane in a parallel run its own remaining work rather than every lane's.
+   * Per run, like the other per-run tallies.
+   */
+  readonly sessionRoutes = new Map<string, Set<string>>();
+
+  /** Routes this session reached this run, in the order first reached. */
+  routesVisitedBy(session: string): ReadonlySet<string> {
+    return this.sessionRoutes.get(session) ?? new Set();
+  }
+
+  /** The sessions that reached this route this run. */
+  sessionsOnRoute(route: string): string[] {
+    return [...this.sessionRoutes].filter(([, routes]) => routes.has(route)).map(([session]) => session);
   }
 
   /**
@@ -1019,7 +1100,7 @@ export class MemoryStore {
    * sessions, like the dropdown choices: an earlier run's empty submit says
    * nothing about this build, and in a parallel run any lane may try it.
    */
-  readonly emptySubmits = new Map<string, { route: string; key: string; triedEmpty: boolean; guarded?: boolean }>();
+  readonly emptySubmits = new Map<string, FormEntry>();
 
   /**
    * A form seen on a visited state. Recording it again changes nothing, except
@@ -1027,9 +1108,10 @@ export class MemoryStore {
    * takes it off the list for good: the page refuses the empty submit itself,
    * and no one could clear an entry whose submit cannot be pressed.
    */
-  recordForm(fingerprint: string, key: string, guarded = false): void {
+  recordForm(fingerprint: string, key: string, guarded = false, session?: string): void {
     const entry = this.formEntry(fingerprint, key);
     if (entry && guarded) entry.guarded = true;
+    if (entry && session) entry.seenBy.add(session);
   }
 
   /**
@@ -1044,22 +1126,29 @@ export class MemoryStore {
     return entry !== null;
   }
 
-  private formEntry(fingerprint: string, key: string, create = true): { route: string; key: string; triedEmpty: boolean; guarded?: boolean } | null {
+  private formEntry(fingerprint: string, key: string, create = true): FormEntry | null {
     // Another site's frame is not the app's form to probe.
     if (isEmbedKey(key)) return null;
     const route = fingerprint.split("#")[0];
     const id = `${route}\u0000${key}`;
     let entry = this.emptySubmits.get(id) ?? null;
     if (!entry && create) {
-      entry = { route, key, triedEmpty: false };
+      entry = { route, key, triedEmpty: false, seenBy: new Set() };
       this.emptySubmits.set(id, entry);
     }
     return entry;
   }
 
-  /** Forms seen this run that no session has submitted empty, in the order they were first seen. */
-  formsNeverSubmittedEmpty(): Array<{ route: string; key: string }> {
-    return [...this.emptySubmits.values()].filter((f) => !f.triedEmpty && !f.guarded).map(({ route, key }) => ({ route, key }));
+  /**
+   * Forms seen this run that no session has submitted empty, in the order they
+   * were first seen, each with the sessions that saw it. Given a session, only
+   * the forms that session saw: in a parallel run another lane's form may sit
+   * on a route this one never opens, or behind a role it does not have.
+   */
+  formsNeverSubmittedEmpty(session?: string): Array<{ route: string; key: string; seenBy: string[] }> {
+    return [...this.emptySubmits.values()]
+      .filter((f) => !f.triedEmpty && !f.guarded && (session === undefined || f.seenBy.has(session)))
+      .map(({ route, key, seenBy }) => ({ route, key, seenBy: [...seenBy] }));
   }
 
   constructor(projectDir: string) {
@@ -1598,8 +1687,13 @@ export class MemoryStore {
     fs.appendFileSync(this.sessionLogPath, JSON.stringify(full) + "\n");
   }
 
-  /** Record a visit to a state; returns whether it was new. */
-  visitState(fingerprint: string, url: string, route: string, elementKeys: string[]): boolean {
+  /** Record a visit to a state; returns whether it was new. `session` names who visited, for this run's per-session coverage. */
+  visitState(fingerprint: string, url: string, route: string, elementKeys: string[], session?: string): boolean {
+    if (session) {
+      const routes = this.sessionRoutes.get(session) ?? new Set<string>();
+      routes.add(route);
+      this.sessionRoutes.set(session, routes);
+    }
     let rec = this.data.states[fingerprint];
     const isNew = !rec;
     if (!rec) {
@@ -1651,8 +1745,12 @@ export class MemoryStore {
    *    across sessions rarely reuses the exact words — Jaccard catches it).
    * Returns [finding, isNew].
    */
-  /** Returns the finding, whether it is new, and whether an existing worth-a-look was just promoted to a defect by it. */
-  addFinding(input: Omit<Finding, "id" | "foundAt" | "runs" | "repro">): [Finding, boolean, boolean] {
+  /**
+   * Returns the finding, whether it is new, whether an existing worth-a-look
+   * was just promoted to a defect by it, and how a merge treated what the two
+   * filings disagree on (MergeNote).
+   */
+  addFinding(input: Omit<Finding, "id" | "foundAt" | "runs" | "repro" | "lastRun">): [Finding, boolean, boolean, MergeNote] {
     // Redact BEFORE the id is derived, so a re-found finding whose quoted
     // secret differs by a character still hashes to the same id.
     const f = {
@@ -1667,12 +1765,33 @@ export class MemoryStore {
     const id = findingId(f);
     const existing = this.data.findings.find((x) => isDuplicateFinding(x, f));
     if (existing) {
-      existing.runs += 1;
+      // Counted once per run: a lane filing the same thing again minutes
+      // later is not the bug recurring.
+      const sameRun = existing.lastRun === this.runId;
+      if (!sameRun) existing.runs += 1;
+      existing.lastRun = this.runId;
       existing.foundAt = new Date().toISOString();
       if (!existing.evidence && f.evidence) existing.evidence = f.evidence;
+      // The same session filing it again in the same run is correcting its
+      // own filing: its newer convention and detail are taken. Anyone else's
+      // filing is a second sighting, which keeps the first wording.
+      const correction = sameRun && !!f.session && existing.session === f.session;
+      const note: MergeNote = { sameRun, updated: [], kept: [] };
       // A worth-a-look filed again as a defect is promoted, at the severity the defect was filed at.
       const promoted = isWorthALook(existing) && !isWorthALook(f);
-      const tier = mergeTier(existing, f);
+      const tier = mergeTier(existing, f, correction ? "incoming" : "existing");
+      // A convention filled in where there was none is not a disagreement, so it says nothing.
+      if (isWorthALook(existing) && isWorthALook(f) && f.convention && existing.convention && f.convention !== existing.convention) {
+        (correction ? note.updated : note.kept).push("convention");
+      }
+      if (f.detail && f.detail !== existing.detail) {
+        if (correction) {
+          existing.detail = f.detail;
+          note.updated.push("detail");
+        } else {
+          note.kept.push("detail");
+        }
+      }
       Object.assign(withoutTier(existing), tier);
       if (promoted) existing.severity = f.severity;
       // Re-finding a RESOLVED finding is a regression — reopen it loudly
@@ -1692,7 +1811,7 @@ export class MemoryStore {
         existing.regressedAt = existing.foundAt;
       }
       this.flush();
-      return [existing, false, promoted];
+      return [existing, false, promoted, note];
     }
 
     // Repro trace scoped to the finding's route: everything since the action
@@ -1726,10 +1845,11 @@ export class MemoryStore {
         .map((a) => `${a.action}${a.target ? ` ${a.target}` : ""} @ ${a.url}`),
       foundAt: new Date().toISOString(),
       runs: 1,
+      lastRun: this.runId,
     };
     this.data.findings.push(finding);
     this.flush();
-    return [finding, true, false];
+    return [finding, true, false, { sameRun: false, updated: [], kept: [] }];
   }
 
   get findings(): Finding[] {
@@ -1746,7 +1866,7 @@ export class MemoryStore {
    * element counts as exercised when it was exercised in ANY state of the
    * route. (`state` in the result therefore holds a route.)
    */
-  coverage(): {
+  coverage(scope?: { routes: ReadonlySet<string> }): {
     states: number;
     elementsTotal: number;
     elementsExercised: number;
@@ -1770,6 +1890,10 @@ export class MemoryStore {
     const unexercised: Array<{ state: string; keys: string[]; total: number }> = [];
     const embeds = { total: 0, exercised: 0 };
     for (const [route, elements] of byRoute) {
+      // A scope narrows what is counted, never what counts as chrome: that is
+      // decided over every route, so a lane on two pages does not see the
+      // project's sidebar as those pages' own controls.
+      if (scope && !scope.routes.has(route)) continue;
       const own: string[] = [];
       // The route's OWN element count — deduped across states and with shared
       // chrome removed, i.e. exactly the denominator `own` is a subset of.
@@ -1805,7 +1929,8 @@ export class MemoryStore {
     if (chromeLeft.length > 0) {
       unexercised.push({ state: SHARED_CHROME_ROUTE, keys: chromeLeft, total: chrome.size });
     }
-    return { states: Object.keys(this.data.states).length, elementsTotal, elementsExercised, unexercised, embeds };
+    const states = scope ? Object.values(this.data.states).filter((st) => scope.routes.has(st.route)).length : Object.keys(this.data.states).length;
+    return { states, elementsTotal, elementsExercised, unexercised, embeds };
   }
 
   /**

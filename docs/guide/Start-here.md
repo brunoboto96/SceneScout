@@ -90,9 +90,9 @@ What happens next, in order:
 
 1. **Scan.** `scout_scan` reads the project: framework, routes found in the source, saved logins. The demo is plain HTML, so it finds no framework and the route list is built from links instead.
 2. **Attach.** `scout_attach` opens a browser in a write mode (`read-only` for a local app). Its result has a `Live view:` line with an address; the agent passes it on to you.
-3. **Crawl.** `scout_crawl` visits every known route in one call and reports each one's status, element count and problems.
+3. **Crawl.** `scout_crawl` visits every known route in one call and reports each one's status, element count and problems. A route that landed on another page is marked `REDIRECTED`, and a path crawled by name that answers as a page joins the route list.
 4. **Investigate.** The agent follows up on what the crawl flagged: it navigates, snapshots, reproduces, and files each defect with `scout_finding`.
-5. **Measure.** `scout_design_audit` scores representative pages; `scout_journey` measures how many steps a task takes and whether the user had to backtrack.
+5. **Measure.** `scout_design_audit` scores representative pages; `scout_journey` measures how many steps a task takes, how long it took while being worked on (pauses over 30 seconds are left out and counted), and whether the user had to backtrack.
 6. **Report.** `scout_report` checks the level's contract and writes `.scenescout/report.md`.
 
 A `medium` run is sized at around 150 actions. On the demo it typically finds the 500 behind the Archived filter, the badge covering a button, the double-click that creates two orders and the approve endpoint that accepts a clerk, among others; how many of the planted defects a run finds varies from run to run, which is what [Measuring it](Measuring-it.md) is about.

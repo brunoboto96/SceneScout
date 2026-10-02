@@ -182,7 +182,10 @@ test("an abandoned journey is never called efficient", () => {
   const m = measureJourney([step("click", "/orders")], false);
   assert.ok(m.verdict.some((v) => /TASK NOT COMPLETED/.test(v)));
   assert.ok(!m.verdict.some((v) => /efficient/.test(v)));
-  assert.match(formatJourney({ goal: "export last month", completed: false, seconds: 9 }, m), /^JOURNEY ABANDONED — "export last month"/);
+  assert.match(
+    formatJourney({ goal: "export last month", completed: false, time: { activeMs: 9000, wallMs: 9000, idleGaps: 0 } }, m),
+    /^JOURNEY ABANDONED — "export last month"/,
+  );
 });
 
 test("policy blocks are reported as tester safety, not held against the app", () => {
@@ -190,7 +193,10 @@ test("policy blocks are reported as tester safety, not held against the app", ()
   assert.equal(m.policyBlocks, 1);
   assert.equal(m.refusals, 1);
   assert.equal(m.interactions, 2, "the block itself is not something the user did");
-  assert.match(formatJourney({ goal: "g", completed: true, seconds: 1 }, m), /Policy: 1 write-policy blocks, 1 refusals \(tester safety, not app defects\)/);
+  assert.match(
+    formatJourney({ goal: "g", completed: true, time: { activeMs: 1000, wallMs: 1000, idleGaps: 0 } }, m),
+    /Policy: 1 write-policy blocks, 1 refusals \(tester safety, not app defects\)/,
+  );
 });
 
 test("the screen and interaction thresholds fire just past their limits, not at them", () => {
