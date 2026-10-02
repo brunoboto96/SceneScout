@@ -19,7 +19,7 @@ import { chromium, firefox, webkit } from "playwright";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { profilePath, writeProfile } from "../../dist/engine/profiles.js";
 import { captureState } from "../../dist/login-run.js";
-import { BROWSER, check, revokeFixtureTokens, type SmokeContext } from "./harness.ts";
+import { BROWSER, check, eventually, revokeFixtureTokens, WAIT_MS, type SmokeContext } from "./harness.ts";
 
 export const title = "re-attach on auth lost";
 
@@ -46,20 +46,16 @@ async function recordSessionProfile(baseUrl: string, project: string, withSessio
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.goto(`${baseUrl}/ss-signin`);
-    await page.waitForFunction((want) => document.querySelector("h1")?.textContent === want, SIGNED_IN, { timeout: 10000 });
+    await page.waitForFunction((want) => document.querySelector("h1")?.textContent === want, SIGNED_IN, { timeout: WAIT_MS });
     writeProfile(project, "member", withSessionStorage ? await captureState(context) : await context.storageState());
   } finally {
     await browser.close();
   }
 }
 
-/** Whether the page shows the signed-in heading once its session check has answered. */
+/** Whether the page shows the signed-in heading once its session check has answered. Spaced out, since each look is a snapshot. */
 async function showsSignedIn(engine: BrowserEngine): Promise<boolean> {
-  for (let i = 0; i < 30; i++) {
-    if ((await engine.snapshot(true)).includes(SIGNED_IN)) return true;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  return false;
+  return eventually(async () => (await engine.snapshot(true)).includes(SIGNED_IN), WAIT_MS, 100);
 }
 
 /** A role session on the sessionStorage-only app loses its sign-in; returns what the navigation that decides the re-attach said. */

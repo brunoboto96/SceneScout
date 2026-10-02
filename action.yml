@@ -95,6 +95,10 @@ inputs:
     description: The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; update rewrites the baselines past it, and any taken on another operating system. Empty means 0.1, so anti-aliasing noise between machines and browser builds does not fail the gate; 0 counts every pixel whose colour changed by more than 8 in 255 on a channel.
     required: false
     default: ""
+  sarif-file-anchor:
+    description: The repository file, relative to the repository root, that a check.sarif result points at when no saved flow raised it (code scanning keeps only results located in a repository file). Empty means the workflow file that is running.
+    required: false
+    default: ""
   working-directory:
     description: The directory the check runs in; relative paths in the other inputs are resolved against it.
     required: false

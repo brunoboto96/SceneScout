@@ -353,6 +353,11 @@ interface SnapshotElement extends InteractableInfo {
   coveredBy?: string | null;
   /** Set when a field's name is its placeholder, name attribute or type rather than a label. */
   nameFrom?: NameFrom | null;
+  /** Read by the geometry oracles (collector.ts GeometryElement). */
+  focusable?: boolean;
+  focusMoves?: boolean;
+  passThrough?: boolean;
+  fieldPad?: { l: number; r: number } | null;
   /** A user can act on it (collector isInteractive); false for what is listed only for its test id or its text. */
   interactive?: boolean;
   /** Inside an aria-hidden subtree. */
@@ -1875,6 +1880,10 @@ export class BrowserEngine {
       chrome?: boolean;
       coveredBy?: string | null;
       nameFrom?: NameFrom | null;
+      focusable?: boolean;
+      focusMoves?: boolean;
+      passThrough?: boolean;
+      fieldPad?: { l: number; r: number } | null;
       /** Read for the label policy only (collector.ts POLICY_TEXT_SRC); not kept on the listed element. */
       ownText?: string;
       centre?: string[];

@@ -76,6 +76,7 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--baseline` | `off` | `compare` pictures each page or element listed in the baselines' `targets.json` and files `visual-change` when one no longer looks like its baseline; `update` writes new baselines ([visual baselines](Ways-to-use-it.md#visual-baselines)) |
 | `--baselines` | `<project>/.scenescout/baselines` | The folder holding `targets.json` and the baselines. The default is ignored by git; name a folder the project commits to share them |
 | `--baseline-threshold` | `0.1` | The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; `update` rewrites the baselines past it (and any taken on another operating system). Not 0 by default, so anti-aliasing noise between machines and browser builds does not fail the gate; `0` counts every changed pixel (a colour channel off by more than 8 in 255). A change of size always counts |
+| `--sarif-file-anchor` | the running workflow's file, else `package.json`, else `README.md` | The repository file, relative to the repository root, that a `check.sarif` result points at when no saved flow raised it. See [SARIF locations](Ways-to-use-it.md#sarif-locations) |
 
 ### `scenescout ci`
 
@@ -105,6 +106,7 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--nav-timeout-ms` | `20000` | As for `check` |
 | `--project` | the current directory | The project whose `.scenescout/` holds the memory |
 | `--out` | `<project>/.scenescout/ci` | Where the files go |
+| `--sarif-file-anchor` | as for `check` | The repository file each `ci.sarif` result points at |
 
 The API key has no option: it is read from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` only.
 
@@ -201,6 +203,8 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_LOGIN_SUBMIT_SELECTOR` | `login --script` | As `--submit-selector` |
 | `CLAUDE_CONFIG_DIR` | `install`, `doctor` | Where Claude Code keeps its configuration; the skill goes into its `skills/` folder. Default `~/.claude` |
 | `GITHUB_STEP_SUMMARY` | `check`, `ci` | Set by GitHub Actions; the report or summary is appended to it |
+| `GITHUB_WORKFLOW_REF` | `check`, `ci` | Set by GitHub Actions; with no `--sarif-file-anchor`, its workflow file is the file SARIF results point at |
+| `GITHUB_WORKSPACE` | `check`, `ci` | Set by GitHub Actions; the repository root that SARIF file paths are relative to |
 
 Variables the server reads belong in the MCP client's configuration for the server (an `env` entry), not only in your shell.
 
@@ -234,6 +238,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `baseline` | empty | As `--baseline` |
 | `baselines` | empty | As `--baselines`, relative to `working-directory` |
 | `baseline-threshold` | empty | As `--baseline-threshold` |
+| `sarif-file-anchor` | empty | As `--sarif-file-anchor`, relative to the repository root; empty means the workflow file that is running |
 | `working-directory` | `.` | Where the check runs; other relative paths are resolved from here |
 | `version` | empty | The scenescout npm version to run; empty means the version of the action's ref |
 | `cli` | empty | A built `dist/cli.js` to run instead of the npm package, for testing the action itself |
@@ -268,6 +273,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `show` | empty | As `--show` |
 | `compare-url` | empty | As `--compare-url` |
 | `dedup` | empty | As `--dedup`; empty means `judge` |
+| `sarif-file-anchor` | empty | As `--sarif-file-anchor`, relative to the repository root; empty means the workflow file that is running |
 | `storage-state` | empty | As `--storage-state`, relative to `working-directory` |
 | `browser` | `chromium` | As `--browser` |
 | `action-timeout-ms` | empty | As `--action-timeout-ms` |

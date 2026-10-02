@@ -28,6 +28,7 @@ import type { DesignDefect } from "./design.js";
 import { flowStepEvidence, type FlowRun, type SkippedFlowFile } from "./flow.js";
 import { parseLimitFlag } from "./limits.js";
 import { redactRoute, redactSecrets } from "./memory.js";
+import { SARIF_ANCHOR_FALLBACKS, checkSarifAnchor, sarifFileFor, sarifLocation, type SarifFiles } from "./sarif.js";
 import { httpErrorDetail, httpStatusOf, type OracleViolation } from "./oracles.js";
 import type { CheckRetest } from "./verify.js";
 
@@ -109,7 +110,11 @@ export const CHECK_RULES = {
     title: "Control covered by pinned chrome",
     help: "A fixed or sticky element sits on top of the control, so clicks land on it instead.",
   },
-  "clipped-control": { severity: "medium", title: "Control unreachable", help: "The control is clipped inside a container that cannot scroll." },
+  "clipped-control": {
+    severity: "medium",
+    title: "Control unreachable",
+    help: "The control is clipped inside a container that cannot scroll and has no control beside it to page it.",
+  },
   "offpage-control": { severity: "medium", title: "Control outside the page", help: "The control is laid out where no scrolling can reach it." },
   "overlapping-controls": { severity: "low", title: "Controls overlap", help: "Two controls in the same layer cover most of each other." },
   "broken-image": { severity: "medium", title: "Broken image", help: "The browser could not render the image." },
@@ -122,7 +127,11 @@ export const CHECK_RULES = {
   contrast: { severity: "low", title: "Text contrast below WCAG", help: "Text needs 4.5:1 (3:1 when large) against its background." },
   "focus-indicator": { severity: "low", title: "No visible focus indicator", help: "Tabbing to the control changes nothing on screen." },
   "horizontal-scroll": { severity: "medium", title: "Page scrolls sideways", help: "Content is wider than the viewport." },
-  "tiny-target": { severity: "low", title: "Small click target", help: "Below the 24px WCAG 2.2 target-size minimum." },
+  "tiny-target": {
+    severity: "low",
+    title: "Small click target",
+    help: "Below the 24px WCAG 2.2 target-size minimum, measured on what the user clicks (a native input's label or drop zone), with another target inside its 24px circle.",
+  },
   "clipped-text": { severity: "low", title: "Text clipped", help: "Text is wider than its box and cut off without an ellipsis." },
   "image-aspect": { severity: "low", title: "Image distorted", help: "The rendered box does not match the image's proportions." },
   "flow-step-failed": {
@@ -197,6 +206,8 @@ export interface CheckIssue {
   routes: string[];
   /** Another site's frame, when the failure was that embed's. */
   embed?: string;
+  /** The file of the first saved flow that raised it, when one did: where its SARIF result points. */
+  flow?: string;
   fingerprint: string;
 }
 
@@ -290,11 +301,14 @@ export function checkFindings(
   const looks = new Map<string, CheckObservation>();
   /** Evidence as it is written: no origin, no secret, and bounded. */
   const cleanEvidence = (evidence: string): string => redactSecrets(withoutOrigin(evidence, origin)).slice(0, 300);
-  const add = (rule: CheckRule, evidence: string, route: string, opts: { severity?: CheckSeverity; embed?: string } = {}): void => {
+  const add = (rule: CheckRule, evidence: string, route: string, opts: { severity?: CheckSeverity; embed?: string; flow?: string } = {}): void => {
     if (ignore.includes(rule)) return;
     const clean = cleanEvidence(evidence);
     const key = `${rule}\u0000${clean}`;
-    const found = byKey.get(key) ?? looks.get(key);
+    const issue = byKey.get(key);
+    // A fact a crawled page and a flow both show points at the flow: the flow is the file that reproduces it.
+    if (issue && opts.flow && !issue.flow) issue.flow = opts.flow;
+    const found = issue ?? looks.get(key);
     if (found) {
       if (!found.routes.includes(route)) found.routes.push(route);
       return;
@@ -310,6 +324,7 @@ export function checkFindings(
       evidence: clean,
       routes: [route],
       ...(opts.embed ? { embed: opts.embed } : {}),
+      ...(opts.flow ? { flow: opts.flow } : {}),
       fingerprint,
     });
   };
@@ -334,9 +349,9 @@ export function checkFindings(
     for (const d of r.design) add(d.rule, d.detail, d.chrome ? SHARED_CHROME_ROUTE : route);
   }
   for (const f of flows) {
-    for (const { path, violation } of f.violations) add(violationRule(violation), violation.detail, path, { embed: violation.embed });
+    for (const { path, violation } of f.violations) add(violationRule(violation), violation.detail, path, { embed: violation.embed, flow: f.file });
     // A refused step is not the app's defect: the check reports it as "could not run" (refusedFlowReason).
-    if (f.outcome.status === "failed") add("flow-step-failed", flowStepEvidence(f), f.outcome.path);
+    if (f.outcome.status === "failed") add("flow-step-failed", flowStepEvidence(f), f.outcome.path, { flow: f.file });
   }
   const visual: CheckIssue[] = [];
   if (baselines && !ignore.includes(VISUAL_RULE)) {
@@ -512,6 +527,8 @@ export interface CheckOptions extends CheckSettings {
   baselinesDir?: string;
   /** The percentage of a picture's pixels that may change before its baseline is not met. */
   baselineThreshold: number;
+  /** The repository file a SARIF result with no flow of its own points at; absent means sarif.ts's default. */
+  sarifFileAnchor?: string;
 }
 
 /**
@@ -539,6 +556,7 @@ export const CHECK_OPTION_NAMES = [
   "baseline",
   "baselines",
   "baseline-threshold",
+  "sarif-file-anchor",
 ] as const;
 
 export const MAX_CHECK_ROUTES = 150;
@@ -638,6 +656,8 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
   if (baseline === "off" && (baselinesDir !== undefined || flags.has("baseline-threshold"))) {
     return { ok: false, error: "--baselines and --baseline-threshold apply only with --baseline compare or --baseline update" };
   }
+  const anchor = flags.has("sarif-file-anchor") ? checkSarifAnchor(flags.get("sarif-file-anchor")!) : undefined;
+  if (anchor && !anchor.ok) return anchor;
 
   const resolve = (p: string): string => resolveArgPath(cwd, p);
   return {
@@ -663,6 +683,7 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
       baseline,
       ...(baselinesDir !== undefined ? { baselinesDir: resolve(baselinesDir) } : {}),
       baselineThreshold: threshold.value,
+      ...(anchor ? { sarifFileAnchor: anchor.value } : {}),
     },
   };
 }
@@ -755,11 +776,13 @@ export function describeSettings(result: Pick<CheckResult, "settings" | "mode">)
 const SARIF_LEVEL: Record<CheckSeverity, "error" | "warning" | "note"> = { high: "error", medium: "warning", low: "note" };
 
 /**
- * SARIF 2.1.0, for code-scanning dashboards. A UI check has no source file to
- * point at, so each result's location is the route, relative to the checked
- * app (the APP base id). Fingerprints come from the evidence, not the
- * location, so a preview deployment on a new URL does not reopen every alert;
- * an unmet visual baseline's comes from its target and browser instead.
+ * SARIF 2.1.0, for code-scanning dashboards. Code scanning keeps a result
+ * only when its location is a repository file, so each result points at one
+ * (sarif.ts says which) and carries its routes in logical locations, in
+ * `properties.routes` and in its message. Fingerprints come from the
+ * evidence, not the location, so a preview deployment on a new URL does not
+ * reopen every alert; an unmet visual baseline's comes from its target and
+ * browser instead.
  */
 const RETEST_SARIF_RULE = {
   id: "open-finding-reproduces",
@@ -769,40 +792,41 @@ const RETEST_SARIF_RULE = {
   defaultConfiguration: { level: "error" },
 };
 
-function sarifLocation(route: string): object {
-  return route === SHARED_CHROME_ROUTE
-    ? {
-        physicalLocation: { artifactLocation: { uri: "", uriBaseId: "APP" } },
-        message: { text: "the app's shared shell, on every page that renders it" },
-      }
-    : { physicalLocation: { artifactLocation: { uri: route.replace(/^\//, ""), uriBaseId: "APP" } } };
+function routeLocation(file: string, route: string): object {
+  return route === SHARED_CHROME_ROUTE ? sarifLocation(file, route, "the app's shared shell, on every page that renders it") : sarifLocation(file, route);
 }
 
-export function toSarif(result: CheckResult, toolVersion: string): object {
+/** Where a result was seen, for its message: the first three routes and how many more. */
+function onRoutes(routes: readonly string[]): string {
+  return ` — on ${routes.slice(0, 3).join(", ")}${routes.length > 3 ? ` and ${routes.length - 3} more` : ""}`;
+}
+
+/** `files` defaults to package.json as the anchor, with no flows directory; the CLI always passes what it resolved. */
+export function toSarif(result: CheckResult, toolVersion: string, files: SarifFiles = { anchor: SARIF_ANCHOR_FALLBACKS[0] }): object {
   const used = [...new Set(result.issues.map((i) => i.rule))];
   const lookRules = [...new Set(result.worthALook.map((o) => o.rule))];
-  const base = new URL(result.url);
   const reproducing = retestGateFailures(result);
   const refused = result.flows.filter((f) => f.outcome.status === "refused");
   const issueResults: object[] = result.issues.map((i) => ({
     ruleId: i.rule,
     level: SARIF_LEVEL[i.severity],
     message: {
-      text: `${CHECK_RULES[i.rule].title}: ${i.evidence}${i.routes.length > 1 ? ` (on ${i.routes.length} routes)` : ""}${i.embed ? ` (in an embed of ${i.embed})` : ""}`,
+      text: `${CHECK_RULES[i.rule].title}: ${i.evidence}${i.embed ? ` (in an embed of ${i.embed})` : ""}${onRoutes(i.routes)}`,
     },
-    locations: i.routes.slice(0, 10).map(sarifLocation),
+    locations: i.routes.slice(0, 10).map((route) => routeLocation(sarifFileFor(files, i.flow), route)),
     partialFingerprints: { "scenescoutCheck/v1": i.fingerprint },
+    properties: { routes: i.routes, ...(i.flow ? { flow: i.flow } : {}) },
   }));
   // Always "note", whatever --fail-on says: a result a code-scanning dashboard shows, never one that reads as an error.
   const lookResults: object[] = result.worthALook.map((o) => ({
     ruleId: o.rule,
     level: "note",
     message: {
-      text: `Worth a look — ${WORTH_A_LOOK_RULES[o.rule].title}: ${o.evidence}${o.routes.length > 1 ? ` (on ${o.routes.length} routes)` : ""}. A defect only if your project uses ${o.convention}.`,
+      text: `Worth a look — ${WORTH_A_LOOK_RULES[o.rule].title}: ${o.evidence}${onRoutes(o.routes)}. A defect only if your project uses ${o.convention}.`,
     },
-    locations: o.routes.slice(0, 10).map(sarifLocation),
+    locations: o.routes.slice(0, 10).map((route) => routeLocation(files.anchor, route)),
     partialFingerprints: { "scenescoutCheck/v1": o.fingerprint },
-    properties: { tier: "worth-a-look", convention: o.convention },
+    properties: { tier: "worth-a-look", convention: o.convention, routes: o.routes },
   }));
   // Only the re-tests that fail the gate are results: a reviewer reading code scanning sees what failed it.
   const retestResults: object[] = reproducing.map((r) => ({
@@ -810,9 +834,10 @@ export function toSarif(result: CheckResult, toolVersion: string): object {
     // The severity the finding was filed at, as the page rules map theirs; an unknown one reads as the worst.
     level: SARIF_LEVEL[(CHECK_SEVERITIES as readonly string[]).includes(r.severity) ? (r.severity as CheckSeverity) : "high"],
     message: {
-      text: `Open finding still reproduces: [${r.severity}] ${r.title} (${r.id}) — ${r.signatures.join(", ")} (gated by --gate-retests ${result.settings.gateRetests})`,
+      text: `Open finding still reproduces: [${r.severity}] ${r.title} (${r.id}) — ${r.signatures.join(", ")}${onRoutes([r.path])} (gated by --gate-retests ${result.settings.gateRetests})`,
     },
-    locations: [{ physicalLocation: { artifactLocation: { uri: r.path.replace(/^\//, ""), uriBaseId: "APP" } } }],
+    locations: [routeLocation(files.anchor, r.path)],
+    properties: { routes: [r.path] },
     partialFingerprints: { "scenescoutCheck/v1": createHash("sha256").update(`retest\u0000${r.id}`).digest("hex").slice(0, 32) },
   }));
   return {
@@ -856,7 +881,7 @@ export function toSarif(result: CheckResult, toolVersion: string): object {
             })),
           },
         ],
-        originalUriBaseIds: { APP: { uri: `${base.origin}/` } },
+        properties: { app: new URL(result.url).origin },
         results: [...issueResults, ...lookResults, ...retestResults],
       },
     ],

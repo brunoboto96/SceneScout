@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Clipped list fixtures</title>
+    <style>
+      body { margin: 0; font: 15px/1.4 system-ui, sans-serif; padding: 24px; }
+      .card { width: 320px; height: 200px; overflow: hidden; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 24px; }
+      .card ul { list-style: none; margin: 0; padding: 0; max-height: 120px; }
+      .card li button { display: block; width: 100%; height: 32px; }
+      /* NOT a defect: the list scrolls inside the overflow-hidden card. */
+      .scrolls { overflow-y: auto; }
+      /* DEFECT: the same list cannot scroll, and the card hides the rest. */
+      .stuck { overflow: hidden; }
+    </style>
+  </head>
+  <body>
+    <h1>Clipped lists</h1>
+    <div class="card" data-testid="scrolling-card">
+      <ul class="scrolls" data-testid="scrolling-list"></ul>
+    </div>
+    <div class="card" data-testid="stuck-card">
+      <ul class="stuck" data-testid="stuck-list"></ul>
+    </div>
+    <script>
+      const fill = (sel, label, n) => {
+        const list = document.querySelector(sel);
+        for (let i = 1; i <= n; i++) {
+          const li = document.createElement("li");
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = label + " " + i;
+          li.appendChild(b);
+          list.appendChild(li);
+        }
+      };
+      fill('[data-testid="scrolling-list"]', "Palette option", 30);
+      fill('[data-testid="stuck-list"]', "Locked option", 5);
+    </script>
+  </body>
+</html>

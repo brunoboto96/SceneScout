@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
-import { check, settle, until, type SmokeContext } from "./harness.ts";
+import { check, eventually, settle, until, type SmokeContext } from "./harness.ts";
 
 export const title = "cross-run memory, safe-write, uploads";
 
@@ -29,6 +29,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     if (!obRef) throw new Error("Create item button not found");
     const postsBefore = stats.itemPosts;
     const obResult = await engine2.click(obRef);
+    // Absence has no event to wait for: give a POST that did escape time to land.
     await settle(400);
     check("observe: a plain create POST is reported as blocked", obResult.includes("WRITE-POLICY blocked (observe)") && obResult.includes("POST"), obResult);
     check("observe: the POST never reaches the server", stats.itemPosts === postsBefore, `server received ${stats.itemPosts - postsBefore} POST(s)`);
@@ -51,6 +52,8 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     const signupResult = await engine2.click(obRefOf("observe-signup"));
     await engine2.click(obRefOf("observe-invite"));
     await engine2.click(obRefOf("observe-password"));
+    await eventually(() => (stats.writes["POST /api/auth/login"] ?? 0) >= 1);
+    // Absence has no event to wait for: give the refused writes that did escape time to land.
     await settle(400);
     check(
       "observe: a login POST still reaches the server (a session has to be able to exist)",
@@ -64,6 +67,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     );
     check("observe: the blocked sign-up is reported as the policy's doing", signupResult.includes("WRITE-POLICY blocked (observe)"), signupResult);
     const nativeResult = await engine2.click(obRefOf("observe-native-submit"));
+    // Absence has no event to wait for: give a native post that did escape time to land.
     await settle(400);
     // A path no other suite posts to: the server counts writes across the whole run.
     check("observe: a native form POST never reaches the server", !stats.writes["POST /api/observe-native-post"], JSON.stringify(stats.writes));

@@ -79,6 +79,7 @@ import {
   type FirstRunFacts,
 } from "./first-run.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME, writeSelfIgnore } from "./engine/memory.js";
+import { sarifFilesFor } from "./engine/sarif.js";
 import {
   formatStatus,
   liveEngines,
@@ -160,7 +161,10 @@ Usage:
                                       them); --baseline-threshold N: the % of a picture's pixels that may change
                                       before its baseline is not met; update rewrites those past it, and any taken
                                       on another OS (default 0.1, so small anti-aliasing noise between machines
-                                      passes; 0 counts every changed pixel))
+                                      passes; 0 counts every changed pixel);
+                                     --sarif-file-anchor path: the repository file a SARIF result points at when
+                                      no saved flow raised it (default: the running workflow's file on GitHub
+                                      Actions, else package.json, else README.md))
                                     Exit code: 0 passed, 1 failed the gate, 2 could not run.
   scenescout ci <url>               An exploratory run with no person present: a model reached through its API
                                     drives the tools by the SceneScout method and the run ends in the report.
@@ -189,7 +193,9 @@ Usage:
                                      --dedup judge|rule: judge (default) also asks the run's model, at its lowest
                                       effort, whether a filed finding the rule keeps apart is one already on its
                                       page (titles, categories, evidence and the page's path are sent);
-                                      rule asks nothing)
+                                      rule asks nothing;
+                                     --sarif-file-anchor path: the repository file each SARIF result points at,
+                                      as for check)
                                     Exit code: 0 the run ran (findings never change it), 2 could not run.
   scenescout login <url> --role <name>
                                     Open a visible browser at the URL, sign in there (SSO, MFA, anything), then
@@ -642,7 +648,15 @@ async function check(args: string[]): Promise<never> {
     if (!options.outDir) writeSelfIgnore(path.dirname(outDir));
     fs.mkdirSync(outDir, { recursive: true });
     fs.writeFileSync(path.join(outDir, "report.md"), markdown);
-    fs.writeFileSync(path.join(outDir, "check.sarif"), JSON.stringify(toSarif(result, version), null, 2) + "\n");
+    const sarifFiles = sarifFilesFor({
+      option: options.sarifFileAnchor,
+      env: process.env,
+      projectDir: options.projectDir,
+      flowsDir: inputs.flowsDir,
+      exists: (p) => fs.existsSync(p),
+    });
+    if (sarifFiles.warning) console.error(`scenescout check: ${sarifFiles.warning}`);
+    fs.writeFileSync(path.join(outDir, "check.sarif"), JSON.stringify(toSarif(result, version, sarifFiles), null, 2) + "\n");
     fs.writeFileSync(path.join(outDir, "check.json"), JSON.stringify(toSummaryJson(result, version), null, 2) + "\n");
     // On GitHub Actions the verdict also goes on the run's summary page.
     if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, markdown);

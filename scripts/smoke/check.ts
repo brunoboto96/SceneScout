@@ -13,9 +13,8 @@ import { fileURLToPath } from "node:url";
 // @ts-expect-error — plain .mjs, no types; it exports createDemoServer().
 import { createDemoServer } from "../../demo-app/server.mjs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
-import { LOOSENED_RULE_HOLD_MS } from "../../dist/engine/policy.js";
 import { writeRedirectHopsJudged } from "../../dist/browsers.js";
-import { BROWSER, check, type SmokeContext } from "./harness.ts";
+import { BROWSER, check, eventually, settle, until, type SmokeContext } from "./harness.ts";
 
 export const title = "check (deterministic gate)";
 
@@ -568,9 +567,9 @@ async function flowWriteEdges({
   );
 
   // The hand-back: a step arms a beacon on pagehide, then opens a same-origin tab, which becomes the page the flow
-  // drives; the page behind it stays open with its beacon armed. The session ends well after the flow's rule has
-  // stopped being held (LOOSENED_RULE_HOLD_MS), under the crawl's read-only rule, which lets a same-origin beacon out:
-  // so a page the flow did not leave at its hand-back sends its beacon then, as the session closes it.
+  // drives; the page behind it stays open with its beacon armed. The session ends after the flow's rule has stopped
+  // being held (LOOSENED_RULE_HOLD_MS), under the crawl's read-only rule, which lets a same-origin beacon out: so a
+  // page the flow did not leave at its hand-back sends its beacon then, as the session closes it.
   const engine = new BrowserEngine();
   const leavesAtStart = writes("POST /api/leave");
   let replay: Awaited<ReturnType<BrowserEngine["replayFlow"]>> | null = null;
@@ -589,11 +588,14 @@ async function flowWriteEdges({
       ],
       "observe",
     );
-    await new Promise((resolve) => setTimeout(resolve, LOOSENED_RULE_HOLD_MS + 1000));
+    // White-box: the rule a write heard of now is judged by, which stays the flow's for the hold and then is the crawl's.
+    const rule = (engine as unknown as { writeRule: { at(): string } }).writeRule;
+    await until("the flow's rule to stop being held", () => rule.at() === "read-only");
   } finally {
     await engine.close();
   }
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  // Absence has no event to wait for: give a beacon the closing page did send time to land.
+  await settle(500);
   check(
     `${BROWSER}: when a flow ends, every page in the context is left under the flow's rule before the crawl's comes back, the one a step opened a tab from included: its beacon on leaving never reaches the server`,
     replay?.outcome.status === "passed" && writes("POST /api/leave") === leavesAtStart,
@@ -621,7 +623,15 @@ async function flowWriteEdges({
         ],
         "observe",
       );
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+      // The server answers the sign-in with its redirect 1.5 s after it arrives: wait for the hop to be judged, which
+      // is either the engine refusing it or the save arriving.
+      // Read afresh on every look: the engine replaces the list as the flow hands back.
+      const refused = () => (lateEngine as unknown as { blockedRequests: Array<{ sig: string }> }).blockedRequests;
+      await eventually(
+        () =>
+          writes("POST /api/handback/login") > signInsAtStart &&
+          (writes("POST /api/handback/saved") > savedAtStart || refused().some((b) => b.sig.includes("/api/handback/saved"))),
+      );
     } finally {
       await lateEngine.close();
     }

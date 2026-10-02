@@ -57,6 +57,8 @@ export interface CheckInputs {
   findings: Finding[] | null;
   /** What --baseline compare or update pictures, from the baselines folder's targets.json; absent with --baseline off. */
   baselineTargets?: BaselineTarget[];
+  /** The directory the flows were read from, or null when none was. */
+  flowsDir?: string | null;
 }
 
 /** The baselines folder a check uses: the one --baselines names, else the project's own. */
@@ -88,7 +90,12 @@ export function readCheckInputs(options: CheckOptions): CheckInputs {
   const where = resolveFlowsDir(options.flows, options.projectDir, (p) => fs.existsSync(p) && fs.statSync(p).isDirectory());
   if ("error" in where) throw new Error(where.error);
   const loaded = where.dir ? loadFlows(where.dir) : { flows: [], skipped: [] };
-  const read = { flows: loaded.flows, skippedFlows: loaded.skipped, ...(options.baseline !== "off" ? { baselineTargets: readBaselineTargets(options) } : {}) };
+  const read = {
+    flows: loaded.flows,
+    skippedFlows: loaded.skipped,
+    flowsDir: where.dir,
+    ...(options.baseline !== "off" ? { baselineTargets: readBaselineTargets(options) } : {}),
+  };
   if (!options.retest) return { ...read, findings: null };
   // Read, never written: a check leaves the project's memory as it found it.
   const memoryPath = path.join(options.projectDir, MEMORY_DIRNAME, "memory.json");
