@@ -6,6 +6,9 @@
  * and ignored the rest. Every subcommand now answers `--help` / `-h` with the
  * usage text and exit 0 before it does anything, and a command that parses its
  * own flags by hand refuses one it does not know.
+ *
+ * A first argument that is an address instead of a subcommand is a first run,
+ * `scenescout <url>` (first-run.ts), which parses its own options.
  */
 
 /** Every subcommand, each run by a handler cli.ts supplies. */
@@ -90,6 +93,35 @@ export function isSubcommand(command: string | undefined): command is Subcommand
   return command !== undefined && Object.hasOwn(HANDLERS_OF, command);
 }
 
+/** A host with no scheme: a name or address, an optional port, then optionally a path, query or fragment. */
+const BARE_HOST = /^(?:\[[0-9a-f:.]+\]|[a-z0-9-]+(?:\.[a-z0-9-]+)*)(?::\d{1,5})?(?:[/?#].*)?$/i;
+
+/** Whether an argument starts with a scheme, such as `http://`. */
+export function hasScheme(arg: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(arg);
+}
+
+/** The host part of an address written without its scheme: everything before its path, query or fragment. */
+export function hostOf(arg: string): string {
+  return arg.split(/[/?#]/)[0];
+}
+
+/**
+ * Whether the first argument is an address, which makes the command line a
+ * first run (`scenescout <url>`): it has a scheme (`http://…`, and `ftp://…`,
+ * which the first run then refuses with a reason), or it reads as a host
+ * without one (`localhost:3000`, `example.com/app`), which the first run asks
+ * to be written in full. Subcommands are settled first, and a word that is
+ * neither (`instal`) still gets the usage.
+ */
+export function looksLikeUrl(arg: string | undefined): arg is string {
+  if (!arg || arg.startsWith("-")) return false;
+  if (hasScheme(arg)) return true;
+  if (!BARE_HOST.test(arg)) return false;
+  const host = hostOf(arg);
+  return host.includes(".") || host.includes(":") || host.toLowerCase() === "localhost";
+}
+
 /** Settle help and flag errors for a subcommand before its handler is reached. */
 export function preflight(command: Subcommand, args: readonly string[]): Preflight {
   if (wantsHelp(args)) return { kind: "help" };
@@ -105,6 +137,8 @@ export interface CliHandlers {
   /** A command line the preflight refused: print the sentence and exit non-zero. */
   refuse: (message: string) => never;
   commands: Record<Subcommand, (args: string[]) => void | Promise<void>>;
+  /** `scenescout <url>`: the first run, given the whole command line, the address first. */
+  firstRun: (args: [url: string, ...rest: string[]]) => void | Promise<void>;
 }
 
 /**
@@ -122,7 +156,12 @@ export async function dispatch(command: string | undefined, args: string[], h: C
     case "-v":
       return h.version();
   }
-  if (!isSubcommand(command)) return h.usage(1);
+  if (!isSubcommand(command)) {
+    if (!looksLikeUrl(command)) return h.usage(1);
+    // Its own parser refuses an option it does not know, with the first run's exit code, as check's does.
+    if (wantsHelp(args)) return h.usage(0);
+    return h.firstRun([command, ...args]);
+  }
   const verdict = preflight(command, args);
   if (verdict.kind === "help") return h.usage(0);
   if (verdict.kind === "error") return h.refuse(verdict.message);

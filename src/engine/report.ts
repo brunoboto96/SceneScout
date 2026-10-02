@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { SHARED_CHROME_ROUTE, isEmbedKey, isWorthALook, type Finding, type MemoryStore, type PageScore } from "./memory.js";
+import { SHARED_CHROME_ROUTE, isEmbedKey, isWorthALook, judgedMergesOf, type Finding, type MemoryStore, type PageScore } from "./memory.js";
 import type { OracleViolation } from "./oracles.js";
 import { sayVerification } from "./verify.js";
 import type { WriteMode } from "./policy.js";
@@ -609,6 +609,8 @@ export function generateReport(
   if (extras?.policyAttributed) {
     lines.push(`| Errors caused by the tester's own write-policy blocks (not counted above) | ${extras.policyAttributed} |`);
   }
+  const judged = memory.dedupJudge?.describe() ?? (memory.dedupOff ? `the rule alone: the dedup judge was asked for and is off (${memory.dedupOff})` : null);
+  if (judged) lines.push(`| Finding dedup | ${judged.replace(/\|/g, "/")} |`);
   lines.push(`| Elements exercised (informational — denominator grows with every state) | ${cov.elementsExercised}/${cov.elementsTotal} |`);
   lines.push(``);
 
@@ -717,6 +719,12 @@ export function generateReport(
     if (f.evidence) lines.push(`- **Evidence:** \`${f.evidence}\``);
     lines.push(`- **Where:** \`${f.state}\` (${f.url})`);
     lines.push(`- **Seen in runs:** ${f.runs}`);
+    // A merge the model made is shown with what was filed, so a wrong one can be seen, and refiled as its own defect (ADR 4).
+    for (const m of judgedMergesOf(f)) {
+      lines.push(
+        `- **Merged by the dedup judge** (p_same ${m.pSame.toFixed(2)}, ${m.at.slice(0, 10)}): [${m.severity}] ${m.title}, filed as ${m.category}${m.evidence ? ` with evidence \`${m.evidence}\`` : ""}`,
+      );
+    }
     // Only printed once somebody has re-tested it. A finding nobody has looked
     // at again says nothing here, which is the honest thing for it to say.
     if (f.verdict && f.verifiedAt) {

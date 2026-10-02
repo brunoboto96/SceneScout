@@ -3,8 +3,12 @@
  * SceneScout MCP server (stdio).
  *
  * Exposes deterministic browser-exploration tools — Playwright actions, state
- * memory, oracles, findings, report — to any MCP client. No LLM calls happen
- * here: the client (e.g. Claude Code on a subscription) is the brain.
+ * memory, oracles, findings, report — to any MCP client. The client (e.g.
+ * Claude Code on a subscription) is the brain, and no LLM call happens here
+ * unless finding dedup is set to ask a model judge (SCENESCOUT_DEDUP, or
+ * scout_attach {dedup}): then a filing the dedup rule keeps apart is put to a
+ * model, through the client when it is a `scenescout ci` run, else with a key
+ * from this process's environment (engine/dedup.ts).
  *
  * The server process is a per-conversation daemon and behaves like one:
  * - Multi-session, genuinely concurrent: named sessions each own a live
@@ -34,7 +38,10 @@ import { ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, McpError }
 import { z } from "zod";
 import { BrowserEngine } from "./engine/browser.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
-import { describeMerge, FINDING_CATEGORIES, isWorthALook, MemoryStore, mergeableCategories, redactSecrets } from "./engine/memory.js";
+import { describeMerge, FINDING_CATEGORIES, isWorthALook, MemoryStore, mergeableCategories, redactSecrets, type FiledFinding } from "./engine/memory.js";
+import { DEDUP_ENV, DEDUP_MODES, redactKeys, secretValues, type DedupMode } from "./engine/ci.js";
+import { DedupJudge, planDedup, samplingAsk } from "./engine/dedup.js";
+import { httpJudgeAsk } from "./ci-run.js";
 import {
   decodedEntitiesNote,
   ignoredConventionsNote,
@@ -878,6 +885,15 @@ server.registerTool(
         .describe(
           "Session name for multi-role runs (e.g. 'admin', 'qa'). Creates/replaces that session's browser and makes it the default. Default: 'default'.",
         ),
+      dedup: z
+        .enum(DEDUP_MODES)
+        .optional()
+        .describe(
+          `How this run tells a filed finding from one already recorded. Default: the ${DEDUP_ENV} environment variable, else 'rule', the store's rule alone. ` +
+            "'judge': the rule first, then, for a filing the rule keeps apart from everything recorded, a model is asked whether it is one of the open findings on its page, and merges it when it says so. " +
+            "It needs ANTHROPIC_API_KEY or OPENAI_API_KEY in the server's environment, and sends each pair's titles, categories and evidence, and the page's path, to that provider — ONLY when the user asked for it. " +
+            "Applies to every session of the project until the run ends.",
+        ),
     },
   },
   serializedControl(
@@ -899,6 +915,7 @@ server.registerTool(
       actionTimeoutMs,
       navTimeoutMs,
       session,
+      dedup,
     }: {
       url: string;
       projectPath: string;
@@ -917,6 +934,7 @@ server.registerTool(
       actionTimeoutMs?: number;
       navTimeoutMs?: number;
       session?: string;
+      dedup?: DedupMode;
     }) => {
       try {
         const target = session ?? activeName;
@@ -979,6 +997,8 @@ server.registerTool(
         // project is the same run, and keeps what the run has learned.
         const previous = eng.memory;
         if (previous && previous !== store && ![...engines.values()].some((e) => e !== eng && e.memory === previous)) previous.endRun();
+        // Before the browser starts: a value it cannot use refuses the attach rather than being replaced.
+        const dedupNote = configureDedup(store, dedup);
         const viewport = viewportWidth && viewportHeight ? { width: viewportWidth, height: viewportHeight } : undefined;
         const out = await eng.attach({
           url,
@@ -1016,13 +1036,69 @@ server.registerTool(
           record && eng.memory?.dir
             ? `\n\n📸 RECORDING: a frame of the page after each action, under ${path.join(eng.memory.dir, "recordings", target)}/ (at most ${RECORD_MAX_FRAMES}). scout_report writes them into report.html beside report.md.`
             : "";
-        return text(out + conflictNote + recordNote + describePace(eng.pace) + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine(), target);
+        return text(
+          out + conflictNote + recordNote + dedupNote + describePace(eng.pace) + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine(),
+          target,
+        );
       } catch (err) {
         return errorText(err);
       }
     },
   ),
 );
+
+/** Keys in this process's environment, and anything shaped like one, taken out of a line before it is shown. */
+const withoutKeys = (text: string): string => redactKeys(text, secretValues(process.env));
+
+/** A line for the operator, on stderr. */
+function logLine(line: string): void {
+  console.error(withoutKeys(`[scenescout] ${line}`));
+}
+
+/**
+ * Set how a project's filings are deduplicated for this run (engine/dedup.ts
+ * planDedup): what this attach names, else what an earlier attach of the run
+ * named, else DEDUP_ENV. Returns the line the attach reports, or "".
+ */
+function configureDedup(store: MemoryStore, asked: DedupMode | undefined): string {
+  if (asked) store.dedupChoice = asked;
+  const plan = planDedup(store.dedupChoice, process.env, server.server.getClientCapabilities());
+  if (plan.mode === "rule") {
+    store.dedupJudge = null;
+    store.dedupOff = undefined;
+    return "";
+  }
+  // On already for this run: say so only when it has since been switched off.
+  if (store.dedupJudge instanceof DedupJudge)
+    return store.dedupJudge.off ? `\n⚠ DEDUP JUDGE OFF: switched off earlier in this run after ${store.dedupJudge.off}. The rule decides duplicates.` : "";
+  if (plan.via === "off") {
+    store.dedupOff = plan.why;
+    logLine(`dedup judge off: ${plan.why}; the rule decides duplicates`);
+    return plan.note;
+  }
+  const ask = plan.via === "client" ? samplingAsk((params, options) => server.server.createMessage(params, options)) : httpJudgeAsk(plan.resolved, plan.key);
+  store.dedupJudge = new DedupJudge(ask, { label: plan.label, log: logLine, redact: withoutKeys });
+  store.dedupOff = undefined;
+  return plan.note;
+}
+
+/** What scout_finding tells the agent about what filing did. */
+function filedText(filed: FiledFinding, category: string): string {
+  const { finding, isNew, promoted } = filed;
+  if (isNew && isWorthALook(finding))
+    return `Recorded as worth a look (not a defect in the report's totals): ${finding.title} (id ${finding.id}) — a defect only if your project uses ${finding.convention}`;
+  if (isNew) return `Finding recorded: [${finding.severity}] ${finding.title} (id ${finding.id})`;
+  if (filed.judged)
+    return (
+      `Not recorded as new: the dedup judge read it as the same defect as finding ${finding.id} (p_same ${filed.judged.pSame.toFixed(2)}) — [${finding.severity}] ${finding.title}, filed as ${finding.category}, seen in ${finding.runs} runs.` +
+      `${promoted ? " That finding was worth a look and is now a defect." : ""} Its title, category, severity and evidence are kept on that finding, so the report shows the merge. If yours is a different defect, file it again with a title that says what differs.`
+    );
+  if (promoted)
+    return `Merged into finding ${finding.id}, which was worth a look, and promoted to a defect: [${finding.severity}] ${finding.title}. It now counts among the report's findings.`;
+  if (finding.regressedAt)
+    return `⟳ REOPENED as a REGRESSION: finding ${finding.id} was previously resolved but the evidence reproduces again (seen in ${finding.runs} runs). Worth calling out to the user.`;
+  return `Not recorded as new: merged into existing finding ${finding.id} — [${finding.severity}] ${finding.title}${finding.evidence ? ` (evidence: ${finding.evidence.slice(0, 160)})` : " (no evidence)"}, filed as ${finding.category}, seen in ${finding.runs} run${finding.runs === 1 ? "" : "s"}${filed.merge?.sameRun ? " (already filed this run, so the count did not change)" : ""}.${filed.merge ? describeMerge(filed.merge, finding.convention) : ""} If yours is a different bug, file it again: under the category that says what is wrong if it is another kind of defect (a finding filed as ${category} merges only with one filed as ${mergeableCategories(category).join(" or ")}), or with evidence naming the request that failed for you (method and path) — two findings are kept apart when both name requests and none is shared.`;
+}
 
 function sessionLines(): string {
   const lines = ["Live sessions:"];
@@ -1659,9 +1735,9 @@ server.registerTool(
       try {
         const eng = engineFor(session);
         if (!eng.memory) throw new Error("Not attached — findings need an active session.");
-        const [finding, isNew, promoted, merge] = eng.memory.addFinding({
+        const filed = await eng.memory.fileFinding({
           severity,
-          category: category as Parameters<typeof eng.memory.addFinding>[0]["category"],
+          category,
           title,
           detail,
           evidence,
@@ -1670,18 +1746,8 @@ server.registerTool(
           state: eng.currentState || "(unknown)",
           session: eng.sessionKey,
         });
-        return text(
-          isNew
-            ? isWorthALook(finding)
-              ? `Recorded as worth a look (not a defect in the report's totals): ${finding.title} (id ${finding.id}) — a defect only if your project uses ${finding.convention}`
-              : `Finding recorded: [${finding.severity}] ${finding.title} (id ${finding.id})`
-            : promoted
-              ? `Merged into finding ${finding.id}, which was worth a look, and promoted to a defect: [${finding.severity}] ${finding.title}. It now counts among the report's findings.`
-              : finding.regressedAt
-                ? `⟳ REOPENED as a REGRESSION: finding ${finding.id} was previously resolved but the evidence reproduces again (seen in ${finding.runs} runs). Worth calling out to the user.`
-                : `Not recorded as new: merged into existing finding ${finding.id} — [${finding.severity}] ${finding.title}${finding.evidence ? ` (evidence: ${finding.evidence.slice(0, 160)})` : " (no evidence)"}, filed as ${finding.category}, seen in ${finding.runs} run${finding.runs === 1 ? "" : "s"}${merge.sameRun ? " (already filed this run, so the count did not change)" : ""}.${describeMerge(merge, finding.convention)} If yours is a different bug, file it again: under the category that says what is wrong if it is another kind of defect (a finding filed as ${category} merges only with one filed as ${mergeableCategories(category).join(" or ")}), or with evidence naming the request that failed for you (method and path) — two findings are kept apart when both name requests and none is shared.`,
-          session,
-        );
+        if (filed.judgeError) logLine(`dedup judge: ${filed.judgeError}; the rule decided`);
+        return text(filedText(filed, category), session);
       } catch (err) {
         return errorText(err);
       }

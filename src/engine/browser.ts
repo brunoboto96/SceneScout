@@ -3736,8 +3736,11 @@ export class BrowserEngine {
    * harvested from their links, none is marked visited or attempted, and a
    * failed load is not remembered, so the pages and what they link to stay on
    * the unvisited list exactly as before. A check's re-test loads use it.
+   *
+   * `deadline` (epoch ms): no route is started once it has passed; those left
+   * stay unvisited. The first run's time budget is the only caller.
    */
-  async crawl(paths?: string[], opts: { inspect?: boolean; limit?: number; measureOnly?: boolean } = {}): Promise<string> {
+  async crawl(paths?: string[], opts: { inspect?: boolean; limit?: number; measureOnly?: boolean; deadline?: number } = {}): Promise<string> {
     const page = this.requirePage();
     const memory = this.memory!;
     this.crawlHealth = [];
@@ -3764,6 +3767,10 @@ export class BrowserEngine {
     const queue = [...targets];
     for (let i = 0; i < queue.length; i++) {
       const path = queue[i];
+      if (opts.deadline !== undefined && Date.now() >= opts.deadline) {
+        summary.push(`… stopped at the time limit: ${queue.length - i} route(s) not started`);
+        break;
+      }
       const url = `${this.baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
       if (!this.isSameOrigin(url)) {
         summary.push(`${path} — SKIPPED (off-origin)`);
