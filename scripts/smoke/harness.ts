@@ -145,6 +145,12 @@ export function releaseHeldPages(): void {
   for (const answer of waiting) answer();
 }
 
+/** The single sign-on fixture: the app's session cookie, the provider's own, the code it hands back and the state it carries. */
+export const SSO_SESSION_COOKIE = "sso_session";
+export const SSO_PROVIDER_COOKIE = "provider_session";
+const SSO_CODE = "pc-123";
+const SSO_STATE = "st-1";
+
 /** The session cookie the fixture's cookie sign-in sets. */
 export const SIGN_IN_COOKIE = "fixture_session";
 
@@ -651,6 +657,87 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       const signedIn = (req.headers.cookie ?? "").split(/;\s*/).includes(`${SIGN_IN_COOKIE}=member`);
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(fs.readFileSync(path.join(appDir, signedIn ? "cookie-account.html" : "cookie-account-signed-out.html")));
+      return;
+    }
+    // A sign-in through a stand-in single sign-on provider on the second
+    // origin: /sso/signin links to /sso-provider/authorize there (its origin
+    // given as ?provider=), which takes any password, sets its own cookie on
+    // its own path and sends the browser back to /sso/callback with a code and
+    // the state. The callback moves on to /sso/finishing with no session yet,
+    // and the session cookie is set only once /sso/exchange is answered.
+    if (urlPath === "/sso/signin" && req.method === "GET") {
+      const provider = new URL(req.url ?? "/", "http://x").searchParams.get("provider") ?? "";
+      if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(provider)) {
+        res.writeHead(400);
+        res.end("provider must be a loopback origin");
+        return;
+      }
+      const authorize = `${provider}/sso-provider/authorize?return=${encodeURIComponent(`http://${req.headers.host}/sso/callback`)}&state=${SSO_STATE}`;
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "sso-signin.html"), "utf8").replace("<!--AUTHORIZE-->", escapeHtml(authorize)));
+      return;
+    }
+    if (urlPath === "/sso-provider/authorize" && req.method === "GET") {
+      const q = new URL(req.url ?? "/", "http://x").searchParams;
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(
+        fs
+          .readFileSync(path.join(appDir, "sso-provider.html"), "utf8")
+          .replace("<!--RETURN-->", escapeHtml(q.get("return") ?? ""))
+          .replace("<!--STATE-->", escapeHtml(q.get("state") ?? "")),
+      );
+      return;
+    }
+    if (urlPath === "/sso-provider/authorize" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+        const back = form.get("return") ?? "";
+        if (!/^http:\/\/127\.0\.0\.1:\d+\/sso\/callback$/.test(back)) {
+          res.writeHead(400);
+          res.end("return must be the app's callback");
+          return;
+        }
+        res.writeHead(303, {
+          location: `${back}?code=${SSO_CODE}&state=${encodeURIComponent(form.get("state") ?? "")}`,
+          // The provider's own session, on its own path: never sent to the app's pages.
+          "set-cookie": `${SSO_PROVIDER_COOKIE}=provider-session-0123456789abcdef; Path=/sso-provider; HttpOnly; SameSite=Lax`,
+        });
+        res.end();
+      });
+      return;
+    }
+    if (urlPath === "/sso/callback") {
+      const q = new URL(req.url ?? "/", "http://x").searchParams;
+      const ok = q.get("code") === SSO_CODE && q.get("state") === SSO_STATE;
+      res.writeHead(302, { location: ok ? `/sso/finishing?c=${SSO_CODE}` : "/sso/signin" });
+      res.end();
+      return;
+    }
+    if (urlPath === "/sso/finishing" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "sso-finishing.html")));
+      return;
+    }
+    if (urlPath === "/sso/exchange" && req.method === "POST") {
+      const ok = new URL(req.url ?? "/", "http://x").searchParams.get("c") === SSO_CODE;
+      res.writeHead(ok ? 200 : 403, {
+        "content-type": "application/json",
+        ...(ok ? { "set-cookie": `${SSO_SESSION_COOKIE}=member; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600` } : {}),
+      });
+      res.end(JSON.stringify({ ok }));
+      return;
+    }
+    if (urlPath === "/sso/home") {
+      const signedIn = (req.headers.cookie ?? "").split(/;\s*/).includes(`${SSO_SESSION_COOKIE}=member`);
+      if (!signedIn) {
+        res.writeHead(302, { location: "/sso/signin" });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "sso-home.html")));
       return;
     }
     // The scripted sign-in: email, then password on the same page, then a

@@ -31,6 +31,7 @@ import * as authLoss from "./smoke/auth-loss.ts";
 import * as loginProfiles from "./smoke/login-profiles.ts";
 import * as scriptedLogin from "./smoke/scripted-login.ts";
 import * as passwordlessLogin from "./smoke/passwordless-login.ts";
+import * as ssoLogin from "./smoke/sso-login.ts";
 import * as reattach from "./smoke/reattach.ts";
 import * as refreshBroker from "./smoke/refresh-broker.ts";
 import * as refreshCookie from "./smoke/refresh-cookie.ts";
@@ -60,6 +61,7 @@ const suites = [
   loginProfiles,
   scriptedLogin,
   passwordlessLogin,
+  ssoLogin,
   reattach,
   refreshBroker,
   refreshCookie,

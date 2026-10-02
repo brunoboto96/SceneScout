@@ -204,8 +204,11 @@ test("--script is a switch, and its own flags are refused without it", () => {
     );
   const manual = parseLoginArgs(["http://127.0.0.1:3000", "--role", "member"], "/p");
   assert.ok(manual.ok && manual.options.script === undefined);
-  const stray = parseLoginArgs(["http://127.0.0.1:3000", "--role", "member", "--success-url", "/a"], "/p");
-  assert.deepEqual(stray, { ok: false, error: "--success-url only applies with --script" });
+  const stray = parseLoginArgs(["http://127.0.0.1:3000", "--role", "member", "--success-selector", "#in"], "/p");
+  assert.deepEqual(stray, { ok: false, error: "--success-selector only applies with --script" });
+  // --success-url is the one the window reads too: it goes to the window, not into a script map.
+  const windowed = parseLoginArgs(["http://127.0.0.1:3000", "--role", "member", "--success-url", "/a"], "/p");
+  assert.ok(windowed.ok && windowed.options.script === undefined && windowed.options.successUrl === "/a");
   // No flag carries a credential: one would sit in the process list and the shell history.
   const cred = parseLoginArgs(["http://127.0.0.1:3000", "--role", "member", "--script", "--password", "x"], "/p");
   assert.deepEqual(cred, { ok: false, error: "unknown option --password" });

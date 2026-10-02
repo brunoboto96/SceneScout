@@ -34,6 +34,18 @@ import {
   validateRoleName,
   writeProfile,
 } from "../src/engine/profiles.ts";
+import {
+  isAuthReturn,
+  judgeSignIn,
+  LoginWindows,
+  looksLikeCredential,
+  STABLE_LOOKS,
+  startWatch,
+  type HeldValue,
+  type SignInLook,
+  type SignInVerdict,
+  type SignInWatch,
+} from "../src/engine/signed-in.ts";
 import { cookieMatchesHost, describeLifetime, judgeLifetime, judgeProfileFile, jwtExpiry, readLifetime } from "../src/engine/expiry.ts";
 
 const POSIX = process.platform !== "win32";
@@ -229,6 +241,22 @@ test("scenescout login takes one URL and a valid role, and nothing that would le
   refused(["file:///etc/passwd", "--role", "admin"], /only http and https/);
   refused(["http://user:pw@127.0.0.1:3000", "--role", "admin"], /no credentials in the URL/);
   refused(["http://127.0.0.1:3000", "--role", "admin", "--browser", "edge"], /--browser must be one of/);
+  refused(["http://127.0.0.1:3000", "--role", "admin", "--save", "later"], /--save must be one of auto, enter/);
+  refused(["http://127.0.0.1:3000", "--role", "admin", "--script", "--save", "enter"], /--save applies to the window/);
+});
+
+test("the window saves by itself unless --save enter asks for Enter alone, and reads --success-url without --script", () => {
+  const plain = parseLoginArgs(["http://127.0.0.1:3000", "--role", "admin"], "/work");
+  assert.ok(plain.ok && plain.options.save === undefined, "no --save leaves the default, auto, to the runner");
+  const enter = parseLoginArgs(["http://127.0.0.1:3000", "--role", "admin", "--save", "enter"], "/work");
+  assert.ok(enter.ok && enter.options.save === "enter");
+  const success = parseLoginArgs(["http://127.0.0.1:3000", "--role", "admin", "--success-url=/home"], "/work");
+  assert.ok(success.ok && success.options.successUrl === "/home" && success.options.script === undefined);
+  const scripted = parseLoginArgs(["http://127.0.0.1:3000", "--role", "admin", "--script", "--success-url", "/home"], "/work");
+  assert.ok(
+    scripted.ok && scripted.options.successUrl === undefined && scripted.options.script?.get("success-url") === "/home",
+    "with --script it stays the script's",
+  );
 });
 
 // ── sessionStorage and IndexedDB ────────────────────────────────────────────
@@ -589,4 +617,226 @@ test("reading a profile file: a bad file is refused without quoting its contents
     /could not be read \(ENOENT\)/,
   );
   assert.equal(judgeProfileFile("/p/admin.json", opts, () => JSON.stringify(stateOf([cookie("sid", NOW + 2 * 60 * MIN)]))).kind, "ok");
+});
+
+// ── When an interactive sign-in has finished ────────────────────────────────
+
+const SI_APP = "http://app.test:3000";
+const SI_IDP = "https://idp.test";
+const held = (name: string, value: string, domain = "app.test", p = "/"): HeldValue => ({ kind: "cookie", key: `cookie|${domain}|${p}|${name}`, name, value });
+const local = (name: string, value: string, origin = SI_APP): HeldValue => ({ kind: "local", key: `local|${origin}|${name}`, name, value });
+const look = (url: string, over: Partial<SignInLook> = {}): SignInLook => ({ url, signInField: false, held: [], popupAway: false, ...over });
+const SESSION = held("app_session", "s3cr3t-session-value-0123456789");
+
+/** Run the looks through the watch and return every verdict. */
+function judgeAll(watch: SignInWatch, looks: SignInLook[]): SignInVerdict[] {
+  const out: SignInVerdict[] = [];
+  let w = watch;
+  for (const l of looks) {
+    const r = judgeSignIn(w, l);
+    w = r.watch;
+    out.push(r.verdict);
+  }
+  return out;
+}
+const last = (v: SignInVerdict[]): SignInVerdict => v[v.length - 1];
+const reasonOf = (v: SignInVerdict): string => (v.kind === "waiting" ? v.reason : `signed-in:${v.via}`);
+/** The same look twice, as STABLE_LOOKS asks. */
+const twice = (l: SignInLook): SignInLook[] => Array.from({ length: STABLE_LOOKS }, () => l);
+
+test("an SSO round trip: still on the identity provider is not signed in, nor is the app's callback, nor the app with no session yet", () => {
+  const watch = startWatch(`${SI_APP}/`, []);
+  const steps = judgeAll(watch, [
+    look(`${SI_APP}/login`, { signInField: false }),
+    look(`${SI_IDP}/authorize?client_id=x`),
+    // The provider's own session cookie, set on its host: the app holds nothing yet.
+    look(`${SI_IDP}/authorize?client_id=x`, { held: [held("idp_session", "idp-session-value-0123456789", "idp.test")] }),
+    look(`${SI_APP}/sso/callback?code=abc&state=xyz`, { held: [SESSION] }),
+    look(`${SI_APP}/sso/finishing`),
+    look(`${SI_APP}/sso/finishing`),
+  ]);
+  assert.deepEqual(steps.map(reasonOf), ["sign-in-screen", "away", "away", "returning", "no-session", "no-session"]);
+  // The contrast: the same trip, and then the app holds a new session. Signed in, once two looks agree.
+  const done = judgeAll(watch, [look(`${SI_APP}/login`), look(`${SI_IDP}/authorize`), ...twice(look(`${SI_APP}/home`, { held: [SESSION] }))]);
+  assert.deepEqual(done.map(reasonOf), ["sign-in-screen", "away", "settling", "signed-in:credential"]);
+  assert.deepEqual(last(done), { kind: "signed-in", via: "credential", credential: 'cookie "app_session"' });
+});
+
+test("one look is never enough: a redirect chain passes through pages that look signed in for a moment", () => {
+  const watch = { ...startWatch(`${SI_APP}/`, []), sawSignIn: true };
+  const moved = judgeAll(watch, [look(`${SI_APP}/a`, { held: [SESSION] }), look(`${SI_APP}/b`, { held: [SESSION] })]);
+  assert.deepEqual(moved.map(reasonOf), ["settling", "settling"], "two looks at two addresses are two first looks");
+  const interrupted = judgeAll(watch, [
+    look(`${SI_APP}/a`, { held: [SESSION] }),
+    look(`${SI_APP}/a`, { held: [SESSION], signInField: true }),
+    look(`${SI_APP}/a`, { held: [SESSION] }),
+  ]);
+  assert.equal(reasonOf(last(interrupted)), "settling", "a look that went back to waiting starts the count again");
+});
+
+test("a sign-in form on the app: the password field holds it open; the same page without one, with a new session, is signed in", () => {
+  const watch = startWatch(`${SI_APP}/login`, [held("csrftoken", "a".repeat(32))]);
+  const form = judgeAll(watch, [look(`${SI_APP}/login`, { signInField: true }), ...twice(look(`${SI_APP}/`, { signInField: true, held: [SESSION] }))]);
+  assert.equal(reasonOf(last(form)), "sign-in-screen", "a password field on screen is the sign-in screen, whatever is held");
+  const spa = judgeAll(watch, [
+    look(`${SI_APP}/`, { signInField: true }),
+    ...twice(look(`${SI_APP}/`, { held: [local("access_token", "opaque-access-token-0123456789")] })),
+  ]);
+  assert.deepEqual(last(spa), { kind: "signed-in", via: "credential", credential: 'localStorage "access_token"' }, "a single-page app that signs in in place");
+});
+
+test("a landing page that sets a cookie before anyone signs in is not a sign-in", () => {
+  // Never through a sign-in screen: a banner dismissed, a preference stored.
+  const watch = startWatch(`${SI_APP}/`, []);
+  const banner = judgeAll(watch, twice(look(`${SI_APP}/`, { held: [held("session_pref", "x".repeat(24))] })));
+  assert.equal(reasonOf(last(banner)), "not-started");
+  // The contrast: the same cookie after the sign-in screen was seen.
+  const after = judgeAll(watch, [look(`${SI_APP}/signin`), ...twice(look(`${SI_APP}/`, { held: [held("session_pref", "x".repeat(24))] }))]);
+  assert.equal(reasonOf(last(after)), "signed-in:credential");
+});
+
+test("what was held when the window opened is the baseline: only a new value, or a changed one, counts", () => {
+  const anon = held("PHPSESSID", "anonymous-session-id-000000");
+  const watch = { ...startWatch(`${SI_APP}/`, [anon]), sawSignIn: true };
+  assert.equal(reasonOf(last(judgeAll(watch, twice(look(`${SI_APP}/`, { held: [anon] }))))), "no-session", "the anonymous session the first page set");
+  const rotated = held("PHPSESSID", "rotated-at-sign-in-11111111");
+  assert.equal(reasonOf(last(judgeAll(watch, twice(look(`${SI_APP}/`, { held: [rotated] }))))), "signed-in:credential", "the same cookie rotated at sign-in");
+});
+
+test("the provider's state, nonce and anti-forgery values are not a session; analytics are not either", () => {
+  const cases: [string, string, boolean][] = [
+    ["whatever", jwt(), true],
+    ["app_session", "abc", true],
+    ["connect.sid", "s%3Aabc.def", true],
+    ["sid", "short", true],
+    [".AspNetCore.Cookies", "CfDJ8-long-opaque-value", true],
+    ["sb-project-auth-token", JSON.stringify({ access_token: jwt(), user: {} }), true],
+    ["store", JSON.stringify({ token: "opaque-token-value" }), true],
+    ["persist:root", '{"auth":"{\\"token\\":null}"}', false],
+    ["authState", '{"isLoggedIn":false}', false],
+    ["k", "Zm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4", true],
+    ["oauth_state", "Zm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4", false],
+    ["oidc_nonce", "Zm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4", false],
+    ["csrftoken", "Zm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4", false],
+    ["XSRF-TOKEN", "Zm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4", false],
+    ["code_verifier", "Zm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4", false],
+    ["_ga", "GA1.1.1234567890.1234567890", false],
+    ["theme", "dark", false],
+    ["cookie_consent", "accepted-all-categories-2026", false],
+    ["app_session", "", false],
+  ];
+  for (const [name, value, want] of cases) assert.equal(looksLikeCredential({ name, value }), want, `${name}=${value}`);
+});
+
+test("an OAuth, OpenID Connect or SAML return is the app still finishing, not the end", () => {
+  const cases: [string, boolean][] = [
+    [`${SI_APP}/callback?code=abc&state=xyz`, true],
+    [`${SI_APP}/callback#access_token=abc&token_type=bearer`, true],
+    [`${SI_APP}/callback#id_token=abc`, true],
+    [`${SI_APP}/saml/acs?SAMLResponse=abc`, true],
+    [`${SI_APP}/orders?code=SUMMER&page=2`, false],
+    [`${SI_APP}/home`, false],
+    ["not a url", false],
+  ];
+  for (const [url, want] of cases) assert.equal(isAuthReturn(url), want, url);
+});
+
+test("a sign-in popup on the provider holds the window open until it closes", () => {
+  const watch = startWatch(`${SI_APP}/login`, []);
+  const popup = judgeAll(watch, [look(`${SI_APP}/login`), ...twice(look(`${SI_APP}/home`, { held: [SESSION], popupAway: true }))]);
+  assert.equal(reasonOf(last(popup)), "popup");
+  const closed = judgeAll(watch, [
+    look(`${SI_APP}/login`),
+    look(`${SI_APP}/login`, { popupAway: true }),
+    ...twice(look(`${SI_APP}/home`, { held: [SESSION] })),
+  ]);
+  assert.equal(reasonOf(last(closed)), "signed-in:credential");
+});
+
+test("about:blank before the first page is nowhere; another origin is the provider", () => {
+  const watch = startWatch(`${SI_APP}/`, []);
+  assert.equal(reasonOf(last(judgeAll(watch, [look("about:blank")]))), "not-started");
+  const r = judgeSignIn(watch, look("about:blank"));
+  assert.equal(r.watch.sawSignIn, false, "a blank tab is not a sign-in screen");
+  assert.equal(judgeSignIn(watch, look(`${SI_IDP}/`)).watch.sawSignIn, true);
+});
+
+test("a success URL decides instead of the session, once a sign-in screen was seen: reached with no sign-in field is signed in; anywhere else is not", () => {
+  const watch = { ...startWatch(`${SI_APP}/`, [], "/dashboard"), sawSignIn: true };
+  assert.equal(reasonOf(last(judgeAll(watch, twice(look(`${SI_APP}/dashboard`))))), "signed-in:success-url", "no credential needed");
+  assert.equal(
+    reasonOf(last(judgeAll(watch, twice(look(`${SI_APP}/home`, { held: [SESSION] }))))),
+    "no-session",
+    "a new session elsewhere is not the success URL",
+  );
+  assert.equal(reasonOf(last(judgeAll(watch, twice(look(`${SI_APP}/dashboard`, { signInField: true }))))), "sign-in-screen");
+  assert.equal(reasonOf(last(judgeAll(watch, twice(look(`${SI_IDP}/dashboard`))))), "away", "a path is looked for on the app only");
+  // The contrast: the same page before any sign-in screen. A success URL the start page matches ("/") would otherwise save at once.
+  const fresh = startWatch(`${SI_APP}/`, [], "/");
+  assert.equal(reasonOf(last(judgeAll(fresh, twice(look(`${SI_APP}/`))))), "not-started");
+  assert.equal(reasonOf(last(judgeAll(fresh, [look(`${SI_APP}/login`), ...twice(look(`${SI_APP}/`))]))), "signed-in:success-url");
+  const absolute = { ...startWatch(`${SI_APP}/`, [], "https://portal.test/start"), sawSignIn: true };
+  assert.equal(
+    reasonOf(last(judgeAll(absolute, twice(look("https://portal.test/start?x=1"))))),
+    "signed-in:success-url",
+    "an absolute success URL may be on another origin",
+  );
+  assert.equal(
+    reasonOf(last(judgeAll(absolute, twice(look("https://portal.test/start", { signInField: true }))))),
+    "sign-in-screen",
+    "...and a sign-in field there still holds it",
+  );
+});
+
+test("a second step with no field (a push to approve, a challenge, an account picker) is still the sign-in", () => {
+  const watch = { ...startWatch(`${SI_APP}/`, []), sawSignIn: true };
+  for (const p of ["/mfa", "/2fa/push", "/verify", "/auth/challenge", "/select-account", "/log-in"]) {
+    assert.equal(reasonOf(last(judgeAll(watch, twice(look(`${SI_APP}${p}`, { held: [SESSION] }))))), "sign-in-screen", p);
+  }
+  // The contrast: the same partial session on a page that is not a step of the sign-in.
+  assert.equal(reasonOf(last(judgeAll(watch, twice(look(`${SI_APP}/verifications`, { held: [SESSION] }))))), "signed-in:credential", "/verifications");
+});
+
+test("the app is the origin the window opened at, and the same host's other scheme or www. its first page landed on", () => {
+  const upgraded = startWatch("http://app.test/", [], undefined, "https://www.app.test/login");
+  assert.deepEqual(upgraded.appOrigins, ["http://app.test", "https://www.app.test"]);
+  const done = judgeAll(upgraded, [look("https://www.app.test/login"), ...twice(look("https://www.app.test/home", { held: [SESSION] }))]);
+  assert.equal(reasonOf(last(done)), "signed-in:credential");
+  // The contrast: a first page on another host is the provider, not the app.
+  const sso = startWatch("https://app.test/", [], undefined, "https://login.idp.test/authorize");
+  assert.deepEqual(sso.appOrigins, ["https://app.test"]);
+  assert.equal(reasonOf(last(judgeAll(sso, twice(look("https://login.idp.test/done", { held: [SESSION] }))))), "away");
+});
+
+test("a scout_login window is waited on by every call for its role, and its outcome is kept until a call reports it", async () => {
+  let clock = 0;
+  const windows = new LoginWindows<{ id: number; done: Promise<string> }>(1000, () => clock);
+  let opened = 0;
+  const finish = new Map<number, (v: string) => void>();
+  const start = async () => {
+    opened += 1;
+    const id = opened;
+    return { id, done: new Promise<string>((r) => finish.set(id, r)) };
+  };
+  const first = await windows.get("p\0admin", start);
+  const again = await windows.get("p\0admin", start);
+  assert.equal(opened, 1, "a second call waits on the open window");
+  assert.ok(!first.resumed && again.resumed && again.window === first.window);
+  assert.equal((await windows.get("p\0viewer", start)).window.id, 2, "another role has its own window");
+  // The sign-in finishes between two calls: the next call gets that outcome, not a new window.
+  finish.get(1)!("saved");
+  await first.window.done;
+  await new Promise((r) => setImmediate(r));
+  clock = 500;
+  const late = await windows.get("p\0admin", start);
+  assert.ok(late.resumed && late.window.id === 1 && (await late.window.done) === "saved");
+  windows.reported("p\0admin", late.window);
+  assert.equal((await windows.get("p\0admin", start)).window.id, 3, "once reported, the next call opens a new window");
+  // An outcome nobody asked for is dropped after keepMs.
+  const viewer = windows.all().find((w) => w.id === 2)!;
+  finish.get(2)!("closed");
+  await viewer.done;
+  await new Promise((r) => setImmediate(r));
+  clock = 5000;
+  assert.equal((await windows.get("p\0viewer", start)).window.id, 4);
 });
