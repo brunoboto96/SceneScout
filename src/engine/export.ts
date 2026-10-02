@@ -37,12 +37,12 @@ export const EXPORT_OPTION_NAMES = [
   "severity-map",
   "labels",
   "screenshots",
-  "include-closed",
+  "refile-closed",
   "include-worth-a-look",
   "dry-run",
   "yes",
 ] as const;
-const SWITCHES = new Set(["include-closed", "include-worth-a-look", "dry-run", "yes"]);
+const SWITCHES = new Set(["refile-closed", "include-worth-a-look", "dry-run", "yes"]);
 /** Options someone might reach for to pass a credential. Each is refused with where the credential comes from instead. */
 const CREDENTIAL_FLAGS = new Set(["token", "github-token", "gh-token", "jira-token", "api-token", "jira-api-token", "jira-email", "email", "password"]);
 
@@ -96,7 +96,12 @@ export type ExportOptions = ExportTarget & {
   /** Labels added to every issue, beside the marker label. */
   labels: string[];
   screenshots: boolean;
-  includeClosed: boolean;
+  /**
+   * File a finding again when the issue carrying its marker is closed. Off,
+   * an issue in any state counts as filed: teams close the issues they will
+   * not fix, and filing those again on every export is noise.
+   */
+  refileClosed: boolean;
   includeWorthALook: boolean;
   /** True unless `--yes` was given: a dry run lists what would be filed and files nothing. */
   dryRun: boolean;
@@ -282,7 +287,7 @@ export function parseExportArgs(args: readonly string[], cwd: string, env: Reado
       severityMap: severityMap.value,
       labels: labels.value,
       screenshots: screenshots === "on",
-      includeClosed: flags.has("include-closed"),
+      refileClosed: flags.has("refile-closed"),
       includeWorthALook: flags.has("include-worth-a-look"),
       dryRun: !flags.has("yes"),
     },

@@ -24,7 +24,7 @@ and which failure direction was chosen deliberately.
 | [0013](0013-a-convention-is-the-projects-to-decide.md) | What is a defect only under a project's convention is reported as "worth a look", naming the convention: never scored, counted as a defect or gated |
 | [0014](0014-an-unattended-run-reports-and-never-gates.md) | `scenescout ci` drives the MCP server with a model's API and no person present; it reports and never gates, stops at the first cap reached and still writes the report, never prints a key, and runs `destructive` only with `--allow-destructive` as well |
 | [0015](0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md) | A `/scenescout qa` comment tests the pull request's deployed preview: the job that holds the key checks out nothing and runs SceneScout from an exact release, reached only through a keyless gate that checks the commenter and refuses forks by default |
-| [0016](0016-an-export-files-each-finding-once-and-only-when-asked.md) | `scenescout export` files each finding once, found again by a label and a marker; a dry run unless `--yes`, at most `--max-issues` per export, a create that may have been carried out never re-sent blind, what cannot be read refused rather than guessed, inert issue text, and no uploads to GitHub |
+| [0018](0018-an-export-files-each-finding-once-and-only-when-asked.md) | `scenescout export` files each finding once, found again by a label and a marker on an issue in any state (`--refile-closed` files again over a closed one); a dry run unless `--yes`, at most `--max-issues` per export, a create that may have been carried out never re-sent blind, what cannot be read refused rather than guessed, inert issue text, and no uploads to GitHub |
 
 ## Writing a new one
 

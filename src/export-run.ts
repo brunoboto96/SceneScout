@@ -232,6 +232,7 @@ interface TrackerApi {
    * have been carried out is never re-sent to Jira.
    */
   consistentListing: boolean;
+  /** The labelled issues and the findings their markers name: closed issues too, unless `includeClosed` is false. */
   existing(includeClosed: boolean): Promise<Listing>;
   create(f: Finding, ctx: IssueContext, frames: readonly Frame[]): Promise<Created>;
 }
@@ -508,13 +509,16 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
       : o.to === "github"
         ? githubApi(o.github, client(o.github.apiUrl, { ...credentials.headers, ...GITHUB_HEADERS }, http))
         : jiraApi(o.jira, client(o.jira.baseUrl, credentials.headers, http));
+    // A closed issue counts as filed unless --refile-closed.
+    const includeClosed = !o.refileClosed;
     let existing: Map<string, FiledIssue> | null = null;
     if (tracker) {
-      const found = await tracker.existing(o.includeClosed);
+      const found = await tracker.existing(includeClosed);
       existing = found.map;
       say(
-        `Compared with ${tracker.label}: ${found.issues} ${o.includeClosed ? "" : "open "}issue(s) carry the ${MARKER_LABEL} label` +
-          `${found.unmarked ? `, ${found.unmarked} of them with no marker` : ""}${o.includeClosed ? "" : " (--include-closed counts closed ones too)"}.`,
+        `Compared with ${tracker.label}: ${found.issues} ${includeClosed ? "" : "open "}issue(s) carry the ${MARKER_LABEL} label` +
+          `${includeClosed ? " (open or closed)" : ""}${found.unmarked ? `, ${found.unmarked} of them with no marker` : ""}` +
+          `${includeClosed ? "" : "; a finding whose issue was closed is filed again (--refile-closed)"}.`,
       );
     } else if (!credentials.ok) {
       say(`Not compared with ${TRACKER_LABEL[o.to]}: ${credentials.error}. A finding filed earlier is listed below as one to file.`);
@@ -552,7 +556,7 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
       }
       if (created > 0 && pauseMs > 0) await http.wait(pauseMs);
       const { ctx, frames } = contextOf(f);
-      const done = await fileOne(tracker, f, ctx, o.to === "jira" ? frames : [], o.includeClosed, http);
+      const done = await fileOne(tracker, f, ctx, o.to === "jira" ? frames : [], includeClosed, http);
       created++;
       filed.push({ id: f.id, issue: done.issue });
       say(

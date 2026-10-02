@@ -113,7 +113,7 @@ test("options: GitHub's defaults are a dry run of every open defect, at most 20,
     severityMap: DEFAULT_SEVERITY_MAP.github,
     labels: [],
     screenshots: true,
-    includeClosed: false,
+    refileClosed: false,
     includeWorthALook: false,
     dryRun: true,
   });
@@ -1134,6 +1134,54 @@ test("GitHub: a tracker that never answers is given up on after the timeout", { 
   }
 });
 
+test("GitHub: a finding whose issue was closed is not filed again by default, and is with --refile-closed", async () => {
+  const gh = await standInGitHub();
+  try {
+    // Closed as won't-fix, say.
+    gh.issues.push({ number: 1, title: "x", body: githubMarker("aaa0000001"), labels: ["scenescout"], state: "closed" });
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    const dir = projectWith(THREE);
+    const skipped = await exportOnce([...GH, "--yes", "--only", "aaa0000001"], env, dir);
+    assert.equal(skipped.exitCode, EXIT_EXPORT.done, skipped.err.join("\n"));
+    assert.deepEqual(skipped.filed, []);
+    assert.ok(skipped.out.some((l) => l.includes("already filed") && l.endsWith("as #1 (closed)")));
+    assert.equal(posts(gh).length, 0);
+
+    const refiled = await exportOnce([...GH, "--yes", "--only", "aaa0000001", "--refile-closed"], env, dir);
+    assert.equal(refiled.exitCode, EXIT_EXPORT.done, refiled.err.join("\n"));
+    assert.deepEqual(refiled.filed, ["#2"]);
+    assert.deepEqual(findingIdsInGithubBody(gh.issues[1].body), ["aaa0000001"]);
+
+    // Now an open issue carries it, so neither way files it a third time.
+    for (const extra of [[], ["--refile-closed"]]) {
+      const again = await exportOnce([...GH, "--yes", "--only", "aaa0000001", ...extra], env, dir);
+      assert.deepEqual(again.filed, [], extra.join(" "));
+      assert.ok(
+        again.out.some((l) => l.includes("already filed") && l.endsWith("as #2")),
+        extra.join(" "),
+      );
+    }
+    assert.equal(gh.issues.length, 2);
+  } finally {
+    await gh.close();
+  }
+});
+
+test("GitHub: under --refile-closed, the re-check after a failed create does not take the closed issue for the new one", async () => {
+  const gh = await standInGitHub();
+  try {
+    gh.issues.push({ number: 1, title: "x", body: githubMarker("aaa0000001"), labels: ["scenescout"], state: "closed" });
+    gh.faults.push({ method: "POST", path: /\/issues$/, status: 503, body: { message: "Unavailable" } });
+    const run = await exportOnce([...GH, "--yes", "--only", "aaa0000001", "--refile-closed"], { GH_TOKEN, GITHUB_API_URL: gh.url }, projectWith(THREE));
+    assert.equal(run.exitCode, EXIT_EXPORT.done, run.err.join("\n"));
+    assert.deepEqual(run.filed, ["#2"]);
+    assert.equal(posts(gh).length, 2, "the failed create, and the one sent after the marker was not found on an open issue");
+    assert.ok(!run.out.some((l) => l.includes("found by its marker")));
+  } finally {
+    await gh.close();
+  }
+});
+
 test("GitHub: the cap files the worst first, and the next export files the rest", async () => {
   const gh = await standInGitHub();
   try {
@@ -1164,7 +1212,7 @@ test("GitHub: labels GitHub dropped stop the export after that issue, since a la
   }
 });
 
-test("GitHub: issues past the first page of 100 are read, and closed ones count only with --include-closed", async () => {
+test("GitHub: issues past the first page of 100 are read, closed ones counted unless --refile-closed", async () => {
   const gh = await standInGitHub();
   try {
     for (let n = 1; n <= 150; n++) gh.issues.push({ number: n, title: `old ${n}`, body: githubMarker(`old${n}`), labels: ["scenescout"], state: "open" });
@@ -1172,14 +1220,17 @@ test("GitHub: issues past the first page of 100 are read, and closed ones count 
     gh.issues.push({ number: 151, title: "closed", body: githubMarker("bbb0000002"), labels: ["scenescout"], state: "closed" });
     const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
     const dir = projectWith(THREE);
-    const open = await exportOnce(GH, env, dir);
-    assert.ok(open.out.some((l) => l.includes("aaa0000001") && l.endsWith("as #130")));
+    const any = await exportOnce(GH, env, dir);
+    assert.ok(any.out.some((l) => l.includes("aaa0000001") && l.endsWith("as #130")));
     assert.ok(
-      open.out.some((l) => l.includes("would file") && l.includes("bbb0000002")),
-      "a closed issue does not count by default",
+      any.out.some((l) => l.includes("bbb0000002") && l.endsWith("as #151 (closed)")),
+      "a closed issue counts as filed by default",
     );
-    const all = await exportOnce([...GH, "--include-closed"], env, dir);
-    assert.ok(all.out.some((l) => l.includes("bbb0000002") && l.endsWith("as #151 (closed)")));
+    assert.ok(any.out.some((l) => l.includes("151 issue(s) carry the scenescout label (open or closed)")));
+    const open = await exportOnce([...GH, "--refile-closed"], env, dir);
+    assert.ok(open.out.some((l) => l.includes("aaa0000001") && l.endsWith("as #130")));
+    assert.ok(open.out.some((l) => l.includes("would file") && l.includes("bbb0000002")));
+    assert.ok(open.out.some((l) => l.includes("150 open issue(s) carry the scenescout label; a finding whose issue was closed is filed again")));
   } finally {
     await gh.close();
   }
@@ -1289,7 +1340,7 @@ test("Jira: a dry run files nothing; credentials are Basic and never printed", a
   }
 });
 
-test("Jira: a 429 on a create is waited out and sent again; a closed issue counts only with --include-closed", async () => {
+test("Jira: a 429 on a create is waited out and sent again", async () => {
   const jira = await standInJira();
   try {
     const env = JIRA_ENV(jira.url);
@@ -1299,13 +1350,35 @@ test("Jira: a 429 on a create is waited out and sent again; a closed issue count
     assert.deepEqual(run.filed, ["QA-1"]);
     assert.ok(run.waits.includes(1000));
     assert.equal(jira.issues.length, 1);
+  } finally {
+    await jira.close();
+  }
+});
 
-    jira.issues[0].done = true;
+test("Jira: a finding whose issue was closed is not filed again by default, and is with --refile-closed", async () => {
+  const jira = await standInJira();
+  try {
+    jira.issues.push({
+      key: "QA-1",
+      fields: { labels: ["scenescout"], description: jiraDescription(finding({ id: "aaa0000001" }), CTX) },
+      done: true,
+      attachments: [],
+    });
+    const env = JIRA_ENV(jira.url);
     const dir = projectWith(THREE);
-    const open = await exportOnce(["--to", "jira", "--only", "aaa0000001"], env, dir);
-    assert.ok(open.out.some((l) => l.includes("would file") && l.includes("aaa0000001")));
-    const closed = await exportOnce(["--to", "jira", "--only", "aaa0000001", "--include-closed"], env, dir);
-    assert.ok(closed.out.some((l) => l.includes("already filed") && l.endsWith("as QA-1 (closed)")));
+    const skipped = await exportOnce(["--to", "jira", "--yes", "--only", "aaa0000001"], env, dir);
+    assert.equal(skipped.exitCode, EXIT_EXPORT.done, skipped.err.join("\n"));
+    assert.deepEqual(skipped.filed, []);
+    assert.ok(skipped.out.some((l) => l.includes("already filed") && l.endsWith("as QA-1 (closed)")));
+    assert.equal(jira.issues.length, 1);
+
+    const refiled = await exportOnce(["--to", "jira", "--yes", "--only", "aaa0000001", "--refile-closed"], env, dir);
+    assert.equal(refiled.exitCode, EXIT_EXPORT.done, refiled.err.join("\n"));
+    assert.deepEqual(refiled.filed, ["QA-2"]);
+    assert.deepEqual(findingIdsInJiraDescription(jira.issues[1].fields.description), ["aaa0000001"]);
+    const queries = jira.seen.filter((x) => x.url === "/rest/api/3/search/jql").map((x) => (JSON.parse(x.raw.toString("utf8")) as { jql: string }).jql);
+    assert.ok(!queries[0].includes("statusCategory"), "by default the query asks for closed issues too");
+    assert.ok(queries.at(-1)!.includes("statusCategory != Done"), "--refile-closed asks for open ones only");
   } finally {
     await jira.close();
   }
@@ -1474,7 +1547,7 @@ test("GitHub: labelled issues that carry no marker are counted, and file nothing
     gh.issues.push({ number: 2, title: "empty", body: null, labels: ["scenescout"], state: "open" });
     const run = await exportOnce(GH, { GH_TOKEN, GITHUB_API_URL: gh.url }, projectWith(THREE));
     assert.equal(run.exitCode, EXIT_EXPORT.done, run.err.join("\n"));
-    assert.ok(run.out.some((l) => l.includes("2 open issue(s) carry the scenescout label, 2 of them with no marker")));
+    assert.ok(run.out.some((l) => l.includes("2 issue(s) carry the scenescout label (open or closed), 2 of them with no marker")));
     assert.equal(run.out.filter((l) => l.includes("would file")).length, 3);
   } finally {
     await gh.close();
@@ -1507,7 +1580,7 @@ test("Jira: a create that may have been made is never sent again, since Jira's s
   }
 });
 
-test("Jira: issues past the first page of 100 are read, and closed ones count only with --include-closed", async () => {
+test("Jira: issues past the first page of 100 are read, closed ones counted unless --refile-closed", async () => {
   const jira = await standInJira();
   try {
     for (let n = 1; n <= 150; n++)
@@ -1526,11 +1599,15 @@ test("Jira: issues past the first page of 100 are read, and closed ones count on
     });
     const env = JIRA_ENV(jira.url);
     const dir = projectWith(THREE);
-    const open = await exportOnce(["--to", "jira"], env, dir);
+    const any = await exportOnce(["--to", "jira"], env, dir);
+    assert.ok(any.out.some((l) => l.includes("aaa0000001") && l.endsWith("as QA-130")));
+    assert.ok(
+      any.out.some((l) => l.includes("bbb0000002") && l.endsWith("as QA-151 (closed)")),
+      "a closed issue counts as filed by default",
+    );
+    const open = await exportOnce(["--to", "jira", "--refile-closed"], env, dir);
     assert.ok(open.out.some((l) => l.includes("aaa0000001") && l.endsWith("as QA-130")));
     assert.ok(open.out.some((l) => l.includes("would file") && l.includes("bbb0000002")));
-    const all = await exportOnce(["--to", "jira", "--include-closed"], env, dir);
-    assert.ok(all.out.some((l) => l.includes("bbb0000002") && l.endsWith("as QA-151 (closed)")));
     assert.deepEqual(jira.violations, []);
   } finally {
     await jira.close();

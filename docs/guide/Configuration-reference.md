@@ -124,7 +124,7 @@ Each `--script` option can also come from an environment variable, below; the op
 | `--severity-map` | labels `severity: high`, `severity: medium` and `severity: low` on GitHub; priorities `High`, `Medium` and `Low` in Jira | What each severity becomes, as `high=…,medium=…,low=…`. A severity left out keeps its default, an empty name sets none, and `none` sets none at all |
 | `--labels` | none | Labels added to every issue, comma-separated, at most 10. Jira labels cannot hold a space |
 | `--screenshots` | `on` | `off` leaves the run's frames out: Jira attaches them, GitHub names them |
-| `--include-closed` | off | A closed issue carrying a finding's marker counts as filed too |
+| `--refile-closed` | off | File a finding again when the issue carrying its marker is closed. Off, an issue open or closed counts as filed, so a won't-fix is not filed again |
 | `--include-worth-a-look` | off | Export worth-a-look findings as well as defects |
 | `--dry-run` | on, unless `--yes` | List what would be filed and send nothing but reads. Given only to say so |
 | `--yes` | off | File the issues |

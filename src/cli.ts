@@ -166,7 +166,8 @@ Usage:
                                       or JIRA_BASE_URL, JIRA_PROJECT_KEY, JIRA_ISSUE_TYPE, for Jira Cloud;
                                      --min-severity high|medium|low (default low); --only id,id;
                                      --max-issues N (default 20, at most 100): the most one export files;
-                                     --include-closed: a closed issue counts as filed too; --include-worth-a-look;
+                                     --refile-closed: file a finding again when its issue was closed (by default
+                                      an issue open or closed counts as filed); --include-worth-a-look;
                                      --severity-map high=…,medium=…,low=… or none: a label on GitHub, a priority
                                       in Jira (default severity: high… / High, Medium, Low); --labels a,b;
                                      --screenshots on|off (default on: attached in Jira, named on GitHub);

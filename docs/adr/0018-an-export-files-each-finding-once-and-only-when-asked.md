@@ -1,4 +1,4 @@
-# 16. An export files each finding once, and only when asked
+# 18. An export files each finding once, and only when asked
 
 Status: accepted
 
@@ -26,12 +26,17 @@ render.
 - **A marker and a label decide what is already filed.** Every issue carries
   the `scenescout` label and a marker holding the finding's id (an HTML comment
   on GitHub; a last line in a Jira description, which cannot hide text). Before
-  its first create, the export lists the open issues with the label (all of
-  them with `--include-closed`) and reads their markers. On GitHub it lists
-  rather than searching: the search API is indexed with a delay, so an export
-  run right after another would not see the issues it had just filed. Jira
-  offers no listing by label other than its search, which also lags; that
-  limit is documented rather than hidden.
+  its first create, the export lists the issues with the label, open and
+  closed, and reads their markers. On GitHub it lists rather than searching:
+  the search API is indexed with a delay, so an export run right after another
+  would not see the issues it had just filed. Jira offers no listing by label
+  other than its search, which also lags; that limit is documented rather than
+  hidden.
+- **A closed issue counts as filed.** Teams close the issues they decide not
+  to fix, and filing those again on every export would be noise someone has to
+  close again each time. `--refile-closed` counts open issues only, for a team
+  that closes an issue when the defect is fixed and wants a new one when a run
+  finds it again.
 - **A create is never sent twice blind.** A create that timed out, got a 5xx
   or had its answer cut off may have been carried out. On GitHub the issues
   are listed again before it is re-sent, and one carrying the finding's marker
@@ -63,8 +68,11 @@ render.
 
 ## Consequences
 
-- Removing the `scenescout` label or the marker from an issue, or closing it
-  (without `--include-closed`), makes the next export file the finding again.
+- Removing the `scenescout` label or the marker from an issue makes the next
+  export file the finding again, and so does closing it under
+  `--refile-closed`. Without that flag, a defect that comes back after its
+  issue was closed as fixed is not filed again: the export lists it as already
+  filed, naming the closed issue.
   GitHub drops the labels of an issue created by an account that may not set
   them, so the export stops after such an issue rather than file more it could
   not find again.
@@ -75,8 +83,9 @@ render.
 - Two exports of one project at the same moment are not guarded against each
   other, and an export to Jira straight after another may not yet see what the
   first filed.
-- An export reads every labelled issue each time it runs, 100 at a time; at
-  50 pages it refuses rather than file without knowing what is already there.
+- An export reads every labelled issue, closed ones included, each time it
+  runs, 100 at a time; at 50 pages it refuses rather than file without knowing
+  what is already there.
 - Escaped text reads with backslashes in the raw Markdown and zero-width spaces
   inside addresses, so an address copied out of an issue may need retyping.
 - Jira Cloud's REST API v3 is supported; Server and Data Center are not.

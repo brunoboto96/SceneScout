@@ -483,7 +483,7 @@ A pull request from a fork gets no secrets, so the step exits 2 there for want o
           GH_TOKEN: ${{ github.token }}
 ```
 
-Without `--yes` it is a dry run that lists what it would file. A later export skips every finding with an open issue, by the marker each issue carries. That marker holds the finding's id from the project's memory, so keep `.scenescout/memory.json` between runs (with `actions/cache`, as above): a run that starts from an empty memory gives a defect it words differently a new id, and a new issue. The guide has [the details](guide/Ways-to-use-it.md#filing-findings-as-issues), and the [configuration reference](guide/Configuration-reference.md#scenescout-export) every option.
+Without `--yes` it is a dry run that lists what it would file. A later export skips every finding that already has an issue, open or closed, by the marker each issue carries (`--refile-closed` files one again when its issue is closed). That marker holds the finding's id from the project's memory, so keep `.scenescout/memory.json` between runs (with `actions/cache`, as above): a run that starts from an empty memory gives a defect it words differently a new id, and a new issue. The guide has [the details](guide/Ways-to-use-it.md#filing-findings-as-issues), and the [configuration reference](guide/Configuration-reference.md#scenescout-export) every option.
 
 ### Other CI systems
 

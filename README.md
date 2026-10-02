@@ -447,7 +447,7 @@ npx scenescout export --to github --repo owner/app --yes    # files it
 npx scenescout export --to jira --jira-url https://your-site.atlassian.net --jira-project QA --yes
 ```
 
-- **Each finding once.** Every issue carries the `scenescout` label and a marker with the finding's id. Before filing, the export reads the open labelled issues and skips every finding already filed, naming its issue, so a second export of the same run files only what the first left over the cap. A finding whose issue was closed is filed again unless `--include-closed`.
+- **Each finding once.** Every issue carries the `scenescout` label and a marker with the finding's id. Before filing, the export reads the labelled issues, open or closed, and skips every finding already filed, naming its issue, so a second export of the same run files only what the first left over the cap. A closed won't-fix is not filed again; `--refile-closed` files a finding again when its issue is closed.
 - **A dry run unless `--yes`**, and at most `--max-issues` (default 20) per export; the next export files the rest. `--min-severity`, `--only <ids>` and `--include-worth-a-look` choose what goes.
 - **Inert issues.** Titles, descriptions, steps and evidence come from the run and the app's pages, so no `@mention`, link, `#123` reference, HTML or Markdown in them does anything.
 - **Severity** becomes a label on GitHub and a priority in Jira; `--severity-map` renames them or turns them off. **Screenshots** from a recorded run are attached in Jira; GitHub's API takes no uploads, so a GitHub issue names the frames in the run's `.scenescout/` folder.
