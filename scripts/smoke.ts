@@ -99,7 +99,15 @@ async function checkNothingLeft(suite: string): Promise<void> {
   }
 }
 
+/**
+ * The engine's action limit for this run, when the environment does not set one. The default (5 s) is the right
+ * answer for a person's run, and a loaded test machine overran it on a plain click. A step a suite means to time out
+ * passes its own lower limit, so raising the default only stops load from posing as a failure.
+ */
+const SMOKE_ACTION_TIMEOUT_MS = "15000";
+
 async function main(): Promise<void> {
+  process.env.SCENESCOUT_ACTION_TIMEOUT_MS ??= SMOKE_ACTION_TIMEOUT_MS;
   // What is open before anything runs (stdio), so what is open at the end can be compared with it.
   const baseline = process.getActiveResourcesInfo();
   if (process.platform === "win32") console.log("(leftover-process check skipped: no ps on Windows; open handles are still checked)");
@@ -127,7 +135,7 @@ async function main(): Promise<void> {
   }
   // Anything still open would keep node running after the last line of output, and `npm test` with it.
   let extra: string[] = [];
-  await eventually(() => (extra = extraHandles(baseline, process.getActiveResourcesInfo())).length === 0, 3000);
+  await eventually(() => (extra = extraHandles(baseline, process.getActiveResourcesInfo())).length === 0);
   check("nothing is left open that would keep node running", extra.length === 0, `open: ${extra.join(", ")}`);
   if (ran === 0) {
     // A filter that matches nothing must not read as a pass.

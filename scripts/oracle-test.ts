@@ -38,6 +38,7 @@ import {
 import { EventEmitter } from "node:events";
 import vm from "node:vm";
 import {
+  MAX_ITEMS,
   POSTMESSAGE_BINDING,
   describeTokenPost,
   maskToken,
@@ -421,7 +422,9 @@ test("a hostile value cannot make the parse backtrack, and an unclosed tag is no
   const hostile = "<a\t!=" + "\t!=".repeat(20000) + "x";
   const started = Date.now();
   const shape = injectionProbe(hostile, "f", "u");
-  assert.ok(Date.now() - started < 200, `took ${Date.now() - started}ms`);
+  // Wall-clock on purpose, since cost is what is under test: about a millisecond here, against time exponential in the
+  // input's length for the regex described above. The bound sits far from both, so a loaded machine cannot trip it.
+  assert.ok(Date.now() - started < 2000, `took ${Date.now() - started}ms`);
   assert.equal(shape, null, "the tag never closes");
   assert.equal(injectionProbe("<a href='/x'", "f", "u"), null);
   assert.equal(injectionProbe("<a href='/x'>go", "f", "u")?.text, "go", "a closed tag with no closing tag still has its text");
@@ -940,10 +943,22 @@ test("postMessage capture: a cyclic, deep or hostile message cannot break the ap
 test("postMessage capture: binary buffers and huge arrays are not walked, and a long JSON string is sent whole", () => {
   const { win, reported, delivered } = captureIn();
   const post = win.postMessage as (...a: unknown[]) => void;
-  const message = { bytes: new Uint8Array(5_000_000), numbers: new Array(1_000_000).fill(7), access_token: OPAQUE };
-  const started = Date.now();
+  // Counted rather than timed: how many of an array's items the walk reads, and whether it goes inside a binary
+  // buffer at all. A time bound stood for the same two facts, and a loaded machine could trip it.
+  let itemsRead = 0;
+  const numbers = new Proxy(new Array(1_000_000).fill(7), {
+    get(target, key, receiver) {
+      if (typeof key === "string" && /^\d+$/.test(key)) itemsRead += 1;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  let bytesWalked = false;
+  // A named property on the buffer, which a walk that went inside it would read.
+  const bytes = Object.defineProperty(new Uint8Array(16), "probe", { enumerable: true, get: () => ((bytesWalked = true), OPAQUE) });
+  const message = { bytes, numbers, access_token: OPAQUE };
   post(message, "*");
-  assert.ok(Date.now() - started < 500, "the walk is bounded");
+  assert.ok(itemsRead <= MAX_ITEMS, `the walk reads at most ${MAX_ITEMS} of an array's items, not all of them (read ${itemsRead})`);
+  assert.equal(bytesWalked, false, "a binary buffer is not walked");
   assert.equal(delivered.length, 1);
   assert.deepEqual(reported[0], [["data.access_token", OPAQUE]], "a token past a large array is still found");
   const big = JSON.stringify({ padding: "x".repeat(20_000), session: { access_token: OPAQUE } });
