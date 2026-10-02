@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>History</title>
+  </head>
+  <body>
+    <!--
+      "Show history" sends a write the server refuses and renders a sortable
+      table whose column header reads "Updated on". A column header names what
+      a column holds; it claims nothing, so nothing contradicts the refusal.
+      Its counterpart, claims-columns-caption.html, is identical except that
+      the same words are a paragraph rather than a column header.
+    -->
+    <h1>History</h1>
+    <button data-testid="history-show-button" onclick="show()">Show history</button>
+    <div data-testid="history-area"></div>
+    <script>
+      const AS_HEADER = true;
+      async function show() {
+        await fetch("/api/refuse/403?history=viewed", { method: "POST" }).catch(() => {});
+        document.querySelector("[data-testid=history-area]").innerHTML = AS_HEADER
+          ? '<table><thead><tr><th>Name</th><th aria-sort="none"><button>Updated on</button></th></tr></thead><tbody><tr><td>w1</td><td>today</td></tr></tbody></table>'
+          : '<p>Updated on</p><table><thead><tr><th>Name</th><th>When</th></tr></thead><tbody><tr><td>w1</td><td>today</td></tr></tbody></table>';
+      }
+    </script>
+  </body>
+</html>

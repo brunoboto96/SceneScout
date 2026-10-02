@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { RecordedDecision } from "./calibration.js";
+import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
 import type { InjectionProbe } from "./injection.js";
@@ -12,8 +13,11 @@ export interface StateRecord {
   /** When it was last reached. Absent on records written before pruning existed; they fall back to firstSeen. */
   lastSeen?: string;
   visits: number;
-  /** elementKey → exercised? absentStreak counts consecutive visits where the element was gone (pruned at 3). */
-  elements: Record<string, { exercised: boolean; lastAction?: string; absentStreak?: number }>;
+  /**
+   * elementKey → exercised? absentStreak counts consecutive visits where the element was gone (pruned at 3).
+   * `inert`: listed for its test id but not something a user can act on; left out of coverage.
+   */
+  elements: Record<string, { exercised: boolean; lastAction?: string; absentStreak?: number; inert?: boolean }>;
 }
 
 /**
@@ -81,6 +85,78 @@ export interface Finding {
   tier?: "worth_a_look";
   /** For a worth_a_look: the convention that would make it a defect, as "a defect only if …" would finish it. */
   convention?: string;
+  /**
+   * Filings the dedup judge read as this same defect and merged into it, newest
+   * last, at most MAX_JUDGED_MERGES: each one's title, category, severity and
+   * evidence (not its detail). Kept so a merge the model made shows in the
+   * report rather than vanishing (ADR 4); the rule's own merges record nothing,
+   * as before.
+   */
+  judgedMerges?: JudgedMerge[];
+}
+
+/** A filing the dedup judge merged into a stored finding: what was filed, and how sure the judge was. */
+export interface JudgedMerge {
+  title: string;
+  category: string;
+  severity: Finding["severity"];
+  evidence?: string;
+  /** The judge's probability that the two are one defect. */
+  pSame: number;
+  at: string;
+}
+
+/** Most judged merges one finding keeps; the oldest go first. */
+export const MAX_JUDGED_MERGES = 10;
+
+/**
+ * A finding's judged merges that are well formed. The file is read back
+ * without a schema, and the report prints each of these, so a hand-edited
+ * entry that is not one is dropped, not trusted.
+ */
+export function judgedMergesOf(f: Pick<Finding, "judgedMerges">): JudgedMerge[] {
+  if (!Array.isArray(f.judgedMerges)) return [];
+  return f.judgedMerges.filter(
+    (m): m is JudgedMerge =>
+      !!m &&
+      typeof m === "object" &&
+      typeof m.title === "string" &&
+      typeof m.category === "string" &&
+      typeof m.at === "string" &&
+      ["high", "medium", "low"].includes(m.severity) &&
+      typeof m.pSame === "number" &&
+      Number.isFinite(m.pSame) &&
+      (m.evidence === undefined || typeof m.evidence === "string"),
+  );
+}
+
+/** What a finding is filed with. Everything else on a finding is the store's to set. */
+export type FindingInput = Pick<Finding, "severity" | "category" | "title" | "detail" | "evidence" | "url" | "state" | "session" | "tier" | "convention">;
+
+/** The dedup judge's answer: the stored finding a filing is the same defect as, and how sure it is; or null for none. */
+export type JudgeVerdict = { sameAs: string; pSame: number } | null;
+
+/**
+ * Asked about a filing the rule keeps apart from every stored finding: which
+ * open finding on its page, if any, it is the same defect as (engine/dedup.ts
+ * DedupJudge). It resolves and never rejects: a judge that cannot answer
+ * leaves the rule's decision in place, which is to keep the filing apart.
+ */
+export interface DuplicateJudge {
+  judge(incoming: FindingInput, stored: readonly Readonly<Finding>[]): Promise<JudgeVerdict>;
+  /** One line for the report on what the judge did this run, or null when it was never asked. */
+  describe(): string | null;
+}
+
+/** What filing a finding did. `judged` is set only when the dedup judge merged it. */
+export interface FiledFinding {
+  finding: Finding;
+  isNew: boolean;
+  /** An existing worth-a-look was promoted to a defect by this filing. */
+  promoted: boolean;
+  judged?: { pSame: number };
+  /** The judge failed in a way it should have caught itself; the rule decided. For the caller to log. */
+  judgeError?: string;
 }
 
 /**
@@ -367,6 +443,8 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
         // Keep whichever action was actually recorded; ours wins a tie.
         ...((el.lastAction ?? prev?.lastAction) ? { lastAction: el.lastAction ?? prev?.lastAction } : {}),
         absentStreak: Math.min(prev?.absentStreak ?? 0, el.absentStreak ?? 0),
+        // Ours is the latest reading of whether a user can act on it.
+        ...(el.inert ? { inert: true } : {}),
       };
     }
     out.states[fp] = {
@@ -400,6 +478,10 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
     const tier = mergeTier(older, newer);
     Object.assign(withoutTier(merged), tier);
     if (!isWorthALook(merged) && isWorthALook(newer)) merged.severity = older.severity;
+    // Each side's judged merges are a record of filings, not later knowledge: kept from both.
+    const trail = unionJudgedMerges(f, other);
+    if (trail) merged.judgedMerges = trail;
+    else delete merged.judgedMerges;
     byId.set(f.id, merged);
   }
   out.findings = [...byId.values()];
@@ -454,6 +536,15 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
   if (Object.keys(out.laneRoutes).length === 0) delete out.laneRoutes;
 
   return out;
+}
+
+/** Two findings' judged merges as one list, each filing once, oldest first, at most MAX_JUDGED_MERGES. Idempotent. */
+function unionJudgedMerges(a: Pick<Finding, "judgedMerges">, b: Pick<Finding, "judgedMerges">): JudgedMerge[] | undefined {
+  const all = [...judgedMergesOf(b), ...judgedMergesOf(a)];
+  if (all.length === 0) return undefined;
+  const byKey = new Map<string, JudgedMerge>();
+  for (const m of all) byKey.set(`${m.at}\u0000${m.title}`, m);
+  return [...byKey.values()].sort((x, y) => x.at.localeCompare(y.at)).slice(-MAX_JUDGED_MERGES);
 }
 
 /** Most routes kept per lane. A lane report carries at most a few hundred; this keeps a long-lived project's file small. */
@@ -531,6 +622,11 @@ function findingJaccard(a: Set<string>, b: Set<string>): number {
   const inter = [...a].filter((t) => b.has(t)).length;
   const union = new Set([...a, ...b]).size;
   return union === 0 ? 0 : inter / union;
+}
+
+/** How alike two titles are, 0 to 1, by the token overlap the rule's last tier uses. Orders the dedup judge's candidates. */
+export function titleSimilarity(a: string, b: string): number {
+  return findingJaccard(findingTokens(a), findingTokens(b));
 }
 
 /**
@@ -972,7 +1068,21 @@ export class MemoryStore {
     this.auditsThisRun = 0;
     this.selectChoices.clear();
     this.emptySubmits.clear();
+    this.dedupJudge = null;
+    this.dedupChoice = undefined;
+    this.dedupOff = undefined;
   }
+
+  /**
+   * The dedup judge filings go through (fileFinding), or null for the rule
+   * alone. Per run, like the probes: the server sets it when a session
+   * attaches, and a run that never asks for it dedups by the rule only.
+   */
+  dedupJudge: DuplicateJudge | null = null;
+  /** What an attach of this run asked for by name; unset means the server's environment decides. */
+  dedupChoice?: DedupMode;
+  /** Why the judge this run asked for could not be set up (no key), for the report; unset when it was not asked for or is on. */
+  dedupOff?: string;
 
   /**
    * Each dropdown's options and the ones chosen in THIS run, by any session,
@@ -1115,6 +1225,9 @@ export class MemoryStore {
       if (dupOf) {
         dupOf.runs += f.runs;
         if (!dupOf.evidence && f.evidence) dupOf.evidence = f.evidence;
+        // Each copy's judged merges are filings: folding the copies keeps them all.
+        const trail = unionJudgedMerges(dupOf, f);
+        if (trail) dupOf.judgedMerges = trail;
         if (f.status === "resolved") dupOf.status = "resolved";
         const promoted = isWorthALook(dupOf) && !isWorthALook(f);
         const tier = mergeTier(dupOf, f);
@@ -1598,8 +1711,12 @@ export class MemoryStore {
     fs.appendFileSync(this.sessionLogPath, JSON.stringify(full) + "\n");
   }
 
-  /** Record a visit to a state; returns whether it was new. */
-  visitState(fingerprint: string, url: string, route: string, elementKeys: string[]): boolean {
+  /**
+   * Record a visit to a state; returns whether it was new. `inertKeys` are the
+   * listed keys a user cannot act on (collector inertKeys): they stay known,
+   * so a click on one still registers, but coverage does not count them.
+   */
+  visitState(fingerprint: string, url: string, route: string, elementKeys: string[], inertKeys: readonly string[] = []): boolean {
     let rec = this.data.states[fingerprint];
     const isNew = !rec;
     if (!rec) {
@@ -1609,9 +1726,12 @@ export class MemoryStore {
     rec.visits += 1;
     rec.lastSeen = new Date().toISOString();
     const present = new Set(elementKeys);
+    const inert = new Set(inertKeys);
     for (const key of elementKeys) {
       if (!rec.elements[key]) rec.elements[key] = { exercised: false };
       rec.elements[key].absentStreak = 0;
+      if (inert.has(key)) rec.elements[key].inert = true;
+      else delete rec.elements[key].inert;
     }
     // Prune ghosts: dynamic elements (list rows, ordinal-suffixed duplicates)
     // that vanish for 3 consecutive visits would otherwise make coverage
@@ -1652,10 +1772,64 @@ export class MemoryStore {
    * Returns [finding, isNew].
    */
   /** Returns the finding, whether it is new, and whether an existing worth-a-look was just promoted to a defect by it. */
-  addFinding(input: Omit<Finding, "id" | "foundAt" | "runs" | "repro">): [Finding, boolean, boolean] {
-    // Redact BEFORE the id is derived, so a re-found finding whose quoted
-    // secret differs by a character still hashes to the same id.
-    const f = {
+  addFinding(input: FindingInput): [Finding, boolean, boolean] {
+    const f = this.redacted(input);
+    const id = findingId(f);
+    const existing = this.data.findings.find((x) => isDuplicateFinding(x, f));
+    if (existing) return [existing, false, this.mergeInto(existing, f, id)];
+    return [this.append(f, id), true, false];
+  }
+
+  /**
+   * File a finding, asking the dedup judge when one is set (dedupJudge) and
+   * the rule keeps the filing apart from everything stored. The rule decides
+   * first, exactly as addFinding: a merge the rule makes is never put to the
+   * model, so the judge can only add merges, never undo one, and the rule's
+   * merge at the next load (retroMerge) cannot split what the judge joined.
+   * Without a judge this is addFinding.
+   */
+  async fileFinding(input: FindingInput): Promise<FiledFinding> {
+    const f = this.redacted(input);
+    const id = findingId(f);
+    const byRule = this.data.findings.find((x) => isDuplicateFinding(x, f));
+    if (byRule) return { finding: byRule, isNew: false, promoted: this.mergeInto(byRule, f, id) };
+    const judge = this.dedupJudge;
+    if (!judge) return { finding: this.append(f, id), isNew: true, promoted: false };
+    const before = new Set(this.data.findings.map((x) => x.id));
+    let verdict: JudgeVerdict = null;
+    let judgeError: string | undefined;
+    try {
+      verdict = await judge.judge(f, [...this.data.findings]);
+    } catch (err) {
+      judgeError = err instanceof Error ? err.message : String(err);
+    }
+    const extra = judgeError ? { judgeError } : {};
+    // The list may have changed while the judge was asked. A filing that
+    // landed meanwhile is compared by the rule, as it would have been with no
+    // judge; the finding the judge chose is looked up again by id, since a
+    // merge with another process's memory may have replaced its object.
+    const landed = this.data.findings.find((x) => !before.has(x.id) && isDuplicateFinding(x, f));
+    if (landed) return { finding: landed, isNew: false, promoted: this.mergeInto(landed, f, id), ...extra };
+    // Only what a judge may answer is taken: an open finding on the filing's page, called the same at better than even.
+    const route = f.state.split("#")[0];
+    const chosen =
+      verdict && verdict.pSame >= 0.5
+        ? this.data.findings.find((x) => x.id === verdict.sameAs && x.status !== "resolved" && x.state.split("#")[0] === route)
+        : undefined;
+    if (chosen && verdict) {
+      const judged = { pSame: verdict.pSame };
+      return { finding: chosen, isNew: false, promoted: this.mergeInto(chosen, f, id, judged), judged, ...extra };
+    }
+    return { finding: this.append(f, id), isNew: true, promoted: false, ...extra };
+  }
+
+  /**
+   * The filing with secrets redacted. BEFORE the id is derived, so a re-found
+   * finding whose quoted secret differs by a character still hashes to the
+   * same id; and before the dedup judge is shown it.
+   */
+  private redacted(input: FindingInput): FindingInput {
+    return {
       ...input,
       title: redactSecrets(input.title),
       detail: redactSecrets(input.detail),
@@ -1664,37 +1838,55 @@ export class MemoryStore {
       url: redactSecrets(input.url),
       evidence: input.evidence ? redactSecrets(input.evidence) : input.evidence,
     };
-    const id = findingId(f);
-    const existing = this.data.findings.find((x) => isDuplicateFinding(x, f));
-    if (existing) {
-      existing.runs += 1;
-      existing.foundAt = new Date().toISOString();
-      if (!existing.evidence && f.evidence) existing.evidence = f.evidence;
-      // A worth-a-look filed again as a defect is promoted, at the severity the defect was filed at.
-      const promoted = isWorthALook(existing) && !isWorthALook(f);
-      const tier = mergeTier(existing, f);
-      Object.assign(withoutTier(existing), tier);
-      if (promoted) existing.severity = f.severity;
-      // Re-finding a RESOLVED finding is a regression — reopen it loudly
-      // rather than letting it hide in the report's completed section. But a
-      // FUZZY match must never resurrect a fixed bug: telling someone a
-      // regression landed when it did not is far more costly than carrying a
-      // visible duplicate, and it corrupts the one signal that says whether a
-      // fix held. Demand an exact identity match (same category+title+route) or
-      // an identical evidence signature before reopening.
-      const exactMatch =
-        existing.id === id ||
-        (!!existing.evidence &&
-          !!f.evidence &&
-          existing.evidence.toLowerCase().replace(/\s+/g, " ").trim() === f.evidence.toLowerCase().replace(/\s+/g, " ").trim());
-      if (existing.status === "resolved" && exactMatch) {
-        existing.status = "open";
-        existing.regressedAt = existing.foundAt;
-      }
-      this.flush();
-      return [existing, false, promoted];
-    }
+  }
 
+  /**
+   * Fold a filing into the finding it duplicates. Returns whether a
+   * worth-a-look was promoted to a defect by it. `judged`: the dedup judge
+   * made this merge, so the filing is kept on the finding (judgedMerges).
+   */
+  private mergeInto(existing: Finding, f: FindingInput, id: string, judged?: { pSame: number }): boolean {
+    existing.runs += 1;
+    existing.foundAt = new Date().toISOString();
+    if (!existing.evidence && f.evidence) existing.evidence = f.evidence;
+    // A worth-a-look filed again as a defect is promoted, at the severity the defect was filed at.
+    const promoted = isWorthALook(existing) && !isWorthALook(f);
+    const tier = mergeTier(existing, f);
+    Object.assign(withoutTier(existing), tier);
+    if (promoted) existing.severity = f.severity;
+    // Re-finding a RESOLVED finding is a regression — reopen it loudly
+    // rather than letting it hide in the report's completed section. But a
+    // FUZZY match must never resurrect a fixed bug: telling someone a
+    // regression landed when it did not is far more costly than carrying a
+    // visible duplicate, and it corrupts the one signal that says whether a
+    // fix held. Demand an exact identity match (same category+title+route) or
+    // an identical evidence signature before reopening.
+    const exactMatch =
+      existing.id === id ||
+      (!!existing.evidence &&
+        !!f.evidence &&
+        existing.evidence.toLowerCase().replace(/\s+/g, " ").trim() === f.evidence.toLowerCase().replace(/\s+/g, " ").trim());
+    if (existing.status === "resolved" && exactMatch) {
+      existing.status = "open";
+      existing.regressedAt = existing.foundAt;
+    }
+    if (judged) {
+      const entry: JudgedMerge = {
+        title: f.title,
+        category: f.category,
+        severity: f.severity,
+        ...(f.evidence ? { evidence: f.evidence } : {}),
+        pSame: judged.pSame,
+        at: existing.foundAt,
+      };
+      existing.judgedMerges = [...(existing.judgedMerges ?? []), entry].slice(-MAX_JUDGED_MERGES);
+    }
+    this.flush();
+    return promoted;
+  }
+
+  /** Store a filing as a new finding, with its repro trace. */
+  private append(f: FindingInput, id: string): Finding {
     // Repro trace scoped to the finding's route: everything since the action
     // that landed there, not 12 lines of unrelated cross-module noise.
     const routeOf = (url: string): string => {
@@ -1729,7 +1921,7 @@ export class MemoryStore {
     };
     this.data.findings.push(finding);
     this.flush();
-    return [finding, true, false];
+    return finding;
   }
 
   get findings(): Finding[] {
@@ -1848,6 +2040,8 @@ export class MemoryStore {
         byRoute.set(rec.route, route);
       }
       for (const [key, v] of Object.entries(rec.elements)) {
+        // Not a control: nothing to exercise, so not counted as a gap or a total.
+        if (v.inert) continue;
         route.set(key, (route.get(key) ?? false) || v.exercised);
       }
     }

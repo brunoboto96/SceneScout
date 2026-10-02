@@ -8,7 +8,7 @@
  *   npx tsx --test --test-name-pattern "cap" scripts/ci-test.ts
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,8 +16,50 @@ import test from "node:test";
 import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { z } from "zod";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CI_ACTION_ONLY_INPUTS, ciArgs, ciOutDirFor, ciSummaryOutputs, ciVerdict, hasCiCommand } from "../action/ci-action.mjs";
-import { agentLoop, captureShots, HttpModelClient, MAX_RETRIES, MAX_TOOL_CALLS_PER_TURN, OutOfTime, ProviderError, type ModelClient } from "../src/ci-run.ts";
+import {
+  agentLoop,
+  captureShots,
+  ciClient,
+  httpClient,
+  HttpModelClient,
+  httpJudgeAsk,
+  judgeHandler,
+  MAX_RETRIES,
+  MAX_TOOL_CALLS_PER_TURN,
+  OutOfTime,
+  ProviderError,
+  runCi,
+  toolHost,
+  type JudgeCalls,
+  type ModelClient,
+  type ToolHost,
+} from "../src/ci-run.ts";
+import { LANE_RULES, MAX_LANES } from "../src/engine/brief.ts";
+import {
+  ciLaneKickoff,
+  ciLaneSystemPrompt,
+  crawlFoundNothing,
+  crawlNotes,
+  LANE_TOOLS,
+  laneSessions,
+  mergeLaneStops,
+  planCiLanes,
+  PLANNER_SESSION,
+} from "../src/engine/ci-lanes.ts";
+import {
+  clientAnswersJudge,
+  DedupJudge,
+  JUDGE_CALL_MS,
+  JUDGE_MAX_OUTPUT_TOKENS,
+  JUDGE_SYSTEM,
+  JUDGE_TOOL,
+  judgeSamplingParams,
+  samplingAsk,
+} from "../src/engine/dedup.ts";
 import { CAPTURE_MARGIN, captureClip, capturedName, captureFileName, captureResultText, parseCaptureResult, rebaseUrl } from "../src/engine/capture.ts";
 import { decodePng, diffImages, encodePng, isPng, type RgbaImage } from "../src/engine/png.ts";
 import {
@@ -39,10 +81,16 @@ import {
   ciSystemPrompt,
   ciToolArgs,
   ciTools,
+  attachFailure,
   DEFAULT_CAPS,
+  dedupModeFromEnv,
   detectProvider,
+  judgeEffort,
+  judgeKeyConfig,
   estimateCost,
   findingsThisRun,
+  MAX_CI_LANES,
+  newBudget,
   NO_USAGE,
   parseCiArgs,
   readFindings,
@@ -50,15 +98,19 @@ import {
   resolvePrice,
   redactKeys,
   secretValues,
+  settleTurn,
+  takeTurn,
   toolResultText,
   usageLine,
   wallLeftMs,
   type Caps,
   type CiResult,
+  type StopReason,
+  type Spend,
   type ToolSpec,
   type Usage,
 } from "../src/engine/ci.ts";
-import type { Finding } from "../src/engine/memory.ts";
+import { MemoryStore, type Finding } from "../src/engine/memory.ts";
 import {
   appendRows,
   compareVersions,
@@ -90,15 +142,17 @@ const ANTHROPIC_KEY = "fake-anthropic-key-fedcba9876543210";
 
 // ── options ─────────────────────────────────────────────────────────────────
 
-test("options: the defaults are the agreed caps, read-only and medium", () => {
+test("options: the defaults are the agreed caps, read-only, medium, and the dedup judge", () => {
   const p = parseCiArgs(["http://127.0.0.1:3000"], "/work");
   assert.ok(p.ok);
   assert.deepEqual(p.options, {
     url: "http://127.0.0.1:3000/",
     projectDir: "/work",
     caps: { turns: 40, tokens: 1_500_000, wallMs: 20 * 60_000 },
+    lanes: 1,
     mode: "read-only",
     level: "medium",
+    dedup: "judge",
   });
 });
 
@@ -116,6 +170,7 @@ test("options: every option is read, in both spellings", () => {
       "--max-tokens",
       "50000",
       "--max-minutes=3",
+      "--lanes=3",
       "--price-in=0.5",
       "--price-cached-in",
       "0.05",
@@ -128,6 +183,8 @@ test("options: every option is read, in both spellings", () => {
       "--browser=webkit",
       "--project=site",
       "--out=results",
+      "--dedup",
+      "rule",
     ],
     "/work",
   );
@@ -141,12 +198,14 @@ test("options: every option is read, in both spellings", () => {
     effort: "high",
     baseUrl: "https://llm.example.com/v1",
     caps: { turns: 5, tokens: 50_000, wallMs: 3 * 60_000 },
+    lanes: 3,
     price: { input: 0.5, cachedInput: 0.05, output: 2 },
     mode: "safe-write",
     level: "medium",
     focus: "the order form",
     storageStatePath: "/work/auth/user.json",
     browser: "webkit",
+    dedup: "rule",
   });
 });
 
@@ -176,6 +235,25 @@ test("options: what is refused, and why", () => {
   assert.match(bad([u, "--price-in=-1"]), /--price-in must be US dollars per million tokens, from 0 to 1000/);
   assert.match(bad([u, "--price-out=cheap"]), /--price-out must be/);
   assert.match(bad([u, "--price-cached-in="]), /--price-cached-in must be/);
+  assert.match(bad([u, "--dedup=model"]), /--dedup must be one of rule, judge/);
+  assert.match(bad([u, "--lanes=0"]), /--lanes must be a whole number from 1 to 8/);
+  assert.match(bad([u, "--lanes=9"]), /--lanes must be a whole number from 1 to 8/);
+  assert.match(bad([u, "--lanes=2.5"]), /--lanes must be a whole number/);
+});
+
+test("lanes: shared caps need a turn per lane, and a run that shows one element takes none", () => {
+  const u = "http://127.0.0.1:3000";
+  const parse = (args: string[]) => parseCiArgs([u, ...args], "/work");
+  const four = parse(["--lanes", "4"]);
+  assert.ok(four.ok && four.options.lanes === 4 && four.options.caps.turns === 40, "the caps are not multiplied by the lanes");
+  const short = parse(["--lanes=4", "--max-turns=3"]);
+  assert.ok(!short.ok && /--lanes 4 needs --max-turns of at least 4/.test(short.error), JSON.stringify(short));
+  assert.ok(parse(["--lanes=4", "--max-turns=4"]).ok, "exactly one turn each is allowed");
+  const show = parse(["--lanes=2", "--show", "the Save button"]);
+  assert.ok(!show.ok && /--show explores nothing/.test(show.error), JSON.stringify(show));
+  const oneLane = parse(["--lanes=1", "--show", "the Save button"]);
+  assert.ok(oneLane.ok && oneLane.options.lanes === 1, "one lane is the single loop, which a capture is");
+  assert.equal(MAX_CI_LANES, MAX_LANES, "the bound is scout_lane_brief's, since the split is the same");
 });
 
 test("destructive: only with --allow-destructive, which alone changes nothing", () => {
@@ -867,6 +945,707 @@ test("loop: a paused turn is resumed without results, and counted", async () => 
   assert.deepEqual([out.stop, out.spend.turns, model.received.length], ["done", 2, 0]);
 });
 
+// ── lanes: the split, the shared caps, the merge ────────────────────────────
+
+/** What a planner's scout_crawl prints, in the engine's own format: route lines, then the problem list, then coverage. */
+const CRAWL_TEXT = [
+  "CRAWL of 6 route(s):",
+  "/orders — 200 · 14 el · 2 no-testid",
+  "/orders/new — 200 · 9 el",
+  "/stock — 500 · 3 el · 1⚠",
+  "/reports — LOAD FAILED",
+  "/settings — 200 · 0 el · DEAD-END",
+  "/elsewhere — SKIPPED (off-origin)",
+  "",
+  "PROBLEM ROUTES (3):",
+  "/stock",
+  "    console-error: Failed to load resource: the server responded with a status of 500",
+  "/reports: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:3000/reports",
+  "/settings → dead end",
+  "",
+  "Routes visited: 6/7 — still unvisited: /reports",
+  "Take scout_snapshot to inspect the current page, or navigate into a problem route.",
+].join("\n");
+const TARGET = "http://127.0.0.1:3000/";
+
+test("lanes: the planning crawl's routes, each with what the crawl said about it", () => {
+  const notes = crawlNotes(CRAWL_TEXT);
+  assert.deepEqual([...notes.keys()], ["/orders", "/orders/new", "/stock", "/reports", "/settings"], "an off-origin path is not the app's");
+  assert.deepEqual(notes.get("/stock"), [
+    "/stock — 500 · 3 el · 1⚠",
+    "/stock",
+    "    console-error: Failed to load resource: the server responded with a status of 500",
+  ]);
+  assert.deepEqual(notes.get("/reports"), ["/reports — LOAD FAILED", "/reports: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:3000/reports"]);
+  assert.deepEqual(notes.get("/settings"), ["/settings — 200 · 0 el · DEAD-END", "/settings → dead end"]);
+  // The contrast: a healthy route carries its own line and nothing from the problem list.
+  assert.deepEqual(notes.get("/orders"), ["/orders — 200 · 14 el · 2 no-testid"]);
+  assert.equal(crawlNotes("All crawled routes healthy.").size, 0);
+
+  assert.equal(crawlFoundNothing(CRAWL_TEXT), false);
+  assert.equal(crawlFoundNothing("Nothing to crawl: every known route has been visited. Use scout_coverage for remaining unexercised elements."), true);
+  assert.equal(crawlFoundNothing("Nothing new to crawl. 1 route(s) failed to load earlier in this session and are still unvisited: /reports."), true);
+  assert.equal(crawlFoundNothing("[session default · anonymous]\nNo routes to crawl yet: no scanned or link-discovered routes."), true);
+});
+
+test("lanes: the split is brief.ts's — whole modules per lane, every route once, sessions of their own on the target's origin", () => {
+  const plan = planCiLanes({ target: TARGET, notes: crawlNotes(CRAWL_TEXT), count: 2, mode: "read-only", focus: "the order form" });
+  assert.equal(plan.oneLoop, undefined);
+  assert.equal(plan.lanes.length, 2);
+  const routes = plan.lanes.flatMap((l) => l.routes).sort();
+  assert.deepEqual(routes, ["/", "/orders", "/orders/new", "/reports", "/settings", "/stock"], "the page the run attached on is a route too");
+  const modules = plan.lanes.flatMap((l) => l.modules);
+  assert.equal(new Set(modules).size, modules.length, "no module is in two lanes");
+  assert.deepEqual(
+    plan.lanes.map((l) => [l.session, l.url]),
+    [
+      ["orders+1", "http://127.0.0.1:3000/orders"],
+      ["lane-2+2", "http://127.0.0.1:3000/"],
+    ],
+  );
+  assert.ok(
+    plan.lanes.every((l) => l.session !== PLANNER_SESSION),
+    "no lane is the planner's session",
+  );
+  // A route written like a host stays a path on the target's origin.
+  const odd = planCiLanes({
+    target: TARGET,
+    notes: crawlNotes("CRAWL of 2 route(s):\n//elsewhere.example/x — 200 · 1 el\n/orders — 200 · 1 el"),
+    count: 3,
+    mode: "read-only",
+  });
+  assert.ok(odd.lanes.length >= 2 && odd.lanes.every((l) => new URL(l.url).origin === "http://127.0.0.1:3000"), JSON.stringify(odd.lanes.map((l) => l.url)));
+  assert.match(plan.lanes[0].objective, /^Own \/orders and \/settings — the order form$/);
+  // Each lane is handed what the crawl saw on its own routes, and only those.
+  assert.ok(plan.lanes[1].crawl.some((l) => /^\/stock — 500/.test(l)) && plan.lanes[1].crawl.some((l) => /console-error/.test(l)));
+  assert.ok(!plan.lanes[0].crawl.some((l) => /stock|reports/.test(l)), plan.lanes[0].crawl.join("\n"));
+
+  // Nothing to split: one lane asked, or every route in one module (the target is under /orders here).
+  assert.match(planCiLanes({ target: TARGET, notes: crawlNotes(CRAWL_TEXT), count: 1, mode: "read-only" }).oneLoop ?? "", /one lane was asked for/);
+  const oneModule = planCiLanes({
+    target: "http://127.0.0.1:3000/orders",
+    notes: crawlNotes("CRAWL of 1 route(s):\n/orders/2 — 200 · 3 el"),
+    count: 4,
+    mode: "read-only",
+  });
+  assert.deepEqual(oneModule.lanes, []);
+  assert.match(oneModule.oneLoop ?? "", /found 2 route\(s\), all in one module \(\/orders\)/);
+  // A planning crawl that failed is the reason given, not the app; one that found routes before failing is planned on.
+  const failed = planCiLanes({ target: TARGET, notes: new Map(), count: 2, mode: "read-only", planningFailed: "the planning crawl failed: timed out" });
+  assert.equal(failed.oneLoop, "the planning crawl failed: timed out, so there was nothing to split");
+  assert.equal(
+    planCiLanes({ target: TARGET, notes: crawlNotes(CRAWL_TEXT), count: 2, mode: "read-only", planningFailed: "the planning crawl failed: timed out" }).lanes
+      .length,
+    2,
+  );
+});
+
+test("lanes: a lane's session name is its own, never the planner's or another lane's, and at most 40 characters", () => {
+  assert.deepEqual(laneSessions(["orders", "orders", "default", "stock"]), ["orders", "orders-2", "default-3", "stock"]);
+  const long = "x".repeat(40);
+  const named = laneSessions([long, long]);
+  assert.equal(named[0], long);
+  assert.ok(named[1] !== long && named[1].length <= 40 && named[1].endsWith("-2"), named[1]);
+});
+
+test("lanes: the caps are the run's — a turn is taken before its call, given back when the call fails, and spent once it returns", () => {
+  const b = newBudget({ turns: 3, tokens: 1000, wallMs: 60_000 }, 0);
+  for (let i = 0; i < 3; i++) assert.equal(takeTurn(b, 0), null);
+  assert.equal(takeTurn(b, 0), "turns", "three calls under way hold all three turns before any has returned");
+  settleTurn(b); // one call failed: not counted, and its turn goes back
+  assert.deepEqual([b.turns, b.inFlight], [0, 2]);
+  assert.equal(takeTurn(b, 0), null);
+  for (let i = 0; i < 3; i++) settleTurn(b, use(400));
+  assert.deepEqual([b.turns, b.inFlight, b.usage.input], [3, 0, 1200]);
+  assert.equal(takeTurn(b, 0), "tokens", "1,200 of 1,000 tokens: the token cap is checked before the turn cap, as capReached does");
+  assert.equal(takeTurn(newBudget({ turns: 3, tokens: 1000, wallMs: 60_000 }, 0), 60_000), "time");
+  assert.throws(
+    () => settleTurn(newBudget({ turns: 3, tokens: 1000, wallMs: 60_000 }, 0), use(1)),
+    /settleTurn without a turn taken/,
+    "a settle nobody took a turn for is a bug, not a turn",
+  );
+});
+
+test("lanes: loops drawing on one budget make the run's turns between them, not each", async () => {
+  const caps: Caps = { turns: 5, tokens: 10_000_000, wallMs: 3_600_000 };
+  const budget = newBudget(caps, Date.now());
+  const forever = () => new Scripted([{ text: "", calls: [call("x", "scout_crawl")], usage: use(1) }]);
+  const [a, b] = await Promise.all(
+    [forever(), forever()].map((client) => agentLoop({ client, host: host(), tools: LOOP_TOOLS, caps, budget, log: () => {}, projectDir: "/work" })),
+  );
+  assert.equal(a.spend.turns + b.spend.turns, 5, "five turns between the two loops, as one loop would get");
+  assert.ok(a.spend.turns >= 2 && b.spend.turns >= 2, `both loops had turns: ${a.spend.turns} and ${b.spend.turns}`);
+  assert.deepEqual([a.stop, b.stop], ["turns", "turns"]);
+  assert.deepEqual([budget.turns, budget.usage.input, budget.inFlight], [5, 5, 0]);
+});
+
+test("lanes: a lane's calls go to its own session, whatever the model names; a tool that takes no session gets none", async () => {
+  const h = host();
+  const tools = [...LOOP_TOOLS, { name: "scout_scan", description: "", parameters: { type: "object", properties: {} } }];
+  const model = new Scripted([
+    { text: "", calls: [call("a", "scout_snapshot", { session: "default" }), call("b", "scout_scan", {}), call("c", "scout_crawl")], usage: use(1) },
+    { text: "done", calls: [], usage: use(1) },
+  ]);
+  await agentLoop({
+    client: model,
+    host: h,
+    tools,
+    caps: BIG,
+    log: () => {},
+    projectDir: "/work",
+    session: { name: "orders", tools: new Set(["scout_snapshot", "scout_crawl"]) },
+  });
+  assert.deepEqual(h.seen, [
+    { name: "scout_snapshot", args: { session: "orders" } },
+    { name: "scout_scan", args: { projectPath: path.resolve("/work") } },
+    { name: "scout_crawl", args: { session: "orders" } },
+  ]);
+});
+
+test("lanes: every lane gets the same method and rules, and a first message of its own", () => {
+  const sys = ciLaneSystemPrompt("THE METHOD", { mode: "read-only", level: "medium" });
+  assert.ok(sys.startsWith("THE METHOD\n\n---"));
+  for (const rule of LANE_RULES) assert.ok(sys.includes(`- ${rule}`), `the lane prompt drops a lane rule: ${rule.slice(0, 50)}`);
+  assert.match(sys, /scout_playbook and scout_report are not available/);
+  assert.match(sys, /The run writes one report for every lane once all are done/);
+  assert.deepEqual(
+    [...LANE_TOOLS],
+    CI_TOOLS.filter((t) => t !== "scout_report"),
+    "a lane has every exploring tool but the report",
+  );
+  const plan = planCiLanes({ target: TARGET, notes: crawlNotes(CRAWL_TEXT), count: 2, mode: "read-only" });
+  const kick = (i: number) =>
+    ciLaneKickoff({ lane: plan.lanes[i], laneCount: 2, url: TARGET, projectDir: "/work", mode: "read-only", level: "medium", caps: DEFAULT_CAPS });
+  assert.match(kick(0), /as lane "orders\+1", one of 2 running at once/);
+  assert.match(kick(0), /Your routes \(3\): \/orders, \/orders\/new, \/settings/);
+  assert.match(kick(0), /Budget: the run's 40 model turns, 1,500,000 tokens and 20 minutes are shared by the 2 lanes: plan on about 20 turns/);
+  assert.match(kick(1), /What the planning crawl saw on your routes:\n {2}\/reports — LOAD FAILED/);
+  assert.doesNotMatch(kick(0), /\/stock/, "a lane is not told about another lane's routes");
+});
+
+test("lanes: how the lanes' endings become the run's", () => {
+  const lane = (session: string, stop: StopReason, attached = true, stopDetail?: string) => ({
+    session,
+    stop,
+    attached,
+    ...(stopDetail ? { stopDetail } : {}),
+  });
+  const cases: Array<[ReturnType<typeof lane>[], { stop: StopReason; stopDetail?: string }]> = [
+    [[lane("a", "done"), lane("b", "done")], { stop: "done" }],
+    [[lane("a", "done"), lane("b", "turns")], { stop: "turns" }],
+    [[lane("a", "turns"), lane("b", "time")], { stop: "time" }],
+    [[lane("a", "tokens"), lane("b", "turns")], { stop: "tokens" }],
+    // A provider failure in any lane is what the workflow must fix.
+    [[lane("a", "done"), lane("b", "provider-error", true, "HTTP 401: bad key")], { stop: "provider-error", stopDetail: "lane b: HTTP 401: bad key" }],
+    // A lane that could not attach does not change how the others ended, but is named.
+    [[lane("a", "done"), lane("b", "could-not-start", false, "net::ERR")], { stop: "done", stopDetail: "1 of 2 lanes could not attach: b" }],
+    [[lane("a", "turns"), lane("b", "could-not-start", false)], { stop: "turns", stopDetail: "1 of 2 lanes could not attach: b" }],
+    // A lane that broke after attaching: the run could not finish, whatever the others did.
+    [
+      [lane("a", "done"), lane("b", "could-not-start", true, "the lane failed: boom")],
+      { stop: "could-not-start", stopDetail: "lane b: the lane failed: boom" },
+    ],
+    [
+      [lane("a", "could-not-start", false, "net::ERR"), lane("b", "could-not-start", false)],
+      { stop: "could-not-start", stopDetail: "no lane could attach (a: net::ERR)" },
+    ],
+    [[lane("a", "time", false), lane("b", "time", false)], { stop: "time" }],
+    // The time cap left one lane no time to attach: a cap ended part of the exploration.
+    [[lane("a", "done"), lane("b", "time", false)], { stop: "time" }],
+  ];
+  for (const [lanes, expected] of cases) assert.deepEqual(mergeLaneStops(lanes), expected, JSON.stringify(lanes));
+});
+
+/**
+ * A stand-in for the MCP server with no browser: sessions that attach and
+ * close, a planner's crawl, findings filed into the project's real memory
+ * store (so its dedup is the one a run gets), and a report file. As in the
+ * server, a call that names no session goes to whichever attached last.
+ */
+function standInServer(
+  projectDir: string,
+  o: {
+    crawl: string;
+    failAttach?: (url: string, session: string) => boolean;
+    failNavigate?: (url: string) => boolean;
+    /** What a successful scout_navigate returns, when a test needs it to say more than the URL. */
+    navigateText?: (url: string, session: string) => string;
+    onCrawl?: () => void;
+  },
+) {
+  fs.mkdirSync(projectDir, { recursive: true });
+  const store = new MemoryStore(projectDir);
+  const calls: Array<{ name: string; session: string; args: Record<string, unknown> }> = [];
+  let active = PLANNER_SESSION;
+  let crawled = false;
+  const withSession = [
+    "scout_attach",
+    "scout_close",
+    "scout_crawl",
+    "scout_snapshot",
+    "scout_navigate",
+    "scout_click",
+    "scout_finding",
+    "scout_coverage",
+    "scout_report",
+  ];
+  const listed = [...withSession, "scout_scan"].map((name) => ({
+    name,
+    description: name,
+    inputSchema: { type: "object", properties: withSession.includes(name) ? { session: { type: "string" } } : { projectPath: { type: "string" } } },
+  }));
+  const host: ToolHost = {
+    tools: async () => listed,
+    call: async (name, args) => {
+      const session = typeof args.session === "string" ? args.session : active;
+      calls.push({ name, session, args });
+      switch (name) {
+        case "scout_attach":
+          if (o.failAttach?.(String(args.url), session)) return { text: "ERROR: page.goto: net::ERR_CONNECTION_REFUSED", isError: true };
+          if (typeof args.session === "string") active = args.session;
+          return { text: `Attached ${session} on ${String(args.url)}`, isError: false };
+        case "scout_navigate":
+          if (o.failNavigate?.(String(args.target))) return { text: "ERROR: page.goto: net::ERR_ABORTED", isError: true };
+          return { text: o.navigateText?.(String(args.target), session) ?? `URL: ${String(args.target)}`, isError: false };
+        case "scout_crawl": {
+          const first = !crawled;
+          crawled = true;
+          o.onCrawl?.();
+          return { text: first ? o.crawl : "Nothing to crawl: every known route has been visited.", isError: false };
+        }
+        case "scout_finding": {
+          const [f, isNew] = store.addFinding({
+            severity: args.severity as Finding["severity"],
+            category: args.category as Finding["category"],
+            title: String(args.title),
+            detail: String(args.detail ?? ""),
+            ...(typeof args.evidence === "string" ? { evidence: args.evidence } : {}),
+            url: `http://127.0.0.1:3000/${session}`,
+            state: session,
+            session,
+          });
+          return { text: isNew ? `Finding recorded: ${f.title} (id ${f.id})` : `Not recorded as new: merged into existing finding ${f.id}`, isError: false };
+        }
+        case "scout_report":
+          fs.writeFileSync(path.join(projectDir, ".scenescout", "report.md"), `# SceneScout Report\n\nWritten from ${session}.\n`);
+          return { text: `Report written from ${session}.`, isError: false };
+        default:
+          return { text: `${name} ran in ${session}`, isError: false };
+      }
+    },
+    close: async () => {},
+  };
+  return { host, calls };
+}
+
+/** runCi with no browser and no network, and nothing appended to a real job summary. */
+async function runStandIn(
+  args: string[],
+  projectDir: string,
+  server: ReturnType<typeof standInServer>,
+  makeClient: (system: string, tools: readonly ToolSpec[], kickoff: string) => ModelClient,
+  secrets: readonly string[] = [],
+) {
+  const parsed = parseCiArgs([TARGET, "--project", projectDir, ...args], projectDir);
+  assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+  const summary = process.env.GITHUB_STEP_SUMMARY;
+  delete process.env.GITHUB_STEP_SUMMARY;
+  try {
+    const resolved = { provider: "openai" as const, model: "gpt-6-luna", effort: "low", baseUrl: "https://api.invalid/v1" };
+    const lines: string[] = [];
+    const run = await runCi(parsed.options, resolved, {
+      makeClient,
+      version: "0.0.0-test",
+      secrets,
+      startHost: async () => server.host,
+      log: (l) => lines.push(l),
+    });
+    const out = path.join(projectDir, ".scenescout", "ci");
+    return {
+      ...run,
+      lines,
+      json: JSON.parse(fs.readFileSync(path.join(out, "ci.json"), "utf8")),
+      summary: fs.readFileSync(path.join(out, "summary.md"), "utf8"),
+    };
+  } finally {
+    if (summary !== undefined) process.env.GITHUB_STEP_SUMMARY = summary;
+  }
+}
+
+const laneOf = (kickoff: string): string | undefined => /as lane "([^"]+)"/.exec(kickoff)?.[1];
+
+test("lanes: a run split in two plans, runs both lanes at once on their own sessions, and folds them into one report", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-lanes-"));
+  try {
+    const server = standInServer(dir, { crawl: CRAWL_TEXT });
+    const systems = new Set<string>();
+    const kickoffs: string[] = [];
+    const makeClient = (system: string, tools: readonly ToolSpec[], kickoff: string): ModelClient => {
+      systems.add(system);
+      kickoffs.push(kickoff);
+      assert.ok(!tools.some((t) => t.name === "scout_report"), "a lane is not given the report");
+      const lane = laneOf(kickoff) ?? "?";
+      // Both lanes meet the same failing endpoint, and each has one defect of its own.
+      return new Scripted([
+        {
+          text: "",
+          calls: [
+            call("s", "scout_snapshot"),
+            call("f", "scout_finding", {
+              severity: "high",
+              category: "http-error",
+              title: `Saving fails on ${lane}`,
+              detail: "d",
+              evidence: "POST /api/things 500",
+            }),
+          ],
+          usage: use(100),
+        },
+        {
+          text: "",
+          calls: [call("g", "scout_finding", { severity: "low", category: "a11y", title: `A field on ${lane} has no label`, detail: "d" })],
+          usage: use(100),
+        },
+        { text: `Lane ${lane} is done.`, calls: [], usage: use(100) },
+      ]);
+    };
+    const run = await runStandIn(["--lanes", "2"], dir, server, makeClient);
+    assert.deepEqual([run.result.stop, run.exitCode], ["done", 0], run.lines.join("\n"));
+    assert.equal(systems.size, 1, "every lane gets the same system prompt, so the provider caches it once");
+    assert.deepEqual(kickoffs.map(laneOf).sort(), ["lane-2+2", "orders+1"]);
+
+    const calls = server.calls;
+    const at = (pred: (c: (typeof calls)[number]) => boolean) => calls.findIndex(pred);
+    const crawl = at((c) => c.name === "scout_crawl" && c.session === PLANNER_SESSION);
+    const laneAttaches = calls.filter((c) => c.name === "scout_attach" && c.session !== PLANNER_SESSION);
+    assert.ok(crawl >= 0 && crawl < at((c) => c.name === "scout_attach" && c.session !== PLANNER_SESSION), "the planner crawls before any lane attaches");
+    const snapshot = at((c) => c.name === "scout_snapshot" && c.session === PLANNER_SESSION);
+    assert.ok(snapshot >= 0 && snapshot < crawl, "and snapshots first: attaching harvests no links, so a first crawl would find nothing to visit");
+    // Every lane attaches on the target, as the planner did: the engine resolves a session's paths against the URL it attached with.
+    assert.deepEqual(laneAttaches.map((c) => [c.session, c.args.url, c.args.mode]).sort(), [
+      ["lane-2+2", TARGET, "read-only"],
+      ["orders+1", TARGET, "read-only"],
+    ]);
+    // Then the run opens each lane's first route by its full URL; the lane whose first route is the target stays put.
+    assert.deepEqual(
+      calls.filter((c) => c.name === "scout_navigate").map((c) => [c.session, c.args.target]),
+      [["orders+1", "http://127.0.0.1:3000/orders"]],
+    );
+    for (const lane of ["orders+1", "lane-2+2"]) {
+      const theirs = calls.filter((c) => ["scout_snapshot", "scout_finding"].includes(c.name) && c.args.session === lane);
+      assert.equal(theirs.length, 3, `${lane}'s snapshot and findings all went to its own session`);
+    }
+    // The report: once, from the planner's session named outright (a lane attaching last made itself the default), after every lane closed.
+    const reports = calls.filter((c) => c.name === "scout_report");
+    assert.deepEqual(
+      reports.map((c) => c.session),
+      [PLANNER_SESSION],
+    );
+    const report = at((c) => c.name === "scout_report");
+    for (const lane of ["orders+1", "lane-2+2"])
+      assert.ok(at((c) => c.name === "scout_close" && c.args.session === lane) < report, `${lane} closed before the report`);
+    assert.equal(calls.at(-1)?.name, "scout_close");
+    assert.equal(calls.at(-1)?.args.all, true);
+
+    // The merge: the failing endpoint both lanes filed is one finding; each lane's own defect is its own.
+    const titles = (run.json.findings as Array<{ title: string; category: string }>).map((f) => f.category).sort();
+    assert.deepEqual(titles, ["a11y", "a11y", "http-error"], JSON.stringify(run.json.findings));
+    assert.deepEqual(run.json.counts, { high: 1, medium: 0, low: 2, worthALook: 0 });
+    assert.equal(run.json.usage.turns, 6, "three turns in each lane");
+    assert.deepEqual(
+      {
+        asked: run.json.lanes.asked,
+        planned: run.json.lanes.planned,
+        ran: run.json.lanes.ran,
+        sessions: run.json.lanes.sessions.map((l: { session: string; turns: number; stop: string }) => [l.session, l.turns, l.stop]),
+      },
+      {
+        asked: 2,
+        planned: 2,
+        ran: 2,
+        sessions: [
+          ["orders+1", 3, "done"],
+          ["lane-2+2", 3, "done"],
+        ],
+      },
+    );
+    assert.match(run.summary, /\| Lanes \| 2 of 2 asked ran at once, sharing the caps below \|/);
+    assert.match(run.summary, /\| orders\+1 \| \/orders, \/settings \| 3 \| 3 \| 300 \| done \|/);
+    assert.ok(fs.readFileSync(path.join(dir, ".scenescout", "ci", "report.md"), "utf8").includes(`Written from ${PLANNER_SESSION}.`));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("lanes: under runCi the lanes share the turn cap, and a lane whose first route will not open starts from the target", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-lanes-cap-"));
+  try {
+    const server = standInServer(dir, { crawl: CRAWL_TEXT, failNavigate: (url) => url.endsWith("/orders") });
+    const forever = (): ModelClient => new Scripted([{ text: "", calls: [call("x", "scout_snapshot")], usage: use(10) }]);
+    const run = await runStandIn(["--lanes", "2", "--max-turns", "7", "--storage-state", "auth/user.json"], dir, server, () => forever());
+    assert.deepEqual([run.result.stop, run.result.spend.turns, run.exitCode], ["turns", 7, 0], "seven turns between the lanes, not seven each");
+    // Every lane signs in, and is held to the write mode, exactly as the run's own session was.
+    for (const a of server.calls.filter((c) => c.name === "scout_attach"))
+      assert.deepEqual([a.args.storageStatePath, a.args.mode], [`${dir}/auth/user.json`, "read-only"], String(a.session));
+    const sessions = run.json.lanes.sessions as Array<{ session: string; turns: number; attached: boolean }>;
+    assert.equal(
+      sessions.reduce((k, l) => k + l.turns, 0),
+      7,
+    );
+    assert.ok(
+      run.lines.some((l) => /\[orders\+1\] could not open \/orders \(page\.goto: net::ERR_ABORTED\); starting from the target instead/.test(l)),
+      "its first route did not open, so it started from the target, and the log says why",
+    );
+    assert.ok(run.lines.some((l) => /\[orders\+1\] attached on \/, owning/.test(l)));
+    assert.ok(sessions.every((l) => l.attached));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("lanes: with nothing to split the run explores in one loop, and says why", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-lanes-one-"));
+  try {
+    const server = standInServer(dir, { crawl: "CRAWL of 0 route(s):\n\nAll crawled routes healthy." });
+    const kickoffs: string[] = [];
+    const run = await runStandIn(["--lanes", "4"], dir, server, (_system, tools, kickoff) => {
+      kickoffs.push(kickoff);
+      assert.ok(
+        tools.some((t) => t.name === "scout_report"),
+        "the one loop writes its report as ever",
+      );
+      return new Scripted([{ text: "Done.", calls: [], usage: use(1) }]);
+    });
+    assert.equal(kickoffs.length, 1);
+    assert.equal(laneOf(kickoffs[0]), undefined, "the ordinary kickoff, not a lane's");
+    assert.match(run.json.lanes.oneLoop, /found 1 route\(s\), all in one module \(\/\)/);
+    assert.equal(run.json.lanes.ran, 0);
+    assert.match(run.summary, /\| Lanes \| 4 asked; explored in one loop: the planning crawl found 1 route/);
+    assert.ok(!server.calls.some((c) => c.name === "scout_attach" && c.session !== PLANNER_SESSION), "no lane attached");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("lanes: a first route the server refuses leaves the lane on the target; a page that merely shows an error line does not", async () => {
+  const opened = async (navigateText: (url: string, session: string) => string) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-lanes-open-"));
+    try {
+      const server = standInServer(dir, { crawl: CRAWL_TEXT, navigateText });
+      const run = await runStandIn(["--lanes", "2"], dir, server, () => new Scripted([{ text: "Done.", calls: [], usage: use(1) }]));
+      return run.lines.find((l) => l.startsWith("[orders+1] attached on")) ?? "";
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  // Refused, after the line the server puts first when several sessions are live.
+  assert.match(await opened((url, session) => `[session ${session} · anonymous]\nREFUSED: ${url} is outside the attached origin`), /attached on \/, owning/);
+  // The contrast: the same first line, then a page that happens to have a line reading "ERROR: …".
+  assert.match(
+    await opened((url, session) => `[session ${session} · anonymous]\nURL: ${url}\nERROR: shown by the page itself`),
+    /attached on \/orders, owning/,
+  );
+});
+
+test("lanes: a lane that cannot attach is named, and the others' run stands", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-lanes-noattach-"));
+  try {
+    const server = standInServer(dir, { crawl: CRAWL_TEXT, failAttach: (_url, session) => session === "orders+1" });
+    const run = await runStandIn(["--lanes", "2"], dir, server, () => new Scripted([{ text: "Done.", calls: [], usage: use(1) }]));
+    assert.deepEqual([run.result.stop, run.exitCode], ["done", 0], "a lane that never started does not fail the run");
+    assert.equal(run.result.stopDetail, "1 of 2 lanes could not attach: orders+1");
+    assert.deepEqual([run.json.lanes.planned, run.json.lanes.ran], [2, 1], "a lane that never attached is not counted as run");
+    assert.deepEqual(
+      run.json.lanes.sessions.map((l: { session: string; attached: boolean; stop: string; detail?: string }) => [l.session, l.attached, l.stop, l.detail]),
+      [
+        ["orders+1", false, "could-not-start", "page.goto: net::ERR_CONNECTION_REFUSED"],
+        ["lane-2+2", true, "done", undefined],
+      ],
+    );
+    assert.match(run.summary, /\| Lanes \| 1 of 2 asked ran at once, sharing the caps below; 1 could not attach \|/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("lanes: a planning crawl that uses up the time cap leaves every lane unstarted, and the run ends at the cap with its report", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-lanes-slowplan-"));
+  try {
+    let clock = 1_000_000;
+    const server = standInServer(dir, { crawl: CRAWL_TEXT, onCrawl: () => (clock += 3 * 60_000) });
+    const parsed = parseCiArgs([TARGET, "--project", dir, "--lanes", "2", "--max-minutes", "2"], dir);
+    assert.ok(parsed.ok);
+    const summary = process.env.GITHUB_STEP_SUMMARY;
+    delete process.env.GITHUB_STEP_SUMMARY;
+    let models = 0;
+    let run: Awaited<ReturnType<typeof runCi>>;
+    try {
+      run = await runCi(
+        parsed.options,
+        { provider: "openai", model: "gpt-6-luna", effort: "low", baseUrl: "https://api.invalid/v1" },
+        {
+          makeClient: () => {
+            models += 1;
+            return new Scripted([{ text: "Done.", calls: [], usage: use(1) }]);
+          },
+          version: "0.0.0-test",
+          now: () => clock,
+          startHost: async () => server.host,
+        },
+      );
+    } finally {
+      if (summary !== undefined) process.env.GITHUB_STEP_SUMMARY = summary;
+    }
+    assert.deepEqual([run.result.stop, run.exitCode, models], ["time", 0, 0], "the cap ended it, not a failure, and no model was called");
+    assert.ok(!server.calls.some((c) => c.name === "scout_attach" && c.session !== PLANNER_SESSION), "no lane attached");
+    assert.ok(
+      run.result.lanes?.sessions.every((l) => !l.attached && l.stop === "time"),
+      JSON.stringify(run.result.lanes),
+    );
+    assert.ok(run.written.includes("report.md"), "the report is written whatever ended the run");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("attach: an error result or a sign-in the app no longer accepts is a failure, an ordinary attach is not", () => {
+  assert.equal(attachFailure({ text: "ERROR: page.goto: net::ERR_CONNECTION_REFUSED", isError: true }), "page.goto: net::ERR_CONNECTION_REFUSED");
+  assert.equal(attachFailure({ text: "ERROR: something", isError: false }), "something");
+  assert.equal(
+    attachFailure({ text: "[session orders · admin]\nAttached.\n⚠ AUTH FAILED: the saved session was refused", isError: false }),
+    "⚠ AUTH FAILED: the saved session was refused",
+  );
+  // The contrast: an attach whose page mentions an error is still an attach.
+  assert.equal(attachFailure({ text: "Attached to http://127.0.0.1:3000/ — the page says ERROR: none", isError: false }), null);
+});
+
+test("lanes: a lane that fails outright is waited out with the others, and the run says it could not finish", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-lanes-broken-"));
+  try {
+    const server = standInServer(dir, { crawl: CRAWL_TEXT });
+    // The healthy lane takes a while: a run that raced its lanes would move on, and close everything, before it was done.
+    const slow = (): ModelClient => {
+      let n = 0;
+      return {
+        next: async () => {
+          await new Promise((r) => setTimeout(r, 30));
+          n += 1;
+          return n < 4 ? { text: "", calls: [call(`s${n}`, "scout_snapshot")], usage: use(1) } : { text: "Done.", calls: [], usage: use(1) };
+        },
+        addResults: () => {},
+      };
+    };
+    const run = await runStandIn(["--lanes", "2"], dir, server, (_system, _tools, kickoff) => {
+      if (laneOf(kickoff) === "orders+1") throw new Error("the client could not be built");
+      return slow();
+    });
+    assert.deepEqual([run.result.stop, run.exitCode], ["could-not-start", 2], "a lane that broke is a run that could not finish");
+    assert.equal(run.result.stopDetail, "lane orders+1: the lane failed: the client could not be built");
+    assert.equal(
+      server.calls.filter((c) => c.name === "scout_snapshot" && c.session === "lane-2+2").length,
+      3,
+      "the healthy lane finished before the run moved on",
+    );
+    assert.deepEqual(server.calls.at(-1)?.args, { all: true }, "and nothing ran after the run closed its sessions");
+    // What the healthy lane spent and found is kept: its turns, the lane table and the report.
+    assert.equal(run.json.usage.turns, 4);
+    assert.deepEqual(
+      run.json.lanes.sessions.map((l: { session: string; attached: boolean; stop: string }) => [l.session, l.attached, l.stop]),
+      [
+        ["orders+1", true, "could-not-start"],
+        ["lane-2+2", true, "done"],
+      ],
+    );
+    assert.ok(run.written.includes("report.md"), run.written.join());
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("lanes: past the time cap a finished lane is left to the run's own close", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-lanes-late-"));
+  try {
+    const server = standInServer(dir, { crawl: CRAWL_TEXT });
+    let clock = 1_000_000;
+    // Every model call takes a minute: two minutes in, the time cap ends both lanes.
+    const minute = (): ModelClient =>
+      new Scripted([
+        () => {
+          clock += 60_000;
+          return { text: "", calls: [call("s", "scout_snapshot")], usage: use(1) };
+        },
+      ]);
+    const parsed = parseCiArgs([TARGET, "--project", dir, "--lanes", "2", "--max-minutes", "2"], dir);
+    assert.ok(parsed.ok);
+    const summary = process.env.GITHUB_STEP_SUMMARY;
+    delete process.env.GITHUB_STEP_SUMMARY;
+    let run;
+    try {
+      run = await runCi(
+        parsed.options,
+        { provider: "openai", model: "gpt-6-luna", effort: "low", baseUrl: "https://api.invalid/v1" },
+        {
+          makeClient: () => minute(),
+          version: "0.0.0-test",
+          now: () => clock,
+          startHost: async () => server.host,
+        },
+      );
+    } finally {
+      if (summary !== undefined) process.env.GITHUB_STEP_SUMMARY = summary;
+    }
+    assert.equal(run.result.stop, "time");
+    const closes = server.calls.filter((c) => c.name === "scout_close").map((c) => c.args);
+    assert.deepEqual(closes, [{ all: true }], "no lane's own close ran after the cap; the run's close, within its finishing budget, collected them");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("lanes: driven over HTTP by the stand-in model API, each lane holds its own conversation and their shared finding is filed once", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-lanes-http-"));
+  const key = "fake-lanes-key-0123456789abcdef";
+  const api = spawn(process.execPath, [path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-model-api.mjs"), "0"], {
+    env: { ...process.env, EXPECTED_KEY: key },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  try {
+    const base = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("the stand-in API did not start")), 10_000);
+      api.stdout!.on("data", (chunk: Buffer) => {
+        const m = /(http:\/\/127\.0\.0\.1:\d+\/v1)/.exec(chunk.toString());
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[1]);
+        }
+      });
+      api.on("exit", (code) => reject(new Error(`the stand-in API exited with ${code}`)));
+    });
+    const server = standInServer(dir, { crawl: CRAWL_TEXT });
+    const resolved = { provider: "openai" as const, model: "gpt-6-luna", effort: "low", baseUrl: base };
+    const run = await runStandIn(["--lanes", "2"], dir, server, (system, tools, kickoff) => httpClient(resolved, key, system, tools, kickoff), [key]);
+    assert.deepEqual([run.result.stop, run.exitCode], ["done", 0], run.lines.join("\n"));
+    assert.equal(run.json.usage.turns, 4, "two turns in each lane's own conversation");
+    for (const lane of ["orders+1", "lane-2+2"])
+      assert.deepEqual(
+        server.calls.filter((c) => c.args.session === lane && ["scout_crawl", "scout_finding"].includes(c.name)).map((c) => c.name),
+        ["scout_crawl", "scout_finding"],
+        lane,
+      );
+    const findings = run.json.findings as Array<{ title: string }>;
+    assert.deepEqual(
+      findings.map((f) => f.title),
+      ["The stand-in model's finding, filed by every lane"],
+      "both lanes filed it; the run reports it once",
+    );
+    const written = fs.readdirSync(path.join(dir, ".scenescout", "ci")).map((f) => fs.readFileSync(path.join(dir, ".scenescout", "ci", f), "utf8"));
+    assert.ok(!written.some((t) => t.includes(key)) && !run.lines.some((l) => l.includes(key)), "the key the API echoes is in no file and no line");
+  } finally {
+    api.kill();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── what a run writes ───────────────────────────────────────────────────────
 
 const finding = (over: Partial<Finding>): Finding => ({
@@ -1039,6 +1818,12 @@ test("action: this repository runs it against the demo app and a stand-in API, g
     job.steps!.some((s) => /grep -rF "\$OPENAI_API_KEY"/.test(s.run ?? "")),
     "the job looks for the key in what the run wrote",
   );
+  // The same action split into lanes, against the same stand-in, checked for its merged finding.
+  const lanes = job.steps!.find((s) => s.uses === "./ci" && s.with?.lanes !== undefined);
+  assert.ok(lanes && Number(lanes.with?.lanes) >= 2, "the job also runs the action split into lanes");
+  assert.equal(lanes.with?.["base-url"], step.with?.["base-url"], "the lanes run uses the stand-in API too");
+  const checked = job.steps!.find((s) => /\$\{\{ steps\.lanes\.outputs\.low \}\}/.test(JSON.stringify(s)));
+  assert.ok(checked && /test "\$LOW" = 1/.test(checked.run ?? ""), "the finding every lane filed is counted once");
 });
 
 type WorkflowStep = { uses?: string; run?: string; env?: Record<string, string>; with?: Record<string, string> };
@@ -1072,8 +1857,8 @@ test("benchmark workflow: started by hand or called, reads the repository and no
   assert.ok(run, "it runs the ci action from this commit");
   assert.equal(run.with?.cli, "dist/cli.js");
   assert.equal(run.with?.provider, "${{ inputs.provider }}");
-  // The run's caps are inputs of both triggers, passed to the action's inputs of the same name; empty keeps the CLI's default.
-  for (const cap of ["max-turns", "max-tokens"]) {
+  // The run's caps and its lanes are inputs of both triggers, passed to the action's inputs of the same name; empty keeps the CLI's default.
+  for (const cap of ["max-turns", "max-tokens", "lanes"]) {
     assert.ok(cap in action.inputs, `the ci action has no ${cap} input`);
     assert.equal(run.with?.[cap], `\${{ inputs.${cap} }}`);
     for (const trigger of ["workflow_dispatch", "workflow_call"]) assert.equal(wf.on[trigger].inputs[cap]?.default, "", `${trigger} ${cap}`);
@@ -1295,6 +2080,7 @@ const ROW = (over: Partial<CiResultRow> = {}): CiResultRow => ({
   provider: "openai",
   model: "some-model-1",
   effort: "low",
+  dedup: "rule",
   key: "0123456789",
   recall: { found: 5, expected: 13 },
   precision: { correct: 7, labelled: 8, low: "70%", high: "90%" },
@@ -1421,6 +2207,7 @@ const CI_JSON = {
   effort: "low",
   stop: { reason: "turns", text: "stopped at the turn cap (40 model calls)" },
   usage: { turns: 40, inputTokens: 885_574, cachedInputTokens: 858_517, cacheWriteTokens: 0, outputTokens: 3_152, seconds: 98, estimatedCostUsd: 0.01286687 },
+  dedup: { by: "judge", effort: "none", calls: 3, failed: 0, inputTokens: 900, outputTokens: 75, seconds: 1.2 },
 };
 const CARD = {
   key: "0123456789",
@@ -1455,6 +2242,7 @@ test("result row: what the run reported about itself, and how the key scored it"
     provider: "openai",
     model: "some-model-1",
     effort: "low",
+    dedup: "judge",
     key: "0123456789",
     recall: { found: 3, expected: 13 },
     // 3 right of 4 labelled; of the 5 scored (6 less the contextual one), 3 are right at worst and 4 at best.
@@ -1503,6 +2291,42 @@ test("result row: what the run reported about itself, and how the key scored it"
   assert.throws(() => parseRunSummary({ ...CI_JSON, usage: { ...CI_JSON.usage, turns: -1 } }), /usage.turns must be a whole number/);
   assert.throws(() => parseRunSummary({ ...CI_JSON, usage: { ...CI_JSON.usage, estimatedCostUsd: "cheap" } }), /estimatedCostUsd/);
   assert.throws(() => resultRow({ ...base, run: parseRunSummary({ ...CI_JSON, version: "dev" }) }), /Not a version/);
+  // How the run deduplicated is the run's own record: a ci.json from before the judge has none, and deduplicated by the rule.
+  const { dedup: _judged, ...beforeJudge } = CI_JSON;
+  assert.equal(resultRow({ ...base, run: parseRunSummary(beforeJudge) }).dedup, "rule");
+  assert.equal(resultRow({ ...base, run: parseRunSummary({ ...CI_JSON, dedup: { by: "rule" } }) }).dedup, "rule");
+  assert.throws(() => parseRunSummary({ ...CI_JSON, dedup: { by: "model" } }), /dedup.by must be one of rule, judge, not "model"/);
+  assert.throws(() => parseRunSummary({ ...CI_JSON, dedup: "judge" }), /dedup.by must be one of rule, judge/);
+});
+
+test("result row: a run that asked for lanes records how many it asked for and ran, and the table says so beside the model", () => {
+  const row = (lanes: unknown) =>
+    resultRow({
+      app: "demo",
+      source: "manual",
+      date: "2026-01-12",
+      commit: "abcdef0",
+      archive: "x",
+      run: parseRunSummary({ ...CI_JSON, lanes }),
+      card: CARD as never,
+    });
+  assert.deepEqual(row({ asked: 4, planned: 4, ran: 4, sessions: [] }).lanes, { asked: 4, planned: 4, ran: 4 });
+  assert.deepEqual(row({ asked: 4, planned: 0, ran: 0, oneLoop: "nothing to split", sessions: [] }).lanes, { asked: 4, planned: 0, ran: 0, oneLoop: true });
+  assert.equal(row(undefined).lanes, undefined, "a single loop's row is as it was");
+  assert.equal(row({ asked: 1, planned: 0, ran: 0 }).lanes, undefined, "one lane asked is the single loop");
+  assert.throws(() => row({ asked: "four", planned: 4, ran: 4 }), /lanes\.asked must be a whole number/);
+  assert.throws(() => row({ asked: 4, ran: 4 }), /lanes\.planned must be a whole number/);
+  assert.throws(() => row(4), /lanes is 4, not an object/);
+  const cell = (lanes?: CiResultRow["lanes"]) =>
+    renderTable([ROW(lanes ? { lanes } : {})])
+      .split("\n")[2]
+      .split(" | ")[4];
+  assert.equal(cell(), "openai · some-model-1 · low");
+  assert.equal(cell({ asked: 4, planned: 4, ran: 4 }), "openai · some-model-1 · low · 4 lanes");
+  assert.equal(cell({ asked: 4, planned: 3, ran: 3 }), "openai · some-model-1 · low · 3 lanes of 4 asked", "the app split into fewer");
+  assert.equal(cell({ asked: 4, planned: 4, ran: 3 }), "openai · some-model-1 · low · 3 lanes, 1 could not attach", "not the same as a smaller split");
+  assert.equal(cell({ asked: 4, planned: 0, ran: 0, oneLoop: true }), "openai · some-model-1 · low · 4 lanes asked, one loop ran");
+  assert.equal(cell({ asked: 4, planned: 4, ran: 0 }), "openai · some-model-1 · low · 4 lanes asked, none ran", "not a loop that never ran");
 });
 
 test("results file: rows are appended in order and a recorded run is never replaced", () => {
@@ -1521,6 +2345,11 @@ test("results file: rows are appended in order and a recorded run is never repla
   assert.throws(() => appendRows(one, [ROW({ archive: "d" }), ROW({ archive: "d" })]), /d is already recorded/);
   assert.deepEqual(parseResults({ rows: [ROW()] }).rows, [ROW()]);
   assert.throws(() => parseResults({ rows: [{}] }), /row 0 is not a result row/);
+  // A row that does not say how it deduplicated could be read beside a row of the other mode as one configuration.
+  const { dedup: _mode, ...unmarked } = ROW({ archive: "unmarked" });
+  assert.throws(() => parseResults({ rows: [ROW(), unmarked] }), /row 1 \(unmarked\) has dedup undefined, not one of rule, judge/);
+  assert.throws(() => parseResults({ rows: [ROW({ dedup: "model" as never })] }), /has dedup "model"/);
+  assert.equal(parseResults({ rows: [ROW({ dedup: "judge" })] }).rows[0].dedup, "judge");
   assert.throws(() => parseResults([]), /rows array/);
 });
 
@@ -1533,8 +2362,10 @@ test("results table: one line per row, and it replaces only what is between its 
   assert.equal(lines.length, 4);
   assert.equal(
     lines[2],
-    "| 2026-01-05 | demo | 1.2.0 | scheduled | openai · some-model-1 · low | 0123456789 | 5/13 | 7/8 (70%–90%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |",
+    "| 2026-01-05 | demo | 1.2.0 | scheduled | openai · some-model-1 · low | rule | 0123456789 | 5/13 | 7/8 (70%–90%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |",
   );
+  assert.match(lines[0], /\| Provider · model · effort \| Dedup \| Key \|/);
+  assert.match(renderTable([ROW({ dedup: "judge" })]).split("\n")[2], /\| openai · some-model-1 · low \| judge \| 0123456789 \|/);
   assert.match(lines[3], /\| 3\/3 \(100%\) \| 0\.123 \| done \| 36 \| .* \| 45s \| — \|$/);
   for (const l of lines) assert.equal(l.split("|").length, lines[0].split("|").length, "every line has the header's columns");
 
@@ -1560,6 +2391,13 @@ test("results: docs/benchmark.md shows exactly what bench/ci-results.json record
     assert.ok(fs.existsSync(archive), `${r.archive} has no archive in bench/runs`);
     assert.equal((JSON.parse(fs.readFileSync(archive, "utf8")) as { app?: string }).app, r.app, `${r.archive} is archived as another app's run`);
   }
+  // Every run of a version from before the model judge (3.14.1 and earlier) deduplicated by the rule alone, and says so.
+  const beforeJudge = results.rows.filter((r) => compareVersions(r.version, "3.14.1") <= 0);
+  assert.ok(beforeJudge.length >= 9, "the rows recorded before the judge are still there");
+  assert.deepEqual(
+    beforeJudge.filter((r) => r.dedup !== "rule").map((r) => r.archive),
+    [],
+  );
   // The two runs taken by hand before the workflow existed are the first rows.
   assert.deepEqual(
     results.rows
@@ -1898,4 +2736,272 @@ test("compare: a base that throws keeps the preview's picture and records why, a
   assert.ok(fs.existsSync(path.join(dir, "shots", "preview.png")), "the preview's picture is kept");
   assert.match(outcome.detail ?? "", /the base URL could not be captured: scout_attach timed out/);
   assert.equal(outcome.base, undefined);
+});
+
+// ── finding dedup: the model judge ──────────────────────────────────────────
+
+test("dedup: the judge asks at the lowest effort each API takes; the server's mode and key come from its environment", () => {
+  assert.equal(judgeEffort("openai"), "none");
+  assert.equal(judgeEffort("anthropic"), "low", "the Messages API has no none");
+  assert.equal(dedupModeFromEnv({}), "rule", "the MCP server judges only when told to");
+  assert.equal(dedupModeFromEnv({ SCENESCOUT_DEDUP: " judge " }), "judge");
+  assert.throws(() => dedupModeFromEnv({ SCENESCOUT_DEDUP: "model" }), /SCENESCOUT_DEDUP must be one of rule, judge, not "model"/);
+
+  const one = judgeKeyConfig({ OPENAI_API_KEY: OPENAI_KEY });
+  assert.ok(one.ok);
+  assert.deepEqual(one.resolved, { provider: "openai", model: "gpt-6-luna", effort: "none", baseUrl: "https://api.openai.com/v1" });
+  assert.equal(one.key, OPENAI_KEY);
+  const both = { OPENAI_API_KEY: OPENAI_KEY, ANTHROPIC_API_KEY: ANTHROPIC_KEY };
+  const ambiguous = judgeKeyConfig(both);
+  assert.ok(!ambiguous.ok && /both .* are set: set SCENESCOUT_DEDUP_PROVIDER/.test(ambiguous.error));
+  const named = judgeKeyConfig({ ...both, SCENESCOUT_DEDUP_PROVIDER: "anthropic" });
+  assert.ok(named.ok && named.resolved.provider === "anthropic" && named.resolved.effort === "low" && named.key === ANTHROPIC_KEY);
+  const none = judgeKeyConfig({});
+  assert.ok(!none.ok && /needs ANTHROPIC_API_KEY or OPENAI_API_KEY in the server's environment/.test(none.error));
+  const missing = judgeKeyConfig({ OPENAI_API_KEY: OPENAI_KEY, SCENESCOUT_DEDUP_PROVIDER: "anthropic" });
+  assert.ok(!missing.ok && /SCENESCOUT_DEDUP_PROVIDER=anthropic needs ANTHROPIC_API_KEY/.test(missing.error));
+  assert.throws(() => judgeKeyConfig({ OPENAI_API_KEY: OPENAI_KEY, SCENESCOUT_DEDUP_PROVIDER: "gemini" }), /must be one of anthropic, openai/);
+  for (const r of [one, ambiguous, named, none, missing]) assert.ok(!(r.ok ? "" : r.error).includes(OPENAI_KEY), "no message carries a key");
+});
+
+test("dedup: the summary and ci.json say how findings were deduplicated and what the judge's calls cost", () => {
+  const judged = RESULT({
+    dedup: { by: "judge", effort: "none", calls: 4, failed: 1, usage: { input: 1_200, cachedInput: 0, cacheWrite: 0, output: 100 }, ms: 3_400 },
+  });
+  const md = ciSummaryMarkdown(judged);
+  assert.match(
+    md,
+    /\| Finding dedup \| the rule, then the model judge at effort none for filings it kept apart: 4 call\(s\), 1 without an answer \(the rule decided those\), 1,300 tokens \(in the usage below\), 3\.4s \|/,
+  );
+  assert.deepEqual((ciSummaryJson(judged, "9.9.9") as { dedup: unknown }).dedup, {
+    by: "judge",
+    effort: "none",
+    calls: 4,
+    failed: 1,
+    inputTokens: 1_200,
+    outputTokens: 100,
+    seconds: 3.4,
+  });
+  const ruled = RESULT({ dedup: { by: "rule" } });
+  assert.match(ciSummaryMarkdown(ruled), /\| Finding dedup \| the rule alone \|/);
+  assert.deepEqual((ciSummaryJson(ruled, "9.9.9") as { dedup: unknown }).dedup, { by: "rule" });
+  assert.ok(!/Finding dedup/.test(ciSummaryMarkdown(RESULT())), "a capture run files nothing and says nothing about dedup");
+});
+
+/** Two filings on one page that the store's rule keeps apart: no evidence, nothing quoted, titles too unalike. */
+const SAVE_FILING = { severity: "medium", category: "ux-confusing", title: "The save button gives no feedback", detail: "Pressed it; nothing changed." };
+const SILENT_FILING = { severity: "high", category: "ux-confusing", title: "Clicking save shows nothing", detail: "No toast, no spinner." };
+const QUIET_FILING = { severity: "low", category: "ux-confusing", title: "Pressing save does nothing visible", detail: "Same page." };
+
+/** The judge's stand-in API: the Responses API's shape, a judge_pair call, and the usage a real call reports. */
+const judgeAnswers =
+  (verdict: string, confidence: number) =>
+  (body: { tools: Array<{ name: string }> }): { status: number; body: unknown } =>
+    body.tools.some((t) => t.name === "judge_pair")
+      ? {
+          status: 200,
+          body: {
+            status: "completed",
+            output: [{ type: "function_call", call_id: "j1", name: "judge_pair", arguments: JSON.stringify({ verdict, confidence }) }],
+            usage: { input_tokens: 300, input_tokens_details: { cached_tokens: 0 }, output_tokens: 25 },
+          },
+        }
+      : { status: 400, body: { error: { message: "only the judge calls this API in the test" } } };
+
+/**
+ * A CI run's dedup, end to end with no browser: the loop and a scripted model
+ * file findings through the run's own MCP client (ciClient, judgeHandler and
+ * httpJudgeAsk against a stand-in API) into a server whose store files them as
+ * the MCP server does (fileFinding), its judge asking through the client by
+ * sampling, as the MCP server's does when the client declares
+ * DEDUP_JUDGE_CAPABILITY. Only the transport is in memory instead of stdio.
+ */
+async function judgedRun(o: {
+  filings: Array<Record<string, unknown>>;
+  judge: boolean;
+  api: (body: any) => { status: number; body: unknown };
+  after?: (server: McpServer) => Promise<void>;
+}) {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ci-dedup-"));
+  const store = new MemoryStore(project);
+  const server = new McpServer({ name: "test-server", version: "1" });
+  server.registerTool(
+    "scout_finding",
+    {
+      description: "File a finding",
+      inputSchema: {
+        severity: z.enum(["high", "medium", "low"]),
+        category: z.string(),
+        title: z.string(),
+        detail: z.string(),
+        evidence: z.string().optional(),
+      },
+    },
+    async (args) => {
+      const filed = await store.fileFinding({ ...args, url: "http://app.test/orders", state: "/orders#s1" });
+      const said = filed.isNew
+        ? `recorded ${filed.finding.id}`
+        : `merged into ${filed.finding.id}${filed.judged ? ` by the judge at ${filed.judged.pSame}` : ""}`;
+      return { content: [{ type: "text" as const, text: said }] };
+    },
+  );
+  const requests: any[] = [];
+  const api = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    requests.push(body);
+    const r = o.api(body);
+    return new Response(JSON.stringify(r.body), { status: r.status, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  // The run's budget: the loop takes its turns from it, and the judge's calls add their tokens to it, as runCi has them do.
+  const spend = newBudget(BIG, Date.now());
+  const calls: JudgeCalls = { calls: 0, failed: 0, usage: { ...NO_USAGE }, ms: 0 };
+  const resolved = { provider: "openai" as const, model: "gpt-6-luna", effort: "none", baseUrl: "http://model.test/v1" };
+  const ask = httpJudgeAsk(resolved, OPENAI_KEY, { fetch: api, sleep: async () => {} });
+  const client = ciClient(o.judge ? judgeHandler({ ask, model: resolved.model, spend, caps: BIG, calls, secrets: [OPENAI_KEY] }) : undefined);
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
+  const logs: string[] = [];
+  // What the MCP server does on attach with dedup "judge" (configureDedup, planDedup): ask through the client when it says it answers.
+  if (clientAnswersJudge(server.server.getClientCapabilities()))
+    store.dedupJudge = new DedupJudge(
+      samplingAsk((params, options) => server.server.createMessage(params, options)),
+      { label: "the CI run's model", log: (l) => logs.push(l) },
+    );
+  const model = new Scripted([
+    ...o.filings.map((f, i) => ({ text: "", calls: [call(`f${i}`, "scout_finding", f)], usage: use(100) })),
+    { text: "Done.", calls: [], usage: use(10) },
+  ]);
+  const tools: ToolSpec[] = [{ name: "scout_finding", description: "", parameters: { type: "object", properties: {} } }];
+  try {
+    const out = await agentLoop({ client: model, host: toolHost(client), tools, caps: BIG, log: () => {}, projectDir: project, budget: spend });
+    await o.after?.(server);
+    return { out, run: spend, findings: store.findings.map((f) => ({ ...f })), logs, requests, calls, results: model.received.flat() };
+  } finally {
+    await client.close();
+    store.flush();
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+}
+
+test("dedup end to end: two near-duplicate findings the rule keeps apart are merged by the judge, and its tokens count in the run's usage", async () => {
+  // The contrast first: the same two filings with the rule alone stay two findings, and no model is asked.
+  const ruled = await judgedRun({ filings: [SAVE_FILING, SILENT_FILING], judge: false, api: judgeAnswers("same", 0.92) });
+  assert.equal(ruled.findings.length, 2);
+  assert.equal(ruled.requests.length, 0);
+
+  const judged = await judgedRun({ filings: [SAVE_FILING, SILENT_FILING], judge: true, api: judgeAnswers("same", 0.92) });
+  assert.equal(judged.out.stop, "done");
+  assert.equal(judged.findings.length, 1, JSON.stringify(judged.findings.map((f) => f.title)));
+  const [kept] = judged.findings;
+  assert.equal(kept.title, SAVE_FILING.title);
+  assert.equal(kept.runs, 2);
+  assert.deepEqual(
+    kept.judgedMerges?.map((m) => [m.title, m.severity, m.pSame]),
+    [[SILENT_FILING.title, "high", 0.92]],
+  );
+  assert.match(judged.results[1].text, /merged into .* by the judge at 0\.92/);
+  // One call: the run's model, at effort none, offered only judge_pair, shown both findings and the page.
+  assert.equal(judged.requests.length, 1);
+  const [req] = judged.requests;
+  assert.equal(req.reasoning.effort, "none");
+  assert.equal(req.max_output_tokens, JUDGE_MAX_OUTPUT_TOKENS);
+  assert.deepEqual(
+    req.tools.map((t: { name: string }) => t.name),
+    ["judge_pair"],
+  );
+  assert.match(req.input[0].content, /page \/orders\.[\s\S]*Finding A: .*The save button gives no feedback[\s\S]*Finding B: .*Clicking save shows nothing/);
+  assert.ok(!JSON.stringify(req).includes("Pressed it"), "a finding's detail is not sent");
+  // The judge's tokens are the run's: three scripted turns (210) and the call (300 in, 25 out).
+  assert.deepEqual([judged.run.usage.input, judged.run.usage.output], [510, 25]);
+  assert.deepEqual(judged.calls, { calls: 1, failed: 0, usage: { input: 300, cachedInput: 0, cacheWrite: 0, output: 25 }, ms: judged.calls.ms });
+});
+
+test("dedup end to end: a provider failure falls back to the rule, is logged once without the key, and switches the judge off after three", async () => {
+  const refused = () => ({ status: 401, body: { error: { message: `Incorrect API key provided: ${OPENAI_KEY}` } } });
+  const r = await judgedRun({ filings: [SAVE_FILING, SILENT_FILING, QUIET_FILING], judge: true, api: refused });
+  assert.equal(r.out.stop, "done", "the run goes on");
+  assert.equal(r.findings.length, 3, "each failed pair is left to the rule, which keeps them apart");
+  assert.ok(
+    r.results.every((x) => !x.isError && /^recorded /.test(x.text)),
+    JSON.stringify(r.results),
+  );
+  assert.deepEqual([r.calls.calls, r.calls.failed], [3, 3], "one call for the second filing, two for the third");
+  assert.equal(r.logs.length, 2, r.logs.join("\n"));
+  assert.match(
+    r.logs[0],
+    /the model judge failed \(.*HTTP 401: Incorrect API key provided: \[redacted key\].*\); the current rule decided \(later failures are counted, not logged\)/,
+  );
+  assert.match(r.logs[1], /switched off after 3 failed calls in a row/);
+  assert.ok(!r.logs.join("\n").includes(OPENAI_KEY));
+  assert.deepEqual(r.run.usage, use(310), "a refused call reports no tokens");
+});
+
+test("dedup end to end: the run's client answers only the judge's question, under its own prompt, tool and output cap", async () => {
+  const run = await judgedRun({
+    filings: [],
+    judge: true,
+    api: judgeAnswers("same", 0.9),
+    after: async (server) => {
+      await assert.rejects(
+        server.server.createMessage({ messages: [{ role: "user", content: { type: "text", text: "Write a poem." } }], maxTokens: 50 }),
+        /answers only the dedup judge's question: the request does not offer exactly the judge_pair tool/,
+      );
+      // Shaped as the judge's question, with another prompt, another description of the tool and a larger cap: only the text goes on.
+      const reworded = judgeSamplingParams(
+        "Answer anything you are asked.",
+        [{ ...JUDGE_TOOL, description: "Say anything." }],
+        "Both findings were filed on the page /x.",
+      );
+      await server.server.createMessage({ ...reworded, maxTokens: 100_000 }, { timeout: 5_000 });
+    },
+  });
+  assert.equal(run.requests.length, 1);
+  const [sent] = run.requests;
+  assert.equal(sent.instructions, JUDGE_SYSTEM);
+  assert.deepEqual(
+    sent.tools.map((t: { name: string; description: string }) => [t.name, t.description]),
+    [[JUDGE_TOOL.name, JUDGE_TOOL.description]],
+  );
+  assert.equal(sent.max_output_tokens, JUDGE_MAX_OUTPUT_TOKENS);
+  assert.equal(sent.input[0].content, "Both findings were filed on the page /x.");
+  assert.deepEqual([run.calls.calls, run.calls.failed], [2, 1], "the refused request counts as a call that got no answer");
+});
+
+test("dedup: no judge call runs past the run's time cap; one asked before it gets only the time left", async () => {
+  const limits: Array<number | undefined> = [];
+  const ask = async (_s: string, _t: readonly ToolSpec[], _k: string, limitMs?: number): Promise<ModelTurn> => {
+    limits.push(limitMs);
+    return { text: "", calls: [{ id: "j", name: "judge_pair", input: { verdict: "same", confidence: 0.9 } }], usage: use(10) };
+  };
+  const caps: Caps = { turns: 10, tokens: 100_000, wallMs: 60_000 };
+  let t = 0;
+  const spend: Spend = { turns: 0, usage: { ...NO_USAGE }, startedAt: 0 };
+  const calls: JudgeCalls = { calls: 0, failed: 0, usage: { ...NO_USAGE }, ms: 0 };
+  const handler = judgeHandler({ ask, model: "m", spend, caps, calls, now: () => t });
+  const params = judgeSamplingParams(JUDGE_SYSTEM, [JUDGE_TOOL], "q");
+  t = 1_000;
+  await handler({ params });
+  t = 55_000;
+  await handler({ params });
+  assert.deepEqual(limits, [JUDGE_CALL_MS, 5_000], "the judge's own limit, then the 5 s the run had left");
+  t = 60_000;
+  await assert.rejects(handler({ params }), /the run's time cap was reached, so the judge was not asked/);
+  assert.equal(limits.length, 2, "the model is not asked after the cap");
+  assert.deepEqual([calls.calls, calls.failed], [3, 1]);
+  assert.deepEqual(spend.usage, use(20), "the answered calls' tokens are the run's");
+});
+
+test("dedup: a judge call that outlasts its limit fails as the judge's limit, not the run's time cap", async () => {
+  // A request that never answers. A real one holds its socket open, which keeps the process running until the abort;
+  // AbortSignal.timeout's timer does not (it is unref'd), so the stand-in holds a timer of its own until then.
+  const hung = (async (_url: string | URL | Request, init?: RequestInit) =>
+    new Promise<Response>((_, reject) => {
+      const socket = setTimeout(() => {}, 60_000);
+      init?.signal?.addEventListener("abort", () => {
+        clearTimeout(socket);
+        reject(init.signal!.reason);
+      });
+    })) as typeof fetch;
+  const ask = httpJudgeAsk({ provider: "openai", model: "m", effort: "none", baseUrl: "http://model.test/v1" }, OPENAI_KEY, { fetch: hung, callMs: 50 });
+  await assert.rejects(ask("s", [], "q"), (err: Error) => /^no answer within 50ms/.test(err.message) && !(err instanceof OutOfTime));
 });

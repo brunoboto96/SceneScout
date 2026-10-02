@@ -104,6 +104,28 @@ SceneScout needs only a URL. Give it the source code as well and it gets noticea
 
 ## 🚀 Quickstart
 
+### ⚡ A first look, nothing to set up
+
+Node 20 or newer and the address of an app you are allowed to test:
+
+```bash
+npx -y scenescout http://localhost:3000
+```
+
+It needs no model, no API key and no MCP client. It downloads the headless Chromium build if the machine has none (once, about 200 MB) and changes nothing else: no skill, no MCP registration, nothing on your PATH. Then it opens up to 20 pages in `observe` mode, where nothing but reads leaves the page (signing in and refreshing a token apart), starting none after 3 minutes. It measures each one the way [`scenescout check`](docs/guide/Ways-to-use-it.md#scenescout-check-a-gate-in-ci) does, writes `scenescout-report/report.md` in the current folder and prints the three issues to look at first:
+
+```
+Look at these first:
+  1. [medium] Request failed with a client error: GET /img/weekly-chart.png → HTTP 404 (on /)
+  2. [medium] Dead end: /reports-scheduled.html: 0 controls (on /reports-scheduled.html)
+  3. [medium] Control covered by pinned chrome: button "Save notes" is COVERED by pinned chrome [order-stickybar] at this scroll position — a click aimed at it lands on that element instead (on /order.html?id=1042)
+
+12 pages looked at in 12 s in observe mode: 0 high · 6 medium · 2 low · 5 worth a look, never counted.
+Report: scenescout-report/report.md
+```
+
+That is the [demo app](demo-app/). It exits 0 whatever it finds (a look, not a gate), and 2 when the address cannot be reached or the report cannot be written. After the address, `--max-routes` and `--max-minutes` raise the limits, `--mode read-only` lets a plain POST through, and `--out` names another folder. A `scenescout-report/` holding files a first look did not write is left alone, and no report it did not write is ever replaced. A first look only opens pages. To have your agent click, fill forms, compare roles and remember what it learned, set SceneScout up as below.
+
 ### 📦 Prerequisites
 
 | | |
@@ -193,7 +215,7 @@ A browser window opens at the URL. Sign in however the app asks, then come back 
 
 Then `/scenescout --role admin`, or `scout_attach { role: "admin" }` from any agent. Every session attached with the same role gets its own browser built from that one login, so parallel lanes can all run as `admin`. A role with no saved login is refused with the command to run. `role` and `storageStatePath` are alternatives: pass one.
 
-Sessions of one role share one saved login, so they share its refresh token too. An app that rotates refresh tokens and treats a second use of a spent one as theft would revoke the whole token family, and sign every session of that role out, the moment two of them refreshed with the same token. SceneScout stops that for a session attached by role. When the page is about to send a refresh token from the role's profile, the session first takes a lock beside the profile (`.scenescout/auth/<role>.json.lock`, owner-only, taken over if its holder has not touched it in 30 seconds). Holding the lock, it re-reads the profile: if another session has rotated the token in the meantime, it loads that profile into its own browser and sends the current token in place of the spent one. Once the page has stored the rotated token, the session writes its state back over the profile and releases the lock. Sessions in separate processes share the lock through the file. A refresh token is recognised by name (a cookie, a storage key, or a field inside a JSON storage value whose name contains `refresh`) and is never printed or logged. An app whose sign-in renews through the identity provider's own session cookie needs none of this, since no refresh token is shared. `SCENESCOUT_REFRESH_BROKER=off` turns the broker off.
+Sessions of one role share one saved login, so they share its refresh token too. An app that rotates refresh tokens and treats a second use of a spent one as theft would revoke the whole token family, and sign every session of that role out, the moment two of them refreshed with the same token. SceneScout stops that for a session attached by role. When the page is about to send a refresh token from the role's profile, the session first takes a lock beside the profile (`.scenescout/auth/<role>.json.lock`, owner-only, taken over if its holder has not touched it in 30 seconds). Holding the lock, it re-reads the profile: if another session has rotated the token in the meantime, it loads that profile into its own browser and sends the current token in place of the spent one. Once the page has stored the rotated token, the session writes its state back over the profile and releases the lock. Sessions in separate processes share the lock through the file. A refresh token is recognised by name (a cookie, a storage key, or a field inside a JSON storage value whose name contains `refresh`) and is never printed or logged. A token that is only in a cookie makes a request a refresh only when the request is plausibly the refresh call, a POST to a path named for one or an endpoint seen to rotate the cookie, so a refresh cookie scoped to `/` never holds back the app's other requests; scripts, stylesheets, images and fonts are never brokered, and a broker that cannot do its job lets the request through unchanged. See [the guide](docs/guide/Signing-in.md#sessions-that-share-a-refresh-token). An app whose sign-in renews through the identity provider's own session cookie needs none of this, since no refresh token is shared. `SCENESCOUT_REFRESH_BROKER=off` turns the broker off.
 
 In CI, where nobody can type, `--script` signs in headless as a test user from `SCENESCOUT_LOGIN_USERNAME`, `SCENESCOUT_LOGIN_PASSWORD` and, for a one-time code, `SCENESCOUT_LOGIN_TOTP_SECRET` or a fixed code the test environment accepts in `SCENESCOUT_LOGIN_OTP_CODE` (with no password for a passwordless sign-in), and saves the same profile. No credential value is ever printed. See [signing in from CI](docs/ci.md#signing-in-from-ci) for the options and the rules: a test tenant's user, never production or a real person's account.
 
@@ -343,6 +365,8 @@ That refusal *is* the guarantee: an extensive report can only exist when nothing
 
 A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app bug. The server never sees a blocked request, but a page's own `fetch` or XHR is answered with a `403` in its place rather than dropped, so the page's handling of a refusal really runs: a page that then claims success is reported as a `false_success` ([ADR 9](docs/adr/0009-a-refused-write-is-answered-not-dropped.md)).
 
+A control is judged by its own label: a dropdown by the option picked, a row by its own text rather than the buttons inside it, and "Discard changes" on an unsent form is allowed. When a page asks to confirm leaving unsent input, the result says so; `observe` and `read-only` stay unless the call passes `leave: true`. See the [safety model](docs/guide/Safety-model.md).
+
 ---
 
 ## 📋 What you get
@@ -430,6 +454,7 @@ npx scenescout ci http://127.0.0.1:3000
 - **Providers:** the Anthropic Messages API (default model `claude-sonnet-5`) or the OpenAI Responses API (default `gpt-6-luna`), chosen by which key is set; with both set, `--provider` decides. `--model` and `--effort` (default `low`) override; `--base-url` points at another endpoint that implements the same API.
 - **Caps:** at most 40 model turns, 1,500,000 tokens and 20 minutes (`--max-turns`, `--max-tokens`, `--max-minutes`). The first cap reached ends the exploration; the report is still written, and says which cap ended it.
 - **Mode:** `read-only` by default; `--mode observe` sends no form at all, `--mode safe-write` lets the run create records and change only the ones it created. `--mode destructive` runs only with `--allow-destructive` as well.
+- **Duplicates:** when the dedup rule keeps a filed finding apart, the run's model is asked at its lowest effort whether it is one already open on the same page, and merges it on a "same", keeping the filing's title, category, severity and evidence under that finding. The two findings' titles, categories and evidence, and the page's path, are sent; `--dedup rule` turns it off ([ADR 17](docs/adr/0017-a-model-judges-only-the-merges-the-rule-misses.md)).
 - **Output**, in `.scenescout/ci/` (or `--out`): `report.md` and `report.html` (the report an agent's run writes), `summary.md` (also appended to the GitHub job summary), `ci.json` and `ci.sarif`, with a usage line: turns, tokens, time and an estimated cost where the model's price is known (`--price-in`, `--price-out` give one for any model).
 
 There is a GitHub Action for it (`uses: brunoboto96/SceneScout/ci@…`). [docs/ci.md](docs/ci.md#an-unattended-exploratory-run) has the workflow and every option; [ADR 14](docs/adr/0014-an-unattended-run-reports-and-never-gates.md) says why it works this way.

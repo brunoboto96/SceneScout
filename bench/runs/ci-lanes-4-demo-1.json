@@ -1,0 +1,33 @@
+{
+  "app": "demo",
+  "run": "ci-lanes-4-demo-1",
+  "date": "2026-10-02",
+  "note": "Unattended run with --lanes 4 on the engine at eba7aea; gpt-6-luna, effort low, default caps shared by the lanes. See Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard chart image fails to load",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard order link overlaps bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard e16 dash-all-orders overlaps e17 dash-new-badge 85%"
+    },
+    {
+      "title": "Customers page lacks a visually prominent next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "customers.html has no visually dominant action"
+    },
+    {
+      "title": "Export CSV crashes on the reports page",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports-export-csv throws Cannot read properties of undefined (reading 'rows')"
+    }
+  ],
+  "decisions": []
+}

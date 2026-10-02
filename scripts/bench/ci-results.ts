@@ -7,6 +7,7 @@
  * workflow calls.
  */
 import { precisionBounds, type Scorecard } from "../../src/engine/bench.ts";
+import { DEDUP_MODES, type DedupMode } from "../../src/engine/ci.ts";
 
 export const CI_RESULT_APPS = ["demo", "holdout"] as const;
 export type CiResultApp = (typeof CI_RESULT_APPS)[number];
@@ -27,6 +28,20 @@ export interface CiResultRow {
   provider: string;
   model: string;
   effort: string;
+  /**
+   * Present when the run asked for two or more lanes (--lanes): how many it
+   * asked for, how many the split made (fewer when the app had fewer modules),
+   * how many attached and ran, and oneLoop when it had nothing to split and
+   * explored in one loop.
+   */
+  lanes?: { asked: number; planned: number; ran: number; oneLoop?: true };
+  /**
+   * How the run deduplicated findings: by the rule alone, or with the model
+   * judge as well (`scenescout ci --dedup`). Rows that differ in it are two
+   * configurations, never one: the judge merges what the rule keeps apart, so
+   * it moves the finding counts and with them recall and precision.
+   */
+  dedup: DedupMode;
   /** The answer key's hash: rows scored against different keys are not comparable. */
   key: string;
   recall: { found: number; expected: number };
@@ -129,8 +144,24 @@ export interface CiRunSummary {
   provider: string;
   model: string;
   effort: string;
+  /** The lanes it asked for, planned and ran, when it asked for two or more. */
+  lanes?: { asked: number; planned: number; ran: number; oneLoop?: true };
+  dedup: DedupMode;
   stop: { reason: string };
   usage: { turns: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; seconds: number; estimatedCostUsd?: number | null };
+}
+
+/**
+ * The dedup mode a run's ci.json records. A ci.json with none was written by
+ * a version from before the model judge, which deduplicated by the rule alone;
+ * any value other than a known mode is refused rather than read as one.
+ */
+function dedupOf(v: Record<string, unknown>): DedupMode {
+  if (v.dedup === undefined) return "rule";
+  const by = isObj(v.dedup) ? v.dedup.by : undefined;
+  if (typeof by !== "string" || !(DEDUP_MODES as readonly string[]).includes(by))
+    throw new Error(`dedup.by must be one of ${DEDUP_MODES.join(", ")}, not ${JSON.stringify(by)}`);
+  return by as DedupMode;
 }
 
 type CardFields = Pick<Scorecard, "key" | "expected" | "found" | "correct" | "falsePositives" | "unknown" | "ambiguous" | "findings" | "contextual"> &
@@ -152,11 +183,22 @@ export function parseRunSummary(v: unknown): CiRunSummary {
   const u = v.usage;
   const cost = u.estimatedCostUsd;
   if (cost !== undefined && cost !== null && (typeof cost !== "number" || !(cost >= 0))) throw new Error(`usage.estimatedCostUsd is ${JSON.stringify(cost)}`);
+  if (v.lanes !== undefined && !isObj(v.lanes)) throw new Error(`lanes is ${JSON.stringify(v.lanes)}, not an object`);
+  const lanes = isObj(v.lanes)
+    ? {
+        asked: count(v.lanes.asked, "lanes.asked"),
+        planned: count(v.lanes.planned, "lanes.planned"),
+        ran: count(v.lanes.ran, "lanes.ran"),
+        ...(typeof v.lanes.oneLoop === "string" ? { oneLoop: true as const } : {}),
+      }
+    : undefined;
   return {
     version: text(v.version, "version"),
     provider: text(v.provider, "provider"),
     model: text(v.model, "model"),
     effort: text(v.effort, "effort"),
+    ...(lanes && lanes.asked > 1 ? { lanes } : {}),
+    dedup: dedupOf(v),
     stop: { reason: text(v.stop.reason, "stop.reason") },
     usage: {
       turns: count(u.turns, "usage.turns"),
@@ -201,6 +243,8 @@ export function resultRow(opts: {
     provider: run.provider,
     model: run.model,
     effort: run.effort,
+    ...(run.lanes ? { lanes: run.lanes } : {}),
+    dedup: run.dedup,
     key: text(card.key, "the scorecard's key"),
     recall: { found: card.found.length, expected: count(card.expected, "expected") },
     precision: { correct: count(card.correct, "correct"), labelled, low, high },
@@ -222,6 +266,9 @@ export function parseResults(v: unknown): CiResults {
   for (const [i, r] of v.rows.entries()) {
     if (!isObj(r) || typeof r.archive !== "string" || typeof r.version !== "string" || typeof r.provider !== "string" || typeof r.date !== "string")
       throw new Error(`row ${i} is not a result row`);
+    // Every row says how it deduplicated: a row without it could be compared with one of the other mode.
+    if (typeof r.dedup !== "string" || !(DEDUP_MODES as readonly string[]).includes(r.dedup))
+      throw new Error(`row ${i} (${r.archive}) has dedup ${JSON.stringify(r.dedup)}, not one of ${DEDUP_MODES.join(", ")}`);
     compareVersions(r.version, r.version);
   }
   return v as unknown as CiResults;
@@ -247,26 +294,38 @@ export const TABLE_START = "<!-- ci-results:start (generated from bench/ci-resul
 export const TABLE_END = "<!-- ci-results:end -->";
 
 const thousands = (n: number) => n.toLocaleString("en-US");
+/** A run that asked for lanes says so beside its model, so its row is never read as a single loop's. */
+const lanesNote = (l: CiResultRow["lanes"]): string =>
+  !l
+    ? ""
+    : l.oneLoop
+      ? ` · ${l.asked} lanes asked, one loop ran`
+      : l.ran === 0
+        ? ` · ${l.asked} lanes asked, none ran`
+        : ` · ${l.ran} lanes` + (l.planned < l.asked ? ` of ${l.asked} asked` : "") + (l.ran < l.planned ? `, ${l.planned - l.ran} could not attach` : "");
 const duration = (s: number) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`);
 
+/** The table's columns, and which are figures, set right-aligned. */
+const COLUMNS: ReadonlyArray<{ head: string; figure?: true }> = [
+  { head: "Date" },
+  { head: "App" },
+  { head: "Version" },
+  { head: "Source" },
+  { head: "Provider · model · effort" },
+  { head: "Dedup" },
+  { head: "Key" },
+  { head: "Recall", figure: true },
+  { head: "Precision (bounds)", figure: true },
+  { head: "Brier", figure: true },
+  { head: "Ended" },
+  { head: "Turns", figure: true },
+  { head: "Tokens in (cached) / out", figure: true },
+  { head: "Wall", figure: true },
+  { head: "Cost", figure: true },
+];
+
 export function renderTable(rows: readonly CiResultRow[]): string {
-  const head = [
-    "Date",
-    "App",
-    "Version",
-    "Source",
-    "Provider · model · effort",
-    "Key",
-    "Recall",
-    "Precision (bounds)",
-    "Brier",
-    "Ended",
-    "Turns",
-    "Tokens in (cached) / out",
-    "Wall",
-    "Cost",
-  ];
-  const lines = [`| ${head.join(" | ")} |`, `|${head.map((_, i) => (i >= 6 && i !== 9 ? "---:" : "---")).join("|")}|`];
+  const lines = [`| ${COLUMNS.map((c) => c.head).join(" | ")} |`, `|${COLUMNS.map((c) => (c.figure ? "---:" : "---")).join("|")}|`];
   for (const r of rows) {
     const p = r.precision;
     const bounds = p.low === p.high ? p.low : `${p.low}–${p.high}`;
@@ -276,7 +335,8 @@ export function renderTable(rows: readonly CiResultRow[]): string {
         r.app,
         r.version,
         r.source,
-        `${r.provider} · ${r.model} · ${r.effort}`,
+        `${r.provider} · ${r.model} · ${r.effort}${lanesNote(r.lanes)}`,
+        r.dedup,
         r.key,
         `${r.recall.found}/${r.recall.expected}`,
         `${r.precision.correct}/${r.precision.labelled} (${bounds})`,

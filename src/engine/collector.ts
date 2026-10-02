@@ -43,44 +43,167 @@ export const XPATH_OF_SRC = `(el) => {
   }`;
 
 /**
+ * What an element's accessible name is read from, as page-side source: every
+ * candidate source, read from the DOM and nothing decided. PICK_NAME_SRC
+ * decides, so the order can be table-tested without a browser.
+ *
+ * A label's text is read without the control's own text: a wrapping label
+ * holds the control, and a select's options or a textarea's contents are not
+ * its label.
+ */
+export const NAME_FACTS_SRC = `(el) => {
+    const tag = el.tagName.toLowerCase();
+    const role = el.getAttribute("role") || "";
+    const inputType = tag === "input" ? el.type : "";
+    const byId = (id) => { const n = document.getElementById(id); return n ? n.textContent || "" : ""; };
+    const labels = [];
+    for (const label of Array.from(el.labels || [])) {
+      const own = label.contains(el) ? el.textContent || "" : "";
+      labels.push((label.textContent || "").replace(own, ""));
+    }
+    const live = /^(status|alert|log|timer|marquee)$/.test(role) || tag === "output" ||
+      (el.hasAttribute("aria-live") && el.getAttribute("aria-live") !== "off");
+    return {
+      tag,
+      inputType,
+      labelledBy: (el.getAttribute("aria-labelledby") || "").split(/\\s+/).filter(Boolean).map(byId).join(" "),
+      ariaLabel: el.getAttribute("aria-label"),
+      labels,
+      title: el.getAttribute("title") || "",
+      placeholder: el.getAttribute("placeholder") || "",
+      nameAttr: el.getAttribute("name") || "",
+      // Read only for button-like inputs: a text field's value is what the user typed, not its name.
+      value: inputType === "submit" || inputType === "reset" || inputType === "button" ? el.value || "" : "",
+      alt: el.getAttribute("alt") || "",
+      live,
+      text: el.innerText || el.textContent || "",
+    };
+  }`;
+
+/**
+ * The accessible name chosen from NAME_FACTS_SRC's facts, as page-side source,
+ * in the order of the accessible-name computation: aria-labelledby,
+ * aria-label, then the host language's label (an image's alt; a <label>,
+ * for= or wrapping; a button-like input's value), then title, then the
+ * placeholder. Returns the name and, for a field, where it came from when that
+ * is not a label (`from`, see NameFrom): the name falls back to the
+ * placeholder, the name attribute or the type so every field can be told apart
+ * and targeted, and the name is half of the element's coverage key, so the
+ * fallback stays.
+ *
+ * - A select is never named by its options: their text is its value, not its name.
+ * - Other elements are named by their text, and by title when they have none
+ *   (an icon-only button with a tooltip).
+ * - A live region (status, alert, log, timer, an aria-live region, <output>)
+ *   is named by the text it announces, which is what matters after an action.
+ * - A whitespace-only aria-label ends the name with nothing, as it always has
+ *   here: the field it hides is reported as unnamed.
+ */
+export const PICK_NAME_SRC = `(f) => {
+    const clean = (s) => (s || "").replace(/\\s+/g, " ").trim();
+    const named = (s) => ({ name: s.slice(0, 80), from: null });
+    const field = f.tag === "input" || f.tag === "textarea" || f.tag === "select";
+    if (clean(f.labelledBy)) return named(clean(f.labelledBy));
+    if (f.ariaLabel) {
+      if (clean(f.ariaLabel)) return named(clean(f.ariaLabel));
+      return { name: "", from: field ? "fallback" : null };
+    }
+    if (f.tag === "img") return named(clean(f.alt));
+    if (f.live && clean(f.text)) return named(clean(f.text));
+    const labels = f.labels.map(clean).filter(Boolean).join(" ");
+    if (labels) return named(labels);
+    if (field) {
+      const t = f.inputType;
+      if (t === "submit" || t === "reset" || t === "button") {
+        if (clean(f.value)) return named(clean(f.value));
+        // The browser's own text: what a user sees on the button.
+        if (t !== "button") return named(t === "submit" ? "Submit" : "Reset");
+      }
+      if (t === "image" && clean(f.alt)) return named(clean(f.alt));
+      if (clean(f.title)) return named(clean(f.title));
+      if (f.tag !== "select" && clean(f.placeholder)) return { name: clean(f.placeholder).slice(0, 80), from: "placeholder" };
+      return { name: (clean(f.nameAttr) || t || f.tag).slice(0, 80), from: "fallback" };
+    }
+    if (clean(f.text)) return named(clean(f.text));
+    return named(clean(f.title));
+  }`;
+
+/** The facts NAME_FACTS_SRC reads, as PICK_NAME_SRC takes them. */
+export interface NameFacts {
+  tag: string;
+  inputType: string;
+  labelledBy: string;
+  ariaLabel: string | null;
+  labels: string[];
+  title: string;
+  placeholder: string;
+  nameAttr: string;
+  value: string;
+  alt: string;
+  live: boolean;
+  text: string;
+}
+
+/**
+ * PICK_NAME_SRC run outside a page, from the same source the page runs, so a
+ * table test exercises exactly the rule the collector ships.
+ */
+export function pickName(facts: NameFacts): { name: string; from: NameFrom | null } {
+  return (new Function(`return (${PICK_NAME_SRC});`)() as (f: NameFacts) => { name: string; from: NameFrom | null })(facts);
+}
+
+/** The element's name and where a field's came from, as page-side source. */
+export const NAME_SRC = `(el) => (${PICK_NAME_SRC})((${NAME_FACTS_SRC})(el))`;
+
+/**
  * The collector's accessible name, as page-side source. Exported for the same
  * reason as XPATH_OF_SRC: a page-side probe that names an element (forms.ts)
  * must name it exactly as the snapshot did, or the two cannot be compared.
  */
-export const ACCESSIBLE_NAME_SRC = `(el) => {
-    const aria = el.getAttribute("aria-label");
-    if (aria) return aria.trim();
-    // aria-labelledby before any fallback: it is the standard way to name an
-    // icon-only control from adjacent text, and skipping it made exactly those
-    // buttons report an empty name — which then read as an a11y defect the app
-    // did not actually have, and made the element harder to target.
-    const labelledBy = el.getAttribute("aria-labelledby");
-    if (labelledBy) {
-      const named = labelledBy
-        .split(/\\s+/)
-        .map((id) => {
-          const n = document.getElementById(id);
-          return n && n.textContent ? n.textContent.trim() : "";
-        })
-        .filter(Boolean)
-        .join(" ");
-      if (named) return named.replace(/\\s+/g, " ").slice(0, 80);
+export const ACCESSIBLE_NAME_SRC = `(el) => (${NAME_SRC})(el).name`;
+
+/**
+ * What the label policy reads of an element besides its name (policy.ts
+ * destructiveLabelOf), as page-side source shared by the snapshot and the
+ * live re-check before an action, so the two cannot judge differently.
+ *
+ * `ownText`: the label the element is given (aria-label, aria-labelledby),
+ * then its text without the text of the controls inside it.
+ * `centre`: the labels of the controls inside it whose boxes cover the
+ * element's centre point, which is where a click on the element lands. Boxes,
+ * not a hit test, so it reads the same whether or not the element is scrolled
+ * into view, and every covering control is named, not only the topmost.
+ */
+export const POLICY_TEXT_SRC = `(el) => {
+    const CONTROL = 'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="tab"], [role="menuitem"], ' +
+      '[role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="listbox"], [onclick]';
+    const parts = [];
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const owner = node.parentElement && node.parentElement.closest(CONTROL);
+      if (owner && owner !== el && el.contains(owner)) continue;
+      const t = (node.textContent || "").trim();
+      if (t) parts.push(t);
+      if (parts.join(" ").length > 400) break;
     }
-    const tag = el.tagName.toLowerCase();
-    // An image's name is its alt text. Without this an <img> read as
-    // "(unnamed)" even when it was labelled, and a missing alt looked the same
-    // as a present one.
-    if (tag === "img") return (el.getAttribute("alt") || "").trim().slice(0, 80);
-    if (tag === "input" || tag === "textarea") {
-      const id = el.getAttribute("id");
-      if (id) {
-        const label = document.querySelector('label[for="' + CSS.escape(id) + '"]');
-        if (label && label.textContent) return label.textContent.trim();
-      }
-      return (el.getAttribute("placeholder") || el.getAttribute("name") || el.type || "input").trim();
+    // A label the element is given (aria-label, aria-labelledby) is its own: an icon-only control's only name.
+    const given = [el.getAttribute("aria-label") || ""].concat((el.getAttribute("aria-labelledby") || "").split(/\\s+/).filter(Boolean).map((id) => {
+      const n = document.getElementById(id);
+      return n ? n.textContent || "" : "";
+    })).join(" ").trim();
+    const ownText = (given + " " + parts.join(" ")).replace(/\\s+/g, " ").trim().slice(0, 400);
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const centre = [];
+    for (const c of Array.from(el.querySelectorAll(CONTROL))) {
+      const b = c.getBoundingClientRect();
+      if (b.width === 0 || b.height === 0 || cx < b.left || cx > b.right || cy < b.top || cy > b.bottom) continue;
+      const label = (c.getAttribute("aria-label") || c.innerText || c.textContent || c.getAttribute("value") || "").trim().replace(/\\s+/g, " ").slice(0, 120);
+      if (label && centre.length < 10) centre.push(label);
+      const tid = c.getAttribute("data-testid");
+      if (tid && centre.length < 10) centre.push(tid);
     }
-    const text = el.innerText || el.textContent || "";
-    return text.trim().replace(/\\s+/g, " ").slice(0, 80);
+    return { ownText, centre };
   }`;
 
 /**
@@ -101,37 +224,58 @@ export const DIALOG_LIKE_SEL = '[role="dialog"], [role="alertdialog"], dialog[op
 export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
   const xpathOf = ${XPATH_OF_SRC};
   const visible = ${VISIBLE_SRC};
-  const accessibleName = ${ACCESSIBLE_NAME_SRC};
-  // Whether a field's accessibleName came from something that is not a label. The
-  // name falls back to the placeholder, then the name attribute, then the type,
-  // so every field can be told apart and targeted, and it is half of the
-  // element's key, which project memory keeps across runs: it stays as it is.
-  // This says what the fallback hides. A real label is aria-label,
-  // aria-labelledby, a <label> (for= or wrapping, read through el.labels),
-  // title, or for a button-like input its value or the browser's default text.
-  // "placeholder" when the placeholder is all there is, "fallback" when not even
-  // that, null when the field is labelled or is not a field.
-  const nameFrom = (el) => {
-    const tag = el.tagName.toLowerCase();
-    if (tag !== "input" && tag !== "textarea") return null;
-    if ((el.getAttribute("aria-label") || "").trim()) return null;
-    const labelledBy = (el.getAttribute("aria-labelledby") || "").split(/\\s+/).filter(Boolean);
-    if (labelledBy.some((id) => { const n = document.getElementById(id); return n && (n.textContent || "").trim(); })) return null;
-    for (const label of Array.from(el.labels || [])) {
-      // A wrapping label's text includes a textarea's own content; that is not a label.
-      const own = label.contains(el) ? el.textContent || "" : "";
-      if ((label.textContent || "").replace(own, "").trim()) return null;
-    }
-    if ((el.getAttribute("title") || "").trim()) return null;
-    const type = tag === "input" ? el.type : "";
-    if (type === "submit" || type === "reset") return null;
-    if (type === "button" && (el.value || "").trim()) return null;
-    if (type === "image" && (el.getAttribute("alt") || "").trim()) return null;
-    return (el.getAttribute("placeholder") || "").trim() ? "placeholder" : "fallback";
-  };
-  const selector =
+  const nameOf = ${NAME_SRC};
+  const policyText = ${POLICY_TEXT_SRC};
+  // What the collector lists before anything else: controls, and anything the
+  // app tagged with a test id so it can be targeted.
+  const controlSelector =
     'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="tab"], ' +
     '[role="menuitem"], [role="checkbox"], [role="switch"], [role="combobox"], [onclick], [data-testid]';
+  // Live regions: what a page announces after an action (an error banner, a
+  // "Saved" status). Listed whether or not the app tagged them, because what
+  // the user is told must not depend on a test id. Those listed only for this
+  // are marked liveOnly: they are read, not acted on.
+  const liveSelector = '[role="alert"], [role="alertdialog"], [role="status"], [aria-live]:not([aria-live="off"]), output';
+  const selector = controlSelector + ", " + liveSelector;
+  // Whether a user can act on the element: a native control, an interactive
+  // role, a tab stop, a click handler, or a pointer cursor it sets itself (a
+  // cursor inherited from a clickable card is the card's, not its badge's).
+  // Everything else listed is here for its test id or its text, and is neither
+  // an unnamed control nor a gap in coverage.
+  const CONTROL_ROLES = /^(button|link|tab|menuitem|menuitemcheckbox|menuitemradio|checkbox|radio|switch|combobox|textbox|searchbox|slider|spinbutton|option|treeitem)$/;
+  const isInteractive = (el) => {
+    if (el.matches('a[href], button, input, select, textarea, summary, [contenteditable="true"], [contenteditable=""]')) return true;
+    if (CONTROL_ROLES.test(el.getAttribute("role") || "")) return true;
+    const tabindex = el.getAttribute("tabindex");
+    if (tabindex !== null && tabindex.trim() !== "" && Number(tabindex) >= 0) return true;
+    if (el.hasAttribute("onclick") || typeof el.onclick === "function") return true;
+    if (window.getComputedStyle(el).cursor === "pointer") {
+      const parent = el.parentElement;
+      return !parent || window.getComputedStyle(parent).cursor !== "pointer";
+    }
+    return false;
+  };
+  // A horizontally scrolling container a control sits outside of: the control
+  // is reachable, by a sideways scroll of that container, but nothing on screen
+  // shows it is there. Carousels (scroll-snap) page sideways by design and are
+  // left out. Returns how to name the container, or null.
+  const scrolledOutIn = (el, rect) => {
+    for (let anc = el.parentElement; anc && anc !== document.body && anc !== document.documentElement; anc = anc.parentElement) {
+      const as = window.getComputedStyle(anc);
+      if ((as.overflowX === "auto" || as.overflowX === "scroll") && anc.scrollWidth > anc.clientWidth + 1) {
+        if (as.scrollSnapType && as.scrollSnapType !== "none") return null;
+        const left = anc.getBoundingClientRect().left + anc.clientLeft;
+        const cx = rect.left + rect.width / 2;
+        if (cx >= left && cx <= left + anc.clientWidth) return null;
+        const tid = anc.getAttribute("data-testid");
+        if (tid) return "[" + tid + "]";
+        const label = (anc.getAttribute("aria-label") || "").trim().slice(0, 40);
+        return "<" + anc.tagName.toLowerCase() + (anc.id ? "#" + anc.id : "") + ">" + (label ? ' "' + label + '"' : "");
+      }
+      if (as.position === "fixed") return null;
+    }
+    return null;
+  };
   const seen = new Set();
   const out = [];
   // Positioning/scroll LAYER + CHROME classification, for the overlap oracle.
@@ -263,6 +407,10 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
           : inputType === "file" ? "file"
           : "textbox")
         : tag === "img" ? "image"
+        // An aria-live region without a role announces like one: assertive
+        // interrupts as an alert does, polite waits as a status does.
+        : tag === "output" ? "status"
+        : el.hasAttribute("aria-live") && el.getAttribute("aria-live") !== "off" ? (el.getAttribute("aria-live") === "assertive" ? "alert" : "status")
         : "generic");
     const rect = el.getBoundingClientRect();
     // Below-the-fold is reachable (scroll); clipped INSIDE an overflow-hidden
@@ -297,13 +445,29 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
         anc = anc.parentElement;
       }
     }
+    const named = nameOf(el);
+    const interactive = isInteractive(el);
+    const checkable = tag === "input" && (inputType === "checkbox" || inputType === "radio");
     out.push({
       coveredBy: coveredByPinnedChrome(el, rect, role),
       tag,
       role,
-      name: accessibleName(el),
-      nameFrom: nameFrom(el),
+      name: named.name,
+      ...policyText(el),
+      nameFrom: named.from,
       testid: el.getAttribute("data-testid"),
+      interactive,
+      ariaHidden: el.closest('[aria-hidden="true"]') !== null,
+      liveOnly: !el.matches(controlSelector),
+      state: {
+        pressed: el.getAttribute("aria-pressed"),
+        selected: el.getAttribute("aria-selected"),
+        checked: checkable ? String(el.checked) : el.getAttribute("aria-checked"),
+        expanded: el.getAttribute("aria-expanded"),
+        current: el.getAttribute("aria-current"),
+      },
+      // Only controls: a tagged cell or row out of view is not something the user has to reach.
+      scrolledOutIn: ePos === "fixed" || clippedByAncestor || !interactive ? null : scrolledOutIn(el, rect),
       xpath: xpathOf(el),
       disabled: el.disabled === true || el.getAttribute("aria-disabled") === "true",
       href: tag === "a" ? el.getAttribute("href") : null,
@@ -344,9 +508,72 @@ export type NameFrom = "placeholder" | "fallback";
  * type is unnamed too: the collector fills those in so the field can be
  * targeted, but nothing announces them.
  */
-export function missingName(el: { role: string; name: string; nameFrom?: NameFrom | null }): boolean {
+export function missingName(el: { role: string; name: string; nameFrom?: NameFrom | null; interactive?: boolean; ariaHidden?: boolean }): boolean {
+  // Listed for its test id or its text, not a control: a decorative badge, a
+  // page wrapper. Absent on elements collected before the collector said.
+  if (el.interactive === false) return false;
+  // Hidden from assistive technology on purpose: nothing announces it, so it needs no name.
+  if (el.ariaHidden) return false;
   if (el.nameFrom === "fallback") return true;
   return !el.name && !LIVE_REGION_ROLES.has(el.role);
+}
+
+/** An element's ARIA state as the collector reads it: each attribute's value, or null when absent. */
+export interface ElementState {
+  pressed?: string | null;
+  selected?: string | null;
+  /** A native checkbox or radio's checked property ("true"/"false"), else aria-checked. */
+  checked?: string | null;
+  expanded?: string | null;
+  current?: string | null;
+}
+
+/**
+ * The snapshot's state markers: which filter is active, which tab is chosen,
+ * which box is ticked, which section is open. Only states that are on are
+ * shown, so a page of plain buttons stays as short as it was.
+ */
+export function stateFlags(state: ElementState | undefined): string[] {
+  if (!state) return [];
+  const flags: string[] = [];
+  if (state.pressed === "true") flags.push("pressed");
+  else if (state.pressed === "mixed") flags.push("partly pressed");
+  if (state.selected === "true") flags.push("selected");
+  if (state.checked === "true") flags.push("checked");
+  else if (state.checked === "mixed") flags.push("partly checked");
+  if (state.expanded === "true") flags.push("expanded");
+  if (state.current && state.current !== "false") flags.push("current");
+  return flags;
+}
+
+/**
+ * How the snapshot diff says an element's state moved: what it gained, then
+ * what it lost. Null when the state is the same.
+ */
+export function stateChange(was: readonly string[], now: readonly string[]): string | null {
+  const gained = now.filter((f) => !was.includes(f));
+  const lost = was.filter((f) => !now.includes(f));
+  if (gained.length === 0 && lost.length === 0) return null;
+  return [gained.length ? `now [${gained.join(", ")}]` : null, lost.length ? `no longer [${lost.join(", ")}]` : null].filter(Boolean).join(", ");
+}
+
+/**
+ * The elements a state's identity and coverage are kept over: all but the
+ * live regions listed only for what they say. Their text changes with every
+ * message, so in a fingerprint they would make each message a new state, and
+ * nothing in them can be exercised.
+ */
+export function trackedElements<T extends { liveOnly?: boolean }>(elements: readonly T[]): T[] {
+  return elements.filter((el) => !el.liveOnly);
+}
+
+/**
+ * Keys of tracked elements a user cannot act on: listed for their test id (a
+ * wrapper, a heading, a badge). Coverage leaves them out of what there is to
+ * exercise, or the denominator counts page structure as untested controls.
+ */
+export function inertKeys(elements: ReadonlyArray<{ key: string; interactive?: boolean; liveOnly?: boolean }>): string[] {
+  return elements.filter((el) => !el.liveOnly && el.interactive === false).map((el) => el.key);
 }
 
 /**
@@ -408,6 +635,7 @@ export function geometryIssues(
     layer?: number;
     chrome?: boolean;
     coveredBy?: string | null;
+    scrolledOutIn?: string | null;
   }>,
   viewport: { width: number; height: number },
 ): string[] {
@@ -452,6 +680,20 @@ export function geometryIssues(
     }
   }
   if (coveredTotal > 3) issues.push(`…and ${coveredTotal - 3} more pinned controls covered by other pinned chrome`);
+  // Controls a horizontally scrolling container holds outside its visible
+  // width (the last column of a wide table): reachable by a sideways scroll,
+  // but nothing on screen says they are there. One line per container, since
+  // a table repeats its row actions; a layout choice, so worded as one.
+  const sideways = new Map<string, number>();
+  for (const el of elements) {
+    if (el.scrolledOutIn && el.rect.w > 0 && el.rect.h > 0) sideways.set(el.scrolledOutIn, (sideways.get(el.scrolledOutIn) ?? 0) + 1);
+  }
+  for (const [container, n] of [...sideways].slice(0, 2)) {
+    issues.push(
+      `${n} control${n === 1 ? " is" : "s are"} scrolled out of view inside a horizontally scrolling container ${container} — only a sideways scroll of it shows ${n === 1 ? "it" : "them"}; worth a look at this width, not necessarily a defect`,
+    );
+  }
+  if (sideways.size > 2) issues.push(`…and ${sideways.size - 2} more horizontally scrolling containers holding controls out of view`);
   const overlapArea = (a: Rect, b: Rect): number => {
     const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
     const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
@@ -513,6 +755,90 @@ export const BROKEN_IMAGES_SCRIPT = `(() => {
   }
   return { images, total };
 })()`;
+
+/**
+ * What the page's main region holds besides controls, read in the page: its
+ * first heading, its paragraphs and how much static text it has. A main area
+ * with a heading and an empty-state sentence lists no controls, and without
+ * this it reads exactly like a main area that rendered nothing.
+ *
+ * The region is the `<main>` or `[role=main]` landmark; without one, the body
+ * less its banner, navigation, complementary and footer regions. Static text
+ * is visible text outside controls (links, buttons, fields, options), so a
+ * page of nothing but a nav does not count as having content. The text walk
+ * stops after 5000 text nodes.
+ */
+export const MAIN_REGION_SCRIPT = `(() => {
+  const shown = (n) => !!n && (n.offsetWidth > 0 || n.offsetHeight > 0 || n.getClientRects().length > 0) && window.getComputedStyle(n).visibility !== "hidden";
+  const landmarks = Array.from(document.querySelectorAll('main, [role="main"]')).filter(shown);
+  const landmark = landmarks[0] || null;
+  const region = landmark || document.body;
+  if (!region) return { landmark: false, heading: null, paragraphs: 0, chars: 0, controls: 0, media: 0 };
+  const CHROME = 'header, nav, footer, aside, [role="banner"], [role="navigation"], [role="contentinfo"], [role="complementary"]';
+  const outside = (n) => !landmark && !!n.closest(CHROME);
+  const CONTROL = 'a[href], button, input, select, textarea, option, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="checkbox"], [role="switch"], [role="combobox"]';
+  const inRegion = (sel) => Array.from(region.querySelectorAll(sel)).filter((n) => shown(n) && !outside(n));
+  const headings = inRegion('h1, h2, h3, h4, h5, h6, [role="heading"]').filter((n) => (n.textContent || "").trim());
+  const h = headings.find((n) => n.tagName === "H1") || headings[0] || null;
+  const level = h ? (/^H[1-6]$/.test(h.tagName) ? Number(h.tagName[1]) : Number(h.getAttribute("aria-level") || 2)) : 0;
+  const heading = h ? { level, text: (h.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 60) } : null;
+  const paragraphs = inRegion("p").filter((n) => (n.textContent || "").trim()).length;
+  let chars = 0;
+  let seen = 0;
+  const walker = document.createTreeWalker(region, NodeFilter.SHOW_TEXT);
+  for (let t = walker.nextNode(); t && seen < 5000; t = walker.nextNode()) {
+    seen += 1;
+    const parent = t.parentElement;
+    if (!parent || parent.closest('script, style, noscript, template, [aria-hidden="true"]') || parent.closest(CONTROL) || outside(parent) || !shown(parent)) continue;
+    chars += (t.textContent || "").replace(/\\s+/g, " ").trim().length;
+  }
+  return {
+    landmark: !!landmark,
+    heading,
+    paragraphs,
+    chars,
+    controls: inRegion(CONTROL).length,
+    media: inRegion("img, svg, video, canvas, iframe, object, embed").length,
+  };
+})()`;
+
+/** What MAIN_REGION_SCRIPT reports. */
+export interface MainRegion {
+  /** A `<main>`/`[role=main]` landmark was found; false means the body less its chrome was read instead. */
+  landmark: boolean;
+  heading: { level: number; text: string } | null;
+  paragraphs: number;
+  chars: number;
+  controls: number;
+  media: number;
+}
+
+/** Nothing at all in the region: no heading, no text, no control, no image or embed. */
+function mainIsEmpty(m: MainRegion): boolean {
+  return !m.heading && m.chars === 0 && m.controls === 0 && m.media === 0;
+}
+
+/**
+ * The snapshot's one line on the main region, e.g.
+ * `main: h1 "Orders" · 2 paragraphs · 180 chars of static text`, or
+ * `main: EMPTY`. Named `content` when the page has no main landmark.
+ */
+export function mainRegionLine(m: MainRegion): string {
+  const where = m.landmark ? "main" : "content (no main landmark)";
+  if (mainIsEmpty(m)) return `${where}: EMPTY`;
+  const parts = [
+    m.heading ? `h${m.heading.level} "${m.heading.text}"` : null,
+    m.paragraphs > 0 ? `${m.paragraphs} paragraph${m.paragraphs === 1 ? "" : "s"}` : null,
+    m.chars > 0 ? `${m.chars} chars of static text` : "no static text",
+  ].filter(Boolean);
+  return `${where}: ${parts.join(" · ")}`;
+}
+
+/** The same in a crawl line's few words: `main 180 chars`, or `main EMPTY`. */
+export function mainRegionTag(m: MainRegion): string {
+  const where = m.landmark ? "main" : "content";
+  return mainIsEmpty(m) ? `${where} EMPTY` : `${where} ${m.chars} chars`;
+}
 
 export interface BrokenImage {
   alt: string;

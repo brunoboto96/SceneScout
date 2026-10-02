@@ -26,6 +26,14 @@ import {
   capForeignName,
   stripForeignHref,
   frameToPageRect,
+  pickName,
+  type NameFacts,
+  stateFlags,
+  stateChange,
+  trackedElements,
+  inertKeys,
+  mainRegionLine,
+  mainRegionTag,
 } from "../src/engine/collector.ts";
 import { EventEmitter } from "node:events";
 import vm from "node:vm";
@@ -45,9 +53,12 @@ import {
   EmbedRequestLog,
   OracleMonitor,
   POLICY_BLOCK_WINDOW_MS,
+  REPLAY_ECHO_WINDOW_MS,
+  ReplayLog,
   failedLoadEchoOf,
   formatViolations,
   isPolicyInduced,
+  isRouteCancellation,
   redactViolation,
 } from "../src/engine/oracles.ts";
 import {
@@ -459,6 +470,135 @@ test("an empty live region is not an unnamed control; an empty button still is",
   assert.equal(displayName({ role: "status", name: "Saved." }), "Saved.");
 });
 
+test("the accessible name follows the computation's order: aria-labelledby, aria-label, label, title, placeholder", () => {
+  const facts = (over: Partial<NameFacts>): NameFacts => ({
+    tag: "input",
+    inputType: "text",
+    labelledBy: "",
+    ariaLabel: null,
+    labels: [],
+    title: "",
+    placeholder: "",
+    nameAttr: "",
+    value: "",
+    alt: "",
+    live: false,
+    text: "",
+    ...over,
+  });
+  const cases: Array<[string, Partial<NameFacts>, { name: string; from: "placeholder" | "fallback" | null }]> = [
+    // Each source wins over every one after it.
+    ["aria-labelledby before aria-label", { labelledBy: "Caption", ariaLabel: "Aria", labels: ["Label"] }, { name: "Caption", from: null }],
+    ["aria-label before a label", { ariaLabel: "Aria", labels: ["Label"], title: "Title" }, { name: "Aria", from: null }],
+    ["a label before title", { labels: ["Label"], title: "Title", placeholder: "Hint" }, { name: "Label", from: null }],
+    ["title before placeholder", { title: "Title", placeholder: "Hint", nameAttr: "q" }, { name: "Title", from: null }],
+    ["placeholder before the name attribute", { placeholder: "Hint", nameAttr: "q" }, { name: "Hint", from: "placeholder" }],
+    ["then the name attribute", { nameAttr: "q" }, { name: "q", from: "fallback" }],
+    ["then the type", {}, { name: "text", from: "fallback" }],
+    // A radio wrapped in a label (NAME_FACTS_SRC strips the control's own text from it) against one with only a name.
+    ["a wrapped radio is named by its label", { inputType: "radio", nameAttr: "fmt", labels: ["  Alpha "] }, { name: "Alpha", from: null }],
+    ["an unwrapped radio falls back to its name attribute", { inputType: "radio", nameAttr: "fmt" }, { name: "fmt", from: "fallback" }],
+    // A select is named by its label, never by its options' text.
+    ["a labelled select", { tag: "select", inputType: "", labels: ["Country "], text: "France Spain" }, { name: "Country", from: null }],
+    ["an unlabelled select", { tag: "select", inputType: "", nameAttr: "country", text: "France Spain" }, { name: "country", from: "fallback" }],
+    ["a select ignores a placeholder attribute", { tag: "select", inputType: "", placeholder: "Pick" }, { name: "select", from: "fallback" }],
+    // A button-like input is named by its value, or the browser's own text.
+    ["a submit input by its value", { inputType: "submit", value: "Send", nameAttr: "go" }, { name: "Send", from: null }],
+    ["a submit input with no value", { inputType: "submit" }, { name: "Submit", from: null }],
+    // An icon-only button: its title, or nothing.
+    ["an icon button with a title", { tag: "button", inputType: "", title: "Download file" }, { name: "Download file", from: null }],
+    ["an icon button with neither text nor title", { tag: "button", inputType: "" }, { name: "", from: null }],
+    ["a button's text before its title", { tag: "button", inputType: "", text: "Save", title: "Save the draft" }, { name: "Save", from: null }],
+    // A live region is named by what it announces.
+    [
+      "a live region by its text",
+      { tag: "div", inputType: "", live: true, ariaLabel: null, labels: ["Result"], text: " Could not save " },
+      { name: "Could not save", from: null },
+    ],
+    ["an image by its alt", { tag: "img", inputType: "", alt: "Logo", title: "Home" }, { name: "Logo", from: null }],
+    // Kept as before: a whitespace-only aria-label ends the name, and the field reads as unnamed.
+    ["a blank aria-label hides the placeholder", { ariaLabel: "  ", placeholder: "Hint" }, { name: "", from: "fallback" }],
+    ["an empty aria-label is no aria-label", { ariaLabel: "", placeholder: "Hint" }, { name: "Hint", from: "placeholder" }],
+  ];
+  for (const [label, over, want] of cases) assert.deepEqual(pickName(facts(over)), want, label);
+  assert.equal(pickName(facts({ labels: ["x".repeat(200)] })).name.length, 80, "a name is capped");
+});
+
+test("an element listed for its test id is not an unnamed control; an icon button with no name still is", () => {
+  // The same empty name; only whether a user can act on it, or whether it is hidden from assistive technology, differs.
+  assert.equal(missingName({ role: "generic", name: "", interactive: false }), false, "a decorative badge");
+  assert.equal(missingName({ role: "generic", name: "", interactive: true, ariaHidden: true }), false, "an aria-hidden dot");
+  assert.equal(missingName({ role: "button", name: "", interactive: true, ariaHidden: false }), true, "an icon-only button");
+  assert.equal(missingName({ role: "textbox", name: "q", nameFrom: "fallback", interactive: true }), true, "a field named by its name attribute");
+});
+
+test("only the live regions listed for their text leave a state's identity, and only non-controls leave coverage", () => {
+  const els = [
+    { key: "button:save", interactive: true },
+    { key: "tid:wrapper", interactive: false },
+    { key: "live:alert", interactive: false, liveOnly: true },
+    { key: "button:old" },
+  ];
+  assert.deepEqual(
+    trackedElements(els).map((e) => e.key),
+    ["button:save", "tid:wrapper", "button:old"],
+  );
+  assert.deepEqual(inertKeys(els), ["tid:wrapper"], "an element collected before the collector said is counted, as before");
+});
+
+test("state markers show what is on, and the diff says how it moved", () => {
+  assert.deepEqual(stateFlags(undefined), []);
+  assert.deepEqual(stateFlags({ pressed: "false", selected: "false", checked: "false", expanded: "false", current: "false" }), []);
+  assert.deepEqual(stateFlags({ pressed: "true" }), ["pressed"]);
+  assert.deepEqual(stateFlags({ selected: "true", expanded: "true" }), ["selected", "expanded"]);
+  assert.deepEqual(stateFlags({ checked: "true" }), ["checked"]);
+  assert.deepEqual(stateFlags({ checked: "mixed", pressed: "mixed" }), ["partly pressed", "partly checked"]);
+  assert.deepEqual(stateFlags({ current: "page" }), ["current"]);
+  assert.deepEqual(stateFlags({ pressed: null, current: null }), []);
+  assert.equal(stateChange([], []), null);
+  assert.equal(stateChange(["pressed"], ["pressed"]), null);
+  assert.equal(stateChange([], ["pressed"]), "now [pressed]");
+  assert.equal(stateChange(["pressed"], []), "no longer [pressed]");
+  assert.equal(stateChange(["selected"], ["expanded"]), "now [expanded], no longer [selected]");
+});
+
+test("the main-region line tells a page of text from a main area that rendered nothing", () => {
+  const withText = { landmark: true, heading: { level: 1, text: "Title" }, paragraphs: 1, chars: 21, controls: 0, media: 0 };
+  const empty = { landmark: true, heading: null, paragraphs: 0, chars: 0, controls: 0, media: 0 };
+  assert.equal(mainRegionLine(withText), 'main: h1 "Title" · 1 paragraph · 21 chars of static text');
+  assert.equal(mainRegionLine(empty), "main: EMPTY");
+  assert.equal(mainRegionTag(withText), "main 21 chars");
+  assert.equal(mainRegionTag(empty), "main EMPTY");
+  // A main area holding only controls, or only an image or embed, is not empty.
+  assert.equal(mainRegionLine({ ...empty, controls: 3 }), "main: no static text");
+  assert.equal(mainRegionLine({ ...empty, media: 1 }), "main: no static text");
+  assert.equal(
+    mainRegionLine({ ...withText, paragraphs: 2, landmark: false }),
+    'content (no main landmark): h1 "Title" · 2 paragraphs · 21 chars of static text',
+  );
+  assert.equal(mainRegionTag({ ...empty, landmark: false }), "content EMPTY");
+});
+
+test("controls held outside a horizontally scrolling container's visible width are one worth-a-look line per container", () => {
+  const row = (i: number, scrolledOutIn: string | null) => ({
+    ref: `e${i}`,
+    name: "Edit",
+    role: "button",
+    xpath: `/html/body/div[1]/table[1]/tbody[1]/tr[${i}]/td[6]/button[1]`,
+    rect: { x: 900, y: 100 + i * 40, w: 60, h: 30 },
+    scrolledOutIn,
+  });
+  // A 600px wrapper around a 1200px table: its last column is out of view.
+  const wide = geometryIssues([row(1, "[table-wrap]"), row(2, "[table-wrap]"), row(3, "[table-wrap]")], { width: 1280, height: 900 });
+  assert.deepEqual(wide, [
+    "3 controls are scrolled out of view inside a horizontally scrolling container [table-wrap] — only a sideways scroll of it shows them; worth a look at this width, not necessarily a defect",
+  ]);
+  // The same table narrow enough to fit: the collector marks nothing, and nothing is said.
+  assert.deepEqual(geometryIssues([row(1, null), row(2, null), row(3, null)], { width: 1280, height: 900 }), []);
+  const one = geometryIssues([row(1, "<div#wrap>")], { width: 1280, height: 900 });
+  assert.match(one[0], /^1 control is scrolled out of view inside a horizontally scrolling container <div#wrap> — only a sideways scroll of it shows it;/);
+});
+
 test("a field's shown name is not a label when it came from its placeholder, name attribute or type", () => {
   // The same shown name each time; only where it came from differs.
   const labelled = { role: "textbox", name: "Your email", nameFrom: null };
@@ -828,5 +968,127 @@ test("postMessage capture: binary buffers and huge arrays are not walked, and a 
   assert.deepEqual(
     tokenHits([sent]).map((h) => h.path),
     ["data(json).session.access_token"],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The tester's own scout_request probes are not the page's violations.
+// ---------------------------------------------------------------------------
+
+/** A fake page and a monitor on it; requests carry a `replay` flag the engine's identity check reads. */
+function monitored(): { page: EventEmitter & { url: () => string }; monitor: OracleMonitor } {
+  const page = Object.assign(new EventEmitter(), { url: () => "http://app.test/things" });
+  const monitor = new OracleMonitor();
+  monitor.setReplayCheck((r) => (r as unknown as { replay: boolean }).replay);
+  monitor.attach(page as unknown as Page);
+  return { page, monitor };
+}
+const fakeResponse = (url: string, status: number, replay: boolean) => {
+  const request = { url: () => url, method: () => "GET", replay };
+  return { status: () => status, url: () => url, request: () => request };
+};
+const failedLoad = (url: string) => ({
+  type: () => "error",
+  text: () => "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+  location: () => ({ url, lineNumber: 0, columnNumber: 0 }),
+});
+
+test("OracleMonitor: a refused scout_request probe and its console echo are not the page's violations", () => {
+  const { page, monitor } = monitored();
+  const url = "http://app.test/api/things/9";
+  monitor.replayStarted(url);
+  page.emit("response", fakeResponse(url, 403, true));
+  page.emit("console", failedLoad(url));
+  monitor.replayEnded(url);
+  assert.deepEqual(monitor.drain(), []);
+  assert.equal(monitor.replayAttributed, 2, "counted, not silently dropped");
+});
+
+test("OracleMonitor: the same 403 fetched by the page itself is still reported", () => {
+  const { page, monitor } = monitored();
+  const url = "http://app.test/api/things/9";
+  page.emit("response", fakeResponse(url, 403, false));
+  page.emit("console", failedLoad(url));
+  assert.deepEqual(
+    monitor.drain().map((v) => `${v.severity} ${v.kind}`),
+    ["medium http_error", "high console_error"],
+  );
+  assert.equal(monitor.replayAttributed, 0);
+});
+
+test("ReplayLog: a replay's echo is matched by address while in flight and for a short window after", () => {
+  const log = new ReplayLog();
+  const page = "http://app.test/things";
+  const echo = "Failed to load resource: the server responded with a status of 404 (Not Found)";
+  const url = "http://app.test/api/things/9";
+  assert.equal(log.echoes(echo, url, page, 0), false, "nothing replayed yet");
+  log.begin(url);
+  assert.equal(log.echoes(echo, url, page, 10_000), true, "in flight, however long it takes");
+  log.end(url, 1000);
+  assert.equal(log.echoes(echo, `${url}#frag`, page, 1000 + REPLAY_ECHO_WINDOW_MS), true, "the fragment is never sent");
+  assert.equal(log.echoes(echo, "http://app.test/api/things/10", page, 1001), false, "another address is the page's");
+  assert.equal(log.echoes("Uncaught TypeError: x is undefined", url, page, 1001), false, "only the failed-load echo");
+  assert.equal(log.echoes(echo, url, page, 1001 + REPLAY_ECHO_WINDOW_MS), false, "past the window the address is the page's again");
+  // A redirect hop is begun and ended like the call itself, so it does not stay the replay's for the session.
+  const hop = "http://app.test/login";
+  log.begin(hop);
+  log.end(hop, 5000);
+  assert.equal(log.echoes(echo, hop, page, 5000 + REPLAY_ECHO_WINDOW_MS + 1), false);
+});
+
+// ---------------------------------------------------------------------------
+// A router cancelling a route change on purpose (isRouteCancellation).
+// ---------------------------------------------------------------------------
+
+test("isRouteCancellation: a click that stayed put and opened a confirmation, or says it cancelled a route", () => {
+  const click = { byClick: true, viaLink: true, urlChanged: false, dialogOpened: true };
+  const plain = "Navigation cancelled: unsaved changes";
+  const cases: Array<[string, typeof click, boolean, string]> = [
+    [plain, click, true, "a link click that opened a confirmation instead of moving"],
+    [plain, { ...click, dialogOpened: false }, false, "the same throw with no dialog"],
+    [plain, { ...click, viaLink: false }, false, "a button with no route asked for"],
+    [plain, { ...click, urlChanged: true }, false, "the URL moved: not a cancellation"],
+    [plain, { ...click, byClick: false }, false, "not raised by a click"],
+    ["Route change aborted", { ...click, viaLink: false, dialogOpened: false }, true, "the wording names a cancelled route"],
+    ["Abort fetching component for route: /things", { ...click, viaLink: false, dialogOpened: false }, true, "either order"],
+    ["Route change aborted", { ...click, urlChanged: true }, false, "but never when the URL moved"],
+    ["Cannot read properties of undefined (reading 'route')", { ...click, viaLink: false, dialogOpened: false }, false, "a crash that mentions a route"],
+    ["Request aborted", { ...click, viaLink: false, dialogOpened: false }, false, "an abort with no route"],
+  ];
+  for (const [message, c, want, why] of cases) assert.equal(isRouteCancellation(message, c), want, why);
+});
+
+test("OracleMonitor: a route-change cancellation is re-ranked medium with a note; a crash stays high", () => {
+  const { page, monitor } = monitored();
+  const since = Date.now();
+  page.emit("pageerror", new Error("Navigation cancelled: unsaved changes"));
+  monitor.downgradeRouteCancellations(since, { byClick: true, viaLink: true, urlChanged: false, dialogOpened: true });
+  const [cancel] = monitor.drain();
+  assert.equal(cancel.severity, "medium");
+  assert.match(cancel.detail, /router cancelling the route change/);
+  assert.match(cancel.detail, /opened a dialog/, "the note names the evidence it was read on");
+
+  page.emit("pageerror", new Error("Route change aborted"));
+  monitor.downgradeRouteCancellations(since, { byClick: true, viaLink: false, urlChanged: false, dialogOpened: false });
+  const [worded] = monitor.drain();
+  assert.equal(worded.severity, "medium");
+  assert.match(worded.detail, /says the route change was cancelled/);
+  assert.doesNotMatch(worded.detail, /dialog/, "no dialog is claimed when none was seen");
+  assert.equal(monitor.all[0].severity, "medium", "the session log holds the same verdict");
+
+  page.emit("pageerror", new Error("Navigation cancelled: unsaved changes"));
+  monitor.downgradeRouteCancellations(since, { byClick: true, viaLink: true, urlChanged: false, dialogOpened: false });
+  const [crash] = monitor.drain();
+  assert.equal(crash.severity, "high");
+  assert.doesNotMatch(crash.detail, /router/);
+});
+
+test("OracleMonitor: a contradiction keeps the severity its rule gave it", () => {
+  const monitor = new OracleMonitor();
+  monitor.noteContradiction({ kind: "false_success", detail: "partial: 1 of 2", evidence: "x", severity: "medium" }, "http://app.test/");
+  monitor.noteContradiction({ kind: "false_success", detail: "all refused", evidence: "y" }, "http://app.test/");
+  assert.deepEqual(
+    monitor.drain().map((v) => v.severity),
+    ["medium", "high"],
   );
 });

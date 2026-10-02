@@ -245,6 +245,39 @@ jobs:
           node dist/cli.js ci http://127.0.0.1:4173 --base-url http://127.0.0.1:4180/v1 --project "$RUNNER_TEMP/ci-cli" > "$RUNNER_TEMP/ci-cli.log" 2>&1
           grep -F "[redacted key]" "$RUNNER_TEMP/ci-cli.log"
           if grep -F "$OPENAI_API_KEY" "$RUNNER_TEMP/ci-cli.log"; then echo "the key was printed"; exit 1; fi
+      # The same run split into two lanes. The stand-in API scripts each lane's
+      # conversation on its own, and every lane files the same finding, which
+      # the run must report once.
+      - name: CI run through the action, in two lanes
+        id: lanes
+        uses: ./ci
+        with:
+          url: http://127.0.0.1:4173
+          cli: dist/cli.js
+          base-url: http://127.0.0.1:4180/v1
+          max-minutes: "5"
+          lanes: "2"
+          project: ${{ runner.temp }}/ci-lanes-project
+          out: ${{ runner.temp }}/ci-lanes
+          upload-artifact: "false"
+          upload-sarif: "false"
+      - name: The two lanes ran, their shared finding was reported once, and no key was written
+        env:
+          OUTCOME: ${{ steps.lanes.outcome }}
+          STOP: ${{ steps.lanes.outputs.stop }}
+          TURNS: ${{ steps.lanes.outputs.turns }}
+          LOW: ${{ steps.lanes.outputs.low }}
+          JSON: ${{ steps.lanes.outputs.json }}
+          OUT: ${{ runner.temp }}/ci-lanes
+        run: |
+          set -x
+          test "$OUTCOME" = success
+          test "$STOP" = done
+          test "$TURNS" = 4
+          test "$LOW" = 1
+          node -e 'const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (j.lanes.ran !== 2) process.exit(1)' "$JSON"
+          set +x # the line below names the key; a trace would print it
+          if grep -rF "$OPENAI_API_KEY" "$OUT"; then echo "the key was written"; exit 1; fi
 
   # The branch ruleset requires ONE check, named "test". A matrix reports one
   # check per cell under changing names, so this job is the stable name that

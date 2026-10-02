@@ -479,6 +479,54 @@ async function liveViewOffCheck(): Promise<void> {
   }
 }
 
+/**
+ * SCENESCOUT_DEDUP=judge turns the dedup judge on for an agent's run, with a
+ * key from the server's environment, and an attach that names `dedup` wins
+ * over it. The attach says when the judge comes on and what it sends, and
+ * when it cannot (no key). No finding is filed, so no model is called.
+ */
+async function dedupJudgeEnvCheck(): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-dedup-"));
+  /** One server with SCENESCOUT_DEDUP=judge and `extra` in its environment, and the replies to attaches made in order. */
+  const attaches = async (extra: Record<string, string>, calls: Array<Record<string, unknown>>): Promise<string[]> => {
+    const base = Object.fromEntries(
+      Object.entries(process.env).filter((e): e is [string, string] => typeof e[1] === "string" && !["ANTHROPIC_API_KEY", "OPENAI_API_KEY"].includes(e[0])),
+    );
+    const client = new Client({ name: "ft-check-dedup", version: "0.0.1" });
+    await client.connect(
+      new StdioClientTransport({ command: "node", args: [serverPath], env: { ...base, SCENESCOUT_LIVE: "off", SCENESCOUT_DEDUP: "judge", ...extra } }),
+    );
+    try {
+      const replies: string[] = [];
+      for (const args of calls)
+        replies.push(textOf(await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir, ...args } })));
+      assertClosedAll(textOf(await client.callTool({ name: "scout_close", arguments: { all: true } })));
+      return replies;
+    } finally {
+      await client.close();
+    }
+  };
+  try {
+    const KEY = "fake-mcp-check-key-0123456789";
+    const [ruled, judged] = await attaches({ OPENAI_API_KEY: KEY }, [
+      { session: "a", dedup: "rule" },
+      { session: "b", dedup: "judge" },
+    ]);
+    if (/Finding dedup|DEDUP JUDGE/.test(ruled)) fail(`scout_attach {dedup: "rule"} did not win over SCENESCOUT_DEDUP=judge:\n${ruled}`);
+    if (!/Finding dedup: the rule, then a model judge \(openai gpt-6-luna, effort none\)[\s\S]*is sent to openai/.test(judged))
+      fail(`scout_attach {dedup: "judge"} with a key did not say the judge is on and what it sends:\n${judged}`);
+    if (judged.includes(KEY)) fail("the attach printed the key");
+    const [keyless] = await attaches({}, [{}]);
+    if (!/⚠ DEDUP JUDGE OFF: the judge needs ANTHROPIC_API_KEY or OPENAI_API_KEY in the server's environment\. The rule decides duplicates\./.test(keyless))
+      fail(`SCENESCOUT_DEDUP=judge with no key did not say the judge is off:\n${keyless}`);
+    console.log("✓ SCENESCOUT_DEDUP=judge asks for the judge, an attach's dedup wins over it, and the attach says what the judge sends or why it is off");
+  } finally {
+    await fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
 async function main(): Promise<void> {
   const transport = new StdioClientTransport({ command: "node", args: [serverPath] });
   const client = new Client({ name: "ft-check", version: "0.0.1" });
@@ -641,6 +689,7 @@ async function main(): Promise<void> {
   await client.close();
   await tokenGoneCheck(liveProject);
   await liveViewOffCheck();
+  await dedupJudgeEnvCheck();
   console.log("\nMCP CHECK PASSED");
 }
 

@@ -20,12 +20,15 @@ Run `npx -y scenescout doctor` first (`--engine` for clients other than Claude C
 | `⚠ AUTH FAILED` on attach, or every route lands on the sign-in page | The saved login or storage state has expired, or the app is not running at the URL. Record the role again with `scenescout login <url> --role <name>`; regenerate a Playwright storage state the way your project does |
 | `⚠ SESSION AUTH LOST` mid-run | The session was signed out after it started. A role session re-attaches once from the latest saved profile; record the login again and it can carry on. Pages reached while signed out are not counted as covered |
 | `🛡 WRITE-POLICY blocked` in a tool result | The write mode refused a request. This is the policy working, not an app bug. If the flow matters, re-run in a mode that allows it, against data you can afford to change ([Safety model](Safety-model.md)) |
+| `⚠ LEAVE CONFIRMATION` and the page did not change | The page asked to confirm leaving because it holds unsent input, and `observe` and `read-only` stay by default. Repeat the `scout_navigate`, `scout_click` or `scout_back` with `leave: true` to leave and discard that input ([Safety model](Safety-model.md#leaving-a-page-with-unsent-input)) |
 | A timeout that names a limit | An action has 5 s and a page 20 s (15 s in a crawl). On a busy machine, raise them with `scout_attach {actionTimeoutMs, navTimeoutMs}`, the environment variables, or `--action-timeout-ms` and `--nav-timeout-ms`. A page that really takes 20 s to load is a finding |
 | `⚠ AMBIGUOUS SESSION` | More than one session is live and a call named none, so it went to whichever attached last. The agent should pass `session` on every call in a multi-role run |
 | The live view does not open | `scenescout watch` finds the engine through `.scenescout/` in the folder it runs in; pass the project path if it differs. `SCENESCOUT_LIVE=off` in the server's environment closes it |
 | The report refuses to finish | The level's contract is not met, and `scout_report` lists what is missing. Work the list down, or choose a lower level. `force: true` writes it anyway, with the gaps printed |
 | Parallel lanes slow the machine to a crawl | Each lane is a real browser. Run about as many as the machine has cores, less two, and let each lane attach when it starts |
 | A closed session will not close | `scout_close` keeps a lane open until its report has been accepted by `scout_lane_report`, because the lane's decisions are kept against its session. Fold the report, then close |
+| `⚠ DEDUP JUDGE OFF` on attach | The dedup judge was asked for (`SCENESCOUT_DEDUP=judge` or `scout_attach {dedup: "judge"}`) and the server has no key to ask it with, or has both keys and no `SCENESCOUT_DEDUP_PROVIDER`. The rule decides duplicates, as it does by default. Put the key in the server's environment, or leave the judge off |
+| A finding says "Merged by the dedup judge" | A model read that filing as the same defect as the finding it sits under. Its title, category, severity and evidence are kept there; if the two are different defects, file it again with a title that says what differs |
 
 ## In CI
 

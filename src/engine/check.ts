@@ -140,6 +140,11 @@ export const WORTH_A_LOOK_RULES = {
     help: "Links with no underline, in the same colour as the page's body text. In running text a reader cannot tell them from the text around them; in navigation this styling is common, and the check cannot tell the two apart.",
     convention: "a visible link style (an underline or a distinct colour) wherever links appear, navigation included",
   },
+  "scrolled-out-controls": {
+    title: "Controls scrolled out of view sideways",
+    help: "Controls inside a horizontally scrolling container (a wide table's last column, say) lie outside its visible width at this viewport, so only a sideways scroll of the container shows them. A wide table that scrolls is a common, deliberate layout; it matters where a project keeps every row's actions in view.",
+    convention: "row actions and other controls that stay in view without a sideways scroll of their container at this viewport width",
+  },
 } as const satisfies Record<string, { title: string; help: string; convention: string }>;
 
 export type DefectRule = keyof typeof CHECK_RULES;
@@ -173,7 +178,10 @@ export interface CheckIssue {
   fingerprint: string;
 }
 
-const SEVERITY_RANK: Record<CheckSeverity, number> = { high: 0, medium: 1, low: 2 };
+export const SEVERITY_RANK: Record<CheckSeverity, number> = { high: 0, medium: 1, low: 2 };
+
+/** The route a defect of the app's shared shell is charged to: one fix, however many pages show it. */
+export const SHARED_CHROME_ROUTE = "(shared chrome)";
 
 /** Snapshot refs (`e12`) are numbered per run; evidence carrying them would never match itself twice. */
 function stripRefs(line: string): string {
@@ -226,6 +234,7 @@ export function geometryRule(line: string): CheckRule | null {
   if (/ is UNREACHABLE /.test(line)) return "clipped-control";
   if (/ is rendered outside the reachable page area/.test(line)) return "offpage-control";
   if (/ overlaps /.test(line)) return "overlapping-controls";
+  if (/ scrolled out of view inside a horizontally scrolling container /.test(line)) return "scrolled-out-controls";
   return "layout-issue";
 }
 
@@ -291,7 +300,7 @@ export function checkFindings(
     for (const line of r.brokenImages) if (!/^…and \d+ more/.test(line)) add("broken-image", stripRefs(line), route);
     for (const u of r.unnamed) add("unnamed-control", u, route);
     for (const p of r.placeholderOnly) add("placeholder-only-label", p, route);
-    for (const d of r.design) add(d.rule, d.detail, d.chrome ? "(shared chrome)" : route);
+    for (const d of r.design) add(d.rule, d.detail, d.chrome ? SHARED_CHROME_ROUTE : route);
   }
   for (const f of flows) {
     for (const { path, violation } of f.violations) add(violationRule(violation), violation.detail, path, { embed: violation.embed });
@@ -435,6 +444,14 @@ export interface CheckOptions extends CheckSettings {
   actionTimeoutMs?: number;
   /** How long a page may take to load; absent means the environment variable, else the default (limits.ts). */
   navTimeoutMs?: number;
+  /**
+   * Once this long has passed since the run began, route discovery starts no
+   * new page; the page in progress finishes, and the start page is always
+   * measured. Not with `paths`, which is a list the caller chose. Only the
+   * first run (`scenescout <url>`) sets it; `scenescout check` visits every
+   * route up to --max-routes however long that takes.
+   */
+  timeBudgetMs?: number;
   maxRoutes: number;
   paths?: string[];
   ignore: CheckRule[];
@@ -467,7 +484,14 @@ export const CHECK_OPTION_NAMES = [
 ] as const;
 
 export const MAX_CHECK_ROUTES = 150;
+/** Link discovery rounds: each crawl reveals the routes its pages link to. Past a few, a site is paginating rather than revealing. */
+export const MAX_DISCOVERY_ROUNDS = 6;
 export const DEFAULT_CHECK_ROUTES = 50;
+
+/** A path given on the command line, resolved from the directory the command runs in; the same on every platform. */
+export function resolveArgPath(cwd: string, p: string): string {
+  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) ? p : `${cwd.replace(/[\\/]$/, "")}/${p}`;
+}
 
 /** Parse `scenescout check` arguments. Every mistake is a sentence, never a half-configured run. */
 export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true; options: CheckOptions } | { ok: false; error: string } {
@@ -547,7 +571,7 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
   const gateRetests = oneOf("gate-retests", GATE_RETESTS, DEFAULT_SETTINGS.gateRetests);
   if (!gateRetests) return { ok: false, error: `--gate-retests must be one of ${GATE_RETESTS.join(", ")}` };
 
-  const resolve = (p: string): string => (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) ? p : `${cwd.replace(/[\\/]$/, "")}/${p}`);
+  const resolve = (p: string): string => resolveArgPath(cwd, p);
   return {
     ok: true,
     options: {
@@ -586,8 +610,10 @@ export interface CheckResult {
   issues: CheckIssue[];
   /** Observations that are defects only under a convention of the project: listed apart, never counted or gated. */
   worthALook: CheckObservation[];
-  /** Routes the engine knew of but did not reach within --max-routes. */
+  /** Routes the engine knew of but did not reach within --max-routes (or, for a first run, its time budget). */
   unvisited: string[];
+  /** Present only when the options gave a time budget: how long it was, and whether it ran out with routes still to visit. */
+  timeBudget?: { ms: number; reached: boolean };
   ignored: CheckRule[];
   /** Every saved flow replayed, in file order. */
   flows: FlowRun[];
@@ -670,7 +696,7 @@ const RETEST_SARIF_RULE = {
 };
 
 function sarifLocation(route: string): object {
-  return route === "(shared chrome)"
+  return route === SHARED_CHROME_ROUTE
     ? {
         physicalLocation: { artifactLocation: { uri: "", uriBaseId: "APP" } },
         message: { text: "the app's shared shell, on every page that renders it" },
@@ -784,10 +810,67 @@ function code(text: string): string {
   const pad = longest > 0 ? " " : "";
   return `${fence}${pad}${text}${pad}${fence}`;
 }
-
+/** The first three routes as code spans, and how many more. */
 function routeList(routes: readonly string[]): string {
   const shown = routes.slice(0, 3).map(code);
   return shown.join(", ") + (routes.length > 3 ? ` and ${routes.length - 3} more` : "");
+}
+
+/** One markdown list item for an issue: its title, rule, evidence and routes. */
+export function issueLine(i: CheckIssue): string {
+  return `**${CHECK_RULES[i.rule].title}** \`${i.rule}\`: ${cell(i.evidence)}${i.embed ? ` _(in an embed of ${i.embed}: its behaviour, not the app's)_` : ""} — ${routeList(i.routes)}`;
+}
+
+/** The issues, one section per severity, worst first. Shared by the check's report and the first run's. */
+export function issueSections(issues: readonly CheckIssue[]): string[] {
+  const lines: string[] = [];
+  for (const sev of CHECK_SEVERITIES) {
+    const of = issues.filter((i) => i.severity === sev);
+    if (of.length === 0) continue;
+    lines.push("", `## ${sev[0].toUpperCase()}${sev.slice(1)} (${of.length})`, "");
+    for (const i of of) lines.push(`- ${issueLine(i)}`);
+  }
+  return lines;
+}
+
+const WORTH_A_LOOK_INTRO = "Measured exactly, and defects only under a convention of your project that the check cannot see.";
+
+/** The worth-a-look section, or nothing when there is none. `gated`: the report is a gate's, so say these never fail it. */
+export function worthALookSection(observations: readonly CheckObservation[], gated = true): string[] {
+  if (observations.length === 0) return [];
+  const lines = [
+    "",
+    `## Worth a look (${observations.length})`,
+    "",
+    `${WORTH_A_LOOK_INTRO} They are not counted above${gated ? " and never fail the gate, at any --fail-on" : ""}.`,
+    "",
+  ];
+  for (const o of observations) {
+    lines.push(
+      `- **${WORTH_A_LOOK_RULES[o.rule].title}** \`${o.rule}\`: ${cell(o.evidence)} — a defect only if your project uses ${o.convention} — ${routeList(o.routes)}`,
+    );
+  }
+  return lines;
+}
+
+/** The table of routes measured, with each one's status, controls and issue count. */
+export function routesTable(result: Pick<CheckResult, "routes" | "issues">): string[] {
+  const lines = ["", "## Routes", "", "| Route | Status | Controls | Issues |", "|---|---|---|---|"];
+  for (const r of result.routes) {
+    const n = result.issues.filter((i) => i.routes.includes(r.path)).length;
+    const status =
+      (r.loadError !== undefined ? "did not load" : r.loginRedirect ? `${r.status ?? "?"} → sign-in` : String(r.status ?? "?")) +
+      (r.auditError ? ` (design not measured: ${cell(r.auditError.slice(0, 80))})` : "");
+    // Plain text, not a code span: inside a table cell a code span keeps the backslashes cell() adds.
+    lines.push(`| ${cell(r.path)} | ${status} | ${r.elements} | ${n} |`);
+  }
+  return lines;
+}
+
+/** The routes known and not visited, as one line; nothing when every known route was visited. */
+export function unvisitedLine(unvisited: readonly string[], why: string): string[] {
+  if (unvisited.length === 0) return [];
+  return ["", `Not visited (${why}): ${unvisited.slice(0, 20).map(code).join(", ")}${unvisited.length > 20 ? " …" : ""}`];
 }
 
 /** The human report: the verdict first, then what failed it, then everything else. */
@@ -815,42 +898,10 @@ export function formatCheck(result: CheckResult): string {
   );
   // Right under the verdict: what a green check was allowed to do is part of what it means.
   lines.push("", `Settings — ${describeSettings(result)}`);
-  for (const sev of CHECK_SEVERITIES) {
-    const of = result.issues.filter((i) => i.severity === sev);
-    if (of.length === 0) continue;
-    lines.push("", `## ${sev[0].toUpperCase()}${sev.slice(1)} (${of.length})`, "");
-    for (const i of of) {
-      lines.push(
-        `- **${CHECK_RULES[i.rule].title}** \`${i.rule}\`: ${cell(i.evidence)}${i.embed ? ` _(in an embed of ${i.embed}: its behaviour, not the app's)_` : ""} — ${routeList(i.routes)}`,
-      );
-    }
-  }
-  if (result.worthALook.length > 0) {
-    lines.push(
-      "",
-      `## Worth a look (${result.worthALook.length})`,
-      "",
-      "Measured exactly, and defects only under a convention of your project that the check cannot see. They are not counted above and never fail the gate, at any --fail-on.",
-      "",
-    );
-    for (const o of result.worthALook) {
-      lines.push(
-        `- **${WORTH_A_LOOK_RULES[o.rule].title}** \`${o.rule}\`: ${cell(o.evidence)} — a defect only if your project uses ${o.convention} — ${routeList(o.routes)}`,
-      );
-    }
-  }
-  lines.push("", "## Routes", "", "| Route | Status | Controls | Issues |", "|---|---|---|---|");
-  for (const r of result.routes) {
-    const n = result.issues.filter((i) => i.routes.includes(r.path)).length;
-    const status =
-      (r.loadError !== undefined ? "did not load" : r.loginRedirect ? `${r.status ?? "?"} → sign-in` : String(r.status ?? "?")) +
-      (r.auditError ? ` (design not measured: ${cell(r.auditError.slice(0, 80))})` : "");
-    // Plain text, not a code span: inside a table cell a code span keeps the backslashes cell() adds.
-    lines.push(`| ${cell(r.path)} | ${status} | ${r.elements} | ${n} |`);
-  }
-  if (result.unvisited.length > 0) {
-    lines.push("", `Not visited (over --max-routes): ${result.unvisited.slice(0, 20).map(code).join(", ")}${result.unvisited.length > 20 ? " …" : ""}`);
-  }
+  lines.push(...issueSections(result.issues));
+  lines.push(...worthALookSection(result.worthALook));
+  lines.push(...routesTable(result));
+  lines.push(...unvisitedLine(result.unvisited, "over --max-routes"));
   if (result.flows.length > 0 || result.skippedFlows.length > 0) {
     lines.push("", `## Flows (${result.flows.length})`, "");
     for (const f of result.flows) {
@@ -936,6 +987,7 @@ export function toSummaryJson(result: CheckResult, toolVersion: string): object 
       ...(r.auditError !== undefined ? { designNotMeasured: r.auditError } : {}),
     })),
     unvisited: result.unvisited,
+    ...(result.timeBudget ? { timeBudget: result.timeBudget } : {}),
     ignored: result.ignored,
     flows: result.flows.map((f) => ({
       name: f.name,

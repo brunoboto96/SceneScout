@@ -7,9 +7,15 @@
  * it was sent, as some APIs' error messages do, so a test can check the run
  * never prints it.
  *
+ * Each conversation is scripted on its own, so a run split into lanes gets
+ * the same two turns in every lane. A lane (its first message names it) also
+ * files one finding with its crawl, the same one in every lane, so the run can
+ * show the lanes' findings folded into one.
+ *
  *   EXPECTED_KEY=dummy node scripts/fake-model-api.mjs 4180
  *
- * A request without `Authorization: Bearer $EXPECTED_KEY` gets a 401.
+ * Port 0 takes a free one; the line it prints names the port it got. A
+ * request without `Authorization: Bearer $EXPECTED_KEY` gets a 401.
  */
 import http from "node:http";
 
@@ -39,10 +45,22 @@ const server = http.createServer((req, res) => {
       return reply(400, { error: { message: "the body is not JSON" } });
     }
     const answered = (body.input ?? []).filter((i) => i && i.type === "function_call_output").length;
+    const first = (body.input ?? []).find((i) => i && i.role === "user");
+    const lane = typeof first?.content === "string" ? /as lane "([^"]+)"/.exec(first.content)?.[1] : undefined;
     if (answered === 0) {
+      const finding = {
+        severity: "low",
+        category: "http-error",
+        title: "The stand-in model's finding, filed by every lane",
+        detail: `Filed by lane ${lane}.`,
+        evidence: "GET /api/stand-in 500",
+      };
       return reply(200, {
         status: "completed",
-        output: [{ type: "function_call", id: "fc_1", call_id: "call_1", name: "scout_crawl", arguments: "{}" }],
+        output: [
+          { type: "function_call", id: "fc_1", call_id: "call_1", name: "scout_crawl", arguments: "{}" },
+          ...(lane ? [{ type: "function_call", id: "fc_2", call_id: "call_2", name: "scout_finding", arguments: JSON.stringify(finding) }] : []),
+        ],
         usage: usage(1000),
       });
     }
@@ -53,4 +71,4 @@ const server = http.createServer((req, res) => {
     });
   });
 });
-server.listen(port, "127.0.0.1", () => console.log(`fake model API on http://127.0.0.1:${port}/v1`));
+server.listen(port, "127.0.0.1", () => console.log(`fake model API on http://127.0.0.1:${server.address().port}/v1`));
