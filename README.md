@@ -254,14 +254,24 @@ The view is served on `127.0.0.1` only, behind a token that changes every time t
 ## 🎬 Recording a run, and reading it back
 
 A report says what happened. For QA work that is not always enough — the point
-is often to *show* what was checked, not to assert it. Ask for a recorded run
-and the engine keeps a frame of the page after every action:
+is often to *show* what was checked, not to assert it.
+
+Every finding already carries a picture: the element it is about, with a margin,
+or the page as it was. It is kept in `.scenescout/recordings/`, shown under the
+finding in `report.html`, and returned with the `scout_finding` result, so a
+chat client shows the evidence the moment it is filed. Pictures are bounded in
+size and in how many reach the conversation, and a CI job keeps them on file
+only; `SCENESCOUT_EVIDENCE` and `scout_attach {evidence}` change that
+([configuration reference](docs/guide/Configuration-reference.md#environment-variables)).
+
+Ask for a recorded run and the engine also keeps a frame of the page after every action:
 
 ```
 Use SceneScout to test http://localhost:3000, record the run
 ```
 
-or, on the tool directly, `scout_attach {record: true}`.
+or, on the tool directly, `scout_attach {record: true}`. `SCENESCOUT_RECORD=on` in
+the server's environment records every run.
 
 Then `scout_report` writes two files side by side in `.scenescout/`:
 `report.md` as always, and `report.html` — the whole run as one self-contained

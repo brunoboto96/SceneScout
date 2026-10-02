@@ -60,8 +60,25 @@ import {
   judgeSamplingParams,
   samplingAsk,
 } from "../src/engine/dedup.ts";
-import { CAPTURE_MARGIN, captureClip, capturedName, captureFileName, captureResultText, parseCaptureResult, rebaseUrl } from "../src/engine/capture.ts";
-import { decodePng, diffImages, encodePng, isPng, type RgbaImage } from "../src/engine/png.ts";
+import {
+  CAPTURE_MARGIN,
+  captureClip,
+  capturedName,
+  captureFileName,
+  captureResultText,
+  describePicture,
+  EVIDENCE_LIMITS,
+  evidenceFrame,
+  evidenceSettings,
+  findingPicturePath,
+  isCiEnv,
+  parseCaptureResult,
+  readFindingPicture,
+  rebaseUrl,
+  recordChoice,
+  returnsInline,
+} from "../src/engine/capture.ts";
+import { decodePng, diffImages, encodePng, encodePngCompact, fitPicture, FIT_MIN_SIDE, isPng, shrinkImage, type RgbaImage } from "../src/engine/png.ts";
 import {
   CAPTURE_TOOLS,
   CI_CAPTURE_NAME,
@@ -311,7 +328,10 @@ test("provider: detected from the one key present; both keys need --provider; a 
 
 test("the server's environment has no key in it, and no live view", () => {
   const env = childEnv({ OPENAI_API_KEY: OPENAI_KEY, ANTHROPIC_API_KEY: ANTHROPIC_KEY, PATH: "/bin", HOME: "/h" });
-  assert.deepEqual(env, { PATH: "/bin", HOME: "/h", SCENESCOUT_LIVE: "off" });
+  assert.deepEqual(env, { PATH: "/bin", HOME: "/h", SCENESCOUT_LIVE: "off", SCENESCOUT_EVIDENCE: "file" });
+  // The loop is text-only, so a finding's picture is kept on file; a job that chose otherwise keeps its choice.
+  assert.equal(childEnv({ SCENESCOUT_EVIDENCE: "off" }).SCENESCOUT_EVIDENCE, "off");
+  assert.equal(childEnv({ SCENESCOUT_EVIDENCE: " " }).SCENESCOUT_EVIDENCE, "file");
 });
 
 // ── redaction ───────────────────────────────────────────────────────────────
@@ -3028,4 +3048,163 @@ test("dedup: a judge call that outlasts its limit fails as the judge's limit, no
     })) as typeof fetch;
   const ask = httpJudgeAsk({ provider: "openai", model: "m", effort: "none", baseUrl: "http://model.test/v1" }, OPENAI_KEY, { fetch: hung, callMs: 50 });
   await assert.rejects(ask("s", [], "q"), (err: Error) => /^no answer within 50ms/.test(err.message) && !(err instanceof OutOfTime));
+});
+
+// ── a finding's picture ─────────────────────────────────────────────────────
+
+test("evidence: inline for interactive use, on file in CI; the option, then the environment, decide first", () => {
+  const rows: Array<[string, Parameters<typeof evidenceSettings>[0], Record<string, string>, string, string]> = [
+    ["interactive", undefined, {}, "inline", "default (interactive)"],
+    ["CI=true", undefined, { CI: "true" }, "file", "default (CI)"],
+    ["CI=1", undefined, { CI: "1" }, "file", "default (CI)"],
+    ["GitHub Actions", undefined, { GITHUB_ACTIONS: "true" }, "file", "default (CI)"],
+    ["CI=false is not CI", undefined, { CI: "false" }, "inline", "default (interactive)"],
+    ["CI=0 is not CI", undefined, { CI: "0" }, "inline", "default (interactive)"],
+    ["the environment over the CI default", undefined, { CI: "true", SCENESCOUT_EVIDENCE: "inline" }, "inline", "environment"],
+    ["the environment, any case", undefined, { SCENESCOUT_EVIDENCE: " OFF " }, "off", "environment"],
+    ["the option over the environment", "file", { SCENESCOUT_EVIDENCE: "off" }, "file", "option"],
+    ["the option in CI", "inline", { CI: "true" }, "inline", "option"],
+  ];
+  for (const [label, asked, env, mode, source] of rows) {
+    const got = evidenceSettings(asked, env);
+    assert.equal(got.mode, mode, label);
+    assert.equal(got.source, source, label);
+  }
+  assert.throws(() => evidenceSettings(undefined, { SCENESCOUT_EVIDENCE: "always" }), /SCENESCOUT_EVIDENCE must be one of inline, file, off \(got "always"\)/);
+  assert.equal(isCiEnv({}), false);
+  assert.equal(isCiEnv({ CI: "" }), false);
+});
+
+test("evidence: the size bounds default, read from the environment within their limits, and refuse anything else", () => {
+  const d = evidenceSettings(undefined, {});
+  assert.deepEqual(
+    { maxPx: d.maxPx, maxBytes: d.maxBytes, inlineMax: d.inlineMax },
+    { maxPx: EVIDENCE_LIMITS.maxPx.default, maxBytes: EVIDENCE_LIMITS.maxKb.default * 1024, inlineMax: EVIDENCE_LIMITS.inline.default },
+  );
+  const set = evidenceSettings("file", { SCENESCOUT_EVIDENCE_MAX_PX: "400", SCENESCOUT_EVIDENCE_MAX_KB: "64", SCENESCOUT_EVIDENCE_INLINE: "0" });
+  assert.deepEqual({ maxPx: set.maxPx, maxBytes: set.maxBytes, inlineMax: set.inlineMax }, { maxPx: 400, maxBytes: 64 * 1024, inlineMax: 0 });
+  for (const [name, value] of [
+    ["SCENESCOUT_EVIDENCE_MAX_PX", "100"],
+    ["SCENESCOUT_EVIDENCE_MAX_PX", "800px"],
+    ["SCENESCOUT_EVIDENCE_MAX_KB", "99999"],
+    ["SCENESCOUT_EVIDENCE_MAX_KB", "-1"],
+    ["SCENESCOUT_EVIDENCE_INLINE", "1e3"],
+  ])
+    assert.throws(() => evidenceSettings(undefined, { [name]: value }), new RegExp(`^Error: ${name} must be a whole number`), `${name}=${value}`);
+});
+
+test("record: the option, then SCENESCOUT_RECORD, else off in every kind of run", () => {
+  assert.equal(recordChoice(undefined, {}), false);
+  assert.equal(recordChoice(undefined, { CI: "true" }), false);
+  assert.equal(recordChoice(undefined, { SCENESCOUT_RECORD: "on" }), true);
+  assert.equal(recordChoice(undefined, { SCENESCOUT_RECORD: "TRUE" }), true);
+  assert.equal(recordChoice(undefined, { SCENESCOUT_RECORD: "off" }), false);
+  assert.equal(recordChoice(false, { SCENESCOUT_RECORD: "on" }), false, "the option wins");
+  assert.equal(recordChoice(true, {}), true);
+  assert.throws(() => recordChoice(undefined, { SCENESCOUT_RECORD: "sometimes" }), /SCENESCOUT_RECORD must be on or off/);
+});
+
+test("evidence: when a picture is taken, and what it frames", () => {
+  const base = { mode: "inline" as const, pageOpen: true, isNew: true, hasPicture: false, regressed: false };
+  assert.deepEqual(evidenceFrame({ ...base, ref: "e7" }), { take: true, frame: "element", ref: "e7" });
+  assert.deepEqual(evidenceFrame(base), { take: true, frame: "viewport" }, "no element named: the viewport");
+  assert.deepEqual(evidenceFrame({ ...base, ref: "  " }), { take: true, frame: "viewport" }, "a blank ref names nothing");
+  assert.deepEqual(evidenceFrame({ ...base, mode: "file", ref: "e7" }), { take: true, frame: "element", ref: "e7" }, "on file only is still taken");
+  assert.equal(evidenceFrame({ ...base, mode: "off" }).take, false);
+  assert.equal(evidenceFrame({ ...base, pageOpen: false }).take, false);
+  // A merge into a finding that has its picture keeps that one; one with none gets this one.
+  const merged = { ...base, isNew: false };
+  assert.deepEqual(evidenceFrame({ ...merged, hasPicture: true }), { take: false, why: "the finding it merged into already has its picture" });
+  assert.deepEqual(evidenceFrame({ ...merged, hasPicture: false }), { take: true, frame: "viewport" });
+  // A regression is new evidence that it is back: the picture is replaced.
+  assert.deepEqual(evidenceFrame({ ...merged, hasPicture: true, regressed: true, ref: "e2" }), { take: true, frame: "element", ref: "e2" });
+});
+
+test("evidence: a session returns pictures inline up to its count, then keeps them on file only", () => {
+  assert.equal(returnsInline("inline", 0, 10), true);
+  assert.equal(returnsInline("inline", 9, 10), true);
+  assert.equal(returnsInline("inline", 10, 10), false);
+  assert.equal(returnsInline("inline", 0, 0), false, "a count of 0 returns none");
+  assert.equal(returnsInline("file", 0, 10), false);
+  assert.equal(returnsInline("off", 0, 10), false);
+});
+
+test("evidence: a picture's path is under the session's recordings, and nothing from the agent reaches it raw", () => {
+  assert.equal(findingPicturePath("default", "a1b2c3d4e5"), "recordings/default/finding-a1b2c3d4e5.png");
+  assert.equal(findingPicturePath("../../etc", "a1b2"), "recordings/etc/finding-a1b2.png");
+  assert.equal(findingPicturePath("", "../x"), "recordings/session/finding-finding.png");
+  // What memory.json holds is read back only when it is one of these paths.
+  const ok = { file: "recordings/default/finding-a1b2.png", width: 300, height: 120, frame: "element", label: "Save", at: "2026-01-01T00:00:00Z" };
+  assert.deepEqual(readFindingPicture(ok), ok);
+  assert.equal(readFindingPicture({ ...ok, file: "../memory.json" }), null);
+  assert.equal(readFindingPicture({ ...ok, file: "recordings/default/0001-click.jpg" }), null, "a frame is not a finding's picture");
+  assert.equal(readFindingPicture({ ...ok, frame: "page" }), null);
+  assert.equal(readFindingPicture({ ...ok, width: "300" }), null);
+  assert.equal(readFindingPicture(undefined), null);
+  assert.equal(describePicture(ok), '300×120, "Save" and around it');
+  assert.equal(describePicture({ ...ok, frame: "viewport", label: undefined }), "300×120, the page as it was");
+});
+
+test("png: the compact encoding reads back exactly, three channels when opaque and four when not", () => {
+  const opaque = picture(37, 21, [250, 250, 250, 255], { x: 5, y: 4, w: 12, h: 6, rgba: [20, 90, 200, 255] });
+  const back = decodePng(encodePngCompact(opaque));
+  assert.deepEqual([back.width, back.height], [37, 21]);
+  assert.deepEqual(Buffer.from(back.data), Buffer.from(opaque.data));
+  assert.equal(encodePngCompact(opaque)[25], 2, "RGB");
+  const clear = picture(9, 9, [0, 0, 0, 0], { x: 2, y: 2, w: 3, h: 3, rgba: [255, 0, 0, 128] });
+  assert.deepEqual(Buffer.from(decodePng(encodePngCompact(clear)).data), Buffer.from(clear.data));
+  assert.equal(encodePngCompact(clear)[25], 6, "RGBA");
+  assert.ok(encodePngCompact(opaque).length < encodePng(opaque).length, "smaller than the diff's encoding");
+});
+
+test("png: shrinking averages what each pixel covers and never enlarges", () => {
+  // Black and white columns, two wide: halved, each output pixel is one of each, so grey.
+  const stripes = picture(8, 2, [255, 255, 255, 255]);
+  for (let y = 0; y < 2; y++) for (let x = 0; x < 8; x++) if (x % 4 < 2) stripes.data.set([0, 0, 0, 255], (y * 8 + x) * 4);
+  const half = shrinkImage(stripes, 4, 1);
+  assert.deepEqual([half.width, half.height], [4, 1]);
+  assert.deepEqual([...half.data.subarray(0, 4)], [0, 0, 0, 255]);
+  const quarter = shrinkImage(stripes, 2, 1);
+  assert.deepEqual([...quarter.data.subarray(0, 4)], [128, 128, 128, 255], "a thin line fades, it does not vanish");
+  assert.equal(shrinkImage(stripes, 16, 4), stripes, "never enlarged");
+});
+
+/** A noisy picture, which compresses badly, as a busy page does. */
+function noisy(width: number, height: number): RgbaImage {
+  const data = new Uint8Array(width * height * 4);
+  // mulberry32: a fixed sequence with no pattern deflate can use.
+  let seed = 7;
+  const next = (): number => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return (t ^ (t >>> 14)) >>> 0;
+  };
+  for (let i = 0; i < data.length; i += 4) {
+    const v = next();
+    data[i] = v & 0xff;
+    data[i + 1] = (v >>> 8) & 0xff;
+    data[i + 2] = (v >>> 16) & 0xff;
+    data[i + 3] = 255;
+  }
+  return { width, height, data };
+}
+
+test("png: a picture is fitted to its longer side, then to its bytes, or refused when nothing readable fits", () => {
+  const plain = picture(1280, 720, [240, 240, 240, 255], { x: 100, y: 100, w: 300, h: 40, rgba: [10, 10, 10, 255] });
+  const sided = fitPicture(plain, 800, 200 * 1024);
+  assert.ok(sided);
+  assert.deepEqual([sided.width, sided.height, sided.shrunk], [800, 450, true], "the longer side to 800, the shape kept");
+  const small = fitPicture(picture(300, 100, [1, 2, 3, 255]), 800, 200 * 1024);
+  assert.deepEqual([small?.width, small?.height, small?.shrunk], [300, 100, false], "a picture inside the bounds is kept at its size");
+  const tall = fitPicture(picture(200, 1000, [9, 9, 9, 255]), 500, 200 * 1024);
+  assert.deepEqual([tall?.width, tall?.height], [100, 500], "the longer side is the height");
+  // Noise does not compress: the bytes bound shrinks it further, and the result is within it.
+  const busy = noisy(600, 400);
+  const fitted = fitPicture(busy, 800, 64 * 1024);
+  assert.ok(fitted && fitted.png.length <= 64 * 1024 && fitted.width < 600 && fitted.shrunk, `fitted to the bytes: ${fitted?.png.length}`);
+  assert.ok(Math.max(fitted.width, fitted.height) >= FIT_MIN_SIDE);
+  assert.ok(isPng(fitted.png) && decodePng(fitted.png).width === fitted.width);
+  // Nothing at the smallest readable size fits in 1 KB of noise: none, rather than a smudge.
+  assert.equal(fitPicture(busy, 800, 1024), null);
 });

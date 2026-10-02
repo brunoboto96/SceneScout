@@ -173,6 +173,12 @@ export const LIVE_PAGE = `<!doctype html>
   #report .doc details { margin: 8px 0; }
   #report .doc summary { cursor: pointer; color: var(--muted); }
   #report .doc .unset { color: var(--muted); font-style: italic; }
+  #report .doc figure.picture { margin: 8px 0 14px; max-width: min(100%, 720px); }
+  #report .doc figure.picture img { display: block; max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 6px; }
+  #report .doc figure.picture figcaption { margin-top: 4px; font-size: 12px; color: var(--muted); }
+  #report .doc figure.picture .gone-note { display: none; padding: 12px; border: 1px dashed var(--line); border-radius: 6px; color: var(--muted); }
+  #report .doc figure.picture.gone img { display: none; }
+  #report .doc figure.picture.gone .gone-note { display: block; }
   #report .doc details.evidence { margin: 10px 0 16px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
   #report .doc details.evidence[open] summary { margin-bottom: 10px; }
   #report .doc details.evidence figure { margin: 0 0 12px; }
@@ -494,7 +500,28 @@ export const LIVE_PAGE = `<!doctype html>
   function evidenceFor(id) {
     var found = null;
     reportEvidence.forEach(function (e) { if (e.id === id) found = e; });
-    if (!found || !found.frames.length) return null;
+    if (!found) return null;
+    // The picture taken when it was filed comes first, open: it is what a reader looks for.
+    var picture = null;
+    if (found.picture) {
+      picture = el('figure', 'picture');
+      picture.setAttribute('data-testid', 'live-report-picture-' + id);
+      var link = el('a');
+      link.href = 'record/' + found.picture.file;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.setAttribute('data-testid', 'live-report-picture-open');
+      var pic = el('img');
+      pic.loading = 'lazy';
+      pic.src = 'record/' + found.picture.file;
+      pic.alt = 'What the finding is about, when it was filed';
+      pic.addEventListener('error', function () { picture.classList.add('gone'); });
+      link.appendChild(pic);
+      picture.appendChild(link);
+      picture.appendChild(el('figcaption', '', found.picture.caption));
+      picture.appendChild(el('p', 'gone-note', 'This picture is no longer in ' + found.picture.file.replace(/\\/[^/]*$/, '') + '.'));
+    }
+    if (!found.frames.length) return picture;
     var box = el('details', 'evidence');
     box.setAttribute('data-testid', 'live-report-evidence-' + id);
     box.appendChild(el('summary', '', found.frames.length + (found.frames.length === 1 ? ' screenshot' : ' screenshots') + ' from around this finding'));
@@ -514,7 +541,11 @@ export const LIVE_PAGE = `<!doctype html>
       fig.appendChild(el('p', 'gone-note', 'This frame is no longer in ' + f.frame.replace(/\\/[^/]*$/, '') + '.'));
       shots.appendChild(fig);
     });
-    return box;
+    if (!picture) return box;
+    var both = el('div');
+    both.appendChild(picture);
+    both.appendChild(box);
+    return both;
   }
   function renderMarkdown(root, md) {
     root.textContent = '';

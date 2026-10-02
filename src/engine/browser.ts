@@ -5203,7 +5203,7 @@ export class BrowserEngine {
    * clicked, and the write policy is not involved. The rectangle's rules are
    * capture.ts.
    */
-  async captureElement(target: { ref?: string; key?: string }, margin: number): Promise<{ png: Buffer; key: string; label: string; url: string }> {
+  async captureElement(target: { ref?: string; key?: string }, margin: number, log = true): Promise<{ png: Buffer; key: string; label: string; url: string }> {
     const page = this.requirePage();
     let el: SnapshotElement | undefined;
     if (target.ref) {
@@ -5230,10 +5230,33 @@ export class BrowserEngine {
     const clip = captureClip(box, margin, viewport);
     if (!clip) throw new Error(`${el.name || el.key} is outside the viewport, so it has no picture.`);
     const png = await page.screenshot({ type: "png", clip, animations: "disabled" });
-    this.logAction({ action: "capture", target: el.key.slice(0, 200), url: page.url() });
+    if (log) this.logAction({ action: "capture", target: el.key.slice(0, 200), url: page.url() });
     // Found by key, the refs were rebuilt without a snapshot: none of them may be acted on.
     if (target.key) this.refs.clear();
     return { png, key: el.key, label: el.name, url: page.url() };
+  }
+
+  /**
+   * A finding's picture, as a PNG: the element `ref` names plus
+   * `margin` (captureElement), or the viewport. An element that cannot be
+   * pictured (a stale ref, one not displayed) leaves the viewport instead, and
+   * `note` says why, so a finding is never filed without the evidence that was
+   * there to take. What is taken and how it is bounded is capture.ts and png.ts.
+   */
+  async captureEvidence(ref: string | undefined, margin: number): Promise<{ png: Buffer; frame: "element" | "viewport"; label: string; note?: string }> {
+    let note: string | undefined;
+    if (ref) {
+      try {
+        // Not logged: the log is what a later finding's repro trace is built from, and a picture is no step to repeat.
+        const shot = await this.captureElement({ ref }, margin, false);
+        return { png: shot.png, frame: "element", label: shot.label };
+      } catch (err) {
+        note = `${ref} could not be pictured (${err instanceof Error ? err.message : String(err)}), so the viewport was`;
+      }
+    }
+    const page = this.requirePage();
+    const png = await page.screenshot({ type: "png", animations: "disabled", scale: "css", timeout: this.limits.actionMs });
+    return { png, frame: "viewport", label: "", ...(note ? { note } : {}) };
   }
 
   /**

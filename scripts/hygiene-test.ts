@@ -16,9 +16,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { findingPicturePath } from "../src/engine/capture.ts";
+import { MEMORY_DIRNAME, writeSelfIgnore } from "../src/engine/memory.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8" }).split("\0").filter(Boolean);
@@ -72,6 +75,8 @@ export const FORBIDDEN_PATH_RE = new RegExp(
     "storage-?state[^/]*\\.json$",
     "(^|/)trace\\.zip$",
     "(^|/)(test-results|playwright-report)/",
+    // A finding's picture or a recorded frame, copied out of its .scenescout/ folder: a picture of an app under test.
+    "(^|/)recordings/[^/]+/(finding-[0-9a-f]+\\.png|\\d{4}-[^/]+\\.jpg)$",
   ].join("|"),
   "i",
 );
@@ -138,10 +143,19 @@ test("the rules fire on the shapes they exist for, and stay quiet on placeholder
     "cookies.json",
     "fixtures/trace.zip",
     "test-results/run/video.webm",
+    ".scenescout/recordings/default/finding-a1b2c3d4e5.png",
+    "docs/recordings/qa/finding-a1b2c3d4e5.png",
+    "evidence/recordings/qa/0007-click.jpg",
   ]) {
     assert.ok(FORBIDDEN_PATH_RE.test(p), `${p} must be refused`);
   }
-  for (const p of [".env.example", "src/engine/memory.ts", "docs/adr/0002-enforce-the-write-policy-at-the-network-layer.md", "skills/scenescout/SKILL.md"]) {
+  for (const p of [
+    ".env.example",
+    "examples/screenshots/report.png",
+    "src/engine/memory.ts",
+    "docs/adr/0002-enforce-the-write-policy-at-the-network-layer.md",
+    "skills/scenescout/SKILL.md",
+  ]) {
     assert.ok(!FORBIDDEN_PATH_RE.test(p), `${p} is an ordinary file`);
   }
 
@@ -203,6 +217,27 @@ test("every run-output directory the hygiene rule refuses is also ignored by git
   );
   const missing = [".scenescout", ".scenecraft", ".frontend-tester"].filter((dir) => !entries.has(`${dir}/`) && !entries.has(dir));
   assert.deepEqual(missing, [], "a directory the hygiene rule refuses must not be stageable in the first place");
+});
+
+test("a finding's picture, where the engine keeps it, is ignored by the project's git and never shows as a file to add", () => {
+  // The engine writes .scenescout/.gitignore on its first attach; the pictures go beside the frames under it.
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "hygiene-pictures-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: project });
+    const dir = path.join(project, MEMORY_DIRNAME);
+    fs.mkdirSync(dir, { recursive: true });
+    writeSelfIgnore(dir);
+    const picture = path.join(dir, findingPicturePath("qa lead", "a1b2c3d4e5"));
+    fs.mkdirSync(path.dirname(picture), { recursive: true });
+    fs.writeFileSync(picture, "png");
+    // The contrast: a file outside .scenescout/ is offered to git, so the check below can fail.
+    fs.writeFileSync(path.join(project, "app.ts"), "export {};\n");
+    const status = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: project, encoding: "utf8" });
+    assert.deepEqual(status.trim().split("\n"), ["?? app.ts"], status);
+    assert.equal(FORBIDDEN_PATH_RE.test(path.relative(project, picture).split(path.sep).join("/")), true, "and refused here if it were ever tracked");
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
 });
 
 test("every email address in the repository is on a reserved example domain", () => {

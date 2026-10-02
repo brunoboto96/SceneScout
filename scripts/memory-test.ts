@@ -331,6 +331,32 @@ test("merging two processes' copies of a finding keeps the routes either saw it 
   assert.equal("seenOn" in neither.findings[0], false, "no routes on either side: no field");
 });
 
+test("a finding's picture is kept, and survives a merge with another process's copy that has none", () => {
+  const picture = { file: "recordings/default/finding-x.png", width: 320, height: 180, frame: "viewport" as const, at: "2026-01-02T00:00:00Z" };
+  const finding = {
+    id: "x",
+    severity: "low" as const,
+    category: "c",
+    title: "t",
+    detail: "d",
+    url: "u",
+    state: "/a#1",
+    repro: [],
+    foundAt: "2026-01-01",
+    runs: 1,
+  };
+  // The other process re-found it later (so its copy is newer) without a picture: the picture is not lost.
+  const mine: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [{ ...finding, picture }] };
+  const theirs: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [{ ...finding, foundAt: "2026-01-02" }] };
+  assert.deepEqual(mergeMemory(mine, theirs).findings[0].picture, picture);
+  assert.deepEqual(mergeMemory(theirs, mine).findings[0].picture, picture);
+  assert.equal("picture" in mergeMemory({ ...mine, findings: [finding] }, theirs).findings[0], false, "neither has one: no field");
+  const store = freshStore();
+  const [filed] = store.addFinding({ ...base, title: "A picture is kept", detail: "d" });
+  assert.equal(store.setPicture(filed.id, picture)?.picture, picture);
+  assert.equal(store.setPicture("no-such-id", picture), null);
+});
+
 test("dedup: two bugs on one endpoint that answered 2xx stay two findings", () => {
   // Seen in two real runs, in both directions: a double submit and an
   // accepted negative quantity both had evidence naming `POST /api/orders`

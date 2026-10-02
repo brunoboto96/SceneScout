@@ -575,6 +575,26 @@ test("replay: frames hang under the finding they belong to, at the prefix the re
   assert.ok(!renderMarkdown(md).includes('class="evidence"'));
 });
 
+test("replay: a finding's picture shows open under it, with or without recorded frames, and links to itself", () => {
+  const picture = { file: "recordings/clerk/finding-e3aad70ee8.png", width: 320, height: 120, caption: '320×120, "Save" and around it' };
+  const md = "### A finding\n\n- **Id:** `e3aad70ee8` · **Category:** http-error\n- **Where:** `/orders.html`\n";
+  const alone = renderMarkdown(md, [{ id: "e3aad70ee8", frames: [], picture }]);
+  assert.match(alone, /<figure class="picture">/);
+  assert.match(alone, /data-testid="finding-picture-open" data-finding="e3aad70ee8"/);
+  assert.match(alone, /<img loading="lazy" [^>]*src="recordings\/clerk\/finding-e3aad70ee8\.png" width="320" height="120"/);
+  assert.match(alone, /320×120, &quot;Save&quot; and around it/, "the caption is escaped");
+  assert.ok(!alone.includes('class="evidence"'), "no frames: no accordion");
+  assert.ok(alone.indexOf("e3aad70ee8") < alone.indexOf('<figure class="picture">'), "under the finding's own list");
+  const served = renderMarkdown(md, [{ id: "e3aad70ee8", frames: [], picture }], "record/");
+  assert.match(served, /src="record\/recordings\/clerk\/finding-e3aad70ee8\.png"/, "over HTTP, the live view's route");
+  const both = renderMarkdown(md, [
+    { id: "e3aad70ee8", frames: [{ at: "2026-09-20T14:00:01.000Z", action: "click", detail: "Save", frame: "recordings/clerk/0002.jpg" }], picture },
+  ]);
+  assert.ok(both.indexOf('<figure class="picture">') < both.indexOf('<details class="evidence">'), "the picture first, then the frames");
+  // The contrast: the same finding with no picture shows none.
+  assert.ok(!renderMarkdown(md, [{ id: "e3aad70ee8", frames: [] }]).includes("picture"));
+});
+
 test("replay: a run with no frames says so rather than showing empty boxes", () => {
   const dry = buildReplayHtml({
     markdown: "## Findings\n",

@@ -208,6 +208,131 @@ async function expiryBriefCheck(client: Client): Promise<void> {
 }
 
 /**
+ * Evidence by default: a filed finding carries a picture on disk, in the
+ * scout_finding result as image content, and in report.html; one that names
+ * an element frames it; the inline count stops further pictures coming back
+ * while they are still kept; and a session with pictures off takes none.
+ */
+async function findingPictureCheck(client: Client): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-pictures-"));
+  const callRaw = async (name: string, args: Record<string, unknown>) =>
+    (await client.callTool({ name, arguments: args })) as { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> };
+  const imagesOf = (r: Awaited<ReturnType<typeof callRaw>>) => r.content.filter((c) => c.type === "image");
+  const file = (n: number) => ({
+    session: "pictures",
+    severity: "low",
+    category: "ux-confusing",
+    // Words and evidence no dedup rule joins: each filing is its own finding.
+    title: ["The action button shows no focus ring", "A paragraph runs far wider than reads comfortably", "An uppercase label shouts"][n - 1],
+    detail: `Filed to check pictures (${n}).`,
+    evidence: `picture check ${n}`,
+  });
+  try {
+    await callRaw("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "pictures", mode: "read-only", objective: "pictures" });
+    const snap = textOf(await callRaw("scout_snapshot", { session: "pictures" }));
+    const ref = /(e\d+) button "Focusless action"/.exec(snap)?.[1];
+    if (!ref) fail(`the fixture's button was not in the snapshot:\n${snap.slice(0, 400)}`);
+    // The element named: framed, on disk, and returned as a PNG the client shows.
+    const named = await callRaw("scout_finding", { ...file(1), ref });
+    const namedText = textOf(named);
+    const images = imagesOf(named);
+    if (images.length !== 1 || images[0].mimeType !== "image/png") fail(`a filed finding returned no picture:\n${namedText}`);
+    const sent = Buffer.from(images[0].data ?? "", "base64");
+    const kept = /📷 Picture \((\d+)×(\d+), "Focusless action" and around it\): (\S+\.png)/.exec(namedText);
+    if (!kept) fail(`the result did not say what the picture frames and where it is:\n${namedText}`);
+    if (!fs.existsSync(kept[3]) || !fs.readFileSync(kept[3]).equals(sent)) fail(`the picture on disk is not the one returned: ${kept[3]}`);
+    if (
+      !kept[3].startsWith(path.join(fs.realpathSync(projectDir), ".scenescout", "recordings")) &&
+      !kept[3].startsWith(path.join(projectDir, ".scenescout", "recordings"))
+    )
+      fail(`the picture was not kept under the project's .scenescout/recordings: ${kept[3]}`);
+    // An element plus its margin is smaller than the 1280-wide viewport.
+    if (Number(kept[1]) >= 1000) fail(`a picture of one button is ${kept[1]} wide: it framed the page, not the element`);
+    console.log("✓ scout_finding keeps a picture of the element it names and returns it as image content");
+    // No element named: the viewport, bounded to the default longer side.
+    const page = await callRaw("scout_finding", file(2));
+    const pageShot = /📷 Picture \((\d+)×(\d+), the page as it was/.exec(textOf(page));
+    if (!pageShot || imagesOf(page).length !== 1) fail(`a finding naming no element did not picture the page:\n${textOf(page)}`);
+    if (Math.max(Number(pageShot[1]), Number(pageShot[2])) > 800) fail(`the page's picture is over the 800px default: ${pageShot[0]}`);
+    const report = textOf(await callRaw("scout_report", { session: "pictures", level: "minimal", force: true }));
+    const html = fs.readFileSync(path.join(projectDir, ".scenescout", "report.html"), "utf8");
+    const md = fs.readFileSync(path.join(projectDir, ".scenescout", "report.md"), "utf8");
+    if (!/<figure class="picture">/.test(html) || !/src="recordings\/pictures\/finding-[0-9a-f]+\.png"/.test(html))
+      fail(`report.html does not show the findings' pictures:\n${report.slice(0, 300)}`);
+    if (!/- \*\*Picture:\*\* `recordings\/pictures\/finding-[0-9a-f]+\.png`/.test(md)) fail("report.md does not name the findings' pictures");
+    // Taking a picture is no step anyone took: the next finding's repro trace does not list it.
+    if (/^\d+\. capture /m.test(md)) fail(`a finding's picture appears as a step in a repro trace:\n${md}`);
+    console.log("✓ report.html shows each finding's picture, and report.md names it");
+    // A session with pictures off takes none, and its result has no image.
+    await callRaw("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "plain", mode: "read-only", objective: "plain", evidence: "off" });
+    const off = await callRaw("scout_finding", { ...file(3), session: "plain" });
+    if (imagesOf(off).length !== 0 || /📷/.test(textOf(off))) fail(`a session with pictures off took one:\n${textOf(off)}`);
+    if (fs.readdirSync(path.join(projectDir, ".scenescout", "recordings")).includes("plain")) fail("a session with pictures off wrote a picture");
+    console.log('✓ evidence: "off" takes no picture');
+    // Pictures stay out of git: the folder ignores itself.
+    if (
+      !fs
+        .readFileSync(path.join(projectDir, ".scenescout", ".gitignore"), "utf8")
+        .split("\n")
+        .includes("*")
+    )
+      fail(".scenescout/ does not ignore its pictures");
+    assertClosedAll(await callRaw("scout_close", { all: true }).then(textOf));
+  } finally {
+    await fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
+/** The inline count: past it, a session's pictures are kept and named but no longer returned. */
+async function findingPictureCapCheck(): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-picture-cap-"));
+  const client = new Client({ name: "ft-check-picture-cap", version: "0.0.1" });
+  const env = Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined));
+  await client.connect(
+    new StdioClientTransport({
+      command: "node",
+      args: [serverPath],
+      env: { ...env, SCENESCOUT_LIVE: "off", SCENESCOUT_EVIDENCE: "inline", SCENESCOUT_EVIDENCE_INLINE: "1", SCENESCOUT_EVIDENCE_MAX_PX: "400" },
+    }),
+  );
+  try {
+    await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir, mode: "read-only", objective: "cap" } });
+    const filings = [];
+    for (const n of [1, 2]) {
+      filings.push(
+        (await client.callTool({
+          name: "scout_finding",
+          arguments: {
+            severity: "low",
+            category: "ux-confusing",
+            title: n === 1 ? "The save button is hard to find" : "Two headings say the same thing",
+            detail: `Filed to check the cap (${n}).`,
+            evidence: `cap check ${n}`,
+          },
+        })) as {
+          content: Array<{ type: string; text?: string }>;
+        },
+      );
+    }
+    const [first, second] = filings;
+    if (first.content.filter((c) => c.type === "image").length !== 1) fail(`the first picture under a count of 1 was not returned:\n${textOf(first)}`);
+    if (second.content.some((c) => c.type === "image")) fail(`a picture past SCENESCOUT_EVIDENCE_INLINE=1 was returned:\n${textOf(second)}`);
+    if (!/Not shown here: this session has returned its 1/.test(textOf(second))) fail(`a capped picture was not named as kept:\n${textOf(second)}`);
+    const size = /📷 Picture \((\d+)×(\d+)/.exec(textOf(second));
+    if (!size || Math.max(Number(size[1]), Number(size[2])) > 400) fail(`SCENESCOUT_EVIDENCE_MAX_PX=400 was not applied:\n${textOf(second)}`);
+    console.log("✓ past SCENESCOUT_EVIDENCE_INLINE a picture is kept but not returned, and SCENESCOUT_EVIDENCE_MAX_PX bounds its size");
+    await client.callTool({ name: "scout_close", arguments: { all: true } });
+  } finally {
+    await client.close();
+    await fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
+/**
  * A parallel run over the wire: the planner reports while a lane did the
  * auditing, and a lane's report is folded with what it judged and never filed.
  * Both live in the server (the gate and the fold), not in the engine the smoke
@@ -684,6 +809,7 @@ async function main(): Promise<void> {
   console.log("✓ scout_scan round-trip works");
 
   await expiryBriefCheck(client);
+  await findingPictureCheck(client);
   await laneCheck(client);
   await reattachLaneCheck(client);
   const liveProject = await liveViewCheck(client);
@@ -691,6 +817,7 @@ async function main(): Promise<void> {
   await tokenGoneCheck(liveProject);
   await liveViewOffCheck();
   await dedupJudgeEnvCheck();
+  await findingPictureCapCheck();
   console.log("\nMCP CHECK PASSED");
 }
 

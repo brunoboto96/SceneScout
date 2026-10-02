@@ -14,6 +14,7 @@ import {
 } from "./memory.js";
 import type { OracleViolation } from "./oracles.js";
 import { sayVerification } from "./verify.js";
+import { describePicture, readFindingPicture } from "./capture.js";
 import type { WriteMode } from "./policy.js";
 import { feedForSession } from "./live.js";
 import { buildReplayHtml, evidenceFor, type FindingEvidence, type ReplaySession } from "./replay.js";
@@ -145,9 +146,16 @@ export function formatWorthALook(items: readonly Finding[], sessionStart: string
     lines.push(`- **A defect only if** your project uses ${f.convention ?? "a convention the finding does not name"}`);
     if (f.evidence) lines.push(`- **Seen:** \`${f.evidence}\``);
     lines.push(`- **Where:** \`${f.state}\` (${f.url})${alsoSeenOn(f)}`);
+    lines.push(...pictureLine(f));
     lines.push(``, f.detail, ``);
   }
   return lines;
+}
+
+/** A finding's picture as a bullet, its path relative to report.md, or nothing when it has none. */
+export function pictureLine(f: Finding): string[] {
+  const p = readFindingPicture(f.picture);
+  return p ? [`- **Picture:** \`${p.file}\` (${describePicture(p)})`] : [];
 }
 
 /** The other routes a merged finding was filed on, as the end of its Where line, or "". */
@@ -196,9 +204,14 @@ export function findingEvidence(memory: MemoryStore, sessions: readonly ReplaySe
       // running at once, the run's whole log interleaves them, and the steps
       // before a finding would come from whichever lane acted last.
       const own = f.session ? sessions.find((s) => s.session === f.session) : undefined;
-      return { id: f.id, frames: evidenceFor(own ? own.steps : all, f.foundAt) };
+      const picture = readFindingPicture(f.picture);
+      return {
+        id: f.id,
+        frames: evidenceFor(own ? own.steps : all, f.foundAt),
+        ...(picture ? { picture: { file: picture.file, width: picture.width, height: picture.height, caption: describePicture(picture) } } : {}),
+      };
     })
-    .filter((e) => e.frames.length > 0);
+    .filter((e) => e.frames.length > 0 || !!e.picture);
 }
 
 /**
@@ -795,6 +808,7 @@ export function generateReport(
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}`);
     if (f.evidence) lines.push(`- **Evidence:** \`${f.evidence}\``);
     lines.push(`- **Where:** \`${f.state}\` (${f.url})${alsoSeenOn(f)}`);
+    lines.push(...pictureLine(f));
     lines.push(`- **Seen in runs:** ${f.runs}`);
     // A merge the model made is shown with what was filed, so a wrong one can be seen, and refiled as its own defect (ADR 4).
     for (const m of judgedMergesOf(f)) {

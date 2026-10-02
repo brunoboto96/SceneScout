@@ -211,6 +211,13 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
 | `SCENESCOUT_LIVE` | the server | `off` keeps the live view closed |
 | `SCENESCOUT_REFRESH_BROKER` | the server | `off` turns off the refresh broker for role sessions |
+| `SCENESCOUT_EVIDENCE` | the server | What happens to the picture each finding is filed with: `inline` (kept, in `report.html`, and returned in the `scout_finding` result), `file` (kept and in the report only) or `off`. Default `inline`, or `file` in a CI job. A `scout_attach` `evidence` wins over it |
+| `SCENESCOUT_EVIDENCE_MAX_PX` | the server | The longest side of a finding's picture, in pixels, 160 to 2000 (default 800). A larger picture is shrunk to fit |
+| `SCENESCOUT_EVIDENCE_MAX_KB` | the server | The most a finding's picture may take, in kilobytes, 16 to 2048 (default 200). A larger one is shrunk until it fits |
+| `SCENESCOUT_EVIDENCE_INLINE` | the server | How many pictures one session returns in its `scout_finding` results, 0 to 500 (default 10). Later ones are still kept and in the report |
+| `SCENESCOUT_RECORD` | the server | `on` keeps a frame after every action in every session, for teams that want each QA run recorded; `off` (default) does not. A `scout_attach` `record` wins over it |
+| `CI` | the server | Set by CI services. When it is set (and not `false` or `0`), finding pictures default to `file` |
+| `GITHUB_ACTIONS` | the server | Set by GitHub Actions. `true` counts as a CI job, as `CI` does |
 | `SCENESCOUT_DEDUP` | the server | `judge` asks a model, with a key below, whether a filing the dedup rule keeps apart from everything recorded is one of the open findings on its page; `rule` (default) does not. A `scout_attach` `dedup` wins over it |
 | `SCENESCOUT_DEDUP_PROVIDER` | the server | `anthropic` or `openai`: which key the dedup judge uses when both are set |
 | `ANTHROPIC_API_KEY` | `ci`; the server with the dedup judge on | The Anthropic key. The only way to give one |
@@ -382,7 +389,8 @@ What an agent can pass when it attaches a session. You rarely set these by hand;
 | `task` | a placeholder | What the session is doing right now |
 | `paceMs` | `0` | A floor between actions, 0 to 60000 |
 | `trustedEmbeds` | none | Origins of embedded frames whose writes may go out, in `safe-write` only |
-| `record` | `false` | Keep a frame after every action and write `report.html` |
+| `record` | `SCENESCOUT_RECORD`, else `false` | Keep a frame after every action and show it beside each step in `report.html` |
+| `evidence` | `SCENESCOUT_EVIDENCE`, else `inline` (`file` in a CI job) | What happens to the picture each finding is filed with: `inline` keeps it, shows it in `report.html` and returns it in the `scout_finding` result; `file` keeps it and shows it in the report; `off` takes none |
 | `actionTimeoutMs` | `SCENESCOUT_ACTION_TIMEOUT_MS`, else `5000` | 1000 to 120000 |
 | `navTimeoutMs` | `SCENESCOUT_NAV_TIMEOUT_MS`, else `20000` | 1000 to 300000 |
 | `dedup` | `SCENESCOUT_DEDUP`, else `rule` | `judge` asks a model whether a filing the rule keeps apart from everything recorded is one of the open findings on its page; it needs a key in the server's environment and sends the findings' titles, categories and evidence, and the page's path, to the provider. For the whole run |

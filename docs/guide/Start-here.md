@@ -149,6 +149,8 @@ The level is a contract that `scout_report` enforces for what the engine can see
 
 [examples/report.md](../../examples/report.md) is a complete report from the demo app.
 
+Each finding is filed with a picture of what it is about: the element the agent names, with a margin around it, or the page as it was. The picture is kept in `.scenescout/recordings/`, shown under the finding in `.scenescout/report.html`, and returned with the agent's `scout_finding` result, so a chat client shows the evidence as it is filed. Pictures are held to 800 pixels on their longer side and 200 KB, and a session returns the first 10 in the conversation; later ones are kept and in the report. `scout_attach {evidence: "file"}` keeps them out of the conversation, `{evidence: "off"}` takes none, and a CI job keeps them on file by default. The [configuration reference](Configuration-reference.md#environment-variables) has the settings. A picture shows whatever the page showed, and the engine's secret redaction reads text, not pixels: on a page that displays secrets, turn pictures off.
+
 Findings stay in `.scenescout/memory.json`. The next run skips states already covered, deduplicates findings on their evidence and lists older findings as an index; `scout_report {history: "full"}` prints every one in full. `.scenescout/` writes its own `.gitignore`, so a `git add -A` in the project does not pick it up.
 
 ## The live view
@@ -162,7 +164,7 @@ scenescout status           # the same information as text
 
 The page is served on `127.0.0.1` only, behind a token that changes on each start, and answers `GET` and nothing else. No frame it shows is written to disk. `SCENESCOUT_LIVE=off` in the server's environment keeps it closed.
 
-To keep a copy of the run, ask for a recording (`Use SceneScout to test … and record the run`, or `scout_attach {record: true}`). The engine then keeps a frame after every action, and `scout_report` also writes `.scenescout/report.html`: one self-contained page with the report, the screenshots around each finding and each session's trail. Recording is off by default because frames are pictures of the app, which the engine's secret redaction cannot read.
+To keep a copy of the whole run, ask for a recording (`Use SceneScout to test … and record the run`, or `scout_attach {record: true}`). The engine then keeps a frame after every action, and `.scenescout/report.html`, the self-contained page `scout_report` writes beside the report, shows the screenshots around each finding and each session's trail. Recording is off by default because frames are pictures of the app, which the engine's secret redaction cannot read. A team that wants every QA run recorded sets `SCENESCOUT_RECORD=on` in the server's environment once.
 
 ## Next
 
