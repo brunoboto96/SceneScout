@@ -1078,6 +1078,13 @@ request's. The change was reverted and no second run was spent.
 | 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | turns | 40 | 826,683 (802,609) / 1,597 | 1m 18s | $0.011 |
 | 2026-09-27 | demo | 3.13.1 | dispatched | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 5/5 (100%) | — | done | 33 | 670,885 (646,007) / 1,755 | 1m 14s | $0.010 |
 | 2026-09-27 | holdout | 3.13.1 | dispatched | openai · gpt-6-luna · low | b5a7933f32 | 3/10 | 3/5 (43%–71%) | — | turns | 40 | 870,166 (842,856) / 1,930 | 2m 34s | $0.012 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | turns | 40 | 774,823 (727,016) / 2,913 | 33s | $0.014 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | turns | 40 | 766,576 (756,424) / 2,417 | 33s | $0.010 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low | c1786bc817 | 3/13 | 4/4 (80%–100%) | — | done | 29 | 609,604 (602,591) / 1,641 | 1m 19s | $0.008 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low | c1786bc817 | 3/13 | 4/4 (100%) | — | done | 29 | 599,431 (574,840) / 1,647 | 1m 09s | $0.009 |
+| 2026-10-02 | holdout | 3.14.1 | manual | openai · gpt-6-luna · low | b5a7933f32 | 1/10 | 1/4 (20%–40%) | — | done | 27 | 558,749 (551,323) / 1,760 | 1m 05s | $0.007 |
+| 2026-10-02 | holdout | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | b5a7933f32 | 2/10 | 2/4 (40%–60%) | — | turns | 40 | 780,989 (767,682) / 2,721 | 32s | $0.010 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | c1786bc817 | 8/13 | 9/9 (90%–100%) | — | done | 95 | 2,027,350 (2,001,159) / 6,777 | 1m 29s | $0.026 |
 
 <!-- ci-results:end -->
 
@@ -1095,6 +1102,97 @@ adopted:** a net one-defect gain from one run is within the run-to-run spread
 5/13 in 36 turns at low effort, so more turns do not yet explain a gap. The
 CLI's default cap stays 40; the workflow inputs stay, so a later experiment
 can set the caps without editing the workflow.
+
+### Lanes: one loop against four (task 40)
+
+`scenescout ci --lanes 4` splits the app between four model loops that share
+the run's caps ([ADR 16](adr/0016-an-unattended-run-may-split-into-lanes-that-share-its-caps.md)).
+One layer changed: the shape of the run. Held fixed: the engine at commit
+`eba7aea` (with `--lanes` built in, so both sides ran the same code),
+gpt-6-luna at effort `low`, ci-run-1's caps (the defaults: 40 turns,
+1,500,000 tokens, 20 minutes), `read-only`, level `medium`, and a fresh app and
+project per run, dispatched through the benchmark workflow's `lanes` input.
+The rows are the `ci-lanes-*` archives in the table above. Per-lane turns and
+what each lane opened come from the runs' `ci.json` and logs, in workflow runs
+36952225081, 36952230314 (lanes), 36952235854, 36952240780 (one loop),
+36953212250 and 36952251577 (held-out) and 36953334977 (raised caps); the
+archives keep the findings.
+
+**The noise floor first.** Single-loop runs of one engine agree closely: the
+four low-effort demo rows from 3.12.0 to 3.13.1 above all read 5/13, and the
+two single-loop runs here both read 3/13. Between releases the gap is wider:
+the scheduled run of v3.14.1 found 2/13 on the demo and 1/10 on the held-out
+app, where the dispatched run of v3.13.1 a day earlier found 5/13 and 3/10,
+with the same model, effort and caps. That 2/13 run lists the
+scheduled-reports dead end in other words ("renders with no usable controls"),
+which the key may not match; a person should check the phrasing against the
+key. To be safe, each configuration compared here was run twice on the demo,
+and a difference within ±3, the gap between those two releases, is read as
+noise.
+
+| | Demo recall | Held-out recall | Turns | Wall | Cost per run |
+|---|---:|---:|---|---|---:|
+| One loop | 3/13, 3/13 | 1/10 | 29, 29; 27, each ended by itself | 1m 05s to 1m 19s | $0.007 to $0.009 |
+| 4 lanes, the caps shared | 3/13, 3/13 | 2/10 | 40, the turn cap | 32s to 33s | $0.010 to $0.014 |
+| 4 lanes, caps raised to 160 turns and 6,000,000 tokens (one run) | 8/13 | not run | 95, every lane ended by itself | 1m 29s | $0.026 |
+
+**Item by item.** Every demo run found the chart image's 404 and the badge
+covering a dashboard button, both on the landing page. With the caps shared,
+the lanes also found the export crash on the reports page (run 1) or the
+sticky bar covering Save (run 2), and missed the scheduled-reports dead end
+that the single loop found both times: each lanes run gained one item and lost
+one.
+On the held-out app both configurations found the notices page stuck after a
+500, and the lanes run also found the overdue loans' contrast, which is within
+the noise. Labelled precision was 3/3 per lanes run against 4/4 per
+single-loop run on the demo, and 2/4 against 1/4 on the held-out app. Six of
+the seven runs left one finding unlabelled (a page with no visually dominant
+next action, the new-order form accepting zero items, a link with no test id),
+and the seventh set one aside; they are listed for a person to judge, and the
+key was not changed.
+
+**Why sharing the caps found no more.** The four lanes split the same 40 turns,
+about ten each, and spent them all in 33 seconds, while the single loop ended
+by itself at 29 turns, so the cap never bound it. A lane spent its ten turns on
+its first route: the lane that owned the landing page clicked through the
+dashboard and never opened its other two routes, one of which holds the dead
+end. Sharing the caps keeps the run's ceiling where it was, the lanes spending
+all of it, and leaves each lane a quarter of a budget the single loop does not
+use in full.
+
+**Raised caps, direction only.** With the caps raised to about a single loop's
+budget per lane, four lanes found 8/13, and all 9 labelled findings were
+correct: the two landing-page items, plus the double submit, the new-order
+hint's contrast, the e-mail field with no label, the export crash, the
+scheduled-reports dead end and the sticky bar, and one correct finding the
+key lists beyond its expected ones (a customer name rendered as markup in the
+orders list). Every lane ended by itself, after 16 to 36 turns, the level's
+contract was met, and the run used about 2.0 million tokens, about 3.4 times a
+single loop's. +5 is beyond the noise
+floor, but it is one run, with the caps raised. The single loop was not re-run
+at 160 turns: at this effort it ends by itself near 30 turns, well inside 40.
+
+**Decision: the default stays one loop.** At the run's own caps, four lanes
+found as many expected defects as one loop on the demo (3/13 in each of two
+runs, though not the same ones) and one more on the held-out app (2/10 against
+1/10, within the noise), in half the wall time and with about 1.3 times the
+tokens. Lanes stay as an option, documented with what this measured, because
+the raised-cap run points at the budget per lane, not the split, as what binds.
+Two more demo runs and a held-out run at those caps would show whether lanes
+with a per-lane budget beat one loop reliably; that is the next experiment,
+before any default changes.
+
+**Spend and what was not run.** Eight runs: the seven above, and a held-out
+lanes run dispatched together with five others. One of its lanes had a model
+call refused for the organisation's tokens-per-minute limit (HTTP 429) through
+all its retries, so the run ended `provider-error` (exit 2), as a model API
+failure in any lane does, and kept no artifact; it is not scored. Four lanes
+sent about 1.4 million tokens a minute at this model, about 2.8 times one
+loop's 0.5 million, so a per-minute limit is reached sooner; the one refusal
+seen came with six runs in flight on one organisation's limit. [The lanes
+section of the CI guide](ci.md#lanes) says so. Lanes
+2 was not run: the last run went to the raised caps instead, the cause the
+action logs pointed at.
 
 ## Finding dedup as a measured decision (task 15)
 

@@ -64,8 +64,13 @@ what ended a run whose lanes ended differently.
   lane, and the model finished it only if every lane finished by itself. A
   lane whose browser could not attach is listed with its reason and named in
   the stop's detail, and does not fail the run, unless none could attach.
-- **The default is set by measurement**: it stays one loop unless measured
-  runs show a split finding more (docs/benchmark.md, "Unattended runs").
+- **The default is set by measurement, and stays one loop.** On the demo app
+  at the default caps, four lanes found 3 of 13 expected defects in each of
+  two runs, as one loop did in each of two (a difference within three was
+  read as noise), in half the wall time and with about 1.3 times the
+  tokens. One run with the caps raised to 160 turns and 6,000,000 tokens found
+  8 of 13: a direction, not a result, and the next experiment
+  (docs/benchmark.md, "Lanes: one loop against four").
 
 ## Consequences
 
@@ -74,7 +79,14 @@ what ended a run whose lanes ended differently.
   browser; the planning session stays open to write the report.
 - Each lane resends the method and the tool descriptions on every turn, as one
   loop does, so a split run spends about as many tokens per turn as one loop,
-  most of them cached.
+  most of them cached; but its lanes spend them at once. Four lanes sent about
+  1.4 million tokens a minute, about 2.8 times one loop's, so a provider's
+  tokens-per-minute limit is reached sooner (the one refusal seen came with
+  six runs in flight on one organisation's limit).
+- Shared caps leave each lane a share of them: at the default caps, about ten
+  turns each for four lanes, which in the runs measured kept the lanes on their
+  first pages (the lane owning the landing page never opened its other
+  routes). A run that splits needs its caps raised with it to use the split.
 - A module is a route's first path segment. An app whose pages are all files
   at the root is one module per page, so related pages can land in different
   lanes; an app whose pages all sit under one path is one module, and splits

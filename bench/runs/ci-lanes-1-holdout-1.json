@@ -1,0 +1,39 @@
+{
+  "app": "holdout",
+  "run": "ci-lanes-1-holdout-1",
+  "date": "2026-10-02",
+  "note": "Unattended run, one loop (the default), on the engine at eba7aea with --lanes built in; gpt-6-luna, effort low, default caps. The baseline for the lanes comparison; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Fines page shows an empty list after its request is forbidden",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; fines list empty (1)"
+    },
+    {
+      "title": "Members register request is forbidden",
+      "severity": "high",
+      "category": "http-error",
+      "evidence": "GET /api/members 403"
+    },
+    {
+      "title": "Fines page has no visually dominant next step",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "design audit /fines.html: no visually dominant action"
+    },
+    {
+      "title": "Catalogue availability checkbox target is only 13×13 px",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "catalogue-available target 13x13px"
+    },
+    {
+      "title": "Home notices fail to load with HTTP 500",
+      "severity": "high",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500; home-notices remains Loading notices…"
+    }
+  ],
+  "decisions": []
+}

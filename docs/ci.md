@@ -444,7 +444,11 @@ What ended a run in lanes: a model API failure in any lane ends it as `provider-
 
 With fewer than two modules there is nothing to split: the run explores in one loop, and the summary and `ci.json` say so, as they do when the planning crawl failed. Fewer modules than lanes gives fewer lanes. Pages that all sit under one path (`/app/…`) are one module, so such an app splits into at most two lanes, one of them only the page the run started on, or none when the target URL is itself under that path.
 
-Each lane is a browser running at the same time as the others, and the run's first session keeps its browser open to write the report, so give the runner the memory for them all: as for agent-driven lanes, about as many lanes as the runner has cores, less two. [The benchmark](benchmark.md#unattended-runs-scenescout-ci) is where lanes and one loop are compared.
+Each lane is a browser running at the same time as the others, and the run's first session keeps its browser open to write the report, so give the runner the memory for them all: as for agent-driven lanes, about as many lanes as the runner has cores, less two.
+
+Lanes spend tokens faster: in [the benchmark](benchmark.md#lanes-one-loop-against-four-task-40), four lanes sent about 1.4 million tokens a minute, about 2.8 times one loop's, so a provider's tokens-per-minute limit is reached sooner, and a call still refused (HTTP 429) after its retries ends the run as `provider-error`.
+
+What lanes find depends on the budget each lane gets. On the demo app at the default caps, four lanes found as many expected defects as one loop (3 of 13 in two runs each, not the same ones): ten turns a lane left each lane on its first page, while one loop ended by itself at 29 turns. With the caps raised to 160 turns and 6,000,000 tokens, one run of four lanes found 8 of 13, every lane ending by itself. That is one run, so a direction rather than a result, but it is why the default stays one loop, and why `--lanes` is worth raising `--max-turns` and `--max-tokens` with.
 
 ### Showing one element
 
