@@ -46,6 +46,20 @@ export function redactViolation<T extends { detail: string; url: string }>(v: T)
 export const POLICY_BLOCK_WINDOW_MS = 2000;
 
 /**
+ * How a block surfaces in an error's wording: the browser's own lines for a
+ * dropped request or the stand-in 403, the status as HTTP clients word their
+ * rejection ("Request failed with status code 403", "403 Forbidden"), and the
+ * stand-in body's own sentence echoed into an error. A 403 alone with neither
+ * word is left out: "Error 403 at line 12" is not the policy.
+ */
+const POLICY_INDUCED_RE = [
+  /ERR_BLOCKED_BY_CLIENT|Failed to fetch|NetworkError when attempting to fetch|Load failed|the server responded with a status of 403\b/i,
+  /\bstatus(?: code)?:? 403\b/i,
+  /\b403\b[^\n]{0,40}\b(?:forbidden|refused)\b|\b(?:forbidden|refused)\b[^\n]{0,40}\b403\b/i,
+  /refused by the tester's [a-z-]+ write policy/i,
+];
+
+/**
  * Is this console or page error a consequence of the tester's OWN write-policy
  * block rather than something the app did?
  *
@@ -64,7 +78,7 @@ export const POLICY_BLOCK_WINDOW_MS = 2000;
 export function isPolicyInduced(v: { kind: string; detail: string }, msSincePolicyBlock: number | null): boolean {
   if (msSincePolicyBlock === null || msSincePolicyBlock > POLICY_BLOCK_WINDOW_MS) return false;
   if (v.kind !== "page_error" && v.kind !== "console_error") return false;
-  return /ERR_BLOCKED_BY_CLIENT|Failed to fetch|NetworkError when attempting to fetch|Load failed|the server responded with a status of 403\b/i.test(v.detail);
+  return POLICY_INDUCED_RE.some((re) => re.test(v.detail));
 }
 
 /**
