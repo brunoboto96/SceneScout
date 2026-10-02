@@ -27,6 +27,8 @@ Run `npx -y scenescout doctor` first (`--engine` for clients other than Claude C
 | The report refuses to finish | The level's contract is not met, and `scout_report` lists what is missing. Work the list down, or choose a lower level. `force: true` writes it anyway, with the gaps printed |
 | Parallel lanes slow the machine to a crawl | Each lane is a real browser. Run about as many as the machine has cores, less two, and let each lane attach when it starts |
 | A closed session will not close | `scout_close` keeps a lane open until its report has been accepted by `scout_lane_report`, because the lane's decisions are kept against its session. Fold the report, then close |
+| `⚠ DEDUP JUDGE OFF` on attach | The dedup judge was asked for (`SCENESCOUT_DEDUP=judge` or `scout_attach {dedup: "judge"}`) and the server has no key to ask it with, or has both keys and no `SCENESCOUT_DEDUP_PROVIDER`. The rule decides duplicates, as it does by default. Put the key in the server's environment, or leave the judge off |
+| A finding says "Merged by the dedup judge" | A model read that filing as the same defect as the finding it sits under. Its title, category, severity and evidence are kept there; if the two are different defects, file it again with a title that says what differs |
 
 ## In CI
 

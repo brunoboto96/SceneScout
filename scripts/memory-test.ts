@@ -36,7 +36,14 @@ import {
   isEmbedKey,
   isWorthALook,
   mergeTier,
+  MAX_JUDGED_MERGES,
+  judgedMergesOf,
+  type DuplicateJudge,
+  type Finding,
+  type FindingInput,
+  type JudgeVerdict,
 } from "../src/engine/memory.ts";
+import { analyzeDesign, type StyleRecord } from "../src/engine/design.ts";
 import {
   FORMS_READ_FAILED,
   FORMS_SUBMIT_UNMATCHED,
@@ -47,6 +54,7 @@ import {
   isEmptySubmit,
   isFormBookkeeping,
   isNavigationTeardown,
+  isSubmitLike,
   isTextEntry,
   sameControl,
   submits,
@@ -54,6 +62,50 @@ import {
   type FieldFacts,
   type FormProbe,
 } from "../src/engine/forms.ts";
+
+/** One styled element for a design audit; override only what a case is about. */
+function designRecord(over: Partial<StyleRecord>): StyleRecord {
+  return {
+    tag: "div",
+    testid: null,
+    text: "text",
+    textLen: 4,
+    interactive: false,
+    rect: { x: 300, y: 20, w: 200, h: 40 },
+    fontSize: 16,
+    fontWeight: 400,
+    fontFamily: "Inter",
+    lineHeight: 24,
+    textTransform: "none",
+    textAlign: "left",
+    underline: false,
+    color: "rgb(0, 0, 0)",
+    bg: "rgb(255, 255, 255)",
+    padding: [8, 8, 8, 8],
+    marginV: [0, 0],
+    radius: 4,
+    shadow: "",
+    clipped: false,
+    fixed: false,
+    required: false,
+    submitish: false,
+    inputType: "",
+    role: "",
+    filled: false,
+    inForm: false,
+    inRow: false,
+    inSearch: false,
+    inBreadcrumb: false,
+    shell: false,
+    sideStripe: false,
+    gradientText: false,
+    glass: false,
+    glow: false,
+    aiGradient: false,
+    ...over,
+    textLen: (over.text ?? "text").length,
+  };
+}
 
 /** Temp dirs created by the running test, cleaned up even when it fails. */
 let dirs: string[] = [];
@@ -515,6 +567,45 @@ test("coverage: a route's elements are counted once across its state fingerprint
   assert.deepEqual(cov.unexercised, [{ state: "/a", keys: ["button:open"], total: 2 }]);
 });
 
+test("coverage counts the controls on a page, not the wrappers and badges it lists for their test ids", () => {
+  // Three buttons and ten tagged wrappers on one page: the same keys listed either way, and the one
+  // fact that flips the count is whether the collector said a user can act on the element.
+  const store = freshStore();
+  const buttons = ["button:save", "button:open", "button:close"];
+  const wrappers = Array.from({ length: 10 }, (_, i) => `tid:wrapper-${i}`);
+  store.visitState("/page#f1", "http://x/page", "/page", [...buttons, ...wrappers], wrappers);
+  const cov = store.coverage();
+  assert.equal(cov.elementsTotal, 3, "three controls, not thirteen elements");
+  assert.deepEqual(cov.unexercised, [{ state: "/page", keys: buttons, total: 3 }]);
+  // The wrappers stay known, so a click aimed at one still registers, without counting as coverage.
+  store.markExercised("/page#f1", "tid:wrapper-0", "click");
+  assert.equal(store.wasExercised("/page#f1", "tid:wrapper-0"), true);
+  assert.equal(store.coverage().elementsExercised, 0);
+  // Listed without the inert set (as memory written before it), every key counts, as it always did.
+  const legacy = freshStore();
+  legacy.visitState("/page#f1", "http://x/page", "/page", [...buttons, ...wrappers]);
+  assert.equal(legacy.coverage().elementsTotal, 13);
+  // A merge with another process's memory keeps the mark.
+  const file = (inert: boolean): Parameters<typeof mergeMemory>[0] => ({
+    version: 1,
+    states: {
+      "/page#f1": {
+        url: "http://x/page",
+        route: "/page",
+        firstSeen: "2026-01-01",
+        visits: 1,
+        elements: { "tid:wrapper-1": { exercised: false, ...(inert ? { inert: true } : {}) } },
+      },
+    },
+    findings: [],
+  });
+  assert.equal(mergeMemory(file(true), file(false)).states["/page#f1"].elements["tid:wrapper-1"].inert, true, "ours says inert, and wins");
+  assert.equal(mergeMemory(file(false), file(true)).states["/page#f1"].elements["tid:wrapper-1"].inert, undefined, "ours says a control, and wins");
+  // A key that becomes a control on a later visit counts again.
+  store.visitState("/page#f1", "http://x/page", "/page", [...buttons, ...wrappers], wrappers.slice(1));
+  assert.equal(store.coverage().elementsTotal, 4);
+});
+
 test("coverage reports each route's own deduped total, so the gap ledger can compare like with like", () => {
   // The untouched-route check asks "were ALL of this route's elements missed?".
   // It used to answer by re-counting raw state elements, which double-counts an
@@ -706,6 +797,34 @@ test("an element on most routes is shared chrome; one on a few pages is not", ()
   assert.ok(chrome.has("tid:sidebar-logo"), "on every route → shell");
   assert.ok(chrome.has("span:18"), "recognised without a testid, which is how badges render");
   assert.ok(!chrome.has("tid:page-0-title"), "on one route → that page's own content");
+});
+
+test("a page's design score does not depend on whether it was audited before the census warmed up", () => {
+  // Audit route A first, then three others, then A again: the census knows the
+  // shell only by the end, and A must score the same both times or the
+  // worst-pages ranking depends on audit order.
+  const store = freshStore();
+  const sidebar = Array.from({ length: 30 }, (_, i) =>
+    designRecord({ tag: "a", text: `Section ${i}`, interactive: true, filled: true, shell: true, bg: "rgb(30, 41, 59)", color: "rgb(100, 116, 139)" }),
+  );
+  const page = (name: string) => ({
+    records: [
+      designRecord({ tag: "h1", text: name }),
+      designRecord({ tag: "button", text: `New ${name}`, interactive: true, filled: true, bg: "rgb(20, 80, 200)", color: "rgb(255, 255, 255)" }),
+      ...sidebar,
+    ],
+    page: { scrollW: 1280, clientW: 1280, headings: [{ level: 1, size: 30, text: name }], images: [], density: 10, focusSamples: [] },
+  });
+  const audit = (route: string) => {
+    const { score, signatures } = analyzeDesign(page(route), { width: 1280, height: 900 }, store.designChromeKeys());
+    store.recordDesignElements(route, signatures);
+    return score;
+  };
+  const firstA = audit("/a");
+  assert.equal(store.designChromeKeys().size, 0, "one audited route: the census knows nothing yet");
+  for (const r of ["/b", "/c", "/d"]) audit(r);
+  assert.ok(store.designChromeKeys().size >= 30, "four audited routes: the census now knows the sidebar");
+  assert.deepEqual(audit("/a"), firstA);
 });
 
 test("chrome is not inferred from too few routes", () => {
@@ -1711,4 +1830,270 @@ test("coverage: controls inside another site's frame are counted apart from the 
     "an embed's controls never reach the gap ledger",
   );
   assert.equal(isEmbedKey("frame:about:srcdoc#Inner|button:x"), false);
+});
+
+test("isSubmitLike: submit words count as whole words of the name or test id", () => {
+  const cases: Array<[string, string, string | null, boolean]> = [
+    ["button", "Sign in", null, true],
+    ["button", "Continue", "sign-in", true],
+    ["button", "Sign", null, true],
+    ["button", "Go", "auth_signup_button", true],
+    ["button", "Save", null, true],
+    ["button", "Add", "rowAdd", true],
+    // The words inside other words are not the word.
+    ["button", "Verify", "assignee-verify", false],
+    ["button", "Lookup", "postcode-lookup", false],
+    ["button", "Design", null, false],
+    ["button", "Address book", "address-book", false],
+    // Only buttons.
+    ["link", "Sign in", null, false],
+  ];
+  for (const [role, name, testid, want] of cases) assert.equal(isSubmitLike(role, name, testid), want, `${role} ${name} ${testid}`);
+});
+
+// ---------------------------------------------------------------------------
+// The dedup judge, as the store asks it (fileFinding)
+// ---------------------------------------------------------------------------
+
+/** Two filings the rule keeps apart on one page: no evidence, no shared literal, titles too unalike. */
+const quiet = { severity: "medium" as const, category: "ux-confusing", detail: "", url: "http://x/orders", state: "/orders#f1" };
+const SAVE = { ...quiet, title: "The save button gives no feedback" };
+const SILENT = { ...quiet, title: "Clicking save shows nothing", state: "/orders#f2" };
+
+/** A judge that answers from a script and records what it was shown. */
+function scriptedJudge(answer: (incoming: FindingInput, stored: readonly Readonly<Finding>[]) => JudgeVerdict | Promise<JudgeVerdict>) {
+  const asked: Array<{ incoming: string; stored: string[] }> = [];
+  const judge: DuplicateJudge = {
+    judge: async (incoming, stored) => {
+      asked.push({ incoming: incoming.title, stored: stored.map((f) => f.title) });
+      return answer(incoming, stored);
+    },
+    describe: () => null,
+  };
+  return { judge, asked };
+}
+
+test("dedup judge: a filing the rule keeps apart is merged when the judge says it is the same, and what was filed is kept on the finding", async () => {
+  const ruleOnly = freshStore();
+  await ruleOnly.fileFinding(SAVE);
+  const apart = await ruleOnly.fileFinding(SILENT);
+  assert.equal(apart.isNew, true, "the rule keeps the two apart: this is the case the judge is for");
+
+  const store = freshStore();
+  const first = await store.fileFinding(SAVE);
+  const { judge, asked } = scriptedJudge(() => ({ sameAs: first.finding.id, pSame: 0.93 }));
+  store.dedupJudge = judge;
+  const filed = await store.fileFinding({ ...SILENT, severity: "high", evidence: "no toast after POST /api/orders 200" });
+  assert.equal(filed.isNew, false);
+  assert.deepEqual(filed.judged, { pSame: 0.93 });
+  assert.equal(store.findings.length, 1);
+  assert.equal(filed.finding.runs, 2);
+  assert.deepEqual(asked, [{ incoming: SILENT.title, stored: [SAVE.title] }]);
+  const [merge] = filed.finding.judgedMerges ?? [];
+  assert.deepEqual(
+    { ...merge, at: undefined },
+    { title: SILENT.title, category: "ux-confusing", severity: "high", evidence: "no toast after POST /api/orders 200", pSame: 0.93, at: undefined },
+  );
+  // Kept on disk, so a later run and the report see it.
+  const reread = openStore(path.dirname(store.dir));
+  assert.equal(reread.findings[0].judgedMerges?.[0].title, SILENT.title);
+});
+
+test("dedup judge: the rule decides first, so a filing it merges never reaches the judge, and the judge's 'none' keeps a filing apart", async () => {
+  const store = freshStore();
+  const { judge, asked } = scriptedJudge(() => null);
+  store.dedupJudge = judge;
+  await store.fileFinding({ ...base, title: "Reports load fails", detail: "x", evidence: "GET /api/reports 500" });
+  const byRule = await store.fileFinding({ ...base, title: "The reports page errors", detail: "y", evidence: "GET /api/reports 500" });
+  assert.equal(byRule.isNew, false);
+  assert.equal(byRule.judged, undefined);
+  assert.equal(byRule.finding.judgedMerges, undefined, "a merge the rule makes records nothing, as before");
+  assert.deepEqual(asked, [{ incoming: "Reports load fails", stored: [] }], "the second filing, which the rule merged, was never put to the judge");
+  await store.fileFinding(SAVE);
+  const kept = await store.fileFinding(SILENT);
+  assert.equal(kept.isNew, true);
+  assert.equal(asked.length, 3, "the judge was asked about each filing the rule kept apart");
+  assert.equal(store.findings.length, 3);
+});
+
+test("dedup judge: a filing that lands while the judge is asked is compared by the rule, and a finding resolved meanwhile is never merged into", async () => {
+  const store = freshStore();
+  const first = await store.fileFinding(SAVE);
+  // While the judge is out, another session files the same text: the rule merges the two, as it would have with no judge.
+  store.dedupJudge = scriptedJudge(() => {
+    store.addFinding({ ...SILENT, state: "/orders#f3" });
+    return null;
+  }).judge;
+  const raced = await store.fileFinding(SILENT);
+  assert.equal(raced.isNew, false);
+  assert.equal(raced.finding.title, SILENT.title);
+  assert.equal(store.findings.length, 2);
+
+  // The judge chose a finding someone resolved before its answer came back: the filing stays apart.
+  store.dedupJudge = scriptedJudge(() => {
+    first.finding.status = "resolved";
+    return { sameAs: first.finding.id, pSame: 0.9 };
+  }).judge;
+  const late = await store.fileFinding({ ...quiet, title: "Pressing save does nothing visible", state: "/orders#f4" });
+  assert.equal(late.isNew, true);
+  assert.equal(first.finding.runs, 1);
+});
+
+test("dedup judge: a judge that throws leaves the rule's decision and says why; with no judge fileFinding files as addFinding does", async () => {
+  const store = freshStore();
+  await store.fileFinding(SAVE);
+  store.dedupJudge = {
+    judge: async () => {
+      throw new Error("judge fault");
+    },
+    describe: () => null,
+  };
+  const filed = await store.fileFinding(SILENT);
+  assert.equal(filed.isNew, true);
+  assert.equal(filed.judgeError, "judge fault");
+
+  // The contrast: no judge, the same two filings as addFinding sees them.
+  const a = freshStore();
+  const b = freshStore();
+  const viaFile = [await a.fileFinding(SAVE), await a.fileFinding(SILENT)].map((f) => f.isNew);
+  const viaAdd = [b.addFinding(SAVE), b.addFinding(SILENT)].map(([, isNew]) => isNew);
+  assert.deepEqual(viaFile, viaAdd);
+  // The run's end turns the judge off: the next run asks for it again or goes without.
+  store.dedupJudge = scriptedJudge(() => null).judge;
+  store.dedupChoice = "judge";
+  store.endRun();
+  assert.equal(store.dedupJudge, null);
+  assert.equal(store.dedupChoice, undefined);
+});
+
+test("dedup judge: two stores writing one memory keep every judged merge, once, at most the cap", () => {
+  const finding = (judgedMerges: Finding["judgedMerges"], foundAt: string): Finding => ({
+    id: "x",
+    severity: "low",
+    category: "c",
+    title: "t",
+    detail: "d",
+    url: "u",
+    state: "/a#1",
+    repro: [],
+    foundAt,
+    runs: 2,
+    ...(judgedMerges ? { judgedMerges } : {}),
+  });
+  const m = (title: string, at: string) => ({ title, category: "c", severity: "low" as const, pSame: 0.9, at });
+  const mine = { version: 1 as const, states: {}, findings: [finding([m("one", "2026-01-01"), m("two", "2026-01-02")], "2026-01-03")] };
+  const theirs = { version: 1 as const, states: {}, findings: [finding([m("one", "2026-01-01"), m("three", "2026-01-04")], "2026-01-01")] };
+  const once = mergeMemory(mine, theirs);
+  assert.deepEqual(
+    once.findings[0].judgedMerges?.map((x) => x.title),
+    ["one", "two", "three"],
+  );
+  assert.deepEqual(mergeMemory(once, theirs).findings[0].judgedMerges, once.findings[0].judgedMerges, "merging the same document again changes nothing");
+  const many = Array.from({ length: MAX_JUDGED_MERGES + 3 }, (_, i) => m(`m${i}`, `2026-02-${String(i + 1).padStart(2, "0")}`));
+  const capped = mergeMemory({ ...mine, findings: [finding(many, "2026-03-01")] }, theirs).findings[0].judgedMerges!;
+  assert.equal(capped.length, MAX_JUDGED_MERGES);
+  assert.equal(capped.at(-1)!.title, `m${MAX_JUDGED_MERGES + 2}`, "the newest are kept");
+  assert.equal(
+    mergeMemory({ ...mine, findings: [finding(undefined, "2026-01-03")] }, { ...theirs, findings: [finding(undefined, "2026-01-01")] }).findings[0]
+      .judgedMerges,
+    undefined,
+  );
+});
+
+test("dedup judge: only what a judge may answer is merged: an open finding on the filing's page, called the same at better than even", async () => {
+  const store = freshStore();
+  const elsewhere = await store.fileFinding({ ...SAVE, state: "/settings#f1" });
+  const here = await store.fileFinding(SAVE);
+  const verdicts = [
+    { sameAs: elsewhere.finding.id, pSame: 0.95 }, // another page
+    { sameAs: here.finding.id, pSame: 0.3 }, // below even: a contradiction, not a merge
+    { sameAs: "no-such-id", pSame: 0.95 },
+  ];
+  for (const [i, verdict] of verdicts.entries()) {
+    store.dedupJudge = scriptedJudge(() => verdict).judge;
+    // Each has its own title and names its own request, so the rule keeps them apart from each other too.
+    const filed = await store.fileFinding({ ...SILENT, title: `${SILENT.title} (case ${i})`, evidence: `no toast after POST /api/orders/${i} 200` });
+    assert.equal(filed.isNew, true, JSON.stringify(verdict));
+  }
+  // The contrast: the same answer naming the finding on this page, at 0.95, merges.
+  store.dedupJudge = scriptedJudge(() => ({ sameAs: here.finding.id, pSame: 0.95 })).judge;
+  assert.equal((await store.fileFinding({ ...SILENT, title: `${SILENT.title} (case 9)`, evidence: "no toast after POST /api/orders/9 200" })).isNew, false);
+});
+
+test("dedup judge: a merge made after another process rewrote memory.json lands on the finding as it now is, and stays on disk", async () => {
+  const store = freshStore();
+  const first = await store.fileFinding(SAVE);
+  store.dedupJudge = scriptedJudge(() => {
+    // Another process writes the file while the judge is out, and this store folds it in (as any save would), replacing its objects.
+    const other = openStore(path.dirname(store.dir));
+    other.addFinding({ ...quiet, title: "Another process's finding on the settings page", state: "/settings#f9" });
+    store.flush();
+    return { sameAs: first.finding.id, pSame: 0.9 };
+  }).judge;
+  const filed = await store.fileFinding(SILENT);
+  assert.equal(filed.isNew, false);
+  const kept = store.findings.find((f) => f.id === first.finding.id)!;
+  assert.equal(kept.runs, 2);
+  assert.deepEqual(
+    judgedMergesOf(kept).map((m) => m.title),
+    [SILENT.title],
+  );
+  assert.ok(
+    store.findings.some((f) => f.title === "Another process's finding on the settings page"),
+    "and the other process's finding is kept",
+  );
+  const reread = openStore(path.dirname(store.dir));
+  const onDisk = reread.findings.find((f) => f.id === first.finding.id)!;
+  assert.equal(onDisk.runs, 2);
+  assert.deepEqual(
+    judgedMergesOf(onDisk).map((m) => m.title),
+    [SILENT.title],
+  );
+});
+
+test("dedup judge: when a load folds two copies of one finding together, both copies' judged merges are kept", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
+  dirs.push(dir);
+  fs.mkdirSync(path.join(dir, MEMORY_DIRNAME), { recursive: true });
+  const copy = (id: string, title: string, merged: string, at: string): Finding => ({
+    id,
+    severity: "medium",
+    category: "http-error",
+    title,
+    detail: "",
+    url: "http://x/a",
+    state: "/a#f1",
+    repro: [],
+    foundAt: at,
+    runs: 1,
+    evidence: "POST /api/things 500",
+    judgedMerges: [{ title: merged, category: "http-error", severity: "medium", pSame: 0.9, at }],
+  });
+  // One defect filed twice under different titles: the same failing request, so the load's rule folds them into one.
+  const memory = {
+    version: 1,
+    states: {},
+    findings: [
+      copy("one", "Saving a thing fails", "Save errors out", "2026-01-01T00:00:00.000Z"),
+      copy("two", "The thing will not save", "Save is broken", "2026-01-02T00:00:00.000Z"),
+    ],
+  };
+  fs.writeFileSync(path.join(dir, MEMORY_DIRNAME, "memory.json"), JSON.stringify(memory));
+  const store = openStore(dir);
+  assert.equal(store.findings.length, 1);
+  assert.deepEqual(
+    judgedMergesOf(store.findings[0]).map((m) => m.title),
+    ["Save errors out", "Save is broken"],
+  );
+});
+
+test("dedup judge: a judged merge read back malformed is dropped, not printed or trusted", () => {
+  const good = { title: "Save is broken", category: "http-error", severity: "medium" as const, pSame: 0.9, at: "2026-01-01" };
+  const f = { judgedMerges: [good, { ...good, pSame: "0.9" }, { ...good, severity: "urgent" }, { title: "no rest" }, null, "text"] } as unknown as Pick<
+    Finding,
+    "judgedMerges"
+  >;
+  assert.deepEqual(judgedMergesOf(f), [good]);
+  assert.deepEqual(judgedMergesOf({ judgedMerges: "not a list" } as unknown as Pick<Finding, "judgedMerges">), []);
+  assert.deepEqual(judgedMergesOf({}), []);
 });

@@ -187,8 +187,35 @@ or is not — and the page half is never enough alone. A page that shows an erro
 raises neither, which is why the false-positive rate stays low enough to report
 at high severity.
 
+`false_success` also pairs the write with the claim. The write must be one the
+action sent: a request already in flight when the action began, one sent with
+no input pending (a page load, a scroll) or one to the page's own
+infrastructure (telemetry, an error monitor, a token refresh) is never paired.
+If another write of the same action went through, the claim may be about that
+one, but part of the user's change was still refused without a word: that is
+reported as a partial `false_success` at medium ("partial: N of M writes from
+this action were refused"), and all refused stays high. The claim must be new: the engine reads the page
+as each click, keypress or typing begins, and a success word already on screen
+then (a status badge reading "Published", a heading) is not the page's answer.
+Column headers ("Updated on") are not read as claims at all. An announced
+message that names the refusal ("was refused", "rejected", "could not") counts
+as the page admitting it.
+
+Not every violation is the page's. Calls the agent makes with `scout_request`
+are matched by request identity, and their failures, with the browser's console
+line about each, are counted apart rather than charged to the next page: a
+refused probe is the evidence the agent went looking for. An uncaught page
+error that a link click raises while leaving the URL where it was and opening a
+confirmation, or whose message says a route change was cancelled, is reported
+at medium with a note rather than high: some client-side routers can only stop
+a route change by throwing.
+
 Dedup is on machine signatures rather than prose, because titles get rephrased
-between runs ([ADR 4](adr/0004-dedup-on-machine-signals-not-prose.md)).
+between runs ([ADR 4](adr/0004-dedup-on-machine-signals-not-prose.md)). Where
+a model is asked for (by default in `scenescout ci`), a filing the rule keeps
+apart is then put to it against the open findings on the same page, and a
+"same" merges it, kept on the finding it joined
+([ADR 17](adr/0017-a-model-judges-only-the-merges-the-rule-misses.md)).
 
 ---
 
@@ -417,6 +444,7 @@ is the one file a test cannot reach without launching a browser
 | When to stop waiting | `settle.ts` | `settle-test` |
 | What may leave the page, and what a refused request is told | `policy.ts`, `ownership.ts` | `policy-test`, `smoke/contradiction` |
 | Page contradicts the server | `claims.ts` | `claims-test`, `smoke/contradiction` |
+| Whose a violation is: the tester's own `scout_request` probes, a router cancelling a route change, a silent submit | `oracles.ts`, `forms.ts` | `oracle-test`, `memory-test`, `smoke/attribution` |
 | Typed markup coming back as an element | `injection.ts` | `oracle-test`, `smoke/injection` |
 | A token posted with targetOrigin `"*"` | `postmessage.ts` | `oracle-test`, `smoke/postmessage` |
 | What a lane hands back | `lane.ts` | `lane-test` |

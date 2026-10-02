@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Record</title>
+  </head>
+  <body>
+    <!--
+      claims-record.html with one difference: after the refused comment the
+      page shows a new "Comment saved" toast. The badge is the same; the toast
+      is the page claiming a write the server refused.
+    -->
+    <h1>Record 7</h1>
+    <span data-testid="record-status-badge">Published</span>
+    <label for="comment">Comment</label>
+    <input id="comment" data-testid="record-comment-input" />
+    <button data-testid="record-comment-button" onclick="addComment()">Add comment</button>
+    <p data-testid="record-toast"></p>
+    <script>
+      const TOAST = "Comment saved";
+      async function addComment() {
+        await fetch("/api/refuse/403?comment=1", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => {});
+        if (TOAST) document.querySelector("[data-testid=record-toast]").textContent = TOAST;
+      }
+    </script>
+  </body>
+</html>

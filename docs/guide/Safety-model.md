@@ -40,7 +40,7 @@ A page holding unsent input can ask the browser to confirm leaving (`beforeunloa
 
 The server never sees a refused request, but the page's own `fetch` or XHR is answered with a `403` in the server's place rather than dropped. The page's handling of a refusal then really runs, which is useful: a page that shows an error is behaving correctly, and a page that claims "Saved" is lying to its user. That second case is reported as `false_success`, a high finding ([ADR 9](../adr/0009-a-refused-write-is-answered-not-dropped.md)).
 
-`scout_request`, which calls the app's API directly as the session, meets the same policy. A refused call returns `REFUSED by the write policy` instead of a status, because the server was never asked and the result proves nothing either way.
+`scout_request`, which calls the app's API directly as the session, meets the same policy. A refused call returns `REFUSED by the write policy` instead of a status, because the server was never asked and the result proves nothing either way. Whatever a `scout_request` call meets, its answer is in that tool's result and nowhere else: a probe the server refuses is not reported as an `http_error` or `console_error` of the page the session visits next.
 
 ## How `safe-write` knows what the run created
 
@@ -74,6 +74,7 @@ Frames that were not read are listed on a `FRAMES` line, and the summary should 
 
 - **`scenescout check` needs no key and no secret.** It can run on every pull request, forks included.
 - **`scenescout ci` reads the model key from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` and nowhere else.** There is no option or action input for it. The browser and the MCP server run in a child process started without the key, and every line the run prints or writes is passed through a redaction of the key values and of anything shaped like a provider key.
+- **The dedup judge sends finding text to the model's provider.** A `scenescout ci` run asks its model, by default, whether a finding the dedup rule keeps apart is one already open on the same page, sending the two findings' titles, categories and evidence, and the page's path (`--dedup rule` asks nothing). The MCP server makes those calls only when `SCENESCOUT_DEDUP=judge` or `scout_attach {dedup: "judge"}` asks for it, and then with a key from its own environment; in a CI run it asks through the run, so the server's process still never holds the key.
 - **A fork's pull request gets no secrets under `pull_request`**, so `scenescout ci` exits 2 there for want of a key. Do not work around that with `pull_request_target` or `workflow_run` while checking out and starting the fork's app: the fork's code would run beside the key, and its pages would be the text the model reads.
 - **`/scenescout qa` keeps the key away from pull-request code by construction.** The job that holds the key checks out nothing, builds nothing and runs SceneScout from an exact release tag against an already-deployed preview. The team-membership token reaches only the gate job. Forks are refused unless `SCENESCOUT_QA_ALLOW_FORKS` is `true`, and the run stays `read-only` ([ADR 15](../adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md)).
 - **Scripted sign-in credentials** follow the rules in [Signing in](Signing-in.md#the-rules-for-ci-credentials).
