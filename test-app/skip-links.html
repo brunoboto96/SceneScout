@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Skip link fixtures</title>
+    <style>
+      body { margin: 0; font: 15px/1.4 system-ui, sans-serif; }
+      /* NOT a defect: a skip link parked above the page until it takes focus,
+         then shown over the header's home link. */
+      .skip { position: fixed; left: 8px; top: -72px; width: 138px; height: 40px; background: #111; color: #fff; z-index: 10; }
+      .skip:focus { top: 8px; }
+      header { position: fixed; top: 0; left: 0; right: 0; height: 56px; background: #f4f4f4; }
+      header .home { position: absolute; left: 12px; top: 12px; width: 120px; height: 32px; }
+      header .account { position: absolute; right: 12px; top: 12px; width: 120px; height: 32px; }
+      /* DEFECT: a fixed ribbon added on top of the header's Account link. */
+      .ribbon { position: fixed; right: 0; top: 4px; width: 200px; height: 48px; background: #b91c1c; color: #fff; z-index: 5; }
+      main { padding: 80px 24px; }
+      /* DEFECT: a link parked off the page with nothing to bring it back. */
+      .lost { position: absolute; left: -5000px; top: 120px; width: 100px; height: 30px; }
+      /* NOT a defect: a button parked off the page that a :focus rule (inside
+         a media block) brings back. */
+      .parked { position: absolute; left: -5000px; top: 200px; width: 160px; height: 30px; }
+      @media screen {
+        .focus-return:focus { left: 24px; }
+      }
+      /* DEFECT: the same button with no rule to bring it back. */
+    </style>
+  </head>
+  <body>
+    <a class="skip" href="#main" data-testid="skip-link">Skip to content</a>
+    <header>
+      <a class="home" href="#top" data-testid="header-home">Home</a>
+      <a class="account" href="/page2.html" data-testid="header-account">Account</a>
+    </header>
+    <div class="ribbon" data-testid="promo-ribbon">Spring offer</div>
+    <main id="main">
+      <h1>Skip links</h1>
+      <p>Content.</p>
+      <a class="lost" href="/page2.html" data-testid="lost-link">Old reports</a>
+      <button type="button" class="parked focus-return" data-testid="parked-return">Jump to filters</button>
+      <button type="button" class="parked" data-testid="parked-lost">Export filters</button>
+    </main>
+  </body>
+</html>

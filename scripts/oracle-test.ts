@@ -17,6 +17,10 @@ import {
   frameLines,
   geometryIssues,
   hasVisibleFrame,
+  isFieldAdornment,
+  isPassThroughOverlay,
+  isPagerName,
+  revealedOnFocus,
   masksForeignName,
   missingName,
   placeholderOnly,
@@ -158,6 +162,79 @@ test("clipped-unreachable controls are reported and capped with a count", () => 
     issues.some((i) => i.includes("…and 6 more")),
     "the remainder is disclosed as a count, never silently dropped",
   );
+});
+
+test("a skip link parked off the page is not reported; any other control at the same spot still is", () => {
+  const parked = { x: 8, y: -72, w: 138, h: 40 };
+  const offPage = (over: Partial<El>) =>
+    geometryIssues([el({ ref: "e1", xpath: "/html/body/a[1]", rect: parked, ...over })], VIEWPORT).filter((i) => i.includes("outside the reachable page area"));
+  // The skip-link shape: a link into this same document, reachable by Tab.
+  assert.deepEqual(offPage({ role: "link", href: "#main", focusable: true }), []);
+  // Any focusable control a :focus rule moves comes back the same way.
+  assert.deepEqual(offPage({ role: "button", href: null, focusable: true, focusMoves: true }), []);
+  // The other half: nothing brings these back.
+  assert.equal(offPage({ role: "button", href: null, focusable: true }).length, 1, "a button parked off the page");
+  assert.equal(offPage({ role: "link", href: "/reports", focusable: true }).length, 1, "a link to another page");
+  assert.equal(offPage({ role: "link", href: "#", focusable: true }).length, 1, "a bare # is not a place in the page");
+  assert.equal(offPage({ role: "link", href: "#/reports", focusable: true }).length, 1, "a hash route is navigation, not a skip link");
+  assert.equal(offPage({ role: "link", href: "#!/reports", focusable: true }).length, 1, "nor is a hashbang route");
+  assert.equal(offPage({ role: "link", href: "#main", focusable: false }).length, 1, "out of the Tab order, so focus never reveals it");
+  assert.equal(offPage({ role: "link", href: "#main" }).length, 1, "focusability unknown counts as not focusable");
+  assert.equal(revealedOnFocus({ href: "#main", focusable: true }), true);
+  assert.equal(revealedOnFocus({ href: null, focusable: true, focusMoves: false }), false);
+});
+
+test("a pass-through overlay over a control is not an overlap; the same overlay taking clicks is", () => {
+  const pair = (passThrough: boolean) =>
+    geometryIssues(
+      [
+        el({ ref: "e1", name: "Watermark", role: "generic", xpath: "/html/body/div[1]/div[1]", rect: { x: 0, y: 0, w: 600, h: 400 }, passThrough }),
+        el({ ref: "e2", name: "Open page", role: "link", xpath: "/html/body/div[1]/a[1]", rect: { x: 40, y: 40, w: 120, h: 30 } }),
+      ],
+      VIEWPORT,
+    ).filter((i) => i.includes("overlaps"));
+  assert.deepEqual(pair(true), []);
+  assert.equal(pair(false).length, 1);
+  // pointer-events:none on a disabled button (a common design-system rule) does not make a collision intended.
+  const buttons = geometryIssues(
+    [
+      el({ ref: "e1", name: "Submit", xpath: "/html/body/div[1]/button[1]", rect: { x: 20, y: 10, w: 120, h: 32 }, passThrough: true }),
+      el({ ref: "e2", name: "Cancel", xpath: "/html/body/div[1]/button[2]", rect: { x: 30, y: 14, w: 120, h: 32 } }),
+    ],
+    VIEWPORT,
+  ).filter((i) => i.includes("overlaps"));
+  assert.equal(buttons.length, 1);
+  // A small pass-through badge on a large control is not an overlay of it.
+  assert.equal(
+    isPassThroughOverlay({ role: "generic", passThrough: true, rect: { x: 0, y: 0, w: 10, h: 10 } }, { rect: { x: 0, y: 0, w: 100, h: 40 } }),
+    false,
+  );
+});
+
+test("a button in a text field's reserved padding is an adornment; one reaching into the text is a collision", () => {
+  const field = { ref: "e1", name: "Search", role: "textbox", xpath: "/html/body/div[1]/input[1]", rect: { x: 100, y: 100, w: 300, h: 36 } };
+  const clear = { ref: "e2", name: "Clear", role: "button", xpath: "/html/body/div[1]/button[1]", rect: { x: 368, y: 106, w: 24, h: 24 } };
+  const overlaps = (f: Partial<El>, b: Partial<El>) =>
+    geometryIssues([el({ ...field, ...f }), el({ ...clear, ...b })], VIEWPORT).filter((i) => i.includes("overlaps"));
+  // padding-right 36px reserves x 364-400; the button sits at 368-392.
+  assert.deepEqual(overlaps({ fieldPad: { l: 8, r: 36 } }, {}), []);
+  assert.deepEqual(overlaps({ fieldPad: { l: 36, r: 8 } }, { rect: { x: 108, y: 106, w: 24, h: 24 } }), [], "a leading icon in the left padding");
+  // The same button with no padding reserved for it lies over the text.
+  assert.equal(overlaps({ fieldPad: { l: 8, r: 8 } }, {}).length, 1);
+  // Half over the field and half outside it is not inside the field at all.
+  assert.equal(overlaps({ fieldPad: { l: 8, r: 36 } }, { rect: { x: 100, y: 90, w: 300, h: 30 } }).length, 1);
+  // Not a text field: no padding is reserved for anything.
+  assert.equal(overlaps({ role: "button", fieldPad: null }, {}).length, 1);
+  assert.equal(isFieldAdornment({ rect: field.rect, fieldPad: { l: 8, r: 36 } }, clear), true);
+});
+
+test("a pager control's name is told from ordinary buttons", () => {
+  for (const name of ["Next", "Next page", "Previous slide", "prev", "›", "→", "Go to slide 3", "Page 2", "Slide 4 of 9", "Scroll right"]) {
+    assert.equal(isPagerName(name), true, name);
+  }
+  for (const name of ["Save", "Back to dashboard", "Pages", "Next.js docs are great", "Delete page", "Imagery", "Show more filters"]) {
+    assert.equal(isPagerName(name), false, name);
+  }
 });
 
 test("a violation never re-publishes a credential carried in the request URL", () => {

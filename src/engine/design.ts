@@ -48,6 +48,13 @@ export interface StyleRecord {
   /** box-shadow value (truncated) or "" — elevation-system consistency. */
   shadow: string;
   clipped: boolean;
+  /**
+   * The box a pointer user actually hits to operate this control, when it is
+   * not the control's own: a native input together with the label that wraps
+   * or touches it, or, for a visually hidden input, the label or clickable
+   * container (a drop zone) that operates it. Absent when the target is `rect`.
+   */
+  target?: { x: number; y: number; w: number; h: number };
   /** position:fixed/sticky — chrome that rides along as the user scrolls. */
   fixed: boolean;
   /** Form-control burden signals: is this a required field, and is it a submit control? */
@@ -154,6 +161,33 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     else h = (r - g) / (max - min) + 4;
     return ((h * 60) + 360) % 360;
   };
+  // The box a pointer user hits to operate a native input (StyleRecord.target).
+  const unionBox = (boxes) => {
+    let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+    for (const x of boxes) { l = Math.min(l, x.left); t = Math.min(t, x.top); r = Math.max(r, x.right); b = Math.max(b, x.bottom); }
+    return { x: Math.round(l), y: Math.round(t), w: Math.round(r - l), h: Math.round(b - t) };
+  };
+  const gapBetween = (a, b) => Math.max(a.left - b.right, b.left - a.right, a.top - b.bottom, b.top - a.bottom, 0);
+  const targetOf = (el, rect, hiddenInput) => {
+    if (el.tagName !== "INPUT") return null;
+    const boxes = [];
+    for (const label of Array.from(el.labels || [])) {
+      const lr = label.getBoundingClientRect();
+      if (lr.width === 0 || lr.height === 0) continue;
+      // A label elsewhere on the page also operates the input, but it is a
+      // second target, not a bigger one; only a label that wraps or touches
+      // the input makes one box with it. A hidden input has no box of its own,
+      // so any label of it is the target.
+      if (hiddenInput || label.contains(el) || gapBetween(lr, rect) <= 4) boxes.push(lr);
+    }
+    if (hiddenInput && boxes.length === 0 && el.parentElement) {
+      const zone = el.parentElement.closest('button, [role="button"], [onclick], [tabindex]:not([tabindex="-1"])');
+      if (zone) boxes.push(zone.getBoundingClientRect());
+    }
+    if (boxes.length === 0) return null;
+    if (!hiddenInput) boxes.push(rect);
+    return unionBox(boxes);
+  };
   const vh = window.innerHeight;
   let density = 0;
   const all = document.querySelectorAll("body *");
@@ -201,6 +235,7 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     const slop = sideStripe || gradientText || glass || glow || aiGradient;
     if (!interactive && !ownText && !slop) continue;
     const fullText = ownText ? (el.textContent || "").trim().replace(/\\s+/g, " ") : "";
+    const target = interactive ? targetOf(el, rect, srOnly || s.opacity === "0") : null;
     out.push({
       tag: el.tagName.toLowerCase(),
       testid: el.getAttribute("data-testid"),
@@ -225,6 +260,7 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
       // signature of "text wider than its box". Flagging it reported the
       // accessibility affordance itself as an accessibility defect.
       clipped: !srOnly && el.scrollWidth > el.clientWidth + 2 && /hidden|clip/.test(s.overflowX) && s.textOverflow !== "ellipsis" && ownText,
+      ...(target ? { target } : {}),
       fixed: s.position === "fixed" || s.position === "sticky",
       required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true",
       submitish: el.matches('button[type="submit"], input[type="submit"]') || /\\b(save|submit|create|send|confirm|apply|continue|next|finish|approve|sign)\\b/i.test(fullText),
@@ -296,7 +332,7 @@ function hueOf([r, g, b]: [number, number, number]): number | null {
 
 const label = (r: StyleRecord): string => (r.testid ? `[${r.testid}]` : `<${r.tag}> "${r.text.slice(0, 30) || "(no text)"}"`);
 /** One wording for a small target, page or shell alike: the shell section's, so its prose is unchanged. */
-const tinyTargetDetail = (r: StyleRecord): string => `${label(r)} — ${Math.round(r.rect.w)}×${Math.round(r.rect.h)}px tap target`;
+const tinyTargetDetail = (r: StyleRecord): string => `${label(r)} — ${Math.round(targetBox(r).w)}×${Math.round(targetBox(r).h)}px tap target`;
 const clippedTextDetail = (r: StyleRecord): string => `${label(r)} — text is clipped by its container`;
 
 /**
@@ -346,9 +382,55 @@ function gridValues(top: ReadonlyArray<[number, number]>): string {
     .join(", ");
 }
 
+/** The box a pointer user hits to operate the control: its label or drop zone where one operates it, else its own. */
+export function targetBox(r: StyleRecord): StyleRecord["rect"] {
+  return r.target ?? r.rect;
+}
+
+/** The WCAG 2.2 target-size minimum, in CSS pixels. */
+const MIN_TARGET = 24;
+
 /** Below the WCAG 2.2 target-size minimum; inline links are exempt by that rule. */
-function tooSmall(r: StyleRecord): boolean {
-  return r.tag !== "a" && (r.rect.h < 24 || r.rect.w < 24) && r.rect.h > 0;
+function undersized(r: StyleRecord): boolean {
+  const b = targetBox(r);
+  return r.interactive && r.tag !== "a" && (b.h < MIN_TARGET || b.w < MIN_TARGET) && b.h > 0;
+}
+
+const centreOf = (b: StyleRecord["rect"]): [number, number] => [b.x + b.w / 2, b.y + b.h / 2];
+
+/** Distance from a point to the nearest edge of a box; 0 inside it. */
+function distanceToBox([px, py]: [number, number], b: StyleRecord["rect"]): number {
+  const dx = Math.max(b.x - px, 0, px - (b.x + b.w));
+  const dy = Math.max(b.y - py, 0, py - (b.y + b.h));
+  return Math.hypot(dx, dy);
+}
+
+/**
+ * The WCAG 2.5.8 spacing exception: an undersized target passes when a 24px
+ * circle on its centre touches no other target and no other undersized
+ * target's circle. `others` is every interactive record on the page, shell
+ * included, since a neighbour in the shell is as easy to hit by mistake.
+ */
+export function spacedApart(r: StyleRecord, others: readonly StyleRecord[]): boolean {
+  const c = centreOf(targetBox(r));
+  for (const o of others) {
+    if (o === r || !o.interactive) continue;
+    const ob = targetBox(o);
+    if (ob.w === 0 || ob.h === 0) continue;
+    if (undersized(o)) {
+      const [ox, oy] = centreOf(ob);
+      if (Math.hypot(ox - c[0], oy - c[1]) < MIN_TARGET) return false;
+    } else if (distanceToBox(c, ob) < MIN_TARGET / 2) return false;
+  }
+  return true;
+}
+
+/**
+ * A target that fails WCAG 2.5.8: under 24px, measured on what the user hits
+ * (targetBox), and not saved by the spacing exception.
+ */
+export function tooSmall(r: StyleRecord, all: readonly StyleRecord[]): boolean {
+  return undersized(r) && !spacedApart(r, all);
 }
 
 /**
@@ -511,15 +593,17 @@ export function analyzeDesign(
     spacingLines.push(`${mar.pct}% of vertical margins are off a 4px grid — ad-hoc values: ${mar.top.map(([v, n]) => `${v}px×${n}`).join(", ")}`);
   if (spacingLines.length > 0) sections.push(`SPACING: ` + spacingLines.join("\n  "));
 
-  // ---- 5. Touch/click targets below ~24px are hard to hit. Inline links are
-  //      exempt (mirrors the WCAG 2.2 target-size exception); worst offenders first.
-  const tiny = records.filter((r) => r.interactive && tooSmall(r)).sort((a, b) => a.rect.w * a.rect.h - b.rect.w * b.rect.h);
+  // ---- 5. Touch/click targets below ~24px are hard to hit (WCAG 2.5.8). Measured
+  //      on what the user hits (a native input's label or drop zone), with
+  //      that rule's exceptions: inline links, and a small target with nothing
+  //      else within its 24px circle. Worst offenders first.
+  const tiny = records.filter((r) => tooSmall(r, allRecords)).sort((a, b) => targetBox(a).w * targetBox(a).h - targetBox(b).w * targetBox(b).h);
   if (tiny.length > 0) {
     sections.push(
       `TINY targets (${tiny.length}, smallest first):\n` +
         tiny
           .slice(0, 6)
-          .map((r) => `  ⚠ ${label(r)} — ${r.rect.w}×${r.rect.h}px`)
+          .map((r) => `  ⚠ ${label(r)} — ${targetBox(r).w}×${targetBox(r).h}px`)
           .join("\n"),
     );
   }
@@ -853,7 +937,7 @@ export function analyzeDesign(
   if (chromeRecords.length > 0) {
     chromeDefects.push(
       ...contrastFailures(chromeRecords).map((detail) => ({ rule: "contrast" as const, detail, chrome: true })),
-      ...chromeRecords.filter((r) => r.interactive && tooSmall(r)).map((r) => ({ rule: "tiny-target" as const, detail: tinyTargetDetail(r), chrome: true })),
+      ...chromeRecords.filter((r) => tooSmall(r, allRecords)).map((r) => ({ rule: "tiny-target" as const, detail: tinyTargetDetail(r), chrome: true })),
       ...chromeRecords.filter((r) => r.clipped && r.textLen > 0).map((r) => ({ rule: "clipped-text" as const, detail: clippedTextDetail(r), chrome: true })),
     );
     const chromeIssues = chromeDefects.map((d) => d.detail);

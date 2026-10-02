@@ -221,6 +221,8 @@ test("every defect is also in the prose report, so check and scout_design_audit 
   const p = payload([
     rec({ text: "Hint", color: "rgb(184, 192, 202)", bg: "rgb(246, 248, 250)" }),
     rec({ tag: "button", testid: "tiny", interactive: true, text: "x", rect: { x: 0, y: 100, w: 14, h: 14 } }),
+    // Close enough that the small one does not get WCAG 2.5.8's spacing exception.
+    rec({ tag: "button", interactive: true, text: "Go", rect: { x: 16, y: 100, w: 80, h: 32 } }),
     rec({ testid: "cut", text: "A long label", clipped: true, rect: { x: 0, y: 200, w: 40, h: 20 } }),
   ]);
   p.page.scrollW = 1600;
@@ -258,10 +260,48 @@ test("off-grid spacing and body-coloured links are measured facts the check can 
   assert.match(drifting.report, /3 link\(s\) with no underline AND the same color as body text/);
 });
 
+/** The tiny-target defects of a page of these records. */
+const tinyOf = (records: Rec[]) =>
+  analyzeDesign(payload(records), VIEWPORT)
+    .defects.filter((d) => d.rule === "tiny-target")
+    .map((d) => d.detail);
+
+test("a native checkbox is measured with the label that wraps it; the same checkbox with its label elsewhere is not", () => {
+  // A row: an "Edit" button, then 4px to its right a 13px checkbox. Only the label differs.
+  const edit = rec({ tag: "button", interactive: true, text: "Edit", rect: { x: 0, y: 0, w: 60, h: 32 } });
+  const checkbox = (target?: Rec["target"]) =>
+    rec({ tag: "input", testid: "remember", interactive: true, text: "", textLen: 0, rect: { x: 64, y: 9, w: 13, h: 13 }, ...(target ? { target } : {}) });
+  // Wrapped in a 200×32 <label>: that label is what the user clicks.
+  assert.deepEqual(tinyOf([edit, checkbox({ x: 64, y: 0, w: 200, h: 32 })]), []);
+  // A for= label 100px away operates it too, but the box beside the Edit button is 13px.
+  assert.deepEqual(tinyOf([edit, checkbox()]), ["[remember] — 13×13px tap target"]);
+});
+
+test("a visually hidden file input is measured as the drop zone that operates it", () => {
+  const neighbour = rec({ tag: "button", interactive: true, text: "Cancel", rect: { x: 0, y: 0, w: 80, h: 32 } });
+  const input = (target?: Rec["target"]) =>
+    rec({ tag: "input", testid: "upload-input", interactive: true, text: "", textLen: 0, rect: { x: 84, y: 10, w: 1, h: 1 }, ...(target ? { target } : {}) });
+  assert.deepEqual(tinyOf([neighbour, input({ x: 84, y: 0, w: 320, h: 120 })]), []);
+  assert.deepEqual(tinyOf([neighbour, input()]), ["[upload-input] — 1×1px tap target"]);
+});
+
+test("WCAG 2.5.8 spacing: a small target alone passes; two small targets side by side do not", () => {
+  const icon = (testid: string, x: number, y: number) => rec({ tag: "button", testid, interactive: true, text: "", textLen: 0, rect: { x, y, w: 16, h: 16 } });
+  // Two 16px icon buttons 4px apart: their 24px circles overlap.
+  assert.deepEqual(tinyOf([icon("edit", 0, 16), icon("remove", 20, 16)]).sort(), ["[edit] — 16×16px tap target", "[remove] — 16×16px tap target"]);
+  // One 16px button alone in a 48px row, the next row's 48px below.
+  assert.deepEqual(tinyOf([icon("select-1", 0, 16), icon("select-2", 0, 64)]), []);
+  // A full-size target within 12px of the small one's centre also fails it.
+  assert.deepEqual(tinyOf([icon("select-1", 0, 16), rec({ tag: "a", interactive: true, text: "Order 1", rect: { x: 18, y: 12, w: 120, h: 24 } })]), [
+    "[select-1] — 16×16px tap target",
+  ]);
+});
+
 test("a control is one fact whether or not the shell is known yet: same rule, same wording", () => {
   const small = rec({ tag: "button", testid: "nav-x", interactive: true, text: "x", rect: { x: 0, y: 0, w: 14.4, h: 14.4 } });
-  const before = analyzeDesign(payload([small, rec({ text: "Body" })]), VIEWPORT).defects.find((d) => d.rule === "tiny-target")!;
-  const after = analyzeDesign(payload([small, rec({ text: "Body" })]), VIEWPORT, new Set([styleSignature(small)])).defects.find(
+  const beside = rec({ tag: "button", interactive: true, text: "Menu", rect: { x: 16, y: 0, w: 80, h: 32 } });
+  const before = analyzeDesign(payload([small, beside, rec({ text: "Body" })]), VIEWPORT).defects.find((d) => d.rule === "tiny-target")!;
+  const after = analyzeDesign(payload([small, beside, rec({ text: "Body" })]), VIEWPORT, new Set([styleSignature(small)])).defects.find(
     (d) => d.rule === "tiny-target",
   )!;
   assert.equal(before.chrome, undefined);

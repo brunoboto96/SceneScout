@@ -93,6 +93,50 @@ export const DIALOG_LIKE_SEL = '[role="dialog"], [role="alertdialog"], dialog[op
 // Declared above the collector script because that script interpolates it.
 
 /**
+ * The accessible name of a control that pages a clipping container: next and
+ * previous arrows, numbered slide or page buttons, scroll-left and
+ * scroll-right. Content clipped inside a container such a control sits beside
+ * is revealed by it, so it is not unreachable. Exported so the page-side walk
+ * and its table test read the same pattern.
+ */
+export const PAGER_NAME =
+  /^(?:[‹›«»<>←→⟨⟩❮❯]|(?:go to |show )?(?:next|previous|prev)(?:\s+\w+)?|(?:go to |show )?(?:slide|page|image|item|step)\s*\d+.*|scroll (?:left|right|up|down)\b.*)$/i;
+
+/** Whether a control's name says it pages a container (see PAGER_NAME). */
+export function isPagerName(name: string): boolean {
+  return PAGER_NAME.test(name.trim());
+}
+
+/**
+ * An href that points at a place in this same document: "#main". Not a bare
+ * "#", and not a hash route ("#/reports", "#!/reports"), which is navigation.
+ */
+export const IN_PAGE_ANCHOR = /^#(?![/!])./;
+
+/**
+ * Style properties that can bring a box parked off the page back into it. A
+ * :focus rule that sets one of these is how a skip link is revealed; a :focus
+ * rule that only draws an outline is not.
+ */
+export const FOCUS_MOVES_PROPS = [
+  "position",
+  "top",
+  "left",
+  "right",
+  "bottom",
+  "inset",
+  "transform",
+  "translate",
+  "clip",
+  "clip-path",
+  "margin",
+  "margin-top",
+  "margin-left",
+  "width",
+  "height",
+];
+
+/**
  * Page-side interactable collector. Shipped as a STRING, not a function:
  * loader transforms (tsx/vitest esbuild hooks inject a `__name` helper) break
  * serialized functions inside the browser, where the helper doesn't exist.
@@ -226,6 +270,39 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
     const text = (node.innerText || node.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 40);
     return "<" + node.tagName.toLowerCase() + ">" + (text ? ' "' + text + '"' : "");
   };
+  /** A link to a place in this same document (a skip link's shape): "#main", never a bare "#" or a hash route ("#/reports"). */
+  const inPageAnchor = (node) => node.tagName === "A" && ${IN_PAGE_ANCHOR}.test(node.getAttribute("href") || "");
+  // The page's :focus rules that move a box (FOCUS_MOVES_PROPS), as selectors
+  // with the :focus part removed: an element they match is shown when it takes
+  // focus. Read once, only when an element sits off the page.
+  let focusMoveSelectors = null;
+  const FOCUS_MOVES = ${JSON.stringify(FOCUS_MOVES_PROPS)};
+  const readFocusRules = (rules, out) => {
+    for (const rule of Array.from(rules || [])) {
+      if (out.length >= 500) return;
+      if (rule.cssRules && !rule.selectorText) { readFocusRules(rule.cssRules, out); continue; }
+      const sel = rule.selectorText || "";
+      if (!/:focus/.test(sel) || !rule.style) continue;
+      const props = Array.from(rule.style);
+      if (!props.some((p) => FOCUS_MOVES.indexOf(p) >= 0 || /^(inset|margin)-/.test(p))) continue;
+      for (const part of sel.split(",")) {
+        if (/:focus/.test(part)) out.push(part.replace(/:focus(-visible|-within)?/g, "").trim() || "*");
+      }
+    }
+  };
+  const focusMoves = (el) => {
+    if (focusMoveSelectors === null) {
+      focusMoveSelectors = [];
+      for (const sheet of Array.from(document.styleSheets)) {
+        // Reading another origin's stylesheet throws by design; its rules stay unknown.
+        try { readFocusRules(sheet.cssRules, focusMoveSelectors); } catch (e) { continue; }
+      }
+    }
+    return focusMoveSelectors.some((sel) => {
+      // Removing :focus can leave an invalid selector (":not()"), which matches nothing.
+      try { return el.matches(sel); } catch (e) { return false; }
+    });
+  };
   const coveredByPinnedChrome = (el, rect, role) => {
     if (INTERACTIVE_ROLES.indexOf(role) === -1) return null;
     const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
@@ -234,6 +311,11 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
     if (!ownRoot || insideScrollablePane(el)) return null;
     const top = document.elementFromPoint(cx, cy);
     if (!top || top === el || el.contains(top) || top.contains(el)) return null;
+    // A skip link is pinned out of sight until it takes focus, then shown over
+    // the header. While focused it covers whatever is under it, by design, and
+    // it leaves again as soon as focus moves on.
+    const active = document.activeElement;
+    if (active && inPageAnchor(active) && (top === active || active.contains(top))) return null;
     const coverRoot = pinnedRootOf(top);
     if (!coverRoot || coverRoot === ownRoot || coverRoot.contains(ownRoot) || ownRoot.contains(coverRoot)) return null;
     // A dialog's fixed wrapper often carries no role or class itself; the
@@ -243,6 +325,63 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
     const cr = coverRoot.getBoundingClientRect();
     if (cr.width * cr.height > window.innerWidth * window.innerHeight * 0.5) return null;
     return describe(coverRoot);
+  };
+
+  const PAGER = new RegExp(${JSON.stringify(PAGER_NAME.source)}, "i");
+  // Per container and axis: a carousel clips every slide but one, and they share the answer.
+  const pagedClips = new Map();
+  const revealedByControl = (clip, axis) => {
+    const key = pagedClips.get(clip) || {};
+    if (key[axis] === undefined) { key[axis] = pagesClip(clip, axis); pagedClips.set(clip, key); }
+    return key[axis];
+  };
+  // Content laid out as slides along the clipped axis: two or more children
+  // (of the clip, or of its single track) the clip's own size on that axis,
+  // at least one starting outside it. A table wider than its card, or a list
+  // longer than it, is not; a "Next page" in its footer pages rows, not them.
+  const slidesIn = (clip, axis) => {
+    const cr = clip.getBoundingClientRect();
+    const start = axis === "x" ? cr.left : cr.top;
+    const span = axis === "x" ? cr.width : cr.height;
+    const track = clip.children.length === 1 ? clip.children[0] : clip;
+    let size = 0, outside = 0;
+    for (const kid of Array.from(track.children).slice(0, 50)) {
+      const r = kid.getBoundingClientRect();
+      const s = axis === "x" ? r.width : r.height;
+      if (s < span * 0.9 || s > span * 1.1) continue;
+      size += 1;
+      const at = axis === "x" ? r.left : r.top;
+      if (at >= start + span - 1 || at + s <= start + 1) outside += 1;
+    }
+    return size >= 2 && outside >= 1;
+  };
+  /**
+   * Whether a control in or beside a clipping container pages it: a visible
+   * control within two levels above the container that names the container
+   * (or something in it) in aria-controls, or, when the container holds
+   * slides on the clipped axis, one whose name says next, previous, or a
+   * numbered slide or page.
+   */
+  const pagesClip = (clip, axis) => {
+    let region = clip;
+    for (let i = 0; i < 2 && region.parentElement && region.parentElement !== document.body; i++) region = region.parentElement;
+    const cr = clip.getBoundingClientRect();
+    let slides = null;
+    const controls = region.querySelectorAll('button, [role="button"], a[href], [role="tab"], input[type="button"]');
+    for (const c of Array.from(controls).slice(0, 200)) {
+      if (!visible(c)) continue;
+      // A control inside the clip must itself be showing: a button on another
+      // hidden slide (the clipped element among them) pages nothing.
+      if (clip.contains(c)) {
+        const r = c.getBoundingClientRect();
+        if (r.bottom <= cr.top || r.top >= cr.bottom || r.right <= cr.left || r.left >= cr.right) continue;
+      }
+      const controlled = (c.getAttribute("aria-controls") || "").split(/\\s+/).filter(Boolean);
+      if (controlled.some((id) => { const t = document.getElementById(id); return t && (t === clip || clip.contains(t) || t.contains(clip)); })) return true;
+      const name = (c.getAttribute("aria-label") || c.getAttribute("title") || c.textContent || "").trim().replace(/\\s+/g, " ");
+      if (PAGER.test(name) && (slides === null ? (slides = slidesIn(clip, axis)) : slides)) return true;
+    }
+    return false;
   };
 
   for (const el of Array.from(document.querySelectorAll(selector))) {
@@ -265,16 +404,20 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
         : tag === "img" ? "image"
         : "generic");
     const rect = el.getBoundingClientRect();
+    const elStyle = window.getComputedStyle(el);
     // Below-the-fold is reachable (scroll); clipped INSIDE an overflow-hidden
     // ancestor is not — the container cannot scroll, so the control exists in
     // layout but no user can ever see or reach it. Out-of-flow boxes are only
     // clipped by their CONTAINING-BLOCK chain: position:fixed escapes ordinary
     // ancestors entirely, and position:absolute skips static ones — a dropdown
     // panel deliberately escaping its clipping wrapper is NOT unreachable.
-    const ePos = window.getComputedStyle(el).position;
+    // A scrolling ancestor reveals what it holds: past one, what the user can
+    // see is that scroller's box, so it is the scroller's box (not the
+    // element's) that the clipping ancestors above it are tested against.
     let clippedByAncestor = false;
-    if (ePos !== "fixed") {
-      let escaping = ePos === "absolute";
+    if (elStyle.position !== "fixed") {
+      let escaping = elStyle.position === "absolute";
+      const box = { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right };
       let anc = el.parentElement;
       while (anc && anc !== document.body && anc.tagName !== "HTML") {
         const as = window.getComputedStyle(anc);
@@ -284,21 +427,46 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
           escaping = false;
         }
         const oy = as.overflowY, ox = as.overflowX;
-        const hidesY = oy === "hidden" || oy === "clip";
-        const hidesX = ox === "hidden" || ox === "clip";
-        if (hidesY || hidesX) {
-          const ar = anc.getBoundingClientRect();
-          if (ar.width > 0 && ar.height > 0) {
-            const outY = hidesY && (rect.bottom <= ar.top || rect.top >= ar.bottom);
-            const outX = hidesX && (rect.right <= ar.left || rect.left >= ar.right);
-            if (outY || outX) { clippedByAncestor = true; break; }
+        const ar = anc.getBoundingClientRect();
+        if (ar.width > 0 && ar.height > 0) {
+          let hidden = null;
+          let scrolls = false;
+          // A scroller reveals anything it holds on that axis. Not tested
+          // against its scroll range: reversed flex columns (chat logs) and
+          // right-to-left text scroll to negative offsets.
+          if (oy === "auto" || oy === "scroll") { box.top = ar.top; box.bottom = ar.bottom; scrolls = true; }
+          else if ((oy === "hidden" || oy === "clip") && (box.bottom <= ar.top || box.top >= ar.bottom)) hidden = "y";
+          if (ox === "auto" || ox === "scroll") { box.left = ar.left; box.right = ar.right; scrolls = true; }
+          else if ((ox === "hidden" || ox === "clip") && (box.right <= ar.left || box.left >= ar.right)) hidden = "x";
+          if (hidden) {
+            // A pager beside the container (next/previous, numbered slides, or
+            // a control naming it in aria-controls) reveals what it clips.
+            if (!revealedByControl(anc, hidden)) clippedByAncestor = true;
+            break;
+          }
+          // Above a scroller, clipping follows the SCROLLER's containing chain.
+          if (scrolls) {
+            if (as.position === "fixed") break;
+            if (as.position === "absolute") escaping = true;
           }
         }
         anc = anc.parentElement;
       }
     }
+    // Parked above or left of the page: can taking focus bring it back?
+    const docX = rect.x + window.scrollX, docY = rect.y + window.scrollY;
+    const offPage = docX + rect.width <= 0 || docY + rect.height <= 0;
+    const focusable = el.tabIndex >= 0 && el.disabled !== true;
     out.push({
       coveredBy: coveredByPinnedChrome(el, rect, role),
+      focusable,
+      focusMoves: offPage && focusable ? focusMoves(el) : false,
+      // pointer-events:none lets every click through: it cannot take one meant for something else.
+      passThrough: elStyle.pointerEvents === "none",
+      // A text field's side padding, where an adornment (a clear button, an icon) is meant to sit.
+      fieldPad: tag === "textarea" || (tag === "input" && /^(textbox|combobox|searchbox|spinbutton)$/.test(role))
+        ? { l: parseFloat(elStyle.paddingLeft) || 0, r: parseFloat(elStyle.paddingRight) || 0 }
+        : null,
       tag,
       role,
       name: accessibleName(el),
@@ -392,33 +560,96 @@ export interface Rect {
   h: number;
 }
 
+/** One control as the geometry oracles read it (the collector's record, plus the snapshot's ref). */
+export interface GeometryElement {
+  ref: string;
+  name: string;
+  role: string;
+  xpath: string;
+  rect: Rect;
+  clipped?: boolean;
+  layer?: number;
+  chrome?: boolean;
+  coveredBy?: string | null;
+  /** A link's href as written, or null. */
+  href?: string | null;
+  /** Reachable by Tab. */
+  focusable?: boolean;
+  /** Matched by a :focus rule that moves or resizes it (read only for boxes off the page). */
+  focusMoves?: boolean;
+  /** pointer-events:none: clicks pass through it. */
+  passThrough?: boolean;
+  /** A text field's left and right padding in px, or null for anything else. */
+  fieldPad?: { l: number; r: number } | null;
+}
+
+/**
+ * Whether a box parked off the page comes back when it takes focus: a skip
+ * link. Either a link into this same document (the skip-link shape), or any
+ * focusable element a :focus rule moves. It must be reachable by Tab, or
+ * nothing ever brings it back.
+ */
+export function revealedOnFocus(el: Pick<GeometryElement, "href" | "focusable" | "focusMoves">): boolean {
+  if (!el.focusable) return false;
+  return IN_PAGE_ANCHOR.test(el.href ?? "") || el.focusMoves === true;
+}
+
+/**
+ * Whether `other` is an adornment of the text field `field`: a clear button or
+ * icon lying wholly inside the padding the field reserves at its left or right
+ * edge. Text never runs under that padding, so nothing collides. An element
+ * that reaches into the text area is a real collision and is not an adornment.
+ */
+export function isFieldAdornment(field: Pick<GeometryElement, "rect" | "fieldPad">, other: Pick<GeometryElement, "rect">): boolean {
+  const pad = field.fieldPad;
+  if (!pad) return false;
+  const f = field.rect;
+  const r = other.rect;
+  const t = 4; // borders, and rounding to whole pixels
+  if (r.y < f.y - t || r.y + r.h > f.y + f.h + t) return false;
+  const inLeft = pad.l > 0 && r.x >= f.x - t && r.x + r.w <= f.x + pad.l + t;
+  const inRight = pad.r > 0 && r.x >= f.x + f.w - pad.r - t && r.x + r.w <= f.x + f.w + t;
+  return inLeft || inRight;
+}
+
+/** Roles of the controls a click is aimed at; anything else with pointer-events:none is decoration. */
+const CONTROL_ROLES = new Set([
+  "button",
+  "link",
+  "textbox",
+  "combobox",
+  "checkbox",
+  "radio",
+  "switch",
+  "tab",
+  "menuitem",
+  "file",
+  "searchbox",
+  "spinbutton",
+  "slider",
+  "option",
+]);
+
+/** Whether `overlay` is a decorative layer over `other` that lets clicks through to it. */
+export function isPassThroughOverlay(overlay: Pick<GeometryElement, "rect" | "role" | "passThrough">, other: Pick<GeometryElement, "rect">): boolean {
+  return overlay.passThrough === true && !CONTROL_ROLES.has(overlay.role) && overlay.rect.w * overlay.rect.h >= other.rect.w * other.rect.h;
+}
+
 /**
  * Deterministic geometry oracles — the checks people reach for screenshots to
  * do, computed from layout boxes instead: interactables rendered fully outside
  * the viewport, and heavy overlap between non-nested interactables.
  */
-export function geometryIssues(
-  elements: Array<{
-    ref: string;
-    name: string;
-    role: string;
-    xpath: string;
-    rect: Rect;
-    clipped?: boolean;
-    layer?: number;
-    chrome?: boolean;
-    coveredBy?: string | null;
-  }>,
-  viewport: { width: number; height: number },
-): string[] {
+export function geometryIssues(elements: GeometryElement[], viewport: { width: number; height: number }): string[] {
   const issues: string[] = [];
   let clippedTotal = 0;
   for (const el of elements) {
     const { x, y, w, h } = el.rect;
     // Rects are DOCUMENT coords: below-the-fold content is normal; unreachable
     // means left/above the document origin, or absurdly far right (no page
-    // scrolls 3 viewports horizontally on purpose).
-    if (w > 0 && h > 0 && (x + w <= 0 || y + h <= 0 || x >= viewport.width * 3)) {
+    // scrolls 3 viewports horizontally on purpose). A skip link parked there
+    // until it takes focus is the accessibility pattern working.
+    if (w > 0 && h > 0 && (x + w <= 0 || y + h <= 0 || x >= viewport.width * 3) && !revealedOnFocus(el)) {
       issues.push(`${el.ref} ${el.role} "${el.name}" is rendered outside the reachable page area (${x},${y} ${w}×${h})`);
     }
     // Distinct from below-the-fold: this control's own container hides it and
@@ -471,6 +702,13 @@ export function geometryIssues(
       // layering (a sticky footer riding over the nav list it pins). Real
       // collision bugs that matter live in the content flow, not the chrome.
       if (a.chrome && b.chrome) continue;
+      // An overlay with pointer-events:none cannot take a click meant for what
+      // it lies over. Only a non-control at least as large as the other counts:
+      // design systems also set it on disabled buttons, and a disabled button
+      // drawn over another is still a collision.
+      if (isPassThroughOverlay(a, b) || isPassThroughOverlay(b, a)) continue;
+      // A clear button or icon inside a text field's reserved padding.
+      if (isFieldAdornment(a, b) || isFieldAdornment(b, a)) continue;
       const area = overlapArea(a.rect, b.rect);
       const smaller = Math.min(a.rect.w * a.rect.h, b.rect.w * b.rect.h);
       if (smaller > 0 && area / smaller > 0.6) {

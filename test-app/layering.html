@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Layering fixtures</title>
+    <style>
+      body { margin: 0; font: 15px/1.4 system-ui, sans-serif; padding: 24px; }
+      .field { position: relative; width: 300px; margin-bottom: 24px; }
+      .field input { width: 300px; height: 36px; box-sizing: border-box; padding-left: 8px; font: inherit; }
+      .field button { position: absolute; right: 6px; top: 6px; width: 24px; height: 24px; padding: 0; }
+      /* NOT a defect: the clear button sits in padding the field reserves for it. */
+      .reserved input { padding-right: 36px; }
+      /* DEFECT: the same button with no padding reserved, so it lies over the text. */
+      .unreserved input { padding-right: 8px; }
+      .viewer { position: relative; width: 400px; height: 120px; border: 1px solid #ccc; margin-bottom: 24px; }
+      .viewer a { position: absolute; left: 24px; top: 24px; }
+      .mark { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: rgba(0, 0, 0, 0.15); font-size: 32px; }
+      /* NOT a defect: a decorative overlay that lets clicks through. */
+      .through { pointer-events: none; }
+      /* DEFECT: the same overlay taking the clicks meant for the link under it. */
+      .blocking { pointer-events: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Layering</h1>
+    <div class="field reserved">
+      <input type="text" aria-label="Search orders" data-testid="search-reserved" />
+      <button type="button" aria-label="Clear search" data-testid="clear-reserved">×</button>
+    </div>
+    <div class="field unreserved">
+      <input type="text" aria-label="Search customers" data-testid="search-unreserved" />
+      <button type="button" aria-label="Clear customers" data-testid="clear-unreserved">×</button>
+    </div>
+    <div class="viewer">
+      <a href="/page2.html" data-testid="through-link">Open document</a>
+      <div class="mark through" data-testid="mark-through">DRAFT</div>
+    </div>
+    <div class="viewer">
+      <a href="/page2.html" data-testid="blocked-link">Open archive</a>
+      <div class="mark blocking" data-testid="mark-blocking">COPY</div>
+    </div>
+  </body>
+</html>

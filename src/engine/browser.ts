@@ -295,6 +295,11 @@ interface SnapshotElement extends InteractableInfo {
   coveredBy?: string | null;
   /** Set when a field's name is its placeholder, name attribute or type rather than a label. */
   nameFrom?: NameFrom | null;
+  /** Read by the geometry oracles (collector.ts GeometryElement). */
+  focusable?: boolean;
+  focusMoves?: boolean;
+  passThrough?: boolean;
+  fieldPad?: { l: number; r: number } | null;
 }
 
 const SETTLE_MS = 400;
@@ -1631,6 +1636,10 @@ export class BrowserEngine {
       chrome?: boolean;
       coveredBy?: string | null;
       nameFrom?: NameFrom | null;
+      focusable?: boolean;
+      focusMoves?: boolean;
+      passThrough?: boolean;
+      fieldPad?: { l: number; r: number } | null;
     };
     // SPAs (and dev servers mid-recompile) can present an empty shell for a
     // few seconds — and a shell that already renders its chrome (sidebar,

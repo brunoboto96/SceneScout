@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Target size fixtures</title>
+    <style>
+      body { margin: 0; font: 15px/1.4 system-ui, sans-serif; padding: 24px; }
+      .row { display: flex; align-items: center; height: 48px; }
+      .row > button.edit { width: 60px; height: 32px; margin-right: 4px; }
+      input[type="checkbox"] { width: 13px; height: 13px; margin: 0; }
+      .wrap { display: inline-flex; align-items: center; gap: 8px; width: 200px; height: 32px; }
+      .far { margin-left: 100px; }
+      .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+      .drop { position: relative; display: flex; align-items: center; justify-content: center; width: 320px; height: 120px; border: 2px dashed #888; margin: 12px 0; }
+      .icon { width: 16px; height: 16px; padding: 0; font-size: 10px; line-height: 1; }
+      .icons .icon + .icon { margin-left: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>Target sizes</h1>
+    <!-- NOT a defect: the checkbox's wrapping label is what the user clicks. -->
+    <div class="row">
+      <button type="button" class="edit">Edit</button>
+      <label class="wrap"><input type="checkbox" data-testid="target-wrapped-check" /> Remember me</label>
+    </div>
+    <!-- DEFECT: the same checkbox beside the same button, its label 100px away. -->
+    <div class="row">
+      <button type="button" class="edit">Edit</button>
+      <input type="checkbox" id="far-check" data-testid="target-far-check" />
+      <label class="far" for="far-check">Remember me</label>
+    </div>
+    <!-- NOT a defect: a visually hidden file input operated by its drop zone. -->
+    <div class="drop" role="button" tabindex="0" data-testid="target-drop-zone">
+      Drop files here
+      <input type="file" class="sr-only" data-testid="target-drop-input" />
+    </div>
+    <!-- DEFECT: a visually hidden file input nothing operates, beside a button. -->
+    <div class="row">
+      <button type="button" class="edit">Cancel</button>
+      <input type="file" class="sr-only" style="position: static" data-testid="target-bare-input" />
+    </div>
+    <!-- DEFECT: two 16px icon buttons 4px apart. -->
+    <div class="row icons">
+      <button type="button" class="icon" aria-label="Edit row" data-testid="target-icon-a">e</button>
+      <button type="button" class="icon" aria-label="Remove row" data-testid="target-icon-b">x</button>
+    </div>
+    <!-- NOT a defect: one 16px button alone in a 48px row (WCAG 2.5.8 spacing). -->
+    <div class="row">
+      <button type="button" class="icon" aria-label="Select row" data-testid="target-alone">s</button>
+    </div>
+  </body>
+</html>

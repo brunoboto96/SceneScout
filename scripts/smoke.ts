@@ -35,6 +35,7 @@ import * as reattach from "./smoke/reattach.ts";
 import * as refreshBroker from "./smoke/refresh-broker.ts";
 import * as liveView from "./smoke/live-view.ts";
 import * as contradiction from "./smoke/contradiction.ts";
+import * as geometry from "./smoke/geometry.ts";
 import * as frames from "./smoke/frames.ts";
 import * as injection from "./smoke/injection.ts";
 import * as postmessage from "./smoke/postmessage.ts";
@@ -57,6 +58,7 @@ const suites = [
   injection,
   postmessage,
   contradiction,
+  geometry,
   frames,
   unload,
   timeLimits,
