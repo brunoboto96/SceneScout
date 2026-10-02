@@ -32,6 +32,7 @@ import {
   verdict,
 } from "../action/check-action.mjs";
 import { brokenImageIssues, geometryIssues } from "../src/engine/collector.ts";
+import { analyzeDesign, type DesignPayload, type StyleRecord } from "../src/engine/design.ts";
 import { httpErrorDetail } from "../src/engine/oracles.ts";
 import {
   loadFlows,
@@ -161,6 +162,71 @@ test("every line the real geometry oracle writes maps to its rule, and its '…a
     ],
     lines.join("\n"),
   );
+});
+
+/** A design payload of ordinary style records, each overridden by one entry of `over`. */
+function designPayload(over: object[]): DesignPayload {
+  const base: StyleRecord = {
+    tag: "div",
+    testid: null,
+    text: "text",
+    textLen: 4,
+    interactive: false,
+    rect: { x: 0, y: 0, w: 200, h: 40 },
+    fontSize: 16,
+    fontWeight: 400,
+    fontFamily: "Inter",
+    lineHeight: 24,
+    textTransform: "none",
+    textAlign: "left",
+    underline: false,
+    color: "rgb(0, 0, 0)",
+    bg: "rgb(255, 255, 255)",
+    padding: [8, 8, 8, 8],
+    marginV: [0, 0],
+    radius: 4,
+    shadow: "",
+    clipped: false,
+    fixed: false,
+    required: false,
+    submitish: false,
+    sideStripe: false,
+    gradientText: false,
+    glass: false,
+    glow: false,
+    aiGradient: false,
+    inputType: "",
+    role: "",
+    filled: false,
+    inForm: false,
+    inRow: false,
+    inSearch: false,
+    inBreadcrumb: false,
+    shell: false,
+  };
+  return {
+    records: over.map((o) => ({ ...base, ...o })),
+    page: { scrollW: 1280, clientW: 1280, headings: [{ level: 1, size: 30, text: "Page" }], images: [], density: 10, focusSamples: [] },
+  };
+}
+
+test("intended layering is no issue in the check, while the same layout without it still is", () => {
+  const vp = { width: 1280, height: 900 };
+  const rulesOf = (geometry: string[], design: RouteHealth["design"] = []) => issuesFromRoutes([route({ geometry, design })], ORIGIN).map((i) => i.rule);
+  // A skip link parked above the page, against a button parked at the same spot.
+  const parked = { x: 8, y: -72, w: 138, h: 40 };
+  assert.deepEqual(rulesOf(geometryIssues([box("e1", "Skip to content", { role: "link", href: "#main", focusable: true, rect: parked })], vp)), []);
+  assert.deepEqual(rulesOf(geometryIssues([box("e1", "Export", { focusable: true, rect: parked })], vp)), ["offpage-control"]);
+  // A clear button inside a search field's padding, against one with no padding reserved for it.
+  const field = (r: number) => box("e1", "Search", { role: "textbox", rect: { x: 100, y: 100, w: 300, h: 36 }, fieldPad: { l: 8, r } });
+  const clear = box("e2", "Clear", { rect: { x: 368, y: 106, w: 24, h: 24 } });
+  assert.deepEqual(rulesOf(geometryIssues([field(36), clear], vp)), []);
+  assert.deepEqual(rulesOf(geometryIssues([field(8), clear], vp)), ["overlapping-controls"]);
+  // A small target alone in its row, against two side by side.
+  const icon = (testid: string, x: number) => ({ tag: "button", testid, text: "", textLen: 0, interactive: true, rect: { x, y: 16, w: 16, h: 16 } });
+  const designOf = (records: object[]) => analyzeDesign(designPayload(records), vp).defects;
+  assert.deepEqual(rulesOf([], designOf([icon("select", 0)])), []);
+  assert.deepEqual(rulesOf([], designOf([icon("select", 0), icon("remove", 20)])), ["tiny-target", "tiny-target"]);
 });
 
 test("every OVERLAY line the probe can write is classified: the certain ones block, the placement ones do not", () => {
