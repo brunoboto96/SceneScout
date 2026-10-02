@@ -168,8 +168,9 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `ANTHROPIC_API_KEY` | `ci` | The Anthropic key. The only way to give one |
 | `OPENAI_API_KEY` | `ci` | The OpenAI key. The only way to give one |
 | `SCENESCOUT_LOGIN_USERNAME` | `login --script` | Required: the test user's username or email |
-| `SCENESCOUT_LOGIN_PASSWORD` | `login --script` | Required: the password |
+| `SCENESCOUT_LOGIN_PASSWORD` | `login --script` | The password. Required unless the sign-in is passwordless: then leave it unset and set a code below. Set but empty is refused |
 | `SCENESCOUT_LOGIN_TOTP_SECRET` | `login --script` | The base32 TOTP secret or `otpauth://` URI, when the form asks for a code |
+| `SCENESCOUT_LOGIN_OTP_CODE` | `login --script` | A fixed one-time code the test environment accepts (4 to 12 letters or digits), when the form asks for a code. Not with `SCENESCOUT_LOGIN_TOTP_SECRET` |
 | `SCENESCOUT_LOGIN_SUCCESS_URL` | `login --script` | As `--success-url` |
 | `SCENESCOUT_LOGIN_SUCCESS_SELECTOR` | `login --script` | As `--success-selector` |
 | `SCENESCOUT_LOGIN_USERNAME_SELECTOR` | `login --script` | As `--username-selector` |

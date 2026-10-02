@@ -1,0 +1,39 @@
+{
+  "app": "demo",
+  "run": "ci-demo-3-14-1-2",
+  "date": "2026-09-28",
+  "note": "Unattended scenescout ci run (scheduled) of v3.14.1; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard chart image fails to load",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard action links overlap the bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "Dashboard geometry: dash-all-orders overlaps dash-new-badge 85%"
+    },
+    {
+      "title": "Dashboard navigation links blend into body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "dashboard audit: 8 body-color un-underlined links"
+    },
+    {
+      "title": "Order detail route requests a null order",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/orders/null 404"
+    },
+    {
+      "title": "Scheduled reports route renders with no usable controls",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html: zero interactables"
+    }
+  ],
+  "decisions": []
+}

@@ -149,7 +149,9 @@ Usage:
   scenescout login <url> --role <name> --script
                                     For CI: sign in headless from SCENESCOUT_LOGIN_USERNAME, SCENESCOUT_LOGIN_PASSWORD
                                     and, if the form asks for a code, SCENESCOUT_LOGIN_TOTP_SECRET (base32 or an
-                                    otpauth:// URI), then save the profile as above. A test user only. No value
+                                    otpauth:// URI) or SCENESCOUT_LOGIN_OTP_CODE (a fixed code a test environment
+                                    accepts), then save the profile as above. With a code and no password, a
+                                    passwordless sign-in (the username, then the code). A test user only. No value
                                     is ever printed. Exit 0 signed in and saved, 1 not.
                                     (--success-url text|url; --success-selector css; --username-selector,
                                     --password-selector, --otp-selector, --submit-selector css; each of these also
