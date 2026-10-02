@@ -88,6 +88,37 @@ export function normalizePath(rawUrl: string): string {
 }
 
 /**
+ * Whether refs a snapshot took at `from` may still be used at `to`: the same
+ * origin and the exact same path (hash-route path included), differing at
+ * most in query parameters that are not UI state, or in an in-page fragment.
+ * A search box's "Clear" or a filter that rewrites only `?q=` leaves the same
+ * screen with the same controls; a tab parameter, another path or an id in the
+ * path does not. A record chosen by a query parameter (`?id=6`) does keep them,
+ * so the action checks the element it finds (test id and name) before acting:
+ * a list that now shows other rows under the same paths cannot hand it another one.
+ */
+export function refsSurviveUrlChange(from: string, to: string): boolean {
+  if (from === to) return true;
+  let a: URL;
+  let b: URL;
+  try {
+    a = new URL(from);
+    b = new URL(to);
+  } catch {
+    return false;
+  }
+  if (a.origin !== b.origin || a.pathname !== b.pathname) return false;
+  const hashPath = (u: URL): string => (u.hash.startsWith("#/") ? u.hash.split("?")[0] : "");
+  if (hashPath(a) !== hashPath(b)) return false;
+  return normalizePath(from) === normalizePath(to);
+}
+
+/** A route without its UI-state query: the screen whose tabs are its variants ("/things/:id?tab=history" → "/things/:id"). */
+export function routeBase(route: string): string {
+  return route.split("?")[0];
+}
+
+/**
  * Paths that are not UI pages, however they entered the route list: API
  * endpoints and file downloads.
  *

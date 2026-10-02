@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Refs: query-only changes</title></head>
+<body>
+  <!-- A list screen whose search and filters rewrite only the query string
+       with history.replaceState, the way client-side lists keep their filters
+       in the address bar. The screen and its controls stay where they were, so
+       refs from the snapshot before must still act. "Open the other page" is a
+       real route change, the contrast: refs from before it are refused.
+       "Closed only" also swaps the rows for others under the same test id
+       and the same paths: a row's ref from before it must not act on the
+       row that took its place. -->
+  <main>
+    <h1>Things</h1>
+    <input type="search" aria-label="Search things" data-testid="things-search">
+    <button type="button" data-testid="things-clear">Clear search</button>
+    <a href="?status=open" data-testid="things-filter-open">Open only</a>
+    <a href="?status=closed" data-testid="things-filter-closed">Closed only</a>
+    <button type="button" data-testid="things-count">Count</button>
+    <div id="rows"><button type="button" data-testid="things-row">Open thing A</button><button type="button" data-testid="things-row">Open thing B</button></div>
+    <p data-testid="things-said" role="status"></p>
+    <a href="/refs-other.html" data-testid="things-other">Open the other page</a>
+  </main>
+  <script>
+    const said = document.querySelector('[data-testid="things-said"]');
+    document.querySelector('[data-testid="things-clear"]').addEventListener('click', () => {
+      history.replaceState(null, '', location.pathname);
+      said.textContent = 'Search cleared';
+    });
+    for (const a of document.querySelectorAll('[data-testid^="things-filter-"]')) {
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        history.replaceState(null, '', a.getAttribute('href'));
+        const status = new URLSearchParams(location.search).get('status');
+        said.textContent = 'Filter: ' + status;
+        if (status === 'closed') {
+          document.getElementById('rows').innerHTML =
+            '<button type="button" data-testid="things-row">Closed thing C</button><button type="button" data-testid="things-row">Closed thing D</button>';
+        }
+      });
+    }
+    document.querySelector('[data-testid="things-count"]').addEventListener('click', () => {
+      said.textContent = 'Counted at ' + location.search;
+    });
+  </script>
+</body>
+</html>

@@ -244,6 +244,14 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
     const runRef = /(e\d+) button "Run report"/.exec(alertSnap)?.[1];
     if (!runRef) throw new Error(`"Run report" not in /claims-block-alert.html: ${alertSnap.slice(0, 400)}`);
     await engine.click(runRef);
+    // The diff against this route's last snapshot carries the mark too, not only the full list.
+    const runDiff = await engine.snapshot();
+    const diffLine = runDiff.split("\n").find((l) => /^[+~] /.test(l) && l.includes("You do not have permission")) ?? runDiff;
+    check(
+      "the diff after the click marks the new alert as after a write-policy block",
+      /DIFF vs the last snapshot/.test(runDiff) && /\(after a write-policy block\)$/.test(diffLine),
+      diffLine,
+    );
     const afterRun = await engine.snapshot(true);
     const lineOf = (text: string): string => afterRun.split("\n").find((l) => / alert "/.test(l) && l.includes(text)) ?? afterRun;
     check(
