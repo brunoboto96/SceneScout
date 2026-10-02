@@ -42,6 +42,7 @@ SceneScout needs only a URL, but it does better from inside the app's repository
 - **Slow it down.** "Pause five seconds between actions so I can follow." That is `scout_attach {paceMs: 5000}`, or `scout_session {paceMs: 5000}` mid-run.
 - **Another browser.** "Run the same pass in WebKit." `scout_attach {browser: "webkit"}`, after `npx -y scenescout install --browser-only --browsers webkit`.
 - **A phone-sized viewport.** `scout_attach {viewportWidth: 390, viewportHeight: 844}`, then a design audit on the key pages.
+- **Fewer duplicate findings.** "Ask a model whether two findings are the same defect." That is `scout_attach {dedup: "judge"}`, or `SCENESCOUT_DEDUP=judge` in the server's environment, with `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` there too. A filing the rule keeps apart is then compared with the open findings on its page, and each pair's titles, categories and evidence, and the page's path, are sent to that provider. It is off by default.
 
 ## Parallel lanes
 
@@ -148,6 +149,7 @@ npx -y scenescout ci http://127.0.0.1:3000
 - **Provider.** Chosen by which key is set: the Anthropic Messages API or the OpenAI Responses API. With both set, `--provider` decides. `--model`, `--effort` and `--base-url` (another endpoint implementing the same API) override the defaults.
 - **Caps.** 40 model turns, 1,500,000 tokens and 20 minutes by default (`--max-turns`, `--max-tokens`, `--max-minutes`). The first cap reached ends the exploration; the report is still written and says which cap ended it. `--max-tokens` is the setting that bounds the cost.
 - **Mode.** `read-only` by default. `--mode destructive` also needs `--allow-destructive`.
+- **Duplicates.** By default the run's model is also asked, at its lowest effort, whether a finding the dedup rule keeps apart is one already open on the same page, and merges it when it says so. Each pair asked about sends the two findings' titles, categories and evidence, and the page's path, to the provider, and the calls count in the usage. `--dedup rule` turns it off.
 - **Output.** `report.md`, `report.html`, `summary.md`, `ci.json` and `ci.sarif` in `.scenescout/ci/`, with a usage line: turns, tokens, time and an estimated cost.
 - **One element instead of a run.** `--show "the Save button"` captures that element as a PNG and does not explore; `--compare-url <url>` captures it on a second deployment too and writes a diff picture.
 

@@ -1274,6 +1274,18 @@ has a model, or an opt-in setting for the store with the rule as the default
 and the fallback) is a design decision for its own change. Until then the
 rule still decides in the store.
 
+**Wired in ([#229](https://github.com/brunoboto96/SceneScout/issues/229),
+[ADR 16](adr/0016-a-model-judges-only-the-merges-the-rule-misses.md)).** The
+store now asks the judge about a filing the rule keeps apart, against the open
+findings on the same page (at most three calls per filing), and merges on a
+"same"; the rule's merges are never put to it, because every pair the judge
+won above was a merge the rule missed. `scenescout ci` judges by default with
+the run's model at the lowest effort its API takes (`--dedup rule` turns it
+off); the MCP server judges only when `SCENESCOUT_DEDUP=judge` or
+`scout_attach {dedup: "judge"}` asks for it. Not yet measured: the judge as
+wired, on pairs from runs made after this change, which is the check that the
+gain above holds in the store.
+
 ## Rejected and not-yet-tried
 
 Edits considered and not kept, so they are not retried blind:

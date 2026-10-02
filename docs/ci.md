@@ -430,6 +430,23 @@ The run attaches once, to the URL it is given, in the mode it is given (with `--
 
 `--storage-state <file>` explores while signed in; a session that no longer signs in exits 2 before the model is called. `--browser`, `--action-timeout-ms`, `--nav-timeout-ms`, `--project` and `--out` are as for `check`.
 
+### Finding dedup
+
+Two findings the model files about one defect should be one entry in the report. The store's rule merges them when they share a machine signal: the same evidence, the same failing request, a quoted message, or titles sharing at least half their words ([ADR 4](adr/0004-dedup-on-machine-signals-not-prose.md)). It almost never merges two different defects, and it misses many merges: two descriptions of one defect in different words stay two findings. On the answer keys' labelled pairs a model judge did far better (Brier 0.019 against the rule's 0.180 on the demo app, 0.007 against 0.140 on the held-out app at effort `none`, with no wrong merge), so a run asks one by default:
+
+| `--dedup` | What happens to a filed finding |
+|---|---|
+| `judge` (default) | The rule decides first. When it keeps the filing apart from everything recorded, the run's model is asked, finding against finding, whether it is the same defect as one of the open findings on the same page: the three most alike by title, at most. A "same" merges the filing into that finding; the report shows it under the finding (its title, category, severity and evidence, with the judge's probability), so a wrong merge can be seen, and the filing refiled as its own defect. Anything else (different, unsure, an answer that contradicts itself, a call that fails or takes longer than 15 seconds) leaves the rule's decision. |
+| `rule` | The rule alone, as before; nothing is sent. |
+
+- **What is sent.** For each pair asked about: the page's path and the two findings' titles, categories and evidence, to the provider the run already uses. Not their detail, and nothing else. The run already sends that provider the pages it explores.
+- **What it costs.** One call per pair, a few hundred input tokens and about 25 output tokens each, with the run's model at the lowest effort its API takes: `none` on OpenAI, `low` on Anthropic. The judge's tokens count in the run's usage and towards `--max-tokens`. The summary and `ci.json` (`dedup`) say how many calls were made and what they used.
+- **When it fails.** A failed call, an unsure answer or one that contradicts itself is logged once and leaves that pair to the rule. No judge call runs past the time cap: one asked after it is not sent, and one asked before it gets only the time left. Three failed calls in a row switch the judge off for the rest of the run, with one line saying so. A filing with more open findings on its page than the judge asks about is logged once per page.
+- **Where the key stays.** The judge's calls are made by the run, not by the MCP server: the server asks for each one over its MCP connection (a sampling request), so the server's process still never has the key.
+- A rule merge is never put to the model, so the judge only adds merges and never splits what the rule joined. It was measured with OpenAI's `gpt-6-luna` at effort `none` ([docs/benchmark.md](benchmark.md#judge-run-2-the-judge-beats-the-rule-on-both-apps)); with another model or provider it has not been.
+
+Outside CI the judge is off: an agent's run dedups by the rule unless `SCENESCOUT_DEDUP=judge` is in the MCP server's environment, or `scout_attach {dedup: "judge"}` asks for it, and then it needs `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the server's environment too ([configuration reference](guide/Configuration-reference.md#environment-variables)).
+
 ### Showing one element
 
 `scenescout ci <url> --show "the Save button"` does not explore. The model is given only `scout_snapshot`, `scout_crawl`, `scout_navigate`, `scout_back`, `scout_scroll` and `scout_capture`, and is told to find the element the words describe and capture it; the words are passed as data, quoted. The picture is SceneScout's, not the model's: `scout_capture` scrolls the element into view and takes a browser screenshot of its bounds plus an 8-pixel margin, cut to the viewport. The model chooses which element by its ref and nothing else; the file's name is fixed. The picture is `shots/preview.png` in the output directory.
@@ -444,7 +461,7 @@ In `<project>/.scenescout/ci/`, or `--out`:
 
 - `report.md` and `report.html`: the report, exactly as an agent's run writes it (it is also in `.scenescout/report.md`, with the run's memory);
 - `summary.md`: how the run ended, what it spent, and the findings this run made or saw again. On GitHub Actions it is also appended to the job summary;
-- `ci.json`: the same, for a script: `stop`, `contractMet`, `usage` (`turns`, `inputTokens`, `cachedInputTokens`, `outputTokens`, `seconds`, `estimatedCostUsd`), `counts` and `findings`;
+- `ci.json`: the same, for a script: `stop`, `contractMet`, `usage` (`turns`, `inputTokens`, `cachedInputTokens`, `outputTokens`, `seconds`, `estimatedCostUsd`), `dedup` (`by`, and with the judge `effort`, `calls`, `failed`, `inputTokens`, `outputTokens` and `seconds`, already counted in `usage`), `counts` and `findings`;
 - `ci.sarif`: the findings as SARIF 2.1.0, at `error`, `warning` or `note` by severity, and worth-a-look findings as notes.
 
 The usage line reads like `14 turn(s), 402,310 tokens in (301,200 cached), 18,400 out, 9m 12s, estimated cost $0.0223`. The cost is estimated from the token counts the API returns and the published price of the default models. `--price-in`, `--price-cached-in` and `--price-out` (US dollars per million tokens) replace those prices, or give one for any other model; cached input with no price of its own is charged at the input price. With neither a built-in price nor both `--price-in` and `--price-out`, the line says the cost was not estimated.
