@@ -949,4 +949,9 @@ test("crawl: a path that ended on another route says REDIRECTED in its line, and
     "the sign-in bounce keeps its own flag, not both",
   );
   assert.equal(crawlLine(stayed, { elements: 3, missingTestid: 2, unnamed: 1 }, ["1⚠"]), "/settings — 200 · 3 el · 2 no-testid · 1 unnamed · 1⚠");
+  assert.equal(
+    crawlLine({ ...stayed, landedRoute: "/settings/profile" }, { ...counts, main: "main EMPTY" }, []),
+    "/settings — 200 · 94 el · main EMPTY · REDIRECTED → /settings/profile",
+    "what the main area holds sits beside the element count",
+  );
 });

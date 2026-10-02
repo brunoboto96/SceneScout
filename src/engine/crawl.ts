@@ -44,12 +44,19 @@ export function crawledRoute(o: CrawlOutcome): string | null {
  * so, as scout_navigate does: "/old — 200 · 94 el" read as the old page
  * answering, when the 200 and the 94 elements were the page it landed on.
  * The sign-in bounce has its own flag (AUTH-REDIRECT) and is not repeated.
+ * `main` is what the page's main area holds (collector mainRegionTag), so
+ * "41 el" alone cannot hide a main area that rendered nothing.
  */
-export function crawlLine(o: CrawlOutcome, counts: { elements: number; missingTestid: number; unnamed: number }, flags: readonly string[]): string {
+export function crawlLine(
+  o: CrawlOutcome,
+  counts: { elements: number; missingTestid: number; unnamed: number; main?: string | null },
+  flags: readonly string[],
+): string {
   const redirected = !o.loginRedirect && o.landedRoute !== o.requestedRoute;
   const allFlags = [...(redirected ? [`REDIRECTED → ${o.landedRoute}`] : []), ...flags];
   return (
     `${o.path} — ${o.status} · ${counts.elements} el` +
+    (counts.main ? ` · ${counts.main}` : "") +
     (counts.missingTestid ? ` · ${counts.missingTestid} no-testid` : "") +
     (counts.unnamed ? ` · ${counts.unnamed} unnamed` : "") +
     (allFlags.length ? ` · ${allFlags.join(" ")}` : "")

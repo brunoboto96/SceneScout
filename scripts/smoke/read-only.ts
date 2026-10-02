@@ -157,7 +157,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     await engine.navigate("/");
     const snap3 = await engine.snapshot();
     check("home revisited (memory works)", snap3.includes("(revisited)"), snap3);
-    check("exercised elements marked done", /Compute report.*done/.test(snap3), snap3);
+    check("exercised elements marked exercised", /Compute report.*\bexercised\]/.test(snap3), snap3);
 
     console.log("design audit (computed styles, no pixels)");
     await engine.navigate("/");
@@ -167,10 +167,12 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     check("clipped text detected", design.includes("CLIPPED") && design.includes("design-clipped"), design);
 
     console.log("task efficiency (journey cost + page-level ease heuristics)");
+    await engine.navigate("/design-form.html");
+    const formAudit = await engine.designAudit();
     check(
       "form burden flagged when required fields aren't marked",
-      design.includes("TASK EFFICIENCY") && /NONE marked required|only \d+ are required/.test(design),
-      design,
+      formAudit.includes("TASK EFFICIENCY") && formAudit.includes("6 form fields and NONE marked required"),
+      formAudit,
     );
     await engine.navigate("/");
     engine.startJourney("Submit feedback");
@@ -222,6 +224,24 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       design.match(/CLIPPED text[^\n]*(\n  [^\n]*)*/)?.[0] ?? "no clipped section",
     );
     check("system summary always present", design.includes("SYSTEM SUMMARY:") && design.includes("spacing on 4px grid"), design);
+
+    console.log("design audit reads where a control sits (shell, rows, search, breadcrumb)");
+    await engine.navigate("/design-context.html");
+    const context = await engine.designAudit();
+    check("a sidebar in a shell landmark is excluded from the first audit's score", /\d+ shared-chrome elements excluded/.test(context), context);
+    check("the shell's contrast failure is reported as the shell's", /SHARED CHROME[\s\S]*design-ctx-shell-1/.test(context), context);
+    check(
+      "the page's own header, inside <main>, is still page content",
+      /CONTRAST failures[^\n]*\n(  [^\n]*\n)*[^\n]*design-ctx-own-header/.test(context),
+      context,
+    );
+    check(
+      "row checkboxes, row selects and a search box are not a form to fill in",
+      !/form fields and NONE marked required|fields of which only|input fields but no obvious submit/.test(context),
+      context,
+    );
+    check("white fields and a breadcrumb do not compete with the page's one button", !context.includes("equally-prominent actions compete"), context);
+    await engine.navigate("/");
 
     console.log("overlay/modal oracle (app modals, not native dialogs)");
     const ovSnap = await engine.snapshot(true);

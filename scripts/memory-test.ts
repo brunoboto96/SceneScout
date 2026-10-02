@@ -44,6 +44,7 @@ import {
   type FindingInput,
   type JudgeVerdict,
 } from "../src/engine/memory.ts";
+import { analyzeDesign, type StyleRecord } from "../src/engine/design.ts";
 import {
   FORMS_READ_FAILED,
   FORMS_SUBMIT_UNMATCHED,
@@ -56,6 +57,7 @@ import {
   FORM_PROBE_BODY,
   isFormBookkeeping,
   isNavigationTeardown,
+  isSubmitLike,
   isTextEntry,
   sameControl,
   submits,
@@ -64,6 +66,50 @@ import {
   type FormProbe,
 } from "../src/engine/forms.ts";
 import { coverageView } from "../src/engine/report.ts";
+
+/** One styled element for a design audit; override only what a case is about. */
+function designRecord(over: Partial<StyleRecord>): StyleRecord {
+  return {
+    tag: "div",
+    testid: null,
+    text: "text",
+    textLen: 4,
+    interactive: false,
+    rect: { x: 300, y: 20, w: 200, h: 40 },
+    fontSize: 16,
+    fontWeight: 400,
+    fontFamily: "Inter",
+    lineHeight: 24,
+    textTransform: "none",
+    textAlign: "left",
+    underline: false,
+    color: "rgb(0, 0, 0)",
+    bg: "rgb(255, 255, 255)",
+    padding: [8, 8, 8, 8],
+    marginV: [0, 0],
+    radius: 4,
+    shadow: "",
+    clipped: false,
+    fixed: false,
+    required: false,
+    submitish: false,
+    inputType: "",
+    role: "",
+    filled: false,
+    inForm: false,
+    inRow: false,
+    inSearch: false,
+    inBreadcrumb: false,
+    shell: false,
+    sideStripe: false,
+    gradientText: false,
+    glass: false,
+    glow: false,
+    aiGradient: false,
+    ...over,
+    textLen: (over.text ?? "text").length,
+  };
+}
 
 /** Temp dirs created by the running test, cleaned up even when it fails. */
 let dirs: string[] = [];
@@ -527,6 +573,45 @@ test("coverage: a route's elements are counted once across its state fingerprint
   assert.deepEqual(cov.unexercised, [{ state: "/a", keys: ["button:open"], total: 2 }]);
 });
 
+test("coverage counts the controls on a page, not the wrappers and badges it lists for their test ids", () => {
+  // Three buttons and ten tagged wrappers on one page: the same keys listed either way, and the one
+  // fact that flips the count is whether the collector said a user can act on the element.
+  const store = freshStore();
+  const buttons = ["button:save", "button:open", "button:close"];
+  const wrappers = Array.from({ length: 10 }, (_, i) => `tid:wrapper-${i}`);
+  store.visitState("/page#f1", "http://x/page", "/page", [...buttons, ...wrappers], wrappers);
+  const cov = store.coverage();
+  assert.equal(cov.elementsTotal, 3, "three controls, not thirteen elements");
+  assert.deepEqual(cov.unexercised, [{ state: "/page", keys: buttons, total: 3 }]);
+  // The wrappers stay known, so a click aimed at one still registers, without counting as coverage.
+  store.markExercised("/page#f1", "tid:wrapper-0", "click");
+  assert.equal(store.wasExercised("/page#f1", "tid:wrapper-0"), true);
+  assert.equal(store.coverage().elementsExercised, 0);
+  // Listed without the inert set (as memory written before it), every key counts, as it always did.
+  const legacy = freshStore();
+  legacy.visitState("/page#f1", "http://x/page", "/page", [...buttons, ...wrappers]);
+  assert.equal(legacy.coverage().elementsTotal, 13);
+  // A merge with another process's memory keeps the mark.
+  const file = (inert: boolean): Parameters<typeof mergeMemory>[0] => ({
+    version: 1,
+    states: {
+      "/page#f1": {
+        url: "http://x/page",
+        route: "/page",
+        firstSeen: "2026-01-01",
+        visits: 1,
+        elements: { "tid:wrapper-1": { exercised: false, ...(inert ? { inert: true } : {}) } },
+      },
+    },
+    findings: [],
+  });
+  assert.equal(mergeMemory(file(true), file(false)).states["/page#f1"].elements["tid:wrapper-1"].inert, true, "ours says inert, and wins");
+  assert.equal(mergeMemory(file(false), file(true)).states["/page#f1"].elements["tid:wrapper-1"].inert, undefined, "ours says a control, and wins");
+  // A key that becomes a control on a later visit counts again.
+  store.visitState("/page#f1", "http://x/page", "/page", [...buttons, ...wrappers], wrappers.slice(1));
+  assert.equal(store.coverage().elementsTotal, 4);
+});
+
 test("coverage reports each route's own deduped total, so the gap ledger can compare like with like", () => {
   // The untouched-route check asks "were ALL of this route's elements missed?".
   // It used to answer by re-counting raw state elements, which double-counts an
@@ -791,6 +876,34 @@ test("an element on most routes is shared chrome; one on a few pages is not", ()
   assert.ok(chrome.has("tid:sidebar-logo"), "on every route → shell");
   assert.ok(chrome.has("span:18"), "recognised without a testid, which is how badges render");
   assert.ok(!chrome.has("tid:page-0-title"), "on one route → that page's own content");
+});
+
+test("a page's design score does not depend on whether it was audited before the census warmed up", () => {
+  // Audit route A first, then three others, then A again: the census knows the
+  // shell only by the end, and A must score the same both times or the
+  // worst-pages ranking depends on audit order.
+  const store = freshStore();
+  const sidebar = Array.from({ length: 30 }, (_, i) =>
+    designRecord({ tag: "a", text: `Section ${i}`, interactive: true, filled: true, shell: true, bg: "rgb(30, 41, 59)", color: "rgb(100, 116, 139)" }),
+  );
+  const page = (name: string) => ({
+    records: [
+      designRecord({ tag: "h1", text: name }),
+      designRecord({ tag: "button", text: `New ${name}`, interactive: true, filled: true, bg: "rgb(20, 80, 200)", color: "rgb(255, 255, 255)" }),
+      ...sidebar,
+    ],
+    page: { scrollW: 1280, clientW: 1280, headings: [{ level: 1, size: 30, text: name }], images: [], density: 10, focusSamples: [] },
+  });
+  const audit = (route: string) => {
+    const { score, signatures } = analyzeDesign(page(route), { width: 1280, height: 900 }, store.designChromeKeys());
+    store.recordDesignElements(route, signatures);
+    return score;
+  };
+  const firstA = audit("/a");
+  assert.equal(store.designChromeKeys().size, 0, "one audited route: the census knows nothing yet");
+  for (const r of ["/b", "/c", "/d"]) audit(r);
+  assert.ok(store.designChromeKeys().size >= 30, "four audited routes: the census now knows the sidebar");
+  assert.deepEqual(audit("/a"), firstA);
 });
 
 test("chrome is not inferred from too few routes", () => {
@@ -1727,13 +1840,13 @@ test("empty submit: forms seen are listed until any session submits them empty, 
 
 test("coverage in a parallel run: a session sees its own routes and forms by default, the project view sees both and says whose", () => {
   const store = freshStore();
-  store.visitState("/a#1", "http://x/a", "/a", ["tid:a-save", "tid:a-filter"], "lane-a");
+  store.visitState("/a#1", "http://x/a", "/a", ["tid:a-save", "tid:a-filter"], [], "lane-a");
   store.recordForm("/a#1", "tid:a-save", false, "lane-a");
-  store.visitState("/b#1", "http://x/b", "/b", ["tid:b-save", "tid:b-delete"], "lane-b");
+  store.visitState("/b#1", "http://x/b", "/b", ["tid:b-save", "tid:b-delete"], [], "lane-b");
   store.recordForm("/b#1", "tid:b-save", false, "lane-b");
   // Both lanes on one route: one form, seen by both.
-  store.visitState("/c#1", "http://x/c", "/c", ["tid:c-send"], "lane-a");
-  store.visitState("/c#2", "http://x/c", "/c", ["tid:c-send"], "lane-b");
+  store.visitState("/c#1", "http://x/c", "/c", ["tid:c-send"], [], "lane-a");
+  store.visitState("/c#2", "http://x/c", "/c", ["tid:c-send"], [], "lane-b");
   store.recordForm("/c#1", "tid:c-send", false, "lane-a");
   store.recordForm("/c#2", "tid:c-send", false, "lane-b");
 
@@ -1840,6 +1953,25 @@ test("coverage: controls inside another site's frame are counted apart from the 
     "an embed's controls never reach the gap ledger",
   );
   assert.equal(isEmbedKey("frame:about:srcdoc#Inner|button:x"), false);
+});
+
+test("isSubmitLike: submit words count as whole words of the name or test id", () => {
+  const cases: Array<[string, string, string | null, boolean]> = [
+    ["button", "Sign in", null, true],
+    ["button", "Continue", "sign-in", true],
+    ["button", "Sign", null, true],
+    ["button", "Go", "auth_signup_button", true],
+    ["button", "Save", null, true],
+    ["button", "Add", "rowAdd", true],
+    // The words inside other words are not the word.
+    ["button", "Verify", "assignee-verify", false],
+    ["button", "Lookup", "postcode-lookup", false],
+    ["button", "Design", null, false],
+    ["button", "Address book", "address-book", false],
+    // Only buttons.
+    ["link", "Sign in", null, false],
+  ];
+  for (const [role, name, testid, want] of cases) assert.equal(isSubmitLike(role, name, testid), want, `${role} ${name} ${testid}`);
 });
 
 // ---------------------------------------------------------------------------

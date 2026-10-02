@@ -243,6 +243,24 @@ export function isEmptySubmit(kind: "click" | "enter", probe: FormProbe | null):
   return probe !== null && submits(kind, probe) && allTextEmpty(probe.fields);
 }
 
+/** The words that make a button submit-style, matched as whole words. */
+const SUBMIT_WORDS = new Set(["submit", "send", "save", "create", "apply", "subscribe", "register", "sign", "signin", "signup", "post", "add"]);
+
+/**
+ * Whether a button reads as one that sends something, by its name and test
+ * id. Whole words only: a test id is split on its separators and its camel
+ * case first, so "sign-in" and "Sign" count but the "sign" inside "assignee"
+ * and the "post" inside "postcode" do not.
+ */
+export function isSubmitLike(role: string, name: string, testid: string | null): boolean {
+  if (role !== "button") return false;
+  const words = `${name} ${testid ?? ""}`
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z]+/);
+  return words.some((w) => SUBMIT_WORDS.has(w));
+}
+
 /**
  * Whether a failed page read is the page going away under it (a navigation
  * or a closed tab), which is expected after a submit and says nothing. Any

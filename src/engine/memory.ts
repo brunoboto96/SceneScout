@@ -14,8 +14,11 @@ export interface StateRecord {
   /** When it was last reached. Absent on records written before pruning existed; they fall back to firstSeen. */
   lastSeen?: string;
   visits: number;
-  /** elementKey → exercised? absentStreak counts consecutive visits where the element was gone (pruned at 3). */
-  elements: Record<string, { exercised: boolean; lastAction?: string; absentStreak?: number }>;
+  /**
+   * elementKey → exercised? absentStreak counts consecutive visits where the element was gone (pruned at 3).
+   * `inert`: listed for its test id but not something a user can act on; left out of coverage.
+   */
+  elements: Record<string, { exercised: boolean; lastAction?: string; absentStreak?: number; inert?: boolean }>;
 }
 
 /**
@@ -496,6 +499,8 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
         // Keep whichever action was actually recorded; ours wins a tie.
         ...((el.lastAction ?? prev?.lastAction) ? { lastAction: el.lastAction ?? prev?.lastAction } : {}),
         absentStreak: Math.min(prev?.absentStreak ?? 0, el.absentStreak ?? 0),
+        // Ours is the latest reading of whether a user can act on it.
+        ...(el.inert ? { inert: true } : {}),
       };
     }
     out.states[fp] = {
@@ -1797,8 +1802,13 @@ export class MemoryStore {
     fs.appendFileSync(this.sessionLogPath, JSON.stringify(full) + "\n");
   }
 
-  /** Record a visit to a state; returns whether it was new. `session` names who visited, for this run's per-session coverage. */
-  visitState(fingerprint: string, url: string, route: string, elementKeys: string[], session?: string): boolean {
+  /**
+   * Record a visit to a state; returns whether it was new. `inertKeys` are the
+   * listed keys a user cannot act on (collector inertKeys): they stay known,
+   * so a click on one still registers, but coverage does not count them.
+   * `session` names who visited, for this run's per-session coverage.
+   */
+  visitState(fingerprint: string, url: string, route: string, elementKeys: string[], inertKeys: readonly string[] = [], session?: string): boolean {
     if (session) {
       const routes = this.sessionRoutes.get(session) ?? new Set<string>();
       routes.add(route);
@@ -1813,9 +1823,12 @@ export class MemoryStore {
     rec.visits += 1;
     rec.lastSeen = new Date().toISOString();
     const present = new Set(elementKeys);
+    const inert = new Set(inertKeys);
     for (const key of elementKeys) {
       if (!rec.elements[key]) rec.elements[key] = { exercised: false };
       rec.elements[key].absentStreak = 0;
+      if (inert.has(key)) rec.elements[key].inert = true;
+      else delete rec.elements[key].inert;
     }
     // Prune ghosts: dynamic elements (list rows, ordinal-suffixed duplicates)
     // that vanish for 3 consecutive visits would otherwise make coverage
@@ -2159,6 +2172,8 @@ export class MemoryStore {
         byRoute.set(rec.route, route);
       }
       for (const [key, v] of Object.entries(rec.elements)) {
+        // Not a control: nothing to exercise, so not counted as a gap or a total.
+        if (v.inert) continue;
         route.set(key, (route.get(key) ?? false) || v.exercised);
       }
     }

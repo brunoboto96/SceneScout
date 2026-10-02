@@ -169,6 +169,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `flow-step-failed` | high | Saved flow broke |
 | `off-grid-spacing` | worth a look | Spacing off a 4px grid |
 | `indistinct-link` | worth a look | Link styled like body text |
+| `scrolled-out-controls` | worth a look | Controls scrolled out of view sideways |
 
 ## Environment variables
 

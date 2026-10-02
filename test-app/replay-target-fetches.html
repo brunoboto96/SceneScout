@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Things</title>
+  </head>
+  <body>
+    <!--
+      replay-target.html with one difference: this page's own script requests
+      the refused address on load. The same 403 the tester probed is now the
+      page's request, so it is reported as the page's http_error.
+    -->
+    <h1>Things</h1>
+    <p data-testid="things-intro">Nothing on this page fails.</p>
+    <script>
+      fetch("/api/refuse/403?probe=boundary").catch(() => {});
+    </script>
+  </body>
+</html>
