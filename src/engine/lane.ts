@@ -40,6 +40,8 @@ export const LANE_CONVENTION_MAX = 160;
 export const LANE_NAME_MAX = 40;
 /** A route as the lane saw it, query string included. */
 export const LANE_ROUTE_MAX = 200;
+/** The id scout_finding returned: ten characters today, with room to spare so a longer id never refuses a report. */
+export const LANE_FINDING_MAX = 64;
 
 export const LANE_SEVERITIES = ["high", "medium", "low"] as const;
 /** The same set scout_finding accepts, so a lane can report every finding it filed. */
@@ -82,6 +84,13 @@ export const LaneDecision = z
      */
     // Any string here: its length is checked only on a worth_a_look (below), because on every other verdict it is ignored.
     convention: z.string().nullable().optional(),
+    /**
+     * The id scout_finding returned when the lane filed this observation. It
+     * ties the decision to its finding exactly, where matching the evidence
+     * text misses a lane that reworded it between filing and reporting.
+     * Optional, so a reply written before the field existed still parses.
+     */
+    finding: z.string().min(1).max(LANE_FINDING_MAX).nullable().optional(),
   })
   .strict()
   .superRefine((d, ctx) => {
@@ -313,9 +322,10 @@ export function laneReportInstruction(lane: string): string {
 const LANE_RUBRIC: readonly string[] = [
   "Reply with ONE JSON object and nothing else — no prose before or after it, no explanation, no headings. A fenced ```json block is fine; anything outside it is discarded unread, so put nothing there you want kept.",
   `Shape: {"lane":<your lane name>,"status":<${quoteAll(LANE_STATUSES)}>,"decisions":[…],"routes":[…],"blocked_by":<string or null>}.`,
-  `Each decision: {"observation":<a short id for what was observed, unique in the report, at most ${LANE_OBSERVATION_MAX} characters>,"verdict":<${quoteAll(LANE_VERDICTS)}>,"severity":<${quoteAll(LANE_SEVERITIES)} or null>,"category":<${quoteAll(LANE_CATEGORIES)} or null>,"confidence":<0..1>,"evidence":<machine signature such as "GET /api/things 500", or null>,"convention":<string or null>}.`,
+  `Each decision: {"observation":<a short id for what was observed, unique in the report, at most ${LANE_OBSERVATION_MAX} characters>,"verdict":<${quoteAll(LANE_VERDICTS)}>,"severity":<${quoteAll(LANE_SEVERITIES)} or null>,"category":<${quoteAll(LANE_CATEGORIES)} or null>,"confidence":<0..1>,"evidence":<machine signature such as "GET /api/things 500", or null>,"convention":<string or null>,"finding":<the id scout_finding returned for it, or null>}.`,
   `A "defect" must carry a severity and a category. "evidence" is a signature, not a sentence: at most ${LANE_EVIDENCE_MAX} characters. "confidence" is how sure you are of the verdict, calibrated: 0.5 means a coin flip, 0.95 means you would bet on it.`,
   `"worth_a_look" is for an observation that is real but is a defect only under a convention of the project you cannot see (a spacing scale, how navigation links are styled, whether controls carry test ids, whether the app targets touch screens): it must name that convention in "convention", one line of at most ${LANE_CONVENTION_MAX} characters, such as "a 4px spacing scale". On every other verdict leave "convention" null or out: it is ignored there. It is not for "I could not tell": that is "unsure".`,
+  `"finding" is the id scout_finding gave the observation when you filed it, at most ${LANE_FINDING_MAX} characters: it ties the decision to its finding exactly, so name it on every defect you filed. If scout_finding said your filing was merged into a finding that is a different bug, file it again as it says and name the id it gives then.`,
   `"routes" lists the routes you covered, each at most ${LANE_ROUTE_MAX} characters. "blocked_by" is one line of at most ${LANE_BLOCKED_BY_MAX} characters saying what stopped you: required when the status is "blocked", allowed with "partial", null with "complete"; the detail belongs in a finding. The lane name is at most ${LANE_NAME_MAX} characters. At most ${LANE_MAX_ITEMS} decisions and ${LANE_MAX_ITEMS} routes. Unknown keys are refused.`,
   "The object IS your final report: whatever hands it back must hand back the object verbatim, not a summary of it.",
 ];
@@ -411,8 +421,8 @@ export function isTemplateSegment(seg: string): boolean {
 /**
  * Whether two paths name the same route. A template segment on either side
  * stands for ONE segment that is an id by route identity's own rule
- * (`isIdSegment`: a number after the first segment, a UUID, a long hex
- * string), or for another template. Never for a word: `/users/{id}` is not
+ * (`isIdSegment`: a number or a code-shaped id after the first segment, a
+ * UUID, a long hex string), or for another template. Never for a word: `/users/{id}` is not
  * `/users/me`, `/things/:id` is not `/things/export`, and a path of three stars does
  * not stand for every three-segment path. Same number of segments, every literal
  * equal (case-insensitive), so a template never absorbs a slash or an empty

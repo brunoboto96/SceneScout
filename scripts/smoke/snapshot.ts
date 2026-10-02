@@ -112,6 +112,25 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       /snapshot-main\.html — 200 · \d+ el · main \d+ chars/.test(mains) && /snapshot-main-empty\.html — 200 · \d+ el · main EMPTY/.test(mains),
       mains,
     );
+    // The same shell three ways, each answering 200: real content, the app's error view, a placeholder that never resolves.
+    const shown = await engine.crawl(["/snapshot-main.html", "/snapshot-main-error.html", "/snapshot-main-loading.html"]);
+    const lineFor = (p: string): string => lineOf(shown, new RegExp(`^/${p.replace(".", "\\.")} — `));
+    check("a main area holding only an alert is flagged ERROR-VIEW", /ERROR-VIEW/.test(lineFor("snapshot-main-error.html")), shown);
+    check("...one holding only loading placeholders is flagged STILL-LOADING", /STILL-LOADING/.test(lineFor("snapshot-main-loading.html")), shown);
+    check("...and the page with content is flagged as neither", !/ERROR-VIEW|STILL-LOADING/.test(lineFor("snapshot-main.html")), shown);
+    check(
+      "both are listed as problem routes, saying what the main area showed",
+      /snapshot-main-error\.html → main area shows only an error view \("Not found/.test(shown) &&
+        /snapshot-main-loading\.html → main area still shows only a loading placeholder/.test(shown) &&
+        !/All crawled routes healthy/.test(shown),
+      shown,
+    );
+    const known = Object.keys(engine.memory?.discoveredRoutes ?? {});
+    check(
+      "...and neither joins the route contract, while the page with content does",
+      known.includes("/snapshot-main.html") && !known.includes("/snapshot-main-error.html") && !known.includes("/snapshot-main-loading.html"),
+      known.join(", "),
+    );
 
     // ── controls out of view inside a sideways-scrolling container ─────────
     await engine.navigate("/snapshot-sideways.html");

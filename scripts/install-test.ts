@@ -1225,12 +1225,13 @@ test("the flags each hand-parsed command documents still reach it", async () => 
   for (const argv of cases) assert.deepEqual(await dispatched(argv), { ran: [argv.join(" ")], exit: null, said: [] }, argv.join(" "));
 });
 
-test("check, ci and login keep their own option parsing, and serve starts whatever else it is given", async () => {
-  // Their parsers refuse unknown options with their own exit codes (check and ci exit 2), so the preflight leaves them be.
+test("check, ci, login and export keep their own option parsing, and serve starts whatever else it is given", async () => {
+  // Their parsers refuse unknown options with their own exit codes (check, ci and export exit 2), so the preflight leaves them be.
   for (const argv of [
     ["check", "http://127.0.0.1:3000", "--nope"],
     ["ci", "http://127.0.0.1:3000", "--nope"],
     ["login", "http://127.0.0.1:3000", "--nope"],
+    ["export", "--to", "github", "--nope"],
     ["serve", "--stray"],
   ]) {
     assert.deepEqual((await dispatched(argv)).ran, [argv.join(" ")], argv.join(" "));
@@ -1449,6 +1450,9 @@ test("a first run is a check in its mode, never gated, in Chromium, with its cap
     flowWrites: "never",
     onRefusedStep: "report",
     gateRetests: "never",
+    // A first look pictures nothing for visual baselines.
+    baseline: "off",
+    baselineThreshold: 0.1,
   });
   assert.equal(firstRunCheckOptions({ url: "http://127.0.0.1:3000/", maxRoutes: 7, maxMinutes: 2, mode: "read-only" }, "/p").mode, "read-only");
 });

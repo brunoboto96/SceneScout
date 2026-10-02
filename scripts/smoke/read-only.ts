@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { feedForSession } from "../../dist/engine/live.js";
-import { generateReport } from "../../dist/engine/report.js";
+import { computeGaps, generateReport } from "../../dist/engine/report.js";
 import { FORMS_INVENTORY_SCRIPT } from "../../dist/engine/forms.js";
 import { focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
 import { BROWSER, check, eventually, settle, WAIT_MS, type SmokeContext } from "./harness.ts";
@@ -241,6 +241,35 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       context,
     );
     check("white fields and a breadcrumb do not compete with the page's one button", !context.includes("equally-prominent actions compete"), context);
+    check(
+      "a field labelled only by its placeholder is reported and scored",
+      context.includes(`<input> "Any user" — labelled only by its placeholder`),
+      context,
+    );
+    check("and costs the page's a11y score", !/a11y 100 /.test(context), context);
+    check("design-form.html, every field labelled, reports no names", !formAudit.includes("NAMES ("), formAudit);
+    const { DESIGN_COLLECT_SCRIPT: collect } = await import("../../dist/engine/design.js");
+    const ctxRecords = (
+      (await (engine as any).page.evaluate(collect)) as {
+        records: Array<{ tag: string; name?: string; contentName?: string; inFilter?: boolean; inRow: boolean; inputType: string }>;
+      }
+    ).records;
+    check(
+      "a button named by its image's alt text is not unnamed; the one with an empty alt is, once",
+      ctxRecords.some((r) => r.tag === "button" && r.contentName === "Search") && (context.match(/control with no accessible name/g) ?? []).length === 1,
+      context,
+    );
+    check(
+      "the audit names an icon button by its aria-label, as the snapshot does",
+      ctxRecords.some((r) => r.tag === "button" && r.name === "Dismiss"),
+      JSON.stringify(ctxRecords.filter((r) => r.tag === "button")),
+    );
+    check(
+      "fields in a panel whose heading names it a filter are read as in a filter; the search box is not",
+      ctxRecords.filter((r) => r.inputType === "date" || (r.inputType === "checkbox" && !r.inRow)).every((r) => r.inFilter === true) &&
+        ctxRecords.some((r) => r.inputType === "search" && r.inFilter === false),
+      JSON.stringify(ctxRecords.filter((r) => r.tag === "input")),
+    );
     await engine.navigate("/");
 
     console.log("overlay/modal oracle (app modals, not native dialogs)");
@@ -1078,6 +1107,89 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     await engine.close().catch(() => {});
   }
   await labelsAndLeaving({ baseUrl, projectDir, stats } as SmokeContext);
+  await readPosts({ baseUrl, projectDir, stats } as SmokeContext);
+}
+
+/**
+ * A search page that loads its results with a POST. Observe refuses it until
+ * the user names the endpoint as a read; then the search goes out and the page
+ * works, while the same path carrying a delete command or a GraphQL mutation,
+ * and a POST to an endpoint nobody named, are still refused.
+ */
+async function readPosts({ baseUrl, projectDir, stats }: SmokeContext): Promise<void> {
+  const writesTo = (key: string): number => stats.writes[key] ?? 0;
+  const lineOf = (snap: string, testid: string): string => snap.match(new RegExp(`[^\\n]*\\[testid=${testid}[,\\]][^\\n]*`))?.[0] ?? "";
+  const loaded = async (engine: InstanceType<typeof BrowserEngine>): Promise<string> => {
+    let snap = "";
+    const done = await eventually(
+      async () => {
+        snap = await engine.snapshot(true);
+        return !/Loading…|Pending/.test(snap);
+      },
+      WAIT_MS,
+      200,
+    );
+    if (!done) throw new Error(`read-posts fixture: the page's requests never settled:\n${snap}`);
+    return snap;
+  };
+
+  console.log("observe: a search read through POST is refused until it is named as a read");
+  const plain = new BrowserEngine();
+  try {
+    await plain.attach({ url: baseUrl, projectDir, mode: "observe" });
+    const before = writesTo("POST /api/search");
+    await plain.navigate("/read-posts.html");
+    const snap = await loaded(plain);
+    check("unnamed, the search POST never reaches the server", writesTo("POST /api/search") === before, JSON.stringify(stats.writes));
+    check("...and the page shows the refusal as its error", lineOf(snap, "search-results").includes("Search failed: status 403"), snap);
+  } finally {
+    await plain.close().catch(() => {});
+  }
+  // Lanes close their sessions before the planner writes the report: the page must outlive the session.
+  const closedGaps = computeGaps(plain.memory!);
+  check(
+    "after the session closed, the report's gap ledger still names the page and its endpoint",
+    closedGaps.some((g) => g.includes("observe refused") && /\/read-posts\.html \([^)]*POST \/api\/search[,)]/.test(g)),
+    JSON.stringify(closedGaps),
+  );
+
+  console.log("observe: the same page with POST /api/search named as a read");
+  const named = new BrowserEngine();
+  try {
+    const out = await named.attach({ url: baseUrl, projectDir, mode: "observe", readPosts: ["POST /api/search"] });
+    check("the attach says which POSTs are reads", out.includes("Read POSTs: POST /api/search"), out);
+    const before = { search: writesTo("POST /api/search"), notes: writesTo("POST /api/notes") };
+    await named.navigate("/read-posts.html");
+    const snap = await loaded(named);
+    check(
+      "the search goes out and the page shows its results",
+      lineOf(snap, "search-results").includes("Results: Widget A, Widget B") && writesTo("POST /api/search") > before.search,
+      snap,
+    );
+    check(
+      "the same path with a delete command or a GraphQL mutation is still refused",
+      lineOf(snap, "search-delete").includes("refused: status 403") &&
+        lineOf(snap, "search-graphql").includes("refused: status 403") &&
+        writesTo("POST /api/search (delete)") === 0 &&
+        writesTo("POST /api/search (mutation)") === 0,
+      `${snap}\n${JSON.stringify(stats.writes)}`,
+    );
+    check(
+      "a POST nobody named is still refused",
+      lineOf(snap, "notes-save").includes("refused: status 403") && writesTo("POST /api/notes") === before.notes,
+      `${snap}\n${JSON.stringify(stats.writes)}`,
+    );
+    const logged = named.memory!.actionLog.filter((e) => e.action === "write-policy:read-post");
+    check("each read POST let out is logged", logged.length >= 1 && logged.every((e) => (e.target ?? "").includes("POST /api/search")), JSON.stringify(logged));
+    check(
+      "the page's search leaves the gap ledger once it is a named read, and the unnamed POST stays",
+      computeGaps(named.memory!).some((g) => /\/read-posts\.html \(POST \/api\/notes\)/.test(g)) &&
+        !computeGaps(named.memory!).some((g) => /\/read-posts\.html \([^)]*POST \/api\/search[,)]/.test(g)),
+      JSON.stringify(computeGaps(named.memory!)),
+    );
+  } finally {
+    await named.close().catch(() => {});
+  }
 }
 
 /**

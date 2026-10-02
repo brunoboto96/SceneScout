@@ -55,7 +55,7 @@ An excerpt of the report it wrote — [read the whole thing](examples/report.md)
 > **🟡 [LOW] The dashboard chart image is missing** *(callout 2)*
 > Evidence: `GET /img/weekly-chart.png → HTTP 404`
 >
-> **Gap ledger — what was NOT tested:** 9/12 visited routes never design-audited · single-role run, so permission boundaries are untested
+> **Gap ledger — what was NOT tested:** 9 of 12 known routes visited this run and never design-audited · single-role run, so permission boundaries are untested
 
 Every finding comes with a repro trace and a Playwright regression-test skeleton. To try it yourself, clone this repository, run `npm run demo:serve`, then `/scenescout --url http://127.0.0.1:4173` — see [demo-app/](demo-app/). Its README lists every seeded defect and which oracle catches it.
 
@@ -432,12 +432,15 @@ With the default settings its saved flows send no HTTP write (they replay under 
 - `--flow-writes never|allow` (default `never`): `never` replays flows under observe's rule whatever `--mode` says; `allow` replays them under `--mode`, so in `read-only` a flow's form submissions are sent to the target on every run.
 - `--on-refused-step report|stop` (default `report`): `report` marks a flow whose step was refused "could not run", keeps every other verdict and exits 2; `stop` exits 2 at that step with no results.
 - `--gate-retests never|high|all` (default `high`): which still-reproducing re-tested findings fail the gate.
+- `--baseline off|compare|update` (default `off`), with `--baselines <dir>` and `--baseline-threshold <percent>` (default `0.1`, so small anti-aliasing noise between machines passes): visual baselines, below.
 
 The defaults are what an unconfigured check does, for a first try or an AI agent running it unattended: its flows send no HTTP write and it never silently hides a result. Each setting is a choice for the project; the report and `check.json` print the values a check ran with.
 
 `scenescout check --help` lists every option. Why the defaults are what they are: [ADR 11](docs/adr/0011-a-gate-is-deterministic-and-fails-only-on-what-it-can-prove.md).
 
 It also replays the flows saved in `.scenescout/flows/*.json`, with no model: the steps `scout_run_plan` takes (navigate, click, type, select, press) plus `expect-text`, `expect-url` and `expect-request`. A flow whose step breaks fails the gate, naming the flow and the step. And it re-tests the open findings earlier runs left in the project's memory that a page load can reproduce, reporting each as still reproducing or possibly fixed; by default a finding filed high that still reproduces fails the gate. [docs/ci.md](docs/ci.md#saved-flows) has the flow format; [ADR 12](docs/adr/0012-a-check-replays-saved-flows-and-reports-re-tests.md) says why it works this way.
+
+With `--baseline compare` it also holds pages and elements to approved pictures: list them in a `targets.json`, take the baselines once with `--baseline update`, and a later check that finds one changed past `--baseline-threshold` fails the gate with the share of pixels changed and a diff picture beside the report. Baselines are kept per browser, in a git-ignored folder unless `--baselines` names one the project commits, and only `--baseline update` ever writes one. [The guide](docs/guide/Ways-to-use-it.md#visual-baselines) has the details; [ADR 19](docs/adr/0019-a-visual-baseline-changes-only-when-asked.md) says why.
 
 Beyond those flows it explores nothing and fills no forms. That is the exploratory run's job, and its findings belong in a report, not a gate.
 
@@ -460,6 +463,25 @@ npx scenescout ci http://127.0.0.1:3000
 There is a GitHub Action for it (`uses: brunoboto96/SceneScout/ci@…`). [docs/ci.md](docs/ci.md#an-unattended-exploratory-run) has the workflow and every option; [ADR 14](docs/adr/0014-an-unattended-run-reports-and-never-gates.md) says why it works this way.
 
 On a pull request, an allowed account can comment `/scenescout qa` to run it against that pull request's deployed preview and get the results as a reply. The job that holds the key checks out nothing and runs SceneScout from an exact release tag, so the pull request's code never runs beside the key. [docs/ci.md](docs/ci.md#a-qa-review-from-a-pull-request-comment) has the workflow to copy and what a project configures; [ADR 15](docs/adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md) says why.
+
+## 📮 Filing findings as issues
+
+`scenescout export` turns the project's open findings into GitHub or Jira issues, where the team already works. It reads `.scenescout/memory.json`, so it runs after an interactive run, `scenescout ci` or anything else that wrote findings:
+
+```bash
+export GH_TOKEN=…        # or GITHUB_TOKEN; for Jira, JIRA_EMAIL and JIRA_API_TOKEN. Read from the environment only
+npx scenescout export --to github --repo owner/app          # a dry run: lists what it would file
+npx scenescout export --to github --repo owner/app --yes    # files it
+npx scenescout export --to jira --jira-url https://your-site.atlassian.net --jira-project QA --yes
+```
+
+- **Each finding once.** Every issue carries the `scenescout` label and a marker with the finding's id. Before filing, the export reads the labelled issues, open or closed, and skips every finding already filed, naming its issue, so a second export of the same run files only what the first left over the cap. A closed won't-fix is not filed again; `--refile-closed` files a finding again when its issue is closed.
+- **A dry run unless `--yes`**, and at most `--max-issues` (default 20) per export; the next export files the rest. `--min-severity`, `--only <ids>` and `--include-worth-a-look` choose what goes.
+- **Inert issues.** Titles, descriptions, steps and evidence come from the run and the app's pages, so no `@mention`, link, `#123` reference, HTML or Markdown in them does anything.
+- **Severity** becomes a label on GitHub and a priority in Jira; `--severity-map` renames them or turns them off. **Screenshots** from a recorded run are attached in Jira; GitHub's API takes no uploads, so a GitHub issue names the frames in the run's `.scenescout/` folder.
+- **Credentials** are never printed. Every request has a timeout, a short rate limit is waited out, failed reads are retried with backoff, and redirects are refused. Jira's search can take a little while to show a new issue, so leave a few minutes between two exports to the same Jira project.
+
+[The guide](docs/guide/Ways-to-use-it.md#filing-findings-as-issues) has the details and a GitHub Actions step.
 
 ---
 
@@ -673,10 +695,11 @@ npx -y scenescout login <url> --role admin   # sign in once in a visible browser
 src/
   mcp-server.ts     the 29 tools + per-session dispatch
   scan.ts           project discovery (framework, routes, auth)
-  cli.ts            scan · serve · install · doctor · check · ci · login · status · watch
+  cli.ts            scan · serve · install · doctor · check · ci · login · export · status · watch
   check-run.ts      drives a check: attach, crawl every route, collect what was measured
   ci-run.ts         drives a CI run: the MCP server as a child, the model's API, the agent loop
   login-run.ts      drives `scenescout login`: a visible browser, Enter to save the role's profile; or --script, headless from the environment
+  export-run.ts     drives `scenescout export`: reads the findings, asks GitHub or Jira what is filed, files the rest
   installer.ts      setup logic (skill link, MCP registration, diagnostics)
   engine/
     browser.ts      the engine class: attach, snapshot, actions, crawl, plans
@@ -703,8 +726,10 @@ src/
     expiry.ts       how long a saved sign-in lasts: cookie dates and JWT exp, checked before lanes start
     report.ts       the gap ledger + report generation
     check.ts        the check's rules, gate, report and SARIF
+    baseline.ts     visual baselines: targets.json, where each picture is kept, when one is met
     sarif.ts        which repository file a SARIF result points at, so code scanning keeps it
     ci.ts           a CI run's options, provider choice, caps, key redaction, tools and files
+    export.ts       which findings an export files, the inert issue it writes, the marker that dedups it
     provider.ts     the Anthropic and OpenAI message shapes, and retries
     replay.ts       the run as one page: steps, tasks, frames under each finding
     …               collector · dispatch · fixtures · authloss · reaper

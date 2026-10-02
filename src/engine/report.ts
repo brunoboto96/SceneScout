@@ -1,6 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
-import { SHARED_CHROME_ROUTE, isEmbedKey, isWorthALook, judgedMergesOf, type Finding, type MemoryStore, type PageScore } from "./memory.js";
+import {
+  baseRoute,
+  reachedRoutes,
+  routeIdentity,
+  isEmbedKey,
+  isWorthALook,
+  judgedMergesOf,
+  seenOnOf,
+  type Finding,
+  type MemoryStore,
+  type PageScore,
+} from "./memory.js";
 import type { OracleViolation } from "./oracles.js";
 import { sayVerification } from "./verify.js";
 import type { WriteMode } from "./policy.js";
@@ -133,10 +144,16 @@ export function formatWorthALook(items: readonly Finding[], sessionStart: string
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}${f.foundAt >= sessionStart ? "" : " · seen in an earlier run"}`);
     lines.push(`- **A defect only if** your project uses ${f.convention ?? "a convention the finding does not name"}`);
     if (f.evidence) lines.push(`- **Seen:** \`${f.evidence}\``);
-    lines.push(`- **Where:** \`${f.state}\` (${f.url})`);
+    lines.push(`- **Where:** \`${f.state}\` (${f.url})${alsoSeenOn(f)}`);
     lines.push(``, f.detail, ``);
   }
   return lines;
+}
+
+/** The other routes a merged finding was filed on, as the end of its Where line, or "". */
+function alsoSeenOn(f: Finding): string {
+  const routes = seenOnOf(f);
+  return routes.length > 0 ? `; also seen on ${routes.map((r) => `\`${r}\``).join(", ")}` : "";
 }
 
 /**
@@ -216,12 +233,26 @@ export interface ReportExtras {
   createdResources?: string[];
   /** Known routes never visited — first entry of the gap ledger. */
   unvisitedRoutes?: string[];
+  /**
+   * The route contract (scanned ∪ discovered routes), the one set every route
+   * line of the gap ledger counts over. Absent, the routes visited stand in.
+   */
+  knownRoutes?: string[];
+  /**
+   * Which visits the ledger's "nothing exercised" and "never audited" lines
+   * judge: "run" (the default) the routes this run reached, "project" every
+   * route any run reached. A process that has reached nothing yet (a report
+   * built from memory alone) reads the project.
+   */
+  ledgerScope?: "run" | "project";
   /** Errors caused by the write policy's own blocks, which were not counted as violations. */
   policyAttributed?: number;
   /** The write mode the run used. In "observe" no form can be submitted, which the ledger must say rather than blame the run. */
   mode?: WriteMode;
   /** Origins trusted with their embeds' writes; they only counted in safe-write. */
   trustedEmbeds?: string[];
+  /** POST endpoints the user named as reads; they only count in observe. */
+  readPosts?: string[];
   /** The engine's version, for the HTML's header. */
   version?: string;
   /** Sessions attached right now. Only these can be holding a browser, so only these are warned about. */
@@ -450,12 +481,16 @@ export function formatUnchosenOptions(dropdowns: ReadonlyArray<{ route: string; 
  * routes this lane never opened and forms its role cannot reach, and a lane
  * reading those as its own either wastes turns on them or reports itself
  * incomplete. "project" is everything the memory holds, each route and form
- * tagged with the sessions that reached it this run. `routeLine` is the
- * route contract's line (formatRouteCoverage), which is the role's either way.
+ * tagged with the sessions that reached it this run. In the session scope
+ * each route lists only the controls on states this session recorded. `routeLine`
+ * is the route contract's line (formatRouteCoverage), labelled as the
+ * project's in the session scope.
  */
 export function coverageView(memory: MemoryStore, session: string, scope: "session" | "project", routeLine: string): string[] {
   const routes = scope === "session" ? memory.routesVisitedBy(session) : null;
-  const cov = memory.coverage(routes ? { routes } : undefined);
+  // A session's own controls are the ones on the states it recorded: another
+  // role's table on the same route is not this session's work.
+  const cov = memory.coverage(routes ? { routes, states: memory.statesVisitedBy(session) } : undefined);
   const inScope = (route: string): boolean => routes === null || routes.has(route);
   const tag = (route: string): string => {
     if (routes) return "";
@@ -471,7 +506,8 @@ export function coverageView(memory: MemoryStore, session: string, scope: "sessi
   return [
     ...head,
     `States known: ${cov.states} · Elements exercised: ${cov.elementsExercised}/${cov.elementsTotal}${cov.embeds.total > 0 ? ` (plus ${cov.embeds.exercised}/${cov.embeds.total} inside other sites' frames, not counted)` : ""}`,
-    routeLine,
+    // The route contract is the project's, every session's and every run's; a session's own figure is the head's.
+    routes ? `Project route contract (every session, every run): ${routeLine}` : routeLine,
     `Unexercised elements by route:`,
     ...cov.unexercised
       .slice(0, 25)
@@ -484,6 +520,100 @@ export function coverageView(memory: MemoryStore, session: string, scope: "sessi
 }
 
 /**
+ * The gap-ledger line for pages whose scripts sent a POST that observe
+ * refused, or null. Some apps read through POST (a search, a report query); a
+ * page loading its data that way cannot be tested in observe until the user
+ * names the endpoint in `readPosts`. The engine cannot tell a read from a
+ * write, so it names the endpoints and leaves the choice to the user.
+ */
+export function observeRefusedPostsGap(pages: ReadonlyArray<{ route: string; endpoints: readonly string[] }> | undefined): string | null {
+  const list = (pages ?? []).filter((p) => p.endpoints.length > 0);
+  if (list.length === 0) return null;
+  const shown = list
+    .slice(0, 8)
+    .map((p) => `${p.route} (${p.endpoints.join(", ")})`)
+    .join("; ");
+  return (
+    `${list.length} page(s) sent a POST that observe refused, so whatever it loads is untested: ${shown}${list.length > 8 ? " …" : ""}. ` +
+    `If one of these only reads (a search or query sent as POST), the user can name it in readPosts ("POST /path") and the page can be tested in observe; anything that writes stays refused.`
+  );
+}
+
+/**
+ * The route lines of the gap ledger: never visited, visited but nothing
+ * exercised, never design-audited. All three count over ONE set, the route
+ * contract (`knownRoutes`), and say so, so their figures can be compared with
+ * each other and with the route line of scout_coverage.
+ *
+ * A state route folds into its contract route, and a UI-state query variant
+ * (`/things/:id?section=history`) into its base path: a tab clicked on the
+ * base route is recorded on the base route's state, and a variant reached by
+ * URL is the same page. A visited route the contract does not hold (a path
+ * typed by hand that does not exist) is not a route of the app.
+ *
+ * "Nothing exercised" and "never audited" judge the routes this run reached
+ * (`ledgerScope`), since a route an earlier run looked at and left says
+ * nothing about this run. Whether a control was exercised, or a route
+ * audited, still counts from any run.
+ */
+function routeLedger(memory: MemoryStore, extras?: ReportExtras): string[] {
+  const lines: string[] = [];
+  const runStates = memory.runStates;
+  const scope = extras?.ledgerScope ?? (runStates.size > 0 ? "run" : "project");
+  const states = scope === "run" ? runStates : undefined;
+  const when = scope === "run" ? "this run" : "in any run";
+  const visited = new Set<string>();
+  for (const [fp, st] of Object.entries(memory.states)) if (!states || states.has(fp)) visited.add(routeIdentity(st.route));
+  const hasContract = (extras?.knownRoutes?.length ?? 0) > 0;
+  const contract = hasContract ? [...new Set(extras!.knownRoutes)] : [...visited];
+  const of = `of ${contract.length} ${hasContract ? "known" : "visited"} route(s)`;
+
+  const unvisited = extras?.unvisitedRoutes ?? [];
+  if (unvisited.length > 0) {
+    lines.push(
+      `${unvisited.length} ${hasContract ? `${of} ` : "route(s) "}never visited in any run: ${unvisited.slice(0, 10).join(", ")}${unvisited.length > 10 ? " …" : ""}`,
+    );
+  }
+
+  // `total` and `exercised` come from coverage() so they are the SAME deduped,
+  // chrome-stripped count the unexercised list is drawn from. Recomputing them
+  // from raw state elements (as this once did) counts every state's copy of a
+  // shared element, and a genuinely untouched route vanished from the ledger.
+  // The shared-chrome pseudo-route is no state's route, so it is never visited.
+  const cov = memory.coverage(states ? { states } : undefined);
+  const groups = new Map<string, { total: number; exercised: number }>();
+  for (const [route, c] of cov.perRoute) {
+    if (!visited.has(route)) continue;
+    const g = groups.get(baseRoute(route)) ?? { total: 0, exercised: 0 };
+    g.total += c.total;
+    g.exercised += c.exercised;
+    groups.set(baseRoute(route), g);
+  }
+  const auditedBases = new Set(
+    Object.entries(memory.routeFacts)
+      .filter(([, f]) => f.audited)
+      .map(([r]) => baseRoute(routeIdentity(r))),
+  );
+  // A contract route counts as reached when it was itself, or (being a base
+  // path) when one of its tabs or sections was.
+  const reached = contract.filter(reachedRoutes(visited));
+  const untouched = reached.filter((r) => {
+    const g = groups.get(baseRoute(routeIdentity(r)));
+    return g !== undefined && g.total > 0 && g.exercised === 0;
+  });
+  if (untouched.length > 0) {
+    lines.push(
+      `${untouched.length} ${of} visited ${when} but NOTHING exercised (looked at, never touched): ${untouched.slice(0, 8).join(", ")}${untouched.length > 8 ? " …" : ""}`,
+    );
+  }
+  const unaudited = reached.filter((r) => !auditedBases.has(baseRoute(routeIdentity(r))));
+  if (unaudited.length > 0) {
+    lines.push(`${unaudited.length} ${of} visited ${when} and never design-audited: ${unaudited.slice(0, 8).join(", ")}${unaudited.length > 8 ? " …" : ""}`);
+  }
+  return lines;
+}
+
+/**
  * The GAP LEDGER — an explicit enumeration of what was NOT tested. This is
  * what turns "extensive" from a vibe into a verifiable claim: a run is only
  * as trustworthy as its list of known gaps, and an empty ledger is the only
@@ -491,39 +621,8 @@ export function coverageView(memory: MemoryStore, session: string, scope: "sessi
  */
 export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[] {
   const gaps: string[] = [];
-  const cov = memory.coverage();
   const facts = memory.routeFacts;
-  const visitedRoutes = [...new Set(Object.values(memory.states).map((st) => st.route))];
-  if (extras?.unvisitedRoutes?.length) {
-    gaps.push(
-      `${extras.unvisitedRoutes.length} route(s) never visited: ${extras.unvisitedRoutes.slice(0, 10).join(", ")}${extras.unvisitedRoutes.length > 10 ? " …" : ""}`,
-    );
-  }
-  // `total` comes from coverage() so it is the SAME deduped, chrome-stripped
-  // denominator that `keys` is a subset of. Recomputing it from raw state
-  // elements (as this once did) counts every state's copy of a shared element,
-  // so any route with two states had total > keys.length, the equality never
-  // held, and a genuinely untouched route vanished from the ledger.
-  // SHARED_CHROME_ROUTE is a pseudo-route: no state carries it, so it cannot be
-  // "visited" and there is nothing to navigate to in order to clear it. Before
-  // coverage() reported a total for it, it fell out of this filter by accident
-  // (total === 0); excluding it explicitly keeps the ledger to entries a tester
-  // can actually act on.
-  const untouched = cov.unexercised.filter((u) => u.state !== SHARED_CHROME_ROUTE && u.total > 0 && u.keys.length === u.total);
-  if (untouched.length > 0) {
-    gaps.push(
-      `${untouched.length} route(s) visited but NOTHING exercised (looked at, never touched): ${untouched
-        .slice(0, 8)
-        .map((u) => u.state)
-        .join(", ")}${untouched.length > 8 ? " …" : ""}`,
-    );
-  }
-  const unaudited = visitedRoutes.filter((r) => !facts[r]?.audited);
-  if (unaudited.length > 0) {
-    gaps.push(
-      `${unaudited.length}/${visitedRoutes.length} visited route(s) never design-audited: ${unaudited.slice(0, 8).join(", ")}${unaudited.length > 8 ? " …" : ""}`,
-    );
-  }
+  gaps.push(...routeLedger(memory, extras));
   // Filled in, never committed. `mutated` records that a state-changing request
   // actually left the page; a route where someone typed, picked an option or
   // attached a file but nothing was ever submitted is a form that was looked
@@ -552,6 +651,9 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
           : ""),
     );
   }
+  // From project memory, not a session: lanes close theirs before the report is written.
+  const refusedPosts = observeRefusedPostsGap(memory.observeRefusedPosts);
+  if (refusedPosts) gaps.push(refusedPosts);
   const journeyTotal = Object.values(facts).reduce((a, f) => a + (f.journeysCompleted ?? 0), 0);
   if (journeyTotal === 0) {
     gaps.push(
@@ -717,7 +819,7 @@ export function generateReport(
     if (!complete && f.regressedAt) lines.push(`- **⟳ REGRESSED:** previously marked resolved, re-found ${f.regressedAt} — the fix did not hold`);
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}`);
     if (f.evidence) lines.push(`- **Evidence:** \`${f.evidence}\``);
-    lines.push(`- **Where:** \`${f.state}\` (${f.url})`);
+    lines.push(`- **Where:** \`${f.state}\` (${f.url})${alsoSeenOn(f)}`);
     lines.push(`- **Seen in runs:** ${f.runs}`);
     // A merge the model made is shown with what was filed, so a wrong one can be seen, and refiled as its own defect (ADR 4).
     for (const m of judgedMergesOf(f)) {
@@ -827,6 +929,19 @@ export function generateReport(
     );
     lines.push(``);
     for (const o of extras.trustedEmbeds) lines.push(`- \`${o}\``);
+    lines.push(``);
+  }
+
+  if (extras?.readPosts && extras.readPosts.length > 0) {
+    lines.push(`## Read POSTs`);
+    lines.push(``);
+    lines.push(
+      extras.mode === "observe"
+        ? `Named by the user as endpoints that only read, so observe let them out unless the path or body looked destructive or the body was a GraphQL mutation:`
+        : `Named as reads, but not applied: they only count in observe mode, and this run was ${extras.mode ?? "read-only"}:`,
+    );
+    lines.push(``);
+    for (const e of extras.readPosts) lines.push(`- \`${e}\``);
     lines.push(``);
   }
 

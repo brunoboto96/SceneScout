@@ -136,7 +136,45 @@ const REFUSED_RE = /\b(?:refused|rejected|blocked)\b/i;
  * change the user made was kept, so it is never paired with a success claim.
  */
 export const INFRASTRUCTURE_WRITE_RE =
-  /\/auth\/(refresh|token|session)|refresh[-_]?token|\/telemetry|\/analytics|\/heartbeat|\/sentry|\/collect\b|\/logs?\b|\/metrics\b/i;
+  /\/auth\/(refresh|token|session)|refresh[-_]?token|\/telemetry|\/analytics|\/heartbeat|\/sentry|\/envelope\b|client[-_]?errors?\b|\/collect\b|\/logs?\b|\/metrics\b/i;
+
+/** When one watched request was sent, against the action being judged. All times are the engine's clock, in ms. */
+export interface RequestTiming {
+  /** When the request started. */
+  started: number;
+  /** When the current user input began, or null before the first. */
+  inputSince: number | null;
+  /** When the current action began. An action that is not input moves this past `inputSince`. */
+  actionStartedAt: number;
+  /**
+   * When the input started loading a new main-frame document (its first
+   * navigation request), or null when it loaded none. A client-side route
+   * change sends no navigation request and leaves this null.
+   */
+  documentLoadSince: number | null;
+  /** True for the main frame's navigation request itself: a native form post, or a link's GET. */
+  isDocumentLoad: boolean;
+}
+
+/**
+ * Whether a request is one the action being judged did not send (see
+ * `WatchedRequest.background`).
+ *
+ * Once a click has started loading a new document, what follows is not the
+ * click's own write. Requests the old page sends as it is left (a preference
+ * save on pagehide) belong to that page, and requests the new page sends as it
+ * loads (an error monitor, a visit beacon) are sent with no input on it yet.
+ * Neither is answered by anything on screen, and the new page's text is all
+ * new against the old page's, so paired they read every static "Completed" as
+ * a false success. The click's own writes come before the navigation starts:
+ * a script's save awaited before it moves the page, or the navigation itself
+ * when it is a native form post.
+ */
+export function isBackgroundRequest(t: RequestTiming): boolean {
+  if (t.inputSince === null || t.inputSince < t.actionStartedAt || t.started < t.inputSince) return true;
+  if (t.isDocumentLoad) return false;
+  return t.documentLoadSince !== null && t.started > t.documentLoadSince;
+}
 
 /** Whether a piece of announced text explains a refusal. */
 export function isRefusalNotice(text: string): boolean {
@@ -180,6 +218,8 @@ export interface PageState {
   emptyLists: number;
   /** Open dialogs (native, role=dialog or alertdialog) on the page. Read with the texts so the engine needs no second call. */
   dialogs?: number;
+  /** Visible fields marked aria-invalid="true": a form's client-side validation answering. */
+  invalid?: number;
 }
 
 /** What counts as an open dialog: a native one or an ARIA one. */
@@ -243,7 +283,12 @@ function admitsInAnnouncement(text: string): boolean {
  * "Published", a heading, a row from earlier. Only what the action put up can
  * contradict what the action's write met. Without it, every text counts.
  */
-export function findContradictions(requests: readonly WatchedRequest[], page: PageState, before?: PageState | null): Contradiction[] {
+export function findContradictions(
+  requests: readonly WatchedRequest[],
+  page: PageState,
+  before?: PageState | null,
+  acted?: { before: ActedControl; after: ActedControl } | null,
+): Contradiction[] {
   const refused = requests.filter(isRefused);
   if (refused.length === 0) return [];
 
@@ -311,7 +356,155 @@ export function findContradictions(requests: readonly WatchedRequest[], page: Pa
     }
   }
 
+  // No success word, but the control or a counter beside it shows the change
+  // as kept: an optimistic UI telling the same falsehood without words.
+  // Medium: the page never said "saved", and a reader may still notice a
+  // reload putting the old value back.
+  const change = acted && writes.length > 0 && kept.length === 0 && successAt < 0 ? keptChange(acted.before, acted.after) : null;
+  if (change) {
+    const worst = writes[0];
+    out.push({
+      kind: "false_success",
+      severity: "medium",
+      detail: `${say(worst)} was refused, and the page shows the change as kept (${change}) with no error. The user is told their change was kept when the server rejected it.${standIn(worst)}`,
+      evidence: `false-success-kept ${say(worst)}`,
+    });
+  }
+
   return out;
+}
+
+/** The acted-on control as the click found it and as it left it, read by ACTED_CONTROL_SRC. */
+export interface ActedControl {
+  /** The control's role (its ARIA role, else "checkbox"/"radio" for a native box, else its tag). */
+  role: string;
+  /** Null when the control has no such state. */
+  checked: boolean | null;
+  pressed: boolean | null;
+  selected: boolean | null;
+  /**
+   * Counter-shaped texts ("1/3 completed", "Step 2 of 5", "40%") near the
+   * control: in the container it shares with it (a dialog, a form, a group,
+   * a region), and in what the page announces.
+   */
+  counters: string[];
+}
+
+/** A counter: "1/3", "2 of 5", "40%". Not a date ("10/02/2026") nor a part of a longer number. */
+export const COUNTER_RE = /(?<![\d/.,:])(?:\d{1,4} ?(?:\/|of) ?\d{1,4}|\d{1,3} ?%)(?![\d/.,:])/i;
+
+/** The containers a counter must share with the control to count as its counter. */
+const CONTROL_CONTAINER_SEL =
+  'dialog, [role="dialog"], [role="alertdialog"], fieldset, form, [role="group"], [role="radiogroup"], [role="toolbar"], [role="region"], section, aside, [role="complementary"]';
+
+/** Most counters read for one control. */
+export const MAX_COUNTERS = 20;
+
+/**
+ * Page-side reader of an acted-on control: `(${ACTED_CONTROL_SRC})(node)`
+ * returns an ActedControl, or null for no node. A label stands for the box it
+ * labels. Shipped as a string for the same reason CLAIM_SCAN_SCRIPT is.
+ */
+export const ACTED_CONTROL_SRC = `(node) => {
+  if (!node) return null;
+  const visible = ${VISIBLE_SRC};
+  const box = (n) => n && n.tagName === "INPUT" && (n.type === "checkbox" || n.type === "radio");
+  const control = node.control || (box(node) ? node : node.querySelector && node.querySelector("input[type=checkbox], input[type=radio]")) || node;
+  const flag = (v) => (v === "true" ? true : v === "false" ? false : null);
+  const role = control.getAttribute("role") || (box(control) ? control.type : control.tagName.toLowerCase());
+  const counter = ${COUNTER_RE};
+  const counters = [];
+  const add = (t) => {
+    const text = (t || "").replace(/\\s+/g, " ").trim();
+    if (text && text.length <= 60 && counter.test(text) && !counters.includes(text) && counters.length < ${MAX_COUNTERS}) counters.push(text);
+  };
+  const near = control.closest(${JSON.stringify(CONTROL_CONTAINER_SEL)}) || (control.parentElement && control.parentElement.parentElement);
+  if (near) {
+    const walker = document.createTreeWalker(near, NodeFilter.SHOW_ELEMENT);
+    for (let el = near; el && counters.length < ${MAX_COUNTERS}; el = walker.nextNode()) {
+      let own = "";
+      for (const child of el.childNodes) if (child.nodeType === 3) own += child.nodeValue;
+      if (own.trim() && visible(el)) add(own);
+    }
+  }
+  for (const region of document.querySelectorAll("[role~='status'], [role~='alert'], [aria-live]:not([aria-live='off']), output")) {
+    if (visible(region)) add(region.innerText);
+  }
+  return {
+    role,
+    checked: box(control) ? control.checked : flag(control.getAttribute("aria-checked")),
+    pressed: flag(control.getAttribute("aria-pressed")),
+    selected: flag(control.getAttribute("aria-selected")),
+    counters,
+  };
+}`;
+
+/**
+ * How the acted-on control shows its change as kept, or null when it does not.
+ *
+ * A checked, pressed or selected state that moved is the change itself (a
+ * tab's selection is not: choosing a tab is moving around, not a change the
+ * user asked to keep). A counter beside it that moved ("0/3" to "1/3
+ * completed") counts it as done. A counter that merely appeared does not: a
+ * step that opens with "Step 1 of 3" counts nothing yet.
+ */
+export function keptChange(before: ActedControl, after: ActedControl): string | null {
+  for (const state of ["checked", "pressed", "selected"] as const) {
+    if (state === "selected" && after.role === "tab") continue;
+    const was = before[state];
+    const now = after[state];
+    if (was !== null && now !== null && was !== now) return `the control is now ${now ? state : `not ${state}`}`;
+  }
+  const gone = before.counters.filter((c) => !after.counters.includes(c));
+  const fresh = after.counters.filter((c) => !before.counters.includes(c));
+  if (gone.length > 0 && fresh.length > 0) return `${JSON.stringify(gone[0])} became ${JSON.stringify(fresh[0])}`;
+  return null;
+}
+
+/** How a click that sent nothing was answered on the page, when it was. */
+export type QuietAnswer = "dialog" | "validation";
+
+/**
+ * Whether a submit-shaped click that sent no request was answered on the page
+ * anyway, judged from the page as the click began and as it settled.
+ *
+ * - A dialog opened: a step (a confirmation), not a submit.
+ * - A field became invalid, or the page announced something new that is not
+ *   a success claim: client-side validation said what was wrong, and no
+ *   request was expected. A new "Saved!" is the opposite, the very case the
+ *   silent-submit note is for, so it never counts.
+ *
+ * Null when either reading is missing or nothing visible answered.
+ */
+export function quietAnswer(before: PageState | null, after: PageState | null): QuietAnswer | null {
+  if (!before || !after) return null;
+  if ((after.dialogs ?? 0) > (before.dialogs ?? 0)) return "dialog";
+  if ((after.invalid ?? 0) > (before.invalid ?? 0)) return "validation";
+  const said = new Set(before.announced ?? []);
+  if ((after.announced ?? []).some((text) => !said.has(text) && classify(text) !== "success")) return "validation";
+  return null;
+}
+
+/**
+ * Whether a piece of announced text (an alert's or a live region's name, as
+ * the snapshot lists it) was not on the page at `baseline`. The name may be a
+ * region's sentences run together and cut short, so it is matched by prefix
+ * either way against the baseline's texts and announced sentences. False
+ * when there is no baseline: nothing says when the text arrived.
+ */
+export function saidSince(text: string, baseline: PageState | null): boolean {
+  if (!baseline) return false;
+  const norm = (t: string): string => t.replace(/\s+/g, " ").trim();
+  const said = norm(text);
+  if (!said) return false;
+  for (const earlier of [...baseline.texts, ...(baseline.announced ?? [])]) {
+    const e = norm(earlier);
+    if (!e) continue;
+    if (e === said) return false;
+    const shorter = Math.min(e.length, said.length);
+    if (shorter >= 20 && (e.startsWith(said) || said.startsWith(e))) return false;
+  }
+  return true;
 }
 
 /** Most announced regions read from one page. */
@@ -391,6 +584,9 @@ export const CLAIM_SCAN_SCRIPT = `(() => {
   // confirmation a router cancelled a route change for (oracles.ts).
   let dialogs = 0;
   for (const d of document.querySelectorAll(${JSON.stringify(DIALOG_SEL)})) if (visible(d)) dialogs += 1;
+  // Fields the page marked invalid, so a submit answered by validation is not called silent.
+  let invalid = 0;
+  for (const f of document.querySelectorAll('[aria-invalid="true"]')) if (visible(f)) invalid += 1;
 
-  return { texts, announced, emptyLists, dialogs };
+  return { texts, announced, emptyLists, dialogs, invalid };
 })()`;

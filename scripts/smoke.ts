@@ -42,11 +42,14 @@ import * as frames from "./smoke/frames.ts";
 import * as injection from "./smoke/injection.ts";
 import * as postmessage from "./smoke/postmessage.ts";
 import * as checkGate from "./smoke/check.ts";
+import * as baselines from "./smoke/baselines.ts";
 import * as firstRun from "./smoke/first-run.ts";
 import * as unload from "./smoke/unload.ts";
 import * as ciRun from "./smoke/ci.ts";
 import * as timeLimits from "./smoke/time-limits.ts";
 import * as snapshotContents from "./smoke/snapshot.ts";
+import * as targets from "./smoke/targets.ts";
+import * as settleAfterLeaving from "./smoke/settle.ts";
 
 const suites = [
   readOnly,
@@ -67,9 +70,12 @@ const suites = [
   attribution,
   frames,
   snapshotContents,
+  targets,
+  settleAfterLeaving,
   unload,
   timeLimits,
   checkGate,
+  baselines,
   firstRun,
   ciRun,
 ];

@@ -11,6 +11,7 @@
     .crumbs a { display: inline-block; padding: 4px 12px; min-width: 60px; background: rgb(255, 255, 255); color: rgb(17, 24, 39); }
     header h1 { color: rgb(190, 190, 190); }
     button { padding: 8px 16px; min-width: 100px; border: 0; background: rgb(20, 80, 200); color: rgb(255, 255, 255); }
+    button.icon { min-width: 0; padding: 6px; background: transparent; color: rgb(17, 24, 39); }
     input, select { padding: 6px; background: rgb(255, 255, 255); min-width: 80px; }
   </style>
 </head>
@@ -19,7 +20,15 @@
        the design audit keeps it out of the page's score from the first audit;
        the page's own header is inside <main> and stays page content. The row
        checkboxes select rows, the row selects edit them in place, and the
-       search box filters: none of them is a form to fill in and submit. -->
+       search box filters: none of them is a form to fill in and submit. Nor is
+       the filter panel, which names itself one through its heading and applies
+       as it changes, though it has typed fields and no <form>. Its user field
+       is labelled only by its placeholder, which the audit reports and scores;
+       design-form.html labels every field and is the contrast. The icon button
+       is named by its aria-label and must be listed by that name. The image
+       button is named by its image's alt text, which the accessible-name
+       computation reads, so it is not listed as unnamed; the one beside it
+       has an empty alt and nothing else, and is. -->
   <aside aria-label="Sections">
     <nav>
       <a href="#s1" data-testid="design-ctx-shell-1">Section one</a>
@@ -36,6 +45,18 @@
       <h1 data-testid="design-ctx-own-header">Things</h1>
       <button type="button" data-testid="design-ctx-new">New thing</button>
     </header>
+    <button type="button" class="icon" aria-label="Dismiss"><svg width="16" height="16" aria-hidden="true"><path d="M2 2L14 14M14 2L2 14" stroke="currentColor"/></svg></button>
+    <button type="button" class="icon"><img alt="Search" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2216%22 height=%2216%22/%3E" width="16" height="16"></button>
+    <button type="button" class="icon"><img alt="" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2216%22 height=%2216%22/%3E" width="16" height="16"></button>
+    <section aria-labelledby="design-ctx-filters-title">
+      <h2 id="design-ctx-filters-title">Filters</h2>
+      <input type="date" aria-label="From">
+      <input type="date" aria-label="To">
+      <input type="text" placeholder="Any user">
+      <label><input type="checkbox"> Open</label>
+      <label><input type="checkbox"> Closed</label>
+      <label><input type="checkbox"> Archived</label>
+    </section>
     <div role="search"><input type="search" aria-label="Search things" data-testid="design-ctx-search"></div>
     <table>
       <tbody id="rows"></tbody>

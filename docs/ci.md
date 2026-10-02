@@ -91,6 +91,9 @@ Every option of `scenescout check` is an input with the same name. `scenescout c
 | `flow-writes` | `never` | `allow` replays flows under `mode` (below) |
 | `on-refused-step` | `report` | `stop` ends the check at a refused flow step (below) |
 | `gate-retests` | `high` | `never` or `all` (below) |
+| `baseline` | `off` | `compare` or `update` the visual baselines listed in `targets.json` (below) |
+| `baselines` | `<project>/.scenescout/baselines` | The folder holding `targets.json` and the baselines; name one the repository commits (below) |
+| `baseline-threshold` | 0.1 | The percentage of a picture's pixels that may change, 0 to 100 (below) |
 | `sarif-file-anchor` | the workflow file that is running | The repository file a `check.sarif` result points at when no saved flow raised it, relative to the repository root (below) |
 
 And the action's own:
@@ -101,7 +104,7 @@ And the action's own:
 | `version` | the ref's release | The scenescout npm version to run |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo`. Set `false` on a runner or container that has them |
-| `upload-artifact` | `true` | Keep the three files as an artifact |
+| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met |
 | `artifact-name` | `scenescout-check-<job id>` | A second use in the same job gets `-2`, a third `-3`. Jobs of a matrix share a job id, so give each cell its own name, e.g. `scenescout-check-${{ matrix.browser }}` |
 | `upload-sarif` | `false` | Upload `check.sarif` to code scanning (below) |
 
@@ -291,6 +294,62 @@ When the project's `.scenescout/memory.json` holds findings earlier exploratory 
 - **not re-tested**: the page did not load, or sent the browser to sign-in.
 
 Re-tests are reported in `report.md` and `check.json`. Whether one fails the gate is `--gate-retests` (below); "possibly fixed" and "not re-tested" never do. The check reads the memory and never writes it, so nothing is resolved; `scout_verify` in an exploratory run does that, and re-tests the findings that need an interaction. `--retest off` skips all of this. The memory is ignored by git unless a project commits it, so without that this applies to checks run where the memory lives.
+
+## Visual baselines
+
+`--baseline compare` (the action's `baseline: compare`) pictures each page or element listed in the baselines folder's `targets.json` and compares it, pixel by pixel, with the baseline the project approved. `--baseline update` writes new baselines, and nothing else ever does. The [guide](guide/Ways-to-use-it.md#visual-baselines) describes `targets.json`, how each picture is taken and what each outcome means; this section is about running it in CI. Why it works this way: [ADR 19](adr/0019-a-visual-baseline-changes-only-when-asked.md).
+
+**Commit the baselines.** The default folder, `.scenescout/baselines/`, is ignored by git, so a runner would start without it, `targets.json` included, and the check would stop with exit 2. Keep the baselines and `targets.json` in a folder the repository commits, and name it:
+
+```yaml
+      - uses: brunoboto96/SceneScout@v3
+        with:
+          url: http://127.0.0.1:3000
+          baseline: compare
+          baselines: tests/visual
+```
+
+**Take them on the runner.** Each operating system draws text differently, so baselines taken on a laptop seldom match pictures taken on a Linux runner, and the report says when a baseline was taken on another system. Take them where the check runs: a workflow started by hand that updates them and keeps the folder as an artifact, which you download and commit. An update replaces every baseline taken on another system, however close it came, so one run on the runner retakes them all.
+
+```yaml
+on:
+  workflow_dispatch:
+
+jobs:
+  baselines:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Start the app as the check job does.
+      - uses: brunoboto96/SceneScout@v3
+        with:
+          url: http://127.0.0.1:3000
+          baseline: update
+          baselines: tests/visual
+      # always(): the check step fails when a target could not be pictured, and the baselines it did write are still wanted.
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-baselines
+          path: tests/visual
+```
+
+The check step fails if a target could not be pictured, since that target's baseline was not written. Targets are pictured whatever `paths` says: each names its own page. Baselines are kept per browser, under `chromium/`, `firefox/` or `webkit/`, so a matrix over browsers takes and compares each browser's own.
+
+**What an unmet baseline leaves.** It is a `visual-change` issue, high, so it fails the default gate, as a broken saved flow does: both are expectations the project wrote down. Its evidence gives the share of pixels changed and the path of the diff picture. `report.md` lists every target and what became of it; `check.json` has the run under `baselines` (`mode`, `engine`, `threshold`, `dir`, and for each target its `path`, `element`, `status`, `detail`, `platformNote`, `partial`, `diff`, `baseline`, the PNG in the folder, and `files`, the pictures beside the report); in `check.sarif` it is a result at level `error` whose fingerprint is the target and the browser, so the same element changing by another amount is the same alert. The baseline, the picture now and the diff, with the changed pixels in red, are written under `visual/` beside the report, and the action keeps them in its artifact.
+
+| Outcome | Status in `check.json` | An issue? |
+|---|---|---|
+| Within the threshold | `matches` | No |
+| Past the threshold, or a change of size | `changed` | Yes |
+| The page did not load, answered an HTTP error or sent the browser to sign-in; its fonts never finished loading; or the element was not visible or is outside the window | `not-captured` (with `detail` saying which) | Yes, in `compare` and in `update` |
+| A baseline that is half there, cannot be read, belongs to another target, or was taken with other settings | `unusable` (with `detail` saying which) | Yes: a comparison that compared nothing must not pass |
+| No baseline yet | `no-baseline` | No, and the verdict line counts it as not compared |
+| Written by `update` | `updated` | No |
+
+An element larger than the window is pictured where it is inside the window, and its result's `partial` says so: list smaller elements within it to hold the rest.
+
+**Allowing small changes.** `baseline-threshold` (`--baseline-threshold`) is the percentage of a picture's pixels that may change before its baseline is not met. The default is 0.1, not 0: two pictures of an unchanged page taken by one browser build on one machine compare at 0%, but a run on another machine, or after a browser or font update, can anti-alias text and curved edges a pixel differently, and a gate that fails on that noise teaches a team to ignore it. 0.1% is 1,152 pixels of a 1280×900 page and 64 of a 320×200 picture, so a smaller change, such as a character of small text on a large element, passes; set `0` to count every changed pixel. A change of size always counts. `update` rewrites the baselines past the threshold, as compare would judge them, and leaves the rest alone, so noise under it leaves the folder untouched; a baseline taken on another operating system it always replaces. Each pixel is already allowed a difference of 8 in 255 on each colour channel, which absorbs a colour rounded one step differently. `fail-on: never` reports everything without failing the job, visual changes included.
 
 ## Worth a look
 
@@ -527,6 +586,18 @@ Put it after the steps that start the app and wait for it, as in the check's wor
 Its own inputs are the check action's: `working-directory`, `version`, `cli`, `node-version`, `install-deps`, `upload-artifact`, `artifact-name` (default `scenescout-ci-<job id>`) and `upload-sarif` (to code scanning under the category `scenescout-ci`), and `cache` (default `true`; `false` keeps the browser out of the actions cache, for a job that checks out a ref chosen by an input). Its outputs are `exit-code`, `stop`, `high`, `medium`, `low`, `worth-a-look`, `turns`, `tokens`, `estimated-cost`, and the paths `report`, `summary`, `json` and `sarif`.
 
 A pull request from a fork gets no secrets, so the step exits 2 there for want of a key; run it on pushes, on a schedule, or on pull requests from the same repository. Under `pull_request_target`, a fork's code runs with the repository's secrets; a job that sets the key and checks out and starts a fork's app gives that code the key and makes its pages the text the model reads.
+
+### Filing the findings as issues
+
+`scenescout export` files the project's open findings as GitHub or Jira issues, each once, so a step after the run can put them where the team works. With the job's token and `issues: write` permission:
+
+```yaml
+      - run: npx -y scenescout@3 export --to github --repo "$GITHUB_REPOSITORY" --yes
+        env:
+          GH_TOKEN: ${{ github.token }}
+```
+
+Without `--yes` it is a dry run that lists what it would file. A later export skips every finding that already has an issue, open or closed, by the marker each issue carries (`--refile-closed` files one again when its issue is closed). That marker holds the finding's id from the project's memory, so keep `.scenescout/memory.json` between runs (with `actions/cache`, as above): a run that starts from an empty memory gives a defect it words differently a new id, and a new issue. The guide has [the details](guide/Ways-to-use-it.md#filing-findings-as-issues), and the [configuration reference](guide/Configuration-reference.md#scenescout-export) every option.
 
 ### Other CI systems
 

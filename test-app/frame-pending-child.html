@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Loading widget</title></head>
+<body>
+  <p id="state" data-testid="pending-child-state">waiting</p>
+  <script>
+    // Headers arrive at once; the body never finishes while the page is open.
+    fetch('/api/held-body?n=' + new URLSearchParams(location.search).get('n')).then(() => {
+      document.getElementById('state').textContent = 'headers received';
+    });
+  </script>
+</body>
+</html>

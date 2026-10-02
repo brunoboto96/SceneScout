@@ -100,6 +100,37 @@ export interface Finding {
    * as before.
    */
   judgedMerges?: JudgedMerge[];
+  /**
+   * Other routes (route classes, as in `state` before its `#`) a filing merged
+   * into this finding was made on, oldest first, at most MAX_SEEN_ON. One root
+   * cause in a shared component is filed from every page that shows it, and
+   * the merge would otherwise leave the finding naming only the first.
+   * Absent until a filing from another route merges in.
+   */
+  seenOn?: string[];
+}
+
+/** Most other routes one finding records it was seen on; the oldest go first. */
+export const MAX_SEEN_ON = 20;
+
+/** The route class a finding was filed on: its state before the `#`. */
+export const findingRoute = (f: Pick<Finding, "state">): string => f.state.split("#")[0];
+
+/** A finding's other routes that are well formed: the file is read back without a schema. */
+export function seenOnOf(f: Pick<Finding, "seenOn">): string[] {
+  return Array.isArray(f.seenOn) ? f.seenOn.filter((r): r is string => typeof r === "string" && r.length > 0) : [];
+}
+
+/**
+ * `f`'s other routes with `routes` added: each once, never its own route,
+ * oldest first, at most MAX_SEEN_ON. Undefined when there are none, so a
+ * finding seen on one route keeps no empty field. Idempotent.
+ */
+function withSeenOn(f: Pick<Finding, "state" | "seenOn">, routes: readonly string[]): string[] | undefined {
+  const own = findingRoute(f);
+  const out: string[] = [];
+  for (const r of [...seenOnOf(f), ...routes]) if (r && r !== own && !out.includes(r)) out.push(r);
+  return out.length > 0 ? out.slice(-MAX_SEEN_ON) : undefined;
 }
 
 /** A filing the dedup judge merged into a stored finding: what was filed, and how sure the judge was. */
@@ -196,11 +227,14 @@ export interface MergeNote {
   sameRun: boolean;
   updated: Array<"convention" | "detail">;
   kept: Array<"convention" | "detail">;
+  /** The filing's route, when it differs from the finding's and was newly recorded in its seenOn. */
+  seenOn?: string;
 }
 
 /** The sentence a merged filing's result adds about what it changed, or "" when the two filings agreed. */
 export function describeMerge(note: MergeNote, convention: string | undefined): string {
   const parts: string[] = [];
+  if (note.seenOn) parts.push(` Your page, ${note.seenOn}, is recorded as another route it was seen on.`);
   if (note.updated.length > 0) {
     const what = note.updated.map((f) => (f === "convention" ? `its convention is now "${convention ?? ""}"` : "its detail is now yours")).join(" and ");
     parts.push(` Taken as a correction of your own filing: ${what}.`);
@@ -383,6 +417,16 @@ export function redactSecrets(text: string): string {
   return hits > 0 ? `${out} [${hits} secret${hits === 1 ? "" : "s"} redacted]` : out;
 }
 
+/**
+ * Routes are links the app printed, and a link can carry a token
+ * (`?reset=…`, `?api_key=…`). Evidence is redacted where issues are built;
+ * this does the same for every route string before anything is written.
+ */
+export function redactRoute(route: string): string {
+  // The trailing "[n secrets redacted]" note belongs to prose; in a route it would read as part of the path.
+  return redactSecrets(route).replace(/ \[\d+ secrets? redacted\]$/, "");
+}
+
 /** The action-log lines that open and close a journey (scout_journey). The feed reads them to tell which goal an action served. */
 export const JOURNEY_START = "journey:start";
 export const JOURNEY_END = "journey:end";
@@ -464,7 +508,25 @@ interface MemoryFile {
    * its own page (a verdict), which the wording alone cannot.
    */
   laneRoutes?: Record<string, string[]>;
+  /**
+   * Pages whose scripts sent a POST observe refused: route → endpoint
+   * ("POST /api/search") → when it was last refused or cleared. Kept here, not
+   * on a session, because lanes close their sessions before the report is
+   * written. An entry is cleared, not deleted, so the merge with another
+   * process keeps the later of the two.
+   */
+  observeRefusedPosts?: Record<string, Record<string, RefusedPost>>;
 }
+
+/** One endpoint observe refused on a page; `cleared` once it went out (named as a read, or sent in a looser mode). */
+export interface RefusedPost {
+  at: number;
+  cleared?: boolean;
+}
+
+/** The most pages, and endpoints per page, the refused-POST record keeps. */
+const MAX_REFUSED_POST_ROUTES = 50;
+const MAX_REFUSED_POSTS_PER_ROUTE = 5;
 
 const EMPTY: MemoryFile = { version: 1, states: {}, findings: [] };
 
@@ -538,6 +600,10 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
     const trail = unionJudgedMerges(f, other);
     if (trail) merged.judgedMerges = trail;
     else delete merged.judgedMerges;
+    // So are the routes each side saw it on.
+    const seenOn = withSeenOn(older, seenOnOf(newer));
+    if (seenOn) merged.seenOn = seenOn;
+    else delete merged.seenOn;
     byId.set(f.id, merged);
   }
   out.findings = [...byId.values()];
@@ -565,6 +631,15 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
     };
   }
   if (Object.keys(out.routeFacts).length === 0) delete out.routeFacts;
+
+  // Per endpoint, the later of the two: a clear in one process outlasts an older refusal in another.
+  out.observeRefusedPosts = { ...(theirs.observeRefusedPosts ?? {}) };
+  for (const [route, endpoints] of Object.entries(mine.observeRefusedPosts ?? {})) {
+    const merged = { ...(out.observeRefusedPosts[route] ?? {}) };
+    for (const [endpoint, rec] of Object.entries(endpoints)) if (!merged[endpoint] || rec.at >= merged[endpoint].at) merged[endpoint] = rec;
+    out.observeRefusedPosts[route] = merged;
+  }
+  if (Object.keys(out.observeRefusedPosts).length === 0) delete out.observeRefusedPosts;
 
   out.roleAccess = { ...(theirs.roleAccess ?? {}) };
   for (const [role, routes] of Object.entries(mine.roleAccess ?? {})) {
@@ -635,11 +710,55 @@ function decisionKey(d: RecordedDecision): string {
   return [d.lane, d.observation, d.verdict, d.severity ?? "", d.category ?? "", d.confidence, d.evidence ?? ""].join("|");
 }
 
+/** Route identity of a stored route, memoised: states written before an id shape collapsed fold into today's form. */
+const routeIdentityCache = new Map<string, string>();
+export function routeIdentity(route: string): string {
+  let out = routeIdentityCache.get(route);
+  if (out === undefined) {
+    out = normalizePath(route);
+    if (routeIdentityCache.size > 10_000) routeIdentityCache.clear();
+    routeIdentityCache.set(route, out);
+  }
+  return out;
+}
+
+/** A route's base: its path, without the UI-state query naming a tab or section of it. */
+export function baseRoute(route: string): string {
+  return route.split("?")[0] || "/";
+}
+
 /**
- * Most lane decisions kept. Calibration wants a few dozen; a long-lived
- * project would otherwise accumulate every decision ever made and re-serialise
- * them on each save, which is what made an old history slow to open.
+ * Whether a contract route was reached, given the routes states were recorded
+ * on: the route itself, by today's route identity, or, for a base path, one of
+ * its tabs or sections (`/things/:id?section=history` reaches `/things/:id`).
+ * One rule for the "never visited" list and the gap ledger, so a route is not
+ * both reached and never visited.
  */
+export function reachedRoutes(stateRoutes: Iterable<string>): (route: string) => boolean {
+  const visited = new Set<string>();
+  for (const r of stateRoutes) visited.add(routeIdentity(r));
+  const bases = new Set([...visited].map(baseRoute));
+  return (route: string): boolean => {
+    const n = routeIdentity(route);
+    return visited.has(n) || (!n.includes("?") && bases.has(n));
+  };
+}
+
+/**
+ * Link-discovered routes re-keyed by today's route identity. A memory written
+ * before an id shape collapsed holds one route per record (`/things/AB-1001`,
+ * `/things/AB-1002`); folded, they are the one route they always were, and
+ * the first example seen stays its navigable path.
+ */
+export function renormalizeRoutes(map: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [route, example] of Object.entries(map)) {
+    const key = routeIdentity(route);
+    if (!(key in out)) out[key] = example;
+  }
+  return out;
+}
+
 /**
  * Whether a coverage key belongs to a control inside another site's frame:
  * those keys carry the frame's origin (collector.ts frameElementKey), where
@@ -649,6 +768,11 @@ export function isEmbedKey(key: string): boolean {
   return /^frame:https?:\/\//.test(key);
 }
 
+/**
+ * Most lane decisions kept. Calibration wants a few dozen; a long-lived
+ * project would otherwise accumulate every decision ever made and re-serialise
+ * them on each save, which is what made an old history slow to open.
+ */
 export const MAX_LANE_DECISIONS = 1000;
 
 /**
@@ -919,12 +1043,24 @@ function sameFinding(
   // that answered 2xx counts too — a false success names one — so the same bug
   // described once by its page load and once by its failing call stays as two
   // findings: a visible duplicate, the direction ADR 4 accepts.
+  //
+  // And when both findings carry evidence (and it differs, or it would have
+  // matched above), the detail does not count: the literal must be in the
+  // other finding's title or evidence, the two places a finding states what
+  // it is about. A filter option's label ("Last 7 days") quoted in one title
+  // and in passing in the other finding's detail names the control both
+  // defects were found through, not one defect: an undated row listed under
+  // the wrong group and four widgets ignoring the filter shared only that
+  // label, and the second filing was lost to the first. Without evidence on
+  // one side the detail still counts — nothing machine-written says they
+  // differ.
   if (sameFamily(a.category, b.category) && !requestsDisagree(a.evidence, b.evidence)) {
     const aTitleLits = findingLiterals(a.title);
     const bTitleLits = findingLiterals(b.title);
     if (aTitleLits.size > 0 || bTitleLits.size > 0) {
-      const aAll = findingLiterals(a.title, a.detail, a.evidence);
-      const bAll = findingLiterals(b.title, b.detail, b.evidence);
+      const bothEvidenced = !!(aEv && bEv);
+      const aAll = findingLiterals(a.title, bothEvidenced ? undefined : a.detail, a.evidence);
+      const bAll = findingLiterals(b.title, bothEvidenced ? undefined : b.detail, b.evidence);
       for (const lit of aTitleLits) if (bAll.has(lit)) return true;
       for (const lit of bTitleLits) if (aAll.has(lit)) return true;
     }
@@ -1128,6 +1264,8 @@ export class MemoryStore {
     this.dedupChoice = undefined;
     this.dedupOff = undefined;
     this.sessionRoutes.clear();
+    this.sessionStates.clear();
+    this.runStates.clear();
     this.runId = newRunId();
   }
 
@@ -1145,6 +1283,22 @@ export class MemoryStore {
    * Per run, like the other per-run tallies.
    */
   readonly sessionRoutes = new Map<string, Set<string>>();
+
+  /**
+   * The state fingerprints each session recorded this run. A route's states
+   * differ by who looked: an admin's table and a viewer's access-denied alert
+   * are two states of one route, and a session's own coverage lists only the
+   * controls on the states it saw.
+   */
+  readonly sessionStates = new Map<string, Set<string>>();
+
+  /** Every state fingerprint recorded this run, by any session: the gap ledger's default scope. */
+  readonly runStates = new Set<string>();
+
+  /** The states this session recorded this run. */
+  statesVisitedBy(session: string): ReadonlySet<string> {
+    return this.sessionStates.get(session) ?? new Set();
+  }
 
   /** Routes this session reached this run, in the order first reached. */
   routesVisitedBy(session: string): ReadonlySet<string> {
@@ -1179,7 +1333,12 @@ export class MemoryStore {
    */
   readonly selectChoices = new Map<string, { route: string; key: string; options: string[]; chosen: Set<string> }>();
 
-  recordSelectChoice(fingerprint: string, key: string, options: readonly string[], chosen: string): void {
+  /**
+   * `loaded` names the options already selected before the choice: the value
+   * the page loaded with has already been asked of the server, so it is not
+   * owed a choice.
+   */
+  recordSelectChoice(fingerprint: string, key: string, options: readonly string[], chosen: string, loaded: readonly string[] = []): void {
     const route = fingerprint.split("#")[0];
     const id = `${route}\u0000${key}`;
     const distinct = [...new Set(options)];
@@ -1191,6 +1350,7 @@ export class MemoryStore {
     // The latest list wins: options a page added or removed since are not owed.
     if (distinct.length > 0) entry.options = distinct;
     if (chosen) entry.chosen.add(chosen);
+    for (const label of loaded) if (label) entry.chosen.add(label);
     this.selectChoices.set(id, entry);
   }
 
@@ -1319,6 +1479,8 @@ export class MemoryStore {
         // Each copy's judged merges are filings: folding the copies keeps them all.
         const trail = unionJudgedMerges(dupOf, f);
         if (trail) dupOf.judgedMerges = trail;
+        const seenOn = withSeenOn(dupOf, [findingRoute(f), ...seenOnOf(f)]);
+        if (seenOn) dupOf.seenOn = seenOn;
         if (f.status === "resolved") dupOf.status = "resolved";
         const promoted = isWorthALook(dupOf) && !isWorthALook(f);
         const tier = mergeTier(dupOf, f);
@@ -1433,6 +1595,44 @@ export class MemoryStore {
 
   get routeFacts(): Record<string, RouteFacts> {
     return this.data.routeFacts ?? {};
+  }
+
+  /** Record that observe refused a script's POST to `endpoint` on `route`. Deduplicated; saved only when something changed. */
+  noteObserveRefusedPost(route: string, endpoint: string, now = Date.now()): void {
+    const all = this.data.observeRefusedPosts ?? {};
+    const forRoute = all[route] ?? {};
+    const rec = forRoute[endpoint];
+    if (rec && !rec.cleared) return;
+    if (!rec && !all[route] && Object.keys(all).length >= MAX_REFUSED_POST_ROUTES) return;
+    if (!rec && Object.keys(forRoute).length >= MAX_REFUSED_POSTS_PER_ROUTE) return;
+    forRoute[endpoint] = { at: now };
+    all[route] = forRoute;
+    this.data.observeRefusedPosts = all;
+    this.save();
+  }
+
+  /** Clear every open refusal whose endpoint `went` says has since gone out. Saved only when something changed. */
+  clearObserveRefusedPosts(went: (endpoint: string) => boolean, now = Date.now()): void {
+    let changed = false;
+    for (const endpoints of Object.values(this.data.observeRefusedPosts ?? {}))
+      for (const [endpoint, rec] of Object.entries(endpoints))
+        if (!rec.cleared && went(endpoint)) {
+          endpoints[endpoint] = { at: now, cleared: true };
+          changed = true;
+        }
+    if (changed) this.save();
+  }
+
+  /** Pages with a POST observe refused and nothing has since let out, for the gap ledger. */
+  get observeRefusedPosts(): Array<{ route: string; endpoints: string[] }> {
+    return Object.entries(this.data.observeRefusedPosts ?? {})
+      .map(([route, endpoints]) => ({
+        route,
+        endpoints: Object.entries(endpoints)
+          .filter(([, rec]) => !rec.cleared)
+          .map(([endpoint]) => endpoint),
+      }))
+      .filter((p) => p.endpoints.length > 0);
   }
 
   /** Record that `role` reached (or was denied) `route`. Denials never overwrite a recorded "reached" — flaky redirects must not erase real access. */
@@ -1630,6 +1830,7 @@ export class MemoryStore {
           raw.states = kept;
           this.prunedStates = dropped;
         }
+        if (raw.discoveredRoutes) raw.discoveredRoutes = renormalizeRoutes(raw.discoveredRoutes);
         return raw;
       }
       this.loadWarning = `memory.json has unknown version ${String((raw as { version?: unknown }).version)} — starting fresh.`;
@@ -1809,10 +2010,14 @@ export class MemoryStore {
    * `session` names who visited, for this run's per-session coverage.
    */
   visitState(fingerprint: string, url: string, route: string, elementKeys: string[], inertKeys: readonly string[] = [], session?: string): boolean {
+    this.runStates.add(fingerprint);
     if (session) {
       const routes = this.sessionRoutes.get(session) ?? new Set<string>();
       routes.add(route);
       this.sessionRoutes.set(session, routes);
+      const states = this.sessionStates.get(session) ?? new Set<string>();
+      states.add(fingerprint);
+      this.sessionStates.set(session, states);
     }
     let rec = this.data.states[fingerprint];
     const isNew = !rec;
@@ -1957,12 +2162,17 @@ export class MemoryStore {
     existing.lastRun = this.runId;
     existing.foundAt = new Date().toISOString();
     if (!existing.evidence && f.evidence) existing.evidence = f.evidence;
+    // A filing from another page is another place the defect shows.
+    const route = findingRoute(f);
+    const knew = route === findingRoute(existing) || seenOnOf(existing).includes(route);
+    const seenOn = withSeenOn(existing, [route]);
+    if (seenOn) existing.seenOn = seenOn;
     // The same session filing it again in the same run is correcting its
     // own filing: its newer convention and detail are taken. Anyone else's
     // filing is a second sighting, which keeps the first wording. A merge the
     // dedup judge made is never a correction: the judge saw two filings.
     const correction = !judged && sameRun && !!f.session && existing.session === f.session;
-    const merge: MergeNote = { sameRun, updated: [], kept: [] };
+    const merge: MergeNote = { sameRun, updated: [], kept: [], ...(knew ? {} : { seenOn: route }) };
     // A worth-a-look filed again as a defect is promoted, at the severity the defect was filed at.
     const promoted = isWorthALook(existing) && !isWorthALook(f);
     const tier = mergeTier(existing, f, correction ? "incoming" : "existing");
@@ -2064,16 +2274,24 @@ export class MemoryStore {
    * rendered in 30 states of one route is one set of elements, not 30. An
    * element counts as exercised when it was exercised in ANY state of the
    * route. (`state` in the result therefore holds a route.)
+   *
+   * `scope.routes` narrows the routes counted; `scope.states` narrows the
+   * elements listed to the ones those states hold (a session's own states, or
+   * this run's), while whether one was exercised still comes from every state
+   * of the route.
    */
-  coverage(scope?: { routes: ReadonlySet<string> }): {
+  coverage(scope?: { routes?: ReadonlySet<string>; states?: ReadonlySet<string> }): {
     states: number;
     elementsTotal: number;
     elementsExercised: number;
     unexercised: Array<{ state: string; keys: string[]; total: number }>;
+    /** Each route's own controls (chrome and other sites' frames left out) and how many were exercised. */
+    perRoute: Map<string, { total: number; exercised: number }>;
     /** Controls inside other sites' frames: counted apart, never in the app's totals or its gap ledger. */
     embeds: { total: number; exercised: number };
   } {
     const byRoute = this.elementsByRoute();
+    const listed = scope?.states ? this.elementsByRoute(scope.states) : byRoute;
     // Shared layout CHROME (sidebar nav, header, breadcrumbs) is one set of
     // components, not one set per route — clicking "nav-documents" on /admin is
     // the same click as on /. Counting it per route inflated the denominator by
@@ -2087,12 +2305,13 @@ export class MemoryStore {
     let elementsTotal = 0;
     let elementsExercised = 0;
     const unexercised: Array<{ state: string; keys: string[]; total: number }> = [];
+    const perRoute = new Map<string, { total: number; exercised: number }>();
     const embeds = { total: 0, exercised: 0 };
-    for (const [route, elements] of byRoute) {
+    for (const [route, elements] of listed) {
       // A scope narrows what is counted, never what counts as chrome: that is
       // decided over every route, so a lane on two pages does not see the
       // project's sidebar as those pages' own controls.
-      if (scope && !scope.routes.has(route)) continue;
+      if (scope?.routes && !scope.routes.has(route)) continue;
       const own: string[] = [];
       // The route's OWN element count — deduped across states and with shared
       // chrome removed, i.e. exactly the denominator `own` is a subset of.
@@ -2116,6 +2335,7 @@ export class MemoryStore {
         if (done) elementsExercised += 1;
         else own.push(key);
       }
+      perRoute.set(route, { total: ownTotal, exercised: ownTotal - own.length });
       if (own.length > 0) unexercised.push({ state: route, keys: own, total: ownTotal });
     }
     // Chrome counted once, at the end, as its own pseudo-route.
@@ -2128,8 +2348,12 @@ export class MemoryStore {
     if (chromeLeft.length > 0) {
       unexercised.push({ state: SHARED_CHROME_ROUTE, keys: chromeLeft, total: chrome.size });
     }
-    const states = scope ? Object.values(this.data.states).filter((st) => scope.routes.has(st.route)).length : Object.keys(this.data.states).length;
-    return { states, elementsTotal, elementsExercised, unexercised, embeds };
+    const states = scope
+      ? Object.entries(this.data.states).filter(
+          ([fp, st]) => (!scope.routes || scope.routes.has(routeIdentity(st.route))) && (!scope.states || scope.states.has(fp)),
+        ).length
+      : Object.keys(this.data.states).length;
+    return { states, elementsTotal, elementsExercised, unexercised, perRoute, embeds };
   }
 
   /**
@@ -2162,20 +2386,50 @@ export class MemoryStore {
     return keys;
   }
 
-  /** Element keys folded per route, exercised-in-any-state. */
-  private elementsByRoute(): Map<string, Map<string, boolean>> {
-    const byRoute = new Map<string, Map<string, boolean>>();
-    for (const rec of Object.values(this.data.states)) {
-      let route = byRoute.get(rec.route);
-      if (!route) {
-        route = new Map();
-        byRoute.set(rec.route, route);
+  /**
+   * Element keys folded per route, exercised-in-any-state. With `only`, the
+   * keys listed are the ones those states hold; exercised still reads every
+   * state of the route.
+   *
+   * A key is not a control when ANY state of the route recorded it as inert.
+   * Whether a user can act on an element depends on the element, not on the
+   * state it was seen in, and states recorded before the flag existed carry
+   * an unflagged copy that would otherwise keep a wrapper in the count until
+   * that exact state is visited again.
+   *
+   * Routes are re-read through route identity, so states recorded under an
+   * older form of a route (before an id shape collapsed) fold into it.
+   */
+  private elementsByRoute(only?: ReadonlySet<string>): Map<string, Map<string, boolean>> {
+    const inert = new Map<string, Set<string>>();
+    const exercised = new Map<string, Set<string>>();
+    const listed = new Map<string, Set<string>>();
+    const bucket = (map: Map<string, Set<string>>, route: string): Set<string> => {
+      let set = map.get(route);
+      if (!set) {
+        set = new Set();
+        map.set(route, set);
       }
+      return set;
+    };
+    for (const [fp, rec] of Object.entries(this.data.states)) {
+      const route = routeIdentity(rec.route);
+      const keys = only && !only.has(fp) ? null : bucket(listed, route);
       for (const [key, v] of Object.entries(rec.elements)) {
-        // Not a control: nothing to exercise, so not counted as a gap or a total.
-        if (v.inert) continue;
-        route.set(key, (route.get(key) ?? false) || v.exercised);
+        if (v.inert) bucket(inert, route).add(key);
+        if (v.exercised) bucket(exercised, route).add(key);
+        keys?.add(key);
       }
+    }
+    const byRoute = new Map<string, Map<string, boolean>>();
+    for (const [route, keys] of listed) {
+      const elements = new Map<string, boolean>();
+      for (const key of keys) {
+        // Not a control: nothing to exercise, so not counted as a gap or a total.
+        if (inert.get(route)?.has(key)) continue;
+        elements.set(key, exercised.get(route)?.has(key) ?? false);
+      }
+      byRoute.set(route, elements);
     }
     return byRoute;
   }

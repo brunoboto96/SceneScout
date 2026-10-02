@@ -18,14 +18,14 @@ Generated: (by `npm run demo`)
 
 | Route | Overall | A11y | Craft | Consistency | Task clarity | Audited |
 |---|---|---|---|---|---|---|
-| `/orders-new.html` | **97** | 96 | 100 | 90 | 100 | (run date) |
+| `/orders-new.html` | **96** | 92 | 100 | 90 | 100 | (run date) |
 | `/` | **98** | 100 | 100 | 90 | 100 | (run date) |
 | `/order.html` | **98** | 100 | 100 | 90 | 100 | (run date) |
 
 ## Gap ledger — what was NOT tested
 
-- ⚠ 3 route(s) visited but NOTHING exercised (looked at, never touched): /approvals.html, /settings.html, /signin.html
-- ⚠ 9/12 visited route(s) never design-audited: /orders.html, /approvals.html, /inventory.html, /customers.html, /reports.html, /audit.html, /settings.html, /signin.html …
+- ⚠ 3 of 12 known route(s) visited this run but NOTHING exercised (looked at, never touched): /approvals.html, /settings.html, /signin.html
+- ⚠ 9 of 12 known route(s) visited this run and never design-audited: /orders.html, /approvals.html, /inventory.html, /customers.html, /reports.html, /audit.html, /settings.html, /signin.html …
 - ⚠ single-role run (anonymous) — permission boundaries and role capability gaps are untested
 
 ## Findings — seen this session (12)

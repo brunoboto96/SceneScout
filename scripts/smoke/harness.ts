@@ -35,6 +35,8 @@ export interface ServerStats {
   sharedWorkerDeletes: number;
   /** Every non-GET request that reached the server, as "METHOD /path" → count. What the write policy let through, seen from the other side. */
   writes: Record<string, number>;
+  /** Requests for /api/held-body, whose body the server never finishes sending. */
+  heldBodies: number;
 }
 
 /** How long the fixture server holds /slow-page back. */
@@ -313,7 +315,7 @@ function loopbackOrigin(value: string | null): string {
 
 /** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
 export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBaseUrl: string; stats: ServerStats; close: () => Promise<void> }> {
-  const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {} };
+  const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {}, heldBodies: 0 };
   const board: string[] = [];
   let codeCounter = 0;
   const usedCodes = new Set<string>();
@@ -358,6 +360,14 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
         res.writeHead(200, { "content-type": "text/html" });
         res.end(fs.readFileSync(path.join(appDir, "slow.html")));
       }, SLOW_PAGE_MS);
+      return;
+    }
+    // A response whose headers arrive at once and whose body is held open until the client goes away: a request a
+    // page leaves behind still in flight. Counted, so a suite can wait until the frame has sent it.
+    if (urlPath === "/api/held-body") {
+      stats.heldBodies += 1;
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.write("partial");
       return;
     }
     // A server that hangs up without answering: the navigation fails at once (no timeout to wait out).
@@ -431,6 +441,25 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     if (req.method && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
       const key = `${req.method} ${urlPath}`;
       stats.writes[key] = (stats.writes[key] ?? 0) + 1;
+    }
+    // A search read through POST (read-posts.html). A body carrying a delete command or a GraphQL mutation is counted
+    // apart, so a suite can prove none arrived while plain searches did.
+    if (urlPath === "/api/search" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        const tag = body.includes('"action":"delete"') ? " (delete)" : body.includes("mutation") ? " (mutation)" : "";
+        if (tag) stats.writes[`POST /api/search${tag}`] = (stats.writes[`POST /api/search${tag}`] ?? 0) + 1;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ results: ["Widget A", "Widget B"] }));
+      });
+      return;
+    }
+    if (urlPath === "/api/notes" && req.method === "POST") {
+      res.writeHead(201, { "content-type": "application/json" });
+      res.end("{}");
+      return;
     }
     // A visit a page records as it loads (first-look-post.html): counted in `writes` above, and answered as a real endpoint would.
     if (urlPath === "/api/visits" && req.method === "POST") {

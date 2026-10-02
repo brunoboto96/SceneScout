@@ -12,7 +12,23 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CLAIM_TEXT_MAX, classify, findContradictions, isRefused, isRefusalNotice, type PageState, type WatchedRequest } from "../src/engine/claims.ts";
+import {
+  type ActedControl,
+  CLAIM_TEXT_MAX,
+  classify,
+  COUNTER_RE,
+  findContradictions,
+  INFRASTRUCTURE_WRITE_RE,
+  isBackgroundRequest,
+  isRefused,
+  isRefusalNotice,
+  keptChange,
+  type PageState,
+  quietAnswer,
+  type RequestTiming,
+  saidSince,
+  type WatchedRequest,
+} from "../src/engine/claims.ts";
 
 const req = (over: Partial<WatchedRequest> = {}): WatchedRequest => ({
   method: "GET",
@@ -335,4 +351,142 @@ test("all of the action's writes refused stays high", () => {
   assert.equal(all?.kind, "false_success");
   assert.equal(all.severity, undefined, "high, the default");
   assert.doesNotMatch(all.detail, /partial/);
+});
+
+// ── a click that loads a new document ───────────────────────────────────────
+
+test("a request sent after a click started loading a new document is not the click's own write", () => {
+  const click = (over: Partial<RequestTiming>): boolean =>
+    isBackgroundRequest({ started: 1500, inputSince: 1000, actionStartedAt: 1000, documentLoadSince: 1200, isDocumentLoad: false, ...over });
+  // The new page's beacon, and the old page's save as it is left: both after the navigation began.
+  assert.equal(click({ started: 1500 }), true, "sent by the page the click loaded");
+  assert.equal(click({ started: 1201 }), true, "sent as the old page was left");
+  // The click's own save, awaited before the script moved the page.
+  assert.equal(click({ started: 1100 }), false);
+  // A native form post is the navigation itself, and is the click's.
+  assert.equal(click({ started: 1200, isDocumentLoad: true }), false);
+  // No document loaded (a client-side route change): everything since the click is its own, as before.
+  assert.equal(click({ started: 1500, documentLoadSince: null }), false);
+  // The earlier rules still hold.
+  assert.equal(click({ started: 900, documentLoadSince: null }), true, "in flight before the click");
+  assert.equal(click({ actionStartedAt: 2000, documentLoadSince: null }), true, "no input behind the current action");
+  assert.equal(click({ inputSince: null, documentLoadSince: null }), true, "no input at all");
+});
+
+test("an error monitor's tunnel and a client-error endpoint are infrastructure writes", () => {
+  for (const url of [
+    "http://app.test/api/errors/envelope",
+    "http://app.test/api/client-errors",
+    "http://app.test/clienterror",
+    "http://app.test/api/client_errors/batch",
+  ]) {
+    assert.match(url, INFRASTRUCTURE_WRITE_RE, url);
+  }
+  for (const url of ["http://app.test/api/envelopes/7", "http://app.test/api/clients/3", "http://app.test/api/errors-report-settings"]) {
+    assert.doesNotMatch(url, INFRASTRUCTURE_WRITE_RE, url);
+  }
+  assert.deepEqual(findContradictions([write({ url: "http://app.test/api/errors/envelope" })], page({ texts: ["Saved"] })), []);
+});
+
+// ── a control or a counter showing a refused change as kept ────────────────
+
+const control = (over: Partial<ActedControl> = {}): ActedControl => ({ role: "radio", checked: false, pressed: null, selected: null, counters: [], ...over });
+
+test("keptChange: a checked, pressed or selected state that moved is the change shown as kept", () => {
+  assert.equal(keptChange(control(), control({ checked: true })), "the control is now checked");
+  assert.equal(keptChange(control({ checked: true }), control({ checked: false })), "the control is now not checked");
+  assert.equal(
+    keptChange(control({ role: "button", checked: null, pressed: false }), control({ role: "button", checked: null, pressed: true })),
+    "the control is now pressed",
+  );
+  assert.equal(
+    keptChange(control({ role: "option", checked: null, selected: false }), control({ role: "option", checked: null, selected: true })),
+    "the control is now selected",
+  );
+  // Choosing a tab is moving around, not a change to keep.
+  assert.equal(keptChange(control({ role: "tab", checked: null, selected: false }), control({ role: "tab", checked: null, selected: true })), null);
+  // Reverted on the refusal: nothing moved.
+  assert.equal(keptChange(control(), control()), null);
+  // A state the control does not have says nothing.
+  assert.equal(keptChange(control({ checked: null }), control({ checked: true })), null);
+});
+
+test("keptChange: a counter beside the control that moved counts the change as done", () => {
+  assert.equal(
+    keptChange(control({ role: "button", checked: null, counters: ["0/3"] }), control({ role: "button", checked: null, counters: ["1/3 completed"] })),
+    '"0/3" became "1/3 completed"',
+  );
+  // Unchanged, or one that only appeared, counts nothing.
+  assert.equal(keptChange(control({ counters: ["Step 1 of 3"] }), control({ counters: ["Step 1 of 3"] })), null);
+  assert.equal(keptChange(control({ counters: [] }), control({ counters: ["Step 1 of 3"] })), null);
+});
+
+test("COUNTER_RE reads counters, not dates or longer numbers", () => {
+  for (const text of ["1/3 completed", "Step 2 of 5", "0/3", "40% done", "3 / 10"]) assert.match(text, COUNTER_RE, text);
+  for (const text of ["10/02/2026", "Version 1.2/3.4", "Order 12345/678901", "Profile"]) assert.doesNotMatch(text, COUNTER_RE, text);
+});
+
+test("a refused write whose control stays changed is a medium false_success; reverted, it is nothing", () => {
+  const put = write({ method: "PUT", url: "http://app.test/api/preferences/density" });
+  const [kept] = findContradictions([put], page({ texts: ["Density"] }), page({ texts: ["Density"] }), {
+    before: control(),
+    after: control({ checked: true }),
+  });
+  assert.equal(kept?.kind, "false_success");
+  assert.equal(kept.severity, "medium");
+  assert.match(kept.detail, /^PUT \/api\/preferences\/density 403 was refused, and the page shows the change as kept \(the control is now checked\)/);
+  assert.equal(kept.evidence, "false-success-kept PUT /api/preferences/density 403");
+  // The contrast: the handler put the old choice back.
+  assert.deepEqual(findContradictions([put], page({ texts: ["Density"] }), page({ texts: ["Density"] }), { before: control(), after: control() }), []);
+});
+
+test("the kept-change rule stays quiet where the other rules would", () => {
+  const moved = { before: control(), after: control({ checked: true }) };
+  const put = write({ method: "PUT", url: "http://app.test/api/preferences/density" });
+  // Admitted.
+  assert.deepEqual(findContradictions([put], page({ texts: ["Could not save your preference"] }), page(), moved), []);
+  // A background write is never paired.
+  assert.deepEqual(findContradictions([{ ...put, background: true }], page(), page(), moved), []);
+  // Another write of the same action went through: the change may be that one's.
+  const ok = req({ method: "PUT", url: "http://app.test/api/preferences/theme", status: 200 });
+  assert.deepEqual(findContradictions([put, ok], page(), page(), moved), []);
+  // A success word already reported the lie: one finding, not two.
+  const both = findContradictions([put], page({ texts: ["Saved"] }), page(), moved);
+  assert.deepEqual(
+    both.map((c) => c.evidence),
+    ["false-success PUT /api/preferences/density 403"],
+  );
+});
+
+// ── a submit that sends nothing, answered on the page ───────────────────────
+
+test("quietAnswer: a dialog opening, or validation, answers a click that sent nothing", () => {
+  const start = page({ texts: ["New item"], announced: [], dialogs: 0, invalid: 0 });
+  assert.equal(quietAnswer(start, { ...start, dialogs: 1 }), "dialog");
+  assert.equal(quietAnswer(start, { ...start, invalid: 2 }), "validation");
+  assert.equal(quietAnswer(start, { ...start, announced: ["5 fields need attention"] }), "validation");
+  // Nothing visible changed: the note stays.
+  assert.equal(quietAnswer(start, { ...start }), null);
+  // A new success claim is the very case the note warns about.
+  assert.equal(quietAnswer(start, { ...start, announced: ["Saved!"] }), null);
+  // An alert that was already there answers nothing.
+  const alerted = { ...start, announced: ["Name is required"] };
+  assert.equal(quietAnswer(alerted, { ...alerted }), null);
+  // Unread on either side: nothing is known.
+  assert.equal(quietAnswer(null, start), null);
+  assert.equal(quietAnswer(start, null), null);
+});
+
+// ── an alert after a write-policy block ─────────────────────────────────────
+
+test("saidSince: an alert not on the page at the input's start is new; one already there is not", () => {
+  const baseline = page({ texts: ["Reports", "Run query"], announced: ["Last run yesterday"] });
+  assert.equal(saidSince("You do not have permission to use this feature. Contact your administrator.", baseline), true);
+  assert.equal(saidSince("Last run yesterday", baseline), false);
+  // A name the snapshot cut short still matches the sentence it came from.
+  const long = page({ texts: [], announced: ["You do not have permission to use this feature."] });
+  assert.equal(saidSince("You do not have permission to use this", long), false);
+  // No baseline: when it arrived is unknown, so it is not tagged.
+  assert.equal(saidSince("You do not have permission", null), false);
+  assert.equal(saidSince("   ", baseline), false);
 });

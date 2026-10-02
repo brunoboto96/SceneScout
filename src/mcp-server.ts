@@ -86,6 +86,7 @@ import {
   NAV_TIMEOUT_ENV,
   watchdogFor,
 } from "./engine/limits.js";
+import { MAX_READ_POSTS, READ_POSTS_ENV } from "./engine/policy.js";
 import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
@@ -293,8 +294,10 @@ function reportExtras(eng: BrowserEngine): ReportExtras {
     designAudits: eng.memory?.auditsThisRun ?? eng.designAuditCount,
     createdResources: eng.createdResources,
     unvisitedRoutes: unvisited,
+    knownRoutes: all,
     mode: eng.mode,
     trustedEmbeds: [...eng.trustedEmbeds],
+    readPosts: eng.readPosts.map((e) => e.entry),
     policyAttributed: eng.oracleLog.policyAttributed,
     version: PKG_VERSION,
     attachedSessions: [...engines.keys()],
@@ -748,7 +751,7 @@ server.registerTool(
               .map((u) => `  · ${u}`)
               .join("\n") +
             (unfiled.length > MAX_UNFILED_NAMED ? `\n  … +${unfiled.length - MAX_UNFILED_NAMED} more` : "") +
-            `\nFile each with scout_finding (the same evidence), or confirm which finding already covers it, before closing the lane's session. A judged defect that is never filed is not in the report.`
+            `\nFile each with scout_finding (the same evidence), or have the lane name the finding's id in the decision's "finding", before closing the lane's session. A judged defect that is never filed is not in the report.`
           : "";
       laneLedger.fold(lane, engines.get(lane)?.attached === true);
       // A lane that lost its sign-in and re-attached from its role's profile
@@ -793,7 +796,7 @@ server.registerTool(
   "scout_attach",
   {
     description:
-      "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass `role` to sign in with a login the user saved by `scenescout login <url> --role <name>`, or a Playwright storage-state JSON as storageStatePath. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
+      "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted, and POSTs the user named in readPosts) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass `role` to sign in with a login the user saved by `scenescout login <url> --role <name>`, or a Playwright storage-state JSON as storageStatePath. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
     inputSchema: {
       url: z.string().describe("Base URL of the running app, e.g. http://localhost:3000"),
       projectPath: z.string().describe("Absolute path to the project (memory + report live in .scenescout/ here)"),
@@ -853,6 +856,14 @@ server.registerTool(
           'Origins of embedded frames (e.g. "https://pay.example.com") whose writes out of the app may go out — ONLY when the user named them, typically a provider in test mode, and only in safe-write mode. ' +
             "Never add one yourself. Hostile input, repeated-click probes and uploads stay refused in them.",
         ),
+      readPosts: z
+        .array(z.string().max(300))
+        .max(MAX_READ_POSTS)
+        .optional()
+        .describe(
+          `POST endpoints that only read, e.g. ["POST /api/search", "POST https://api.example.com/reports/query"], which observe mode then lets out — ONLY when the user named them. Never add one yourself, even when the gap ledger lists a refused POST: ask the user. ` +
+            `Exact paths; * stands for one path segment. Still refused when the path or body looks destructive or the body is a GraphQL mutation. Observe mode only. Default: the ${READ_POSTS_ENV} environment variable, else none.`,
+        ),
       record: z
         .boolean()
         .default(false)
@@ -911,6 +922,7 @@ server.registerTool(
       task,
       record,
       trustedEmbeds,
+      readPosts,
       paceMs,
       actionTimeoutMs,
       navTimeoutMs,
@@ -930,6 +942,7 @@ server.registerTool(
       task?: string;
       record?: boolean;
       trustedEmbeds?: string[];
+      readPosts?: string[];
       paceMs?: number;
       actionTimeoutMs?: number;
       navTimeoutMs?: number;
@@ -1018,6 +1031,7 @@ server.registerTool(
           task: objective ? task : undefined,
           record,
           trustedEmbeds,
+          readPosts,
           actionTimeoutMs,
           navTimeoutMs,
           memoryStore: store,
@@ -1193,9 +1207,15 @@ server.registerTool(
   "scout_crawl",
   {
     description:
-      "Engine-side route sweep in ONE call: visits each path (default: all known routes not yet visited), records states into coverage memory, and returns a per-route health summary (HTTP status, element count, oracle violations, dead-ends, auth-redirects). Navigation-only — safe in read-only mode. Use this FIRST for broad coverage; explore interactively only where it flags problems or where journeys matter.",
+      "Engine-side route sweep in ONE call: visits each path (default: all known routes not yet visited), records states into coverage memory, and returns a per-route health summary (HTTP status, element count, what the main area holds, oracle violations, dead-ends, auth-redirects, and ERROR-VIEW or STILL-LOADING for a main area showing only an alert or a loading placeholder). Navigation-only — safe in read-only mode. Use this FIRST for broad coverage; explore interactively only where it flags problems or where journeys matter.",
     inputSchema: {
-      paths: z.array(z.string()).max(150).optional().describe("Paths to visit, e.g. ['/orders','/settings']. Omit to crawl all unvisited known routes."),
+      paths: z
+        .array(z.string())
+        .max(150)
+        .optional()
+        .describe(
+          "Paths to visit, e.g. ['/orders','/settings'], or full URLs on the attached origin. A path resolves from the origin's root, whatever page the session attached on. Omit to crawl all unvisited known routes.",
+        ),
       session: sessionParam,
     },
   },
@@ -1405,7 +1425,8 @@ server.registerTool(
 server.registerTool(
   "scout_navigate",
   {
-    description: "Navigate to a URL or a path relative to the attached base URL (e.g. '/orders'). Also supports 'back' via scout_back.",
+    description:
+      "Navigate to a path on the attached origin (e.g. '/orders') or a full URL on it. A path resolves from the origin's root, whatever page the session attached on. Also supports 'back' via scout_back.",
     inputSchema: {
       target: z.string().describe("Absolute URL or path like /settings"),
       leave: leaveParam,
@@ -1865,6 +1886,7 @@ server.registerTool(
           routesTotal: all.length,
           designAudits: auditsThisRun,
           unvisitedRoutes: unvisited,
+          knownRoutes: all,
           mode: eng.mode,
         });
         if (lvl === "extensive" && gapList.length > 0) {
@@ -1891,8 +1913,10 @@ server.registerTool(
           designAudits: auditsThisRun,
           createdResources: eng.createdResources,
           unvisitedRoutes: unvisited,
+          knownRoutes: all,
           mode: eng.mode,
           trustedEmbeds: [...eng.trustedEmbeds],
+          readPosts: eng.readPosts.map((e) => e.entry),
           policyAttributed: eng.oracleLog.policyAttributed,
           // Which sessions are still open decides whether a quiet one is holding a browser, and how long its trailing idle runs.
           attachedSessions: [...engines.keys()],

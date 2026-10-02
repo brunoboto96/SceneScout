@@ -19,14 +19,27 @@ import {
 import fs from "node:fs";
 import path from "node:path";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
-import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
+import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, reachedRoutes, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
 import { normalizeTask } from "./task.js";
-import { CLAIM_SCAN_SCRIPT, findContradictions, INFRASTRUCTURE_WRITE_RE, OPEN_DIALOGS_SCRIPT, type PageState, type WatchedRequest } from "./claims.js";
+import {
+  ACTED_CONTROL_SRC,
+  type ActedControl,
+  CLAIM_SCAN_SCRIPT,
+  findContradictions,
+  INFRASTRUCTURE_WRITE_RE,
+  isBackgroundRequest,
+  OPEN_DIALOGS_SCRIPT,
+  type PageState,
+  quietAnswer,
+  saidSince,
+  type WatchedRequest,
+} from "./claims.js";
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
-import { captureClip } from "./capture.js";
+import { captureClip, cutByViewport } from "./capture.js";
+import { STOP_ANIMATIONS_SCRIPT, type PictureSettings } from "./baseline.js";
 import {
   COLLECT_INTERACTABLES_SCRIPT,
   POLICY_TEXT_SRC,
@@ -62,6 +75,7 @@ import {
   MAIN_REGION_SCRIPT,
   mainRegionLine,
   mainRegionTag,
+  mainState,
   type MainRegion,
 } from "./collector.js";
 import { OracleMonitor, formatViolations, httpErrorDetail, requestKey } from "./oracles.js";
@@ -82,8 +96,8 @@ import {
   type SeenRequest,
 } from "./flow.js";
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
-import { describePace, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
-import { crawledRoute, crawlLine } from "./crawl.js";
+import { describePace, InFlightRequests, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
+import { crawledRoute, crawlLine, mainStateFlag } from "./crawl.js";
 import {
   authToRemember,
   BODY_FETCH_MAX,
@@ -95,6 +109,7 @@ import {
   requestHeaders,
   resolveMethod,
   resolveRequestUrl,
+  resolveTarget,
   staleCredentialNote,
   toReplayResult,
   wantsView,
@@ -130,7 +145,7 @@ import {
   type FormProbe,
 } from "./forms.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
-import { DEFAULT_TIME_LIMITS, explainTimeout, limitHint, resolveTimeLimits, type LimitKind, type TimeLimits } from "./limits.js";
+import { DEFAULT_TIME_LIMITS, explainTimeout, firstLineOf, isTimeoutMessage, limitHint, resolveTimeLimits, type LimitKind, type TimeLimits } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { boundedTeardown } from "./teardown.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
@@ -160,6 +175,13 @@ import {
   hostileForEmbed,
   trustedEmbedOrigins,
   MAX_TRUSTED_EMBEDS,
+  MAX_READ_POSTS,
+  READ_POSTS_ENV,
+  readPostAllowed,
+  matchReadPost,
+  readPostEntries,
+  readPostsSetting,
+  type ReadPost,
   trustsForeignWrite,
   embedProbeRefusal,
   EmbedMoveTracker,
@@ -257,6 +279,8 @@ export interface AttachOptions {
   /** Which browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else Chromium. */
   browser?: BrowserEngineName;
   viewport?: { width: number; height: number };
+  /** CSS pixels to device pixels. Default: the browser's own (1). `scenescout check --baseline` names it, so its pictures are comparable. */
+  deviceScaleFactor?: number;
   /** The session's objective: the whole remit this session was given, shown to whoever is watching the run. */
   objective?: string;
   /**
@@ -285,6 +309,12 @@ export interface AttachOptions {
    * input, repeated-click probes and uploads stay refused in them.
    */
   trustedEmbeds?: string[];
+  /**
+   * POST endpoints that only read ("POST /api/search"), let out in observe
+   * mode — ONLY when the user named them. Default: SCENESCOUT_READ_POSTS, else
+   * none (policy.ts readPostsSetting).
+   */
+  readPosts?: string[];
   /**
    * Share one MemoryStore across engines attached to the same project
    * (multi-session/multi-role runs): coverage and findings from every role
@@ -405,6 +435,8 @@ interface ClickContext {
   urlBefore: string;
   /** Open dialogs as the click began, or null when they could not be read. */
   dialogsBefore: number | null;
+  /** What the page said as the click began (the input's claim baseline), or null when it could not be read. */
+  claimsBefore: PageState | null;
 }
 
 /** Non-GET traffic that is auth/telemetry plumbing, not tester-caused state mutation. One list, shared with the false-success rule. */
@@ -470,19 +502,21 @@ function xpathLookup(xpath: string): string {
 
 /**
  * Runs in the page against one dropdown, BEFORE a choice: its options' values
- * and labels. Read first because a dropdown may reset itself (a bulk-action or
- * "jump to" menu) or remove itself on change. Skips disabled and hidden
- * options, and a placeholder or "all" option with an empty value — the state
- * the page loads in, which is not an option anyone owes a choice.
+ * and labels, and which are selected. Read first because a dropdown may reset
+ * itself (a bulk-action or "jump to" menu) or remove itself on change. Skips
+ * disabled and hidden options, and a placeholder or "all" option with an empty
+ * value — the state the page loads in, which is not an option anyone owes a
+ * choice. The option selected before the choice is the value the page already
+ * asked the server for, which is not owed one either.
  */
-function describeSelect(node: Element): Array<{ value: string; label: string }> | null {
+function describeSelect(node: Element): Array<{ value: string; label: string; selected: boolean }> | null {
   // A plan may target the dropdown by its <label>; selectOption follows a label to its control, so this does too.
   const target = node instanceof HTMLLabelElement ? (node.control ?? node.querySelector("select")) : node;
   const select = target as HTMLSelectElement | null;
   if (!select || !select.options) return null;
   return Array.from(select.options)
     .filter((o) => !o.disabled && !o.hidden && o.value !== "")
-    .map((o) => ({ value: o.value, label: (o.label || o.textContent || "").trim().slice(0, 80) }))
+    .map((o) => ({ value: o.value, label: (o.label || o.textContent || "").trim().slice(0, 80), selected: o.selected }))
     .filter((o) => o.label !== "");
 }
 
@@ -490,7 +524,7 @@ function describeSelect(node: Element): Array<{ value: string; label: string }> 
  * A dropdown's options, read without waiting: a select that is not there to
  * read is not worth stalling the action for.
  */
-async function readSelectOptions(loc: Locator): Promise<Array<{ value: string; label: string }> | null> {
+async function readSelectOptions(loc: Locator): Promise<Array<{ value: string; label: string; selected: boolean }> | null> {
   return loc.evaluate(describeSelect, undefined, { timeout: 1000 }).catch(() => null);
 }
 
@@ -589,6 +623,9 @@ export class BrowserEngine {
   /** Origins named as trusted embeds (policy.ts trustsEmbedWrite decides when that counts). */
   trustedEmbeds = new Set<string>();
   private trustNotice = "";
+  /** POST endpoints the user named as reads (policy.ts readPostAllowed decides when that counts). */
+  readPosts: ReadPost[] = [];
+  private readPostNotice = "";
   /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
   role = "anonymous";
   /** How the attached session signed in: a role profile, a storage-state file, or not at all. */
@@ -1099,14 +1136,26 @@ export class BrowserEngine {
     if (this.replayRequests.has(req)) return;
     if (this.watchedResponses.length >= BrowserEngine.MAX_WATCHED_RESPONSES) return;
     const started = this.requestStartedAt.get(req) ?? 0;
+    let isDocumentLoad = false;
+    try {
+      isDocumentLoad = req.isNavigationRequest() && this.page !== null && req.frame() === this.page.mainFrame();
+    } catch {
+      /* a worker's request: no frame, so not the page's navigation */
+    }
     this.watchedResponses.push({
       method: req.method(),
       url: req.url(),
       status,
       resourceType: req.resourceType(),
       blockedByPolicy: this.refusedByAnyPolicy(req),
-      // The current action is a user input only when it is the one that set the input mark.
-      background: this.inputSince === null || this.inputSince < this.actionStartedAt || started < this.inputSince,
+      // The current action is a user input only when it is the one that set the input mark (claims.ts isBackgroundRequest).
+      background: isBackgroundRequest({
+        started,
+        inputSince: this.inputSince,
+        actionStartedAt: this.actionStartedAt,
+        documentLoadSince: this.documentLoadSince,
+        isDocumentLoad,
+      }),
     });
   }
 
@@ -1119,6 +1168,12 @@ export class BrowserEngine {
   private inputSince: number | null = null;
   /** What the page said as the current input began, for the contradiction rules; null when it could not be read. */
   private claimBaseline: PageState | null = null;
+  /** When the current input started loading a new main-frame document, or null while it has loaded none (claims.ts isBackgroundRequest). */
+  private documentLoadSince: number | null = null;
+  /** The control the current click acted on, as the click found it, for the kept-change rule (claims.ts keptChange). */
+  private actedControl: { scope: Page | Frame; xpath: string; before: ActedControl } | null = null;
+  /** When the write policy last refused a request, for the snapshot's "after a write-policy block" tag. */
+  private lastBlockAt = 0;
 
   /**
    * Mark the start of a user input: read what the page says now, so a claim
@@ -1129,12 +1184,39 @@ export class BrowserEngine {
   private async beginInput(): Promise<void> {
     this.inputSince = this.actionStartedAt;
     this.claimBaseline = null;
+    this.documentLoadSince = null;
+    this.actedControl = null;
     const page = this.page;
     if (!page || page.isClosed()) return;
     try {
       this.claimBaseline = (await page.evaluate(CLAIM_SCAN_SCRIPT)) as PageState;
     } catch {
       // A page mid-navigation has nothing on screen to excuse.
+    }
+  }
+
+  /** The page's claims as they stand (CLAIM_SCAN_SCRIPT), or null on a page that cannot be read. */
+  private async readClaims(page: Page): Promise<PageState | null> {
+    try {
+      return (await page.evaluate(CLAIM_SCAN_SCRIPT)) as PageState;
+    } catch {
+      // A page mid-navigation has nothing to read.
+      return null;
+    }
+  }
+
+  /**
+   * Read the control a click is about to act on, so a refused write it sends
+   * can be judged by whether the control then shows the change as kept
+   * (claims.ts keptChange). Never fails the click: unread, the rule is skipped.
+   */
+  private async readActedControl(el: SnapshotElement): Promise<void> {
+    const scope = this.scopeOf(el);
+    try {
+      const before = (await scope.evaluate(`(${ACTED_CONTROL_SRC})(${xpathLookup(el.xpath)})`)) as ActedControl | null;
+      this.actedControl = before ? { scope, xpath: el.xpath, before } : null;
+    } catch {
+      this.actedControl = null;
     }
   }
 
@@ -1149,6 +1231,8 @@ export class BrowserEngine {
   private async scanForContradictions(): Promise<void> {
     const requests = this.watchedResponses;
     this.watchedResponses = [];
+    const acted = this.actedControl;
+    this.actedControl = null;
     const page = this.page;
     if (!page || page.isClosed() || requests.length === 0) return;
     if (!requests.some((r) => r.status === null || r.status >= 400)) return;
@@ -1162,7 +1246,16 @@ export class BrowserEngine {
     }
     // A baseline belongs to the input that took it, and to its page.
     const before = this.inputSince !== null && this.inputSince >= this.actionStartedAt ? this.claimBaseline : null;
-    for (const found of findContradictions(requests, state, before)) {
+    // The acted-on control as the click left it, read only when a refusal makes it matter.
+    let actedNow: ActedControl | null = null;
+    if (acted && before) {
+      try {
+        actedNow = (await acted.scope.evaluate(`(${ACTED_CONTROL_SRC})(${xpathLookup(acted.xpath)})`)) as ActedControl | null;
+      } catch {
+        // The control's document went away: nothing left to show the change.
+      }
+    }
+    for (const found of findContradictions(requests, state, before, acted && actedNow ? { before: acted.before, after: actedNow } : null)) {
       if (this.contradictionsReported.has(found.evidence)) continue;
       this.contradictionsReported.add(found.evidence);
       this.oracles.noteContradiction(found, url);
@@ -1302,6 +1395,16 @@ export class BrowserEngine {
         : "") +
       (trust.rejected.length > 0 ? ` Not a plain http(s) origin, so not trusted: ${trust.rejected.join(", ")}.` : "") +
       (trust.overflow.length > 0 ? ` More than ${MAX_TRUSTED_EMBEDS} trusted embeds; not trusted: ${trust.overflow.join(", ")}.` : "");
+    const reads = readPostEntries(readPostsSetting(opts.readPosts, process.env[READ_POSTS_ENV]));
+    this.readPosts = reads.entries;
+    this.readPostNotice =
+      (reads.entries.length > 0
+        ? this.mode === "observe"
+          ? ` Read POSTs: ${reads.entries.map((e) => e.entry).join(", ")} — named as reads, so observe lets them out unless the path or body looks destructive or the body is a GraphQL mutation; each one is logged.`
+          : ` Read POSTs (${reads.entries.map((e) => e.entry).join(", ")}) apply in observe mode only; ${this.mode} judges POSTs by its own rule.`
+        : "") +
+      (reads.rejected.length > 0 ? ` Not a "POST /path" or "POST https://host/path" entry, so not a read: ${reads.rejected.join(", ")}.` : "") +
+      (reads.overflow.length > 0 ? ` More than ${MAX_READ_POSTS} read POSTs; not reads: ${reads.overflow.join(", ")}.` : "");
     this.sessionObjective = (opts.objective ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
     // An agent-supplied task counts as stated; the placeholder does not.
     this.setTask(opts.task ?? "Attaching and taking stock", opts.task !== undefined);
@@ -1326,6 +1429,14 @@ export class BrowserEngine {
     // role must not discard what another role already created — otherwise
     // every multi-role handoff would be blocked as "not yours".
     this.memory = opts.memoryStore ?? new MemoryStore(opts.projectDir);
+    // A page refused before an endpoint was named as a read is no longer a gap for it.
+    if (this.readPosts.length > 0 && this.mode === "observe") {
+      const appOrigin = URL.canParse(this.baseUrl) ? new URL(this.baseUrl).origin : "";
+      this.memory.clearObserveRefusedPosts((endpoint) => {
+        const target = endpoint.replace(/^POST /, "");
+        return matchReadPost(this.readPosts, this.baseUrl, target.startsWith("/") ? appOrigin + target : target) !== null;
+      });
+    }
     // The REAL path, not merely the resolved one: on macOS the temp tree is a
     // symlink, and a fence comparing a real path against an unreal one would
     // refuse every upload from inside the project.
@@ -1375,6 +1486,7 @@ export class BrowserEngine {
       this.context = await this.browser.newContext({
         storageState: profile?.storageState as BrowserContextOptions["storageState"],
         viewport: opts.viewport ?? { width: 1280, height: 900 },
+        ...(opts.deviceScaleFactor !== undefined ? { deviceScaleFactor: opts.deviceScaleFactor } : {}),
         serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
       const restoreSession = sessionStorageInitScript(profile?.sessionStorage ?? []);
@@ -1395,14 +1507,25 @@ export class BrowserEngine {
     this.openSockets.clear();
     this.socketsWarned = false;
     const watchSockets = (p: Page): void => void p.on("websocket", (ws) => this.openSockets.add(ws.url().slice(0, 120)));
+    // A request whose document goes away mid-body gets no finished or failed
+    // event, so a frame that commits a navigation, is removed, or closes with
+    // its page drops what it left in flight (the rule is in settle.ts).
+    const requests = (this.requests = new InFlightRequests<Request, Frame>());
+    const watchFrames = (p: Page): void => {
+      p.on("framenavigated", (frame) => requests.navigated(frame));
+      p.on("framedetached", (detached) => requests.gone((frame) => frame === detached));
+      p.on("close", () => requests.gone((frame) => frame.page() === p));
+    };
+    const watchPage = (p: Page): void => {
+      watchSockets(p);
+      watchFrames(p);
+    };
     // The first page already exists by now; later ones (popups) arrive as events.
-    if (this.page) watchSockets(this.page);
-    this.context.on("page", watchSockets);
-    this.context.on("requestfinished", () => {
-      this.inFlight = Math.max(0, this.inFlight - 1);
-    });
+    if (this.page) watchPage(this.page);
+    this.context.on("page", watchPage);
+    this.context.on("requestfinished", (req) => requests.ended(req));
     this.context.on("requestfailed", (req) => {
-      this.inFlight = Math.max(0, this.inFlight - 1);
+      requests.ended(req, true);
       this.watchResponse(req, null);
       this.pageRequests.failed(req, req.failure()?.errorText ?? "", Date.now(), this.refusedByAnyPolicy(req));
     });
@@ -1419,12 +1542,20 @@ export class BrowserEngine {
           if (this.page && req.frame() === this.page.mainFrame()) {
             this.embedMoves.navigationStarted(req.url(), req.headers()["referer"], this.embeddedSites());
             this.pageRequests.loaded(req.url(), Date.now());
+            // The current input moved the page to a new document: what is sent from here on is not its own write.
+            if (this.inputSince !== null && this.documentLoadSince === null && this.inputSince >= this.actionStartedAt) this.documentLoadSince = Date.now();
           }
         } catch {
           /* no frame: not the driven page */
         }
       }
-      this.inFlight += 1;
+      let sender: Frame | undefined;
+      try {
+        sender = req.frame();
+      } catch {
+        /* a worker's request: no frame, so it ends only by finishing or failing */
+      }
+      requests.started(req, sender, req.isNavigationRequest());
       this.lastRequestStart = Date.now();
       this.requestStartedAt.set(req, this.lastRequestStart);
       this.claimReplay(req);
@@ -1437,6 +1568,8 @@ export class BrowserEngine {
       }
       const method = req.method();
       if (method === "GET" || method === "HEAD" || method === "OPTIONS") return;
+      // A POST the user named as a read is not state the tester mutated, nor a form exercised.
+      if (this.readPostOf(this.writeRule.at(), method, req.url(), req.postData())) return;
       // Infrastructure POSTs (token refresh, telemetry) are not state the
       // tester mutated — reporting them trains the driver to ignore the notice.
       if (BENIGN_MUTATION_RE.test(req.url())) return;
@@ -1568,6 +1701,7 @@ export class BrowserEngine {
         const pathname = pathnameOf(url);
         const refuse = (why?: string) => {
           const answered = answersWithRefusal(req.resourceType());
+          if (rule === "observe" && method === "POST" && !why && answered && !BENIGN_MUTATION_RE.test(url)) this.noteObserveRefusedPost(url, req.postData());
           this.noteBlocked({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered, why, type: req.resourceType() });
           this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}${why ? ` (${why})` : ""}`, url: this.page?.url() ?? "" });
           this.refusedByPolicy.add(req);
@@ -1590,6 +1724,18 @@ export class BrowserEngine {
         // one, and in observe only the requests a login itself needs.
         if (isAuthExempt(rule, method, pathname, destructiveWire)) {
           this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+          return route.fallback();
+        }
+        // A POST the user named as a read (observe only, never one that looks destructive): out, and logged.
+        const readPost = this.readPostOf(rule, method, url, req.postData(), destructiveWire);
+        if (readPost) {
+          this.logAction({
+            action: "write-policy:read-post",
+            target: `${method} ${pathname} (named as a read: ${readPost.entry})`,
+            url: this.page?.url() ?? "",
+          });
+          this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+          this.clearRefusedPost(url);
           return route.fallback();
         }
 
@@ -1627,6 +1773,7 @@ export class BrowserEngine {
             this.pendingCreations.add(task);
           }
           this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+          if (method === "POST") this.clearRefusedPost(url);
           return route.fallback();
         }
         return refuse();
@@ -1720,7 +1867,7 @@ export class BrowserEngine {
       `Memory: ${this.memory.dir}.${this.memory.loadWarning ? ` WARNING: ${this.memory.loadWarning}` : ""}` +
       (this.memory.prunedStates > 0 ? ` Trimmed ${this.memory.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
       `${this.memory.legacyDirNote ? ` ${this.memory.legacyDirNote}` : ""}` +
-      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""}${this.trustNotice} Call scout_snapshot to see the current state.` +
+      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice} Call scout_snapshot to see the current state.` +
       profileNote +
       authWarning
     );
@@ -1778,6 +1925,7 @@ export class BrowserEngine {
     page.on("dialog", (dialog) => {
       this.nativeDialogAt = Date.now();
       const type = dialog.type();
+      if (type !== "alert") this.nativeQuestionAt = this.nativeDialogAt;
       const leave = type === "beforeunload" ? this.leaveChoice : undefined;
       const response = dialogResponse(type, this.readOnly, leave);
       this.logAction({
@@ -1808,6 +1956,8 @@ export class BrowserEngine {
 
   /** When the page last opened a native dialog (confirm, alert, prompt). */
   private nativeDialogAt = 0;
+  /** When a native dialog that asks something (confirm, prompt, a leave confirmation) last opened; an alert only tells. */
+  private nativeQuestionAt = 0;
 
   private requirePage(): Page {
     if (!this.page || !this.memory) {
@@ -1875,8 +2025,12 @@ export class BrowserEngine {
   /** Set at attach: this session was given credentials, so a bounce to a login page is a verdict worth waiting for. */
   private watchesForBounce = false;
 
-  /** Requests started and not yet finished or failed, from the context's own events. */
-  private inFlight = 0;
+  /** Requests started and not yet finished, failed, or left behind by their frame. */
+  private requests = new InFlightRequests<Request, Frame>();
+  /** How many are in flight. */
+  private get inFlight(): number {
+    return this.requests.count;
+  }
   /** When the most recent request started, so a page that fires one late is not read too early. */
   private lastRequestStart = 0;
   /**
@@ -2235,6 +2389,15 @@ export class BrowserEngine {
     await this.scanForInjections();
     await this.scanForContradictions();
 
+    // An alert or live region that appeared after the write policy refused one of
+    // the current input's requests may be the page answering the engine's
+    // refusal, not a defect of its own: said beside it, so a reader of the
+    // snapshot alone does not file it (claims.ts saidSince).
+    const blockedThisInput = this.inputSince !== null && this.inputSince >= this.actionStartedAt && this.lastBlockAt >= this.inputSince;
+    const afterBlock = (el: SnapshotElement): string =>
+      blockedThisInput && (el.liveOnly || el.role === "alert" || el.role === "status") && saidSince(el.name, this.claimBaseline)
+        ? " (after a write-policy block)"
+        : "";
     const line = (el: SnapshotElement): string => {
       const dup = el.key.match(/~(\d+)$/);
       const flags = [
@@ -2248,7 +2411,7 @@ export class BrowserEngine {
         memory.wasExercised(fp, el.key) ? "exercised" : null,
         el.href ? `href=${el.href.slice(0, 60)}` : null,
       ].filter(Boolean);
-      return `${el.ref} ${el.role} "${displayName(el)}"${flags.length ? ` [${flags.join(", ")}]` : ""}${el.frame ? ` ⟨in ${frameLabel(el.frame)}⟩` : ""}`;
+      return `${el.ref} ${el.role} "${displayName(el)}"${flags.length ? ` [${flags.join(", ")}]` : ""}${el.frame ? ` ⟨in ${frameLabel(el.frame)}⟩` : ""}${afterBlock(el)}`;
     };
 
     // Diff mode: when re-snapshotting the same route, report only what
@@ -2300,7 +2463,7 @@ export class BrowserEngine {
             // A live region saying something new is the message itself, so it is shown in full like a new element.
             ...relabeled.map((el) =>
               el.liveOnly
-                ? `~ ${el.ref} ${el.role} "${displayName(el)}" (was ${prev.byKey.get(el.key)?.label ? `"${prev.byKey.get(el.key)?.label}"` : "empty"})`
+                ? `~ ${el.ref} ${el.role} "${displayName(el)}" (was ${prev.byKey.get(el.key)?.label ? `"${prev.byKey.get(el.key)?.label}"` : "empty"})${afterBlock(el)}`
                 : `~ ${el.ref} relabeled → "${el.name}"`,
             ),
             ...retoggled.map((el) => `~ ${el.ref} "${el.name}" is now ${el.disabled ? "DISABLED" : "ENABLED"}`),
@@ -2394,6 +2557,50 @@ export class BrowserEngine {
     return { el, liveLabel: live.label, live: { ownText: live.ownText, centre: live.centre } };
   }
 
+  /** The read-POST entry that lets this request out under `rule`, or null (policy.ts readPostAllowed). */
+  private readPostOf(rule: WriteMode, method: string, url: string, body: string | null | undefined, destructiveWire?: boolean): ReadPost | null {
+    if (this.readPosts.length === 0 || rule !== "observe" || method !== "POST") return null;
+    const pathname = pathnameOf(url);
+    return readPostAllowed({
+      mode: rule,
+      method,
+      url,
+      appUrl: this.baseUrl,
+      body,
+      destructiveWire: destructiveWire ?? isDestructiveWire(pathname, body),
+      entries: this.readPosts,
+    });
+  }
+
+  /** How the gap ledger names a POST's endpoint: "POST /path" on the app's origin, "POST https://host/path" elsewhere; null when unreadable. */
+  private refusedPostEndpoint(url: string): string | null {
+    try {
+      const u = new URL(url);
+      return `POST ${u.origin === new URL(this.baseUrl).origin ? "" : u.origin}${u.pathname}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Remember in project memory, for the gap ledger, a script's POST that
+   * observe refused on the page the session is on. Not one that looks
+   * destructive, nor one to an endpoint already named as a read (its body was
+   * a mutation): naming it would change nothing.
+   */
+  private noteObserveRefusedPost(url: string, body: string | null): void {
+    const pageUrl = this.page?.url();
+    if (!pageUrl || !this.memory || isDestructiveWire(pathnameOf(url), body) || matchReadPost(this.readPosts, this.baseUrl, url)) return;
+    const endpoint = this.refusedPostEndpoint(url);
+    if (endpoint) this.memory.noteObserveRefusedPost(normalizePath(pageUrl), endpoint);
+  }
+
+  /** A POST to this endpoint went out, so the pages observe refused it on are no longer a gap for it. */
+  private clearRefusedPost(url: string): void {
+    const endpoint = this.refusedPostEndpoint(url);
+    if (endpoint && this.memory) this.memory.clearObserveRefusedPosts((e) => e === endpoint);
+  }
+
   private actionPolicyCheck(el: SnapshotElement, liveLabel: string, live: { ownText?: string; centre?: string[] } = {}): string | null {
     if (!this.readOnly) return null;
     // Same-origin navigation links are exempt: navigation is non-destructive
@@ -2406,7 +2613,15 @@ export class BrowserEngine {
     // same holds for choosing a file: selection is not the send.
     if (el.role === "textbox" || el.role === "file") return null;
     // Judged as the snapshot judged it, and again on what is there now (policy.ts destructiveLabelOf).
-    const now = destructiveLabelOf({ tag: el.tag, role: el.role, name: liveLabel, testid: el.testid, ownText: live.ownText, centre: live.centre });
+    const now = destructiveLabelOf({
+      tag: el.tag,
+      role: el.role,
+      name: liveLabel,
+      testid: el.testid,
+      ownText: live.ownText,
+      centre: live.centre,
+      interactive: el.interactive,
+    });
     if (el.destructive || now !== null) {
       return destructiveRefusal(now ?? (liveLabel || el.name || el.testid || el.ref), this.mode);
     }
@@ -2684,6 +2899,7 @@ export class BrowserEngine {
       let pathname = url;
       try {
         pathname = pathnameOf(url);
+        const readPost = this.readPostOf(rule, method, url, bytes?.toString("utf8"));
         const { foreign, offApp } = unseenWriteSource({
           appUrl: this.baseUrl,
           mode: rule,
@@ -2702,7 +2918,14 @@ export class BrowserEngine {
           foreign,
           offApp,
           owned: this.isOwnedResource(pathname),
+          readPost: readPost !== null,
         });
+        if (readPost && verdict.allow)
+          this.logAction({
+            action: "write-policy:read-post",
+            target: `${method} ${pathname} (named as a read: ${readPost.entry})`,
+            url: this.page?.url() ?? "",
+          });
       } catch (err) {
         // Fail closed: a write that cannot be judged is refused, and reported as refused below.
         console.error(
@@ -2766,6 +2989,7 @@ export class BrowserEngine {
    * beacons on every load cannot crowd out the block an action itself caused.
    */
   private noteBlocked(entry: { at: number; sig: string; answered: boolean; why?: string; type?: string }): void {
+    this.lastBlockAt = Math.max(this.lastBlockAt, entry.at);
     const list = this.blockedRequests;
     if (list.length < 20 || (list.length < 60 && !list.some((e) => blockSignature(e.sig) === blockSignature(entry.sig)))) list.push(entry);
   }
@@ -2992,12 +3216,18 @@ export class BrowserEngine {
     // (silent no-op forms): capture the count before to compare after.
     const xhrBefore = this.xhrCount;
     const submitLike = isSubmitLike(el.role, el.name, el.testid);
-    const clickContext: ClickContext = { viaLink: el.role === "link", urlBefore: page.url(), dialogsBefore: this.claimBaseline?.dialogs ?? null };
+    const clickContext: ClickContext = {
+      viaLink: el.role === "link",
+      urlBefore: page.url(),
+      dialogsBefore: this.claimBaseline?.dialogs ?? null,
+      claimsBefore: this.claimBaseline,
+    };
     const clickTarget = this.scopeOf(el).locator(`xpath=${el.xpath}`);
     // Read before the click: what the form's fields hold when it goes. Only a
     // button or an input can submit a form; nothing else is asked.
     const form = !el.frame && (el.tag === "button" || el.tag === "input") ? await this.probeForm(clickTarget) : null;
     const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
+    await this.readActedControl(el);
     const { forced } = await this.resilientClick(clickTarget, this.limits.actionMs, clicks);
     this.memory!.markExercised(this.currentFingerprint, el.key, clicks > 1 ? `click×${clicks}` : "click");
     this.noteFormSubmit(formState, "click", form);
@@ -3032,6 +3262,11 @@ export class BrowserEngine {
       const landed = await this.stableUrl();
       if (landed !== this.snapshotUrl) return result + `\nℹ The page then moved client-side to ${landed} (take a new snapshot).` + forcedNote;
       if (this.xhrCount !== xhrBefore) return result + forcedNote;
+      // The page may have answered without a request: a dialog, or validation saying what is missing (claims.ts quietAnswer).
+      // A native alert is not a step: alert("Saved!") with nothing sent is the very case the note is for.
+      const answer = this.nativeQuestionAt >= this.actionStartedAt ? "dialog" : quietAnswer(clickContext.claimsBefore, await this.readClaims(page));
+      if (answer === "dialog") return result + `\nℹ The click opened a dialog (a step, not a submit), so no request was expected yet.` + forcedNote;
+      if (answer === "validation") return result + `\nℹ Client-side validation answered (no request expected).` + forcedNote;
       return (
         result +
         `\nℹ NOTE: this submit-style click fired ZERO network requests and no navigation — if the UI showed success, the data may have been silently discarded (worth verifying; category: other/silent-failure).` +
@@ -3477,12 +3712,13 @@ export class BrowserEngine {
       .catch(() => null);
   }
 
-  /** Record a dropdown's options and the ones picked, by the values selectOption reported. */
-  private recordSelectChoice(fingerprint: string, key: string, options: Array<{ value: string; label: string }>, picked: string[]): void {
+  /** Record a dropdown's options, the one it held before, and the ones picked, by the values selectOption reported. */
+  private recordSelectChoice(fingerprint: string, key: string, options: Array<{ value: string; label: string; selected?: boolean }>, picked: string[]): void {
     const labels = options.map((o) => o.label);
+    const loaded = options.filter((o) => o.selected).map((o) => o.label);
     const chosen = picked.map((v) => options.find((o) => o.value === v)?.label).filter((l): l is string => !!l);
-    if (chosen.length === 0) this.memory!.recordSelectChoice(fingerprint, key, labels, "");
-    for (const label of chosen) this.memory!.recordSelectChoice(fingerprint, key, labels, label);
+    if (chosen.length === 0) this.memory!.recordSelectChoice(fingerprint, key, labels, "", loaded);
+    for (const label of chosen) this.memory!.recordSelectChoice(fingerprint, key, labels, label, loaded);
   }
 
   async select(ref: string, value: string): Promise<string> {
@@ -3666,10 +3902,14 @@ export class BrowserEngine {
   private async navigateNow(target: string): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
-    const url = target.startsWith("http") ? target : `${this.baseUrl}${target.startsWith("/") ? "" : "/"}${target}`;
-    if (!this.isSameOrigin(url)) {
-      return `REFUSED: ${url} is outside the attached origin (${this.baseUrl}). Exploration is fenced to the app under test.`;
+    // A path resolves against the origin, not the page the session attached on (request.ts resolveTarget).
+    const resolved = resolveTarget(this.baseUrl, target);
+    if (!("url" in resolved)) {
+      return resolved.offOrigin
+        ? `REFUSED: ${target.trim()} is outside the attached origin (${new URL(this.baseUrl).origin}). Exploration is fenced to the app under test.`
+        : `REFUSED: ${resolved.problem}`;
     }
+    const url = resolved.url;
     // A notice describes ONE navigation. Clearing up front means a notice left
     // undelivered by a previous throw can never prepend itself to this result.
     this.authLoss.clear();
@@ -4318,17 +4558,20 @@ export class BrowserEngine {
    *
    * Visited/attempted keys are stored NORMALIZED, so the normalized form of
    * each known route is compared too — normalizePath is idempotent, so this
-   * only adds matches for routes that genuinely were reached.
+   * only adds matches for routes that genuinely were reached. Reached is
+   * memory's reachedRoutes, the gap ledger's own rule: stored routes are read
+   * through today's route identity, and a base path is reached by one of its
+   * tabs or sections.
    */
   unvisitedKnownRoutes(): string[] {
     if (!this.memory) return [];
     const all = this.allKnownRoutes();
     if (all.length === 0) return [];
-    const visited = new Set(Object.values(this.memory.states).map((s) => s.route));
+    const reached = reachedRoutes(Object.values(this.memory.states).map((s) => s.route));
     const attempted = this.memory.attemptedByRole(this.role);
     return all.filter((r) => {
       const n = normalizePath(r);
-      return !visited.has(r) && !(r in attempted) && !visited.has(n) && !(n in attempted);
+      return !reached(r) && !(r in attempted) && !(n in attempted);
     });
   }
 
@@ -4419,11 +4662,12 @@ export class BrowserEngine {
         summary.push(`… stopped at the time limit: ${queue.length - i} route(s) not started`);
         break;
       }
-      const url = `${this.baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
-      if (!this.isSameOrigin(url)) {
-        summary.push(`${path} — SKIPPED (off-origin)`);
+      const resolved = resolveTarget(this.baseUrl, path);
+      if (!("url" in resolved)) {
+        summary.push(`${path} — SKIPPED (${resolved.offOrigin ? "off-origin" : resolved.problem})`);
         continue;
       }
+      const url = resolved.url;
       this.actionStartedAt = Date.now();
       this.oracles.drain(false); // discard pre-route leftovers WITHOUT marking their signatures as reported
       let status: number | string = "ERR";
@@ -4437,11 +4681,7 @@ export class BrowserEngine {
         // on every discovery round). Deliberately not written to memory: one outage
         // must not count a route as covered in every later run's gap ledger.
         if (!opts.measureOnly) this.loadFailedRoutes.add(normalizePath(url));
-        // The browser commits its own error page for this failure tens of
-        // milliseconds after goto has thrown, and that commit interrupts the next
-        // navigation, charging this route's failure to the next one. Wait for it;
-        // a browser that shows no error page simply lets the wait time out.
-        await page.waitForEvent("framenavigated", { predicate: (f) => f === page.mainFrame(), timeout: 1500 }).catch(() => undefined);
+        await this.errorPageCommitted(page);
         summary.push(`${path} — LOAD FAILED`);
         // The page a re-attach went back to never loaded, so nothing says whether it worked.
         if (this.authLoss.reattaching) this.authLoss.abortReattach(`the page it went back to, ${path}, did not load (${reason})`);
@@ -4529,22 +4769,34 @@ export class BrowserEngine {
       // What the page's main area holds besides controls: "41 el" alone cannot tell a page
       // of text from a main area that rendered nothing.
       const main = await this.readMainRegion(page);
+      // A main area holding only an alert or a loading placeholder is the usual look of a broken route that answered 200.
+      const shows = main && !deadEnd ? mainState(main) : null;
+      const stateFlag = mainStateFlag(shows);
 
-      const flags = [loginRedirect ? "AUTH-REDIRECT" : null, deadEnd ? "DEAD-END" : null, violations.length > 0 ? `${violations.length}⚠` : null].filter(
-        (f): f is string => f !== null,
-      );
-      const outcome = { path, status, requestedRoute, landedRoute: route, loginRedirect, deadEnd };
+      const flags = [
+        loginRedirect ? "AUTH-REDIRECT" : null,
+        deadEnd ? "DEAD-END" : null,
+        stateFlag,
+        violations.length > 0 ? `${violations.length}⚠` : null,
+      ].filter((f): f is string => f !== null);
+      const outcome = { path, status, requestedRoute, landedRoute: route, loginRedirect, deadEnd, mainState: shows };
       summary.push(crawlLine(outcome, { elements: trackedElements(elements).length, missingTestid, unnamed, main: main ? mainRegionTag(main) : null }, flags));
       // A path asked for by name joins the route contract once it answered as a page (crawl.ts crawledRoute).
       const joined = explicit && !opts.measureOnly ? crawledRoute(outcome) : null;
       if (joined) memory.addDiscoveredRoutes([{ route: joined, example: path }]);
-      if (violations.length > 0 || deadEnd || loginRedirect || (typeof status === "number" && status >= 400)) {
+      if (violations.length > 0 || deadEnd || stateFlag || loginRedirect || (typeof status === "number" && status >= 400)) {
         const detail = violations
           .slice(0, 3)
           .map((v) => `    ${v.kind}: ${v.detail.slice(0, 160)}`)
           .join("\n");
+        const showing =
+          shows === "error"
+            ? ` → main area shows only an error view${main?.text ? ` ("${main.text.slice(0, 80)}")` : ""}`
+            : shows === "loading"
+              ? ` → main area still shows only a loading placeholder after settling${main?.text ? ` ("${main.text.slice(0, 80)}")` : ""}`
+              : "";
         problems.push(
-          `${path}${loginRedirect ? " → redirected to login (auth missing/expired?)" : ""}${deadEnd ? " → dead end" : ""}${detail ? `\n${detail}` : ""}`,
+          `${path}${loginRedirect ? " → redirected to login (auth missing/expired?)" : ""}${deadEnd ? " → dead end" : ""}${showing}${detail ? `\n${detail}` : ""}`,
         );
       }
       // A role session that lost its sign-in on this route re-attaches once
@@ -4606,14 +4858,14 @@ export class BrowserEngine {
   ): Promise<string> {
     const page = this.requirePage();
     const transcript: string[] = [];
-    const resolveTarget = (target: string) => {
+    const locatePlanTarget = (target: string) => {
       const parsed = parseTarget(target);
       if (!parsed) throw new Error(`Plan targets must be ${TARGET_HELP} (got: ${target})`);
       return BrowserEngine.locatorFor(page, parsed).first();
     };
     /** Last state captured this plan — reused as the next step's pre-state while the page has not moved. */
     let lastCapture: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
-    const liveLabel = async (loc: ReturnType<typeof resolveTarget>): Promise<string> => {
+    const liveLabel = async (loc: ReturnType<typeof locatePlanTarget>): Promise<string> => {
       const [aria, testid, txt] = await Promise.all([
         loc.getAttribute("aria-label").catch(() => null),
         loc.getAttribute("data-testid").catch(() => null),
@@ -4636,7 +4888,7 @@ export class BrowserEngine {
       // the step's own line, so it cannot read as the previous step's.
       let note = "";
       // A select step's options and choice, recorded against the dropdown the bookkeeping below finds.
-      let chose: { options: Array<{ value: string; label: string }>; picked: string[] } | null = null;
+      let chose: { options: Array<{ value: string; label: string; selected: boolean }>; picked: string[] } | null = null;
       let preState: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
       // The form this step may submit, read before it went (forms.ts).
       let form: { kind: "click" | "enter"; probe: FormProbe | null } | null = null;
@@ -4678,7 +4930,7 @@ export class BrowserEngine {
           await page.keyboard.press(key);
         } else {
           if (!step.target) throw new Error(`${step.action} needs a target`);
-          const loc = resolveTarget(step.target);
+          const loc = locatePlanTarget(step.target);
           // Coverage is recorded against the state the element LIVED IN, so it
           // has to be captured before the action changes the page. Marking it
           // afterwards (as this did) recorded against the state the click
@@ -4930,11 +5182,6 @@ export class BrowserEngine {
         await (this.page ?? page).waitForTimeout(100).catch(() => {});
       }
     };
-    const firstLine = (err: unknown): string =>
-      (err instanceof Error ? err.message : String(err))
-        .split("\n")[0]
-        .replace(/^[a-z]+\.[a-zA-Z]+: /, "")
-        .trim();
     try {
       for (const [i, step] of steps.entries()) {
         const n = i + 1;
@@ -4947,7 +5194,9 @@ export class BrowserEngine {
         try {
           const current = this.requirePage();
           if (step.action === "navigate") {
-            const url = `${this.baseUrl}${step.target}`;
+            const resolved = resolveTarget(this.baseUrl, step.target);
+            if (!("url" in resolved)) throw new Error(resolved.problem);
+            const url = resolved.url;
             const resp = await current
               .goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs })
               .catch((err: unknown) => Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs)));
@@ -5023,7 +5272,7 @@ export class BrowserEngine {
             if (!last.ok) failure = last.reason;
           }
         } catch (err) {
-          failure = firstLine(explainTimeout(err, "action", this.limits.actionMs));
+          failure = firstLineOf(explainTimeout(err, "action", this.limits.actionMs));
         }
         await this.scanForInjections().catch(() => {});
         await this.scanForContradictions().catch(() => {});
@@ -5184,6 +5433,112 @@ export class BrowserEngine {
     // Found by key, the refs were rebuilt without a snapshot: none of them may be acted on.
     if (target.key) this.refs.clear();
     return { png, key: el.key, label: el.name, url: page.url() };
+  }
+
+  /**
+   * After a navigation threw. The browser commits its own error page for the
+   * failure tens of milliseconds after goto has thrown, and that commit
+   * interrupts the next navigation, charging this failure to the next page.
+   * Wait for it; a browser that shows no error page simply lets the wait time
+   * out, which is not an error.
+   */
+  private async errorPageCommitted(page: Page): Promise<void> {
+    await page.waitForEvent("framenavigated", { predicate: (f) => f === page.mainFrame(), timeout: 1500 }).catch(() => undefined);
+  }
+
+  /** The browser this session drives. */
+  get browserEngine(): BrowserEngineName {
+    return this.engineName;
+  }
+
+  /** Whether the page and its browser are still there: a failure after either is gone is the engine's, not the page's. */
+  get alive(): boolean {
+    return !!this.page && !this.page.isClosed() && !!this.browser?.isConnected();
+  }
+
+  /** True when `p` settles in time, false when it times out. Any other failure is thrown, so a closed page never reads as a slow one. */
+  private static async inTime(p: Promise<unknown>): Promise<boolean> {
+    try {
+      await p;
+      return true;
+    } catch (err) {
+      if (err instanceof Error && isTimeoutMessage(err.message)) return false;
+      throw err;
+    }
+  }
+
+  /**
+   * A picture for `scenescout check --baseline`: the page at `pathOnApp`
+   * loaded afresh (from a blank page, so a target that differs from the last
+   * only by its #fragment is still a new load), told the motion preference
+   * `how` names, read once its fonts have loaded and its animations are
+   * stopped, then either the viewport from the top (no target) or one element,
+   * found the way a saved flow finds its target, with `how.margin` around it.
+   * The screenshot is taken with `how`'s animation and caret settings, at one
+   * picture pixel per CSS pixel. Reads only. Throws a sentence when it cannot
+   * take the picture. `cut` says when an element reaches outside the window.
+   * What is compared and what it means is baseline.ts, which also holds the
+   * settings; the rectangle is capture.ts. Call endBaselineCaptures when done.
+   */
+  async captureForBaseline(
+    pathOnApp: string,
+    target: FlowTarget | null,
+    how: PictureSettings,
+  ): Promise<{ png: Buffer; viewport: { width: number; height: number }; deviceScaleFactor: number; cut: string | null }> {
+    const page = this.requirePage();
+    const action = <T>(p: Promise<T>): Promise<T> => p.catch((err: unknown) => Promise.reject(explainTimeout(err, "action", this.limits.actionMs)));
+    const within = `within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
+    // Before the load, so a page that reads the preference once, as it starts, reads it too.
+    await page.emulateMedia({ reducedMotion: how.reducedMotion });
+    let resp: import("playwright").Response | null;
+    try {
+      await page.goto("about:blank", { timeout: this.limits.crawlNavMs });
+      resp = await page.goto(`${this.baseUrl}${pathOnApp}`, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
+    } catch (err) {
+      await this.errorPageCommitted(page);
+      throw explainTimeout(err, "nav", this.limits.crawlNavMs);
+    }
+    const status = resp?.status() ?? null;
+    if (status !== null && status >= 400) throw new Error(`the page answered HTTP ${status}`);
+    await this.settle();
+    // A sign-in page pictured as the page's baseline would be written by an update and compared from then on.
+    const landed = await this.landedUrl(page);
+    if (this.authLoss.isLoginRedirect(pathOnApp, landed, this.baseUrl)) {
+      throw new Error(`the page sent the browser to sign-in (${new URL(landed).pathname}): the session is missing or expired`);
+    }
+    // Text drawn in a fallback font, then again when the web font arrives, would differ from one run to the next.
+    const fonts = page.waitForFunction("!document.fonts || document.fonts.status === 'loaded'", null, { timeout: this.limits.actionMs });
+    if (!(await BrowserEngine.inTime(fonts))) throw new Error(`its fonts were still loading, not done ${within}`);
+    // Stopped before anything is measured, not only for the screenshot: a target that itself moves would be cropped mid-movement.
+    if (how.animations === "disabled") await page.evaluate(STOP_ANIMATIONS_SCRIPT);
+    const viewport = page.viewportSize() ?? ((await page.evaluate("({ width: innerWidth, height: innerHeight })")) as { width: number; height: number });
+    const deviceScaleFactor = Number(await page.evaluate("window.devicePixelRatio"));
+    const settings = { type: "png", animations: how.animations, caret: how.caret, scale: "css", timeout: this.limits.actionMs } as const;
+    let png: Buffer;
+    let cut: string | null = null;
+    if (!target) {
+      await page.evaluate("window.scrollTo(0, 0)");
+      png = await action(page.screenshot(settings));
+    } else {
+      const locator = BrowserEngine.locatorFor(page, target).first();
+      if (!(await BrowserEngine.inTime(locator.waitFor({ state: "visible", timeout: this.limits.actionMs })))) {
+        throw new Error(`nothing visible matches it ${within}`);
+      }
+      await action(locator.scrollIntoViewIfNeeded({ timeout: this.limits.actionMs }));
+      const box = await action(locator.boundingBox({ timeout: this.limits.actionMs }));
+      if (!box) throw new Error("it is not displayed");
+      const clip = captureClip(box, how.margin, viewport);
+      if (!clip) throw new Error("it is outside the viewport");
+      cut = cutByViewport(box, viewport);
+      png = await action(page.screenshot({ ...settings, clip }));
+    }
+    this.logAction({ action: "capture", target: target ? `baseline ${pathOnApp}` : `baseline ${pathOnApp} (page)`, url: page.url() });
+    return { png, viewport, deviceScaleFactor, cut };
+  }
+
+  /** Stop telling the page to reduce motion, so what runs after the baselines (saved flows) sees the page as a user does. */
+  async endBaselineCaptures(): Promise<void> {
+    await this.requirePage().emulateMedia({ reducedMotion: null });
   }
 
   /**

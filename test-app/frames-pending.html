@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Frames with a request still loading</title></head>
+<body>
+  <h1>Embeds that are still downloading</h1>
+  <!-- Each frame fetches a body the server keeps sending: the fetch resolves on
+       the response's headers, and the request is still in flight when the page is left. -->
+  <iframe title="Loading widget one" src="/frame-pending-child.html?n=1" width="300" height="80" data-testid="pending-frame-one"></iframe>
+  <iframe title="Loading widget two" src="/frame-pending-child.html?n=2" width="300" height="80" data-testid="pending-frame-two"></iframe>
+  <a href="/page2.html" data-testid="pending-next-link">Next page</a>
+  <script>
+    // With ?top=1 the page's own document sends one too, so leaving the page leaves it behind as well.
+    if (new URLSearchParams(location.search).get('top') === '1') fetch('/api/held-body?n=top');
+  </script>
+</body>
+</html>

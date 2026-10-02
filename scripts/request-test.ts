@@ -24,6 +24,7 @@ import {
   requestHeaders,
   resolveMethod,
   resolveRequestUrl,
+  resolveTarget,
   staleCredentialNote,
   toReplayResult,
 } from "../src/engine/request.ts";
@@ -47,6 +48,34 @@ test("…and is fenced to it, like navigation is", () => {
   }
   assert.match((resolveRequestUrl(BASE, "javascript:alert(1)") as { problem: string }).problem, /http and https|path or a URL/i);
   assert.match((resolveRequestUrl(BASE, "   ") as { problem: string }).problem, /No path given/);
+});
+
+test("every tool resolves a target against the attached origin, not the attach URL's path", () => {
+  // A session attached on a page below the root, as a lane landing on its own section is.
+  const ATTACHED = "https://app.example/things";
+  const url = (t: string): string => {
+    const out = resolveTarget(ATTACHED, t);
+    assert.ok("url" in out, `${t} must resolve: ${JSON.stringify(out)}`);
+    return out.url;
+  };
+  assert.equal(url("/widgets"), "https://app.example/widgets", "a leading / is origin-relative");
+  assert.equal(url("widgets"), "https://app.example/widgets", "a bare path is read as one from the root");
+  assert.equal(url("/widgets/42?tab=history#notes"), "https://app.example/widgets/42?tab=history#notes");
+  assert.equal(url("https://app.example/widgets"), "https://app.example/widgets", "a full same-origin URL is used as given");
+  // A known route is stored as its full pathname; it must not gain the attach path either.
+  assert.equal(url("/things/7"), "https://app.example/things/7");
+  // Attached deeper, or with a trailing slash: still the same answers.
+  assert.equal((resolveTarget("https://app.example/a/b/", "x") as { url: string }).url, "https://app.example/x");
+  assert.equal((resolveTarget("https://app.example/a/b/", "/x") as { url: string }).url, "https://app.example/x");
+  for (const off of ["https://elsewhere.example/widgets", "//elsewhere.example/widgets", "http://app.example/widgets"]) {
+    const out = resolveTarget(ATTACHED, off);
+    assert.ok("problem" in out && out.offOrigin, `${off} is another origin and must be refused as one`);
+  }
+  const scheme = resolveTarget(ATTACHED, "javascript:alert(1)");
+  assert.ok("problem" in scheme && !scheme.offOrigin);
+  // scout_request follows the same rule, so a call and a page load agree on where a path goes.
+  assert.deepEqual(resolveRequestUrl(ATTACHED, "/api/things"), { url: "https://app.example/api/things" });
+  assert.deepEqual(resolveRequestUrl("https://app.example/a/b", "api/things"), { url: "https://app.example/api/things" });
 });
 
 test("only methods a browser can replay are accepted", () => {
