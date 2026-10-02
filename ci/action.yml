@@ -90,6 +90,10 @@ inputs:
     description: With show, also capture the same element on the same page of this URL, and write a diff picture and the share of pixels changed.
     required: false
     default: ""
+  dedup:
+    description: judge or rule. judge (the default when empty) also asks the run's model, at the lowest effort its API takes, whether a finding the rule keeps apart is one already open on the same page, sending the two findings' titles, categories and evidence, and the page's path; rule asks nothing.
+    required: false
+    default: ""
   storage-state:
     description: A Playwright storage-state file to explore while signed in, relative to working-directory.
     required: false

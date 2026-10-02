@@ -9,6 +9,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "key": "c1786bc817",
       "recall": {
         "found": 5,
@@ -41,6 +42,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "medium",
+      "dedup": "rule",
       "key": "c1786bc817",
       "recall": {
         "found": 3,
@@ -73,6 +75,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "key": "c1786bc817",
       "recall": {
         "found": 5,
@@ -105,6 +108,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "medium",
+      "dedup": "rule",
       "key": "c1786bc817",
       "recall": {
         "found": 4,
@@ -137,6 +141,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "key": "c1786bc817",
       "recall": {
         "found": 5,
@@ -169,6 +174,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "key": "c1786bc817",
       "recall": {
         "found": 5,
@@ -201,6 +207,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "key": "b5a7933f32",
       "recall": {
         "found": 3,
@@ -233,6 +240,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "key": "c1786bc817",
       "recall": {
         "found": 2,
@@ -265,6 +273,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "key": "b5a7933f32",
       "recall": {
         "found": 1,
@@ -297,6 +306,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "lanes": {
         "asked": 4,
         "planned": 4,
@@ -334,6 +344,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "lanes": {
         "asked": 4,
         "planned": 4,
@@ -371,6 +382,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "key": "c1786bc817",
       "recall": {
         "found": 3,
@@ -403,6 +415,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "key": "c1786bc817",
       "recall": {
         "found": 3,
@@ -435,6 +448,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "key": "b5a7933f32",
       "recall": {
         "found": 1,
@@ -467,6 +481,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "lanes": {
         "asked": 4,
         "planned": 4,
@@ -504,6 +519,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "lanes": {
         "asked": 4,
         "planned": 4,
@@ -541,6 +557,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "lanes": {
         "asked": 4,
         "planned": 4,
@@ -578,6 +595,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "key": "c1786bc817",
       "recall": {
         "found": 5,
@@ -610,6 +628,7 @@
       "provider": "openai",
       "model": "gpt-6-luna",
       "effort": "low",
+      "dedup": "rule",
       "lanes": {
         "asked": 4,
         "planned": 4,

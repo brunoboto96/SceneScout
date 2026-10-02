@@ -1,9 +1,10 @@
 # Ways to use it
 
-SceneScout has five ways in. They share one engine, one write policy and one project memory in `.scenescout/`, so what one finds, another can re-test.
+SceneScout has six ways in. They share one engine and one write policy, and all but the first share one project memory in `.scenescout/`, so what one finds, another can re-test.
 
 | Way | Who drives it | Model needed | Fails a build | Use it for |
 |---|---|---|---|---|
+| [`scenescout <url>`](Start-here.md#a-first-look-with-nothing-set-up) | Nobody: deterministic | None | No | A first look at any app, with nothing set up first |
 | [An interactive run](#an-interactive-run) | Your coding agent, with you watching | Your agent's | No | Exploring a feature while you build it; a pre-release pass |
 | [Parallel lanes](#parallel-lanes) | Several agents, one per area or role | Your agent's | No | A large app, or a multi-role app, in less wall time |
 | [`scenescout check`](#scenescout-check-a-gate-in-ci) | Nobody: deterministic | None | Yes | A pull-request gate |
@@ -42,6 +43,7 @@ SceneScout needs only a URL, but it does better from inside the app's repository
 - **Slow it down.** "Pause five seconds between actions so I can follow." That is `scout_attach {paceMs: 5000}`, or `scout_session {paceMs: 5000}` mid-run.
 - **Another browser.** "Run the same pass in WebKit." `scout_attach {browser: "webkit"}`, after `npx -y scenescout install --browser-only --browsers webkit`.
 - **A phone-sized viewport.** `scout_attach {viewportWidth: 390, viewportHeight: 844}`, then a design audit on the key pages.
+- **Fewer duplicate findings.** "Ask a model whether two findings are the same defect." That is `scout_attach {dedup: "judge"}`, or `SCENESCOUT_DEDUP=judge` in the server's environment, with `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` there too. A filing the rule keeps apart is then compared with the open findings on its page, and each pair's titles, categories and evidence, and the page's path, are sent to that provider. It is off by default.
 
 ## Parallel lanes
 
@@ -149,6 +151,7 @@ npx -y scenescout ci http://127.0.0.1:3000
 - **Caps.** 40 model turns, 1,500,000 tokens and 20 minutes by default (`--max-turns`, `--max-tokens`, `--max-minutes`). The first cap reached ends the exploration; the report is still written and says which cap ended it. `--max-tokens` is the setting that bounds the cost.
 - **Lanes.** `--lanes 4` splits the app between four model loops that explore at once, each in its own browser and its own modules, as [parallel lanes](#parallel-lanes) do. They share the caps above rather than getting them each, so raise `--max-turns` and `--max-tokens` with them: at the defaults each of four lanes gets about ten turns, which found no more than one loop on the benchmark's demo app, while `--lanes 4 --max-turns 160 --max-tokens 6000000` found the most (about 2.3 times one loop's cost; run one at a time per API key). Their findings go into one report.
 - **Mode.** `read-only` by default. `--mode destructive` also needs `--allow-destructive`.
+- **Duplicates.** By default the run's model is also asked, at its lowest effort, whether a finding the dedup rule keeps apart is one already open on the same page, and merges it when it says so. Each pair asked about sends the two findings' titles, categories and evidence, and the page's path, to the provider, and the calls count in the usage. `--dedup rule` turns it off.
 - **Output.** `report.md`, `report.html`, `summary.md`, `ci.json` and `ci.sarif` in `.scenescout/ci/`, with a usage line: turns, tokens, time and an estimated cost.
 - **One element instead of a run.** `--show "the Save button"` captures that element as a PNG and does not explore; `--compare-url <url>` captures it on a second deployment too and writes a diff picture.
 

@@ -18,6 +18,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { CreateMessageRequestSchema, ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import {
+  DEDUP_JUDGE_CAPABILITY,
+  durationText,
+  JUDGE_CALL_MS,
+  JUDGE_MAX_OUTPUT_TOKENS,
+  JUDGE_SYSTEM,
+  JUDGE_TOOL,
+  judgeKickoffOf,
+  samplingResultOf,
+  type Ask,
+} from "./engine/dedup.js";
 import { CAPTURE_MARGIN, parseCaptureResult, rebaseUrl, SHOT_FILES, SHOTS_DIRNAME, type CaptureInfo, type CaptureOutcome } from "./engine/capture.js";
 import {
   addUsage,
@@ -53,6 +65,7 @@ import {
   type CiOptions,
   type CiResult,
   type LaneResult,
+  type JudgeCalls,
   type ResolvedProvider,
   type Spend,
   type StopReason,
@@ -82,6 +95,7 @@ import {
   retryable,
   retryAfterMs,
   type Conversation,
+  type ConversationOptions,
   type ModelTurn,
   type ToolOutcome,
 } from "./engine/provider.js";
@@ -201,10 +215,99 @@ export class HttpModelClient implements ModelClient {
   }
 }
 
+/** One conversation with the provider `resolved` names. */
+function conversationFor(resolved: ResolvedProvider, o: ConversationOptions, kickoff: string): Conversation {
+  return resolved.provider === "anthropic" ? new AnthropicConversation(o, kickoff) : new OpenAIConversation(o, kickoff);
+}
+
 export function httpClient(resolved: ResolvedProvider, key: string, system: string, tools: readonly ToolSpec[], kickoff: string): ModelClient {
   const o = { baseUrl: resolved.baseUrl, model: resolved.model, effort: resolved.effort, system, tools };
-  const conversation = resolved.provider === "anthropic" ? new AnthropicConversation(o, kickoff) : new OpenAIConversation(o, kickoff);
-  return new HttpModelClient(conversation, key);
+  return new HttpModelClient(conversationFor(resolved, o, kickoff), key);
+}
+
+/**
+ * The dedup judge's model call over HTTP: one short conversation per pair, at
+ * `resolved`'s effort, with its output capped and every attempt and retry
+ * inside `callMs`. Used by `scenescout ci` (the run's provider and model at
+ * the judge's effort) and by the MCP server when a key is in its environment.
+ */
+export function httpJudgeAsk(
+  resolved: ResolvedProvider,
+  key: string,
+  deps: { fetch?: Fetch; sleep?: (ms: number) => Promise<void>; callMs?: number } = {},
+): Ask {
+  return async (system, tools, kickoff, limitMs) => {
+    const ms = Math.min(deps.callMs ?? JUDGE_CALL_MS, limitMs ?? Infinity);
+    const o = { baseUrl: resolved.baseUrl, model: resolved.model, effort: resolved.effort, system, tools, maxOutputTokens: JUDGE_MAX_OUTPUT_TOKENS };
+    try {
+      return await new HttpModelClient(conversationFor(resolved, o, kickoff), key, { fetch: deps.fetch, sleep: deps.sleep, attemptMs: ms }).next(ms);
+    } catch (err) {
+      // The "time cap" here is the judge call's own limit, not the run's: say which.
+      if (err instanceof OutOfTime) throw new Error(err.message.replace(/^the time cap was reached/, `no answer within ${durationText(ms)}`));
+      throw err;
+    }
+  };
+}
+
+/**
+ * The client's answer to the server's dedup judge (a sampling request): the
+ * question goes to the run's model through `ask`, under this side's own
+ * JUDGE_SYSTEM and JUDGE_TOOL, and the answer goes back as the tool call. Its
+ * tokens are added to the run's usage, so the caps count them, and no call
+ * runs past the time cap: one asked after it is refused, and one asked before
+ * it gets only the time left. A request that is not the judge's question is
+ * refused; a failed call is reported to the server, whose judge then leaves
+ * the rule's decision and logs it.
+ */
+export function judgeHandler(o: {
+  ask: Ask;
+  model: string;
+  spend: Spend;
+  caps: CiOptions["caps"];
+  calls: JudgeCalls;
+  secrets?: readonly string[];
+  now?: () => number;
+}) {
+  const now = o.now ?? Date.now;
+  return async (request: { params: unknown }) => {
+    o.calls.calls += 1;
+    const question = judgeKickoffOf(request.params);
+    if (!question.ok) {
+      o.calls.failed += 1;
+      throw new McpError(ErrorCode.InvalidRequest, `this client answers only the dedup judge's question: ${question.error}`);
+    }
+    const left = wallLeftMs(o.spend, o.caps, now());
+    if (left <= 0) {
+      o.calls.failed += 1;
+      throw new McpError(ErrorCode.InternalError, "the run's time cap was reached, so the judge was not asked");
+    }
+    const started = now();
+    try {
+      const turn = await o.ask(JUDGE_SYSTEM, [JUDGE_TOOL], question.kickoff, Math.min(JUDGE_CALL_MS, left));
+      o.spend.usage = addUsage(o.spend.usage, turn.usage);
+      o.calls.usage = addUsage(o.calls.usage, turn.usage);
+      return samplingResultOf(turn, o.model);
+    } catch (err) {
+      o.calls.failed += 1;
+      throw new McpError(ErrorCode.InternalError, redactKeys(err instanceof Error ? err.message : String(err), o.secrets ?? []));
+    } finally {
+      o.calls.ms += now() - started;
+    }
+  };
+}
+
+/**
+ * The run's MCP client. With a judge handler it declares sampling with tools
+ * and DEDUP_JUDGE_CAPABILITY, and answers the server's dedup judge with it;
+ * without one it declares nothing, and the server dedups by the rule.
+ */
+export function ciClient(judge?: ReturnType<typeof judgeHandler>): Client {
+  const client = new Client(
+    { name: "scenescout-ci", version: "1" },
+    judge ? { capabilities: { sampling: { tools: {} }, experimental: { [DEDUP_JUDGE_CAPABILITY]: {} } } } : undefined,
+  );
+  if (judge) client.setRequestHandler(CreateMessageRequestSchema, judge);
+  return client;
 }
 
 /** The MCP server, from the model's side: call a tool by name and get its text back. */
@@ -214,14 +317,8 @@ export interface ToolHost {
   close(): Promise<void>;
 }
 
-async function startServer(log: (line: string) => void): Promise<ToolHost> {
-  if (!fs.existsSync(serverPath)) throw new Error(`${serverPath} is missing: run \`npm run build\` first`);
-  const transport = new StdioClientTransport({ command: process.execPath, args: [serverPath], env: childEnv(process.env), stderr: "pipe" });
-  transport.stderr?.on("data", (chunk: Buffer) => {
-    for (const line of chunk.toString("utf8").split(/\r?\n/)) if (line.trim()) log(`  [server] ${line}`);
-  });
-  const client = new Client({ name: "scenescout-ci", version: "1" });
-  await client.connect(transport);
+/** A connected client as the loop's tool host. */
+export function toolHost(client: Client): ToolHost {
   return {
     tools: async () => (await client.listTools()).tools,
     call: async (name, args, timeoutMs) => {
@@ -235,6 +332,17 @@ async function startServer(log: (line: string) => void): Promise<ToolHost> {
       await client.close();
     },
   };
+}
+
+async function startServer(log: (line: string) => void, judge?: ReturnType<typeof judgeHandler>): Promise<ToolHost> {
+  if (!fs.existsSync(serverPath)) throw new Error(`${serverPath} is missing: run \`npm run build\` first`);
+  const transport = new StdioClientTransport({ command: process.execPath, args: [serverPath], env: childEnv(process.env), stderr: "pipe" });
+  transport.stderr?.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString("utf8").split(/\r?\n/)) if (line.trim()) log(`  [server] ${line}`);
+  });
+  const client = ciClient(judge);
+  await client.connect(transport);
+  return toolHost(client);
 }
 
 function readMemoryFindings(projectDir: string): Finding[] {
@@ -476,12 +584,12 @@ async function exploreInLanes(o: {
   makeClient: (system: string, tools: readonly ToolSpec[], kickoff: string) => ModelClient;
   log: (line: string) => void;
   now: () => number;
-  startedAt: number;
+  /** The run's budget: the lanes take their turns from it, beside whatever the dedup judge adds. */
+  budget: Budget;
   attachArgs: (a: { url: string; objective: string; task: string; session: string }) => Record<string, unknown>;
   attachMs: number;
 }): Promise<{ lanes: CiLanes; outcome?: LoopOutcome }> {
-  const { host, options, log, now } = o;
-  const budget = newBudget(options.caps, o.startedAt);
+  const { host, options, log, now, budget } = o;
   const timeLeft = (): number => wallLeftMs(budgetSpend(budget), options.caps, now());
 
   // ── plan ──
@@ -658,12 +766,19 @@ export async function runCi(
   resolved: ResolvedProvider,
   deps: {
     makeClient: (system: string, tools: readonly ToolSpec[], kickoff: string) => ModelClient;
+    /**
+     * The dedup judge's model call (httpJudgeAsk in the CLI). With `--dedup
+     * judge` and no judge given, the rule decides and the log says so.
+     */
+    judge?: Ask;
+    /** The effort `judge` asks at, for the summary. */
+    judgeEffort?: string;
     log?: (line: string) => void;
     secrets?: readonly string[];
     version: string;
     now?: () => number;
     /** How the MCP server is reached: started in a child process, unless a test hands in another. */
-    startHost?: (log: (line: string) => void) => Promise<ToolHost>;
+    startHost?: (log: (line: string) => void, judge?: ReturnType<typeof judgeHandler>) => Promise<ToolHost>;
   },
 ): Promise<CiRunResult> {
   const secrets = deps.secrets ?? [];
@@ -674,7 +789,14 @@ export async function runCi(
   const before = readMemoryFindings(options.projectDir);
   // Pictures an earlier run left in the same output are not this run's: they must never be uploaded as its.
   fs.rmSync(path.join(outDir, SHOTS_DIRNAME), { recursive: true, force: true });
-  let outcome: LoopOutcome = { stop: "could-not-start", spend: { turns: 0, usage: { ...NO_USAGE }, startedAt } };
+  // One budget for the run: every loop (one, or each lane) takes its turns from it, and the dedup judge's calls add their tokens, which the caps count.
+  const budget = newBudget(options.caps, startedAt);
+  // A run asked to show an element files no findings, so it has nothing to deduplicate.
+  const wantsJudge = options.dedup === "judge" && !options.show;
+  if (wantsJudge && !deps.judge) log("No model was given for the dedup judge; the rule decides duplicates.");
+  const judgeAsk = wantsJudge ? deps.judge : undefined;
+  const judgeCalls: JudgeCalls = { calls: 0, failed: 0, usage: { ...NO_USAGE }, ms: 0 };
+  let outcome: LoopOutcome = { stop: "could-not-start", spend: budgetSpend(budget) };
   let contractMet = false;
   let reportWritten = false;
   let capture: CaptureOutcome | undefined;
@@ -686,12 +808,18 @@ export async function runCi(
   try {
     // The page-load limit may be longer than the usual attach budget; the attach gets that limit and a minute to launch.
     const attachMs = Math.max(ATTACH_MS, resolveTimeLimits(options, process.env).navMs + 60_000);
-    host = await (deps.startHost ?? startServer)(log);
+    // One judge handler for the run's client: it answers the server's dedup questions and adds their tokens to the run's budget.
+    const judge = judgeAsk
+      ? judgeHandler({ ask: judgeAsk, model: resolved.model, spend: budget, caps: options.caps, calls: judgeCalls, secrets, now })
+      : undefined;
+    host = await (deps.startHost ?? startServer)(log, judge);
     // What every session of the run attaches with: the planner's here, and each lane's when the run is split.
     const attachArgs = (a: { url: string; objective: string; task: string; session?: string }): Record<string, unknown> => ({
       url: a.url,
       projectPath: options.projectDir,
       mode: options.mode,
+      // Named either way, so a SCENESCOUT_DEDUP in the job's environment never decides for the option. Every session alike: they share one memory.
+      dedup: judgeAsk ? "judge" : "rule",
       objective: a.objective.slice(0, 300),
       task: a.task,
       ...(a.session ? { session: a.session } : {}),
@@ -728,7 +856,7 @@ export async function runCi(
           caps: options.caps,
           log,
           now,
-          startedAt,
+          budget,
           projectDir: options.projectDir,
           onResult: (name, _args, r) => {
             if (name === "scout_capture" && !r.isError) captured = parseCaptureResult(r.text) ?? captured;
@@ -736,7 +864,7 @@ export async function runCi(
         });
       };
       if (options.lanes > 1 && !options.show) {
-        const split = await exploreInLanes({ host, listed, options, makeClient: deps.makeClient, log, now, startedAt, attachArgs, attachMs });
+        const split = await exploreInLanes({ host, listed, options, makeClient: deps.makeClient, log, now, budget, attachArgs, attachMs });
         lanes = split.lanes;
         outcome = split.outcome ?? (await oneLoop());
       } else {
@@ -785,11 +913,17 @@ export async function runCi(
     stop: outcome.stop,
     ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}),
     contractMet,
-    spend: outcome.spend,
+    // The run's, not the last loop's: every lane's turns, and the judge's tokens.
+    spend: budgetSpend(budget),
     endedAt,
     findings: findingsThisRun(before, readMemoryFindings(options.projectDir)),
     ...(capture ? { capture } : {}),
     ...(lanes ? { lanes } : {}),
+    ...(options.show
+      ? {}
+      : {
+          dedup: judgeAsk ? { by: "judge" as const, ...(deps.judgeEffort ? { effort: deps.judgeEffort } : {}), ...judgeCalls } : { by: "rule" as const },
+        }),
   };
   const written: string[] = [];
   try {

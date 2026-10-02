@@ -6,7 +6,7 @@ This guide is for a developer who wants to use SceneScout on their own project. 
 
 | Page | What it covers |
 |---|---|
-| [Start here](Start-here.md) | Install, a first run against the demo app, reading the report and the live view |
+| [Start here](Start-here.md) | A first look with one command and no setup, then install, a first run against the demo app, reading the report and the live view |
 | [Ways to use it](Ways-to-use-it.md) | An interactive run, parallel lanes, `scenescout check` as a CI gate, `scenescout ci` unattended, `/scenescout qa` on pull requests |
 | [Signing in](Signing-in.md) | Saved logins per role, what a profile holds, expiry, re-attach, the refresh broker, scripted sign-in for CI |
 | [Safety model](Safety-model.md) | The four write modes, what is refused and why, embedded third-party frames, keys and forks in CI |

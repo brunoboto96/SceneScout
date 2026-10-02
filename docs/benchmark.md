@@ -1026,9 +1026,17 @@ only read the repository, and the job that writes the results never holds the
 model's key.
 
 A row is one run, and a single run is noisy: ci-run-1 and ci-run-2 differ only
-in effort and moved recall by two defects. Precision is the labelled ratio
-with its bounds; Brier is lane calibration's, and is "—" because an unattended
-run's lanes, when it has any, hand back no lane report stating a confidence. Cost is the run's own estimate from
+in effort and moved recall by two defects. Dedup is how the run told a filed
+finding from one already recorded, as its `ci.json` says: `rule` for the rule
+alone, which is every run recorded before the model judge was wired in
+([ADR 17](adr/0017-a-model-judges-only-the-merges-the-rule-misses.md)) and any
+run of a version without it, and `judge` for the rule with the judge, the
+default from the release that wires it in. The judge merges findings the rule
+keeps apart, so it changes how many findings a run reports, and with that its
+recall and precision: a `judge` row and a `rule` row are two configurations,
+and a change between them is not read as the engine's. Precision is the
+labelled ratio with its bounds; Brier is lane calibration's, and is "—"
+because an unattended run's lanes, when it has any, hand back no lane report stating a confidence. Cost is the run's own estimate from
 the model's list price. The first two rows were taken by hand with the
 benchmark workflow on the engine at commit `7280e29`, before this workflow
 existed. That commit reports itself as 3.12.0, but the v3.12.0 tag predates
@@ -1069,27 +1077,27 @@ request's. The change was reverted and no second run was spent.
 
 <!-- ci-results:start (generated from bench/ci-results.json by scripts/bench/ci-record.ts; do not edit by hand) -->
 
-| Date | App | Version | Source | Provider · model · effort | Key | Recall | Precision (bounds) | Brier | Ended | Turns | Tokens in (cached) / out | Wall | Cost |
-|---|---|---|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|
-| 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 7/8 (88%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |
-| 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · medium | c1786bc817 | 3/13 | 3/3 (100%) | — | turns | 40 | 885,574 (858,517) / 3,152 | 1m 38s | $0.013 |
-| 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 6/6 (86%–100%) | — | done | 27 | 533,110 (509,907) / 1,730 | 1m 05s | $0.008 |
-| 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · medium | c1786bc817 | 4/13 | 5/5 (100%) | — | done | 65 | 1,657,036 (1,620,750) / 7,123 | 2m 55s | $0.023 |
-| 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | turns | 40 | 826,683 (802,609) / 1,597 | 1m 18s | $0.011 |
-| 2026-09-27 | demo | 3.13.1 | dispatched | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 5/5 (100%) | — | done | 33 | 670,885 (646,007) / 1,755 | 1m 14s | $0.010 |
-| 2026-09-27 | holdout | 3.13.1 | dispatched | openai · gpt-6-luna · low | b5a7933f32 | 3/10 | 3/5 (43%–71%) | — | turns | 40 | 870,166 (842,856) / 1,930 | 2m 34s | $0.012 |
-| 2026-09-28 | demo | 3.14.1 | scheduled | openai · gpt-6-luna · low | c1786bc817 | 2/13 | 3/3 (60%–100%) | — | done | 32 | 665,543 (640,873) / 1,395 | 1m 32s | $0.010 |
-| 2026-09-28 | holdout | 3.14.1 | scheduled | openai · gpt-6-luna · low | b5a7933f32 | 1/10 | 1/3 (33%) | — | done | 28 | 583,026 (575,890) / 1,444 | 1m 02s | $0.007 |
-| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | turns | 40 | 774,823 (727,016) / 2,913 | 33s | $0.014 |
-| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | turns | 40 | 766,576 (756,424) / 2,417 | 33s | $0.010 |
-| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low | c1786bc817 | 3/13 | 4/4 (80%–100%) | — | done | 29 | 609,604 (602,591) / 1,641 | 1m 19s | $0.008 |
-| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low | c1786bc817 | 3/13 | 4/4 (100%) | — | done | 29 | 599,431 (574,840) / 1,647 | 1m 09s | $0.009 |
-| 2026-10-02 | holdout | 3.14.1 | manual | openai · gpt-6-luna · low | b5a7933f32 | 1/10 | 1/4 (20%–40%) | — | done | 27 | 558,749 (551,323) / 1,760 | 1m 05s | $0.007 |
-| 2026-10-02 | holdout | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | b5a7933f32 | 2/10 | 2/4 (40%–60%) | — | turns | 40 | 780,989 (767,682) / 2,721 | 32s | $0.010 |
-| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | c1786bc817 | 8/13 | 9/9 (90%–100%) | — | done | 95 | 2,027,350 (2,001,159) / 6,777 | 1m 29s | $0.026 |
-| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | c1786bc817 | 8/13 | 9/9 (100%) | — | done | 86 | 1,804,634 (1,760,945) / 6,753 | 1m 24s | $0.025 |
-| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 5/5 (100%) | — | done | 37 | 803,803 (777,552) / 2,177 | 1m 24s | $0.011 |
-| 2026-10-02 | holdout | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | b5a7933f32 | 7/10 | 7/9 (50%–86%) | — | done | 86 | 1,801,743 (1,776,235) / 7,040 | 1m 13s | $0.024 |
+| Date | App | Version | Source | Provider · model · effort | Dedup | Key | Recall | Precision (bounds) | Brier | Ended | Turns | Tokens in (cached) / out | Wall | Cost |
+|---|---|---|---|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|
+| 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · low | rule | c1786bc817 | 5/13 | 7/8 (88%) | — | done | 36 | 741,675 (716,628) / 2,190 | 1m 10s | $0.011 |
+| 2026-09-27 | demo | 3.12.0 | manual | openai · gpt-6-luna · medium | rule | c1786bc817 | 3/13 | 3/3 (100%) | — | turns | 40 | 885,574 (858,517) / 3,152 | 1m 38s | $0.013 |
+| 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · low | rule | c1786bc817 | 5/13 | 6/6 (86%–100%) | — | done | 27 | 533,110 (509,907) / 1,730 | 1m 05s | $0.008 |
+| 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · medium | rule | c1786bc817 | 4/13 | 5/5 (100%) | — | done | 65 | 1,657,036 (1,620,750) / 7,123 | 2m 55s | $0.023 |
+| 2026-09-27 | demo | 3.13.0 | manual | openai · gpt-6-luna · low | rule | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | turns | 40 | 826,683 (802,609) / 1,597 | 1m 18s | $0.011 |
+| 2026-09-27 | demo | 3.13.1 | dispatched | openai · gpt-6-luna · low | rule | c1786bc817 | 5/13 | 5/5 (100%) | — | done | 33 | 670,885 (646,007) / 1,755 | 1m 14s | $0.010 |
+| 2026-09-27 | holdout | 3.13.1 | dispatched | openai · gpt-6-luna · low | rule | b5a7933f32 | 3/10 | 3/5 (43%–71%) | — | turns | 40 | 870,166 (842,856) / 1,930 | 2m 34s | $0.012 |
+| 2026-09-28 | demo | 3.14.1 | scheduled | openai · gpt-6-luna · low | rule | c1786bc817 | 2/13 | 3/3 (60%–100%) | — | done | 32 | 665,543 (640,873) / 1,395 | 1m 32s | $0.010 |
+| 2026-09-28 | holdout | 3.14.1 | scheduled | openai · gpt-6-luna · low | rule | b5a7933f32 | 1/10 | 1/3 (33%) | — | done | 28 | 583,026 (575,890) / 1,444 | 1m 02s | $0.007 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | rule | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | turns | 40 | 774,823 (727,016) / 2,913 | 33s | $0.014 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | rule | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | turns | 40 | 766,576 (756,424) / 2,417 | 33s | $0.010 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low | rule | c1786bc817 | 3/13 | 4/4 (80%–100%) | — | done | 29 | 609,604 (602,591) / 1,641 | 1m 19s | $0.008 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low | rule | c1786bc817 | 3/13 | 4/4 (100%) | — | done | 29 | 599,431 (574,840) / 1,647 | 1m 09s | $0.009 |
+| 2026-10-02 | holdout | 3.14.1 | manual | openai · gpt-6-luna · low | rule | b5a7933f32 | 1/10 | 1/4 (20%–40%) | — | done | 27 | 558,749 (551,323) / 1,760 | 1m 05s | $0.007 |
+| 2026-10-02 | holdout | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | rule | b5a7933f32 | 2/10 | 2/4 (40%–60%) | — | turns | 40 | 780,989 (767,682) / 2,721 | 32s | $0.010 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | rule | c1786bc817 | 8/13 | 9/9 (90%–100%) | — | done | 95 | 2,027,350 (2,001,159) / 6,777 | 1m 29s | $0.026 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | rule | c1786bc817 | 8/13 | 9/9 (100%) | — | done | 86 | 1,804,634 (1,760,945) / 6,753 | 1m 24s | $0.025 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low | rule | c1786bc817 | 5/13 | 5/5 (100%) | — | done | 37 | 803,803 (777,552) / 2,177 | 1m 24s | $0.011 |
+| 2026-10-02 | holdout | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | rule | b5a7933f32 | 7/10 | 7/9 (50%–86%) | — | done | 86 | 1,801,743 (1,776,235) / 7,040 | 1m 13s | $0.024 |
 
 <!-- ci-results:end -->
 
@@ -1419,6 +1427,18 @@ sent to the provider. Where it belongs (the `scenescout ci` run, which already
 has a model, or an opt-in setting for the store with the rule as the default
 and the fallback) is a design decision for its own change. Until then the
 rule still decides in the store.
+
+**Wired in ([#229](https://github.com/brunoboto96/SceneScout/issues/229),
+[ADR 17](adr/0017-a-model-judges-only-the-merges-the-rule-misses.md)).** The
+store now asks the judge about a filing the rule keeps apart, against the open
+findings on the same page (at most three calls per filing), and merges on a
+"same"; the rule's merges are never put to it, because every pair the judge
+won above was a merge the rule missed. `scenescout ci` judges by default with
+the run's model at the lowest effort its API takes (`--dedup rule` turns it
+off); the MCP server judges only when `SCENESCOUT_DEDUP=judge` or
+`scout_attach {dedup: "judge"}` asks for it. Not yet measured: the judge as
+wired, on pairs from runs made after this change, which is the check that the
+gain above holds in the store.
 
 ## Rejected and not-yet-tried
 
