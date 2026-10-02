@@ -281,6 +281,8 @@ export type { WriteMode } from "./policy.js";
 export interface AttachOptions {
   url: string;
   projectDir: string;
+  /** projectDir is a per-site folder SceneScout chose, not one the agent or client named. */
+  projectChosen?: boolean;
   storageStatePath?: string;
   /**
    * A role whose profile `scenescout login` saved under .scenescout/auth/.
@@ -1398,7 +1400,13 @@ export class BrowserEngine {
     // Resolved before anything is closed, so a bad role, a missing profile or
     // a time limit out of bounds leaves a live session as it was.
     const limits = resolveTimeLimits(opts, process.env);
-    const auth = resolveAttachAuth({ projectDir: opts.projectDir, url: opts.url, role: opts.role, storageStatePath: opts.storageStatePath });
+    const auth = resolveAttachAuth({
+      projectDir: opts.projectDir,
+      url: opts.url,
+      role: opts.role,
+      storageStatePath: opts.storageStatePath,
+      projectChosen: opts.projectChosen,
+    });
     const brokered = brokerEnabled({ roleSession: auth.kind === "role", option: opts.refreshBroker, env: process.env[REFRESH_BROKER_ENV] });
     const storageStatePath = auth.kind === "none" ? undefined : auth.storageStatePath;
     if (storageStatePath && !fs.existsSync(storageStatePath)) {

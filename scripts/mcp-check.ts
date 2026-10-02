@@ -12,7 +12,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { spawnSync } from "node:child_process";
 import { introQuestions } from "../dist/intake.js";
-import { writeProfile } from "../dist/engine/profiles.js";
+import { shellQuote, writeProfile } from "../dist/engine/profiles.js";
 import { siteFolderName } from "../dist/engine/project-folder.js";
 import { revokeFixtureTokens, settle, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE, WAIT_MS } from "./smoke/harness.ts";
 
@@ -716,6 +716,8 @@ async function defaultFolderCheck(): Promise<void> {
       fail(`an attach with no projectPath did not find the sign-in saved in ${site}:\n${withRole}`);
     const noRole = await attachWithout(undefined, {}, { role: "nobody" });
     if (!/no sign-in is saved for role "nobody"/.test(noRole)) fail(`an attach for a role saved nowhere was not refused:\n${noRole}`);
+    if (!noRole.includes(`--role nobody --project ${shellQuote(site)}\``))
+      fail(`the refusal in a folder SceneScout chose does not name it with --project, so the command would save elsewhere:\n${noRole}`);
     const fromRoots = await attachWithout([workspace]);
     if (!fromRoots.includes(`workspace folder, under ${workspace}`))
       fail(`an attach with no projectPath did not use the client's workspace ${workspace}:\n${fromRoots}`);

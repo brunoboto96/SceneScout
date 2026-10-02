@@ -1063,6 +1063,7 @@ server.registerTool(
         const out = await eng.attach({
           url,
           projectDir: projectPath,
+          projectChosen: folder.source === "default",
           storageStatePath,
           role,
           mode,
