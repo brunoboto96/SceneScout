@@ -16,7 +16,7 @@ import { chromium, firefox, webkit, type Page } from "playwright";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { profilePath, writeProfile } from "../../dist/engine/profiles.js";
 import { saveLogin, savedLine } from "../../dist/login-run.js";
-import { BROWSER, check, SIGN_IN_COOKIE, type SmokeContext } from "./harness.ts";
+import { BROWSER, check, eventually, SIGN_IN_COOKIE, WAIT_MS, type SmokeContext } from "./harness.ts";
 
 export const title = "login profiles";
 
@@ -34,11 +34,15 @@ const IDB_OUT = "No IndexedDB token: signed out";
 /** The page text once it has settled on one of two answers (the IndexedDB page answers asynchronously). */
 async function settledText(engine: BrowserEngine, answers: string[]): Promise<string> {
   let text = "";
-  for (let i = 0; i < 20; i++) {
-    text = await pageText(engine);
-    if (answers.some((a) => text.includes(a))) return text;
-    await new Promise((r) => setTimeout(r, 100));
-  }
+  // Spaced out, since each look is a snapshot. A page that never answers is reported by the check that reads the text.
+  await eventually(
+    async () => {
+      text = await pageText(engine);
+      return answers.some((a) => text.includes(a));
+    },
+    WAIT_MS,
+    100,
+  );
   return text;
 }
 
@@ -196,13 +200,17 @@ export async function run({ baseUrl, foreignBaseUrl }: SmokeContext): Promise<vo
     await spa.navigate(`${baseUrl}/session-frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
     const spaPage = (spa as unknown as { page: Page }).page;
     const frameHeading = async (origin: string): Promise<string> => {
-      for (let i = 0; i < 40; i++) {
-        const frame = spaPage.frames().find((f) => f.url().startsWith(`${origin}/session-account.html`));
-        const heading = frame ? await frame.textContent("h1").catch(() => null) : null;
-        if (heading === SESSION_IN || heading === SESSION_OUT) return heading;
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      return "(no answer)";
+      let heading: string | null = null;
+      const answered = await eventually(
+        async () => {
+          const frame = spaPage.frames().find((f) => f.url().startsWith(`${origin}/session-account.html`));
+          heading = frame ? await frame.textContent("h1").catch(() => null) : null;
+          return heading === SESSION_IN || heading === SESSION_OUT;
+        },
+        WAIT_MS,
+        100,
+      );
+      return answered && heading ? heading : "(no answer)";
     };
     const sameFrame = await frameHeading(baseUrl);
     const foreignFrame = await frameHeading(foreignBaseUrl);

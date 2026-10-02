@@ -154,8 +154,13 @@ afterEach(() => {
 
 const base = { severity: "medium" as const, category: "http-error", url: "http://x/a", state: "/a#f1" };
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Poll until `cond` holds, failing after a generous bound: waiting on the condition, not a guess at how long it takes. */
+async function until(label: string, cond: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for: ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -710,7 +715,7 @@ test("a failed background write is recorded, not thrown, and clears on recovery"
   console.error = (...args: unknown[]) => void logged.push(args.join(" "));
   try {
     store.visitState("/a#f1", "http://x/a", "/a", ["button:save"]); // schedules a debounced save() at 500ms
-    await sleep(700);
+    await until("the debounced write to fail and say so", () => logged.length > 0);
   } finally {
     console.error = realError;
   }

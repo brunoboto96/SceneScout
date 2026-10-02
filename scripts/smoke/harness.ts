@@ -73,6 +73,13 @@ export function check(name: string, cond: boolean, context?: string): void {
 }
 
 /**
+ * How long a wait gives its condition by default. A wait returns as soon as the
+ * condition holds, so a generous bound costs a passing run nothing; it only
+ * decides how long a genuine hang takes to be reported.
+ */
+export const WAIT_MS = 15_000;
+
+/**
  * Wait for a condition instead of guessing how long it takes.
  *
  * These waits exist because a click fires a request whose RESPONSE registers
@@ -88,20 +95,21 @@ export function check(name: string, cond: boolean, context?: string): void {
  * silently did nothing and the assertion after it ran against the state
  * before the thing it was waiting for.
  */
-export async function until(label: string, cond: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
+export async function until(label: string, cond: () => boolean | Promise<boolean>, timeoutMs = WAIT_MS): Promise<void> {
   if (!(await eventually(cond, timeoutMs))) throw new Error(`timed out after ${timeoutMs}ms waiting for: ${label}`);
 }
 
 /**
  * Poll like `until`, but answer whether the condition came to hold instead of
  * throwing: for a check whose failure should be reported as that check, with
- * its own context, rather than end the suite.
+ * its own context, rather than end the suite. `everyMs` spaces out a condition
+ * that is costly to ask, such as one that takes a snapshot.
  */
-export async function eventually(cond: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<boolean> {
+export async function eventually(cond: () => boolean | Promise<boolean>, timeoutMs = WAIT_MS, everyMs = 25): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (!(await cond())) {
     if (Date.now() > deadline) return false;
-    await new Promise((r) => setTimeout(r, 25));
+    await new Promise((r) => setTimeout(r, everyMs));
   }
   return true;
 }
@@ -110,10 +118,31 @@ export async function eventually(cond: () => boolean | Promise<boolean>, timeout
  * A deliberate fixed pause, for the cases where the thing being asserted is
  * that something did NOT happen. There is no condition to poll for when the
  * expected outcome is absence, so name the wait honestly rather than dressing
- * it up as a poll.
+ * it up as a poll. A slow machine can only make such a window miss a late
+ * arrival, never fail a check that should pass. Each call says why it has no
+ * condition to wait on instead.
  */
 export function settle(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Requests for a page asked with `held=1`, waiting for the suite to let them be answered. */
+const heldPages = new Set<() => void>();
+
+/** How many `held=1` page requests the fixture server is holding. */
+export function heldPageCount(): number {
+  return heldPages.size;
+}
+
+/**
+ * Answer every `held=1` page request held so far. A held page is a request
+ * provably still in flight for as long as a suite needs it to be, where a
+ * server timer would only make it likely.
+ */
+export function releaseHeldPages(): void {
+  const waiting = [...heldPages];
+  heldPages.clear();
+  for (const answer of waiting) answer();
 }
 
 /** The session cookie the fixture's cookie sign-in sets. */
@@ -293,6 +322,17 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
   // Tiny server for the test app: static pages + a minimal items API for
   // write-policy testing.
   const handle: http.RequestListener = (req, res) => {
+    // Any page asked for with held=1 is answered, as if asked without it, only once the suite releases it (releaseHeldPages).
+    const held = /([?&])held=1(&|$)/;
+    if (held.test(req.url ?? "")) {
+      const answer = (): void => {
+        req.url = (req.url ?? "/").replace(held, (_, before: string, after: string) => (after ? before : "")).replace(/\?$/, "");
+        handle(req, res);
+      };
+      heldPages.add(answer);
+      res.on("close", () => heldPages.delete(answer));
+      return;
+    }
     const urlPath = (req.url ?? "/").split("?")[0];
     // An embed that redirects before it loads, as many do (/embed → /embed/).
     // A server error, served on both origins.
