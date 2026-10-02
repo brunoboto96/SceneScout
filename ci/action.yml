@@ -50,6 +50,10 @@ inputs:
     description: The most minutes of exploration; the report is written after. Empty means 20.
     required: false
     default: ""
+  lanes:
+    description: How many model loops explore at once (1 to 8), each in its own browser and part of the app, sharing the caps above. Empty means 1.
+    required: false
+    default: ""
   price-in:
     description: US dollars per million input tokens, for the cost estimate. Empty means the built-in price for the model, if it has one.
     required: false

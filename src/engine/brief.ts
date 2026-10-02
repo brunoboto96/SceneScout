@@ -148,6 +148,22 @@ function laneObjective(modules: readonly string[], goal?: string): string {
 }
 
 /**
+ * How every lane works, whoever briefs it: formatBriefs passes these to a
+ * planner's lane agents, and an unattended run's lanes (`scenescout ci
+ * --lanes`) are given the same lines in their prompt. One list, so the two
+ * kinds of lane cannot drift apart.
+ */
+export const LANE_RULES: readonly string[] = [
+  `A lane works ITS routes only. Two lanes auditing the same register while a third module is never opened is the failure this plan exists to prevent — and route coverage will look complete either way. A defect on a page it does not own is that page's lane's to file.`,
+  `Every acting tool takes a \`task\`. A lane that acts with none is refused, and the person watching the live view would otherwise see a browser clicking through their app with nothing to say why.`,
+  `File each defect with scout_finding the moment it is judged, before writing the report. A defect only in the report is not in the run's report.`,
+  `Before calling a list empty, stale or stuck, read the status of the request behind it: a correct empty result and a failed one can render identically.`,
+  `On a create form, submit one markup-shaped value, then open where that record is listed. Any lane's session catches it rendering as markup, so the list may belong to another lane.`,
+  `When a control is withheld from this role, call the endpoint behind it with scout_request: hiding a button is not enforcing a rule. When a sort or filter runs, check the result is what it claims.`,
+  `Check scout_coverage before finishing.`,
+];
+
+/**
  * The briefing the planner gives the lanes.
  *
  * It states the two rules a hand-written brief keeps dropping: a lane touches
@@ -165,13 +181,7 @@ export function formatBriefs(briefs: readonly LaneBrief[], opts: BriefOptions = 
     `  scout_attach { session: "<lane>", url: "<origin><landing>", projectPath, mode: "${mode}"${signInArgument(opts)}, objective: "<objective>" }`,
     ``,
     `Rules to pass on, which a hand-written brief tends to drop:`,
-    `  · A lane works ITS routes only. Two lanes auditing the same register while a third module is never opened is the failure this plan exists to prevent — and route coverage will look complete either way. A defect on a page it does not own is that page's lane's to file.`,
-    `  · Every acting tool takes a \`task\`. A lane that acts with none is refused, and the person watching the live view would otherwise see a browser clicking through their app with nothing to say why.`,
-    `  · File each defect with scout_finding the moment it is judged, before writing the report. A defect only in the report is not in the run's report.`,
-    `  · Before calling a list empty, stale or stuck, read the status of the request behind it: a correct empty result and a failed one can render identically.`,
-    `  · On a create form, submit one markup-shaped value, then open where that record is listed. Any lane's session catches it rendering as markup, so the list may belong to another lane.`,
-    `  · When a control is withheld from this role, call the endpoint behind it with scout_request: hiding a button is not enforcing a rule. When a sort or filter runs, check the result is what it claims.`,
-    `  · Check scout_coverage before finishing.`,
+    ...LANE_RULES.map((rule) => `  · ${rule}`),
     `  · A lane reports back with scout_lane_report, not prose, and does NOT close its session: the planner folds the report, which checks each judged defect was filed, then closes it. Call scout_lane_report with no reply to get the instruction to put in its prompt.`,
     ``,
   ];

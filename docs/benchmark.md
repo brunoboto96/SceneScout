@@ -994,8 +994,9 @@ archive; it is recorded so it can be checked, not fixed against this app.
 ## Unattended runs (scenescout ci)
 
 [`scenescout ci`](ci.md) runs the SceneScout method without an agent at the
-keyboard: one model, reached through its API, explores the app in `read-only`
-until it finishes or reaches a cap. Its rows are not comparable with the
+keyboard: a model, reached through its API, explores the app in `read-only`
+until it finishes or reaches a cap, in one loop or, with `--lanes`, in
+several conversations at once that share the caps. Its rows are not comparable with the
 [Results](#results) above, which are eight parallel lanes in `safe-write`
 driven by an agent; compare them with each other.
 
@@ -1027,7 +1028,7 @@ model's key.
 A row is one run, and a single run is noisy: ci-run-1 and ci-run-2 differ only
 in effort and moved recall by two defects. Precision is the labelled ratio
 with its bounds; Brier is lane calibration's, and is "—" because an unattended
-run has no lanes to state a confidence. Cost is the run's own estimate from
+run's lanes, when it has any, hand back no lane report stating a confidence. Cost is the run's own estimate from
 the model's list price. The first two rows were taken by hand with the
 benchmark workflow on the engine at commit `7280e29`, before this workflow
 existed. That commit reports itself as 3.12.0, but the v3.12.0 tag predates

@@ -45,6 +45,10 @@ on:
         description: The most tokens, input and output summed over the run. Empty means the CLI's default.
         type: string
         default: ""
+      lanes:
+        description: Model loops that explore at once, sharing the caps. Empty means the CLI's default.
+        type: string
+        default: ""
   workflow_call:
     inputs:
       app:
@@ -71,6 +75,10 @@ on:
         description: The most tokens, input and output summed over the run. Empty means the CLI's default.
         type: string
         default: ""
+      lanes:
+        description: Model loops that explore at once, sharing the caps. Empty means the CLI's default.
+        type: string
+        default: ""
       ref:
         description: The ref to check out and run, e.g. a release tag. Empty means the calling workflow's.
         type: string
@@ -90,7 +98,7 @@ permissions:
 
 jobs:
   run:
-    name: scenescout ci · ${{ inputs.app }}
+    name: scenescout ci · ${{ inputs.app }}${{ inputs.lanes != '' && format(' · {0} lanes', inputs.lanes) || '' }}
     runs-on: ubuntu-latest
     # 20 minutes of exploration, up to 4 more to write the report, and the setup before it.
     timeout-minutes: 40
@@ -153,6 +161,7 @@ jobs:
           effort: ${{ inputs.effort }}
           max-turns: ${{ inputs.max-turns }}
           max-tokens: ${{ inputs.max-tokens }}
+          lanes: ${{ inputs.lanes }}
           project: ${{ steps.app.outputs.project }}
           upload-artifact: "false"
           upload-sarif: "false"

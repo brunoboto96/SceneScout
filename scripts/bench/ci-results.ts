@@ -27,6 +27,13 @@ export interface CiResultRow {
   provider: string;
   model: string;
   effort: string;
+  /**
+   * Present when the run asked for two or more lanes (--lanes): how many it
+   * asked for, how many the split made (fewer when the app had fewer modules),
+   * how many attached and ran, and oneLoop when it had nothing to split and
+   * explored in one loop.
+   */
+  lanes?: { asked: number; planned: number; ran: number; oneLoop?: true };
   /** The answer key's hash: rows scored against different keys are not comparable. */
   key: string;
   recall: { found: number; expected: number };
@@ -129,6 +136,8 @@ export interface CiRunSummary {
   provider: string;
   model: string;
   effort: string;
+  /** The lanes it asked for, planned and ran, when it asked for two or more. */
+  lanes?: { asked: number; planned: number; ran: number; oneLoop?: true };
   stop: { reason: string };
   usage: { turns: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; seconds: number; estimatedCostUsd?: number | null };
 }
@@ -152,11 +161,21 @@ export function parseRunSummary(v: unknown): CiRunSummary {
   const u = v.usage;
   const cost = u.estimatedCostUsd;
   if (cost !== undefined && cost !== null && (typeof cost !== "number" || !(cost >= 0))) throw new Error(`usage.estimatedCostUsd is ${JSON.stringify(cost)}`);
+  if (v.lanes !== undefined && !isObj(v.lanes)) throw new Error(`lanes is ${JSON.stringify(v.lanes)}, not an object`);
+  const lanes = isObj(v.lanes)
+    ? {
+        asked: count(v.lanes.asked, "lanes.asked"),
+        planned: count(v.lanes.planned, "lanes.planned"),
+        ran: count(v.lanes.ran, "lanes.ran"),
+        ...(typeof v.lanes.oneLoop === "string" ? { oneLoop: true as const } : {}),
+      }
+    : undefined;
   return {
     version: text(v.version, "version"),
     provider: text(v.provider, "provider"),
     model: text(v.model, "model"),
     effort: text(v.effort, "effort"),
+    ...(lanes && lanes.asked > 1 ? { lanes } : {}),
     stop: { reason: text(v.stop.reason, "stop.reason") },
     usage: {
       turns: count(u.turns, "usage.turns"),
@@ -201,6 +220,7 @@ export function resultRow(opts: {
     provider: run.provider,
     model: run.model,
     effort: run.effort,
+    ...(run.lanes ? { lanes: run.lanes } : {}),
     key: text(card.key, "the scorecard's key"),
     recall: { found: card.found.length, expected: count(card.expected, "expected") },
     precision: { correct: count(card.correct, "correct"), labelled, low, high },
@@ -247,6 +267,15 @@ export const TABLE_START = "<!-- ci-results:start (generated from bench/ci-resul
 export const TABLE_END = "<!-- ci-results:end -->";
 
 const thousands = (n: number) => n.toLocaleString("en-US");
+/** A run that asked for lanes says so beside its model, so its row is never read as a single loop's. */
+const lanesNote = (l: CiResultRow["lanes"]): string =>
+  !l
+    ? ""
+    : l.oneLoop
+      ? ` · ${l.asked} lanes asked, one loop ran`
+      : l.ran === 0
+        ? ` · ${l.asked} lanes asked, none ran`
+        : ` · ${l.ran} lanes` + (l.planned < l.asked ? ` of ${l.asked} asked` : "") + (l.ran < l.planned ? `, ${l.planned - l.ran} could not attach` : "");
 const duration = (s: number) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`);
 
 export function renderTable(rows: readonly CiResultRow[]): string {
@@ -276,7 +305,7 @@ export function renderTable(rows: readonly CiResultRow[]): string {
         r.app,
         r.version,
         r.source,
-        `${r.provider} · ${r.model} · ${r.effort}`,
+        `${r.provider} · ${r.model} · ${r.effort}${lanesNote(r.lanes)}`,
         r.key,
         `${r.recall.found}/${r.recall.expected}`,
         `${r.precision.correct}/${r.precision.labelled} (${bounds})`,
