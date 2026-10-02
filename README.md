@@ -268,7 +268,9 @@ Then `scout_report` writes two files side by side in `.scenescout/`:
 page. It opens from the file system with nothing running, needs no network, and
 holds:
 
-- **The report**, rendered from the same Markdown.
+- **The report**, rendered from the same Markdown: the plain-language view
+  first (each problem's steps, what was expected, what happened and its
+  picture), with each problem's technical detail one click away.
 - **The screenshots around each finding**, in an accordion under it, from the
   session that filed it.
 - **Every session's trail**, in the blocks its tasks made, each step with the
