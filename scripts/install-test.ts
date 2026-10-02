@@ -1611,12 +1611,14 @@ test(
     assert.equal(path.dirname(fallback.dir), tmpdir);
     assert.deepEqual(fs.readdirSync(fallback.dir).sort(), [FIRST_LOOK_MARKER, "check.json", "report.md"]);
     assert.match(fallback.note ?? "", /could not be written \((EACCES|EPERM)\), so the report is in a temporary folder/);
-    // Nowhere at all: both reasons, so neither is lost.
+    // Nowhere at all: both reasons, so neither is lost. The temporary folder would go under a file, which POSIX
+    // reports as ENOTDIR and Windows as ENOENT.
     const noTmp = path.join(tmp("sc-first-tmp-"), "a-file");
     fs.writeFileSync(noTmp, "x");
+    const underFile = process.platform === "win32" ? "ENOENT" : "ENOTDIR";
     assert.throws(
       () => writeFirstRunReport(REPORT_FILES, { cwd, tmpdir: noTmp }),
-      /could not be written \((EACCES|EPERM)\), and neither could a temporary folder \(ENOTDIR\)/,
+      new RegExp(`could not be written \\((EACCES|EPERM)\\), and neither could a temporary folder \\(${underFile}\\)`),
     );
     fs.chmodSync(path.join(dir, FIRST_LOOK_MARKER), 0o644);
   },
