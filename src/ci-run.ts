@@ -65,6 +65,7 @@ import {
 } from "./engine/ci.js";
 import { resolveTimeLimits } from "./engine/limits.js";
 import { MEMORY_DIRNAME, writeSelfIgnore, type Finding } from "./engine/memory.js";
+import { sarifFilesFor } from "./engine/sarif.js";
 import { decodePng, diffImages, encodePng } from "./engine/png.js";
 import {
   AnthropicConversation,
@@ -688,7 +689,8 @@ export async function runCi(
     const summary = ciSummaryMarkdown(result, secrets);
     write("summary.md", summary);
     write("ci.json", JSON.stringify(ciSummaryJson(result, deps.version, secrets), null, 2) + "\n");
-    write("ci.sarif", JSON.stringify(ciSarif(result, deps.version, secrets), null, 2) + "\n");
+    const { anchor } = sarifFilesFor({ option: options.sarifFileAnchor, env: process.env, projectDir: options.projectDir, exists: (p) => fs.existsSync(p) });
+    write("ci.sarif", JSON.stringify(ciSarif(result, deps.version, secrets, anchor), null, 2) + "\n");
     // A capture run's outcome is its pictures and ci.json: it wrote no report by design.
     if (options.show) reportWritten = true;
     if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, redactKeys(summary, secrets));

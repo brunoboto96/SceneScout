@@ -91,6 +91,7 @@ Every option of `scenescout check` is an input with the same name. `scenescout c
 | `flow-writes` | `never` | `allow` replays flows under `mode` (below) |
 | `on-refused-step` | `report` | `stop` ends the check at a refused flow step (below) |
 | `gate-retests` | `high` | `never` or `all` (below) |
+| `sarif-file-anchor` | the workflow file that is running | The repository file a `check.sarif` result points at when no saved flow raised it, relative to the repository root (below) |
 
 And the action's own:
 
@@ -122,6 +123,8 @@ permissions:
 ```
 
 A pull request from a fork gets a read-only token, so the upload fails there; leave it off for those runs, or upload only on pushes to your main branch.
+
+Code scanning keeps a result only when its location is a file in the repository, so no result points at a page. An issue a saved flow raised points at that flow's file; every other result points at the anchor, which is the `sarif-file-anchor` input (`--sarif-file-anchor`) when it is set, else the workflow file that is running (from `GITHUB_WORKFLOW_REF`), else `package.json`, else `README.md`. Paths are relative to the repository root, which is `GITHUB_WORKSPACE` on Actions and the project directory elsewhere. The page each result was seen on is in its message, in a logical location of kind `resource` and in `properties.routes`. Fingerprints come from the evidence, so moving the anchor does not reopen alerts.
 
 ### Checking while signed in
 
@@ -477,7 +480,7 @@ In `<project>/.scenescout/ci/`, or `--out`:
 - `report.md` and `report.html`: the report, exactly as an agent's run writes it (it is also in `.scenescout/report.md`, with the run's memory);
 - `summary.md`: how the run ended, what it spent, and the findings this run made or saw again. On GitHub Actions it is also appended to the job summary;
 - `ci.json`: the same, for a script: `stop`, `contractMet`, `usage` (`turns`, `inputTokens`, `cachedInputTokens`, `outputTokens`, `seconds`, `estimatedCostUsd`), `dedup` (`by`, and with the judge `effort`, `calls`, `failed`, `inputTokens`, `outputTokens` and `seconds`, already counted in `usage`), `counts` and `findings`;
-- `ci.sarif`: the findings as SARIF 2.1.0, at `error`, `warning` or `note` by severity, and worth-a-look findings as notes.
+- `ci.sarif`: the findings as SARIF 2.1.0, at `error`, `warning` or `note` by severity, and worth-a-look findings as notes. Each result points at the same anchor file as a check's (`--sarif-file-anchor`, see [Code scanning](#code-scanning)), with its page in the message, in a logical location and in `properties.route`.
 
 The usage line reads like `14 turn(s), 402,310 tokens in (301,200 cached), 18,400 out, 9m 12s, estimated cost $0.0223`. The cost is estimated from the token counts the API returns and the published price of the default models. `--price-in`, `--price-cached-in` and `--price-out` (US dollars per million tokens) replace those prices, or give one for any other model; cached input with no price of its own is charged at the input price. With neither a built-in price nor both `--price-in` and `--price-out`, the line says the cost was not estimated.
 

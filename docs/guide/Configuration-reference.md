@@ -73,6 +73,7 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--flow-writes` | `never` | `never` replays flows under observe's rule; `allow` replays them under `--mode` |
 | `--on-refused-step` | `report` | `report` marks a flow whose step was refused "could not run" and exits 2 with every other verdict kept; `stop` exits 2 at that step with no results |
 | `--gate-retests` | `high` | Which still-reproducing re-tested findings fail the gate: `never`, `high` or `all` |
+| `--sarif-file-anchor` | the running workflow's file, else `package.json`, else `README.md` | The repository file, relative to the repository root, that a `check.sarif` result points at when no saved flow raised it. See [SARIF locations](Ways-to-use-it.md#sarif-locations) |
 
 ### `scenescout ci`
 
@@ -101,6 +102,7 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--nav-timeout-ms` | `20000` | As for `check` |
 | `--project` | the current directory | The project whose `.scenescout/` holds the memory |
 | `--out` | `<project>/.scenescout/ci` | Where the files go |
+| `--sarif-file-anchor` | as for `check` | The repository file each `ci.sarif` result points at |
 
 The API key has no option: it is read from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` only.
 
@@ -195,6 +197,8 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_LOGIN_SUBMIT_SELECTOR` | `login --script` | As `--submit-selector` |
 | `CLAUDE_CONFIG_DIR` | `install`, `doctor` | Where Claude Code keeps its configuration; the skill goes into its `skills/` folder. Default `~/.claude` |
 | `GITHUB_STEP_SUMMARY` | `check`, `ci` | Set by GitHub Actions; the report or summary is appended to it |
+| `GITHUB_WORKFLOW_REF` | `check`, `ci` | Set by GitHub Actions; with no `--sarif-file-anchor`, its workflow file is the file SARIF results point at |
+| `GITHUB_WORKSPACE` | `check`, `ci` | Set by GitHub Actions; the repository root that SARIF file paths are relative to |
 
 Variables the server reads belong in the MCP client's configuration for the server (an `env` entry), not only in your shell.
 
@@ -225,6 +229,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `flow-writes` | empty | As `--flow-writes` |
 | `on-refused-step` | empty | As `--on-refused-step` |
 | `gate-retests` | empty | As `--gate-retests` |
+| `sarif-file-anchor` | empty | As `--sarif-file-anchor`, relative to the repository root; empty means the workflow file that is running |
 | `working-directory` | `.` | Where the check runs; other relative paths are resolved from here |
 | `version` | empty | The scenescout npm version to run; empty means the version of the action's ref |
 | `cli` | empty | A built `dist/cli.js` to run instead of the npm package, for testing the action itself |
@@ -258,6 +263,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `show` | empty | As `--show` |
 | `compare-url` | empty | As `--compare-url` |
 | `dedup` | empty | As `--dedup`; empty means `judge` |
+| `sarif-file-anchor` | empty | As `--sarif-file-anchor`, relative to the repository root; empty means the workflow file that is running |
 | `storage-state` | empty | As `--storage-state`, relative to `working-directory` |
 | `browser` | `chromium` | As `--browser` |
 | `action-timeout-ms` | empty | As `--action-timeout-ms` |

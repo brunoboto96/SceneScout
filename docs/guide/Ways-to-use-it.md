@@ -111,6 +111,15 @@ A step that breaks fails the gate (`flow-step-failed`, high) naming the flow and
 
 **SARIF.** `check.sarif` is SARIF 2.1.0. With the GitHub Action, `upload-sarif: true` sends it to code scanning; the job then needs `security-events: write`.
 
+### SARIF locations
+
+Code scanning keeps a result only when its location is a file in the repository, so the results in `check.sarif` and `ci.sarif` point at repository files, and the page each one was seen on goes beside the file: in the message, as a logical location of kind `resource`, and in `properties.routes` (`properties.route` in `ci.sarif`).
+
+- An issue a saved flow raised points at that flow's file, relative to the repository root.
+- Anything else points at the anchor: `--sarif-file-anchor <path>` (the action's `sarif-file-anchor` input) when given; else, on GitHub Actions, the workflow file that is running, read from `GITHUB_WORKFLOW_REF`; else `package.json` when the repository has one; else `README.md`.
+- The repository root is `GITHUB_WORKSPACE` when it is set, and the project directory otherwise.
+- Alerts keep their identity across runs: the fingerprints come from the evidence, not the location.
+
 ### On GitHub Actions
 
 ```yaml
@@ -151,7 +160,7 @@ npx -y scenescout ci http://127.0.0.1:3000
 - **Caps.** 40 model turns, 1,500,000 tokens and 20 minutes by default (`--max-turns`, `--max-tokens`, `--max-minutes`). The first cap reached ends the exploration; the report is still written and says which cap ended it. `--max-tokens` is the setting that bounds the cost.
 - **Mode.** `read-only` by default. `--mode destructive` also needs `--allow-destructive`.
 - **Duplicates.** By default the run's model is also asked, at its lowest effort, whether a finding the dedup rule keeps apart is one already open on the same page, and merges it when it says so. Each pair asked about sends the two findings' titles, categories and evidence, and the page's path, to the provider, and the calls count in the usage. `--dedup rule` turns it off.
-- **Output.** `report.md`, `report.html`, `summary.md`, `ci.json` and `ci.sarif` in `.scenescout/ci/`, with a usage line: turns, tokens, time and an estimated cost.
+- **Output.** `report.md`, `report.html`, `summary.md`, `ci.json` and `ci.sarif` in `.scenescout/ci/`, with a usage line: turns, tokens, time and an estimated cost. Each `ci.sarif` result points at the anchor file described under [SARIF locations](#sarif-locations).
 - **One element instead of a run.** `--show "the Save button"` captures that element as a PNG and does not explore; `--compare-url <url>` captures it on a second deployment too and writes a diff picture.
 
 The GitHub Action is `brunoboto96/SceneScout/ci`, with the key passed in the step's `env` from a secret:

@@ -15,6 +15,7 @@ import type { CaptureOutcome } from "./capture.js";
 import { markdownCell } from "./check.js";
 import { parseLimitFlag } from "./limits.js";
 import { isWorthALook, redactSecrets, type Finding } from "./memory.js";
+import { SARIF_ANCHOR_FALLBACKS, checkSarifAnchor, sarifLocation } from "./sarif.js";
 
 // ── options ─────────────────────────────────────────────────────────────────
 
@@ -102,6 +103,7 @@ export const CI_OPTION_NAMES = [
   "show",
   "compare-url",
   "dedup",
+  "sarif-file-anchor",
 ] as const;
 
 /** The longest --show description: it becomes a line of the model's prompt. */
@@ -134,6 +136,8 @@ export interface CiOptions {
   navTimeoutMs?: number;
   /** How filed findings are deduplicated: by the rule alone, or with the model judge as well (DEDUP_MODES). */
   dedup: DedupMode;
+  /** The repository file each SARIF result points at; absent means sarif.ts's default. */
+  sarifFileAnchor?: string;
 }
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
@@ -273,6 +277,8 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
   if (!navTimeout.ok) return navTimeout;
   const dedup = flags.get("dedup") ?? DEFAULT_CI_DEDUP;
   if (!(DEDUP_MODES as readonly string[]).includes(dedup)) return { ok: false, error: `--dedup must be one of ${DEDUP_MODES.join(", ")}` };
+  const anchor = flags.has("sarif-file-anchor") ? checkSarifAnchor(flags.get("sarif-file-anchor")!) : undefined;
+  if (anchor && !anchor.ok) return anchor;
 
   const resolve = (p: string): string => (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) ? p : `${cwd.replace(/[\\/]$/, "")}/${p}`);
   return {
@@ -297,6 +303,7 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
       ...(actionTimeout.value !== undefined ? { actionTimeoutMs: actionTimeout.value } : {}),
       ...(navTimeout.value !== undefined ? { navTimeoutMs: navTimeout.value } : {}),
       dedup: dedup as DedupMode,
+      ...(anchor ? { sarifFileAnchor: anchor.value } : {}),
     },
   };
 }
@@ -954,8 +961,13 @@ function appOrigin(url: string): string {
   }
 }
 
-/** This run's findings as SARIF 2.1.0: one rule per category, the finding's id as its fingerprint. */
-export function ciSarif(r: CiResult, version: string, secrets: readonly string[] = []): object {
+/**
+ * This run's findings as SARIF 2.1.0: one rule per category, the finding's id
+ * as its fingerprint. Code scanning keeps only results located in a repository
+ * file, so each points at the anchor (sarif.ts) and carries its page as a
+ * logical location, in `properties.route` and in its message.
+ */
+export function ciSarif(r: CiResult, version: string, secrets: readonly string[] = [], anchor: string = SARIF_ANCHOR_FALLBACKS[0]): object {
   const clean = (s: string): string => redactKeys(redactSecrets(s), secrets);
   const categories = [...new Set(r.findings.map((f) => f.category))].sort();
   return {
@@ -972,19 +984,22 @@ export function ciSarif(r: CiResult, version: string, secrets: readonly string[]
           },
         },
         invocations: [{ executionSuccessful: r.stop !== "provider-error" && r.stop !== "could-not-start", properties: { stop: r.stop } }],
-        originalUriBaseIds: { APP: { uri: `${appOrigin(r.url)}/` } },
-        results: r.findings.map((f) => ({
-          ruleId: `finding/${f.category}`,
-          level: isWorthALook(f) ? "note" : SARIF_LEVEL[f.severity],
-          message: {
-            text: isWorthALook(f)
-              ? `Worth a look — ${clean(f.title)}. A defect only if your project uses ${clean(f.convention ?? "a convention")}.`
-              : `[${f.severity}] ${clean(f.title)}${f.evidence ? ` — ${clean(f.evidence)}` : ""}`,
-          },
-          locations: [{ physicalLocation: { artifactLocation: { uri: clean(pathOf(f.url)).replace(/^\//, ""), uriBaseId: "APP" } } }],
-          partialFingerprints: { "scenescoutFinding/v1": createHash("sha256").update(f.id).digest("hex").slice(0, 32) },
-          ...(isWorthALook(f) ? { properties: { tier: "worth-a-look", convention: clean(f.convention ?? "") } } : {}),
-        })),
+        properties: { app: clean(appOrigin(r.url)) },
+        results: r.findings.map((f) => {
+          const route = clean(pathOf(f.url));
+          return {
+            ruleId: `finding/${f.category}`,
+            level: isWorthALook(f) ? "note" : SARIF_LEVEL[f.severity],
+            message: {
+              text: isWorthALook(f)
+                ? `Worth a look — ${clean(f.title)} — on ${route}. A defect only if your project uses ${clean(f.convention ?? "a convention")}.`
+                : `[${f.severity}] ${clean(f.title)}${f.evidence ? ` — ${clean(f.evidence)}` : ""} — on ${route}`,
+            },
+            locations: [sarifLocation(anchor, route)],
+            partialFingerprints: { "scenescoutFinding/v1": createHash("sha256").update(f.id).digest("hex").slice(0, 32) },
+            properties: { route, ...(isWorthALook(f) ? { tier: "worth-a-look", convention: clean(f.convention ?? "") } : {}) },
+          };
+        }),
       },
     ],
   };
