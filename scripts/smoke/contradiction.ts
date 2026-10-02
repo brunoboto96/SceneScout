@@ -152,6 +152,25 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
       `${baseline} → ${found("refused_empty").length + found("false_success").length}`,
     );
 
+    // ── what a success word on screen is paired with ───────────────────────
+    // Each pair differs in one fact: whether the action put up a new claim,
+    // and whether the claim is free text or a column header.
+    const pairs: Array<[string, string, boolean, string]> = [
+      ["/claims-record.html", "Add comment", false, 'a status badge reading "Published" before the refused write is not a false success'],
+      ["/claims-record-toast.html", "Add comment", true, "the same page putting up a new toast after the refused write is"],
+      ["/claims-columns.html", "Show history", false, 'a new sortable column headed "Updated on" is not a false success'],
+      ["/claims-columns-caption.html", "Show history", true, "the same words as a paragraph are"],
+    ];
+    for (const [route, label, lies, name] of pairs) {
+      await engine.navigate(route);
+      const pairSnap = await engine.snapshot();
+      const ref = new RegExp(`(e\\d+) button "${label}"`).exec(pairSnap)?.[1];
+      if (!ref) throw new Error(`"${label}" not in ${route}: ${pairSnap.slice(0, 400)}`);
+      const pairBefore = found("false_success").length;
+      const out = await engine.click(ref);
+      check(name, found("false_success").length > pairBefore === lies, out.slice(0, 700));
+    }
+
     // The HTTP oracle still reports every refusal on its own. The contradiction
     // rules answer a different question and must not silence it.
     check(

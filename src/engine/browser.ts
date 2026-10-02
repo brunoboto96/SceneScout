@@ -20,7 +20,7 @@ import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type Inter
 import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
 import { normalizeTask } from "./task.js";
-import { CLAIM_SCAN_SCRIPT, findContradictions, type PageState, type WatchedRequest } from "./claims.js";
+import { CLAIM_SCAN_SCRIPT, findContradictions, INFRASTRUCTURE_WRITE_RE, OPEN_DIALOGS_SCRIPT, type PageState, type WatchedRequest } from "./claims.js";
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
@@ -52,7 +52,7 @@ import {
   labelFlag,
   type NameFrom,
 } from "./collector.js";
-import { OracleMonitor, formatViolations, httpErrorDetail } from "./oracles.js";
+import { OracleMonitor, formatViolations, httpErrorDetail, requestKey } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
 import {
@@ -93,6 +93,7 @@ import {
   FORMS_READ_FAILED,
   FORMS_SUBMIT_UNMATCHED,
   isEmptySubmit,
+  isSubmitLike,
   sameControl,
   isNavigationTeardown,
   submits,
@@ -325,8 +326,16 @@ const CHOOSER_GRACE_MS = 2000;
 /** How long a hover waits for delay-gated tooltips (component libraries warm up for as long as ~1500ms). */
 const HOVER_REVEAL_WINDOW_MS = 2500;
 
-/** Non-GET traffic that is auth/telemetry plumbing, not tester-caused state mutation. */
-const BENIGN_MUTATION_RE = /\/auth\/(refresh|token|session)|refresh[-_]?token|\/telemetry|\/analytics|\/heartbeat|\/sentry|\/collect\b|\/logs?\b|\/metrics\b/i;
+/** What a click's result needs to judge a page error the click raised (rankRouteCancellations). */
+interface ClickContext {
+  viaLink: boolean;
+  urlBefore: string;
+  /** Open dialogs as the click began, or null when they could not be read. */
+  dialogsBefore: number | null;
+}
+
+/** Non-GET traffic that is auth/telemetry plumbing, not tester-caused state mutation. One list, shared with the false-success rule. */
+const BENIGN_MUTATION_RE = INFRASTRUCTURE_WRITE_RE;
 
 /**
  * What the policy needs to know about where a request came from: the URLs of
@@ -660,15 +669,22 @@ export class BrowserEngine {
       headers: requestHeaders({ given: input.headers, auth: this.lastAuthHeader, body: input.body }),
     });
     let raw: Parameters<typeof toReplayResult>[0];
+    // Claimed by the first matching request the page sends (the request
+    // listener), so the oracles and the contradiction ledger know it is ours.
+    this.pendingReplay = { method: method.method, key: requestKey(target.url) };
+    this.oracles.replayStarted(target.url);
     try {
       raw = (await page.evaluate(script)) as Parameters<typeof toReplayResult>[0];
-      this.forgetReplay(method.method, target.url);
     } catch (err) {
       // The page could not run the fetch at all (a navigation mid-call, a
       // closed page). The policy answers rather than rejects, so this is not it.
       const message = err instanceof Error ? err.message : String(err);
       this.logAction({ action: "request", target: `${method.method} ${input.path}`, url: page.url(), result: `blocked: ${message.split("\n")[0]}` });
       return `${method.method} ${input.path} — the request did not complete: ${message.split("\n")[0]}`;
+    } finally {
+      this.pendingReplay = null;
+      this.oracles.replayEnded(target.url);
+      for (const hop of this.replayHops.splice(0)) this.oracles.replayEnded(hop);
     }
     const result = toReplayResult(raw);
     this.logAction({
@@ -681,21 +697,34 @@ export class BrowserEngine {
     return formatReplay(method.method, result);
   }
 
+  /** The scout_request call in flight, until the page's request for it is seen. */
+  private pendingReplay: { method: string; key: string } | null = null;
+  /** Addresses the call in flight was redirected to, ended with it. */
+  private readonly replayHops: string[] = [];
   /**
-   * Take the replayed request back out of the contradiction ledger. It was the
-   * agent's call, not the page's, so whatever the page says next is not its
-   * answer — and left in, a replay the policy refused was blamed on the next
-   * click as that click's false success, in place of the click's own request.
-   * Only this request: anything else the page fetched meanwhile stays.
+   * The requests scout_request sent, by identity (redirect hops included). They
+   * are the agent's calls, not the page's: their failures are not the page's
+   * violations, and whatever the page says next is not their answer. Left in
+   * the contradiction ledger, a replay the policy refused was blamed on the
+   * next click as that click's false success.
    */
-  private forgetReplay(method: string, url: string): void {
-    for (let i = this.watchedResponses.length - 1; i >= 0; i -= 1) {
-      const r = this.watchedResponses[i];
-      if (r.method === method && r.url === url) {
-        this.watchedResponses.splice(i, 1);
-        return;
-      }
+  private readonly replayRequests = new WeakSet<import("playwright").Request>();
+  /** When each request started, so the contradiction rules can tell the action's own writes from ones already in flight. */
+  private readonly requestStartedAt = new WeakMap<import("playwright").Request, number>();
+
+  /** Note whether a request the page is sending is this session's scout_request call. */
+  private claimReplay(req: import("playwright").Request): void {
+    const from = req.redirectedFrom();
+    if (from && this.replayRequests.has(from)) {
+      this.replayRequests.add(req);
+      this.oracles.replayStarted(req.url());
+      this.replayHops.push(req.url());
+      return;
     }
+    const pending = this.pendingReplay;
+    if (!pending || req.method() !== pending.method || requestKey(req.url()) !== pending.key) return;
+    this.replayRequests.add(req);
+    this.pendingReplay = null;
   }
 
   /**
@@ -911,16 +940,52 @@ export class BrowserEngine {
    * element on the current page? Runs wherever violations are drained, so the
    * finding reaches the agent in the result of the action that revealed it.
    */
-  /** Record one answered request for the contradiction rules. Ones the policy stopped are marked, never dropped: the rules need to know they were ours. */
+  /**
+   * Record one answered request for the contradiction rules. Ones the policy
+   * stopped are marked, never dropped: the rules need to know they were ours.
+   * The agent's own scout_request calls are left out: the page did not send them.
+   */
   private watchResponse(req: import("playwright").Request, status: number | null): void {
+    if (this.replayRequests.has(req)) return;
     if (this.watchedResponses.length >= BrowserEngine.MAX_WATCHED_RESPONSES) return;
+    const started = this.requestStartedAt.get(req) ?? 0;
     this.watchedResponses.push({
       method: req.method(),
       url: req.url(),
       status,
       resourceType: req.resourceType(),
       blockedByPolicy: this.refusedByAnyPolicy(req),
+      // The current action is a user input only when it is the one that set the input mark.
+      background: this.inputSince === null || this.inputSince < this.actionStartedAt || started < this.inputSince,
     });
+  }
+
+  /**
+   * When the current user input (a click, a keypress, typing, a choice) began,
+   * or null before the first. An action that is not input (a navigation, a
+   * scroll, a crawl) moves actionStartedAt past it, which is how a request is
+   * known to have no input behind it.
+   */
+  private inputSince: number | null = null;
+  /** What the page said as the current input began, for the contradiction rules; null when it could not be read. */
+  private claimBaseline: PageState | null = null;
+
+  /**
+   * Mark the start of a user input: read what the page says now, so a claim
+   * already on screen (a status badge, a heading) is not taken for the
+   * page's answer to this input's write. Never fails the action: with no
+   * baseline every text counts, as before.
+   */
+  private async beginInput(): Promise<void> {
+    this.inputSince = this.actionStartedAt;
+    this.claimBaseline = null;
+    const page = this.page;
+    if (!page || page.isClosed()) return;
+    try {
+      this.claimBaseline = (await page.evaluate(CLAIM_SCAN_SCRIPT)) as PageState;
+    } catch {
+      // A page mid-navigation has nothing on screen to excuse.
+    }
   }
 
   /**
@@ -945,7 +1010,9 @@ export class BrowserEngine {
       // A page mid-navigation has no DOM to ask.
       return;
     }
-    for (const found of findContradictions(requests, state)) {
+    // A baseline belongs to the input that took it, and to its page.
+    const before = this.inputSince !== null && this.inputSince >= this.actionStartedAt ? this.claimBaseline : null;
+    for (const found of findContradictions(requests, state, before)) {
       if (this.contradictionsReported.has(found.evidence)) continue;
       this.contradictionsReported.add(found.evidence);
       this.oracles.noteContradiction(found, url);
@@ -1105,6 +1172,7 @@ export class BrowserEngine {
     }
     this.oracles = new OracleMonitor();
     this.oracles.setPolicyRefusalCheck((req) => this.refusedByAnyPolicy(req));
+    this.oracles.setReplayCheck((req) => this.replayRequests.has(req));
     // A request an embed sends to the app is the app's to answer: only one headed outside the app is the embed's.
     this.oracles.setEmbedAttribution((req) => {
       let site: string | null = null;
@@ -1183,6 +1251,8 @@ export class BrowserEngine {
       }
       this.inFlight += 1;
       this.lastRequestStart = Date.now();
+      this.requestStartedAt.set(req, this.lastRequestStart);
+      this.claimReplay(req);
       const type = req.resourceType();
       if (type === "xhr" || type === "fetch") this.xhrCount += 1;
       const method = req.method();
@@ -1517,6 +1587,7 @@ export class BrowserEngine {
   /** Dialogs (confirm/alert): dismiss in read-only mode, accept otherwise. Must be wired on every page we drive, including adopted popups. */
   private wireDialogHandler(page: Page): void {
     page.on("dialog", (dialog) => {
+      this.nativeDialogAt = Date.now();
       const action = this.readOnly ? "dismiss" : "accept";
       this.logAction({
         action: `dialog:${action}`,
@@ -1526,6 +1597,9 @@ export class BrowserEngine {
       void (this.readOnly ? dialog.dismiss() : dialog.accept()).catch(() => {});
     });
   }
+
+  /** When the page last opened a native dialog (confirm, alert, prompt). */
+  private nativeDialogAt = 0;
 
   private requirePage(): Page {
     if (!this.page || !this.memory) {
@@ -2052,6 +2126,7 @@ export class BrowserEngine {
     if (!live) {
       throw new Error(`Element ${ref} no longer exists in the DOM — take a new scout_snapshot.`);
     }
+    await this.beginInput();
     if (el.testid && live.testid !== el.testid) {
       this.refs.clear();
       throw new Error(
@@ -2078,7 +2153,30 @@ export class BrowserEngine {
     return null;
   }
 
-  private async afterAction(action: string, target: string): Promise<string> {
+  /**
+   * Re-rank a page error this click raised when it reads as a router
+   * cancelling a route change (oracles.ts isRouteCancellation). The dialog
+   * count is read only when there is such an error to judge.
+   */
+  private async rankRouteCancellations(click: ClickContext, url: string): Promise<void> {
+    const since = this.actionStartedAt;
+    if (!this.oracles.hasPageErrorSince(since)) return;
+    let dialogsNow: number | null = null;
+    try {
+      dialogsNow = (await this.requirePage().evaluate(OPEN_DIALOGS_SCRIPT)) as number;
+    } catch {
+      // A page mid-navigation: only a native dialog can count.
+    }
+    const ariaDialogOpened = dialogsNow !== null && click.dialogsBefore !== null && dialogsNow > click.dialogsBefore;
+    this.oracles.downgradeRouteCancellations(since, {
+      byClick: true,
+      viaLink: click.viaLink,
+      urlChanged: url !== click.urlBefore,
+      dialogOpened: ariaDialogOpened || this.nativeDialogAt >= since,
+    });
+  }
+
+  private async afterAction(action: string, target: string, click?: ClickContext): Promise<string> {
     const page = this.requirePage();
     await this.settle();
     let url = page.url();
@@ -2107,6 +2205,7 @@ export class BrowserEngine {
     this.logAction({ action, target, url, ...(frame ? { frame } : {}) });
     await this.scanForInjections();
     await this.scanForContradictions();
+    if (click) await this.rankRouteCancellations(click, url);
     const violations = this.oracles.drain();
     const mutations = this.drainMutations() + this.drainBlocked() + this.drainCreated();
     const navigated = this.snapshotUrl !== "" && url !== this.snapshotUrl;
@@ -2637,7 +2736,8 @@ export class BrowserEngine {
     // Submit-shaped clicks that fire zero network requests are a smell
     // (silent no-op forms): capture the count before to compare after.
     const xhrBefore = this.xhrCount;
-    const submitLike = el.role === "button" && /submit|send|save|create|apply|subscribe|register|sign|post|add\b/i.test(el.name + " " + (el.testid ?? ""));
+    const submitLike = isSubmitLike(el.role, el.name, el.testid);
+    const clickContext: ClickContext = { viaLink: el.role === "link", urlBefore: page.url(), dialogsBefore: this.claimBaseline?.dialogs ?? null };
     const clickTarget = this.scopeOf(el).locator(`xpath=${el.xpath}`);
     // Read before the click: what the form's fields hold when it goes. Only a
     // button or an input can submit a form; nothing else is asked.
@@ -2646,7 +2746,7 @@ export class BrowserEngine {
     const { forced } = await this.resilientClick(clickTarget, this.limits.actionMs, clicks);
     this.memory!.markExercised(this.currentFingerprint, el.key, clicks > 1 ? `click×${clicks}` : "click");
     this.noteFormSubmit(formState, "click", form);
-    const result = await this.afterAction(clicks > 1 ? `click×${clicks}` : "click", `${el.role} "${el.name}"`);
+    const result = await this.afterAction(clicks > 1 ? `click×${clicks}` : "click", `${el.role} "${el.name}"`, clickContext);
     // Impatient-user probe: a rapid multi-click that fires the SAME
     // state-changing request more than once means the action is not guarded
     // against double submission (button not disabled during flight, endpoint
@@ -2671,6 +2771,12 @@ export class BrowserEngine {
     // beacon is not counted as xhr/fetch, so an aborted one looks exactly like
     // "fired nothing" — and the note would blame the app for the tool's block.
     if (submitLike && this.xhrCount === xhrBefore && this.lastActionBlocked === 0 && page.url() === this.snapshotUrl) {
+      // A client-side router can move the page just after the request-based
+      // settle, with no request for it to wait on: watch the URL before
+      // calling the click silent, and look at the requests again after.
+      const landed = await this.stableUrl();
+      if (landed !== this.snapshotUrl) return result + `\nℹ The page then moved client-side to ${landed} (take a new snapshot).` + forcedNote;
+      if (this.xhrCount !== xhrBefore) return result + forcedNote;
       return (
         result +
         `\nℹ NOTE: this submit-style click fired ZERO network requests and no navigation — if the UI showed success, the data may have been silently discarded (worth verifying; category: other/silent-failure).` +
@@ -3210,6 +3316,7 @@ export class BrowserEngine {
   private async pressNow(key: string): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
+    await this.beginInput();
     const refusal = await this.vetFocusedActivation(key);
     if (refusal) return refusal;
     // Identify the focused control BEFORE the key lands — activating it may
@@ -3914,6 +4021,8 @@ export class BrowserEngine {
 
     for (const [i, step] of steps.slice(0, 20).entries()) {
       this.actionStartedAt = Date.now();
+      // A navigation or a scroll is not input: navigate() moves the action mark itself, and what a scroll loads is the page's own doing.
+      if (step.action !== "navigate" && step.action !== "scroll") await this.beginInput();
       const desc = `${i + 1}. ${step.action} ${step.target ?? step.value ?? ""}`;
       // Identity captured BEFORE the action — buttons that relabel themselves
       // (Add to Cart → View Cart) are unmatchable in the post-action DOM.
@@ -4223,6 +4332,7 @@ export class BrowserEngine {
         let failure: string | null = null;
         let refusal: string | null = null;
         this.actionStartedAt = Date.now();
+        if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "press") await this.beginInput();
         try {
           const current = this.requirePage();
           if (step.action === "navigate") {

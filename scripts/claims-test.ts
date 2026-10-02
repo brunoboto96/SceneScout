@@ -259,3 +259,69 @@ test("the same contradiction on the same endpoint carries the same evidence acro
   const b = findContradictions([req({ status: 403, url: "http://other.test/api/things?page=1" })], page({ texts: ["Nothing to show"] }));
   assert.equal(a[0].evidence, b[0].evidence, "the host is not part of the signature");
 });
+
+// ── pairing a success claim with the write it would be lying about ──────────
+// Each pair below differs in the one fact that flips the verdict.
+
+const write = (over: Partial<WatchedRequest> = {}): WatchedRequest =>
+  req({ method: "POST", url: "http://app.test/api/things/7/comments", status: 403, ...over });
+
+test("a success word already on screen before the action is not the page's answer to it", () => {
+  // A record page whose status badge reads "Published" before and after a refused comment.
+  const before = page({ texts: ["Thing 7", "Published", "Add comment"] });
+  assert.deepEqual(findContradictions([write()], page({ texts: ["Thing 7", "Published", "Add comment"] }), before), []);
+  // The contrast: the same refusal, and the action put up a new toast.
+  const found = findContradictions([write()], page({ texts: ["Thing 7", "Published", "Add comment", "Comment saved"] }), before);
+  assert.equal(found[0]?.kind, "false_success");
+  assert.match(found[0].detail, /"Comment saved"/, "the claim quoted is the new one, not the badge");
+});
+
+test("without a baseline every text still counts, as for a page load", () => {
+  assert.equal(findContradictions([write()], page({ texts: ["Published"] }))[0]?.kind, "false_success");
+});
+
+test("a refusal named outright where the page announces it is an admission", () => {
+  // An app echoing the stand-in's own wording in its alert, beside a stale success badge.
+  const after = (said: string): PageState => page({ texts: ["Published", "Saved"], announced: [said] });
+  const before = page({ texts: ["Published"] });
+  for (const said of [
+    "POST /api/things/7/comments was refused by the tester's observe write policy.",
+    "Your comment was rejected.",
+    "Request blocked.",
+    "Could not post the comment.",
+  ]) {
+    assert.deepEqual(findContradictions([write()], after(said), before), [], said);
+  }
+  // The contrast: the same alert with the admission taken out.
+  assert.equal(findContradictions([write()], after("Your comment was queued."), before)[0]?.kind, "false_success");
+});
+
+test("refusal words count when the action put them up, not when a badge already said them", () => {
+  // "Rejected" and "Blocked" are ordinary status badges; only a new one is the page answering.
+  const fresh = findContradictions([write()], page({ texts: ["Rejected", "Saved"] }), page({ texts: [] }));
+  assert.deepEqual(fresh, []);
+  const stale = findContradictions([write()], page({ texts: ["Rejected", "Saved"] }), page({ texts: ["Rejected"] }));
+  assert.equal(stale[0]?.kind, "false_success");
+});
+
+test("a write the page sent in the background is never paired with a success claim", () => {
+  // An error-monitoring beacon refused while a list shows "Updated" text.
+  const shown = page({ texts: ["Updated today"] });
+  assert.deepEqual(findContradictions([write({ background: true })], shown), []);
+  assert.equal(findContradictions([write({ background: false })], shown)[0]?.kind, "false_success");
+});
+
+test("a refused infrastructure write says nothing about the user's change", () => {
+  const shown = page({ texts: ["Saved"] });
+  assert.deepEqual(findContradictions([write({ url: "http://app.test/api/telemetry" })], shown), []);
+  assert.deepEqual(findContradictions([write({ url: "http://app.test/sentry/envelope" })], shown), []);
+  assert.equal(findContradictions([write({ url: "http://app.test/api/things" })], shown)[0]?.kind, "false_success");
+});
+
+test("a write of the same action that went through may own the success message", () => {
+  const shown = page({ texts: ["Saved"] });
+  const kept = req({ method: "PUT", url: "http://app.test/api/things/7", status: 200 });
+  assert.deepEqual(findContradictions([write(), kept], shown), []);
+  // The contrast: that write was the page's own, from before the action.
+  assert.equal(findContradictions([write(), { ...kept, background: true }], shown)[0]?.kind, "false_success");
+});

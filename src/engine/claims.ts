@@ -59,6 +59,14 @@ export interface WatchedRequest {
    * refusal is exactly what these rules judge.
    */
   blockedByPolicy?: boolean;
+  /**
+   * True when the action being judged did not send it: it was already in
+   * flight when the action began, or no user input was pending at all (a page
+   * load, a scroll). A poll or an error-monitoring beacon the page sends on its
+   * own is refused like any other write, but no message on screen is an
+   * answer to it, so a refused one is never paired with a success claim.
+   */
+  background?: boolean;
 }
 
 /** Whether this request is one whose refusal the page should be admitting to. */
@@ -113,6 +121,23 @@ const ERROR_RE =
 const REFUSAL_RE =
   /\b(?:can(?:not|[’'`]?t| not)|must be|(?:is|are) already|only (?:an? |the )?\w+(?: \w+)? (?:can|may|be)|may only|can only(?: be)?|(?:nothing|not) (?:was|has been|have been|been) (?:saved|sent|deleted|updated|created|changed|submitted)|(?:was|were|has|have|is|are)(?: not|n[’']t)(?: been)? (?:saved|sent|deleted|updated|created|changed|submitted))\b/i;
 
+/**
+ * Words that name a refusal outright. An admission when the page ANNOUNCES them
+ * or puts them up in answer to the action, as when a toast echoes the server's
+ * "was refused" message. Not page-wide: "Rejected" and "Blocked" are ordinary
+ * status badges and filter tabs on record pages, and counted wherever they
+ * stood they would excuse every lie on such a page.
+ */
+const REFUSED_RE = /\b(?:refused|rejected|blocked)\b/i;
+
+/**
+ * Addresses of a page's own infrastructure writes: a token refresh, telemetry,
+ * an error monitor, a heartbeat. Refusing one says nothing about whether the
+ * change the user made was kept, so it is never paired with a success claim.
+ */
+export const INFRASTRUCTURE_WRITE_RE =
+  /\/auth\/(refresh|token|session)|refresh[-_]?token|\/telemetry|\/analytics|\/heartbeat|\/sentry|\/collect\b|\/logs?\b|\/metrics\b/i;
+
 /** Whether a piece of announced text explains a refusal. */
 export function isRefusalNotice(text: string): boolean {
   const trimmed = text.trim();
@@ -153,7 +178,20 @@ export interface PageState {
    * an empty-state sentence at all — which is most of them.
    */
   emptyLists: number;
+  /** Open dialogs (native, role=dialog or alertdialog) on the page. Read with the texts so the engine needs no second call. */
+  dialogs?: number;
 }
+
+/** What counts as an open dialog: a native one or an ARIA one. */
+const DIALOG_SEL = 'dialog[open], [role="dialog"], [role="alertdialog"]';
+
+/** Page-side count of the open dialogs alone, for a caller that needs nothing else the claim scan reads. */
+export const OPEN_DIALOGS_SCRIPT = `(() => {
+  const visible = ${VISIBLE_SRC};
+  let dialogs = 0;
+  for (const d of document.querySelectorAll(${JSON.stringify(DIALOG_SEL)})) if (visible(d)) dialogs += 1;
+  return dialogs;
+})()`;
 
 export interface Contradiction {
   kind: "refused_empty" | "false_success";
@@ -182,24 +220,41 @@ function standIn(req: WatchedRequest): string {
     : "";
 }
 
+/** Whether an announced sentence admits the failure: an error, a refusal named outright, or one explained in the app's own words. */
+function admitsInAnnouncement(text: string): boolean {
+  return classify(text) === "error" || REFUSED_RE.test(text) || isRefusalNotice(text);
+}
+
 /**
  * The contradictions this action produced, if any.
  *
  * Both rules are silent whenever the page admits the failure, and both require
  * a genuinely refused request — the page half never fires alone.
+ *
+ * `before` is what the page said when the action began, when the action was
+ * the user's (a click, a keypress, typing). A success claim already on screen
+ * then is not the page's answer to this action's write: a status badge reading
+ * "Published", a heading, a row from earlier. Only what the action put up can
+ * contradict what the action's write met. Without it, every text counts.
  */
-export function findContradictions(requests: readonly WatchedRequest[], page: PageState): Contradiction[] {
+export function findContradictions(requests: readonly WatchedRequest[], page: PageState, before?: PageState | null): Contradiction[] {
   const refused = requests.filter(isRefused);
   if (refused.length === 0) return [];
 
   const claims = page.texts.map(classify);
+  const earlier = before ? new Set([...before.texts, ...(before.announced ?? [])]) : null;
+  const isNew = (text: string): boolean => earlier === null || !earlier.has(text);
   // An app that says what went wrong has behaved correctly, and nothing below
   // applies. This is checked before anything else so that a page carrying both
   // an error banner and a stale empty state is not reported.
   if (claims.includes("error")) return [];
-  // A refusal explained in the app's own words, where the page announces its
-  // responses. Help text with the same wording elsewhere excuses nothing.
-  if ((page.announced ?? []).some(isRefusalNotice)) return [];
+  // An admission where the page announces its responses: an error, a refusal
+  // named outright (an app echoing the server's "was refused"), or one
+  // explained in the app's own words. Help text with the same wording
+  // elsewhere excuses nothing.
+  if ((page.announced ?? []).some(admitsInAnnouncement)) return [];
+  // A refusal named outright in text the action put up, announced or not.
+  if (earlier !== null && page.texts.some((t) => isNew(t) && t.length <= CLAIM_TEXT_MAX && REFUSED_RE.test(t))) return [];
 
   const out: Contradiction[] = [];
 
@@ -218,10 +273,17 @@ export function findContradictions(requests: readonly WatchedRequest[], page: Pa
     });
   }
 
-  const writes = refused.filter((r) => WRITING_METHODS.has(r.method.toUpperCase()));
-  if (writes.length > 0 && claims.includes("success")) {
+  // Only writes this action sent, and not the page's own infrastructure.
+  const isActionWrite = (r: WatchedRequest): boolean => WRITING_METHODS.has(r.method.toUpperCase()) && !r.background && !INFRASTRUCTURE_WRITE_RE.test(r.url);
+  const writes = refused.filter(isActionWrite);
+  // A write of the same action that went through may be the one the message
+  // answers. Which write a "Saved" is about cannot be told from here, and a
+  // high-severity finding must not guess.
+  const kept = requests.some((r) => isActionWrite(r) && DATA_RESOURCES.has(r.resourceType) && !r.blockedByPolicy && r.status !== null && r.status < 400);
+  const successAt = claims.findIndex((c, i) => c === "success" && isNew(page.texts[i]));
+  if (writes.length > 0 && !kept && successAt >= 0) {
     const worst = writes[0];
-    const message = page.texts[claims.indexOf("success")];
+    const message = page.texts[successAt];
     out.push({
       kind: "false_success",
       detail: `${say(worst)} was refused, and the page says ${JSON.stringify(message.trim().slice(0, 80))}. The user is told their change was kept when the server rejected it.${standIn(worst)}`,
@@ -260,6 +322,7 @@ export const CLAIM_SCAN_SCRIPT = `(() => {
   // is a container of static text (its form's help, its warning), and counting
   // it brought back the help text this set exists to exclude.
   const ANNOUNCES = "[role~='status'], [role~='alert'], [aria-live]:not([aria-live='off']), output";
+  const COLUMN_HEADER = "th, [role~='columnheader'], [aria-sort]";
   const seen = new Set();
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
   let el = document.body;
@@ -267,7 +330,8 @@ export const CLAIM_SCAN_SCRIPT = `(() => {
     let own = "";
     for (const node of el.childNodes) if (node.nodeType === 3) own += node.nodeValue;
     own = own.replace(/\\s+/g, " ").trim();
-    if (own && own.length <= ${CLAIM_TEXT_MAX} && !seen.has(own) && visible(el)) {
+    // A column header names what a column holds ("Updated on", "Completed"); it claims nothing.
+    if (own && own.length <= ${CLAIM_TEXT_MAX} && !seen.has(own) && !el.closest(COLUMN_HEADER) && visible(el)) {
       seen.add(own);
       texts.push(own);
     }
@@ -303,7 +367,10 @@ export const CLAIM_SCAN_SCRIPT = `(() => {
       if (s && s.length <= ${CLAIM_TEXT_MAX} && !announced.includes(s)) announced.push(s);
     }
   }
+  // Open dialogs, so a page error raised as one opens can be read as the
+  // confirmation a router cancelled a route change for (oracles.ts).
+  let dialogs = 0;
+  for (const d of document.querySelectorAll(${JSON.stringify(DIALOG_SEL)})) if (visible(d)) dialogs += 1;
 
-
-  return { texts, announced, emptyLists };
+  return { texts, announced, emptyLists, dialogs };
 })()`;
