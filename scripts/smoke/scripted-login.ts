@@ -29,7 +29,8 @@ function forms(values: string[]): string[] {
   return values.flatMap((v) => [v, encodeURIComponent(v), encodeURIComponent(v).replace(/%20/g, "+"), v.replace(/\s+/g, "")]);
 }
 
-function login(args: string[], env: Record<string, string | undefined>): Promise<{ code: number | null; out: string; err: string }> {
+/** `scenescout login` through the built CLI, with no SCENESCOUT_LOGIN_ variable from this process: only `env`'s. */
+export function login(args: string[], env: Record<string, string | undefined>): Promise<{ code: number | null; out: string; err: string }> {
   const clean: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("SCENESCOUT_LOGIN_")) clean[k] = v;
   for (const [k, v] of Object.entries(env)) if (v !== undefined) clean[k] = v;
@@ -45,7 +46,7 @@ function login(args: string[], env: Record<string, string | undefined>): Promise
 }
 
 /** Every file under a directory, read as text. */
-function filesUnder(dir: string): Array<{ file: string; text: string }> {
+export function filesUnder(dir: string): Array<{ file: string; text: string }> {
   if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir, { recursive: true, withFileTypes: true }).flatMap((d) => {
     if (!d.isFile()) return [];
@@ -54,7 +55,8 @@ function filesUnder(dir: string): Array<{ file: string; text: string }> {
   });
 }
 
-function leaked(text: string, secrets: string[]): string[] {
+/** The secrets, in any of their forms, that a text contains, ignoring case. */
+export function leaked(text: string, secrets: string[]): string[] {
   const lower = text.toLowerCase();
   return forms(secrets).filter((s) => s.length > 0 && lower.includes(s.toLowerCase()));
 }

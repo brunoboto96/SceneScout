@@ -80,7 +80,7 @@ The command prints how long the saved login will last. Record it again when it r
 /scenescout --url https://admin.staging.example.com --role operator
 ```
 
-**In CI.** Use a test user on a test tenant whose second factor is an authenticator-app secret, and `scenescout login … --script` with `SCENESCOUT_LOGIN_TOTP_SECRET` ([Signing in from CI](Signing-in.md#signing-in-from-ci)). If the provider uses push or SMS factors, or a CAPTCHA, use a test-only sign-in endpoint or a saved session as a secret instead.
+**In CI.** Use a test user on a test tenant whose second factor is an authenticator-app secret, and `scenescout login … --script` with `SCENESCOUT_LOGIN_TOTP_SECRET` ([Signing in from CI](Signing-in.md#signing-in-from-ci)). For an app that emails or texts a code, passwordless or as a second factor, set the fixed code its test environment accepts as `SCENESCOUT_LOGIN_OTP_CODE` ([A passwordless sign-in](Signing-in.md#a-passwordless-sign-in)). If the provider uses push factors, a code that cannot be fixed, or a CAPTCHA, use a test-only sign-in endpoint or a saved session as a secret instead.
 
 **What to expect.** A session that expires mid-run raises `SESSION AUTH LOST`, and a role session re-attaches once from the role's latest saved profile, so running `scenescout login` again lets it carry on. Routes that bounced to the sign-in page are recorded as not covered.
 
