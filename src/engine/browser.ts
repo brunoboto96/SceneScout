@@ -82,7 +82,7 @@ import {
   type SeenRequest,
 } from "./flow.js";
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
-import { describePace, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
+import { describePace, InFlightRequests, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
 import { crawledRoute, crawlLine } from "./crawl.js";
 import {
   BODY_FETCH_MAX,
@@ -1360,14 +1360,25 @@ export class BrowserEngine {
     this.openSockets.clear();
     this.socketsWarned = false;
     const watchSockets = (p: Page): void => void p.on("websocket", (ws) => this.openSockets.add(ws.url().slice(0, 120)));
+    // A request whose document goes away mid-body gets no finished or failed
+    // event, so a frame that commits a navigation, is removed, or closes with
+    // its page drops what it left in flight (the rule is in settle.ts).
+    const requests = (this.requests = new InFlightRequests<Request, Frame>());
+    const watchFrames = (p: Page): void => {
+      p.on("framenavigated", (frame) => requests.navigated(frame));
+      p.on("framedetached", (detached) => requests.gone((frame) => frame === detached));
+      p.on("close", () => requests.gone((frame) => frame.page() === p));
+    };
+    const watchPage = (p: Page): void => {
+      watchSockets(p);
+      watchFrames(p);
+    };
     // The first page already exists by now; later ones (popups) arrive as events.
-    if (this.page) watchSockets(this.page);
-    this.context.on("page", watchSockets);
-    this.context.on("requestfinished", () => {
-      this.inFlight = Math.max(0, this.inFlight - 1);
-    });
+    if (this.page) watchPage(this.page);
+    this.context.on("page", watchPage);
+    this.context.on("requestfinished", (req) => requests.ended(req));
     this.context.on("requestfailed", (req) => {
-      this.inFlight = Math.max(0, this.inFlight - 1);
+      requests.ended(req, true);
       this.watchResponse(req, null);
       this.pageRequests.failed(req, req.failure()?.errorText ?? "", Date.now(), this.refusedByAnyPolicy(req));
     });
@@ -1388,7 +1399,13 @@ export class BrowserEngine {
           /* no frame: not the driven page */
         }
       }
-      this.inFlight += 1;
+      let sender: Frame | undefined;
+      try {
+        sender = req.frame();
+      } catch {
+        /* a worker's request: no frame, so it ends only by finishing or failing */
+      }
+      requests.started(req, sender, req.isNavigationRequest());
       this.lastRequestStart = Date.now();
       this.requestStartedAt.set(req, this.lastRequestStart);
       this.claimReplay(req);
@@ -1838,8 +1855,12 @@ export class BrowserEngine {
   /** Set at attach: this session was given credentials, so a bounce to a login page is a verdict worth waiting for. */
   private watchesForBounce = false;
 
-  /** Requests started and not yet finished or failed, from the context's own events. */
-  private inFlight = 0;
+  /** Requests started and not yet finished, failed, or left behind by their frame. */
+  private requests = new InFlightRequests<Request, Frame>();
+  /** How many are in flight. */
+  private get inFlight(): number {
+    return this.requests.count;
+  }
   /** When the most recent request started, so a page that fires one late is not read too early. */
   private lastRequestStart = 0;
   /**

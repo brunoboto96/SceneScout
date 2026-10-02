@@ -47,6 +47,7 @@ import * as unload from "./smoke/unload.ts";
 import * as ciRun from "./smoke/ci.ts";
 import * as timeLimits from "./smoke/time-limits.ts";
 import * as snapshotContents from "./smoke/snapshot.ts";
+import * as settleAfterLeaving from "./smoke/settle.ts";
 
 const suites = [
   readOnly,
@@ -67,6 +68,7 @@ const suites = [
   attribution,
   frames,
   snapshotContents,
+  settleAfterLeaving,
   unload,
   timeLimits,
   checkGate,
