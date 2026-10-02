@@ -9,6 +9,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { introQuestions } from "./intake.js";
 
 export const PLAYBOOK_TOOL = "scout_playbook";
 export const PLAYBOOK_PROMPT = "explore";
@@ -82,6 +83,10 @@ export function explorePrompt(playbook: string, args: Record<string, unknown> | 
   const level = given("level");
   if (level !== undefined && !(LEVELS as readonly string[]).includes(level)) {
     throw new Error(`level "${level}" is not one the method knows. Use one of: ${LEVELS.join(", ")}.`);
+  }
+  // Nothing asked for at all: the person has chosen no settings, so the run starts with the plain questions.
+  if (given("url") === undefined && level === undefined && given("focus") === undefined) {
+    return `${playbook}\n\n---\n\nRun an exploratory test session following the method above. I gave no settings: before setup, ask me these questions in one message, then choose the settings from my answers as the method says.\n${introQuestions()}`;
   }
   const asks = [
     given("url") ? `Target: ${given("url")}` : "Target: ask me for the URL of the running app, or find it from the project.",

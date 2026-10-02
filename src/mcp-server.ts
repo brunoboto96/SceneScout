@@ -78,6 +78,7 @@ import { decideOpen, OPEN_CHOICES, OPEN_ENV, openChoiceFromEnv, openInBrowser, t
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
 import { loginCommand } from "./engine/profiles.js";
 import { computeGaps, coverageView, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
+import { DEFAULT_REPORT_AUDIENCE, REPORT_AUDIENCES, type ReportAudience } from "./engine/plain.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
 import {
   ACTION_TIMEOUT_ENV,
@@ -88,12 +89,33 @@ import {
   NAV_TIMEOUT_ENV,
   watchdogFor,
 } from "./engine/limits.js";
+import { MAX_READ_POSTS, READ_POSTS_ENV } from "./engine/policy.js";
 import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { formatScan, scanProject } from "./scan.js";
-import { CAPTURE_MARGIN, CAPTURES_DIRNAME, captureFileName, captureResultText, MAX_CAPTURE_MARGIN } from "./engine/capture.js";
+import {
+  CAPTURE_MARGIN,
+  CAPTURES_DIRNAME,
+  captureFileName,
+  captureResultText,
+  describePicture,
+  EVIDENCE_ENV,
+  EVIDENCE_LIMITS,
+  EVIDENCE_MARGIN,
+  EVIDENCE_MODES,
+  evidenceFrame,
+  evidenceSettings,
+  findingPicturePath,
+  MAX_CAPTURE_MARGIN,
+  RECORD_ENV,
+  recordChoice,
+  returnsInline,
+  type EvidenceMode,
+  type EvidenceSettings,
+} from "./engine/capture.js";
+import { decodePng, fitPicture } from "./engine/png.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
 const engines = new Map<string, BrowserEngine>();
@@ -298,6 +320,7 @@ function reportExtras(eng: BrowserEngine): ReportExtras {
     knownRoutes: all,
     mode: eng.mode,
     trustedEmbeds: [...eng.trustedEmbeds],
+    readPosts: eng.readPosts.map((e) => e.entry),
     policyAttributed: eng.oracleLog.policyAttributed,
     version: PKG_VERSION,
     attachedSessions: [...engines.keys()],
@@ -818,7 +841,7 @@ server.registerTool(
   "scout_attach",
   {
     description:
-      "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass `role` to sign in with a login the user saved by `scenescout login <url> --role <name>`, or a Playwright storage-state JSON as storageStatePath. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
+      "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted, and POSTs the user named in readPosts) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass `role` to sign in with a login the user saved by `scenescout login <url> --role <name>`, or a Playwright storage-state JSON as storageStatePath. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
     inputSchema: {
       url: z.string().describe("Base URL of the running app, e.g. http://localhost:3000"),
       projectPath: z.string().describe("Absolute path to the project (memory + report live in .scenescout/ here)"),
@@ -878,12 +901,27 @@ server.registerTool(
           'Origins of embedded frames (e.g. "https://pay.example.com") whose writes out of the app may go out — ONLY when the user named them, typically a provider in test mode, and only in safe-write mode. ' +
             "Never add one yourself. Hostile input, repeated-click probes and uploads stay refused in them.",
         ),
+      readPosts: z
+        .array(z.string().max(300))
+        .max(MAX_READ_POSTS)
+        .optional()
+        .describe(
+          `POST endpoints that only read, e.g. ["POST /api/search", "POST https://api.example.com/reports/query"], which observe mode then lets out — ONLY when the user named them. Never add one yourself, even when the gap ledger lists a refused POST: ask the user. ` +
+            `Exact paths; * stands for one path segment. Still refused when the path or body looks destructive or the body is a GraphQL mutation. Observe mode only. Default: the ${READ_POSTS_ENV} environment variable, else none.`,
+        ),
       record: z
         .boolean()
-        .default(false)
+        .optional()
         .describe(
           "Keep a frame of the page after every action, under .scenescout/recordings/, and show it beside that step in report.html. " +
-            "Off by default: a recording is pictures of the app under test sitting in the project folder. Turn it on for QA work, where the run is evidence and not only a report.",
+            `Default: the ${RECORD_ENV} environment variable (on or off), else off: a recording is pictures of the app under test sitting in the project folder. Turn it on for QA work, where the run is evidence and not only a report.`,
+        ),
+      evidence: z
+        .enum(EVIDENCE_MODES)
+        .optional()
+        .describe(
+          "What happens to the picture each scout_finding takes of what it is about. 'inline': kept under .scenescout/recordings/, shown in report.html, and returned in the scout_finding result so the conversation shows it. 'file': kept and shown in the report only. 'off': none taken. " +
+            `Default: the ${EVIDENCE_ENV} environment variable, else 'inline', or 'file' in a CI job. Pictures are bounded in size and in how many one session returns (see the configuration reference).`,
         ),
       actionTimeoutMs: z
         .number()
@@ -943,7 +981,9 @@ server.registerTool(
       objective,
       task,
       record,
+      evidence,
       trustedEmbeds,
+      readPosts,
       paceMs,
       actionTimeoutMs,
       navTimeoutMs,
@@ -963,7 +1003,9 @@ server.registerTool(
       objective?: string;
       task?: string;
       record?: boolean;
+      evidence?: EvidenceMode;
       trustedEmbeds?: string[];
+      readPosts?: string[];
       paceMs?: number;
       actionTimeoutMs?: number;
       navTimeoutMs?: number;
@@ -1039,6 +1081,8 @@ server.registerTool(
         if (previous && previous !== store && ![...engines.values()].some((e) => e !== eng && e.memory === previous)) previous.endRun();
         // Before the browser starts: a value it cannot use refuses the attach rather than being replaced.
         const dedupNote = configureDedup(store, dedup);
+        const recording = recordChoice(record, process.env);
+        const pictures = evidenceSettings(evidence, process.env);
         const viewport = viewportWidth && viewportHeight ? { width: viewportWidth, height: viewportHeight } : undefined;
         const out = await eng.attach({
           url,
@@ -1056,8 +1100,9 @@ server.registerTool(
           objective: objective ?? task,
           paceMs,
           task: objective ? task : undefined,
-          record,
+          record: recording,
           trustedEmbeds,
+          readPosts,
           actionTimeoutMs,
           navTimeoutMs,
           memoryStore: store,
@@ -1069,6 +1114,8 @@ server.registerTool(
           await ensureLive(eng.memory.dir);
           writeStatus(target, "idle", "scout_attach");
         }
+        // A new attach is a new count of pictures returned.
+        evidenceFor.set(eng, { ...pictures, shown: 0 });
         openDecisions.set(target, opening);
         // The address holds the token, and goes only to this machine's opener: the live view's loopback and token rules are unchanged.
         let openNote = "";
@@ -1084,11 +1131,23 @@ server.registerTool(
         // a run doing it says where they go rather than leaving the person to
         // find a folder of screenshots later.
         const recordNote =
-          record && eng.memory?.dir
+          recording && eng.memory?.dir
             ? `\n\n📸 RECORDING: a frame of the page after each action, under ${path.join(eng.memory.dir, "recordings", target)}/ (at most ${RECORD_MAX_FRAMES}). scout_report writes them into report.html beside report.md.`
             : "";
+        const picturesNote =
+          pictures.mode !== "off" && eng.memory?.dir
+            ? `\n📷 FINDING PICTURES: ${pictures.mode} (${pictures.source}): each scout_finding keeps a picture of what it names under ${path.join(eng.memory.dir, "recordings")}/ for report.html${pictures.mode === "inline" ? `, and returns the first ${pictures.inlineMax} in its result` : ""}.`
+            : "";
         return text(
-          out + conflictNote + recordNote + dedupNote + describePace(eng.pace) + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine() + openNote,
+          out +
+            conflictNote +
+            recordNote +
+            picturesNote +
+            dedupNote +
+            describePace(eng.pace) +
+            (engines.size > 1 ? `\n${sessionLines()}` : "") +
+            liveLine() +
+            openNote,
           target,
         );
       } catch (err) {
@@ -1131,6 +1190,62 @@ function configureDedup(store: MemoryStore, asked: DedupMode | undefined): strin
   store.dedupJudge = new DedupJudge(ask, { label: plan.label, log: logLine, redact: withoutKeys });
   store.dedupOff = undefined;
   return plan.note;
+}
+
+/** Each session's finding-picture settings from its last attach, and how many pictures its results have carried since. */
+const evidenceFor = new WeakMap<BrowserEngine, EvidenceSettings & { shown: number }>();
+
+type ImageContent = { type: "image"; data: string; mimeType: string };
+
+/**
+ * Take, bound and keep a filed finding's picture (capture.ts decides whether
+ * and of what; png.ts fits it). Returns the line the result adds and, when the
+ * result carries it, the picture. A picture that cannot be taken or kept never
+ * fails the filing, which is already recorded: the line says why there is none.
+ */
+async function findingPicture(eng: BrowserEngine, filed: FiledFinding, ref: string | undefined): Promise<{ line: string; image?: ImageContent }> {
+  const settings = evidenceFor.get(eng);
+  const dir = eng.memory?.dir;
+  if (!settings || !dir) return { line: "" };
+  const { finding, isNew } = filed;
+  const plan = evidenceFrame({
+    mode: settings.mode,
+    ref,
+    pageOpen: eng.alive,
+    isNew,
+    hasPicture: !!finding.picture,
+    regressed: !isNew && !!finding.regressedAt && finding.regressedAt === finding.foundAt,
+  });
+  if (!plan.take) return { line: settings.mode === "off" ? "" : `\nNo picture taken: ${plan.why}.` };
+  try {
+    const shot = await eng.captureEvidence(plan.frame === "element" ? plan.ref : undefined, EVIDENCE_MARGIN);
+    const fitted = fitPicture(decodePng(shot.png), settings.maxPx, settings.maxBytes);
+    if (!fitted) return { line: `\nNo picture kept: none small enough to be readable fits in ${Math.round(settings.maxBytes / 1024)} KB.` };
+    const rel = findingPicturePath(eng.sessionKey, finding.id);
+    const file = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, fitted.png);
+    const picture = {
+      width: fitted.width,
+      height: fitted.height,
+      frame: shot.frame,
+      ...(shot.label ? { label: shot.label } : {}),
+      at: new Date().toISOString(),
+    };
+    eng.memory?.setPicture(finding.id, rel, picture);
+    const said = `\n📷 Picture (${describePicture(picture)}${fitted.shrunk ? ", shrunk to fit" : ""}): ${file}${shot.note ? ` — ${shot.note}` : ""}`;
+    if (!returnsInline(settings.mode, settings.shown, settings.inlineMax)) {
+      const capped =
+        settings.mode === "inline"
+          ? ` Not shown here: this session has returned its ${settings.inlineMax} (${EVIDENCE_LIMITS.inline.env} sets how many); it is in report.html.`
+          : "";
+      return { line: said + capped };
+    }
+    settings.shown += 1;
+    return { line: said, image: { type: "image", data: fitted.png.toString("base64"), mimeType: "image/png" } };
+  } catch (err) {
+    return { line: `\nNo picture kept: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 /** What scout_finding tells the agent about what filing did. */
@@ -1225,7 +1340,7 @@ server.registerTool(
   "scout_snapshot",
   {
     description:
-      "Capture the current page state: URL, state fingerprint, a one-line summary of the main area's heading and text, interactable elements with refs (e1, e2, …) and their state (pressed, selected, checked, expanded, current), what the page announces (alert and status regions, by their text), geometry issues, coverage, and oracle violations since the last action. Re-snapshotting the same route returns a DIFF (refs stay stable). Cheap — prefer this over screenshots.",
+      "Capture the current page state: URL, state fingerprint, a one-line summary of the main area's heading and text, interactable elements with refs (e1, e2, …) and their state (pressed, selected, checked, expanded, current), what the page announces (alert and status regions, by their text), geometry issues, coverage, and oracle violations since the last action. Re-snapshotting a route returns a DIFF against its last snapshot, even after visiting elsewhere, and another tab of the same screen diffs against that screen's last tab; refs stay stable, including across a search or filter that rewrites only the query string. On a dense page, says what past the element cap was cut. Cheap — prefer this over screenshots.",
     inputSchema: {
       full: z.boolean().default(false).describe("Force a full element list instead of a diff"),
       session: sessionParam,
@@ -1244,9 +1359,15 @@ server.registerTool(
   "scout_crawl",
   {
     description:
-      "Engine-side route sweep in ONE call: visits each path (default: all known routes not yet visited), records states into coverage memory, and returns a per-route health summary (HTTP status, element count, oracle violations, dead-ends, auth-redirects). Navigation-only — safe in read-only mode. Use this FIRST for broad coverage; explore interactively only where it flags problems or where journeys matter.",
+      "Engine-side route sweep in ONE call: visits each path (default: all known routes not yet visited), records states into coverage memory, and returns a per-route health summary (HTTP status, element count, what the main area holds, oracle violations, dead-ends, auth-redirects, and ERROR-VIEW or STILL-LOADING for a main area showing only an alert or a loading placeholder). Navigation-only — safe in read-only mode. Use this FIRST for broad coverage; explore interactively only where it flags problems or where journeys matter.",
     inputSchema: {
-      paths: z.array(z.string()).max(150).optional().describe("Paths to visit, e.g. ['/orders','/settings']. Omit to crawl all unvisited known routes."),
+      paths: z
+        .array(z.string())
+        .max(150)
+        .optional()
+        .describe(
+          "Paths to visit, e.g. ['/orders','/settings'], or full URLs on the attached origin. A path resolves from the origin's root, whatever page the session attached on. Omit to crawl all unvisited known routes.",
+        ),
       session: sessionParam,
     },
   },
@@ -1456,7 +1577,8 @@ server.registerTool(
 server.registerTool(
   "scout_navigate",
   {
-    description: "Navigate to a URL or a path relative to the attached base URL (e.g. '/orders'). Also supports 'back' via scout_back.",
+    description:
+      "Navigate to a path on the attached origin (e.g. '/orders') or a full URL on it. A path resolves from the origin's root, whatever page the session attached on. Also supports 'back' via scout_back.",
     inputSchema: {
       target: z.string().describe("Absolute URL or path like /settings"),
       leave: leaveParam,
@@ -1749,7 +1871,7 @@ server.registerTool(
   "scout_finding",
   {
     description:
-      "Record a structured finding (bug, UX issue, or improvement). Deduplicates across runs; automatically captures the recent action trace as the repro. Use for anything worth reporting: crashes, oracle violations you confirmed, dead ends, confusing UX, permission leaks, missing testids — and design-audit improvement opportunities (ux-polish) with their concrete measurements.",
+      "Record a structured finding (bug, UX issue, or improvement). Deduplicates across runs; automatically captures the recent action trace as the repro, and a picture of what it is about (the element `ref` names, else the viewport), kept for report.html and returned in this result as an image. Use for anything worth reporting: crashes, oracle violations you confirmed, dead ends, confusing UX, permission leaks, missing testids — and design-audit improvement opportunities (ux-polish) with their concrete measurements.",
     inputSchema: {
       severity: z.enum(["high", "medium", "low"]),
       category: z.enum(FINDING_CATEGORIES).describe("Pick the closest — use 'other' only when nothing fits"),
@@ -1769,6 +1891,13 @@ server.registerTool(
         .describe(
           "Only for a WORTH-A-LOOK finding: the observation is real, and it is a defect only under a convention of this project you cannot see. Name that convention, e.g. 'a 4px spacing scale' or 'test ids on every control'. The report lists it under \"Worth a look\", apart from the defects, and does not count it as one. Not for \"I could not tell\": leave that unfiled or look closer. Omit for a defect.",
         ),
+      ref: z
+        .string()
+        .max(20)
+        .optional()
+        .describe(
+          "The ref, from the latest scout_snapshot, of the element the finding is about. Its picture (the element plus a margin) is kept with the finding and shown in report.html. Omit it and the picture is the viewport.",
+        ),
       session: sessionParam,
     },
   },
@@ -1782,6 +1911,7 @@ server.registerTool(
         detail,
         evidence,
         convention,
+        ref,
       }: {
         severity: "high" | "medium" | "low";
         category: string;
@@ -1789,6 +1919,7 @@ server.registerTool(
         detail: string;
         evidence?: string;
         convention?: string;
+        ref?: string;
       },
       session,
     ) => {
@@ -1807,7 +1938,10 @@ server.registerTool(
           session: eng.sessionKey,
         });
         if (filed.judgeError) logLine(`dedup judge: ${filed.judgeError}; the rule decided`);
-        return text(filedText(filed, category), session);
+        const picture = await findingPicture(eng, filed, ref);
+        const result = text(filedText(filed, category) + picture.line, session);
+        if (picture.image) result.content.push(picture.image);
+        return result;
       } catch (err) {
         return errorText(err);
       }
@@ -1869,12 +2003,21 @@ server.registerTool(
         .describe(
           "How much of the history to print. 'index' lists findings from earlier runs, and resolved ones, as a row each: id, severity, age, title. 'full' prints every one in full as before — on one project that was 1.75 MB against 113 KB, nearly half of it findings already fixed. Use 'full' when handing the document to someone who has no access to the memory.",
         ),
+      report: z
+        .enum(REPORT_AUDIENCES)
+        .default(DEFAULT_REPORT_AUDIENCE)
+        .describe(
+          "Which parts the report carries. 'both' (default): a plain-language section first — a short summary, then each problem with numbered steps, what was expected, what happened, its picture and its impact (blocks users, annoying, cosmetic), each with its technical detail folded beneath — followed by the technical report. 'qa': the plain section alone, for a tester or anyone not technical. 'dev': the technical report alone, as before the plain section existed. It applies to the files this call writes; the live view always shows both.",
+        ),
       session: sessionParam,
     },
   },
   serializedPerSession(
     "scout_report",
-    async ({ force, level, history }: { force?: boolean; level?: "minimal" | "medium" | "extensive"; history?: "index" | "full" }, session) => {
+    async (
+      { force, level, history, report }: { force?: boolean; level?: "minimal" | "medium" | "extensive"; history?: "index" | "full"; report?: ReportAudience },
+      session,
+    ) => {
       try {
         const eng = engineFor(session);
         if (!eng.memory) throw new Error("Not attached.");
@@ -1942,6 +2085,7 @@ server.registerTool(
           html,
         } = generateReport(eng.memory, eng.oracleLog.all, {
           history,
+          report,
           routesVisited: all.length - unvisited.length,
           routesTotal: all.length,
           designAudits: auditsThisRun,
@@ -1950,6 +2094,7 @@ server.registerTool(
           knownRoutes: all,
           mode: eng.mode,
           trustedEmbeds: [...eng.trustedEmbeds],
+          readPosts: eng.readPosts.map((e) => e.entry),
           policyAttributed: eng.oracleLog.policyAttributed,
           // Which sessions are still open decides whether a quiet one is holding a browser, and how long its trailing idle runs.
           attachedSessions: [...engines.keys()],

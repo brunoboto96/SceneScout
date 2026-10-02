@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
 import { isNonPageRoute, normalizePath } from "../src/engine/fingerprint.ts";
-import { crawledRoute, crawlLine } from "../src/engine/crawl.ts";
+import { crawledRoute, crawlLine, mainStateFlag } from "../src/engine/crawl.ts";
 import { MemoryStore, reachedRoutes } from "../src/engine/memory.ts";
 import { formatNeverSubmittedEmpty } from "../src/engine/forms.ts";
 import {
@@ -27,9 +27,14 @@ import {
   formatUnchosenOptions,
   describeAge,
   generateReport,
+  observeRefusedPostsGap,
   replayDocument,
   reportEvidence,
+  withAudience,
 } from "../src/engine/report.ts";
+import { IMPACT, isSafeRelativePath, PLAIN_WORDING, pictureOf, plainFinding, plainStep, plainSteps, plainWording } from "../src/engine/plain.ts";
+import { FINDING_CATEGORIES } from "../src/engine/memory.ts";
+import { ORACLE_KINDS } from "../src/engine/oracles.ts";
 import { buildReplayHtml, escapeHtml, evidenceFor, framePath, RECORD_MAX_FRAMES, renderMarkdown, resolveFrame, taskBlocks } from "../src/engine/replay.ts";
 import type { ActivityLine } from "../src/engine/live.ts";
 
@@ -223,6 +228,45 @@ test("ledger: touching one control clears the nothing-exercised gap for that rou
   store.visitState("/form#b", "http://x/form?open=1", "/form", ["textbox:name", "button:save", "button:cancel"]);
   store.markExercised("/form#a", "button:save", "click");
   assert.ok(!computeGaps(store).some((g) => g.includes("NOTHING exercised")));
+});
+
+test("ledger: a page whose POST observe refused is named, with the endpoint and how to name it as a read", () => {
+  const store = freshStore();
+  store.visitState("/search#a", "http://x/search", "/search", ["textbox:query"]);
+  store.noteObserveRefusedPost("/search", "POST /api/search");
+  store.noteObserveRefusedPost("/search", "POST /api/search");
+  assert.deepEqual(store.observeRefusedPosts, [{ route: "/search", endpoints: ["POST /api/search"] }], "deduplicated");
+  const line = computeGaps(store).find((g) => g.includes("observe refused"));
+  assert.ok(line, `expected the refused POST in the ledger, got: ${JSON.stringify(computeGaps(store))}`);
+  assert.ok(line.includes("/search (POST /api/search)") && line.includes("readPosts"), line);
+  // Beside the route lines, not in place of them: both reach the ledger.
+  const both = computeGaps(store, { routesVisited: 1, routesTotal: 2, designAudits: 0, knownRoutes: ["/search", "/orders"], unvisitedRoutes: ["/orders"] });
+  assert.ok(both.some((g) => g.includes("never visited") && g.includes("/orders")) && both.some((g) => g.includes("observe refused")), JSON.stringify(both));
+  // The contrast: once a POST to it went out (named as a read, or sent in a looser mode), no line.
+  store.clearObserveRefusedPosts((e) => e === "POST /api/search");
+  assert.ok(!computeGaps(store).some((g) => g.includes("observe refused")));
+  assert.equal(observeRefusedPostsGap([{ route: "/search", endpoints: [] }]), null);
+});
+
+test("ledger: a closed lane's refused POSTs are kept in project memory for the planner's report", () => {
+  // Lanes close their sessions before the planner writes the report, so the record lives in memory, on disk.
+  const lane = freshStore();
+  lane.noteObserveRefusedPost("/reports", "POST /api/reports/query", 1000);
+  lane.flush();
+  const planner = new MemoryStore(lane.dir.replace(/[\\/]\.scenescout$/, ""));
+  stores.push(planner);
+  assert.ok(
+    computeGaps(planner).some((g) => g.includes("/reports (POST /api/reports/query)")),
+    JSON.stringify(computeGaps(planner)),
+  );
+  // Two processes: the later of a refusal and a clear wins in the merge, whichever saves last.
+  planner.clearObserveRefusedPosts((e) => e === "POST /api/reports/query", 2000);
+  planner.flush();
+  lane.noteObserveRefusedPost("/other", "POST /api/other", 1500);
+  lane.flush();
+  const after = new MemoryStore(lane.dir.replace(/[\\/]\.scenescout$/, ""));
+  stores.push(after);
+  assert.deepEqual(after.observeRefusedPosts, [{ route: "/other", endpoints: ["POST /api/other"] }], JSON.stringify(after.observeRefusedPosts));
 });
 
 test("ledger: an abandoned journey does not count as task ease being measured", () => {
@@ -573,6 +617,26 @@ test("replay: frames hang under the finding they belong to, at the prefix the re
   // A finding with no frames reads exactly as it did before recording existed.
   assert.ok(!renderMarkdown(md, [{ id: "e3aad70ee8", frames: [] }]).includes('class="evidence"'));
   assert.ok(!renderMarkdown(md).includes('class="evidence"'));
+});
+
+test("replay: a finding's picture shows open under it, with or without recorded frames, and links to itself", () => {
+  const picture = { file: "recordings/clerk/finding-e3aad70ee8.png", width: 320, height: 120, caption: '320×120, "Save" and around it' };
+  const md = "### A finding\n\n- **Id:** `e3aad70ee8` · **Category:** http-error\n- **Where:** `/orders.html`\n";
+  const alone = renderMarkdown(md, [{ id: "e3aad70ee8", frames: [], picture }]);
+  assert.match(alone, /<figure class="picture">/);
+  assert.match(alone, /data-testid="finding-picture-open" data-finding="e3aad70ee8"/);
+  assert.match(alone, /<img loading="lazy" [^>]*src="recordings\/clerk\/finding-e3aad70ee8\.png" width="320" height="120"/);
+  assert.match(alone, /320×120, &quot;Save&quot; and around it/, "the caption is escaped");
+  assert.ok(!alone.includes('class="evidence"'), "no frames: no accordion");
+  assert.ok(alone.indexOf("e3aad70ee8") < alone.indexOf('<figure class="picture">'), "under the finding's own list");
+  const served = renderMarkdown(md, [{ id: "e3aad70ee8", frames: [], picture }], "record/");
+  assert.match(served, /src="record\/recordings\/clerk\/finding-e3aad70ee8\.png"/, "over HTTP, the live view's route");
+  const both = renderMarkdown(md, [
+    { id: "e3aad70ee8", frames: [{ at: "2026-09-20T14:00:01.000Z", action: "click", detail: "Save", frame: "recordings/clerk/0002.jpg" }], picture },
+  ]);
+  assert.ok(both.indexOf('<figure class="picture">') < both.indexOf('<details class="evidence">'), "the picture first, then the frames");
+  // The contrast: the same finding with no picture shows none.
+  assert.ok(!renderMarkdown(md, [{ id: "e3aad70ee8", frames: [] }]).includes("picture"));
 });
 
 test("replay: a run with no frames says so rather than showing empty boxes", () => {
@@ -999,6 +1063,18 @@ test("crawl: an explicitly crawled path that answered as a page joins the route 
   assert.equal(crawledRoute({ ...page, deadEnd: true }), null, "the same 200 with nothing on the page: an app answering every path, not a route");
   assert.equal(crawledRoute({ ...page, status: "no-response" }), null);
   assert.equal(crawledRoute({ ...page, path: "/api/things", requestedRoute: "/api/things", landedRoute: "/api/things" }), null);
+  // A client-rendered app answers 200 for a path it does not have and draws its not-found view; a page stuck loading is no better.
+  assert.equal(crawledRoute({ ...page, mainState: "error" }), null, "the app's error view: a 200 that is not a route");
+  assert.equal(crawledRoute({ ...page, mainState: "loading" }), null, "a placeholder that never resolved: nothing says the route exists");
+  assert.equal(crawledRoute({ ...page, mainState: null }), "/reports/archive", "the same page with content of its own joins");
+  assert.equal(mainStateFlag("error"), "ERROR-VIEW");
+  assert.equal(mainStateFlag("loading"), "STILL-LOADING");
+  assert.equal(mainStateFlag(null), null);
+  // With route identity: a crawled record page joins as its route class, and the same page showing the error view does not join at all.
+  const record = { path: "/things/WID-2025-001", status: 200, requestedRoute: normalizePath("https://app.example/things/WID-2025-001"), loginRedirect: false };
+  const recordPage = { ...record, landedRoute: record.requestedRoute };
+  assert.equal(crawledRoute(recordPage), "/things/:id");
+  assert.equal(crawledRoute({ ...recordPage, mainState: "error" }), null);
 
   // Through the store: the known-route count rises by exactly one.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-crawl-"));
@@ -1030,5 +1106,208 @@ test("crawl: a path that ended on another route says REDIRECTED in its line, and
     crawlLine({ ...stayed, landedRoute: "/settings/profile" }, { ...counts, main: "main EMPTY" }, []),
     "/settings — 200 · 94 el · main EMPTY · REDIRECTED → /settings/profile",
     "what the main area holds sits beside the element count",
+  );
+});
+
+// ---- The plain-language report (#291) ----
+
+test("plain wording: one entry for every finding category and every oracle kind, and nothing else", () => {
+  const expected = [...FINDING_CATEGORIES, ...ORACLE_KINDS].sort();
+  assert.deepEqual(Object.keys(PLAIN_WORDING).sort(), expected, "a new category or oracle needs its plain words in PLAIN_WORDING");
+});
+
+test("plain wording: each entry reads as plain language", () => {
+  for (const [kind, words] of Object.entries(PLAIN_WORDING)) {
+    assert.ok(words.problem.length > 0 && !words.problem.endsWith("."), `${kind}: the problem is a short phrase without a full stop`);
+    assert.match(words.expected, /^[A-Z].*\.$/, `${kind}: what was expected is a sentence`);
+    // The vocabulary this view exists to keep out: oracle names, status codes, request methods, route syntax.
+    for (const text of [words.problem, words.expected]) {
+      assert.doesNotMatch(text, /oracle|_|\bHTTP\b|\b[1-5]\d\d\b|:id|testid|\bDOM\b/i, `${kind}: "${text}" is not plain`);
+      assert.doesNotMatch(text, /\b(GET|POST|PUT|PATCH|DELETE)\b/, `${kind}: "${text}" names a request method`);
+    }
+  }
+  assert.deepEqual(plainWording("a-category-from-an-older-file"), PLAIN_WORDING.other);
+  assert.deepEqual(plainWording("toString"), PLAIN_WORDING.other, "a prototype key is not a category");
+  assert.deepEqual(IMPACT, { high: "Blocks users", medium: "Annoying", low: "Cosmetic" });
+});
+
+test("plain steps: each repro action as a person would do it, and the tester's own steps left out", () => {
+  const cases: Array<[string, string | null]> = [
+    ["navigate http://app.test/things @ http://app.test/things", "Go to http://app.test/things"],
+    ["crawl /things/new @ http://app.test/things/new", "Go to http://app.test/things/new"],
+    ['click button "Save" @ http://app.test/things', 'Click the "Save" button'],
+    ['click link "New thing" @ http://app.test/things/new', 'Click the "New thing" link'],
+    ['click×2 button "Create" @ http://app.test/x', 'Double-click the "Create" button'],
+    ['click×3 button "Create" @ http://app.test/x', 'Click 3 times on the "Create" button'],
+    ['click button "" @ http://app.test/x', "Click the unnamed button"],
+    ['type textbox "Name" ← "Ada" @ http://app.test/x', 'Type "Ada" into the "Name" field'],
+    ['type searchbox "Find" ← "a \\"quoted\\" word" + Enter @ http://app.test/x', 'Type "a \\"quoted\\" word" into the "Find" search box and press Enter'],
+    ['select combobox "Status" = archived @ http://app.test/x', 'Choose "archived" in the "Status" list'],
+    ['upload the "Attachment" input (accepts .pdf) ← report.pdf (1200 bytes, application/pdf; generated) @ http://app.test/x', 'Attach the file "report.pdf"'],
+    ['hover button "Help" @ http://app.test/x', 'Point at the "Help" button'],
+    ["press Escape @ http://app.test/x", "Press Escape"],
+    ["scroll down @ http://app.test/x", "Scroll down"],
+    ["back @ http://app.test/x", "Go back to the previous page"],
+    ['plan:click button "Next" @ http://app.test/x', 'Click the "Next" button'],
+    ['click widget "Odd" @ http://app.test/x', 'Click the "Odd" widget'],
+    ["snapshot @ http://app.test/x", null],
+    ["screenshot @ http://app.test/x", null],
+    ["design-audit @ http://app.test/x", null],
+    ["journey:start create a thing @ http://app.test/", null],
+    ["write-policy:blocked POST /api/things @ http://app.test/x", null],
+  ];
+  for (const [line, want] of cases) assert.equal(plainStep(line), want, line);
+});
+
+test("plain steps: start at the last page the run went to, or at the page the trace began on", () => {
+  assert.deepEqual(
+    plainSteps([
+      "crawl /elsewhere @ http://app.test/elsewhere",
+      "navigate http://app.test/things @ http://app.test/things",
+      "snapshot @ http://app.test/things",
+      'click button "Export" @ http://app.test/things',
+    ]),
+    ["Go to http://app.test/things", 'Click the "Export" button'],
+    "what came before the last navigation was on another page",
+  );
+  assert.deepEqual(
+    plainSteps([
+      "journey:start add a thing @ http://app.test/",
+      'click link "New thing" @ http://app.test/things/new',
+      'click button "Create" @ http://app.test/things/new',
+    ]),
+    ["Go to http://app.test/", 'Click the "New thing" link', 'Click the "Create" button'],
+    "a trace with no navigation starts on the page its first step was on",
+  );
+  assert.deepEqual(plainSteps([]), []);
+});
+
+test("a finding's picture: its own first, a recorded frame next, and never a path that leaves the run's folder", () => {
+  const f = { id: "a", severity: "high", category: "visual", title: "t", detail: "d", url: "u", state: "/s", repro: [], foundAt: "", runs: 1 } as const;
+  assert.equal(pictureOf({ ...f, repro: [] }), undefined);
+  assert.equal(pictureOf({ ...f, repro: [] }, "recordings/s/0001-click.jpg"), "recordings/s/0001-click.jpg");
+  assert.equal(pictureOf({ ...f, repro: [], picture: "findings/a.png" } as never, "recordings/s/0001-click.jpg"), "findings/a.png");
+  for (const bad of ["../outside.png", "/etc/x.png", "https://evil.test/x.png", "javascript:alert(1)", "a//b.png", "a b.png", 42]) {
+    assert.equal(pictureOf({ ...f, repro: [], picture: bad } as never), undefined, String(bad));
+    if (typeof bad === "string") assert.equal(isSafeRelativePath(bad), false, bad);
+  }
+});
+
+test("the report setting: both puts the plain section first, qa prints it alone, dev prints the technical report alone", () => {
+  const store = freshStore();
+  store.addFinding({
+    severity: "high",
+    category: "http-error",
+    title: "Saving a thing fails",
+    detail: "The save request fails and the form stays open with no message.",
+    evidence: "POST /api/things → HTTP 500",
+    url: "http://app.test/things/new",
+    state: "/things/new#abc",
+  });
+  store.addFinding({
+    severity: "low",
+    category: "visual",
+    title: "A label is clipped",
+    detail: "The label is cut off.",
+    url: "http://app.test/",
+    state: "/#def",
+  });
+  const extras = { routesVisited: 2, routesTotal: 3, designAudits: 1 };
+  const both = generateReport(store, [{ kind: "http_error", severity: "high", detail: "POST /api/things 500", url: "", at: "" }], extras, {
+    write: false,
+  }).markdown;
+  const qa = generateReport(store, [], { ...extras, report: "qa" }, { write: false }).markdown;
+  const dev = generateReport(store, [], { ...extras, report: "dev" }, { write: false }).markdown;
+  const unset = generateReport(store, [{ kind: "http_error", severity: "high", detail: "POST /api/things 500", url: "", at: "" }], extras, {
+    write: false,
+  }).markdown;
+
+  assert.equal(unset, both.replace(/Generated: .*/, unset.match(/Generated: .*/)![0]), "both is the default");
+  const order = [
+    "# SceneScout Report",
+    "## In plain words",
+    "### 1. Saving a thing fails",
+    "## Technical detail",
+    "## Summary",
+    "## Findings — seen this session",
+  ];
+  const at = order.map((h) => both.indexOf(h));
+  assert.ok(
+    at.every((i, k) => i >= 0 && (k === 0 || i > at[k - 1])),
+    `sections in order: ${order.map((h, k) => `${h}@${at[k]}`).join(", ")}`,
+  );
+  assert.match(both, /This run found 2 problems: 1 blocks users and 1 is cosmetic\. It went to 2 of the 3 pages it knew about\./);
+  assert.match(both, /- The server refused or failed a request \(once\)/);
+  assert.match(both, /\*\*Blocks users\*\* · The server refused or failed a request · on http:\/\/app\.test\/things\/new/);
+  assert.match(both, /\*\*What was expected:\*\* The action completes/);
+  assert.doesNotMatch(both, /also seen on/, "a finding seen on one page names only that page");
+  const shared = { ...store.findings[0], seenOn: ["/other-things", "/more-things"] };
+  assert.match(plainFinding(shared, 1, { audience: "both" }).join("\n"), /on http:\/\/app\.test\/things\/new, and also seen on \/other-things, \/more-things/);
+  assert.match(both, /\*\*What happened:\*\* The save request fails/);
+  assert.match(
+    both,
+    /<details><summary>Technical detail<\/summary>\n\n- \*\*Finding id:\*\* `[0-9a-f]+` · \*\*Category:\*\* http-error · \*\*Severity:\*\* high/,
+  );
+  assert.match(both, /- \*\*Evidence:\*\* `POST \/api\/things → HTTP 500`/);
+  assert.equal(both.match(/^- \*\*Id:\*\* /gm)?.length, 2, "each finding's own Id line appears once, in the technical report: frames hang under it");
+
+  assert.ok(qa.includes("## In plain words") && qa.includes("### 2. A label is clipped"));
+  for (const technical of ["## Summary", "## Gap ledger", "```ts", "## Technical detail", "the technical detail below"]) {
+    assert.ok(!qa.includes(technical), `qa leaves out ${technical}`);
+  }
+  assert.match(qa, /The run left \d+ things unchecked\.\n\n- /, "with no gap ledger to point at, qa lists what was not checked");
+
+  assert.ok(!dev.includes("In plain words") && !dev.includes("## Technical detail"));
+  assert.match(dev, /^# SceneScout Report\n\nGenerated: .*\n\n## Summary\n/, "dev is the technical report as it was");
+  assert.equal(
+    dev,
+    withAudience(dev.split("\n"), "dev", () => ["never built"]),
+  );
+});
+
+test("report.html: the plain view first, a picture shown, the technical detail one click away", () => {
+  const md = [
+    "# SceneScout Report",
+    "",
+    "## In plain words",
+    "",
+    "### 1. A <b>thing</b> fails",
+    "",
+    "![What the page showed](recordings/s/0001-click.jpg)",
+    "",
+    "![x](../../secret.png)",
+    "",
+    "<details><summary>Technical detail</summary>",
+    "",
+    "- **Finding id:** `abc`",
+    "",
+    "</details>",
+    "",
+    "## Technical detail",
+    "",
+    "## Summary",
+  ].join("\n");
+  const file = renderMarkdown(md);
+  assert.match(file, /<h3 id="plain">In plain words<\/h3>/);
+  assert.match(file, /<h3 id="technical">Technical detail<\/h3>/);
+  assert.match(
+    file,
+    /<figure class="picture"><a href="recordings\/s\/0001-click\.jpg"[^>]*data-testid="report-picture-open"><img [^>]*src="recordings\/s\/0001-click\.jpg" alt="What the page showed">/,
+  );
+  assert.ok(!file.includes("secret.png"), "a picture path leaving the run's folder is dropped");
+  assert.ok(file.includes("A &lt;b&gt;thing&lt;/b&gt; fails"));
+  assert.match(file, /<details><summary data-testid="report-technical-toggle">Technical detail<\/summary>/);
+  assert.match(renderMarkdown(md, [], "record/"), /src="record\/recordings\/s\/0001-click\.jpg"/, "the served view reaches a recorded frame through its route");
+  assert.match(renderMarkdown("![p](findings/a.png)", [], "record/"), /src="findings\/a\.png"/, "only recordings go through the frame route");
+
+  const base = { sessions: [], project: "p", at: "2026-01-01T00:00:00.000Z", version: "" };
+  const html = buildReplayHtml({ ...base, markdown: md });
+  assert.match(
+    html,
+    /<nav><a href="#plain" data-testid="report-plain-link">In plain words<\/a><a href="#technical" data-testid="report-technical-link">Technical detail<\/a><a href="#steps"/,
+  );
+  assert.match(
+    buildReplayHtml({ ...base, markdown: "# SceneScout Report\n\n## Summary" }),
+    /<nav><a href="#report" data-testid="report-top-link">Report<\/a><a href="#steps"/,
   );
 });

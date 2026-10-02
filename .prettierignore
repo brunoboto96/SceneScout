@@ -5,3 +5,4 @@ package-lock.json
 test-app/
 # Prose and tables are hand-laid-out; reflowing them is churn, not consistency.
 *.md
+.mcpb-build/

@@ -14,12 +14,15 @@ import {
 } from "./memory.js";
 import type { OracleViolation } from "./oracles.js";
 import { sayVerification } from "./verify.js";
+import { describePicture, readFindingPicture } from "./capture.js";
 import type { WriteMode } from "./policy.js";
 import { feedForSession } from "./live.js";
 import { buildReplayHtml, evidenceFor, type FindingEvidence, type ReplaySession } from "./replay.js";
 import { calibrate, formatCalibration } from "./calibration.js";
 import { formatPace, measurePace } from "./pace.js";
 import { formatNeverSubmittedEmpty } from "./forms.js";
+import { DEFAULT_REPORT_AUDIENCE, formatPlainSection, type ReportAudience } from "./plain.js";
+import { COLLECTOR_CAP } from "./collector.js";
 
 function playwrightSkeleton(f: Finding): string {
   const routeClass = f.state.split("#")[0].split("?")[0];
@@ -145,9 +148,16 @@ export function formatWorthALook(items: readonly Finding[], sessionStart: string
     lines.push(`- **A defect only if** your project uses ${f.convention ?? "a convention the finding does not name"}`);
     if (f.evidence) lines.push(`- **Seen:** \`${f.evidence}\``);
     lines.push(`- **Where:** \`${f.state}\` (${f.url})${alsoSeenOn(f)}`);
+    lines.push(...pictureLine(f));
     lines.push(``, f.detail, ``);
   }
   return lines;
+}
+
+/** A finding's picture as a bullet, its path relative to report.md, or nothing when it has none. */
+export function pictureLine(f: Finding): string[] {
+  const p = readFindingPicture(f);
+  return p ? [`- **Picture:** \`${p.file}\` (${describePicture(p)})`] : [];
 }
 
 /** The other routes a merged finding was filed on, as the end of its Where line, or "". */
@@ -196,9 +206,22 @@ export function findingEvidence(memory: MemoryStore, sessions: readonly ReplaySe
       // running at once, the run's whole log interleaves them, and the steps
       // before a finding would come from whichever lane acted last.
       const own = f.session ? sessions.find((s) => s.session === f.session) : undefined;
-      return { id: f.id, frames: evidenceFor(own ? own.steps : all, f.foundAt) };
+      const picture = readFindingPicture(f);
+      return {
+        id: f.id,
+        frames: evidenceFor(own ? own.steps : all, f.foundAt),
+        ...(picture
+          ? {
+              picture: {
+                file: picture.file,
+                ...(picture.width && picture.height ? { width: picture.width, height: picture.height } : {}),
+                caption: describePicture(picture),
+              },
+            }
+          : {}),
+      };
     })
-    .filter((e) => e.frames.length > 0);
+    .filter((e) => e.frames.length > 0 || !!e.picture);
 }
 
 /**
@@ -251,6 +274,8 @@ export interface ReportExtras {
   mode?: WriteMode;
   /** Origins trusted with their embeds' writes; they only counted in safe-write. */
   trustedEmbeds?: string[];
+  /** POST endpoints the user named as reads; they only count in observe. */
+  readPosts?: string[];
   /** The engine's version, for the HTML's header. */
   version?: string;
   /** Sessions attached right now. Only these can be holding a browser, so only these are warned about. */
@@ -266,6 +291,12 @@ export interface ReportExtras {
    * between runs of the same machine, and a sample carrying it can never match.
    */
   pace?: boolean;
+  /**
+   * Which parts the document carries: "both" (the default) the plain-language
+   * view first and the technical report after it, "qa" the plain view alone,
+   * "dev" the technical report alone, as it was before the plain view existed.
+   */
+  report?: ReportAudience;
 }
 
 /**
@@ -352,13 +383,10 @@ function offersSubmit(elements: Record<string, unknown>): boolean {
   });
 }
 
-/**
- * The collector stops at 150 elements, so on a dense page the submit control
- * may simply not be in the element list. "No submit found" then means "we did
- * not look far enough", not "there is nothing to submit" — never suppress on
- * that basis.
- */
-const COLLECTOR_CAP = 150;
+// The collector stops at COLLECTOR_CAP elements, so on a dense page the
+// submit control may simply not be in the element list. "No submit found"
+// then means "we did not look far enough", not "there is nothing to submit" —
+// never suppress on that basis.
 
 /**
  * Make app-controlled text safe inside a Markdown table cell. The backslash
@@ -518,6 +546,26 @@ export function coverageView(memory: MemoryStore, session: string, scope: "sessi
 }
 
 /**
+ * The gap-ledger line for pages whose scripts sent a POST that observe
+ * refused, or null. Some apps read through POST (a search, a report query); a
+ * page loading its data that way cannot be tested in observe until the user
+ * names the endpoint in `readPosts`. The engine cannot tell a read from a
+ * write, so it names the endpoints and leaves the choice to the user.
+ */
+export function observeRefusedPostsGap(pages: ReadonlyArray<{ route: string; endpoints: readonly string[] }> | undefined): string | null {
+  const list = (pages ?? []).filter((p) => p.endpoints.length > 0);
+  if (list.length === 0) return null;
+  const shown = list
+    .slice(0, 8)
+    .map((p) => `${p.route} (${p.endpoints.join(", ")})`)
+    .join("; ");
+  return (
+    `${list.length} page(s) sent a POST that observe refused, so whatever it loads is untested: ${shown}${list.length > 8 ? " …" : ""}. ` +
+    `If one of these only reads (a search or query sent as POST), the user can name it in readPosts ("POST /path") and the page can be tested in observe; anything that writes stays refused.`
+  );
+}
+
+/**
  * The route lines of the gap ledger: never visited, visited but nothing
  * exercised, never design-audited. All three count over ONE set, the route
  * contract (`knownRoutes`), and say so, so their figures can be compared with
@@ -629,6 +677,9 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
           : ""),
     );
   }
+  // From project memory, not a session: lanes close theirs before the report is written.
+  const refusedPosts = observeRefusedPostsGap(memory.observeRefusedPosts);
+  if (refusedPosts) gaps.push(refusedPosts);
   const journeyTotal = Object.values(facts).reduce((a, f) => a + (f.journeysCompleted ?? 0), 0);
   if (journeyTotal === 0) {
     gaps.push(
@@ -638,6 +689,36 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
   const roles = Object.keys(memory.roleAccess);
   if (roles.length < 2) gaps.push(`single-role run (${roles.join(", ") || "no role recorded"}) — permission boundaries and role capability gaps are untested`);
   return gaps;
+}
+
+/** The last frame on screen before each finding was filed, by id: its picture on a recorded run. */
+function lastFrames(memory: MemoryStore): Map<string, string> {
+  return new Map(findingEvidence(memory, replaySessions(memory)).map((e) => [e.id, e.frames[e.frames.length - 1].frame]));
+}
+
+/**
+ * The document for an audience. `technical` is the report's lines, its title
+ * and date before the first section. The plain section is built only when it
+ * is printed: "both" puts it between the date and the technical report, which
+ * gets a heading of its own, and "qa" prints it alone.
+ */
+export function withAudience(technical: readonly string[], audience: ReportAudience, plain: () => string[]): string {
+  if (audience === "dev") return technical.join("\n");
+  // The title and date are everything before the first section.
+  const first = technical.findIndex((l) => l.startsWith("## "));
+  const split = first < 0 ? technical.length : first;
+  const head = technical.slice(0, split);
+  const body = technical.slice(split);
+  if (audience === "qa") return [...head, ...plain()].join("\n");
+  return [
+    ...head,
+    ...plain(),
+    `## Technical detail`,
+    ``,
+    `Everything below is for developers: requests, oracles, routes and ids, the gap ledger and a test skeleton for each finding.`,
+    ``,
+    ...body,
+  ].join("\n");
 }
 
 /**
@@ -795,6 +876,7 @@ export function generateReport(
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}`);
     if (f.evidence) lines.push(`- **Evidence:** \`${f.evidence}\``);
     lines.push(`- **Where:** \`${f.state}\` (${f.url})${alsoSeenOn(f)}`);
+    lines.push(...pictureLine(f));
     lines.push(`- **Seen in runs:** ${f.runs}`);
     // A merge the model made is shown with what was filed, so a wrong one can be seen, and refiled as its own defect (ADR 4).
     for (const m of judgedMergesOf(f)) {
@@ -907,6 +989,19 @@ export function generateReport(
     lines.push(``);
   }
 
+  if (extras?.readPosts && extras.readPosts.length > 0) {
+    lines.push(`## Read POSTs`);
+    lines.push(``);
+    lines.push(
+      extras.mode === "observe"
+        ? `Named by the user as endpoints that only read, so observe let them out unless the path or body looked destructive or the body was a GraphQL mutation:`
+        : `Named as reads, but not applied: they only count in observe mode, and this run was ${extras.mode ?? "read-only"}:`,
+    );
+    lines.push(``);
+    for (const e of extras.readPosts) lines.push(`- \`${e}\``);
+    lines.push(``);
+  }
+
   lines.push(...violationRollup(oracleLog.filter((v) => !v.embed)));
   lines.push(
     ...embedSection(
@@ -938,7 +1033,18 @@ export function generateReport(
   // judged for the number to mean anything; formatCalibration decides both.
   lines.push(...formatCalibration(calibrate(memory.laneDecisions, memory.findings)));
 
-  const markdown = lines.join("\n");
+  const markdown = withAudience(lines, extras?.report ?? DEFAULT_REPORT_AUDIENCE, () =>
+    formatPlainSection({
+      current,
+      historical: historical.length,
+      worthALook: worthALook.length,
+      violations: oracleLog.filter((v) => !v.embed),
+      routes: extras && extras.routesTotal > 0 ? { visited: extras.routesVisited, total: extras.routesTotal } : undefined,
+      gaps,
+      lastFrames: lastFrames(memory),
+      audience: extras?.report ?? DEFAULT_REPORT_AUDIENCE,
+    }),
+  );
   const outPath = path.join(memory.dir, "report.md");
   const htmlPath = path.join(memory.dir, "report.html");
   let htmlWritten = false;

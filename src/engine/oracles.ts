@@ -2,8 +2,21 @@ import type { Page, Request } from "playwright";
 import type { Contradiction } from "./claims.js";
 import { redactSecrets } from "./memory.js";
 
+/** Every kind of violation the oracles record. One list, so the report's plain wording can be held equal to it. */
+export const ORACLE_KINDS = [
+  "console_error",
+  "page_error",
+  "request_failed",
+  "http_error",
+  "dom_injection",
+  "refused_empty",
+  "false_success",
+  "postmessage_token",
+] as const;
+export type OracleKind = (typeof ORACLE_KINDS)[number];
+
 export interface OracleViolation {
-  kind: "console_error" | "page_error" | "request_failed" | "http_error" | "dom_injection" | "refused_empty" | "false_success" | "postmessage_token";
+  kind: OracleKind;
   severity: "high" | "medium";
   detail: string;
   url: string;

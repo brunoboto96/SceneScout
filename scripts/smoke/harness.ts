@@ -334,6 +334,19 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       return;
     }
     const urlPath = (req.url ?? "/").split("?")[0];
+    // Says whether the request carried an Authorization header, never its value. Served on both
+    // origins, and open to a cross-origin call that sends one, as a third-party API is.
+    if (urlPath === "/api/auth-echo") {
+      const cors = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization" };
+      if (req.method === "OPTIONS") {
+        res.writeHead(204, cors);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { ...cors, "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ authorization: req.headers.authorization ? "sent" : "none" }));
+      return;
+    }
     // An embed that redirects before it loads, as many do (/embed → /embed/).
     // A server error, served on both origins.
     if (urlPath === "/api/fail-500") {
@@ -428,6 +441,25 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     if (req.method && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
       const key = `${req.method} ${urlPath}`;
       stats.writes[key] = (stats.writes[key] ?? 0) + 1;
+    }
+    // A search read through POST (read-posts.html). A body carrying a delete command or a GraphQL mutation is counted
+    // apart, so a suite can prove none arrived while plain searches did.
+    if (urlPath === "/api/search" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        const tag = body.includes('"action":"delete"') ? " (delete)" : body.includes("mutation") ? " (mutation)" : "";
+        if (tag) stats.writes[`POST /api/search${tag}`] = (stats.writes[`POST /api/search${tag}`] ?? 0) + 1;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ results: ["Widget A", "Widget B"] }));
+      });
+      return;
+    }
+    if (urlPath === "/api/notes" && req.method === "POST") {
+      res.writeHead(201, { "content-type": "application/json" });
+      res.end("{}");
+      return;
     }
     // A visit a page records as it loads (first-look-post.html): counted in `writes` above, and answered as a real endpoint would.
     if (urlPath === "/api/visits" && req.method === "POST") {
@@ -781,10 +813,14 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       const family: TokenFamily = { current: newToken(), spent: new Set(), access: new Set([newToken()]), revoked: false, rotations: 0 };
       families.push(family);
       const session = JSON.stringify({ accessToken: [...family.access][0], refreshToken: family.current });
+      // With idb=1 the sign-in also keeps a marker in IndexedDB, as an auth SDK may, and moves on once it is committed.
+      const idb = /[?&]idb=1(&|$)/.test(req.url ?? "");
+      const go = idb
+        ? `const o = indexedDB.open("rt-auth", 1); o.onupgradeneeded = () => o.result.createObjectStore("marks");` +
+          ` o.onsuccess = () => { const tx = o.result.transaction("marks", "readwrite"); tx.objectStore("marks").put("rt-idb-marker", "mark"); tx.oncomplete = () => location.replace("/rt-app"); };`
+        : `location.replace("/rt-app");`;
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
-      res.end(
-        `<!doctype html><title>Signing in</title><script>localStorage.setItem("session", ${JSON.stringify(session)}); location.replace("/rt-app");</script>`,
-      );
+      res.end(`<!doctype html><title>Signing in</title><script>localStorage.setItem("session", ${JSON.stringify(session)}); ${go}</script>`);
       return;
     }
     if (urlPath === "/rt-app") {

@@ -50,6 +50,11 @@ export const XPATH_OF_SRC = `(el) => {
  * A label's text is read without the control's own text: a wrapping label
  * holds the control, and a select's options or a textarea's contents are not
  * its label.
+ *
+ * `content` is what the element's image content says, which the text cannot
+ * hold: the alt text of the first descendant <img>, else the aria-label or
+ * <title> of a descendant <svg> or role="img", in document order, skipping
+ * anything inside an aria-hidden part of the element.
  */
 export const NAME_FACTS_SRC = `(el) => {
     const tag = el.tagName.toLowerCase();
@@ -60,6 +65,17 @@ export const NAME_FACTS_SRC = `(el) => {
     for (const label of Array.from(el.labels || [])) {
       const own = label.contains(el) ? el.textContent || "" : "";
       labels.push((label.textContent || "").replace(own, ""));
+    }
+    let content = "";
+    for (const d of el.querySelectorAll("img, svg, [role='img']")) {
+      const hidden = d.closest('[aria-hidden="true"]');
+      if (hidden && el.contains(hidden)) continue;
+      const title = d.tagName.toLowerCase() === "svg" ? d.querySelector(":scope > title") : null;
+      const said = (d.tagName === "IMG" ? d.getAttribute("alt") : d.getAttribute("aria-label") || (title ? title.textContent : "")) || "";
+      if (said.trim()) {
+        content = said;
+        break;
+      }
     }
     const live = /^(status|alert|log|timer|marquee)$/.test(role) || tag === "output" ||
       (el.hasAttribute("aria-live") && el.getAttribute("aria-live") !== "off");
@@ -77,6 +93,7 @@ export const NAME_FACTS_SRC = `(el) => {
       alt: el.getAttribute("alt") || "",
       live,
       text: el.innerText || el.textContent || "",
+      content,
     };
   }`;
 
@@ -92,8 +109,15 @@ export const NAME_FACTS_SRC = `(el) => {
  * fallback stays.
  *
  * - A select is never named by its options: their text is its value, not its name.
- * - Other elements are named by their text, and by title when they have none
- *   (an icon-only button with a tooltip).
+ * - Other elements are named by their text; with none, by their image content
+ *   (a link holding only a logo with alt text, a button holding only an svg
+ *   with a <title>); and with neither, by title (an icon-only button with a
+ *   tooltip). Text and image content are not joined: a control with both is
+ *   named by its text, as it was before image content counted.
+ * - A name taken from image content carries `prior`, the name the rule gave
+ *   before image content counted (the title, or nothing). The name is half of
+ *   the coverage key, so the key under the earlier rule is kept beside the new
+ *   one and coverage recorded under it carries over (memory.ts keyAliases).
  * - A live region (status, alert, log, timer, an aria-live region, <output>)
  *   is named by the text it announces, which is what matters after an action.
  * - A whitespace-only aria-label ends the name with nothing, as it always has
@@ -125,6 +149,7 @@ export const PICK_NAME_SRC = `(f) => {
       return { name: (clean(f.nameAttr) || t || f.tag).slice(0, 80), from: "fallback" };
     }
     if (clean(f.text)) return named(clean(f.text));
+    if (clean(f.content)) return { ...named(clean(f.content)), prior: clean(f.title).slice(0, 80) };
     return named(clean(f.title));
   }`;
 
@@ -142,14 +167,23 @@ export interface NameFacts {
   alt: string;
   live: boolean;
   text: string;
+  content: string;
+}
+
+/** A name PICK_NAME_SRC chose, and the name the earlier rule gave when the two can differ. */
+export interface PickedName {
+  name: string;
+  from: NameFrom | null;
+  /** Present only when image content named the element: the name before image content counted. */
+  prior?: string;
 }
 
 /**
  * PICK_NAME_SRC run outside a page, from the same source the page runs, so a
  * table test exercises exactly the rule the collector ships.
  */
-export function pickName(facts: NameFacts): { name: string; from: NameFrom | null } {
-  return (new Function(`return (${PICK_NAME_SRC});`)() as (f: NameFacts) => { name: string; from: NameFrom | null })(facts);
+export function pickName(facts: NameFacts): PickedName {
+  return (new Function(`return (${PICK_NAME_SRC});`)() as (f: NameFacts) => PickedName)(facts);
 }
 
 /** The element's name and where a field's came from, as page-side source. */
@@ -262,6 +296,26 @@ export const FOCUS_MOVES_PROPS = [
   "height",
 ];
 
+/** The most elements a snapshot lists in full; past it, what is left is counted (cutSummary). */
+export const COLLECTOR_CAP = 150;
+/** Pager and "load more" controls listed past the cap, so a lane can still reach the rest of a long list. */
+export const MAX_KEPT_PAST_CAP = 10;
+/** How many elements past the cap are looked at, to keep them or count them, before the rest goes uncounted. */
+export const MAX_SCANNED_PAST_CAP = 2000;
+
+/**
+ * A control that pages a list or loads more of it, by its name: "Next",
+ * "Previous page", "Page 3", "»", "Load more", "Show 20 more", "More results".
+ * Narrower than PAGER_NAME, which also takes "Item 4" and "Step 2" for a
+ * carousel's slides: past the cap, those are the list itself.
+ */
+export const LIST_PAGER_NAME =
+  /^(?:[‹›«»<>←→]|(?:go to )?(?:next|previous|prev|first|last)(?: page)?|(?:go to )?page \d+|(?:load|show|see|view) (?:\d+ )?more\b.*|more results)$/i;
+
+/** A test id that names a pager or a "load more" control: "pager-next", "pagination", "load-more", "next-page". */
+export const PAGER_TESTID =
+  /(?:^|[-_.:])(?:pager|pagination|paginator|load-?more|show-?more|(?:next|prev|previous)-?page|page-?(?:next|prev|previous))(?:$|[-_.:])/i;
+
 /**
  * Page-side interactable collector. Shipped as a STRING, not a function:
  * loader transforms (tsx/vitest esbuild hooks inject a `__name` helper) break
@@ -290,18 +344,29 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
   // Everything else listed is here for its test id or its text, and is neither
   // an unnamed control nor a gap in coverage.
   const CONTROL_ROLES = /^(button|link|tab|menuitem|menuitemcheckbox|menuitemradio|checkbox|radio|switch|combobox|textbox|searchbox|slider|spinbutton|option|treeitem)$/;
-  const isInteractive = (el) => {
-    if (el.matches('a[href], button, input, select, textarea, summary, [contenteditable="true"], [contenteditable=""]')) return true;
-    if (CONTROL_ROLES.test(el.getAttribute("role") || "")) return true;
+  // For an element that is neither a native control nor in a control role:
+  // what alone makes it actionable (affordanceFlags). Null for a control.
+  const affordancesOf = (el) => {
+    if (el.matches('a[href], button, input, select, textarea, summary, [contenteditable="true"], [contenteditable=""]')) return null;
+    if (CONTROL_ROLES.test(el.getAttribute("role") || "")) return null;
     const tabindex = el.getAttribute("tabindex");
-    if (tabindex !== null && tabindex.trim() !== "" && Number(tabindex) >= 0) return true;
-    if (el.hasAttribute("onclick") || typeof el.onclick === "function") return true;
+    const tabStop = tabindex !== null && tabindex.trim() !== "" && Number(tabindex) >= 0;
+    const clickHandler = el.hasAttribute("onclick") || typeof el.onclick === "function";
+    let pointer = false;
     if (window.getComputedStyle(el).cursor === "pointer") {
       const parent = el.parentElement;
-      return !parent || window.getComputedStyle(parent).cursor !== "pointer";
+      pointer = !parent || window.getComputedStyle(parent).cursor !== "pointer";
     }
-    return false;
+    return { tabStop, clickHandler, pointer };
   };
+  const isInteractive = (aff) => aff === null || aff.tabStop || aff.clickHandler || aff.pointer;
+  // Past the element cap, a control that pages the list or loads more of it
+  // is still listed (up to MAX_KEPT_PAST_CAP), and the rest is only counted.
+  const LIST_PAGER = ${String(LIST_PAGER_NAME)};
+  const PAGER_TID = ${String(PAGER_TESTID)};
+  let keptPastCap = 0;
+  let scannedPastCap = 0;
+  const cut = [];
   // A horizontally scrolling container a control sits outside of: the control
   // is reachable, by a sideways scroll of that container, but nothing on screen
   // shows it is there. Carousels (scroll-snap) page sideways by design and are
@@ -554,6 +619,15 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
         : tag === "output" ? "status"
         : el.hasAttribute("aria-live") && el.getAttribute("aria-live") !== "off" ? (el.getAttribute("aria-live") === "assertive" ? "alert" : "status")
         : "generic");
+    if (out.length >= ${COLLECTOR_CAP}) {
+      // Past the cap only a bounded number of elements is looked at at all.
+      if (++scannedPastCap > ${MAX_SCANNED_PAST_CAP}) { cut.push({ cut: true, uncounted: true }); break; }
+      const tid = el.getAttribute("data-testid");
+      const said = (el.getAttribute("aria-label") || el.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 60);
+      const pages = LIST_PAGER.test(said) || (tid !== null && PAGER_TID.test(tid));
+      if (!pages || keptPastCap >= ${MAX_KEPT_PAST_CAP}) { cut.push({ cut: true, role, testid: tid }); continue; }
+      keptPastCap += 1;
+    }
     const rect = el.getBoundingClientRect();
     const elStyle = window.getComputedStyle(el);
     // Below-the-fold is reachable (scroll); clipped INSIDE an overflow-hidden
@@ -609,7 +683,8 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
     const offPage = docX + rect.width <= 0 || docY + rect.height <= 0;
     const focusable = el.tabIndex >= 0 && el.disabled !== true;
     const named = nameOf(el);
-    const interactive = isInteractive(el);
+    const affords = affordancesOf(el);
+    const interactive = isInteractive(affords);
     const checkable = tag === "input" && (inputType === "checkbox" || inputType === "radio");
     out.push({
       coveredBy: coveredByPinnedChrome(el, rect, role),
@@ -626,8 +701,10 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
       name: named.name,
       ...policyText(el),
       nameFrom: named.from,
+      ...(named.prior !== undefined ? { priorName: named.prior } : {}),
       testid: el.getAttribute("data-testid"),
       interactive,
+      affords: affords && (affords.tabStop || affords.clickHandler || affords.pointer) ? affords : null,
       ariaHidden: el.closest('[aria-hidden="true"]') !== null,
       liveOnly: !el.matches(controlSelector),
       state: {
@@ -653,9 +730,8 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
         h: Math.round(rect.height),
       },
     });
-    if (out.length >= 150) break;
   }
-  return out;
+  return cut.length > 0 ? out.concat(cut) : out;
 })()`;
 
 /**
@@ -781,6 +857,131 @@ export function labelFlag(el: { name: string; nameFrom?: NameFrom | null }): str
 export function displayName(el: { role: string; name: string }): string {
   if (el.name) return el.name;
   return LIVE_REGION_ROLES.has(el.role) ? "(empty live region)" : "(unnamed)";
+}
+
+/** What alone makes an element that is neither a native control nor in a control role actionable (the collector's affordancesOf). */
+export interface Affordances {
+  /** tabindex 0 or more. */
+  tabStop: boolean;
+  /** An onclick attribute or property. Listeners added with addEventListener cannot be seen from the page. */
+  clickHandler: boolean;
+  /** A pointer cursor it sets itself, not one inherited from a clickable parent. */
+  pointer: boolean;
+}
+
+/**
+ * The snapshot's flags for an element listed without a control's role that a
+ * user can still act on: "clickable" for a click handler or its own pointer
+ * cursor, "focusable" for a tab stop. A row a click opens then reads apart
+ * from a wrapper listed only for its test id, which gets neither.
+ */
+export function affordanceFlags(el: { affords?: Affordances | null }): string[] {
+  const a = el.affords;
+  if (!a) return [];
+  const flags: string[] = [];
+  if (a.clickHandler || a.pointer) flags.push("clickable");
+  if (a.tabStop) flags.push("focusable");
+  return flags;
+}
+
+/** What the collector reports of an element past its cap: its role and test id, or that the count stopped. */
+export interface CutElement {
+  role?: string;
+  testid?: string | null;
+  uncounted?: boolean;
+}
+
+/**
+ * A test id as a family: a trailing number or id after a separator becomes
+ * "*", so "row-12" and "row-13" read as "row-*" while "pager-next" stays itself.
+ */
+export function testidFamily(testid: string): string {
+  return testid.replace(/([-_.:])(?:\d+|[0-9a-f]{8}(?:-?[0-9a-f]{4}){3}-?[0-9a-f]{12}|[0-9a-f]{12,})$/i, "$1*");
+}
+
+/**
+ * What a truncated snapshot left out, by role and test-id family, largest
+ * group first: "38 link [row-*], 1 button [pager-next], 12 generic". At most
+ * `groups` groups are named; the rest is counted together. "and more past
+ * those, not counted" when the collector stopped looking.
+ */
+export function cutSummary(cut: readonly CutElement[], groups = 8): string {
+  const counts = new Map<string, number>();
+  let uncounted = false;
+  for (const c of cut) {
+    if (c.uncounted) {
+      uncounted = true;
+      continue;
+    }
+    const label = `${c.role ?? "element"}${c.testid ? ` [${testidFamily(c.testid)}]` : ""}`;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const named = sorted.slice(0, groups).map(([label, n]) => `${n} ${label}`);
+  const rest = sorted.slice(groups).reduce((sum, [, n]) => sum + n, 0);
+  if (rest > 0) named.push(`${rest} other`);
+  if (uncounted) named.push("and more past those, not counted");
+  return named.join(", ");
+}
+
+/** A key without the ordinal the collector adds to the second and later elements sharing it ("tid:row~3" → "tid:row"). */
+export function keyFamily(key: string): string {
+  return key.replace(/~\d+$/, "");
+}
+
+/**
+ * Which element of the previous snapshot each current element is, as that
+ * snapshot's key, or null for an element new since. Gives the ref an element
+ * keeps, and what the diff calls added, removed or changed.
+ *
+ * An element alone under its key is the one that held the key before, so its
+ * new text reads as a relabel. Elements sharing a key (rows tagged with one
+ * test id) are told apart by their own text and href, not their position: a
+ * filtered list then reads as the rows it lost and gained, where by position
+ * the first row "became" another record. A row that kept its link but changed
+ * its text is still matched by the link. `byPosition` keeps the position for
+ * elements whose text is meant to change, such as live regions.
+ */
+export function matchPrevious(
+  prev: ReadonlyMap<string, { label: string; href?: string | null }>,
+  current: ReadonlyArray<{ key: string; name: string; href?: string | null; byPosition?: boolean }>,
+): Array<string | null> {
+  const prevByFamily = new Map<string, string[]>();
+  for (const key of prev.keys()) {
+    const fam = keyFamily(key);
+    const list = prevByFamily.get(fam);
+    if (list) list.push(key);
+    else prevByFamily.set(fam, [key]);
+  }
+  const curByFamily = new Map<string, number[]>();
+  current.forEach((el, i) => {
+    const fam = keyFamily(el.key);
+    const list = curByFamily.get(fam);
+    if (list) list.push(i);
+    else curByFamily.set(fam, [i]);
+  });
+  const out: Array<string | null> = current.map(() => null);
+  for (const [fam, idxs] of curByFamily) {
+    const prevKeys = prevByFamily.get(fam) ?? [];
+    const single = prevKeys.length <= 1 && idxs.length <= 1;
+    if (single || idxs.some((i) => current[i].byPosition)) {
+      for (const i of idxs) out[i] = prev.has(current[i].key) ? current[i].key : null;
+      continue;
+    }
+    const free = new Set(prevKeys);
+    const take = (i: number, same: (p: { label: string; href?: string | null }) => boolean): void => {
+      for (const k of free) {
+        if (same(prev.get(k)!)) {
+          out[i] = k;
+          free.delete(k);
+          return;
+        }
+      }
+    };
+    for (const i of idxs) take(i, (p) => p.label === current[i].name && (p.href ?? null) === (current[i].href ?? null));
+    for (const i of idxs) if (out[i] === null && current[i].href) take(i, (p) => !!p.href && p.href === current[i].href);
+  }
+  return out;
 }
 
 export interface Rect {
@@ -1015,7 +1216,7 @@ export const MAIN_REGION_SCRIPT = `(() => {
   const landmarks = Array.from(document.querySelectorAll('main, [role="main"]')).filter(shown);
   const landmark = landmarks[0] || null;
   const region = landmark || document.body;
-  if (!region) return { landmark: false, heading: null, paragraphs: 0, chars: 0, controls: 0, media: 0 };
+  if (!region) return { landmark: false, heading: null, paragraphs: 0, chars: 0, controls: 0, media: 0, states: [], rest: 0, text: "" };
   const CHROME = 'header, nav, footer, aside, [role="banner"], [role="navigation"], [role="contentinfo"], [role="complementary"]';
   const outside = (n) => !landmark && !!n.closest(CHROME);
   const CONTROL = 'a[href], button, input, select, textarea, option, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="checkbox"], [role="switch"], [role="combobox"]';
@@ -1025,22 +1226,48 @@ export const MAIN_REGION_SCRIPT = `(() => {
   const level = h ? (/^H[1-6]$/.test(h.tagName) ? Number(h.tagName[1]) : Number(h.getAttribute("aria-level") || 2)) : 0;
   const heading = h ? { level, text: (h.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 60) } : null;
   const paragraphs = inRegion("p").filter((n) => (n.textContent || "").trim()).length;
+  // Status regions: an alert, a live status, a busy or progress marker. What lies outside
+  // them is the page's own content; a main area with none is showing only its state.
+  const STATE = '[role="alert"], [role="status"], [aria-busy="true"], [role="progressbar"]';
+  const stateOf = (n) => {
+    const s = n.closest(STATE);
+    return s && (s === region || region.contains(s)) ? s : null;
+  };
+  const states = [];
+  for (const s of [region, ...inRegion(STATE)]) {
+    if (!s.matches(STATE)) continue;
+    const role = s.getAttribute("role");
+    const kind = role === "alert" || role === "status" || role === "progressbar" ? role : "busy";
+    if (!states.includes(kind)) states.push(kind);
+    if (s.getAttribute("aria-busy") === "true" && !states.includes("busy")) states.push("busy");
+  }
   let chars = 0;
+  let rest = 0;
+  let text = "";
   let seen = 0;
   const walker = document.createTreeWalker(region, NodeFilter.SHOW_TEXT);
   for (let t = walker.nextNode(); t && seen < 5000; t = walker.nextNode()) {
     seen += 1;
     const parent = t.parentElement;
     if (!parent || parent.closest('script, style, noscript, template, [aria-hidden="true"]') || parent.closest(CONTROL) || outside(parent) || !shown(parent)) continue;
-    chars += (t.textContent || "").replace(/\\s+/g, " ").trim().length;
+    const words = (t.textContent || "").replace(/\\s+/g, " ").trim();
+    chars += words.length;
+    if (!stateOf(parent)) rest += words.length;
+    if (words && text.length < 160) text = (text ? text + " " + words : words).slice(0, 160);
   }
+  const controls = inRegion(CONTROL);
+  const media = inRegion("img, svg, video, canvas, iframe, object, embed");
+  rest += [...headings, ...controls, ...media].filter((n) => !stateOf(n)).length;
   return {
     landmark: !!landmark,
     heading,
     paragraphs,
     chars,
-    controls: inRegion(CONTROL).length,
-    media: inRegion("img, svg, video, canvas, iframe, object, embed").length,
+    controls: controls.length,
+    media: media.length,
+    states,
+    rest,
+    text,
   };
 })()`;
 
@@ -1053,6 +1280,58 @@ export interface MainRegion {
   chars: number;
   controls: number;
   media: number;
+  /**
+   * The status regions in the area: `alert`, `status` (a live status), `busy`
+   * (`aria-busy="true"`) and `progressbar`, each named once. Absent from an older reading.
+   */
+  states?: string[];
+  /** How much lies outside those regions: characters of static text, plus one per heading, control or image. */
+  rest?: number;
+  /** The area's static text, its first 160 characters, whitespace collapsed. */
+  text?: string;
+}
+
+/**
+ * Whether text says only that something is on its way, e.g. "Loading…",
+ * "Loading orders...", "Please wait", once or repeated. Each sentence must
+ * open with the loading words and stay short.
+ */
+function isLoadingText(text: string): boolean {
+  const parts = text
+    .split(/\.{1,3}|…/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return parts.length > 0 && parts.every((p) => /^(?:loading|please wait)\b[^!?]{0,30}$/i.test(p));
+}
+
+/**
+ * What a main area holding nothing but its state is showing, or null when it
+ * holds content of its own. A client-rendered app answers 200 for a path it
+ * does not have and draws its not-found or error view; a route still waiting
+ * on data after the page settled shows only a placeholder. Both read as a
+ * healthy page to a status code and an element count.
+ *
+ * - `error`: everything in the area is inside a `role="alert"` region that says something.
+ * - `loading`: everything is inside an `aria-busy="true"` region or a
+ *   progress bar, or inside a live status whose only words are a loading
+ *   message or that holds only a spinner, or (with no such marker at all)
+ *   the area's only words are a loading message.
+ *
+ * A live status saying anything else ("No orders yet") is an empty state,
+ * which is content, and so is an alert beside a heading or a control.
+ */
+export function mainState(m: MainRegion): "error" | "loading" | null {
+  const states = m.states ?? [];
+  const text = (m.text ?? "").trim();
+  if (states.length === 0) {
+    return !m.heading && m.controls === 0 && m.media === 0 && isLoadingText(text) ? "loading" : null;
+  }
+  if ((m.rest ?? 1) > 0) return null;
+  // An alert with nothing in it is a live region waiting for a message, not a message.
+  if (states.includes("alert") && text !== "") return "error";
+  if (states.includes("busy") || states.includes("progressbar")) return "loading";
+  // A spinner inside a status, or a status saying it is loading; an empty one alone is just an empty main area.
+  return states.includes("status") && (isLoadingText(text) || (text === "" && m.media > 0)) ? "loading" : null;
 }
 
 /** Nothing at all in the region: no heading, no text, no control, no image or embed. */

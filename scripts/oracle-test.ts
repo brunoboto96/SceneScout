@@ -41,6 +41,7 @@ import {
   trackedElements,
   inertKeys,
   mainRegionLine,
+  mainState,
   mainRegionTag,
 } from "../src/engine/collector.ts";
 import { EventEmitter } from "node:events";
@@ -591,9 +592,10 @@ test("the accessible name follows the computation's order: aria-labelledby, aria
     alt: "",
     live: false,
     text: "",
+    content: "",
     ...over,
   });
-  const cases: Array<[string, Partial<NameFacts>, { name: string; from: "placeholder" | "fallback" | null }]> = [
+  const cases: Array<[string, Partial<NameFacts>, { name: string; from: "placeholder" | "fallback" | null; prior?: string }]> = [
     // Each source wins over every one after it.
     ["aria-labelledby before aria-label", { labelledBy: "Caption", ariaLabel: "Aria", labels: ["Label"] }, { name: "Caption", from: null }],
     ["aria-label before a label", { ariaLabel: "Aria", labels: ["Label"], title: "Title" }, { name: "Aria", from: null }],
@@ -616,6 +618,17 @@ test("the accessible name follows the computation's order: aria-labelledby, aria
     ["an icon button with a title", { tag: "button", inputType: "", title: "Download file" }, { name: "Download file", from: null }],
     ["an icon button with neither text nor title", { tag: "button", inputType: "" }, { name: "", from: null }],
     ["a button's text before its title", { tag: "button", inputType: "", text: "Save", title: "Save the draft" }, { name: "Save", from: null }],
+    // An image-only link or button is named by its image content, as the accessible-name computation names it;
+    // `prior` is the name it had before image content counted, which its earlier coverage key was made from.
+    ["an image link by its alt text", { tag: "a", inputType: "", content: " Home " }, { name: "Home", from: null, prior: "" }],
+    ["an image link with an empty alt stays unnamed", { tag: "a", inputType: "", content: "" }, { name: "", from: null }],
+    [
+      "image content before title",
+      { tag: "button", inputType: "", content: "Search", title: "Find things" },
+      { name: "Search", from: null, prior: "Find things" },
+    ],
+    ["text before image content", { tag: "a", inputType: "", text: "Home", content: "Logo" }, { name: "Home", from: null }],
+    ["a field is not named by image content", { tag: "input", inputType: "text", content: "Logo", nameAttr: "q" }, { name: "q", from: "fallback" }],
     // A live region is named by what it announces.
     [
       "a live region by its text",
@@ -684,6 +697,47 @@ test("the main-region line tells a page of text from a main area that rendered n
     'content (no main landmark): h1 "Title" · 2 paragraphs · 21 chars of static text',
   );
   assert.equal(mainRegionTag({ ...empty, landmark: false }), "content EMPTY");
+});
+
+test("a main area holding only an alert or a loading placeholder is told apart from one with content of its own", () => {
+  const base = { landmark: true, heading: null, paragraphs: 0, chars: 0, controls: 0, media: 0 };
+  // The app's not-found view: heading, sentence and retry button, all inside one alert.
+  const errorView = {
+    ...base,
+    heading: { level: 2, text: "Not found" },
+    paragraphs: 1,
+    chars: 40,
+    controls: 1,
+    states: ["alert"],
+    rest: 0,
+    text: "Not found This item could not be loaded.",
+  };
+  assert.equal(mainState(errorView), "error");
+  // The contrast: the same alert above the page's own heading is a page reporting a problem, not an error view.
+  assert.equal(mainState({ ...errorView, rest: 6 }), null);
+  // Loading: a busy region or a progress bar, whatever it says.
+  assert.equal(mainState({ ...base, chars: 12, states: ["busy"], rest: 0, text: "Fetching data" }), "loading");
+  assert.equal(mainState({ ...base, media: 1, states: ["progressbar"], rest: 0, text: "" }), "loading");
+  // A live status saying it is loading is loading; one stating an empty result is an empty state, which is content.
+  assert.equal(mainState({ ...base, chars: 10, states: ["status"], rest: 0, text: "Loading..." }), "loading");
+  assert.equal(mainState({ ...base, chars: 13, states: ["status"], rest: 0, text: "No orders yet" }), null);
+  assert.equal(mainState({ ...base, media: 1, states: ["status"], rest: 0, text: "" }), "loading", "a spinner inside a status");
+  // Empty live regions are waiting for a message: alone in an empty main area they are EMPTY, not a state.
+  assert.equal(mainState({ ...base, states: ["alert"], rest: 0, text: "" }), null);
+  assert.equal(mainState({ ...base, states: ["status"], rest: 0, text: "" }), null);
+  // No marker at all: placeholder text alone, repeated, as an app's skeleton prints it.
+  const placeholders = { ...base, paragraphs: 2, chars: 16, states: [], rest: 16, text: "Loading… Loading…" };
+  assert.equal(mainState(placeholders), "loading");
+  assert.equal(mainState({ ...placeholders, text: "Loading orders..." }), "loading");
+  assert.equal(mainState({ ...placeholders, text: "Please wait" }), "loading");
+  // ...but not the same words beside a heading or a control, and not a sentence that merely mentions loading.
+  assert.equal(mainState({ ...placeholders, heading: { level: 1, text: "Orders" } }), null);
+  assert.equal(mainState({ ...placeholders, controls: 1 }), null);
+  assert.equal(mainState({ ...placeholders, text: "Loading bays are open until six. Book a slot below." }), null);
+  assert.equal(mainState({ ...placeholders, text: "Nothing pending" }), null);
+  // An empty main area is EMPTY (and a dead end), not a state; an older reading without the fields is never flagged.
+  assert.equal(mainState({ ...base, states: [], rest: 0, text: "" }), null);
+  assert.equal(mainState({ ...base, chars: 21, heading: { level: 1, text: "Title" }, paragraphs: 1 }), null);
 });
 
 test("controls held outside a horizontally scrolling container's visible width are one worth-a-look line per container", () => {

@@ -48,6 +48,8 @@ import * as unload from "./smoke/unload.ts";
 import * as ciRun from "./smoke/ci.ts";
 import * as timeLimits from "./smoke/time-limits.ts";
 import * as snapshotContents from "./smoke/snapshot.ts";
+import * as refsAndDiffs from "./smoke/refs.ts";
+import * as targets from "./smoke/targets.ts";
 import * as settleAfterLeaving from "./smoke/settle.ts";
 
 const suites = [
@@ -69,6 +71,8 @@ const suites = [
   attribution,
   frames,
   snapshotContents,
+  refsAndDiffs,
+  targets,
   settleAfterLeaving,
   unload,
   timeLimits,

@@ -20,6 +20,7 @@
  */
 import path from "node:path";
 import type { ActivityLine } from "./live.js";
+import { isSafeRelativePath } from "./plain.js";
 
 /** One session's trail, as the document shows it. */
 export interface ReplaySession {
@@ -34,6 +35,8 @@ export interface ReplaySession {
 export interface FindingEvidence {
   id: string;
   frames: Array<{ at: string; action: string; detail: string; frame: string }>;
+  /** The picture taken when it was filed (capture.ts FindingPicture), shown above the frames. */
+  picture?: { file: string; width?: number; height?: number; caption: string };
 }
 
 export interface ReplayInput {
@@ -66,6 +69,16 @@ export interface ReplayInput {
 /** Most frames one recorded session keeps. A long run is thousands of actions, and a project folder is not a video store. */
 export const RECORD_MAX_FRAMES = 600;
 
+/** A name reduced to one plain path segment: letters, digits, dot, dash and underscore, never leading with a dot or dash. */
+export function plainSegment(text: string, fallback: string): string {
+  return (
+    text
+      .replace(/[^a-z0-9._-]+/gi, "-")
+      .replace(/^[.-]+/, "")
+      .slice(0, 60) || fallback
+  );
+}
+
 /**
  * Where a recorded frame is stored, relative to the memory directory — and
  * the path the live view serves it at, so it is always written with forward
@@ -74,12 +87,7 @@ export const RECORD_MAX_FRAMES = 600;
  * nothing about where the engine writes.
  */
 export function framePath(session: string, index: number, action: string): string {
-  const plain = (text: string, fallback: string): string =>
-    text
-      .replace(/[^a-z0-9._-]+/gi, "-")
-      .replace(/^[.-]+/, "")
-      .slice(0, 60) || fallback;
-  return `recordings/${plain(session, "session")}/${String(index).padStart(4, "0")}-${plain(action, "step")}.jpg`;
+  return `recordings/${plainSegment(session, "session")}/${String(index).padStart(4, "0")}-${plainSegment(action, "step")}.jpg`;
 }
 
 /**
@@ -199,8 +207,20 @@ export function evidenceFor(steps: readonly ActivityLine[], foundAt: string, mos
   }));
 }
 
+/** A finding's own picture, shown open under it: the evidence a reader looks for first. */
+function renderPicture(p: NonNullable<FindingEvidence["picture"]>, id: string, framePrefix = "", savedAt = ""): string {
+  const src = escapeHtml(framePrefix + p.file);
+  return (
+    `<figure class="picture"><a class="frame" href="${src}" target="_blank" rel="noreferrer" data-testid="finding-picture-open" data-finding="${escapeHtml(id)}">` +
+    `<img loading="lazy" ${GONE} src="${src}"${p.width && p.height ? ` width="${p.width}" height="${p.height}"` : ""} alt="What the finding is about, when it was filed">` +
+    `<p class="gone-note">This picture is not beside this file. Pictures live in the run's <code>recordings/</code> folder, which travels with it.</p></a>` +
+    `<figcaption>${escapeHtml(p.caption)}${savedAt ? `<span class="onDisk">${escapeHtml(savedAt + "/" + p.file)}</span>` : ""}</figcaption></figure>`
+  );
+}
+
 function renderEvidence(e: FindingEvidence, framePrefix = "", savedAt = ""): string {
-  if (e.frames.length === 0) return "";
+  const picture = e.picture ? renderPicture(e.picture, e.id, framePrefix, savedAt) : "";
+  if (e.frames.length === 0) return picture;
   const shots = e.frames
     .map(
       (f) =>
@@ -211,8 +231,11 @@ function renderEvidence(e: FindingEvidence, framePrefix = "", savedAt = ""): str
         `</figcaption></figure>`,
     )
     .join("");
-  return `<details class="evidence"><summary>Evidence — the ${e.frames.length} step${e.frames.length === 1 ? "" : "s"} on screen before this was filed</summary><div class="shots">${shots}</div></details>`;
+  return `${picture}<details class="evidence"><summary>Evidence — the ${e.frames.length} step${e.frames.length === 1 ? "" : "s"} on screen before this was filed</summary><div class="shots">${shots}</div></details>`;
 }
+
+/** The report's sections the header links to, by heading. */
+const SECTION_ANCHORS: Record<string, string> = { "In plain words": "plain", "Technical detail": "technical" };
 
 /**
  * The report's markdown as elements. A deliberately small subset — headings,
@@ -249,11 +272,28 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
     } else if ((m = /^(#{1,6}) (.*)$/.exec(line))) {
       flush();
       const level = Math.min(6, m[1].length + 1);
-      out.push(`<h${level}>${inline(m[2])}</h${level}>`);
+      // The two parts of the report are what the header links to.
+      const anchor = m[1] === "##" ? SECTION_ANCHORS[m[2]] : undefined;
+      out.push(`<h${level}${anchor ? ` id="${anchor}"` : ""}>${inline(m[2])}</h${level}>`);
+      i += 1;
+    } else if ((m = /^!\[([^\]]*)\]\(([^)\s]+)\)$/.exec(line))) {
+      // A finding's picture. The path is the report's own, relative to the run's
+      // folder, and anything else (a scheme, an absolute path, `..`) is dropped.
+      flush();
+      if (isSafeRelativePath(m[2])) {
+        const src = (m[2].startsWith("recordings/") ? framePrefix : "") + m[2];
+        out.push(
+          `<figure class="picture"><a href="${escapeHtml(src)}" target="_blank" rel="noreferrer" data-testid="report-picture-open"><img loading="lazy" ${GONE} src="${escapeHtml(src)}" alt="${escapeHtml(m[1])}"></a>` +
+            `<p class="gone-note">This picture is not beside this file. It lives in the run's folder, which travels with it.</p>` +
+            (savedAt ? `<span class="onDisk">${escapeHtml(savedAt + "/" + m[2])}</span>` : "") +
+            `</figure>`,
+        );
+      }
       i += 1;
     } else if ((m = /^<details><summary>(.*)<\/summary>$/.exec(line))) {
       flush();
-      out.push(`<details><summary>${inline(m[1])}</summary>`);
+      const testid = m[1] === "Technical detail" ? "report-technical-toggle" : "report-details-toggle";
+      out.push(`<details><summary data-testid="${testid}">${inline(m[1])}</summary>`);
       i += 1;
     } else if (/^<\/details>$/.test(line)) {
       flush();
@@ -354,6 +394,10 @@ ol.steps { list-style:none; margin:0; padding:0; }
 .step .d { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .step .frame { display:block; margin:4px 0 10px; }
 .step .frame img { max-width:min(100%,720px); max-height:360px; object-fit:cover; object-position:top; border:1px solid var(--line); border-radius:6px; display:block; }
+figure.picture { margin:6px 0 14px; max-width:min(100%,720px); }
+figure.picture img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:6px; display:block; background:var(--panel); }
+figure.picture figcaption { margin-top:4px; color:var(--muted); font-size:12px; }
+figure.picture figcaption .onDisk { display:block; font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
 details.evidence { margin:6px 0 18px; padding:8px 12px; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
 details.evidence > summary { cursor:pointer; color:var(--muted); font-size:13px; }
 details.evidence .shots { display:flex; flex-wrap:wrap; gap:14px; margin-top:12px; }
@@ -373,6 +417,11 @@ header .served code { font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,m
 figure.gone .gone-note, a.gone .gone-note { display:block; }
 figure.gone img, a.gone img { display:none; }
 a.frame.gone { display:block; max-width:min(100%,720px); }
+figure.picture { margin:8px 0 14px; max-width:min(100%,720px); }
+figure.picture img { width:auto; max-width:100%; max-height:420px; border:1px solid var(--line); border-radius:6px; display:block; background:var(--panel); }
+details > summary { cursor:pointer; }
+details:not(.session):not(.evidence) { margin:4px 0 18px; padding:6px 12px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+details:not(.session):not(.evidence) > summary { color:var(--muted); font-size:13px; }
 details.evidence figcaption { margin-top:4px; color:var(--muted); font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
 `;
 
@@ -426,6 +475,20 @@ function exitWatch(savedFile: string): string {
   );
 }
 
+/** The header's links: the report's parts it holds, then the steps. */
+function navLinks(markdown: string): string {
+  const has = (heading: string): boolean => markdown.split("\n").includes(`## ${heading}`);
+  return [
+    has("In plain words")
+      ? `<a href="#plain" data-testid="report-plain-link">In plain words</a>`
+      : `<a href="#report" data-testid="report-top-link">Report</a>`,
+    has("Technical detail") ? `<a href="#technical" data-testid="report-technical-link">Technical detail</a>` : "",
+    `<a href="#steps" data-testid="report-steps-link">Steps</a>`,
+  ]
+    .filter(Boolean)
+    .join("");
+}
+
 /** The whole document: one file, no external assets, opens from the file system. */
 export function buildReplayHtml(input: ReplayInput): string {
   const framed = input.sessions.some((s) => s.steps.some((x) => x.frame));
@@ -445,7 +508,7 @@ export function buildReplayHtml(input: ReplayInput): string {
   <h1>SceneScout run</h1>
   <span class="meta">${escapeHtml(input.project)} · written ${escapeHtml(stamp(input.at))}${input.version ? ` · v${escapeHtml(input.version)}` : ""}</span>
   ${savedAt ? `<p class="served">This page is served by the engine and goes when it does. The copy that stays is <code>${escapeHtml(savedAt)}/report.html</code>, beside the frames it shows.</p>` : ""}
-  <nav><a href="#report">Report</a><a href="#steps">Steps</a></nav>
+  <nav>${navLinks(input.markdown)}</nav>
 </header>
 ${
   savedAt

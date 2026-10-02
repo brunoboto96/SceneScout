@@ -223,6 +223,54 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       JSON.stringify(lanes.map((lane, i) => lockTaken(lane).slice(before[i]))),
     );
     check("...and the profile holds the current token", await until(() => profileIsCurrent(project)));
+    for (const engine of opened.splice(0)) await engine.close();
+
+    // ---- A swap the broker cannot send: reported as a failure only ---------
+    // One lane rotates the cookie; another then refreshes by a native form
+    // post with the spent one. The broker loads the rotated profile, but a
+    // navigation's Cookie header is the browser's to build, so where the
+    // request shows it the broker cannot send the current token, and the result
+    // must not claim it did. A browser that adds cookies after the route
+    // handler takes them from the jar the profile was loaded into, and the swap
+    // goes through. Either way, one result never says both.
+    await recordProfile(baseUrl, project, "scope=root");
+    const [rotator] = await attachLanes(baseUrl, project, "read-only", 1, opened);
+    // A short action limit, so a click that waits it out fails in seconds rather than a minute. Half
+    // of it still leaves room for a click's settle wait, which can run to its own cap after a navigation.
+    const FORM_ACTION_LIMIT_MS = 8000;
+    const former = new BrowserEngine();
+    opened.push(former);
+    await former.attach({ url: `${baseUrl}/rc-app`, projectDir: project, mode: "read-only", role: "member", actionTimeoutMs: FORM_ACTION_LIMIT_MS });
+    check(
+      "swap by form: both lanes start signed in",
+      (await Promise.all([rotator, former].map(settled))).every((s) => s.signedIn === "in"),
+    );
+    expireFixtureAccess();
+    await rotator.navigate(`${baseUrl}/rc-app`);
+    check("swap by form: the first lane refreshes and stays signed in", (await settled(rotator)).signedIn === "in");
+    check("...and saves the rotation", await until(() => profileIsCurrent(project)));
+    await former.navigate(`${baseUrl}/refresh-form.html`);
+    const snap = await former.snapshot(true);
+    const ref = /(e\d+) button "Refresh by form"/.exec(snap)?.[1];
+    check("swap by form: the form's button is in the snapshot", ref !== undefined, snap.slice(0, 300));
+    // The broker loads the rotated profile while it holds the form's navigation. Loading it must not
+    // wait on that navigation, so the click returns once it commits, carrying the broker's line itself.
+    const clickStart = Date.now();
+    let clicked = "";
+    let clickError = "";
+    try {
+      clicked = ref ? await former.click(ref) : "";
+    } catch (err) {
+      clickError = String(err).split("\n")[0];
+    }
+    const clickMs = Date.now() - clickStart;
+    check("swap by form: the click returns", clickError === "", clickError);
+    check("...well within its action limit", clickMs < FORM_ACTION_LIMIT_MS / 2, `${clickMs} ms of ${FORM_ACTION_LIMIT_MS} ms`);
+    const brokerLines = JSON.stringify(clicked.split("\n").filter((l) => l.includes("↻") || l.includes("⚠")));
+    const swappedLine = clicked.includes("another session had rotated the role's token");
+    const failedLine = clicked.includes("could not be brokered");
+    check("...and its own result reports the broker's outcome", swappedLine || failedLine, brokerLines);
+    check("...and never says it sent the current token for a refresh it could not broker", !(swappedLine && failedLine), brokerLines);
   } finally {
     for (const engine of opened) await engine.close().catch(() => {});
     fs.rmSync(project, { recursive: true, force: true });

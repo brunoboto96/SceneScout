@@ -152,7 +152,9 @@ Either way it downloads the browser and registers the server with the client you
 /plugin install scenescout@scenescout-marketplace
 ```
 
-Then download the browser once with `npx -y scenescout install --browser-only`. The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release lands here the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
+Then download the browser once with `npx -y scenescout install --browser-only`, and start a new chat to use SceneScout. The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release lands here the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
+
+**Using Claude Desktop?** Install the extension: download `scenescout-X.Y.Z.mcpb` from the [latest release](https://github.com/brunoboto96/SceneScout/releases/latest) and open it (or Settings > Extensions > Advanced settings > Install Extension). It works as soon as it is installed. Download the browser once with `npx -y scenescout install --browser-only`, then start a new chat and ask *"Use SceneScout to test http://localhost:3000"*. [More in the guide](docs/guide/Start-here.md#as-a-claude-desktop-extension).
 
 **A client that is not in that list?** Run `npx -y scenescout install --browser-only` and [add the server to its config by hand](#-other-mcp-clients).
 
@@ -201,7 +203,9 @@ In Claude Code the skill gives you a command with flags for the same thing:
 
 The agent scans the project (if there is one), attaches read-only, explores, and writes findings to `.scenescout/report.md`. That's it.
 
-**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (who to explore as: a login saved with `scenescout login`, a storage state found by the scan, or a path to a Playwright storage-state JSON) · `--observe` / `--safe-write` / `--allow-destructive`.
+**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (who to explore as: a login saved with `scenescout login`, a storage state found by the scan, or a path to a Playwright storage-state JSON) · `--focus <text>` (a ticket or a sentence to check) · `--observe` / `--read-only` / `--safe-write` / `--allow-destructive`.
+
+**No flags at all** (`/scenescout` on its own) and the agent asks four plain questions instead: the address, whether and how you sign in, what to check (tickets or a description), and whether the site holds real data. Real data, or not being sure, means nothing but `GET` requests leave the page; you are never asked to pick a mode. Any flag skips the questions. See [Plain questions instead of flags](docs/guide/Ways-to-use-it.md#plain-questions-instead-of-flags).
 
 ### 🔑 Signing in as a role
 
@@ -254,21 +258,33 @@ The view is served on `127.0.0.1` only, behind a token that changes every time t
 ## 🎬 Recording a run, and reading it back
 
 A report says what happened. For QA work that is not always enough — the point
-is often to *show* what was checked, not to assert it. Ask for a recorded run
-and the engine keeps a frame of the page after every action:
+is often to *show* what was checked, not to assert it.
+
+Every finding already carries a picture: the element it is about, with a margin,
+or the page as it was. It is kept in `.scenescout/recordings/`, shown under the
+finding in `report.html`, and returned with the `scout_finding` result, so a
+chat client shows the evidence the moment it is filed. Pictures are bounded in
+size and in how many reach the conversation, and a CI job keeps them on file
+only; `SCENESCOUT_EVIDENCE` and `scout_attach {evidence}` change that
+([configuration reference](docs/guide/Configuration-reference.md#environment-variables)).
+
+Ask for a recorded run and the engine also keeps a frame of the page after every action:
 
 ```
 Use SceneScout to test http://localhost:3000, record the run
 ```
 
-or, on the tool directly, `scout_attach {record: true}`.
+or, on the tool directly, `scout_attach {record: true}`. `SCENESCOUT_RECORD=on` in
+the server's environment records every run.
 
 Then `scout_report` writes two files side by side in `.scenescout/`:
 `report.md` as always, and `report.html` — the whole run as one self-contained
 page. It opens from the file system with nothing running, needs no network, and
 holds:
 
-- **The report**, rendered from the same Markdown.
+- **The report**, rendered from the same Markdown: the plain-language view
+  first (each problem's steps, what was expected, what happened and its
+  picture), with each problem's technical detail one click away.
 - **The screenshots around each finding**, in an accordion under it, from the
   session that filed it.
 - **Every session's trail**, in the blocks its tasks made, each step with the

@@ -440,6 +440,8 @@ export function childEnv(env: Record<string, string | undefined>): Record<string
   out.SCENESCOUT_LIVE = "off";
   // ...and an unattended run opens nothing in a browser, even on a desktop, unless the user set it.
   if (!out.SCENESCOUT_OPEN?.trim()) out.SCENESCOUT_OPEN = "none";
+  // The loop is text-only (toolResultText), so a finding's picture is kept for the report, never sent back. A choice the job made is its own.
+  if (!out.SCENESCOUT_EVIDENCE?.trim()) out.SCENESCOUT_EVIDENCE = "file";
   return out;
 }
 

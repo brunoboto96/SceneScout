@@ -147,31 +147,48 @@ export interface ReplayResult {
 }
 
 /**
- * The path to call, resolved against the attached origin and fenced to it.
- * Navigation is fenced the same way: a run attached to one app must not be
- * able to make its browser talk to another host just because a path was
- * spelled as a full URL.
+ * Where a page, a crawl path, a plan step or a replayed call goes, given the
+ * URL the session was attached on. One rule for every tool:
+ *
+ * - A path resolves against the attached ORIGIN, never the attach URL's path.
+ *   `/widgets` is `/widgets` whether the session attached on `/` or on
+ *   `/things`, as URL rules and every browser read it; a bare `widgets` is
+ *   read as `/widgets` too, so the page the session happens to be on never
+ *   changes where a target goes.
+ * - A full URL on the attached origin is used as given.
+ * - Anything on another origin, or a scheme other than http(s), is refused:
+ *   a run attached to one app must not be able to make its browser talk to
+ *   another host just because a target was spelled as a full URL.
+ *
+ * `offOrigin` marks the refusal that is the fence, so a caller can word it as one.
  */
-export function resolveRequestUrl(baseUrl: string, path: string): { url: string } | { problem: string } {
-  const trimmed = path.trim();
-  if (!trimmed) return { problem: "No path given. Pass a path such as /api/things, or a full URL on the attached origin." };
-  let target: URL;
-  let base: URL;
+export function resolveTarget(attachUrl: string, target: string): { url: string } | { problem: string; offOrigin: boolean } {
+  const trimmed = target.trim();
+  if (!trimmed) return { problem: "No path given. Pass a path such as /api/things, or a full URL on the attached origin.", offOrigin: false };
+  let resolved: URL;
+  let origin: string;
   try {
-    base = new URL(baseUrl);
-    target = new URL(trimmed, base);
+    origin = new URL(attachUrl).origin;
+    resolved = new URL(trimmed, `${origin}/`);
   } catch {
-    return { problem: `Could not read ${JSON.stringify(trimmed)} as a path or a URL.` };
+    return { problem: `Could not read ${JSON.stringify(trimmed)} as a path or a URL.`, offOrigin: false };
   }
-  if (target.protocol !== "http:" && target.protocol !== "https:") {
-    return { problem: `Only http and https can be requested; ${target.protocol} cannot.` };
+  if (resolved.protocol !== "http:" && resolved.protocol !== "https:") {
+    return { problem: `Only http and https can be reached; ${resolved.protocol} cannot.`, offOrigin: false };
   }
-  if (target.origin !== base.origin) {
+  if (resolved.origin !== origin) {
     return {
-      problem: `${target.origin} is not the origin this session is attached to (${base.origin}). A session talks to its own app only; attach another session to test another host.`,
+      problem: `${resolved.origin} is not the origin this session is attached to (${origin}). A session talks to its own app only; attach another session to test another host.`,
+      offOrigin: true,
     };
   }
-  return { url: target.toString() };
+  return { url: resolved.toString() };
+}
+
+/** The URL scout_request calls: resolveTarget's rule, so a call and a page load never disagree on where a path goes. */
+export function resolveRequestUrl(attachUrl: string, path: string): { url: string } | { problem: string } {
+  const out = resolveTarget(attachUrl, path);
+  return "url" in out ? out : { problem: out.problem };
 }
 
 /** The method, upper-cased, or the reason it cannot be replayed. */
@@ -215,6 +232,46 @@ export function requestHeaders(input: { given?: Record<string, string>; auth?: s
   if (input.body !== undefined) out["content-type"] = "application/json";
   for (const [name, value] of Object.entries(input.given ?? {})) out[name.toLowerCase()] = value;
   return out;
+}
+
+/**
+ * The Authorization header to remember from a request the browser is sending,
+ * or null to leave the remembered one as it is. Every request the app sends to
+ * its own origin counts, reads included: an app that rotates its access token
+ * and then only reads would otherwise leave scout_request replaying the token
+ * of its last write, long expired. A request to another origin, or one sent
+ * from a frame of another origin, is skipped, so an embedded widget's bearer
+ * token is never replayed to the app; and so is a scout_request call's own
+ * request, so a credential the caller chose for one call does not become the
+ * session's. `frameUrl` is the sending frame's address, when it has one (a
+ * worker's request has none; about:blank and the like count as the app's).
+ */
+export function authToRemember(input: { url: string; baseUrl: string; headers: Record<string, string>; replay: boolean; frameUrl?: string }): string | null {
+  if (input.replay) return null;
+  try {
+    const origin = new URL(input.baseUrl).origin;
+    if (new URL(input.url).origin !== origin) return null;
+    if (input.frameUrl && /^https?:/i.test(input.frameUrl) && new URL(input.frameUrl).origin !== origin) return null;
+  } catch {
+    return null;
+  }
+  const entry = Object.entries(input.headers).find(([name]) => name.toLowerCase() === "authorization");
+  const value = entry?.[1];
+  return value && value.trim() ? value : null;
+}
+
+/**
+ * A line for a replay the server answered 401 while the page's own latest
+ * authorised request to the origin succeeded: the replayed credential is the
+ * likely cause, not the server's permissions. Empty otherwise. Statuses only,
+ * never the credential.
+ */
+export function staleCredentialNote(replayStatus: number, sentAuth: boolean, pageLast: { status: number } | null): string {
+  if (replayStatus !== 401 || !sentAuth || !pageLast || pageLast.status < 200 || pageLast.status >= 300) return "";
+  return (
+    `\n⚠ The page's own latest authorised request to this origin got ${pageLast.status}, but this call got 401: ` +
+    `the replayed credential may be stale. Load a page that calls the API, then call again before reading this as a permission or sign-in problem.`
+  );
 }
 
 /** The raw result of the in-page fetch, reduced to what the agent and the report need. */

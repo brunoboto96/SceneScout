@@ -16,6 +16,7 @@
  * launches a browser.
  */
 import path from "node:path";
+import { isCiEnv } from "./capture.js";
 
 /** The environment variable that sets `open` for every session of the server. A `scout_attach` `open` wins over it. */
 export const OPEN_ENV = "SCENESCOUT_OPEN";
@@ -42,12 +43,6 @@ export function openChoiceFromEnv(env: Record<string, string | undefined>): Open
   if (raw === "") return undefined;
   if (!(OPEN_CHOICES as readonly string[]).includes(raw)) throw new Error(`${OPEN_ENV} must be one of ${OPEN_CHOICES.join(", ")}, not ${JSON.stringify(raw)}`);
   return raw as OpenChoice;
-}
-
-/** Running under CI: the `CI` variable every common CI provider sets, unless it is empty, 0 or false. */
-export function isCi(env: Record<string, string | undefined>): boolean {
-  const ci = (env.CI ?? "").trim().toLowerCase();
-  return ci !== "" && ci !== "0" && ci !== "false";
 }
 
 /**
@@ -78,7 +73,7 @@ const both = (choice: OpenChoice, why: string): OpenDecision => ({
  */
 export function decideOpen(choice: OpenChoice | undefined, ctx: OpenContext): OpenDecision {
   if (choice) return both(choice, `open is set to ${choice}`);
-  if (isCi(ctx.env)) return both("none", "a CI run");
+  if (isCiEnv(ctx.env)) return both("none", "a CI run");
   if (noDisplay(ctx.env, ctx.platform)) return both("none", "no display to show a window on");
   return both("both", "a local desktop session");
 }

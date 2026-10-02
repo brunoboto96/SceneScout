@@ -8,8 +8,8 @@ Only test apps you own or are authorised to test.
 
 | Mode | How to ask for it | What leaves the page |
 |---|---|---|
-| `observe` | `--observe`, `scout_attach {mode: "observe"}` | `GET` requests only, plus what a session needs to exist: signing in, signing out and refreshing a token. Signing up, changing or resetting a password and creating users are refused like any other write |
-| `read-only` (default) | nothing | Ordinary form submissions (a plain `POST`) go through. `PUT`, `PATCH`, `DELETE`, destructive-looking `POST`s and clicks on destructive-labelled controls (delete, revoke, archive and the like) are refused |
+| `observe` | `--observe`, `scout_attach {mode: "observe"}` | `GET` requests only, plus what a session needs to exist: signing in, signing out and refreshing a token, and any `POST` you name as a read. Signing up, changing or resetting a password and creating users are refused like any other write |
+| `read-only` (default) | `--read-only` | Ordinary form submissions (a plain `POST`) go through. `PUT`, `PATCH`, `DELETE`, destructive-looking `POST`s and clicks on destructive-labelled controls (delete, revoke, archive and the like) are refused |
 | `safe-write` | `--safe-write` | Anything that creates. Changes and deletes only on records this run created, never on data that was there before |
 | `destructive` | `--allow-destructive` | Everything |
 
@@ -29,10 +29,23 @@ Each refused endpoint is named in full, with the explanation, the first time a s
 
 In `observe` and `read-only` a click is also refused before it happens when the control's own label is destructive (delete, revoke, archive and the like). Only the control's own name counts:
 
-- A button, link, menu item, tab or option is judged by its name.
+- A button, link, menu item, tab or option is judged by its whole name, however long.
 - A dropdown is not judged by its options: a filter offering "All, Create, Delete" can be set to "Create", and choosing "Delete" is refused.
-- A row, card or panel is judged by its own text, not by the buttons inside it, which are listed and judged on their own. A control covering the row's centre, where a click on it would land, is judged with it.
+- A row, card, heading or panel is judged by its test id and by the control covering its centre, where a click on it would land. Its text is the record it shows ("Archive Test Widget", "Final sign-off recorded"), so it counts only for a clickable element whose own text is a short command of at most four words and no sentence, such as a clickable box reading "Delete". A heading is never judged by its text. The buttons inside a row are listed and judged on their own.
+- Removing a filter chip ("Remove Status: Open filter") drops a condition from the view, so it is allowed. "Remove member" is refused.
+- "Sign off" is refused as a command: at the start of a label, or joined to another verb ("Save and sign off"). Elsewhere it is the approval noun ("Needs sign-off", "Manager sign-off") and is allowed.
 - "Discard changes", "Discard your edits" and the like drop only what was typed and never sent, so they are allowed. "Discard draft", "Discard record" and a bare "Discard" are refused, and a write the confirm sends is judged on the network like any other: `discard` in a request path is treated as destructive.
+
+## POST endpoints that only read
+
+Some apps read data through `POST`: a search page, a report query, a GraphQL `query`. `observe` refuses every `POST`, so such a page shows the refusal as its error and cannot be tested. The gap ledger names each page where that happened, with the endpoint.
+
+When you know an endpoint only reads, name it: `scout_attach {mode: "observe", readPosts: ["POST /api/search"]}`, or set `SCENESCOUT_READ_POSTS` for `check`, `ci` and a first look. Nothing is named by default, and the agent must not add an endpoint you did not name.
+
+- An entry is `POST /path` for the app's own origin, or `POST https://host/path` for an API on another origin. The path is exact, a trailing slash aside; `*` stands for one path segment, such as an id. The query string is not part of it.
+- A named endpoint is still refused when its path or body looks destructive, when its body is a GraphQL `mutation` or `subscription` or a persisted query (a hash with no query text, so what it runs cannot be read), or when its body is too long to check.
+- Each one let out is logged as `write-policy:read-post`, and the report lists the endpoints you named.
+- It applies in `observe` only. `read-only` and `safe-write` already let a `POST` out unless it looks destructive.
 
 ## Leaving a page with unsent input
 
@@ -40,7 +53,7 @@ A page holding unsent input can ask the browser to confirm leaving (`beforeunloa
 
 The server never sees a refused request, but the page's own `fetch` or XHR is answered with a `403` in the server's place rather than dropped. The page's handling of a refusal then really runs, which is useful: a page that shows an error is behaving correctly, and a page that claims "Saved" is lying to its user. That second case is reported as `false_success`, a high finding ([ADR 9](../adr/0009-a-refused-write-is-answered-not-dropped.md)). The errors the stand-in causes are not held against the app: a console or page error raised just after a block that reads as that refusal ("Failed to fetch", "Request failed with status code 403", "403 Forbidden", or the stand-in's own message) is left out of the findings, and the same wording with no block just before it is still reported. An alert or live region that appeared after the policy refused one of the current action's requests is marked `(after a write-policy block)` in the snapshot, so a message such as "You do not have permission" is read as the page answering the engine, not as a permission defect.
 
-`scout_request`, which calls the app's API directly as the session, meets the same policy. A refused call returns `REFUSED by the write policy` instead of a status, because the server was never asked and the result proves nothing either way. Whatever a `scout_request` call meets, its answer is in that tool's result and nowhere else: a probe the server refuses is not reported as an `http_error` or `console_error` of the page the session visits next.
+`scout_request`, which calls the app's API directly as the session, meets the same policy. It carries the session's cookies and the Authorization header the page last sent to the app's own origin, on a read or a write; a header the page sent to another origin, such as an embedded widget's token, is never replayed. When a replay gets 401 while the page's own latest authorised request succeeded, the result says the replayed credential may be stale. A refused call returns `REFUSED by the write policy` instead of a status, because the server was never asked and the result proves nothing either way. Whatever a `scout_request` call meets, its answer is in that tool's result and nowhere else: a probe the server refuses is not reported as an `http_error` or `console_error` of the page the session visits next.
 
 ## How `safe-write` knows what the run created
 
