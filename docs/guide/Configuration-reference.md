@@ -385,7 +385,7 @@ What an agent passes to open a sign-in window from the conversation ([Signing in
 |---|---|---|
 | `url` | (required) | Where to sign in: the app's address or its sign-in page |
 | `role` | (required) | The name the sign-in is saved under |
-| `projectPath` | (required) | The project's absolute path; the sign-in is saved in its `.scenescout/auth/` |
+| `projectPath` | as for `scout_attach` | The project's absolute path; the sign-in is saved in its `.scenescout/auth/`. Left out, the folder an attach with no `projectPath` uses for the same site, named in the result, so a login and the attach after it agree |
 | `browser` | `SCENESCOUT_BROWSER`, else `chromium` | `chromium`, `firefox` or `webkit` |
 | `successUrl` | none | As `--success-url` |
 | `waitSeconds` | `120` | How long one call waits before returning with the window still open, 1 to 600 |

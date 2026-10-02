@@ -2699,6 +2699,18 @@ test("what wins: projectPath, then the workspace, then the per-site default", ()
   assert.ok("refused" in unnamed && unnamed.refused.includes("Pass projectPath"));
 });
 
+test("a sign-in page and the app's address resolve to one folder, so scout_login and scout_attach agree", () => {
+  const folderOf = (url: string) => {
+    const got = chooseProjectFolder({ url, home: macHome, exists: noRepo });
+    assert.ok(!("refused" in got), url);
+    return got.dir;
+  };
+  assert.equal(folderOf("http://localhost:3000/login?next=%2Forders"), folderOf("http://localhost:3000"));
+  assert.equal(folderOf("https://staging.example.com/auth/sso"), folderOf("http://staging.example.com/"));
+  // The contrast: another port is another site.
+  assert.notEqual(folderOf("http://localhost:3001/login"), folderOf("http://localhost:3000"));
+});
+
 test("the default folder is never placed inside a git repository; a given one may be", () => {
   const repoAt = (root: string) => (p: string) => p === path.posix.join(root, ".git");
   // Documents itself under version control: the default is refused, naming the repository and the setting.

@@ -1289,7 +1289,12 @@ server.registerTool(
     inputSchema: {
       url: z.string().describe("Where to sign in: the app's address or its sign-in page, e.g. http://localhost:3000/login"),
       role: z.string().max(40).describe("The name to save the sign-in under, e.g. admin; scout_attach { role } signs in with it"),
-      projectPath: z.string().describe("Absolute path to the project (the sign-in is saved in .scenescout/auth/ here), as for scout_attach"),
+      projectPath: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute path to the project (the sign-in is saved in .scenescout/auth/ here), as for scout_attach. Omitted: the same folder an attach with no projectPath uses for this site, which the result names.",
+        ),
       browser: z
         .enum(["chromium", "firefox", "webkit"])
         .optional()
@@ -1310,14 +1315,19 @@ server.registerTool(
         .describe(`How long this call waits for the user before returning with the window still open (default ${LOGIN_WAIT_DEFAULT_S})`),
     },
   },
-  async (args: { url: string; role: string; projectPath: string; browser?: BrowserEngineName; successUrl?: string; waitSeconds?: number }, extra) => {
+  async (args: { url: string; role: string; projectPath?: string; browser?: BrowserEngineName; successUrl?: string; waitSeconds?: number }, extra) => {
     try {
+      // The folder an attach with no projectPath would use, so the attach after this finds the sign-in.
+      const folder = await projectFolderFor(args.url, args.projectPath);
+      if ("refused" in folder) return errorText(new Error(folder.refused));
+      const projectDir = path.resolve(folder.dir);
+      const where = folder.note ? `\n\n${folder.note}` : "";
       const parsed = parseLoginArgs(
         [args.url, "--role", args.role, ...(args.browser ? ["--browser", args.browser] : []), ...(args.successUrl ? ["--success-url", args.successUrl] : [])],
-        path.resolve(args.projectPath),
+        projectDir,
       );
       if (!parsed.ok) return errorText(new Error(parsed.error));
-      const options = { ...parsed.options, projectDir: path.resolve(args.projectPath) };
+      const options = { ...parsed.options, projectDir };
       const key = `${options.projectDir}\0${options.role}`;
       const { window: pending, resumed } = await pendingLogins.get(key, () => startLoginWindow(options));
       const waitMs = (args.waitSeconds ?? LOGIN_WAIT_DEFAULT_S) * 1000;
@@ -1362,14 +1372,15 @@ server.registerTool(
         const p = pending.progress();
         return text(
           `Still waiting for the user to sign in as "${options.role}"${differs}: ${p.reason === "starting" ? "the window is opening" : WAIT_SAYS[p.reason]}. ` +
-            `The window stays open for up to ${LOGIN_WINDOW_MAX_MS / 60_000} minutes from when it opened. Call scout_login again with the same role to keep waiting, once the user says they are done or to check.`,
+            `The window stays open for up to ${LOGIN_WINDOW_MAX_MS / 60_000} minutes from when it opened. Call scout_login again with the same role to keep waiting, once the user says they are done or to check.` +
+            where,
           activeName,
         );
       }
       // This call reports the outcome; the next call for the role opens a new window.
       pendingLogins.reported(key, pending);
       if (!outcome.ok) return errorText(new Error(`nothing was saved for role "${options.role}": ${outcome.error}`));
-      return text(`${outcome.detected}\n${savedLine(options, outcome.saved)}`, activeName);
+      return text(`${outcome.detected}\n${savedLine(options, outcome.saved)}${where}`, activeName);
     } catch (err) {
       return errorText(err);
     }

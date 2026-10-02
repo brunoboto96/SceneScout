@@ -684,12 +684,12 @@ async function defaultFolderCheck(): Promise<void> {
     ),
   );
   /** Attach once with no projectPath, from a client offering `roots` (or none), and return the reply. */
-  const attachWithout = async (roots?: string[], extraEnv: Record<string, string> = {}): Promise<string> => {
+  const attachWithout = async (roots?: string[], extraEnv: Record<string, string> = {}, extraArgs: Record<string, unknown> = {}): Promise<string> => {
     const client = new Client({ name: "ft-check-folder", version: "0.0.1" }, roots ? { capabilities: { roots: {} } } : undefined);
     if (roots) client.setRequestHandler(ListRootsRequestSchema, async () => ({ roots: roots.map((r) => ({ uri: pathToFileURL(r).href })) }));
     await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env: { ...env, ...extraEnv } }));
     try {
-      const reply = textOf(await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl } }));
+      const reply = textOf(await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, ...extraArgs } }));
       assertClosedAll(textOf(await client.callTool({ name: "scout_close", arguments: { all: true } })));
       return reply;
     } finally {
@@ -702,6 +702,20 @@ async function defaultFolderCheck(): Promise<void> {
     if (!plain.includes(`kept in ${site}`) || !plain.includes(path.join(site, ".scenescout", "report.md")))
       fail(`an attach with no projectPath and no workspace did not name the site's folder ${site}:\n${plain}`);
     if (!fs.existsSync(path.join(site, ".scenescout"))) fail(`the default folder ${site} was not created on first use`);
+    // scout_login with no projectPath saves into the same site folder (one resolver, keyed by host and port,
+    // so its sign-in page and the app's address agree). A sign-in saved there is found by an attach that
+    // names no folder; the contrast is a role saved nowhere, which is refused.
+    writeProfile(site, "member", {
+      cookies: [{ name: "member_session", value: "x", domain: "127.0.0.1", path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Lax" }],
+      origins: [],
+    });
+    if (siteFolderName(`${fixture.baseUrl}/sso/signin?next=%2F`) !== siteFolderName(fixture.baseUrl))
+      fail("a sign-in page and its app resolve to different folders");
+    const withRole = await attachWithout(undefined, {}, { role: "member" });
+    if (/no sign-in is saved/.test(withRole) || !withRole.includes(`kept in ${site}`))
+      fail(`an attach with no projectPath did not find the sign-in saved in ${site}:\n${withRole}`);
+    const noRole = await attachWithout(undefined, {}, { role: "nobody" });
+    if (!/no sign-in is saved for role "nobody"/.test(noRole)) fail(`an attach for a role saved nowhere was not refused:\n${noRole}`);
     const fromRoots = await attachWithout([workspace]);
     if (!fromRoots.includes(`workspace folder, under ${workspace}`))
       fail(`an attach with no projectPath did not use the client's workspace ${workspace}:\n${fromRoots}`);
@@ -710,7 +724,7 @@ async function defaultFolderCheck(): Promise<void> {
     if (!/SCENESCOUT_PROJECTS_DIR is "off"[\s\S]*Pass projectPath/.test(off))
       fail(`SCENESCOUT_PROJECTS_DIR=off with no projectPath did not refuse the attach:\n${off}`);
     console.log(
-      "✓ scout_attach with no projectPath uses the client's workspace, else a folder for the site that the result names, and none when the setting is off",
+      "✓ scout_attach with no projectPath uses the client's workspace, else a folder for the site that the result names and where a saved sign-in is found, and none when the setting is off",
     );
   } finally {
     await fixture.close();
@@ -859,19 +873,22 @@ async function main(): Promise<void> {
   if (JSON.stringify(listed) !== JSON.stringify(attachParams)) {
     guideGaps.push(`Configuration-reference.md lists scout_attach options [${listed.join(", ")}], the server has [${attachParams.join(", ")}]`);
   }
-  // The Default column says "(required)" for exactly the options the schema requires.
-  const listedRequired = [...attachSection.matchAll(/^\| `([A-Za-z]+)` \| \(required\) \|/gm)].map((m) => m[1]).sort();
-  const attachRequired = [...((tools.find((t) => t.name === "scout_attach")?.inputSchema as { required?: string[] }).required ?? [])].sort();
-  if (JSON.stringify(listedRequired) !== JSON.stringify(attachRequired)) {
-    guideGaps.push(
-      `Configuration-reference.md marks scout_attach options [${listedRequired.join(", ")}] required, the server requires [${attachRequired.join(", ")}]`,
-    );
+  // The Default column says "(required)" for exactly the options the schema requires, for each tool the reference tables.
+  for (const tool of ["scout_attach", "scout_login"]) {
+    const section = (reference.split(`\n## \`${tool}\` options\n`)[1] ?? "").split("\n## ")[0];
+    const listedRequired = [...section.matchAll(/^\| `([A-Za-z]+)` \| \(required\) \|/gm)].map((m) => m[1]).sort();
+    const required = [...((tools.find((t) => t.name === tool)?.inputSchema as { required?: string[] } | undefined)?.required ?? [])].sort();
+    if (!section) guideGaps.push(`Configuration-reference.md has no ${tool} options table`);
+    else if (JSON.stringify(listedRequired) !== JSON.stringify(required))
+      guideGaps.push(`Configuration-reference.md marks ${tool} options [${listedRequired.join(", ")}] required, the server requires [${required.join(", ")}]`);
   }
   if (guideGaps.length > 0) {
     console.error(`MCP CHECK FAILED — the guide disagrees with the server's tools:\n  ${guideGaps.join("\n  ")}`);
     process.exit(1);
   }
-  console.log("✓ the guide names only tools and parameters the server has, and lists every scout_attach option and which are required");
+  console.log(
+    "✓ the guide names only tools and parameters the server has, and lists every scout_attach option, and which scout_attach and scout_login options are required",
+  );
 
   const result = await client.callTool({ name: "scout_scan", arguments: { projectPath: packageRoot } });
   const text = (result.content as Array<{ type: string; text?: string }>).map((c) => c.text ?? "").join("");

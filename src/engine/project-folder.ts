@@ -168,7 +168,7 @@ export function chooseProjectFolder(input: {
     return {
       dir: input.workspace,
       source: "workspace",
-      note: `📁 FILES: no projectPath was given, so this run's notes, memory and report are kept in your workspace folder, under ${input.workspace}.`,
+      note: `📁 FILES: no projectPath was given, so this run's notes, memory, sign-ins and report are kept in your workspace folder, under ${input.workspace}.`,
     };
   }
   let root: string | null;
@@ -196,7 +196,7 @@ export function chooseProjectFolder(input: {
     dir,
     source: "default",
     note:
-      `📁 FILES: this site's notes, memory and report are kept in ${dir} — a folder SceneScout made for this site, since none was given. ` +
+      `📁 FILES: this site's notes, memory, sign-ins and report are kept in ${dir} — a folder SceneScout made for this site, since none was given. ` +
       `The report will be ${p.join(dir, MEMORY_DIRNAME, "report.md")}. Pass projectPath, or set ${PROJECTS_DIR_ENV}, to keep them elsewhere.`,
   };
 }
