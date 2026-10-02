@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Action results</title>
+    <style>
+      body { margin: 0; font: 15px/1.4 system-ui, sans-serif; padding: 16px 24px; }
+      .slot { position: relative; display: inline-block; margin: 8px 0; }
+      .slot button { padding: 10px 24px; }
+      /* An overlay over its slot's button: every click aimed at the button lands on it. */
+      .over { position: absolute; inset: 0; background: rgba(180, 30, 30, 0.9); color: #fff; font-size: 12px; display: flex; align-items: center; justify-content: center; }
+      .hidden { display: none; }
+      /* A button that never stops moving: the strict click waits for it to be still and gives up. Its own icon sits at its centre. */
+      @keyframes wobble { from { transform: translateX(0); } to { transform: translateX(6px); } }
+      .wobble { animation: wobble 0.15s infinite alternate; padding: 10px 24px; }
+      .wobble svg { width: 16px; height: 16px; vertical-align: middle; }
+    </style>
+  </head>
+  <body>
+    <h1>Action results</h1>
+
+    <!-- Dropdowns whose labels say more than their values. -->
+    <label>Severity
+      <select data-testid="severity">
+        <option value="">Choose…</option>
+        <option value="low">Low — minor impact</option>
+        <option value="medium">Medium — some impact</option>
+        <option value="high">High — blocks work</option>
+      </select>
+    </label>
+    <label>Assignee
+      <select data-testid="assignee">
+        <option value="u1">Pat Lee</option>
+        <option value="u2">Pat Long</option>
+      </select>
+    </label>
+
+    <!-- Date and time fields, which take one format each. -->
+    <label>Due at <input type="datetime-local" data-testid="due-at" /></label>
+    <label>Due on <input type="date" data-testid="due-on" /></label>
+
+    <!-- A pager whose buttons end up under something else. -->
+    <div>
+      <button type="button" data-testid="save-draft">Save draft</button>
+      <span class="slot">
+        <button type="button" data-testid="older-page">Older</button>
+        <div class="over" role="status" data-testid="banner-info">Maintenance tonight</div>
+      </span>
+      <span class="slot">
+        <button type="button" data-testid="next-page">Next</button>
+        <div class="over hidden" role="status" data-testid="toast-error">Could not save the record</div>
+      </span>
+      <button type="button" class="wobble" data-testid="wobble-btn">Refresh <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="currentColor" /></svg></button>
+    </div>
+    <p data-testid="pager-log"></p>
+
+    <!-- Tabs, each loading its own panel; some panels are refused. -->
+    <div role="tablist">
+      <button type="button" role="tab" data-testid="tab-a" data-src="/pixel.png">Overview</button>
+      <button type="button" role="tab" data-testid="tab-b" data-src="/api/refuse/403?tab=b">Audit</button>
+      <button type="button" role="tab" data-testid="tab-c" data-src="/pixel.png?tab=c">Notes</button>
+      <button type="button" role="tab" data-testid="tab-d" data-src="/api/refuse/403?tab=d">History</button>
+      <button type="button" role="tab" data-testid="tab-e">Links</button>
+    </div>
+    <p data-testid="tab-log"></p>
+
+    <script>
+      const log = (id, text) => (document.querySelector(`[data-testid="${id}"]`).textContent = text);
+      document.querySelector('[data-testid="save-draft"]').addEventListener("click", () => {
+        const fail = () => document.querySelector('[data-testid="toast-error"]').classList.remove("hidden");
+        fetch("/api/items", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+          .then((r) => { if (!r.ok) fail(); })
+          .catch(fail);
+      });
+      for (const id of ["older-page", "next-page", "wobble-btn"]) {
+        document.querySelector(`[data-testid="${id}"]`).addEventListener("click", () => log("pager-log", `clicked ${id}`));
+      }
+      for (const tab of document.querySelectorAll('[role="tab"]')) {
+        tab.addEventListener("click", () => {
+          log("tab-log", `opened ${tab.textContent}`);
+          // The Links panel breaks in the page itself: an uncaught error, not a refused request.
+          if (!tab.dataset.src) throw new Error("Links panel failed to render");
+          fetch(tab.dataset.src).catch(() => log("tab-log", "panel request failed"));
+        });
+      }
+    </script>
+  </body>
+</html>

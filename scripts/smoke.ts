@@ -52,6 +52,7 @@ import * as snapshotContents from "./smoke/snapshot.ts";
 import * as refsAndDiffs from "./smoke/refs.ts";
 import * as targets from "./smoke/targets.ts";
 import * as settleAfterLeaving from "./smoke/settle.ts";
+import * as actionResults from "./smoke/action-results.ts";
 
 const suites = [
   readOnly,
@@ -76,6 +77,7 @@ const suites = [
   refsAndDiffs,
   targets,
   settleAfterLeaving,
+  actionResults,
   unload,
   timeLimits,
   checkGate,
