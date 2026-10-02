@@ -29,6 +29,7 @@ import { AuthLossTracker } from "./authloss.js";
 import { captureClip } from "./capture.js";
 import {
   COLLECT_INTERACTABLES_SCRIPT,
+  POLICY_TEXT_SRC,
   VISIBLE_SRC,
   geometryIssues,
   type Rect,
@@ -136,8 +137,16 @@ import {
   AUTH_FLOW_RE,
   answersWithRefusal,
   destructiveRefusal,
+  destructiveLabelOf,
+  pickIsDestructive,
   isDestructive,
   isDestructiveWire,
+  blockSignature,
+  BlockNotices,
+  dialogNote,
+  dialogResponse,
+  ESCAPE_REFUSAL,
+  type DialogResponse,
   allowsWrite,
   policyRefusal,
   type WriteMode,
@@ -415,9 +424,6 @@ function requestSource(req: Request): { frameChain: string[]; frameUrl: string |
   return { frameChain, frameUrl };
 }
 
-/** The `why` of a top-window navigation refused as a possible frame escape; the notice words it on its own. */
-const ESCAPE_REFUSAL = "a possible frame escape";
-
 /** The most frames a snapshot reads controls from. */
 const MAX_READ_FRAMES = 10;
 
@@ -621,6 +627,14 @@ export class BrowserEngine {
   }
   /** Requests blocked by the write policy since the last action (timestamped for attribution). */
   private blockedRequests: Array<{ at: number; sig: string; answered: boolean; why?: string; type?: string }> = [];
+  /** What this session has been told about blocked writes, so each endpoint is explained once. */
+  private blockNotices = new BlockNotices();
+  /** Native dialogs the page opened since the last action's result, and how each was answered. */
+  private dialogsSeen: Array<{ type: string; message: string; response: DialogResponse; leave?: boolean }> = [];
+  /** The caller's answer to a leave confirmation for the action in progress (dialogResponse); undefined lets the mode decide. */
+  private leaveChoice: boolean | undefined = undefined;
+  /** Resolves the navigation in progress when the page's leave confirmation is answered "stay". */
+  private onLeaveRefused: (() => void) | null = null;
   /**
    * WebSockets this session's pages opened. The write policy works on HTTP
    * requests; frames sent over a socket are not inspected. In observe mode that
@@ -1259,6 +1273,8 @@ export class BrowserEngine {
     this.framesFailed = 0;
     this.headed = opts.headed ?? false;
     this.blockedRequests = [];
+    this.blockNotices.reset();
+    this.dialogsSeen = [];
     this.watchedResponses = [];
     this.contradictionsReported = new Set();
     this.tokenPostsReported = new Set();
@@ -1451,8 +1467,7 @@ export class BrowserEngine {
         if (method === "GET" && req.resourceType() === "document" && this.embedEscapeNavigation(req)) {
           const why = ESCAPE_REFUSAL;
           // Reported like any refusal, so a click whose navigation this stopped does not read as a click that did nothing.
-          if (this.blockedRequests.length < 20)
-            this.blockedRequests.push({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why, type: req.resourceType() });
+          this.noteBlocked({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why, type: req.resourceType() });
           this.logAction({ action: "write-policy:blocked", target: `navigation to ${req.url().slice(0, 140)} (${why})`, url: this.page?.url() ?? "" });
           this.refusedByPolicy.add(req);
           this.oracles.notePolicyBlock();
@@ -1510,8 +1525,7 @@ export class BrowserEngine {
         const pathname = pathnameOf(url);
         const refuse = (why?: string) => {
           const answered = answersWithRefusal(req.resourceType());
-          if (this.blockedRequests.length < 20)
-            this.blockedRequests.push({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered, why, type: req.resourceType() });
+          this.noteBlocked({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered, why, type: req.resourceType() });
           this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}${why ? ` (${why})` : ""}`, url: this.page?.url() ?? "" });
           this.refusedByPolicy.add(req);
           this.oracles.notePolicyBlock();
@@ -1711,18 +1725,43 @@ export class BrowserEngine {
     });
   }
 
-  /** Dialogs (confirm/alert): dismiss in read-only mode, accept otherwise. Must be wired on every page we drive, including adopted popups. */
+  /**
+   * Native dialogs, answered by policy.ts dialogResponse: alert, confirm and
+   * prompt dismissed in read-only and observe and accepted otherwise; a leave
+   * confirmation (beforeunload) by the caller's `leave`, else by the mode. Each
+   * is reported in the next action's result (dialogNote). Must be wired on
+   * every page we drive, including adopted popups.
+   */
   private wireDialogHandler(page: Page): void {
     page.on("dialog", (dialog) => {
       this.nativeDialogAt = Date.now();
-      const action = this.readOnly ? "dismiss" : "accept";
+      const type = dialog.type();
+      const leave = type === "beforeunload" ? this.leaveChoice : undefined;
+      const response = dialogResponse(type, this.readOnly, leave);
       this.logAction({
-        action: `dialog:${action}`,
+        action: `dialog:${type === "beforeunload" ? "leave-" : ""}${response}`,
         target: dialog.message().slice(0, 120),
         url: this.page?.url() ?? "",
       });
-      void (this.readOnly ? dialog.dismiss() : dialog.accept()).catch(() => {});
+      if (this.dialogsSeen.length < 10) this.dialogsSeen.push({ type, message: dialog.message(), response, ...(leave !== undefined ? { leave } : {}) });
+      if (type === "beforeunload" && response === "dismiss" && page === this.page) this.onLeaveRefused?.();
+      void (response === "dismiss" ? dialog.dismiss() : dialog.accept()).catch((err: unknown) => {
+        // A dialog already closed by the page or by the browser going away has nothing left to answer.
+        console.error(`[scenescout] could not answer a ${type} dialog: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      });
     });
+  }
+
+  /** The lines for the native dialogs the page opened since the last result, cleared as they are read. */
+  private drainDialogs(): string {
+    const notes = this.dialogsSeen.map((d) => dialogNote(d)).join("");
+    this.dialogsSeen = [];
+    return notes;
+  }
+
+  /** Whether the page asked to confirm leaving, since the `since`th dialog this action saw, and was answered "stay". */
+  private leaveRefused(since: number): boolean {
+    return this.dialogsSeen.slice(since).some((d) => d.type === "beforeunload" && d.response === "dismiss");
   }
 
   /** When the page last opened a native dialog (confirm, alert, prompt). */
@@ -1832,6 +1871,9 @@ export class BrowserEngine {
       chrome?: boolean;
       coveredBy?: string | null;
       nameFrom?: NameFrom | null;
+      /** Read for the label policy only (collector.ts POLICY_TEXT_SRC); not kept on the listed element. */
+      ownText?: string;
+      centre?: string[];
       interactive?: boolean;
       ariaHidden?: boolean;
       liveOnly?: boolean;
@@ -1881,12 +1923,13 @@ export class BrowserEngine {
       keyCounts.set(baseKey, count + 1);
       const key = count === 0 ? baseKey : `${baseKey}~${count}`;
       const ref = prevByKey?.get(key)?.ref ?? `e${++this.refCounter}`;
+      const { ownText: _ownText, centre: _centre, ...listed } = el;
       const full: SnapshotElement = {
-        ...el,
+        ...listed,
         ...(tag ? { frame: tag } : {}),
         // Judged on the real label, then masked: the policy must see what a click would press.
         // A message is not a control: "Could not delete" in an alert is not a Delete button.
-        destructive: el.liveOnly ? false : isDestructive(el.name, el.testid),
+        destructive: el.liveOnly ? false : destructiveLabelOf(el) !== null,
         ...(tag?.foreign ? { name: masksForeignName(el.tag, el.role) ? MASKED_NAME : capForeignName(el.name) } : {}),
         ...(tag?.foreign && el.href ? { href: stripForeignHref(el.href) } : {}),
         ref,
@@ -2273,7 +2316,7 @@ export class BrowserEngine {
    * policy applies to what is actually acted on — SPA re-renders can put a
    * different element under a previously-safe XPath.
    */
-  private async resolveForAction(ref: string): Promise<{ el: SnapshotElement; liveLabel: string }> {
+  private async resolveForAction(ref: string): Promise<{ el: SnapshotElement; liveLabel: string; live: { ownText?: string; centre?: string[] } }> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
     const el = this.refs.get(ref);
@@ -2289,9 +2332,9 @@ export class BrowserEngine {
     const live = (await this.scopeOf(el)
       .evaluate(
         `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return null; ` +
-          `return { testid: node.getAttribute('data-testid'), label: (node.getAttribute('aria-label') || node.innerText || node.textContent || node.getAttribute('placeholder') || '').trim().slice(0, 120) }; })()`,
+          `return { testid: node.getAttribute('data-testid'), label: (node.getAttribute('aria-label') || node.innerText || node.textContent || node.getAttribute('placeholder') || '').trim().slice(0, 120), ...(${POLICY_TEXT_SRC})(node) }; })()`,
       )
-      .catch(() => null)) as { testid: string | null; label: string } | null;
+      .catch(() => null)) as { testid: string | null; label: string; ownText?: string; centre?: string[] } | null;
     if (!live) {
       throw new Error(`Element ${ref} no longer exists in the DOM — take a new scout_snapshot.`);
     }
@@ -2302,10 +2345,10 @@ export class BrowserEngine {
         `Element under ${ref} changed (expected testid=${el.testid}, found ${live.testid ?? "none"}) — the DOM shifted; take a new scout_snapshot.`,
       );
     }
-    return { el, liveLabel: live.label };
+    return { el, liveLabel: live.label, live: { ownText: live.ownText, centre: live.centre } };
   }
 
-  private actionPolicyCheck(el: SnapshotElement, liveLabel: string): string | null {
+  private actionPolicyCheck(el: SnapshotElement, liveLabel: string, live: { ownText?: string; centre?: string[] } = {}): string | null {
     if (!this.readOnly) return null;
     // Same-origin navigation links are exempt: navigation is non-destructive
     // under the origin fence, and blocking "Reset filters"-style nav links
@@ -2316,8 +2359,10 @@ export class BrowserEngine {
     // is submission, which the pressEnter/submit path vets separately. The
     // same holds for choosing a file: selection is not the send.
     if (el.role === "textbox" || el.role === "file") return null;
-    if (el.destructive || isDestructive(liveLabel)) {
-      return destructiveRefusal(liveLabel || el.name || el.testid || el.ref, this.mode);
+    // Judged as the snapshot judged it, and again on what is there now (policy.ts destructiveLabelOf).
+    const now = destructiveLabelOf({ tag: el.tag, role: el.role, name: liveLabel, testid: el.testid, ownText: live.ownText, centre: live.centre });
+    if (el.destructive || now !== null) {
+      return destructiveRefusal(now ?? (liveLabel || el.name || el.testid || el.ref), this.mode);
     }
     return null;
   }
@@ -2367,6 +2412,7 @@ export class BrowserEngine {
           ? `OK: ${action} ${target}\nThe page tried to navigate with a request the write policy blocked, so the browser showed an error page; returned to ${url}.`
           : `OK: ${action} ${target}\nNavigated off-origin and was bounced back to ${url}. Exploration is fenced to ${this.baseUrl}.`) +
         blocked +
+        this.drainDialogs() +
         formatViolations(this.oracles.drain())
       );
     }
@@ -2383,7 +2429,13 @@ export class BrowserEngine {
       // errors ("take a new snapshot") instead of acting on the wrong element.
       this.refs.clear();
     }
-    return `OK: ${action} ${target}\nURL now: ${url}` + (navigated ? " (page changed — take a new snapshot)" : "") + mutations + formatViolations(violations);
+    return (
+      `OK: ${action} ${target}\nURL now: ${url}` +
+      (navigated ? " (page changed — take a new snapshot)" : "") +
+      this.drainDialogs() +
+      mutations +
+      formatViolations(violations)
+    );
   }
 
   /** Does this request path address a record this run created? Rules live in ownership.ts. */
@@ -2622,14 +2674,13 @@ export class BrowserEngine {
         return;
       }
       // Refused and reported as any refusal is. Dropped rather than answered: the page that sent it is going or gone.
-      if (this.blockedRequests.length < 20)
-        this.blockedRequests.push({
-          at: Date.now(),
-          sig: `${method} ${url.slice(0, 140)}`,
-          answered: false,
-          why: verdict.why,
-          type: (event.resourceType ?? "other").toLowerCase(),
-        });
+      this.noteBlocked({
+        at: Date.now(),
+        sig: `${method} ${url.slice(0, 140)}`,
+        answered: false,
+        why: verdict.why,
+        type: (event.resourceType ?? "other").toLowerCase(),
+      });
       this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}${verdict.why ? ` (${verdict.why})` : ""}`, url: this.page?.url() ?? "" });
       this.oracles.notePolicyBlock();
     } catch (err) {
@@ -2644,13 +2695,12 @@ export class BrowserEngine {
         }
         await answer(false);
         try {
-          if (this.blockedRequests.length < 20)
-            this.blockedRequests.push({
-              at: Date.now(),
-              sig: `${method} ${url.slice(0, 140)}`,
-              answered: false,
-              type: (event.resourceType ?? "other").toLowerCase(),
-            });
+          this.noteBlocked({
+            at: Date.now(),
+            sig: `${method} ${url.slice(0, 140)}`,
+            answered: false,
+            type: (event.resourceType ?? "other").toLowerCase(),
+          });
           this.logAction({
             action: "write-policy:blocked",
             target: `${method} ${url.slice(0, 140)} (not judged: an error in the policy)`,
@@ -2664,40 +2714,24 @@ export class BrowserEngine {
     }
   }
 
-  /** Report (and clear) write-policy blocks since the last action. */
+  /**
+   * Record a refused write for the next notice. Twenty are kept as they come;
+   * past that only an endpoint not already kept, up to sixty, so a page that
+   * beacons on every load cannot crowd out the block an action itself caused.
+   */
+  private noteBlocked(entry: { at: number; sig: string; answered: boolean; why?: string; type?: string }): void {
+    const list = this.blockedRequests;
+    if (list.length < 20 || (list.length < 60 && !list.some((e) => blockSignature(e.sig) === blockSignature(entry.sig)))) list.push(entry);
+  }
+
+  /** Report (and clear) write-policy blocks since the last action: each endpoint in full once per session, then counted (BlockNotices). */
   private drainBlocked(): string {
     this.lastActionBlocked = this.blockedRequests.length;
     if (this.blockedRequests.length === 0) return "";
-    const list = this.blockedRequests
-      .slice(0, 5)
-      .map((e) => this.lateMark(e))
-      .join("; ");
-    const extra = this.blockedRequests.length > 5 ? ` (+${this.blockedRequests.length - 5} more)` : "";
-    const answered = this.blockedRequests.some((e) => e.answered);
-    const reasons = new Set(this.blockedRequests.map((e) => e.why).filter((w): w is string => !!w));
-    const escaped = reasons.delete(ESCAPE_REFUSAL);
-    const foreign = [...reasons];
+    const blocked = this.blockedRequests.map((e) => ({ sig: e.sig, late: e.at < this.actionStartedAt, answered: e.answered, why: e.why }));
     this.blockedRequests = [];
     // The rule that judged them, which just after a flow hands back is still the flow's (WriteRule).
-    const rule = this.writeRule.at();
-    return (
-      `\n🛡 WRITE-POLICY blocked (${rule}): ${list}${extra}. ` +
-      `This is the tester's safety policy, NOT an app bug — do not file a finding for the resulting error UI. ` +
-      (foreign.length > 0
-        ? `Refused because it was ${foreign.join("; ")}: it would reach a site embedded in the page rather than the app, which no mode but destructive allows. `
-        : "") +
-      (escaped
-        ? `A move of the whole page off the app, with no Referer, was refused: a frame that held another site now sits on a data: or blob: URL, where WebKit drops the frame's sandbox, so the move may be that frame's. No mode but destructive allows it. `
-        : "") +
-      (answered
-        ? `The page's own requests were answered with a 403 in the server's place, so the page's handling of a refusal is real: an error message is correct, and a success message is a false_success violation. `
-        : "") +
-      (rule === "observe"
-        ? `observe mode blocks every request that is not a GET, so no form submission reaches the server. Re-attach with mode="read-only" ONLY if the user confirms that ordinary form submissions are acceptable on this target.`
-        : rule === "read-only"
-          ? `Re-attach with mode="safe-write" to test create/edit flows, or "destructive" (user-approved disposable env only).`
-          : `In safe-write, updates/deletes are only allowed on resources this session created (${this.createdResources.length} so far).`)
-    );
+    return this.blockNotices.notice(this.writeRule.at(), blocked, this.createdResources.length);
   }
 
   /** Once per session, in observe mode only: say that socket frames are outside the policy. */
@@ -2885,14 +2919,20 @@ export class BrowserEngine {
     });
   }
 
-  async click(ref: string, clicks = 1): Promise<string> {
-    return this.withinLimit("action", () => this.clickNow(ref, clicks));
+  /** `leave` answers a leave confirmation the click raises (policy.ts dialogResponse); undefined lets the mode decide. */
+  async click(ref: string, clicks = 1, leave?: boolean): Promise<string> {
+    this.leaveChoice = leave;
+    try {
+      return await this.withinLimit("action", () => this.clickNow(ref, clicks));
+    } finally {
+      this.leaveChoice = undefined;
+    }
   }
 
   private async clickNow(ref: string, clicks = 1): Promise<string> {
     const page = this.requirePage();
-    const { el, liveLabel } = await this.resolveForAction(ref);
-    const refusal = this.actionPolicyCheck(el, liveLabel);
+    const { el, liveLabel, live } = await this.resolveForAction(ref);
+    const refusal = this.actionPolicyCheck(el, liveLabel, live);
     if (refusal) {
       this.logAction({ action: "click:refused", target: liveLabel || el.name, url: page.url() });
       return refusal;
@@ -3035,7 +3075,7 @@ export class BrowserEngine {
 
   private async typeNow(ref: string, text: string, pressEnter = false, replace = false): Promise<string> {
     const page = this.requirePage();
-    const { el, liveLabel } = await this.resolveForAction(ref);
+    const { el, liveLabel, live } = await this.resolveForAction(ref);
     if (el.role === "file") {
       // fill() refuses a file input — and it used to refuse with a stack
       // trace, leaving every upload form stranded. Point at the tool that can.
@@ -3044,7 +3084,7 @@ export class BrowserEngine {
         `Use scout_upload {ref:"${ref}"}: a small valid fixture is generated and matched to the input's accept attribute, or pass fixture / filePath.`
       );
     }
-    const refusal = this.actionPolicyCheck(el, liveLabel);
+    const refusal = this.actionPolicyCheck(el, liveLabel, live);
     if (refusal) return refusal;
     const embed = this.foreignEmbedOf(el);
     if (embed) {
@@ -3108,7 +3148,7 @@ export class BrowserEngine {
     if (opts.ref) {
       const resolved = await this.resolveForAction(opts.ref);
       el = resolved.el;
-      const refusal = this.actionPolicyCheck(el, resolved.liveLabel);
+      const refusal = this.actionPolicyCheck(el, resolved.liveLabel, resolved.live);
       if (refusal) return refusal;
       const embed = this.foreignEmbedOf(el);
       if (embed) return embedProbeRefusal("a file upload", embed);
@@ -3375,6 +3415,22 @@ export class BrowserEngine {
     );
   }
 
+  /**
+   * The label of the option a select step picks, matched as selectOption
+   * matches it (value or label). Empty when none matches; null when it could
+   * not be read, which the caller refuses, since the pick cannot be vetted.
+   */
+  private static async chosenOptionLabel(loc: import("playwright").Locator, value: string | undefined): Promise<string | null> {
+    if (value === undefined) return "";
+    return loc
+      .evaluate((node, v) => {
+        const opts = Array.from((node as HTMLSelectElement).options ?? []);
+        const o = opts.find((x) => x.value === v || x.label === v || (x.textContent || "").trim() === v);
+        return o ? (o.label || o.textContent || "").trim().slice(0, 120) : "";
+      }, value)
+      .catch(() => null);
+  }
+
   /** Record a dropdown's options and the ones picked, by the values selectOption reported. */
   private recordSelectChoice(fingerprint: string, key: string, options: Array<{ value: string; label: string }>, picked: string[]): void {
     const labels = options.map((o) => o.label);
@@ -3389,8 +3445,8 @@ export class BrowserEngine {
 
   private async selectNow(ref: string, value: string): Promise<string> {
     const page = this.requirePage();
-    const { el, liveLabel } = await this.resolveForAction(ref);
-    const refusal = this.actionPolicyCheck(el, liveLabel);
+    const { el, liveLabel, live } = await this.resolveForAction(ref);
+    const refusal = this.actionPolicyCheck(el, liveLabel, live);
     if (refusal) return refusal;
     if (this.readOnly) {
       // Bulk-action dropdowns fire on change — vet the chosen option itself.
@@ -3401,8 +3457,9 @@ export class BrowserEngine {
             `const o = opts.find(o => o.value === v || o.label === v || (o.textContent || '').trim() === v); ` +
             `return o ? (o.label || o.textContent || '').trim().slice(0, 120) : ''; })()`,
         )
-        .catch(() => "")) as string;
-      if (isDestructive(value) || isDestructive(optionLabel)) {
+        .catch(() => null)) as string | null;
+      // The dropdown itself is not judged by its options (destructiveLabelOf), so the pick is the check: one that cannot be read is refused.
+      if (pickIsDestructive(value, el.testid, optionLabel)) {
         this.logAction({ action: "select:refused", target: optionLabel || value, url: page.url() });
         return destructiveRefusal(optionLabel || value, this.mode);
       }
@@ -3549,7 +3606,18 @@ export class BrowserEngine {
     }
   }
 
-  async navigate(target: string): Promise<string> {
+  /** `leave` answers a leave confirmation the page raises (policy.ts dialogResponse); undefined lets the mode decide. */
+  async navigate(target: string, leave?: boolean): Promise<string> {
+    this.leaveChoice = leave;
+    try {
+      return await this.navigateNow(target);
+    } finally {
+      this.leaveChoice = undefined;
+      this.onLeaveRefused = null;
+    }
+  }
+
+  private async navigateNow(target: string): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
     const url = target.startsWith("http") ? target : `${this.baseUrl}${target.startsWith("/") ? "" : "/"}${target}`;
@@ -3559,7 +3627,38 @@ export class BrowserEngine {
     // A notice describes ONE navigation. Clearing up front means a notice left
     // undelivered by a previous throw can never prepend itself to this result.
     this.authLoss.clear();
-    await this.withinLimit("nav", () => page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
+    // A page holding unsent input can ask to confirm leaving. Answered "stay",
+    // the navigation is cancelled, which a browser reports as an aborted load
+    // (or, in some engines, never reports at all), so the answer itself ends
+    // the wait and the result says what happened instead of ERR_ABORTED.
+    // Only a confirmation raised by this navigation explains its failure, not one left over from before it.
+    const dialogsBefore = this.dialogsSeen.length;
+    const stayed = new Promise<"stayed">((resolve) => {
+      this.onLeaveRefused = () => resolve("stayed");
+    });
+    const going = this.withinLimit("nav", () => page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
+    let outcome: "went" | "stayed";
+    try {
+      outcome = await Promise.race([going.then(() => "went" as const), stayed]);
+    } catch (err) {
+      if (!this.leaveRefused(dialogsBefore)) throw err;
+      outcome = "stayed";
+    } finally {
+      this.onLeaveRefused = null;
+    }
+    if (outcome === "stayed") {
+      // The cancelled load settles on its own; its error is the cancellation this result reports.
+      going.catch((err: unknown) => {
+        this.logAction({
+          action: "navigate:cancelled",
+          target: err instanceof Error ? err.message.split("\n")[0].slice(0, 160) : String(err),
+          url: page.url(),
+        });
+      });
+      // Not a navigation outcome: the session stayed by its own answer, so nothing is recorded for the auth-loss tracker.
+      const result = await this.afterAction("navigate", url);
+      return result.replace(/^OK: navigate /, "NOT NAVIGATED: ");
+    }
     // Settle BEFORE judging where we landed. A client-side auth guard redirects
     // after hydration, not during goto, so reading page.url() here showed the
     // requested path and the bounce went unnoticed — which is precisely how a
@@ -4102,11 +4201,24 @@ export class BrowserEngine {
     this.authLoss.record({ requestedRoute, landedRoute, bounced, role: this.role, target: requestedUrl });
   }
 
-  async goBack(): Promise<string> {
+  /** `leave` answers a leave confirmation the page raises (policy.ts dialogResponse); undefined lets the mode decide. */
+  async goBack(leave?: boolean): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
-    await page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }).catch(() => {});
-    return this.afterAction("back", "");
+    this.leaveChoice = leave;
+    try {
+      // A back that goes nowhere (no history, a cancelled leave) is reported by the URL the result shows.
+      await page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }).catch((err: unknown) => {
+        this.logAction({
+          action: "back:no-navigation",
+          target: err instanceof Error ? err.message.split("\n")[0].slice(0, 160) : String(err),
+          url: page.url(),
+        });
+      });
+      return await this.afterAction("back", "");
+    } finally {
+      this.leaveChoice = undefined;
+    }
   }
 
   /** The full route contract: scanned filesystem routes ∪ link-discovered route classes. */
@@ -4508,7 +4620,13 @@ export class BrowserEngine {
           preTestid = await loc.getAttribute("data-testid").catch(() => null);
           const label = await liveLabel(loc);
           preLabel = label;
-          if (this.readOnly && (step.action === "click" || step.action === "select" || step.action === "upload") && isDestructive(label, step.value)) {
+          // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
+          const isSelect = step.action === "select" && (await loc.evaluate((n) => n.tagName.toLowerCase() === "select").catch(() => false));
+          if (
+            this.readOnly &&
+            (step.action === "click" || step.action === "select" || step.action === "upload") &&
+            (isSelect ? pickIsDestructive(step.value, preTestid, await BrowserEngine.chosenOptionLabel(loc, step.value)) : isDestructive(label, step.value))
+          ) {
             transcript.push(`${desc} → ${destructiveRefusal(label || step.target, this.mode)}`);
             break;
           }
@@ -4622,7 +4740,7 @@ export class BrowserEngine {
         await this.scanForInjections();
         await this.scanForContradictions();
         const violations = this.oracles.drain();
-        const mutations = this.drainMutations() + this.drainBlocked() + this.drainCreated();
+        const mutations = this.drainDialogs() + this.drainMutations() + this.drainBlocked() + this.drainCreated();
         // Abort only on NEW violations: a known-failing endpoint repeating on
         // every navigation must not make every plan abort at step 1.
         if (violations.some((v) => !v.repeat)) {
@@ -4784,7 +4902,16 @@ export class BrowserEngine {
                 (await loc.textContent({ timeout: 1000 }).catch(() => null)) ??
                 ""
               ).trim();
-              if (this.readOnly && step.action !== "type" && isDestructive(label, step.action === "select" ? step.value : undefined)) {
+              // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
+              const isSelect = step.action === "select" && (await loc.evaluate((n) => n.tagName.toLowerCase() === "select").catch(() => false));
+              const testid = await loc.getAttribute("data-testid").catch(() => null);
+              if (
+                this.readOnly &&
+                step.action !== "type" &&
+                (isSelect
+                  ? pickIsDestructive(step.value, testid, await BrowserEngine.chosenOptionLabel(loc, step.value))
+                  : isDestructive(label, step.action === "select" ? step.value : undefined))
+              ) {
                 refusal = destructiveRefusal(label || step.target, this.mode);
               } else if (step.action === "click") {
                 await loc.click({ timeout: this.limits.actionMs });

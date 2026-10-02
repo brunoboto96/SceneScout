@@ -296,6 +296,366 @@
       "seconds": 62,
       "costUsd": 0.007194500000000001,
       "archive": "ci-holdout-3-14-1-2"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "demo",
+      "version": "3.14.1",
+      "commit": "eba7aea",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "rule",
+      "lanes": {
+        "asked": 4,
+        "planned": 4,
+        "ran": 4
+      },
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 3,
+        "labelled": 3,
+        "low": "75%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 40,
+      "tokens": {
+        "input": 774823,
+        "cachedInput": 727016,
+        "output": 2913
+      },
+      "seconds": 33,
+      "costUsd": 0.013507360000000001,
+      "archive": "ci-lanes-4-demo-1"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "demo",
+      "version": "3.14.1",
+      "commit": "eba7aea",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "rule",
+      "lanes": {
+        "asked": 4,
+        "planned": 4,
+        "ran": 4
+      },
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 3,
+        "labelled": 3,
+        "low": "75%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 40,
+      "tokens": {
+        "input": 766576,
+        "cachedInput": 756424,
+        "output": 2417
+      },
+      "seconds": 33,
+      "costUsd": 0.00978794,
+      "archive": "ci-lanes-4-demo-2"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "demo",
+      "version": "3.14.1",
+      "commit": "eba7aea",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "rule",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 4,
+        "labelled": 4,
+        "low": "80%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 29,
+      "tokens": {
+        "input": 609604,
+        "cachedInput": 602591,
+        "output": 1641
+      },
+      "seconds": 79,
+      "costUsd": 0.00754771,
+      "archive": "ci-lanes-1-demo-1"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "demo",
+      "version": "3.14.1",
+      "commit": "eba7aea",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "rule",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 4,
+        "labelled": 4,
+        "low": "100%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 29,
+      "tokens": {
+        "input": 599431,
+        "cachedInput": 574840,
+        "output": 1647
+      },
+      "seconds": 69,
+      "costUsd": 0.009031,
+      "archive": "ci-lanes-1-demo-2"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "holdout",
+      "version": "3.14.1",
+      "commit": "eba7aea",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "rule",
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 1,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 1,
+        "labelled": 4,
+        "low": "20%",
+        "high": "40%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 27,
+      "tokens": {
+        "input": 558749,
+        "cachedInput": 551323,
+        "output": 1760
+      },
+      "seconds": 65,
+      "costUsd": 0.007135830000000001,
+      "archive": "ci-lanes-1-holdout-1"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "holdout",
+      "version": "3.14.1",
+      "commit": "eba7aea",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "rule",
+      "lanes": {
+        "asked": 4,
+        "planned": 4,
+        "ran": 4
+      },
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 2,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 2,
+        "labelled": 4,
+        "low": "40%",
+        "high": "60%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 40,
+      "tokens": {
+        "input": 780989,
+        "cachedInput": 767682,
+        "output": 2721
+      },
+      "seconds": 32,
+      "costUsd": 0.01036802,
+      "archive": "ci-lanes-4-holdout-1"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "demo",
+      "version": "3.14.1",
+      "commit": "eba7aea",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "rule",
+      "lanes": {
+        "asked": 4,
+        "planned": 4,
+        "ran": 4
+      },
+      "key": "c1786bc817",
+      "recall": {
+        "found": 8,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 9,
+        "labelled": 9,
+        "low": "90%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 95,
+      "tokens": {
+        "input": 2027350,
+        "cachedInput": 2001159,
+        "output": 6777
+      },
+      "seconds": 89,
+      "costUsd": 0.02601919,
+      "archive": "ci-lanes-4-demo-160-turns"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "demo",
+      "version": "3.14.1",
+      "commit": "0b709b2",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "rule",
+      "lanes": {
+        "asked": 4,
+        "planned": 4,
+        "ran": 4
+      },
+      "key": "c1786bc817",
+      "recall": {
+        "found": 8,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 9,
+        "labelled": 9,
+        "low": "100%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 86,
+      "tokens": {
+        "input": 1804634,
+        "cachedInput": 1760945,
+        "output": 6753
+      },
+      "seconds": 84,
+      "costUsd": 0.02535485,
+      "archive": "ci-lanes-4-demo-160-turns-2"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "demo",
+      "version": "3.14.1",
+      "commit": "0b709b2",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "rule",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 5,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 5,
+        "labelled": 5,
+        "low": "100%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 37,
+      "tokens": {
+        "input": 803803,
+        "cachedInput": 777552,
+        "output": 2177
+      },
+      "seconds": 84,
+      "costUsd": 0.01148912,
+      "archive": "ci-lanes-1-demo-160-turns"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "holdout",
+      "version": "3.14.1",
+      "commit": "0b709b2",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "rule",
+      "lanes": {
+        "asked": 4,
+        "planned": 4,
+        "ran": 4
+      },
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 7,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 7,
+        "labelled": 9,
+        "low": "50%",
+        "high": "86%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 86,
+      "tokens": {
+        "input": 1801743,
+        "cachedInput": 1776235,
+        "output": 7040
+      },
+      "seconds": 73,
+      "costUsd": 0.02383315,
+      "archive": "ci-lanes-4-holdout-160-turns"
     }
   ]
 }

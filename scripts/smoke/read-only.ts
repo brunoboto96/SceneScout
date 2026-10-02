@@ -1075,4 +1075,131 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
   } finally {
     await engine.close().catch(() => {});
   }
+  await labelsAndLeaving({ baseUrl, projectDir, stats } as SmokeContext);
+}
+
+/**
+ * The label policy judges a control by its own name, a page's leave
+ * confirmation is reported and left to the caller, and a blocked endpoint is
+ * explained once. Each against its contrast: the destructive control beside
+ * the harmless one is still refused, and its request never reaches the server.
+ */
+async function labelsAndLeaving({ baseUrl, projectDir, stats }: SmokeContext): Promise<void> {
+  const writesTo = (key: string): number => stats.writes[key] ?? 0;
+  const engine = new BrowserEngine();
+  try {
+    console.log("observe: a control is judged by its own label");
+    await engine.attach({ url: baseUrl, projectDir, mode: "observe" });
+    await engine.navigate("/leave-guard.html");
+    const snap = await engine.snapshot(true);
+    const lineOf = (testid: string): { ref: string; line: string } => {
+      const m = snap.match(new RegExp(`(e\\d+) [^\\n]*\\[testid=${testid}[,\\]][^\\n]*`));
+      if (!m) throw new Error(`leave-guard fixture: no element with testid ${testid} in:\n${snap}`);
+      return { ref: m[1], line: m[0] };
+    };
+    const filter = lineOf("log-filter");
+    check("a filter whose options include Delete is not marked destructive", !filter.line.includes("DESTRUCTIVE"), filter.line);
+    const row = lineOf("record-row");
+    check("a row holding a Delete button off its centre is not marked destructive", !row.line.includes("DESTRUCTIVE"), row.line);
+    check("...the Delete button inside it is", lineOf("record-row-delete").line.includes("DESTRUCTIVE"), lineOf("record-row-delete").line);
+    const icon = lineOf("record-icon-action");
+    check("an icon-only control named Delete by its aria-label is marked destructive", icon.line.includes("DESTRUCTIVE"), icon.line);
+    const iconClick = await engine.click(icon.ref);
+    check("...and clicking it is refused", iconClick.includes("REFUSED"), iconClick);
+    check("...and a row whose centre is a Remove button is", lineOf("record-row-centred").line.includes("DESTRUCTIVE"), lineOf("record-row-centred").line);
+    check(
+      "an in-app Discard changes is not marked destructive",
+      !lineOf("guard-discard-changes").line.includes("DESTRUCTIVE"),
+      lineOf("guard-discard-changes").line,
+    );
+    check("...Discard record is", lineOf("guard-discard-record").line.includes("DESTRUCTIVE"), lineOf("guard-discard-record").line);
+
+    const pickCreate = await engine.select(filter.ref, "create");
+    check("choosing Create in the filter is allowed", !pickCreate.includes("REFUSED"), pickCreate);
+    const pickDelete = await engine.select(filter.ref, "delete");
+    check("choosing Delete in the filter is refused", pickDelete.includes("REFUSED"), pickDelete);
+    const rowClick = await engine.click(row.ref);
+    check("clicking the row is allowed", !rowClick.includes("REFUSED"), rowClick);
+    const deleteClick = await engine.click(lineOf("record-row-delete").ref);
+    const centredClick = await engine.click(lineOf("record-row-centred").ref);
+    check("clicking the Delete button is refused", deleteClick.includes("REFUSED"), deleteClick);
+    check("clicking the row whose centre is Remove is refused", centredClick.includes("REFUSED"), centredClick);
+    const recordClick = await engine.click(lineOf("guard-discard-record").ref);
+    check("Discard record is refused", recordClick.includes("REFUSED"), recordClick);
+    await settle(300);
+    check(
+      "no delete or discard of a record reached the server",
+      writesTo("DELETE /api/records/7") + writesTo("DELETE /api/records/8") + writesTo("DELETE /api/records/9") + writesTo("POST /api/records/7") === 0,
+      JSON.stringify(stats.writes),
+    );
+
+    console.log("observe: a background beacon blocked on every load is explained once");
+    const firstLoad = await engine.navigate("/leave-guard.html");
+    const secondLoad = await engine.navigate("/leave-guard.html");
+    check("the beacon's endpoint was already explained in this session", !firstLoad.includes("NOT an app bug"), firstLoad);
+    check(
+      "a repeat is counted on one line, without the paragraph",
+      /WRITE-POLICY blocked \(observe\): 1 repeat block of 1 known endpoint \(POST \S*\/api\/monitor\/tunnel ×1\)/.test(secondLoad) &&
+        !secondLoad.includes("observe mode blocks every request"),
+      secondLoad,
+    );
+    check("the beacon never reached the server", writesTo("POST /api/monitor/tunnel") === 0, JSON.stringify(stats.writes));
+
+    console.log("observe: a page that asks to confirm leaving");
+    await engine.navigate("/page2.html");
+    const clean = await engine.navigate("/leave-guard.html");
+    check("leaving a page with nothing typed raises no leave confirmation", !clean.includes("LEAVE CONFIRMATION"), clean);
+    let snapG = await engine.snapshot(true);
+    const refIn = (s: string, testid: string): string => {
+      const m = s.match(new RegExp(`(e\\d+) [^\\n]*\\[testid=${testid}[,\\]]`));
+      if (!m) throw new Error(`leave-guard fixture: no element with testid ${testid} in:\n${s}`);
+      return m[1];
+    };
+    await engine.type(refIn(snapG, "guard-title"), "unsent title");
+    const stayed = await engine.navigate("/page2.html");
+    check(
+      "a navigation the page asks to confirm is reported by name, not as ERR_ABORTED",
+      stayed.startsWith("NOT NAVIGATED") && stayed.includes("LEAVE CONFIRMATION") && !stayed.includes("ERR_ABORTED"),
+      stayed,
+    );
+    check("...and the session stayed on the form", stayed.includes("leave-guard.html") && !/URL now: \S*page2/.test(stayed), stayed);
+    snapG = await engine.snapshot(true);
+    const cancel = await engine.click(refIn(snapG, "guard-cancel"));
+    check("a Cancel that goes back across documents says the page asked to confirm leaving", cancel.includes("LEAVE CONFIRMATION"), cancel);
+
+    console.log("observe: discarding unsent changes in the app's own confirm");
+    snapG = await engine.snapshot(true);
+    const discard = await engine.click(refIn(snapG, "guard-discard-changes"));
+    check("Discard changes that sends nothing is allowed in observe", !discard.includes("REFUSED") && !discard.includes("WRITE-POLICY blocked"), discard);
+    const afterDiscard = await engine.navigate("/page2.html");
+    check("...and the page then leaves without asking", afterDiscard.startsWith("OK") && !afterDiscard.includes("LEAVE CONFIRMATION"), afterDiscard);
+
+    await engine.navigate("/leave-guard.html");
+    snapG = await engine.snapshot(true);
+    await engine.type(refIn(snapG, "guard-title"), "unsent again");
+    const left = await engine.navigate("/page2.html", true);
+    check("leave: true leaves, and says the unsent input was discarded", /URL now: \S*page2\.html/.test(left) && /answered "leave" as asked/.test(left), left);
+  } finally {
+    await engine.close().catch(() => {});
+  }
+
+  console.log("read-only: a Discard changes that sends a write is refused on the wire");
+  const ro = new BrowserEngine();
+  try {
+    await ro.attach({ url: baseUrl, projectDir, mode: "read-only" });
+    await ro.navigate("/leave-guard.html");
+    const snap = await ro.snapshot(true);
+    const ref = snap.match(/(e\d+) [^\n]*\[testid=guard-discard-changes-remote[,\]]/)?.[1];
+    if (!ref) throw new Error(`leave-guard fixture: no guard-discard-changes-remote in:\n${snap}`);
+    const result = await ro.click(ref);
+    await settle(300);
+    check("the label does not refuse it", !result.includes("REFUSED by"), result);
+    check(
+      "...the policy blocks its discard request and it never reaches the server",
+      result.includes("WRITE-POLICY blocked (read-only)") && result.includes("/api/drafts/7/discard") && writesTo("POST /api/drafts/7/discard") === 0,
+      `${result}\n${JSON.stringify(stats.writes)}`,
+    );
+  } finally {
+    await ro.close().catch(() => {});
+  }
 }
