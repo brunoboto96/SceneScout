@@ -31,6 +31,7 @@ import { BrowserEngine } from "./engine/browser.js";
 import {
   checkFindings,
   redactBaselineRun,
+  MAX_DISCOVERY_ROUNDS,
   redactFlowRuns,
   redactRoute,
   redactRoutes,
@@ -46,9 +47,6 @@ import { MemoryStore, MEMORY_DIRNAME, writeSelfIgnore, type Finding } from "./en
 import { decodePng, encodePng, type RgbaImage } from "./engine/png.js";
 import { firstLineOf } from "./engine/limits.js";
 import { checkRetestPlan, retestResults, wellFormedFindings } from "./engine/verify.js";
-
-/** Link discovery rounds: each crawl reveals the routes its pages link to. Past a few, a site is paginating rather than revealing. */
-const MAX_ROUNDS = 6;
 
 /** What a check reads from the project before it starts: its saved flows, the findings earlier runs left, and the targets of any visual baselines. */
 export interface CheckInputs {
@@ -112,11 +110,18 @@ export async function runCheck(
   log: (line: string) => void = () => {},
   inputs: CheckInputs = { flows: [], findings: null },
 ): Promise<CheckResult> {
+  if (options.paths && options.timeBudgetMs !== undefined) throw new Error("a time budget applies to route discovery, not to a list of paths");
   // A throwaway memory: a check is one run, and a store shared with earlier
   // exploratory runs would count their visits as this check's and skip those routes.
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-check-"));
+  // Also on an exit the finally below never reaches, such as Ctrl+C, which the browser's driver answers with process.exit.
+  const removeScratch = (): void => fs.rmSync(scratch, { recursive: true, force: true });
+  process.once("exit", removeScratch);
   const engine = new BrowserEngine();
   const start = new URL(options.url);
+  // From the start of the run, browser launch included: the budget is wall-clock time a person waits.
+  const deadline = options.timeBudgetMs !== undefined ? Date.now() + options.timeBudgetMs : undefined;
+  const pastDeadline = (): boolean => deadline !== undefined && Date.now() >= deadline;
   try {
     // Attached at the origin: the engine joins every crawled path onto the URL
     // it attached to, so attaching to a start page with a path would double it.
@@ -138,21 +143,24 @@ export async function runCheck(
     const authFailed = attached.split("\n").find((line) => line.startsWith("⚠ AUTH FAILED"));
     if (authFailed) throw new Error(authFailed.replace(/ Continuing now tests a logged-out app\.$/, "").replace(/re-attach/, "run the check again"));
     const routes: RouteHealth[] = [];
-    const crawl = async (paths: string[] | undefined, limit: number): Promise<void> => {
-      await engine.crawl(paths, { inspect: true, limit });
+    const crawl = async (paths: string[] | undefined, limit: number, deadline?: number): Promise<void> => {
+      await engine.crawl(paths, { inspect: true, limit, deadline });
       routes.push(...engine.lastCrawlHealth);
     };
     if (options.paths) {
       await crawl(options.paths.slice(0, options.maxRoutes), options.maxRoutes);
     } else {
-      // The start page first, whatever else is known: it is the one route the user named.
+      // The start page first, whatever else is known: it is the one route the user named. The
+      // time budget does not apply to it, so a run always measures at least the page it was given.
       await crawl([`${start.pathname}${start.search}${start.hash}`], 1);
-      for (let round = 0; round < MAX_ROUNDS && routes.length < options.maxRoutes; round++) {
-        if (engine.crawlableRoutes().length === 0) break;
-        await crawl(undefined, options.maxRoutes - routes.length);
+      for (let round = 0; round < MAX_DISCOVERY_ROUNDS && routes.length < options.maxRoutes; round++) {
+        if (engine.crawlableRoutes().length === 0 || pastDeadline()) break;
+        await crawl(undefined, options.maxRoutes - routes.length, deadline);
         log(`  ${routes.length} route(s) checked`);
       }
     }
+    // Out of time with routes still to visit; a cap of routes reached first is --max-routes's to report.
+    const timeLimitReached = pastDeadline() && routes.length < options.maxRoutes && engine.crawlableRoutes().length > 0;
     // Pages of open findings the crawl did not load exactly: loaded now, so each re-test has its own measurement.
     // Kept apart from `routes`: they are measured only to re-test, never checked against the page rules, and do not count
     // towards --max-routes. With --paths the check stays on the paths it was given.
@@ -213,8 +221,9 @@ export async function runCheck(
       routes: measured,
       issues,
       worthALook,
-      // Routes that failed to load are issues already; "not visited" is only what --max-routes left out.
+      // Routes that failed to load are issues already; "not visited" is only what --max-routes (or the time budget) left out.
       unvisited: options.paths ? [] : engine.crawlableRoutes().map(redactRoute),
+      ...(options.timeBudgetMs !== undefined ? { timeBudget: { ms: options.timeBudgetMs, reached: timeLimitReached } } : {}),
       ignored: options.ignore,
       flows,
       skippedFlows: inputs.skippedFlows ?? [],
@@ -224,7 +233,8 @@ export async function runCheck(
     };
   } finally {
     await engine.close().catch((err: unknown) => log(`closing the browser failed: ${err instanceof Error ? err.message : String(err)}`));
-    fs.rmSync(scratch, { recursive: true, force: true });
+    process.off("exit", removeScratch);
+    removeScratch();
   }
 }
 

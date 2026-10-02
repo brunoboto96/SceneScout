@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Recent activity</title>
+  </head>
+  <body>
+    <main>
+      <h1>Recent activity</h1>
+      <p id="status">Loading…</p>
+      <button type="button" data-testid="activity-refresh">Refresh</button>
+    </main>
+    <script>
+      // A page that records each visit with a plain POST as it loads, the way a "last seen" marker or a view counter
+      // does. Observe mode refuses it before it leaves the page; read-only lets a plain POST like this through.
+      const status = document.getElementById("status");
+      fetch("/api/visits", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ page: "activity" }) })
+        .then((r) => (status.textContent = r.ok ? "Up to date" : "Could not record this visit"))
+        .catch(() => (status.textContent = "Could not record this visit"));
+    </script>
+  </body>
+</html>

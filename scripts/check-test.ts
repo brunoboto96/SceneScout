@@ -79,6 +79,22 @@ import {
 } from "../src/engine/baseline.ts";
 import { cutByViewport } from "../src/engine/capture.ts";
 import { encodePng, type RgbaImage } from "../src/engine/png.ts";
+import {
+  echoesListedRequest,
+  firstLook,
+  firstRunSummary,
+  formatFirstRun,
+  GUIDE_URL,
+  modeSentence,
+  pagesAffected,
+  resourceOf,
+  sameAddress,
+  shellArg,
+  stopReason,
+  unreachableReason,
+  writtenByFirstLook,
+  type FirstRunFacts,
+} from "../src/first-run.ts";
 import { checkRetestPlan, retestResults, wellFormedFindings, type MeasuredPage } from "../src/engine/verify.ts";
 import {
   CHECK_OPTION_NAMES,
@@ -102,6 +118,7 @@ import {
   refusedFlowReason,
   withoutOwnResponse,
   summarise,
+  SHARED_CHROME_ROUTE,
   toSarif,
   toSummaryJson,
   unmeasuredReason,
@@ -2150,4 +2167,410 @@ test("action: the pictures of changed baselines are kept with the results, and o
   );
   const steps = action.runs.steps as Array<{ name: string; with?: { path?: string } }>;
   assert.match(steps.find((s) => s.name === "Keep the results")?.with?.path ?? "", /\$\{\{ steps\.run\.outputs\.visual \}\}/);
+});
+
+// ── The first run (`scenescout <url>`): what it leads with, its summary and its report ──
+
+/** A failed request as the HTTP oracle records it. */
+function httpError(url: string, status: number): RouteHealth["violations"][number] {
+  return { kind: "http_error", severity: status >= 500 ? "high" : "medium", detail: httpErrorDetail("GET", url, status), url: `${ORIGIN}/` };
+}
+
+/** The broken-image oracle's own line for one image. */
+function brokenImage(src: string, alt = "Chart"): string[] {
+  return brokenImageIssues({ images: [{ alt, src, testid: null }], total: 1 }, `${ORIGIN}/`);
+}
+
+/** The browser's own console line about a load that failed. */
+function loadEcho(detail: string, page = "/"): RouteHealth["violations"][number] {
+  return { kind: "console_error", severity: "medium", detail, url: `${ORIGIN}${page}` };
+}
+const ECHO_404 = "Failed to load resource: the server responded with a status of 404 (Not Found)";
+
+const rules = (issues: readonly CheckIssue[]): string[] => issues.map((i) => i.rule);
+
+test("first look: the highest severity first, then the most pages affected", () => {
+  const issues = issuesFromRoutes(
+    [
+      route({ path: "/", violations: [httpError(`${ORIGIN}/api/a`, 404)], unnamed: ["button [testid=menu]"] }),
+      route({ path: "/b", unnamed: ["button [testid=menu]"], design: [{ rule: "contrast", detail: '<p> "x" — 2.1:1' }] }),
+      route({
+        path: "/c",
+        unnamed: ["button [testid=menu]"],
+        violations: [{ kind: "page_error", severity: "high", detail: "TypeError: x is undefined", url: `${ORIGIN}/c` }],
+      }),
+    ],
+    ORIGIN,
+  );
+  assert.deepEqual(rules(firstLook(issues, 3)), ["page-error", "unnamed-control", "client-error"]);
+  // Only three, whatever else there is; fewer when there are fewer.
+  assert.equal(firstLook(issues, 3).length, 3);
+  assert.deepEqual(rules(firstLook(issues, 3, 10)), ["page-error", "unnamed-control", "client-error", "contrast"]);
+  assert.deepEqual(firstLook([], 3), []);
+});
+
+test("first look: an image that answers 404 is one thing to look at, not a failed request and a broken image", () => {
+  const chart = `${ORIGIN}/img/chart.png`;
+  const same = issuesFromRoutes(
+    [route({ violations: [httpError(chart, 404)], brokenImages: brokenImage(chart), placeholderOnly: ['textbox [testid=email] "Email"'] })],
+    ORIGIN,
+  );
+  assert.deepEqual(resourceOf(same.find((i) => i.rule === "client-error")!), "/img/chart.png");
+  assert.deepEqual(resourceOf(same.find((i) => i.rule === "broken-image")!), "/img/chart.png");
+  assert.deepEqual(rules(firstLook(same, 1)), ["client-error", "placeholder-only-label"], "the request is shown, the broken image it leaves is not");
+  // The near miss: a different image is a different thing, and keeps its slot.
+  const other = issuesFromRoutes(
+    [
+      route({
+        violations: [httpError(chart, 404)],
+        brokenImages: brokenImage(`${ORIGIN}/img/logo.png`, "Logo"),
+        placeholderOnly: ['textbox [testid=email] "Email"'],
+      }),
+    ],
+    ORIGIN,
+  );
+  assert.deepEqual(rules(firstLook(other, 1)), ["client-error", "broken-image", "placeholder-only-label"]);
+  // Another site's image and its failed request match too: neither loses its origin.
+  const cdn = "https://cdn.example.test/hero.jpg";
+  const foreign = issuesFromRoutes([route({ violations: [httpError(cdn, 404)], brokenImages: brokenImage(cdn, "Hero") })], ORIGIN);
+  assert.deepEqual(rules(firstLook(foreign, 1)), ["client-error"]);
+});
+
+test("first look: the same image is matched when redaction has rewritten its address, and when one record cut it shorter", () => {
+  // A token in the query: both records are redacted the same way, and each ends with redaction's note.
+  const signed = `${ORIGIN}/img/chart.png?token=a1b2c3d4e5f6g7h8`;
+  const redacted = issuesFromRoutes([route({ violations: [httpError(signed, 404)], brokenImages: brokenImage(signed) })], ORIGIN);
+  assert.ok(
+    redacted.every((i) => / \[1 secret redacted\]$/.test(i.evidence)),
+    JSON.stringify(redacted),
+  );
+  assert.deepEqual(rules(firstLook(redacted, 1)), ["client-error"]);
+  // The page script keeps 160 characters of an image's address and the request oracle 200.
+  const long = `${ORIGIN}/assets/${"a".repeat(120)}/${"b".repeat(60)}.png`;
+  const cut = issuesFromRoutes([route({ violations: [httpError(long, 404)], brokenImages: brokenImage(long.slice(0, 160)) })], ORIGIN);
+  assert.deepEqual(rules(firstLook(cut, 1)), ["client-error"]);
+  // The near misses: a short address that merely starts a longer one is another resource.
+  assert.equal(sameAddress("/img/a.png", "/img/a.png.map"), false);
+  assert.equal(sameAddress(`/x/${"a".repeat(90)}`, `/x/${"a".repeat(90)}/more`), true);
+  assert.equal(sameAddress("/img/a.png", "/img/b.png"), false);
+});
+
+test("first look: a console error comes after the other issues of its severity and reach, since its cause is usually listed too", () => {
+  const issues = issuesFromRoutes(
+    [
+      route({
+        violations: [loadEcho(ECHO_404)],
+        placeholderOnly: ['textbox [testid=email] "Email"'],
+        geometry: ['e3 button "Save" is COVERED by pinned chrome [bar] at this scroll position'],
+      }),
+    ],
+    ORIGIN,
+  );
+  assert.deepEqual(rules(firstLook(issues, 1)), ["covered-control", "placeholder-only-label", "console-error"]);
+  // A console error on more pages than the rest still outranks them: reach comes first.
+  const wide = issuesFromRoutes(
+    ["/", "/b"]
+      .map((p) => route({ path: p, violations: [loadEcho("Widget failed", p)] }))
+      .concat(route({ path: "/c", placeholderOnly: ['textbox [testid=email] "Email"'] })),
+    ORIGIN,
+  );
+  assert.deepEqual(rules(firstLook(wide, 3)), ["console-error", "placeholder-only-label"]);
+});
+
+test("first look: the browser's console line about a failed load takes no slot while the request it echoes is listed", () => {
+  const covered = 'e3 button "Save" is COVERED by pinned chrome [bar] at this scroll position';
+  const pick = (routes: RouteHealth[]) => rules(firstLook(issuesFromRoutes(routes, ORIGIN), routes.length));
+  // The 404 request and its echo on the same page: one slot, and the next issue gets the second.
+  assert.deepEqual(pick([route({ violations: [httpError(`${ORIGIN}/img/chart.png`, 404), loadEcho(ECHO_404)], geometry: [covered] })]), [
+    "client-error",
+    "covered-control",
+  ]);
+  // Two pages, a different 404 on each: the echo is filed once for both pages, so it reaches further than either
+  // request, and is still not the thing to look at.
+  assert.deepEqual(
+    pick([
+      route({ path: "/", violations: [httpError(`${ORIGIN}/a.png`, 404), loadEcho(ECHO_404)] }),
+      route({ path: "/b", violations: [httpError(`${ORIGIN}/b.png`, 404), loadEcho(ECHO_404, "/b")] }),
+    ]),
+    ["client-error", "client-error"],
+  );
+  // A server error and its line.
+  const echo500 = "Failed to load resource: the server responded with a status of 500 (Internal Server Error)";
+  assert.deepEqual(pick([route({ violations: [httpError(`${ORIGIN}/api/a`, 500), loadEcho(echo500)] })]), ["server-error"]);
+  // A request redaction rewrote is still the one the line echoes.
+  assert.deepEqual(pick([route({ violations: [httpError(`${ORIGIN}/api/a?token=a1b2c3d4e5f6g7h8`, 404), loadEcho(ECHO_404)] })]), ["client-error"]);
+  // Near misses, each keeps its slot: another status, another page, a console error that is not a load echo.
+  assert.deepEqual(pick([route({ violations: [httpError(`${ORIGIN}/api/a`, 404), loadEcho(echo500)] })]), ["client-error", "console-error"]);
+  assert.deepEqual(
+    pick([route({ path: "/", violations: [httpError(`${ORIGIN}/api/a`, 404)] }), route({ path: "/b", violations: [loadEcho(ECHO_404, "/b")] })]),
+    ["client-error", "console-error"],
+  );
+  assert.deepEqual(pick([route({ violations: [httpError(`${ORIGIN}/api/a`, 404), loadEcho("Uncaught (in promise) Error: chart data missing")] })]), [
+    "client-error",
+    "console-error",
+  ]);
+  // A request that failed at the network level, and the browser's line naming the same error, or another one.
+  const refused = {
+    kind: "request_failed" as const,
+    severity: "medium" as const,
+    detail: `GET ${ORIGIN}/api/feed → net::ERR_CONNECTION_REFUSED`,
+    url: `${ORIGIN}/`,
+  };
+  assert.deepEqual(pick([route({ violations: [refused, loadEcho("Failed to load resource: net::ERR_CONNECTION_REFUSED")] })]), ["request-failed"]);
+  assert.deepEqual(pick([route({ violations: [refused, loadEcho("Failed to load resource: net::ERR_NAME_NOT_RESOLVED")] })]), [
+    "request-failed",
+    "console-error",
+  ]);
+  // With no request listed, the line is the only trace of the failure, and it is kept.
+  const [lone] = issuesFromRoutes([route({ violations: [loadEcho(ECHO_404)] })], ORIGIN);
+  assert.equal(echoesListedRequest(lone, [lone]), false);
+});
+
+test("first look: the app's shared shell counts as every page", () => {
+  const issues = issuesFromRoutes(
+    [
+      route({
+        path: "/",
+        design: [
+          { rule: "tiny-target", detail: '<a> "Help" 16×16', chrome: true },
+          { rule: "contrast", detail: '<p> "x" — 2.1:1' },
+        ],
+      }),
+      route({ path: "/b", design: [{ rule: "contrast", detail: '<p> "x" — 2.1:1' }] }),
+      route({ path: "/c" }),
+    ],
+    ORIGIN,
+  );
+  const shell = issues.find((i) => i.rule === "tiny-target")!;
+  assert.deepEqual(shell.routes, [SHARED_CHROME_ROUTE]);
+  assert.equal(pagesAffected(shell, 3), 3);
+  assert.deepEqual(rules(firstLook(issues, 3)), ["tiny-target", "contrast"]);
+});
+
+/** A first run's result: never gated, in observe mode, a 3-minute budget not reached, with what a case needs. */
+function firstRunFacts(over: Partial<CheckResult> = {}, maxRoutes = 20): FirstRunFacts {
+  return {
+    result: {
+      ...result([], "never"),
+      mode: "observe",
+      settings: { flowWrites: "never", onRefusedStep: "report", gateRetests: "never", retest: false },
+      timeBudget: { ms: 180_000, reached: false },
+      ...over,
+    },
+    options: { maxRoutes },
+    elapsedMs: 41_000,
+  };
+}
+
+const threeIssues = (): CheckIssue[] =>
+  issuesFromRoutes(
+    [
+      route({ path: "/", violations: [httpError(`${ORIGIN}/img/chart.png`, 404)], brokenImages: brokenImage(`${ORIGIN}/img/chart.png`) }),
+      route({ path: "/new", placeholderOnly: ['textbox [testid=email] "Email"'], design: [{ rule: "contrast", detail: '<p> "hint" — 1.7:1' }] }),
+      route({ path: "/done", elements: 0 }),
+    ],
+    ORIGIN,
+  );
+
+test("the summary opens with the three issues to look at first, then the counts, the report and what to try next", () => {
+  const issues = threeIssues();
+  const routes = ["/", "/new", "/done"].map((p) => route({ path: p }));
+  const lines = firstRunSummary(firstRunFacts({ issues, routes }), "scenescout-report/report.md");
+  assert.equal(lines[0], "Look at these first:");
+  assert.match(lines[1], /^ {2}1\. \[medium\] Request failed with a client error: GET \/img\/chart\.png → HTTP 404 \(on \/\)$/);
+  assert.match(lines[2], /^ {2}2\. \[medium\] Dead end: \/done: 0 controls \(on \/done\)$/);
+  assert.match(lines[3], /^ {2}3\. \[medium\] Field labelled only by its placeholder: .*\(on \/new\)$/);
+  assert.equal(lines[4], "");
+  assert.equal(lines[5], "3 pages looked at in 41 s in observe mode: 0 high · 4 medium · 1 low.");
+  assert.equal(lines[6], "Report: scenescout-report/report.md");
+  assert.match(lines.at(-1)!, /^Next: .*npx -y scenescout install.*scenescout check.*scenescout login <url> --role <name>.*Guide: https:\/\/github\.com\//);
+  assert.ok(lines.at(-1)!.endsWith(GUIDE_URL));
+});
+
+test("the summary says where an issue was seen: one page, several, or every page for the shared shell", () => {
+  const menu = (p: string) => route({ path: p, unnamed: ["button [testid=menu]"] });
+  const several = firstRunSummary(firstRunFacts({ issues: issuesFromRoutes(["/", "/b", "/c"].map(menu), ORIGIN), routes: ["/", "/b", "/c"].map(menu) }), "r");
+  assert.match(several[1], /\(on 3 pages: \/, \/b and 1 more\)$/);
+  const shell = issuesFromRoutes([route({ design: [{ rule: "tiny-target", detail: '<a> "Help" 16×16', chrome: true }] })], ORIGIN);
+  assert.match(firstRunSummary(firstRunFacts({ issues: shell }), "r")[1], /\(on every page\)$/);
+});
+
+test("the summary's counts name what is never counted and what was not measured", () => {
+  const worthALook = [
+    { rule: "off-grid-spacing" as const, evidence: "paddings off a 4px grid: 6px", routes: ["/"], convention: "a 4px spacing scale", fingerprint: "f" },
+  ];
+  const lines = firstRunSummary(firstRunFacts({ routes: [route({ auditError: "no visible styled elements to measure" })], worthALook }), "r");
+  assert.ok(
+    lines.includes("1 page looked at in 41 s in observe mode: 0 high · 0 medium · 0 low · 1 worth a look, never counted · design not measured on 1 page."),
+    lines.join("\n"),
+  );
+});
+
+test("the summary prints what a page said on one line, with no control character from the app reaching the terminal", () => {
+  const thrown = {
+    kind: "page_error" as const,
+    severity: "high" as const,
+    detail: "TypeError: boom\n    at render (app.js:1:1)\u001b[2J\u001b]0;owned\u0007",
+    url: `${ORIGIN}/`,
+  };
+  const lines = firstRunSummary(firstRunFacts({ issues: issuesFromRoutes([route({ violations: [thrown] })], ORIGIN) }), "r");
+  assert.equal(lines[1], "  1. [high] Uncaught exception: TypeError: boom at render (app.js:1:1) [2J ]0;owned (on /)");
+  // A long one is cut, not wrapped.
+  const long = { ...thrown, detail: `Error: ${"x".repeat(400)}` };
+  const cut = firstRunSummary(firstRunFacts({ issues: issuesFromRoutes([route({ violations: [long] })], ORIGIN) }), "r")[1];
+  assert.ok(cut.includes("x…") && cut.length < 220, cut);
+});
+
+test("the summary on an app with nothing to report says so, and still says where the report is and what next", () => {
+  const lines = firstRunSummary(firstRunFacts({ routes: [route(), route({ path: "/b" })] }), "r/report.md");
+  assert.equal(lines[0], "No issues found on the 2 pages looked at.");
+  assert.ok(lines.includes("Report: r/report.md"));
+  assert.match(lines.at(-1)!, /^Next: /);
+});
+
+test("the time a look took is read in whole seconds, then minutes and seconds, never 60 seconds", () => {
+  const took = (ms: number): string =>
+    firstRunSummary({ ...firstRunFacts({ routes: [route()] }), elapsedMs: ms }, "r")[2].replace(/^1 page looked at in (.+) in observe mode.*$/, "$1");
+  assert.equal(took(41_000), "41 s");
+  assert.equal(took(200), "1 s");
+  assert.equal(took(59_600), "1 min 0 s");
+  assert.equal(took(65_000), "1 min 5 s");
+  assert.equal(took(119_700), "2 min 0 s");
+});
+
+test("the summary says which limit stopped the look: the time limit, the page limit and the link steps are told apart", () => {
+  const twenty = Array.from({ length: 20 }, (_, i) => route({ path: `/p${i}` }));
+  const timeUp = firstRunSummary(firstRunFacts({ routes: twenty.slice(0, 7), unvisited: ["/x", "/y"], timeBudget: { ms: 180_000, reached: true } }), "r");
+  assert.ok(
+    timeUp.includes("Stopped after 3 minutes, the first look's time limit, with 2 more pages found and not looked at. --max-minutes raises it."),
+    timeUp.join("\n"),
+  );
+  const full = firstRunSummary(firstRunFacts({ routes: twenty, unvisited: ["/x", "/y"] }), "r");
+  assert.ok(
+    full.includes("Stopped at 20 pages, the first look's limit, with 2 more pages found and not looked at. --max-routes raises it, up to 150."),
+    full.join("\n"),
+  );
+  const one = firstRunSummary(firstRunFacts({ routes: twenty, unvisited: ["/x"] }), "r");
+  assert.ok(
+    one.some((l) => l.includes("with 1 more page found")),
+    one.join("\n"),
+  );
+  // Neither limit reached and pages left: the link steps ran out, and neither option is offered as the fix.
+  const deep = firstRunSummary(firstRunFacts({ routes: twenty.slice(0, 7), unvisited: ["/x"] }), "r");
+  const note = deep.find((l) => l.startsWith("1 more page found and not looked at: links are followed 6 steps from the start page"));
+  assert.ok(note && note.includes(`npx -y scenescout check ${ORIGIN}/ --paths /a,/b`) && !/--max-(routes|minutes)/.test(note), deep.join("\n"));
+  // Every page found was looked at: nothing stopped it.
+  const done = firstRunSummary(firstRunFacts({ routes: twenty, unvisited: [] }), "r");
+  assert.ok(!done.some((l) => /^Stopped|more pages? found/.test(l)), done.join("\n"));
+  assert.equal(stopReason({ routes: twenty, unvisited: [], timeBudget: { ms: 1, reached: true } }, 20), null);
+});
+
+test("the summary says when the start page was a sign-in page, or moved to another site", () => {
+  const bounced = firstRunSummary(firstRunFacts({ routes: [route({ loginRedirect: true, url: `${ORIGIN}/login` })] }), "r");
+  assert.ok(
+    bounced.some((l) => /^The start page sent the browser to a sign-in page/.test(l) && l.includes(`npx -y scenescout login ${ORIGIN}/ --role <name>`)),
+    bounced.join("\n"),
+  );
+  const open = firstRunSummary(firstRunFacts({ routes: [route()] }), "r");
+  assert.ok(!open.some((l) => /sign-in page|moved to/.test(l)), open.join("\n"));
+  // http to https, or to another host: the links there are another site's to the engine, so the look stopped at one page.
+  const moved = firstRunSummary(firstRunFacts({ url: "http://app.example.test/", routes: [route({ url: "https://app.example.test/" })] }), "r");
+  assert.ok(
+    moved.includes(
+      "The start page moved to https://app.example.test, so its links count as another site's and were not followed. To look further, run it there: npx -y scenescout https://app.example.test/.",
+    ),
+    moved.join("\n"),
+  );
+  // A page that did not load says nothing about where the app lives.
+  const failed = firstRunSummary(
+    firstRunFacts({ url: "http://app.example.test/", routes: [route({ url: "https://elsewhere.test/", loadError: "timeout", status: null })] }),
+    "r",
+  );
+  assert.ok(!failed.some((l) => /moved to/.test(l)), failed.join("\n"));
+});
+
+test("the report opens with what to look at first and ends with what to try next; it never speaks of a gate", () => {
+  const issues = threeIssues();
+  const routes = ["/", "/new", "/done"].map((p) => route({ path: p }));
+  const worthALook = [
+    { rule: "off-grid-spacing" as const, evidence: "paddings off a 4px grid: 6px", routes: ["/"], convention: "a 4px spacing scale", fingerprint: "f" },
+  ];
+  const report = formatFirstRun(firstRunFacts({ issues, routes, worthALook, unvisited: ["/later"] }));
+  const at = (text: string): number => {
+    const i = report.indexOf(text);
+    assert.ok(i >= 0, `the report has no "${text}"\n${report}`);
+    return i;
+  };
+  assert.ok(report.startsWith("# SceneScout first look\n"));
+  assert.ok(at("## Look at these first") < at("## Medium (4)"));
+  assert.match(report, /\n1\. \[medium\] \*\*Request failed with a client error\*\* `client-error`: GET \/img\/chart\.png → HTTP 404/);
+  assert.match(report, /\n3\. \[medium\] \*\*Field labelled only by its placeholder\*\*/);
+  assert.ok(at("## Routes") < at("Not visited (past the link steps followed): `/later`"));
+  assert.ok(at("## What to try next") > at("## Routes"));
+  assert.ok(report.includes(`The guide: ${GUIDE_URL}`));
+  // The mode it ran in, and what that mode lets out of the page, said as the safety model says it.
+  assert.ok(report.includes(" · observe mode · "), report);
+  assert.ok(report.includes(modeSentence("observe")), report);
+  // A look, not a gate: no verdict, no settings line, and the worth-a-look note says nothing about failing a gate.
+  assert.ok(!/\*\*PASSED\*\*|\*\*FAILED\*\*|gate:|--fail-on|Settings —/.test(report), report);
+  // The check's own report keeps its gate wording.
+  assert.match(formatCheck({ ...result([]), worthALook }), /never fail the gate, at any --fail-on/);
+});
+
+test("the summary and the report say which mode the look ran in, and what that mode lets out of the page", () => {
+  const observe = firstRunFacts({ routes: [route()] });
+  const readOnly = firstRunFacts({ routes: [route()], mode: "read-only" });
+  assert.equal(firstRunSummary(observe, "r")[2], "1 page looked at in 41 s in observe mode: 0 high · 0 medium · 0 low.");
+  assert.equal(firstRunSummary(readOnly, "r")[2], "1 page looked at in 41 s in read-only mode: 0 high · 0 medium · 0 low.");
+  // Observe lets nothing but reads out, sign-in and token refresh apart; read-only lets a plain POST through, and says so.
+  assert.equal(
+    modeSentence("observe"),
+    "In observe mode nothing but GET, HEAD and OPTIONS requests leaves the page, apart from signing in, signing out and refreshing a token: every other request a page sends is refused.",
+  );
+  assert.match(modeSentence("read-only"), /a plain POST the page's own scripts send goes through/);
+  const observeReport = formatFirstRun(observe);
+  const readOnlyReport = formatFirstRun(readOnly);
+  assert.ok(
+    observeReport.includes(" · observe mode · ") && observeReport.includes(modeSentence("observe")) && !observeReport.includes(modeSentence("read-only")),
+  );
+  assert.ok(
+    readOnlyReport.includes(" · read-only mode · ") && readOnlyReport.includes(modeSentence("read-only")) && !readOnlyReport.includes(modeSentence("observe")),
+  );
+});
+
+test("the commands the report suggests can be pasted into a shell: an address with ? or & in it is quoted, a plain one is not", () => {
+  const plain = formatFirstRun(firstRunFacts({ url: `${ORIGIN}/` }));
+  assert.ok(plain.includes(`\`npx -y scenescout check ${ORIGIN}/\``), plain);
+  const query = formatFirstRun(firstRunFacts({ url: `${ORIGIN}/start?tab=1&view=all` }));
+  assert.ok(query.includes(`\`npx -y scenescout check '${ORIGIN}/start?tab=1&view=all'\``), query);
+  assert.ok(query.includes(`\`npx -y scenescout login '${ORIGIN}/start?tab=1&view=all' --role <name>\``), query);
+  assert.equal(shellArg("http://x/it's"), "'http://x/it'\\''s'");
+});
+
+test("a first run that loaded no page could not reach the address; one page loaded is enough to report", () => {
+  assert.equal(
+    unreachableReason([route({ status: null, loadError: "net::ERR_CONNECTION_REFUSED at http://127.0.0.1:9/" })]),
+    "net::ERR_CONNECTION_REFUSED at http://127.0.0.1:9/",
+  );
+  assert.equal(unreachableReason([]), "no page loaded");
+  assert.equal(unreachableReason([route({ status: null, loadError: "timeout" }), route({ path: "/b" })]), null);
+  // A page that answers with an error loaded: that is a finding, not an unreachable address.
+  assert.equal(unreachableReason([route({ status: 500 })]), null);
+});
+
+test("the report and the JSON a first look writes begin the way a later look recognises as its own; anything else does not", () => {
+  const facts = firstRunFacts({ issues: threeIssues(), routes: [route()] });
+  assert.equal(writtenByFirstLook("report.md", formatFirstRun(facts)), true);
+  assert.equal(writtenByFirstLook("check.json", JSON.stringify(toSummaryJson(facts.result, "1.0.0"), null, 2) + "\n"), true);
+  // The near misses: a check's report, someone's notes, a JSON object of another shape.
+  assert.equal(writtenByFirstLook("report.md", formatCheck(result([]))), false);
+  assert.equal(writtenByFirstLook("report.md", "# My report\n"), false);
+  assert.equal(writtenByFirstLook("check.json", '{\n  "mine": true\n}\n'), false);
+  assert.equal(writtenByFirstLook("check.json", JSON.stringify(toSummaryJson(facts.result, "1.0.0"))), false, "not as a first look writes it");
+});
+
+test("a check's JSON records a time budget only when it had one", () => {
+  const budget = toSummaryJson({ ...result([]), timeBudget: { ms: 180_000, reached: true } }, "1.0.0") as { timeBudget?: unknown };
+  assert.deepEqual(budget.timeBudget, { ms: 180_000, reached: true });
+  assert.equal("timeBudget" in (toSummaryJson(result([]), "1.0.0") as object), false);
 });

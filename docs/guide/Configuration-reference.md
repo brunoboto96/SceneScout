@@ -8,6 +8,7 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 
 | Command | What it does |
 |---|---|
+| `scenescout <url>` | A first look with no setup: the check's measurements in observe mode, capped, opening with the three issues to look at first; exit 0 it looked, 2 could not run |
 | `scenescout install` | Installs the skill, downloads the browser, registers the MCP server and puts `scenescout` on your PATH |
 | `scenescout doctor` | Checks the setup and prints the fix for anything missing |
 | `scenescout serve` | Runs the MCP server on stdio; this is what a client starts |
@@ -19,6 +20,19 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `scenescout watch [path]` | Opens the live view in a browser |
 
 `scenescout --version` prints the version, and `scenescout --help` the usage. Every command also prints the usage on `--help` or `-h` and exits 0 without doing anything else, so `scenescout install --help` installs nothing. `install`, `doctor`, `scan`, `status` and `watch` refuse an option or an extra argument they do not take, and exit 1 naming it.
+
+### `scenescout <url>`
+
+A first look: an address in place of a command, first on the line, as in `npx -y scenescout http://localhost:3000 --max-routes 10`. It runs the check's crawl and measurements in `observe` mode unless `--mode read-only` is given, and never gates. It writes `report.md` and `check.json` to `scenescout-report/` in the current directory, with a `.gitignore` that keeps that folder out of commits and a `.scenescout-first-look` marker, or to a temporary folder when that cannot be written. It writes only into a `scenescout-report/` that is new, empty or holds the marker: any other folder or file of that name is left as it is, and the run exits 2 before it starts, pointing at `--out`. In any folder, a `report.md` or `check.json` is replaced only when a first look wrote it, which its first line shows. When the headless Chromium build is missing it downloads that and nothing else: no skill, no MCP registration, nothing on the PATH. It always drives Chromium, whatever `SCENESCOUT_BROWSER` says, and reads nothing from the directory it runs in: no flows, no memory, no source routes. Exit 0 once it has looked, whatever it found; 2 when it could not run (the address could not be reached, a bad option, no browser) or could not write its report, whose summary it still prints.
+
+| Option | Default | |
+|---|---|---|
+| `--max-routes` | `20` | The most pages to look at, 1 to 150 |
+| `--max-minutes` | `3` | No page is started after this many minutes, 1 to 30. The start page is always looked at |
+| `--mode` | `observe` | `observe`: nothing but `GET`, `HEAD` and `OPTIONS` requests leaves the page, signing in, signing out and refreshing a token apart. `read-only`: a plain `POST` the page sends goes through, while `PUT`, `PATCH`, `DELETE` and destructive-looking `POST`s are refused. See the [safety model](Safety-model.md) |
+| `--out` | `./scenescout-report` | Where the report goes. A folder named here is used as given and created only once the address has answered, with no `.gitignore` added and never swapped for a temporary one. It may hold other files, but not a `report.md` or `check.json` a first look did not write. A file, a link, such a report, or a folder that cannot be written ends the run before it starts; a permission that check cannot see shows when the report is written, after the summary |
+
+The address must be written in full, with `http://` or `https://`; one without its scheme is refused with the line to type. An option of `scenescout check` is refused with a pointer to `check`, which has it.
 
 ### `scenescout install`
 
@@ -83,6 +97,7 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `--focus` | none | An area or flow to spend the run on, at most 300 characters |
 | `--show` | none | Capture the element these words describe as a PNG instead of exploring, at most 200 characters |
 | `--compare-url` | none | With `--show`, capture the same element on this URL too and write a diff picture |
+| `--dedup` | `judge` | How a filed finding is told from one already recorded. `judge`: the rule, then, for a filing the rule keeps apart from everything recorded, the run's model at the lowest effort its API takes (`none` on OpenAI, `low` on Anthropic) is asked about the open findings on the same page, and a "same" merges them. Each asked pair's titles, categories and evidence, and the page's path, are sent to the provider, and the calls count in the usage. `rule`: the rule alone |
 | `--storage-state` | none | A Playwright storage-state file, to explore while signed in |
 | `--browser` | `chromium` | `chromium`, `firefox` or `webkit` |
 | `--action-timeout-ms` | `5000` | As for `check` |
@@ -164,12 +179,14 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | Variable | Read by | |
 |---|---|---|
 | `SCENESCOUT_BROWSER` | the server, `check`, `ci`, `login`, `doctor` | The default browser: `chromium` (default), `firefox` or `webkit` |
-| `SCENESCOUT_ACTION_TIMEOUT_MS` | the server, `check`, `ci`, `login` | How long one action may take, 1000 to 120000 (default 5000). An option wins over it |
-| `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login` | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
+| `SCENESCOUT_ACTION_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long one action may take, 1000 to 120000 (default 5000). An option wins over it |
+| `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
 | `SCENESCOUT_LIVE` | the server | `off` keeps the live view closed |
 | `SCENESCOUT_REFRESH_BROKER` | the server | `off` turns off the refresh broker for role sessions |
-| `ANTHROPIC_API_KEY` | `ci` | The Anthropic key. The only way to give one |
-| `OPENAI_API_KEY` | `ci` | The OpenAI key. The only way to give one |
+| `SCENESCOUT_DEDUP` | the server | `judge` asks a model, with a key below, whether a filing the dedup rule keeps apart from everything recorded is one of the open findings on its page; `rule` (default) does not. A `scout_attach` `dedup` wins over it |
+| `SCENESCOUT_DEDUP_PROVIDER` | the server | `anthropic` or `openai`: which key the dedup judge uses when both are set |
+| `ANTHROPIC_API_KEY` | `ci`; the server with the dedup judge on | The Anthropic key. The only way to give one |
+| `OPENAI_API_KEY` | `ci`; the server with the dedup judge on | The OpenAI key. The only way to give one |
 | `SCENESCOUT_LOGIN_USERNAME` | `login --script` | Required: the test user's username or email |
 | `SCENESCOUT_LOGIN_PASSWORD` | `login --script` | The password. Required unless the sign-in is passwordless: then leave it unset and set a code below. Set but empty is refused |
 | `SCENESCOUT_LOGIN_TOTP_SECRET` | `login --script` | The base32 TOTP secret or `otpauth://` URI, when the form asks for a code |
@@ -247,6 +264,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `focus` | empty | As `--focus` |
 | `show` | empty | As `--show` |
 | `compare-url` | empty | As `--compare-url` |
+| `dedup` | empty | As `--dedup`; empty means `judge` |
 | `storage-state` | empty | As `--storage-state`, relative to `working-directory` |
 | `browser` | `chromium` | As `--browser` |
 | `action-timeout-ms` | empty | As `--action-timeout-ms` |
@@ -326,3 +344,4 @@ What an agent can pass when it attaches a session. You rarely set these by hand;
 | `record` | `false` | Keep a frame after every action and write `report.html` |
 | `actionTimeoutMs` | `SCENESCOUT_ACTION_TIMEOUT_MS`, else `5000` | 1000 to 120000 |
 | `navTimeoutMs` | `SCENESCOUT_NAV_TIMEOUT_MS`, else `20000` | 1000 to 300000 |
+| `dedup` | `SCENESCOUT_DEDUP`, else `rule` | `judge` asks a model whether a filing the rule keeps apart from everything recorded is one of the open findings on its page; it needs a key in the server's environment and sends the findings' titles, categories and evidence, and the page's path, to the provider. For the whole run |

@@ -40,7 +40,7 @@ export const MAX_BASELINE_TARGETS = 100;
  * a smaller change passes unless the project lowers the threshold. A change of
  * size always counts.
  */
-const DEFAULT_BASELINE_THRESHOLD = 0.1;
+export const DEFAULT_BASELINE_THRESHOLD = 0.1;
 /** The element a target names when it names none: the page's viewport, from the top. */
 const PAGE_ELEMENT = "page";
 /** Where the pictures of an unmet baseline go, beside report.md. */

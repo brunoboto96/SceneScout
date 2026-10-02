@@ -30,7 +30,8 @@ import { CHECK_OPTION_NAMES, CHECK_RULES, parseCheckArgs, WORTH_A_LOOK_RULES } f
 import { CI_OPTION_NAMES, KEY_ENV, parseCiArgs } from "../src/engine/ci.ts";
 import { LOGIN_OPTION_NAMES } from "../src/engine/profiles.ts";
 import { SCRIPT_FLAGS } from "../src/engine/scripted-login.ts";
-import { SUBCOMMANDS } from "../src/commands.ts";
+import { looksLikeUrl, SUBCOMMANDS } from "../src/commands.ts";
+import { FIRST_RUN_DEFAULTS, FIRST_RUN_OPTION_NAMES, parseFirstRunArgs } from "../src/first-run.ts";
 import { GUIDE_DIR, toWikiPage } from "./guide-wiki.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -338,8 +339,12 @@ const SCRIPT_ONLY = ["script", ...SCRIPT_FLAGS];
 /** The subcommands the CLI dispatches. */
 const COMMANDS = sorted([...SUBCOMMANDS]);
 
-test("the reference lists every command the CLI dispatches", () => {
-  const listed = sorted(tableIn(REFERENCE, "## Commands").map((r) => r[0].match(/^`scenescout ([a-z]+)/)?.[1] ?? ""));
+test("the reference lists every command the CLI dispatches, and the first run an address starts", () => {
+  const rows = tableIn(REFERENCE, "## Commands").map((r) => r[0]);
+  const firstRun = rows.filter((r) => r === "`scenescout <url>`");
+  assert.equal(firstRun.length, 1, "the commands table has one row for `scenescout <url>`");
+  assert.ok(looksLikeUrl("http://localhost:3000"), "the CLI takes an address as a first run");
+  const listed = sorted(rows.filter((r) => !firstRun.includes(r)).map((r) => r.match(/^`scenescout ([a-z]+)/)?.[1] ?? ""));
   assert.deepEqual(listed, COMMANDS);
 });
 
@@ -348,6 +353,7 @@ test("the reference lists exactly the options of check, ci and login", () => {
   assert.deepEqual(listed("check"), sorted(CHECK_OPTION_NAMES));
   assert.deepEqual(listed("ci"), sorted(CI_OPTION_NAMES));
   assert.deepEqual(listed("login"), sorted([...LOGIN_OPTION_NAMES, ...SCRIPT_ONLY]));
+  assert.deepEqual(listed("<url>"), sorted(FIRST_RUN_OPTION_NAMES));
 });
 
 test("the reference lists exactly the flags install, doctor and watch read", () => {
@@ -383,8 +389,18 @@ test("the defaults the reference gives for check and ci are the parsers' default
     "max-turns": o.caps.turns,
     "max-tokens": o.caps.tokens,
     "max-minutes": o.caps.wallMs / 60_000,
+    dedup: o.dedup,
   };
   for (const [option, value] of Object.entries(expectCi)) assert.equal(defaults("ci").get(option), `\`${value}\``, `ci --${option}`);
+  const first = parseFirstRunArgs(["http://127.0.0.1:3000"], "/p");
+  assert.ok(first.ok);
+  assert.deepEqual(
+    { maxRoutes: first.options.maxRoutes, maxMinutes: first.options.maxMinutes, mode: first.options.mode },
+    { maxRoutes: FIRST_RUN_DEFAULTS.maxRoutes, maxMinutes: FIRST_RUN_DEFAULTS.maxMinutes, mode: FIRST_RUN_DEFAULTS.mode },
+  );
+  assert.equal(defaults("<url>").get("max-routes"), `\`${first.options.maxRoutes}\``, "first run --max-routes");
+  assert.equal(defaults("<url>").get("max-minutes"), `\`${first.options.maxMinutes}\``, "first run --max-minutes");
+  assert.equal(defaults("<url>").get("mode"), `\`${first.options.mode}\``, "first run --mode");
 });
 
 test("the check rules table is every rule with its severity", () => {
@@ -407,6 +423,7 @@ test("every --option a page mentions is one SceneScout has", () => {
     ...CHECK_OPTION_NAMES,
     ...CI_OPTION_NAMES,
     ...LOGIN_OPTION_NAMES,
+    ...FIRST_RUN_OPTION_NAMES,
     ...SCRIPT_ONLY,
     ...CLI_LITERAL_FLAGS,
     ...SKILL_FLAGS,
@@ -422,13 +439,23 @@ test("every --option a page mentions is one SceneScout has", () => {
   assert.deepEqual(unknown, []);
 });
 
+/** `scenescout <word>` in code a page shows; an address after it (`scenescout http://…`) is a first run, not a command. */
+const SHOWN_COMMAND_RE = /(?<![\w/.@-])scenescout[ \t]+([a-z]+)\b(?!:\/\/)/g;
+
 test("every scenescout command a page shows is one the CLI has", () => {
   const unknown: string[] = [];
   for (const [name, text] of pages) {
-    for (const m of codeText(text).matchAll(/(?<![\w/.@-])scenescout[ \t]+([a-z]+)\b/g))
-      if (!COMMANDS.includes(m[1])) unknown.push(`${name}: scenescout ${m[1]}`);
+    for (const m of codeText(text).matchAll(SHOWN_COMMAND_RE)) if (!COMMANDS.includes(m[1])) unknown.push(`${name}: scenescout ${m[1]}`);
   }
   assert.deepEqual(unknown, []);
+});
+
+test("a shown command is told from a first run's address", () => {
+  const shown = (code: string) => [...code.matchAll(SHOWN_COMMAND_RE)].map((m) => m[1]);
+  assert.deepEqual(shown("npx -y scenescout http://localhost:3000 --max-routes 5"), []);
+  assert.deepEqual(shown("npx -y scenescout https://app.example.com"), []);
+  assert.deepEqual(shown("npx -y scenescout chek http://localhost:3000"), ["chek"]);
+  assert.deepEqual(shown("scenescout check http://localhost:3000"), ["check"]);
 });
 
 // ── Environment variables ────────────────────────────────────────────────────
