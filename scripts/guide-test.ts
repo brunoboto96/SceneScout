@@ -33,7 +33,16 @@ import { LOGIN_OPTION_NAMES } from "../src/engine/profiles.ts";
 import { SCRIPT_FLAGS } from "../src/engine/scripted-login.ts";
 import { looksLikeUrl, SUBCOMMANDS } from "../src/commands.ts";
 import { FIRST_RUN_DEFAULTS, FIRST_RUN_OPTION_NAMES, parseFirstRunArgs } from "../src/first-run.ts";
-import { flagsGiven, INTAKE_QUESTIONS, introQuestions, questionsToAsk, settingsFromAnswers, SKILL_FLAGS as INTAKE_FLAGS } from "../src/intake.ts";
+import {
+  flagsGiven,
+  INTAKE_QUESTIONS,
+  INTAKE_ROLE,
+  SIGN_IN_HINT,
+  introQuestions,
+  questionsToAsk,
+  settingsFromAnswers,
+  SKILL_FLAGS as INTAKE_FLAGS,
+} from "../src/intake.ts";
 import { GUIDE_DIR, toWikiPage } from "./guide-wiki.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -710,6 +719,15 @@ test("the skill and the guide ask the same questions, map them the same way and 
   assert.match(row("The address"), /scout_attach \{url\}/);
   assert.match(row("Sign-in"), /scout_login \{url, role: "user"\}/);
   assert.match(row("Sign-in"), /attach with `role: "user"`/);
+  // The words the agent says and the objective it sets are the ones settingsFromAnswers gives.
+  for (const hint of Object.values(SIGN_IN_HINT)) assert.ok(row("Sign-in").includes(hint), `the skill's sign-in row says: ${hint}`);
+  assert.ok(row("Sign-in").includes("A browser window will open: "), "the skill says the window will open before scout_login is called");
+  assert.ok(row("Sign-in").includes(`scenescout login <url> --role ${INTAKE_ROLE}`), "the fallback saves the same role");
+  const answers = { address: "http://x.test", signIn: "none", realData: "yes" } as const;
+  const ticketsObjective = settingsFromAnswers({ ...answers, whatToCheck: { tickets: ["T"] } }).attach.objective;
+  assert.ok(row("What to check").includes(`\`${ticketsObjective.replace(/T$/, "…")}\``), "the skill's ticket objective is the code's");
+  const wholeObjective = settingsFromAnswers({ ...answers, whatToCheck: "everything" }).attach.objective;
+  assert.ok(row("What to check").includes(`objective: "${wholeObjective}"`), "the skill's whole-site objective is the code's");
   assert.match(row("What to check"), /`objective`/);
   assert.match(row("Real data"), /Yes, or not sure: `mode: "observe"`\. No: `mode: "read-only"`/);
   assert.match(intro, /\*\*Flags given:\*\* ask nothing\./);

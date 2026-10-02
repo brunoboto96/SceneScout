@@ -82,7 +82,7 @@ export interface IntakeAnswers {
 export const INTAKE_ROLE = "user";
 
 /** What a sign-in answer tells the person before the window opens. */
-const SIGN_IN_HINT: Record<Exclude<SignInAnswer, "none">, string> = {
+export const SIGN_IN_HINT: Record<Exclude<SignInAnswer, "none">, string> = {
   sso: "sign in with Google or Microsoft as you normally would",
   password: "sign in with your email and password as you normally would",
   "one-time-code": "sign in as you normally would and enter the code when it arrives",
@@ -108,7 +108,7 @@ export function settingsFromAnswers(a: IntakeAnswers): IntakeSettings {
   if (!url) throw new Error("the address is empty: ask for it again before attaching");
   const mode = a.realData === "no" ? "read-only" : "observe";
   const login =
-    a.signIn === "none" ? null : { tool: "scout_login" as const, url, role: INTAKE_ROLE, tellUser: `A browser window has opened: ${SIGN_IN_HINT[a.signIn]}.` };
+    a.signIn === "none" ? null : { tool: "scout_login" as const, url, role: INTAKE_ROLE, tellUser: `A browser window will open: ${SIGN_IN_HINT[a.signIn]}.` };
   let objective = "Explore the whole site";
   let focus: string | undefined;
   if (a.whatToCheck !== "everything") {

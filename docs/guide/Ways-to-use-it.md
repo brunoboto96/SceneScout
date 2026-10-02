@@ -28,7 +28,7 @@ Use SceneScout to test http://localhost:3000 as the admin role, focusing on chec
 | `--url <app>` | Where the app runs |
 | `--role <name or path>` | Who to test as: a login saved with `scenescout login`, a storage state the scan found, or a path to a Playwright storage-state file ([Signing in](Signing-in.md)) |
 | `--focus <text>` | What to check: a ticket or a sentence. It becomes the session's objective |
-| `--observe`, `--read-only`, `--safe-write`, `--allow-destructive` | A write mode other than the default ([Safety model](Safety-model.md)) |
+| `--observe`, `--read-only`, `--safe-write`, `--allow-destructive` | The write mode, in place of the one the agent would choose ([Safety model](Safety-model.md)) |
 
 ### Plain questions instead of flags
 

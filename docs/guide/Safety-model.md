@@ -9,7 +9,7 @@ Only test apps you own or are authorised to test.
 | Mode | How to ask for it | What leaves the page |
 |---|---|---|
 | `observe` | `--observe`, `scout_attach {mode: "observe"}` | `GET` requests only, plus what a session needs to exist: signing in, signing out and refreshing a token, and any `POST` you name as a read. Signing up, changing or resetting a password and creating users are refused like any other write |
-| `read-only` (default) | nothing | Ordinary form submissions (a plain `POST`) go through. `PUT`, `PATCH`, `DELETE`, destructive-looking `POST`s and clicks on destructive-labelled controls (delete, revoke, archive and the like) are refused |
+| `read-only` (default) | `--read-only` | Ordinary form submissions (a plain `POST`) go through. `PUT`, `PATCH`, `DELETE`, destructive-looking `POST`s and clicks on destructive-labelled controls (delete, revoke, archive and the like) are refused |
 | `safe-write` | `--safe-write` | Anything that creates. Changes and deletes only on records this run created, never on data that was there before |
 | `destructive` | `--allow-destructive` | Everything |
 
