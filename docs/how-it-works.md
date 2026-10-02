@@ -199,7 +199,14 @@ as each click, keypress or typing begins, and a success word already on screen
 then (a status badge reading "Published", a heading) is not the page's answer.
 Column headers ("Updated on") are not read as claims at all. An announced
 message that names the refusal ("was refused", "rejected", "could not") counts
-as the page admitting it.
+as the page admitting it. When a click loads a new document, only what the click
+sent before the navigation began is its own write (a save awaited before the
+script moves the page, or a native form post): the old page's writes as it is
+left and the new page's as it loads are never paired with the new page's text.
+With no success word, a control or a counter beside it can still tell the same
+falsehood: a refused write whose radio, checkbox or toggle stays changed, or
+whose counter moves ("0/3" to "1/3 completed"), is a `false_success` at medium
+("the page shows the change as kept").
 
 Not every violation is the page's. Calls the agent makes with `scout_request`
 are matched by request identity, and their failures, with the browser's console

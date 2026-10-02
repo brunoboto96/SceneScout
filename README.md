@@ -55,7 +55,7 @@ An excerpt of the report it wrote — [read the whole thing](examples/report.md)
 > **🟡 [LOW] The dashboard chart image is missing** *(callout 2)*
 > Evidence: `GET /img/weekly-chart.png → HTTP 404`
 >
-> **Gap ledger — what was NOT tested:** 9/12 visited routes never design-audited · single-role run, so permission boundaries are untested
+> **Gap ledger — what was NOT tested:** 9 of 12 known routes visited this run and never design-audited · single-role run, so permission boundaries are untested
 
 Every finding comes with a repro trace and a Playwright regression-test skeleton. To try it yourself, clone this repository, run `npm run demo:serve`, then `/scenescout --url http://127.0.0.1:4173` — see [demo-app/](demo-app/). Its README lists every seeded defect and which oracle catches it.
 

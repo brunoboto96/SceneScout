@@ -306,6 +306,25 @@ test("errors caused by the tester's own write-policy block are not held against 
     assert.equal(isPolicyInduced({ kind: "page_error", detail }, null), false, `${detail}: no block happened (e.g. destructive mode never blocks)`);
     assert.equal(isPolicyInduced({ kind: "page_error", detail }, POLICY_BLOCK_WINDOW_MS + 1), false, `${detail}: too long after the block`);
   }
+  // An HTTP client's rejection of the stand-in 403, as a console line or as an
+  // unhandled rejection: the policy's within the window, the server's outside it.
+  for (const detail of [
+    "AxiosError: Request failed with status code 403",
+    "Uncaught (in promise) AxiosError: Request failed with status code 403",
+    "Unhandled rejection: HTTPError: 403 Forbidden",
+    "Error: Forbidden (403)",
+    "Error: request was refused: status 403",
+    'Error: {"error":"Forbidden","message":"PUT /api/things/7 was refused by the tester\'s observe write policy. The server never received it."}',
+  ]) {
+    assert.equal(isPolicyInduced({ kind: "page_error", detail }, 30), true, `${detail}: within the block window`);
+    assert.equal(isPolicyInduced({ kind: "console_error", detail }, 30), true, `${detail}: as a console line`);
+    assert.equal(isPolicyInduced({ kind: "page_error", detail }, null), false, `${detail}: no block, so the server's own 403`);
+    assert.equal(isPolicyInduced({ kind: "page_error", detail }, POLICY_BLOCK_WINDOW_MS + 1), false, `${detail}: too long after the block`);
+  }
+  // A 403 with neither word, or another status, is not the policy's wording.
+  assert.equal(isPolicyInduced({ kind: "page_error", detail: "Error 403 at line 12" }, 30), false);
+  assert.equal(isPolicyInduced({ kind: "page_error", detail: "AxiosError: Request failed with status code 500" }, 30), false);
+  assert.equal(isPolicyInduced({ kind: "page_error", detail: "Forbidden character in input" }, 30), false);
   // A block excuses nothing that is not a fetch failure.
   assert.equal(isPolicyInduced({ kind: "page_error", detail: "Cannot read properties of undefined (reading 'rows')" }, 10), false);
   assert.equal(isPolicyInduced({ kind: "http_error", detail: "GET http://x/api/orders → HTTP 500" }, 10), false);

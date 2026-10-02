@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>New record</title>
+  </head>
+  <body>
+    <!--
+      Three submit-shaped buttons that send no request, and differ in what the
+      page does instead:
+
+      "Save" with its required field empty puts up an error summary and marks
+      the field invalid: client-side validation answered, no request expected.
+      "Save draft" does nothing at all: the click really was silent.
+      "Complete and sign" opens a confirmation dialog: a step, not a submit.
+      "Send note" puts up a native alert reading "Saved!" and sends nothing:
+      an alert only tells, so the click really was silent.
+    -->
+    <h1>New record</h1>
+    <label for="title">Title</label>
+    <input id="title" data-testid="record-title-input" />
+    <div data-testid="record-errors"></div>
+    <button type="button" data-testid="record-save-button" onclick="save()">Save</button>
+    <button type="button" data-testid="record-draft-button" onclick="saveDraft()">Save draft</button>
+    <button type="button" data-testid="record-sign-button" onclick="openSign()">Complete and sign</button>
+    <button type="button" data-testid="record-note-button" onclick="alert('Saved!')">Send note</button>
+    <div role="dialog" aria-label="Confirm signing" data-testid="sign-dialog" hidden>
+      <p>Sign this record now?</p>
+      <button type="button" data-testid="sign-cancel-button" onclick="this.closest('[role=dialog]').hidden = true">Cancel</button>
+    </div>
+    <script>
+      function save() {
+        const field = document.getElementById("title");
+        if (!field.value.trim()) {
+          field.setAttribute("aria-invalid", "true");
+          const summary = document.createElement("div");
+          summary.setAttribute("role", "alert");
+          summary.textContent = "1 field needs attention";
+          document.querySelector("[data-testid=record-errors]").replaceChildren(summary);
+        }
+      }
+      function saveDraft() {}
+      function openSign() {
+        document.querySelector("[data-testid=sign-dialog]").hidden = false;
+      }
+    </script>
+  </body>
+</html>

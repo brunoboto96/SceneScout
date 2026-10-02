@@ -293,6 +293,7 @@ function reportExtras(eng: BrowserEngine): ReportExtras {
     designAudits: eng.memory?.auditsThisRun ?? eng.designAuditCount,
     createdResources: eng.createdResources,
     unvisitedRoutes: unvisited,
+    knownRoutes: all,
     mode: eng.mode,
     trustedEmbeds: [...eng.trustedEmbeds],
     policyAttributed: eng.oracleLog.policyAttributed,
@@ -1872,6 +1873,7 @@ server.registerTool(
           routesTotal: all.length,
           designAudits: auditsThisRun,
           unvisitedRoutes: unvisited,
+          knownRoutes: all,
           mode: eng.mode,
         });
         if (lvl === "extensive" && gapList.length > 0) {
@@ -1898,6 +1900,7 @@ server.registerTool(
           designAudits: auditsThisRun,
           createdResources: eng.createdResources,
           unvisitedRoutes: unvisited,
+          knownRoutes: all,
           mode: eng.mode,
           trustedEmbeds: [...eng.trustedEmbeds],
           policyAttributed: eng.oracleLog.policyAttributed,

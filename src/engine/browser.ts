@@ -19,10 +19,22 @@ import {
 import fs from "node:fs";
 import path from "node:path";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
-import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
+import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, reachedRoutes, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
 import { normalizeTask } from "./task.js";
-import { CLAIM_SCAN_SCRIPT, findContradictions, INFRASTRUCTURE_WRITE_RE, OPEN_DIALOGS_SCRIPT, type PageState, type WatchedRequest } from "./claims.js";
+import {
+  ACTED_CONTROL_SRC,
+  type ActedControl,
+  CLAIM_SCAN_SCRIPT,
+  findContradictions,
+  INFRASTRUCTURE_WRITE_RE,
+  isBackgroundRequest,
+  OPEN_DIALOGS_SCRIPT,
+  type PageState,
+  quietAnswer,
+  saidSince,
+  type WatchedRequest,
+} from "./claims.js";
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
@@ -407,6 +419,8 @@ interface ClickContext {
   urlBefore: string;
   /** Open dialogs as the click began, or null when they could not be read. */
   dialogsBefore: number | null;
+  /** What the page said as the click began (the input's claim baseline), or null when it could not be read. */
+  claimsBefore: PageState | null;
 }
 
 /** Non-GET traffic that is auth/telemetry plumbing, not tester-caused state mutation. One list, shared with the false-success rule. */
@@ -472,19 +486,21 @@ function xpathLookup(xpath: string): string {
 
 /**
  * Runs in the page against one dropdown, BEFORE a choice: its options' values
- * and labels. Read first because a dropdown may reset itself (a bulk-action or
- * "jump to" menu) or remove itself on change. Skips disabled and hidden
- * options, and a placeholder or "all" option with an empty value — the state
- * the page loads in, which is not an option anyone owes a choice.
+ * and labels, and which are selected. Read first because a dropdown may reset
+ * itself (a bulk-action or "jump to" menu) or remove itself on change. Skips
+ * disabled and hidden options, and a placeholder or "all" option with an empty
+ * value — the state the page loads in, which is not an option anyone owes a
+ * choice. The option selected before the choice is the value the page already
+ * asked the server for, which is not owed one either.
  */
-function describeSelect(node: Element): Array<{ value: string; label: string }> | null {
+function describeSelect(node: Element): Array<{ value: string; label: string; selected: boolean }> | null {
   // A plan may target the dropdown by its <label>; selectOption follows a label to its control, so this does too.
   const target = node instanceof HTMLLabelElement ? (node.control ?? node.querySelector("select")) : node;
   const select = target as HTMLSelectElement | null;
   if (!select || !select.options) return null;
   return Array.from(select.options)
     .filter((o) => !o.disabled && !o.hidden && o.value !== "")
-    .map((o) => ({ value: o.value, label: (o.label || o.textContent || "").trim().slice(0, 80) }))
+    .map((o) => ({ value: o.value, label: (o.label || o.textContent || "").trim().slice(0, 80), selected: o.selected }))
     .filter((o) => o.label !== "");
 }
 
@@ -492,7 +508,7 @@ function describeSelect(node: Element): Array<{ value: string; label: string }> 
  * A dropdown's options, read without waiting: a select that is not there to
  * read is not worth stalling the action for.
  */
-async function readSelectOptions(loc: Locator): Promise<Array<{ value: string; label: string }> | null> {
+async function readSelectOptions(loc: Locator): Promise<Array<{ value: string; label: string; selected: boolean }> | null> {
   return loc.evaluate(describeSelect, undefined, { timeout: 1000 }).catch(() => null);
 }
 
@@ -1136,14 +1152,26 @@ export class BrowserEngine {
     if (this.replayRequests.has(req)) return;
     if (this.watchedResponses.length >= BrowserEngine.MAX_WATCHED_RESPONSES) return;
     const started = this.requestStartedAt.get(req) ?? 0;
+    let isDocumentLoad = false;
+    try {
+      isDocumentLoad = req.isNavigationRequest() && this.page !== null && req.frame() === this.page.mainFrame();
+    } catch {
+      /* a worker's request: no frame, so not the page's navigation */
+    }
     this.watchedResponses.push({
       method: req.method(),
       url: req.url(),
       status,
       resourceType: req.resourceType(),
       blockedByPolicy: this.refusedByAnyPolicy(req),
-      // The current action is a user input only when it is the one that set the input mark.
-      background: this.inputSince === null || this.inputSince < this.actionStartedAt || started < this.inputSince,
+      // The current action is a user input only when it is the one that set the input mark (claims.ts isBackgroundRequest).
+      background: isBackgroundRequest({
+        started,
+        inputSince: this.inputSince,
+        actionStartedAt: this.actionStartedAt,
+        documentLoadSince: this.documentLoadSince,
+        isDocumentLoad,
+      }),
     });
   }
 
@@ -1156,6 +1184,12 @@ export class BrowserEngine {
   private inputSince: number | null = null;
   /** What the page said as the current input began, for the contradiction rules; null when it could not be read. */
   private claimBaseline: PageState | null = null;
+  /** When the current input started loading a new main-frame document, or null while it has loaded none (claims.ts isBackgroundRequest). */
+  private documentLoadSince: number | null = null;
+  /** The control the current click acted on, as the click found it, for the kept-change rule (claims.ts keptChange). */
+  private actedControl: { scope: Page | Frame; xpath: string; before: ActedControl } | null = null;
+  /** When the write policy last refused a request, for the snapshot's "after a write-policy block" tag. */
+  private lastBlockAt = 0;
 
   /**
    * Mark the start of a user input: read what the page says now, so a claim
@@ -1166,12 +1200,39 @@ export class BrowserEngine {
   private async beginInput(): Promise<void> {
     this.inputSince = this.actionStartedAt;
     this.claimBaseline = null;
+    this.documentLoadSince = null;
+    this.actedControl = null;
     const page = this.page;
     if (!page || page.isClosed()) return;
     try {
       this.claimBaseline = (await page.evaluate(CLAIM_SCAN_SCRIPT)) as PageState;
     } catch {
       // A page mid-navigation has nothing on screen to excuse.
+    }
+  }
+
+  /** The page's claims as they stand (CLAIM_SCAN_SCRIPT), or null on a page that cannot be read. */
+  private async readClaims(page: Page): Promise<PageState | null> {
+    try {
+      return (await page.evaluate(CLAIM_SCAN_SCRIPT)) as PageState;
+    } catch {
+      // A page mid-navigation has nothing to read.
+      return null;
+    }
+  }
+
+  /**
+   * Read the control a click is about to act on, so a refused write it sends
+   * can be judged by whether the control then shows the change as kept
+   * (claims.ts keptChange). Never fails the click: unread, the rule is skipped.
+   */
+  private async readActedControl(el: SnapshotElement): Promise<void> {
+    const scope = this.scopeOf(el);
+    try {
+      const before = (await scope.evaluate(`(${ACTED_CONTROL_SRC})(${xpathLookup(el.xpath)})`)) as ActedControl | null;
+      this.actedControl = before ? { scope, xpath: el.xpath, before } : null;
+    } catch {
+      this.actedControl = null;
     }
   }
 
@@ -1186,6 +1247,8 @@ export class BrowserEngine {
   private async scanForContradictions(): Promise<void> {
     const requests = this.watchedResponses;
     this.watchedResponses = [];
+    const acted = this.actedControl;
+    this.actedControl = null;
     const page = this.page;
     if (!page || page.isClosed() || requests.length === 0) return;
     if (!requests.some((r) => r.status === null || r.status >= 400)) return;
@@ -1199,7 +1262,16 @@ export class BrowserEngine {
     }
     // A baseline belongs to the input that took it, and to its page.
     const before = this.inputSince !== null && this.inputSince >= this.actionStartedAt ? this.claimBaseline : null;
-    for (const found of findContradictions(requests, state, before)) {
+    // The acted-on control as the click left it, read only when a refusal makes it matter.
+    let actedNow: ActedControl | null = null;
+    if (acted && before) {
+      try {
+        actedNow = (await acted.scope.evaluate(`(${ACTED_CONTROL_SRC})(${xpathLookup(acted.xpath)})`)) as ActedControl | null;
+      } catch {
+        // The control's document went away: nothing left to show the change.
+      }
+    }
+    for (const found of findContradictions(requests, state, before, acted && actedNow ? { before: acted.before, after: actedNow } : null)) {
       if (this.contradictionsReported.has(found.evidence)) continue;
       this.contradictionsReported.add(found.evidence);
       this.oracles.noteContradiction(found, url);
@@ -1462,6 +1534,8 @@ export class BrowserEngine {
           if (this.page && req.frame() === this.page.mainFrame()) {
             this.embedMoves.navigationStarted(req.url(), req.headers()["referer"], this.embeddedSites());
             this.pageRequests.loaded(req.url(), Date.now());
+            // The current input moved the page to a new document: what is sent from here on is not its own write.
+            if (this.inputSince !== null && this.documentLoadSince === null && this.inputSince >= this.actionStartedAt) this.documentLoadSince = Date.now();
           }
         } catch {
           /* no frame: not the driven page */
@@ -1826,6 +1900,7 @@ export class BrowserEngine {
     page.on("dialog", (dialog) => {
       this.nativeDialogAt = Date.now();
       const type = dialog.type();
+      if (type !== "alert") this.nativeQuestionAt = this.nativeDialogAt;
       const leave = type === "beforeunload" ? this.leaveChoice : undefined;
       const response = dialogResponse(type, this.readOnly, leave);
       this.logAction({
@@ -1856,6 +1931,8 @@ export class BrowserEngine {
 
   /** When the page last opened a native dialog (confirm, alert, prompt). */
   private nativeDialogAt = 0;
+  /** When a native dialog that asks something (confirm, prompt, a leave confirmation) last opened; an alert only tells. */
+  private nativeQuestionAt = 0;
 
   private requirePage(): Page {
     if (!this.page || !this.memory) {
@@ -2288,6 +2365,15 @@ export class BrowserEngine {
     await this.scanForInjections();
     await this.scanForContradictions();
 
+    // An alert or live region that appeared after the write policy refused one of
+    // the current input's requests may be the page answering the engine's
+    // refusal, not a defect of its own: said beside it, so a reader of the
+    // snapshot alone does not file it (claims.ts saidSince).
+    const blockedThisInput = this.inputSince !== null && this.inputSince >= this.actionStartedAt && this.lastBlockAt >= this.inputSince;
+    const afterBlock = (el: SnapshotElement): string =>
+      blockedThisInput && (el.liveOnly || el.role === "alert" || el.role === "status") && saidSince(el.name, this.claimBaseline)
+        ? " (after a write-policy block)"
+        : "";
     const line = (el: SnapshotElement): string => {
       const dup = el.key.match(/~(\d+)$/);
       const flags = [
@@ -2301,7 +2387,7 @@ export class BrowserEngine {
         memory.wasExercised(fp, el.key) ? "exercised" : null,
         el.href ? `href=${el.href.slice(0, 60)}` : null,
       ].filter(Boolean);
-      return `${el.ref} ${el.role} "${displayName(el)}"${flags.length ? ` [${flags.join(", ")}]` : ""}${el.frame ? ` ⟨in ${frameLabel(el.frame)}⟩` : ""}`;
+      return `${el.ref} ${el.role} "${displayName(el)}"${flags.length ? ` [${flags.join(", ")}]` : ""}${el.frame ? ` ⟨in ${frameLabel(el.frame)}⟩` : ""}${afterBlock(el)}`;
     };
 
     // Diff mode: when re-snapshotting the same route, report only what
@@ -2353,7 +2439,7 @@ export class BrowserEngine {
             // A live region saying something new is the message itself, so it is shown in full like a new element.
             ...relabeled.map((el) =>
               el.liveOnly
-                ? `~ ${el.ref} ${el.role} "${displayName(el)}" (was ${prev.byKey.get(el.key)?.label ? `"${prev.byKey.get(el.key)?.label}"` : "empty"})`
+                ? `~ ${el.ref} ${el.role} "${displayName(el)}" (was ${prev.byKey.get(el.key)?.label ? `"${prev.byKey.get(el.key)?.label}"` : "empty"})${afterBlock(el)}`
                 : `~ ${el.ref} relabeled → "${el.name}"`,
             ),
             ...retoggled.map((el) => `~ ${el.ref} "${el.name}" is now ${el.disabled ? "DISABLED" : "ENABLED"}`),
@@ -2819,6 +2905,7 @@ export class BrowserEngine {
    * beacons on every load cannot crowd out the block an action itself caused.
    */
   private noteBlocked(entry: { at: number; sig: string; answered: boolean; why?: string; type?: string }): void {
+    this.lastBlockAt = Math.max(this.lastBlockAt, entry.at);
     const list = this.blockedRequests;
     if (list.length < 20 || (list.length < 60 && !list.some((e) => blockSignature(e.sig) === blockSignature(entry.sig)))) list.push(entry);
   }
@@ -2943,8 +3030,8 @@ export class BrowserEngine {
    * window hides an earlier one inside it: the note then stays unsuffixed.
    */
   private blockedBetween(since: number, until: number): boolean {
-    const at = this.oracles.lastWriteBlockAt;
-    return at !== null && at >= since && at <= until;
+    const at = this.lastBlockAt;
+    return at > 0 && at >= since && at <= until;
   }
 
   /**
@@ -3065,12 +3152,18 @@ export class BrowserEngine {
     // (silent no-op forms): capture the count before to compare after.
     const xhrBefore = this.xhrCount;
     const submitLike = isSubmitLike(el.role, el.name, el.testid);
-    const clickContext: ClickContext = { viaLink: el.role === "link", urlBefore: page.url(), dialogsBefore: this.claimBaseline?.dialogs ?? null };
+    const clickContext: ClickContext = {
+      viaLink: el.role === "link",
+      urlBefore: page.url(),
+      dialogsBefore: this.claimBaseline?.dialogs ?? null,
+      claimsBefore: this.claimBaseline,
+    };
     const clickTarget = this.scopeOf(el).locator(`xpath=${el.xpath}`);
     // Read before the click: what the form's fields hold when it goes. Only a
     // button or an input can submit a form; nothing else is asked.
     const form = !el.frame && (el.tag === "button" || el.tag === "input") ? await this.probeForm(clickTarget) : null;
     const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
+    await this.readActedControl(el);
     const { forced, cover, coverReadAt } = await this.resilientClick(clickTarget, this.limits.actionMs, clicks);
     const coverNote = cover ? describeCover(cover, this.blockedBetween(this.snapshotAt, coverReadAt)) : null;
     this.memory!.markExercised(this.currentFingerprint, el.key, clicks > 1 ? `click×${clicks}` : "click");
@@ -3109,6 +3202,11 @@ export class BrowserEngine {
       const landed = await this.stableUrl();
       if (landed !== this.snapshotUrl) return result + `\nℹ The page then moved client-side to ${landed} (take a new snapshot).` + forcedNote;
       if (this.xhrCount !== xhrBefore) return result + forcedNote;
+      // The page may have answered without a request: a dialog, or validation saying what is missing (claims.ts quietAnswer).
+      // A native alert is not a step: alert("Saved!") with nothing sent is the very case the note is for.
+      const answer = this.nativeQuestionAt >= this.actionStartedAt ? "dialog" : quietAnswer(clickContext.claimsBefore, await this.readClaims(page));
+      if (answer === "dialog") return result + `\nℹ The click opened a dialog (a step, not a submit), so no request was expected yet.` + forcedNote;
+      if (answer === "validation") return result + `\nℹ Client-side validation answered (no request expected).` + forcedNote;
       return (
         result +
         `\nℹ NOTE: this submit-style click fired ZERO network requests and no navigation — if the UI showed success, the data may have been silently discarded (worth verifying; category: other/silent-failure).` +
@@ -3587,12 +3685,13 @@ export class BrowserEngine {
     return { arg: { index: match.index }, label: match.option.label, option: match.option };
   }
 
-  /** Record a dropdown's options and the ones picked, by the values selectOption reported. */
-  private recordSelectChoice(fingerprint: string, key: string, options: Array<{ value: string; label: string }>, picked: string[]): void {
+  /** Record a dropdown's options, the one it held before, and the ones picked, by the values selectOption reported. */
+  private recordSelectChoice(fingerprint: string, key: string, options: Array<{ value: string; label: string; selected?: boolean }>, picked: string[]): void {
     const labels = options.map((o) => o.label);
+    const loaded = options.filter((o) => o.selected).map((o) => o.label);
     const chosen = picked.map((v) => options.find((o) => o.value === v)?.label).filter((l): l is string => !!l);
-    if (chosen.length === 0) this.memory!.recordSelectChoice(fingerprint, key, labels, "");
-    for (const label of chosen) this.memory!.recordSelectChoice(fingerprint, key, labels, label);
+    if (chosen.length === 0) this.memory!.recordSelectChoice(fingerprint, key, labels, "", loaded);
+    for (const label of chosen) this.memory!.recordSelectChoice(fingerprint, key, labels, label, loaded);
   }
 
   async select(ref: string, value: string): Promise<string> {
@@ -4394,17 +4493,20 @@ export class BrowserEngine {
    *
    * Visited/attempted keys are stored NORMALIZED, so the normalized form of
    * each known route is compared too — normalizePath is idempotent, so this
-   * only adds matches for routes that genuinely were reached.
+   * only adds matches for routes that genuinely were reached. Reached is
+   * memory's reachedRoutes, the gap ledger's own rule: stored routes are read
+   * through today's route identity, and a base path is reached by one of its
+   * tabs or sections.
    */
   unvisitedKnownRoutes(): string[] {
     if (!this.memory) return [];
     const all = this.allKnownRoutes();
     if (all.length === 0) return [];
-    const visited = new Set(Object.values(this.memory.states).map((s) => s.route));
+    const reached = reachedRoutes(Object.values(this.memory.states).map((s) => s.route));
     const attempted = this.memory.attemptedByRole(this.role);
     return all.filter((r) => {
       const n = normalizePath(r);
-      return !visited.has(r) && !(r in attempted) && !visited.has(n) && !(n in attempted);
+      return !reached(r) && !(r in attempted) && !(n in attempted);
     });
   }
 
@@ -4722,7 +4824,7 @@ export class BrowserEngine {
       // the step's own line, so it cannot read as the previous step's.
       let note = "";
       // A select step's options and choice, recorded against the dropdown the bookkeeping below finds.
-      let chose: { options: Array<{ value: string; label: string }>; picked: string[] } | null = null;
+      let chose: { options: Array<{ value: string; label: string; selected: boolean }>; picked: string[] } | null = null;
       let preState: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
       // The form this step may submit, read before it went (forms.ts).
       let form: { kind: "click" | "enter"; probe: FormProbe | null } | null = null;
