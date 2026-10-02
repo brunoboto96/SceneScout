@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Search</title>
+  </head>
+  <body>
+    <main>
+      <h1>Search</h1>
+      <p data-testid="search-results">Loading…</p>
+      <p data-testid="search-delete">Pending</p>
+      <p data-testid="search-graphql">Pending</p>
+      <p data-testid="notes-save">Pending</p>
+    </main>
+    <script>
+      // A search page that loads its results with a POST, as some apps read through POST. Beside it, the contrasts a
+      // run that names /api/search as a read must still refuse in observe: the same path carrying a delete command,
+      // the same path carrying a GraphQL mutation, and a plain POST to an endpoint nobody named.
+      const show = (testid, text) => (document.querySelector(`[data-testid="${testid}"]`).textContent = text);
+      const post = (path, body) =>
+        fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) =>
+          r.ok ? r.json() : Promise.reject(new Error(`status ${r.status}`)),
+        );
+      post("/api/search", { q: "widget" })
+        .then((data) => show("search-results", `Results: ${data.results.join(", ")}`))
+        .catch((err) => show("search-results", `Search failed: ${err.message}`));
+      post("/api/search", { action: "delete", ids: [3] })
+        .then(() => show("search-delete", "sent"))
+        .catch((err) => show("search-delete", `refused: ${err.message}`));
+      post("/api/search", { query: "mutation { renameWidget(id: 3) { id } }" })
+        .then(() => show("search-graphql", "sent"))
+        .catch((err) => show("search-graphql", `refused: ${err.message}`));
+      post("/api/notes", { text: "a note" })
+        .then(() => show("notes-save", "sent"))
+        .catch((err) => show("notes-save", `refused: ${err.message}`));
+    </script>
+  </body>
+</html>
