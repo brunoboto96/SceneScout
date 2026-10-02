@@ -1181,7 +1181,7 @@ export const MAIN_REGION_SCRIPT = `(() => {
   const landmarks = Array.from(document.querySelectorAll('main, [role="main"]')).filter(shown);
   const landmark = landmarks[0] || null;
   const region = landmark || document.body;
-  if (!region) return { landmark: false, heading: null, paragraphs: 0, chars: 0, controls: 0, media: 0 };
+  if (!region) return { landmark: false, heading: null, paragraphs: 0, chars: 0, controls: 0, media: 0, states: [], rest: 0, text: "" };
   const CHROME = 'header, nav, footer, aside, [role="banner"], [role="navigation"], [role="contentinfo"], [role="complementary"]';
   const outside = (n) => !landmark && !!n.closest(CHROME);
   const CONTROL = 'a[href], button, input, select, textarea, option, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="checkbox"], [role="switch"], [role="combobox"]';
@@ -1191,22 +1191,48 @@ export const MAIN_REGION_SCRIPT = `(() => {
   const level = h ? (/^H[1-6]$/.test(h.tagName) ? Number(h.tagName[1]) : Number(h.getAttribute("aria-level") || 2)) : 0;
   const heading = h ? { level, text: (h.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 60) } : null;
   const paragraphs = inRegion("p").filter((n) => (n.textContent || "").trim()).length;
+  // Status regions: an alert, a live status, a busy or progress marker. What lies outside
+  // them is the page's own content; a main area with none is showing only its state.
+  const STATE = '[role="alert"], [role="status"], [aria-busy="true"], [role="progressbar"]';
+  const stateOf = (n) => {
+    const s = n.closest(STATE);
+    return s && (s === region || region.contains(s)) ? s : null;
+  };
+  const states = [];
+  for (const s of [region, ...inRegion(STATE)]) {
+    if (!s.matches(STATE)) continue;
+    const role = s.getAttribute("role");
+    const kind = role === "alert" || role === "status" || role === "progressbar" ? role : "busy";
+    if (!states.includes(kind)) states.push(kind);
+    if (s.getAttribute("aria-busy") === "true" && !states.includes("busy")) states.push("busy");
+  }
   let chars = 0;
+  let rest = 0;
+  let text = "";
   let seen = 0;
   const walker = document.createTreeWalker(region, NodeFilter.SHOW_TEXT);
   for (let t = walker.nextNode(); t && seen < 5000; t = walker.nextNode()) {
     seen += 1;
     const parent = t.parentElement;
     if (!parent || parent.closest('script, style, noscript, template, [aria-hidden="true"]') || parent.closest(CONTROL) || outside(parent) || !shown(parent)) continue;
-    chars += (t.textContent || "").replace(/\\s+/g, " ").trim().length;
+    const words = (t.textContent || "").replace(/\\s+/g, " ").trim();
+    chars += words.length;
+    if (!stateOf(parent)) rest += words.length;
+    if (words && text.length < 160) text = (text ? text + " " + words : words).slice(0, 160);
   }
+  const controls = inRegion(CONTROL);
+  const media = inRegion("img, svg, video, canvas, iframe, object, embed");
+  rest += [...headings, ...controls, ...media].filter((n) => !stateOf(n)).length;
   return {
     landmark: !!landmark,
     heading,
     paragraphs,
     chars,
-    controls: inRegion(CONTROL).length,
-    media: inRegion("img, svg, video, canvas, iframe, object, embed").length,
+    controls: controls.length,
+    media: media.length,
+    states,
+    rest,
+    text,
   };
 })()`;
 
@@ -1219,6 +1245,58 @@ export interface MainRegion {
   chars: number;
   controls: number;
   media: number;
+  /**
+   * The status regions in the area: `alert`, `status` (a live status), `busy`
+   * (`aria-busy="true"`) and `progressbar`, each named once. Absent from an older reading.
+   */
+  states?: string[];
+  /** How much lies outside those regions: characters of static text, plus one per heading, control or image. */
+  rest?: number;
+  /** The area's static text, its first 160 characters, whitespace collapsed. */
+  text?: string;
+}
+
+/**
+ * Whether text says only that something is on its way, e.g. "Loading…",
+ * "Loading orders...", "Please wait", once or repeated. Each sentence must
+ * open with the loading words and stay short.
+ */
+function isLoadingText(text: string): boolean {
+  const parts = text
+    .split(/\.{1,3}|…/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return parts.length > 0 && parts.every((p) => /^(?:loading|please wait)\b[^!?]{0,30}$/i.test(p));
+}
+
+/**
+ * What a main area holding nothing but its state is showing, or null when it
+ * holds content of its own. A client-rendered app answers 200 for a path it
+ * does not have and draws its not-found or error view; a route still waiting
+ * on data after the page settled shows only a placeholder. Both read as a
+ * healthy page to a status code and an element count.
+ *
+ * - `error`: everything in the area is inside a `role="alert"` region that says something.
+ * - `loading`: everything is inside an `aria-busy="true"` region or a
+ *   progress bar, or inside a live status whose only words are a loading
+ *   message or that holds only a spinner, or (with no such marker at all)
+ *   the area's only words are a loading message.
+ *
+ * A live status saying anything else ("No orders yet") is an empty state,
+ * which is content, and so is an alert beside a heading or a control.
+ */
+export function mainState(m: MainRegion): "error" | "loading" | null {
+  const states = m.states ?? [];
+  const text = (m.text ?? "").trim();
+  if (states.length === 0) {
+    return !m.heading && m.controls === 0 && m.media === 0 && isLoadingText(text) ? "loading" : null;
+  }
+  if ((m.rest ?? 1) > 0) return null;
+  // An alert with nothing in it is a live region waiting for a message, not a message.
+  if (states.includes("alert") && text !== "") return "error";
+  if (states.includes("busy") || states.includes("progressbar")) return "loading";
+  // A spinner inside a status, or a status saying it is loading; an empty one alone is just an empty main area.
+  return states.includes("status") && (isLoadingText(text) || (text === "" && m.media > 0)) ? "loading" : null;
 }
 
 /** Nothing at all in the region: no heading, no text, no control, no image or embed. */

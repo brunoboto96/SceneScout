@@ -83,6 +83,7 @@ import {
   MAIN_REGION_SCRIPT,
   mainRegionLine,
   mainRegionTag,
+  mainState,
   type MainRegion,
 } from "./collector.js";
 import { OracleMonitor, formatViolations, httpErrorDetail, requestKey } from "./oracles.js";
@@ -104,7 +105,7 @@ import {
 } from "./flow.js";
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { describePace, InFlightRequests, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
-import { crawledRoute, crawlLine } from "./crawl.js";
+import { crawledRoute, crawlLine, mainStateFlag } from "./crawl.js";
 import {
   BODY_FETCH_MAX,
   buildRequestScript,
@@ -115,6 +116,7 @@ import {
   requestHeaders,
   resolveMethod,
   resolveRequestUrl,
+  resolveTarget,
   toReplayResult,
   wantsView,
   type BodyView,
@@ -4036,10 +4038,14 @@ export class BrowserEngine {
   private async navigateNow(target: string): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
-    const url = target.startsWith("http") ? target : `${this.baseUrl}${target.startsWith("/") ? "" : "/"}${target}`;
-    if (!this.isSameOrigin(url)) {
-      return `REFUSED: ${url} is outside the attached origin (${this.baseUrl}). Exploration is fenced to the app under test.`;
+    // A path resolves against the origin, not the page the session attached on (request.ts resolveTarget).
+    const resolved = resolveTarget(this.baseUrl, target);
+    if (!("url" in resolved)) {
+      return resolved.offOrigin
+        ? `REFUSED: ${target.trim()} is outside the attached origin (${new URL(this.baseUrl).origin}). Exploration is fenced to the app under test.`
+        : `REFUSED: ${resolved.problem}`;
     }
+    const url = resolved.url;
     // A notice describes ONE navigation. Clearing up front means a notice left
     // undelivered by a previous throw can never prepend itself to this result.
     this.authLoss.clear();
@@ -4761,11 +4767,12 @@ export class BrowserEngine {
         summary.push(`… stopped at the time limit: ${queue.length - i} route(s) not started`);
         break;
       }
-      const url = `${this.baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
-      if (!this.isSameOrigin(url)) {
-        summary.push(`${path} — SKIPPED (off-origin)`);
+      const resolved = resolveTarget(this.baseUrl, path);
+      if (!("url" in resolved)) {
+        summary.push(`${path} — SKIPPED (${resolved.offOrigin ? "off-origin" : resolved.problem})`);
         continue;
       }
+      const url = resolved.url;
       this.actionStartedAt = Date.now();
       this.oracles.drain(false); // discard pre-route leftovers WITHOUT marking their signatures as reported
       let status: number | string = "ERR";
@@ -4867,22 +4874,34 @@ export class BrowserEngine {
       // What the page's main area holds besides controls: "41 el" alone cannot tell a page
       // of text from a main area that rendered nothing.
       const main = await this.readMainRegion(page);
+      // A main area holding only an alert or a loading placeholder is the usual look of a broken route that answered 200.
+      const shows = main && !deadEnd ? mainState(main) : null;
+      const stateFlag = mainStateFlag(shows);
 
-      const flags = [loginRedirect ? "AUTH-REDIRECT" : null, deadEnd ? "DEAD-END" : null, violations.length > 0 ? `${violations.length}⚠` : null].filter(
-        (f): f is string => f !== null,
-      );
-      const outcome = { path, status, requestedRoute, landedRoute: route, loginRedirect, deadEnd };
+      const flags = [
+        loginRedirect ? "AUTH-REDIRECT" : null,
+        deadEnd ? "DEAD-END" : null,
+        stateFlag,
+        violations.length > 0 ? `${violations.length}⚠` : null,
+      ].filter((f): f is string => f !== null);
+      const outcome = { path, status, requestedRoute, landedRoute: route, loginRedirect, deadEnd, mainState: shows };
       summary.push(crawlLine(outcome, { elements: trackedElements(elements).length, missingTestid, unnamed, main: main ? mainRegionTag(main) : null }, flags));
       // A path asked for by name joins the route contract once it answered as a page (crawl.ts crawledRoute).
       const joined = explicit && !opts.measureOnly ? crawledRoute(outcome) : null;
       if (joined) memory.addDiscoveredRoutes([{ route: joined, example: path }]);
-      if (violations.length > 0 || deadEnd || loginRedirect || (typeof status === "number" && status >= 400)) {
+      if (violations.length > 0 || deadEnd || stateFlag || loginRedirect || (typeof status === "number" && status >= 400)) {
         const detail = violations
           .slice(0, 3)
           .map((v) => `    ${v.kind}: ${v.detail.slice(0, 160)}`)
           .join("\n");
+        const showing =
+          shows === "error"
+            ? ` → main area shows only an error view${main?.text ? ` ("${main.text.slice(0, 80)}")` : ""}`
+            : shows === "loading"
+              ? ` → main area still shows only a loading placeholder after settling${main?.text ? ` ("${main.text.slice(0, 80)}")` : ""}`
+              : "";
         problems.push(
-          `${path}${loginRedirect ? " → redirected to login (auth missing/expired?)" : ""}${deadEnd ? " → dead end" : ""}${detail ? `\n${detail}` : ""}`,
+          `${path}${loginRedirect ? " → redirected to login (auth missing/expired?)" : ""}${deadEnd ? " → dead end" : ""}${showing}${detail ? `\n${detail}` : ""}`,
         );
       }
       // A role session that lost its sign-in on this route re-attaches once
@@ -4944,14 +4963,14 @@ export class BrowserEngine {
   ): Promise<string> {
     const page = this.requirePage();
     const transcript: string[] = [];
-    const resolveTarget = (target: string) => {
+    const locatePlanTarget = (target: string) => {
       const parsed = parseTarget(target);
       if (!parsed) throw new Error(`Plan targets must be ${TARGET_HELP} (got: ${target})`);
       return BrowserEngine.locatorFor(page, parsed).first();
     };
     /** Last state captured this plan — reused as the next step's pre-state while the page has not moved. */
     let lastCapture: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
-    const liveLabel = async (loc: ReturnType<typeof resolveTarget>): Promise<string> => {
+    const liveLabel = async (loc: ReturnType<typeof locatePlanTarget>): Promise<string> => {
       const [aria, testid, txt] = await Promise.all([
         loc.getAttribute("aria-label").catch(() => null),
         loc.getAttribute("data-testid").catch(() => null),
@@ -5016,7 +5035,7 @@ export class BrowserEngine {
           await page.keyboard.press(key);
         } else {
           if (!step.target) throw new Error(`${step.action} needs a target`);
-          const loc = resolveTarget(step.target);
+          const loc = locatePlanTarget(step.target);
           // Coverage is recorded against the state the element LIVED IN, so it
           // has to be captured before the action changes the page. Marking it
           // afterwards (as this did) recorded against the state the click
@@ -5280,7 +5299,9 @@ export class BrowserEngine {
         try {
           const current = this.requirePage();
           if (step.action === "navigate") {
-            const url = `${this.baseUrl}${step.target}`;
+            const resolved = resolveTarget(this.baseUrl, step.target);
+            if (!("url" in resolved)) throw new Error(resolved.problem);
+            const url = resolved.url;
             const resp = await current
               .goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs })
               .catch((err: unknown) => Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs)));
