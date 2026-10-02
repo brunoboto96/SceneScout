@@ -211,6 +211,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
 | `SCENESCOUT_LIVE` | the server | `off` keeps the live view closed |
 | `SCENESCOUT_REFRESH_BROKER` | the server | `off` turns off the refresh broker for role sessions |
+| `SCENESCOUT_READ_POSTS` | the server, `check`, `ci`, a first look | POST endpoints that only read, let out in `observe`: entries such as `POST /api/search`, separated by commas or new lines. Unset: none. A `scout_attach` `readPosts` wins over it |
 | `SCENESCOUT_DEDUP` | the server | `judge` asks a model, with a key below, whether a filing the dedup rule keeps apart from everything recorded is one of the open findings on its page; `rule` (default) does not. A `scout_attach` `dedup` wins over it |
 | `SCENESCOUT_DEDUP_PROVIDER` | the server | `anthropic` or `openai`: which key the dedup judge uses when both are set |
 | `ANTHROPIC_API_KEY` | `ci`; the server with the dedup judge on | The Anthropic key. The only way to give one |
@@ -382,6 +383,7 @@ What an agent can pass when it attaches a session. You rarely set these by hand;
 | `task` | a placeholder | What the session is doing right now |
 | `paceMs` | `0` | A floor between actions, 0 to 60000 |
 | `trustedEmbeds` | none | Origins of embedded frames whose writes may go out, in `safe-write` only |
+| `readPosts` | `SCENESCOUT_READ_POSTS`, else none | POST endpoints that only read (`"POST /api/search"`, `"POST https://api.example.com/query"`), let out in `observe` only. Exact paths, `*` for one path segment, at most 20 ([Safety model](Safety-model.md#post-endpoints-that-only-read)) |
 | `record` | `false` | Keep a frame after every action and write `report.html` |
 | `actionTimeoutMs` | `SCENESCOUT_ACTION_TIMEOUT_MS`, else `5000` | 1000 to 120000 |
 | `navTimeoutMs` | `SCENESCOUT_NAV_TIMEOUT_MS`, else `20000` | 1000 to 300000 |
