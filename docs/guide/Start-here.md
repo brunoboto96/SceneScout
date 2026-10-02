@@ -145,11 +145,14 @@ The level is a contract that `scout_report` enforces for what the engine can see
 
 `.scenescout/report.md` and `report.html` open **In plain words**, for anyone who does not read request signatures: a short summary, then each problem this run found, worst first, with its impact (blocks users, annoying or cosmetic), the steps that led to it, what was expected, what happened and, when there is one, a picture of the page. Each problem keeps its technical detail (id, category, evidence, route) folded beneath it, one click away.
 
+When the run was given tickets, the plain section answers them before listing the problems: for each ticket, every acceptance criterion as passed, failed or not tested. A failed criterion names the problems that show it, with their pictures; one not tested says why (the account used could not reach it, the run was only allowed to look, or it was outside what the run could check). A verdict the agent was not sure of is marked unsure.
+
 `scout_report {report}` chooses which parts a report carries: `both` (default) the plain section and then the technical report, `qa` the plain section alone, `dev` the technical report alone. It applies to the files `scout_report` writes; the live view's report always shows both.
 
 The technical report follows, worst first:
 
 - **Summary**: open findings, route coverage, design audits, oracle violations, and how many errors the write policy itself caused (these are not counted as the app's).
+- **Acceptance criteria**: on a run given tickets, each criterion's verdict with the confidence the agent stated, the ids of the findings it linked, its reason and the sessions that judged it.
 - **Page quality scores**: 0 to 100 per audited route, for accessibility, craft, consistency and task clarity, worst first.
 - **Gap ledger**: what was not tested. Treat it as the honest limit of the run, not as noise.
 - **Findings**: each with a severity, category, the evidence as a machine signature (`GET /api/orders?status=archived → HTTP 500`), where it happened, a repro trace of the last actions and a Playwright regression-test skeleton.

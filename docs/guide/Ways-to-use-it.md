@@ -43,7 +43,7 @@ Invoke the skill with no flags (`/scenescout`, or the `explore` prompt with no a
 |---|---|
 | The address | The URL the session attaches to |
 | A way of signing in | A browser window opens, you sign in as you normally would, and the session attaches with the saved login (role `user`). No sign-in: the session attaches signed out |
-| Tickets or a description | The session's objective, and the area it keeps to. "Everything" explores the whole site |
+| Tickets or a description | The session's objective, and the area it keeps to. Tickets are also read for their acceptance criteria, and the report answers each one. "Everything" explores the whole site |
 | Real data: yes, or not sure | `observe`: nothing but `GET` requests leave the page, so nothing is created or changed |
 | Real data: no | `read-only`: ordinary forms are submitted, deletes and other destructive requests are blocked |
 
@@ -60,6 +60,7 @@ SceneScout needs only a URL, but it does better from inside the app's repository
 
 - **More than one role.** "Test as clerk and manager: the clerk submits an order and the manager approves it." One agent keeps both browsers signed in (`scout_attach {session: "clerk", role: "clerk"}`, then `session: "manager"`) and alternates between them. The report adds a role capability matrix. A button hidden from a role is checked against the server with `scout_request`, so "the clerk cannot approve" is proven by a refusal, not by a missing button.
 - **Keep a flow.** "Save the checkout flow you just walked." The agent writes the steps it used as `.scenescout/flows/checkout.json`, and `scenescout check` replays it on every pull request (below).
+- **Answer the tickets.** "Check these tickets" with the tickets pasted or uploaded. `scout_tickets` reads their acceptance criteria: Given/When/Then scenarios, checklists, numbered or `AC1:` criteria, and lists under an "Acceptance criteria" heading. A ticket with none of these is reported as having no recognisable criteria; nothing is guessed. The agent plans its journeys against the criteria and records each one with `scout_criterion` as passed, failed (naming the findings that show it) or not tested (`no-access`, `observe-blocked` or `out-of-scope`), with its confidence. Which findings show a criterion failing is the agent's judgement, not a match on words. The report answers each ticket in the plain section and lists every verdict with its confidence in the technical one.
 - **Re-test earlier findings.** "The fixes for last week's findings have landed; re-test them." `scout_verify` lists open findings worst route first and records each as gone, still present or changed.
 - **Why a page is empty.** "The list is empty after switching tabs, but the API has data." `scout_network` lists the fetch and XHR requests the page made since it loaded, with status and timing, so a request that failed, one still pending and one that never ran can be told apart. When a response is longer than the 2000 characters `scout_request` returns, `scout_request {select: "stats.open"}` returns one value of the JSON body, and `scout_request {offset: 2000}` the next part.
 - **Show one element.** "Show me the new filter bar." `scout_capture` saves a PNG of that element; it shows, it does not judge.
