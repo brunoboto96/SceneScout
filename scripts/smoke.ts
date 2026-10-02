@@ -33,8 +33,10 @@ import * as scriptedLogin from "./smoke/scripted-login.ts";
 import * as passwordlessLogin from "./smoke/passwordless-login.ts";
 import * as reattach from "./smoke/reattach.ts";
 import * as refreshBroker from "./smoke/refresh-broker.ts";
+import * as refreshCookie from "./smoke/refresh-cookie.ts";
 import * as liveView from "./smoke/live-view.ts";
 import * as contradiction from "./smoke/contradiction.ts";
+import * as attribution from "./smoke/attribution.ts";
 import * as frames from "./smoke/frames.ts";
 import * as injection from "./smoke/injection.ts";
 import * as postmessage from "./smoke/postmessage.ts";
@@ -44,6 +46,7 @@ import * as firstRun from "./smoke/first-run.ts";
 import * as unload from "./smoke/unload.ts";
 import * as ciRun from "./smoke/ci.ts";
 import * as timeLimits from "./smoke/time-limits.ts";
+import * as snapshotContents from "./smoke/snapshot.ts";
 
 const suites = [
   readOnly,
@@ -55,11 +58,14 @@ const suites = [
   passwordlessLogin,
   reattach,
   refreshBroker,
+  refreshCookie,
   liveView,
   injection,
   postmessage,
   contradiction,
+  attribution,
   frames,
+  snapshotContents,
   unload,
   timeLimits,
   checkGate,

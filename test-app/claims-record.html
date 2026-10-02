@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Record</title>
+  </head>
+  <body>
+    <!--
+      A record page whose status badge reads "Published" before anything is
+      clicked. "Add comment" is refused and the page puts up nothing new, so
+      the badge is not the page's answer to the refused write and nothing
+      contradicts it. Its counterpart, claims-record-toast.html, is identical
+      except that it then shows a new "Comment saved" toast, which is a lie.
+    -->
+    <h1>Record 7</h1>
+    <span data-testid="record-status-badge">Published</span>
+    <label for="comment">Comment</label>
+    <input id="comment" data-testid="record-comment-input" />
+    <button data-testid="record-comment-button" onclick="addComment()">Add comment</button>
+    <p data-testid="record-toast"></p>
+    <script>
+      const TOAST = "";
+      async function addComment() {
+        await fetch("/api/refuse/403?comment=1", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => {});
+        if (TOAST) document.querySelector("[data-testid=record-toast]").textContent = TOAST;
+      }
+    </script>
+  </body>
+</html>

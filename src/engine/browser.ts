@@ -11,7 +11,9 @@ import {
   type Frame,
   type Locator,
   type Page,
+  type APIResponse,
   type Request,
+  type Response,
   type Route,
 } from "playwright";
 import fs from "node:fs";
@@ -20,7 +22,7 @@ import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type Inter
 import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
 import { normalizeTask } from "./task.js";
-import { CLAIM_SCAN_SCRIPT, findContradictions, type PageState, type WatchedRequest } from "./claims.js";
+import { CLAIM_SCAN_SCRIPT, findContradictions, INFRASTRUCTURE_WRITE_RE, OPEN_DIALOGS_SCRIPT, type PageState, type WatchedRequest } from "./claims.js";
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
@@ -52,8 +54,17 @@ import {
   describeControl,
   labelFlag,
   type NameFrom,
+  type ElementState,
+  stateFlags,
+  stateChange,
+  trackedElements,
+  inertKeys,
+  MAIN_REGION_SCRIPT,
+  mainRegionLine,
+  mainRegionTag,
+  type MainRegion,
 } from "./collector.js";
-import { OracleMonitor, formatViolations, httpErrorDetail } from "./oracles.js";
+import { OracleMonitor, formatViolations, httpErrorDetail, requestKey } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, measureJourney } from "./journey.js";
 import {
@@ -94,6 +105,7 @@ import {
   FORMS_READ_FAILED,
   FORMS_SUBMIT_UNMATCHED,
   isEmptySubmit,
+  isSubmitLike,
   sameControl,
   isNavigationTeardown,
   submits,
@@ -160,20 +172,40 @@ import {
 } from "./profiles.js";
 import {
   acquireLock,
+  brokerDecision,
   brokerEnabled,
+  cookieMayCount,
+  endpointKey,
+  endpointsPathFor,
+  headersForResend,
+  isStaticAsset,
+  learnableEndpoint,
   lockPathFor,
   planRefresh,
-  presentedToken,
   profileAfterRotation,
+  readLearnedEndpoints,
   REFRESH_BROKER_ENV,
   refreshTokenSlots,
+  rotatedCookies,
   rotatedFromResponse,
   rotationStored,
   swapProfileToken,
   swapRequest,
+  swapToken,
+  withLearnedEndpoint,
+  writeLearnedEndpoints,
+  type BrokerDecision,
   type HeldLock,
   type TokenSlot,
 } from "./refresh.js";
+
+/** A refresh's answer as the write-back reads it, from the page's response or from one the broker fetched itself. */
+interface RefreshAnswer {
+  ok: boolean;
+  status: number;
+  text: () => Promise<string>;
+  setCookies: () => Promise<string[]>;
+}
 
 export type { WriteMode } from "./policy.js";
 
@@ -298,6 +330,16 @@ interface SnapshotElement extends InteractableInfo {
   coveredBy?: string | null;
   /** Set when a field's name is its placeholder, name attribute or type rather than a label. */
   nameFrom?: NameFrom | null;
+  /** A user can act on it (collector isInteractive); false for what is listed only for its test id or its text. */
+  interactive?: boolean;
+  /** Inside an aria-hidden subtree. */
+  ariaHidden?: boolean;
+  /** A live region listed only for what it says: kept out of the state's identity and its coverage (trackedElements). */
+  liveOnly?: boolean;
+  /** Pressed, selected, checked, expanded, current (stateFlags). */
+  state?: ElementState;
+  /** The horizontally scrolling container it sits outside the visible width of, when it does. */
+  scrolledOutIn?: string | null;
 }
 
 const SETTLE_MS = 400;
@@ -328,8 +370,16 @@ const CHOOSER_GRACE_MS = 2000;
 /** How long a hover waits for delay-gated tooltips (component libraries warm up for as long as ~1500ms). */
 const HOVER_REVEAL_WINDOW_MS = 2500;
 
-/** Non-GET traffic that is auth/telemetry plumbing, not tester-caused state mutation. */
-const BENIGN_MUTATION_RE = /\/auth\/(refresh|token|session)|refresh[-_]?token|\/telemetry|\/analytics|\/heartbeat|\/sentry|\/collect\b|\/logs?\b|\/metrics\b/i;
+/** What a click's result needs to judge a page error the click raised (rankRouteCancellations). */
+interface ClickContext {
+  viaLink: boolean;
+  urlBefore: string;
+  /** Open dialogs as the click began, or null when they could not be read. */
+  dialogsBefore: number | null;
+}
+
+/** Non-GET traffic that is auth/telemetry plumbing, not tester-caused state mutation. One list, shared with the false-success rule. */
+const BENIGN_MUTATION_RE = INFRASTRUCTURE_WRITE_RE;
 
 /**
  * What the policy needs to know about where a request came from: the URLs of
@@ -495,7 +545,7 @@ export class BrowserEngine {
   /** URL at the time of the last snapshot — refs are valid only while it matches. */
   private snapshotUrl = "";
   /** Last snapshot's identity map (per route) — enables stable refs + diff snapshots. */
-  private lastSnap: { route: string; byKey: Map<string, { ref: string; label: string; disabled: boolean }> } | null = null;
+  private lastSnap: { route: string; byKey: Map<string, { ref: string; label: string; disabled: boolean; state: string[] }> } | null = null;
   /** Non-parameterized routes discovered by the project scan — the objective completion contract. */
   knownRoutes: string[] = [];
   /** Real path of the attached project — the fence for scout_upload's filePath. */
@@ -530,11 +580,23 @@ export class BrowserEngine {
    * when the session is not attached by role, the broker is off, or the
    * profile holds no refresh token.
    */
-  private refresh: { projectDir: string; role: string; file: string; known: TokenSlot[]; spent: TokenSlot[] } | null = null;
+  private refresh: {
+    projectDir: string;
+    role: string;
+    file: string;
+    known: TokenSlot[];
+    spent: TokenSlot[];
+    /** Endpoints seen to rotate the token (endpointKey), this session's and those other sessions saved beside the profile. */
+    learned: Set<string>;
+    learnedCheckedAt: number;
+    learnedMtimeMs: number;
+  } | null = null;
+  /** Requests the broker took the lock for: their write-back is its own, so the rotation watcher leaves them alone. */
+  private brokeredRequests = new WeakSet<Request>();
   /** Write-backs still waiting on a response, so close() lets them release their lock. */
   private readonly refreshTasks = new Set<Promise<void>>();
   /** What the broker did this session, for the lane report: counts only. */
-  private refreshCounts = { refreshed: 0, swapped: 0, failed: 0 };
+  private refreshCounts = { refreshed: 0, swapped: 0, failed: 0, learned: 0 };
 
   /** UI-label blocking applies only in read-only mode (safe-write enforces at the network layer instead). */
   get readOnly(): boolean {
@@ -663,15 +725,22 @@ export class BrowserEngine {
       headers: requestHeaders({ given: input.headers, auth: this.lastAuthHeader, body: input.body }),
     });
     let raw: Parameters<typeof toReplayResult>[0];
+    // Claimed by the first matching request the page sends (the request
+    // listener), so the oracles and the contradiction ledger know it is ours.
+    this.pendingReplay = { method: method.method, key: requestKey(target.url) };
+    this.oracles.replayStarted(target.url);
     try {
       raw = (await page.evaluate(script)) as Parameters<typeof toReplayResult>[0];
-      this.forgetReplay(method.method, target.url);
     } catch (err) {
       // The page could not run the fetch at all (a navigation mid-call, a
       // closed page). The policy answers rather than rejects, so this is not it.
       const message = err instanceof Error ? err.message : String(err);
       this.logAction({ action: "request", target: `${method.method} ${input.path}`, url: page.url(), result: `blocked: ${message.split("\n")[0]}` });
       return `${method.method} ${input.path} — the request did not complete: ${message.split("\n")[0]}`;
+    } finally {
+      this.pendingReplay = null;
+      this.oracles.replayEnded(target.url);
+      for (const hop of this.replayHops.splice(0)) this.oracles.replayEnded(hop);
     }
     const result = toReplayResult(raw);
     this.logAction({
@@ -684,21 +753,34 @@ export class BrowserEngine {
     return formatReplay(method.method, result);
   }
 
+  /** The scout_request call in flight, until the page's request for it is seen. */
+  private pendingReplay: { method: string; key: string } | null = null;
+  /** Addresses the call in flight was redirected to, ended with it. */
+  private readonly replayHops: string[] = [];
   /**
-   * Take the replayed request back out of the contradiction ledger. It was the
-   * agent's call, not the page's, so whatever the page says next is not its
-   * answer — and left in, a replay the policy refused was blamed on the next
-   * click as that click's false success, in place of the click's own request.
-   * Only this request: anything else the page fetched meanwhile stays.
+   * The requests scout_request sent, by identity (redirect hops included). They
+   * are the agent's calls, not the page's: their failures are not the page's
+   * violations, and whatever the page says next is not their answer. Left in
+   * the contradiction ledger, a replay the policy refused was blamed on the
+   * next click as that click's false success.
    */
-  private forgetReplay(method: string, url: string): void {
-    for (let i = this.watchedResponses.length - 1; i >= 0; i -= 1) {
-      const r = this.watchedResponses[i];
-      if (r.method === method && r.url === url) {
-        this.watchedResponses.splice(i, 1);
-        return;
-      }
+  private readonly replayRequests = new WeakSet<import("playwright").Request>();
+  /** When each request started, so the contradiction rules can tell the action's own writes from ones already in flight. */
+  private readonly requestStartedAt = new WeakMap<import("playwright").Request, number>();
+
+  /** Note whether a request the page is sending is this session's scout_request call. */
+  private claimReplay(req: import("playwright").Request): void {
+    const from = req.redirectedFrom();
+    if (from && this.replayRequests.has(from)) {
+      this.replayRequests.add(req);
+      this.oracles.replayStarted(req.url());
+      this.replayHops.push(req.url());
+      return;
     }
+    const pending = this.pendingReplay;
+    if (!pending || req.method() !== pending.method || requestKey(req.url()) !== pending.key) return;
+    this.replayRequests.add(req);
+    this.pendingReplay = null;
   }
 
   /**
@@ -914,16 +996,52 @@ export class BrowserEngine {
    * element on the current page? Runs wherever violations are drained, so the
    * finding reaches the agent in the result of the action that revealed it.
    */
-  /** Record one answered request for the contradiction rules. Ones the policy stopped are marked, never dropped: the rules need to know they were ours. */
+  /**
+   * Record one answered request for the contradiction rules. Ones the policy
+   * stopped are marked, never dropped: the rules need to know they were ours.
+   * The agent's own scout_request calls are left out: the page did not send them.
+   */
   private watchResponse(req: import("playwright").Request, status: number | null): void {
+    if (this.replayRequests.has(req)) return;
     if (this.watchedResponses.length >= BrowserEngine.MAX_WATCHED_RESPONSES) return;
+    const started = this.requestStartedAt.get(req) ?? 0;
     this.watchedResponses.push({
       method: req.method(),
       url: req.url(),
       status,
       resourceType: req.resourceType(),
       blockedByPolicy: this.refusedByAnyPolicy(req),
+      // The current action is a user input only when it is the one that set the input mark.
+      background: this.inputSince === null || this.inputSince < this.actionStartedAt || started < this.inputSince,
     });
+  }
+
+  /**
+   * When the current user input (a click, a keypress, typing, a choice) began,
+   * or null before the first. An action that is not input (a navigation, a
+   * scroll, a crawl) moves actionStartedAt past it, which is how a request is
+   * known to have no input behind it.
+   */
+  private inputSince: number | null = null;
+  /** What the page said as the current input began, for the contradiction rules; null when it could not be read. */
+  private claimBaseline: PageState | null = null;
+
+  /**
+   * Mark the start of a user input: read what the page says now, so a claim
+   * already on screen (a status badge, a heading) is not taken for the
+   * page's answer to this input's write. Never fails the action: with no
+   * baseline every text counts, as before.
+   */
+  private async beginInput(): Promise<void> {
+    this.inputSince = this.actionStartedAt;
+    this.claimBaseline = null;
+    const page = this.page;
+    if (!page || page.isClosed()) return;
+    try {
+      this.claimBaseline = (await page.evaluate(CLAIM_SCAN_SCRIPT)) as PageState;
+    } catch {
+      // A page mid-navigation has nothing on screen to excuse.
+    }
   }
 
   /**
@@ -948,7 +1066,9 @@ export class BrowserEngine {
       // A page mid-navigation has no DOM to ask.
       return;
     }
-    for (const found of findContradictions(requests, state)) {
+    // A baseline belongs to the input that took it, and to its page.
+    const before = this.inputSince !== null && this.inputSince >= this.actionStartedAt ? this.claimBaseline : null;
+    for (const found of findContradictions(requests, state, before)) {
       if (this.contradictionsReported.has(found.evidence)) continue;
       this.contradictionsReported.add(found.evidence);
       this.oracles.noteContradiction(found, url);
@@ -1047,14 +1167,27 @@ export class BrowserEngine {
     this.authLoss.beginSession(auth.kind, this.role);
     let profileNote = "";
     this.refresh = null;
-    this.refreshCounts = { refreshed: 0, swapped: 0, failed: 0 };
+    this.refreshCounts = { refreshed: 0, swapped: 0, failed: 0, learned: 0 };
+    this.brokeredRequests = new WeakSet();
     if (auth.kind === "role") {
       const note = permissionNote(auth.storageStatePath, fs.statSync(auth.storageStatePath).mode);
       if (note) profileNote = `\n⚠ ${note}`;
       if (brokered) {
         const read = this.readRoleProfile();
         const known = read.ok ? refreshTokenSlots(read.state) : [];
-        if (known.length > 0) this.refresh = { projectDir: opts.projectDir, role: auth.role, file: auth.storageStatePath, known, spent: [] };
+        if (known.length > 0) {
+          this.refresh = {
+            projectDir: opts.projectDir,
+            role: auth.role,
+            file: auth.storageStatePath,
+            known,
+            spent: [],
+            learned: new Set(),
+            learnedCheckedAt: 0,
+            learnedMtimeMs: 0,
+          };
+          this.learnedEndpoints();
+        }
       }
     }
     this.currentMode = opts.mode ?? "read-only";
@@ -1108,6 +1241,7 @@ export class BrowserEngine {
     }
     this.oracles = new OracleMonitor();
     this.oracles.setPolicyRefusalCheck((req) => this.refusedByAnyPolicy(req));
+    this.oracles.setReplayCheck((req) => this.replayRequests.has(req));
     // A request an embed sends to the app is the app's to answer: only one headed outside the app is the embed's.
     this.oracles.setEmbedAttribution((req) => {
       let site: string | null = null;
@@ -1187,6 +1321,8 @@ export class BrowserEngine {
       }
       this.inFlight += 1;
       this.lastRequestStart = Date.now();
+      this.requestStartedAt.set(req, this.lastRequestStart);
+      this.claimReplay(req);
       const type = req.resourceType();
       if (type === "xhr" || type === "fetch") this.xhrCount += 1;
       const method = req.method();
@@ -1226,6 +1362,15 @@ export class BrowserEngine {
         }
       }
     });
+
+    // The refresh broker. Registered before the write policy, so it runs after
+    // it: the policy judges each request as the page sent it and hands on
+    // (route.fallback) only what it lets out, and the broker sees only those.
+    // A refresh the policy refuses is never sent, so it needs no lock.
+    if (this.refresh) {
+      await this.context.route("**/*", (route) => this.brokerRefresh(route));
+      this.context.on("response", (res) => this.watchRotation(res));
+    }
 
     // Write policy — enforced on the wire, where the truth lives.
     if (this.mode !== "destructive") {
@@ -1304,10 +1449,12 @@ export class BrowserEngine {
           } catch {
             /* could not ask: load it as it would have loaded */
           }
-          await route.continue().catch(() => {});
+          await route.fallback().catch(() => {});
           return;
         }
-        if (method === "GET" || method === "HEAD" || method === "OPTIONS") return route.continue();
+        // What the policy lets out it hands on with route.fallback, never route.continue: the
+        // refresh broker, registered before this handler, runs next. With no broker it goes out.
+        if (method === "GET" || method === "HEAD" || method === "OPTIONS") return route.fallback();
         const url = req.url();
         const pathname = pathnameOf(url);
         const refuse = (why?: string) => {
@@ -1336,7 +1483,7 @@ export class BrowserEngine {
         // one, and in observe only the requests a login itself needs.
         if (isAuthExempt(rule, method, pathname, destructiveWire)) {
           this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
-          return route.continue();
+          return route.fallback();
         }
 
         let owned = this.isOwnedResource(pathname);
@@ -1373,7 +1520,7 @@ export class BrowserEngine {
             this.pendingCreations.add(task);
           }
           this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
-          return route.continue();
+          return route.fallback();
         }
         return refuse();
       };
@@ -1389,11 +1536,6 @@ export class BrowserEngine {
         }
       }
     }
-
-    // The refresh broker. Registered after the write policy so it runs first
-    // and hands every request on to it: a refresh it lets through is still
-    // judged by the policy like any other request.
-    if (this.refresh) await this.context.route("**/*", (route) => this.brokerRefresh(route));
 
     // Popups / target=_blank: adopt same-origin pages as the active page (with
     // oracles attached); close foreign-origin popups so exploration cannot
@@ -1521,6 +1663,7 @@ export class BrowserEngine {
   /** Dialogs (confirm/alert): dismiss in read-only mode, accept otherwise. Must be wired on every page we drive, including adopted popups. */
   private wireDialogHandler(page: Page): void {
     page.on("dialog", (dialog) => {
+      this.nativeDialogAt = Date.now();
       const action = this.readOnly ? "dismiss" : "accept";
       this.logAction({
         action: `dialog:${action}`,
@@ -1530,6 +1673,9 @@ export class BrowserEngine {
       void (this.readOnly ? dialog.dismiss() : dialog.accept()).catch(() => {});
     });
   }
+
+  /** When the page last opened a native dialog (confirm, alert, prompt). */
+  private nativeDialogAt = 0;
 
   private requirePage(): Page {
     if (!this.page || !this.memory) {
@@ -1635,6 +1781,11 @@ export class BrowserEngine {
       chrome?: boolean;
       coveredBy?: string | null;
       nameFrom?: NameFrom | null;
+      interactive?: boolean;
+      ariaHidden?: boolean;
+      liveOnly?: boolean;
+      state?: ElementState;
+      scrolledOutIn?: string | null;
     };
     // SPAs (and dev servers mid-recompile) can present an empty shell for a
     // few seconds — and a shell that already renders its chrome (sidebar,
@@ -1672,7 +1823,9 @@ export class BrowserEngine {
       ...framed.flatMap((g) => g.raws.map((raw) => ({ raw: raw as RawElement, frame: g.frame, tag: g.tag }))),
     ];
     const elements: SnapshotElement[] = all.map(({ raw: el, frame, tag }) => {
-      const baseKey = frameElementKey(elementKey(el), tag);
+      // A live region listed for what it says is known by its role, not its
+      // text, so a new message reads as the same region saying something else.
+      const baseKey = frameElementKey(el.liveOnly ? `live:${el.role}` : elementKey(el), tag);
       const count = keyCounts.get(baseKey) ?? 0;
       keyCounts.set(baseKey, count + 1);
       const key = count === 0 ? baseKey : `${baseKey}~${count}`;
@@ -1681,7 +1834,8 @@ export class BrowserEngine {
         ...el,
         ...(tag ? { frame: tag } : {}),
         // Judged on the real label, then masked: the policy must see what a click would press.
-        destructive: isDestructive(el.name, el.testid),
+        // A message is not a control: "Could not delete" in an alert is not a Delete button.
+        destructive: el.liveOnly ? false : isDestructive(el.name, el.testid),
         ...(tag?.foreign ? { name: masksForeignName(el.tag, el.role) ? MASKED_NAME : capForeignName(el.name) } : {}),
         ...(tag?.foreign && el.href ? { href: stripForeignHref(el.href) } : {}),
         ref,
@@ -1830,12 +1984,13 @@ export class BrowserEngine {
     const page = this.requirePage();
     const { elements, forms } = await this.collect();
     const url = page.url();
-    const fp = fingerprintState(url, elements);
+    const fp = fingerprintState(url, trackedElements(elements));
     this.memory?.visitState(
       fp,
       url,
       normalizePath(url),
-      elements.map((el) => el.key),
+      trackedElements(elements).map((el) => el.key),
+      inertKeys(elements),
     );
     for (const f of forms) this.memory?.recordForm(fp, f.key, f.guarded);
     return { fp, elements, url };
@@ -1871,6 +2026,16 @@ export class BrowserEngine {
       found.push({ route: normalizePath(abs.toString()), example: abs.pathname + abs.search + abs.hash });
     }
     if (found.length > 0) this.memory.addDiscoveredRoutes(found);
+  }
+
+  /** What the main region holds besides controls (MAIN_REGION_SCRIPT). A failed read is logged and gives no line, not "EMPTY". */
+  private async readMainRegion(page: Page): Promise<MainRegion | null> {
+    try {
+      return (await page.evaluate(MAIN_REGION_SCRIPT)) as MainRegion;
+    } catch (err) {
+      console.error(`[scenescout] main-region read failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
   }
 
   /** Every file input on the page. A failed probe is logged, not passed off as "none". */
@@ -1909,13 +2074,14 @@ export class BrowserEngine {
     const url = page.url();
     this.snapshotUrl = url;
     const route = normalizePath(url);
-    const fp = fingerprintState(url, elements);
+    const fp = fingerprintState(url, trackedElements(elements));
     this.currentFingerprint = fp;
     const isNew = memory.visitState(
       fp,
       url,
       route,
-      elements.map((el) => el.key),
+      trackedElements(elements).map((el) => el.key),
+      inertKeys(elements),
     );
     for (const f of forms) memory.recordForm(fp, f.key, f.guarded);
     memory.recordRoleAccess(this.role, route, "reached");
@@ -1930,12 +2096,14 @@ export class BrowserEngine {
     const line = (el: SnapshotElement): string => {
       const dup = el.key.match(/~(\d+)$/);
       const flags = [
+        ...stateFlags(el.state),
         el.testid ? `testid=${el.testid}` : null,
         dup ? `copy#${Number(dup[1]) + 1}` : null,
         el.disabled ? "disabled" : null,
         el.destructive ? "DESTRUCTIVE" : null,
         labelFlag(el),
-        memory.wasExercised(fp, el.key) ? "done" : null,
+        // "exercised", not "done": it says an earlier action or run acted on it, and "done" read as the control's own state.
+        memory.wasExercised(fp, el.key) ? "exercised" : null,
         el.href ? `href=${el.href.slice(0, 60)}` : null,
       ].filter(Boolean);
       return `${el.ref} ${el.role} "${displayName(el)}"${flags.length ? ` [${flags.join(", ")}]` : ""}${el.frame ? ` ⟨in ${frameLabel(el.frame)}⟩` : ""}`;
@@ -1944,7 +2112,10 @@ export class BrowserEngine {
     // Diff mode: when re-snapshotting the same route, report only what
     // changed — same idea as UI reconciliation, applied to agent context.
     const prev = this.lastSnap?.route === route ? this.lastSnap : null;
-    this.lastSnap = { route, byKey: new Map(elements.map((el) => [el.key, { ref: el.ref, label: el.name, disabled: el.disabled }])) };
+    this.lastSnap = {
+      route,
+      byKey: new Map(elements.map((el) => [el.key, { ref: el.ref, label: el.name, disabled: el.disabled, state: stateFlags(el.state) }])),
+    };
 
     let body: string;
     if (!full && prev) {
@@ -1967,9 +2138,16 @@ export class BrowserEngine {
         const old = prev.byKey.get(el.key);
         return old !== undefined && old.disabled !== el.disabled;
       });
-      const changedKeys = new Set([...relabeled, ...retoggled].map((el) => el.key));
+      // A filter pill that became the active one, a tab now selected, a
+      // section now open: the same element, in a different state.
+      const restated = elements.flatMap((el) => {
+        const old = prev.byKey.get(el.key);
+        const change = old ? stateChange(old.state, stateFlags(el.state)) : null;
+        return change ? [{ el, change }] : [];
+      });
+      const changedKeys = new Set([...relabeled, ...retoggled, ...restated.map((r) => r.el)].map((el) => el.key));
       const unchanged = elements.length - added.length - changedKeys.size;
-      if (added.length === 0 && removed.length === 0 && relabeled.length === 0 && retoggled.length === 0) {
+      if (added.length === 0 && removed.length === 0 && relabeled.length === 0 && retoggled.length === 0 && restated.length === 0) {
         body = `No element changes since the last snapshot (${unchanged} interactables, refs unchanged).`;
       } else {
         body =
@@ -1977,12 +2155,18 @@ export class BrowserEngine {
           [
             ...added.map((el) => `+ ${line(el)}`),
             ...removed.map(([key, v]) => `- ${v.ref} "${v.label}" (gone: ${key})`),
-            ...relabeled.map((el) => `~ ${el.ref} relabeled → "${el.name}"`),
+            // A live region saying something new is the message itself, so it is shown in full like a new element.
+            ...relabeled.map((el) =>
+              el.liveOnly
+                ? `~ ${el.ref} ${el.role} "${displayName(el)}" (was ${prev.byKey.get(el.key)?.label ? `"${prev.byKey.get(el.key)?.label}"` : "empty"})`
+                : `~ ${el.ref} relabeled → "${el.name}"`,
+            ),
             ...retoggled.map((el) => `~ ${el.ref} "${el.name}" is now ${el.disabled ? "DISABLED" : "ENABLED"}`),
+            ...restated.map(({ el, change }) => `~ ${el.ref} "${displayName(el)}" ${change}`),
           ].join("\n");
       }
     } else {
-      const missingTestids = elements.filter((el) => !el.testid && !el.disabled).length;
+      const missingTestids = trackedElements(elements).filter((el) => !el.testid && !el.disabled).length;
       body =
         `Interactables (${elements.length}${truncated ? "+ — TRUNCATED at 150, dense page" : ""}${missingTestids ? `, ${missingTestids} missing data-testid` : ""}):\n` +
         elements.map(line).join("\n");
@@ -1996,11 +2180,13 @@ export class BrowserEngine {
     const cov = memory.coverage();
     const unvisited = this.unvisitedKnownRoutes();
     const title = await page.title();
+    const main = await this.readMainRegion(page);
     return (
       `URL: ${url}\nTitle: ${title}\nState: ${fp} ${isNew ? "(NEW state)" : "(revisited)"}\n` +
       `Coverage: ${cov.states} states known · ${cov.elementsExercised}/${cov.elementsTotal} elements exercised` +
       (this.allKnownRoutes().length > 0 ? ` · routes ${this.allKnownRoutes().length - unvisited.length}/${this.allKnownRoutes().length} visited` : "") +
       `\n` +
+      (main ? `${mainRegionLine(main)}\n` : "") +
       body +
       (geometry.length > 0 ? `\nGEOMETRY issues:\n` + geometry.map((g) => `  ⚠ ${g}`).join("\n") : "") +
       (brokenImages.length > 0 ? `\nBROKEN IMAGES:\n` + brokenImages.map((b) => `  ⚠ ${b}`).join("\n") : "") +
@@ -2019,7 +2205,7 @@ export class BrowserEngine {
         : "") +
       this.socketNotice() +
       formatViolations(this.oracles.drain()) +
-      (elements.length === 0
+      (trackedElements(elements).length === 0
         ? hasVisibleFrame(frames)
           ? "\n⚠ No interactable elements in the page itself: what it shows is inside the frames listed above, which were not explored."
           : "\n⚠ DEAD END: no interactable elements found on this page."
@@ -2056,6 +2242,7 @@ export class BrowserEngine {
     if (!live) {
       throw new Error(`Element ${ref} no longer exists in the DOM — take a new scout_snapshot.`);
     }
+    await this.beginInput();
     if (el.testid && live.testid !== el.testid) {
       this.refs.clear();
       throw new Error(
@@ -2082,7 +2269,30 @@ export class BrowserEngine {
     return null;
   }
 
-  private async afterAction(action: string, target: string): Promise<string> {
+  /**
+   * Re-rank a page error this click raised when it reads as a router
+   * cancelling a route change (oracles.ts isRouteCancellation). The dialog
+   * count is read only when there is such an error to judge.
+   */
+  private async rankRouteCancellations(click: ClickContext, url: string): Promise<void> {
+    const since = this.actionStartedAt;
+    if (!this.oracles.hasPageErrorSince(since)) return;
+    let dialogsNow: number | null = null;
+    try {
+      dialogsNow = (await this.requirePage().evaluate(OPEN_DIALOGS_SCRIPT)) as number;
+    } catch {
+      // A page mid-navigation: only a native dialog can count.
+    }
+    const ariaDialogOpened = dialogsNow !== null && click.dialogsBefore !== null && dialogsNow > click.dialogsBefore;
+    this.oracles.downgradeRouteCancellations(since, {
+      byClick: true,
+      viaLink: click.viaLink,
+      urlChanged: url !== click.urlBefore,
+      dialogOpened: ariaDialogOpened || this.nativeDialogAt >= since,
+    });
+  }
+
+  private async afterAction(action: string, target: string, click?: ClickContext): Promise<string> {
     const page = this.requirePage();
     await this.settle();
     let url = page.url();
@@ -2111,6 +2321,7 @@ export class BrowserEngine {
     this.logAction({ action, target, url, ...(frame ? { frame } : {}) });
     await this.scanForInjections();
     await this.scanForContradictions();
+    if (click) await this.rankRouteCancellations(click, url);
     const violations = this.oracles.drain();
     const mutations = this.drainMutations() + this.drainBlocked() + this.drainCreated();
     const navigated = this.snapshotUrl !== "" && url !== this.snapshotUrl;
@@ -2641,7 +2852,8 @@ export class BrowserEngine {
     // Submit-shaped clicks that fire zero network requests are a smell
     // (silent no-op forms): capture the count before to compare after.
     const xhrBefore = this.xhrCount;
-    const submitLike = el.role === "button" && /submit|send|save|create|apply|subscribe|register|sign|post|add\b/i.test(el.name + " " + (el.testid ?? ""));
+    const submitLike = isSubmitLike(el.role, el.name, el.testid);
+    const clickContext: ClickContext = { viaLink: el.role === "link", urlBefore: page.url(), dialogsBefore: this.claimBaseline?.dialogs ?? null };
     const clickTarget = this.scopeOf(el).locator(`xpath=${el.xpath}`);
     // Read before the click: what the form's fields hold when it goes. Only a
     // button or an input can submit a form; nothing else is asked.
@@ -2650,7 +2862,7 @@ export class BrowserEngine {
     const { forced } = await this.resilientClick(clickTarget, this.limits.actionMs, clicks);
     this.memory!.markExercised(this.currentFingerprint, el.key, clicks > 1 ? `click×${clicks}` : "click");
     this.noteFormSubmit(formState, "click", form);
-    const result = await this.afterAction(clicks > 1 ? `click×${clicks}` : "click", `${el.role} "${el.name}"`);
+    const result = await this.afterAction(clicks > 1 ? `click×${clicks}` : "click", `${el.role} "${el.name}"`, clickContext);
     // Impatient-user probe: a rapid multi-click that fires the SAME
     // state-changing request more than once means the action is not guarded
     // against double submission (button not disabled during flight, endpoint
@@ -2675,6 +2887,12 @@ export class BrowserEngine {
     // beacon is not counted as xhr/fetch, so an aborted one looks exactly like
     // "fired nothing" — and the note would blame the app for the tool's block.
     if (submitLike && this.xhrCount === xhrBefore && this.lastActionBlocked === 0 && page.url() === this.snapshotUrl) {
+      // A client-side router can move the page just after the request-based
+      // settle, with no request for it to wait on: watch the URL before
+      // calling the click silent, and look at the requests again after.
+      const landed = await this.stableUrl();
+      if (landed !== this.snapshotUrl) return result + `\nℹ The page then moved client-side to ${landed} (take a new snapshot).` + forcedNote;
+      if (this.xhrCount !== xhrBefore) return result + forcedNote;
       return (
         result +
         `\nℹ NOTE: this submit-style click fired ZERO network requests and no navigation — if the UI showed success, the data may have been silently discarded (worth verifying; category: other/silent-failure).` +
@@ -2981,7 +3199,8 @@ export class BrowserEngine {
   private async measureLayout(page: Page, elements: SnapshotElement[], url: string): Promise<{ geometry: string[]; brokenImages: string[] }> {
     const viewport = page.viewportSize() ?? { width: 1280, height: 900 };
     const byDocument = new Map<string, SnapshotElement[]>();
-    for (const el of elements) {
+    // A live region is a message, not a control: its box overlapping a control is not a collision.
+    for (const el of trackedElements(elements)) {
       const doc = el.frame ? el.key.slice(0, el.key.indexOf("|") + 1) : "";
       byDocument.set(doc, [...(byDocument.get(doc) ?? []), el]);
     }
@@ -3214,6 +3433,7 @@ export class BrowserEngine {
   private async pressNow(key: string): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
+    await this.beginInput();
     const refusal = await this.vetFocusedActivation(key);
     if (refusal) return refusal;
     // Identify the focused control BEFORE the key lands — activating it may
@@ -3406,84 +3626,316 @@ export class BrowserEngine {
   }
 
   /**
-   * The refresh broker's route handler. A request carrying none of the role's
-   * refresh tokens is handed on untouched. One carrying one waits for the
-   * role's refresh lock; holding it, the session re-reads the profile, loads
-   * it and sends the current token in place of a spent one when another
-   * session rotated it meanwhile, and keeps the lock until the page has
-   * stored the rotation and it is written back. A lock that cannot be had is
-   * reported and the request dropped: sending a token another session may
-   * have spent is what revokes the family. Token values are never logged.
+   * The refresh broker's route handler, run after the write policy has let a
+   * request out. brokerDecision (refresh.ts) says which requests are refresh
+   * calls; every other request goes on untouched, and a static asset is
+   * decided before the first await so it is never held back. A refresh waits
+   * for the role's lock; holding it, the session re-reads the profile, and
+   * when another session has rotated the token meanwhile it loads that
+   * profile and sends the current token in place of the spent one. The lock
+   * is kept until the rotation is written back. Whatever goes wrong here, the
+   * request goes on as the page sent it, with a line in the action log: an
+   * app whose requests fail is worse than the rare double refresh. Token
+   * values are never logged.
    */
   private async brokerRefresh(route: Route): Promise<void> {
-    const broker = this.refresh;
     const req = route.request();
-    if (!broker) return route.fallback();
-    const headers = await req.allHeaders().catch(() => req.headers());
-    const wire = { url: req.url(), body: req.postData(), headers };
-    // Spent tokens too: a page still holding one would otherwise send it unbrokered.
-    const sent = presentedToken(wire, [...broker.known, ...broker.spent]);
-    if (!sent) return route.fallback();
-    const where = `${req.method()} ${pathnameOf(req.url())}`;
+    const broker = this.refresh;
+    const method = req.method();
+    if (!broker || isStaticAsset(method, req.resourceType())) return this.passOn(route);
+    const where = `${method} ${pathnameOf(req.url())}`;
+    let decision: BrokerDecision;
+    try {
+      const tokens = [...broker.known, ...broker.spent];
+      const learned = this.learnedEndpoints();
+      const base = { method, url: req.url(), resourceType: req.resourceType(), body: req.postData() };
+      decision = brokerDecision({ ...base, headers: req.headers() }, tokens, learned);
+      // The Cookie header is read only for a request it could make a refresh call:
+      // a refresh cookie scoped to "/" rides on every request the page makes.
+      if (decision.kind === "pass" && decision.why === "no known token" && cookieMayCount(method, base.url, learned)) {
+        decision = brokerDecision({ ...base, headers: await this.withCookieHeader(req) }, tokens, learned);
+      }
+    } catch (err) {
+      return this.unbrokered(route, where, err);
+    }
+    if (decision.kind === "pass") return this.passOn(route);
+
     let lock: HeldLock;
     try {
       lock = await acquireLock(lockPathFor(broker.file));
     } catch (err) {
-      this.refreshCounts.failed += 1;
-      this.logAction({
-        action: "refresh-broker:dropped",
-        target: `${where} (${err instanceof Error ? err.message : String(err)})`,
-        url: this.page?.url() ?? "",
-      });
-      await route.abort("blockedbyclient").catch(() => {});
-      return;
+      return this.unbrokered(route, where, err);
     }
+    this.brokeredRequests.add(req);
+    const sent = decision.sent;
     let handedOn = false;
     try {
       const read = this.readRoleProfile();
       if (!read.ok) throw new Error(read.why);
       const plan = planRefresh(sent, refreshTokenSlots(read.state));
-      let presented = sent;
-      let overrides: { url?: string; postData?: string; headers?: Record<string, string> } = {};
-      if (plan.kind === "swap") {
-        // Another session rotated the token while this one waited: load what it saved, and send the current token.
-        const applied = await this.applyState(read.state);
-        if (!applied.ok) throw new Error(applied.why);
-        const swapped = swapRequest(wire, sent.value, plan.to.value);
-        overrides = {
+      if (plan.kind === "unknown") {
+        // The profile holds another sign-in now: send this one on, and leave the profile alone.
+        this.logAction({ action: "refresh-broker", target: `${where} with ${sent.slot} (no longer in the profile; sent as is)`, url: this.page?.url() ?? "" });
+        handedOn = true;
+        lock.release();
+        return this.passOn(route);
+      }
+      if (plan.kind === "send") {
+        this.logAction({ action: "refresh-broker", target: `${where} with ${sent.slot}`, url: this.page?.url() ?? "" });
+        handedOn = true;
+        this.trackRefreshTask(this.writeBackAfter(this.pageAnswer(req), sent, lock));
+        return this.passOn(route);
+      }
+      // Another session rotated the token while this one waited: load what it saved, and send the current token.
+      const applied = await this.applyState(read.state);
+      if (!applied.ok) throw new Error(applied.why);
+      this.refreshCounts.swapped += 1;
+      const all = await req.allHeaders();
+      const cookieLine = Object.entries(all).find(([name]) => name.toLowerCase() === "cookie")?.[1] ?? "";
+      const swapped = swapRequest({ url: req.url(), body: req.postData(), headers: all }, sent.value, plan.to.value);
+      if (swapToken(cookieLine, sent.value, plan.to.value) === cookieLine) {
+        // Not in the Cookie header the request shows: a route override carries a token
+        // in its body, URL or headers, and a browser that adds cookies after this
+        // handler (WebKit) takes them from the jar the profile was just loaded into.
+        this.logAction({
+          action: "refresh-broker",
+          target: `${where} with ${plan.to.slot} (rotated by another session; loaded its profile)`,
+          url: this.page?.url() ?? "",
+        });
+        handedOn = true;
+        this.trackRefreshTask(this.writeBackAfter(this.pageAnswer(req), plan.to, lock));
+        return this.passOn(route, {
           ...(swapped.url ? { url: swapped.url } : {}),
           ...(swapped.body !== undefined ? { postData: swapped.body } : {}),
-          ...(swapped.headers ? { headers: swapped.headers } : {}),
-        };
-        presented = plan.to;
-        this.refreshCounts.swapped += 1;
+          ...(swapped.headers ? { headers: headersForResend(swapped.headers, null) } : {}),
+        });
+      }
+      // In the Cookie header, which a browser keeps as it built it whatever a
+      // route override says: the broker sends the request itself and answers
+      // the page with the response. Only a script's request; anything else
+      // goes on as the page sent it.
+      handedOn = true;
+      const type = req.resourceType();
+      if (type !== "fetch" && type !== "xhr") {
+        lock.release();
+        return this.unbrokered(route, where, new Error(`the spent token is in its Cookie header, and a ${type} request is not one the broker answers itself`));
+      }
+      let response: APIResponse;
+      try {
+        response = await route.fetch({
+          ...(swapped.url ? { url: swapped.url } : {}),
+          ...(swapped.body !== undefined ? { postData: swapped.body } : {}),
+          headers: headersForResend(swapped.headers ?? all, swapToken(cookieLine, sent.value, plan.to.value)),
+          maxRedirects: 0,
+        });
+      } catch (err) {
+        lock.release();
+        return this.unbrokered(route, where, err);
       }
       this.logAction({
         action: "refresh-broker",
-        target: `${where} with ${presented.slot}${plan.kind === "swap" ? " (rotated by another session; loaded its profile)" : plan.kind === "unknown" ? " (no longer in the profile; sent as is)" : ""}`,
+        target: `${where} with ${plan.to.slot} (rotated by another session; loaded its profile and sent the current cookie)`,
         url: this.page?.url() ?? "",
       });
-      handedOn = true;
-      if (plan.kind === "unknown") {
-        // The profile holds another sign-in now: send this one on, and leave the profile alone.
-        lock.release();
-        await route.fallback(overrides);
-        return;
-      }
-      const task = this.writeBackAfter(req, presented, lock).finally(() => this.refreshTasks.delete(task));
-      this.refreshTasks.add(task);
-      await route.fallback(overrides);
+      // The response's cookies are already in the browser's jar, so the write-back does not wait on the page.
+      this.trackRefreshTask(this.writeBackAfter(Promise.resolve(BrowserEngine.fetchedAnswer(response)), plan.to, lock));
+      await route.fulfill({ response }).catch(() => {
+        /* the page went away before its answer: the rotation is still saved */
+      });
     } catch (err) {
-      if (!handedOn) {
-        lock.release();
-        this.refreshCounts.failed += 1;
+      if (handedOn) {
         this.logAction({
-          action: "refresh-broker:dropped",
+          action: "refresh-broker:error",
           target: `${where} (${err instanceof Error ? err.message.split("\n")[0] : String(err)})`,
           url: this.page?.url() ?? "",
         });
-        await route.abort("blockedbyclient").catch(() => {});
+        return;
       }
+      lock.release();
+      return this.unbrokered(route, where, err);
+    }
+  }
+
+  /**
+   * A request's headers with the Cookie header it will be sent with. Some
+   * browsers (WebKit) add cookies only after the route handler has run, so
+   * when the request shows none, the line is built from the browser's jar
+   * for that URL, which is what will be sent.
+   */
+  private async withCookieHeader(req: Request): Promise<Record<string, string>> {
+    const headers = await req.allHeaders();
+    if (Object.keys(headers).some((name) => name.toLowerCase() === "cookie") || !this.context) return headers;
+    const jar = await this.context.cookies(req.url());
+    return jar.length > 0 ? { ...headers, cookie: jar.map((c) => `${c.name}=${c.value}`).join("; ") } : headers;
+  }
+
+  /** Hand a request on as it is, or with overrides. A request the page has already cancelled rejects this; nothing is left to send then. */
+  private async passOn(route: Route, overrides?: Parameters<Route["fallback"]>[0]): Promise<void> {
+    await route.fallback(overrides).catch(() => {});
+  }
+
+  /** The broker could not do its job for this request: it goes on as the page sent it, and the action log says why. */
+  private async unbrokered(route: Route, where: string, err: unknown): Promise<void> {
+    this.refreshCounts.failed += 1;
+    // Unbrokered after all: if its response rotates the cookie, the rotation watcher saves it.
+    this.brokeredRequests.delete(route.request());
+    this.logAction({
+      action: "refresh-broker:unbrokered",
+      target: `${where} sent as the page sent it (${err instanceof Error ? err.message.split("\n")[0] : String(err)})`,
+      url: this.page?.url() ?? "",
+    });
+    return this.passOn(route);
+  }
+
+  /** Track a write-back so close() waits for it to release the role's lock. */
+  private trackRefreshTask(task: Promise<void>): void {
+    const tracked = task.finally(() => this.refreshTasks.delete(tracked));
+    this.refreshTasks.add(tracked);
+  }
+
+  /** The page's response to a request, or null if none came in 30 seconds. */
+  private pageAnswer(req: Request): Promise<RefreshAnswer | null> {
+    let timer: NodeJS.Timeout | undefined;
+    const answered = req
+      .response()
+      .then((res): RefreshAnswer | null =>
+        res ? { ok: res.ok(), status: res.status(), text: () => res.text(), setCookies: () => res.headerValues("set-cookie") } : null,
+      )
+      .finally(() => clearTimeout(timer));
+    return Promise.race([answered, new Promise<null>((resolve) => (timer = setTimeout(() => resolve(null), 30000)))]);
+  }
+
+  /** A response the broker fetched itself, read the way the write-back reads one. */
+  private static fetchedAnswer(res: APIResponse): RefreshAnswer {
+    return {
+      ok: res.ok(),
+      status: res.status(),
+      text: () => res.text(),
+      setCookies: async () =>
+        res
+          .headersArray()
+          .filter((h) => h.name.toLowerCase() === "set-cookie")
+          .map((h) => h.value),
+    };
+  }
+
+  /**
+   * The endpoints learned to rotate the role's token: this session's, and
+   * those any session of the role saved beside the profile, re-read at most
+   * twice a second and only when the file changed.
+   */
+  private learnedEndpoints(): ReadonlySet<string> {
+    const broker = this.refresh;
+    if (!broker) return new Set();
+    const now = Date.now();
+    if (now - broker.learnedCheckedAt < 500) return broker.learned;
+    broker.learnedCheckedAt = now;
+    const file = endpointsPathFor(broker.file);
+    try {
+      const mtimeMs = fs.statSync(file).mtimeMs;
+      if (mtimeMs !== broker.learnedMtimeMs) {
+        broker.learnedMtimeMs = mtimeMs;
+        for (const key of readLearnedEndpoints(file)) broker.learned.add(key);
+      }
+    } catch (err) {
+      // No file yet means nothing learned yet. Any other error keeps what this session already knows.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT")
+        this.logAction({
+          action: "refresh-broker:error",
+          target: `could not read the learned endpoints (${err instanceof Error ? err.message.split("\n")[0] : String(err)})`,
+          url: "",
+        });
+    }
+    return broker.learned;
+  }
+
+  /**
+   * A response that replaced the role's refresh cookie with a new token on a
+   * request the broker did not take the lock for: that endpoint rotates the
+   * token. It is learned, for this session at once and for every session of
+   * the role through the file beside the profile, so the next call to it is
+   * brokered; and the rotation is written back, so the other sessions do not
+   * go on presenting the token this one spent. Only a POST, PUT or PATCH is
+   * learned, and never a sign-in, sign-up or sign-out (learnableEndpoint).
+   */
+  private watchRotation(res: Response): void {
+    const broker = this.refresh;
+    if (!broker || !broker.known.some((t) => t.cookie !== undefined)) return;
+    const req = res.request();
+    // A GET is never learned: a server that re-issues the cookie on its reads would otherwise put them all behind the lock.
+    const method = req.method();
+    if (method !== "POST" && method !== "PUT" && method !== "PATCH") return;
+    if (this.brokeredRequests.has(req) || !res.ok() || !learnableEndpoint(req.url())) return;
+    this.trackRefreshTask(
+      (async () => {
+        const rotated = rotatedCookies(await res.headerValues("set-cookie"), broker.known);
+        if (rotated.length > 0) await this.adoptRotation(endpointKey(req.method(), req.url()), rotated);
+      })().catch((err: unknown) => {
+        this.logAction({
+          action: "refresh-broker:error",
+          target: `${pathnameOf(req.url())}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`,
+          url: this.page?.url() ?? "",
+        });
+      }),
+    );
+  }
+
+  /** Learn an endpoint seen to rotate the token, and write the rotation back if the profile still holds the token it replaced. */
+  private async adoptRotation(key: string, rotated: TokenSlot[]): Promise<void> {
+    const broker = this.refresh;
+    if (!broker) return;
+    const isNew = !broker.learned.has(key);
+    broker.learned.add(key);
+    if (isNew) this.refreshCounts.learned += 1;
+    const names = rotated.map((r) => r.slot).join(", ");
+    let lock: HeldLock;
+    try {
+      lock = await acquireLock(lockPathFor(broker.file));
+    } catch (err) {
+      this.logAction({
+        action: "refresh-broker:learned",
+        target: `${key} rotates ${names}; not saved (${err instanceof Error ? err.message.split("\n")[0] : String(err)})`,
+        url: this.page?.url() ?? "",
+      });
+      return;
+    }
+    try {
+      const file = endpointsPathFor(broker.file);
+      const list = readLearnedEndpoints(file);
+      if (!list.includes(key)) writeLearnedEndpoints(file, withLearnedEndpoint(list, key));
+      const read = this.readRoleProfile();
+      if (!read.ok) throw new Error(read.why);
+      const current = refreshTokenSlots(read.state);
+      // Only over the token this session spent: a profile another session moved on since is left as it is.
+      const stillSpent = rotated.every((r) => current.some((c) => c.slot === r.slot && c.value === r.value));
+      let now: unknown = undefined;
+      // The jar takes the Set-Cookie as the response arrives; a short wait covers a browser that is a moment behind.
+      for (let waited = 0; stillSpent && waited <= 1000; waited += 50) {
+        const state = await this.context?.storageState().catch(() => undefined);
+        if (state && rotated.every((r) => rotationStored(state, r))) {
+          now = state;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (now) {
+        const state = profileAfterRotation(now, read.state);
+        writeProfile(broker.projectDir, broker.role, state);
+        this.rememberTokens(refreshTokenSlots(state));
+        this.logAction({
+          action: "refresh-broker:learned",
+          target: `${key} rotates ${names}; saved to the profile, and brokered from now on`,
+          url: this.page?.url() ?? "",
+        });
+      } else {
+        this.logAction({
+          action: "refresh-broker:learned",
+          target: `${key} rotates ${names}; brokered from now on (${stillSpent ? "the browser had not stored the new token" : "the profile already holds another token"}, so the profile was left as it is)`,
+          url: this.page?.url() ?? "",
+        });
+      }
+    } finally {
+      lock.release();
     }
   }
 
@@ -3492,21 +3944,17 @@ export class BrowserEngine {
    * and release the lock. The page's own state is saved once it holds the
    * rotated token, so the next session gets the access token with it; a page
    * that has not stored it in time has the token read from the response
-   * instead. A refused or failed refresh changes nothing on disk.
+   * instead. A refused or failed refresh changes nothing on disk, and nor does
+   * one whose response left a refresh cookie as it was (a server that does
+   * not rotate refresh tokens).
    */
-  private async writeBackAfter(req: Request, presented: TokenSlot, lock: HeldLock): Promise<void> {
+  private async writeBackAfter(answer: Promise<RefreshAnswer | null>, presented: TokenSlot, lock: HeldLock): Promise<void> {
     const broker = this.refresh;
     try {
-      let timer: NodeJS.Timeout | undefined;
-      const res = await Promise.race([
-        req.response().finally(() => clearTimeout(timer)),
-        new Promise<null>((resolve) => {
-          timer = setTimeout(() => resolve(null), 30000);
-        }),
-      ]);
+      const res = await answer;
       if (!broker) return;
-      if (!res || !res.ok()) {
-        const why = res ? `answered ${res.status()}` : "had no response";
+      if (!res || !res.ok) {
+        const why = res ? `answered ${res.status}` : "had no response";
         this.logAction({
           action: "refresh-broker:not-saved",
           target: `${presented.slot}: the refresh ${why}; the profile was left as it was`,
@@ -3515,7 +3963,9 @@ export class BrowserEngine {
         return;
       }
       let state: unknown = null;
-      for (let waited = 0; waited <= 5000; waited += 50) {
+      // A cookie is in the browser's jar by the time the response is; a token the page stores itself can take longer.
+      const patienceMs = presented.cookie !== undefined ? 1000 : 5000;
+      for (let waited = 0; waited <= patienceMs; waited += 50) {
         const now = await this.context?.storageState().catch(() => null);
         if (now && rotationStored(now, presented)) {
           const onDisk = this.readRoleProfile();
@@ -3526,9 +3976,17 @@ export class BrowserEngine {
       }
       if (!state) {
         const body = await res.text().catch(() => "");
-        const rotated = rotatedFromResponse(body, await res.headerValues("set-cookie").catch(() => []));
+        const rotated = rotatedFromResponse(body, await res.setCookies().catch(() => []));
         const read = this.readRoleProfile();
         if (rotated && read.ok) state = swapProfileToken(read.state, presented.value, rotated);
+      }
+      if (!state && presented.cookie !== undefined) {
+        this.logAction({
+          action: "refresh-broker:unrotated",
+          target: `${presented.slot}: the response kept it as it was; nothing to save`,
+          url: this.page?.url() ?? "",
+        });
+        return;
       }
       if (!state) {
         this.refreshCounts.failed += 1;
@@ -3564,10 +4022,11 @@ export class BrowserEngine {
 
   /** What the refresh broker did this session, or "" when it did nothing. Counts only. */
   refreshSummary(): string {
-    const { refreshed, swapped, failed } = this.refreshCounts;
-    if (refreshed + swapped + failed === 0) return "";
+    const { refreshed, swapped, failed, learned } = this.refreshCounts;
+    if (refreshed + swapped + failed + learned === 0) return "";
     const parts = [`refreshed role '${this.role}''s token ${refreshed} time${refreshed === 1 ? "" : "s"} under the role's lock`];
     if (swapped > 0) parts.push(`${swapped} of them after another session had rotated it`);
+    if (learned > 0) parts.push(`learned ${learned} endpoint${learned === 1 ? "" : "s"} that rotate${learned === 1 ? "s" : ""} it`);
     if (failed > 0) parts.push(`${failed} refresh${failed === 1 ? "" : "es"} could not be brokered (see the action log)`);
     return parts.join("; ");
   }
@@ -3761,13 +4220,14 @@ export class BrowserEngine {
       const { elements, forms } = await this.collect().finally(() => (this.harvestPaused = false));
       const finalUrl = page.url();
       const route = normalizePath(finalUrl);
-      const fp = fingerprintState(finalUrl, elements);
+      const fp = fingerprintState(finalUrl, trackedElements(elements));
       if (!opts.measureOnly) {
         memory.visitState(
           fp,
           finalUrl,
           route,
-          elements.map((el) => el.key),
+          trackedElements(elements).map((el) => el.key),
+          inertKeys(elements),
         );
         for (const f of forms) memory.recordForm(fp, f.key, f.guarded);
         memory.recordRoleAccess(this.role, route, "reached");
@@ -3804,7 +4264,7 @@ export class BrowserEngine {
         url: finalUrl,
         status: typeof status === "number" ? status : null,
         loginRedirect,
-        elements: elements.length,
+        elements: trackedElements(elements).length,
         unnamed: own.filter(missingName).map(describeControl),
         placeholderOnly: own.filter(placeholderOnly).map(placeholderEvidence),
         violations: violations.map(({ kind, severity, detail, url, embed }) => ({ kind, severity, detail, url, ...(embed ? { embed } : {}) })),
@@ -3813,17 +4273,21 @@ export class BrowserEngine {
         design: inspected?.design ?? [],
         ...(inspected?.auditError ? { auditError: inspected.auditError } : {}),
       });
-      const deadEnd = elements.length === 0;
+      const deadEnd = trackedElements(elements).length === 0;
       // A field labelled only by its placeholder counts here too: to someone reading the crawl, it has no label.
       // Counted over the page's own controls, as the check's lists are: another site's frame is not this app's to fix.
       const unnamed = own.filter((el) => missingName(el) || placeholderOnly(el)).length;
-      const missingTestid = elements.filter((el) => !el.testid && !el.disabled).length;
+      const missingTestid = trackedElements(elements).filter((el) => !el.testid && !el.disabled).length;
+      // What the page's main area holds besides controls: "41 el" alone cannot tell a page
+      // of text from a main area that rendered nothing.
+      const main = await this.readMainRegion(page);
 
       const flags = [loginRedirect ? "AUTH-REDIRECT" : null, deadEnd ? "DEAD-END" : null, violations.length > 0 ? `${violations.length}⚠` : null].filter(
         Boolean,
       );
       summary.push(
-        `${path} — ${status} · ${elements.length} el` +
+        `${path} — ${status} · ${trackedElements(elements).length} el` +
+          (main ? ` · ${mainRegionTag(main)}` : "") +
           (missingTestid ? ` · ${missingTestid} no-testid` : "") +
           (unnamed ? ` · ${unnamed} unnamed` : "") +
           (flags.length ? ` · ${flags.join(" ")}` : ""),
@@ -3914,6 +4378,8 @@ export class BrowserEngine {
 
     for (const [i, step] of steps.slice(0, 20).entries()) {
       this.actionStartedAt = Date.now();
+      // A navigation or a scroll is not input: navigate() moves the action mark itself, and what a scroll loads is the page's own doing.
+      if (step.action !== "navigate" && step.action !== "scroll") await this.beginInput();
       const desc = `${i + 1}. ${step.action} ${step.target ?? step.value ?? ""}`;
       // Identity captured BEFORE the action — buttons that relabel themselves
       // (Add to Cart → View Cart) are unmatchable in the post-action DOM.
@@ -4056,12 +4522,13 @@ export class BrowserEngine {
             // this plan just reached, and it deserves coverage of its own)…
             const { elements, forms } = await this.collect();
             const url = page.url();
-            const fp = fingerprintState(url, elements);
+            const fp = fingerprintState(url, trackedElements(elements));
             this.memory!.visitState(
               fp,
               url,
               normalizePath(url),
-              elements.map((el) => el.key),
+              trackedElements(elements).map((el) => el.key),
+              inertKeys(elements),
             );
             for (const f of forms) this.memory!.recordForm(fp, f.key, f.guarded);
             this.memory!.recordRoleAccess(this.role, normalizePath(url), "reached");
@@ -4218,6 +4685,7 @@ export class BrowserEngine {
         let failure: string | null = null;
         let refusal: string | null = null;
         this.actionStartedAt = Date.now();
+        if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "press") await this.beginInput();
         try {
           const current = this.requirePage();
           if (step.action === "navigate") {
@@ -4363,10 +4831,9 @@ export class BrowserEngine {
     payload.page.focusSamples = await probeFocusIndicators(page);
     this.designAuditCount += 1;
     if (this.memory) this.memory.auditsThisRun += 1;
-    // The census is built from previous audits, so the first few pages of a run
-    // score with chrome included and later ones don't. That is the same warm-up
-    // the coverage census has: nothing is knowable as "shared" until it has been
-    // seen on several routes.
+    // The census is built from previous audits and knows nothing until it has
+    // seen several routes; the shell's landmarks (design.ts) cover those first
+    // pages, so the shell is out of the score from the first audit.
     const { report, score, signatures, defects } = analyzeDesign(
       payload,
       page.viewportSize() ?? { width: 1280, height: 900 },
