@@ -4368,10 +4368,9 @@ export class BrowserEngine {
     payload.page.focusSamples = await probeFocusIndicators(page);
     this.designAuditCount += 1;
     if (this.memory) this.memory.auditsThisRun += 1;
-    // The census is built from previous audits, so the first few pages of a run
-    // score with chrome included and later ones don't. That is the same warm-up
-    // the coverage census has: nothing is knowable as "shared" until it has been
-    // seen on several routes.
+    // The census is built from previous audits and knows nothing until it has
+    // seen several routes; the shell's landmarks (design.ts) cover those first
+    // pages, so the shell is out of the score from the first audit.
     const { report, score, signatures, defects } = analyzeDesign(
       payload,
       page.viewportSize() ?? { width: 1280, height: 900 },

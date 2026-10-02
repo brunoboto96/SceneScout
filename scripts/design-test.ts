@@ -47,6 +47,14 @@ function rec(over: Partial<Rec> = {}): Rec {
     gradientText: false,
     glass: false,
     glow: false,
+    inputType: "",
+    role: "",
+    filled: false,
+    inForm: false,
+    inRow: false,
+    inSearch: false,
+    inBreadcrumb: false,
+    shell: false,
     ...over,
   } as Rec;
 }
@@ -277,4 +285,163 @@ test("shell contrast failures are flagged as chrome defects once the shell is kn
     JSON.stringify(defects),
   );
   assert.ok(!defects.some((d) => d.rule === "contrast" && !d.chrome), JSON.stringify(defects));
+});
+
+// ---------------------------------------------------------------------------
+// Task efficiency counts actions and form fields, not every control
+// ---------------------------------------------------------------------------
+
+const GREY = "rgb(209, 213, 219)";
+const BLUE = "rgb(20, 80, 200)";
+const BURDEN = /form fields and NONE marked required|fields of which only|input fields but no obvious submit/;
+const COMPETING = /equally-prominent actions compete/;
+
+const field = (over: Partial<Rec> = {}): Rec =>
+  rec({ tag: "input", inputType: "text", interactive: true, text: "", textLen: 0, bg: "rgb(255, 255, 255)", rect: { x: 300, y: 100, w: 320, h: 36 }, ...over });
+const button = (text: string, over: Partial<Rec> = {}): Rec =>
+  rec({
+    tag: "button",
+    text,
+    textLen: text.length,
+    interactive: true,
+    filled: true,
+    bg: BLUE,
+    color: "rgb(255, 255, 255)",
+    rect: { x: 300, y: 400, w: 120, h: 40 },
+    ...over,
+  });
+
+test("row-selection checkboxes and a search box are not a form; six bare fields in a <form> are", () => {
+  const list = [
+    rec({ text: "Things", bg: GREY }),
+    field({ inputType: "search", bg: GREY }),
+    ...Array.from({ length: 26 }, (_, i) => field({ inputType: "checkbox", inRow: true, rect: { x: 10, y: 120 + i * 40, w: 16, h: 16 } })),
+  ];
+  const listReport = analyzeDesign(payload(list), VIEWPORT).report;
+  assert.ok(!BURDEN.test(listReport), `a list page asks the user to fill nothing in:\n${listReport}`);
+
+  const form = [rec({ text: "New thing", bg: GREY }), ...Array.from({ length: 6 }, (_, i) => field({ inForm: true, testid: `f-${i}` }))];
+  const formReport = analyzeDesign(payload(form), VIEWPORT).report;
+  assert.ok(formReport.includes("6 form fields and NONE marked required"), "a real form with nothing marked required is still flagged");
+  assert.ok(formReport.includes("6 input fields but no obvious submit"), "and so is one with no way to submit it");
+});
+
+test("a select per table row edits the row in place; the same selects in a form are fields", () => {
+  const select = (inRow: boolean, i: number): Rec => field({ tag: "select", inputType: "", inRow, inForm: !inRow, testid: `role-${i}` });
+  const table = analyzeDesign(payload([rec({ text: "Members" }), ...Array.from({ length: 18 }, (_, i) => select(true, i))]), VIEWPORT).report;
+  assert.ok(!BURDEN.test(table), "inline-edit selects are not a form to fill in");
+  const form = analyzeDesign(payload([rec({ text: "Members" }), ...Array.from({ length: 18 }, (_, i) => select(false, i))]), VIEWPORT).report;
+  assert.ok(BURDEN.test(form), "the same controls in a form are a burden the rule should measure");
+});
+
+test("a page with no <form> is judged on its loose fields; the same fields in table rows are not", () => {
+  // Many apps build a form without the element, so its absence cannot excuse the fields.
+  const loose = (inRow: boolean): string =>
+    analyzeDesign(payload([rec({ text: "New thing" }), ...Array.from({ length: 6 }, (_, i) => field({ inRow, testid: `f-${i}` }))]), VIEWPORT).report;
+  assert.ok(loose(false).includes("6 form fields and NONE marked required"), "six bare fields with no <form> are still a form");
+  assert.ok(!BURDEN.test(loose(true)), "six controls in table rows edit those rows");
+});
+
+test("a ghost button showing its card's background is not a competing action; the same button filled is", () => {
+  const ghost = (filled: boolean): string =>
+    analyzeDesign(
+      payload([
+        rec({ text: "Page", bg: GREY }),
+        ...["One", "Two", "Three", "Four"].map((t, i) =>
+          button(t, { filled, bg: "rgb(255, 255, 255)", color: "rgb(30, 30, 30)", rect: { x: 300 + i * 130, y: 60, w: 120, h: 40 } }),
+        ),
+      ]),
+      VIEWPORT,
+    ).report;
+  assert.ok(COMPETING.test(ghost(true)), "four white-filled buttons on a grey page compete");
+  assert.ok(!COMPETING.test(ghost(false)), "four ghost buttons over a white card do not");
+});
+
+test("fields outside the <form> do not count against it", () => {
+  // Filters beside a form are not part of what it submits.
+  const filters = Array.from({ length: 9 }, (_, i) => field({ tag: "select", inputType: "", testid: `filter-${i}` }));
+  const form = [
+    field({ inForm: true, required: true, testid: "name" }),
+    field({ inForm: true, testid: "notes" }),
+    button("Save", { inForm: true, submitish: true }),
+  ];
+  const { report } = analyzeDesign(payload([rec({ text: "Page" }), ...filters, ...form]), VIEWPORT);
+  assert.ok(!BURDEN.test(report), report);
+});
+
+test("white fields on a grey page are not competing actions; five filled buttons are", () => {
+  const formPage = [
+    rec({ text: "New thing", bg: GREY }),
+    rec({ tag: "a", text: "Things", interactive: true, inBreadcrumb: true, filled: true, bg: "rgb(255, 255, 255)", rect: { x: 0, y: 0, w: 80, h: 24 } }),
+    ...Array.from({ length: 6 }, (_, i) => field({ inForm: true, testid: `f-${i}`, rect: { x: 300, y: 100 + i * 50, w: 320, h: 36 } })),
+    button("Create", { inForm: true, submitish: true }),
+    button("Cancel", { inForm: true, bg: "rgb(255, 255, 255)", color: "rgb(30, 30, 30)", rect: { x: 440, y: 400, w: 120, h: 40 } }),
+  ];
+  const calm = analyzeDesign(payload(formPage), VIEWPORT).report;
+  assert.ok(!COMPETING.test(calm), `one primary and one secondary button do not compete:\n${calm}`);
+  assert.ok(!calm.includes("no visually dominant action"), "and the primary button is still recognised as the next step");
+
+  const busy = [
+    rec({ text: "Toolbar", bg: GREY }),
+    ...["Export", "Import", "Archive", "Share", "Delete"].map((t, i) => button(t, { rect: { x: 300 + i * 130, y: 60, w: 120, h: 40 } })),
+  ];
+  assert.ok(COMPETING.test(analyzeDesign(payload(busy), VIEWPORT).report), "five filled primary-coloured buttons still compete");
+});
+
+test("a link painted as a button competes; a plain or breadcrumb link does not", () => {
+  const link = (i: number, over: Partial<Rec>): Rec =>
+    rec({ tag: "a", text: `Go ${i}`, interactive: true, bg: BLUE, rect: { x: 300 + i * 130, y: 60, w: 120, h: 40 }, ...over });
+  const page = (over: Partial<Rec>): string =>
+    analyzeDesign(payload([rec({ text: "Page", bg: GREY }), ...[0, 1, 2, 3].map((i) => link(i, over))]), VIEWPORT).report;
+  assert.ok(COMPETING.test(page({ filled: true })), "filled links read as buttons");
+  assert.ok(!COMPETING.test(page({ filled: false })), "links on a coloured ancestor are text, not buttons");
+  assert.ok(!COMPETING.test(page({ filled: true, inBreadcrumb: true })), "a breadcrumb is a way back, not an action");
+});
+
+// ---------------------------------------------------------------------------
+// The shell is known from the first audit, not after the census warms up
+// ---------------------------------------------------------------------------
+
+const sidebar = (): Rec[] =>
+  Array.from({ length: 30 }, (_, i) =>
+    rec({
+      tag: "a",
+      text: `Section ${i}`,
+      interactive: true,
+      filled: true,
+      shell: true,
+      bg: "rgb(30, 41, 59)",
+      color: "rgb(100, 116, 139)",
+      rect: { x: 0, y: i * 30, w: 220, h: 28 },
+    }),
+  );
+
+test("a sidebar in a shell landmark is chrome on the first audit; a page's own header is not", () => {
+  const ownHeader = rec({ tag: "h1", text: "Things", color: "rgb(200, 200, 200)", bg: "rgb(255, 255, 255)", rect: { x: 300, y: 20, w: 400, h: 40 } });
+  const records = [rec({ text: "Body copy" }), ownHeader, button("New thing", { rect: { x: 900, y: 20, w: 120, h: 40 } }), ...sidebar()];
+  const first = analyzeDesign(payload(records), VIEWPORT);
+  assert.ok(first.report.includes("30 shared-chrome elements excluded from the score"), first.report);
+  assert.ok(!COMPETING.test(first.report), "the sidebar's links are not this page's actions");
+  assert.ok(first.report.includes("SHARED CHROME"), "the sidebar's contrast failures are still reported, as the shell's");
+
+  const known = analyzeDesign(payload(records), VIEWPORT, new Set(sidebar().map(styleSignature)));
+  assert.deepEqual(first.score, known.score, "the page scores the same before and after the census knows the shell");
+
+  assert.ok(first.report.includes("CONTRAST failures"), "the page's own header is judged as page content");
+  assert.ok(
+    first.defects.some((d) => d.rule === "contrast" && !d.chrome && d.detail.includes("Things")),
+    "and its defect is the page's, not the shell's",
+  );
+});
+
+test("body-coloured links in the shell are still measured, as the shell's; link-coloured ones are not flagged", () => {
+  const body = "rgb(17, 17, 17)";
+  const paragraph = rec({ tag: "p", text: "A paragraph of body copy long enough to set the body colour.", textLen: 60, color: body });
+  const navLink = (color: string): Rec => rec({ tag: "a", text: "Reports", interactive: true, shell: true, color });
+  const plain = analyzeDesign(payload([paragraph, paragraph, navLink(body)]), VIEWPORT);
+  const flagged = plain.defects.find((d) => d.rule === "indistinct-link");
+  assert.ok(flagged?.chrome, `the shell's navigation link is reported, and as the shell's: ${JSON.stringify(plain.defects)}`);
+  assert.ok(plain.report.includes(`→ ${flagged.detail}`), "and the prose says it as a convention, the way the page's own section does");
+  const blue = analyzeDesign(payload([paragraph, paragraph, navLink("rgb(20, 80, 200)")]), VIEWPORT);
+  assert.ok(!blue.defects.some((d) => d.rule === "indistinct-link"), "a link that looks like a link is not flagged");
 });
