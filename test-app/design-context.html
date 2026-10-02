@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Design context</title>
+  <style>
+    body { margin: 0; font: 16px/1.5 sans-serif; background: rgb(209, 213, 219); color: rgb(17, 24, 39); }
+    aside { position: fixed; left: 0; top: 0; bottom: 0; width: 220px; background: rgb(30, 41, 59); }
+    aside a { display: block; margin: 4px 8px; padding: 6px 12px; background: rgb(51, 65, 85); color: rgb(100, 116, 139); text-decoration: none; }
+    main { margin-left: 240px; padding: 16px; }
+    .crumbs a { display: inline-block; padding: 4px 12px; min-width: 60px; background: rgb(255, 255, 255); color: rgb(17, 24, 39); }
+    header h1 { color: rgb(190, 190, 190); }
+    button { padding: 8px 16px; min-width: 100px; border: 0; background: rgb(20, 80, 200); color: rgb(255, 255, 255); }
+    input, select { padding: 6px; background: rgb(255, 255, 255); min-width: 80px; }
+  </style>
+</head>
+<body>
+  <!-- A list page inside an app shell. The sidebar is in a shell landmark, so
+       the design audit keeps it out of the page's score from the first audit;
+       the page's own header is inside <main> and stays page content. The row
+       checkboxes select rows, the row selects edit them in place, and the
+       search box filters: none of them is a form to fill in and submit. -->
+  <aside aria-label="Sections">
+    <nav>
+      <a href="#s1" data-testid="design-ctx-shell-1">Section one</a>
+      <a href="#s2" data-testid="design-ctx-shell-2">Section two</a>
+      <a href="#s3" data-testid="design-ctx-shell-3">Section three</a>
+      <a href="#s4" data-testid="design-ctx-shell-4">Section four</a>
+      <a href="#s5" data-testid="design-ctx-shell-5">Section five</a>
+      <a href="#s6" data-testid="design-ctx-shell-6">Section six</a>
+    </nav>
+  </aside>
+  <main>
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="#home" data-testid="design-ctx-crumb">Home</a></nav>
+    <header>
+      <h1 data-testid="design-ctx-own-header">Things</h1>
+      <button type="button" data-testid="design-ctx-new">New thing</button>
+    </header>
+    <div role="search"><input type="search" aria-label="Search things" data-testid="design-ctx-search"></div>
+    <table>
+      <tbody id="rows"></tbody>
+    </table>
+  </main>
+  <script>
+    const rows = document.getElementById("rows");
+    for (let i = 1; i <= 8; i++) {
+      rows.insertAdjacentHTML(
+        "beforeend",
+        `<tr><td><input type="checkbox" aria-label="Select thing ${i}" data-testid="design-ctx-pick-${i}"></td><td>Thing ${i}</td>` +
+          `<td><select aria-label="Kind of thing ${i}" data-testid="design-ctx-kind-${i}"><option>Small</option><option>Large</option></select></td></tr>`,
+      );
+    }
+  </script>
+</body>
+</html>
