@@ -694,7 +694,8 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
 
 /** The last frame on screen before each finding was filed, by id: its picture on a recorded run. */
 function lastFrames(memory: MemoryStore): Map<string, string> {
-  // A finding can have its own picture and no recorded frames at all.
+  // A finding can carry evidence with no recorded frames (its own picture
+  // only), so it has no last frame to offer.
   return new Map(
     findingEvidence(memory, replaySessions(memory))
       .filter((e) => e.frames.length > 0)

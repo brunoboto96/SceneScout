@@ -686,6 +686,23 @@ test("replay: the header says when, on a clock it names, and says nothing about 
   assert.ok(!bare.includes("· v<"));
 });
 
+test("a finding with its own picture and no recorded frames still gets a report, with no last frame", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-report-"));
+  const store = new MemoryStore(dir);
+  const [finding] = store.addFinding({
+    severity: "medium",
+    category: "ux-confusing",
+    title: "Save shows no feedback",
+    detail: "…",
+    url: "http://app.test/x",
+    state: "/x#abc",
+  });
+  // As a finding filed on a run that is not recording: a picture, and no frames.
+  (finding as { picture?: string }).picture = `recordings/default/finding-${finding.id}.png`;
+  const report = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 1 }, { write: false });
+  assert.match(report.markdown, /Save shows no feedback/);
+});
+
 test("the report's summary names the one-page version only when it is really there", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-report-"));
   const store = new MemoryStore(dir);
@@ -706,15 +723,6 @@ test("the report's summary names the one-page version only when it is really the
   assert.match(blocked.summary, /^Report written to /);
   assert.ok(fs.readFileSync(path.join(store.dir, "report.md"), "utf8").length > 0, "the report of record is unaffected");
   fs.rmSync(dir, { recursive: true, force: true });
-});
-
-test("a finding with its own picture and no recorded frames does not stop the report", () => {
-  const store = freshStore();
-  const [f] = store.addFinding({ severity: "high", category: "page-error", title: "Export throws", detail: "d", url: "http://app.test/r", state: "/r#1" });
-  // As a finding filed with a picture on a run that records no frames carries it.
-  Object.assign(f, { picture: "recordings/default/finding-0123abcd.png" });
-  const r = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 1 }, { write: false });
-  assert.ok(r.markdown.includes("![What the page showed](recordings/default/finding-0123abcd.png)"));
 });
 
 test("replay: a finding's evidence comes from the session that filed it, not from whoever acted last", () => {
