@@ -155,7 +155,8 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     const snap2 = await engine.snapshot();
     check("broken page is a NEW state with dead-end warning", snap2.includes("(NEW state)") && snap2.includes("DEAD END"), snap2);
     await engine.navigate("/");
-    const snap3 = await engine.snapshot();
+    // In full: a revisited route is otherwise a diff against its last snapshot, which lists no unchanged element.
+    const snap3 = await engine.snapshot(true);
     check("home revisited (memory works)", snap3.includes("(revisited)"), snap3);
     check("exercised elements marked exercised", /Compute report.*\bexercised\]/.test(snap3), snap3);
 

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Refs: rows, focusable and clickable</title></head>
+<body>
+  <!-- A register whose rows are table rows with tabindex=0 and a click
+       handler, deliberately not role=button: they are listed only for their
+       test id, so the snapshot must say they can be clicked and focused. The
+       wrapper beside them carries a test id and nothing else, the contrast.
+       "Only Gamma" filters the list in place, so a diff must read as the rows
+       that went, not as the first row relabeled. -->
+  <main>
+    <h1>Register</h1>
+    <div data-testid="register-wrapper">
+      <button type="button" data-testid="register-only-gamma">Only Gamma</button>
+      <table>
+        <tbody>
+          <tr tabindex="0" data-testid="register-row" onclick="this.dataset.opened = '1'"><td>Alpha record</td></tr>
+          <tr tabindex="0" data-testid="register-row" onclick="this.dataset.opened = '1'"><td>Beta record</td></tr>
+          <tr tabindex="0" data-testid="register-row" onclick="this.dataset.opened = '1'"><td>Gamma record</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+  <script>
+    document.querySelector('[data-testid="register-only-gamma"]').addEventListener('click', () => {
+      for (const tr of document.querySelectorAll('tr')) if (!/Gamma/.test(tr.textContent)) tr.remove();
+    });
+  </script>
+</body>
+</html>
