@@ -19,15 +19,11 @@ import { fileURLToPath } from "node:url";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { profilePath } from "../../dist/engine/profiles.js";
 import { check, SCRIPTED_USER, type SmokeContext } from "./harness.ts";
+import { leaked, leakedInFile } from "./secrets.ts";
 
 export const title = "scripted login";
 
 const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "dist", "cli.js");
-
-/** Every form a credential could take in output: as set, URL-encoded, with + for spaces, and the secret without its spaces. */
-function forms(values: string[]): string[] {
-  return values.flatMap((v) => [v, encodeURIComponent(v), encodeURIComponent(v).replace(/%20/g, "+"), v.replace(/\s+/g, "")]);
-}
 
 /** `scenescout login` through the built CLI, with no SCENESCOUT_LOGIN_ variable from this process: only `env`'s. */
 export function login(args: string[], env: Record<string, string | undefined>): Promise<{ code: number | null; out: string; err: string }> {
@@ -55,10 +51,12 @@ export function filesUnder(dir: string): Array<{ file: string; text: string }> {
   });
 }
 
-/** The secrets, in any of their forms, that a text contains, ignoring case. */
-export function leaked(text: string, secrets: string[]): string[] {
-  const lower = text.toLowerCase();
-  return forms(secrets).filter((s) => s.length > 0 && lower.includes(s.toLowerCase()));
+/** Each file under a directory that holds a secret, with the secrets it holds, as `file: secret, ...`. */
+export function dirtyFiles(dir: string, secrets: string[]): string[] {
+  return filesUnder(dir).flatMap((f) => {
+    const found = leakedInFile(f.text, secrets);
+    return found.length > 0 ? [`${f.file}: ${found.join(", ")}`] : [];
+  });
 }
 
 export async function run({ baseUrl }: SmokeContext): Promise<void> {
@@ -91,8 +89,8 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     );
     check("no credential value reaches stdout or stderr", leaked(ok.out + ok.err, secrets).length === 0, leaked(ok.out + ok.err, secrets).join(", "));
     const files = filesUnder(path.join(project, ".scenescout"));
-    const dirty = files.filter((f) => leaked(f.text, secrets).length > 0).map((f) => f.file);
-    check("no credential value is in any file under .scenescout/, the profile included", files.length > 0 && dirty.length === 0, dirty.join(", "));
+    const dirty = dirtyFiles(path.join(project, ".scenescout"), secrets);
+    check("no credential value is in any file under .scenescout/, the profile included", files.length > 0 && dirty.length === 0, dirty.join("\n"));
     check("the profile file is owner-only", process.platform === "win32" || (fs.statSync(profilePath(project, "member")).mode & 0o777) === 0o600);
 
     // With no success condition configured, leaving the sign-in fields behind is the signal.
