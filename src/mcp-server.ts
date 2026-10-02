@@ -30,6 +30,7 @@
  *   (`scenescout watch <project>`, engine/live.ts, ADR 7).
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -87,6 +88,7 @@ import {
   watchdogFor,
 } from "./engine/limits.js";
 import { MAX_READ_POSTS, READ_POSTS_ENV } from "./engine/policy.js";
+import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "./engine/project-folder.js";
 import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
@@ -799,7 +801,13 @@ server.registerTool(
       "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted, and POSTs the user named in readPosts) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass `role` to sign in with a login the user saved by `scenescout login <url> --role <name>`, or a Playwright storage-state JSON as storageStatePath. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
     inputSchema: {
       url: z.string().describe("Base URL of the running app, e.g. http://localhost:3000"),
-      projectPath: z.string().describe("Absolute path to the project (memory + report live in .scenescout/ here)"),
+      projectPath: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute path to the project (memory + report live in .scenescout/ here). Pass it whenever you have a project or working folder. " +
+            `Omitted: the client's workspace folder, else a folder per tested site under the user's documents folder (Documents/SceneScout/<host>/, or ${PROJECTS_DIR_ENV}), which the result names — tell the user where it is.`,
+        ),
       storageStatePath: z.string().optional().describe("Optional Playwright storage-state JSON path for authenticated exploration. Not with `role`."),
       role: z
         .string()
@@ -930,7 +938,7 @@ server.registerTool(
       dedup,
     }: {
       url: string;
-      projectPath: string;
+      projectPath?: string;
       storageStatePath?: string;
       role?: string;
       mode?: "observe" | "read-only" | "safe-write" | "destructive";
@@ -950,6 +958,10 @@ server.registerTool(
       dedup?: DedupMode;
     }) => {
       try {
+        // Settled first: a refusal leaves the default session as it was.
+        const folder = await projectFolderFor(url, projectPath);
+        if ("refused" in folder) return errorText(new Error(folder.refused));
+        projectPath = folder.dir;
         const target = session ?? activeName;
         if (session) {
           activeName = session;
@@ -1051,7 +1063,14 @@ server.registerTool(
             ? `\n\n📸 RECORDING: a frame of the page after each action, under ${path.join(eng.memory.dir, "recordings", target)}/ (at most ${RECORD_MAX_FRAMES}). scout_report writes them into report.html beside report.md.`
             : "";
         return text(
-          out + conflictNote + recordNote + dedupNote + describePace(eng.pace) + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine(),
+          out +
+            (folder.note ? `\n\n${folder.note}` : "") +
+            conflictNote +
+            recordNote +
+            dedupNote +
+            describePace(eng.pace) +
+            (engines.size > 1 ? `\n${sessionLines()}` : "") +
+            liveLine(),
           target,
         );
       } catch (err) {
@@ -1060,6 +1079,31 @@ server.registerTool(
     },
   ),
 );
+
+/**
+ * The folder an attach keeps its files in (engine/project-folder.ts): the
+ * projectPath given, else the client's workspace folder, else a folder per
+ * tested site. Only a client that offers roots is asked for them.
+ */
+async function projectFolderFor(url: string, given: string | undefined) {
+  let workspace: string | null = null;
+  if (given === undefined && server.server.getClientCapabilities()?.roots) {
+    try {
+      workspace = workspaceFromRoots((await server.server.listRoots(undefined, { timeout: 3000 })).roots);
+    } catch (err) {
+      logLine(`the client offers a workspace but did not list it (${(err as Error).message}); using the default folder`);
+    }
+  }
+  const userDirsFile = path.join(os.homedir(), ".config", "user-dirs.dirs");
+  const userDirs = process.platform === "linux" && fs.existsSync(userDirsFile) ? fs.readFileSync(userDirsFile, "utf8") : undefined;
+  return chooseProjectFolder({
+    given,
+    workspace,
+    url,
+    home: { platform: process.platform, homedir: os.homedir(), env: process.env, userDirs },
+    exists: fs.existsSync,
+  });
+}
 
 /** Keys in this process's environment, and anything shaped like one, taken out of a line before it is shown. */
 const withoutKeys = (text: string): string => redactKeys(text, secretValues(process.env));

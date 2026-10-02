@@ -17,6 +17,16 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import {
+  chooseProjectFolder,
+  documentsDir,
+  enclosingRepo,
+  type Home,
+  projectsRoot,
+  PROJECTS_DIR_ENV,
+  siteFolderName,
+  workspaceFromRoots,
+} from "../src/engine/project-folder.ts";
+import {
   LEGACY_MEMORY_DIRNAME,
   MEMORY_DIRNAME,
   MemoryStore,
@@ -2428,4 +2438,131 @@ test("select choices: the option a dropdown held before the choice counts as cho
   const fresh = freshStore();
   fresh.recordSelectChoice("/trends#a", "trends-period", periods, "Weekly");
   assert.deepEqual(fresh.unchosenOptions()[0]?.unchosen, ["Daily", "Monthly"]);
+});
+
+// ── The project folder a run uses when the attach names none (engine/project-folder.ts) ──
+
+const macHome: Home = { platform: "darwin", homedir: "/Users/u", env: {} };
+const noRepo = () => false;
+
+test("the documents folder, per platform", () => {
+  const cases: Array<[string, Home, string]> = [
+    ["macOS", macHome, "/Users/u/Documents"],
+    ["Windows, USERPROFILE", { platform: "win32", homedir: "C:\\Users\\v", env: { USERPROFILE: "C:\\Users\\u" } }, "C:\\Users\\u\\Documents"],
+    ["Windows, no USERPROFILE", { platform: "win32", homedir: "C:\\Users\\u", env: {} }, "C:\\Users\\u\\Documents"],
+    ["Linux, nothing set", { platform: "linux", homedir: "/home/u", env: {} }, "/home/u/Documents"],
+    ["Linux, XDG_DOCUMENTS_DIR", { platform: "linux", homedir: "/home/u", env: { XDG_DOCUMENTS_DIR: "/data/docs" } }, "/data/docs"],
+    [
+      "Linux, user-dirs.dirs with $HOME",
+      { platform: "linux", homedir: "/home/u", env: {}, userDirs: '# comment\nXDG_DESKTOP_DIR="$HOME/Desktop"\nXDG_DOCUMENTS_DIR="$HOME/Dokumente"\n' },
+      "/home/u/Dokumente",
+    ],
+    [
+      "Linux, the environment wins over user-dirs.dirs",
+      { platform: "linux", homedir: "/home/u", env: { XDG_DOCUMENTS_DIR: "/data/docs" }, userDirs: 'XDG_DOCUMENTS_DIR="$HOME/Dokumente"' },
+      "/data/docs",
+    ],
+    [
+      "Linux, documents set to $HOME means none",
+      { platform: "linux", homedir: "/home/u", env: {}, userDirs: 'XDG_DOCUMENTS_DIR="$HOME/"' },
+      "/home/u/Documents",
+    ],
+    ["Linux, a relative value is ignored", { platform: "linux", homedir: "/home/u", env: { XDG_DOCUMENTS_DIR: "docs" } }, "/home/u/Documents"],
+  ];
+  for (const [name, home, want] of cases) assert.equal(documentsDir(home), want, name);
+});
+
+test("a tested site's folder name: host, port, IDN and IPv6", () => {
+  const cases: Array<[string, string]> = [
+    ["http://localhost:3000", "localhost-3000"],
+    ["http://localhost:3000/orders/7?tab=2#x", "localhost-3000"],
+    ["https://localhost:3000", "localhost-3000"],
+    ["http://localhost:3001", "localhost-3001"],
+    ["https://Staging.Example.com/", "staging.example.com"],
+    ["https://staging.example.com:443/", "staging.example.com"],
+    ["http://staging.example.com:80/", "staging.example.com"],
+    ["https://staging.example.com:8443/", "staging.example.com-8443"],
+    ["https://example.com./", "example.com"],
+    ["https://xn--bcher-kva.example/", "bücher.example"],
+    ["https://bücher.example:8080/", "bücher.example-8080"],
+    ["https://xn--h2brj9c.example/", "भारत.example"],
+    ["https://नमस्ते.example/", "नमस्ते.example"],
+    ["http://127.0.0.1:5173", "127.0.0.1-5173"],
+    ["http://[::1]:8080/", "ipv6-__1-8080"],
+    ["http://con/", "site-con"],
+    ["http://user:secret@example.com/", "example.com"],
+  ];
+  for (const [url, want] of cases) assert.equal(siteFolderName(url), want, url);
+  for (const bad of ["localhost:3000/", "not a url", "file:///tmp/page.html"]) assert.throws(() => siteFolderName(bad), /Pass projectPath/, bad);
+});
+
+test("the folder that holds one folder per site: the setting, off, or Documents/SceneScout", () => {
+  assert.equal(projectsRoot(macHome), "/Users/u/Documents/SceneScout");
+  assert.equal(projectsRoot({ ...macHome, env: { [PROJECTS_DIR_ENV]: "/srv/scenescout/" } }), "/srv/scenescout/");
+  assert.equal(projectsRoot({ ...macHome, env: { [PROJECTS_DIR_ENV]: " OFF " } }), null);
+  assert.equal(projectsRoot({ ...macHome, env: { [PROJECTS_DIR_ENV]: "" } }), "/Users/u/Documents/SceneScout", "empty is unset");
+  assert.throws(() => projectsRoot({ ...macHome, env: { [PROJECTS_DIR_ENV]: "runs" } }), new RegExp(PROJECTS_DIR_ENV));
+  assert.equal(projectsRoot({ platform: "win32", homedir: "C:\\Users\\u", env: {} }), "C:\\Users\\u\\Documents\\SceneScout");
+  assert.equal(projectsRoot({ platform: "win32", homedir: "C:\\Users\\u", env: { [PROJECTS_DIR_ENV]: "D:\\qa" } }), "D:\\qa");
+});
+
+test("what wins: projectPath, then the workspace, then the per-site default", () => {
+  const base = { url: "http://localhost:3000", home: macHome, exists: noRepo };
+  const cases: Array<[string, Parameters<typeof chooseProjectFolder>[0], string, string]> = [
+    ["projectPath over everything", { ...base, given: "/work/app", workspace: "/work/other" }, "given", "/work/app"],
+    ["an empty projectPath is still given (the server's own folder, as before)", { ...base, given: "", workspace: "/work/other" }, "given", ""],
+    ["the workspace over the default", { ...base, workspace: "/work/other" }, "workspace", "/work/other"],
+    ["the default when there is neither", base, "default", "/Users/u/Documents/SceneScout/localhost-3000"],
+    ["the setting moves the default", { ...base, home: { ...macHome, env: { [PROJECTS_DIR_ENV]: "/srv/qa" } } }, "default", "/srv/qa/localhost-3000"],
+    ["projectPath over a setting of off", { ...base, given: "/work/app", home: { ...macHome, env: { [PROJECTS_DIR_ENV]: "off" } } }, "given", "/work/app"],
+  ];
+  for (const [name, input, source, dir] of cases) {
+    const got = chooseProjectFolder(input);
+    assert.ok(!("refused" in got), `${name}: ${JSON.stringify(got)}`);
+    assert.deepEqual([got.source, got.dir], [source, dir], name);
+    if (source === "given") assert.equal(got.note, "", `${name}: a given folder needs no line`);
+    else assert.ok(got.note.includes(dir), `${name}: the result names the folder`);
+  }
+  const plain = chooseProjectFolder(base);
+  assert.ok(!("refused" in plain) && plain.note.includes("/Users/u/Documents/SceneScout/localhost-3000/.scenescout/report.md"), "it says where the report is");
+  const off = chooseProjectFolder({ ...base, home: { ...macHome, env: { [PROJECTS_DIR_ENV]: "off" } } });
+  assert.ok("refused" in off && off.refused.includes("Pass projectPath"), "off, with nothing given, asks for projectPath");
+  const unnamed = chooseProjectFolder({ ...base, url: "about:blank" });
+  assert.ok("refused" in unnamed && unnamed.refused.includes("Pass projectPath"));
+});
+
+test("the default folder is never placed inside a git repository; a given one may be", () => {
+  const repoAt = (root: string) => (p: string) => p === path.posix.join(root, ".git");
+  // Documents itself under version control: the default is refused, naming the repository and the setting.
+  const inRepo = chooseProjectFolder({ url: "http://localhost:3000", home: macHome, exists: repoAt("/Users/u/Documents") });
+  assert.ok("refused" in inRepo, JSON.stringify(inRepo));
+  assert.ok(inRepo.refused.includes("/Users/u/Documents") && inRepo.refused.includes(PROJECTS_DIR_ENV));
+  // The contrast: the same repository somewhere the default does not reach.
+  const beside = chooseProjectFolder({ url: "http://localhost:3000", home: macHome, exists: repoAt("/Users/u/code") });
+  assert.ok(!("refused" in beside) && beside.source === "default");
+  // A setting pointing into a repository is refused the same way.
+  const setInRepo = chooseProjectFolder({
+    url: "http://localhost:3000",
+    home: { ...macHome, env: { [PROJECTS_DIR_ENV]: "/work/app/qa" } },
+    exists: repoAt("/work/app"),
+  });
+  assert.ok("refused" in setInRepo);
+  // A projectPath inside a repository is the user's choice.
+  const given = chooseProjectFolder({ url: "http://localhost:3000", given: "/work/app", home: macHome, exists: repoAt("/work/app") });
+  assert.ok(!("refused" in given) && given.dir === "/work/app");
+  assert.equal(enclosingRepo("/a/b/c", repoAt("/a")), "/a");
+  assert.equal(enclosingRepo("/a/b/c", repoAt("/a/b/c")), "/a/b/c", "the folder itself");
+  assert.equal(enclosingRepo("/a/b/c", noRepo), null);
+  assert.equal(
+    enclosingRepo("C:\\Users\\u\\Documents\\SceneScout\\x", (p) => p === "C:\\Users\\u\\.git", "win32"),
+    "C:\\Users\\u",
+  );
+});
+
+test("a workspace comes only from a file: root", () => {
+  assert.equal(workspaceFromRoots(undefined), null);
+  assert.equal(workspaceFromRoots([]), null);
+  assert.equal(workspaceFromRoots([{ uri: "https://example.com/repo" }]), null);
+  assert.equal(workspaceFromRoots([{ uri: "https://example.com/repo" }, { uri: "file:///work/app" }, { uri: "file:///work/b" }]), "/work/app");
+  assert.equal(workspaceFromRoots([{ uri: "file:///work/my%20app" }]), "/work/my app");
 });
