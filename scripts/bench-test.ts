@@ -64,6 +64,7 @@ import {
   pairId,
   parseJudgement,
   ruleJudgement,
+  sampleByApp,
   samplePairs,
   samplingResultOf,
   scorePairs,
@@ -74,6 +75,7 @@ import {
   type PairFinding,
 } from "../src/engine/dedup.ts";
 import { OpenAIConversation, type ModelTurn } from "../src/engine/provider.ts";
+import { bootstrap, encodeLayout, judgementOf, layoutPieces, pairCluster, pairWords, percentile, PHRASINGS, softmax, textWords } from "./bench/gliner.ts";
 import type { Finding } from "../src/engine/memory.ts";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -1010,6 +1012,156 @@ test("dedup pairs: the sample is capped, the same whatever order the pairs arriv
   assert.deepEqual(samplePairs([...ps].reverse(), 10), one);
   assert.equal(samplePairs(ps, 100).length, 30);
   assert.throws(() => samplePairs(ps, 0), /positive whole number/);
+});
+
+test("dedup pairs: the cap is split evenly between the apps, and what a small app cannot use passes to the next", () => {
+  const many = (app: string, n: number): LabelledPair[] =>
+    Array.from({ length: n }, (_, i) => ({
+      app,
+      route: "/",
+      a: { title: `a${i}`, category: "visual", keyId: "x", run: "r1" },
+      b: { title: `b${i}`, category: "visual", keyId: "x", run: "r2" },
+      same: true,
+    }));
+  const even = sampleByApp([...many("big", 500), ...many("small", 300)], 200);
+  assert.deepEqual([even.get("big")!.length, even.get("small")!.length], [100, 100]);
+  const short = sampleByApp([...many("big", 500), ...many("small", 30)], 200);
+  assert.deepEqual([short.get("big")!.length, short.get("small")!.length], [170, 30]);
+});
+
+// ── a local classifier as the judge (opt-in benchmark, scripts/bench/gliner.ts) ──
+
+// The Python gliner2 library's token ids for one text and two questions, from
+// the ONNX export's published reference; every piece here is one token.
+const GLINER_REFERENCE = {
+  text: "My payouts have failed three times this week and nobody replied to my emails.",
+  ids: [
+    287, 128003, 511, 287, 128007, 3213, 128007, 914, 128007, 340, 1263, 1263, 128001, 287, 128003, 9178, 287, 128007, 2489, 128007, 363, 1263, 1263, 128002,
+    312, 27652, 286, 2506, 475, 631, 291, 542, 263, 5400, 6781, 264, 312, 4548, 323,
+  ],
+  markers: [4, 6, 8, 17, 19],
+};
+const GLINER_VOCAB: Record<string, number> = {
+  "(": 287,
+  ")": 1263,
+  "[P]": 128003,
+  "[L]": 128007,
+  "[SEP_STRUCT]": 128001,
+  "[SEP_TEXT]": 128002,
+  team: 511,
+  payments: 3213,
+  account: 914,
+  other: 340,
+  urgent: 9178,
+  yes: 2489,
+  no: 363,
+  my: 312,
+  payouts: 27652,
+  have: 286,
+  failed: 2506,
+  three: 475,
+  times: 631,
+  this: 291,
+  week: 542,
+  and: 263,
+  nobody: 5400,
+  replied: 6781,
+  to: 264,
+  emails: 4548,
+  ".": 323,
+};
+const vocabTokenize = (piece: string): number[] => {
+  if (!(piece in GLINER_VOCAB)) throw new Error(`no id for ${piece}`);
+  return [GLINER_VOCAB[piece]];
+};
+
+test("gliner layout: the pieces and marker positions are the Python library's for the same text and questions", () => {
+  const words = textWords(GLINER_REFERENCE.text);
+  assert.deepEqual(words, ["my", "payouts", "have", "failed", "three", "times", "this", "week", "and", "nobody", "replied", "to", "my", "emails", "."]);
+  const { ids, markerPositions } = encodeLayout(
+    layoutPieces(
+      [
+        { task: "team", labels: ["payments", "account", "other"] },
+        { task: "urgent", labels: ["yes", "no"] },
+      ],
+      words,
+    ),
+    vocabTokenize,
+  );
+  assert.deepEqual(ids, GLINER_REFERENCE.ids);
+  assert.deepEqual(markerPositions, [
+    [4, 6, 8],
+    [17, 19],
+  ]);
+  assert.deepEqual(markerPositions.flat(), GLINER_REFERENCE.markers);
+});
+
+test("gliner layout: a full stop is added only to text with no ending, URLs and joined words stay whole, and descriptions follow the task in label order", () => {
+  assert.deepEqual(textWords("Done!"), ["done", "!"]);
+  assert.deepEqual(textWords("Done"), ["done", "."]);
+  assert.deepEqual(textWords(""), ["."]);
+  assert.deepEqual(textWords("See https://app.test/a?b=1 and well-known_name"), ["see", "https://app.test/a?b=1", "and", "well-known_name", "."]);
+  assert.deepEqual(textWords("GET /api/things/7 → 500"), ["get", "/", "api", "/", "things", "/", "7", "→", "500", "."]);
+  const { pieces } = layoutPieces([{ task: "Which?", labels: ["b", "a"], descriptions: { a: "first", b: "second" } }], []);
+  assert.deepEqual(pieces, ["(", "[P]", "Which? [DESCRIPTION] b: second [DESCRIPTION] a: first", "(", "[L]", "b", "[L]", "a", ")", ")", "[SEP_TEXT]"]);
+});
+
+test("gliner layout: a marker the tokenizer splits is refused, not read as a label's position", () => {
+  const split = (piece: string) => (piece === "[L]" ? [1, 2] : [9]);
+  assert.throws(() => encodeLayout(layoutPieces([{ task: "q", labels: ["yes", "no"] }], ["x"]), split), /not one token/);
+  assert.throws(() => layoutPieces([{ task: "q", labels: ["yes"] }], []), /at least two labels/);
+});
+
+test("gliner phrasings: each names its same label among its labels, and p_same reads as a verdict at 0.5", () => {
+  assert.ok(PHRASINGS.length <= 3, "at most three phrasings are tried");
+  for (const p of PHRASINGS) assert.ok(p.question.labels.includes(p.sameLabel), p.name);
+  assert.deepEqual(judgementOf(0.5), { verdict: "same", pSame: 0.5 });
+  assert.equal(judgementOf(0.49).verdict, "different");
+  const probs = softmax([2, 0]);
+  assert.ok(Math.abs(probs[0] + probs[1] - 1) < 1e-12 && probs[0] > 0.88 && probs[0] < 0.89);
+});
+
+test("gliner text: a pair over the budget loses evidence from its end, the longer first, and never a title", () => {
+  const pair = {
+    route: "/orders",
+    a: { title: "Total wrong", category: "data", evidence: "one two three four five six seven eight" },
+    b: { title: "Badge stale", category: "ui", evidence: "nine ten" },
+  };
+  const one = () => 1;
+  const whole = pairWords(pair, one, 1000);
+  assert.equal(whole.cut, 0);
+  assert.ok(whole.words.includes("eight") && whole.words.includes("ten"));
+  assert.deepEqual(whole.words.slice(0, 7), ["two", "findings", "filed", "on", "the", "page", "/"]);
+  const cut = pairWords(pair, one, whole.words.length - 4);
+  assert.equal(cut.cut, 4);
+  assert.ok(!cut.words.includes("eight") && !cut.words.includes("six") && cut.words.includes("five"), "the longer evidence is cut first");
+  assert.ok(cut.words.includes("ten") && cut.words.includes("wrong") && cut.words.includes("stale"));
+  assert.throws(() => pairWords(pair, one, 5), /titles alone/);
+});
+
+test("gliner intervals: the same seed gives the same interval, and drawing clusters widens it when a cluster's pairs agree", () => {
+  const values = [...Array(10).fill(0), ...Array(10).fill(1)];
+  const mean = (idx: readonly number[]) => idx.reduce((s, i) => s + values[i], 0) / idx.length;
+  const byPair = bootstrap(values.length, mean, { resamples: 1000 })!;
+  assert.deepEqual(bootstrap(values.length, mean, { resamples: 1000 }), byPair);
+  assert.ok(byPair.lo > 0.2 && byPair.hi < 0.8, `pair-level ${byPair.lo}–${byPair.hi}`);
+  const clusters = values.map((v) => `c${v}`);
+  const byCluster = bootstrap(values.length, mean, { resamples: 1000, clusters })!;
+  assert.deepEqual([byCluster.lo, byCluster.hi], [0, 1], "two clusters are two facts, not twenty");
+  assert.equal(
+    bootstrap(3, () => null, { resamples: 100 }),
+    null,
+  );
+  assert.throws(() => bootstrap(3, mean, { clusters: ["a"] }), /cluster names/);
+  assert.equal(pairCluster("b", "a"), pairCluster("a", "b"));
+  assert.equal(percentile([5, 1, 3, 2, 4], 50), 3);
+  assert.equal(percentile([5, 1, 3, 2, 4], 95), 5);
+});
+
+test("dedup-bench:gliner: the held-out pairs are refused with more than one phrasing, before anything is loaded", () => {
+  const r = spawnSync(process.execPath, ["--import", "tsx", path.join(root, "scripts", "dedup-gliner-bench.ts"), "--app", "holdout"], { encoding: "utf8" });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /chosen on the demo pairs only/);
 });
 
 const pf = (title: string, evidence: string | undefined, category = "http-error"): PairFinding => ({ title, evidence, category, keyId: "k", run: "r" });

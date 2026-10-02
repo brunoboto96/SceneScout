@@ -108,7 +108,8 @@
     "bench": "tsx scripts/bench.ts",
     "bench:ci": "tsx scripts/bench/ci-record.ts",
     "bench-test": "tsx --test scripts/bench-test.ts",
-    "dedup-bench": "tsx scripts/dedup-bench.ts"
+    "dedup-bench": "tsx scripts/dedup-bench.ts",
+    "dedup-bench:gliner": "tsx scripts/dedup-gliner-bench.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

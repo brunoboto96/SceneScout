@@ -1452,6 +1452,134 @@ rule either way; `memory-test` holds it with a contrastive pair. A variant
 that also stopped a title literal matching the other's evidence lost 4
 correct demo merges (440 to 436, no wrong merge avoided) and was not taken.
 
+### A local classifier as the judge: GLiNER2.5-Decide, rejected ([#353](https://github.com/brunoboto96/SceneScout/issues/353))
+
+The model judge needs a key and a call per filing. GLiNER2.5-Decide (Fastino,
+Apache 2.0) is a DeBERTa-v3-large classifier that takes a label set at call
+time and runs locally. This trial measured it on the same 200 pairs as judge
+run 2, through the community ONNX export
+(`onnx-community/GLiNER2.5-Decide-ONNX`, revision `2a9b872b5c`) and
+transformers.js in Node. Nothing was wired in and nothing ships.
+
+**How it was run.** `npm run dedup-bench:gliner` (in `scripts/dedup-gliner-bench.ts`) is opt-in
+and dev-only. It needs `npm install --no-save @huggingface/transformers` and is
+not a dependency of the package. Each pair is one classification. The text holds
+both findings' title, category and evidence, the earlier finding as A, and the
+question's labels mean "same defect" or not. p_same is the softmax probability
+of the "same" label, so Brier and ECE apply. `--against
+bench/dedup/judge-run-2-effort-none.jsonl --archives-at 2118755` scores
+exactly the pairs judge run 2 scored, built from the 22 archives of that
+day (an archive added since changes which run a repeated finding is first
+seen in, and so the pairs). The run compares the classifier pair by pair with
+that judge's recorded answers (its per-pair file at effort none, kept in the
+repository) and with the rule. No pair went over the encoder's 512 tokens.
+
+**The input layout matches the Python library's.** The export takes the
+gliner2 processor's sequence, which the caller must rebuild. Before scoring,
+each run rebuilds the six texts of the export's published reference (token
+ids and probabilities from the Python `gliner2` 2.0.0 library) and stops
+unless the token ids are identical. They were, on all six. Probabilities
+differed by at most 8.1e-2 at q4f16 (top label on 12 of 13 questions) and
+2.9e-4 at fp16 (13 of 13). The Python library itself was not run: it needs
+torch and the 1.7 GB base weights, which the download budget for this trial
+did not cover.
+
+**Phrasings.** Three were tried, and the choice between them was made on the
+demo pairs only. The script refuses the held-out app unless one phrasing is
+named.
+- "yes-no": "Do finding A and finding B describe the same defect?", labels yes and no.
+- "described": "Are finding A and finding B the same defect or different defects?", labels "same defect" and "different defects", each with the model judge's definition as a label description.
+- "duplicate": "Is finding B a duplicate of finding A?", labels "duplicate" and "not a duplicate".
+
+**Variants.** q4f16 (the smallest, 523 MB) was run first. fp32 (1.74 GB)
+would have taken the trial's downloads over its 2 GB budget. fp16 (872 MB)
+matches the reference to 2.9e-4, so it stands in for full precision. The best
+demo Brier picked "duplicate" at q4f16 and "described" at fp16. Each was then
+scored once on the held-out pairs.
+
+Demo sample (21 same / 79 different) and held-out sample (32 / 68), keys
+`c1786bc817` and `b5a7933f32`. The bracketed figures are 95% bootstrap
+intervals, 2,000 resamples. They are drawn by cluster: a cluster is the pair's
+two key entries, 49 clusters on the demo and 41 on the held-out app. Pairs
+between the same two entries are not independent, and pair-level intervals
+are narrower. Two clusters that share one entry are still drawn apart, so
+these intervals are, if anything, still too narrow.
+The rule and the judge rows are the same pairs as judge run 2's.
+
+| App | Decider | Accuracy | Brier [95%] | Skill vs base rate | ECE [95%] | Wrong merges | Missed merges |
+|---|---|---:|---|---:|---|---:|---:|
+| Demo | current rule | 82.0% | 0.180 | −0.08 | 0.180 | 0 | 18 |
+| Demo | model judge, effort none (run 2) | 98.0% [94.8–100] | 0.019 [0.001–0.048] | 0.88 | 0.024 [0.009–0.061] | 0 | 2 |
+| Demo | GLiNER q4f16, yes-no | 50.0% [36.9–62.9] | 0.261 [0.238–0.287] | −0.57 | 0.289 [0.188–0.406] | 36 | 14 |
+| Demo | GLiNER q4f16, described | 65.0% [52.1–76.1] | 0.229 [0.212–0.247] | −0.38 | 0.281 [0.190–0.389] | 29 | 6 |
+| Demo | GLiNER q4f16, duplicate (chosen) | 71.0% [56.3–84.1] | 0.214 [0.151–0.289] | −0.29 | 0.175 [0.123–0.301] | 9 | 20 |
+| Demo | GLiNER fp16, yes-no | 39.0% | 0.276 | −0.66 | 0.311 | 48 | 13 |
+| Demo | GLiNER fp16, described (chosen) | 77.0% | 0.204 | −0.23 | 0.237 | 13 | 10 |
+| Demo | GLiNER fp16, duplicate | 70.0% | 0.213 | −0.29 | 0.172 | 10 | 20 |
+| Held-out | current rule | 86.0% | 0.140 | 0.36 | 0.140 | 0 | 14 |
+| Held-out | model judge, effort none (run 2) | 99.0% [96.5–100] | 0.007 [0.000–0.022] | 0.97 | 0.012 [0.006–0.035] | 0 | 1 |
+| Held-out | GLiNER q4f16, duplicate | 65.0% [46.7–80.9] | 0.214 [0.146–0.299] | 0.02 | 0.146 [0.104–0.314] | 4 | 31 |
+| Held-out | GLiNER fp16, described | 80.0% [67.7–90.5] | 0.204 [0.189–0.220] | 0.06 | 0.346 [0.267–0.393] | 3 | 17 |
+
+The fp16 demo rows were scored to compare variants. Their intervals are in the
+run's output, not here.
+
+**Brier gaps, with cluster bootstrap intervals.** On the held-out pairs,
+GLiNER's Brier minus the judge's is 0.207 [0.140–0.290] at q4f16 and
+0.197 [0.177–0.216] at fp16. GLiNER's Brier minus the rule's is 0.074
+[−0.013–0.171] and 0.064 [−0.055–0.158]. On the demo pairs, the chosen
+phrasings give 0.195 [0.135–0.264] (q4f16) and 0.185 [0.158–0.212] (fp16)
+against the judge, and 0.033 [−0.052–0.123] and 0.024 [−0.095–0.126] against the
+rule. Every interval against the judge excludes zero. Against the rule, every
+point estimate is worse, but the intervals include zero, so 100 pairs per app
+cannot separate the two.
+
+Pair by pair on the held-out pairs:
+- Against the judge, GLiNER is right where the judge is wrong on 0 pairs (q4f16) and 1 pair (fp16), and wrong where the judge is right on 34 and 20.
+- Against the rule, it is right where the rule is wrong on 0 and 7 pairs, and wrong where the rule is right on 21 and 13.
+- It merges wrongly 4 and 3 times. The rule merges wrongly 0 times on these pairs.
+
+**Why it loses.** Its probabilities hardly move. In every configuration,
+the middle three of the five equal-count buckets have mean p_same between
+0.23 and 0.55. The
+ranking is better than the calibration. Ranking AUC was computed afterwards from
+the per-pair files and was not used to choose anything:
+- "described" at fp16: 0.78 on the demo and 0.94 on the held-out pairs.
+- "duplicate" at q4f16, the q4f16 choice: 0.55 and 0.77.
+- "yes-no": below 0.5 at both precisions.
+- The judge: 0.995 and 1.0. The rule, read as 0/1: 0.57 and 0.78.
+
+Choosing by Brier among answers that all sit near 0.5 favoured the phrasing
+whose answers sat lower, nearer the demo's 21% base rate. It did not favour
+the one that separated the pairs best. A recalibration of p_same fitted on the
+demo pairs could turn the fp16 "described" ranking into a better Brier. That
+would be a fourth bounded edit, and it is not tried here (see below).
+
+**Cost on this machine** (Apple M1 Max, CPU, 4 intra-op threads; one tokenize
+and one forward pass per call, after one untimed warm-up call):
+
+| Variant | Download (model, tokenizer, config) | Load | Per call p50 / p95 | Peak resident memory |
+|---|---:|---:|---:|---:|
+| q4f16 | 532 MB | 0.9 s | 351–370 ms / 376–454 ms | 1,025–1,145 MB |
+| fp16 | 881 MB | 2.1–2.3 s | 470–543 ms / 586–604 ms | 1,950–1,956 MB |
+
+The ranges cover the demo and held-out runs. Memory is the Node process's
+peak, about 270 MB of it before the model loads. transformers.js also brings
+`onnxruntime-node`, 290 MB installed. Downloads went to a cache directory
+named on the command line, not the shared Hugging Face cache, and were deleted
+afterwards.
+
+**Decision: rejected for this step.** On these pairs and these phrasings,
+GLiNER2.5-Decide is worse than the model judge on both apps, at both
+precisions, with intervals that exclude zero. It is not better than the rule:
+every point estimate is worse, and the intervals do not separate them. Step 2
+of #353 (an install option, an in-process runtime and `SCENESCOUT_DEDUP=local`)
+is not earned. The limits:
+- One run per configuration. A forward pass is deterministic, so there is no sampling noise. The noise is in the 100 pairs per app.
+- The labels come from the keys.
+- The held-out pairs were scored twice, once per precision. Each time the phrasing was chosen beforehand from the demo pairs.
+- Three phrasings were tried. This rejects the model as asked here, not every use of it.
+
 ## Rejected and not-yet-tried
 
 Edits considered and not kept, so they are not retried blind:
@@ -1482,3 +1610,12 @@ Edits considered and not kept, so they are not retried blind:
   without lane routes. The follow-up, deciding by each lane's archived routes
   and the matched entry's pages, is done: see
   [Ownership by route](#ownership-by-route-task-29).
+
+- **GLiNER2.5-Decide as the duplicate-finding judge, uncalibrated** (#353).
+  Rejected: worse than the model judge on both apps and no better than the
+  rule. See [the trial](#a-local-classifier-as-the-judge-gliner25-decide-rejected-353).
+  Not yet tried: recalibrating its p_same on the demo pairs (one fitted slope
+  and offset, or an isotonic map) and scoring it once on the held-out pairs.
+  The fp16 "described" phrasing ranked the held-out pairs at AUC 0.94, so its
+  failure is in calibration more than in ranking. That is the one edit left
+  worth measuring before the model is set aside.

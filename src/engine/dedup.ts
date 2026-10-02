@@ -142,6 +142,30 @@ export function samplePairs(pairs: readonly LabelledPair[], cap: number): Labell
     .map((x) => x.p);
 }
 
+/**
+ * The benchmark's sample: `cap` pairs split evenly between the apps, smallest
+ * first, and what a small app cannot use passes to the next. In proportion to
+ * pair counts, the demo's thousands of pairs left the held-out app a handful,
+ * too few to score.
+ */
+export function sampleByApp(pairs: readonly LabelledPair[], cap: number): Map<string, LabelledPair[]> {
+  const byApp = new Map<string, LabelledPair[]>();
+  for (const p of pairs) {
+    const list = byApp.get(p.app) ?? [];
+    list.push(p);
+    byApp.set(p.app, list);
+  }
+  const samples = new Map<string, LabelledPair[]>();
+  let left = cap;
+  const apps = [...byApp.entries()].sort((a, b) => a[1].length - b[1].length);
+  apps.forEach(([app, ps], i) => {
+    const share = Math.max(1, Math.min(ps.length, Math.floor(left / (apps.length - i))));
+    samples.set(app, samplePairs(ps, share));
+    left -= share;
+  });
+  return samples;
+}
+
 // ── deciders ────────────────────────────────────────────────────────────────
 
 export type Verdict = "same" | "different" | "unsure";

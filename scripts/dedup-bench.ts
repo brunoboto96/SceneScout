@@ -32,7 +32,7 @@ import {
   formatPairScore,
   pairId,
   ruleJudgement,
-  samplePairs,
+  sampleByApp,
   scorePairs,
   type Ask,
   type Judgement,
@@ -90,17 +90,7 @@ const balance = (ps: readonly LabelledPair[]): string =>
 const byApp = new Map<string, LabelledPair[]>();
 for (const p of set.pairs) byApp.set(p.app, [...(byApp.get(p.app) ?? []), p]);
 
-// The cap is split evenly between the apps, smallest first, and what a small
-// app cannot use passes to the next: in proportion to pair counts, the demo's
-// thousands of pairs left the held-out app a handful, too few to score.
-const samples = new Map<string, LabelledPair[]>();
-let left = cap;
-const apps = [...byApp.entries()].sort((a, b) => a[1].length - b[1].length);
-apps.forEach(([app, ps], i) => {
-  const share = Math.max(1, Math.min(ps.length, Math.floor(left / (apps.length - i))));
-  samples.set(app, samplePairs(ps, share));
-  left -= share;
-});
+const samples = sampleByApp(set.pairs, cap);
 
 const ruleScore = (ps: readonly LabelledPair[]) =>
   scorePairs(
