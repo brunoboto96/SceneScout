@@ -18,7 +18,7 @@ Generated: (by `npm run demo`)
 
 | Route | Overall | A11y | Craft | Consistency | Task clarity | Audited |
 |---|---|---|---|---|---|---|
-| `/orders-new.html` | **97** | 96 | 100 | 90 | 100 | (run date) |
+| `/orders-new.html` | **96** | 92 | 100 | 90 | 100 | (run date) |
 | `/` | **98** | 100 | 100 | 90 | 100 | (run date) |
 | `/order.html` | **98** | 100 | 100 | 90 | 100 | (run date) |
 

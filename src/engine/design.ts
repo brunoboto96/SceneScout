@@ -22,6 +22,8 @@
  * controls, visible keyboard focus.
  */
 
+import { missingName, NAME_SRC, placeholderOnly, type NameFrom } from "./collector.js";
+
 export interface StyleRecord {
   tag: string;
   testid: string | null;
@@ -45,7 +47,7 @@ export interface StyleRecord {
   /** Vertical margins [top, bottom] — the other half of spacing rhythm. */
   marginV: [number, number];
   radius: number;
-  /** box-shadow value (truncated) or "" — elevation-system consistency. */
+  /** Computed box-shadow, every layer (capped at 400 characters), or "" — elevation-system consistency; see elevationKey. */
   shadow: string;
   clipped: boolean;
   /**
@@ -60,6 +62,25 @@ export interface StyleRecord {
   /** Form-control burden signals: is this a required field, and is it a submit control? */
   required: boolean;
   submitish: boolean;
+  /**
+   * An interactive element's accessible name and, for a field, where it came
+   * from when that is not a label: computed by the snapshot's own rule
+   * (collector.ts NAME_SRC), so the audit and the snapshot name a control
+   * alike. Absent on non-interactive records, which are named by their text.
+   */
+  name?: string;
+  nameFrom?: NameFrom | null;
+  /** Inside an aria-hidden subtree: nothing announces it, so it needs no name. */
+  ariaHidden?: boolean;
+  /**
+   * The name a control's image content gives it, read only when `name` is
+   * empty: an <img> with alt text, or an <svg> or role="img" with an
+   * aria-label or <title>, not hidden from assistive technology. The
+   * accessible-name computation names a control from its content this way;
+   * the snapshot's rule (`name`) reads its text alone, so an image-only link
+   * or button would otherwise count as unnamed.
+   */
+  contentName?: string;
   /** Lowercased `type` of an <input>, "" for any other element: a checkbox, a search box and a submit button are all <input>. */
   inputType: string;
   /** The element's own `role` attribute, "" when it has none. */
@@ -77,6 +98,12 @@ export interface StyleRecord {
   inRow: boolean;
   inSearch: boolean;
   inBreadcrumb: boolean;
+  /**
+   * In, or itself, a control that names itself a filter or facet (a test id,
+   * id, aria-label, aria-labelledby or legend containing the word, see
+   * FILTER_WORDS_SRC): a filter applies as it changes and asks for nothing.
+   */
+  inFilter?: boolean;
   /**
    * Inside the app shell's landmarks — a navigation, banner, complementary or
    * content-info region that is not part of the main content, an article or a
@@ -114,6 +141,18 @@ export interface DesignPagePayload {
 export interface DesignPayload {
   records: StyleRecord[];
   page: DesignPagePayload;
+}
+
+/**
+ * Whether some text names a filter or a facet, as page-side source: one of its
+ * words, split at camelCase and punctuation, is filter(s) or facet(s). Whole
+ * words only, so "filterable-list" or "unfiltered" says nothing.
+ */
+export const FILTER_WORDS_SRC = `(s) => (s || "").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z]+/).some((w) => w === "filter" || w === "filters" || w === "facet" || w === "facets")`;
+
+/** FILTER_WORDS_SRC run outside a page, from the same source, so a table test exercises the rule the collector ships. */
+export function namesFilter(text: string): boolean {
+  return (new Function(`return (${FILTER_WORDS_SRC});`)() as (s: string) => boolean)(text);
 }
 
 /**
@@ -171,6 +210,32 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
   const hasOwnText = (el) => {
     for (const n of el.childNodes) {
       if (n.nodeType === 3 && n.textContent.trim().length > 0) return true;
+    }
+    return false;
+  };
+  const nameOf = ${NAME_SRC};
+  // What a control's image content names it (StyleRecord.contentName). An
+  // image inside an aria-hidden part of the control contributes nothing.
+  const contentNameOf = (el) => {
+    for (const d of el.querySelectorAll("img, svg, [role='img']")) {
+      const hidden = d.closest('[aria-hidden="true"]');
+      if (hidden && el.contains(hidden)) continue;
+      const title = d.tagName.toLowerCase() === "svg" ? d.querySelector(":scope > title") : null;
+      const said = (d.tagName === "IMG" ? d.getAttribute("alt") : d.getAttribute("aria-label") || (title ? title.textContent : "")) || "";
+      if (said.trim()) return said.trim().replace(/\\s+/g, " ").slice(0, 80);
+    }
+    return "";
+  };
+  const namesFilter = ${FILTER_WORDS_SRC};
+  // A filter panel names itself one somewhere on the way up: its test id, id,
+  // label, the element its aria-labelledby points at, or a fieldset's legend.
+  const inFilterOf = (el) => {
+    for (let n = el, i = 0; n && n !== document.body && i < 15; n = n.parentElement, i++) {
+      const legend = n.tagName === "FIELDSET" ? n.querySelector(":scope > legend") : null;
+      const labelledBy = (n.getAttribute("aria-labelledby") || "").split(/\\s+/).filter(Boolean)
+        .map((id) => { const t = document.getElementById(id); return t ? t.textContent || "" : ""; }).join(" ");
+      const said = [n.getAttribute("data-testid"), n.id, n.getAttribute("aria-label"), labelledBy, legend ? legend.textContent : ""].join(" ");
+      if (namesFilter(said)) return true;
     }
     return false;
   };
@@ -278,6 +343,7 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     if (!interactive && !ownText && !slop) continue;
     const fullText = ownText ? (el.textContent || "").trim().replace(/\\s+/g, " ") : "";
     const target = interactive ? targetOf(el, rect, srOnly || s.opacity === "0") : null;
+    const named = interactive ? nameOf(el) : null;
     out.push({
       tag: el.tagName.toLowerCase(),
       testid: el.getAttribute("data-testid"),
@@ -297,7 +363,7 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
       padding: [px(s.paddingTop), px(s.paddingRight), px(s.paddingBottom), px(s.paddingLeft)],
       marginV: [px(s.marginTop), px(s.marginBottom)],
       radius: px(s.borderTopLeftRadius),
-      shadow: s.boxShadow && s.boxShadow !== "none" ? s.boxShadow.replace(/\\s+/g, " ").slice(0, 80) : "",
+      shadow: s.boxShadow && s.boxShadow !== "none" ? s.boxShadow.replace(/\\s+/g, " ").slice(0, 400) : "",
       // srOnly text is DELIBERATELY a 1px box with overflow hidden — the exact
       // signature of "text wider than its box". Flagging it reported the
       // accessibility affordance itself as an accessibility defect.
@@ -306,6 +372,8 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
       fixed: s.position === "fixed" || s.position === "sticky",
       required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true",
       submitish: el.matches('button[type="submit"], input[type="submit"]') || /\\b(save|submit|create|send|confirm|apply|continue|next|finish|approve|sign)\\b/i.test(fullText),
+      ...(named ? { name: named.name, nameFrom: named.from, ariaHidden: el.closest('[aria-hidden="true"]') !== null } : {}),
+      ...(named && !named.name ? { contentName: contentNameOf(el) } : {}),
       inputType: el.tagName === "INPUT" ? (el.getAttribute("type") || "text").toLowerCase() : "",
       role: (el.getAttribute("role") || "").toLowerCase(),
       filled: ownFill(s),
@@ -313,6 +381,7 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
       inRow: !!el.closest('tr, [role="row"]'),
       inSearch: !!el.closest('search, [role="search"]'),
       inBreadcrumb: !!el.closest('[aria-label*="breadcrumb" i], [class*="breadcrumb" i]'),
+      inFilter: interactive && inFilterOf(el),
       shell: inShell(el),
       sideStripe, gradientText, glass, glow, aiGradient,
     });
@@ -380,7 +449,17 @@ function hueOf([r, g, b]: [number, number, number]): number | null {
   return Math.round((h * 60 + 360) % 360);
 }
 
-const label = (r: StyleRecord): string => (r.testid ? `[${r.testid}]` : `<${r.tag}> "${r.text.slice(0, 30) || "(no text)"}"`);
+/**
+ * How an audit line names an element: its test id, else what a user hears for
+ * a control (its accessible name, the snapshot's), else its own text. A name
+ * that is only the field's name attribute or type is not one anybody hears,
+ * so it gives way to the text.
+ */
+const label = (r: StyleRecord): string => {
+  if (r.testid) return `[${r.testid}]`;
+  const heard = r.name && r.nameFrom !== "fallback" ? r.name : r.contentName || r.text;
+  return `<${r.tag}> "${heard.slice(0, 30) || "(no text)"}"`;
+};
 /** One wording for a small target, page or shell alike: the shell section's, so its prose is unchanged. */
 const tinyTargetDetail = (r: StyleRecord): string => `${label(r)} — ${Math.round(targetBox(r).w)}×${Math.round(targetBox(r).h)}px tap target`;
 const clippedTextDetail = (r: StyleRecord): string => `${label(r)} — text is clipped by its container`;
@@ -445,6 +524,9 @@ const MIN_TARGET = 24;
 /** Inputs that are buttons, not fields. */
 const BUTTON_INPUT_TYPES = new Set(["submit", "button", "reset", "image"]);
 
+/** Inputs a user types into. Every other type (a checkbox, radio, range, colour or file) is picked rather than typed, and outside a form most of those apply at once. */
+const TYPED_INPUT_TYPES = new Set(["text", "email", "number", "tel", "url", "password", "date", "datetime-local", "month", "week", "time"]);
+
 /** A button, or a link painted as one. Fields, selects and plain links never compete as actions. */
 function buttonLike(r: StyleRecord): boolean {
   if (r.tag === "button" || r.role === "button") return true;
@@ -455,10 +537,14 @@ function buttonLike(r: StyleRecord): boolean {
 /**
  * The fields a user is asked to fill in and submit. Excluded: controls in a
  * table row (a selection checkbox, or a select that edits the row in place),
- * search boxes, and inputs that are buttons. When some fields sit in a <form>,
- * only those count: the rest of the page (filters, toolbars) is not part of
- * what gets submitted. A page with no <form> at all is judged on every field,
- * because many apps build their forms without the element.
+ * search boxes, controls in a panel that names itself a filter, and inputs
+ * that are buttons. When some fields sit in a <form>, only those count: the
+ * rest of the page (filters, toolbars) is not part of what gets submitted. A
+ * page with no <form> at all is judged on the fields a user types into,
+ * because many apps build their forms without the element; its selects and
+ * every input not in TYPED_INPUT_TYPES (checkboxes, radios, file pickers) are
+ * left out, since outside a form those are most often filters and settings
+ * that apply as they change.
  */
 function formFields(records: StyleRecord[]): StyleRecord[] {
   const candidates = records.filter(
@@ -468,10 +554,124 @@ function formFields(records: StyleRecord[]): StyleRecord[] {
       !BUTTON_INPUT_TYPES.has(r.inputType) &&
       r.inputType !== "search" &&
       !r.inSearch &&
-      !r.inRow,
+      !r.inRow &&
+      !r.inFilter,
   );
   const inForm = candidates.filter((r) => r.inForm);
-  return inForm.length > 0 ? inForm : candidates;
+  return inForm.length > 0 ? inForm : candidates.filter(typedField);
+}
+
+/** A field a user types into: a text-like input or a textarea. */
+function typedField(r: StyleRecord): boolean {
+  return r.tag === "textarea" || (r.tag === "input" && TYPED_INPUT_TYPES.has(r.inputType || "text"));
+}
+
+/**
+ * The layers of a computed box-shadow that draw something: a layer with no
+ * offset, blur or spread, or a transparent colour, paints nothing. Utility CSS
+ * stacks such placeholder layers (empty rings) in front of the real shadow on
+ * every element, so a census keyed on the raw value counts the placeholders.
+ * Returned in order, whitespace normalized; empty when nothing is drawn.
+ */
+export function shadowLayers(shadow: string): string[] {
+  const layers: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const ch of shadow) {
+    if (ch === "(") depth += 1;
+    if (ch === ")") depth = Math.max(0, depth - 1);
+    if (ch === "," && depth === 0) {
+      layers.push(current);
+      current = "";
+    } else current += ch;
+  }
+  layers.push(current);
+  return layers
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter((l) => {
+      if (!l || l === "none") return false;
+      const lengths = (l.match(/-?[0-9.]+px/g) ?? []).map(parseFloat);
+      if (lengths.every((n) => n === 0)) return false;
+      if (/\btransparent\b/.test(l)) return false;
+      const colour = l.match(/rgba?\([^)]*\)/);
+      return !(colour && parseRgb(colour[0])?.[3] === 0);
+    });
+}
+
+/** The elevation a box-shadow draws, as one key: its drawing layers. "" for none. */
+export function elevationKey(shadow: string): string {
+  return shadowLayers(shadow).join(", ");
+}
+
+/**
+ * The layer that tells one elevation from the others listed beside it: its
+ * first layer that not every other key has. Shown in place of the whole value,
+ * whose differences often begin past any width an example can be given.
+ */
+export function distinguishingLayer(key: string, others: readonly string[]): string {
+  const layers = shadowLayers(key);
+  const rest = others.filter((o) => o !== key).map(shadowLayers);
+  return layers.find((l) => rest.some((o) => !o.includes(l))) ?? layers[0] ?? "";
+}
+
+/**
+ * A colour with no hue family is a gray: neutral or tinted (a slate or a warm
+ * stone), the shades text and surfaces are built from. Near-white and
+ * near-black are left out, as before: every page has them.
+ */
+export function grayOf(rgb: [number, number, number]): boolean {
+  const avg = (rgb[0] + rgb[1] + rgb[2]) / 3;
+  return hueOf(rgb) === null && avg > 20 && avg < 245;
+}
+
+/**
+ * Grays counted as the steps of a scale: colours within GRAY_STEP of one in
+ * every channel are one step (a translucent text colour composited over two
+ * backgrounds lands a unit or two apart). Commonest first, each with its use count.
+ */
+export function grayCensus(colours: ReadonlyArray<[number, number, number]>): Array<{ rgb: [number, number, number]; n: number }> {
+  const freq = new Map<string, { rgb: [number, number, number]; n: number }>();
+  for (const c of colours) {
+    if (!grayOf(c)) continue;
+    const k = c.join(",");
+    const e = freq.get(k) ?? { rgb: c, n: 0 };
+    e.n += 1;
+    freq.set(k, e);
+  }
+  const steps: Array<{ rgb: [number, number, number]; n: number }> = [];
+  for (const e of [...freq.values()].sort((a, b) => b.n - a.n)) {
+    const near = steps.find((s) => s.rgb.every((v, i) => Math.abs(v - e.rgb[i]) <= GRAY_STEP));
+    if (near) near.n += e.n;
+    else steps.push({ ...e });
+  }
+  return steps.sort((a, b) => b.n - a.n);
+}
+
+/** How far apart, per channel, two grays may be and still be one step of a scale. */
+const GRAY_STEP = 4;
+
+/**
+ * The page's controls a screen-reader user cannot tell apart: fields and
+ * controls with no name, and fields whose only label is the placeholder. The
+ * snapshot's own predicates (collector.ts), over the snapshot's own name, so
+ * the audit and the snapshot agree on a page, except that a control the
+ * snapshot's rule leaves empty is named by its image content (contentName),
+ * as the accessible-name computation names it. Records with no name read are
+ * left out rather than guessed.
+ */
+export function unnamedControls(records: readonly StyleRecord[]): { unnamed: StyleRecord[]; placeholder: StyleRecord[] } {
+  const named = records.filter((r) => r.interactive && typeof r.name === "string");
+  const asSnapshot = (r: StyleRecord) => ({
+    role: r.role,
+    name: r.name || r.contentName || "",
+    nameFrom: r.nameFrom ?? null,
+    interactive: true,
+    ariaHidden: r.ariaHidden === true,
+  });
+  return {
+    unnamed: named.filter((r) => missingName(asSnapshot(r))),
+    placeholder: named.filter((r) => placeholderOnly(asSnapshot(r))),
+  };
 }
 
 /** Below the WCAG 2.2 target-size minimum; inline links are exempt by that rule. */
@@ -744,13 +944,15 @@ export function analyzeDesign(
       `→ buttons render at ${buttonHeights.length} different heights (${buttonHeights.slice(0, 8).join(", ")}px) — 1–2 control sizes read as a system`,
     );
   }
+  // Keyed on the layers that draw something (elevationKey); each example shows the layer that sets it apart.
   const shadows = new Map<string, number>();
-  for (const r of records) if (r.shadow) shadows.set(r.shadow, (shadows.get(r.shadow) ?? 0) + 1);
+  for (const r of records) {
+    const key = elevationKey(r.shadow);
+    if (key) shadows.set(key, (shadows.get(key) ?? 0) + 1);
+  }
   if (shadows.size > 4) {
-    const top = [...shadows.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([s]) => `"${s.slice(0, 40)}"`);
+    const keys = [...shadows.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k);
+    const top = keys.slice(0, 3).map((k) => `"${distinguishingLayer(k, keys.slice(0, 3)).slice(0, 60)}"`);
     consistency.push(`→ ${shadows.size} distinct box-shadow styles (${top.join(", ")}…) — an elevation system needs 2–3 levels, not one per component`);
   }
   if (consistency.length > 0) sections.push(`CONSISTENCY:\n` + consistency.map((s) => `  ${s}`).join("\n"));
@@ -763,19 +965,14 @@ export function analyzeDesign(
       `→ pure #000-on-#fff body text (${pureBlack.length} block(s), e.g. ${label(pureBlack[0])}) — near-black (rgb(23,23,23)-ish) reads softer at length`,
     );
   }
-  const grayFreq = new Map<string, number>();
   const hueFamilies = new Map<number, number>();
+  const colours: Array<[number, number, number]> = [];
   for (const r of records) {
     for (const c of [r.color, r.bg]) {
       const p = parseRgb(c);
       if (!p) continue;
       const rgb: [number, number, number] = [p[0], p[1], p[2]];
-      const spread = Math.max(...rgb) - Math.min(...rgb);
-      const avg = (rgb[0] + rgb[1] + rgb[2]) / 3;
-      if (spread <= 10 && avg > 20 && avg < 245) {
-        const key = rgb.join(",");
-        grayFreq.set(key, (grayFreq.get(key) ?? 0) + 1);
-      }
+      colours.push(rgb);
       const hue = hueOf(rgb);
       if (hue !== null) {
         const bucket = (Math.round(hue / 30) * 30) % 360;
@@ -783,12 +980,10 @@ export function analyzeDesign(
       }
     }
   }
-  if (grayFreq.size > 6) {
-    const top = [...grayFreq.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
-      .map(([k]) => `rgb(${k})`);
-    palette.push(`→ ${grayFreq.size} distinct grays (${top.join(", ")}…) — a deliberate gray scale runs 4–6 steps; near-duplicates suggest ad-hoc values`);
+  const grays = grayCensus(colours);
+  if (grays.length > 6) {
+    const top = grays.slice(0, 5).map((g) => `rgb(${g.rgb.join(",")})`);
+    palette.push(`→ ${grays.length} distinct grays (${top.join(", ")}…) — a deliberate gray scale runs 4–6 steps; near-duplicates suggest ad-hoc values`);
   }
   if (hueFamilies.size > 5) {
     const hues = [...hueFamilies.keys()].sort((a, b) => a - b);
@@ -854,6 +1049,25 @@ export function analyzeDesign(
     }
   }
   if (structure.length > 0) sections.push(`STRUCTURE:\n` + structure.map((s) => `  ${s}`).join("\n"));
+
+  // ---- 10b. NAMES: a control a screen reader cannot name, or a field labelled
+  //      only by a placeholder that disappears as the user types.
+  const names = unnamedControls(records);
+  const nameLines = [
+    ...names.unnamed.map(
+      (r) => `⚠ ${label(r)} — ${r.tag === "input" || r.tag === "select" || r.tag === "textarea" ? "field" : "control"} with no accessible name`,
+    ),
+    ...names.placeholder.map((r) => `⚠ ${label(r)} — labelled only by its placeholder, which is gone once the user types`),
+  ];
+  if (nameLines.length > 0) {
+    sections.push(
+      `NAMES (${nameLines.length}):\n` +
+        nameLines
+          .slice(0, 6)
+          .map((s) => `  ${s}`)
+          .join("\n"),
+    );
+  }
 
   // ---- 11. AFFORDANCES: keyboard focus visibility (trusted-Tab sampled engine-side) + indistinguishable links.
   const affordances: string[] = [];
@@ -997,14 +1211,14 @@ export function analyzeDesign(
   const summary =
     `SYSTEM SUMMARY: ${sizes.length} font sizes (≤7 healthy) · ${families.length} families (≤2) · ` +
     `${buttonRadii.length} button radii (1–2) · ${buttonHeights.length} button heights (1–3) · ${shadows.size} shadow styles (≤3) · ` +
-    `${grayFreq.size} grays (4–6) · ${hueFamilies.size} accent hue families (1–3 + status) · ${gridPct}% spacing on 4px grid · ` +
+    `${grays.length} grays (4–6) · ${hueFamilies.size} accent hue families (1–3 + status) · ${gridPct}% spacing on 4px grid · ` +
     `${page.density} interactive elements in first viewport${page.density > 40 ? " (dense — consider progressive disclosure)" : ""}`;
 
   // ---- Multi-indicator PAGE SCORE. Deductive: start at 100 per dimension,
   //      subtract per measured issue, floor at 0. Weights favour a11y and
   //      task clarity — a page can be pretty and still hard to use.
   const floor0 = (n: number): number => Math.max(0, Math.round(n));
-  const a11yScore = floor0(100 - contrastFails.length * 4 - focusless.length * 6 - tiny.length * 3);
+  const a11yScore = floor0(100 - contrastFails.length * 4 - focusless.length * 6 - tiny.length * 3 - names.unnamed.length * 6 - names.placeholder.length * 4);
   const craftScore = floor0(100 - readability.length * 4 - palette.length * 4 - slopTells.length * 5 - clipped.length * 3 - distorted.length * 4);
   const consistencyScore = floor0(
     100 -
