@@ -8,6 +8,7 @@ import { feedForSession } from "./live.js";
 import { buildReplayHtml, evidenceFor, type FindingEvidence, type ReplaySession } from "./replay.js";
 import { calibrate, formatCalibration } from "./calibration.js";
 import { formatPace, measurePace } from "./pace.js";
+import { formatNeverSubmittedEmpty } from "./forms.js";
 
 function playwrightSkeleton(f: Finding): string {
   const routeClass = f.state.split("#")[0].split("?")[0];
@@ -439,6 +440,46 @@ export function formatUnchosenOptions(dropdowns: ReadonlyArray<{ route: string; 
     "Dropdown options never chosen this run (each can change what the page asks the server for):",
     ...dropdowns.slice(0, 15).map((d) => `  ${d.route} ${d.key}: ${d.unchosen.map((o) => JSON.stringify(o)).join(", ")}`),
     ...(dropdowns.length > 15 ? [`  … +${dropdowns.length - 15} more`] : []),
+  ];
+}
+
+/**
+ * What scout_coverage prints, in one of two scopes. "session" is one lane's
+ * own remaining work: the routes it reached this run and the forms it saw.
+ * In a parallel run the project view lists every lane's gaps, including
+ * routes this lane never opened and forms its role cannot reach, and a lane
+ * reading those as its own either wastes turns on them or reports itself
+ * incomplete. "project" is everything the memory holds, each route and form
+ * tagged with the sessions that reached it this run. `routeLine` is the
+ * route contract's line (formatRouteCoverage), which is the role's either way.
+ */
+export function coverageView(memory: MemoryStore, session: string, scope: "session" | "project", routeLine: string): string[] {
+  const routes = scope === "session" ? memory.routesVisitedBy(session) : null;
+  const cov = memory.coverage(routes ? { routes } : undefined);
+  const inScope = (route: string): boolean => routes === null || routes.has(route);
+  const tag = (route: string): string => {
+    if (routes) return "";
+    const by = memory.sessionsOnRoute(route);
+    return by.length > 0 ? ` (this run: ${by.join(", ")})` : "";
+  };
+  const head =
+    routes === null
+      ? []
+      : routes.size === 0
+        ? [`Scope: session ${session}, which has reached no route this run yet. scope:"project" lists every session's coverage.`]
+        : [`Scope: session ${session} — the ${routes.size} route(s) it reached this run and the forms it saw. scope:"project" lists every session's.`];
+  return [
+    ...head,
+    `States known: ${cov.states} · Elements exercised: ${cov.elementsExercised}/${cov.elementsTotal}${cov.embeds.total > 0 ? ` (plus ${cov.embeds.exercised}/${cov.embeds.total} inside other sites' frames, not counted)` : ""}`,
+    routeLine,
+    `Unexercised elements by route:`,
+    ...cov.unexercised
+      .slice(0, 25)
+      .map((u) => `  ${u.state}: ${u.keys.slice(0, 6).join(", ")}${u.keys.length > 6 ? ` … +${u.keys.length - 6}` : ""}${tag(u.state)}`),
+    ...formatUnchosenOptions(memory.unchosenOptions().filter((d) => inScope(d.route))),
+    ...formatNeverSubmittedEmpty(
+      routes ? memory.formsNeverSubmittedEmpty(session).map(({ route, key }) => ({ route, key })) : memory.formsNeverSubmittedEmpty(),
+    ),
   ];
 }
 

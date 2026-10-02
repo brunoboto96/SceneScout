@@ -66,7 +66,7 @@ import {
 } from "./collector.js";
 import { OracleMonitor, formatViolations, httpErrorDetail, requestKey } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
-import { formatJourney, measureJourney } from "./journey.js";
+import { formatJourney, journeyTime, measureJourney } from "./journey.js";
 import {
   describeStep,
   FLOW_AFTER_LAST_STEP_MS,
@@ -83,7 +83,21 @@ import {
 } from "./flow.js";
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { describePace, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
-import { buildRequestScript, formatReplay, replaySignature, requestHeaders, resolveMethod, resolveRequestUrl, toReplayResult } from "./request.js";
+import { crawledRoute, crawlLine } from "./crawl.js";
+import {
+  BODY_FETCH_MAX,
+  buildRequestScript,
+  formatPageRequests,
+  formatReplay,
+  PageRequests,
+  replaySignature,
+  requestHeaders,
+  resolveMethod,
+  resolveRequestUrl,
+  toReplayResult,
+  wantsView,
+  type BodyView,
+} from "./request.js";
 import {
   defaultEngine,
   focusAdvanceKey,
@@ -99,7 +113,7 @@ import { revealedLines } from "./hover.js";
 import {
   FORMS_INVENTORY_SCRIPT,
   FORM_PROBE_BODY,
-  formProbeExpression,
+  FORM_PROBE_OF_ACTIVE_ELEMENT,
   formIdentity,
   formStatus,
   FORMS_READ_FAILED,
@@ -683,6 +697,33 @@ export class BrowserEngine {
   }
   /** Design audits run by this session. The report gate counts the whole run's, on the shared store (MemoryStore.auditsThisRun). */
   designAuditCount = 0;
+  /** The data requests the driven page made since its document loaded (scout_network). */
+  private readonly pageRequests = new PageRequests();
+
+  /** Add a fetch/XHR to the page's request list when the driven page (any of its frames) sent it. */
+  private notePageRequest(req: import("playwright").Request): void {
+    let fromPage = false;
+    try {
+      fromPage = !!this.page && req.frame().page() === this.page;
+    } catch {
+      /* a service worker's request has no frame: not the page's */
+    }
+    if (!fromPage) return;
+    let route = "";
+    try {
+      route = new URL(this.page!.url()).pathname;
+    } catch {
+      /* about:blank and the like have no route */
+    }
+    this.pageRequests.started(req, { method: req.method(), url: req.url(), route, at: Date.now() });
+  }
+
+  /** The data requests the page made since it loaded, as scout_network lists them. */
+  listPageRequests(opts: { limit?: number; contains?: string } = {}): string {
+    this.requirePage();
+    return formatPageRequests(this.pageRequests.snapshot, { now: Date.now(), ...opts });
+  }
+
   /** Active task-efficiency measurement (scout_journey), if any. */
   private journey: { goal: string; startedAt: number; fromLog: number; startUrl: string } | null = null;
   /** The session's objective: the whole remit the agent was given at scout_attach. Empty when none was given. */
@@ -722,7 +763,7 @@ export class BrowserEngine {
    * the fetch with its stand-in 403, and the result says so rather than
    * printing it as the server's status.
    */
-  async apiRequest(input: { method?: string; path: string; body?: string; headers?: Record<string, string> }): Promise<string> {
+  async apiRequest(input: { method?: string; path: string; body?: string; headers?: Record<string, string>; view?: BodyView }): Promise<string> {
     const page = this.requirePage();
     const method = resolveMethod(input.method);
     if ("problem" in method) return `REFUSED: ${method.problem}`;
@@ -734,6 +775,7 @@ export class BrowserEngine {
       method: method.method,
       body: input.body,
       headers: requestHeaders({ given: input.headers, auth: this.lastAuthHeader, body: input.body }),
+      ...(wantsView(input.view) ? { keep: BODY_FETCH_MAX } : {}),
     });
     let raw: Parameters<typeof toReplayResult>[0];
     // Claimed by the first matching request the page sends (the request
@@ -742,6 +784,7 @@ export class BrowserEngine {
     this.oracles.replayStarted(target.url);
     try {
       raw = (await page.evaluate(script)) as Parameters<typeof toReplayResult>[0];
+      this.pageRequests.markReplay(method.method, target.url);
     } catch (err) {
       // The page could not run the fetch at all (a navigation mid-call, a
       // closed page). The policy answers rather than rejects, so this is not it.
@@ -753,7 +796,7 @@ export class BrowserEngine {
       this.oracles.replayEnded(target.url);
       for (const hop of this.replayHops.splice(0)) this.oracles.replayEnded(hop);
     }
-    const result = toReplayResult(raw);
+    const result = toReplayResult(raw, input.view);
     this.logAction({
       action: "request",
       target: `${method.method} ${input.path}`,
@@ -905,7 +948,11 @@ export class BrowserEngine {
     // role in a multi-role run, so a concurrent session navigating during this
     // journey would otherwise contaminate its path, screen count, and backtracks.
     const log = (this.memory?.actionLog ?? []).slice(j.fromLog).filter((e) => (e.session ?? this.sessionKey) === this.sessionKey);
-    const seconds = Math.round((Date.now() - j.startedAt) / 1000);
+    const time = journeyTime(
+      j.startedAt,
+      log.map((e) => Date.parse(e.at)),
+      Date.now(),
+    );
 
     const measured = measureJourney(log, completed);
 
@@ -918,7 +965,7 @@ export class BrowserEngine {
       /* fact recording is best-effort */
     }
     this.logAction({ action: JOURNEY_END, target: j.goal, url: page.url(), result: completed ? "completed" : "abandoned" });
-    return formatJourney({ goal: j.goal, completed, seconds, note }, measured);
+    return formatJourney({ goal: j.goal, completed, time, note }, measured);
   }
   /** Whether the browser window is visible — headed hover results carry a physical-cursor caveat. */
   private headed = false;
@@ -1317,16 +1364,21 @@ export class BrowserEngine {
     this.context.on("requestfailed", (req) => {
       this.inFlight = Math.max(0, this.inFlight - 1);
       this.watchResponse(req, null);
+      this.pageRequests.failed(req, req.failure()?.errorText ?? "", Date.now(), this.refusedByAnyPolicy(req));
     });
     this.context.on("response", (res) => {
       this.watchResponse(res.request(), res.status());
+      this.pageRequests.answered(res.request(), res.status(), Date.now(), this.refusedByAnyPolicy(res.request()));
     });
     this.context.on("request", (req) => {
       // Who moved the driven page, decided on its navigation's first request
       // (this event fires before the route handler judges that page's writes).
       if (req.isNavigationRequest() && !req.redirectedFrom()) {
         try {
-          if (this.page && req.frame() === this.page.mainFrame()) this.embedMoves.navigationStarted(req.url(), req.headers()["referer"], this.embeddedSites());
+          if (this.page && req.frame() === this.page.mainFrame()) {
+            this.embedMoves.navigationStarted(req.url(), req.headers()["referer"], this.embeddedSites());
+            this.pageRequests.loaded(req.url(), Date.now());
+          }
         } catch {
           /* no frame: not the driven page */
         }
@@ -1336,7 +1388,10 @@ export class BrowserEngine {
       this.requestStartedAt.set(req, this.lastRequestStart);
       this.claimReplay(req);
       const type = req.resourceType();
-      if (type === "xhr" || type === "fetch") this.xhrCount += 1;
+      if (type === "xhr" || type === "fetch") {
+        this.xhrCount += 1;
+        this.notePageRequest(req);
+      }
       const method = req.method();
       if (method === "GET" || method === "HEAD" || method === "OPTIONS") return;
       // Infrastructure POSTs (token refresh, telemetry) are not state the
@@ -2030,8 +2085,9 @@ export class BrowserEngine {
       normalizePath(url),
       trackedElements(elements).map((el) => el.key),
       inertKeys(elements),
+      this.sessionKey,
     );
-    for (const f of forms) this.memory?.recordForm(fp, f.key, f.guarded);
+    for (const f of forms) this.memory?.recordForm(fp, f.key, f.guarded, this.sessionKey);
     return { fp, elements, url };
   }
 
@@ -2121,8 +2177,9 @@ export class BrowserEngine {
       route,
       trackedElements(elements).map((el) => el.key),
       inertKeys(elements),
+      this.sessionKey,
     );
-    for (const f of forms) memory.recordForm(fp, f.key, f.guarded);
+    for (const f of forms) memory.recordForm(fp, f.key, f.guarded, this.sessionKey);
     memory.recordRoleAccess(this.role, route, "reached");
     // A snapshot is what an agent takes when it wants to LOOK at something, so
     // it is the frame a reader most wants beside the step. Recording only the
@@ -2809,7 +2866,7 @@ export class BrowserEngine {
 
   /** The form the focused element belongs to, for a key press that may submit through it. */
   private probeFocusedForm(): Promise<FormProbe | null> {
-    return this.formRead("form probe", this.requirePage().evaluate(formProbeExpression("document.activeElement")) as Promise<FormProbe | null>);
+    return this.formRead("form probe", this.requirePage().evaluate(FORM_PROBE_OF_ACTIVE_ELEMENT) as Promise<FormProbe | null>);
   }
 
   /**
@@ -4258,7 +4315,8 @@ export class BrowserEngine {
     const page = this.requirePage();
     const memory = this.memory!;
     this.crawlHealth = [];
-    const targets = (paths && paths.length > 0 ? paths : this.crawlableRoutes().map((r) => this.navigablePath(r))).slice(0, Math.min(150, opts.limit ?? 150));
+    const explicit = !!paths && paths.length > 0;
+    const targets = (explicit ? paths : this.crawlableRoutes().map((r) => this.navigablePath(r))).slice(0, Math.min(150, opts.limit ?? 150));
     if (targets.length === 0) {
       const failed = this.unvisitedKnownRoutes().filter((r) => this.loadFailedRoutes.has(normalizePath(r)));
       if (failed.length > 0) {
@@ -4340,8 +4398,9 @@ export class BrowserEngine {
           route,
           trackedElements(elements).map((el) => el.key),
           inertKeys(elements),
+          this.sessionKey,
         );
-        for (const f of forms) memory.recordForm(fp, f.key, f.guarded);
+        for (const f of forms) memory.recordForm(fp, f.key, f.guarded, this.sessionKey);
         memory.recordRoleAccess(this.role, route, "reached");
       }
       // If we landed somewhere else (auth wall, canonical redirect), the
@@ -4395,15 +4454,13 @@ export class BrowserEngine {
       const main = await this.readMainRegion(page);
 
       const flags = [loginRedirect ? "AUTH-REDIRECT" : null, deadEnd ? "DEAD-END" : null, violations.length > 0 ? `${violations.length}⚠` : null].filter(
-        Boolean,
+        (f): f is string => f !== null,
       );
-      summary.push(
-        `${path} — ${status} · ${trackedElements(elements).length} el` +
-          (main ? ` · ${mainRegionTag(main)}` : "") +
-          (missingTestid ? ` · ${missingTestid} no-testid` : "") +
-          (unnamed ? ` · ${unnamed} unnamed` : "") +
-          (flags.length ? ` · ${flags.join(" ")}` : ""),
-      );
+      const outcome = { path, status, requestedRoute, landedRoute: route, loginRedirect, deadEnd };
+      summary.push(crawlLine(outcome, { elements: trackedElements(elements).length, missingTestid, unnamed, main: main ? mainRegionTag(main) : null }, flags));
+      // A path asked for by name joins the route contract once it answered as a page (crawl.ts crawledRoute).
+      const joined = explicit && !opts.measureOnly ? crawledRoute(outcome) : null;
+      if (joined) memory.addDiscoveredRoutes([{ route: joined, example: path }]);
       if (violations.length > 0 || deadEnd || loginRedirect || (typeof status === "number" && status >= 400)) {
         const detail = violations
           .slice(0, 3)
@@ -4647,8 +4704,9 @@ export class BrowserEngine {
               normalizePath(url),
               trackedElements(elements).map((el) => el.key),
               inertKeys(elements),
+              this.sessionKey,
             );
-            for (const f of forms) this.memory!.recordForm(fp, f.key, f.guarded);
+            for (const f of forms) this.memory!.recordForm(fp, f.key, f.guarded, this.sessionKey);
             this.memory!.recordRoleAccess(this.role, normalizePath(url), "reached");
             lastCapture = { fp, elements, url };
             // …but mark the acted-on element in the state it came FROM, using
