@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>History</title>
+  </head>
+  <body>
+    <!--
+      claims-columns.html with one difference: "Updated on" is a paragraph,
+      not a column header. As free text after a refused write it reads as the
+      page saying the change was kept.
+    -->
+    <h1>History</h1>
+    <button data-testid="history-show-button" onclick="show()">Show history</button>
+    <div data-testid="history-area"></div>
+    <script>
+      const AS_HEADER = false;
+      async function show() {
+        await fetch("/api/refuse/403?history=viewed", { method: "POST" }).catch(() => {});
+        document.querySelector("[data-testid=history-area]").innerHTML = AS_HEADER
+          ? '<table><thead><tr><th>Name</th><th aria-sort="none"><button>Updated on</button></th></tr></thead><tbody><tr><td>w1</td><td>today</td></tr></tbody></table>'
+          : '<p>Updated on</p><table><thead><tr><th>Name</th><th>When</th></tr></thead><tbody><tr><td>w1</td><td>today</td></tr></tbody></table>';
+      }
+    </script>
+  </body>
+</html>

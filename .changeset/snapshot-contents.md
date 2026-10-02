@@ -1,0 +1,5 @@
+---
+"scenescout": minor
+---
+
+Snapshots say more about the page. Alert and status regions are listed by their text whether or not they carry a test id, and the diff reports a region that says something new. Controls show their state (`pressed`, `selected`, `checked`, `expanded`, `current`) and the diff reports it moving; the per-control `done` marker is now `exercised`. A `main:` line summarises the main area's heading and static text, or says `main: EMPTY`, and crawl lines carry the same count. Accessible names follow the accessible-name computation's order: wrapping labels and `title` name a control, a button-like input is named by its value, and a select is never named by its options. Elements listed only for a test id (wrappers, headings, decorative badges) are no longer counted as unnamed controls or in the coverage denominator, and nothing inside an `aria-hidden` subtree is counted as unnamed. Controls held outside the visible width of a horizontally scrolling container are reported once per container, under the new worth-a-look check rule `scrolled-out-controls`.

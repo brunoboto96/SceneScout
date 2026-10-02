@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Snapshot: what the page announces</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; }
+    [role="alert"], [role="status"] { margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <!-- A save that fails and says so. The banner that explains the failure
+       carries no test id; the field-error summary beside it does. The banner
+       starts empty and is filled by the click, so the snapshot before it is
+       the contrast: an empty live region, never a named alert. The status line
+       starts with text and changes it, which the diff must report as the same
+       region saying something new. -->
+  <main>
+    <h1>Edit record</h1>
+    <form onsubmit="return false">
+      <label for="title">Title</label>
+      <input id="title" name="title" data-testid="alert-title-input">
+      <button type="button" id="save">Save record</button>
+    </form>
+    <div role="alert" id="banner"></div>
+    <div role="alert" data-testid="alert-field-summary">1 field needs attention</div>
+    <p aria-live="polite" id="draft">No changes yet</p>
+  </main>
+  <script>
+    document.getElementById("save").addEventListener("click", () => {
+      document.getElementById("banner").textContent = "Could not save";
+      document.getElementById("draft").textContent = "Draft kept on this device";
+    });
+  </script>
+</body>
+</html>

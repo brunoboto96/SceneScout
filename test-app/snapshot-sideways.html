@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Snapshot: controls scrolled out sideways</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; }
+    .wrap { width: 600px; overflow-x: auto; border: 1px solid #ccc; margin-bottom: 24px; }
+    table { border-collapse: collapse; }
+    td { padding: 4px; }
+    .wide table { width: 1200px; }
+    .narrow table { width: 500px; }
+  </style>
+</head>
+<body>
+  <!-- Two 600px scrolling wrappers around the same table with a row action in
+       its last column. In the first the table is 1200px wide, so the actions
+       sit outside the visible width; in the second it is 500px and fits. The
+       third is as wide as the first, but its hidden column holds only cells
+       tagged with test ids, which are not controls. -->
+  <main>
+    <h1>Orders</h1>
+    <div class="wrap wide" data-testid="sideways-wide">
+      <table>
+        <tr><td>1001</td><td>Placed</td><td>2 items</td><td>Standard</td><td><button type="button">Edit</button></td></tr>
+        <tr><td>1002</td><td>Shipped</td><td>1 item</td><td>Express</td><td><button type="button">Edit</button></td></tr>
+        <tr><td>1003</td><td>Placed</td><td>4 items</td><td>Standard</td><td><button type="button">Edit</button></td></tr>
+      </table>
+    </div>
+    <div class="wrap narrow" data-testid="sideways-narrow">
+      <table>
+        <tr><td>2001</td><td>Placed</td><td>2 items</td><td>Standard</td><td><button type="button">View</button></td></tr>
+        <tr><td>2002</td><td>Shipped</td><td>1 item</td><td>Express</td><td><button type="button">View</button></td></tr>
+        <tr><td>2003</td><td>Placed</td><td>4 items</td><td>Standard</td><td><button type="button">View</button></td></tr>
+      </table>
+    </div>
+    <div class="wrap wide" data-testid="sideways-tagged">
+      <table>
+        <tr><td>3001</td><td>Placed</td><td>2 items</td><td>Standard</td><td data-testid="tagged-total-1">12.00</td></tr>
+        <tr><td>3002</td><td>Shipped</td><td>1 item</td><td>Express</td><td data-testid="tagged-total-2">8.50</td></tr>
+      </table>
+    </div>
+  </main>
+</body>
+</html>

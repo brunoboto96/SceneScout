@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Your account</title>
+    <link rel="stylesheet" href="/rc-static/app.css" />
+  </head>
+  <body>
+    <!--
+      Served at /rc-app. Its refresh token is an HttpOnly cookie the page never
+      sees; its access token is in localStorage. It loads four scripts, a
+      stylesheet and an image, and fires twelve plain GETs at once, and says
+      whether all of it arrived: with a refresh cookie scoped to "/", every one
+      of those requests carries the refresh token. It asks /rc-api/me who is
+      signed in and, on a 401, refreshes once with a POST that carries nothing
+      but the cookie, then asks again. The fixture server revokes the whole
+      token family when a refresh token is presented a second time.
+    -->
+    <main>
+      <h1 data-testid="account-heading">Checking your session</h1>
+      <p id="rc-styled" data-testid="account-styled">Styled by the app's stylesheet</p>
+      <img id="rc-mark" data-testid="account-mark" src="/rc-static/mark.svg" alt="App mark" width="8" height="8" />
+      <p data-testid="account-assets">Loading the app</p>
+    </main>
+    <script src="/rc-static/s1.js"></script>
+    <script src="/rc-static/s2.js"></script>
+    <script src="/rc-static/s3.js"></script>
+    <script src="/rc-static/s4.js"></script>
+    <script>
+      const heading = document.querySelector("h1");
+      const assets = document.querySelector('[data-testid="account-assets"]');
+      const me = () => fetch("/rc-api/me", { headers: { authorization: `Bearer ${localStorage.getItem("rc_access") || ""}` } });
+      const burst = Promise.all(
+        Array.from({ length: 12 }, (_, i) =>
+          fetch(`/rc-api/items?i=${i}`).then(
+            (r) => r.ok,
+            () => false,
+          ),
+        ),
+      );
+      const loaded = new Promise((resolve) => (document.readyState === "complete" ? resolve() : window.addEventListener("load", resolve)));
+      (async () => {
+        let res = await me();
+        if (res.status === 401) {
+          const refreshed = await fetch(localStorage.getItem("rc_refresh_url") || "/rc-auth/refresh", { method: "POST" }).catch(() => null);
+          if (refreshed && refreshed.ok) {
+            localStorage.setItem("rc_access", (await refreshed.json()).access_token);
+            res = await me();
+          }
+        }
+        heading.textContent = res.ok ? "Signed in as a member" : "You are signed out";
+      })();
+      (async () => {
+        const [requests] = await Promise.all([burst, loaded]);
+        const img = document.getElementById("rc-mark");
+        const styled = getComputedStyle(document.getElementById("rc-styled")).color === "rgb(10, 20, 30)";
+        const scripts = window.rcScripts || 0;
+        const answered = requests.filter(Boolean).length;
+        const whole = scripts === 4 && styled && img.complete && img.naturalWidth > 0 && answered === 12;
+        assets.textContent = whole
+          ? "App loaded: 4 scripts, its stylesheet, its image and 12 requests"
+          : `App incomplete: ${scripts} of 4 scripts, stylesheet ${styled ? "applied" : "missing"}, image ${img.naturalWidth > 0 ? "shown" : "missing"}, ${answered} of 12 requests`;
+      })();
+    </script>
+  </body>
+</html>

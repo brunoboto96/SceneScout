@@ -126,6 +126,90 @@ export class EmbedRequestLog {
   }
 }
 
+/** How long after a replay ends the browser's console echo of its failure is still taken for the replay's. */
+export const REPLAY_ECHO_WINDOW_MS = 2000;
+
+/**
+ * Addresses the tester is calling with scout_request, so the browser's console
+ * echo of a refused probe ("Failed to load resource: … 403") is known as the
+ * tester's and not charged to the page. The request itself is matched by
+ * identity in the monitor; the echo carries only an address, so it is matched
+ * by address while the replay is in flight and for a short window after, which
+ * is when the browser prints it. Bounded, dropping the oldest.
+ */
+export class ReplayLog {
+  /** Address → until when an echo of it is the replay's (Infinity while in flight). */
+  private until = new Map<string, number>();
+  constructor(private readonly cap = 200) {}
+
+  begin(url: string): void {
+    const key = requestKey(url);
+    this.until.delete(key);
+    this.until.set(key, Infinity);
+    if (this.until.size > this.cap) this.until.delete(this.until.keys().next().value as string);
+  }
+
+  end(url: string, now: number): void {
+    const key = requestKey(url);
+    if (this.until.has(key)) this.until.set(key, now + REPLAY_ECHO_WINDOW_MS);
+  }
+
+  /** Whether a console message is the browser's echo of a replay's failed load. */
+  echoes(text: string, locationUrl: string | undefined, pageUrl: string, now: number): boolean {
+    const key = failedLoadEchoOf(text, locationUrl, pageUrl);
+    if (key === null) return false;
+    const until = this.until.get(key);
+    if (until === undefined) return false;
+    if (now > until) {
+      this.until.delete(key);
+      return false;
+    }
+    return true;
+  }
+}
+
+/**
+ * Wording of a router cancelling a route change on purpose. Some client-side
+ * routers can only stop a navigation (to keep a dirty form, say) by throwing
+ * from their route-change event, and the apps that use them filter this
+ * sentinel out of their own error monitoring. Narrow on purpose: it must name
+ * the route and the cancelling.
+ */
+const ROUTE_CANCEL_RE = /\brout(?:e|ing)\b.{0,40}\b(?:abort|cancel)|\b(?:abort|cancel)\w*\b.{0,40}\brout(?:e|ing)\b/i;
+
+/** What the engine knows about the action a page error was raised in. */
+export interface PageErrorContext {
+  /** The error was raised during a click. */
+  byClick: boolean;
+  /** The click was on a link: a route change was asked for. */
+  viaLink: boolean;
+  /** The URL the action settled on differs from the one it started on. */
+  urlChanged: boolean;
+  /** A dialog (native, or role=dialog/alertdialog) opened during the action. */
+  dialogOpened: boolean;
+}
+
+/**
+ * Is this uncaught page error a router deliberately cancelling a route change,
+ * rather than a crash? Only for a click that left the URL where it was, and
+ * then only when the message says so, or when the click asked for a route
+ * change and the page put up a confirmation instead. Still reported, at
+ * medium with a note: the error is real and uncaught, but the user never sees
+ * it, and ranking it with crashes made every such page argue it away.
+ */
+export function isRouteCancellation(message: string, c: PageErrorContext): boolean {
+  if (!c.byClick || c.urlChanged) return false;
+  return ROUTE_CANCEL_RE.test(message) || (c.viaLink && c.dialogOpened);
+}
+
+/** Appended to a page error read as a route-change cancellation, saying which evidence it was read on. */
+export function routeCancelNote(message: string): string {
+  const why = ROUTE_CANCEL_RE.test(message)
+    ? "the click left the URL unchanged and the error says the route change was cancelled"
+    : "the click on a link left the URL unchanged and the page opened a dialog instead";
+  return ` (likely a router cancelling the route change on purpose: ${why}; reported at medium, check what the page showed before filing)`;
+}
+
 /**
  * Invariant oracles: passive listeners that record violations regardless of
  * what the agent is doing. The engine drains the buffer after every action and
@@ -143,6 +227,11 @@ export class OracleMonitor {
       const text = msg.text();
       // Benign noise: failed favicon / source map fetches show up as console errors.
       if (/favicon|source map/i.test(text)) return;
+      // The browser's echo of the tester's own scout_request: its answer was in that tool's result.
+      if (this.replays.echoes(text, msg.location().url, page.url(), Date.now())) {
+        this.replayAttributed += 1;
+        return;
+      }
       this.record({
         kind: "console_error",
         severity: "high",
@@ -170,6 +259,10 @@ export class OracleMonitor {
       // Aborted requests are routine during SPA navigation.
       if (failure.includes("ERR_ABORTED")) return;
       if (BENIGN_URL_RE.test(req.url())) return;
+      if (this.isReplay(req)) {
+        this.replayAttributed += 1;
+        return;
+      }
       if (this.refusedByPolicy(req)) {
         this.policyAttributed += 1;
         return;
@@ -189,6 +282,12 @@ export class OracleMonitor {
       // Keep this filter consistent with the console oracle: a missing favicon
       // reported here on every page load teaches the driver to ignore http_error.
       if (BENIGN_URL_RE.test(res.url())) return;
+      // The tester's own scout_request: a probe of a boundary is meant to be
+      // refused, and its answer was in that tool's result, not the page's.
+      if (this.isReplay(res.request())) {
+        this.replayAttributed += 1;
+        return;
+      }
       // The write policy's own stand-in refusal, matched by request identity
       // like a dropped one: the server never said this.
       if (this.refusedByPolicy(res.request())) {
@@ -227,6 +326,48 @@ export class OracleMonitor {
    * errors look the same.
    */
   policyAttributed = 0;
+
+  private isReplay: (req: Request) => boolean = () => false;
+  private readonly replays = new ReplayLog();
+  /** Failures of the tester's own scout_request calls, kept out of the page's violations and counted. */
+  replayAttributed = 0;
+
+  /**
+   * The engine knows which requests are its own scout_request replays, by
+   * identity; their failures are the tester's probes, not the page's.
+   */
+  setReplayCheck(check: (req: Request) => boolean): void {
+    this.isReplay = check;
+  }
+
+  /** A scout_request call to this address is starting: the browser's echo of its failure is the tester's. */
+  replayStarted(url: string): void {
+    this.replays.begin(url);
+  }
+
+  /** That call has returned; its echo is still expected for a short window. */
+  replayEnded(url: string): void {
+    this.replays.end(url, Date.now());
+  }
+
+  /** Whether a page error was recorded since `since` (ms) and not yet drained. */
+  hasPageErrorSince(since: number): boolean {
+    return this.buffer.some((v) => v.kind === "page_error" && Date.parse(v.at) >= since);
+  }
+
+  /**
+   * Re-rank the page errors this click raised that read as a router
+   * cancelling a route change (isRouteCancellation). Done before the drain, so
+   * the action's result, the session log and the report all see one verdict.
+   */
+  downgradeRouteCancellations(since: number, c: PageErrorContext): void {
+    for (const v of this.buffer) {
+      if (v.kind !== "page_error" || v.severity !== "high" || Date.parse(v.at) < since) continue;
+      if (!isRouteCancellation(v.detail, c)) continue;
+      v.severity = "medium";
+      v.detail += routeCancelNote(v.detail);
+    }
+  }
 
   private embedOfRequest: (req: Request) => string | null = () => null;
   private embedRequests = new EmbedRequestLog();
@@ -269,7 +410,7 @@ export class OracleMonitor {
    * it is reported through here rather than by a page event.
    */
   noteContradiction(c: Contradiction, url: string): void {
-    this.record({ kind: c.kind, severity: "high", detail: c.detail, url });
+    this.record({ kind: c.kind, severity: c.severity ?? "high", detail: c.detail, url });
   }
 
   /**

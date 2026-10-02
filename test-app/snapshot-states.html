@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Snapshot: names and states</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; }
+    button { margin: 4px; padding: 6px 10px; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 4px; background: #2a7; }
+    svg { width: 16px; height: 16px; }
+  </style>
+</head>
+<body>
+  <!-- Pairs that differ in one fact each:
+       - two radios wrapped in labels against one with only a name attribute;
+       - an icon button with a title against one with neither text nor title;
+       - a select named by its label, whose options must not become its name;
+       - a decorative aria-hidden dot carrying a test id against the bare icon
+         button above, which is a real unnamed control;
+       - two filter pills, one pressed; a tab strip; a disclosure. Clicking the
+         other pill moves the pressed state, which the diff must report. -->
+  <main>
+    <h1>Names and states</h1>
+    <fieldset>
+      <legend>Format</legend>
+      <label><input type="radio" name="fmt" value="a"><span>Alpha</span></label>
+      <label><input type="radio" name="fmt" value="b" checked><span>Beta</span></label>
+      <input type="radio" name="fmt" value="c">
+    </fieldset>
+    <button type="button" title="Download file" data-testid="states-download"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M8 1v10M3 7l5 5 5-5"/></svg></button>
+    <button type="button" data-testid="states-bare"><svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg></button>
+    <label for="country">Country</label>
+    <select id="country" data-testid="states-country"><option>France</option><option>Spain</option></select>
+    <span class="dot" aria-hidden="true" data-testid="states-dot"></span>
+    <div data-testid="states-card"><h2>Card</h2></div>
+    <div role="group" aria-label="Filter">
+      <button type="button" aria-pressed="true" data-testid="filter-open">Open</button>
+      <button type="button" aria-pressed="false" data-testid="filter-closed">Closed</button>
+    </div>
+    <div role="tablist">
+      <button role="tab" aria-selected="true" data-testid="tab-summary">Summary</button>
+      <button role="tab" aria-selected="false" data-testid="tab-history">History</button>
+    </div>
+    <button type="button" aria-expanded="false" aria-controls="more" data-testid="states-more">More options</button>
+    <div id="more" hidden><p>Nothing else to set.</p></div>
+  </main>
+  <script>
+    for (const pill of document.querySelectorAll("[aria-pressed]")) {
+      pill.addEventListener("click", () => {
+        for (const other of document.querySelectorAll("[aria-pressed]")) other.setAttribute("aria-pressed", String(other === pill));
+      });
+    }
+    const more = document.querySelector("[aria-expanded]");
+    more.addEventListener("click", () => {
+      const open = more.getAttribute("aria-expanded") !== "true";
+      more.setAttribute("aria-expanded", String(open));
+      document.getElementById("more").hidden = !open;
+    });
+  </script>
+</body>
+</html>

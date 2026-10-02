@@ -25,7 +25,7 @@ A refused request is logged as `🛡 WRITE-POLICY blocked` in the tool result. T
 
 The server never sees a refused request, but the page's own `fetch` or XHR is answered with a `403` in the server's place rather than dropped. The page's handling of a refusal then really runs, which is useful: a page that shows an error is behaving correctly, and a page that claims "Saved" is lying to its user. That second case is reported as `false_success`, a high finding ([ADR 9](../adr/0009-a-refused-write-is-answered-not-dropped.md)).
 
-`scout_request`, which calls the app's API directly as the session, meets the same policy. A refused call returns `REFUSED by the write policy` instead of a status, because the server was never asked and the result proves nothing either way.
+`scout_request`, which calls the app's API directly as the session, meets the same policy. A refused call returns `REFUSED by the write policy` instead of a status, because the server was never asked and the result proves nothing either way. Whatever a `scout_request` call meets, its answer is in that tool's result and nowhere else: a probe the server refuses is not reported as an `http_error` or `console_error` of the page the session visits next.
 
 ## How `safe-write` knows what the run created
 

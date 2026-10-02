@@ -85,7 +85,7 @@ npx -y scenescout check http://127.0.0.1:3000 --fail-on high
 
 It writes `report.md`, `check.json` and `check.sarif` to `.scenescout/check/` (or `--out`), and on GitHub Actions appends the report to the job summary.
 
-**What it measures.** HTTP and page errors, failed requests, a page that shows an empty list after a refused request or success after a refused save, layout geometry (covered, clipped, off-page and overlapping controls, blocking overlays, misplaced dialogs), broken images, unnamed controls, fields labelled only by a placeholder, contrast, focus indicators, small targets, sideways scrolling and dead ends. Each rule has a severity; the [configuration reference](Configuration-reference.md#check-rules) lists them.
+**What it measures.** HTTP and page errors, failed requests, a page that shows an empty list after a refused request or success after a refused save, layout geometry (covered, clipped, off-page and overlapping controls, blocking overlays, misplaced dialogs, and, as worth a look, controls held out of view in a sideways-scrolling container), broken images, unnamed controls, fields labelled only by a placeholder, contrast, focus indicators, small targets, sideways scrolling and dead ends. Each rule has a severity; the [configuration reference](Configuration-reference.md#check-rules) lists them.
 
 **The gate.** By default (`--fail-on high`) it fails only on facts that mean a page is broken: a page that did not load, an uncaught exception, a 5xx, a failure shown as success, a saved flow that broke. `--fail-on medium` or `low` is stricter; `never` reports without failing. `--ignore <rule>` drops a rule.
 
