@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   describePace,
+  InFlightRequests,
   keepWatchingUrl,
   normalizePace,
   PACE_MAX_MS,
@@ -113,4 +114,86 @@ test("a page redirecting in a loop does not hold up the run", () => {
   assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: URL_CAP_MS }), false);
   assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: URL_CAP_MS - 1 }), true);
   assert.ok(URL_QUIET_MS < URL_CAP_MS, "the cap must be reachable");
+});
+
+// ── which requests are in flight ─────────────────────────────────────────────
+// A request whose document goes away after its headers arrived and before its
+// body did gets neither a finished nor a failed event. Counted as a plain
+// number, it stayed in flight forever and held every later wait to the cap.
+
+const tracker = () => new InFlightRequests<string, string>();
+
+test("requests are counted in and out by their own events", () => {
+  const t = tracker();
+  t.started("a", "main", false);
+  t.started("b", "main", false);
+  assert.equal(t.count, 2);
+  t.ended("a");
+  assert.equal(t.count, 1);
+  t.ended("a");
+  assert.equal(t.count, 1, "an end seen twice counts out once");
+  t.ended("b");
+  assert.equal(t.count, 0);
+});
+
+test("a frame that is removed takes its requests with it, and only its own", () => {
+  const t = tracker();
+  t.started("frame-fetch", "child", false);
+  t.started("page-fetch", "main", false);
+  t.started("worker-fetch", undefined, false);
+  t.gone((f) => f === "child");
+  assert.equal(t.count, 2);
+  t.ended("frame-fetch");
+  assert.equal(t.count, 2, "a late end for a dropped request does not count out another one");
+});
+
+test("a page that closes drops every frame it held", () => {
+  const t = tracker();
+  t.started("a", "page1/main", false);
+  t.started("b", "page1/child", false);
+  t.started("c", "page2/main", false);
+  t.gone((f) => f.startsWith("page1/"));
+  assert.equal(t.count, 1);
+});
+
+test("a frame that commits a navigation drops what its old document left, not what came after", () => {
+  const t = tracker();
+  t.started("old-fetch", "child", false);
+  t.started("navigation", "child", true);
+  t.started("other-frame", "main", false);
+  t.navigated("child");
+  assert.equal(t.count, 2, "the navigation itself and the other frame's request stay");
+  t.started("new-fetch", "child", false);
+  t.ended("navigation");
+  assert.equal(t.count, 2);
+  t.navigated("child");
+  assert.equal(t.count, 2, "a later same-document change drops nothing the new document sent");
+});
+
+test("a same-document navigation (no navigation request) drops nothing", () => {
+  const t = tracker();
+  t.started("spa-fetch", "main", false);
+  t.navigated("main");
+  assert.equal(t.count, 1);
+});
+
+test("a navigation that failed is not the one a later same-document change is measured against", () => {
+  const t = tracker();
+  t.started("spa-fetch", "main", false);
+  t.started("refused-navigation", "main", true);
+  t.ended("refused-navigation", true);
+  t.navigated("main");
+  assert.equal(t.count, 1, "the fetch is still in flight and still waited for");
+});
+
+test("a redirect chain commits once, keeping the final hop", () => {
+  const t = tracker();
+  t.started("old-fetch", "main", false);
+  t.started("hop-1", "main", true);
+  t.ended("hop-1");
+  t.started("hop-2", "main", true);
+  t.navigated("main");
+  assert.equal(t.count, 1);
+  t.ended("hop-2");
+  assert.equal(t.count, 0);
 });
