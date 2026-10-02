@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawnSync } from "node:child_process";
 import { writeProfile } from "../dist/engine/profiles.js";
 import { revokeFixtureTokens, settle, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE, WAIT_MS } from "./smoke/harness.ts";
@@ -461,7 +461,9 @@ async function tokenGoneCheck(projectDir: string): Promise<void> {
 async function liveViewOffCheck(): Promise<void> {
   const fixture = await startFixtureServer();
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-liveoff-"));
-  const env = Object.fromEntries(Object.entries({ ...process.env, SCENESCOUT_LIVE: "off" }).filter((e): e is [string, string] => typeof e[1] === "string"));
+  const env = Object.fromEntries(
+    Object.entries({ ...process.env, SCENESCOUT_LIVE: "off", SCENESCOUT_OPEN: "none" }).filter((e): e is [string, string] => typeof e[1] === "string"),
+  );
   const client = new Client({ name: "ft-check-off", version: "0.0.1" });
   await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env }));
   try {
@@ -496,7 +498,11 @@ async function dedupJudgeEnvCheck(): Promise<void> {
     );
     const client = new Client({ name: "ft-check-dedup", version: "0.0.1" });
     await client.connect(
-      new StdioClientTransport({ command: "node", args: [serverPath], env: { ...base, SCENESCOUT_LIVE: "off", SCENESCOUT_DEDUP: "judge", ...extra } }),
+      new StdioClientTransport({
+        command: "node",
+        args: [serverPath],
+        env: { ...base, SCENESCOUT_LIVE: "off", SCENESCOUT_OPEN: "none", SCENESCOUT_DEDUP: "judge", ...extra },
+      }),
     );
     try {
       const replies: string[] = [];
@@ -529,10 +535,9 @@ async function dedupJudgeEnvCheck(): Promise<void> {
 }
 
 /**
- * The open setting, over the wire: an interactive client (one that declares
- * elicitation) on a machine with a display gets the live view opened on
- * attach and the report when it is written, once each; a client that is not
- * interactive gets neither. The platform opener is a stand-in script first on
+ * The open setting, over the wire: on a local desktop session, a client that
+ * declares nothing gets the live view opened on attach and the report when it
+ * is written, once each; under CI nothing opens. The platform opener is a stand-in script first on
  * PATH that writes down what it was handed, so no browser is launched.
  */
 async function openCheck(): Promise<void> {
@@ -559,29 +564,33 @@ async function openCheck(): Promise<void> {
     return read();
   };
   try {
-    const plain = new Client({ name: "ft-check-open-plain", version: "0.0.1" });
-    await plain.connect(new StdioClientTransport({ command: "node", args: [serverPath], env }));
+    // CI: nothing opens, and the attach says why and what changes it.
+    const ci = new Client({ name: "ft-check-open-ci", version: "0.0.1" });
+    await ci.connect(new StdioClientTransport({ command: "node", args: [serverPath], env: { ...env, CI: "true" } }));
     try {
-      const attached = textOf(await plain.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir } }));
-      if (attached.includes("Opened the live view") || !attached.includes("Not opened in a browser (a headless run with no interactive client)"))
-        fail(`a headless attach from a client that is not interactive opened the live view, or did not say why not:\n${attached}`);
-      await plain.callTool({ name: "scout_close", arguments: { all: true } });
+      const attached = textOf(await ci.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir } }));
+      if (attached.includes("Opened") || !attached.includes("Not opened in a browser (a CI run); scout_attach {open} or SCENESCOUT_OPEN changes that."))
+        fail(`a CI attach opened the live view, or did not say why not:\n${attached}`);
+      const reported = textOf(await ci.callTool({ name: "scout_report", arguments: { force: true, level: "minimal" } }));
+      if (reported.includes("Opened")) fail(`a CI run opened the report:\n${reported}`);
+      assertClosedAll(textOf(await ci.callTool({ name: "scout_close", arguments: { all: true } })));
     } finally {
-      await plain.close();
+      await ci.close();
     }
 
-    const client = new Client({ name: "ft-check-open", version: "0.0.1" }, { capabilities: { elicitation: {} } });
+    // A local desktop session, from a client that declares nothing: both open.
+    const client = new Client({ name: "ft-check-open", version: "0.0.1" });
     await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env }));
     try {
       const attached = textOf(await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir, session: "first" } }));
       const url = attached.match(LIVE_LINE)?.[1];
-      if (!url || !attached.includes("Opened the live view in the default browser."))
-        fail(`an interactive client's attach did not open the live view:\n${attached}`);
+      if (!url || !attached.includes('Opened the live view in the default browser (SCENESCOUT_OPEN=none, or scout_attach {open: "none"}, turns this off).'))
+        fail(`a headless attach on a local session did not open the live view and name the setting:\n${attached}`);
       const second = textOf(await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir, session: "second" } }));
       if (second.includes("Opened the live view")) fail(`a second attach opened the live view again:\n${second}`);
       const reported = textOf(await client.callTool({ name: "scout_report", arguments: { force: true, level: "minimal", session: "first" } }));
-      if (!reported.includes("Opened the report in the default browser."))
-        fail(`scout_report from an interactive client did not open the report:\n${reported}`);
+      if (!reported.includes("Opened the report in the default browser.") || reported.includes("turns this off"))
+        fail(`scout_report on a local session did not open the report, or named the setting a second time:\n${reported}`);
       const quiet = textOf(
         await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir, session: "quiet", open: "none" } }),
       );
@@ -596,7 +605,7 @@ async function openCheck(): Promise<void> {
     } finally {
       await client.close();
     }
-    console.log("✓ an interactive client gets the live view opened once and the report when written; a client that is not, or open: none, gets neither");
+    console.log("✓ on a local session the live view opens once and the report when written, whatever the client declares; CI and open: none open nothing");
   } finally {
     await fixture.close();
     fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -605,7 +614,8 @@ async function openCheck(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const transport = new StdioClientTransport({ command: "node", args: [serverPath] });
+  // On a desktop the server opens the live view and the report by default; a check opens nothing.
+  const transport = new StdioClientTransport({ command: "node", args: [serverPath], env: { ...getDefaultEnvironment(), SCENESCOUT_OPEN: "none" } });
   const client = new Client({ name: "ft-check", version: "0.0.1" });
   await client.connect(transport);
 

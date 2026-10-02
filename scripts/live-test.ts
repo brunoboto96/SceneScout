@@ -36,7 +36,6 @@ import {
 } from "../src/engine/live.ts";
 import { LIVE_PAGE } from "../src/engine/live-page.ts";
 import {
-  clientIsInteractive,
   decideOpen,
   OPEN_CHOICES,
   OPEN_ENV,
@@ -1362,28 +1361,27 @@ test("the timeline can be walked from the keyboard", () => {
 
 // ---- Opening the live view and the report (engine/open.ts) ----------------
 
-const DESKTOP = { DISPLAY: ":0" };
-
-test("open: the default follows the environment, and a setting wins over it", () => {
-  const ctx = (over: Partial<OpenContext> = {}): OpenContext => ({ headed: false, interactive: false, env: {}, platform: "darwin", ...over });
+test("open: the default opens both on a local desktop session and nothing in CI, over SSH or with no display; a setting wins", () => {
+  const ctx = (over: Partial<OpenContext> = {}): OpenContext => ({ env: {}, platform: "darwin", ...over });
   const cases: Array<[string, OpenChoice | undefined, OpenContext, boolean, boolean]> = [
-    ["headed on a desktop", undefined, ctx({ headed: true }), true, true],
-    ["interactive client, headless browser", undefined, ctx({ interactive: true }), true, true],
-    ["headless, no interactive client", undefined, ctx(), false, false],
-    ["CI, even headed and interactive", undefined, ctx({ headed: true, interactive: true, env: { CI: "true" } }), false, false],
-    ["CI=1", undefined, ctx({ headed: true, env: { CI: "1" } }), false, false],
-    ["CI=false is not CI", undefined, ctx({ headed: true, env: { CI: "false" } }), true, true],
-    ["CI=0 is not CI", undefined, ctx({ headed: true, env: { CI: "0" } }), true, true],
-    ["empty CI is not CI", undefined, ctx({ headed: true, env: { CI: "" } }), true, true],
-    ["over SSH", undefined, ctx({ headed: true, env: { SSH_CONNECTION: "10.0.0.1 5000 10.0.0.2 22" } }), false, false],
-    ["Linux with no display", undefined, ctx({ interactive: true, platform: "linux" }), false, false],
-    ["Linux with X", undefined, ctx({ interactive: true, platform: "linux", env: DESKTOP }), true, true],
-    ["Linux with Wayland", undefined, ctx({ headed: true, platform: "linux", env: { WAYLAND_DISPLAY: "wayland-0" } }), true, true],
-    ["Windows", undefined, ctx({ interactive: true, platform: "win32" }), true, true],
+    ["macOS desktop", undefined, ctx(), true, true],
+    ["Windows desktop", undefined, ctx({ platform: "win32" }), true, true],
+    ["Linux with X", undefined, ctx({ platform: "linux", env: { DISPLAY: ":0" } }), true, true],
+    ["Linux with Wayland", undefined, ctx({ platform: "linux", env: { WAYLAND_DISPLAY: "wayland-0" } }), true, true],
+    ["Linux with no display", undefined, ctx({ platform: "linux" }), false, false],
+    ["FreeBSD with no display", undefined, ctx({ platform: "freebsd" }), false, false],
+    ["CI", undefined, ctx({ env: { CI: "true" } }), false, false],
+    ["CI=1 on a Linux desktop", undefined, ctx({ platform: "linux", env: { CI: "1", DISPLAY: ":0" } }), false, false],
+    ["CI=false is not CI", undefined, ctx({ env: { CI: "false" } }), true, true],
+    ["CI=0 is not CI", undefined, ctx({ env: { CI: "0" } }), true, true],
+    ["empty CI is not CI", undefined, ctx({ env: { CI: "" } }), true, true],
+    ["macOS over SSH", undefined, ctx({ env: { SSH_CONNECTION: "10.0.0.1 5000 10.0.0.2 22" } }), false, false],
+    ["Windows over SSH", undefined, ctx({ platform: "win32", env: { SSH_TTY: "/dev/pts/0" } }), false, false],
+    ["Linux desktop over SSH with X forwarding", undefined, ctx({ platform: "linux", env: { DISPLAY: "localhost:10.0", SSH_CONNECTION: "a" } }), false, false],
     ["set to live", "live", ctx(), true, false],
     ["set to report", "report", ctx(), false, true],
     ["set to both, in CI", "both", ctx({ env: { CI: "true" } }), true, true],
-    ["set to none, headed and interactive", "none", ctx({ headed: true, interactive: true }), false, false],
+    ["set to none on a desktop", "none", ctx(), false, false],
   ];
   for (const [name, choice, c, live, report] of cases) {
     const d = decideOpen(choice, c);
@@ -1397,12 +1395,6 @@ test("open: SCENESCOUT_OPEN is read, and a value outside the choices is refused"
   assert.equal(openChoiceFromEnv({ [OPEN_ENV]: "  " }), undefined);
   for (const c of OPEN_CHOICES) assert.equal(openChoiceFromEnv({ [OPEN_ENV]: c }), c);
   assert.throws(() => openChoiceFromEnv({ [OPEN_ENV]: "yes" }), /SCENESCOUT_OPEN must be one of live, report, both, none/);
-});
-
-test("open: an interactive client is one that can ask its user a question", () => {
-  assert.equal(clientIsInteractive(undefined), false);
-  assert.equal(clientIsInteractive({}), false);
-  assert.equal(clientIsInteractive({ elicitation: {} }), true);
 });
 
 test("open: only a loopback address or an absolute file path is opened", () => {

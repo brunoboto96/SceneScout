@@ -309,9 +309,9 @@ test("provider: detected from the one key present; both keys need --provider; a 
   assert.deepEqual(overridden.resolved, { provider: "openai", model: "other", effort: "none", baseUrl: "https://llm.example.com/v1" });
 });
 
-test("the server's environment has no key in it, and no live view", () => {
-  const env = childEnv({ OPENAI_API_KEY: OPENAI_KEY, ANTHROPIC_API_KEY: ANTHROPIC_KEY, PATH: "/bin", HOME: "/h" });
-  assert.deepEqual(env, { PATH: "/bin", HOME: "/h", SCENESCOUT_LIVE: "off" });
+test("the server's environment has no key in it, no live view, and opens nothing in a browser", () => {
+  const env = childEnv({ OPENAI_API_KEY: OPENAI_KEY, ANTHROPIC_API_KEY: ANTHROPIC_KEY, PATH: "/bin", HOME: "/h", SCENESCOUT_OPEN: "both" });
+  assert.deepEqual(env, { PATH: "/bin", HOME: "/h", SCENESCOUT_LIVE: "off", SCENESCOUT_OPEN: "none" });
 });
 
 // ── redaction ───────────────────────────────────────────────────────────────

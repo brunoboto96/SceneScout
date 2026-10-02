@@ -74,16 +74,7 @@ import {
   type SessionStatus,
 } from "./engine/live.js";
 import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
-import {
-  clientIsInteractive,
-  decideOpen,
-  OPEN_CHOICES,
-  OPEN_ENV,
-  openChoiceFromEnv,
-  openInBrowser,
-  type OpenChoice,
-  type OpenDecision,
-} from "./engine/open.js";
+import { decideOpen, OPEN_CHOICES, OPEN_ENV, openChoiceFromEnv, openInBrowser, type OpenChoice, type OpenDecision } from "./engine/open.js";
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
 import { loginCommand } from "./engine/profiles.js";
 import { computeGaps, coverageView, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
@@ -390,6 +381,8 @@ function liveLine(): string {
 const openDecisions = new Map<string, OpenDecision>();
 /** The live view is one address for every session, so it is opened once per server. */
 let liveOpened = false;
+/** Whether a result has named the setting that turns opening off; named once. */
+let openSettingNamed = false;
 /** Whether an attach has said why the live view was not opened; said once. */
 let openWhySaid = false;
 
@@ -400,7 +393,10 @@ function openForUser(what: string, target: string): string {
     spawn: (command, args, options) => spawn(command, args, options),
     onError: (why) => logLine(`could not open ${what}: ${why}`),
   });
-  return outcome.ok ? `\nOpened ${what} in the default browser.` : `\nCould not open ${what}: ${outcome.why}.`;
+  if (!outcome.ok) return `\nCould not open ${what}: ${outcome.why}.`;
+  if (openSettingNamed) return `\nOpened ${what} in the default browser.`;
+  openSettingNamed = true;
+  return `\nOpened ${what} in the default browser (${OPEN_ENV}=none, or scout_attach {open: "none"}, turns this off).`;
 }
 
 function flushStatus(dir: string): Promise<void> {
@@ -928,7 +924,7 @@ server.registerTool(
         .optional()
         .describe(
           `Open the live view (on this attach) and/or report.html (when scout_report writes it) in the user's default browser: 'live', 'report', 'both' or 'none'. ` +
-            `Default: the ${OPEN_ENV} environment variable, else 'both' when the browser window is visible or the client is interactive, and 'none' in CI, with no display, or in a headless run with no interactive client. ` +
+            `Default: the ${OPEN_ENV} environment variable, else 'both' on a local desktop session (headed or headless) and 'none' in CI, over SSH, or with no display. ` +
             "Pass it only when the user asked for something other than the default.",
         ),
     },
@@ -1036,8 +1032,6 @@ server.registerTool(
         // project is the same run, and keeps what the run has learned.
         // Before anything changes: a SCENESCOUT_OPEN the server cannot use refuses the attach.
         const opening = decideOpen(open ?? openChoiceFromEnv(process.env), {
-          headed: !!headed,
-          interactive: clientIsInteractive(server.server.getClientCapabilities()),
           env: process.env,
           platform: process.platform,
         });

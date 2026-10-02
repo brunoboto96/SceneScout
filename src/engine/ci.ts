@@ -438,6 +438,8 @@ export function childEnv(env: Record<string, string | undefined>): Record<string
   for (const [k, v] of Object.entries(env)) if (v !== undefined && !drop.has(k)) out[k] = v;
   // Nobody watches a CI run: the live view would only hold a port open.
   out.SCENESCOUT_LIVE = "off";
+  // ...and an unattended run opens nothing in a browser, even on a desktop.
+  out.SCENESCOUT_OPEN = "none";
   return out;
 }
 

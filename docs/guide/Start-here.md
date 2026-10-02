@@ -162,7 +162,7 @@ scenescout status           # the same information as text
 
 The page is served on `127.0.0.1` only, behind a token that changes on each start, and answers `GET` and nothing else. No frame it shows is written to disk. `SCENESCOUT_LIVE=off` in the server's environment keeps it closed.
 
-When you can see it, the engine also opens the live view in your default browser as a session attaches, and the report when `scout_report` writes it: that is when the browser window is visible, or your chat client is interactive. In CI, over SSH, or in a headless run with nobody at the client, nothing opens. Set `SCENESCOUT_OPEN` to `live`, `report`, `both` or `none` in the server's environment to choose yourself, or ask the agent (`scout_attach {open: "none"}`). Opening the page changes nothing about who can reach it.
+On a desktop, the engine also opens the live view in your default browser as a session attaches, and the report when `scout_report` writes it, whether or not the browser window is shown. In CI, over SSH, or on Linux with no display, nothing opens. To choose yourself, set `SCENESCOUT_OPEN` to `live`, `report`, `both` or `none` in the server's environment (`none` if you want no tabs), or ask the agent (`scout_attach {open: "none"}`). Opening the page changes nothing about who can reach it.
 
 To keep a copy of the run, ask for a recording (`Use SceneScout to test … and record the run`, or `scout_attach {record: true}`). The engine then keeps a frame after every action, and `scout_report` also writes `.scenescout/report.html`: one self-contained page with the report, the screenshots around each finding and each session's trail. Recording is off by default because frames are pictures of the app, which the engine's secret redaction cannot read.
 

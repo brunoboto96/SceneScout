@@ -25,10 +25,6 @@ export type OpenChoice = (typeof OPEN_CHOICES)[number];
 
 /** The environment `open` is decided in. */
 export interface OpenContext {
-  /** The session's browser window is visible. */
-  headed: boolean;
-  /** The MCP client has a person at it: it declared it can put a question to its user (elicitation). */
-  interactive: boolean;
   env: Record<string, string | undefined>;
   platform: NodeJS.Platform;
 }
@@ -65,11 +61,6 @@ export function noDisplay(env: Record<string, string | undefined>, platform: Nod
   return !env.DISPLAY && !env.WAYLAND_DISPLAY;
 }
 
-/** The client can ask its user a question, so a person is at it. */
-export function clientIsInteractive(caps: { elicitation?: unknown } | undefined): boolean {
-  return !!caps?.elicitation;
-}
-
 const both = (choice: OpenChoice, why: string): OpenDecision => ({
   live: choice === "live" || choice === "both",
   report: choice === "report" || choice === "both",
@@ -78,18 +69,18 @@ const both = (choice: OpenChoice, why: string): OpenDecision => ({
 
 /**
  * What opens. A setting, from the attach or the environment, is followed as
- * given. With none, the least-harm default: never in CI or where no display
- * would show it; both when the browser window is visible or the client is
- * interactive; otherwise nothing, since a headless run with no person at the
- * client has nobody to show a window to.
+ * given. With none, both open on a local desktop session, whether the
+ * session's browser is headed or headless and whatever the MCP client
+ * declares: what a client declares is outside this project's control, and a
+ * person in a chat client is the one who most needs the page opened. Nothing
+ * opens in CI or where no display would show it. A developer who wants no
+ * tabs sets SCENESCOUT_OPEN=none.
  */
 export function decideOpen(choice: OpenChoice | undefined, ctx: OpenContext): OpenDecision {
   if (choice) return both(choice, `open is set to ${choice}`);
   if (isCi(ctx.env)) return both("none", "a CI run");
   if (noDisplay(ctx.env, ctx.platform)) return both("none", "no display to show a window on");
-  if (ctx.headed) return both("both", "the browser window is visible");
-  if (ctx.interactive) return both("both", "the client is interactive");
-  return both("none", "a headless run with no interactive client");
+  return both("both", "a local desktop session");
 }
 
 /**
