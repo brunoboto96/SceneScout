@@ -26,7 +26,7 @@ import type { WriteMode } from "../../dist/engine/policy.js";
 import { profilePath, writeProfile } from "../../dist/engine/profiles.js";
 import { endpointsPathFor, lockPathFor, readLearnedEndpoints, refreshTokenSlots } from "../../dist/engine/refresh.js";
 import { captureState } from "../../dist/login-run.js";
-import { BROWSER, check, expireFixtureAccess, isCurrentRefreshToken, refreshFamilies, type SmokeContext } from "./harness.ts";
+import { BROWSER, check, eventually, expireFixtureAccess, isCurrentRefreshToken, refreshFamilies, WAIT_MS, type SmokeContext } from "./harness.ts";
 
 export const title = "refresh broker (cookie)";
 
@@ -43,7 +43,7 @@ async function recordProfile(baseUrl: string, project: string, query: string): P
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.goto(`${baseUrl}/rc-signin?${query}`);
-    await page.waitForFunction((want) => document.querySelector("h1")?.textContent === want, SIGNED_IN, { timeout: 10000 });
+    await page.waitForFunction((want) => document.querySelector("h1")?.textContent === want, SIGNED_IN, { timeout: WAIT_MS });
     writeProfile(project, "member", await captureState(context));
   } finally {
     await browser.close();
@@ -53,13 +53,15 @@ async function recordProfile(baseUrl: string, project: string, query: string): P
 /** What a lane's page settles on: whether it is signed in, and whether its scripts, stylesheet, image and GETs all arrived. */
 async function settled(engine: BrowserEngine): Promise<{ signedIn: "in" | "out" | "pending"; loaded: "whole" | "incomplete" | "pending" }> {
   let text = "";
-  for (let i = 0; i < 100; i++) {
-    text = await engine.snapshot(true);
-    const signed = text.includes(SIGNED_IN) || text.includes(SIGNED_OUT);
-    const assets = text.includes(LOADED) || text.includes(INCOMPLETE);
-    if (signed && assets) break;
-    await new Promise((r) => setTimeout(r, 100));
-  }
+  // Spaced out, since each look is a snapshot, and several lanes look at once. Twice the usual bound for that.
+  await eventually(
+    async () => {
+      text = await engine.snapshot(true);
+      return (text.includes(SIGNED_IN) || text.includes(SIGNED_OUT)) && (text.includes(LOADED) || text.includes(INCOMPLETE));
+    },
+    2 * WAIT_MS,
+    100,
+  );
   return {
     signedIn: text.includes(SIGNED_IN) ? "in" : text.includes(SIGNED_OUT) ? "out" : "pending",
     loaded: text.includes(LOADED) ? "whole" : text.includes(INCOMPLETE) ? "incomplete" : "pending",
