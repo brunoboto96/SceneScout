@@ -16,6 +16,7 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `scenescout check <url>` | The deterministic check; exit 0 passed, 1 failed the gate, 2 could not run |
 | `scenescout ci <url>` | An unattended exploratory run driven by a model's API; exit 0 ran, 2 could not run |
 | `scenescout login <url> --role <name>` | Saves a sign-in as a role's profile; exit 0 saved, 1 not |
+| `scenescout export --to <tracker>` | Files the project's open findings as GitHub or Jira issues, each once; a dry run unless `--yes`; exit 0 done, 2 could not export |
 | `scenescout status [path]` | What every session of a running engine is doing, as text |
 | `scenescout watch [path]` | Opens the live view in a browser |
 
@@ -125,6 +126,29 @@ The API key has no option: it is read from `ANTHROPIC_API_KEY` or `OPENAI_API_KE
 
 Each `--script` option can also come from an environment variable, below; the option wins.
 
+### `scenescout export`
+
+| Option | Default | |
+|---|---|---|
+| `--to` | (required) | `github` or `jira` |
+| `--repo` | (required for `github`) | The repository the issues go to, as `owner/name` |
+| `--jira-url` | `JIRA_BASE_URL` | The Jira Cloud site, such as `https://your-site.atlassian.net`. Must be https, or plain http to `127.0.0.1`, `localhost` or `[::1]`, with no credentials, query or fragment |
+| `--jira-project` | `JIRA_PROJECT_KEY` | The Jira project's key, such as `QA` |
+| `--jira-issue-type` | `Bug` | The Jira issue type to create; also from `JIRA_ISSUE_TYPE` |
+| `--project` | the current directory | The project whose `.scenescout/memory.json` holds the findings |
+| `--min-severity` | `low` | The least severe finding to file: `high`, `medium` or `low` |
+| `--only` | every finding the other options let through | Only these finding ids, comma-separated |
+| `--max-issues` | `20` | The most issues one export files, 1 to 100. The next export files the rest |
+| `--severity-map` | labels `severity: high`, `severity: medium` and `severity: low` on GitHub; priorities `High`, `Medium` and `Low` in Jira | What each severity becomes, as `high=…,medium=…,low=…`. A severity left out keeps its default, an empty name sets none, and `none` sets none at all |
+| `--labels` | none | Labels added to every issue, comma-separated, at most 10. Jira labels cannot hold a space |
+| `--screenshots` | `on` | `off` leaves the run's frames out: Jira attaches them, GitHub names them |
+| `--refile-closed` | off | File a finding again when the issue carrying its marker is closed. Off, an issue open or closed counts as filed, so a won't-fix is not filed again |
+| `--include-worth-a-look` | off | Export worth-a-look findings as well as defects |
+| `--dry-run` | on, unless `--yes` | List what would be filed and send nothing but reads. Given only to say so |
+| `--yes` | off | File the issues |
+
+Every issue carries the `scenescout` label, which a later export lists issues by, and a marker with the finding's id. Credentials have no option: they are read from `GH_TOKEN` or `GITHUB_TOKEN`, or from `JIRA_EMAIL` and `JIRA_API_TOKEN`, only.
+
 ### `scenescout watch`
 
 | Option | Default | |
@@ -197,6 +221,14 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_LOGIN_PASSWORD_SELECTOR` | `login --script` | As `--password-selector` |
 | `SCENESCOUT_LOGIN_OTP_SELECTOR` | `login --script` | As `--otp-selector` |
 | `SCENESCOUT_LOGIN_SUBMIT_SELECTOR` | `login --script` | As `--submit-selector` |
+| `GH_TOKEN` | `export --to github` | The GitHub token, read before `GITHUB_TOKEN`. It must be able to create issues in the repository, and its account to set labels there |
+| `GITHUB_TOKEN` | `export --to github` | The GitHub token, when `GH_TOKEN` is not set |
+| `GITHUB_API_URL` | `export --to github` | The GitHub API's address, for GitHub Enterprise Server (such as `https://github.example.com/api/v3`). Default `https://api.github.com`; GitHub Actions sets it. The same rules as `--jira-url` |
+| `JIRA_EMAIL` | `export --to jira` | The email address of the Atlassian account the API token belongs to |
+| `JIRA_API_TOKEN` | `export --to jira` | The Atlassian API token. The only way to give one |
+| `JIRA_BASE_URL` | `export --to jira` | As `--jira-url` |
+| `JIRA_PROJECT_KEY` | `export --to jira` | As `--jira-project` |
+| `JIRA_ISSUE_TYPE` | `export --to jira` | As `--jira-issue-type` |
 | `CLAUDE_CONFIG_DIR` | `install`, `doctor` | Where Claude Code keeps its configuration; the skill goes into its `skills/` folder. Default `~/.claude` |
 | `GITHUB_STEP_SUMMARY` | `check`, `ci` | Set by GitHub Actions; the report or summary is appended to it |
 | `GITHUB_WORKFLOW_REF` | `check`, `ci` | Set by GitHub Actions; with no `--sarif-file-anchor`, its workflow file is the file SARIF results point at |
