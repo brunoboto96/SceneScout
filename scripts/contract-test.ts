@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
 import { isNonPageRoute, normalizePath } from "../src/engine/fingerprint.ts";
-import { crawledRoute, crawlLine } from "../src/engine/crawl.ts";
+import { crawledRoute, crawlLine, mainStateFlag } from "../src/engine/crawl.ts";
 import { MemoryStore, reachedRoutes } from "../src/engine/memory.ts";
 import { formatNeverSubmittedEmpty } from "../src/engine/forms.ts";
 import {
@@ -27,6 +27,7 @@ import {
   formatUnchosenOptions,
   describeAge,
   generateReport,
+  observeRefusedPostsGap,
   replayDocument,
   reportEvidence,
 } from "../src/engine/report.ts";
@@ -223,6 +224,45 @@ test("ledger: touching one control clears the nothing-exercised gap for that rou
   store.visitState("/form#b", "http://x/form?open=1", "/form", ["textbox:name", "button:save", "button:cancel"]);
   store.markExercised("/form#a", "button:save", "click");
   assert.ok(!computeGaps(store).some((g) => g.includes("NOTHING exercised")));
+});
+
+test("ledger: a page whose POST observe refused is named, with the endpoint and how to name it as a read", () => {
+  const store = freshStore();
+  store.visitState("/search#a", "http://x/search", "/search", ["textbox:query"]);
+  store.noteObserveRefusedPost("/search", "POST /api/search");
+  store.noteObserveRefusedPost("/search", "POST /api/search");
+  assert.deepEqual(store.observeRefusedPosts, [{ route: "/search", endpoints: ["POST /api/search"] }], "deduplicated");
+  const line = computeGaps(store).find((g) => g.includes("observe refused"));
+  assert.ok(line, `expected the refused POST in the ledger, got: ${JSON.stringify(computeGaps(store))}`);
+  assert.ok(line.includes("/search (POST /api/search)") && line.includes("readPosts"), line);
+  // Beside the route lines, not in place of them: both reach the ledger.
+  const both = computeGaps(store, { routesVisited: 1, routesTotal: 2, designAudits: 0, knownRoutes: ["/search", "/orders"], unvisitedRoutes: ["/orders"] });
+  assert.ok(both.some((g) => g.includes("never visited") && g.includes("/orders")) && both.some((g) => g.includes("observe refused")), JSON.stringify(both));
+  // The contrast: once a POST to it went out (named as a read, or sent in a looser mode), no line.
+  store.clearObserveRefusedPosts((e) => e === "POST /api/search");
+  assert.ok(!computeGaps(store).some((g) => g.includes("observe refused")));
+  assert.equal(observeRefusedPostsGap([{ route: "/search", endpoints: [] }]), null);
+});
+
+test("ledger: a closed lane's refused POSTs are kept in project memory for the planner's report", () => {
+  // Lanes close their sessions before the planner writes the report, so the record lives in memory, on disk.
+  const lane = freshStore();
+  lane.noteObserveRefusedPost("/reports", "POST /api/reports/query", 1000);
+  lane.flush();
+  const planner = new MemoryStore(lane.dir.replace(/[\\/]\.scenescout$/, ""));
+  stores.push(planner);
+  assert.ok(
+    computeGaps(planner).some((g) => g.includes("/reports (POST /api/reports/query)")),
+    JSON.stringify(computeGaps(planner)),
+  );
+  // Two processes: the later of a refusal and a clear wins in the merge, whichever saves last.
+  planner.clearObserveRefusedPosts((e) => e === "POST /api/reports/query", 2000);
+  planner.flush();
+  lane.noteObserveRefusedPost("/other", "POST /api/other", 1500);
+  lane.flush();
+  const after = new MemoryStore(lane.dir.replace(/[\\/]\.scenescout$/, ""));
+  stores.push(after);
+  assert.deepEqual(after.observeRefusedPosts, [{ route: "/other", endpoints: ["POST /api/other"] }], JSON.stringify(after.observeRefusedPosts));
 });
 
 test("ledger: an abandoned journey does not count as task ease being measured", () => {
@@ -1019,6 +1059,18 @@ test("crawl: an explicitly crawled path that answered as a page joins the route 
   assert.equal(crawledRoute({ ...page, deadEnd: true }), null, "the same 200 with nothing on the page: an app answering every path, not a route");
   assert.equal(crawledRoute({ ...page, status: "no-response" }), null);
   assert.equal(crawledRoute({ ...page, path: "/api/things", requestedRoute: "/api/things", landedRoute: "/api/things" }), null);
+  // A client-rendered app answers 200 for a path it does not have and draws its not-found view; a page stuck loading is no better.
+  assert.equal(crawledRoute({ ...page, mainState: "error" }), null, "the app's error view: a 200 that is not a route");
+  assert.equal(crawledRoute({ ...page, mainState: "loading" }), null, "a placeholder that never resolved: nothing says the route exists");
+  assert.equal(crawledRoute({ ...page, mainState: null }), "/reports/archive", "the same page with content of its own joins");
+  assert.equal(mainStateFlag("error"), "ERROR-VIEW");
+  assert.equal(mainStateFlag("loading"), "STILL-LOADING");
+  assert.equal(mainStateFlag(null), null);
+  // With route identity: a crawled record page joins as its route class, and the same page showing the error view does not join at all.
+  const record = { path: "/things/WID-2025-001", status: 200, requestedRoute: normalizePath("https://app.example/things/WID-2025-001"), loginRedirect: false };
+  const recordPage = { ...record, landedRoute: record.requestedRoute };
+  assert.equal(crawledRoute(recordPage), "/things/:id");
+  assert.equal(crawledRoute({ ...recordPage, mainState: "error" }), null);
 
   // Through the store: the known-route count rises by exactly one.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-crawl-"));

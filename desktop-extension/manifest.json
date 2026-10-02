@@ -1,0 +1,36 @@
+{
+  "manifest_version": "0.3",
+  "name": "scenescout",
+  "display_name": "SceneScout",
+  "version": "3.15.0",
+  "description": "Exploratory UI testing: Claude explores a running web app like a curious user, finds what is broken or confusing, and writes a coverage-checked report.",
+  "long_description": "SceneScout gives Claude a real browser to test a web app with. Ask it to test an address, for example http://localhost:3000, and it visits the pages, tries the forms and buttons, notes what is broken or confusing, and writes a report.\n\nBy default a write policy at the network layer blocks edits and deletions, while ordinary form submissions go through. For a site that holds real data, ask it to observe only: then nothing but reads leaves the page.\n\nBefore the first test, download the browser it drives once, from a terminal: `npx -y scenescout install --browser-only`. If it is missing, SceneScout says so and gives the same command.",
+  "author": {
+    "name": "brunoboto96",
+    "url": "https://github.com/brunoboto96"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/brunoboto96/SceneScout.git"
+  },
+  "homepage": "https://github.com/brunoboto96/SceneScout#readme",
+  "documentation": "https://github.com/brunoboto96/SceneScout/tree/main/docs/guide",
+  "support": "https://github.com/brunoboto96/SceneScout/issues",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/mcp-server.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/mcp-server.js"],
+      "env": {}
+    }
+  },
+  "keywords": ["testing", "qa", "exploratory-testing", "playwright", "ui", "accessibility"],
+  "license": "MIT",
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  }
+}

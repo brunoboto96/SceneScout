@@ -429,6 +429,25 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       const key = `${req.method} ${urlPath}`;
       stats.writes[key] = (stats.writes[key] ?? 0) + 1;
     }
+    // A search read through POST (read-posts.html). A body carrying a delete command or a GraphQL mutation is counted
+    // apart, so a suite can prove none arrived while plain searches did.
+    if (urlPath === "/api/search" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        const tag = body.includes('"action":"delete"') ? " (delete)" : body.includes("mutation") ? " (mutation)" : "";
+        if (tag) stats.writes[`POST /api/search${tag}`] = (stats.writes[`POST /api/search${tag}`] ?? 0) + 1;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ results: ["Widget A", "Widget B"] }));
+      });
+      return;
+    }
+    if (urlPath === "/api/notes" && req.method === "POST") {
+      res.writeHead(201, { "content-type": "application/json" });
+      res.end("{}");
+      return;
+    }
     // A visit a page records as it loads (first-look-post.html): counted in `writes` above, and answered as a real endpoint would.
     if (urlPath === "/api/visits" && req.method === "POST") {
       res.writeHead(204);

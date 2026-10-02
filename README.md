@@ -152,7 +152,9 @@ Either way it downloads the browser and registers the server with the client you
 /plugin install scenescout@scenescout-marketplace
 ```
 
-Then download the browser once with `npx -y scenescout install --browser-only`. The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release lands here the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
+Then download the browser once with `npx -y scenescout install --browser-only`, and start a new chat to use SceneScout. The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release lands here the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
+
+**Using Claude Desktop?** Install the extension: download `scenescout-X.Y.Z.mcpb` from the [latest release](https://github.com/brunoboto96/SceneScout/releases/latest) and open it (or Settings > Extensions > Advanced settings > Install Extension). It works as soon as it is installed. Download the browser once with `npx -y scenescout install --browser-only`, then start a new chat and ask *"Use SceneScout to test http://localhost:3000"*. [More in the guide](docs/guide/Start-here.md#as-a-claude-desktop-extension).
 
 **A client that is not in that list?** Run `npx -y scenescout install --browser-only` and [add the server to its config by hand](#-other-mcp-clients).
 

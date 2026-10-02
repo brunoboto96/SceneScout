@@ -218,6 +218,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_RECORD` | the server | `on` keeps a frame after every action in every session, for teams that want each QA run recorded; `off` (default) does not. A `scout_attach` `record` wins over it |
 | `CI` | the server | Set by CI services. When it is set (and not `false` or `0`), finding pictures default to `file` |
 | `GITHUB_ACTIONS` | the server | Set by GitHub Actions. `true` counts as a CI job, as `CI` does |
+| `SCENESCOUT_READ_POSTS` | the server, `check`, `ci`, a first look | POST endpoints that only read, let out in `observe`: entries such as `POST /api/search`, separated by commas or new lines. Unset: none. A `scout_attach` `readPosts` wins over it |
 | `SCENESCOUT_DEDUP` | the server | `judge` asks a model, with a key below, whether a filing the dedup rule keeps apart from everything recorded is one of the open findings on its page; `rule` (default) does not. A `scout_attach` `dedup` wins over it |
 | `SCENESCOUT_DEDUP_PROVIDER` | the server | `anthropic` or `openai`: which key the dedup judge uses when both are set |
 | `ANTHROPIC_API_KEY` | `ci`; the server with the dedup judge on | The Anthropic key. The only way to give one |
@@ -241,6 +242,9 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `JIRA_PROJECT_KEY` | `export --to jira` | As `--jira-project` |
 | `JIRA_ISSUE_TYPE` | `export --to jira` | As `--jira-issue-type` |
 | `CLAUDE_CONFIG_DIR` | `install`, `doctor` | Where Claude Code keeps its configuration; the skill goes into its `skills/` folder. Default `~/.claude` |
+| `APPDATA` | `doctor` | On Windows, where Claude Desktop keeps its installed extensions (`Claude\Claude Extensions` inside it). Set by Windows |
+| `LOCALAPPDATA` | `doctor` | On Windows, where the Microsoft Store build of Claude Desktop keeps its data (`Packages\Claude_…`). Set by Windows |
+| `XDG_CONFIG_HOME` | `doctor` | On Linux, the configuration folder searched for Claude Desktop's extensions. Default `~/.config` |
 | `GITHUB_STEP_SUMMARY` | `check`, `ci` | Set by GitHub Actions; the report or summary is appended to it |
 | `GITHUB_WORKFLOW_REF` | `check`, `ci` | Set by GitHub Actions; with no `--sarif-file-anchor`, its workflow file is the file SARIF results point at |
 | `GITHUB_WORKSPACE` | `check`, `ci` | Set by GitHub Actions; the repository root that SARIF file paths are relative to |
@@ -391,6 +395,7 @@ What an agent can pass when it attaches a session. You rarely set these by hand;
 | `trustedEmbeds` | none | Origins of embedded frames whose writes may go out, in `safe-write` only |
 | `record` | `SCENESCOUT_RECORD`, else `false` | Keep a frame after every action and show it beside each step in `report.html` |
 | `evidence` | `SCENESCOUT_EVIDENCE`, else `inline` (`file` in a CI job) | What happens to the picture each finding is filed with: `inline` keeps it, shows it in `report.html` and returns it in the `scout_finding` result; `file` keeps it and shows it in the report; `off` takes none |
+| `readPosts` | `SCENESCOUT_READ_POSTS`, else none | POST endpoints that only read (`"POST /api/search"`, `"POST https://api.example.com/query"`), let out in `observe` only. Exact paths, `*` for one path segment, at most 20 ([Safety model](Safety-model.md#post-endpoints-that-only-read)) |
 | `actionTimeoutMs` | `SCENESCOUT_ACTION_TIMEOUT_MS`, else `5000` | 1000 to 120000 |
 | `navTimeoutMs` | `SCENESCOUT_NAV_TIMEOUT_MS`, else `20000` | 1000 to 300000 |
 | `dedup` | `SCENESCOUT_DEDUP`, else `rule` | `judge` asks a model whether a filing the rule keeps apart from everything recorded is one of the open findings on its page; it needs a key in the server's environment and sends the findings' titles, categories and evidence, and the page's path, to the provider. For the whole run |

@@ -8,15 +8,21 @@ edit the version or `CHANGELOG.md` (see [.changeset/README.md](../.changeset/REA
 1. Pull requests with user-visible changes carry a changeset.
 2. On each push to `main`, the `release` workflow collects pending changesets
    into a pull request titled **Version Packages**: version bump,
-   `CHANGELOG.md`, and the matching version in `.claude-plugin/plugin.json`.
+   `CHANGELOG.md`, and the matching version in `.claude-plugin/plugin.json`
+   and `desktop-extension/manifest.json`.
 3. Approve and merge that pull request. It is opened with the Actions token,
    and GitHub does not run `pull_request` workflows for pull requests opened
    that way, so the release workflow starts the `test` workflow on the version
    branch itself. The checks appear on the pull request once that run starts. Its author is the Actions bot, so the maintainer's
    approval counts as the code-owner review. Its diff is generated and limited
-   to the version, the changelog, `plugin.json` and the deleted changeset files.
+   to the version, the changelog, `plugin.json`, the extension manifest and the
+   deleted changeset files.
 4. The workflow runs again on that merge, finds no pending changesets, and
    publishes to npm, pushes the `vX.Y.Z` tag and creates the GitHub Release.
+5. It then builds the Claude Desktop extension bundle from that tag
+   (`npm run build && npm run mcpb`, which writes `.mcpb-build/scenescout-X.Y.Z.mcpb`),
+   checks its manifest against the MCPB schema, and attaches it to the release.
+   The manifest follows the MCPB `manifest.json` format, manifest version 0.3.
 
 Nothing is published while the repository variable `NPM_PUBLISH` is anything
 other than `enabled`. The version pull request is still opened and kept up to

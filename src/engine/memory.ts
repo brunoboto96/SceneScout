@@ -518,7 +518,25 @@ interface MemoryFile {
    * its own page (a verdict), which the wording alone cannot.
    */
   laneRoutes?: Record<string, string[]>;
+  /**
+   * Pages whose scripts sent a POST observe refused: route → endpoint
+   * ("POST /api/search") → when it was last refused or cleared. Kept here, not
+   * on a session, because lanes close their sessions before the report is
+   * written. An entry is cleared, not deleted, so the merge with another
+   * process keeps the later of the two.
+   */
+  observeRefusedPosts?: Record<string, Record<string, RefusedPost>>;
 }
+
+/** One endpoint observe refused on a page; `cleared` once it went out (named as a read, or sent in a looser mode). */
+export interface RefusedPost {
+  at: number;
+  cleared?: boolean;
+}
+
+/** The most pages, and endpoints per page, the refused-POST record keeps. */
+const MAX_REFUSED_POST_ROUTES = 50;
+const MAX_REFUSED_POSTS_PER_ROUTE = 5;
 
 const EMPTY: MemoryFile = { version: 1, states: {}, findings: [] };
 
@@ -631,6 +649,15 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
     };
   }
   if (Object.keys(out.routeFacts).length === 0) delete out.routeFacts;
+
+  // Per endpoint, the later of the two: a clear in one process outlasts an older refusal in another.
+  out.observeRefusedPosts = { ...(theirs.observeRefusedPosts ?? {}) };
+  for (const [route, endpoints] of Object.entries(mine.observeRefusedPosts ?? {})) {
+    const merged = { ...(out.observeRefusedPosts[route] ?? {}) };
+    for (const [endpoint, rec] of Object.entries(endpoints)) if (!merged[endpoint] || rec.at >= merged[endpoint].at) merged[endpoint] = rec;
+    out.observeRefusedPosts[route] = merged;
+  }
+  if (Object.keys(out.observeRefusedPosts).length === 0) delete out.observeRefusedPosts;
 
   out.roleAccess = { ...(theirs.roleAccess ?? {}) };
   for (const [role, routes] of Object.entries(mine.roleAccess ?? {})) {
@@ -1586,6 +1613,44 @@ export class MemoryStore {
 
   get routeFacts(): Record<string, RouteFacts> {
     return this.data.routeFacts ?? {};
+  }
+
+  /** Record that observe refused a script's POST to `endpoint` on `route`. Deduplicated; saved only when something changed. */
+  noteObserveRefusedPost(route: string, endpoint: string, now = Date.now()): void {
+    const all = this.data.observeRefusedPosts ?? {};
+    const forRoute = all[route] ?? {};
+    const rec = forRoute[endpoint];
+    if (rec && !rec.cleared) return;
+    if (!rec && !all[route] && Object.keys(all).length >= MAX_REFUSED_POST_ROUTES) return;
+    if (!rec && Object.keys(forRoute).length >= MAX_REFUSED_POSTS_PER_ROUTE) return;
+    forRoute[endpoint] = { at: now };
+    all[route] = forRoute;
+    this.data.observeRefusedPosts = all;
+    this.save();
+  }
+
+  /** Clear every open refusal whose endpoint `went` says has since gone out. Saved only when something changed. */
+  clearObserveRefusedPosts(went: (endpoint: string) => boolean, now = Date.now()): void {
+    let changed = false;
+    for (const endpoints of Object.values(this.data.observeRefusedPosts ?? {}))
+      for (const [endpoint, rec] of Object.entries(endpoints))
+        if (!rec.cleared && went(endpoint)) {
+          endpoints[endpoint] = { at: now, cleared: true };
+          changed = true;
+        }
+    if (changed) this.save();
+  }
+
+  /** Pages with a POST observe refused and nothing has since let out, for the gap ledger. */
+  get observeRefusedPosts(): Array<{ route: string; endpoints: string[] }> {
+    return Object.entries(this.data.observeRefusedPosts ?? {})
+      .map(([route, endpoints]) => ({
+        route,
+        endpoints: Object.entries(endpoints)
+          .filter(([, rec]) => !rec.cleared)
+          .map(([endpoint]) => endpoint),
+      }))
+      .filter((p) => p.endpoints.length > 0);
   }
 
   /** Record that `role` reached (or was denied) `route`. Denials never overwrite a recorded "reached" — flaky redirects must not erase real access. */
