@@ -567,6 +567,45 @@ test("coverage: a route's elements are counted once across its state fingerprint
   assert.deepEqual(cov.unexercised, [{ state: "/a", keys: ["button:open"], total: 2 }]);
 });
 
+test("coverage counts the controls on a page, not the wrappers and badges it lists for their test ids", () => {
+  // Three buttons and ten tagged wrappers on one page: the same keys listed either way, and the one
+  // fact that flips the count is whether the collector said a user can act on the element.
+  const store = freshStore();
+  const buttons = ["button:save", "button:open", "button:close"];
+  const wrappers = Array.from({ length: 10 }, (_, i) => `tid:wrapper-${i}`);
+  store.visitState("/page#f1", "http://x/page", "/page", [...buttons, ...wrappers], wrappers);
+  const cov = store.coverage();
+  assert.equal(cov.elementsTotal, 3, "three controls, not thirteen elements");
+  assert.deepEqual(cov.unexercised, [{ state: "/page", keys: buttons, total: 3 }]);
+  // The wrappers stay known, so a click aimed at one still registers, without counting as coverage.
+  store.markExercised("/page#f1", "tid:wrapper-0", "click");
+  assert.equal(store.wasExercised("/page#f1", "tid:wrapper-0"), true);
+  assert.equal(store.coverage().elementsExercised, 0);
+  // Listed without the inert set (as memory written before it), every key counts, as it always did.
+  const legacy = freshStore();
+  legacy.visitState("/page#f1", "http://x/page", "/page", [...buttons, ...wrappers]);
+  assert.equal(legacy.coverage().elementsTotal, 13);
+  // A merge with another process's memory keeps the mark.
+  const file = (inert: boolean): Parameters<typeof mergeMemory>[0] => ({
+    version: 1,
+    states: {
+      "/page#f1": {
+        url: "http://x/page",
+        route: "/page",
+        firstSeen: "2026-01-01",
+        visits: 1,
+        elements: { "tid:wrapper-1": { exercised: false, ...(inert ? { inert: true } : {}) } },
+      },
+    },
+    findings: [],
+  });
+  assert.equal(mergeMemory(file(true), file(false)).states["/page#f1"].elements["tid:wrapper-1"].inert, true, "ours says inert, and wins");
+  assert.equal(mergeMemory(file(false), file(true)).states["/page#f1"].elements["tid:wrapper-1"].inert, undefined, "ours says a control, and wins");
+  // A key that becomes a control on a later visit counts again.
+  store.visitState("/page#f1", "http://x/page", "/page", [...buttons, ...wrappers], wrappers.slice(1));
+  assert.equal(store.coverage().elementsTotal, 4);
+});
+
 test("coverage reports each route's own deduped total, so the gap ledger can compare like with like", () => {
   // The untouched-route check asks "were ALL of this route's elements missed?".
   // It used to answer by re-counting raw state elements, which double-counts an
