@@ -587,6 +587,18 @@ Its own inputs are the check action's: `working-directory`, `version`, `cli`, `n
 
 A pull request from a fork gets no secrets, so the step exits 2 there for want of a key; run it on pushes, on a schedule, or on pull requests from the same repository. Under `pull_request_target`, a fork's code runs with the repository's secrets; a job that sets the key and checks out and starts a fork's app gives that code the key and makes its pages the text the model reads.
 
+### Filing the findings as issues
+
+`scenescout export` files the project's open findings as GitHub or Jira issues, each once, so a step after the run can put them where the team works. With the job's token and `issues: write` permission:
+
+```yaml
+      - run: npx -y scenescout@3 export --to github --repo "$GITHUB_REPOSITORY" --yes
+        env:
+          GH_TOKEN: ${{ github.token }}
+```
+
+Without `--yes` it is a dry run that lists what it would file. A later export skips every finding that already has an issue, open or closed, by the marker each issue carries (`--refile-closed` files one again when its issue is closed). That marker holds the finding's id from the project's memory, so keep `.scenescout/memory.json` between runs (with `actions/cache`, as above): a run that starts from an empty memory gives a defect it words differently a new id, and a new issue. The guide has [the details](guide/Ways-to-use-it.md#filing-findings-as-issues), and the [configuration reference](guide/Configuration-reference.md#scenescout-export) every option.
+
 ### Other CI systems
 
 ```bash

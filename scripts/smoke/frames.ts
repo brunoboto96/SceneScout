@@ -19,21 +19,6 @@ const ABSENT_MS = 1500;
 /** The same for a move of the whole page, which has to load a page of the other site before that page can write. */
 const MOVED_ABSENT_MS = 2500;
 
-/**
- * Run a page script that sends requests, and return once the engine has seen them finish. A script's fetch resolves on
- * the response's headers, before its request has finished, and leaving the page in between held the engine's next
- * settle for its full cap. Only how long that settle takes depends on this, never what a check sees, so a request the
- * engine never counts out is waited for up to the usual bound and no longer. White-box: the engine's count of requests
- * in flight.
- */
-async function sending<T>(engine: BrowserEngine, send: () => Promise<T>): Promise<T> {
-  const inFlight = (): number => (engine as unknown as { inFlight: number }).inFlight;
-  const before = inFlight();
-  const result = await send();
-  await eventually(() => inFlight() <= before);
-  return result;
-}
-
 export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeContext): Promise<void> {
   const engine = new BrowserEngine();
   try {
@@ -113,8 +98,8 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       eventually(() => paths.every((p) => oracles.all.slice(from).some((v) => v.kind === "http_error" && v.detail.includes(p))));
     type Fetcher = { fetchMissing: () => Promise<unknown> };
     const missingFrom = oracles.all.length;
-    await sending(engine, () => frameAs("same")!.evaluate(() => (window as unknown as Fetcher).fetchMissing()));
-    await sending(engine, () => frameAs("foreign")!.evaluate(() => (window as unknown as Fetcher).fetchMissing()));
+    await frameAs("same")!.evaluate(() => (window as unknown as Fetcher).fetchMissing());
+    await frameAs("foreign")!.evaluate(() => (window as unknown as Fetcher).fetchMissing());
     await httpErrorsRecorded(missingFrom, ["/api/missing-in-frame-same", "/api/missing-in-frame-foreign"]);
     const withViolations = await engine.snapshot();
     const foreignLine = /[^\n]*missing-in-frame-foreign[^\n]*/.exec(withViolations)?.[0] ?? "";
@@ -130,8 +115,8 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     const appPort = new URL(baseUrl).port;
     const foreignPort = new URL(foreignBaseUrl).port;
     const failFrom = oracles.all.length;
-    await sending(engine, () => frameAs("same")!.evaluate(() => (window as unknown as Failer).fetchFail()));
-    await sending(engine, () => frameAs("foreign")!.evaluate(() => (window as unknown as Failer).fetchFail()));
+    await frameAs("same")!.evaluate(() => (window as unknown as Failer).fetchFail());
+    await frameAs("foreign")!.evaluate(() => (window as unknown as Failer).fetchFail());
     await httpErrorsRecorded(failFrom, [`:${appPort}/api/fail-500`, `:${foreignPort}/api/fail-500`]);
     const fiveHundreds = await engine.snapshot();
     check(
@@ -147,7 +132,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     const echoesAfter = async (inFrame: Frame) => {
       const from = oracles.all.length;
       const echoes = () => oracles.all.slice(from).filter((v) => v.kind === "console_error" && /^Failed to load resource/.test(v.detail));
-      await sending(engine, () => inFrame.evaluate((u) => fetch(u, { mode: "no-cors" }).catch(() => "failed"), echoTarget));
+      await inFrame.evaluate((u) => fetch(u, { mode: "no-cors" }).catch(() => "failed"), echoTarget);
       // A browser that echoes a failed load is waited for, then given a window for a second echo, which would be the
       // same failure filed twice; one that does not echo has only the window.
       if (echoesFailedLoads(BROWSER)) await eventually(() => echoes().length > 0);
@@ -233,9 +218,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       `status ${sameStatus}`,
     );
     // sendNote resolves once its fetch has been answered, so a write that got out has been counted by now.
-    const foreignStatus = await sending(engine, () =>
-      frameAs("foreign")!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote()),
-    );
+    const foreignStatus = await frameAs("foreign")!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());
     check(
       "a write from a cross-origin frame never reaches the server",
       stats.writes["POST /api/frame-note-foreign"] === undefined,
@@ -256,7 +239,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       openPopupBorrowed: () => void;
     };
     // sendToApp resolves once its fetch has been answered, and the policy logs a refusal before it answers one.
-    await sending(engine, () => frameAs("foreign")!.evaluate((app) => (window as unknown as Child).sendToApp(app), baseUrl));
+    await frameAs("foreign")!.evaluate((app) => (window as unknown as Child).sendToApp(app), baseUrl);
     const refusedIntoApp = (engine.memory?.actionLog ?? []).some((e) => e.action === "write-policy:blocked" && (e.target ?? "").includes("/api/frame-to-app"));
     check("a foreign frame's write whose destination is the app is not refused by the policy", !refusedIntoApp);
     // Chromium's own local-network rule stops a document the engine re-served
@@ -306,7 +289,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
         return !!f && (await f.evaluate(() => typeof (window as unknown as { sendNote?: unknown }).sendNote === "function").catch(() => false));
       });
       // sendNote resolves once its fetch has been answered: a write that arrives has been counted by then.
-      await sending(engine, () => frameAs(name)!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote()));
+      await frameAs(name)!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());
       const got = stats.writes[`POST /api/frame-note-${name}`] === 1;
       check(
         arrives ? "a captcha-like embed on the app's sign-in page can post to its own site" : "...while the same embed on a checkout page cannot",
@@ -561,7 +544,7 @@ async function trustedEmbeds({ baseUrl, foreignBaseUrl, projectDir, stats }: Smo
       }
       const before = stats.writes["POST /api/frame-note-checkout"] ?? 0;
       // sendNote resolves once its fetch has been answered: a write that arrives has been counted by then.
-      await sending(eng, () => frame()!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote()));
+      await frame()!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());
       const arrived = (stats.writes["POST /api/frame-note-checkout"] ?? 0) - before === 1;
       check(
         `${c.mode}, ${c.trusted ? "trusted" : "not trusted"}: the embed's write ${c.arrives ? "goes out" : "is refused"}`,

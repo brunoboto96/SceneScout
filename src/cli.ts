@@ -10,6 +10,7 @@
  *   scenescout check <url>          Visit every route, measure it, and pass or fail (no model involved)
  *   scenescout ci <url>             An exploratory run driven by a model's API, unattended, that reports
  *   scenescout login <url> --role r Sign in once in a visible browser and save it as a named role
+ *   scenescout export --to github   File the project's findings as GitHub or Jira issues, each once
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -47,6 +48,7 @@ import {
 } from "./installer.js";
 import { baselinesDirOf, defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
 import { httpClient, httpJudgeAsk, runCi } from "./ci-run.js";
+import { runExport } from "./export-run.js";
 import { runLogin, runScriptedLogin, savedLine } from "./login-run.js";
 import { credentialRedactor, LOGIN_ENV, readScriptedLogin } from "./engine/scripted-login.js";
 import { parseLoginArgs } from "./engine/profiles.js";
@@ -78,6 +80,7 @@ import {
   writeFirstRunReport,
   type FirstRunFacts,
 } from "./first-run.js";
+import { credentialSecrets, EXIT_EXPORT, parseExportArgs } from "./engine/export.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME, writeSelfIgnore } from "./engine/memory.js";
 import { sarifFilesFor } from "./engine/sarif.js";
 import {
@@ -215,6 +218,24 @@ Usage:
                                     --password-selector, --otp-selector, --submit-selector css; each of these also
                                     from SCENESCOUT_LOGIN_<FLAG>, e.g. SCENESCOUT_LOGIN_SUCCESS_URL;
                                     --timeout seconds (default 60))
+  scenescout export --to github|jira
+                                    File the project's open findings (from .scenescout/memory.json) as issues,
+                                    each once: a finding whose marker is already on an issue is skipped. A dry run
+                                    that lists what it would file unless --yes is given. Credentials come from the
+                                    environment only: GH_TOKEN or GITHUB_TOKEN; JIRA_EMAIL and JIRA_API_TOKEN.
+                                    (--repo owner/name for GitHub (GITHUB_API_URL for GitHub Enterprise Server);
+                                     --jira-url https://…, --jira-project KEY, --jira-issue-type name (default Bug),
+                                      or JIRA_BASE_URL, JIRA_PROJECT_KEY, JIRA_ISSUE_TYPE, for Jira Cloud;
+                                     --min-severity high|medium|low (default low); --only id,id;
+                                     --max-issues N (default 20, at most 100): the most one export files;
+                                     --refile-closed: file a finding again when its issue was closed (by default
+                                      an issue open or closed counts as filed); --include-worth-a-look;
+                                     --severity-map high=…,medium=…,low=… or none: a label on GitHub, a priority
+                                      in Jira (default severity: high… / High, Medium, Low); --labels a,b;
+                                     --screenshots on|off (default on: attached in Jira, named on GitHub);
+                                     --project dir (default: here); --dry-run; --yes)
+                                    Exit code: 0 done (findings over the cap wait for the next export), 2 could not
+                                    export (it lists what it filed before it stopped) or a screenshot was not attached.
   scenescout status [projectPath]   What is the engine doing right now? (every session + recent actions)
   scenescout watch [projectPath]    Open the live view in a browser: what each session is doing, a thumbnail
                                     of its page, and a live stream you can switch on per session
@@ -836,6 +857,22 @@ async function login(args: string[]): Promise<never> {
   process.exit(0);
 }
 
+/** `scenescout export`: exits as EXIT_EXPORT says. */
+async function exportFindings(args: string[]): Promise<never> {
+  const parsed = parseExportArgs(args, process.cwd(), process.env);
+  if (!parsed.ok) {
+    // A refusal can quote the value it refused, and a credential pasted into an option is still a credential.
+    console.error(redactKeys(`scenescout export: ${parsed.error}`, credentialSecrets(process.env)));
+    process.exit(EXIT_EXPORT.couldNotExport);
+  }
+  const outcome = await runExport(parsed.options, {
+    env: process.env,
+    log: (line) => console.log(line),
+    error: (line) => console.error(line),
+  });
+  process.exit(outcome.exitCode);
+}
+
 const [, , command, ...args] = process.argv;
 
 // A CLI's failure mode should be a sentence, not a stack trace. `scan` on a
@@ -865,6 +902,7 @@ try {
       check,
       ci,
       login,
+      export: exportFindings,
       status: (a) => status(path.resolve(a[0] ?? process.cwd())),
       watch: (a) => {
         const positional = a.filter((x) => !x.startsWith("--"));

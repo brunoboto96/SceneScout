@@ -11,6 +11,8 @@ SceneScout has six ways in. They share one engine and one write policy, and all 
 | [`scenescout ci`](#scenescout-ci-an-unattended-exploratory-run) | A model through its API | An API key | No | Exploration on a schedule or on pushes |
 | [`/scenescout qa`](#scenescout-qa-on-a-pull-request) | A model, started by a PR comment | An API key | No | An on-demand review of a PR's preview deployment |
 
+After a run that files findings (any of these but `scenescout check`, which files none), `scenescout export` files them as GitHub or Jira issues, each once: [Filing findings as issues](#filing-findings-as-issues).
+
 ## An interactive run
 
 Open your agent in the project and ask in plain words, or use the skill's flags in Claude Code:
@@ -254,3 +256,40 @@ Setting any of them replaces the owners default, so include yourself. A commente
 Pull requests from forks are refused by default, with a reply saying why. `SCENESCOUT_QA_ALLOW_FORKS=true` allows them; the key job still runs no fork code, but the preview's pages, which the fork's author wrote, are what the model reads. The run stays in `read-only` mode either way.
 
 [The full reference](../ci.md#a-qa-review-from-a-pull-request-comment) covers the reactions and replies, the jobs and their permissions, and the costs. Why it is shaped this way: [ADR 15](../adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md).
+
+## Filing findings as issues
+
+`scenescout export` turns the project's open findings into issues in GitHub or Jira, where the team already works. It reads `.scenescout/memory.json`, where an interactive run, parallel lanes and `scenescout ci` keep their findings (`scenescout check` only reads it).
+
+```bash
+export GH_TOKEN=…                  # or GITHUB_TOKEN; read from the environment only
+npx -y scenescout export --to github --repo owner/app          # a dry run: lists what it would file
+npx -y scenescout export --to github --repo owner/app --yes    # files it
+```
+
+```bash
+export JIRA_EMAIL=you@example.com JIRA_API_TOKEN=…
+npx -y scenescout export --to jira --jira-url https://your-site.atlassian.net --jira-project QA --yes
+```
+
+- **A dry run unless `--yes`.** Without it, the export lists each finding as "would file", "already filed" or "over the cap", and sends the tracker nothing but reads. With no credentials set, a dry run still lists the findings, without checking which are already filed.
+- **Each finding once.** Every issue carries the `scenescout` label and a marker holding the finding's id: an HTML comment in a GitHub issue's description, a last line in a Jira one. Before filing, the export reads the issues with that label, open or closed, and skips each finding whose marker is on one, naming the issue, so a second export of the same run files only what the first left over the cap. A closed issue counts, so a finding closed as won't-fix is not filed again on every export; `--refile-closed` files a finding again when its issue is closed, so that a defect that comes back after its fix gets a new issue. Keep the label and the marker on filed issues: they are how the next export finds them.
+- **The same finding in a later run.** The marker holds the finding's id, which the project's memory keeps from run to run, so a later run's export skips what an earlier one filed. On a CI runner the memory is gone after the job unless the workflow keeps `.scenescout/memory.json` (for example with `actions/cache`); a fresh memory gives the same defect a new id whenever a run words it differently, and so a new issue.
+- **Jira's search can lag.** Jira finds the labelled issues through its search, which can take a little while to show a new issue. Leave a few minutes between two exports to the same Jira project. A create that Jira may have carried out before an error is never sent again in the same export: the next export finds the issue by its marker, or files it if it was not made. GitHub's issue list shows a new issue at once, so there the export looks again straight away.
+- **What goes.** Open defects, worst first. `--min-severity` leaves out the less severe, `--only` names finding ids, and `--include-worth-a-look` adds the worth-a-look observations. One export files at most `--max-issues` (default 20); the next export files the rest.
+- **What an issue says.** The finding's title and description, its severity, category, page and address, the steps that led to it, its machine evidence, and when it was last found. All of that comes from the run, and some of it from the app's own pages, so it is made inert: an `@mention`, a link, a `#123` reference, HTML or Markdown in it is shown as text and does nothing.
+- **Severity.** A label on GitHub (`severity: high`, `severity: medium`, `severity: low`) and a priority in Jira (`High`, `Medium`, `Low`). `--severity-map high=P1,medium=P2,low=P3` renames them, and `--severity-map none` sets none. `--labels` adds labels to every issue.
+- **Screenshots.** A run recorded with `scout_attach {record: true}` keeps a frame of each step. Jira gets as attachments the last three frames, from the session that filed the finding, in the ten minutes before it was last found. GitHub's API cannot upload a file to an issue, and SceneScout hosts nothing, so a GitHub issue names those frames in the run's `.scenescout/` folder instead. A frame that is missing, over 10 MB, outside the recordings folder, or rewritten since by a later run is left out. `--screenshots off` leaves them all out.
+- **Credentials.** From the environment only, and never printed: `GH_TOKEN` or `GITHUB_TOKEN`, or `JIRA_EMAIL` and `JIRA_API_TOKEN` for Jira Cloud. A GitHub token's account must be able to set labels in the repository, since GitHub silently drops the labels of an issue created by an account that cannot; the export stops after such an issue rather than file more it could not find again.
+- **Requests.** Each may take 20 seconds. A rate limit is waited out when it asks for a minute or less, and ends the export when it asks for longer. A read that fails with a server error, a dropped connection or a timeout is retried with backoff. A redirect is refused, so the credentials never go to another address.
+- **Exit code.** 0 when the export filed what it set out to (findings over the cap wait for the next export) or, on a dry run, listed it. 2 when it could not finish, after saying what it filed before it stopped, or when a screenshot could not be attached to an issue it filed.
+
+In a GitHub Actions job, run it as a step after `scenescout ci`, with the job's own token and `issues: write` in the job's `permissions`, and keep the memory between runs so later runs keep their findings' ids:
+
+```yaml
+      - run: npx -y scenescout export --to github --repo "$GITHUB_REPOSITORY" --yes
+        env:
+          GH_TOKEN: ${{ github.token }}
+```
+
+Every option and variable is in the [configuration reference](Configuration-reference.md#scenescout-export). Why it works this way: [ADR 18](../adr/0018-an-export-files-each-finding-once-and-only-when-asked.md).
