@@ -2918,7 +2918,7 @@ test("dedup end to end: two near-duplicate findings the rule keeps apart are mer
   assert.equal(judged.findings.length, 1, JSON.stringify(judged.findings.map((f) => f.title)));
   const [kept] = judged.findings;
   assert.equal(kept.title, SAVE_FILING.title);
-  assert.equal(kept.runs, 2);
+  assert.equal(kept.runs, 1, "both filings were in one run, which counts once; the merge itself is kept in judgedMerges");
   assert.deepEqual(
     kept.judgedMerges?.map((m) => [m.title, m.severity, m.pSame]),
     [[SILENT_FILING.title, "high", 0.92]],

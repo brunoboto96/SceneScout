@@ -858,9 +858,12 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
           "form:POST /things",
           "form:POST /things/:id/comments",
           "form:name=pay",
+          "tid:event-create",
           "tid:feedback-send",
           "tid:items-save",
+          "tid:meeting-create",
           "tid:message-send",
+          "tid:record-save",
           "tid:rename-submit",
           "tid:signup-submit",
         ]),
@@ -913,6 +916,24 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     await engine.type(esRef("items-name"), "");
     await engine.press("Enter");
     check("scout_press Enter in a blank field submits it empty", !listed("tid:items-save"), JSON.stringify(untried()));
+
+    // The contrastive pair: a date the page filled in on load. Left as the
+    // page set it, the submit is the empty one; changed by the session, it is not.
+    await engine.click(esRef("event-create"));
+    check(
+      "a submit that leaves a page-filled date as it was, and every typed field blank, is the empty submit",
+      !listed("tid:event-create"),
+      JSON.stringify(untried()),
+    );
+    await engine.type(esRef("meeting-starts"), "2030-01-02T03:04", false, true);
+    await engine.click(esRef("meeting-create"));
+    check("...and the same form with the date changed by the session stays listed", listed("tid:meeting-create"), JSON.stringify(untried()));
+    await engine.click(esRef("record-save"));
+    check(
+      "an edit form saved with its page-filled text unchanged is not the empty submit: it stays listed",
+      listed("tid:record-save"),
+      JSON.stringify(untried()),
+    );
 
     const lookupClick = await engine.click(esRef("lookup-go"));
     check("scout_click on a form's submit with its field blank submits it empty", !listed("form:POST /things"), JSON.stringify(untried()));
@@ -982,6 +1003,31 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       "a form whose relative action differs per load only by a record id and a token is one entry",
       entries().filter((k) => k.includes("/comments")).length === 1,
       JSON.stringify(entries()),
+    );
+
+    console.log("network: the requests a page made since it loaded");
+    await engine.navigate("/tab-requests.html");
+    let tabSnap = await engine.snapshot(true);
+    const tabRef = (testid: string): string => {
+      const m = tabSnap.match(new RegExp(`(e\\d+) [^\\n]*testid=${testid}\\b`));
+      if (!m) throw new Error(`ref not found for ${testid} in:\n${tabSnap}`);
+      return m[1];
+    };
+    await engine.click(tabRef("tab-archived"));
+    await eventually(() => /GET \/api\/allow\?tab=archived → 200/.test(engine.listPageRequests()));
+    const afterFetch = engine.listPageRequests();
+    check("a client-side tab switch's fetch is listed with its status", /GET \/api\/allow\?tab=archived → 200 · \d+ ms/.test(afterFetch), afterFetch);
+    await engine.navigate("/tab-requests.html");
+    tabSnap = await engine.snapshot(true);
+    await engine.click(tabRef("tab-drafts"));
+    const noFetch = engine.listPageRequests();
+    check("...and the tab that fetched nothing leaves no entry, on a list a fresh load started again", !/api\/allow/.test(noFetch), noFetch);
+    const picked = await engine.apiRequest({ path: "/api/allow", view: { select: "items" } });
+    check("scout_request select returns only the value at the path", /\(select "items": all 2 characters\)\n\n\[\]$/.test(picked), picked);
+    check(
+      "...and the listing marks scout_request's own call",
+      /GET \/api\/allow → 200[^\n]*sent by scout_request/.test(engine.listPageRequests()),
+      engine.listPageRequests(),
     );
 
     console.log("coverage: the form inventory is cheap on a long form");
