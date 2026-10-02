@@ -531,6 +531,112 @@
       "seconds": 89,
       "costUsd": 0.02601919,
       "archive": "ci-lanes-4-demo-160-turns"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "demo",
+      "version": "3.14.1",
+      "commit": "0b709b2",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 4,
+        "planned": 4,
+        "ran": 4
+      },
+      "key": "c1786bc817",
+      "recall": {
+        "found": 8,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 9,
+        "labelled": 9,
+        "low": "100%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 86,
+      "tokens": {
+        "input": 1804634,
+        "cachedInput": 1760945,
+        "output": 6753
+      },
+      "seconds": 84,
+      "costUsd": 0.02535485,
+      "archive": "ci-lanes-4-demo-160-turns-2"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "demo",
+      "version": "3.14.1",
+      "commit": "0b709b2",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 5,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 5,
+        "labelled": 5,
+        "low": "100%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 37,
+      "tokens": {
+        "input": 803803,
+        "cachedInput": 777552,
+        "output": 2177
+      },
+      "seconds": 84,
+      "costUsd": 0.01148912,
+      "archive": "ci-lanes-1-demo-160-turns"
+    },
+    {
+      "date": "2026-10-02",
+      "app": "holdout",
+      "version": "3.14.1",
+      "commit": "0b709b2",
+      "source": "manual",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 4,
+        "planned": 4,
+        "ran": 4
+      },
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 7,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 7,
+        "labelled": 9,
+        "low": "50%",
+        "high": "86%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 86,
+      "tokens": {
+        "input": 1801743,
+        "cachedInput": 1776235,
+        "output": 7040
+      },
+      "seconds": 73,
+      "costUsd": 0.02383315,
+      "archive": "ci-lanes-4-holdout-160-turns"
     }
   ]
 }

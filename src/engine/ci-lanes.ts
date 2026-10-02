@@ -6,7 +6,7 @@
  * browser or a network: which routes the planning crawl found, how they are
  * split (brief.ts, the split scout_lane_brief makes), what each lane is told,
  * and how the lanes' endings become the run's. The loop that runs them is
- * src/ci-run.ts; the shared budget is engine/ci.ts's. Why: ADR 16.
+ * src/ci-run.ts; the shared budget is engine/ci.ts's. Why: ADR 20.
  */
 import { LANE_RULES, planLanes, type LaneBrief } from "./brief.js";
 import { CI_TOOLS, type Caps, type CiLevel, type CiMode, type StopReason } from "./ci.js";

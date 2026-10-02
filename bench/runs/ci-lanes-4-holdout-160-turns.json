@@ -1,0 +1,101 @@
+{
+  "app": "holdout",
+  "run": "ci-lanes-4-holdout-160-turns",
+  "date": "2026-10-02",
+  "note": "Four lanes (--lanes 4) with the caps raised to 160 turns and 6,000,000 tokens, engine at 0b709b2; gpt-6-luna, effort low. See Unattended runs, lanes.",
+  "findings": [
+    {
+      "title": "Fines page presents a denied request as an empty list",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403 → empty fines list without error"
+    },
+    {
+      "title": "Home notices request returns HTTP 500",
+      "severity": "high",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Book detail spacing consistently falls off a 4px grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "book detail spacing: 0% on 4px grid; 6/14/18/7/9px"
+    },
+    {
+      "title": "Fines page has no visually prominent next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "fines page audit: no visually dominant action"
+    },
+    {
+      "title": "Catalogue availability filter has no accessible name",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "checkbox testid=catalogue-available accessible name empty"
+    },
+    {
+      "title": "Rapid Join clicks send duplicate event-join requests",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/events/1/join fired twice on rapid Join click"
+    },
+    {
+      "title": "Overdue status text fails WCAG contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "loans overdue status contrast 1.84:1"
+    },
+    {
+      "title": "Hold drop button is unnamed",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "button testid=holds-drop-32 accessible name empty"
+    },
+    {
+      "title": "Event join confirmation has no way back to the library",
+      "severity": "medium",
+      "category": "dead-end",
+      "evidence": "GET /events-joined.html renders zero interactable elements"
+    },
+    {
+      "title": "Loans page lacks a visually prominent next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "loans page task-efficiency no visually dominant action"
+    },
+    {
+      "title": "Rapid repeated loan renewals submit twice",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/loans/201/renew fired twice"
+    },
+    {
+      "title": "Account export link is clipped and unreachable",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "account-export UNREACHABLE fully clipped inside overflow-hidden ancestor"
+    },
+    {
+      "title": "Account data export link is visually indistinguishable from body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "account-export link has no underline and same color as body text"
+    },
+    {
+      "title": "Catalogue spacing is mostly off a 4px grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "catalogue spacing audit: 67% off 4px grid; 9px×58, 1px×16, 18px×4, 7px×2",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    },
+    {
+      "title": "Checkout reports success after the write is refused",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/loans 403 (write-policy stand-in); checkout-msg reports checked out"
+    }
+  ],
+  "decisions": []
+}

@@ -432,7 +432,7 @@ export function wallLeftMs(spend: Spend, caps: Caps, now: number): number {
 
 /**
  * What a run's model loops draw their turns from: one loop's, or the one
- * budget every lane of a run shares (ADR 16). The caps are the run's, not a
+ * budget every lane of a run shares (ADR 20). The caps are the run's, not a
  * lane's: lanes together never make more model calls or run longer than one
  * loop would be allowed, and a lane that finishes early leaves what it did not
  * use to the lanes still running.
@@ -584,7 +584,7 @@ export function usageLine(spend: Spend, model: string, endedAt: number, override
  * scout_playbook (the method is the system prompt), scout_screenshot (the
  * loop is text-only), scout_resolve (scout_verify records re-tests), and the
  * lane tools (a run split into lanes is planned and folded by the run itself,
- * not by a model: engine/ci-lanes.ts, ADR 16).
+ * not by a model: engine/ci-lanes.ts, ADR 20).
  */
 export const CI_TOOLS = [
   "scout_scan",

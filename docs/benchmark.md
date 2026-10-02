@@ -1087,6 +1087,9 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-02 | holdout | 3.14.1 | manual | openai · gpt-6-luna · low | b5a7933f32 | 1/10 | 1/4 (20%–40%) | — | done | 27 | 558,749 (551,323) / 1,760 | 1m 05s | $0.007 |
 | 2026-10-02 | holdout | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | b5a7933f32 | 2/10 | 2/4 (40%–60%) | — | turns | 40 | 780,989 (767,682) / 2,721 | 32s | $0.010 |
 | 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | c1786bc817 | 8/13 | 9/9 (90%–100%) | — | done | 95 | 2,027,350 (2,001,159) / 6,777 | 1m 29s | $0.026 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | c1786bc817 | 8/13 | 9/9 (100%) | — | done | 86 | 1,804,634 (1,760,945) / 6,753 | 1m 24s | $0.025 |
+| 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low | c1786bc817 | 5/13 | 5/5 (100%) | — | done | 37 | 803,803 (777,552) / 2,177 | 1m 24s | $0.011 |
+| 2026-10-02 | holdout | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | b5a7933f32 | 7/10 | 7/9 (50%–86%) | — | done | 86 | 1,801,743 (1,776,235) / 7,040 | 1m 13s | $0.024 |
 
 <!-- ci-results:end -->
 
@@ -1108,7 +1111,7 @@ can set the caps without editing the workflow.
 ### Lanes: one loop against four (task 40)
 
 `scenescout ci --lanes 4` splits the app between four model loops that share
-the run's caps ([ADR 16](adr/0016-an-unattended-run-may-split-into-lanes-that-share-its-caps.md)).
+the run's caps ([ADR 20](adr/0020-an-unattended-run-may-split-into-lanes-that-share-its-caps.md)).
 One layer changed: the shape of the run. Held fixed: the engine at commit
 `eba7aea` (with `--lanes` built in, so both sides ran the same code),
 gpt-6-luna at effort `low`, ci-run-1's caps (the defaults: 40 turns,
@@ -1184,7 +1187,49 @@ Two more demo runs and a held-out run at those caps would show whether lanes
 with a per-lane budget beat one loop reliably; that is the next experiment,
 before any default changes.
 
-**Spend and what was not run.** Eight runs: the seven above, and a held-out
+**Settling the raised caps: four more runs and a control.** The spend cap was
+raised to twelve, with no more than two runs in flight. Each run below used
+160 turns and 6,000,000 tokens, on the engine at `0b709b2` (this branch merged
+with main, with no change to `scenescout ci`):
+
+| | Demo recall | Held-out recall | Turns | Wall | Cost |
+|---|---:|---:|---|---|---:|
+| One loop (the control, one run) | 5/13 | not run | 37, ended by itself | 1m 24s | $0.011 |
+| 4 lanes (two scored runs, with the one above) | 8/13, 8/13 | 7/10 | 86 to 95, every lane ended by itself | 1m 13s to 1m 29s | $0.024 to $0.026 |
+
+- **The control separates the caps from the split.** Given 160 turns, one loop
+  still ended by itself, at 37 turns, and found 5/13. Four lanes found 8/13
+  in both demo runs. They found the same five items as the control (the two
+  landing-page items, the hint's contrast, the dead end, the sticky bar),
+  plus the e-mail field with no label, the export crash, and the double submit
+  or the inventory list sorted as text. So the raised caps alone do not
+  explain the gain; the split uses a budget one loop leaves unspent.
+- **The held-out app:** four lanes found 7/10, labelled precision 7/9 (50%–86%,
+  with five findings unlabelled), against 1/10 to 3/10 for every single-loop
+  run on record. One loop was not run there at the raised caps.
+- **The rule, applied as agreed.** The default changes only if lanes at the
+  raised caps beat one loop at the raised caps by more than three on the
+  demo, and do not lose on the held-out app. On the demo the gain is +3
+  (8 against 5), at the noise bound and not beyond it, from one control run.
+  **The default stays one loop.** `--lanes 4 --max-turns 160 --max-tokens
+  6000000` is documented as the configuration that found the most, with its
+  cost.
+- **Its cost.** About 1.8 to 2.0 million tokens and $0.025 a run, about 2.3
+  times the control's, in about the same wall time.
+- **Its limit.** That rate is close to one organisation's 2,000,000
+  tokens-per-minute limit. The third demo lanes run, in flight beside the
+  held-out lanes run, used 2.09 million tokens in 77 seconds. One of its lanes
+  was refused (HTTP 429) after its retries, and the run ended
+  `provider-error`. It is not scored. Running two such runs at once on one
+  organisation's key is enough to reach that limit.
+- **What would settle the default:** one-loop runs at the raised caps on both
+  apps, enough of them to measure that configuration's own spread, beside
+  more lanes runs.
+
+**Spend and what was not run.** Twelve runs in all. The four above are one
+lanes run on the demo and the control, then one lanes run on the demo and
+one on the held-out app; the 429 cost the demo run, so two demo lanes runs at
+these caps were scored, with the first one above. The first eight: the seven above, and a held-out
 lanes run dispatched together with five others. One of its lanes had a model
 call refused for the organisation's tokens-per-minute limit (HTTP 429) through
 all its retries, so the run ended `provider-error` (exit 2), as a model API
@@ -1193,7 +1238,7 @@ sent about 1.4 million tokens a minute at this model, about 2.8 times one
 loop's 0.5 million, so a per-minute limit is reached sooner; the one refusal
 seen came with six runs in flight on one organisation's limit. [The lanes
 section of the CI guide](ci.md#lanes) says so. Lanes
-2 was not run: the last run went to the raised caps instead, the cause the
+2 was not run: the eighth run went to the raised caps instead, the cause the
 action logs pointed at.
 
 ## Finding dedup as a measured decision (task 15)

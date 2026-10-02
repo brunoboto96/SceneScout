@@ -1,4 +1,4 @@
-# 16. An unattended run may split into lanes that share its caps
+# 20. An unattended run may split into lanes that share its caps
 
 Status: accepted. Revisits the "one agent, not lanes" point of [ADR 14](0014-an-unattended-run-reports-and-never-gates.md).
 
@@ -68,9 +68,10 @@ what ended a run whose lanes ended differently.
   at the default caps, four lanes found 3 of 13 expected defects in each of
   two runs, as one loop did in each of two (a difference within three was
   read as noise), in half the wall time and with about 1.3 times the
-  tokens. One run with the caps raised to 160 turns and 6,000,000 tokens found
-  8 of 13: a direction, not a result, and the next experiment
-  (docs/benchmark.md, "Lanes: one loop against four").
+  tokens. With the caps raised to 160 turns and 6,000,000 tokens, four lanes
+  found 8 of 13 in each of two runs and 7 of 10 on the held-out app, against
+  5 of 13 for one loop given the same caps: +3, at the noise bound, so the
+  default did not change (docs/benchmark.md, "Lanes: one loop against four").
 
 ## Consequences
 
