@@ -62,6 +62,70 @@ export function shouldKeepWaiting(state: SettleState): boolean {
   return Math.min(state.sinceLastStartMs, state.elapsedMs) < QUIET_MS;
 }
 
+/**
+ * Which requests are still in flight, for the wait above.
+ *
+ * Counting the context's request events up and down is not enough. A request
+ * that has had its response headers but not its whole body when its document
+ * goes away (the page is left, or a frame is removed or moves on) gets neither
+ * a "finished" nor a "failed" event, so a plain counter never comes back down
+ * and every later wait runs to its cap. Each request is therefore held with the
+ * frame that sent it and the order it started in, and is dropped when it ends,
+ * when its frame is gone, or when its frame commits a navigation that started
+ * after it did. A same-document navigation (history.pushState) sends no
+ * navigation request, so it drops nothing — unless a navigation that answered
+ * without a new document (a 204, a download) is still pending for that frame,
+ * in which case the requests started before it are dropped early. Generic over the request and frame
+ * types so it is tested without a browser.
+ */
+export class InFlightRequests<R, F> {
+  private readonly open = new Map<R, { frame: F | undefined; order: number }>();
+  /** Per frame, the order of the latest navigation request it sent that has not yet committed. */
+  private readonly pendingNavigation = new Map<F, number>();
+  private order = 0;
+
+  /** A request started. `frame` is undefined for one no frame sent (a worker's). */
+  started(request: R, frame: F | undefined, isNavigation: boolean): void {
+    const order = ++this.order;
+    this.open.set(request, { frame, order });
+    if (isNavigation && frame !== undefined) this.pendingNavigation.set(frame, order);
+  }
+
+  /**
+   * A request finished or failed. One already dropped is ignored, so it cannot
+   * be counted out twice. A navigation that failed never commits, so it stops
+   * being the one a later commit of its frame is measured against. A finished
+   * one may still be about to commit (its body can end first), so it stays.
+   */
+  ended(request: R, failed = false): void {
+    const held = this.open.get(request);
+    this.open.delete(request);
+    if (failed && held?.frame !== undefined && this.pendingNavigation.get(held.frame) === held.order) this.pendingNavigation.delete(held.frame);
+  }
+
+  /**
+   * A frame committed a navigation. Requests its old document sent before the
+   * navigation began are dropped; the navigation itself and anything started
+   * after it stay. Without a navigation request (a same-document change) nothing is dropped.
+   */
+  navigated(frame: F): void {
+    const navigation = this.pendingNavigation.get(frame);
+    if (navigation === undefined) return;
+    this.pendingNavigation.delete(frame);
+    for (const [request, held] of this.open) if (held.frame === frame && held.order < navigation) this.open.delete(request);
+  }
+
+  /** Frames that are gone (detached, or their page closed): every request they sent is dropped. */
+  gone(isGone: (frame: F) => boolean): void {
+    for (const [request, held] of this.open) if (held.frame !== undefined && isGone(held.frame)) this.open.delete(request);
+    for (const frame of [...this.pendingNavigation.keys()]) if (isGone(frame)) this.pendingNavigation.delete(frame);
+  }
+
+  get count(): number {
+    return this.open.size;
+  }
+}
+
 /** A pace a session asked for, clamped. Negative or absurd values are a typo, not an instruction. */
 export const PACE_MAX_MS = 60_000;
 
