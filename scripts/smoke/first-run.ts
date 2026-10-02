@@ -368,10 +368,7 @@ async function goneAfterFirstPage(root: string): Promise<void> {
     const out = await runFirst([`${base}/`], work, machine.env);
     check(
       "an address that stops answering after its first page exits 2, says it could not reach it, and writes no report",
-      out.status === 2 &&
-        new RegExp(`could not reach ${base.replace(/[.]/g, "\\.")}/: `).test(out.stderr) &&
-        !out.stdout.includes("Look at these first") &&
-        fs.readdirSync(work).length === 0,
+      out.status === 2 && out.stderr.includes(`could not reach ${base}/: `) && !out.stdout.includes("Look at these first") && fs.readdirSync(work).length === 0,
       `${out.status}\n${out.stdout.slice(-600)}\n${out.stderr.slice(-600)}\n${JSON.stringify(fs.readdirSync(work))}`,
     );
   } finally {

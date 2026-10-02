@@ -58,7 +58,7 @@ A CI runner has nobody to type a password. There are three ways to give a job a 
 
 | Way | How | Trade-off |
 |---|---|---|
-| A test user on a test tenant (recommended) | `scenescout login <url> --role <name> --script` fills the sign-in form from environment variables, including a TOTP code | Tests the real sign-in on every run. Needs a second factor that is an authenticator-app secret you can store, and no CAPTCHA |
+| A test user on a test tenant (recommended) | `scenescout login <url> --role <name> --script` fills the sign-in form from environment variables, including a one-time code | Tests the real sign-in on every run. Needs a code from an authenticator-app secret you can store, or a fixed code the test environment accepts in place of one it would email, and no CAPTCHA |
 | A test-only sign-in endpoint | The app, in test environments only, exposes a route that signs in a named test user; a Playwright step visits it and saves a storage state | Fast and independent of the sign-in page, but it is code that signs anyone in, so every production build must leave it out or refuse it |
 | A saved session as a secret | Record a login on your machine, store the file's contents as an encrypted secret, and write it to a file in the job | No credentials in CI, but the secret is a live session: it expires, and anyone who reads it is signed in until it does |
 
@@ -70,20 +70,33 @@ SCENESCOUT_LOGIN_USERNAME=… SCENESCOUT_LOGIN_PASSWORD=… SCENESCOUT_LOGIN_TOT
     --project "$RUNNER_TEMP/scenescout" --success-url /dashboard
 ```
 
-It runs headless and signs in as a person would. It finds the username, password and one-time-code fields by their `autocomplete`, type and labels, fills what the page shows, and presses the button that moves the form on (Sign in, Next, Continue, Verify), never one that leads to another provider or a password reset. A form that asks for the password after "Next", or for the code on a page of its own, is followed step by step. The profile is saved exactly as the manual login saves it.
+It runs headless and signs in as a person would. It finds the username, password and one-time-code fields by their `autocomplete`, type and labels, fills what the page shows, and presses the button that moves the form on (Sign in, Next, Continue, Verify, Send code), never one that leads to another provider, a password reset, a new code or another address. A form that asks for the password after "Next", or for the code on a page of its own, is followed step by step. A code split into one box per character is typed one character per box. A button the page enables only once the form is complete is waited for, and a page that takes the code itself once it is complete is not submitted again. The profile is saved exactly as the manual login saves it.
+
+### A passwordless sign-in
+
+Many apps sign in with no password: the email, a button that sends a code, then the code. Leave `SCENESCOUT_LOGIN_PASSWORD` unset and give the code. The test environment of such an app commonly accepts one fixed code for test users, which is `SCENESCOUT_LOGIN_OTP_CODE`:
+
+```bash
+SCENESCOUT_LOGIN_USERNAME=… SCENESCOUT_LOGIN_OTP_CODE=… \
+  npx -y scenescout login https://staging.example.com/signin --role member --script \
+    --project "$RUNNER_TEMP/scenescout" --success-url /dashboard
+```
+
+The pause while the app sends the code is never taken for signed in. If the page asks for a password after all, the run stops and names `SCENESCOUT_LOGIN_PASSWORD`.
 
 | Variable | |
 |---|---|
 | `SCENESCOUT_LOGIN_USERNAME` | Required |
-| `SCENESCOUT_LOGIN_PASSWORD` | Required |
+| `SCENESCOUT_LOGIN_PASSWORD` | Required, except for a passwordless sign-in: leave it unset (set but empty is refused) and set one of the two below |
 | `SCENESCOUT_LOGIN_TOTP_SECRET` | When the sign-in asks for a code: the base32 secret, or the whole `otpauth://totp/…` URI. Codes follow RFC 6238, so the runner's clock must be right |
-| `SCENESCOUT_LOGIN_SUCCESS_URL` or `--success-url` | What the URL's path contains once signed in, or an absolute URL it starts with. Recommended: without it, or the selector below, the sign-in counts as done when no credential field is left, which an error page also satisfies |
+| `SCENESCOUT_LOGIN_OTP_CODE` | When the sign-in asks for a code and the test environment accepts a fixed one: 4 to 12 letters or digits. Not with `SCENESCOUT_LOGIN_TOTP_SECRET` |
+| `SCENESCOUT_LOGIN_SUCCESS_URL` or `--success-url` | What the URL's path contains once signed in, or an absolute URL it starts with. Recommended: without it, or the selector below, the sign-in counts as done when no credential field is left once the password or code has gone, which an error page also satisfies |
 | `SCENESCOUT_LOGIN_SUCCESS_SELECTOR` or `--success-selector` | A CSS selector visible only when signed in |
 | `SCENESCOUT_LOGIN_USERNAME_SELECTOR`, `_PASSWORD_SELECTOR`, `_OTP_SELECTOR`, `_SUBMIT_SELECTOR` (or `--username-selector` and so on) | A selector for a field or button the rules above do not find |
 
-`--timeout <seconds>` bounds the whole sign-in (default 60, 5 to 600). Credentials have no flag, because a flag shows in the process list and the shell history. The command exits 0 once signed in and saved and 1 otherwise, and a refused sign-in quotes the page's error message with every credential value replaced by `[redacted]`.
+`--timeout <seconds>` bounds the whole sign-in (default 60, 5 to 600). Credentials have no flag, because a flag shows in the process list and the shell history. The command exits 0 once signed in and saved and 1 otherwise, and a refused sign-in quotes the page's error message with every credential value, the code included, replaced by `[redacted]`.
 
-Not covered: a sign-in form inside an iframe, a code split across one input per digit, a CAPTCHA, and push or SMS second factors. Use a test-only endpoint or a saved session for those.
+Not covered: a sign-in form inside an iframe, a code that is emailed or texted and different every time (the test environment has to accept a fixed one), a sign-in link sent by email, a CAPTCHA, and push second factors. Use a test-only endpoint or a saved session for those.
 
 ### The rules for CI credentials
 
