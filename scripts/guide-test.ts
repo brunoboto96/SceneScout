@@ -389,6 +389,7 @@ test("the defaults the reference gives for check, ci and export are the parsers'
     "max-turns": o.caps.turns,
     "max-tokens": o.caps.tokens,
     "max-minutes": o.caps.wallMs / 60_000,
+    lanes: o.lanes,
     dedup: o.dedup,
   };
   for (const [option, value] of Object.entries(expectCi)) assert.equal(defaults("ci").get(option), `\`${value}\``, `ci --${option}`);

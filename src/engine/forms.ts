@@ -136,6 +136,14 @@ export const TEXT_ENTRY_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Text-entry types an app commonly fills in itself before anyone types (a
+ * date or time set to now). Left at that value, such a field counts as
+ * blank for the empty submit (FieldFacts.filled). Free text is not here: a
+ * pre-filled text field is an edit form holding its record.
+ */
+export const APP_FILLED_TYPES: ReadonlySet<string> = new Set(["date", "datetime-local", "month", "week", "time"]);
+
+/**
  * Input types in which Enter submits the form (the HTML standard's implicit
  * submission). Not checkboxes, radios or buttons: Enter does nothing there.
  */
@@ -149,7 +157,15 @@ export interface FieldFacts {
   disabled: boolean;
   readOnly: boolean;
   visible: boolean;
-  /** Whether its value is anything other than the empty string. */
+  /**
+   * Whether it holds something the session put there: a value other than the
+   * empty string and, for a date or time field (APP_FILLED_TYPES), other than
+   * the one the app gave it before anyone typed (recorded when the inventory
+   * first read the field). A date the app pre-fills with today is the app's
+   * value, so a submit that leaves it alone and every other field blank is
+   * still the empty submit. A pre-filled text field counts as filled, and a
+   * field the inventory never read is judged on its value alone.
+   */
   filled: boolean;
 }
 
@@ -227,6 +243,24 @@ export function isEmptySubmit(kind: "click" | "enter", probe: FormProbe | null):
   return probe !== null && submits(kind, probe) && allTextEmpty(probe.fields);
 }
 
+/** The words that make a button submit-style, matched as whole words. */
+const SUBMIT_WORDS = new Set(["submit", "send", "save", "create", "apply", "subscribe", "register", "sign", "signin", "signup", "post", "add"]);
+
+/**
+ * Whether a button reads as one that sends something, by its name and test
+ * id. Whole words only: a test id is split on its separators and its camel
+ * case first, so "sign-in" and "Sign" count but the "sign" inside "assignee"
+ * and the "post" inside "postcode" do not.
+ */
+export function isSubmitLike(role: string, name: string, testid: string | null): boolean {
+  if (role !== "button") return false;
+  const words = `${name} ${testid ?? ""}`
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z]+/);
+  return words.some((w) => SUBMIT_WORDS.has(w));
+}
+
 /**
  * Whether a failed page read is the page going away under it (a navigation
  * or a closed tab), which is expected after a submit and says nothing. Any
@@ -240,14 +274,34 @@ export function isNavigationTeardown(message: string): boolean {
 const FORM_HELPERS_SRC = `
   const visible = ${VISIBLE_SRC};
   const xpathOf = ${XPATH_OF_SRC};
-  const facts = (f) => ({
-    tag: f.tagName.toLowerCase(),
-    type: f.tagName.toLowerCase() === "input" ? String(f.type || "text").toLowerCase() : "",
-    disabled: f.matches(":disabled"),
-    readOnly: f.readOnly === true,
-    visible: visible(f),
-    filled: typeof f.value === "string" && f.value !== "",
-  });
+  // Each field's value when the inventory first read it: what the app put
+  // there before the session typed anything. Kept in the page, by element,
+  // under a registry symbol the app has no reason to touch.
+  const initialKey = Symbol.for("scenescout.form-initial-values");
+  const initials = window[initialKey] || (window[initialKey] = new WeakMap());
+  // remember: the inventory records a field's first value; the probe at
+  // submit time only compares, so a field first met at the submit counts as
+  // filled whenever it holds anything. Only date and time fields: an app
+  // pre-fills those with "now" on a create form, while a pre-filled text
+  // field is an edit form's record, and saving that unchanged is not the
+  // empty submit.
+  // Held equal to APP_FILLED_TYPES by memory-test; a literal, not a
+  // JSON.stringify, so this script is built from constants alone.
+  const pickerTypes = ["date", "datetime-local", "month", "week", "time"];
+  const facts = (f, remember) => {
+    const value = typeof f.value === "string" ? f.value : "";
+    const type = f.tagName.toLowerCase() === "input" ? String(f.type || "text").toLowerCase() : "";
+    const picker = pickerTypes.includes(type);
+    if (picker && remember && !initials.has(f)) initials.set(f, value);
+    return {
+      tag: f.tagName.toLowerCase(),
+      type,
+      disabled: f.matches(":disabled"),
+      readOnly: f.readOnly === true,
+      visible: visible(f),
+      filled: value !== "" && !(picker && value === initials.get(f)),
+    };
+  };
   // The type PROPERTY: a button with no type, or an unknown one, reports "submit".
   const isSubmit = (el) => {
     const tag = el.tagName.toLowerCase();
@@ -257,11 +311,11 @@ const FORM_HELPERS_SRC = `
   // Each DISTINCT set of field facts once. The rules ask whether any field is
   // text entry and whether every one is blank, which repeats do not change,
   // and a form of 2000 identical rows would otherwise ship 2000 objects back.
-  const fieldFactsOf = (form) => {
+  const fieldFactsOf = (form, remember) => {
     const seen = new Map();
     for (const c of Array.from(form.elements)) {
       if (!/^(input|textarea|select)$/i.test(c.tagName) || c.type === "hidden") continue;
-      const f = facts(c);
+      const f = facts(c, remember);
       const id = f.tag + "|" + f.type + "|" + f.disabled + "|" + f.readOnly + "|" + f.visible + "|" + f.filled;
       if (!seen.has(id)) seen.set(id, f);
     }
@@ -297,7 +351,7 @@ export const FORMS_INVENTORY_SCRIPT = `(() => {
     out.push({
       attrs: attrsOf(form),
       submit: xpathOf(submits[0]),
-      fields: fieldFactsOf(form),
+      fields: fieldFactsOf(form, true),
       submitDisabled: submits.every((s) => s.matches(":disabled")),
     });
   }
@@ -322,27 +376,25 @@ export const FORM_PROBE_BODY = `
     submit: xpathOf(submits[0]),
     submitTestid: submits[0].getAttribute("data-testid"),
     submitName: accessibleName(submits[0]),
-    fields: fieldFactsOf(form),
-    self: facts(node),
+    fields: fieldFactsOf(form, false),
+    self: facts(node, false),
     selfIsSubmit: isSubmit(node),
     defaultDisabled: submits[0].matches(":disabled"),
   };
 `;
 
-/** The probe as an expression over a node expression, for a page-level evaluate. */
-export function formProbeExpression(nodeExpression: string): string {
-  return `((node) => {${FORM_PROBE_BODY}})(${nodeExpression})`;
-}
+/** The probe over the focused element, as an expression for a page-level evaluate. */
+export const FORM_PROBE_OF_ACTIVE_ELEMENT = `((node) => {${FORM_PROBE_BODY}})(document.activeElement)`;
 
 /**
  * The scout_coverage lines for forms no session has submitted empty this
  * run. Empty when there is nothing to say.
  */
-export function formatNeverSubmittedEmpty(forms: ReadonlyArray<{ route: string; key: string }>): string[] {
+export function formatNeverSubmittedEmpty(forms: ReadonlyArray<{ route: string; key: string; seenBy?: readonly string[] }>): string[] {
   if (forms.length === 0) return [];
   return [
     "Forms never submitted empty this run (submit each once with every text field blank: a submit that silently does nothing — no request, no message — hides there):",
-    ...forms.slice(0, 15).map((f) => `  ${f.route} ${f.key}`),
+    ...forms.slice(0, 15).map((f) => `  ${f.route} ${f.key}${f.seenBy && f.seenBy.length > 0 ? ` (seen by ${f.seenBy.join(", ")})` : ""}`),
     ...(forms.length > 15 ? [`  … +${forms.length - 15} more`] : []),
   ];
 }

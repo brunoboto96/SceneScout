@@ -8,6 +8,7 @@
  */
 import { normalizePath } from "./fingerprint.js";
 import type { ActionLogEntry } from "./memory.js";
+import { IDLE_GAP_MS, sayDuration } from "./pace.js";
 
 /** More distinct screens than this for one task is worth questioning. */
 const MANY_SCREENS = 4;
@@ -77,12 +78,48 @@ export function measureJourney(log: ActionLogEntry[], completed: boolean): Journ
   return { interactions, navigations, routeSeq, distinctScreens, backtracks, shortcuts, policyBlocks, refusals, verdict };
 }
 
+/** How long a journey was worked on, as opposed to how long it stood open. */
+export interface JourneyTime {
+  /** Start to end, minus the gaps over the idle threshold. */
+  activeMs: number;
+  /** Start to end on the clock. */
+  wallMs: number;
+  /** Gaps over the threshold, left out of activeMs. */
+  idleGaps: number;
+}
+
+/**
+ * The time a journey took, measured as pace.ts measures a run: the gaps
+ * between consecutive moments (the start, each action of this session, the
+ * end) summed, leaving out any gap over IDLE_GAP_MS. A journey left open
+ * across a long pause between agent turns reported its whole wall-clock
+ * span — 23660 s for ten interactions — as the user's time on the task.
+ */
+export function journeyTime(startMs: number, actionMs: readonly number[], endMs: number, idleMs: number = IDLE_GAP_MS): JourneyTime {
+  const moments = [startMs, ...actionMs.filter((t) => Number.isFinite(t) && t >= startMs && t <= endMs).sort((a, b) => a - b), endMs];
+  let activeMs = 0;
+  let idleGaps = 0;
+  for (let i = 1; i < moments.length; i++) {
+    const gap = moments[i] - moments[i - 1];
+    if (gap > idleMs) idleGaps += 1;
+    else activeMs += gap;
+  }
+  return { activeMs, wallMs: Math.max(0, endMs - startMs), idleGaps };
+}
+
+/** The time figure a journey's result quotes: active seconds, and what was left out when anything was. */
+export function sayJourneyTime(t: JourneyTime): string {
+  const active = `${Math.round(t.activeMs / 1000)}s`;
+  if (t.idleGaps === 0) return active;
+  return `${active} active (${t.idleGaps} idle gap${t.idleGaps === 1 ? "" : "s"} over ${sayDuration(IDLE_GAP_MS)} excluded; ${sayDuration(t.wallMs)} on the clock)`;
+}
+
 /** The tool result for a finished journey. */
-export function formatJourney(j: { goal: string; completed: boolean; seconds: number; note?: string }, m: JourneyMeasure): string {
+export function formatJourney(j: { goal: string; completed: boolean; time: JourneyTime; note?: string }, m: JourneyMeasure): string {
   return [
     `JOURNEY ${j.completed ? "COMPLETED" : "ABANDONED"} — "${j.goal}"`,
     ``,
-    `Interaction cost: ${m.interactions} interactions · ${m.navigations} navigations · ${m.distinctScreens} distinct screens · ${j.seconds}s`,
+    `Interaction cost: ${m.interactions} interactions · ${m.navigations} navigations · ${m.distinctScreens} distinct screens · ${sayJourneyTime(j.time)}`,
     `Path: ${m.routeSeq.slice(0, 12).join(" → ")}${m.routeSeq.length > 12 ? " → …" : ""}`,
     ...(m.policyBlocks > 0 || m.refusals > 0 ? [`Policy: ${m.policyBlocks} write-policy blocks, ${m.refusals} refusals (tester safety, not app defects)`] : []),
     ...(j.note ? [`Note: ${j.note}`] : []),

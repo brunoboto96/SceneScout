@@ -32,6 +32,7 @@ const EXPECTED_TOOLS = [
   "scout_hover",
   "scout_select",
   "scout_navigate",
+  "scout_network",
   "scout_back",
   "scout_press",
   "scout_scroll",
