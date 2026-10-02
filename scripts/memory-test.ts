@@ -43,6 +43,7 @@ import {
   type FindingInput,
   type JudgeVerdict,
 } from "../src/engine/memory.ts";
+import { analyzeDesign, type StyleRecord } from "../src/engine/design.ts";
 import {
   FORMS_READ_FAILED,
   FORMS_SUBMIT_UNMATCHED,
@@ -60,6 +61,50 @@ import {
   type FieldFacts,
   type FormProbe,
 } from "../src/engine/forms.ts";
+
+/** One styled element for a design audit; override only what a case is about. */
+function designRecord(over: Partial<StyleRecord>): StyleRecord {
+  return {
+    tag: "div",
+    testid: null,
+    text: "text",
+    textLen: 4,
+    interactive: false,
+    rect: { x: 300, y: 20, w: 200, h: 40 },
+    fontSize: 16,
+    fontWeight: 400,
+    fontFamily: "Inter",
+    lineHeight: 24,
+    textTransform: "none",
+    textAlign: "left",
+    underline: false,
+    color: "rgb(0, 0, 0)",
+    bg: "rgb(255, 255, 255)",
+    padding: [8, 8, 8, 8],
+    marginV: [0, 0],
+    radius: 4,
+    shadow: "",
+    clipped: false,
+    fixed: false,
+    required: false,
+    submitish: false,
+    inputType: "",
+    role: "",
+    filled: false,
+    inForm: false,
+    inRow: false,
+    inSearch: false,
+    inBreadcrumb: false,
+    shell: false,
+    sideStripe: false,
+    gradientText: false,
+    glass: false,
+    glow: false,
+    aiGradient: false,
+    ...over,
+    textLen: (over.text ?? "text").length,
+  };
+}
 
 /** Temp dirs created by the running test, cleaned up even when it fails. */
 let dirs: string[] = [];
@@ -712,6 +757,34 @@ test("an element on most routes is shared chrome; one on a few pages is not", ()
   assert.ok(chrome.has("tid:sidebar-logo"), "on every route → shell");
   assert.ok(chrome.has("span:18"), "recognised without a testid, which is how badges render");
   assert.ok(!chrome.has("tid:page-0-title"), "on one route → that page's own content");
+});
+
+test("a page's design score does not depend on whether it was audited before the census warmed up", () => {
+  // Audit route A first, then three others, then A again: the census knows the
+  // shell only by the end, and A must score the same both times or the
+  // worst-pages ranking depends on audit order.
+  const store = freshStore();
+  const sidebar = Array.from({ length: 30 }, (_, i) =>
+    designRecord({ tag: "a", text: `Section ${i}`, interactive: true, filled: true, shell: true, bg: "rgb(30, 41, 59)", color: "rgb(100, 116, 139)" }),
+  );
+  const page = (name: string) => ({
+    records: [
+      designRecord({ tag: "h1", text: name }),
+      designRecord({ tag: "button", text: `New ${name}`, interactive: true, filled: true, bg: "rgb(20, 80, 200)", color: "rgb(255, 255, 255)" }),
+      ...sidebar,
+    ],
+    page: { scrollW: 1280, clientW: 1280, headings: [{ level: 1, size: 30, text: name }], images: [], density: 10, focusSamples: [] },
+  });
+  const audit = (route: string) => {
+    const { score, signatures } = analyzeDesign(page(route), { width: 1280, height: 900 }, store.designChromeKeys());
+    store.recordDesignElements(route, signatures);
+    return score;
+  };
+  const firstA = audit("/a");
+  assert.equal(store.designChromeKeys().size, 0, "one audited route: the census knows nothing yet");
+  for (const r of ["/b", "/c", "/d"]) audit(r);
+  assert.ok(store.designChromeKeys().size >= 30, "four audited routes: the census now knows the sidebar");
+  assert.deepEqual(audit("/a"), firstA);
 });
 
 test("chrome is not inferred from too few routes", () => {

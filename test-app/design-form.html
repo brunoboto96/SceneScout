@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Design form</title>
+  <style>
+    body { margin: 0; font: 16px/1.5 sans-serif; background: rgb(209, 213, 219); color: rgb(17, 24, 39); }
+    aside { position: fixed; left: 0; top: 0; bottom: 0; width: 220px; background: rgb(30, 41, 59); }
+    aside a { display: block; margin: 4px 8px; padding: 6px 12px; background: rgb(51, 65, 85); color: rgb(100, 116, 139); text-decoration: none; }
+    main { margin-left: 240px; padding: 16px; }
+    .crumbs a { display: inline-block; padding: 4px 12px; min-width: 60px; background: rgb(255, 255, 255); color: rgb(17, 24, 39); }
+    header h1 { color: rgb(190, 190, 190); }
+    button { padding: 8px 16px; min-width: 100px; border: 0; background: rgb(20, 80, 200); color: rgb(255, 255, 255); }
+    input, select { padding: 6px; background: rgb(255, 255, 255); min-width: 80px; }
+  </style>
+</head>
+<body>
+  <!-- The contrast to design-context.html: the same shell and styles, and a real
+       <form> of six fields with none marked required. This one IS a form to
+       fill in, so the design audit's form-burden line must still fire. -->
+  <aside aria-label="Sections">
+    <nav>
+      <a href="#s1" data-testid="design-ctx-shell-1">Section one</a>
+      <a href="#s2" data-testid="design-ctx-shell-2">Section two</a>
+      <a href="#s3" data-testid="design-ctx-shell-3">Section three</a>
+      <a href="#s4" data-testid="design-ctx-shell-4">Section four</a>
+      <a href="#s5" data-testid="design-ctx-shell-5">Section five</a>
+      <a href="#s6" data-testid="design-ctx-shell-6">Section six</a>
+    </nav>
+  </aside>
+  <main>
+    <header>
+      <h1>New thing</h1>
+    </header>
+    <form data-testid="design-form">
+      <input aria-label="Name" data-testid="design-form-name">
+      <input aria-label="Code" data-testid="design-form-code">
+      <input aria-label="Owner" data-testid="design-form-owner">
+      <input aria-label="Place" data-testid="design-form-place">
+      <input aria-label="Notes" data-testid="design-form-notes">
+      <select aria-label="Kind" data-testid="design-form-kind"><option>Small</option><option>Large</option></select>
+      <button type="submit" data-testid="design-form-save">Save thing</button>
+    </form>
+  </main>
+</body>
+</html>
