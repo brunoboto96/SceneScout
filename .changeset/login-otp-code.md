@@ -1,0 +1,7 @@
+---
+"scenescout": minor
+---
+
+`scenescout login --script` signs in to passwordless apps and takes a fixed one-time code. `SCENESCOUT_LOGIN_OTP_CODE` is a code the test environment accepts, typed where the form asks for one, as an alternative to `SCENESCOUT_LOGIN_TOTP_SECRET` (setting both is refused at startup); it is redacted from all output like the other credentials. `SCENESCOUT_LOGIN_PASSWORD` may be left unset when a code is given: the run fills the username, presses the button that sends the code ("Send code", "Continue"), waits through the moment with no field on screen, and types the code; a password field that appears anyway stops the run naming the variable.
+
+Finding and submitting the code: a code split into one box per character is typed one character per box; a numeric field sized for a code is the code field once the username has gone; an email field whose label mentions a code stays the username. After typing, the run reads the page until it is clear how to go on, so a button enabled only once the form is complete is waited for, a page that takes the code itself is not submitted again, and a field the typing revealed is filled first. A button that signs in or verifies is pressed rather than one that sends a code where a page has both, and buttons that resend a code or change the address are never pressed. With no success URL or selector, a page with no sign-in field now counts as signed in only once a password or a code has gone, so the pause while a code is sent is not taken for a sign-in.
