@@ -32,6 +32,8 @@ export interface CheckInputs {
   skippedFlows?: SkippedFlowFile[];
   /** The project's findings, or null when --retest is off or the project has no memory yet. */
   findings: Finding[] | null;
+  /** The directory the flows were read from, or null when none was. */
+  flowsDir?: string | null;
 }
 
 /**
@@ -43,10 +45,11 @@ export function readCheckInputs(options: CheckOptions): CheckInputs {
   const where = resolveFlowsDir(options.flows, options.projectDir, (p) => fs.existsSync(p) && fs.statSync(p).isDirectory());
   if ("error" in where) throw new Error(where.error);
   const { flows, skipped: skippedFlows } = where.dir ? loadFlows(where.dir) : { flows: [], skipped: [] };
-  if (!options.retest) return { flows, skippedFlows, findings: null };
+  const flowsDir = where.dir;
+  if (!options.retest) return { flows, skippedFlows, findings: null, flowsDir };
   // Read, never written: a check leaves the project's memory as it found it.
   const memoryPath = path.join(options.projectDir, MEMORY_DIRNAME, "memory.json");
-  if (!fs.existsSync(memoryPath)) return { flows, skippedFlows, findings: null };
+  if (!fs.existsSync(memoryPath)) return { flows, skippedFlows, findings: null, flowsDir };
   let findings: unknown;
   try {
     findings = (JSON.parse(fs.readFileSync(memoryPath, "utf8")) as { findings?: unknown }).findings;
@@ -56,7 +59,7 @@ export function readCheckInputs(options: CheckOptions): CheckInputs {
     );
   }
   if (findings !== undefined && !Array.isArray(findings)) throw new Error(`${memoryPath}: "findings" is not a list. Pass --retest off to check without it`);
-  return { flows, skippedFlows, findings: wellFormedFindings((findings as unknown[] | undefined) ?? []) };
+  return { flows, skippedFlows, findings: wellFormedFindings((findings as unknown[] | undefined) ?? []), flowsDir };
 }
 
 export async function runCheck(

@@ -63,6 +63,7 @@ import {
   type FirstRunFacts,
 } from "../src/first-run.ts";
 import { checkRetestPlan, retestResults, wellFormedFindings, type MeasuredPage } from "../src/engine/verify.ts";
+import { resolveSarifAnchor, sarifFilesFor, workflowFileOf } from "../src/engine/sarif.ts";
 import {
   CHECK_OPTION_NAMES,
   CHECK_RULES,
@@ -399,7 +400,27 @@ test("a pipe in evidence cannot break the report's markdown", () => {
   assert.match(md, /a \\\| b c/);
 });
 
-test("SARIF: severities map to levels, rules list only what was found, locations are relative to the app", () => {
+type SarifShape = {
+  version: string;
+  runs: Array<{
+    tool: { driver: { rules: Array<{ id: string }> } };
+    originalUriBaseIds?: unknown;
+    properties: { app: string };
+    results: Array<{
+      ruleId: string;
+      level: string;
+      message: { text: string };
+      locations: Array<{
+        physicalLocation: { artifactLocation: { uri: string; uriBaseId?: string } };
+        logicalLocations: Array<{ kind: string; fullyQualifiedName: string }>;
+      }>;
+      partialFingerprints: Record<string, string>;
+      properties: { routes: string[]; flow?: string };
+    }>;
+  }>;
+};
+
+test("SARIF: severities map to levels, rules list only what was found, locations are a repository file with the route beside it", () => {
   const issues = issuesFromRoutes(
     [
       route({
@@ -410,28 +431,129 @@ test("SARIF: severities map to levels, rules list only what was found, locations
     ],
     ORIGIN,
   );
-  const sarif = toSarif(result(issues), "9.9.9") as {
-    version: string;
-    runs: Array<{
-      tool: { driver: { rules: Array<{ id: string }> } };
-      originalUriBaseIds: { APP: { uri: string } };
-      results: Array<{
-        ruleId: string;
-        level: string;
-        locations: Array<{ physicalLocation: { artifactLocation: { uri: string; uriBaseId: string } } }>;
-        partialFingerprints: Record<string, string>;
-      }>;
-    }>;
-  };
+  const sarif = toSarif(result(issues), "9.9.9", { anchor: ".github/workflows/check.yml" }) as SarifShape;
   assert.equal(sarif.version, "2.1.0");
   const run = sarif.runs[0];
   assert.deepEqual(run.tool.driver.rules.map((r) => r.id).sort(), ["contrast", "page-error"]);
-  assert.equal(run.originalUriBaseIds.APP.uri, `${ORIGIN}/`);
+  assert.equal(run.originalUriBaseIds, undefined, "no location is relative to the app any more");
+  assert.equal(run.properties.app, ORIGIN);
   const byRule = Object.fromEntries(run.results.map((r) => [r.ruleId, r]));
   assert.equal(byRule["page-error"].level, "error");
   assert.equal(byRule["contrast"].level, "note");
-  assert.deepEqual(byRule["page-error"].locations[0].physicalLocation.artifactLocation, { uri: "orders", uriBaseId: "APP" });
-  assert.ok(byRule["page-error"].partialFingerprints["scenescoutCheck/v1"]);
+  // Code scanning drops a result whose location is not a file in the repository.
+  assert.deepEqual(byRule["page-error"].locations[0].physicalLocation.artifactLocation, { uri: ".github/workflows/check.yml" });
+  assert.deepEqual(byRule["page-error"].locations[0].logicalLocations, [{ kind: "resource", name: "/orders", fullyQualifiedName: "/orders" }]);
+  assert.deepEqual(byRule["page-error"].properties.routes, ["/orders"]);
+  assert.match(byRule["page-error"].message.text, / — on \/orders$/);
+  assert.equal(byRule["page-error"].partialFingerprints["scenescoutCheck/v1"], issues.find((i) => i.rule === "page-error")!.fingerprint);
+  assert.ok(!JSON.stringify(sarif).includes('"uriBaseId"'));
+});
+
+test("SARIF: an issue a saved flow raised points at the flow's file; the same kind of issue from a crawled page points at the anchor", () => {
+  const v = { kind: "http_error" as const, severity: "high" as const, detail: httpErrorDetail("GET", `${ORIGIN}/api/things/42`, 500), url: `${ORIGIN}/things` };
+  const files = { anchor: "package.json", flowsDir: ".scenescout/flows" };
+  const uriOf = (issues: CheckIssue[]): string[] =>
+    (toSarif(result(issues), "1", files) as SarifShape).runs[0].results.map((r) => r.locations[0].physicalLocation.artifactLocation.uri);
+  const fromFlow = issuesFromRoutes([route({ path: "/" })], ORIGIN, [], [flowRun({ outcome: BROKE, violations: [{ path: "/things", violation: v }] })]);
+  assert.deepEqual(uriOf(fromFlow), [".scenescout/flows/details.json", ".scenescout/flows/details.json"]);
+  const fromPage = issuesFromRoutes([route({ path: "/things", violations: [v] })], ORIGIN);
+  assert.deepEqual(uriOf(fromPage), ["package.json"]);
+  // Seen on a crawled page first and then in a flow: still the flow's file, and the fingerprint is the page issue's.
+  const both = issuesFromRoutes([route({ path: "/", violations: [v] })], ORIGIN, [], [flowRun({ violations: [{ path: "/things", violation: v }] })]);
+  assert.deepEqual(uriOf(both), [".scenescout/flows/details.json"]);
+  assert.equal(both[0].fingerprint, fromPage[0].fingerprint, "the location moved; the alert's identity did not");
+  // Flows read from outside the repository have no file code scanning could open: the anchor.
+  assert.deepEqual(
+    (toSarif(result(fromFlow), "1", { anchor: "package.json" }) as SarifShape).runs[0].results.map((r) => r.locations[0].physicalLocation.artifactLocation.uri),
+    ["package.json", "package.json"],
+  );
+});
+
+test("SARIF anchor: the option, else the running workflow's file, else package.json, else README.md", () => {
+  const ref = "an-owner/a-repo/.github/workflows/ui-check.yml@refs/pull/7/merge";
+  const none = (): boolean => false;
+  const all = (): boolean => true;
+  const cases: Array<[string, Parameters<typeof resolveSarifAnchor>[0], { file: string; source: string }]> = [
+    ["option wins over the workflow", { option: "docs/ui.md", env: { GITHUB_WORKFLOW_REF: ref }, exists: all }, { file: "docs/ui.md", source: "option" }],
+    ["workflow set", { env: { GITHUB_WORKFLOW_REF: ref }, exists: all }, { file: ".github/workflows/ui-check.yml", source: "workflow" }],
+    ["workflow not set, package.json there", { env: {}, exists: all }, { file: "package.json", source: "fallback" }],
+    ["workflow not set, only README.md", { env: {}, exists: (f) => f === "README.md" }, { file: "README.md", source: "fallback" }],
+    ["workflow ref of the wrong shape", { env: { GITHUB_WORKFLOW_REF: "nonsense" }, exists: all }, { file: "package.json", source: "fallback" }],
+  ];
+  for (const [name, input, want] of cases) assert.deepEqual(resolveSarifAnchor(input), want, name);
+  assert.equal(workflowFileOf("o/r/.github/workflows/a.yml@main"), ".github/workflows/a.yml");
+  assert.equal(workflowFileOf("o/r/.github/workflows/a.yml"), ".github/workflows/a.yml");
+  assert.equal(workflowFileOf("o/r/.github/workflows/a.yml@refs/heads/fix@2"), ".github/workflows/a.yml", "a branch name may hold @");
+  assert.equal(workflowFileOf("o/r/../../etc/passwd@main"), null);
+  assert.equal(workflowFileOf(undefined), null);
+});
+
+test("SARIF anchor: a missing file is warned about by name and skipped for the next one that exists; with none, the SARIF is still written", () => {
+  const ref = "o/r/.github/workflows/ui-check.yml@refs/heads/main";
+  const only =
+    (...present: string[]) =>
+    (f: string): boolean =>
+      present.includes(f);
+  // The contrastive pair: the same option, present and then missing.
+  const present = resolveSarifAnchor({ option: "docs/ui.md", env: {}, exists: only("docs/ui.md", "package.json") });
+  assert.deepEqual(present, { file: "docs/ui.md", source: "option" }, "no warning when the file is there");
+  const missing = resolveSarifAnchor({ option: "docs/ui.md", env: {}, exists: only("package.json") });
+  assert.equal(missing.file, "package.json");
+  assert.equal(missing.source, "fallback");
+  assert.match(missing.warning ?? "", /--sarif-file-anchor docs\/ui\.md is not in the repository; results point at package\.json instead/);
+  assert.ok(!missing.warning!.includes("\n"), "one line");
+  // The same pair for the workflow file.
+  assert.equal(resolveSarifAnchor({ env: { GITHUB_WORKFLOW_REF: ref }, exists: only(".github/workflows/ui-check.yml") }).warning, undefined);
+  const noWorkflow = resolveSarifAnchor({ env: { GITHUB_WORKFLOW_REF: ref }, exists: only("README.md") });
+  assert.equal(noWorkflow.file, "README.md");
+  assert.match(noWorkflow.warning ?? "", /the workflow file \.github\/workflows\/ui-check\.yml is not in the repository; results point at README\.md/);
+  // A quiet fallback chain is not a warning: package.json missing, README.md there.
+  assert.equal(resolveSarifAnchor({ env: {}, exists: only("README.md") }).warning, undefined);
+  // Nothing exists: the first candidate is kept, and the warning says code scanning will drop the results.
+  const none = resolveSarifAnchor({ option: "docs/ui.md", env: { GITHUB_WORKFLOW_REF: ref }, exists: () => false });
+  assert.equal(none.file, "docs/ui.md");
+  assert.match(none.warning ?? "", /tried --sarif-file-anchor docs\/ui\.md, the workflow file .*package\.json, README\.md.*code scanning will drop them/);
+  assert.equal(resolveSarifAnchor({ env: {}, exists: () => false }).file, "package.json");
+});
+
+test("an explicit --sarif-file-anchor that does not exist is parsed, not refused: the warning comes when the SARIF is written", () => {
+  const parsed = parseCheckArgs(["http://127.0.0.1:3000", "--sarif-file-anchor=no/such/file.md"], "/work");
+  assert.ok(parsed.ok && parsed.options.sarifFileAnchor === "no/such/file.md");
+  const files = sarifFilesFor({ option: "no/such/file.md", env: {}, projectDir: "/w/repo", exists: (p) => p === path.join("/w/repo", "package.json") });
+  assert.equal(files.anchor, "package.json");
+  assert.match(files.warning ?? "", /no\/such\/file\.md is not in the repository/);
+});
+
+test("SARIF files: relative to the Actions checkout when there is one, else the project; flows outside it fall back to the anchor", () => {
+  const exists = (p: string): boolean =>
+    [path.join("/w/repo", "package.json"), path.join("/w/repo", ".github/workflows/ui.yml"), path.join("/w/repo/app", "README.md")].includes(p);
+  const ref = "o/r/.github/workflows/ui.yml@refs/heads/main";
+  assert.deepEqual(
+    sarifFilesFor({
+      env: { GITHUB_WORKSPACE: "/w/repo", GITHUB_WORKFLOW_REF: ref },
+      projectDir: "/w/repo/app",
+      flowsDir: "/w/repo/app/.scenescout/flows",
+      exists,
+    }),
+    { anchor: ".github/workflows/ui.yml", source: "workflow", flowsDir: "app/.scenescout/flows" },
+  );
+  assert.deepEqual(sarifFilesFor({ env: { GITHUB_WORKSPACE: "/w/repo" }, projectDir: "/w/repo/app", flowsDir: "/elsewhere/flows", exists }), {
+    anchor: "package.json",
+    source: "fallback",
+  });
+  assert.deepEqual(sarifFilesFor({ env: {}, projectDir: "/w/repo/app", flowsDir: null, exists }), { anchor: "README.md", source: "fallback" });
+});
+
+test("--sarif-file-anchor: a file relative to the repository root, never outside it", () => {
+  const parse = (v: string) => parseCheckArgs(["http://127.0.0.1:3000", `--sarif-file-anchor=${v}`], "/work");
+  const ok = parse("./docs\\ui.md");
+  assert.ok(ok.ok && ok.options.sarifFileAnchor === "docs/ui.md");
+  for (const bad of ["/etc/passwd", "C:/x.md", "../outside.md", "docs/", " "]) {
+    const r = parse(bad);
+    assert.ok(!r.ok && /--sarif-file-anchor/.test(r.error), bad);
+  }
+  const absent = parseCheckArgs(["http://127.0.0.1:3000"], "/work");
+  assert.ok(absent.ok && absent.options.sarifFileAnchor === undefined);
 });
 
 test("a field labelled only by its placeholder is its own medium rule, apart from a control with no name at all", () => {
