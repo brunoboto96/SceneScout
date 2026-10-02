@@ -19,6 +19,7 @@ import {
   joinKeys,
   MIN_FOR_A_VERDICT,
   type RecordedDecision,
+  templateIds,
   unfiledDefects,
 } from "../src/engine/calibration.ts";
 import type { Finding } from "../src/engine/memory.ts";
@@ -360,6 +361,61 @@ test("a decision naming a failing endpoint is filed only by a finding on that en
   const d = decision({ observation: "toast-lies", evidence: "toast says saved but GET /api/items returned 500" });
   assert.deepEqual(unfiledDefects([d], findings), ["toast-lies — toast says saved but GET /api/items returned 500"]);
   assert.deepEqual(unfiledDefects([d], [finding("GET /api/items 500")]), [], "the same failing signature is filed");
+});
+
+test("a decision naming the finding it was filed as is filed when the project holds that defect, whatever its evidence says", () => {
+  // The pair: one fact differs, whether the id the decision names is in the project.
+  const filed = finding("row-approve click → status unchanged; list shows Approved", { id: "a1b2c3d4e5" });
+  const reworded = { observation: "approve-noop", evidence: "approve button does nothing" };
+  assert.deepEqual(unfiledDefects([decision({ ...reworded, finding: "a1b2c3d4e5" })], [filed]), [], "the lane's own link to its filing");
+  assert.deepEqual(
+    unfiledDefects([decision({ ...reworded, finding: "ffffffffff" })], [filed]),
+    ["approve-noop — approve button does nothing (finding ffffffffff is not in this project)"],
+    "an id the project does not hold is not a filing, and is named",
+  );
+  assert.deepEqual(
+    unfiledDefects([decision({ observation: "x", evidence: "GET /api/x 500", finding: "ffffffffff" })], [finding("GET /api/x 500")]),
+    [],
+    "an unknown id falls through to the evidence",
+  );
+  // A worth-a-look is not in the report's findings, so naming one is not a filing.
+  const look = finding("x", { id: "0123456789", tier: "worth_a_look", convention: "c" });
+  assert.deepEqual(unfiledDefects([decision({ ...reworded, finding: "0123456789" })], [look]), [
+    "approve-noop — approve button does nothing (finding 0123456789 is filed only as worth a look)",
+  ]);
+});
+
+test("a lane's rewording of its filed evidence still matches: ids with underscores, and path ids written as the route", () => {
+  const control = "row-stage-pending_review click → no change; stage-badge-label still reads Pending; GET /api/things/:id 200 shows approved; reload fixes it";
+  const pages = "/things/:id stage badge stays Pending after approve; list view shows Approved for every row";
+  const findings = [finding(control), finding(pages)];
+  const unfiled = (evidence: string) => unfiledDefects([decision({ observation: "o", evidence })], findings);
+  // Two identifiers shared, one of them with an underscore inside a part.
+  assert.deepEqual(unfiled("row-stage-pending_review click: stage-badge-label unchanged"), []);
+  // The pages the lane visited, written as the route the finding names.
+  assert.deepEqual(unfiled("/things/5,/1,/2 stage badge stays Pending after approve"), []);
+  assert.deepEqual(unfiled("/things/{thingId} stage badge stays Pending after approve"), []);
+  // The contrast: a different defect on the same control is still unfiled.
+  assert.deepEqual(unfiled("row-stage-pending_review hover: tooltip-help-text missing"), ["o — row-stage-pending_review hover: tooltip-help-text missing"]);
+  assert.deepEqual(unfiled("/widgets/5,/1 stage badge stays Pending after approve"), ["o — /widgets/5,/1 stage badge stays Pending after approve"]);
+});
+
+test("templateIds: an id after a slash, a list of them, or a template is :id; a ratio, a count or a word is left alone", () => {
+  for (const [text, out] of [
+    ["/things/5,/1,/2 x", "/things/:id x"],
+    ["/things/5, 1 and", "/things/:id and"],
+    ["/things/7/parts/9", "/things/:id/parts/:id"],
+    ["/things/{thingId}/parts/*", "/things/:id/parts/:id"],
+    ["/things/:thing_id;", "/things/:id;"],
+    ["contrast 3.1:1 and 8 rows", "contrast 3.1:1 and 8 rows"],
+    ["3/4 widgets and 1/2, 3 rows", "3/4 widgets and 1/2, 3 rows"],
+    ["/api/v2/things/7", "/api/v2/things/:id"],
+    ["/things/me", "/things/me"],
+    ["/v2/things", "/v2/things"],
+    ["/things/5a", "/things/5a"],
+  ] as const) {
+    assert.equal(templateIds(text), out, text);
+  }
 });
 
 test("a short signature does not count as filed just because it appears inside another finding", () => {
