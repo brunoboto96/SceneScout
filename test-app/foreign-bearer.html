@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Embedded widget</title>
+  </head>
+  <body>
+    <!--
+      A page whose own API calls carry no Authorization header, beside a
+      widget that sends a bearer token to another origin (?foreign=<origin>).
+      A replay of the app's API must send no credential: the widget's token
+      belongs to the other site.
+    -->
+    <h1 data-testid="foreign-bearer-heading">Loading</h1>
+    <script>
+      const foreign = new URLSearchParams(location.search).get("foreign") || "";
+      Promise.allSettled([
+        fetch(`${foreign}/api/auth-echo`, { headers: { authorization: "Bearer widget-token" } }),
+        fetch("/api/auth-echo"),
+      ]).then(() => {
+        document.querySelector("h1").textContent = "Loaded";
+      });
+    </script>
+  </body>
+</html>
