@@ -82,6 +82,27 @@
     <input type="text" aria-label="Comment" data-testid="comment-text">
     <button data-testid="comment-post">Post comment</button>
   </form>
+  <!-- Two create forms whose date the page fills in with the current time on
+       load. The pair differs only in what the session does: one is submitted
+       with the date left as the page set it, the other after the session
+       changed the date. -->
+  <form novalidate>
+    <input type="text" aria-label="Event title" data-testid="event-title">
+    <input type="datetime-local" aria-label="Event starts" data-testid="event-starts" class="prefilled-now">
+    <button data-testid="event-create">Create event</button>
+  </form>
+  <form novalidate>
+    <input type="text" aria-label="Meeting title" data-testid="meeting-title">
+    <input type="datetime-local" aria-label="Meeting starts" data-testid="meeting-starts" class="prefilled-now">
+    <button data-testid="meeting-create">Create meeting</button>
+  </form>
+  <!-- An edit form whose text field the page fills in with the record's
+       name on load. Saved unchanged, it is not the empty submit: the field
+       holds the record, not nothing. -->
+  <form novalidate>
+    <input type="text" aria-label="Record name" data-testid="record-name" class="prefilled-record">
+    <button data-testid="record-save">Save record</button>
+  </form>
   <!-- Nothing to leave blank: a checkbox and a select. Never listed. -->
   <form>
     <label><input type="checkbox" data-testid="prefs-digest"> Weekly digest</label>
@@ -104,6 +125,9 @@
     const log = (text) => { document.getElementById('log').textContent = text; };
     const byTestid = (id) => document.querySelector('[data-testid="' + id + '"]');
     for (const form of document.forms) form.addEventListener('submit', (e) => e.preventDefault());
+    // Set by script, not by a value attribute: the field's default value stays empty.
+    for (const field of document.querySelectorAll('.prefilled-now')) field.value = new Date().toISOString().slice(0, 16);
+    for (const field of document.querySelectorAll('.prefilled-record')) field.value = 'Quarterly plan';
     byTestid('signup-form').addEventListener('submit', () => {
       // The defect: blank required field, so return without a word.
       if (!byTestid('signup-email').value) return;

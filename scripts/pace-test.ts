@@ -11,6 +11,7 @@ import { test } from "node:test";
 import { formatPace, IDLE_GAP_MS, measurePace, sayDuration, STALE_SESSION_MS, isActing } from "../src/engine/pace.ts";
 import { FORMS_READ_FAILED, FORMS_SUBMIT_UNMATCHED } from "../src/engine/forms.ts";
 import type { ActionLogEntry } from "../src/engine/memory.ts";
+import { journeyTime, sayJourneyTime } from "../src/engine/journey.ts";
 
 const T0 = Date.parse("2026-09-20T20:00:00.000Z");
 const at = (secs: number): string => new Date(T0 + secs * 1000).toISOString();
@@ -246,4 +247,24 @@ test("a lane that acts again after its report was folded has no after-fold split
   const orders = measurePace(log, T0 + 999_000).sessions[0];
   assert.equal(orders.afterFinishMs, 130_000, "from the LAST action, the one after the fold");
   assert.equal(orders.afterFoldMs, null);
+});
+
+test("a journey's time is its active time: a gap over the idle threshold is left out and said to be", () => {
+  const s = 1000;
+  // Actions at 0 s, 5 s and 6005 s, then the end 5 s later.
+  const paused = journeyTime(0, [0, 5 * s, 6005 * s], 6010 * s);
+  assert.equal(paused.activeMs, 10 * s, "about 10 s of work, not 6010 s of clock");
+  assert.equal(paused.idleGaps, 1);
+  assert.equal(paused.wallMs, 6010 * s);
+  assert.equal(sayJourneyTime(paused), `10s active (1 idle gap over ${sayDuration(IDLE_GAP_MS)} excluded; 1h40m on the clock)`);
+
+  // The same journey without the pause: the plain sum, and nothing to explain.
+  const steady = journeyTime(0, [0, 5 * s, 10 * s], 15 * s);
+  assert.deepEqual(steady, { activeMs: 15 * s, wallMs: 15 * s, idleGaps: 0 });
+  assert.equal(sayJourneyTime(steady), "15s");
+
+  // A gap exactly at the threshold is still work; the action order in the log does not matter.
+  assert.equal(journeyTime(0, [IDLE_GAP_MS, 1], IDLE_GAP_MS + 1).idleGaps, 0);
+  // An action stamped outside the journey (another clock, a bad entry) is not a moment of it.
+  assert.equal(journeyTime(10 * s, [Number.NaN, 0, 12 * s], 14 * s).activeMs, 4 * s);
 });
