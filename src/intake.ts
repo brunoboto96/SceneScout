@@ -5,7 +5,8 @@
  * storage state is. When the skill is invoked with none of its flags, the agent
  * asks four plain questions instead, and each answer chooses a setting: the
  * address chooses the URL, the sign-in answer chooses whether to call
- * scout_login and attach by role, what to check chooses the objective, and real
+ * scout_login and attach by role, what to check chooses the objective (and, for
+ * tickets, the criteria scout_tickets reads so the report answers each), and real
  * data chooses the write mode. A developer who passes flags is asked nothing.
  *
  * The skill (skills/scenescout/SKILL.md) states the same questions and the same
@@ -95,6 +96,8 @@ export interface IntakeSettings {
   attach: { url: string; mode: "observe" | "read-only"; role?: string; objective: string };
   /** Only for a ticket or a description: the area to keep to. */
   focus?: string;
+  /** Only for tickets: read them with scout_tickets once attached, so the report answers each acceptance criterion. */
+  readTickets?: { tool: "scout_tickets"; text: string };
 }
 
 /**
@@ -111,19 +114,27 @@ export function settingsFromAnswers(a: IntakeAnswers): IntakeSettings {
     a.signIn === "none" ? null : { tool: "scout_login" as const, url, role: INTAKE_ROLE, tellUser: `A browser window will open: ${SIGN_IN_HINT[a.signIn]}.` };
   let objective = "Explore the whole site";
   let focus: string | undefined;
+  let readTickets: IntakeSettings["readTickets"];
   if (a.whatToCheck !== "everything") {
     if ("tickets" in a.whatToCheck) {
       const tickets = a.whatToCheck.tickets.map((t) => t.trim()).filter(Boolean);
       if (tickets.length === 0) throw new Error("no tickets were given: ask what to check again, or explore the whole site");
       focus = tickets.join("; ");
       objective = `Check the tickets: ${focus}`;
+      // A rule between them, so each one given is read as its own ticket.
+      readTickets = { tool: "scout_tickets", text: tickets.join("\n\n---\n\n") };
     } else {
       focus = a.whatToCheck.description.trim();
       if (!focus) throw new Error("the description is empty: ask what to check again, or explore the whole site");
       objective = focus;
     }
   }
-  return { login, attach: { url, mode, ...(login ? { role: login.role } : {}), objective }, ...(focus ? { focus } : {}) };
+  return {
+    login,
+    attach: { url, mode, ...(login ? { role: login.role } : {}), objective },
+    ...(focus ? { focus } : {}),
+    ...(readTickets ? { readTickets } : {}),
+  };
 }
 
 /** The questions as a numbered list, the way the explore prompt and the skill put them. */

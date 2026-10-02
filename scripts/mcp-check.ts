@@ -48,6 +48,8 @@ const EXPECTED_TOOLS = [
   "scout_coverage",
   "scout_report",
   "scout_close",
+  "scout_tickets",
+  "scout_criterion",
 ];
 
 type ToolText = { content: Array<{ type: string; text?: string }> };
@@ -594,6 +596,79 @@ async function tokenGoneCheck(projectDir: string): Promise<void> {
   }
 }
 
+/**
+ * Tickets in, an answer per criterion out, over the wire: a ticket file read
+ * by a path relative to the project, a fail refused until it names a finding,
+ * and the report answering the ticket in the plain view and the technical one.
+ */
+async function ticketsCheck(client: Client): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-tickets-"));
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
+  try {
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "tickets", mode: "read-only", objective: "Check the tickets" });
+    fs.writeFileSync(
+      path.join(projectDir, "WID-7.md"),
+      "# WID-7: Export the widget list\n\n## Acceptance criteria\n- The export button downloads a file\n- The file has a header row\n",
+    );
+    const read = await call("scout_tickets", { session: "tickets", path: "WID-7.md" });
+    if (!/Read 1 ticket with 2 acceptance criteria/.test(read) || !read.includes("AC2 [bullet] The file has a header row"))
+      fail(`scout_tickets did not read the ticket file:\n${read}`);
+    const bare = await call("scout_criterion", {
+      session: "tickets",
+      ticket: "WID-7",
+      criterion: "AC1",
+      verdict: "fail",
+      confidence: 0.9,
+      reason: "nothing downloads",
+    });
+    if (!/Not recorded: a failing criterion links to the findings/.test(bare)) fail(`a fail with no finding was recorded:\n${bare}`);
+    const observe = await call("scout_criterion", {
+      session: "tickets",
+      ticket: "WID-7",
+      criterion: "AC2",
+      verdict: "not-tested",
+      untestedBecause: "observe-blocked",
+      confidence: 1,
+      reason: "needs a download",
+    });
+    if (!/Not recorded: this session runs in read-only mode/.test(observe)) fail(`"observe-blocked" was accepted from a read-only session:\n${observe}`);
+    const filed = await call("scout_finding", {
+      session: "tickets",
+      severity: "high",
+      category: "page-error",
+      title: "Export throws",
+      detail: "Nothing downloads.",
+      evidence: "export-throws",
+    });
+    const id = /\b([0-9a-f]{10})\b/.exec(filed)?.[1];
+    if (!id) fail(`scout_finding returned no id:\n${filed}`);
+    const recorded = await call("scout_criterion", {
+      session: "tickets",
+      ticket: "WID-7",
+      criterion: "1",
+      verdict: "fail",
+      findings: [id],
+      confidence: 0.9,
+      reason: "nothing downloads",
+    });
+    if (!recorded.startsWith("Recorded: WID-7 AC1 fails") || !recorded.includes(`(${id})`)) fail(`a fail with its finding was not recorded:\n${recorded}`);
+    const summary = await call("scout_report", { session: "tickets", level: "minimal", force: true });
+    if (!/TICKETS: 1 ticket, 2 criteria — 1 failed and 1 was not tested/.test(summary))
+      fail(`the report summary does not answer the ticket:\n${summary.slice(0, 600)}`);
+    const md = fs.readFileSync(path.join(projectDir, ".scenescout", "report.md"), "utf8");
+    const plain = md.indexOf("### The tickets");
+    const technical = md.indexOf("## Acceptance criteria");
+    if (plain < 0 || technical < 0 || !(plain < md.indexOf("## Technical detail") && md.indexOf("## Technical detail") < technical))
+      fail(`the report does not answer the ticket in the plain view first and the technical report after:\n${md.slice(0, 1500)}`);
+    assertClosedAll(await call("scout_close", { all: true }));
+    console.log("✓ scout_tickets reads a ticket file, scout_criterion records a verdict with its finding, and the report answers it");
+  } finally {
+    await fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
 /** SCENESCOUT_LIVE=off is a promise that no port opens. A switch that only hides the address would break it quietly. */
 async function liveViewOffCheck(): Promise<void> {
   const fixture = await startFixtureServer();
@@ -824,6 +899,7 @@ async function main(): Promise<void> {
   await findingPictureCheck(client);
   await laneCheck(client);
   await reattachLaneCheck(client);
+  await ticketsCheck(client);
   const liveProject = await liveViewCheck(client);
   await client.close();
   await tokenGoneCheck(liveProject);

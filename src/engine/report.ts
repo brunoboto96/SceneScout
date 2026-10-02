@@ -21,7 +21,8 @@ import { buildReplayHtml, evidenceFor, type FindingEvidence, type ReplaySession 
 import { calibrate, formatCalibration } from "./calibration.js";
 import { formatPace, measurePace } from "./pace.js";
 import { formatNeverSubmittedEmpty } from "./forms.js";
-import { DEFAULT_REPORT_AUDIENCE, formatPlainSection, type ReportAudience } from "./plain.js";
+import { DEFAULT_REPORT_AUDIENCE, formatPlainSection, pictureOf, type ReportAudience } from "./plain.js";
+import { formatTicketsPlain, formatTicketsTechnical, ticketSummaryLine, type TicketReportInput } from "./tickets.js";
 import { COLLECTOR_CAP } from "./collector.js";
 
 function playwrightSkeleton(f: Finding): string {
@@ -772,6 +773,11 @@ export function generateReport(
   lines.push(`| Elements exercised (informational — denominator grows with every state) | ${cov.elementsExercised}/${cov.elementsTotal} |`);
   lines.push(``);
 
+  // ---- The tickets the run was given, criterion by criterion. ----
+  const ticketRun = memory.ticketsThisRun();
+  const ticketInput: TicketReportInput = { tickets: ticketRun.tickets, verdicts: ticketRun.verdicts, findings: memory.findings };
+  lines.push(...formatTicketsTechnical(ticketInput));
+
   // ---- Page quality scores, worst first — the cross-page comparator. ----
   // Scores persist across runs, so a table sorted purely by number ranks
   // yesterday's un-fixed measurement above today's re-audit and reports a page
@@ -1033,18 +1039,24 @@ export function generateReport(
   // judged for the number to mean anything; formatCalibration decides both.
   lines.push(...formatCalibration(calibrate(memory.laneDecisions, memory.findings)));
 
-  const markdown = withAudience(lines, extras?.report ?? DEFAULT_REPORT_AUDIENCE, () =>
-    formatPlainSection({
+  const markdown = withAudience(lines, extras?.report ?? DEFAULT_REPORT_AUDIENCE, () => {
+    const frames = lastFrames(memory);
+    return formatPlainSection({
       current,
       historical: historical.length,
       worthALook: worthALook.length,
       violations: oracleLog.filter((v) => !v.embed),
       routes: extras && extras.routesTotal > 0 ? { visited: extras.routesVisited, total: extras.routesTotal } : undefined,
       gaps,
-      lastFrames: lastFrames(memory),
+      lastFrames: frames,
       audience: extras?.report ?? DEFAULT_REPORT_AUDIENCE,
-    }),
-  );
+      tickets: formatTicketsPlain({
+        ...ticketInput,
+        problemNumber: new Map(current.map((f, i) => [f.id, i + 1])),
+        pictureOf: (f) => pictureOf(f, frames.get(f.id)),
+      }),
+    });
+  });
   const outPath = path.join(memory.dir, "report.md");
   const htmlPath = path.join(memory.dir, "report.html");
   let htmlWritten = false;
@@ -1095,6 +1107,7 @@ export function generateReport(
         : []),
     ``,
     `OPEN FINDINGS: ${open.length} (${open.filter((f) => f.severity === "high").length} high) — ${current.length} this session, ${historical.length} historical${resolved.length ? `, ${resolved.length} resolved` : ""}`,
+    ...[ticketSummaryLine(ticketRun.tickets, ticketRun.verdicts)].filter((l): l is string => l !== null),
     ...(extras && extras.routesTotal > 0
       ? [
           `COVERAGE: routes ${extras.routesVisited}/${extras.routesTotal} · ${cov.states} states · ${cov.elementsExercised}/${cov.elementsTotal} elements exercised`,
