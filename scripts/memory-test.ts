@@ -36,6 +36,7 @@ import {
   isEmbedKey,
   isWorthALook,
   mergeTier,
+  describeMerge,
   MAX_JUDGED_MERGES,
   judgedMergesOf,
   type DuplicateJudge,
@@ -52,6 +53,8 @@ import {
   formIdentity,
   formStatus,
   isEmptySubmit,
+  APP_FILLED_TYPES,
+  FORM_PROBE_BODY,
   isFormBookkeeping,
   isNavigationTeardown,
   isSubmitLike,
@@ -62,6 +65,7 @@ import {
   type FieldFacts,
   type FormProbe,
 } from "../src/engine/forms.ts";
+import { coverageView } from "../src/engine/report.ts";
 
 /** One styled element for a design audit; override only what a case is about. */
 function designRecord(over: Partial<StyleRecord>): StyleRecord {
@@ -417,6 +421,8 @@ test("dedup: a quoted control name shared by two findings of different kinds doe
 
   // The contrast, differing only in kind: a second LAYOUT finding that quotes
   // the same control in its detail is the same layout bug, and still merges.
+  // Filed in a later run, so the run count shows which finding it joined.
+  store.endRun();
   const [, again] = store.addFinding({
     ...base,
     category: "visual",
@@ -774,10 +780,83 @@ test("credentials quoted from app output are redacted before they are persisted"
   assert.ok(f.detail.includes("Incorrect API key provided"), "the actionable part of the message survives");
 });
 
+test("seen in N runs counts runs: filings within one run count once, filings in two runs count twice", () => {
+  const store = freshStore();
+  const file = () => store.addFinding({ ...base, title: "Export button does nothing", detail: "No request.", evidence: "click export: 0 requests" });
+  file();
+  const [again, isNew, , note] = file();
+  assert.equal(isNew, false);
+  assert.equal(again.runs, 1, "the same run filing it twice is one run");
+  assert.equal(note.sameRun, true);
+  store.endRun();
+  const [later, , , laterNote] = file();
+  assert.equal(later.runs, 2, "a second run counts");
+  assert.equal(laterNote.sameRun, false);
+  file();
+  assert.equal(store.findings[0].runs, 2, "…once");
+
+  // Another store over the same directory is another process, so another run.
+  const other = openStore(path.dirname(store.dir));
+  const [elsewhere] = other.addFinding({ ...base, title: "Export button does nothing", detail: "No request.", evidence: "click export: 0 requests" });
+  assert.equal(elsewhere.runs, 3);
+});
+
+test("re-filing a worth-a-look: the same session in the same run corrects it; anyone else's filing keeps the first wording and says so", () => {
+  const store = freshStore();
+  const look = (session: string, convention: string, detail: string) =>
+    store.addFinding({
+      ...base,
+      session,
+      title: "Nav links are not underlined",
+      detail,
+      evidence: "nav a text-decoration none",
+      tier: "worth_a_look",
+      convention,
+    });
+  look("lane-a", "links outside navigation must be underlined", "First wording.");
+  const [fixed, , , note] = look("lane-a", "links in navigation must be underlined", "Corrected wording.");
+  assert.equal(fixed.convention, "links in navigation must be underlined", "the correction is taken, not dropped");
+  assert.equal(fixed.detail, "Corrected wording.");
+  assert.deepEqual(note.updated, ["convention", "detail"]);
+  assert.match(
+    describeMerge(note, fixed.convention),
+    /correction of your own filing: its convention is now "links in navigation must be underlined" and its detail is now yours/,
+  );
+
+  const [kept, , , otherNote] = look("lane-b", "every link must be underlined", "Lane b's wording.");
+  assert.equal(kept.convention, "links in navigation must be underlined", "another session's filing does not rewrite it");
+  assert.equal(kept.detail, "Corrected wording.");
+  assert.deepEqual(otherNote.kept, ["convention", "detail"]);
+  assert.match(describeMerge(otherNote, kept.convention), /first filing's convention \("links in navigation must be underlined"\) and detail were kept/);
+
+  store.endRun();
+  const [nextRun, , , nextNote] = look("lane-a", "something else", "Next run's wording.");
+  assert.equal(nextRun.convention, "links in navigation must be underlined", "the same session in a later run is a new sighting, not a correction");
+  assert.deepEqual(nextNote.kept, ["convention", "detail"]);
+
+  const [, , , same] = look("lane-a", "links in navigation must be underlined", "Corrected wording.");
+  // Another session filling in a convention the first filing left out is not a correction, and is not called one.
+  const bare = freshStore();
+  bare.addFinding({ ...base, session: "lane-a", title: "Footer links are grey", detail: "d", evidence: "footer a color", tier: "worth_a_look" });
+  const [filled, , , fillNote] = bare.addFinding({
+    ...base,
+    session: "lane-b",
+    title: "Footer links are grey",
+    detail: "d",
+    evidence: "footer a color",
+    tier: "worth_a_look",
+    convention: "a brand link colour",
+  });
+  assert.equal(filled.convention, "a brand link colour");
+  assert.equal(describeMerge(fillNote, filled.convention), "");
+  assert.equal(describeMerge(same, "links in navigation must be underlined"), "", "a filing that agrees changes nothing and says nothing");
+});
+
 test("redaction is stable, so the same leak re-found is one finding, not two", () => {
   const store = freshStore();
   const mk = (key: string) => store.addFinding({ ...base, title: "Upstream error leaks a key", detail: `key: sk-live-${key}`, evidence: "POST /api/ai 500" });
   const [, firstIsNew] = mk("AAAABBBBCCCCDDDD");
+  store.endRun();
   const [second, secondIsNew] = mk("QQQQRRRRSSSSTTTT");
   assert.ok(firstIsNew, "first sighting is new");
   assert.ok(!secondIsNew, "a differing secret must not fork the finding");
@@ -1735,9 +1814,9 @@ test("empty submit: forms seen are listed until any session submits them empty, 
   store.recordForm("/things/new#a1", "button:add note");
   store.recordForm("/other#c3", "tid:thing-save"); // the same control on another route is another form
   assert.deepEqual(store.formsNeverSubmittedEmpty(), [
-    { route: "/things/new", key: "tid:thing-save" },
-    { route: "/things/new", key: "button:add note" },
-    { route: "/other", key: "tid:thing-save" },
+    { route: "/things/new", key: "tid:thing-save", seenBy: [] },
+    { route: "/things/new", key: "button:add note", seenBy: [] },
+    { route: "/other", key: "tid:thing-save", seenBy: [] },
   ]);
   store.recordFormSubmit("/things/new#b2", "tid:thing-save", false);
   assert.equal(store.formsNeverSubmittedEmpty().length, 3, "a filled submit leaves it listed");
@@ -1757,6 +1836,50 @@ test("empty submit: forms seen are listed until any session submits them empty, 
   assert.equal(store.formsNeverSubmittedEmpty().length, 1, "another site's frame is not the app's form");
   store.endRun();
   assert.deepEqual(store.formsNeverSubmittedEmpty(), [], "an earlier run's forms are not this run's to-do list");
+});
+
+test("coverage in a parallel run: a session sees its own routes and forms by default, the project view sees both and says whose", () => {
+  const store = freshStore();
+  store.visitState("/a#1", "http://x/a", "/a", ["tid:a-save", "tid:a-filter"], [], "lane-a");
+  store.recordForm("/a#1", "tid:a-save", false, "lane-a");
+  store.visitState("/b#1", "http://x/b", "/b", ["tid:b-save", "tid:b-delete"], [], "lane-b");
+  store.recordForm("/b#1", "tid:b-save", false, "lane-b");
+  // Both lanes on one route: one form, seen by both.
+  store.visitState("/c#1", "http://x/c", "/c", ["tid:c-send"], [], "lane-a");
+  store.visitState("/c#2", "http://x/c", "/c", ["tid:c-send"], [], "lane-b");
+  store.recordForm("/c#1", "tid:c-send", false, "lane-a");
+  store.recordForm("/c#2", "tid:c-send", false, "lane-b");
+
+  assert.deepEqual([...store.routesVisitedBy("lane-a")], ["/a", "/c"]);
+  assert.deepEqual(
+    store.formsNeverSubmittedEmpty("lane-a").map((f) => `${f.route} ${f.key}`),
+    ["/a tid:a-save", "/c tid:c-send"],
+    "only the forms lane-a saw",
+  );
+  assert.equal(store.formsNeverSubmittedEmpty().length, 3, "with no session, every form");
+
+  const routeLine = "Routes visited: 3/3 ✓";
+  const own = coverageView(store, "lane-a", "session", routeLine).join("\n");
+  assert.match(own, /Scope: session lane-a — the 2 route\(s\)/);
+  assert.match(own, /\/a: /);
+  assert.match(own, /\/c: /);
+  assert.doesNotMatch(own, /\/b[: ]/, "lane-b's route and form are not lane-a's gaps");
+  assert.doesNotMatch(own, /seen by/, "a session's own list needs no tags");
+  assert.match(own, /Elements exercised: 0\/3/, "the totals count the session's routes only");
+
+  const all = coverageView(store, "lane-a", "project", routeLine).join("\n");
+  assert.match(all, /\/b: [^\n]*\(this run: lane-b\)/, "the project view lists lane-b's route, tagged");
+  assert.match(all, /\/c: [^\n]*\(this run: lane-a, lane-b\)/);
+  assert.match(all, /\/b tid:b-save \(seen by lane-b\)/);
+  assert.match(all, /\/c tid:c-send \(seen by lane-a, lane-b\)/);
+  assert.match(all, /Elements exercised: 0\/5/);
+
+  const fresh = coverageView(store, "lane-c", "session", routeLine).join("\n");
+  assert.match(fresh, /has reached no route this run yet/);
+  assert.doesNotMatch(fresh, /tid:/, "a session that reached nothing has no gaps of its own yet");
+
+  store.endRun();
+  assert.deepEqual([...store.routesVisitedBy("lane-a")], [], "per run: the next run starts with no session's routes");
 });
 
 test("empty submit: a submit only marks a form already listed, and says when it matched none", () => {
@@ -1887,7 +2010,7 @@ test("dedup judge: a filing the rule keeps apart is merged when the judge says i
   assert.equal(filed.isNew, false);
   assert.deepEqual(filed.judged, { pSame: 0.93 });
   assert.equal(store.findings.length, 1);
-  assert.equal(filed.finding.runs, 2);
+  assert.equal(filed.finding.runs, 1, "both filings in one run: one run; the merge is kept in judgedMerges");
   assert.deepEqual(asked, [{ incoming: SILENT.title, stored: [SAVE.title] }]);
   const [merge] = filed.finding.judgedMerges ?? [];
   assert.deepEqual(
@@ -2033,7 +2156,7 @@ test("dedup judge: a merge made after another process rewrote memory.json lands 
   const filed = await store.fileFinding(SILENT);
   assert.equal(filed.isNew, false);
   const kept = store.findings.find((f) => f.id === first.finding.id)!;
-  assert.equal(kept.runs, 2);
+  assert.equal(kept.runs, 1, "one run, however many filings");
   assert.deepEqual(
     judgedMergesOf(kept).map((m) => m.title),
     [SILENT.title],
@@ -2044,7 +2167,7 @@ test("dedup judge: a merge made after another process rewrote memory.json lands 
   );
   const reread = openStore(path.dirname(store.dir));
   const onDisk = reread.findings.find((f) => f.id === first.finding.id)!;
-  assert.equal(onDisk.runs, 2);
+  assert.equal(onDisk.runs, 1);
   assert.deepEqual(
     judgedMergesOf(onDisk).map((m) => m.title),
     [SILENT.title],
@@ -2096,4 +2219,11 @@ test("dedup judge: a judged merge read back malformed is dropped, not printed or
   assert.deepEqual(judgedMergesOf(f), [good]);
   assert.deepEqual(judgedMergesOf({ judgedMerges: "not a list" } as unknown as Pick<Finding, "judgedMerges">), []);
   assert.deepEqual(judgedMergesOf({}), []);
+});
+
+test("the form probe's date and time types are the same list as APP_FILLED_TYPES", () => {
+  const line = FORM_PROBE_BODY.split("\n").find((l) => l.includes("const pickerTypes ="));
+  assert.ok(line, "the probe declares pickerTypes");
+  const listed = JSON.parse(line.slice(line.indexOf("["), line.lastIndexOf("]") + 1)) as string[];
+  assert.deepEqual([...listed].sort(), [...APP_FILLED_TYPES].sort());
 });
