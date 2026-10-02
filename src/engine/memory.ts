@@ -7,6 +7,7 @@ import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
 import type { InjectionProbe } from "./injection.js";
+import { addReading, addVerdict, MAX_TICKETS_KEPT, mergeTicketData, type CriterionVerdict, type StoredTicket, type Ticket } from "./tickets.js";
 
 export interface StateRecord {
   url: string;
@@ -548,6 +549,10 @@ interface MemoryFile {
    * process keeps the later of the two.
    */
   observeRefusedPosts?: Record<string, Record<string, RefusedPost>>;
+  /** Tickets a run was given to answer (scout_tickets), with their acceptance criteria. */
+  tickets?: StoredTicket[];
+  /** Each session's verdict on each criterion (scout_criterion). */
+  criterionVerdicts?: CriterionVerdict[];
 }
 
 /** One endpoint observe refused on a page; `cleared` once it went out (named as a read, or sent in a looser mode). */
@@ -736,6 +741,13 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
     out.laneRoutes[lane] = unionRoutes(out.laneRoutes[lane] ?? [], routes);
   }
   if (Object.keys(out.laneRoutes).length === 0) delete out.laneRoutes;
+
+  // Lanes record criterion verdicts in their own processes too.
+  const ticketData = mergeTicketData(mine, theirs);
+  if (ticketData.tickets) out.tickets = ticketData.tickets;
+  else delete out.tickets;
+  if (ticketData.criterionVerdicts) out.criterionVerdicts = ticketData.criterionVerdicts;
+  else delete out.criterionVerdicts;
 
   return out;
 }
@@ -1834,6 +1846,50 @@ export class MemoryStore {
     // the stored array, so the "before" length was read after the appends and
     // every call after the first reported nothing kept — while storing fine.
     return Math.min(added, MAX_LANE_DECISIONS);
+  }
+
+  /** Every ticket the project has been given, oldest reading first. */
+  get tickets(): StoredTicket[] {
+    return this.data.tickets ?? [];
+  }
+
+  /** Every verdict recorded on a criterion, oldest first. */
+  get criterionVerdicts(): CriterionVerdict[] {
+    return this.data.criterionVerdicts ?? [];
+  }
+
+  /**
+   * Keep tickets read in this run. A ticket read again replaces its earlier
+   * reading (see addReading). Titles and criteria are redacted like any other
+   * stored text: a ticket is pasted by a person and may carry a credential.
+   * Returns the tickets as stored, with the ids to judge them by.
+   */
+  addTickets(parsed: readonly Ticket[]): StoredTicket[] {
+    const clean = parsed.map((t) => ({
+      ...t,
+      title: redactSecrets(t.title),
+      criteria: t.criteria.map((c) => ({ ...c, text: redactSecrets(c.text) })),
+    }));
+    const all = this.tickets;
+    const thisRun = all.filter((t) => t.loadedAt >= this.sessionStart);
+    const { tickets, added } = addReading(thisRun, clean, new Date().toISOString());
+    const ids = new Set(tickets.map((t) => t.id));
+    this.data.tickets = [...all.filter((t) => t.loadedAt < this.sessionStart && !ids.has(t.id)), ...tickets].slice(-MAX_TICKETS_KEPT);
+    this.flush();
+    return added;
+  }
+
+  /** Record one session's verdict on a criterion, replacing that session's earlier verdict on it. */
+  addCriterionVerdict(record: CriterionVerdict): void {
+    this.data.criterionVerdicts = addVerdict(this.criterionVerdicts, { ...record, reason: redactSecrets(record.reason) });
+    this.flush();
+  }
+
+  /** What this run answers: the tickets read in it, or judged in it, and this run's verdicts. */
+  ticketsThisRun(): { tickets: StoredTicket[]; verdicts: CriterionVerdict[] } {
+    const verdicts = this.criterionVerdicts.filter((v) => v.at >= this.sessionStart);
+    const judged = new Set(verdicts.map((v) => v.ticket));
+    return { tickets: this.tickets.filter((t) => t.loadedAt >= this.sessionStart || judged.has(t.id)), verdicts };
   }
 
   /** The routes each lane's report said it covered. Empty on a project that has never run one. */

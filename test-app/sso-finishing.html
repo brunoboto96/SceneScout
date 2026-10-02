@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Signing you in</title>
+  </head>
+  <body>
+    <!--
+      Served at /sso/finishing once the provider has sent the browser back:
+      the app is on its own origin with no session yet while it exchanges the
+      code. The exchange is asked with held=1, so a suite decides when it is
+      answered; its answer sets the session cookie and the page moves on.
+    -->
+    <main>
+      <h1 data-testid="finishing-heading">Signing you in…</h1>
+    </main>
+    <script>
+      const code = new URLSearchParams(location.search).get("c") || "";
+      fetch("/sso/exchange?c=" + encodeURIComponent(code) + "&held=1", { method: "POST" }).then((r) => {
+        if (r.ok) location.replace("/sso/home");
+      });
+    </script>
+  </body>
+</html>

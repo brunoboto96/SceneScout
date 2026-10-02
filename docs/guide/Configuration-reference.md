@@ -118,8 +118,9 @@ The API key has no option: it is read from `ANTHROPIC_API_KEY` or `OPENAI_API_KE
 | `--role` | (required) | The role's name; the profile is saved as `.scenescout/auth/<role>.json` |
 | `--project` | the current directory | The project to save into |
 | `--browser` | `chromium` | `chromium`, `firefox` or `webkit` |
+| `--save` | `auto` | The window: `auto` saves once it sees the sign-in finish, or on Enter; `enter` saves on Enter only. Not with `--script` |
 | `--script` | off | Sign in headless from the environment instead of in a visible window (for CI) |
-| `--success-url` | none | With `--script`: what the URL's path contains once signed in, or an absolute URL it starts with |
+| `--success-url` | none | What the URL's path contains once signed in, or an absolute URL it starts with. In the window, it replaces looking for a new session |
 | `--success-selector` | none | With `--script`: a CSS selector visible only when signed in |
 | `--username-selector` | found by the rules | With `--script`: the username field |
 | `--password-selector` | found by the rules | With `--script`: the password field |
@@ -127,7 +128,7 @@ The API key has no option: it is read from `ANTHROPIC_API_KEY` or `OPENAI_API_KE
 | `--submit-selector` | found by the rules | With `--script`: the button that moves the form on |
 | `--timeout` | `60` | With `--script`: seconds the whole sign-in may take, 5 to 600 |
 
-Each `--script` option can also come from an environment variable, below; the option wins.
+Each `--script` option can also come from an environment variable, below; the option wins. The window reads `--success-url` from the option only.
 
 ### `scenescout export`
 
@@ -224,6 +225,9 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `CI` | the server | Set by CI services. When it is set (and not `false` or `0`), finding pictures default to `file` and nothing opens in a browser by default |
 | `GITHUB_ACTIONS` | the server | Set by GitHub Actions. `true` counts as a CI job, as `CI` does |
 | `SCENESCOUT_READ_POSTS` | the server, `check`, `ci`, a first look | POST endpoints that only read, let out in `observe`: entries such as `POST /api/search`, separated by commas or new lines. Unset: none. A `scout_attach` `readPosts` wins over it |
+| `SCENESCOUT_PROJECTS_DIR` | the server | The absolute folder that holds one folder per tested site, for an attach with no `projectPath` and a client with no workspace folder. Default: `SceneScout` in the documents folder (`~/Documents` on macOS, `%USERPROFILE%\Documents` on Windows, `XDG_DOCUMENTS_DIR` else `~/Documents` on Linux). `off` makes `projectPath` required. A `scout_attach` `projectPath` wins over it |
+| `USERPROFILE` | the server | Windows: the folder whose `Documents` holds the default `SceneScout` folder |
+| `XDG_DOCUMENTS_DIR` | the server | Linux: the documents folder that holds the default `SceneScout` folder, read before `~/.config/user-dirs.dirs` |
 | `SCENESCOUT_DEDUP` | the server | `judge` asks a model, with a key below, whether a filing the dedup rule keeps apart from everything recorded is one of the open findings on its page; `rule` (default) does not. A `scout_attach` `dedup` wins over it |
 | `SCENESCOUT_DEDUP_PROVIDER` | the server | `anthropic` or `openai`: which key the dedup judge uses when both are set |
 | `ANTHROPIC_API_KEY` | `ci`; the server with the dedup judge on | The Anthropic key. The only way to give one |
@@ -378,6 +382,19 @@ Set under Settings → Secrets and variables → Actions. All optional.
 | `SCENESCOUT_QA_TEAM_TOKEN` | secret | none | Reads team membership; passed to the gate job only |
 | `OPENAI_API_KEY` | secret | (required) | The model key, in the template; use `ANTHROPIC_API_KEY` in the `qa` job instead for Anthropic |
 
+## `scout_login` options
+
+What an agent passes to open a sign-in window from the conversation ([Signing in](Signing-in.md#from-a-conversation)).
+
+| Option | Default | |
+|---|---|---|
+| `url` | (required) | Where to sign in: the app's address or its sign-in page |
+| `role` | (required) | The name the sign-in is saved under |
+| `projectPath` | as for `scout_attach` | The project's absolute path; the sign-in is saved in its `.scenescout/auth/`. Left out, the folder an attach with no `projectPath` uses for the same site, named in the result, so a login and the attach after it agree |
+| `browser` | `SCENESCOUT_BROWSER`, else `chromium` | `chromium`, `firefox` or `webkit` |
+| `successUrl` | none | As `--success-url` |
+| `waitSeconds` | `120` | How long one call waits before returning with the window still open, 1 to 600 |
+
 ## `scout_attach` options
 
 What an agent can pass when it attaches a session. You rarely set these by hand; ask for the behaviour in words and the agent passes them.
@@ -385,7 +402,7 @@ What an agent can pass when it attaches a session. You rarely set these by hand;
 | Option | Default | |
 |---|---|---|
 | `url` | (required) | The app's base URL |
-| `projectPath` | (required) | The project's absolute path; `.scenescout/` lives here |
+| `projectPath` | the client's workspace folder, else a folder for the site | The project's absolute path; `.scenescout/` lives here. Given, it always wins. Left out, a client that offers a workspace folder gets that; otherwise each tested site gets its own folder under `SCENESCOUT_PROJECTS_DIR`, by default `Documents/SceneScout/<host>/` (`localhost-3000` for `http://localhost:3000`), created on first use and named in the attach's result. That default is refused when it would sit inside a git repository below your home folder; a home folder that is itself a repository does not count |
 | `role` | none | Sign in with the login saved for this role. Not with `storageStatePath` |
 | `storageStatePath` | none | A Playwright storage-state file. Not with `role` |
 | `mode` | `read-only` | `observe`, `read-only`, `safe-write` or `destructive` ([Safety model](Safety-model.md)) |

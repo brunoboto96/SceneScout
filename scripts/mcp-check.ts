@@ -6,12 +6,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { spawnSync } from "node:child_process";
 import { introQuestions } from "../dist/intake.js";
-import { writeProfile } from "../dist/engine/profiles.js";
+import { shellQuote, writeProfile } from "../dist/engine/profiles.js";
+import { siteFolderName } from "../dist/engine/project-folder.js";
 import { revokeFixtureTokens, settle, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE, WAIT_MS } from "./smoke/harness.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -23,6 +25,7 @@ const EXPECTED_TOOLS = [
   "scout_lane_report",
   "scout_scan",
   "scout_attach",
+  "scout_login",
   "scout_session",
   "scout_journey",
   "scout_note",
@@ -47,6 +50,8 @@ const EXPECTED_TOOLS = [
   "scout_coverage",
   "scout_report",
   "scout_close",
+  "scout_tickets",
+  "scout_criterion",
 ];
 
 type ToolText = { content: Array<{ type: string; text?: string }> };
@@ -306,7 +311,14 @@ async function findingPictureCapCheck(): Promise<void> {
     new StdioClientTransport({
       command: "node",
       args: [serverPath],
-      env: { ...env, SCENESCOUT_LIVE: "off", SCENESCOUT_EVIDENCE: "inline", SCENESCOUT_EVIDENCE_INLINE: "1", SCENESCOUT_EVIDENCE_MAX_PX: "400" },
+      env: {
+        ...env,
+        SCENESCOUT_LIVE: "off",
+        SCENESCOUT_OPEN: "none",
+        SCENESCOUT_EVIDENCE: "inline",
+        SCENESCOUT_EVIDENCE_INLINE: "1",
+        SCENESCOUT_EVIDENCE_MAX_PX: "400",
+      },
     }),
   );
   try {
@@ -593,6 +605,79 @@ async function tokenGoneCheck(projectDir: string): Promise<void> {
   }
 }
 
+/**
+ * Tickets in, an answer per criterion out, over the wire: a ticket file read
+ * by a path relative to the project, a fail refused until it names a finding,
+ * and the report answering the ticket in the plain view and the technical one.
+ */
+async function ticketsCheck(client: Client): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-tickets-"));
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
+  try {
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "tickets", mode: "read-only", objective: "Check the tickets" });
+    fs.writeFileSync(
+      path.join(projectDir, "WID-7.md"),
+      "# WID-7: Export the widget list\n\n## Acceptance criteria\n- The export button downloads a file\n- The file has a header row\n",
+    );
+    const read = await call("scout_tickets", { session: "tickets", path: "WID-7.md" });
+    if (!/Read 1 ticket with 2 acceptance criteria/.test(read) || !read.includes("AC2 [bullet] The file has a header row"))
+      fail(`scout_tickets did not read the ticket file:\n${read}`);
+    const bare = await call("scout_criterion", {
+      session: "tickets",
+      ticket: "WID-7",
+      criterion: "AC1",
+      verdict: "fail",
+      confidence: 0.9,
+      reason: "nothing downloads",
+    });
+    if (!/Not recorded: a failing criterion links to the findings/.test(bare)) fail(`a fail with no finding was recorded:\n${bare}`);
+    const observe = await call("scout_criterion", {
+      session: "tickets",
+      ticket: "WID-7",
+      criterion: "AC2",
+      verdict: "not-tested",
+      untestedBecause: "observe-blocked",
+      confidence: 1,
+      reason: "needs a download",
+    });
+    if (!/Not recorded: this session runs in read-only mode/.test(observe)) fail(`"observe-blocked" was accepted from a read-only session:\n${observe}`);
+    const filed = await call("scout_finding", {
+      session: "tickets",
+      severity: "high",
+      category: "page-error",
+      title: "Export throws",
+      detail: "Nothing downloads.",
+      evidence: "export-throws",
+    });
+    const id = /\b([0-9a-f]{10})\b/.exec(filed)?.[1];
+    if (!id) fail(`scout_finding returned no id:\n${filed}`);
+    const recorded = await call("scout_criterion", {
+      session: "tickets",
+      ticket: "WID-7",
+      criterion: "1",
+      verdict: "fail",
+      findings: [id],
+      confidence: 0.9,
+      reason: "nothing downloads",
+    });
+    if (!recorded.startsWith("Recorded: WID-7 AC1 fails") || !recorded.includes(`(${id})`)) fail(`a fail with its finding was not recorded:\n${recorded}`);
+    const summary = await call("scout_report", { session: "tickets", level: "minimal", force: true });
+    if (!/TICKETS: 1 ticket, 2 criteria — 1 failed and 1 was not tested/.test(summary))
+      fail(`the report summary does not answer the ticket:\n${summary.slice(0, 600)}`);
+    const md = fs.readFileSync(path.join(projectDir, ".scenescout", "report.md"), "utf8");
+    const plain = md.indexOf("### The tickets");
+    const technical = md.indexOf("## Acceptance criteria");
+    if (plain < 0 || technical < 0 || !(plain < md.indexOf("## Technical detail") && md.indexOf("## Technical detail") < technical))
+      fail(`the report does not answer the ticket in the plain view first and the technical report after:\n${md.slice(0, 1500)}`);
+    assertClosedAll(await call("scout_close", { all: true }));
+    console.log("✓ scout_tickets reads a ticket file, scout_criterion records a verdict with its finding, and the report answers it");
+  } finally {
+    await fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
 /** SCENESCOUT_LIVE=off is a promise that no port opens. A switch that only hides the address would break it quietly. */
 async function liveViewOffCheck(): Promise<void> {
   const fixture = await startFixtureServer();
@@ -749,6 +834,73 @@ async function openCheck(): Promise<void> {
   }
 }
 
+/**
+ * An attach with no projectPath: a client that offers a workspace folder (MCP
+ * roots) gets that folder, and one that offers none gets a folder for the
+ * tested site under SCENESCOUT_PROJECTS_DIR, which the result names.
+ */
+async function defaultFolderCheck(): Promise<void> {
+  const fixture = await startFixtureServer();
+  const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-folder-")));
+  const projects = path.join(scratch, "projects");
+  const workspace = path.join(scratch, "workspace");
+  fs.mkdirSync(workspace);
+  const env = Object.fromEntries(
+    Object.entries({ ...process.env, SCENESCOUT_LIVE: "off", SCENESCOUT_OPEN: "none", SCENESCOUT_PROJECTS_DIR: projects }).filter(
+      (e): e is [string, string] => typeof e[1] === "string",
+    ),
+  );
+  /** Attach once with no projectPath, from a client offering `roots` (or none), and return the reply. */
+  const attachWithout = async (roots?: string[], extraEnv: Record<string, string> = {}, extraArgs: Record<string, unknown> = {}): Promise<string> => {
+    const client = new Client({ name: "ft-check-folder", version: "0.0.1" }, roots ? { capabilities: { roots: {} } } : undefined);
+    if (roots) client.setRequestHandler(ListRootsRequestSchema, async () => ({ roots: roots.map((r) => ({ uri: pathToFileURL(r).href })) }));
+    await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env: { ...env, ...extraEnv } }));
+    try {
+      const reply = textOf(await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, ...extraArgs } }));
+      assertClosedAll(textOf(await client.callTool({ name: "scout_close", arguments: { all: true } })));
+      return reply;
+    } finally {
+      await client.close();
+    }
+  };
+  try {
+    const site = path.join(projects, siteFolderName(fixture.baseUrl));
+    const plain = await attachWithout();
+    if (!plain.includes(`kept in ${site}`) || !plain.includes(path.join(site, ".scenescout", "report.md")))
+      fail(`an attach with no projectPath and no workspace did not name the site's folder ${site}:\n${plain}`);
+    if (!fs.existsSync(path.join(site, ".scenescout"))) fail(`the default folder ${site} was not created on first use`);
+    // scout_login with no projectPath saves into the same site folder (one resolver, keyed by host and port,
+    // so its sign-in page and the app's address agree). A sign-in saved there is found by an attach that
+    // names no folder; the contrast is a role saved nowhere, which is refused.
+    writeProfile(site, "member", {
+      cookies: [{ name: "member_session", value: "x", domain: "127.0.0.1", path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Lax" }],
+      origins: [],
+    });
+    if (siteFolderName(`${fixture.baseUrl}/sso/signin?next=%2F`) !== siteFolderName(fixture.baseUrl))
+      fail("a sign-in page and its app resolve to different folders");
+    const withRole = await attachWithout(undefined, {}, { role: "member" });
+    if (/no sign-in is saved/.test(withRole) || !withRole.includes(`kept in ${site}`))
+      fail(`an attach with no projectPath did not find the sign-in saved in ${site}:\n${withRole}`);
+    const noRole = await attachWithout(undefined, {}, { role: "nobody" });
+    if (!/no sign-in is saved for role "nobody"/.test(noRole)) fail(`an attach for a role saved nowhere was not refused:\n${noRole}`);
+    if (!noRole.includes(`--role nobody --project ${shellQuote(site)}\``))
+      fail(`the refusal in a folder SceneScout chose does not name it with --project, so the command would save elsewhere:\n${noRole}`);
+    const fromRoots = await attachWithout([workspace]);
+    if (!fromRoots.includes(`workspace folder, under ${workspace}`))
+      fail(`an attach with no projectPath did not use the client's workspace ${workspace}:\n${fromRoots}`);
+    if (!fs.existsSync(path.join(workspace, ".scenescout"))) fail(`the workspace ${workspace} holds no .scenescout after the attach`);
+    const off = await attachWithout(undefined, { SCENESCOUT_PROJECTS_DIR: "off" });
+    if (!/SCENESCOUT_PROJECTS_DIR is "off"[\s\S]*Pass projectPath/.test(off))
+      fail(`SCENESCOUT_PROJECTS_DIR=off with no projectPath did not refuse the attach:\n${off}`);
+    console.log(
+      "✓ scout_attach with no projectPath uses the client's workspace, else a folder for the site that the result names and where a saved sign-in is found, and none when the setting is off",
+    );
+  } finally {
+    await fixture.close();
+    fs.rmSync(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
 async function main(): Promise<void> {
   // On a desktop the server opens the live view and the report by default; a check opens nothing.
   const transport = new StdioClientTransport({ command: "node", args: [serverPath], env: { ...getDefaultEnvironment(), SCENESCOUT_OPEN: "none" } });
@@ -832,10 +984,7 @@ async function main(): Promise<void> {
   // not register. The skill's first step stops the run when its probe tool is
   // missing, so one stale name there halts every run at setup.
   const mentioned = new Set([...skill.matchAll(/\b(?:mcp__[a-z_]+__)?((?:scout|ft)_[a-z_]+)\b/g)].map((m) => m[1]).filter((n) => !n.endsWith("_")));
-  // scout_login is added by the change that lets a person sign in from the conversation; the skill
-  // names it already, with the `scenescout login` command as the fallback for a server without it.
-  const NAMED_BEFORE_REGISTERED = new Set(["scout_login"]);
-  const unknown = [...mentioned].filter((n) => !names.includes(n) && !NAMED_BEFORE_REGISTERED.has(n));
+  const unknown = [...mentioned].filter((n) => !names.includes(n));
   if (unknown.length > 0) {
     console.error(`MCP CHECK FAILED — the skill refers to tools the server does not register: ${unknown.join(", ")}`);
     process.exit(1);
@@ -894,11 +1043,22 @@ async function main(): Promise<void> {
   if (JSON.stringify(listed) !== JSON.stringify(attachParams)) {
     guideGaps.push(`Configuration-reference.md lists scout_attach options [${listed.join(", ")}], the server has [${attachParams.join(", ")}]`);
   }
+  // The Default column says "(required)" for exactly the options the schema requires, for each tool the reference tables.
+  for (const tool of ["scout_attach", "scout_login"]) {
+    const section = (reference.split(`\n## \`${tool}\` options\n`)[1] ?? "").split("\n## ")[0];
+    const listedRequired = [...section.matchAll(/^\| `([A-Za-z]+)` \| \(required\) \|/gm)].map((m) => m[1]).sort();
+    const required = [...((tools.find((t) => t.name === tool)?.inputSchema as { required?: string[] } | undefined)?.required ?? [])].sort();
+    if (!section) guideGaps.push(`Configuration-reference.md has no ${tool} options table`);
+    else if (JSON.stringify(listedRequired) !== JSON.stringify(required))
+      guideGaps.push(`Configuration-reference.md marks ${tool} options [${listedRequired.join(", ")}] required, the server requires [${required.join(", ")}]`);
+  }
   if (guideGaps.length > 0) {
     console.error(`MCP CHECK FAILED — the guide disagrees with the server's tools:\n  ${guideGaps.join("\n  ")}`);
     process.exit(1);
   }
-  console.log("✓ the guide names only tools and parameters the server has, and lists every scout_attach option");
+  console.log(
+    "✓ the guide names only tools and parameters the server has, and lists every scout_attach option, and which scout_attach and scout_login options are required",
+  );
 
   const result = await client.callTool({ name: "scout_scan", arguments: { projectPath: packageRoot } });
   const text = (result.content as Array<{ type: string; text?: string }>).map((c) => c.text ?? "").join("");
@@ -912,11 +1072,13 @@ async function main(): Promise<void> {
   await findingPictureCheck(client);
   await laneCheck(client);
   await reattachLaneCheck(client);
+  await ticketsCheck(client);
   const liveProject = await liveViewCheck(client);
   await client.close();
   await tokenGoneCheck(liveProject);
   await liveViewOffCheck();
   await dedupJudgeEnvCheck();
+  await defaultFolderCheck();
   await findingPictureCapCheck();
   await openCheck();
   console.log("\nMCP CHECK PASSED");

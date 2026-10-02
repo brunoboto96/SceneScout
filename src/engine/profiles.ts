@@ -22,6 +22,7 @@ import path from "node:path";
 import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
 import { MEMORY_DIRNAME, writeSelfIgnore } from "./memory.js";
 import { SCRIPT_FLAGS } from "./scripted-login.js";
+import { SAVE_MODES, type SaveMode } from "./signed-in.js";
 
 /** The directory under .scenescout/ that holds one file per role. */
 export const AUTH_DIRNAME = "auth";
@@ -315,9 +316,30 @@ export function permissionNote(file: string, mode: number, platform: NodeJS.Plat
   return `The profile at ${file} can be read by other accounts on this machine (mode ${(mode & 0o777).toString(8)}); it holds a live session. Tighten it: chmod 600 "${file}"`;
 }
 
-/** The command that records a role's profile, with the URL when it is known. */
-export function loginCommand(role: string, url?: string): string {
-  return `scenescout login ${url ?? "<url>"} --role ${role}`;
+/** One argument quoted for the platform's usual shell: double quotes on Windows, single quotes elsewhere. */
+export function shellQuote(value: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") return `"${value.replace(/"/g, '""')}"`;
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * The command that records a role's profile, with the URL when it is known,
+ * and `--project` when the profile must go somewhere other than the folder
+ * the command is run from (a project folder SceneScout chose itself).
+ */
+export function loginCommand(role: string, url?: string, project?: string, platform: NodeJS.Platform = process.platform): string {
+  return `scenescout login ${url ?? "<url>"} --role ${role}${project ? ` --project ${shellQuote(project, platform)}` : ""}`;
+}
+
+/**
+ * The command that records a role's profile again for a session: with
+ * `--project` only when SceneScout chose the session's folder itself
+ * (`projectChosen`), since the command otherwise saves into the folder it is
+ * run from and the next attach would not find it. Used by a refusal for a
+ * missing role and by every hint for an expired one.
+ */
+export function reloginCommand(opts: { role: string; url?: string; projectDir: string; projectChosen?: boolean; platform?: NodeJS.Platform }): string {
+  return loginCommand(opts.role, opts.url, opts.projectChosen ? opts.projectDir : undefined, opts.platform);
 }
 
 /** How a session signs in: a role profile, a storage-state file given by path, or not at all. */
@@ -326,10 +348,12 @@ export type AttachAuth = { kind: "role"; role: string; storageStatePath: string 
 /**
  * Turn scout_attach's `role` and `storageStatePath` into the one storage state
  * the session loads. Both at once is refused rather than letting one win
- * silently. A missing profile names the command that records it.
+ * silently. A missing profile names the command that records it, with
+ * `--project` when SceneScout chose the folder (`projectChosen`), so the
+ * command saves where the next attach looks.
  */
 export function resolveAttachAuth(
-  opts: { projectDir: string; url?: string; role?: string; storageStatePath?: string },
+  opts: { projectDir: string; url?: string; role?: string; storageStatePath?: string; projectChosen?: boolean; platform?: NodeJS.Platform },
   exists: (p: string) => boolean = fs.existsSync,
   listRoles: (projectDir: string) => string[] = listProfiles,
 ): AttachAuth {
@@ -348,7 +372,7 @@ export function resolveAttachAuth(
         /* the list is a hint in the message; the refusal stands without it */
       }
       throw new Error(
-        `no sign-in is saved for role "${checked.role}" in this project. Run \`${loginCommand(checked.role, opts.url)}\`, sign in in the window it opens, then attach again.` +
+        `no sign-in is saved for role "${checked.role}" in this project. Run \`${reloginCommand({ role: checked.role, url: opts.url, projectDir: opts.projectDir, projectChosen: opts.projectChosen, platform: opts.platform })}\` (or, from a conversation, scout_login { role: "${checked.role}" }), sign in in the window it opens, then attach again.` +
           (saved.length > 0 ? ` Saved roles: ${saved.join(", ")}.` : ""),
       );
     }
@@ -374,14 +398,22 @@ export interface LoginOptions {
   browser?: BrowserEngineName;
   /** `--script`: sign in headless from the environment's credentials (engine/scripted-login.ts), with these of its flags given. */
   script?: Map<string, string>;
+  /** `--save`, for the window: `auto` (default) saves once the sign-in is seen to finish or on Enter, `enter` on Enter alone. */
+  save?: SaveMode;
+  /** `--success-url` without `--script`: the window counts as signed in at this URL instead of by the session it sees appear. */
+  successUrl?: string;
 }
 
-export const LOGIN_OPTION_NAMES = ["role", "project", "browser"] as const;
+export const LOGIN_OPTION_NAMES = ["role", "project", "browser", "save"] as const;
+
+/** Of the `--script` flags, those the window reads too. */
+const WINDOW_SCRIPT_FLAGS: ReadonlySet<string> = new Set(["success-url"]);
 
 /**
  * Parse `scenescout login <url> --role <name> [--project dir] [--browser engine]
- * [--script [--success-url …] [--timeout s] …]`. `--script` takes no value; the
- * flags only it reads are refused without it.
+ * [--save auto|enter] [--success-url …] [--script [--timeout s] …]`. `--script`
+ * takes no value; the flags only it reads are refused without it, and `--save`,
+ * which only the window reads, is refused with it.
  */
 export function parseLoginArgs(args: readonly string[], cwd: string): { ok: true; options: LoginOptions } | { ok: false; error: string } {
   const positional: string[] = [];
@@ -407,7 +439,8 @@ export function parseLoginArgs(args: readonly string[], cwd: string): { ok: true
   const known = new Set<string>(LOGIN_OPTION_NAMES);
   const scriptOnly = new Set<string>(SCRIPT_FLAGS);
   for (const name of flags.keys()) {
-    if (scriptOnly.has(name) && !script) return { ok: false, error: `--${name} only applies with --script` };
+    if (scriptOnly.has(name) && !script && !WINDOW_SCRIPT_FLAGS.has(name)) return { ok: false, error: `--${name} only applies with --script` };
+    if (name === "save" && script) return { ok: false, error: "--save applies to the window, not to --script, which saves once its sign-in succeeds" };
     if (!known.has(name) && !scriptOnly.has(name)) return { ok: false, error: `unknown option --${name}` };
   }
   if (positional.length !== 1) return { ok: false, error: "give exactly one URL to sign in at, e.g. scenescout login http://127.0.0.1:3000 --role admin" };
@@ -425,6 +458,10 @@ export function parseLoginArgs(args: readonly string[], cwd: string): { ok: true
   if (browser !== undefined && !(BROWSER_ENGINES as readonly string[]).includes(browser)) {
     return { ok: false, error: `--browser must be one of ${BROWSER_ENGINES.join(", ")}` };
   }
+  const save = flags.get("save");
+  if (save !== undefined && !(SAVE_MODES as readonly string[]).includes(save)) return { ok: false, error: `--save must be one of ${SAVE_MODES.join(", ")}` };
+  const successUrl = flags.get("success-url");
+  if (successUrl !== undefined && successUrl.trim() === "") return { ok: false, error: "--success-url needs a value" };
   return {
     ok: true,
     options: {
@@ -433,6 +470,8 @@ export function parseLoginArgs(args: readonly string[], cwd: string): { ok: true
       projectDir: path.resolve(cwd, flags.get("project") ?? "."),
       ...(browser ? { browser: browser as BrowserEngineName } : {}),
       ...(script ? { script: new Map([...flags].filter(([name]) => scriptOnly.has(name))) } : {}),
+      ...(save ? { save: save as SaveMode } : {}),
+      ...(!script && successUrl !== undefined ? { successUrl } : {}),
     },
   };
 }

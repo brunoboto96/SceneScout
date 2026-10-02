@@ -68,7 +68,7 @@ The exploration is driven by a model, which chooses differently each time. The g
 Only one you are authorised to test. For a remote URL with no source, the method starts in `observe` mode.
 
 **Where does everything go?**
-Into `.scenescout/` in the project folder (or the folder you ran from, for a remote URL): memory, notes, findings, reports, saved logins, flows. It ignores itself in git, except `flows/*.json`. Delete it to start from nothing.
+Into `.scenescout/` in the project folder (or the folder you ran from, for a remote URL): memory, notes, findings, reports, saved logins, flows. It ignores itself in git, except `flows/*.json`. Delete it to start from nothing. In a client with no project folder, such as a desktop chat app, each tested site gets its own folder, `Documents/SceneScout/<host>/` by default, and the attach says where; `SCENESCOUT_PROJECTS_DIR` moves it ([configuration reference](Configuration-reference.md#environment-variables)).
 
 **Which browsers does it drive?**
 Chromium by default, and Firefox and WebKit once downloaded (`npx -y scenescout install --browser-only --browsers firefox,webkit`). Firefox and WebKit do not let service workers register, because the write policy can intercept a service worker's requests only in Chromium.

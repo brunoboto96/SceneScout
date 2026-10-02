@@ -31,6 +31,7 @@
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -76,10 +77,31 @@ import {
 import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
 import { decideOpen, OPEN_CHOICES, OPEN_ENV, openChoiceFromEnv, openInBrowser, type OpenChoice, type OpenDecision } from "./engine/open.js";
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
-import { loginCommand } from "./engine/profiles.js";
+import { parseLoginArgs } from "./engine/profiles.js";
+import type { BrowserEngineName } from "./browsers.js";
+import { LOGIN_WINDOW_MAX_MS, savedLine, startLoginWindow, type PendingLogin } from "./login-run.js";
+import { LoginWindows, WAIT_SAYS } from "./engine/signed-in.js";
 import { computeGaps, coverageView, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
 import { DEFAULT_REPORT_AUDIENCE, REPORT_AUDIENCES, type ReportAudience } from "./engine/plain.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
+import {
+  CRITERION_VERDICTS,
+  findCriterion,
+  formatCriteriaForLanes,
+  formatReading,
+  isTicketFileName,
+  judgeCriterion,
+  MAX_CRITERION_FINDINGS,
+  MAX_REASON,
+  MAX_TICKET_FILE_BYTES,
+  MAX_TICKET_TEXT,
+  MAX_TICKETS,
+  NOT_TESTED_REASONS,
+  parseTickets,
+  TICKET_FILE_EXTENSIONS,
+  type CriterionVerdictKind,
+  type NotTestedReason,
+} from "./engine/tickets.js";
 import {
   ACTION_TIMEOUT_ENV,
   DEFAULT_ACTION_TIMEOUT_MS,
@@ -90,6 +112,7 @@ import {
   watchdogFor,
 } from "./engine/limits.js";
 import { MAX_READ_POSTS, READ_POSTS_ENV } from "./engine/policy.js";
+import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "./engine/project-folder.js";
 import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
@@ -707,7 +730,7 @@ server.registerTool(
             runMs: (runMinutes ?? DEFAULT_RUN_MINUTES) * 60_000,
             marginMs: (expiryMarginMinutes ?? DEFAULT_EXPIRY_MARGIN_MINUTES) * 60_000,
             role: eng.auth.role,
-            rerun: loginCommand(eng.auth.role, eng.baseUrl),
+            rerun: eng.reloginCommand(eng.auth.role),
           });
           if (verdict.kind === "refuse") return errorText(new Error(verdict.message));
           if (verdict.kind !== "ok") expiryNote = `⚠ ${verdict.message}\n\n`;
@@ -718,7 +741,14 @@ server.registerTool(
           briefs.map((b) => b.lane),
           (s) => engines.has(s),
         );
-        return text(expiryNote + formatBriefs(briefs, { goal, mode: eng.mode, role: eng.role, roleProfile: eng.auth.kind === "role" }), session);
+        // A run given tickets tells every lane which criteria it answers.
+        const criteria = eng.memory ? formatCriteriaForLanes(eng.memory.ticketsThisRun().tickets) : "";
+        return text(
+          expiryNote +
+            formatBriefs(briefs, { goal, mode: eng.mode, role: eng.role, roleProfile: eng.auth.kind === "role" }) +
+            (criteria ? `\n${criteria}` : ""),
+          session,
+        );
       } catch (err) {
         return errorText(err);
       }
@@ -844,7 +874,13 @@ server.registerTool(
       "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted, and POSTs the user named in readPosts) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass `role` to sign in with a login the user saved by `scenescout login <url> --role <name>`, or a Playwright storage-state JSON as storageStatePath. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
     inputSchema: {
       url: z.string().describe("Base URL of the running app, e.g. http://localhost:3000"),
-      projectPath: z.string().describe("Absolute path to the project (memory + report live in .scenescout/ here)"),
+      projectPath: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute path to the project (memory + report live in .scenescout/ here). Pass it whenever you have a project or working folder. " +
+            `Omitted: the client's workspace folder, else a folder per tested site under the user's documents folder (Documents/SceneScout/<host>/, or ${PROJECTS_DIR_ENV}), which the result names — tell the user where it is.`,
+        ),
       storageStatePath: z.string().optional().describe("Optional Playwright storage-state JSON path for authenticated exploration. Not with `role`."),
       role: z
         .string()
@@ -992,7 +1028,7 @@ server.registerTool(
       open,
     }: {
       url: string;
-      projectPath: string;
+      projectPath?: string;
       storageStatePath?: string;
       role?: string;
       mode?: "observe" | "read-only" | "safe-write" | "destructive";
@@ -1014,6 +1050,10 @@ server.registerTool(
       open?: OpenChoice;
     }) => {
       try {
+        // Settled first: a refusal leaves the default session as it was.
+        const folder = await projectFolderFor(url, projectPath);
+        if ("refused" in folder) return errorText(new Error(folder.refused));
+        projectPath = folder.dir;
         const target = session ?? activeName;
         if (session) {
           activeName = session;
@@ -1087,6 +1127,7 @@ server.registerTool(
         const out = await eng.attach({
           url,
           projectDir: projectPath,
+          projectChosen: folder.source === "default",
           storageStatePath,
           role,
           mode,
@@ -1140,6 +1181,7 @@ server.registerTool(
             : "";
         return text(
           out +
+            (folder.note ? `\n\n${folder.note}` : "") +
             conflictNote +
             recordNote +
             picturesNote +
@@ -1156,6 +1198,31 @@ server.registerTool(
     },
   ),
 );
+
+/**
+ * The folder an attach keeps its files in (engine/project-folder.ts): the
+ * projectPath given, else the client's workspace folder, else a folder per
+ * tested site. Only a client that offers roots is asked for them.
+ */
+async function projectFolderFor(url: string, given: string | undefined) {
+  let workspace: string | null = null;
+  if (given === undefined && server.server.getClientCapabilities()?.roots) {
+    try {
+      workspace = workspaceFromRoots((await server.server.listRoots(undefined, { timeout: 3000 })).roots);
+    } catch (err) {
+      logLine(`the client offers a workspace but did not list it (${(err as Error).message}); using the default folder`);
+    }
+  }
+  const userDirsFile = path.join(os.homedir(), ".config", "user-dirs.dirs");
+  const userDirs = process.platform === "linux" && fs.existsSync(userDirsFile) ? fs.readFileSync(userDirsFile, "utf8") : undefined;
+  return chooseProjectFolder({
+    given,
+    workspace,
+    url,
+    home: { platform: process.platform, homedir: os.homedir(), env: process.env, userDirs },
+    exists: fs.existsSync,
+  });
+}
 
 /** Keys in this process's environment, and anything shaped like one, taken out of a line before it is shown. */
 const withoutKeys = (text: string): string => redactKeys(text, secretValues(process.env));
@@ -1275,6 +1342,127 @@ function sessionLines(): string {
   }
   return lines.join("\n");
 }
+
+// Signing in from the conversation: a window the person signs in in, watched
+// in the background, so a call need not last as long as the person takes and
+// a second call picks up the same window. One per project and role.
+const pendingLogins = new LoginWindows<PendingLogin>(LOGIN_WINDOW_MAX_MS);
+/** How long one scout_login call waits for the person, by default and at most, in seconds. */
+const LOGIN_WAIT_DEFAULT_S = 120;
+const LOGIN_WAIT_MAX_S = 600;
+/** How often a waiting call tells a client that asked for progress that it is still going, in ms. */
+const LOGIN_PROGRESS_EVERY_MS = 10_000;
+
+server.registerTool(
+  "scout_login",
+  {
+    description:
+      "Open a visible browser window for the USER to sign in to the app as a role, and save that sign-in for scout_attach { role }. " +
+      "Use it when an attach is refused because no sign-in is saved for the role, or the saved one has expired. " +
+      'Tell the user first, in plain words: "A browser window is opening. Sign in there as you normally would; it closes by itself once you are in." ' +
+      "The window saves once the user is back on the app with a new session (a round trip through a single sign-on provider is followed, not taken for the end) and closes. " +
+      "Never type credentials into it yourself. Returns once signed in and saved, or after waitSeconds with the window still open: then call scout_login again with the same role to keep waiting. " +
+      "Closing the window saves nothing. Needs a desktop: on a machine with no display, ask the user to run `scenescout login <url> --role <name>` where they can see the window.",
+    inputSchema: {
+      url: z.string().describe("Where to sign in: the app's address or its sign-in page, e.g. http://localhost:3000/login"),
+      role: z.string().max(40).describe("The name to save the sign-in under, e.g. admin; scout_attach { role } signs in with it"),
+      projectPath: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute path to the project (the sign-in is saved in .scenescout/auth/ here), as for scout_attach. Omitted: the same folder an attach with no projectPath uses for this site, which the result names.",
+        ),
+      browser: z
+        .enum(["chromium", "firefox", "webkit"])
+        .optional()
+        .describe("Browser to open. Default: the SCENESCOUT_BROWSER environment variable, else chromium"),
+      successUrl: z
+        .string()
+        .max(500)
+        .optional()
+        .describe(
+          "Only when the user says how to tell: signed in once the URL's path contains this, or the URL starts with it (an absolute URL), instead of when a new session appears",
+        ),
+      waitSeconds: z
+        .number()
+        .int()
+        .min(1)
+        .max(LOGIN_WAIT_MAX_S)
+        .optional()
+        .describe(`How long this call waits for the user before returning with the window still open (default ${LOGIN_WAIT_DEFAULT_S})`),
+    },
+  },
+  async (args: { url: string; role: string; projectPath?: string; browser?: BrowserEngineName; successUrl?: string; waitSeconds?: number }, extra) => {
+    try {
+      // The folder an attach with no projectPath would use, so the attach after this finds the sign-in.
+      const folder = await projectFolderFor(args.url, args.projectPath);
+      if ("refused" in folder) return errorText(new Error(folder.refused));
+      const projectDir = path.resolve(folder.dir);
+      const where = folder.note ? `\n\n${folder.note}` : "";
+      const parsed = parseLoginArgs(
+        [args.url, "--role", args.role, ...(args.browser ? ["--browser", args.browser] : []), ...(args.successUrl ? ["--success-url", args.successUrl] : [])],
+        projectDir,
+      );
+      if (!parsed.ok) return errorText(new Error(parsed.error));
+      const options = { ...parsed.options, projectDir };
+      const key = `${options.projectDir}\0${options.role}`;
+      const { window: pending, resumed } = await pendingLogins.get(key, () => startLoginWindow(options));
+      const waitMs = (args.waitSeconds ?? LOGIN_WAIT_DEFAULT_S) * 1000;
+      const progressToken = extra._meta?.progressToken;
+      let ticks = 0;
+      const ticker =
+        progressToken !== undefined
+          ? setInterval(() => {
+              ticks += 1;
+              const p = pending.progress();
+              void extra
+                .sendNotification({
+                  method: "notifications/progress",
+                  params: {
+                    progressToken,
+                    progress: ticks,
+                    message: `Waiting for the sign-in as "${options.role}": ${p.reason === "starting" ? "the window is opening" : WAIT_SAYS[p.reason]}`,
+                  },
+                })
+                .catch((err: unknown) => console.error(`[scenescout] scout_login progress: ${err instanceof Error ? err.message : String(err)}`));
+            }, LOGIN_PROGRESS_EVERY_MS)
+          : undefined;
+      let timer: NodeJS.Timeout | undefined;
+      let onAbort: (() => void) | undefined;
+      const outcome = await Promise.race([
+        pending.done,
+        new Promise<"waiting">((resolve) => {
+          timer = setTimeout(() => resolve("waiting"), waitMs);
+        }),
+        new Promise<"cancelled">((resolve) => {
+          onAbort = () => resolve("cancelled");
+          extra.signal.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]).finally(() => {
+        clearTimeout(timer);
+        if (ticker) clearInterval(ticker);
+        if (onAbort) extra.signal.removeEventListener("abort", onAbort);
+      });
+      const differs =
+        resumed && pending.url !== options.url ? ` (the window was opened at ${pending.url} by an earlier call; that one is still the one being watched)` : "";
+      if (outcome === "waiting" || outcome === "cancelled") {
+        const p = pending.progress();
+        return text(
+          `Still waiting for the user to sign in as "${options.role}"${differs}: ${p.reason === "starting" ? "the window is opening" : WAIT_SAYS[p.reason]}. ` +
+            `The window stays open for up to ${LOGIN_WINDOW_MAX_MS / 60_000} minutes from when it opened. Call scout_login again with the same role to keep waiting, once the user says they are done or to check.` +
+            where,
+          activeName,
+        );
+      }
+      // This call reports the outcome; the next call for the role opens a new window.
+      pendingLogins.reported(key, pending);
+      if (!outcome.ok) return errorText(new Error(`nothing was saved for role "${options.role}": ${outcome.error}`));
+      return text(`${outcome.detected}\n${savedLine(options, outcome.saved)}${where}`, activeName);
+    } catch (err) {
+      return errorText(err);
+    }
+  },
+);
 
 server.registerTool(
   "scout_session",
@@ -2172,6 +2360,130 @@ server.registerTool(
   }),
 );
 
+// Answering the tickets: read their acceptance criteria, then record a verdict on each.
+server.registerTool(
+  "scout_tickets",
+  {
+    description:
+      "Read the tickets or acceptance criteria the person gave this run, pasted (`text`) or from a file (`path`), and keep them so the report answers each criterion: passed, failed or not tested. " +
+      'Recognises Given/When/Then scenarios, checklists, numbered and "AC1:" criteria, and lists under an "Acceptance criteria" heading; several tickets may be given at once. ' +
+      "A ticket with no recognisable criteria is reported as such, never guessed at. Returns each criterion's id (AC1, AC2, …) to judge it by with scout_criterion. Touches no browser.",
+    inputSchema: {
+      text: z.string().max(MAX_TICKET_TEXT).optional().describe("The tickets as pasted. Pass this or `path`."),
+      path: z
+        .string()
+        .optional()
+        .describe(`A ticket file to read (${TICKET_FILE_EXTENSIONS.join(", ")}), absolute or relative to the project folder. Pass this or \`text\`.`),
+      session: sessionParam,
+    },
+  },
+  serializedPerSession("scout_tickets", async ({ text: pasted, path: file }: { text?: string; path?: string }, session) => {
+    try {
+      const eng = engineFor(session);
+      if (!eng.memory) throw new Error("Not attached — attach first, so the tickets are kept with the project.");
+      if ((pasted === undefined) === (file === undefined)) return text("Pass the tickets as `text`, or a file as `path`: one of the two.", session);
+      let body = pasted ?? "";
+      let source = "pasted text";
+      if (file !== undefined) {
+        // The file a link points at is what is read, so its name is what is checked: a "notes.md" link to a key file is refused.
+        const full = fs.realpathSync(path.isAbsolute(file) ? file : path.resolve(path.dirname(eng.memory.dir), file));
+        if (!isTicketFileName(full))
+          return text(`Not read: a ticket file is one of ${TICKET_FILE_EXTENSIONS.join(", ")}. Paste anything else as \`text\`.`, session);
+        const stat = fs.statSync(full);
+        if (!stat.isFile()) return text(`Not read: ${full} is not a file.`, session);
+        if (stat.size > MAX_TICKET_FILE_BYTES) return text(`Not read: ${full} is larger than ${MAX_TICKET_FILE_BYTES} bytes.`, session);
+        body = fs.readFileSync(full, "utf8");
+        source = path.basename(full);
+      }
+      if (!body.trim()) return text("Nothing to read: the tickets are empty.", session);
+      const parsed = parseTickets(body, source);
+      const kept = eng.memory.addTickets(parsed);
+      // Say what a bound left out, so a long backlog is never answered in part without a word.
+      const cuts = [
+        ...(body.length > MAX_TICKET_TEXT ? [`only the first ${MAX_TICKET_TEXT} characters were read`] : []),
+        ...(parsed.length >= MAX_TICKETS ? [`at most ${MAX_TICKETS} tickets are read at once`] : []),
+      ];
+      return text(formatReading(kept) + (cuts.length ? `\n\n⚠ Not everything was read: ${cuts.join("; ")}. Read the rest in another call.` : ""), session);
+    } catch (err) {
+      return errorText(err);
+    }
+  }),
+);
+
+server.registerTool(
+  "scout_criterion",
+  {
+    description:
+      "Record whether one acceptance criterion of a ticket read with scout_tickets passed, failed or was not tested, with how sure you are. " +
+      "The link from a criterion to the findings that show it is YOUR judgement, stated with a confidence — never matched on words. " +
+      'A "fail" names the findings that show it (file them with scout_finding first); "not-tested" says why in untestedBecause. Recording the same criterion again from the same session replaces your earlier verdict. Touches no browser.',
+    inputSchema: {
+      ticket: z.string().min(1).describe('The ticket\'s id as scout_tickets gave it, e.g. "PROJ-12" or "T1"'),
+      criterion: z.string().min(1).describe('The criterion\'s id, e.g. "AC2" (or just "2")'),
+      verdict: z.enum(CRITERION_VERDICTS).describe('"pass", "fail" or "not-tested"'),
+      findings: z
+        .array(z.string())
+        .max(MAX_CRITERION_FINDINGS)
+        .optional()
+        .describe("Ids of the findings that show this criterion failing (required for a fail; may be given for a pass, none for not-tested)"),
+      confidence: z.number().min(0).max(1).describe("How sure you are of this verdict and of the findings linked to it, from 0 to 1. State it honestly"),
+      reason: z.string().min(1).max(MAX_REASON).describe("What you saw, or why it could not be tried, in a sentence"),
+      untestedBecause: z
+        .enum(NOT_TESTED_REASONS)
+        .optional()
+        .describe(
+          'Only with verdict "not-tested": "no-access" (the role this run used could not reach it), "observe-blocked" (it needs a change sent and this session is in observe mode), "out-of-scope" (it is outside what this run could check, such as an email or another system)',
+        ),
+      session: sessionParam,
+    },
+  },
+  serializedPerSession(
+    "scout_criterion",
+    async (
+      args: {
+        ticket: string;
+        criterion: string;
+        verdict: CriterionVerdictKind;
+        findings?: string[];
+        confidence: number;
+        reason: string;
+        untestedBecause?: NotTestedReason;
+      },
+      session,
+    ) => {
+      try {
+        const eng = engineFor(session);
+        const memory = eng.memory;
+        if (!memory) throw new Error("Not attached.");
+        const judged = judgeCriterion(args, {
+          tickets: memory.tickets,
+          findings: memory.findings,
+          mode: eng.mode,
+          session: eng.sessionKey,
+          at: new Date().toISOString(),
+        });
+        if (!judged.ok) return text(`Not recorded: ${judged.reason}.`, session);
+        memory.addCriterionVerdict(judged.record);
+        const r = judged.record;
+        const ticket = memory.tickets.find((t) => t.id === r.ticket);
+        const criterion = ticket ? findCriterion(ticket, r.criterion) : undefined;
+        const linked = r.findings.map((id) => memory.findings.find((f) => f.id === id)).filter((f) => f !== undefined);
+        const said = r.verdict === "pass" ? "passes" : r.verdict === "fail" ? "fails" : `was not tested (${r.untestedBecause})`;
+        return text(
+          [
+            `Recorded: ${r.ticket} ${r.criterion} ${said}, confidence ${r.confidence.toFixed(2)}.`,
+            ...(criterion ? [`  ${criterion.text}`] : []),
+            ...linked.map((f) => `  linked: [${f.severity}] ${f.title} (${f.id})`),
+          ].join("\n"),
+          session,
+        );
+      } catch (err) {
+        return errorText(err);
+      }
+    },
+  ),
+);
+
 server.registerTool(
   "scout_close",
   {
@@ -2282,7 +2594,7 @@ async function shutdown(): Promise<void> {
       console.error(`[scenescout] could not remove the live view's token file in ${dir}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  await Promise.allSettled([live?.stop(), ...[...engines.values()].map((e) => e.close())]);
+  await Promise.allSettled([live?.stop(), ...[...engines.values()].map((e) => e.close()), ...pendingLogins.all().map((p) => p.cancel())]);
 }
 
 process.on("SIGINT", () => {
