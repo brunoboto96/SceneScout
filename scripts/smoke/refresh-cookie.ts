@@ -223,6 +223,55 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       JSON.stringify(lanes.map((lane, i) => lockTaken(lane).slice(before[i]))),
     );
     check("...and the profile holds the current token", await until(() => profileIsCurrent(project)));
+    for (const engine of opened.splice(0)) await engine.close();
+
+    // ---- A swap the broker cannot send: reported as a failure only ---------
+    // One lane rotates the cookie; another then refreshes by a native form
+    // post with the spent one. The broker loads the rotated profile, but a
+    // navigation's Cookie header is the browser's to build, so where the
+    // request shows it the broker cannot send the current token, and the result
+    // must not claim it did. A browser that adds cookies after the route
+    // handler takes them from the jar the profile was loaded into, and the swap
+    // goes through. Either way, one result never says both.
+    await recordProfile(baseUrl, project, "scope=root");
+    const [rotator] = await attachLanes(baseUrl, project, "read-only", 1, opened);
+    // A short action limit: the form's click can wait out its limit (below), and that wait is not what is checked.
+    const former = new BrowserEngine();
+    opened.push(former);
+    await former.attach({ url: `${baseUrl}/rc-app`, projectDir: project, mode: "read-only", role: "member", actionTimeoutMs: 5000 });
+    check(
+      "swap by form: both lanes start signed in",
+      (await Promise.all([rotator, former].map(settled))).every((s) => s.signedIn === "in"),
+    );
+    expireFixtureAccess();
+    await rotator.navigate(`${baseUrl}/rc-app`);
+    check("swap by form: the first lane refreshes and stays signed in", (await settled(rotator)).signedIn === "in");
+    check("...and saves the rotation", await until(() => profileIsCurrent(project)));
+    const formPage = await former.navigate(`${baseUrl}/refresh-form.html`);
+    const snap = await former.snapshot(true);
+    const ref = /(e\d+) button "Refresh by form"/.exec(snap)?.[1];
+    check("swap by form: the form's button is in the snapshot", ref !== undefined, snap.slice(0, 300));
+    // The click can wait out its action limit for this navigation in some browsers. That wait is not
+    // what this checks: whatever the click returns or not, the next action's result carries the notice.
+    let clicked = "";
+    try {
+      clicked = ref ? await former.click(ref) : "";
+    } catch (err) {
+      check("swap by form: a click that ran out ran out on its action limit", String(err).includes("action limit"), String(err).split("\n")[0]);
+    }
+    const submitted = formPage + clicked + (await former.navigate(`${baseUrl}/refresh-form.html`));
+    const swappedLine = submitted.includes("another session had rotated the role's token");
+    const failedLine = submitted.includes("could not be brokered");
+    check(
+      "swap by form: the result reports the broker's outcome",
+      swappedLine || failedLine,
+      JSON.stringify(submitted.split("\n").filter((l) => l.includes("↻") || l.includes("⚠"))),
+    );
+    check(
+      "...and never says it sent the current token for a refresh it could not broker",
+      !(swappedLine && failedLine),
+      JSON.stringify(submitted.split("\n").filter((l) => l.includes("↻") || l.includes("⚠"))),
+    );
   } finally {
     for (const engine of opened) await engine.close().catch(() => {});
     fs.rmSync(project, { recursive: true, force: true });
