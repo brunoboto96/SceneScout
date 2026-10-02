@@ -33,8 +33,13 @@ import {
 } from "./browsers.js";
 import { CLIENT_LABELS, firstMessageHint, manualFor, parseClients, registerWithClient, vscodeBinary, type CodeOnPath, type OtherClient } from "./clients.js";
 import {
+  CLAUDE_CODE_NOT_NEEDED,
   CLI_NAME,
+  desktopExtensionRoots,
   diagnose,
+  doctorAllGood,
+  findDesktopExtension,
+  installClosing,
   ensureCommand,
   findOnUserPath,
   installSkill,
@@ -597,11 +602,9 @@ async function install(flags: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  if (browserOnly) {
-    console.log("\nThe browser is ready — attach again.");
-    return;
-  }
-  if (forClaude) console.log("\nStart a FRESH Claude Code session, then in any project run:  /scenescout");
+  const closing = installClosing({ browserOnly, forClaude });
+  if (closing) console.log(`\n${closing}`);
+  if (browserOnly) return;
   // Telling someone to restart a client nothing was registered with sends them looking for a server that is not there.
   if (others.length > 0 && !flags.includes("--no-register")) console.log(`\n${firstMessageHint(others)}`);
   console.log(`Something off? Run:  ${cli} doctor${forClaude ? "" : " --engine"}`);
@@ -619,6 +622,8 @@ async function doctor(flags: string[]): Promise<void> {
       const found = (await presentBrowsers())[target];
       return { target, path: found.installed ? found.path : null, expected: found.path };
     })(),
+    desktopExtension: findDesktopExtension(desktopExtensionRoots({ platform: process.platform, home: os.homedir(), env: process.env })),
+    headlessShellDir: (await presentBrowsers())["chromium-headless-shell"].path,
     run: spawnRunner,
   });
   for (const c of checks) {
@@ -626,11 +631,7 @@ async function doctor(flags: string[]): Promise<void> {
     if (!c.ok && c.fix) console.log(`    fix: ${c.fix}`);
   }
   if (checks.some((c) => !c.ok)) process.exit(1);
-  console.log(
-    flags.includes("--engine")
-      ? "\nAll good. Ask your agent:  Use SceneScout to test http://localhost:3000"
-      : "\nAll good. In any project, run:  /scenescout   (or ask: Use SceneScout to test http://localhost:3000)",
-  );
+  console.log(`\n${doctorAllGood({ engineOnly: flags.includes("--engine"), desktopOnly: checks.some((c) => c.name === CLAUDE_CODE_NOT_NEEDED) })}`);
 }
 
 /** `scenescout check`: exit 0 passed, 1 failed the gate, 2 could not run. */

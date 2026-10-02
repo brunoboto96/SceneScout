@@ -152,7 +152,9 @@ Either way it downloads the browser and registers the server with the client you
 /plugin install scenescout@scenescout-marketplace
 ```
 
-Then download the browser once with `npx -y scenescout install --browser-only`. The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release lands here the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
+Then download the browser once with `npx -y scenescout install --browser-only`, and start a new chat to use SceneScout. The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release lands here the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
+
+**Using Claude Desktop?** Install the extension: download `scenescout-X.Y.Z.mcpb` from the [latest release](https://github.com/brunoboto96/SceneScout/releases/latest) and open it (or Settings > Extensions > Advanced settings > Install Extension). It works as soon as it is installed. Download the browser once with `npx -y scenescout install --browser-only`, then start a new chat and ask *"Use SceneScout to test http://localhost:3000"*. [More in the guide](docs/guide/Start-here.md#as-a-claude-desktop-extension).
 
 **A client that is not in that list?** Run `npx -y scenescout install --browser-only` and [add the server to its config by hand](#-other-mcp-clients).
 
@@ -201,7 +203,9 @@ In Claude Code the skill gives you a command with flags for the same thing:
 
 The agent scans the project (if there is one), attaches read-only, explores, and writes findings to `.scenescout/report.md`. That's it.
 
-**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (who to explore as: a login saved with `scenescout login`, a storage state found by the scan, or a path to a Playwright storage-state JSON) · `--observe` / `--safe-write` / `--allow-destructive`.
+**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (who to explore as: a login saved with `scenescout login`, a storage state found by the scan, or a path to a Playwright storage-state JSON) · `--focus <text>` (a ticket or a sentence to check) · `--observe` / `--read-only` / `--safe-write` / `--allow-destructive`.
+
+**No flags at all** (`/scenescout` on its own) and the agent asks four plain questions instead: the address, whether and how you sign in, what to check (tickets or a description), and whether the site holds real data. Real data, or not being sure, means nothing but `GET` requests leave the page; you are never asked to pick a mode. Any flag skips the questions. See [Plain questions instead of flags](docs/guide/Ways-to-use-it.md#plain-questions-instead-of-flags).
 
 ### 🔑 Signing in as a role
 

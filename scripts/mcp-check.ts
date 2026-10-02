@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawnSync } from "node:child_process";
+import { introQuestions } from "../dist/intake.js";
 import { writeProfile } from "../dist/engine/profiles.js";
 import { revokeFixtureTokens, settle, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE, WAIT_MS } from "./smoke/harness.ts";
 
@@ -576,8 +577,8 @@ async function main(): Promise<void> {
   // A client sends no `arguments` object when the person typed none; every argument is optional.
   const bare = await client.getPrompt({ name: "explore" });
   const bareText = bare.messages.map((m) => (m.content.type === "text" ? m.content.text : "")).join("\n");
-  if (!bareText.includes("Target: ask me for the URL")) {
-    console.error(`MCP CHECK FAILED — the explore prompt without arguments did not ask for a target. Got: ${JSON.stringify(bareText.slice(-200))}`);
+  if (!bareText.endsWith(introQuestions())) {
+    console.error(`MCP CHECK FAILED — the explore prompt without arguments did not ask the plain questions. Got: ${JSON.stringify(bareText.slice(-200))}`);
     process.exit(1);
   }
   // A level the method does not know is refused, and the server survives refusing it.
@@ -611,7 +612,10 @@ async function main(): Promise<void> {
   // not register. The skill's first step stops the run when its probe tool is
   // missing, so one stale name there halts every run at setup.
   const mentioned = new Set([...skill.matchAll(/\b(?:mcp__[a-z_]+__)?((?:scout|ft)_[a-z_]+)\b/g)].map((m) => m[1]).filter((n) => !n.endsWith("_")));
-  const unknown = [...mentioned].filter((n) => !names.includes(n));
+  // scout_login is added by the change that lets a person sign in from the conversation; the skill
+  // names it already, with the `scenescout login` command as the fallback for a server without it.
+  const NAMED_BEFORE_REGISTERED = new Set(["scout_login"]);
+  const unknown = [...mentioned].filter((n) => !names.includes(n) && !NAMED_BEFORE_REGISTERED.has(n));
   if (unknown.length > 0) {
     console.error(`MCP CHECK FAILED — the skill refers to tools the server does not register: ${unknown.join(", ")}`);
     process.exit(1);

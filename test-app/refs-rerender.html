@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Refs: a form that re-renders</title></head>
+<body>
+  <!-- A create form whose footer re-renders as the user types: an "Unsaved
+       changes" line appears before the submit, and the submit itself is
+       replaced by a new node with the same test id, as a component library
+       re-rendering its footer does. The old submit's path then finds nothing,
+       and the submit must still be found by its unique test id.
+       "Discard" is the contrast: the same re-render replaces it with a button
+       that says something else, so it must not be acted on. -->
+  <main>
+    <h1>New thing</h1>
+    <form novalidate>
+      <input type="text" aria-label="Thing name" data-testid="create-name">
+      <div class="footer" data-testid="create-footer"></div>
+    </form>
+    <p role="status" data-testid="create-said"></p>
+  </main>
+  <script>
+    const footer = document.querySelector('.footer');
+    const said = document.querySelector('[data-testid="create-said"]');
+    const render = (dirty) => {
+      footer.innerHTML =
+        (dirty ? '<div>Unsaved changes · Draft saved</div>' : '') +
+        '<div><button type="button" data-testid="create-discard">' + (dirty ? 'Discard draft' : 'Discard') + '</button>' +
+        '<button type="submit" data-testid="create-submit">Create thing</button></div>';
+    };
+    render(false);
+    document.querySelector('[data-testid="create-name"]').addEventListener('input', () => render(true));
+    document.forms[0].addEventListener('submit', (e) => {
+      e.preventDefault();
+      said.textContent = 'Created';
+    });
+  </script>
+</body>
+</html>

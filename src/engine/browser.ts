@@ -18,7 +18,7 @@ import {
 } from "playwright";
 import fs from "node:fs";
 import path from "node:path";
-import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
+import { elementKey, fingerprintState, isNonPageRoute, normalizePath, refsSurviveUrlChange, routeBase, type InteractableInfo } from "./fingerprint.js";
 import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, reachedRoutes, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
 import { normalizeTask } from "./task.js";
@@ -42,8 +42,16 @@ import { captureClip, cutByViewport } from "./capture.js";
 import { STOP_ANIMATIONS_SCRIPT, type PictureSettings } from "./baseline.js";
 import {
   COLLECT_INTERACTABLES_SCRIPT,
+  COLLECTOR_CAP,
+  NAME_SRC,
   POLICY_TEXT_SRC,
   VISIBLE_SRC,
+  XPATH_OF_SRC,
+  affordanceFlags,
+  cutSummary,
+  matchPrevious,
+  type Affordances,
+  type CutElement,
   geometryIssues,
   type Rect,
   BROKEN_IMAGES_SCRIPT,
@@ -387,6 +395,8 @@ interface SnapshotElement extends InteractableInfo {
   fieldPad?: { l: number; r: number } | null;
   /** A user can act on it (collector isInteractive); false for what is listed only for its test id or its text. */
   interactive?: boolean;
+  /** For an element with no control role or native control: what alone makes it actionable (collector.ts affordanceFlags). */
+  affords?: Affordances | null;
   /** Inside an aria-hidden subtree. */
   ariaHidden?: boolean;
   /** A live region listed only for what it says: kept out of the state's identity and its coverage (trackedElements). */
@@ -396,6 +406,24 @@ interface SnapshotElement extends InteractableInfo {
   /** The horizontally scrolling container it sits outside the visible width of, when it does. */
   scrolledOutIn?: string | null;
 }
+
+/** One kept snapshot: its route and, by element key, what the diff compares and the ref the element had. */
+interface SnapRecord {
+  route: string;
+  byKey: Map<string, { ref: string; label: string; href: string | null; disabled: boolean; state: string[] }>;
+}
+
+/**
+ * The kept snapshot a new one is compared with: the latest snapshot, an
+ * earlier one of the same route, or the latest of another tab of the screen.
+ */
+interface PrevSnap {
+  snap: SnapRecord;
+  how: "latest" | "revisited" | "tab";
+}
+
+/** How many routes' last snapshots are kept for diffs. */
+const SNAPSHOTS_KEPT = 20;
 
 const SETTLE_MS = 400;
 
@@ -477,6 +505,24 @@ function submitControlIn(elements: readonly SnapshotElement[], probe: FormProbe)
   const el = elements.find((e) => !e.frame && e.xpath === probe.submit);
   return el && sameControl(el, probe) ? el : null;
 }
+
+/** What an action re-reads of its element before acting: test id, label, accessible name, and the policy's text. */
+type LiveFacts = { testid: string | null; label: string; name: string; ownText?: string; centre?: string[] };
+
+/** Page-side, built from constants only: an element's LiveFacts. */
+const LIVE_FACTS_BODY =
+  `return { testid: node.getAttribute('data-testid'), ` +
+  `label: (node.getAttribute('aria-label') || node.innerText || node.textContent || node.getAttribute('placeholder') || '').trim().slice(0, 120), ` +
+  `name: (${NAME_SRC})(node).name, ...(${POLICY_TEXT_SRC})(node) };`;
+const liveFactsOf = new Function("node", LIVE_FACTS_BODY) as (node: Element) => LiveFacts;
+
+/** Page-side: the one element carrying a test id, with its path and LiveFacts; null when none or several do. */
+const uniqueByTestid = new Function(
+  "testid",
+  `const all = document.querySelectorAll('[data-testid="' + CSS.escape(testid) + '"]'); ` +
+    `if (all.length !== 1) return null; const node = all[0]; ` +
+    `return { xpath: (${XPATH_OF_SRC})(node), live: (function (node) { ${LIVE_FACTS_BODY} })(node) };`,
+) as (testid: string) => { xpath: string; live: LiveFacts } | null;
 
 /** Page-side: the form an element belongs to, and what its fields hold now (forms.ts). */
 const probeFormOf = new Function("node", FORM_PROBE_BODY) as (node: Element) => FormProbe | null;
@@ -600,8 +646,17 @@ export class BrowserEngine {
   private currentFingerprint = "";
   /** URL at the time of the last snapshot — refs are valid only while it matches. */
   private snapshotUrl = "";
-  /** Last snapshot's identity map (per route) — enables stable refs + diff snapshots. */
-  private lastSnap: { route: string; byKey: Map<string, { ref: string; label: string; disabled: boolean; state: string[] }> } | null = null;
+  /**
+   * The last snapshot of each recent route, newest last (at most
+   * SNAPSHOTS_KEPT): a route snapshotted again keeps its refs and is shown as
+   * a diff, even after a visit elsewhere, and a tab of a screen diffs against
+   * the screen's last tab.
+   */
+  private snaps = new Map<string, SnapRecord>();
+  /** The route of the latest snapshot, so a diff can say whether it is against that one. */
+  private lastSnapRoute = "";
+  /** Why the refs of the latest snapshot were dropped since it was taken, or null when they were not. */
+  private refsDropped: string | null = null;
   /** Non-parameterized routes discovered by the project scan — the objective completion contract. */
   knownRoutes: string[] = [];
   /** Real path of the attached project — the fence for scout_upload's filePath. */
@@ -1429,7 +1484,7 @@ export class BrowserEngine {
       }
       return embedOfRequest(this.baseUrl, req.url(), site);
     });
-    this.lastSnap = null;
+    this.forgetSnapshots();
     this.designAuditCount = 0;
     // A new attach may be a restarted app: what failed to load before gets another try.
     this.loadFailedRoutes = new Set();
@@ -1775,7 +1830,7 @@ export class BrowserEngine {
             this.page = newPage;
             this.refs.clear();
             this.snapshotUrl = "";
-            this.lastSnap = null;
+            this.forgetSnapshots();
           } else {
             void this.leaveAndClose(newPage);
           }
@@ -2013,8 +2068,53 @@ export class BrowserEngine {
     return this.paceMs;
   }
 
+  /** Forget every kept snapshot: the next one of any route is listed in full, with new refs. */
+  private forgetSnapshots(): void {
+    this.snaps.clear();
+    this.lastSnapRoute = "";
+    this.refsDropped = null;
+  }
+
+  /** Drop the latest snapshot's refs, remembering why so the next diff does not call them stable. */
+  private dropRefs(reason: string): void {
+    this.refs.clear();
+    this.refsDropped ??= reason;
+  }
+
+  /**
+   * The kept snapshot a route's next snapshot is compared with: the route's
+   * own, else the latest of another tab of the same screen (routeBase).
+   */
+  private prevSnapFor(route: string): PrevSnap | null {
+    const own = this.snaps.get(route);
+    if (own) return { snap: own, how: route === this.lastSnapRoute ? "latest" : "revisited" };
+    const base = routeBase(route);
+    const tabs = [...this.snaps.values()].filter((s) => routeBase(s.route) === base);
+    const latest = tabs[tabs.length - 1];
+    return latest ? { snap: latest, how: "tab" } : null;
+  }
+
+  /** Keep a snapshot as its route's latest, dropping the least recent route past SNAPSHOTS_KEPT. */
+  private keepSnapshot(snap: SnapRecord): void {
+    this.snaps.delete(snap.route);
+    this.snaps.set(snap.route, snap);
+    while (this.snaps.size > SNAPSHOTS_KEPT) this.snaps.delete(this.snaps.keys().next().value!);
+    this.lastSnapRoute = snap.route;
+    this.refsDropped = null;
+  }
+
   /** Collect the current page's interactables into SnapshotElements with stable refs. */
-  private async collect(): Promise<{ elements: SnapshotElement[]; truncated: boolean; forms: SeenForm[] }> {
+  private async collect(): Promise<{
+    elements: SnapshotElement[];
+    truncated: boolean;
+    forms: SeenForm[];
+    /** What past the element cap was left out (collector.ts cutSummary). */
+    cut: CutElement[];
+    /** The snapshot this collect's refs were carried over from, and how it relates to this page. */
+    prev: PrevSnap | null;
+    /** For each element, its key in `prev`, or null when it is new since (collector.ts matchPrevious). */
+    matched: Array<string | null>;
+  }> {
     const page = this.requirePage();
     type RawElement = {
       tag: string;
@@ -2042,6 +2142,9 @@ export class BrowserEngine {
       liveOnly?: boolean;
       state?: ElementState;
       scrolledOutIn?: string | null;
+      affords?: Affordances | null;
+      /** Past the collector's cap: only counted (CutElement). */
+      cut?: boolean;
     };
     // SPAs (and dev servers mid-recompile) can present an empty shell for a
     // few seconds — and a shell that already renders its chrome (sidebar,
@@ -2057,7 +2160,8 @@ export class BrowserEngine {
       if (stable) break;
     }
 
-    const mainCount = rawElements.length;
+    const cut = rawElements.filter((r) => r.cut) as CutElement[];
+    rawElements = rawElements.filter((r) => !r.cut);
     // The page's forms, read in the same settled page as its elements. The
     // page's own document only: an xpath names a node in one document.
     const rawForms = ((await this.formRead("form inventory", page.evaluate(FORMS_INVENTORY_SCRIPT))) ?? []) as FormFacts[];
@@ -2070,7 +2174,7 @@ export class BrowserEngine {
     // (and previously issued refs) survive re-snapshots. An element inside a
     // frame carries the frame in its key (collector.ts frameElementKey).
     const route = normalizePath(page.url());
-    const prevByKey = this.lastSnap?.route === route ? this.lastSnap.byKey : null;
+    const prev = this.prevSnapFor(route);
     this.refs.clear();
     this.refFrames.clear();
     const keyCounts = new Map<string, number>();
@@ -2078,15 +2182,14 @@ export class BrowserEngine {
       ...rawElements.map((raw) => ({ raw })),
       ...framed.flatMap((g) => g.raws.map((raw) => ({ raw: raw as RawElement, frame: g.frame, tag: g.tag }))),
     ];
-    const elements: SnapshotElement[] = all.map(({ raw: el, frame, tag }) => {
+    const built = all.map(({ raw: el, frame, tag }) => {
       // A live region listed for what it says is known by its role, not its
       // text, so a new message reads as the same region saying something else.
       const baseKey = frameElementKey(el.liveOnly ? `live:${el.role}` : elementKey(el), tag);
       const count = keyCounts.get(baseKey) ?? 0;
       keyCounts.set(baseKey, count + 1);
       const key = count === 0 ? baseKey : `${baseKey}~${count}`;
-      const ref = prevByKey?.get(key)?.ref ?? `e${++this.refCounter}`;
-      const { ownText: _ownText, centre: _centre, ...listed } = el;
+      const { ownText: _ownText, centre: _centre, cut: _cut, ...listed } = el;
       const full: SnapshotElement = {
         ...listed,
         ...(tag ? { frame: tag } : {}),
@@ -2095,11 +2198,22 @@ export class BrowserEngine {
         destructive: el.liveOnly ? false : destructiveLabelOf(el) !== null,
         ...(tag?.foreign ? { name: masksForeignName(el.tag, el.role) ? MASKED_NAME : capForeignName(el.name) } : {}),
         ...(tag?.foreign && el.href ? { href: stripForeignHref(el.href) } : {}),
-        ref,
+        ref: "",
         key,
       };
-      this.refs.set(ref, full);
-      if (frame) this.refFrames.set(ref, frame);
+      return { full, frame };
+    });
+    // An element keeps the ref it had in the snapshot it is matched to, so
+    // refs an agent holds survive a re-snapshot and the diff stays readable.
+    const matched = matchPrevious(
+      prev?.snap.byKey ?? new Map(),
+      built.map(({ full }) => ({ key: full.key, name: full.name, href: full.href, byPosition: full.liveOnly })),
+    );
+    const elements: SnapshotElement[] = built.map(({ full, frame }, i) => {
+      const was = matched[i];
+      full.ref = (was ? prev?.snap.byKey.get(was)?.ref : undefined) ?? `e${++this.refCounter}`;
+      this.refs.set(full.ref, full);
+      if (frame) this.refFrames.set(full.ref, frame);
       return full;
     });
     this.harvestRoutes(elements.filter((el) => !el.frame?.foreign));
@@ -2111,8 +2225,8 @@ export class BrowserEngine {
       const key = status === "untracked" ? null : (formIdentity(f.attrs) ?? keyAtXpath(elements, f.submit));
       return key ? [{ key, guarded: status === "guarded" }] : [];
     });
-    this.lastCollectTruncated = mainCount >= 150;
-    return { elements, truncated: mainCount >= 150, forms };
+    this.lastCollectTruncated = cut.length > 0;
+    return { elements, truncated: cut.length > 0, forms, cut, prev, matched };
   }
 
   /** Whether the latest collect stopped at the element cap, so some controls have no key at all. */
@@ -2145,7 +2259,9 @@ export class BrowserEngine {
           sx: number;
           sy: number;
         };
-        const raws = got.els.map((r) => ({ ...r, rect: frameToPageRect(r.rect, box, { x: got.sx, y: got.sy }, pageScroll) }));
+        const raws = got.els
+          .filter((r) => !(r as { cut?: boolean }).cut)
+          .map((r) => ({ ...r, rect: frameToPageRect(r.rect, box, { x: got.sx, y: got.sy }, pageScroll) }));
         let origin = "";
         try {
           const u = new URL(frame.url());
@@ -2328,7 +2444,7 @@ export class BrowserEngine {
     const memory = this.memory!;
     await this.settle();
 
-    const { elements, truncated, forms } = await this.collect();
+    const { elements, truncated, forms, cut, prev: prevSnap, matched } = await this.collect();
     const url = page.url();
     this.snapshotUrl = url;
     const route = normalizePath(url);
@@ -2369,6 +2485,7 @@ export class BrowserEngine {
         dup ? `copy#${Number(dup[1]) + 1}` : null,
         el.disabled ? "disabled" : null,
         el.destructive ? "DESTRUCTIVE" : null,
+        ...affordanceFlags(el),
         labelFlag(el),
         // "exercised", not "done": it says an earlier action or run acted on it, and "done" read as the control's own state.
         memory.wasExercised(fp, el.key) ? "exercised" : null,
@@ -2377,21 +2494,30 @@ export class BrowserEngine {
       return `${el.ref} ${el.role} "${displayName(el)}"${flags.length ? ` [${flags.join(", ")}]` : ""}${el.frame ? ` ⟨in ${frameLabel(el.frame)}⟩` : ""}${afterBlock(el)}`;
     };
 
-    // Diff mode: when re-snapshotting the same route, report only what
-    // changed — same idea as UI reconciliation, applied to agent context.
-    const prev = this.lastSnap?.route === route ? this.lastSnap : null;
-    this.lastSnap = {
+    // Diff mode: when re-snapshotting a route (or another tab of the same
+    // screen), report only what changed — same idea as UI reconciliation,
+    // applied to agent context. Elements are paired with the kept snapshot's
+    // by matchPrevious, the same pairing that gave them their refs.
+    const prev = prevSnap?.snap ?? null;
+    const refsDropped = this.refsDropped;
+    this.keepSnapshot({
       route,
-      byKey: new Map(elements.map((el) => [el.key, { ref: el.ref, label: el.name, disabled: el.disabled, state: stateFlags(el.state) }])),
-    };
+      byKey: new Map(elements.map((el) => [el.key, { ref: el.ref, label: el.name, href: el.href, disabled: el.disabled, state: stateFlags(el.state) }])),
+    });
+    const cutLine = truncated ? `TRUNCATED at ${COLLECTOR_CAP}, dense page — cut: ${cutSummary(cut)}` : "";
 
     let body: string;
-    if (!full && prev) {
-      const currentKeys = new Set(elements.map((el) => el.key));
-      const added = elements.filter((el) => !prev.byKey.has(el.key));
-      const removed = [...prev.byKey.entries()].filter(([key]) => !currentKeys.has(key));
+    if (!full && prev && prevSnap) {
+      const was = new Map(elements.map((el, i) => [el.key, matched[i]]));
+      const oldOf = (el: SnapshotElement) => {
+        const key = was.get(el.key);
+        return key ? prev.byKey.get(key) : undefined;
+      };
+      const pairedPrev = new Set(matched.filter((k): k is string => k !== null));
+      const added = elements.filter((el) => !oldOf(el));
+      const removed = [...prev.byKey.entries()].filter(([key]) => !pairedPrev.has(key));
       const relabeled = elements.filter((el) => {
-        const old = prev.byKey.get(el.key);
+        const old = oldOf(el);
         return old !== undefined && old.label !== el.name;
       });
       // An element can change WITHOUT being added, removed or relabeled: the
@@ -2403,40 +2529,53 @@ export class BrowserEngine {
       // to enabled "Save" changed BOTH ways, and reporting only the relabel
       // swallows the enable — the exact fact this line exists to surface.
       const retoggled = elements.filter((el) => {
-        const old = prev.byKey.get(el.key);
+        const old = oldOf(el);
         return old !== undefined && old.disabled !== el.disabled;
       });
       // A filter pill that became the active one, a tab now selected, a
       // section now open: the same element, in a different state.
       const restated = elements.flatMap((el) => {
-        const old = prev.byKey.get(el.key);
+        const old = oldOf(el);
         const change = old ? stateChange(old.state, stateFlags(el.state)) : null;
         return change ? [{ el, change }] : [];
       });
       const changedKeys = new Set([...relabeled, ...retoggled, ...restated.map((r) => r.el)].map((el) => el.key));
       const unchanged = elements.length - added.length - changedKeys.size;
+      // What the diff is against, and whether refs held from the latest snapshot still work.
+      const against =
+        prevSnap.how === "latest"
+          ? "the last snapshot"
+          : prevSnap.how === "revisited"
+            ? "this route's last snapshot"
+            : `the last snapshot of ${prev.route} (tab changed)`;
+      const refNote =
+        prevSnap.how === "latest" && !refsDropped
+          ? "refs stable"
+          : `refs from ${prevSnap.how === "latest" ? "it were dropped when " + refsDropped : "that snapshot"} are re-issued: an unchanged element has its old ref again`;
       if (added.length === 0 && removed.length === 0 && relabeled.length === 0 && retoggled.length === 0 && restated.length === 0) {
-        body = `No element changes since the last snapshot (${unchanged} interactables, refs unchanged).`;
+        body = `No element changes since ${against} (${unchanged} interactables, ${refNote === "refs stable" ? "refs unchanged" : refNote}).`;
       } else {
         body =
-          `DIFF vs last snapshot (${unchanged} unchanged, refs stable):\n` +
+          `DIFF vs ${against} (${unchanged} unchanged, ${refNote}):\n` +
           [
             ...added.map((el) => `+ ${line(el)}`),
             ...removed.map(([key, v]) => `- ${v.ref} "${v.label}" (gone: ${key})`),
             // A live region saying something new is the message itself, so it is shown in full like a new element.
             ...relabeled.map((el) =>
               el.liveOnly
-                ? `~ ${el.ref} ${el.role} "${displayName(el)}" (was ${prev.byKey.get(el.key)?.label ? `"${prev.byKey.get(el.key)?.label}"` : "empty"})${afterBlock(el)}`
+                ? `~ ${el.ref} ${el.role} "${displayName(el)}" (was ${oldOf(el)?.label ? `"${oldOf(el)?.label}"` : "empty"})${afterBlock(el)}`
                 : `~ ${el.ref} relabeled → "${el.name}"`,
             ),
             ...retoggled.map((el) => `~ ${el.ref} "${el.name}" is now ${el.disabled ? "DISABLED" : "ENABLED"}`),
             ...restated.map(({ el, change }) => `~ ${el.ref} "${displayName(el)}" ${change}`),
           ].join("\n");
       }
+      if (cutLine) body += `\n${cutLine}`;
     } else {
       const missingTestids = trackedElements(elements).filter((el) => !el.testid && !el.disabled).length;
       body =
-        `Interactables (${elements.length}${truncated ? "+ — TRUNCATED at 150, dense page" : ""}${missingTestids ? `, ${missingTestids} missing data-testid` : ""}):\n` +
+        `Interactables (${elements.length}${truncated ? "+" : ""}${missingTestids ? `, ${missingTestids} missing data-testid` : ""}):\n` +
+        (cutLine ? `${cutLine}\n` : "") +
         elements.map(line).join("\n");
     }
 
@@ -2483,42 +2622,71 @@ export class BrowserEngine {
 
   /**
    * Resolve a ref and re-verify the live element at action time. Refs are
-   * trusted only while the page URL exactly matches the snapshot's, and even
-   * then the located element's live identity is re-read so the destructive
-   * policy applies to what is actually acted on — SPA re-renders can put a
-   * different element under a previously-safe XPath.
+   * trusted while the page is on the snapshot's URL, or one that differs from
+   * it only in what refsSurviveUrlChange allows (a search or filter query),
+   * and even then the located element's live identity is re-read so the
+   * destructive policy applies to what is actually acted on — SPA re-renders
+   * can put a different element under a previously-safe XPath. After a query
+   * change, the element must still carry its name as well as its test id.
+   *
+   * When the XPath finds nothing because the page re-rendered around the
+   * element (a footer that appears while typing shifts every path below it),
+   * an element with a test id that is unique on the page is found again by it,
+   * checked by name, and the ref is re-bound to it; the action's result says so (rebindNote).
    */
   private async resolveForAction(ref: string): Promise<{ el: SnapshotElement; liveLabel: string; live: { ownText?: string; centre?: string[] } }> {
     this.actionStartedAt = Date.now();
+    this.rebindNote = "";
     const page = this.requirePage();
-    const el = this.refs.get(ref);
+    let el = this.refs.get(ref);
     if (!el) {
-      throw new Error(`Unknown ref "${ref}". Refs are only valid from the latest scout_snapshot — take a new snapshot.`);
+      throw new Error(
+        `Unknown ref "${ref}". Refs are only valid from the latest scout_snapshot${this.refsDropped ? ` (they were dropped when ${this.refsDropped})` : ""} — take a new snapshot.`,
+      );
     }
-    if (page.url() !== this.snapshotUrl) {
-      this.refs.clear();
+    const urlMoved = page.url() !== this.snapshotUrl;
+    if (urlMoved && !refsSurviveUrlChange(this.snapshotUrl, page.url())) {
+      this.dropRefs(`the page moved to ${page.url()}`);
       throw new Error(`Page URL changed since the last snapshot (now ${page.url()}). Take a new scout_snapshot.`);
     }
-    // String EXPRESSION via page.evaluate (locator.evaluate treats a string as
-    // an expression, not a function — the element arg never binds).
-    const live = (await this.scopeOf(el)
-      .evaluate(
-        `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return null; ` +
-          `return { testid: node.getAttribute('data-testid'), label: (node.getAttribute('aria-label') || node.innerText || node.textContent || node.getAttribute('placeholder') || '').trim().slice(0, 120), ...(${POLICY_TEXT_SRC})(node) }; })()`,
-      )
-      .catch(() => null)) as { testid: string | null; label: string; ownText?: string; centre?: string[] } | null;
+    // The element and the test id are passed as arguments: no value of the
+    // page's is written into the code that runs there.
+    const scope = this.scopeOf(el);
+    const handle = await scope.$(`xpath=${el.xpath}`).catch(() => null);
+    let live = handle ? await handle.evaluate(liveFactsOf).catch(() => null) : null;
+    await handle?.dispose().catch(() => undefined);
+    if (!live && el.testid) {
+      // Found again only by a test id the page gives one element: two would leave it guessing.
+      const found = await scope.evaluate(uniqueByTestid, el.testid).catch(() => null);
+      if (found && found.live.name === el.name) {
+        el = { ...el, xpath: found.xpath };
+        this.refs.set(ref, el);
+        live = found.live;
+        this.rebindNote = `\nℹ ${ref} re-bound after a re-render: found again by its unique testid=${el.testid}.`;
+      }
+    }
     if (!live) {
       throw new Error(`Element ${ref} no longer exists in the DOM — take a new scout_snapshot.`);
     }
     await this.beginInput();
     if (el.testid && live.testid !== el.testid) {
-      this.refs.clear();
+      this.dropRefs(`the element under ${ref} changed`);
       throw new Error(
         `Element under ${ref} changed (expected testid=${el.testid}, found ${live.testid ?? "none"}) — the DOM shifted; take a new scout_snapshot.`,
       );
     }
+    // After a query change a list may hold other rows under the same paths and
+    // the same shared test id, so the name must match too. Another site's frame
+    // shows a masked name (masksForeignName), so there is nothing to compare there.
+    if (urlMoved && !el.frame?.foreign && live.name !== el.name) {
+      this.dropRefs(`the element under ${ref} changed`);
+      throw new Error(`Element under ${ref} changed after the URL did (expected "${el.name}", found "${live.name}") — take a new scout_snapshot.`);
+    }
     return { el, liveLabel: live.label, live: { ownText: live.ownText, centre: live.centre } };
   }
+
+  /** Set when the action's ref had to be found again by its test id (resolveForAction); afterAction reports it once. */
+  private rebindNote = "";
 
   /** The read-POST entry that lets this request out under `rule`, or null (policy.ts readPostAllowed). */
   private readPostOf(rule: WriteMode, method: string, url: string, body: string | null | undefined, destructiveWire?: boolean): ReadPost | null {
@@ -2629,7 +2797,7 @@ export class BrowserEngine {
       this.logAction({ action: policyAbortedNavigation ? "write-policy:navigation-blocked" : "origin-fence:bounced", target: url.slice(0, 200), url });
       await page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }).catch(() => {});
       url = page.url();
-      this.refs.clear();
+      this.dropRefs("the page left the app's origin");
       const blocked = this.drainBlocked();
       return (
         (policyAbortedNavigation
@@ -2647,15 +2815,20 @@ export class BrowserEngine {
     if (click) await this.rankRouteCancellations(click, url);
     const violations = this.oracles.drain();
     const mutations = this.drainMutations() + this.drainBlocked() + this.drainCreated();
-    const navigated = this.snapshotUrl !== "" && url !== this.snapshotUrl;
+    const moved = this.snapshotUrl !== "" && url !== this.snapshotUrl;
+    // A query that is not UI state (a search, a filter) leaves the same screen: its refs still work.
+    const navigated = moved && !refsSurviveUrlChange(this.snapshotUrl, url);
     if (navigated) {
       // Refs point into the previous page's DOM; invalidate so a stale ref
       // errors ("take a new snapshot") instead of acting on the wrong element.
-      this.refs.clear();
+      this.dropRefs(`the page moved to ${url}`);
     }
+    const rebound = this.rebindNote;
+    this.rebindNote = "";
     return (
       `OK: ${action} ${target}\nURL now: ${url}` +
-      (navigated ? " (page changed — take a new snapshot)" : "") +
+      (navigated ? " (page changed — take a new snapshot)" : moved ? " (same screen, query changed — refs still apply)" : "") +
+      rebound +
       this.drainDialogs() +
       mutations +
       formatViolations(violations)
@@ -3218,12 +3391,12 @@ export class BrowserEngine {
     // Not when the write policy blocked the submission: a native form POST or a
     // beacon is not counted as xhr/fetch, so an aborted one looks exactly like
     // "fired nothing" — and the note would blame the app for the tool's block.
-    if (submitLike && this.xhrCount === xhrBefore && this.lastActionBlocked === 0 && page.url() === this.snapshotUrl) {
+    if (submitLike && this.xhrCount === xhrBefore && this.lastActionBlocked === 0 && page.url() === clickContext.urlBefore) {
       // A client-side router can move the page just after the request-based
       // settle, with no request for it to wait on: watch the URL before
       // calling the click silent, and look at the requests again after.
       const landed = await this.stableUrl();
-      if (landed !== this.snapshotUrl) return result + `\nℹ The page then moved client-side to ${landed} (take a new snapshot).` + forcedNote;
+      if (landed !== clickContext.urlBefore) return result + `\nℹ The page then moved client-side to ${landed} (take a new snapshot).` + forcedNote;
       if (this.xhrCount !== xhrBefore) return result + forcedNote;
       // The page may have answered without a request: a dialog, or validation saying what is missing (claims.ts quietAnswer).
       // A native alert is not a step: alert("Saved!") with nothing sent is the very case the note is for.
@@ -4753,7 +4926,7 @@ export class BrowserEngine {
     }
     // Crawl leaves the page wherever it ended — refs from before are gone.
     this.refs.clear();
-    this.lastSnap = null;
+    this.forgetSnapshots();
     this.snapshotUrl = "";
 
     const unvisited = this.unvisitedKnownRoutes();
@@ -5032,7 +5205,7 @@ export class BrowserEngine {
       }
     }
     this.refs.clear();
-    this.lastSnap = null;
+    this.forgetSnapshots();
     this.snapshotUrl = "";
     // Count step lines, not transcript lines — hover reveals and scroll
     // positions push informational entries that are not steps.
@@ -5254,7 +5427,7 @@ export class BrowserEngine {
       page.off("websocket", onSocket);
       context.off("response", onResponse);
       this.refs.clear();
-      this.lastSnap = null;
+      this.forgetSnapshots();
       this.snapshotUrl = "";
     }
   }
@@ -5340,8 +5513,8 @@ export class BrowserEngine {
     if (target.ref) {
       el = this.refs.get(target.ref);
       if (!el) throw new Error(`Unknown ref "${target.ref}". Refs are only valid from the latest scout_snapshot — take a new snapshot.`);
-      if (page.url() !== this.snapshotUrl) {
-        this.refs.clear();
+      if (!refsSurviveUrlChange(this.snapshotUrl, page.url())) {
+        this.dropRefs(`the page moved to ${page.url()}`);
         throw new Error(`Page URL changed since the last snapshot (now ${page.url()}). Take a new scout_snapshot.`);
       }
     } else if (target.key) {
@@ -5363,7 +5536,7 @@ export class BrowserEngine {
     const png = await page.screenshot({ type: "png", clip, animations: "disabled" });
     this.logAction({ action: "capture", target: el.key.slice(0, 200), url: page.url() });
     // Found by key, the refs were rebuilt without a snapshot: none of them may be acted on.
-    if (target.key) this.refs.clear();
+    if (target.key) this.dropRefs("an element was captured by its key");
     return { png, key: el.key, label: el.name, url: page.url() };
   }
 
@@ -5757,6 +5930,6 @@ export class BrowserEngine {
     this.refs.clear();
     this.snapshotUrl = "";
     this.currentFingerprint = "";
-    this.lastSnap = null;
+    this.forgetSnapshots();
   }
 }
