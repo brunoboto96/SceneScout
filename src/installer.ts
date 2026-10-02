@@ -6,10 +6,20 @@
  * command runner) as an argument, so a test can point it at a temp dir and a
  * fake `claude` binary instead of mutating the developer's real ~/.claude.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
-import { engineOf, type InstallTarget } from "./browsers.js";
+import {
+  APPROX_DISK_MB,
+  BROWSER_ENGINES,
+  browserPresence,
+  engineOf,
+  playwrightInstallArgs,
+  type BrowserEngineName,
+  type BrowserPresence,
+  type InstallTarget,
+} from "./browsers.js";
 
 export const SKILL_NAME = "scenescout";
 export const MCP_NAME = "scenescout";
@@ -405,6 +415,8 @@ export function diagnose(opts: {
    * under its own revision; null skips that check.
    */
   headlessShellDir?: string | null;
+  /** This copy's version. An extension at least as new downloads its browser on first use, as this copy does; unknown counts as older. */
+  version?: string;
   run: Runner;
 }): Check[] {
   const checks: Check[] = [];
@@ -424,7 +436,7 @@ export function diagnose(opts: {
   });
 
   const extension = opts.desktopExtension ?? null;
-  if (extension) checks.push(...desktopExtensionChecks(extension, opts.headlessShellDir ?? null));
+  if (extension) checks.push(...desktopExtensionChecks(extension, opts.headlessShellDir ?? null, opts.version));
 
   if (opts.scope === "engine") return checks;
 
@@ -486,6 +498,96 @@ export function diagnose(opts: {
     }
   }
   return checks;
+}
+
+/** Which browser builds are on disk, going by the paths Playwright reports for the version we depend on. */
+export async function presentBrowsers(): Promise<BrowserPresence> {
+  const executables: Record<BrowserEngineName, string | null> = { chromium: null, firefox: null, webkit: null };
+  try {
+    const playwright = await import("playwright");
+    for (const name of BROWSER_ENGINES) executables[name] = playwright[name].executablePath() || null;
+  } catch {
+    // Playwright cannot be loaded: every build reads as absent, which is what doctor should say.
+  }
+  return browserPresence(executables);
+}
+
+/**
+ * The reason Playwright's installer gives for a failed download: its first
+ * `Error:` line, which names the cause (a refused connection, a proxy, a full
+ * disk) where its last lines are a stack trace. Null when it gave none.
+ */
+export function installerFailure(stderr: string): string | null {
+  const lines = stderr.split(/\r?\n/).map((l) => l.trim());
+  const first = lines.find((l) => /^Error: \S/.test(l)) ?? lines.find((l) => l !== "" && !l.startsWith("at ") && /fail/i.test(l));
+  return first
+    ? first
+        .replace(/^Error: /, "")
+        .replace(/, caused by$/, "")
+        .slice(0, 300)
+    : null;
+}
+
+/** How long a browser download may run before it is stopped and reported as failed. */
+export const BROWSER_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * The environment Playwright's installer runs in. A host that runs this server
+ * inside its own Electron binary (a desktop app's bundled runtime) makes
+ * process.execPath that binary, which starts the app instead of a script
+ * unless told to behave as Node.
+ */
+export function downloadEnv(env: NodeJS.ProcessEnv, electron: string | undefined): NodeJS.ProcessEnv {
+  return electron ? { ...env, ELECTRON_RUN_AS_NODE: "1" } : env;
+}
+
+/**
+ * Download browser builds through the playwright CLI that ships with our own
+ * dependency. `inherit` shows its progress on this terminal; `stderr` keeps
+ * stdout clean for a server whose stdout is its protocol channel.
+ */
+export function downloadBrowsers(targets: readonly InstallTarget[], output: "inherit" | "stderr"): Promise<{ ok: boolean; detail?: string }> {
+  return new Promise((resolve) => {
+    let cli: string;
+    try {
+      cli = path.join(path.dirname(createRequire(import.meta.url).resolve("playwright/package.json")), "cli.js");
+    } catch (err) {
+      resolve({ ok: false, detail: `Playwright's installer could not be found: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}` });
+      return;
+    }
+    let seen = "";
+    let timedOut = false;
+    const child = spawn(process.execPath, [cli, ...playwrightInstallArgs(targets)], {
+      stdio: output === "inherit" ? "inherit" : ["ignore", process.stderr, "pipe"],
+      env: downloadEnv(process.env, process.versions.electron),
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      process.stderr.write(chunk);
+      if (seen.length < 20_000) seen += chunk.toString();
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, BROWSER_DOWNLOAD_TIMEOUT_MS);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ ok: false, detail: err.message });
+    });
+    // A stopped download may leave a child of the installer holding the pipe, so `close` may never come: answer on `exit`.
+    child.on("exit", () => {
+      if (timedOut) resolve({ ok: false, detail: `stopped after ${BROWSER_DOWNLOAD_TIMEOUT_MS / 60_000} minutes` });
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ ok: true });
+      else if (timedOut) resolve({ ok: false, detail: `stopped after ${BROWSER_DOWNLOAD_TIMEOUT_MS / 60_000} minutes` });
+      else
+        resolve({
+          ok: false,
+          detail: installerFailure(seen) ?? (signal ? `the installer was stopped by ${signal}` : `the installer exited with code ${code}`),
+        });
+    });
+  });
 }
 
 /** The `name` in the desktop extension's manifest.json, which is how its install is told apart from other extensions. */
@@ -589,7 +691,7 @@ export function findDesktopExtension(roots: readonly string[]): DesktopExtension
 export const CLAUDE_CODE_NOT_NEEDED = "Claude Code setup";
 
 /** What doctor says about a desktop extension install. */
-function desktopExtensionChecks(extension: DesktopExtension, ownShellDir: string | null): Check[] {
+function desktopExtensionChecks(extension: DesktopExtension, ownShellDir: string | null, ownVersion: string | undefined): Check[] {
   const reinstall = "in Claude Desktop, remove SceneScout under Settings > Extensions, then install the .mcpb file from the latest release again";
   const label = `SceneScout ${extension.version ?? "(no version in its manifest)"}`;
   const checks: Check[] = [
@@ -608,15 +710,35 @@ function desktopExtensionChecks(extension: DesktopExtension, ownShellDir: string
     const dir = path.join(path.dirname(ownShellDir), `chromium_headless_shell-${extension.headlessShellRevision}`);
     if (!samePath(dir, ownShellDir)) {
       const present = fs.existsSync(path.join(dir, "INSTALLATION_COMPLETE"));
+      const byHand = extension.version ? `npx -y scenescout@${extension.version} install --browser-only` : "npx -y scenescout install --browser-only";
+      const onFirstUse = !present && atLeastVersion(extension.version, ownVersion);
       checks.push({
         name: "browser downloaded (desktop extension)",
-        ok: present,
-        detail: present ? dir : `the extension launches another Chromium build than this copy, and it is not at ${dir}`,
-        fix: extension.version ? `npx -y scenescout@${extension.version} install --browser-only` : "npx -y scenescout install --browser-only",
+        // An extension that downloads its own browser on its first test is ready to use without it.
+        ok: present || onFirstUse,
+        detail: present
+          ? dir
+          : onFirstUse
+            ? `not yet: the test browser downloads on first use (one-time, about ${APPROX_DISK_MB["chromium-headless-shell"]} MB). To have it ready now: ${byHand}`
+            : `the extension launches another Chromium build than this copy, and it is not at ${dir}`,
+        fix: byHand,
       });
     }
   }
   return checks;
+}
+
+/** Whether version `a` (x.y.z) is at least `b`. False when either is missing or not of that shape, so an unknown version is never assumed to be new. */
+export function atLeastVersion(a: string | null | undefined, b: string | null | undefined): boolean {
+  const parse = (v: string | null | undefined): number[] | null => {
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v?.trim() ?? "");
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const x = parse(a);
+  const y = parse(b);
+  if (!x || !y) return false;
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+  return true;
 }
 
 /** The last thing `install` prints when every step worked. */

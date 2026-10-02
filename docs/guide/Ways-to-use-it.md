@@ -66,7 +66,7 @@ SceneScout needs only a URL, but it does better from inside the app's repository
 - **Sweep independent pages.** "Open every tab of the record page and list what fails." A plan stops at its first new violation, which suits a form whose steps depend on each other. For tabs, filters or pages that do not, the agent passes `scout_run_plan {onViolation: "continue"}`: an error status is listed on its step's line and the next step runs. A failed step, a write-policy refusal or an uncaught error still stops it, and a saved flow always stops.
 - **Show one element.** "Show me the new filter bar." `scout_capture` saves a PNG of that element; it shows, it does not judge.
 - **Slow it down.** "Pause five seconds between actions so I can follow." That is `scout_attach {paceMs: 5000}`, or `scout_session {paceMs: 5000}` mid-run.
-- **Another browser.** "Run the same pass in WebKit." `scout_attach {browser: "webkit"}`, after `npx -y scenescout install --browser-only --browsers webkit`.
+- **Another browser.** "Run the same pass in WebKit." `scout_attach {browser: "webkit"}`; the first such attach downloads WebKit, once.
 - **A phone-sized viewport.** `scout_attach {viewportWidth: 390, viewportHeight: 844}`, then a design audit on the key pages.
 - **Fewer duplicate findings.** "Ask a model whether two findings are the same defect." That is `scout_attach {dedup: "judge"}`, or `SCENESCOUT_DEDUP=judge` in the server's environment, with `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` there too. A filing the rule keeps apart is then compared with the open findings on its page, and each pair's titles, categories and evidence, and the page's path, are sent to that provider. It is off by default.
 

@@ -14,23 +14,10 @@
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  APPROX_DISK_MB,
-  BROWSER_ENGINES,
-  browserPresence,
-  defaultAttachNote,
-  defaultEngine,
-  launchTarget,
-  parseBrowserSelection,
-  playwrightInstallArgs,
-  type BrowserEngineName,
-  type BrowserPresence,
-  type InstallTarget,
-} from "./browsers.js";
+import { APPROX_DISK_MB, defaultAttachNote, defaultEngine, launchTarget, parseBrowserSelection, type InstallTarget } from "./browsers.js";
 import { CLIENT_LABELS, firstMessageHint, manualFor, parseClients, registerWithClient, vscodeBinary, type CodeOnPath, type OtherClient } from "./clients.js";
 import {
   CLAUDE_CODE_NOT_NEEDED,
@@ -51,6 +38,7 @@ import {
   resolveClaudeDir,
   spawnRunner,
 } from "./installer.js";
+import { downloadBrowsers, presentBrowsers } from "./installer.js";
 import { baselinesDirOf, defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
 import { httpClient, httpJudgeAsk, runCi } from "./ci-run.js";
 import { runExport } from "./export-run.js";
@@ -394,26 +382,6 @@ function browserOpener(url: string): { command: string; args: string[] } {
   }
 }
 
-/** Which browser builds are on disk, going by the paths Playwright reports for the version we depend on. */
-async function presentBrowsers(): Promise<BrowserPresence> {
-  const executables: Record<BrowserEngineName, string | null> = { chromium: null, firefox: null, webkit: null };
-  try {
-    const playwright = await import("playwright");
-    for (const name of BROWSER_ENGINES) executables[name] = playwright[name].executablePath() || null;
-  } catch {
-    // Playwright cannot be loaded: every build reads as absent, which is what doctor should say.
-  }
-  return browserPresence(executables);
-}
-
-/** Download browser builds through the playwright CLI that ships with our own dependency. */
-function downloadBrowsers(targets: readonly InstallTarget[]): boolean {
-  const require = createRequire(import.meta.url);
-  const cli = path.join(path.dirname(require.resolve("playwright/package.json")), "cli.js");
-  const r = spawnSync(process.execPath, [cli, ...playwrightInstallArgs(targets)], { stdio: "inherit" });
-  return r.status === 0;
-}
-
 /**
  * The value of a flag written as `--name x` or `--name=x`. Undefined when the
  * flag is absent; empty when it was given no value, which includes being
@@ -500,7 +468,7 @@ async function install(flags: string[]): Promise<void> {
     if (missing.length > 0) {
       const size = missing.reduce((sum, t) => sum + APPROX_DISK_MB[t], 0);
       console.log(`· Downloading ${missing.join(", ")} (one-time, about ${size} MB on disk)…`);
-      if (downloadBrowsers(missing)) console.log(`✓ Downloaded: ${missing.join(", ")}.`);
+      if ((await downloadBrowsers(missing, "inherit")).ok) console.log(`✓ Downloaded: ${missing.join(", ")}.`);
       else {
         failed = true;
         console.log(`✗ Browser download failed — run \`npx playwright install ${missing.join(" ")}\` and check your network/proxy.`);
@@ -616,6 +584,7 @@ async function doctor(flags: string[]): Promise<void> {
     packageRoot,
     claudeDir: resolveClaudeDir(process.env, os.homedir()),
     nodeVersion: process.version,
+    version: packageVersion(),
     // What a default attach launches: the headless build of the default browser.
     defaultBrowser: await (async () => {
       const target = launchTarget(defaultEngine(process.env), false);
@@ -725,7 +694,7 @@ async function firstRun(args: string[]): Promise<never> {
   if (downloads.length > 0) {
     console.log(downloadLine(downloads));
     const began = Date.now();
-    if (!downloadBrowsers(downloads)) {
+    if (!(await downloadBrowsers(downloads, "inherit")).ok) {
       return fail(
         `Chromium could not be downloaded. Check the network or proxy and run this again, or download it by hand: npx playwright install ${downloads.join(" ")}`,
       );
