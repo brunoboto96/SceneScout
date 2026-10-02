@@ -117,7 +117,7 @@ async function main(): Promise<void> {
   }
   // Anything still open would keep node running after the last line of output, and `npm test` with it.
   let extra: string[] = [];
-  await eventually(() => (extra = extraHandles(baseline, process.getActiveResourcesInfo())).length === 0, 3000);
+  await eventually(() => (extra = extraHandles(baseline, process.getActiveResourcesInfo())).length === 0);
   check("nothing is left open that would keep node running", extra.length === 0, `open: ${extra.join(", ")}`);
   if (ran === 0) {
     // A filter that matches nothing must not read as a pass.

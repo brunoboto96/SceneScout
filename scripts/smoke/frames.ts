@@ -7,9 +7,32 @@ import type { Frame, Page } from "playwright";
 import { echoesFailedLoads } from "../../dist/browsers.js";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import type { OracleViolation } from "../../dist/engine/oracles.js";
-import { BROWSER, check, until, type SmokeContext } from "./harness.ts";
+import { BROWSER, check, eventually, settle, until, WAIT_MS, type SmokeContext } from "./harness.ts";
 
 export const title = "frames";
+
+/**
+ * Absence has no event to wait for: how long a window, or a write, that got out of an embed is given to show before a
+ * check says none did. A slow machine can only make it miss a late one, never fail a check that should pass.
+ */
+const ABSENT_MS = 1500;
+/** The same for a move of the whole page, which has to load a page of the other site before that page can write. */
+const MOVED_ABSENT_MS = 2500;
+
+/**
+ * Run a page script that sends requests, and return once the engine has seen them finish. A script's fetch resolves on
+ * the response's headers, before its request has finished, and leaving the page in between held the engine's next
+ * settle for its full cap. Only how long that settle takes depends on this, never what a check sees, so a request the
+ * engine never counts out is waited for up to the usual bound and no longer. White-box: the engine's count of requests
+ * in flight.
+ */
+async function sending<T>(engine: BrowserEngine, send: () => Promise<T>): Promise<T> {
+  const inFlight = (): number => (engine as unknown as { inFlight: number }).inFlight;
+  const before = inFlight();
+  const result = await send();
+  await eventually(() => inFlight() <= before);
+  return result;
+}
 
 export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeContext): Promise<void> {
   const engine = new BrowserEngine();
@@ -19,17 +42,13 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     const page = (engine as unknown as { page: Page }).page;
     const frameAs = (as: string): Frame | undefined => page.frames().find((f) => f.url().includes(`as=${as}`));
     const framesLoaded = () =>
-      until(
-        "all three frames to load",
-        async () => {
-          for (const as of ["same", "foreign", "bridge"]) {
-            const f = frameAs(as);
-            if (!f || !(await f.evaluate(() => typeof (window as unknown as { sendNote?: unknown }).sendNote === "function").catch(() => false))) return false;
-          }
-          return true;
-        },
-        8000,
-      );
+      until("all three frames to load", async () => {
+        for (const as of ["same", "foreign", "bridge"]) {
+          const f = frameAs(as);
+          if (!f || !(await f.evaluate(() => typeof (window as unknown as { sendNote?: unknown }).sendNote === "function").catch(() => false))) return false;
+        }
+        return true;
+      });
     await framesLoaded();
 
     console.log("frames: the snapshot says what is embedded");
@@ -70,7 +89,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     );
     const before = stats.writes["POST /api/frame-note-same"] ?? 0;
     const sameClick = await engine.click(sameSend!);
-    await until("the same-origin frame's write to arrive", () => (stats.writes["POST /api/frame-note-same"] ?? 0) === before + 1, 5000).catch(() => {});
+    await until("the same-origin frame's write to arrive", () => (stats.writes["POST /api/frame-note-same"] ?? 0) === before + 1).catch(() => {});
     check("clicking inside the app's own frame acts there, and its write arrives", (stats.writes["POST /api/frame-note-same"] ?? 0) === before + 1, sameClick);
     const markup = await engine.type(foreignNote!, "<img src=x onerror=alert(1)>");
     check("markup typed into another site's frame is refused", /^REFUSED: typing this value \(it is markup\)/.test(markup), markup);
@@ -88,10 +107,15 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     );
 
     console.log("frames: what fails inside another site's frame is labelled as that embed's");
+    const oracles = (engine as unknown as { oracles: { all: OracleViolation[] } }).oracles;
+    /** Wait for an HTTP error naming each of `paths` to be recorded since `from`: the oracle hears of a response after the page has it. */
+    const httpErrorsRecorded = (from: number, paths: string[]) =>
+      eventually(() => paths.every((p) => oracles.all.slice(from).some((v) => v.kind === "http_error" && v.detail.includes(p))));
     type Fetcher = { fetchMissing: () => Promise<unknown> };
-    await frameAs("same")!.evaluate(() => (window as unknown as Fetcher).fetchMissing());
-    await frameAs("foreign")!.evaluate(() => (window as unknown as Fetcher).fetchMissing());
-    await page.waitForTimeout(500);
+    const missingFrom = oracles.all.length;
+    await sending(engine, () => frameAs("same")!.evaluate(() => (window as unknown as Fetcher).fetchMissing()));
+    await sending(engine, () => frameAs("foreign")!.evaluate(() => (window as unknown as Fetcher).fetchMissing()));
+    await httpErrorsRecorded(missingFrom, ["/api/missing-in-frame-same", "/api/missing-in-frame-foreign"]);
     const withViolations = await engine.snapshot();
     const foreignLine = /[^\n]*missing-in-frame-foreign[^\n]*/.exec(withViolations)?.[0] ?? "";
     const sameLine = /[^\n]*missing-in-frame-same[^\n]*/.exec(withViolations)?.[0] ?? "";
@@ -103,12 +127,13 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     check("...while the same failure in the app's own frame is the app's", sameLine !== "" && !/in an embed of/.test(sameLine), withViolations);
     // The cap is the point: the same 500 is high from the app's own frame and medium from another site's.
     type Failer = { fetchFail: () => Promise<unknown> };
-    await frameAs("same")!.evaluate(() => (window as unknown as Failer).fetchFail());
-    await frameAs("foreign")!.evaluate(() => (window as unknown as Failer).fetchFail());
-    await page.waitForTimeout(500);
-    const fiveHundreds = await engine.snapshot();
     const appPort = new URL(baseUrl).port;
     const foreignPort = new URL(foreignBaseUrl).port;
+    const failFrom = oracles.all.length;
+    await sending(engine, () => frameAs("same")!.evaluate(() => (window as unknown as Failer).fetchFail()));
+    await sending(engine, () => frameAs("foreign")!.evaluate(() => (window as unknown as Failer).fetchFail()));
+    await httpErrorsRecorded(failFrom, [`:${appPort}/api/fail-500`, `:${foreignPort}/api/fail-500`]);
+    const fiveHundreds = await engine.snapshot();
     check(
       "a 500 inside another site's frame is capped at medium and named as the embed's, while the app's own 500 stays high",
       new RegExp(`\\[medium\\] http_error \\(in an embed of [^)]*\\): GET http://127\\.0\\.0\\.1:${foreignPort}/api/fail-500`).test(fiveHundreds) &&
@@ -118,13 +143,15 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
 
     console.log("frames: the browser's console echo of a failed load goes where the request went");
     // The one fact varied: which frame sends the same request to the same address on the embed's site.
-    const oracles = (engine as unknown as { oracles: { all: OracleViolation[] } }).oracles;
     const echoTarget = `${foreignBaseUrl}/api/fail-500?echo=1`;
     const echoesAfter = async (inFrame: Frame) => {
       const from = oracles.all.length;
-      await inFrame.evaluate((u) => fetch(u, { mode: "no-cors" }).catch(() => "failed"), echoTarget);
-      await page.waitForTimeout(500);
-      return oracles.all.slice(from).filter((v) => v.kind === "console_error" && /^Failed to load resource/.test(v.detail));
+      const echoes = () => oracles.all.slice(from).filter((v) => v.kind === "console_error" && /^Failed to load resource/.test(v.detail));
+      await sending(engine, () => inFrame.evaluate((u) => fetch(u, { mode: "no-cors" }).catch(() => "failed"), echoTarget));
+      // A browser that echoes a failed load is waited for; one that does not has no event to wait for.
+      if (echoesFailedLoads(BROWSER)) await eventually(() => echoes().length > 0);
+      else await settle(ABSENT_MS);
+      return echoes();
     };
     const embedEchoes = await echoesAfter(frameAs("foreign")!);
     const appEchoes = await echoesAfter(page.mainFrame());
@@ -178,7 +205,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     await frameAs("same")!.evaluate((go) => {
       location.href = go + "/frame-child.html?as=moved";
     }, foreignBaseUrl);
-    await until("the frame to move", async () => !!frameAs("moved"), 5000).catch(() => {});
+    await until("the frame to move", async () => !!frameAs("moved")).catch(() => {});
     const afterMove = await engine.type(oldSameNote!, "<b>x</b>").catch((e: unknown) => String(e));
     check("a ref into a frame that has since moved to another site is stale", /navigated/.test(afterMove), afterMove);
     await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
@@ -186,8 +213,10 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
 
     console.log("frames: hidden frames do not use up the frames a snapshot reads");
     await engine.navigate(`${baseUrl}/frames-many.html`);
-    await until("the visible frame to load", async () => !!frameAs("visibleone"), 8000).catch(() => {});
-    await page.waitForTimeout(500);
+    await until("the visible frame to load", async () => {
+      const f = frameAs("visibleone");
+      return !!f && (await f.evaluate(() => typeof (window as unknown as { sendNote?: unknown }).sendNote === "function").catch(() => false));
+    }).catch(() => {});
     const many = await engine.snapshot(true);
     check("a visible frame after eleven hidden ones is read", /button "Send"[^\n]*⟨in same-origin frame \/frame-child\.html\?as=visibleone/.test(many), many);
     await engine.navigate(`${baseUrl}/frames.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
@@ -196,14 +225,16 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     console.log("frames: a write from a cross-origin frame never leaves; the same write from a same-origin frame does");
     const sameBefore = stats.writes["POST /api/frame-note-same"] ?? 0;
     const sameStatus = await frameAs("same")!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());
-    await until("the same-origin write to arrive", () => (stats.writes["POST /api/frame-note-same"] ?? 0) === sameBefore + 1, 5000).catch(() => {});
+    await until("the same-origin write to arrive", () => (stats.writes["POST /api/frame-note-same"] ?? 0) === sameBefore + 1).catch(() => {});
     check(
       "a write from a same-origin frame reaches the server in read-only",
       stats.writes["POST /api/frame-note-same"] === sameBefore + 1,
       `status ${sameStatus}`,
     );
-    const foreignStatus = await frameAs("foreign")!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());
-    await page.waitForTimeout(500);
+    // sendNote resolves once its fetch has been answered, so a write that got out has been counted by now.
+    const foreignStatus = await sending(engine, () =>
+      frameAs("foreign")!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote()),
+    );
     check(
       "a write from a cross-origin frame never reaches the server",
       stats.writes["POST /api/frame-note-foreign"] === undefined,
@@ -223,8 +254,8 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       openPopupLink: () => void;
       openPopupBorrowed: () => void;
     };
-    await frameAs("foreign")!.evaluate((app) => (window as unknown as Child).sendToApp(app), baseUrl);
-    await page.waitForTimeout(800);
+    // sendToApp resolves once its fetch has been answered, and the policy logs a refusal before it answers one.
+    await sending(engine, () => frameAs("foreign")!.evaluate((app) => (window as unknown as Child).sendToApp(app), baseUrl));
     const refusedIntoApp = (engine.memory?.actionLog ?? []).some((e) => e.action === "write-policy:blocked" && (e.target ?? "").includes("/api/frame-to-app"));
     check("a foreign frame's write whose destination is the app is not refused by the policy", !refusedIntoApp);
     // Chromium's own local-network rule stops a document the engine re-served
@@ -232,7 +263,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     // fixture's app lives; a real embed is public and meets the same rule
     // calling an app on localhost. Elsewhere the write arrives.
     if (BROWSER !== "chromium") {
-      await until("the write into the app to arrive", () => stats.writes["POST /api/frame-to-app"] === 1, 5000).catch(() => {});
+      await until("the write into the app to arrive", () => stats.writes["POST /api/frame-to-app"] === 1).catch(() => {});
       check("...and it arrives", stats.writes["POST /api/frame-to-app"] === 1, JSON.stringify(stats.writes));
     }
 
@@ -245,7 +276,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
         .evaluate((h) => (window as unknown as Child)[h](), how)
         .catch(() => {});
     }
-    await page.waitForTimeout(1500);
+    await settle(ABSENT_MS);
     page.context().off("page", onPopup);
     check(
       "a foreign frame cannot open a window: not by window.open, a detached link, or a borrowed window.open",
@@ -257,7 +288,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
 
     console.log("frames: a form aimed at the top window, from each frame");
     await frameAs("foreign")!.evaluate(() => (window as unknown as Child).postToTop());
-    await page.waitForTimeout(800);
+    await settle(ABSENT_MS);
     check(
       "a foreign frame's form aimed at the top window never reaches the server",
       stats.writes["POST /api/frame-top-foreign"] === undefined,
@@ -269,16 +300,12 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       ["checkout", false],
     ] as const) {
       await engine.navigate(`${baseUrl}/account/${name}.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
-      await until(
-        `the embed on ${name} to load`,
-        async () => {
-          const f = frameAs(name);
-          return !!f && (await f.evaluate(() => typeof (window as unknown as { sendNote?: unknown }).sendNote === "function").catch(() => false));
-        },
-        8000,
-      );
-      await frameAs(name)!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());
-      await page.waitForTimeout(500);
+      await until(`the embed on ${name} to load`, async () => {
+        const f = frameAs(name);
+        return !!f && (await f.evaluate(() => typeof (window as unknown as { sendNote?: unknown }).sendNote === "function").catch(() => false));
+      });
+      // sendNote resolves once its fetch has been answered: a write that arrives has been counted by then.
+      await sending(engine, () => frameAs(name)!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote()));
       const got = stats.writes[`POST /api/frame-note-${name}`] === 1;
       check(
         arrives ? "a captcha-like embed on the app's sign-in page can post to its own site" : "...while the same embed on a checkout page cannot",
@@ -289,47 +316,39 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
 
     console.log("frames: an embed behind a redirect, and one that tries to move the whole page");
     await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
-    await until(
-      "the redirected embed to load",
-      async () => {
-        const f = frameAs("redirected");
-        return !!f && (await f.evaluate(() => typeof (window as unknown as { openPopup?: unknown }).openPopup === "function").catch(() => false));
-      },
-      8000,
-    );
+    await until("the redirected embed to load", async () => {
+      const f = frameAs("redirected");
+      return !!f && (await f.evaluate(() => typeof (window as unknown as { openPopup?: unknown }).openPopup === "function").catch(() => false));
+    });
     const afterRedirect: Page[] = [];
     const onRedirectPopup = (p: Page) => afterRedirect.push(p);
     page.context().on("page", onRedirectPopup);
     await frameAs("redirected")!
       .evaluate(() => (window as unknown as { openPopup: () => void }).openPopup())
       .catch(() => {});
-    await page.waitForTimeout(1500);
+    await settle(ABSENT_MS);
     page.context().off("page", onRedirectPopup);
     check("an embed reached through a redirect is sandboxed too: it cannot open a window", afterRedirect.length === 0, `${afterRedirect.length} popup(s)`);
     await frameAs("redirected")!
       .evaluate(() => (window as unknown as { dataFetch: () => void }).dataFetch())
       .catch(() => {});
-    await page.waitForTimeout(1200);
+    await settle(ABSENT_MS);
     check(
       "a frame that loads a data: URL in its own place cannot post to its site with Origin: null",
       stats.writes["POST /api/frame-datafetch"] === undefined,
       JSON.stringify(stats.writes),
     );
     const redirectedLoaded = () =>
-      until(
-        "the redirected embed to load again",
-        async () => {
-          const f = frameAs("redirected");
-          return !!f && (await f.evaluate(() => typeof (window as unknown as { moveTop?: unknown }).moveTop === "function").catch(() => false));
-        },
-        8000,
-      );
+      until("the redirected embed to load again", async () => {
+        const f = frameAs("redirected");
+        return !!f && (await f.evaluate(() => typeof (window as unknown as { moveTop?: unknown }).moveTop === "function").catch(() => false));
+      });
     await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
     await redirectedLoaded();
     await frameAs("redirected")!
       .evaluate(() => (window as unknown as { dataTopForm: () => void }).dataTopForm())
       .catch(() => {});
-    await page.waitForTimeout(1500);
+    await settle(ABSENT_MS);
     check(
       "...nor from there aim a form at the top window",
       stats.writes["POST /api/frame-datatop"] === undefined,
@@ -337,22 +356,17 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     );
     // A same-document route change on the app page, then the escape: the page still knows what it embeds.
     await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
-    await until(
-      "the redirected embed to load again",
-      async () => {
-        const f = frameAs("redirected");
-        return !!f && (await f.evaluate(() => typeof (window as unknown as { moveTop?: unknown }).moveTop === "function").catch(() => false));
-      },
-      8000,
-    );
+    await until("the redirected embed to load again", async () => {
+      const f = frameAs("redirected");
+      return !!f && (await f.evaluate(() => typeof (window as unknown as { moveTop?: unknown }).moveTop === "function").catch(() => false));
+    });
     await page.evaluate(() => history.pushState({}, "", location.pathname + location.search + "#step-2"));
     // And a navigation that never commits: the frames stay, and so does what the page knows of them.
-    await page.click("#no-content");
-    await page.waitForTimeout(500);
+    await Promise.all([page.waitForResponse((r) => r.url().endsWith("/no-content"), { timeout: WAIT_MS }), page.click("#no-content")]);
     await frameAs("redirected")!
       .evaluate(() => (window as unknown as { moveTop: () => void }).moveTop())
       .catch(() => {});
-    await page.waitForTimeout(2500);
+    await settle(MOVED_ABSENT_MS);
     check(
       "...and if it moves the whole page to its own site, that page's writes out never arrive",
       stats.writes["POST /api/frame-popup"] === undefined,
@@ -361,21 +375,17 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
 
     console.log("frames: the app's own frame redirecting into another site");
     await engine.navigate(`${baseUrl}/frames-app-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
-    await until(
-      "the app frame's redirect target to load",
-      async () => {
-        const f = frameAs("appredirect");
-        return !!f && (await f.evaluate(() => typeof (window as unknown as { openPopup?: unknown }).openPopup === "function").catch(() => false));
-      },
-      8000,
-    );
+    await until("the app frame's redirect target to load", async () => {
+      const f = frameAs("appredirect");
+      return !!f && (await f.evaluate(() => typeof (window as unknown as { openPopup?: unknown }).openPopup === "function").catch(() => false));
+    });
     const fromAppFrame: Page[] = [];
     const onAppFramePopup = (p: Page) => fromAppFrame.push(p);
     page.context().on("page", onAppFramePopup);
     await frameAs("appredirect")!
       .evaluate(() => (window as unknown as { openPopup: () => void }).openPopup())
       .catch(() => {});
-    await page.waitForTimeout(1500);
+    await settle(ABSENT_MS);
     page.context().off("page", onAppFramePopup);
     check(
       "a foreign page reached by the app's own frame redirecting is sandboxed: it cannot open a window",
@@ -388,19 +398,15 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       const on = (p: Page) => seen.push(p);
       page.context().on("page", on);
       await act().catch(() => {});
-      await page.waitForTimeout(1500);
+      await settle(ABSENT_MS);
       page.context().off("page", on);
       return seen.length;
     };
     const loadedAs = (as: string) =>
-      until(
-        `the frame ${as} to load`,
-        async () => {
-          const f = frameAs(as);
-          return !!f && (await f.evaluate(() => typeof (window as unknown as { openPopup?: unknown }).openPopup === "function").catch(() => false));
-        },
-        8000,
-      );
+      until(`the frame ${as} to load`, async () => {
+        const f = frameAs(as);
+        return !!f && (await f.evaluate(() => typeof (window as unknown as { openPopup?: unknown }).openPopup === "function").catch(() => false));
+      });
     await engine.navigate(`${baseUrl}/frames-app-redirect.html?hops=2&foreign=${encodeURIComponent(foreignBaseUrl)}`);
     await loadedAs("appredirect");
     const twoHop = await popupsAfter("appredirect", () => frameAs("appredirect")!.evaluate(() => (window as unknown as { openPopup: () => void }).openPopup()));
@@ -425,7 +431,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     await frameAs("redirected")!
       .evaluate((t) => (window as unknown as { moveTopThird: (t: string) => void }).moveTopThird(t), third)
       .catch(() => {});
-    await page.waitForTimeout(2500);
+    await settle(MOVED_ABSENT_MS);
     check(
       "a frame cannot move the page to a site it does not embed, and nothing is sent from there",
       new URL(page.url()).origin === new URL(baseUrl).origin && stats.writes["POST /api/frame-popup"] === undefined,
@@ -438,7 +444,12 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     await frameAs("redirected")!
       .evaluate(() => (window as unknown as { dataFetch: () => void }).dataFetch())
       .catch(() => {});
-    await page.waitForTimeout(800);
+    await until("the embed to sit on a data: URL", () =>
+      page
+        .mainFrame()
+        .childFrames()
+        .some((f) => f.url().startsWith("data:")),
+    );
     const outSnap = await engine.snapshot(true);
     const outRef = /(e\d+) link "Leave the app"/.exec(outSnap)?.[1];
     const clicked = outRef ? await engine.click(outRef) : `no ref in:\n${outSnap}`;
@@ -456,7 +467,12 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     await page.evaluate(() => {
       (document.getElementById("embed") as HTMLIFrameElement).src = "about:blank";
     });
-    await page.waitForTimeout(500);
+    await until("the embed to be back on about:blank", () =>
+      page
+        .mainFrame()
+        .childFrames()
+        .some((f) => f.url() === "about:blank"),
+    );
     await page.evaluate((href) => {
       const a = document.createElement("a");
       a.href = href;
@@ -464,7 +480,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       document.body.appendChild(a);
       a.click();
     }, `${third}/page2.html`);
-    await page.waitForTimeout(1500);
+    await eventually(() => new URL(page.url()).origin === new URL(third).origin);
     check(
       "...while a no-referrer link out, after the app set that frame back to about:blank, is followed",
       new URL(page.url()).origin === new URL(third).origin,
@@ -486,8 +502,8 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     await reload();
     // Its one-fact contrast: the same form to the same place, sent by the app's own page.
     await page.evaluate((url) => (window as unknown as { postOut: (u: string) => void }).postOut(url), `${foreignBaseUrl}/api/frame-top-foreign`);
-    await until("the app's own form to the other site to arrive", () => stats.writes["POST /api/frame-top-foreign"] === 1, 5000).catch(() => {});
-    await page.waitForURL((u) => u.origin === new URL(foreignBaseUrl).origin, { timeout: 5000 }).catch(() => {});
+    await until("the app's own form to the other site to arrive", () => stats.writes["POST /api/frame-top-foreign"] === 1).catch(() => {});
+    await page.waitForURL((u) => u.origin === new URL(foreignBaseUrl).origin, { timeout: WAIT_MS }).catch(() => {});
     check(
       "...while the app's own page posting the same form to that site is the app's behaviour, and arrives",
       stats.writes["POST /api/frame-top-foreign"] === 1,
@@ -496,7 +512,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     await reload();
     // Last, because it navigates the whole page away.
     await frameAs("same")!.evaluate(() => (window as unknown as Child).postToTop());
-    await until("the same-origin frame's top-window form to arrive", () => stats.writes["POST /api/frame-top-same"] === 1, 5000).catch(() => {});
+    await until("the same-origin frame's top-window form to arrive", () => stats.writes["POST /api/frame-top-same"] === 1).catch(() => {});
     check("...while the same form in a same-origin frame does", stats.writes["POST /api/frame-top-same"] === 1, JSON.stringify(stats.writes));
 
     await trustedEmbeds({ baseUrl, foreignBaseUrl, projectDir, stats });
@@ -535,7 +551,6 @@ async function trustedEmbeds({ baseUrl, foreignBaseUrl, projectDir, stats }: Smo
           (await frame()!
             .evaluate(() => typeof (window as unknown as { sendNote?: unknown }).sendNote === "function")
             .catch(() => false)),
-        8000,
       );
       if (c.trusted && c.mode === "safe-write") {
         const snap = await eng.snapshot(true);
@@ -544,8 +559,8 @@ async function trustedEmbeds({ baseUrl, foreignBaseUrl, projectDir, stats }: Smo
         check("a trusted embed still refuses markup typed into it", /^REFUSED: typing this value \(it is markup\)/.test(typed), typed);
       }
       const before = stats.writes["POST /api/frame-note-checkout"] ?? 0;
-      await frame()!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote());
-      await p.waitForTimeout(600);
+      // sendNote resolves once its fetch has been answered: a write that arrives has been counted by then.
+      await sending(eng, () => frame()!.evaluate(() => (window as unknown as { sendNote: () => Promise<unknown> }).sendNote()));
       const arrived = (stats.writes["POST /api/frame-note-checkout"] ?? 0) - before === 1;
       check(
         `${c.mode}, ${c.trusted ? "trusted" : "not trusted"}: the embed's write ${c.arrives ? "goes out" : "is refused"}`,

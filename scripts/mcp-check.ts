@@ -11,7 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawnSync } from "node:child_process";
 import { writeProfile } from "../dist/engine/profiles.js";
-import { revokeFixtureTokens, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE } from "./smoke/harness.ts";
+import { revokeFixtureTokens, settle, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE, WAIT_MS } from "./smoke/harness.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverPath = path.join(here, "..", "dist", "mcp-server.js");
@@ -412,7 +412,8 @@ async function reattachLaneCheck(client: Client): Promise<void> {
     // caller may remove it straight away. A status write left in flight after
     // the answer lands in a directory being removed (ENOTEMPTY on Node 20).
     const settled = treeState(projectDir);
-    await new Promise((r) => setTimeout(r, 300));
+    // Absence has no event to wait for: give a write still in flight time to land.
+    await settle(300);
     if (treeState(projectDir) !== settled) fail("the project directory was still being written after scout_close answered");
     fs.rmSync(projectDir, { recursive: true });
     console.log("✓ scout_close answers only once its last write has landed");
@@ -429,7 +430,7 @@ async function reattachLaneCheck(client: Client): Promise<void> {
  */
 async function readStatusWhenWhole<T>(projectDir: string): Promise<T> {
   const file = path.join(projectDir, ".scenescout", "status.json");
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + WAIT_MS;
   for (;;) {
     try {
       return JSON.parse(fs.readFileSync(file, "utf8")) as T;
@@ -444,7 +445,7 @@ async function readStatusWhenWhole<T>(projectDir: string): Promise<T> {
 async function tokenGoneCheck(projectDir: string): Promise<void> {
   const tokenFile = path.join(projectDir, ".scenescout", "live-token");
   try {
-    const deadline = Date.now() + 8000;
+    const deadline = Date.now() + WAIT_MS;
     while (fs.existsSync(tokenFile)) {
       if (Date.now() > deadline) fail("the live view's token file is still there after the client closed the connection");
       await new Promise((r) => setTimeout(r, 100));

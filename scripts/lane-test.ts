@@ -672,5 +672,7 @@ test("evidence ending in a long run of whitespace is read in linear time", () =>
   const [r] = statedRequests(evidence);
   const ms = performance.now() - t0;
   assert.equal(r.status, null);
-  assert.ok(ms < 250, `took ${ms.toFixed(0)} ms`);
+  // Wall-clock on purpose, since cost is what is under test: under a millisecond here, against about 19 s for the
+  // quadratic separator on this input. The bound sits far from both, so a loaded machine cannot trip it.
+  assert.ok(ms < 2000, `took ${ms.toFixed(0)} ms`);
 });

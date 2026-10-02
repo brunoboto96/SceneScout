@@ -39,7 +39,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     const engine = new BrowserEngine();
     const before = { ...stats.writes };
     const delta = (key: string): number => writes(key) - (before[key] ?? 0);
-    const landed = (keys: string[] = []) => eventually(() => keys.every((key) => delta(key) >= 1), 15000);
+    const landed = (keys: string[] = []) => eventually(() => keys.every((key) => delta(key) >= 1));
     try {
       const attached = await engine.attach({ url: `${baseUrl}/unload-writes.html${query}`, projectDir, mode });
       // The race page's saves are cancelled on timers up to 30 ms after load; there is no event for "all cancelled".
@@ -47,14 +47,10 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       if (query.includes("frame=")) {
         // The embed must have loaded, and armed its pagehide handler, before the page is left.
         const page = (engine as unknown as { page: import("playwright").Page }).page;
-        await until(
-          "the embed of another site to load",
-          async () => {
-            const embed = page.frames().find((f) => f.url().includes("embedded=1"));
-            return !!embed && (await embed.evaluate(() => document.readyState === "complete").catch(() => false));
-          },
-          15000,
-        );
+        await until("the embed of another site to load", async () => {
+          const embed = page.frames().find((f) => f.url().includes("embedded=1"));
+          return !!embed && (await embed.evaluate(() => document.readyState === "complete").catch(() => false));
+        });
       }
       await landed(arrives.beforeLeaving);
       // Absolute: a relative target resolves against the attach URL, query included.
@@ -191,6 +187,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
   } finally {
     await engine.close();
   }
+  // Absence has no event to wait for: give a write the closing page did send time to land.
   await settle(500);
   check(
     `observe (${how}): the writes a page sends as the session closes it never reach the server either`,
@@ -220,6 +217,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
   } finally {
     await popups.close();
   }
+  // Absence has no event to wait for: give a write a closing popup did send time to land.
   await settle(500);
   const escaped = writes(BEACON) - popupBefore.beacon + (writes(KEEPALIVE) - popupBefore.keepalive);
   check(

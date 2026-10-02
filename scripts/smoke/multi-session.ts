@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { generateReport } from "../../dist/engine/report.js";
-import { check, until, type SmokeContext } from "./harness.ts";
+import { check, eventually, heldPageCount, releaseHeldPages, until, type SmokeContext } from "./harness.ts";
 
 export const title = "multi-session and report honesty";
 
@@ -50,39 +50,28 @@ export async function run({ baseUrl, projectDir }: SmokeContext): Promise<void> 
       "finding recorded via one role is visible to the other",
       engB.memory!.findings.some((f) => f.id === sharedFinding.id),
     );
-    // Concurrency: two sessions' work must OVERLAP in time, not queue. Each
-    // navigate is a real round-trip; if the server serialized every call
-    // globally (the pre-0.9 behaviour) the elapsed time would be ~the sum of
-    // both, and the interleave markers below would come out strictly ordered.
+    // Concurrency: two sessions' work must OVERLAP, not queue. A's navigation
+    // is held by the server until B's has finished, so B finishing at all is
+    // the proof: had calls been serialized globally (the pre-0.9 behaviour), B
+    // would have queued behind A and could not finish until A was let go.
     const order: string[] = [];
-    const startedAt = Date.now();
-    const [msA, msB] = await Promise.all([
-      (async () => {
-        const t = Date.now();
-        order.push("A:start");
-        await engA.navigate("/page2.html");
-        order.push("A:end");
-        return Date.now() - t;
-      })(),
-      (async () => {
-        const t = Date.now();
-        order.push("B:start");
-        await engB.navigate("/");
-        order.push("B:end");
-        return Date.now() - t;
-      })(),
-    ]);
-    const wall = Date.now() - startedAt;
-    check(
-      "two sessions' navigations overlap in wall-clock (concurrent, not queued)",
-      wall < msA + msB,
-      `wall=${wall}ms vs sum=${msA + msB}ms (A=${msA}, B=${msB})`,
+    order.push("A:start");
+    const navA = engA.navigate("/page2.html?held=1").then(
+      () => void order.push("A:end"),
+      (err: unknown) => void order.push(`A:failed ${err instanceof Error ? err.message : String(err)}`),
     );
-    check(
-      "both sessions started before either finished (true interleave)",
-      order.indexOf("A:start") < order.indexOf("B:end") && order.indexOf("B:start") < order.indexOf("A:end"),
-      order.join(" → "),
+    await until("A's navigation to be held by the server", () => heldPageCount() === 1);
+    order.push("B:start");
+    const navB = engB.navigate("/").then(
+      () => void order.push("B:end"),
+      (err: unknown) => void order.push(`B:failed ${err instanceof Error ? err.message : String(err)}`),
     );
+    const bSettled = () => order.some((e) => e === "B:end" || e.startsWith("B:failed"));
+    const overlapped = (await eventually(bSettled)) && order.includes("B:end");
+    releaseHeldPages();
+    await Promise.all([navA, navB]);
+    check("a session's navigation finishes while another session's is still in flight (concurrent, not queued)", overlapped, order.join(" → "));
+    check("both sessions started before either finished (true interleave)", order.join(" → ") === "A:start → B:start → B:end → A:end", order.join(" → "));
     check(
       "each session kept its own page after concurrent navigation",
       engA.currentUrl.includes("page2") && !engB.currentUrl.includes("page2"),
