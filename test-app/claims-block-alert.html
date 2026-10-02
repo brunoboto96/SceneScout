@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Reports</title>
+  </head>
+  <body>
+    <!--
+      "Run report" sends a write the write policy refuses outside destructive
+      mode (a PUT on a record the session did not create). The page answers the
+      refusal with an alert that reads like a permission defect of its own. The
+      notice that was already on the page answers nothing.
+    -->
+    <h1>Reports</h1>
+    <div role="alert" data-testid="reports-notice">Scheduled maintenance tonight from ten to eleven</div>
+    <button data-testid="reports-run-button" onclick="runReport()">Run report</button>
+    <div data-testid="reports-messages"></div>
+    <script>
+      async function runReport() {
+        const res = await fetch("/api/widgets/11", { method: "PUT", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => null);
+        if (!res || !res.ok) {
+          const alert = document.createElement("div");
+          alert.setAttribute("role", "alert");
+          alert.textContent = "You do not have permission to use this feature. Contact your administrator.";
+          document.querySelector("[data-testid=reports-messages]").appendChild(alert);
+        }
+      }
+    </script>
+  </body>
+</html>

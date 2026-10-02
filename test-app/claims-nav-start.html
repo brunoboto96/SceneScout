@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Entries</title>
+  </head>
+  <body>
+    <!--
+      Two ways to reach the same page, claims-nav-done.html, which sends a
+      refused beacon as it loads and says "Saved" in its static subtitle.
+
+      "Back to list" is a plain link: the click sends nothing of its own, so
+      the beacon and the subtitle have nothing to do with each other.
+
+      "Save and go" posts a save that the server refuses, ignores the answer
+      and moves to the same page: the "Saved" there is the page's answer to a
+      write that was refused.
+    -->
+    <h1>Entry 4</h1>
+    <a href="/claims-nav-done.html" data-testid="entry-back-link">Back to list</a>
+    <button data-testid="entry-save-go-button" onclick="saveAndGo()">Save and go</button>
+    <script>
+      async function saveAndGo() {
+        await fetch("/api/refuse/403?nav=save", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => {});
+        location.href = "/claims-nav-done.html";
+      }
+    </script>
+  </body>
+</html>

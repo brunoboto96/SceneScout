@@ -35,6 +35,7 @@ import {
   requestsDisagree,
   isEmbedKey,
   isWorthALook,
+  renormalizeRoutes,
   mergeTier,
   describeMerge,
   MAX_JUDGED_MERGES,
@@ -2231,4 +2232,93 @@ test("the form probe's date and time types are the same list as APP_FILLED_TYPES
   assert.ok(line, "the probe declares pickerTypes");
   const listed = JSON.parse(line.slice(line.indexOf("["), line.lastIndexOf("]") + 1)) as string[];
   assert.deepEqual([...listed].sort(), [...APP_FILLED_TYPES].sort());
+});
+
+test("session coverage lists the controls on the states this session saw, not another role's on the same route", () => {
+  // Role A's state of /x shows five controls; role B's state of /x shows only
+  // an access-denied alert. The one fact that differs is which session recorded which state.
+  const store = freshStore();
+  const adminControls = ["tid:users-table", "tid:invite-btn", "tid:tab-roles", "tid:tab-audit", "tid:save-btn"];
+  store.visitState("/x#admin", "http://x/x", "/x", adminControls, [], "lane-admin");
+  store.visitState("/x#viewer", "http://x/x", "/x", ["tid:access-denied-retry"], [], "lane-viewer");
+
+  const own = store.coverage({ routes: store.routesVisitedBy("lane-viewer"), states: store.statesVisitedBy("lane-viewer") });
+  assert.deepEqual(own.unexercised, [{ state: "/x", keys: ["tid:access-denied-retry"], total: 1 }], "only the viewer's own element");
+  assert.equal(own.states, 1);
+  const admin = store.coverage({ routes: store.routesVisitedBy("lane-admin"), states: store.statesVisitedBy("lane-admin") });
+  assert.deepEqual(admin.unexercised[0]?.keys, adminControls, "the admin's own controls");
+  const project = store.coverage();
+  assert.equal(project.elementsTotal, 6, "the project scope lists both");
+
+  // An element another session already exercised on another state of the route is not this session's gap.
+  store.visitState("/x#viewer2", "http://x/x", "/x", ["tid:access-denied-retry", "tid:save-btn"], [], "lane-viewer");
+  store.markExercised("/x#admin", "tid:save-btn", "click");
+  const after = store.coverage({ routes: store.routesVisitedBy("lane-viewer"), states: store.statesVisitedBy("lane-viewer") });
+  assert.deepEqual(after.unexercised[0]?.keys, ["tid:access-denied-retry"]);
+  assert.equal(after.elementsExercised, 1);
+
+  // The view: the session's own list, and the project's route figure labelled as the project's.
+  const view = coverageView(store, "lane-viewer", "session", "Routes visited: 54/54 ✓").join("\n");
+  assert.doesNotMatch(view, /tid:users-table|tid:invite-btn/, "another role's controls are not listed");
+  assert.match(view, /Project route contract \(every session, every run\): Routes visited: 54\/54/);
+  assert.match(view, /the 1 route\(s\) it reached this run/);
+  const projectView = coverageView(store, "lane-viewer", "project", "Routes visited: 54/54 ✓").join("\n");
+  assert.match(projectView, /^Routes visited: 54\/54 ✓$/m, "the project view prints the line as it is");
+  assert.match(projectView, /tid:users-table/);
+
+  store.endRun();
+  assert.deepEqual([...store.statesVisitedBy("lane-viewer")], [], "per run");
+  assert.equal(store.runStates.size, 0);
+});
+
+test("coverage: a key recorded inert in any state of a route is not a control, even where an older state left it unflagged", () => {
+  // Memory from before the inert flag holds unflagged copies of a wrapper; the
+  // engine since records the same key on the same route as inert.
+  const store = freshStore();
+  store.visitState("/x#old", "http://x/x", "/x", ["tid:wrapper", "button:save"]);
+  store.visitState("/x#new", "http://x/x", "/x", ["tid:wrapper", "button:save", "button:open"], ["tid:wrapper"]);
+  const cov = store.coverage();
+  assert.deepEqual(cov.unexercised, [{ state: "/x", keys: ["button:save", "button:open"], total: 2 }], "the wrapper is not counted");
+  // The contrast: a key that no state flags is still a control.
+  const plain = freshStore();
+  plain.visitState("/x#old", "http://x/x", "/x", ["tid:wrapper", "button:save"]);
+  plain.visitState("/x#new", "http://x/x", "/x", ["tid:wrapper", "button:save", "button:open"]);
+  assert.deepEqual(plain.coverage().unexercised[0]?.keys, ["tid:wrapper", "button:save", "button:open"]);
+  // Another route's states say nothing about this one's.
+  store.visitState("/y#1", "http://x/y", "/y", ["tid:wrapper"]);
+  assert.deepEqual(
+    store.coverage().unexercised.find((u) => u.state === "/y"),
+    { state: "/y", keys: ["tid:wrapper"], total: 1 },
+  );
+});
+
+test("coverage folds states stored under an older route identity into today's, and discovered routes are re-keyed on load", () => {
+  const store = freshStore();
+  // Written before code-shaped ids collapsed: one route per record.
+  store.visitState("/widgets/WID-2025-001#a", "http://x/widgets/WID-2025-001", "/widgets/WID-2025-001", ["button:edit"]);
+  store.visitState("/widgets/:id#b", "http://x/widgets/WID-2025-004", "/widgets/:id", ["button:edit"]);
+  const cov = store.coverage();
+  assert.deepEqual(cov.unexercised, [{ state: "/widgets/:id", keys: ["button:edit"], total: 1 }]);
+  assert.deepEqual(
+    renormalizeRoutes({ "/widgets/WID-2025-001": "/widgets/WID-2025-001", "/widgets/WID-2025-002": "/widgets/WID-2025-002", "/about": "/about" }),
+    { "/widgets/:id": "/widgets/WID-2025-001", "/about": "/about" },
+    "one route, its first example kept",
+  );
+  // Read back from disk, the stored map is re-keyed.
+  store.addDiscoveredRoutes([{ route: "/widgets/WID-2025-009", example: "/widgets/WID-2025-009" }]);
+  store.flush();
+  const again = openStore(path.dirname(store.dir));
+  assert.deepEqual(Object.keys(again.discoveredRoutes), ["/widgets/:id"]);
+});
+
+test("select choices: the option a dropdown held before the choice counts as chosen", () => {
+  // A period select loaded on "Monthly", then set to "Weekly": the page already asked for monthly.
+  const store = freshStore();
+  const periods = ["Daily", "Weekly", "Monthly"];
+  store.recordSelectChoice("/trends#a", "trends-period", periods, "Weekly", ["Monthly"]);
+  assert.deepEqual(store.unchosenOptions(), [{ route: "/trends", key: "trends-period", unchosen: ["Daily"] }], "the third option is still owed");
+  // The contrast: with nothing selected before, Monthly is still unchosen.
+  const fresh = freshStore();
+  fresh.recordSelectChoice("/trends#a", "trends-period", periods, "Weekly");
+  assert.deepEqual(fresh.unchosenOptions()[0]?.unchosen, ["Daily", "Monthly"]);
 });

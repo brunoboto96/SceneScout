@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Preferences</title>
+  </head>
+  <body>
+    <!--
+      claims-density.html with one difference: when the save fails, the page
+      puts the old choice back, so it no longer shows a change that was not
+      kept. Nothing is said either way.
+    -->
+    <h1>Preferences</h1>
+    <fieldset>
+      <legend>Density</legend>
+      <label><input type="radio" name="density" value="comfortable" data-testid="density-comfortable-radio" checked /> Comfortable</label>
+      <label><input type="radio" name="density" value="compact" data-testid="density-compact-radio" /> Compact</label>
+    </fieldset>
+    <script>
+      const REVERT = true;
+      let current = "comfortable";
+      for (const radio of document.querySelectorAll("input[name=density]")) {
+        radio.addEventListener("change", async () => {
+          const res = await fetch("/api/refuse/403?pref=density-revert", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ density: radio.value }) }).catch(() => null);
+          if (res && res.ok) current = radio.value;
+          else if (REVERT) document.querySelector("input[value=" + current + "]").checked = true;
+        });
+      }
+    </script>
+  </body>
+</html>

@@ -193,6 +193,66 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
       else check("the same Save that admits the refused part is not a false_success", partial.length === 0, out.slice(0, 700));
     }
 
+    // ── a click that loads a new document ──────────────────────────────────
+    // Both reach the same page, which beacons a refused write as it loads and
+    // says "Saved" in its static subtitle. They differ in one fact: whether the
+    // click's own write was refused before the page moved.
+    for (const [label, lies, name] of [
+      ["Back to list", false, "a link to a page whose load sends a refused beacon is not a false success over its static text"],
+      ["Save and go", true, 'a refused save that then moves to a page saying "Saved" still is'],
+    ] as const) {
+      await engine.navigate("/claims-nav-start.html");
+      const navSnap = await engine.snapshot(true);
+      const ref = new RegExp(`(e\\d+) (?:link|button) "${label}"`).exec(navSnap)?.[1];
+      if (!ref) throw new Error(`"${label}" not in /claims-nav-start.html: ${navSnap.slice(0, 400)}`);
+      const navBefore = engine.oracleLog.all.length;
+      const out = await engine.click(ref);
+      const lie = engine.oracleLog.all.slice(navBefore).filter((v) => v.kind === "false_success");
+      check(
+        name,
+        lies ? lie.some((v) => v.detail.includes("POST /api/refuse/403?nav=save 403")) : lie.length === 0,
+        `${JSON.stringify(lie)} ${out.slice(0, 500)}`,
+      );
+      check(`..."${label}": the page's own beacon is never the one paired`, !lie.some((v) => v.detail.includes("nav=beacon")), JSON.stringify(lie));
+    }
+
+    // ── a control that shows a refused change as kept ──────────────────────
+    // The same radio and the same refused save; one page puts the old choice back.
+    for (const [route, lies, name] of [
+      ["/claims-density.html", true, "a refused save whose radio stays on the new choice is a medium false_success"],
+      ["/claims-density-revert.html", false, "the same radio put back when the save fails is not"],
+    ] as const) {
+      await engine.navigate(route);
+      const densitySnap = await engine.snapshot();
+      const ref = /(e\d+) radio "Compact"/.exec(densitySnap)?.[1];
+      if (!ref) throw new Error(`"Compact" not in ${route}: ${densitySnap.slice(0, 400)}`);
+      const keptBefore = engine.oracleLog.all.length;
+      const out = await engine.click(ref);
+      const kept = engine.oracleLog.all.slice(keptBefore).filter((v) => v.kind === "false_success");
+      check(
+        name,
+        lies
+          ? kept.length === 1 && kept[0].severity === "medium" && /shows the change as kept \(the control is now checked\)/.test(kept[0].detail)
+          : kept.length === 0,
+        `${JSON.stringify(kept)} ${out.slice(0, 500)}`,
+      );
+    }
+
+    // ── an alert that answers the write policy's refusal ───────────────────
+    await engine.navigate("/claims-block-alert.html");
+    const alertSnap = await engine.snapshot();
+    const runRef = /(e\d+) button "Run report"/.exec(alertSnap)?.[1];
+    if (!runRef) throw new Error(`"Run report" not in /claims-block-alert.html: ${alertSnap.slice(0, 400)}`);
+    await engine.click(runRef);
+    const afterRun = await engine.snapshot(true);
+    const lineOf = (text: string): string => afterRun.split("\n").find((l) => / alert "/.test(l) && l.includes(text)) ?? afterRun;
+    check(
+      "an alert that appeared after a write-policy block says so in the snapshot",
+      /alert "You do not have permission[^"]*".*\(after a write-policy block\)$/.test(lineOf("You do not have permission")),
+      lineOf("You do not have permission"),
+    );
+    check("...and an alert already on the page does not", !/after a write-policy block/.test(lineOf("Scheduled maintenance")), lineOf("Scheduled maintenance"));
+
     // The HTTP oracle still reports every refusal on its own. The contradiction
     // rules answer a different question and must not silence it.
     check(
