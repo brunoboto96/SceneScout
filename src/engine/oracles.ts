@@ -410,7 +410,7 @@ export class OracleMonitor {
    * it is reported through here rather than by a page event.
    */
   noteContradiction(c: Contradiction, url: string): void {
-    this.record({ kind: c.kind, severity: "high", detail: c.detail, url });
+    this.record({ kind: c.kind, severity: c.severity ?? "high", detail: c.detail, url });
   }
 
   /**

@@ -930,3 +930,13 @@ test("OracleMonitor: a route-change cancellation is re-ranked medium with a note
   assert.equal(crash.severity, "high");
   assert.doesNotMatch(crash.detail, /router/);
 });
+
+test("OracleMonitor: a contradiction keeps the severity its rule gave it", () => {
+  const monitor = new OracleMonitor();
+  monitor.noteContradiction({ kind: "false_success", detail: "partial: 1 of 2", evidence: "x", severity: "medium" }, "http://app.test/");
+  monitor.noteContradiction({ kind: "false_success", detail: "all refused", evidence: "y" }, "http://app.test/");
+  assert.deepEqual(
+    monitor.drain().map((v) => v.severity),
+    ["medium", "high"],
+  );
+});

@@ -192,7 +192,9 @@ action sent: a request already in flight when the action began, one sent with
 no input pending (a page load, a scroll) or one to the page's own
 infrastructure (telemetry, an error monitor, a token refresh) is never paired.
 If another write of the same action went through, the claim may be about that
-one, so nothing is reported. The claim must be new: the engine reads the page
+one, but part of the user's change was still refused without a word: that is
+reported as a partial `false_success` at medium ("partial: N of M writes from
+this action were refused"), and all refused stays high. The claim must be new: the engine reads the page
 as each click, keypress or typing begins, and a success word already on screen
 then (a status badge reading "Published", a heading) is not the page's answer.
 Column headers ("Updated on") are not read as claims at all. An announced

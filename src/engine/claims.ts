@@ -198,6 +198,12 @@ export interface Contradiction {
   detail: string;
   /** The canonical signature, for dedup across runs. */
   evidence: string;
+  /**
+   * High unless said otherwise. A partial false success (some of the action's
+   * writes kept, some refused) is medium: the claim may be about the part that
+   * was kept, but part of the user's change was still lost without a word.
+   */
+  severity?: "high" | "medium";
 }
 
 function shortUrl(url: string): string {
@@ -276,19 +282,33 @@ export function findContradictions(requests: readonly WatchedRequest[], page: Pa
   // Only writes this action sent, and not the page's own infrastructure.
   const isActionWrite = (r: WatchedRequest): boolean => WRITING_METHODS.has(r.method.toUpperCase()) && !r.background && !INFRASTRUCTURE_WRITE_RE.test(r.url);
   const writes = refused.filter(isActionWrite);
-  // A write of the same action that went through may be the one the message
-  // answers. Which write a "Saved" is about cannot be told from here, and a
-  // high-severity finding must not guess.
-  const kept = requests.some((r) => isActionWrite(r) && DATA_RESOURCES.has(r.resourceType) && !r.blockedByPolicy && r.status !== null && r.status < 400);
+  // Writes of the same action that went through. The message may be about
+  // one of them, so a success claim beside them is a PARTIAL false success:
+  // part of the user's change was refused and the page said nothing about
+  // that part. Still reported, at medium, because silent partial loss is a
+  // real defect; all refused stays high.
+  const kept = requests.filter((r) => isActionWrite(r) && DATA_RESOURCES.has(r.resourceType) && !r.blockedByPolicy && r.status !== null && r.status < 400);
   const successAt = claims.findIndex((c, i) => c === "success" && isNew(page.texts[i]));
-  if (writes.length > 0 && !kept && successAt >= 0) {
+  if (writes.length > 0 && successAt >= 0) {
     const worst = writes[0];
-    const message = page.texts[successAt];
-    out.push({
-      kind: "false_success",
-      detail: `${say(worst)} was refused, and the page says ${JSON.stringify(message.trim().slice(0, 80))}. The user is told their change was kept when the server rejected it.${standIn(worst)}`,
-      evidence: `false-success ${say(worst)}`,
-    });
+    const message = JSON.stringify(page.texts[successAt].trim().slice(0, 80));
+    if (kept.length === 0) {
+      out.push({
+        kind: "false_success",
+        detail: `${say(worst)} was refused, and the page says ${message}. The user is told their change was kept when the server rejected it.${standIn(worst)}`,
+        evidence: `false-success ${say(worst)}`,
+      });
+    } else {
+      const total = writes.length + kept.length;
+      out.push({
+        kind: "false_success",
+        severity: "medium",
+        detail:
+          `partial: ${writes.length} of ${total} writes from this action were refused (${say(worst)}), and the page says ${message} with no word about the refused part. ` +
+          `The user is told their change was kept when part of it was rejected.${standIn(worst)}`,
+        evidence: `false-success-partial ${say(worst)}`,
+      });
+    }
   }
 
   return out;

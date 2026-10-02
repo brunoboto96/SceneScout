@@ -318,10 +318,21 @@ test("a refused infrastructure write says nothing about the user's change", () =
   assert.equal(findContradictions([write({ url: "http://app.test/api/things" })], shown)[0]?.kind, "false_success");
 });
 
-test("a write of the same action that went through may own the success message", () => {
-  const shown = page({ texts: ["Saved"] });
+test("a success claim beside a kept write and a refused one is a partial false success, at medium", () => {
   const kept = req({ method: "PUT", url: "http://app.test/api/things/7", status: 200 });
-  assert.deepEqual(findContradictions([write(), kept], shown), []);
-  // The contrast: that write was the page's own, from before the action.
-  assert.equal(findContradictions([write(), { ...kept, background: true }], shown)[0]?.kind, "false_success");
+  const [partial] = findContradictions([write(), kept], page({ texts: ["Saved"] }));
+  assert.equal(partial?.kind, "false_success");
+  assert.equal(partial.severity, "medium");
+  assert.match(partial.detail, /^partial: 1 of 2 writes from this action were refused/);
+  assert.equal(partial.evidence, "false-success-partial POST /api/things/7/comments 403", "its own signature, apart from the all-refused one");
+  // The contrast: the same action, and the page admits the refused part.
+  assert.deepEqual(findContradictions([write(), kept], page({ texts: ["Saved", "The comment could not be saved"] })), []);
+});
+
+test("all of the action's writes refused stays high", () => {
+  const kept = req({ method: "PUT", url: "http://app.test/api/things/7", status: 200 });
+  const [all] = findContradictions([write(), { ...kept, background: true }], page({ texts: ["Saved"] }));
+  assert.equal(all?.kind, "false_success");
+  assert.equal(all.severity, undefined, "high, the default");
+  assert.doesNotMatch(all.detail, /partial/);
 });
