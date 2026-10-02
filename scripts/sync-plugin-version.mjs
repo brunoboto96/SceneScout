@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 /**
- * Copy the version from package.json into .claude-plugin/plugin.json.
+ * Copy the version from package.json into .claude-plugin/plugin.json and into
+ * the desktop extension's manifest (desktop-extension/manifest.json).
  *
  * Claude Code only offers a plugin update when the plugin's own version
- * changes, so the two must move together. Runs as part of
- * `npm run version-packages`, right after Changesets has bumped package.json.
- * install-test asserts the two versions are equal.
+ * changes, and a desktop extension shows the version its manifest names, so
+ * both must move with the package. Runs as part of `npm run version-packages`,
+ * right after Changesets has bumped package.json. install-test asserts the
+ * versions are equal.
  *
- * The file is rewritten with JSON.stringify, which lays arrays out differently
- * from Prettier, so `version-packages` runs Prettier over it afterwards. Without
- * that the generated version pull request fails the format check.
+ * The files are rewritten with JSON.stringify, which lays arrays out
+ * differently from Prettier, so `version-packages` runs Prettier over them
+ * afterwards. Without that the generated version pull request fails the format
+ * check.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -17,10 +20,12 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-const pluginPath = path.join(root, ".claude-plugin", "plugin.json");
-const plugin = JSON.parse(fs.readFileSync(pluginPath, "utf8"));
 
-if (plugin.version === pkg.version) process.exit(0);
-plugin.version = pkg.version;
-fs.writeFileSync(pluginPath, `${JSON.stringify(plugin, null, 2)}\n`);
-console.log(`plugin.json → ${pkg.version}`);
+for (const relative of [path.join(".claude-plugin", "plugin.json"), path.join("desktop-extension", "manifest.json")]) {
+  const file = path.join(root, relative);
+  const json = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (json.version === pkg.version) continue;
+  json.version = pkg.version;
+  fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`);
+  console.log(`${relative} → ${pkg.version}`);
+}
