@@ -118,8 +118,9 @@ The API key has no option: it is read from `ANTHROPIC_API_KEY` or `OPENAI_API_KE
 | `--role` | (required) | The role's name; the profile is saved as `.scenescout/auth/<role>.json` |
 | `--project` | the current directory | The project to save into |
 | `--browser` | `chromium` | `chromium`, `firefox` or `webkit` |
+| `--save` | `auto` | The window: `auto` saves once it sees the sign-in finish, or on Enter; `enter` saves on Enter only. Not with `--script` |
 | `--script` | off | Sign in headless from the environment instead of in a visible window (for CI) |
-| `--success-url` | none | With `--script`: what the URL's path contains once signed in, or an absolute URL it starts with |
+| `--success-url` | none | What the URL's path contains once signed in, or an absolute URL it starts with. In the window, it replaces looking for a new session |
 | `--success-selector` | none | With `--script`: a CSS selector visible only when signed in |
 | `--username-selector` | found by the rules | With `--script`: the username field |
 | `--password-selector` | found by the rules | With `--script`: the password field |
@@ -127,7 +128,7 @@ The API key has no option: it is read from `ANTHROPIC_API_KEY` or `OPENAI_API_KE
 | `--submit-selector` | found by the rules | With `--script`: the button that moves the form on |
 | `--timeout` | `60` | With `--script`: seconds the whole sign-in may take, 5 to 600 |
 
-Each `--script` option can also come from an environment variable, below; the option wins.
+Each `--script` option can also come from an environment variable, below; the option wins. The window reads `--success-url` from the option only.
 
 ### `scenescout export`
 
@@ -375,6 +376,19 @@ Set under Settings → Secrets and variables → Actions. All optional.
 | `SCENESCOUT_QA_BASE_URL` | variable | the base branch's newest deployment | What `compare` compares with |
 | `SCENESCOUT_QA_TEAM_TOKEN` | secret | none | Reads team membership; passed to the gate job only |
 | `OPENAI_API_KEY` | secret | (required) | The model key, in the template; use `ANTHROPIC_API_KEY` in the `qa` job instead for Anthropic |
+
+## `scout_login` options
+
+What an agent passes to open a sign-in window from the conversation ([Signing in](Signing-in.md#from-a-conversation)).
+
+| Option | Default | |
+|---|---|---|
+| `url` | (required) | Where to sign in: the app's address or its sign-in page |
+| `role` | (required) | The name the sign-in is saved under |
+| `projectPath` | (required) | The project's absolute path; the sign-in is saved in its `.scenescout/auth/` |
+| `browser` | `SCENESCOUT_BROWSER`, else `chromium` | `chromium`, `firefox` or `webkit` |
+| `successUrl` | none | As `--success-url` |
+| `waitSeconds` | `120` | How long one call waits before returning with the window still open, 1 to 600 |
 
 ## `scout_attach` options
 
