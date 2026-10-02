@@ -244,3 +244,136 @@ export function diffImages(before: RgbaImage, after: RgbaImage, threshold = DIFF
     image: { width, height, data },
   };
 }
+
+/**
+ * Shrinks a picture to `width` × `height` by averaging the source pixels each
+ * output pixel covers, so text and thin lines fade rather than vanish the way
+ * picking one pixel in every few would make them. Never enlarges: a size
+ * larger than the source in either direction is the source's in it.
+ */
+export function shrinkImage(img: RgbaImage, width: number, height: number): RgbaImage {
+  const w = Math.max(1, Math.min(img.width, Math.floor(width)));
+  const h = Math.max(1, Math.min(img.height, Math.floor(height)));
+  if (w === img.width && h === img.height) return img;
+  const data = new Uint8Array(w * h * 4);
+  const sx = img.width / w;
+  const sy = img.height / h;
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.floor(y * sy);
+    const y1 = Math.max(y0 + 1, Math.floor((y + 1) * sy));
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.floor(x * sx);
+      const x1 = Math.max(x0 + 1, Math.floor((x + 1) * sx));
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let a = 0;
+      for (let yy = y0; yy < y1; yy++) {
+        for (let xx = x0; xx < x1; xx++) {
+          const i = (yy * img.width + xx) * 4;
+          r += img.data[i];
+          g += img.data[i + 1];
+          b += img.data[i + 2];
+          a += img.data[i + 3];
+        }
+      }
+      const n = (y1 - y0) * (x1 - x0);
+      const o = (y * w + x) * 4;
+      data[o] = Math.round(r / n);
+      data[o + 1] = Math.round(g / n);
+      data[o + 2] = Math.round(b / n);
+      data[o + 3] = Math.round(a / n);
+    }
+  }
+  return { width: w, height: h, data };
+}
+
+/**
+ * Writes a picture as a PNG as small as this encoder makes one: three
+ * channels when every pixel is opaque (a screenshot always is), and each row
+ * filtered by whichever of the five PNG filters leaves the smallest sum, the
+ * usual heuristic. encodePng stays as it is, since the diff is written by it.
+ */
+export function encodePngCompact(img: RgbaImage): Buffer {
+  if (img.data.length !== img.width * img.height * 4) throw new Error("the pixel data is not width × height × 4 bytes");
+  let opaque = true;
+  for (let i = 3; i < img.data.length; i += 4)
+    if (img.data[i] !== 255) {
+      opaque = false;
+      break;
+    }
+  const channels = opaque ? 3 : 4;
+  const stride = img.width * channels;
+  const rows = new Uint8Array(img.height * stride);
+  if (opaque) {
+    for (let i = 0, j = 0; i < img.data.length; i += 4, j += 3) {
+      rows[j] = img.data[i];
+      rows[j + 1] = img.data[i + 1];
+      rows[j + 2] = img.data[i + 2];
+    }
+  } else rows.set(img.data);
+  const raw = Buffer.alloc(img.height * (stride + 1));
+  const trial = new Uint8Array(stride);
+  for (let y = 0; y < img.height; y++) {
+    const row = y * stride;
+    let best = Infinity;
+    const out = y * (stride + 1);
+    for (let filter = 0; filter <= 4; filter++) {
+      let sum = 0;
+      for (let x = 0; x < stride; x++) {
+        const left = x >= channels ? rows[row + x - channels] : 0;
+        const up = y > 0 ? rows[row - stride + x] : 0;
+        const upLeft = y > 0 && x >= channels ? rows[row - stride + x - channels] : 0;
+        const v = rows[row + x];
+        const p = filter === 0 ? 0 : filter === 1 ? left : filter === 2 ? up : filter === 3 ? (left + up) >> 1 : paeth(left, up, upLeft);
+        const f = (v - p) & 0xff;
+        trial[x] = f;
+        sum += f < 128 ? f : 256 - f;
+      }
+      if (sum < best) {
+        best = sum;
+        raw[out] = filter;
+        raw.set(trial, out + 1);
+      }
+    }
+  }
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(img.width, 0);
+  header.writeUInt32BE(img.height, 4);
+  header[8] = 8;
+  header[9] = opaque ? 2 : 6;
+  return Buffer.concat([SIGNATURE, chunk("IHDR", header), chunk("IDAT", deflateSync(raw, { level: 9 })), chunk("IEND", new Uint8Array(0))]);
+}
+
+/** The most a picture is shrunk to fit its bytes: below this on its longer side it is no longer worth showing. */
+export const FIT_MIN_SIDE = 120;
+
+export interface FittedPicture {
+  png: Buffer;
+  width: number;
+  height: number;
+  /** Smaller than the picture taken, to fit the bounds. */
+  shrunk: boolean;
+}
+
+/**
+ * A picture within `maxSide` pixels on its longer side and `maxBytes` as a
+ * PNG: shrunk to the side first, then, while the file is still too large,
+ * shrunk again in proportion to how far over it is. Null when even
+ * FIT_MIN_SIDE on its longer side is over the bytes: nothing worth looking at
+ * fits, and the caller says so rather than keeping a smudge.
+ */
+export function fitPicture(img: RgbaImage, maxSide: number, maxBytes: number): FittedPicture | null {
+  const longer = Math.max(img.width, img.height);
+  let scale = Math.min(1, maxSide / longer);
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const width = Math.max(1, Math.round(img.width * scale));
+    const height = Math.max(1, Math.round(img.height * scale));
+    const png = encodePngCompact(shrinkImage(img, width, height));
+    if (png.length <= maxBytes) return { png, width, height, shrunk: width !== img.width || height !== img.height };
+    if (Math.max(width, height) <= FIT_MIN_SIDE) return null;
+    // Bytes go roughly with area, so the side goes with the square root; a little under, so one more pass usually fits.
+    scale = Math.max(FIT_MIN_SIDE / longer, scale * Math.sqrt(maxBytes / png.length) * 0.9);
+  }
+  return null;
+}

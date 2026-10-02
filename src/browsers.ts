@@ -7,6 +7,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { isCiEnv } from "./engine/capture.js";
 
 /** A browser the engine can launch. */
 export const BROWSER_ENGINES = ["chromium", "firefox", "webkit"] as const;
@@ -309,13 +310,6 @@ export const BROWSER_DOWNLOAD_SETTINGS = ["auto", "on", "off"] as const;
 export type BrowserDownloadSetting = (typeof BROWSER_DOWNLOAD_SETTINGS)[number];
 export const DEFAULT_BROWSER_DOWNLOAD: BrowserDownloadSetting = "auto";
 
-/** Whether this process runs in CI. Every common CI service sets CI; "false" and "0" are how a job says it is not one. */
-export function inCi(env: NodeJS.ProcessEnv): boolean {
-  const raw = env.CI?.trim().toLowerCase();
-  if (raw !== undefined && raw !== "" && raw !== "false" && raw !== "0") return true;
-  return env.GITHUB_ACTIONS === "true";
-}
-
 /**
  * What an attach does when the build it needs is not on disk: download it
  * itself, refuse because the setting says never, or tell CI to keep its
@@ -332,7 +326,7 @@ export function browserDownloadDecision(env: NodeJS.ProcessEnv): "download" | "r
   }
   if (raw === "off") return "refuse";
   if (raw === "on") return "download";
-  return inCi(env) ? "tell" : "download";
+  return isCiEnv(env) ? "tell" : "download";
 }
 
 /** The plain-words line shown while an attach downloads the build it needs. */

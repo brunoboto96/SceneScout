@@ -28,6 +28,7 @@ import http from "node:http";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { LIVE_PAGE } from "./live-page.js";
+import { isPng } from "./png.js";
 import { JOURNEY_END, JOURNEY_START, TASK_SET, type ActionLogEntry } from "./memory.js";
 
 /** Holds the live view's token, next to status.json. Written owner-only; removed when the engine shuts down. */
@@ -619,7 +620,9 @@ export class LiveServer {
       }
       const jpeg = await this.provider.frame(asked);
       if (!jpeg) return this.send(res, 404, "no such frame");
-      return this.send(res, 200, jpeg, "image/jpeg", { "Content-Length": jpeg.length, "Cache-Control": "private, max-age=3600" });
+      // Frames are JPEG; a finding's picture is PNG (capture.ts), and is labelled as one.
+      const type = isPng(jpeg) ? "image/png" : "image/jpeg";
+      return this.send(res, 200, jpeg, type, { "Content-Length": jpeg.length, "Cache-Control": "private, max-age=3600" });
     }
     if (route === "events" && !name) {
       const wanted = this.param(req, "sessions");

@@ -8,7 +8,18 @@ import os from "node:os";
 import path from "node:path";
 import { readRouteElements, readRouteObjects, resolveRoutes } from "../src/code-routes.ts";
 import { scanProject, describeAuthAge } from "../src/scan.ts";
-import { normalizePath, fingerprintState } from "../src/engine/fingerprint.ts";
+import { normalizePath, fingerprintState, refsSurviveUrlChange, routeBase } from "../src/engine/fingerprint.ts";
+import {
+  COLLECT_INTERACTABLES_SCRIPT,
+  LIST_PAGER_NAME,
+  PAGER_TESTID,
+  affordanceFlags,
+  cutSummary,
+  matchPrevious,
+  testidFamily,
+  type Affordances,
+  type CutElement,
+} from "../src/engine/collector.ts";
 
 let failures = 0;
 function check(name: string, cond: boolean, context?: string): void {
@@ -585,6 +596,136 @@ console.log("code routes: through scanProject");
   const v = scanProject(vueApp);
   check("Vue: routes passed inline to createRouter", sorted(v.routes) === sorted(["/", "/about"]), sorted(v.routes));
   fs.rmSync(vueApp, { recursive: true, force: true });
+}
+
+// ---- how long refs last, and what a re-snapshot is compared with ----------
+
+console.log("refs across a URL change (refsSurviveUrlChange)");
+{
+  const at = (a: string, b: string): boolean => refsSurviveUrlChange(`http://x${a}`, `http://x${b}`);
+  check("a search query cleared keeps the refs", at("/things?q=x", "/things"));
+  check("a filter that rewrites only the query keeps them", at("/things?status=open", "/things?status=closed&page=2"));
+  check("an in-page fragment keeps them", at("/things", "/things#notes"));
+  check("a hash route's own query keeps them", at("/#/things?q=x", "/#/things"));
+  check("the same URL keeps them", at("/things/7?tab=history", "/things/7?tab=history"));
+  check("another tab (a UI-state parameter) drops them", !at("/things/7?tab=details", "/things/7?tab=history"));
+  check("another record drops them, though its route class is the same", !at("/things/7", "/things/8"));
+  check("another path drops them", !at("/things", "/other"));
+  check("another hash route drops them", !at("/#/things", "/#/other"));
+  check("another origin drops them", !refsSurviveUrlChange("http://x/things", "http://y/things"));
+  check("no snapshot URL drops them", !refsSurviveUrlChange("", "http://x/things"));
+  check("a route's base is the route without its tab", routeBase("/things/:id?tab=history") === "/things/:id" && routeBase("/things") === "/things");
+}
+
+console.log("what makes a listed element actionable (affordanceFlags)");
+{
+  const flags = (affords: Affordances | null | undefined): string => affordanceFlags({ affords }).join(", ");
+  check(
+    "a row with a tab stop and a click handler is clickable and focusable",
+    flags({ tabStop: true, clickHandler: true, pointer: false }) === "clickable, focusable",
+  );
+  check("a pointer cursor alone is clickable", flags({ tabStop: false, clickHandler: false, pointer: true }) === "clickable");
+  check("a tab stop alone is focusable", flags({ tabStop: true, clickHandler: false, pointer: false }) === "focusable");
+  check("a wrapper listed for its test id (no affordances) gets neither", flags(null) === "" && flags(undefined) === "");
+  check(
+    "the collector reports affordances only for an element that is not a control",
+    COLLECT_INTERACTABLES_SCRIPT.includes("affords: affords && (affords.tabStop"),
+  );
+}
+
+console.log("what a truncated snapshot cut (cutSummary)");
+{
+  check("a numbered test id reads as its family", testidFamily("row-12") === "row-*" && testidFamily("thing_7") === "thing_*");
+  check("a test id ending in a uuid reads as its family", testidFamily("row-0b9a3c1e-5f2d-4c3b-9a1e-1234567890ab") === "row-*");
+  check("a test id with no id stays itself", testidFamily("pager-next") === "pager-next" && testidFamily("item12") === "item12");
+  const cut: CutElement[] = [
+    ...Array.from({ length: 38 }, (_, i) => ({ role: "link", testid: `row-${i}` })),
+    { role: "button", testid: "bulk-archive" },
+    ...Array.from({ length: 12 }, () => ({ role: "generic", testid: null })),
+  ];
+  check("groups by role and test-id family, largest first", cutSummary(cut) === "38 link [row-*], 12 generic, 1 button [bulk-archive]", cutSummary(cut));
+  check("names at most the asked number of groups and counts the rest together", cutSummary(cut, 1) === "38 link [row-*], 13 other", cutSummary(cut, 1));
+  check(
+    "says when the collector stopped counting",
+    cutSummary([{ role: "link", testid: "a-1" }, { uncounted: true }]) === "1 link [a-*], and more past those, not counted",
+    cutSummary([{ role: "link", testid: "a-1" }, { uncounted: true }]),
+  );
+  check(
+    "a pager or load-more control is told by its name",
+    ["Next", "Previous page", "Page 3", "»", "Load more", "Show 20 more", "See more results", "More results"].every((n) => LIST_PAGER_NAME.test(n)),
+  );
+  check(
+    "...and a list's own items, or a control that merely says more, are not",
+    !["Item 151", "Step 2", "More options", "Read more about pricing plans", "Learn more", "Next steps for onboarding"].some((n) => LIST_PAGER_NAME.test(n)),
+  );
+  check(
+    "a pager is told by its test id",
+    ["pager-next", "pagination", "list-load-more", "next-page", "table.page-prev"].every((t) => PAGER_TESTID.test(t)),
+  );
+  check("...and a test id that only contains the letters is not", !["pagerduty-link", "homepage", "page-title", "row-12"].some((t) => PAGER_TESTID.test(t)));
+  check(
+    "the collector carries both",
+    COLLECT_INTERACTABLES_SCRIPT.includes(`const LIST_PAGER = ${String(LIST_PAGER_NAME)};`) &&
+      COLLECT_INTERACTABLES_SCRIPT.includes(`const PAGER_TID = ${String(PAGER_TESTID)};`),
+  );
+}
+
+console.log("which earlier element each element is (matchPrevious)");
+{
+  const prev = (entries: Array<[string, string, string?]>) => new Map(entries.map(([key, label, href]) => [key, { label, href: href ?? null }]));
+  const rows = prev([
+    ["tid:row", "Alpha record"],
+    ["tid:row~1", "Beta record"],
+    ["tid:row~2", "Gamma record"],
+    ["tid:save", "Save"],
+  ]);
+  const filtered = matchPrevious(rows, [
+    { key: "tid:row", name: "Gamma record" },
+    { key: "tid:save", name: "Save" },
+  ]);
+  check("a filtered list's remaining row is matched by its text, not its position", filtered[0] === "tid:row~2", JSON.stringify(filtered));
+  check("...and a control alone under its key is matched by the key", filtered[1] === "tid:save");
+  const swapped = matchPrevious(rows, [
+    { key: "tid:row", name: "Delta record" },
+    { key: "tid:row~1", name: "Alpha record" },
+  ]);
+  check("a row that is new is not matched, and an old row that moved is", swapped[0] === null && swapped[1] === "tid:row", JSON.stringify(swapped));
+  const relabel = matchPrevious(prev([["tid:status-pill", "Draft"]]), [{ key: "tid:status-pill", name: "Published" }]);
+  check("a single control whose text changed is still the same control (a relabel)", relabel[0] === "tid:status-pill");
+  const linked = matchPrevious(
+    prev([
+      ["tid:row", "Alpha · 2 minutes ago", "/things/1"],
+      ["tid:row~1", "Beta · 5 minutes ago", "/things/2"],
+    ]),
+    [
+      { key: "tid:row", name: "Beta · 6 minutes ago", href: "/things/2" },
+      { key: "tid:row~1", name: "Alpha · 3 minutes ago", href: "/things/1" },
+    ],
+  );
+  check("a row whose text changed but kept its link is matched by the link", linked[0] === "tid:row~1" && linked[1] === "tid:row", JSON.stringify(linked));
+  const same = matchPrevious(
+    prev([
+      ["tid:edit", "Edit"],
+      ["tid:edit~1", "Edit"],
+    ]),
+    [
+      { key: "tid:edit", name: "Edit" },
+      { key: "tid:edit~1", name: "Edit" },
+    ],
+  );
+  check("identical repeated controls keep their order", same[0] === "tid:edit" && same[1] === "tid:edit~1");
+  const live = matchPrevious(
+    prev([
+      ["live:status", "Saved"],
+      ["live:status~1", "Ready"],
+    ]),
+    [
+      { key: "live:status", name: "Could not save", byPosition: true },
+      { key: "live:status~1", name: "Ready", byPosition: true },
+    ],
+  );
+  check("live regions keep their position, so a new message reads as the same region", live[0] === "live:status" && live[1] === "live:status~1");
+  check("nothing before matches nothing", matchPrevious(new Map(), [{ key: "tid:a", name: "A" }])[0] === null);
 }
 
 if (failures > 0) {

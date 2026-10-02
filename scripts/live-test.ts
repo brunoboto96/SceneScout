@@ -788,6 +788,25 @@ test("the page renders the report without building markup, since a finding's tit
   assert.match(script, /fetch\('api\/report'/);
 });
 
+test("the report panel shows a recorded picture through the frame route and drops any other picture line", () => {
+  // The two regexes are written inside a template literal with doubled
+  // backslashes; read them back from the page as the browser gets them.
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
+  const shown = /\(m = (\/\^!\\\[.*?\$\/)\.exec\(line\)\) && m\[2\]\.indexOf\('\.\.'\) < 0/.exec(script);
+  const dropped = /\} else if \((\/\^!\\\[.*?\$\/)\.test\(line\)\) \{/.exec(script);
+  assert.ok(shown && dropped, "both picture branches are in the page");
+  const show = new Function(`return ${shown[1]};`)() as RegExp;
+  const drop = new Function(`return ${dropped[1]};`)() as RegExp;
+  const m = show.exec("![What the page showed](recordings/s/0001-click.jpg)");
+  assert.equal(m?.[2], "recordings/s/0001-click.jpg");
+  assert.match(script, /pic\.src = 'record\/' \+ m\[2\];/, "through the frame route");
+  for (const other of ["![x](findings/a.png)", "![x](https://evil.test/a.png)", "![x](recordings/a b.png)"]) {
+    assert.equal(show.exec(other), null, other);
+    assert.match(other, drop, `${other} is dropped, not printed as text`);
+  }
+  assert.ok(show.test("![x](recordings/../memory.json)") && script.includes("m[2].indexOf('..') < 0"), "a path with .. is refused after the match");
+});
+
 test("the page's script parses: a backslash or backtick lost to the template literal would break every viewer", () => {
   // The page is one TypeScript template literal. A regex written with single
   // backslashes reaches the browser without them, and a stray backtick ends
@@ -1093,6 +1112,9 @@ test("one pastel tint per task, and a close-up with no frame says so", () => {
 
 // ---- the recorded run: its own address, and the frames under each finding ----
 
+/** The first bytes of a PNG, which is how the route tells a finding's picture from a frame. */
+const PICTURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+
 test("a recorded run is a page at its own address, and its frames are served from there", async () => {
   const asked: string[] = [];
   const provider: LiveProvider = {
@@ -1100,7 +1122,7 @@ test("a recorded run is a page at its own address, and its frames are served fro
     replay: () => "<!doctype html><title>Run</title><h1>clerk</h1>",
     frame: async (rel) => {
       asked.push(rel);
-      return rel === "recordings/clerk/0007-click.jpg" ? JPEG : null;
+      return rel === "recordings/clerk/0007-click.jpg" ? JPEG : rel === "recordings/clerk/finding-a1b2.png" ? PICTURE : null;
     },
   };
   const live = new LiveServer(provider);
@@ -1118,6 +1140,11 @@ test("a recorded run is a page at its own address, and its frames are served fro
     assert.equal(shot.status, 200);
     assert.equal(String(shot.headers["content-type"]), "image/jpeg");
     assert.deepEqual(shot.body, JPEG);
+    // A finding's picture is a PNG, and is labelled as one; the frame beside it stays a JPEG.
+    const picture = await request(port, `/${token}/record/recordings/clerk/finding-a1b2.png`);
+    assert.equal(picture.status, 200);
+    assert.equal(String(picture.headers["content-type"]), "image/png");
+    assert.deepEqual(picture.body, PICTURE);
 
     // A viewer may ask for anything. The server hands the path to the provider
     // whole and builds no filesystem path of its own, so an escape is the
@@ -1168,8 +1195,13 @@ test("the report carries the frames each finding was found on, and the page hang
   const shots = script.slice(script.indexOf("function evidenceFor"), script.indexOf("function renderMarkdown"));
   assert.match(shots, /img\.src = 'record\/' \+ f\.frame;/);
   assert.match(shots, /data-testid', 'live-report-evidence-'/);
-  // Nothing is shown for a finding with no frames: an unrecorded run reads as it always did.
-  assert.match(shots, /if \(!found \|\| !found\.frames\.length\) return null;/);
+  // Nothing is shown for a finding with no frames and no picture: an unrecorded run with pictures off reads as it always did.
+  assert.match(shots, /if \(!found\) return null;/);
+  assert.match(shots, /if \(!found\.frames\.length\) return picture;/);
+  // A finding's picture is shown first, from the same route, and opens on its own.
+  assert.match(shots, /pic\.src = 'record\/' \+ found\.picture\.file;/);
+  assert.match(shots, /data-testid', 'live-report-picture-' \+ id/);
+  assert.match(shots, /data-testid', 'live-report-picture-open'/);
   assert.ok(script.includes("/^\\*\\*Id:\\*\\* `([^`]+)`/"), "the id line is what the frames hang from");
 });
 

@@ -46,7 +46,6 @@ import {
   browserDownloadDecision,
   browserPresence,
   defaultAttachNote,
-  inCi,
   defaultEngine,
   beaconResourceType,
   echoesFailedLoads,
@@ -65,6 +64,7 @@ import {
   closeWaitsForLeavingWrites,
 } from "../src/browsers.ts";
 
+import { INTAKE_QUESTIONS, introQuestions } from "../src/intake.ts";
 import { explorePrompt, loadPlaybook, PLAYBOOK_RELATIVE_PATH, SERVER_INSTRUCTIONS, stripFrontMatter } from "../src/playbook.ts";
 
 import { dispatch, HAND_PARSED, looksLikeUrl, SUBCOMMANDS, type CliHandlers, type Subcommand } from "../src/commands.ts";
@@ -1122,12 +1122,21 @@ test("the server instructions stay short and the explore prompt states what was 
   const asked = explorePrompt("# Method", { url: "http://localhost:3000", level: "minimal" });
   assert.ok(asked.startsWith("# Method"));
   assert.match(asked, /Target: http:\/\/localhost:3000\nLevel: minimal$/);
-  // A client may send no arguments object at all.
-  assert.match(explorePrompt("# Method", undefined), /Target: ask me for the URL/);
+  // A client may send no arguments object at all, or an empty one: nothing was chosen, so the plain questions are asked.
+  for (const none of [undefined, {}, { url: "  ", focus: "" }]) {
+    const prompt = explorePrompt("# Method", none);
+    assert.ok(prompt.endsWith(introQuestions()), "with no settings the prompt ends with the four questions");
+    for (const q of INTAKE_QUESTIONS) assert.ok(prompt.includes(q.ask), `the prompt asks: ${q.ask}`);
+    assert.doesNotMatch(prompt, /Target:/);
+  }
   // A level the method does not know would leave the agent guessing.
   assert.throws(() => explorePrompt("# Method", { level: "deep" }), /"deep" is not one the method knows.*minimal, medium, extensive/);
-  // With no URL the agent is told to find one, not left with a blank target.
-  assert.match(explorePrompt("# Method", {}), /Target: ask me for the URL/);
+  // Any setting given skips the questions; with no URL the agent is told to find one, not left with a blank target.
+  for (const some of [{ level: "medium" }, { focus: "checkout" }]) {
+    const prompt = explorePrompt("# Method", some);
+    assert.match(prompt, /Target: ask me for the URL/);
+    for (const q of INTAKE_QUESTIONS) assert.ok(!prompt.includes(q.ask), `a setting given skips: ${q.ask}`);
+  }
 });
 
 const LAUNCH = ["/opt/node/bin/npx", "-y", "scenescout", "serve"];
@@ -2042,8 +2051,9 @@ test("an attach downloads a missing browser itself outside CI, tells CI to keep 
   for (const [env, want] of rows) assert.equal(browserDownloadDecision(env), want, JSON.stringify(env));
   // A setting it does not know refuses the attach rather than reading as a default that might download.
   assert.throws(() => browserDownloadDecision({ [BROWSER_DOWNLOAD_ENV]: "never" }), /SCENESCOUT_BROWSER_DOWNLOAD="never" is not a setting.*auto, on, off/);
-  assert.equal(inCi({ CI: "false", GITHUB_ACTIONS: "true" }), true);
-  assert.equal(inCi({ GITHUB_ACTIONS: "false" }), false);
+  // The same CI rule the evidence pictures default by (isCiEnv), not a second one.
+  assert.equal(browserDownloadDecision({ CI: "false", GITHUB_ACTIONS: "true" }), "tell");
+  assert.equal(browserDownloadDecision({ GITHUB_ACTIONS: "false" }), "download");
 });
 
 test("the download line says in plain words what is happening and how big it is", () => {

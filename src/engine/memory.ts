@@ -2,6 +2,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import type { RecordedDecision } from "./calibration.js";
+import type { PictureShot } from "./capture.js";
 import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
@@ -19,7 +20,20 @@ export interface StateRecord {
    * `inert`: listed for its test id but not something a user can act on; left out of coverage.
    */
   elements: Record<string, { exercised: boolean; lastAction?: string; absentStreak?: number; inert?: boolean }>;
+  /**
+   * The name rule its element keys were made under (NAME_RULE). Absent on a
+   * record written before image content named a control: its keys are read
+   * through the route's key aliases (MemoryFile.keyAliases).
+   */
+  nameRule?: number;
 }
+
+/**
+ * The element-name rule current keys are made under. 2: a link or button with
+ * no text is named by its image content (an <img>'s alt text, an <svg>'s
+ * aria-label or <title>) before its title attribute.
+ */
+export const NAME_RULE = 2;
 
 /**
  * The kinds a finding can be. One list: scout_finding's input schema, the lane
@@ -108,6 +122,15 @@ export interface Finding {
    * Absent until a filing from another route merges in.
    */
   seenOn?: string[];
+  /**
+   * The picture taken when it was filed, as a path relative to the project's
+   * .scenescout/ folder (capture.ts findingPicturePath): the element it named,
+   * or the page. Replaced when a regression reopens it. Absent when pictures
+   * were off, or on findings filed before they existed.
+   */
+  picture?: string;
+  /** What that picture shows (capture.ts PictureShot), kept apart so `picture` stays a plain path. */
+  pictureShot?: PictureShot;
 }
 
 /** Most other routes one finding records it was seen on; the oldest go first. */
@@ -509,6 +532,15 @@ interface MemoryFile {
    */
   laneRoutes?: Record<string, string[]>;
   /**
+   * Element keys a control had under an earlier name rule: route → earlier
+   * key → current key, learned from snapshots that list both (collector.ts
+   * PICK_NAME_SRC `prior`). Coverage reads a state written under the earlier
+   * rule through these, so a control that gained a name keeps what was
+   * recorded for it, and its earlier key is not left behind as an
+   * unexercised control nobody can reach.
+   */
+  keyAliases?: Record<string, Record<string, string>>;
+  /**
    * Pages whose scripts sent a POST observe refused: route → endpoint
    * ("POST /api/search") → when it was last refused or cleared. Kept here, not
    * on a session, because lanes close their sessions before the report is
@@ -531,6 +563,23 @@ const MAX_REFUSED_POSTS_PER_ROUTE = 5;
 const EMPTY: MemoryFile = { version: 1, states: {}, findings: [] };
 
 /**
+ * A state's elements under current keys: each key the route's aliases name
+ * (earlier key → current key) is moved, all at once, so two keys that swap
+ * places do not chain. Where two entries land on one key, exercised is kept
+ * from either.
+ */
+export function rekeyed(elements: StateRecord["elements"], aliases: Readonly<Record<string, string>> | undefined): StateRecord["elements"] {
+  if (!aliases) return elements;
+  const out: StateRecord["elements"] = {};
+  for (const [raw, entry] of Object.entries(elements)) {
+    const key = Object.hasOwn(aliases, raw) ? aliases[raw] : raw;
+    const prev = out[key];
+    out[key] = prev ? { ...prev, ...entry, exercised: prev.exercised || entry.exercised } : entry;
+  }
+  return out;
+}
+
+/**
  * Fold another process's memory into ours, losing nothing from either side.
  *
  * Two SceneScout processes on one project each hold a full snapshot and each
@@ -546,6 +595,13 @@ const EMPTY: MemoryFile = { version: 1, states: {}, findings: [] };
 export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
   const out: MemoryFile = { ...theirs, ...mine, version: 1 };
 
+  out.keyAliases = { ...(theirs.keyAliases ?? {}) };
+  for (const [route, aliases] of Object.entries(mine.keyAliases ?? {})) {
+    // The first reading stands (MemoryStore learnAliases): what is already on disk wins.
+    out.keyAliases[route] = { ...aliases, ...(out.keyAliases[route] ?? {}) };
+  }
+  if (Object.keys(out.keyAliases).length === 0) delete out.keyAliases;
+
   out.states = { ...theirs.states };
   for (const [fp, ours] of Object.entries(mine.states)) {
     const other = theirs.states[fp];
@@ -553,8 +609,14 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
       out.states[fp] = ours;
       continue;
     }
-    const elements = { ...other.elements };
-    for (const [key, el] of Object.entries(ours.elements)) {
+    const nameRule = Math.max(ours.nameRule ?? 0, other.nameRule ?? 0);
+    // When one side is under the current name rule and the other is not, the
+    // other's keys are moved to current ones before the union, as a revisit
+    // moves them (MemoryStore visitState).
+    const current = (side: StateRecord) =>
+      nameRule >= NAME_RULE && (side.nameRule ?? 1) < NAME_RULE ? rekeyed(side.elements, out.keyAliases?.[routeIdentity(side.route)]) : side.elements;
+    const elements = { ...current(other) };
+    for (const [key, el] of Object.entries(current(ours))) {
       const prev = elements[key];
       elements[key] = {
         exercised: (prev?.exercised ?? false) || el.exercised,
@@ -570,6 +632,7 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
       firstSeen: ours.firstSeen < other.firstSeen ? ours.firstSeen : other.firstSeen,
       visits: Math.max(ours.visits, other.visits),
       elements,
+      ...(nameRule ? { nameRule } : {}),
     };
   }
 
@@ -591,6 +654,14 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
       evidence: newer.evidence ?? older.evidence,
       regressedAt: newer.regressedAt ?? older.regressedAt,
     };
+    // A picture and its shot travel together, from whichever side has one, the newer first.
+    const pictured = newer.picture ? newer : older.picture ? older : null;
+    delete merged.picture;
+    delete merged.pictureShot;
+    if (pictured?.picture) {
+      merged.picture = pictured.picture;
+      if (pictured.pictureShot) merged.pictureShot = pictured.pictureShot;
+    }
     // The tier is not "later knowledge wins": a defect on either side is a decision
     // about the convention, and a store still holding the worth-a-look must not undo it.
     const tier = mergeTier(older, newer);
@@ -1790,6 +1861,16 @@ export class MemoryStore {
     return added;
   }
 
+  /** Keep a finding's picture: its path relative to .scenescout/, and what it shows. Returns the finding, or null when there is no such id. */
+  setPicture(id: string, picture: string, shot: PictureShot): Finding | null {
+    const f = this.data.findings.find((x) => x.id === id);
+    if (!f) return null;
+    f.picture = picture;
+    f.pictureShot = shot;
+    this.flush();
+    return f;
+  }
+
   /** Mark a finding resolved; returns it or null. */
   resolveFinding(id: string): Finding | null {
     const f = this.data.findings.find((x) => x.id === id);
@@ -2008,8 +2089,19 @@ export class MemoryStore {
    * listed keys a user cannot act on (collector inertKeys): they stay known,
    * so a click on one still registers, but coverage does not count them.
    * `session` names who visited, for this run's per-session coverage.
+   * `aliases` maps a listed key to the key the same control had under the
+   * earlier name rule (fingerprint.ts keyAliases); the route keeps them so
+   * states written before the rule changed are read under current keys.
    */
-  visitState(fingerprint: string, url: string, route: string, elementKeys: string[], inertKeys: readonly string[] = [], session?: string): boolean {
+  visitState(
+    fingerprint: string,
+    url: string,
+    route: string,
+    elementKeys: string[],
+    inertKeys: readonly string[] = [],
+    session?: string,
+    aliases: Readonly<Record<string, string>> = {},
+  ): boolean {
     this.runStates.add(fingerprint);
     if (session) {
       const routes = this.sessionRoutes.get(session) ?? new Set<string>();
@@ -2027,6 +2119,14 @@ export class MemoryStore {
     }
     rec.visits += 1;
     rec.lastSeen = new Date().toISOString();
+    this.learnAliases(route, aliases);
+    // A record written under the earlier rule can be reached again under the
+    // same fingerprint with its keys renamed: the fingerprint hashes the set
+    // of base keys, so a rename that only moves ordinals (an image button
+    // named like a text button beside it) leaves it unchanged. Its keys are
+    // moved to the current ones before it is marked current.
+    if ((rec.nameRule ?? 1) < NAME_RULE) rec.elements = rekeyed(rec.elements, this.data.keyAliases?.[routeIdentity(route)]);
+    rec.nameRule = NAME_RULE;
     const present = new Set(elementKeys);
     const inert = new Set(inertKeys);
     for (const key of elementKeys) {
@@ -2045,6 +2145,21 @@ export class MemoryStore {
     }
     this.save();
     return isNew;
+  }
+
+  /**
+   * Keep each earlier key → current key the route has not learned yet. The
+   * first reading stands: a later snapshot of another state of the route can
+   * hand out ordinals differently, and the states written under the earlier
+   * rule do not change, so neither should what their keys are read as.
+   */
+  private learnAliases(route: string, aliases: Readonly<Record<string, string>>): void {
+    const pairs = Object.entries(aliases);
+    if (pairs.length === 0) return;
+    const byRoute = (this.data.keyAliases ??= {});
+    const id = routeIdentity(route);
+    const known = (byRoute[id] ??= {});
+    for (const [key, prior] of pairs) if (!Object.hasOwn(known, prior)) known[prior] = key;
   }
 
   markExercised(fingerprint: string, key: string, action: string): void {
@@ -2415,7 +2530,9 @@ export class MemoryStore {
     for (const [fp, rec] of Object.entries(this.data.states)) {
       const route = routeIdentity(rec.route);
       const keys = only && !only.has(fp) ? null : bucket(listed, route);
-      for (const [key, v] of Object.entries(rec.elements)) {
+      // A state written under an earlier name rule is read under current keys.
+      const elements = (rec.nameRule ?? 1) < NAME_RULE ? rekeyed(rec.elements, this.data.keyAliases?.[route]) : rec.elements;
+      for (const [key, v] of Object.entries(elements)) {
         if (v.inert) bucket(inert, route).add(key);
         if (v.exercised) bucket(exercised, route).add(key);
         keys?.add(key);
