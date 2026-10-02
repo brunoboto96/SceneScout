@@ -58,16 +58,39 @@ export function workflowFileOf(ref: string | undefined): string | null {
 
 export type SarifAnchorSource = "option" | "workflow" | "fallback";
 
-/** The anchor file and where it came from. `exists` is asked about repository-relative paths. */
+/**
+ * The anchor file, where it came from, and a warning when the file it should
+ * have been is not in the repository. Candidates are tried in order: the
+ * option, the workflow file, then each fallback; the first that exists wins.
+ * When none does, the first candidate is kept so the SARIF is still written,
+ * and the warning says code scanning will drop its results.
+ * `exists` is asked about repository-relative paths.
+ */
 export function resolveSarifAnchor(o: { option?: string; env: { GITHUB_WORKFLOW_REF?: string }; exists: (repoRelative: string) => boolean }): {
   file: string;
   source: SarifAnchorSource;
+  warning?: string;
 } {
-  if (o.option !== undefined) return { file: o.option, source: "option" };
   const workflow = workflowFileOf(o.env.GITHUB_WORKFLOW_REF);
-  if (workflow) return { file: workflow, source: "workflow" };
-  const found = SARIF_ANCHOR_FALLBACKS.find((f) => o.exists(f));
-  return { file: found ?? SARIF_ANCHOR_FALLBACKS[SARIF_ANCHOR_FALLBACKS.length - 1], source: "fallback" };
+  const candidates: Array<{ file: string; source: SarifAnchorSource }> = [
+    ...(o.option !== undefined ? [{ file: o.option, source: "option" as const }] : []),
+    ...(workflow ? [{ file: workflow, source: "workflow" as const }] : []),
+    ...SARIF_ANCHOR_FALLBACKS.map((file) => ({ file, source: "fallback" as const })),
+  ];
+  const describe = (c: { file: string; source: SarifAnchorSource }): string =>
+    c.source === "option" ? `--sarif-file-anchor ${c.file}` : c.source === "workflow" ? `the workflow file ${c.file}` : c.file;
+  const chosen = candidates.find((c) => o.exists(c.file));
+  // Fallbacks are tried quietly; only a file that was asked for, or the workflow running, is missed out loud.
+  const missed = candidates.slice(0, chosen ? candidates.indexOf(chosen) : candidates.length).filter((c) => c.source !== "fallback");
+  if (!chosen) {
+    const first = candidates[0];
+    return {
+      ...first,
+      warning: `SARIF: no anchor file exists in the repository (tried ${candidates.map(describe).join(", ")}); results point at ${first.file}, and code scanning will drop them`,
+    };
+  }
+  if (missed.length === 0) return chosen;
+  return { ...chosen, warning: `SARIF: ${missed.map(describe).join(" and ")} is not in the repository; results point at ${chosen.file} instead` };
 }
 
 /** The repository root the paths are relative to: the Actions checkout when there is one, else the project. */
@@ -112,9 +135,9 @@ export function sarifFilesFor(o: {
   /** The absolute directory the saved flows were read from, when there were any. */
   flowsDir?: string | null;
   exists: (absolute: string) => boolean;
-}): SarifFiles & { source: SarifAnchorSource } {
+}): SarifFiles & { source: SarifAnchorSource; warning?: string } {
   const root = repositoryRoot(o.env, o.projectDir);
-  const { file, source } = resolveSarifAnchor({ option: o.option, env: o.env, exists: (f) => o.exists(path.join(root, f)) });
+  const { file, source, warning } = resolveSarifAnchor({ option: o.option, env: o.env, exists: (f) => o.exists(path.join(root, f)) });
   const flowsDir = o.flowsDir ? repoRelative(root, o.flowsDir) : null;
-  return { anchor: file, source, ...(flowsDir !== null ? { flowsDir } : {}) };
+  return { anchor: file, source, ...(warning ? { warning } : {}), ...(flowsDir !== null ? { flowsDir } : {}) };
 }

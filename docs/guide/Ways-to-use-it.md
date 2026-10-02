@@ -118,6 +118,7 @@ Code scanning keeps a result only when its location is a file in the repository,
 - An issue a saved flow raised points at that flow's file, relative to the repository root.
 - Anything else points at the anchor: `--sarif-file-anchor <path>` (the action's `sarif-file-anchor` input) when given; else, on GitHub Actions, the workflow file that is running, read from `GITHUB_WORKFLOW_REF`; else `package.json` when the repository has one; else `README.md`.
 - The repository root is `GITHUB_WORKSPACE` when it is set, and the project directory otherwise.
+- The anchor must exist under the repository root. When the option's file or the workflow file is missing, one warning line names it and the next file in that order that exists is used. When none exists, the SARIF is still written, pointing at the first of them, and the warning says code scanning will drop its results. A missing file never stops the run.
 - Alerts keep their identity across runs: the fingerprints come from the evidence, not the location.
 
 ### On GitHub Actions

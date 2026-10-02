@@ -689,7 +689,13 @@ export async function runCi(
     const summary = ciSummaryMarkdown(result, secrets);
     write("summary.md", summary);
     write("ci.json", JSON.stringify(ciSummaryJson(result, deps.version, secrets), null, 2) + "\n");
-    const { anchor } = sarifFilesFor({ option: options.sarifFileAnchor, env: process.env, projectDir: options.projectDir, exists: (p) => fs.existsSync(p) });
+    const { anchor, warning } = sarifFilesFor({
+      option: options.sarifFileAnchor,
+      env: process.env,
+      projectDir: options.projectDir,
+      exists: (p) => fs.existsSync(p),
+    });
+    if (warning) log(warning);
     write("ci.sarif", JSON.stringify(ciSarif(result, deps.version, secrets, anchor), null, 2) + "\n");
     // A capture run's outcome is its pictures and ci.json: it wrote no report by design.
     if (options.show) reportWritten = true;

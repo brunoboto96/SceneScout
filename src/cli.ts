@@ -643,6 +643,7 @@ async function check(args: string[]): Promise<never> {
       flowsDir: inputs.flowsDir,
       exists: (p) => fs.existsSync(p),
     });
+    if (sarifFiles.warning) console.error(`scenescout check: ${sarifFiles.warning}`);
     fs.writeFileSync(path.join(outDir, "check.sarif"), JSON.stringify(toSarif(result, version, sarifFiles), null, 2) + "\n");
     fs.writeFileSync(path.join(outDir, "check.json"), JSON.stringify(toSummaryJson(result, version), null, 2) + "\n");
     // On GitHub Actions the verdict also goes on the run's summary page.

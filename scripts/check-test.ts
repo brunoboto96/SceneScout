@@ -452,7 +452,6 @@ test("SARIF anchor: the option, else the running workflow's file, else package.j
     ["workflow set", { env: { GITHUB_WORKFLOW_REF: ref }, exists: all }, { file: ".github/workflows/ui-check.yml", source: "workflow" }],
     ["workflow not set, package.json there", { env: {}, exists: all }, { file: "package.json", source: "fallback" }],
     ["workflow not set, only README.md", { env: {}, exists: (f) => f === "README.md" }, { file: "README.md", source: "fallback" }],
-    ["workflow not set, neither file", { env: {}, exists: none }, { file: "README.md", source: "fallback" }],
     ["workflow ref of the wrong shape", { env: { GITHUB_WORKFLOW_REF: "nonsense" }, exists: all }, { file: "package.json", source: "fallback" }],
   ];
   for (const [name, input, want] of cases) assert.deepEqual(resolveSarifAnchor(input), want, name);
@@ -463,8 +462,45 @@ test("SARIF anchor: the option, else the running workflow's file, else package.j
   assert.equal(workflowFileOf(undefined), null);
 });
 
+test("SARIF anchor: a missing file is warned about by name and skipped for the next one that exists; with none, the SARIF is still written", () => {
+  const ref = "o/r/.github/workflows/ui-check.yml@refs/heads/main";
+  const only =
+    (...present: string[]) =>
+    (f: string): boolean =>
+      present.includes(f);
+  // The contrastive pair: the same option, present and then missing.
+  const present = resolveSarifAnchor({ option: "docs/ui.md", env: {}, exists: only("docs/ui.md", "package.json") });
+  assert.deepEqual(present, { file: "docs/ui.md", source: "option" }, "no warning when the file is there");
+  const missing = resolveSarifAnchor({ option: "docs/ui.md", env: {}, exists: only("package.json") });
+  assert.equal(missing.file, "package.json");
+  assert.equal(missing.source, "fallback");
+  assert.match(missing.warning ?? "", /--sarif-file-anchor docs\/ui\.md is not in the repository; results point at package\.json instead/);
+  assert.ok(!missing.warning!.includes("\n"), "one line");
+  // The same pair for the workflow file.
+  assert.equal(resolveSarifAnchor({ env: { GITHUB_WORKFLOW_REF: ref }, exists: only(".github/workflows/ui-check.yml") }).warning, undefined);
+  const noWorkflow = resolveSarifAnchor({ env: { GITHUB_WORKFLOW_REF: ref }, exists: only("README.md") });
+  assert.equal(noWorkflow.file, "README.md");
+  assert.match(noWorkflow.warning ?? "", /the workflow file \.github\/workflows\/ui-check\.yml is not in the repository; results point at README\.md/);
+  // A quiet fallback chain is not a warning: package.json missing, README.md there.
+  assert.equal(resolveSarifAnchor({ env: {}, exists: only("README.md") }).warning, undefined);
+  // Nothing exists: the first candidate is kept, and the warning says code scanning will drop the results.
+  const none = resolveSarifAnchor({ option: "docs/ui.md", env: { GITHUB_WORKFLOW_REF: ref }, exists: () => false });
+  assert.equal(none.file, "docs/ui.md");
+  assert.match(none.warning ?? "", /tried --sarif-file-anchor docs\/ui\.md, the workflow file .*package\.json, README\.md.*code scanning will drop them/);
+  assert.equal(resolveSarifAnchor({ env: {}, exists: () => false }).file, "package.json");
+});
+
+test("an explicit --sarif-file-anchor that does not exist is parsed, not refused: the warning comes when the SARIF is written", () => {
+  const parsed = parseCheckArgs(["http://127.0.0.1:3000", "--sarif-file-anchor=no/such/file.md"], "/work");
+  assert.ok(parsed.ok && parsed.options.sarifFileAnchor === "no/such/file.md");
+  const files = sarifFilesFor({ option: "no/such/file.md", env: {}, projectDir: "/w/repo", exists: (p) => p === path.join("/w/repo", "package.json") });
+  assert.equal(files.anchor, "package.json");
+  assert.match(files.warning ?? "", /no\/such\/file\.md is not in the repository/);
+});
+
 test("SARIF files: relative to the Actions checkout when there is one, else the project; flows outside it fall back to the anchor", () => {
-  const exists = (p: string): boolean => p === path.join("/w/repo", "package.json") || p === path.join("/w/repo/app", "README.md");
+  const exists = (p: string): boolean =>
+    [path.join("/w/repo", "package.json"), path.join("/w/repo", ".github/workflows/ui.yml"), path.join("/w/repo/app", "README.md")].includes(p);
   const ref = "o/r/.github/workflows/ui.yml@refs/heads/main";
   assert.deepEqual(
     sarifFilesFor({
