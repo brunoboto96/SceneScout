@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { CHECK_OPTION_NAMES, CHECK_RULES, parseCheckArgs, WORTH_A_LOOK_RULES } from "../src/engine/check.ts";
 import { CI_OPTION_NAMES, KEY_ENV, parseCiArgs } from "../src/engine/ci.ts";
+import { EXPORT_OPTION_NAMES, parseExportArgs } from "../src/engine/export.ts";
 import { LOGIN_OPTION_NAMES } from "../src/engine/profiles.ts";
 import { SCRIPT_FLAGS } from "../src/engine/scripted-login.ts";
 import { SUBCOMMANDS } from "../src/commands.ts";
@@ -343,11 +344,12 @@ test("the reference lists every command the CLI dispatches", () => {
   assert.deepEqual(listed, COMMANDS);
 });
 
-test("the reference lists exactly the options of check, ci and login", () => {
+test("the reference lists exactly the options of check, ci, login and export", () => {
   const listed = (command: string) => sorted(tableIn(REFERENCE, `### \`scenescout ${command}\``).flatMap((r) => optionsIn(r[0])));
   assert.deepEqual(listed("check"), sorted(CHECK_OPTION_NAMES));
   assert.deepEqual(listed("ci"), sorted(CI_OPTION_NAMES));
   assert.deepEqual(listed("login"), sorted([...LOGIN_OPTION_NAMES, ...SCRIPT_ONLY]));
+  assert.deepEqual(listed("export"), sorted(EXPORT_OPTION_NAMES));
 });
 
 test("the reference lists exactly the flags install, doctor and watch read", () => {
@@ -358,7 +360,7 @@ test("the reference lists exactly the flags install, doctor and watch read", () 
   assert.deepEqual(listed, sorted(inCode));
 });
 
-test("the defaults the reference gives for check and ci are the parsers' defaults", () => {
+test("the defaults the reference gives for check, ci and export are the parsers' defaults", () => {
   const defaults = (command: string) => new Map(tableIn(REFERENCE, `### \`scenescout ${command}\``).map((r) => [optionsIn(r[0])[0], r[1]]));
   const check = parseCheckArgs(["http://127.0.0.1:3000"], "/p");
   const ci = parseCiArgs(["http://127.0.0.1:3000"], "/p");
@@ -383,6 +385,16 @@ test("the defaults the reference gives for check and ci are the parsers' default
     "max-minutes": o.caps.wallMs / 60_000,
   };
   for (const [option, value] of Object.entries(expectCi)) assert.equal(defaults("ci").get(option), `\`${value}\``, `ci --${option}`);
+  const ex = parseExportArgs(["--to", "jira", "--jira-url", "https://example.atlassian.net", "--jira-project", "QA"], "/p", {});
+  assert.ok(ex.ok && ex.options.to === "jira");
+  const e = ex.options;
+  const expectExport: Record<string, string | number> = {
+    "min-severity": e.minSeverity,
+    "max-issues": e.maxIssues,
+    screenshots: e.screenshots ? "on" : "off",
+    "jira-issue-type": e.jira.issueType,
+  };
+  for (const [option, value] of Object.entries(expectExport)) assert.equal(defaults("export").get(option), `\`${value}\``, `export --${option}`);
 });
 
 test("the check rules table is every rule with its severity", () => {
@@ -404,6 +416,7 @@ test("every --option a page mentions is one SceneScout has", () => {
   const known = new Set<string>([
     ...CHECK_OPTION_NAMES,
     ...CI_OPTION_NAMES,
+    ...EXPORT_OPTION_NAMES,
     ...LOGIN_OPTION_NAMES,
     ...SCRIPT_ONLY,
     ...CLI_LITERAL_FLAGS,

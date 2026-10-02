@@ -1209,12 +1209,13 @@ test("the flags each hand-parsed command documents still reach it", async () => 
   for (const argv of cases) assert.deepEqual(await dispatched(argv), { ran: [argv.join(" ")], exit: null, said: [] }, argv.join(" "));
 });
 
-test("check, ci and login keep their own option parsing, and serve starts whatever else it is given", async () => {
-  // Their parsers refuse unknown options with their own exit codes (check and ci exit 2), so the preflight leaves them be.
+test("check, ci, login and export keep their own option parsing, and serve starts whatever else it is given", async () => {
+  // Their parsers refuse unknown options with their own exit codes (check, ci and export exit 2), so the preflight leaves them be.
   for (const argv of [
     ["check", "http://127.0.0.1:3000", "--nope"],
     ["ci", "http://127.0.0.1:3000", "--nope"],
     ["login", "http://127.0.0.1:3000", "--nope"],
+    ["export", "--to", "github", "--nope"],
     ["serve", "--stray"],
   ]) {
     assert.deepEqual((await dispatched(argv)).ran, [argv.join(" ")], argv.join(" "));
