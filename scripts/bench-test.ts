@@ -48,15 +48,26 @@ import { HttpModelClient } from "../src/ci-run.ts";
 import { NO_USAGE, redactKeys } from "../src/engine/ci.ts";
 import {
   buildPairs,
+  clientAnswersJudge,
   decideDuplicate,
+  DedupJudge,
+  DEDUP_JUDGE_CAPABILITY,
   formatPairScore,
+  JUDGE_EVIDENCE_CHARS,
   JUDGE_SYSTEM,
+  JUDGE_TITLE_CHARS,
   JUDGE_TOOL,
+  judgeKickoffOf,
+  judgeSamplingParams,
+  MAX_JUDGE_KICKOFF_CHARS,
+  planDedup,
   pairId,
   parseJudgement,
   ruleJudgement,
   samplePairs,
+  samplingResultOf,
   scorePairs,
+  turnFromSampling,
   type Ask,
   type Judgement,
   type LabelledPair,
@@ -1266,4 +1277,304 @@ test("dedup pairs: a pair's id is stable, differs between pairs, and carries non
   assert.equal(pairId(p("B")), pairId(p("B")));
   assert.notEqual(pairId(p("B")), pairId(p("C")));
   assert.match(pairId(p("B")), /^[0-9a-f]{12}$/);
+});
+
+// ── the judge the store asks ────────────────────────────────────────────────
+
+const storedFinding = (id: string, title: string, state = "/orders#s1", extra: Partial<Finding> = {}): Finding => ({
+  id,
+  severity: "medium",
+  category: "ux-confusing",
+  title,
+  detail: "",
+  url: "http://app.test/orders",
+  state,
+  repro: [],
+  foundAt: "2026-10-01T00:00:00.000Z",
+  runs: 1,
+  ...extra,
+});
+const filing = (title: string, state = "/orders#s2") => ({
+  severity: "medium" as const,
+  category: "ux-confusing",
+  title,
+  detail: "",
+  url: "http://app.test/orders",
+  state,
+});
+/** The stored finding a judge call was about, read back from the question it was sent. */
+const askedAbout = (kickoff: string): string => (JSON.parse(/Finding A: (.*)/.exec(kickoff)![1]) as { title: string }).title;
+
+test("store judge: asked only about open findings on the filing's page, the most alike first, at most three, the cap logged once per page", async () => {
+  const asked: string[] = [];
+  const logs: string[] = [];
+  const judge = new DedupJudge(
+    async (_system, _tools, kickoff) => {
+      asked.push(askedAbout(kickoff));
+      return turn({ verdict: "different", confidence: 0.9 });
+    },
+    { label: "test", log: (l) => logs.push(l) },
+  );
+  const stored = [
+    storedFinding("a", "Save button gives no feedback"),
+    storedFinding("b", "Totals column misaligned"),
+    storedFinding("c", "Save shows no confirmation feedback"),
+    storedFinding("d", "Saving gives no feedback", "/other#s1"),
+    storedFinding("e", "Saving gives no feedback at all", "/orders#s3", { status: "resolved" }),
+    storedFinding("f", "Header logo blurry"),
+  ];
+  assert.deepEqual(await judge.judge(filing("Saving gives no feedback"), stored), null);
+  // Another page and a resolved finding are never asked about, however alike; ties go to the newer.
+  assert.deepEqual(asked, ["Save button gives no feedback", "Save shows no confirmation feedback", "Header logo blurry"]);
+  assert.equal(judge.tally.capped, 1);
+  await judge.judge(filing("Saving still gives no feedback"), stored);
+  assert.equal(logs.filter((l) => /could be the one just filed there/.test(l)).length, 1, logs.join("\n"));
+  assert.match(logs[0], /4 open findings on \/orders .*at most 3 calls per filing/);
+});
+
+test("store judge: a 'same' answer merges with its p_same and stops asking; the same pair answered 'different' stays apart", async () => {
+  const stored = [storedFinding("a", "Save button gives no feedback"), storedFinding("b", "Save gives nothing back")];
+  let calls = 0;
+  const same = new DedupJudge(
+    async () => {
+      calls += 1;
+      return turn({ verdict: "same", confidence: 0.9 });
+    },
+    { label: "t", log: () => {} },
+  );
+  assert.deepEqual(await same.judge(filing("Clicking save shows nothing"), stored), { sameAs: "b", pSame: 0.9 });
+  assert.equal(calls, 1);
+  const different = new DedupJudge(async () => turn({ verdict: "different", confidence: 0.9 }), { label: "t", log: () => {} });
+  assert.deepEqual(await different.judge(filing("Clicking save shows nothing"), stored), null);
+  assert.deepEqual([same.tally.same, different.tally.different, different.tally.calls], [1, 2, 2]);
+});
+
+test("store judge: unsure, a contradiction and a failed call each leave the rule's decision, logged once per kind; three failures in a row switch it off", async () => {
+  const logs: string[] = [];
+  let answer: () => Promise<ModelTurn> = async () => turn({ verdict: "unsure", confidence: 0.5 });
+  const judge = new DedupJudge(() => answer(), { label: "t", log: (l) => logs.push(l) });
+  const stored = [storedFinding("a", "Save button gives no feedback")];
+  const file = () => judge.judge(filing("Clicking save shows nothing"), stored);
+  assert.deepEqual(await file(), null);
+  assert.deepEqual(await file(), null);
+  answer = async () => turn({ verdict: "same", confidence: 0.2 });
+  assert.deepEqual(await file(), null);
+  await file();
+  answer = async () => {
+    throw new Error("HTTP 503: overloaded");
+  };
+  await file();
+  await file();
+  assert.equal(judge.off, null, "unsure answers and contradictions do not count towards switching off");
+  assert.equal(logs.length, 3, logs.join("\n"));
+  assert.match(logs[0], /unsure/);
+  assert.match(logs[1], /contradicts its confidence 0\.2/);
+  assert.match(logs[2], /failed \(HTTP 503: overloaded\).*later failures are counted, not logged/);
+  await file();
+  assert.match(judge.off ?? "", /3 failed calls in a row, the last: the model judge failed \(HTTP 503: overloaded\)/);
+  assert.match(logs[3], /switched off .* the rule decides every filing for the rest of this run/);
+  // Off: nothing more is asked, and a "same" it would have given changes nothing.
+  let asked = 0;
+  answer = async () => {
+    asked += 1;
+    return turn({ verdict: "same", confidence: 0.9 });
+  };
+  assert.deepEqual(await file(), null);
+  assert.equal(asked, 0);
+  assert.deepEqual([judge.tally.calls, judge.tally.fellBack, judge.tally.same], [7, 7, 0]);
+});
+
+test("store judge: a call slower than its limit is ended and left to the rule; a filing's time stops further calls", async () => {
+  const logs: string[] = [];
+  const hung = new DedupJudge(() => new Promise<ModelTurn>(() => {}), { label: "t", log: (l) => logs.push(l), callMs: 20 });
+  assert.deepEqual(await hung.judge(filing("Clicking save shows nothing"), [storedFinding("a", "Save button gives no feedback")]), null);
+  assert.match(logs[0], /no answer within 20ms/);
+  let t = 0;
+  let calls = 0;
+  const slow = new DedupJudge(
+    async () => {
+      calls += 1;
+      t += 41_000;
+      return turn({ verdict: "different", confidence: 0.9 });
+    },
+    { label: "t", log: (l) => logs.push(l), now: () => t },
+  );
+  const three = ["Save button gives no feedback", "Save gives nothing back", "Save is silent"].map((title, i) => storedFinding(String(i), title));
+  assert.deepEqual(await slow.judge(filing("Clicking save shows nothing"), three), null);
+  assert.equal(calls, 1, "the 40 s a filing may take ran out after the first call");
+  assert.ok(
+    logs.some((l) => /40s a filing may take ran out/.test(l)),
+    logs.join("\n"),
+  );
+});
+
+test("store judge: describes itself for the report only once it was asked, with what its calls cost", async () => {
+  const judge = new DedupJudge(async () => turn({ verdict: "same", confidence: 0.8 }), { label: "openai m, effort none", log: () => {} });
+  assert.equal(judge.describe(), null);
+  await judge.judge(filing("Clicking save shows nothing"), [storedFinding("a", "Save button gives no feedback")]);
+  assert.match(
+    judge.describe()!,
+    /^the rule, then the model judge \(openai m, effort none\) for filings the rule kept apart: 1 call\(s\), 1 same, 0 different, 0 left to the rule; 15 tokens; \d+\.\ds$/,
+  );
+});
+
+test("judge through a client: the question goes as one text message offering only judge_pair, and the answer comes back as the call", () => {
+  const params = judgeSamplingParams(JUDGE_SYSTEM, [JUDGE_TOOL], "Both findings were filed on the page /x.");
+  assert.deepEqual(judgeKickoffOf(params), { ok: true, kickoff: "Both findings were filed on the page /x." });
+  assert.equal(params.toolChoice.mode, "required");
+  assert.equal(params.systemPrompt, JUDGE_SYSTEM);
+  // What the client answers, read back, is read exactly as the model's own turn would be.
+  for (const answered of [
+    turn({ verdict: "same", confidence: 0.8 }),
+    turn({ verdict: "different", confidence: 0.7 }),
+    turn({ verdict: "same", confidence: 0.3 }),
+  ])
+    assert.deepEqual(parseJudgement(turnFromSampling(samplingResultOf(answered, "m"))), parseJudgement(answered));
+  // Arguments that could not be read come back as text: an error, never a guess.
+  const garbled: ModelTurn = { text: "", calls: [{ id: "c", name: JUDGE_TOOL.name, argsError: "the arguments were not valid JSON" }], usage: NO_USAGE };
+  const read = parseJudgement(turnFromSampling(samplingResultOf(garbled, "m")));
+  assert.ok(!read.ok && /without calling a tool: judge_pair was called with arguments that could not be read/.test(read.error), JSON.stringify(read));
+  assert.match(
+    turnFromSampling({ model: "m", role: "assistant", content: { type: "text", text: "" }, stopReason: "maxTokens" }).note ?? "",
+    /cut at its output limit/,
+  );
+  assert.deepEqual(
+    turnFromSampling(samplingResultOf(turn({ verdict: "same", confidence: 0.8 }), "m")).usage,
+    NO_USAGE,
+    "the client counts the tokens, not the server",
+  );
+});
+
+test("judge through a client: a request that is not the judge's question is refused", () => {
+  const ok = judgeSamplingParams(JUDGE_SYSTEM, [JUDGE_TOOL], "q");
+  const refused = (p: unknown): string => {
+    const r = judgeKickoffOf(p);
+    assert.ok(!r.ok, JSON.stringify(p).slice(0, 200));
+    return r.error;
+  };
+  const object = { type: "object" };
+  assert.match(refused({ ...ok, tools: [] }), /exactly the judge_pair tool/);
+  assert.match(refused({ ...ok, tools: [...ok.tools, { name: "scout_click", inputSchema: object }] }), /exactly the judge_pair tool/);
+  assert.match(refused({ ...ok, tools: [{ name: "scout_click", inputSchema: object }] }), /exactly the judge_pair tool/);
+  assert.match(refused({ ...ok, messages: [...ok.messages, ...ok.messages] }), /one user message/);
+  assert.match(refused({ ...ok, messages: [{ role: "assistant", content: { type: "text", text: "q" } }] }), /one user message/);
+  assert.match(refused({ ...ok, messages: [{ role: "user", content: { type: "image", data: "", mimeType: "image/png" } }] }), /one block of text/);
+  assert.match(refused({ ...ok, messages: [{ role: "user", content: { type: "text", text: "x".repeat(MAX_JUDGE_KICKOFF_CHARS + 1) } }] }), /longer than/);
+  assert.match(refused(null), /no parameters/);
+});
+
+test("store judge: the switch-off counts failures in a row only; an answer between two failures starts the count again", async () => {
+  const logs: string[] = [];
+  const answers: Array<"fail" | "different"> = ["fail", "fail", "different", "fail", "fail"];
+  const judge = new DedupJudge(
+    async () => {
+      if (answers.shift() === "fail") throw new Error("HTTP 503: overloaded");
+      return turn({ verdict: "different", confidence: 0.9 });
+    },
+    { label: "t", log: (l) => logs.push(l) },
+  );
+  for (let i = 0; i < 5; i++) await judge.judge(filing("Clicking save shows nothing"), [storedFinding("a", "Save button gives no feedback")]);
+  assert.equal(judge.off, null, "four failures, never three in a row");
+  assert.deepEqual([judge.tally.calls, judge.tally.different, judge.tally.fellBack], [5, 1, 4]);
+});
+
+test("store judge: a fault in the judge itself switches it off; the log gets the stack, the report only the message", async () => {
+  const logs: string[] = [];
+  let asked = 0;
+  const judge = new DedupJudge(
+    async () => {
+      asked += 1;
+      return turn({ verdict: "same", confidence: 0.9 });
+    },
+    { label: "t", log: (l) => logs.push(l) },
+  );
+  // A stored finding read back from a hand-edited file, with no title: the judge cannot rank it.
+  const broken = { ...storedFinding("a", "x"), title: undefined } as unknown as Finding;
+  assert.equal(await judge.judge(filing("Clicking save shows nothing"), [broken]), null);
+  assert.match(judge.off ?? "", /^a fault in the judge: /);
+  assert.ok(!/\n|at /.test(judge.off ?? ""), "no stack in what the report prints");
+  assert.match(logs.join("\n"), /switched off after a fault in the judge: [\s\S]*\n\s+at /, "the log has the stack");
+  assert.match(judge.describe() ?? "", /switched off after a fault in the judge/);
+  assert.equal(await judge.judge(filing("Clicking save shows nothing"), [storedFinding("b", "Save button gives no feedback")]), null);
+  assert.equal(asked, 0, "switched off, it asks nothing");
+});
+
+test("store judge: a key quoted in a provider's error is redacted from the log and from the reason the report prints", async () => {
+  const KEY = "fake-judge-key-0123456789abcdef";
+  const logs: string[] = [];
+  const judge = new DedupJudge(
+    async () => {
+      throw new Error(`HTTP 401: Incorrect API key provided: ${KEY}`);
+    },
+    { label: "t", log: (l) => logs.push(l), redact: (text) => redactKeys(text, [KEY]) },
+  );
+  for (let i = 0; i < 3; i++) await judge.judge(filing("Clicking save shows nothing"), [storedFinding("a", "Save button gives no feedback")]);
+  assert.match(judge.off ?? "", /the last: the model judge failed \(HTTP 401: Incorrect API key provided: \[redacted key\]\)/);
+  for (const text of [...logs, judge.off ?? "", judge.describe() ?? ""]) assert.ok(!text.includes(KEY), text);
+  // The contrast: with no redaction given, the reason carries what the provider said.
+  const plain = new DedupJudge(
+    async () => {
+      throw new Error(`HTTP 401: Incorrect API key provided: ${KEY}`);
+    },
+    { label: "t", log: () => {} },
+  );
+  for (let i = 0; i < 3; i++) await plain.judge(filing("Clicking save shows nothing"), [storedFinding("a", "Save button gives no feedback")]);
+  assert.ok((plain.off ?? "").includes(KEY));
+});
+
+test("store judge: a long title and evidence are cut, so the question always fits what a client answering the judge accepts", async () => {
+  const kickoffs: string[] = [];
+  const judge = new DedupJudge(
+    async (_system, _tools, kickoff) => {
+      kickoffs.push(kickoff);
+      return turn({ verdict: "different", confidence: 0.9 });
+    },
+    { label: "t", log: () => {} },
+  );
+  const long = storedFinding("a", "Save fails ".repeat(200), "/orders#s1", { evidence: "x".repeat(50_000) });
+  await judge.judge({ ...filing("Save fails again ".repeat(200)), evidence: "y".repeat(50_000) }, [long]);
+  const [kickoff] = kickoffs;
+  assert.ok(kickoff.length < MAX_JUDGE_KICKOFF_CHARS, String(kickoff.length));
+  assert.ok(judgeKickoffOf(judgeSamplingParams(JUDGE_SYSTEM, [JUDGE_TOOL], kickoff)).ok);
+  assert.ok(kickoff.includes(`${"x".repeat(JUDGE_EVIDENCE_CHARS)}…`) && !kickoff.includes("x".repeat(JUDGE_EVIDENCE_CHARS + 1)));
+  assert.ok(!kickoff.includes("Save fails ".repeat(Math.ceil(JUDGE_TITLE_CHARS / 11) + 1)));
+  // Short fields go as they were filed.
+  kickoffs.length = 0;
+  await judge.judge(filing("Clicking save shows nothing"), [
+    storedFinding("b", "Save button gives no feedback", "/orders#s1", { evidence: "POST /api/orders 200" }),
+  ]);
+  assert.match(kickoffs[0], /"title":"Save button gives no feedback","category":"ux-confusing","evidence":"POST \/api\/orders 200"/);
+});
+
+test("server's dedup plan: the rule unless asked; the judge through a client that answers it, else a key, else off and saying why", () => {
+  const KEY = "fake-plan-key-0123456789abcdef";
+  const answers = { sampling: { tools: {} }, experimental: { [DEDUP_JUDGE_CAPABILITY]: {} } };
+  assert.equal(clientAnswersJudge(answers), true);
+  assert.equal(clientAnswersJudge({ sampling: { tools: {} } }), false, "sampling alone is not an offer to answer the judge");
+  assert.equal(
+    clientAnswersJudge({ sampling: {}, experimental: { [DEDUP_JUDGE_CAPABILITY]: {} } }),
+    false,
+    "nor is the capability without sampling with tools",
+  );
+  assert.equal(clientAnswersJudge(undefined), false);
+
+  assert.deepEqual(planDedup(undefined, {}, answers), { mode: "rule", note: "" }, "off unless asked for");
+  assert.deepEqual(
+    planDedup("rule", { SCENESCOUT_DEDUP: "judge", OPENAI_API_KEY: KEY }, answers),
+    { mode: "rule", note: "" },
+    "an attach's rule wins over the variable",
+  );
+  const viaClient = planDedup(undefined, { SCENESCOUT_DEDUP: "judge", OPENAI_API_KEY: KEY }, answers);
+  assert.ok(viaClient.mode === "judge" && viaClient.via === "client", "a client that answers the judge is asked, even with a key in the environment");
+  const viaKey = planDedup("judge", { OPENAI_API_KEY: KEY }, { sampling: { tools: {} } });
+  assert.ok(viaKey.mode === "judge" && viaKey.via === "key");
+  assert.deepEqual(viaKey.resolved, { provider: "openai", model: "gpt-6-luna", effort: "none", baseUrl: "https://api.openai.com/v1" });
+  assert.match(viaKey.note, /a model judge \(openai gpt-6-luna, effort none\)[\s\S]*titles, categories, evidence and the page's path\) is sent to openai/);
+  assert.ok(!viaKey.note.includes(KEY));
+  const off = planDedup("judge", {}, undefined);
+  assert.ok(off.mode === "judge" && off.via === "off");
+  assert.match(off.note, /⚠ DEDUP JUDGE OFF: the judge needs ANTHROPIC_API_KEY or OPENAI_API_KEY in the server's environment\. The rule decides duplicates\./);
+  assert.throws(() => planDedup(undefined, { SCENESCOUT_DEDUP: "yes" }, undefined), /SCENESCOUT_DEDUP must be one of rule, judge/);
+  assert.throws(() => planDedup("judge", { OPENAI_API_KEY: KEY, SCENESCOUT_DEDUP_PROVIDER: "other" }, undefined), /SCENESCOUT_DEDUP_PROVIDER must be one of/);
+  assert.deepEqual(planDedup("rule", { SCENESCOUT_DEDUP: "yes" }, undefined), { mode: "rule", note: "" }, "a named mode does not read the variable");
 });

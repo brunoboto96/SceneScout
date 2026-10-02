@@ -387,6 +387,7 @@ test("the defaults the reference gives for check and ci are the parsers' default
     "max-turns": o.caps.turns,
     "max-tokens": o.caps.tokens,
     "max-minutes": o.caps.wallMs / 60_000,
+    dedup: o.dedup,
   };
   for (const [option, value] of Object.entries(expectCi)) assert.equal(defaults("ci").get(option), `\`${value}\``, `ci --${option}`);
   const first = parseFirstRunArgs(["http://127.0.0.1:3000"], "/p");
