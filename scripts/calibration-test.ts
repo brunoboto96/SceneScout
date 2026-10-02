@@ -32,7 +32,8 @@ const decision = (over: Partial<RecordedDecision> = {}): RecordedDecision => ({
   severity: "medium",
   category: "data-inconsistency",
   confidence: 0.9,
-  evidence: `GET /api/r${n} 500`,
+  // A word with the counter in it: `/api/r100` reads as a code-shaped record id, which route identity collapses.
+  evidence: `GET /api/endpoint-${n} 500`,
   at: "2026-09-22T10:00:00.000Z",
   ...over,
 });

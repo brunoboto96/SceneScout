@@ -421,8 +421,8 @@ export function isTemplateSegment(seg: string): boolean {
 /**
  * Whether two paths name the same route. A template segment on either side
  * stands for ONE segment that is an id by route identity's own rule
- * (`isIdSegment`: a number after the first segment, a UUID, a long hex
- * string), or for another template. Never for a word: `/users/{id}` is not
+ * (`isIdSegment`: a number or a code-shaped id after the first segment, a
+ * UUID, a long hex string), or for another template. Never for a word: `/users/{id}` is not
  * `/users/me`, `/things/:id` is not `/things/export`, and a path of three stars does
  * not stand for every three-segment path. Same number of segments, every literal
  * equal (case-insensitive), so a template never absorbs a slash or an empty

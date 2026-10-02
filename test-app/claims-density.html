@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Preferences</title>
+  </head>
+  <body>
+    <!--
+      A density choice saved as it changes. The save is refused, the page reads
+      no answer, and the radio stays on the new choice: the page shows the
+      change as kept with no word that it was not. claims-density-revert.html
+      differs in one fact: it puts the old choice back when the save fails.
+    -->
+    <h1>Preferences</h1>
+    <fieldset>
+      <legend>Density</legend>
+      <label><input type="radio" name="density" value="comfortable" data-testid="density-comfortable-radio" checked /> Comfortable</label>
+      <label><input type="radio" name="density" value="compact" data-testid="density-compact-radio" /> Compact</label>
+    </fieldset>
+    <script>
+      const REVERT = false;
+      let current = "comfortable";
+      for (const radio of document.querySelectorAll("input[name=density]")) {
+        radio.addEventListener("change", async () => {
+          const res = await fetch("/api/refuse/403?pref=density", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ density: radio.value }) }).catch(() => null);
+          if (res && res.ok) current = radio.value;
+          else if (REVERT) document.querySelector("input[value=" + current + "]").checked = true;
+        });
+      }
+    </script>
+  </body>
+</html>
