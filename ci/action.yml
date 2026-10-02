@@ -94,6 +94,10 @@ inputs:
     description: judge or rule. judge (the default when empty) also asks the run's model, at the lowest effort its API takes, whether a finding the rule keeps apart is one already open on the same page, sending the two findings' titles, categories and evidence, and the page's path; rule asks nothing.
     required: false
     default: ""
+  sarif-file-anchor:
+    description: The repository file, relative to the repository root, that each ci.sarif result points at (code scanning keeps only results located in a repository file). Empty means the workflow file that is running.
+    required: false
+    default: ""
   storage-state:
     description: A Playwright storage-state file to explore while signed in, relative to working-directory.
     required: false
