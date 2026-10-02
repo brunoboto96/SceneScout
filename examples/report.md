@@ -12,7 +12,7 @@ Generated: (by `npm run demo`)
 | Design audits this run (all sessions) | 3 |
 | Oracle violations this session | 11 |
 | Errors caused by the tester's own write-policy blocks (not counted above) | 2 |
-| Elements exercised (informational — denominator grows with every state) | 7/74 |
+| Elements exercised (informational — denominator grows with every state) | 7/44 |
 
 ## Page quality scores (worst first)
 
@@ -24,7 +24,7 @@ Generated: (by `npm run demo`)
 
 ## Gap ledger — what was NOT tested
 
-- ⚠ 5 route(s) visited but NOTHING exercised (looked at, never touched): /approvals.html, /customers.html, /audit.html, /settings.html, /signin.html
+- ⚠ 3 route(s) visited but NOTHING exercised (looked at, never touched): /approvals.html, /settings.html, /signin.html
 - ⚠ 9/12 visited route(s) never design-audited: /orders.html, /approvals.html, /inventory.html, /customers.html, /reports.html, /audit.html, /settings.html, /signin.html …
 - ⚠ single-role run (anonymous) — permission boundaries and role capability gaps are untested
 
@@ -44,7 +44,7 @@ Choosing Status → Archived makes the orders request fail with a 500. The table
 1. crawl /reports-scheduled.html @ http://127.0.0.1:4173/reports-scheduled.html
 2. navigate http://127.0.0.1:4173/orders.html @ http://127.0.0.1:4173/orders.html
 3. snapshot @ http://127.0.0.1:4173/orders.html
-4. select combobox "All Open Shipped Awaiting approval Approved Rejected Archived" = archived @ http://127.0.0.1:4173/orders.html
+4. select combobox "Status" = archived @ http://127.0.0.1:4173/orders.html
 5. screenshot @ http://127.0.0.1:4173/orders.html
 
 </details>
@@ -55,7 +55,7 @@ test("regression: Filtering orders by Archived fails, and the page shows an empt
   // crawl /reports-scheduled.html @ http://127.0.0.1:4173/reports-scheduled.html
   // navigate http://127.0.0.1:4173/orders.html @ http://127.0.0.1:4173/orders.html
   // snapshot @ http://127.0.0.1:4173/orders.html
-  // select combobox "All Open Shipped Awaiting approval Approved Rejected Archived" = archived @ http://127.0.0.1:4173/orders.html
+  // select combobox "Status" = archived @ http://127.0.0.1:4173/orders.html
   // screenshot @ http://127.0.0.1:4173/orders.html
   // TODO: replay the steps above with page.getByTestId()/getByRole(), then assert the fix:
   // expect(consoleErrors).toHaveLength(0);
@@ -440,15 +440,13 @@ test("regression: The confirmation email field has no label, only a placeholder"
 
 ## Unexplored surface (for the next run)
 
-- `/`: tid:stat-open, tid:stat-shipped, tid:stat-revenue, tid:stat-pending, tid:dash-all-orders, tid:dash-new-badge, tid:dash-chart
-- `/orders.html`: tid:orders-new-btn, tid:orders-rows, tid:order-link-1042, tid:order-link-1041, tid:order-link-1040, tid:order-link-1039, tid:order-link-1038, tid:order-link-1037
-- `/approvals.html`: tid:approvals-who, tid:approvals-rows, tid:approvals-row-1038, tid:approvals-order-link-1038, tid:approvals-row-1037, tid:approvals-order-link-1037
-- `/inventory.html`: tid:inventory-sort-name, tid:inventory-rows, tid:inventory-row-HB-101, tid:inventory-row-HB-102, tid:inventory-row-HB-103, tid:inventory-row-HB-104, tid:inventory-row-HB-105, tid:inventory-row-HB-106
-- `/customers.html`: tid:customers-rows, tid:customers-row-1, tid:customers-row-2, tid:customers-row-3, tid:customers-row-4, tid:customers-row-5, tid:customers-row-6
+- `/`: tid:dash-all-orders
+- `/orders.html`: tid:orders-new-btn, tid:order-link-1042, tid:order-link-1041, tid:order-link-1040, tid:order-link-1039, tid:order-link-1038, tid:order-link-1037
+- `/approvals.html`: tid:approvals-order-link-1038, tid:approvals-order-link-1037
+- `/inventory.html`: tid:inventory-sort-name
 - `/reports.html`: tid:reports-scheduled-link
-- `/audit.html`: tid:audit-denied
 - `/settings.html`: tid:settings-name, tid:settings-timezone, tid:settings-save, tid:settings-delete-workspace
-- `/signin.html`: tid:signin-role-clerk, tid:signin-role-manager, tid:signin-role-auditor, tid:signin-status
-- `/orders-new.html`: tid:new-order-form, tid:new-order-items, tid:new-order-email, tid:new-order-cancel, tid:new-order-msg
-- `/order.html`: tid:order-back, tid:order-request-approval, tid:order-notes, tid:order-delete, tid:order-stickybar, link:line items are edited from the list
+- `/signin.html`: tid:signin-role-clerk, tid:signin-role-manager, tid:signin-role-auditor
+- `/orders-new.html`: tid:new-order-items, tid:new-order-email, tid:new-order-cancel
+- `/order.html`: tid:order-back, tid:order-request-approval, tid:order-notes, tid:order-delete, link:line items are edited from the list
 - `(shared layout chrome)`: tid:nav-logo, tid:nav-dashboard, tid:nav-orders, tid:nav-approvals, tid:nav-inventory, tid:nav-customers, tid:nav-reports, tid:nav-audit … +2

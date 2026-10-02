@@ -1,0 +1,87 @@
+{
+  "app": "demo",
+  "run": "ci-lanes-4-demo-160-turns-2",
+  "date": "2026-10-02",
+  "note": "Four lanes (--lanes 4) with the caps raised to 160 turns and 6,000,000 tokens, engine at 0b709b2; gpt-6-luna, effort low. See Unattended runs, lanes.",
+  "findings": [
+    {
+      "title": "Dashboard chart image fails to load",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard order link overlaps bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard geometry: e16 All orders overlaps e17 New: bulk import (85%)"
+    },
+    {
+      "title": "Dashboard spacing frequently falls outside a 4px rhythm",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "dashboard spacing audit: 46% off 4px grid; 2px×16, 14px×6",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    },
+    {
+      "title": "Inventory page offers no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "inventory design audit: no visually dominant action; task-clarity score 92",
+      "tier": "worth_a_look",
+      "convention": "a primary action on operational list pages"
+    },
+    {
+      "title": "Inventory quantity sort appears lexicographic instead of numeric",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "inventory sort Quantity order: HB-103=10, HB-101=120, HB-106=250, HB-104=3, HB-105=64, HB-102=9"
+    },
+    {
+      "title": "Export CSV crashes with an undefined rows error",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports-export-csv throws Cannot read properties of undefined (reading 'rows')"
+    },
+    {
+      "title": "Save notes control is covered by the pinned order sticky bar",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order-save covered by order-stickybar on /order.html"
+    },
+    {
+      "title": "Order form helper text fails WCAG contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new helper text contrast 1.73:1 on #f6f8fa"
+    },
+    {
+      "title": "Optional confirmation email field has no accessible label",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "orders-new confirmation email textbox has no associated label"
+    },
+    {
+      "title": "Scheduled reports page is blank and has no way back",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "UI path Reports > Scheduled reports; /reports-scheduled.html renders 0 interactable elements"
+    },
+    {
+      "title": "Stored markup from an order customer field executes when viewing orders",
+      "severity": "high",
+      "category": "security",
+      "evidence": "dom_injection: <script>alert(1)</script> rendered on /orders.html from testid=new-order-customer"
+    },
+    {
+      "title": "Customer register padding falls outside a 4px spacing grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "design-audit /customers.html: padding 10px×42, 14px×42; 0% on 4px grid",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    }
+  ],
+  "decisions": []
+}

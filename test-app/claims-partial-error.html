@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Record</title>
+  </head>
+  <body>
+    <!--
+      claims-partial.html with one difference: the page says the attachment
+      was not saved. The refused part is admitted, so nothing contradicts it.
+    -->
+    <h1>Record 8</h1>
+    <button data-testid="record-save-button" onclick="save()">Save</button>
+    <p data-testid="record-status"></p>
+    <p data-testid="record-attachment-status"></p>
+    <script>
+      const ADMITS = true;
+      async function save() {
+        await fetch("/api/allow", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+        const attachment = await fetch("/api/refuse/403?part=attachment", { method: "POST" }).catch(() => null);
+        document.querySelector("[data-testid=record-status]").textContent = "Saved";
+        if (ADMITS && !(attachment && attachment.ok))
+          document.querySelector("[data-testid=record-attachment-status]").textContent = "The attachment could not be saved";
+      }
+    </script>
+  </body>
+</html>

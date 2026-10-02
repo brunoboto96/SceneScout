@@ -11,6 +11,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
+import { MAX_LANES } from "./brief.js";
 import type { CaptureOutcome } from "./capture.js";
 import { markdownCell } from "./check.js";
 import { parseLimitFlag } from "./limits.js";
@@ -78,6 +79,15 @@ export interface Caps {
 export const DEFAULT_CAPS: Caps = { turns: 40, tokens: 1_500_000, wallMs: 20 * 60_000 };
 const CAP_BOUNDS = { turns: [1, 500], tokens: [1_000, 20_000_000], minutes: [1, 360] } as const;
 
+/**
+ * How many model loops explore at once, each in its own browser session and
+ * its own part of the app (engine/ci-lanes.ts). 1 is the single loop. The most
+ * is scout_lane_brief's, since the split is the same one. Why the default is
+ * what it is: docs/benchmark.md, "Unattended runs".
+ */
+export const DEFAULT_LANES = 1;
+export const MAX_CI_LANES = MAX_LANES;
+
 /** Every option `scenescout ci` accepts; the ci action's inputs are these names (ci-test holds them equal). */
 export const CI_OPTION_NAMES = [
   "provider",
@@ -87,6 +97,7 @@ export const CI_OPTION_NAMES = [
   "max-turns",
   "max-tokens",
   "max-minutes",
+  "lanes",
   "price-in",
   "price-cached-in",
   "price-out",
@@ -119,6 +130,8 @@ export interface CiOptions {
   effort?: string;
   baseUrl?: string;
   caps: Caps;
+  /** Model loops that explore at once, sharing `caps`; 1 is the single loop. */
+  lanes: number;
   /** Prices given on the command line; absent when none was. */
   price?: PriceOverride;
   mode: CiMode;
@@ -219,7 +232,11 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
   const turns = whole("max-turns", CAP_BOUNDS.turns, DEFAULT_CAPS.turns);
   const tokens = whole("max-tokens", CAP_BOUNDS.tokens, DEFAULT_CAPS.tokens);
   const minutes = whole("max-minutes", CAP_BOUNDS.minutes, DEFAULT_CAPS.wallMs / 60_000);
-  for (const v of [turns, tokens, minutes]) if (typeof v === "string") return { ok: false, error: v };
+  const lanes = whole("lanes", [1, MAX_CI_LANES], DEFAULT_LANES);
+  for (const v of [turns, tokens, minutes, lanes]) if (typeof v === "string") return { ok: false, error: v };
+  // The lanes share the run's turns rather than getting a cap each: fewer turns than lanes would leave a lane none.
+  if ((lanes as number) > (turns as number))
+    return { ok: false, error: `--lanes ${lanes} needs --max-turns of at least ${lanes}: the lanes share the run's turns, and each needs one` };
   const price: PriceOverride = {};
   for (const [flag, field] of [
     ["price-in", "input"],
@@ -258,6 +275,8 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
     .trim();
   if (show !== undefined && show.length > MAX_SHOW) return { ok: false, error: `--show is at most ${MAX_SHOW} characters` };
   if (flags.has("show") && !show) return { ok: false, error: '--show needs a few words describing the element, e.g. --show "the Save button"' };
+  if (show && (lanes as number) > 1)
+    return { ok: false, error: "--lanes splits an exploration between model loops, and --show explores nothing: give one or the other" };
   let compareUrl: string | undefined;
   if (flags.has("compare-url")) {
     if (!show) return { ok: false, error: "--compare-url compares an element: give it with --show" };
@@ -292,6 +311,7 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
       ...(effort ? { effort } : {}),
       ...(baseUrl ? { baseUrl } : {}),
       caps: { turns: turns as number, tokens: tokens as number, wallMs: (minutes as number) * 60_000 },
+      lanes: lanes as number,
       ...(Object.keys(price).length > 0 ? { price } : {}),
       mode: mode as CiMode,
       level: level as CiLevel,
@@ -306,6 +326,18 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
       ...(anchor ? { sarifFileAnchor: anchor.value } : {}),
     },
   };
+}
+
+/**
+ * Why scout_attach did not leave a session the run can use, or null when it
+ * did: an error result, or a saved sign-in the app no longer accepts (the
+ * attach succeeds, and says so on a line of its own).
+ */
+export function attachFailure(r: { text: string; isError: boolean }): string | null {
+  const authFailed = r.text.split("\n").find((l) => l.startsWith("⚠ AUTH FAILED"));
+  if (authFailed) return authFailed;
+  if (r.isError || /^ERROR:/.test(r.text)) return r.text.replace(/^ERROR:\s*/, "");
+  return null;
 }
 
 // ── which provider ──────────────────────────────────────────────────────────
@@ -462,7 +494,8 @@ export function addUsage(a: Usage, b: Usage): Usage {
 /**
  * Which cap, if any, stops the run before its next model call. Checked
  * between turns: one turn's usage is only known after it, so a run can end
- * up to one turn over the token cap, and the report says by how much.
+ * up to one turn over the token cap (one per lane in a run split into lanes:
+ * see Budget), and the report says by how much.
  */
 export function capReached(spend: Spend, caps: Caps, now: number): CapName | null {
   if (now - spend.startedAt >= caps.wallMs) return "time";
@@ -474,6 +507,56 @@ export function capReached(spend: Spend, caps: Caps, now: number): CapName | nul
 /** What is left of the time cap. No model or tool call may run longer. */
 export function wallLeftMs(spend: Spend, caps: Caps, now: number): number {
   return Math.max(0, caps.wallMs - (now - spend.startedAt));
+}
+
+/**
+ * What a run's model loops draw their turns from: one loop's, or the one
+ * budget every lane of a run shares (ADR 20). The caps are the run's, not a
+ * lane's: lanes together never make more model calls or run longer than one
+ * loop would be allowed, and a lane that finishes early leaves what it did not
+ * use to the lanes still running.
+ *
+ * A turn is taken before its model call and counted against the turn cap while
+ * it is under way, so lanes that reach the last turn together cannot all start
+ * it. Tokens are known only once a call returns, so each loop with a call
+ * under way can take the run up to one turn over the token cap, as a single
+ * loop can.
+ */
+export interface Budget {
+  caps: Caps;
+  startedAt: number;
+  /** Model calls that returned, over every loop drawing on this budget. */
+  turns: number;
+  /** What those calls used. */
+  usage: Usage;
+  /** Model calls taken and not yet returned. */
+  inFlight: number;
+}
+
+export function newBudget(caps: Caps, startedAt: number): Budget {
+  return { caps, startedAt, turns: 0, usage: { ...NO_USAGE }, inFlight: 0 };
+}
+
+/** What the budget's loops have spent between them. */
+export function budgetSpend(b: Budget): Spend {
+  return { turns: b.turns, usage: { ...b.usage }, startedAt: b.startedAt };
+}
+
+/** Take the next turn for one loop, or name the cap that refuses it. */
+export function takeTurn(b: Budget, now: number): CapName | null {
+  const cap = capReached({ turns: b.turns + b.inFlight, usage: b.usage, startedAt: b.startedAt }, b.caps, now);
+  if (cap === null) b.inFlight += 1;
+  return cap;
+}
+
+/** A taken turn's call has ended: counted with the usage it reported, or given back when it failed. */
+export function settleTurn(b: Budget, usage?: Usage): void {
+  // A settle with no turn taken would count a call nobody reserved: a bug in the caller, not a state to carry on from.
+  if (b.inFlight <= 0) throw new Error("settleTurn without a turn taken: every settle must follow a takeTurn that returned null");
+  b.inFlight -= 1;
+  if (!usage) return;
+  b.turns += 1;
+  b.usage = addUsage(b.usage, usage);
 }
 
 // ── how a run ends ──────────────────────────────────────────────────────────
@@ -579,7 +662,8 @@ export function usageLine(spend: Spend, model: string, endedAt: number, override
  * closes itself, so the mode and the target cannot change), scout_session,
  * scout_playbook (the method is the system prompt), scout_screenshot (the
  * loop is text-only), scout_resolve (scout_verify records re-tests), and the
- * lane tools (one agent, ADR 14).
+ * lane tools (a run split into lanes is planned and folded by the run itself,
+ * not by a model: engine/ci-lanes.ts, ADR 20).
  */
 export const CI_TOOLS = [
   "scout_scan",
@@ -769,6 +853,32 @@ export function findingsThisRun(before: readonly Finding[], after: readonly Find
   return after.filter((f) => f.status !== "resolved" && (!runsBefore.has(f.id) || f.runs > (runsBefore.get(f.id) ?? 0)));
 }
 
+/** One lane of a run split into lanes (--lanes), as the summary and ci.json report it. */
+export interface LaneResult {
+  /** The lane's session name, derived from what it owns. */
+  session: string;
+  /** The modules it owned, as path prefixes. */
+  modules: string[];
+  /** How many routes it owned. */
+  routes: number;
+  /** False when its browser could not attach, so it never ran. */
+  attached: boolean;
+  stop: StopReason;
+  stopDetail?: string;
+  /** Its own model calls and what they used, as far as it got to report them; the run's totals are the shared budget's. */
+  turns: number;
+  usage: Usage;
+}
+
+/** How a run asked for lanes went: the lanes that ran, or why it explored in one loop instead. */
+export interface CiLanes {
+  /** --lanes as given. */
+  asked: number;
+  sessions: LaneResult[];
+  /** Set when the run explored in one loop although lanes were asked for: why. */
+  oneLoop?: string;
+}
+
 export interface CiResult {
   url: string;
   provider: ProviderName;
@@ -787,6 +897,8 @@ export interface CiResult {
   findings: Finding[];
   /** What a run asked to show an element (--show) captured. */
   capture?: CaptureOutcome;
+  /** Present when lanes were asked for (--lanes 2 or more). */
+  lanes?: CiLanes;
   /** How findings were deduplicated, and what the judge's calls cost. Absent on a capture run, which files none. */
   dedup?: CiDedup;
 }
@@ -844,11 +956,13 @@ export function ciSummaryMarkdown(r: CiResult, secrets: readonly string[] = []):
     ...(r.capture ? [] : [`| Level | ${r.level} — completion contract ${r.contractMet ? "met" : "not met (the report's gap ledger says what is missing)"} |`]),
     `| Mode | ${r.mode} |`,
     `| Model | ${r.provider} ${cell(r.model, secrets)}, effort ${r.effort} |`,
+    ...(r.lanes ? [`| Lanes | ${lanesCell(r.lanes, secrets)} |`] : []),
     ...(r.dedup ? [`| Finding dedup | ${dedupLine(r.dedup)} |`] : []),
     `| Usage | ${usageLine(r.spend, r.model, r.endedAt, r.price)} |`,
     ``,
   ];
   if (r.capture) lines.push(...captureSummaryLines(r.capture, secrets));
+  if (r.lanes && r.lanes.sessions.length > 0) lines.push(...laneSummaryLines(r.lanes, secrets));
   if (defects.length > 0) {
     lines.push(`| Severity | Category | Finding | Page |`, `|---|---|---|---|`);
     for (const f of defects.slice(0, 50))
@@ -865,6 +979,27 @@ export function ciSummaryMarkdown(r: CiResult, secrets: readonly string[] = []):
   // A capture run writes pictures, not a report.
   lines.push(r.capture ? `The pictures are in shots/.` : `The full report, with repro steps and the gap ledger, is report.md.`, ``);
   return lines.join("\n");
+}
+
+function lanesCell(l: CiLanes, secrets: readonly string[]): string {
+  if (l.oneLoop) return `${l.asked} asked; explored in one loop: ${cell(l.oneLoop, secrets)}`;
+  const ran = l.sessions.filter((s) => s.attached).length;
+  const planned = l.sessions.length;
+  return (
+    `${ran} of ${l.asked} asked ran at once, sharing the caps below` +
+    (planned < l.asked ? `; the app split into ${planned}` : "") +
+    (ran < planned ? `; ${planned - ran} could not attach` : "")
+  );
+}
+
+function laneSummaryLines(l: CiLanes, secrets: readonly string[]): string[] {
+  const out = [`| Lane | Owns | Routes | Turns | Tokens | Ended |`, `|---|---|---:|---:|---:|---|`];
+  for (const s of l.sessions)
+    out.push(
+      `| ${cell(s.session, secrets)} | ${cell(s.modules.join(", "), secrets)} | ${s.routes} | ${s.turns} | ${n(s.usage.input + s.usage.output)} | ${s.stop}${s.stopDetail ? `: ${cell(s.stopDetail, secrets)}` : ""} |`,
+    );
+  out.push(``);
+  return out;
 }
 
 function captureSummaryLines(c: CaptureOutcome, secrets: readonly string[]): string[] {
@@ -937,6 +1072,29 @@ export function ciSummaryJson(r: CiResult, version: string, secrets: readonly st
       ...(isWorthALook(f) ? { tier: "worth-a-look", convention: clean(f.convention ?? "") } : {}),
     })),
     ...(r.capture ? { capture: cleanCapture(r.capture, clean) } : {}),
+    ...(r.lanes ? { lanes: lanesJson(r.lanes, clean) } : {}),
+  };
+}
+
+/** The lanes as ci.json holds them. Module paths and lane names come from the app's routes: redacted like the rest. */
+function lanesJson(l: CiLanes, clean: (s: string) => string): object {
+  return {
+    asked: l.asked,
+    planned: l.sessions.length,
+    ran: l.sessions.filter((s) => s.attached).length,
+    ...(l.oneLoop ? { oneLoop: clean(l.oneLoop) } : {}),
+    sessions: l.sessions.map((s) => ({
+      session: clean(s.session),
+      modules: s.modules.map(clean),
+      routes: s.routes,
+      attached: s.attached,
+      stop: s.stop,
+      ...(s.stopDetail ? { detail: clean(s.stopDetail) } : {}),
+      turns: s.turns,
+      inputTokens: s.usage.input,
+      cachedInputTokens: s.usage.cachedInput,
+      outputTokens: s.usage.output,
+    })),
   };
 }
 

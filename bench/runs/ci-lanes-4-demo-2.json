@@ -1,0 +1,33 @@
+{
+  "app": "demo",
+  "run": "ci-lanes-4-demo-2",
+  "date": "2026-10-02",
+  "note": "Unattended run with --lanes 4 on the engine at eba7aea; gpt-6-luna, effort low, default caps shared by the lanes. See Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard actions overlap the bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard All orders overlaps New: bulk import 85%"
+    },
+    {
+      "title": "Order detail's Save notes button is covered by sticky bar",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order-stickybar covers order-save at initial scroll position"
+    },
+    {
+      "title": "Inventory page has no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "inventory page no visually dominant action"
+    }
+  ],
+  "decisions": []
+}

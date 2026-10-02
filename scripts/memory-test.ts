@@ -54,6 +54,7 @@ import {
   isEmptySubmit,
   isFormBookkeeping,
   isNavigationTeardown,
+  isSubmitLike,
   isTextEntry,
   sameControl,
   submits,
@@ -564,6 +565,45 @@ test("coverage: a route's elements are counted once across its state fingerprint
   assert.equal(cov.elementsTotal, 2, "two distinct controls, not four");
   assert.equal(cov.elementsExercised, 1, "exercised in ANY state of the route counts");
   assert.deepEqual(cov.unexercised, [{ state: "/a", keys: ["button:open"], total: 2 }]);
+});
+
+test("coverage counts the controls on a page, not the wrappers and badges it lists for their test ids", () => {
+  // Three buttons and ten tagged wrappers on one page: the same keys listed either way, and the one
+  // fact that flips the count is whether the collector said a user can act on the element.
+  const store = freshStore();
+  const buttons = ["button:save", "button:open", "button:close"];
+  const wrappers = Array.from({ length: 10 }, (_, i) => `tid:wrapper-${i}`);
+  store.visitState("/page#f1", "http://x/page", "/page", [...buttons, ...wrappers], wrappers);
+  const cov = store.coverage();
+  assert.equal(cov.elementsTotal, 3, "three controls, not thirteen elements");
+  assert.deepEqual(cov.unexercised, [{ state: "/page", keys: buttons, total: 3 }]);
+  // The wrappers stay known, so a click aimed at one still registers, without counting as coverage.
+  store.markExercised("/page#f1", "tid:wrapper-0", "click");
+  assert.equal(store.wasExercised("/page#f1", "tid:wrapper-0"), true);
+  assert.equal(store.coverage().elementsExercised, 0);
+  // Listed without the inert set (as memory written before it), every key counts, as it always did.
+  const legacy = freshStore();
+  legacy.visitState("/page#f1", "http://x/page", "/page", [...buttons, ...wrappers]);
+  assert.equal(legacy.coverage().elementsTotal, 13);
+  // A merge with another process's memory keeps the mark.
+  const file = (inert: boolean): Parameters<typeof mergeMemory>[0] => ({
+    version: 1,
+    states: {
+      "/page#f1": {
+        url: "http://x/page",
+        route: "/page",
+        firstSeen: "2026-01-01",
+        visits: 1,
+        elements: { "tid:wrapper-1": { exercised: false, ...(inert ? { inert: true } : {}) } },
+      },
+    },
+    findings: [],
+  });
+  assert.equal(mergeMemory(file(true), file(false)).states["/page#f1"].elements["tid:wrapper-1"].inert, true, "ours says inert, and wins");
+  assert.equal(mergeMemory(file(false), file(true)).states["/page#f1"].elements["tid:wrapper-1"].inert, undefined, "ours says a control, and wins");
+  // A key that becomes a control on a later visit counts again.
+  store.visitState("/page#f1", "http://x/page", "/page", [...buttons, ...wrappers], wrappers.slice(1));
+  assert.equal(store.coverage().elementsTotal, 4);
 });
 
 test("coverage reports each route's own deduped total, so the gap ledger can compare like with like", () => {
@@ -1790,6 +1830,25 @@ test("coverage: controls inside another site's frame are counted apart from the 
     "an embed's controls never reach the gap ledger",
   );
   assert.equal(isEmbedKey("frame:about:srcdoc#Inner|button:x"), false);
+});
+
+test("isSubmitLike: submit words count as whole words of the name or test id", () => {
+  const cases: Array<[string, string, string | null, boolean]> = [
+    ["button", "Sign in", null, true],
+    ["button", "Continue", "sign-in", true],
+    ["button", "Sign", null, true],
+    ["button", "Go", "auth_signup_button", true],
+    ["button", "Save", null, true],
+    ["button", "Add", "rowAdd", true],
+    // The words inside other words are not the word.
+    ["button", "Verify", "assignee-verify", false],
+    ["button", "Lookup", "postcode-lookup", false],
+    ["button", "Design", null, false],
+    ["button", "Address book", "address-book", false],
+    // Only buttons.
+    ["link", "Sign in", null, false],
+  ];
+  for (const [role, name, testid, want] of cases) assert.equal(isSubmitLike(role, name, testid), want, `${role} ${name} ${testid}`);
 });
 
 // ---------------------------------------------------------------------------

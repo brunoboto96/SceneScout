@@ -167,6 +167,8 @@ Usage:
                                      --max-turns N (default 40); --max-tokens N (default 1500000);
                                      --max-minutes N (default 20): the run stops at the first cap reached and still
                                       writes the report;
+                                     --lanes N (default 1, at most 8): split the app between N model loops that
+                                      explore at once, each in its own browser, sharing those caps;
                                      --price-in, --price-cached-in, --price-out: US dollars per million tokens,
                                       over the built-in prices, for the cost estimate of any model;
                                      --mode observe|read-only|safe-write|destructive (default read-only;

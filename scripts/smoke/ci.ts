@@ -6,7 +6,8 @@
  * on an early stop and on a start that fails, the provider rule, that the
  * key never reaches the output, a run asked to show or compare one element
  * (--show, --compare-url) against two deployments of one page that differ in
- * one button's colours, and the dedup judge asked by the server through the
+ * one button's colours, a run split into two lanes (--lanes) from the
+ * fixture app's root, and the dedup judge asked by the server through the
  * run (a sampling request over the server's stdio).
  */
 import { execFile } from "node:child_process";
@@ -63,6 +64,7 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     await earlyStop(baseUrl, path.join(work, "early-stop"));
     await cannotStart(path.join(work, "cannot-start"));
     await showAndCompare(baseUrl, work);
+    await lanes(baseUrl, path.join(work, "lanes"));
     await judgedDedup(baseUrl, path.join(work, "dedup"));
     await overTheWire(baseUrl, work);
   } finally {
@@ -141,6 +143,78 @@ async function cannotStart(project: string): Promise<void> {
     `${result.stop} ${exitCode}`,
   );
   check("ci: it still writes a summary saying so, and no report", written.includes("summary.md") && !written.includes("report.md"), written.join());
+}
+
+// ── lanes ───────────────────────────────────────────────────────────────────
+
+/**
+ * Two lanes over the real server and browsers, from the fixture app's root, the
+ * base URL a run is given: the planner snapshots and crawls it, the routes its
+ * links reach are split into two lanes by module, each lane attaches on the
+ * root and is sent to its own first route, and both file the same failing
+ * endpoint, which the run reports once. The assertions read the split from
+ * ci.json, so a link added to the root page later changes nothing here.
+ */
+async function lanes(baseUrl: string, project: string): Promise<void> {
+  fs.mkdirSync(project, { recursive: true });
+  const seen = new Map<string, { kickoff: string; received: ToolOutcome[][] }>();
+  const makeClient = (_system: string, _tools: unknown, kickoff: string): ModelClient => {
+    const lane = /as lane "([^"]+)"/.exec(kickoff)?.[1] ?? "?";
+    const model = new Scripted([
+      turn([
+        ["s", "scout_snapshot", {}],
+        [
+          "f",
+          "scout_finding",
+          {
+            severity: "medium",
+            category: "http-error",
+            title: `Saving fails in ${lane}`,
+            detail: "Filed by a scripted lane.",
+            evidence: "POST /api/lanes-save 500",
+          },
+        ],
+      ]),
+      turn([], `Lane ${lane} is done.`),
+    ]);
+    seen.set(lane, { kickoff, received: model.received });
+    return model;
+  };
+  const { result, exitCode } = await runCi(options(baseUrl, project, ["--lanes", "2"]), RESOLVED, { makeClient, version: "0.0.0-test" });
+  const out = path.join(project, ".scenescout", "ci");
+  const json = JSON.parse(read(out, "ci.json") || "{}") as {
+    lanes?: { planned: number; ran: number; sessions: Array<{ session: string; modules: string[]; turns: number }> };
+    findings?: Array<{ category: string }>;
+    usage?: { turns: number };
+  };
+  const sessions = json.lanes?.sessions ?? [];
+  const modules = sessions.flatMap((l) => l.modules);
+  check(
+    "ci lanes: the planning crawl splits the app into two lanes, each owning whole modules of its own",
+    json.lanes?.planned === 2 && json.lanes.ran === 2 && modules.length >= 2 && new Set(modules).size === modules.length,
+    JSON.stringify(json.lanes),
+  );
+  // Each lane's first message names the page it was sent to; its snapshot must be of that page, in its own session.
+  const landings = sessions.map((l) => ({ lane: l.session, landing: /Your browser is on (\S+)\.$/m.exec(seen.get(l.session)?.kickoff ?? "")?.[1] ?? "" }));
+  const onItsPage = landings.every(({ lane, landing }) => {
+    const snap = seen.get(lane)?.received[0]?.[0]?.text ?? "";
+    return landing !== "" && snap.startsWith(`[session ${lane} `) && snap.includes(`\nURL: ${baseUrl}${landing}\n`);
+  });
+  check(
+    "ci lanes: each lane attaches on the run's URL, is sent to its own first route, and acts there in its own session",
+    onItsPage && landings.some(({ landing }) => landing !== "/"),
+    JSON.stringify(landings) + "\n" + landings.map(({ lane }) => (seen.get(lane)?.received[0]?.[0]?.text ?? "").slice(0, 200)).join("\n---\n"),
+  );
+  check(
+    "ci lanes: the endpoint both lanes filed is one finding",
+    json.findings?.filter((f) => f.category === "http-error").length === 1,
+    JSON.stringify(json.findings),
+  );
+  check(
+    "ci lanes: the run ends done with exit 0, both lanes' turns counted, and one report",
+    result.stop === "done" && exitCode === 0 && json.usage?.turns === 4 && read(out, "report.md").startsWith("# SceneScout Report"),
+    `${result.stop} ${exitCode} ${JSON.stringify(json.usage)}`,
+  );
 }
 
 // ── the dedup judge, through the server ─────────────────────────────────────

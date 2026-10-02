@@ -1,0 +1,39 @@
+{
+  "app": "demo",
+  "run": "ci-lanes-1-demo-2",
+  "date": "2026-10-02",
+  "note": "Unattended run, one loop (the default), on the engine at eba7aea with --lanes built in; gpt-6-luna, effort low, default caps. The baseline for the lanes comparison; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard action links overlap the bulk-import badge",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "Dashboard e16 All orders overlaps e17 New: bulk import 85%"
+    },
+    {
+      "title": "Order detail requests a null order and returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/orders/null 404"
+    },
+    {
+      "title": "Scheduled reports route is a blank dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "route /reports-scheduled.html has 0 interactables"
+    },
+    {
+      "title": "Dashboard navigation links lack a distinct link affordance",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "dashboard has 8 links with body-text color and no underline"
+    }
+  ],
+  "decisions": []
+}
