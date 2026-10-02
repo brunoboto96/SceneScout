@@ -17,7 +17,7 @@ Only test apps you own or are authorised to test.
 
 `destructive` is for a disposable, seeded environment. The agent never chooses it on its own; it needs you to say so. `scenescout ci` needs two options together (`--mode destructive --allow-destructive`) so that a mode value copied from another workflow cannot turn it on.
 
-`scenescout check` accepts only `observe` and `read-only`, and replays saved flows under observe's rule unless `--flow-writes allow` is given.
+`scenescout check` accepts only `observe` and `read-only`, and replays saved flows under observe's rule unless `--flow-writes allow` is given. A first look (`scenescout <url>`) is often pointed at a live app, so it runs in `observe` unless `--mode read-only` is given, and accepts no other mode.
 
 ## What a refusal looks like
 

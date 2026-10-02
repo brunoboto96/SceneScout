@@ -1,9 +1,10 @@
 # Ways to use it
 
-SceneScout has five ways in. They share one engine, one write policy and one project memory in `.scenescout/`, so what one finds, another can re-test.
+SceneScout has six ways in. They share one engine and one write policy, and all but the first share one project memory in `.scenescout/`, so what one finds, another can re-test.
 
 | Way | Who drives it | Model needed | Fails a build | Use it for |
 |---|---|---|---|---|
+| [`scenescout <url>`](Start-here.md#a-first-look-with-nothing-set-up) | Nobody: deterministic | None | No | A first look at any app, with nothing set up first |
 | [An interactive run](#an-interactive-run) | Your coding agent, with you watching | Your agent's | No | Exploring a feature while you build it; a pre-release pass |
 | [Parallel lanes](#parallel-lanes) | Several agents, one per area or role | Your agent's | No | A large app, or a multi-role app, in less wall time |
 | [`scenescout check`](#scenescout-check-a-gate-in-ci) | Nobody: deterministic | None | Yes | A pull-request gate |
