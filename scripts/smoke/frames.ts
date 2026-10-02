@@ -148,9 +148,10 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       const from = oracles.all.length;
       const echoes = () => oracles.all.slice(from).filter((v) => v.kind === "console_error" && /^Failed to load resource/.test(v.detail));
       await sending(engine, () => inFrame.evaluate((u) => fetch(u, { mode: "no-cors" }).catch(() => "failed"), echoTarget));
-      // A browser that echoes a failed load is waited for; one that does not has no event to wait for.
+      // A browser that echoes a failed load is waited for, then given a window for a second echo, which would be the
+      // same failure filed twice; one that does not echo has only the window.
       if (echoesFailedLoads(BROWSER)) await eventually(() => echoes().length > 0);
-      else await settle(ABSENT_MS);
+      await settle(echoesFailedLoads(BROWSER) ? 500 : ABSENT_MS);
       return echoes();
     };
     const embedEchoes = await echoesAfter(frameAs("foreign")!);

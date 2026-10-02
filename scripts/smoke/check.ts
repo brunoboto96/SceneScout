@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { createDemoServer } from "../../demo-app/server.mjs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { writeRedirectHopsJudged } from "../../dist/browsers.js";
-import { BROWSER, check, settle, until, type SmokeContext } from "./harness.ts";
+import { BROWSER, check, eventually, settle, until, type SmokeContext } from "./harness.ts";
 
 export const title = "check (deterministic gate)";
 
@@ -625,12 +625,12 @@ async function flowWriteEdges({
       );
       // The server answers the sign-in with its redirect 1.5 s after it arrives: wait for the hop to be judged, which
       // is either the engine refusing it or the save arriving.
-      const refused = (lateEngine as unknown as { blockedRequests: Array<{ sig: string }> }).blockedRequests;
-      await until(
-        "the sign-in to arrive and its redirected hop to be judged",
+      // Read afresh on every look: the engine replaces the list as the flow hands back.
+      const refused = () => (lateEngine as unknown as { blockedRequests: Array<{ sig: string }> }).blockedRequests;
+      await eventually(
         () =>
           writes("POST /api/handback/login") > signInsAtStart &&
-          (writes("POST /api/handback/saved") > savedAtStart || refused.some((b) => b.sig.includes("/api/handback/saved"))),
+          (writes("POST /api/handback/saved") > savedAtStart || refused().some((b) => b.sig.includes("/api/handback/saved"))),
       );
     } finally {
       await lateEngine.close();
