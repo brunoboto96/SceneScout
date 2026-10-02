@@ -44,3 +44,7 @@ Thumbs.db
 *.log
 npm-debug.log*
 coverage/
+
+# The desktop extension bundle and its staging folder (npm run mcpb)
+.mcpb-build/
+*.mcpb

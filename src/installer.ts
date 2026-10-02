@@ -394,6 +394,17 @@ export function diagnose(opts: {
    * when it is not on disk; `expected` is where Playwright looks for it.
    */
   defaultBrowser: { target: InstallTarget; path: string | null; expected?: string | null };
+  /**
+   * SceneScout installed as a Claude Desktop extension, from
+   * findDesktopExtension, or null/absent when there is none.
+   */
+  desktopExtension?: DesktopExtension | null;
+  /**
+   * Where this copy's Playwright keeps (or would keep) the headless Chromium
+   * build. The extension's build sits beside it in the same download folder,
+   * under its own revision; null skips that check.
+   */
+  headlessShellDir?: string | null;
   run: Runner;
 }): Check[] {
   const checks: Check[] = [];
@@ -412,12 +423,25 @@ export function diagnose(opts: {
     fix: `${repair.browser(browser.target)}   (or: npx playwright install ${browser.target})`,
   });
 
+  const extension = opts.desktopExtension ?? null;
+  if (extension) checks.push(...desktopExtensionChecks(extension, opts.headlessShellDir ?? null));
+
   if (opts.scope === "engine") return checks;
 
   const skill = path.join(opts.claudeDir, "skills", SKILL_NAME, "SKILL.md");
+  const got = opts.run("claude", ["mcp", "get", MCP_NAME]);
+  if (extension && !fs.existsSync(skill) && (got.missing || got.status !== 0)) {
+    // The extension brings its own server, and Claude Desktop has no skill
+    // folder: someone who only uses Claude Desktop has nothing to fix here.
+    checks.push({
+      name: CLAUDE_CODE_NOT_NEEDED,
+      ok: true,
+      detail: `not set up, and the desktop extension does not need it (to use SceneScout in Claude Code as well: ${repair.setup})`,
+    });
+    return checks;
+  }
   checks.push({ name: "skill installed", ok: fs.existsSync(skill), detail: skill, fix: repair.setup });
 
-  const got = opts.run("claude", ["mcp", "get", MCP_NAME]);
   if (got.missing) {
     checks.push({
       name: "claude CLI on PATH",
@@ -462,4 +486,153 @@ export function diagnose(opts: {
     }
   }
   return checks;
+}
+
+/** The `name` in the desktop extension's manifest.json, which is how its install is told apart from other extensions. */
+export const DESKTOP_EXTENSION_NAME = "scenescout";
+
+/** Where Claude Desktop keeps the folder it unpacks each installed extension into. */
+export function desktopExtensionRoots(opts: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv }): string[] {
+  const folder = "Claude Extensions";
+  if (opts.platform === "darwin") return [path.join(opts.home, "Library", "Application Support", "Claude", folder)];
+  if (opts.platform === "win32") {
+    const roots: string[] = [];
+    const appData = opts.env.APPDATA?.trim() || path.join(opts.home, "AppData", "Roaming");
+    roots.push(path.join(appData, "Claude", folder));
+    // The Microsoft Store build keeps its data in its package's own folder,
+    // named after the package with a publisher suffix.
+    const packages = path.join(opts.env.LOCALAPPDATA?.trim() || path.join(opts.home, "AppData", "Local"), "Packages");
+    for (const entry of readDirNames(packages)) {
+      if (/^Claude_/i.test(entry)) roots.push(path.join(packages, entry, "LocalCache", "Roaming", "Claude", folder));
+    }
+    return roots;
+  }
+  return [path.join(opts.env.XDG_CONFIG_HOME?.trim() || path.join(opts.home, ".config"), "Claude", folder)];
+}
+
+/** The names in a folder, or none when the folder does not exist or cannot be listed. */
+function readDirNames(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "EACCES" || code === "EPERM") return [];
+    throw err;
+  }
+}
+
+export type DesktopExtension = {
+  /** The folder Claude Desktop unpacked the bundle into. */
+  dir: string;
+  version: string | null;
+  /** The server script the manifest names, resolved inside `dir`; null when the manifest names none. */
+  entry: string | null;
+  entryPresent: boolean;
+  /**
+   * The headless Chromium revision its bundled Playwright launches (from
+   * playwright-core's browsers.json), which names the folder that build is
+   * downloaded into; null when it cannot be read.
+   */
+  headlessShellRevision: string | null;
+};
+
+function readJson(file: string): Record<string, unknown> | null {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (err) {
+    // No such file, or a plain file where a folder was expected (a .DS_Store among the extension folders).
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "EACCES" || code === "EPERM") return null;
+    throw err;
+  }
+  try {
+    const value: unknown = JSON.parse(text);
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    // A manifest that is not JSON is not one this function can vouch for; another extension's broken file is not ours to report.
+    return null;
+  }
+}
+
+/**
+ * The SceneScout desktop extension under any of `roots`, or null.
+ *
+ * Extensions are matched by the `name` in their manifest.json, not by folder
+ * name: Claude Desktop names the folder after an id it derives itself.
+ */
+export function findDesktopExtension(roots: readonly string[]): DesktopExtension | null {
+  for (const root of roots) {
+    for (const name of readDirNames(root).sort()) {
+      const dir = path.join(root, name);
+      const manifest = readJson(path.join(dir, "manifest.json"));
+      if (manifest?.name !== DESKTOP_EXTENSION_NAME) continue;
+      const server = manifest.server as { entry_point?: unknown } | undefined;
+      const entry = typeof server?.entry_point === "string" ? path.join(dir, server.entry_point) : null;
+      const browsers = readJson(path.join(dir, "node_modules", "playwright-core", "browsers.json"))?.browsers;
+      const shell = Array.isArray(browsers)
+        ? (browsers as Array<{ name?: unknown; revision?: unknown }>).find((b) => b?.name === "chromium-headless-shell")
+        : undefined;
+      return {
+        dir,
+        version: typeof manifest.version === "string" ? manifest.version : null,
+        entry,
+        entryPresent: entry !== null && fs.existsSync(entry),
+        headlessShellRevision: typeof shell?.revision === "string" && /^\d+$/.test(shell.revision) ? shell.revision : null,
+      };
+    }
+  }
+  return null;
+}
+
+/** The check doctor reports, passing, when only the desktop extension is set up and Claude Code's skill and registration are not needed. */
+export const CLAUDE_CODE_NOT_NEEDED = "Claude Code setup";
+
+/** What doctor says about a desktop extension install. */
+function desktopExtensionChecks(extension: DesktopExtension, ownShellDir: string | null): Check[] {
+  const reinstall = "in Claude Desktop, remove SceneScout under Settings > Extensions, then install the .mcpb file from the latest release again";
+  const label = `SceneScout ${extension.version ?? "(no version in its manifest)"}`;
+  const checks: Check[] = [
+    {
+      name: "desktop extension installed",
+      ok: extension.entryPresent,
+      detail: extension.entryPresent
+        ? `${label} in Claude Desktop: ${extension.dir}`
+        : `${label} in Claude Desktop, but its server is missing: ${extension.entry ?? "the manifest names none"}`,
+      fix: reinstall,
+    },
+  ];
+  // The browser check above is for this copy's Playwright. The extension's may
+  // launch another revision, downloaded into its own folder beside this one.
+  if (extension.headlessShellRevision && ownShellDir) {
+    const dir = path.join(path.dirname(ownShellDir), `chromium_headless_shell-${extension.headlessShellRevision}`);
+    if (!samePath(dir, ownShellDir)) {
+      const present = fs.existsSync(path.join(dir, "INSTALLATION_COMPLETE"));
+      checks.push({
+        name: "browser downloaded (desktop extension)",
+        ok: present,
+        detail: present ? dir : `the extension launches another Chromium build than this copy, and it is not at ${dir}`,
+        fix: extension.version ? `npx -y scenescout@${extension.version} install --browser-only` : "npx -y scenescout install --browser-only",
+      });
+    }
+  }
+  return checks;
+}
+
+/** The last thing `install` prints when every step worked. */
+export function installClosing(opts: { browserOnly: boolean; forClaude: boolean }): string | null {
+  // A plugin install, or a browser download for a server already set up. A
+  // plugin's tools appear in a chat started after it was installed; in a chat
+  // that already has them, asking again is enough.
+  if (opts.browserOnly)
+    return "The browser is ready. Start a new chat to use SceneScout.\n(If SceneScout asked you for this download in a chat it already works in, ask it to try again there.)";
+  if (opts.forClaude) return "Start a new chat in Claude Code to use SceneScout. In any project, run:  /scenescout";
+  return null;
+}
+
+/** The line doctor ends on when every check passed. */
+export function doctorAllGood(opts: { engineOnly: boolean; desktopOnly: boolean }): string {
+  if (opts.desktopOnly) return "All good. In Claude Desktop, start a new chat and ask:  Use SceneScout to test http://localhost:3000";
+  if (opts.engineOnly) return "All good. Ask your agent:  Use SceneScout to test http://localhost:3000";
+  return "All good. In any project, run:  /scenescout   (or ask: Use SceneScout to test http://localhost:3000)";
 }

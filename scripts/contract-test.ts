@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
 import { isNonPageRoute, normalizePath } from "../src/engine/fingerprint.ts";
-import { crawledRoute, crawlLine } from "../src/engine/crawl.ts";
+import { crawledRoute, crawlLine, mainStateFlag } from "../src/engine/crawl.ts";
 import { MemoryStore, reachedRoutes } from "../src/engine/memory.ts";
 import { formatNeverSubmittedEmpty } from "../src/engine/forms.ts";
 import {
@@ -1039,6 +1039,18 @@ test("crawl: an explicitly crawled path that answered as a page joins the route 
   assert.equal(crawledRoute({ ...page, deadEnd: true }), null, "the same 200 with nothing on the page: an app answering every path, not a route");
   assert.equal(crawledRoute({ ...page, status: "no-response" }), null);
   assert.equal(crawledRoute({ ...page, path: "/api/things", requestedRoute: "/api/things", landedRoute: "/api/things" }), null);
+  // A client-rendered app answers 200 for a path it does not have and draws its not-found view; a page stuck loading is no better.
+  assert.equal(crawledRoute({ ...page, mainState: "error" }), null, "the app's error view: a 200 that is not a route");
+  assert.equal(crawledRoute({ ...page, mainState: "loading" }), null, "a placeholder that never resolved: nothing says the route exists");
+  assert.equal(crawledRoute({ ...page, mainState: null }), "/reports/archive", "the same page with content of its own joins");
+  assert.equal(mainStateFlag("error"), "ERROR-VIEW");
+  assert.equal(mainStateFlag("loading"), "STILL-LOADING");
+  assert.equal(mainStateFlag(null), null);
+  // With route identity: a crawled record page joins as its route class, and the same page showing the error view does not join at all.
+  const record = { path: "/things/WID-2025-001", status: 200, requestedRoute: normalizePath("https://app.example/things/WID-2025-001"), loginRedirect: false };
+  const recordPage = { ...record, landedRoute: record.requestedRoute };
+  assert.equal(crawledRoute(recordPage), "/things/:id");
+  assert.equal(crawledRoute({ ...recordPage, mainState: "error" }), null);
 
   // Through the store: the known-route count rises by exactly one.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-crawl-"));
