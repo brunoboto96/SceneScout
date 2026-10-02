@@ -178,6 +178,14 @@ function designPayload(over: object[]): DesignPayload {
     glass: false,
     glow: false,
     aiGradient: false,
+    inputType: "",
+    role: "",
+    filled: false,
+    inForm: false,
+    inRow: false,
+    inSearch: false,
+    inBreadcrumb: false,
+    shell: false,
   };
   return {
     records: over.map((o) => ({ ...base, ...o })),

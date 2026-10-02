@@ -58,7 +58,18 @@ export interface Conversation {
 /** The most output one model call may produce. Large enough for a plan of steps; small enough that one reply cannot spend the budget. */
 export const MAX_OUTPUT_TOKENS = 16_000;
 
-const obj = (v: unknown): Record<string, unknown> | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
+export interface ConversationOptions {
+  baseUrl: string;
+  model: string;
+  effort: string;
+  system: string;
+  tools: readonly ToolSpec[];
+  /** The most output one call may produce; MAX_OUTPUT_TOKENS unless a caller needs less (the dedup judge answers in one short call). */
+  maxOutputTokens?: number;
+}
+
+/** A plain object as a record, or null for anything else (an array, null, a string). */
+export const obj = (v: unknown): Record<string, unknown> | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
 
 function parseArgs(raw: unknown): { input?: unknown; argsError?: string } {
@@ -76,7 +87,7 @@ function parseArgs(raw: unknown): { input?: unknown; argsError?: string } {
 export class AnthropicConversation implements Conversation {
   readonly messages: Array<{ role: "user" | "assistant"; content: unknown }> = [];
   constructor(
-    private readonly o: { baseUrl: string; model: string; effort: string; system: string; tools: readonly ToolSpec[] },
+    private readonly o: ConversationOptions,
     kickoff: string,
   ) {
     this.messages.push({ role: "user", content: kickoff });
@@ -88,7 +99,7 @@ export class AnthropicConversation implements Conversation {
       headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
       body: {
         model: this.o.model,
-        max_tokens: MAX_OUTPUT_TOKENS,
+        max_tokens: this.o.maxOutputTokens ?? MAX_OUTPUT_TOKENS,
         // The method and the tools are the same on every call: cached once, read back at a tenth of the price.
         system: [{ type: "text", text: this.o.system, cache_control: { type: "ephemeral" } }],
         tools: this.o.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters })),
@@ -148,7 +159,7 @@ export class AnthropicConversation implements Conversation {
 export class OpenAIConversation implements Conversation {
   readonly input: unknown[] = [];
   constructor(
-    private readonly o: { baseUrl: string; model: string; effort: string; system: string; tools: readonly ToolSpec[] },
+    private readonly o: ConversationOptions,
     kickoff: string,
   ) {
     this.input.push({ role: "user", content: kickoff });
@@ -164,7 +175,7 @@ export class OpenAIConversation implements Conversation {
         input: this.input,
         tools: this.o.tools.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.parameters, strict: false })),
         reasoning: { effort: this.o.effort },
-        max_output_tokens: MAX_OUTPUT_TOKENS,
+        max_output_tokens: this.o.maxOutputTokens ?? MAX_OUTPUT_TOKENS,
         // Stateless: nothing of the tested app is kept on the provider's side
         // between calls, and the reasoning comes back encrypted so it can be
         // handed back with the rest of the turn.

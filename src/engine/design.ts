@@ -60,6 +60,31 @@ export interface StyleRecord {
   /** Form-control burden signals: is this a required field, and is it a submit control? */
   required: boolean;
   submitish: boolean;
+  /** Lowercased `type` of an <input>, "" for any other element: a checkbox, a search box and a submit button are all <input>. */
+  inputType: string;
+  /** The element's own `role` attribute, "" when it has none. */
+  role: string;
+  /** Paints its OWN background (colour or image), rather than showing an ancestor's: what makes a link look like a button. */
+  filled: boolean;
+  /**
+   * Where the control sits. The task-efficiency rules mean different things in
+   * different places: a checkbox in a table row selects the row, a select in a
+   * row edits it in place, a search box filters, and none of them is a form
+   * field the user must fill in and submit; a breadcrumb link is navigation, not
+   * an action competing with the page's own.
+   */
+  inForm: boolean;
+  inRow: boolean;
+  inSearch: boolean;
+  inBreadcrumb: boolean;
+  /**
+   * Inside the app shell's landmarks — a navigation, banner, complementary or
+   * content-info region that is not part of the main content, an article or a
+   * dialog. The markup states this on the first page audited, so the shell is
+   * kept out of a page's score before the cross-route census has seen enough
+   * routes to recognise it.
+   */
+  shell: boolean;
   /** AI-slop tells (impeccable.style's "absolute bans"), computed in-page. */
   sideStripe: boolean; // colored border-left/right accent > 1px
   gradientText: boolean; // background-clip:text over a gradient
@@ -150,6 +175,23 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     return false;
   };
   const interactiveSel = 'a[href], button, input, select, textarea, [role="button"], [role="link"], [onclick]';
+  // The app shell, as the markup declares it. A <header>/<footer> inside a
+  // <section> is that section's own heading block, not the page banner (the
+  // HTML banner/contentinfo rule), and nothing inside the main content, an
+  // article or a dialog is shell however it is marked up.
+  const shellSel = 'nav, aside, header, footer, [role="navigation"], [role="banner"], [role="complementary"], [role="contentinfo"]';
+  const inShell = (el) => {
+    if (el.closest('main, [role="main"], article, [role="article"], dialog, [role="dialog"], [role="alertdialog"]')) return false;
+    for (let lm = el.closest(shellSel); lm; lm = lm.parentElement ? lm.parentElement.closest(shellSel) : null) {
+      const sectional = (lm.tagName === "HEADER" || lm.tagName === "FOOTER") && !lm.hasAttribute("role");
+      if (!sectional || !(lm.parentElement && lm.parentElement.closest("section"))) return true;
+    }
+    return false;
+  };
+  const ownFill = (s) => {
+    const c = parseColor(s.backgroundColor);
+    return (c !== null && c[3] > 0) || (!!s.backgroundImage && s.backgroundImage !== "none");
+  };
   // Saturated (non-gray) color test on a parsed [r,g,b,a].
   const isSaturated = (p) => p && (Math.max(p[0], p[1], p[2]) - Math.min(p[0], p[1], p[2])) > 40;
   const hueDeg = (p) => {
@@ -264,6 +306,14 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
       fixed: s.position === "fixed" || s.position === "sticky",
       required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true",
       submitish: el.matches('button[type="submit"], input[type="submit"]') || /\\b(save|submit|create|send|confirm|apply|continue|next|finish|approve|sign)\\b/i.test(fullText),
+      inputType: el.tagName === "INPUT" ? (el.getAttribute("type") || "text").toLowerCase() : "",
+      role: (el.getAttribute("role") || "").toLowerCase(),
+      filled: ownFill(s),
+      inForm: !!el.closest('form, [role="form"]'),
+      inRow: !!el.closest('tr, [role="row"]'),
+      inSearch: !!el.closest('search, [role="search"]'),
+      inBreadcrumb: !!el.closest('[aria-label*="breadcrumb" i], [class*="breadcrumb" i]'),
+      shell: inShell(el),
       sideStripe, gradientText, glass, glow, aiGradient,
     });
   }
@@ -334,6 +384,8 @@ const label = (r: StyleRecord): string => (r.testid ? `[${r.testid}]` : `<${r.ta
 /** One wording for a small target, page or shell alike: the shell section's, so its prose is unchanged. */
 const tinyTargetDetail = (r: StyleRecord): string => `${label(r)} — ${Math.round(targetBox(r).w)}×${Math.round(targetBox(r).h)}px tap target`;
 const clippedTextDetail = (r: StyleRecord): string => `${label(r)} — text is clipped by its container`;
+/** One wording for body-coloured links, page or shell alike. */
+const indistinctDetail = (bodyColor: string): string => `links with no underline in the body-text colour ${bodyColor}`;
 
 /**
  * Stable identity for one styled element, used to recognise the SAME component
@@ -389,6 +441,38 @@ export function targetBox(r: StyleRecord): StyleRecord["rect"] {
 
 /** The WCAG 2.2 target-size minimum, in CSS pixels. */
 const MIN_TARGET = 24;
+
+/** Inputs that are buttons, not fields. */
+const BUTTON_INPUT_TYPES = new Set(["submit", "button", "reset", "image"]);
+
+/** A button, or a link painted as one. Fields, selects and plain links never compete as actions. */
+function buttonLike(r: StyleRecord): boolean {
+  if (r.tag === "button" || r.role === "button") return true;
+  if (r.tag === "input") return BUTTON_INPUT_TYPES.has(r.inputType);
+  return r.tag === "a" && r.filled;
+}
+
+/**
+ * The fields a user is asked to fill in and submit. Excluded: controls in a
+ * table row (a selection checkbox, or a select that edits the row in place),
+ * search boxes, and inputs that are buttons. When some fields sit in a <form>,
+ * only those count: the rest of the page (filters, toolbars) is not part of
+ * what gets submitted. A page with no <form> at all is judged on every field,
+ * because many apps build their forms without the element.
+ */
+function formFields(records: StyleRecord[]): StyleRecord[] {
+  const candidates = records.filter(
+    (r) =>
+      r.interactive &&
+      (r.tag === "input" || r.tag === "select" || r.tag === "textarea") &&
+      !BUTTON_INPUT_TYPES.has(r.inputType) &&
+      r.inputType !== "search" &&
+      !r.inSearch &&
+      !r.inRow,
+  );
+  const inForm = candidates.filter((r) => r.inForm);
+  return inForm.length > 0 ? inForm : candidates;
+}
 
 /** Below the WCAG 2.2 target-size minimum; inline links are exempt by that rule. */
 function undersized(r: StyleRecord): boolean {
@@ -484,11 +568,16 @@ export function analyzeDesign(
     return { report: "DESIGN AUDIT: no visible styled elements found (page empty or not hydrated).", score: null, signatures: [], defects: [] };
   }
   const signatures = allRecords.map(styleSignature);
-  const isChrome = (r: StyleRecord): boolean => chromeKeys.has(styleSignature(r));
+  // Chrome is what the census has seen on most routes OR what the markup puts
+  // in a shell landmark. The census alone needs several audited routes before
+  // it knows anything, so the first pages of a run were scored with the whole
+  // shell in them and later ones without — a page's score depended on when it
+  // was audited. The landmark half is known from the first audit on.
+  const isChrome = (r: StyleRecord): boolean => r.shell || chromeKeys.has(styleSignature(r));
   const chromeRecords = allRecords.filter(isChrome);
   // Everything below scores THIS page. `records` deliberately shadows the full
   // set so no rule can accidentally reach past the page's own content.
-  const records = chromeKeys.size > 0 ? allRecords.filter((r) => !isChrome(r)) : allRecords;
+  const records = allRecords.filter((r) => !isChrome(r));
   if (records.length === 0) {
     return { report: "DESIGN AUDIT: this page is entirely shared layout chrome — nothing page-specific to score.", score: null, signatures, defects: [] };
   }
@@ -780,7 +869,12 @@ export function analyzeDesign(
   const bodyColorFreq = new Map<string, number>();
   for (const r of records) if (r.textLen > 40 && r.tag !== "a" && r.color !== "unknown") bodyColorFreq.set(r.color, (bodyColorFreq.get(r.color) ?? 0) + 1);
   const dominantBody = [...bodyColorFreq.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
-  const indistinct = dominantBody ? records.filter((r) => r.tag === "a" && r.textLen > 0 && !r.underline && r.color === dominantBody) : [];
+  const looksLikeBody = (r: StyleRecord): boolean => r.tag === "a" && r.textLen > 0 && !r.underline && r.color === dominantBody;
+  const indistinct = dominantBody ? records.filter(looksLikeBody) : [];
+  // Navigation links are this rule's commonest subject and usually sit in the
+  // shell, so the shell's are measured too, against the page's body colour, and
+  // reported as the shell's.
+  const chromeIndistinct = dominantBody ? chromeRecords.filter(looksLikeBody) : [];
   if (dominantBody) {
     if (indistinct.length > 0) {
       affordances.push(`→ ${indistinct.length} link(s) with no underline AND the same color as body text (e.g. ${label(indistinct[0])}) — invisible as links`);
@@ -838,11 +932,14 @@ export function analyzeDesign(
   //      suite never answers.
   const effort: string[] = [];
   const pageBg = parseRgb(records.find((r) => r.bg && r.bg.startsWith("rgb"))?.bg ?? "") ?? [255, 255, 255, 1];
-  // A "prominent" action = filled control whose background clearly departs
-  // from the page background, at a clickable size. That is what the eye lands
-  // on, so it is the page's implied primary action.
+  // A "prominent" action = a button (or a link painted as one) that paints its
+  // own background, clearly departing from the page background, at a clickable
+  // size. That is what the eye lands on, so it is the page's implied primary
+  // action. Fields never qualify — a white text field on a grey page departs
+  // from the page background too — nor does a ghost button showing a card's
+  // background, nor a breadcrumb, which is a way back rather than an action.
   const prominent = records.filter((r) => {
-    if (!r.interactive || r.rect.w < 60 || r.rect.h < 24) return false;
+    if (!r.interactive || !buttonLike(r) || !r.filled || r.inBreadcrumb || r.rect.w < 60 || r.rect.h < 24) return false;
     const bg = parseRgb(r.bg);
     if (!bg) return false;
     const delta = Math.abs(bg[0] - pageBg[0]) + Math.abs(bg[1] - pageBg[1]) + Math.abs(bg[2] - pageBg[2]);
@@ -869,7 +966,7 @@ export function analyzeDesign(
     );
   }
   // Form burden: how much is being asked, and how much of it is actually needed.
-  const fields = records.filter((r) => r.interactive && /input|select|textarea/.test(r.tag));
+  const fields = formFields(records);
   if (fields.length >= 5) {
     const req = fields.filter((r) => r.required).length;
     if (req === 0) {
@@ -939,14 +1036,16 @@ export function analyzeDesign(
       ...contrastFailures(chromeRecords).map((detail) => ({ rule: "contrast" as const, detail, chrome: true })),
       ...chromeRecords.filter((r) => tooSmall(r, allRecords)).map((r) => ({ rule: "tiny-target" as const, detail: tinyTargetDetail(r), chrome: true })),
       ...chromeRecords.filter((r) => r.clipped && r.textLen > 0).map((r) => ({ rule: "clipped-text" as const, detail: clippedTextDetail(r), chrome: true })),
+      ...(chromeIndistinct.length > 0 ? [{ rule: "indistinct-link" as const, detail: indistinctDetail(dominantBody ?? ""), chrome: true }] : []),
     );
-    const chromeIssues = chromeDefects.map((d) => d.detail);
+    // A convention (indistinct-link) is a → line, as it is on the page; the rest are measurable defects.
+    const chromeIssues = chromeDefects.map((d) => `${d.rule === "indistinct-link" ? "→" : "⚠"} ${d.detail}`);
     if (chromeIssues.length > 0) {
       chromeSection.push(
         `SHARED CHROME (${chromeRecords.length} shell elements, excluded from this page's score and reported here instead):\n` +
           [...new Set(chromeIssues)]
             .slice(0, CHROME_ISSUE_CAP)
-            .map((s) => `  ⚠ ${s}`)
+            .map((s) => `  ${s}`)
             .join("\n") +
           `\n  → these belong to the app shell and recur on every page that renders it. File ONE finding for the shell, not one per page.`,
       );
@@ -980,7 +1079,7 @@ export function analyzeDesign(
     // values on ten pages are one entry on ten routes, and the entry's fingerprint does not move when content does.
     ...(pad.n > 10 && pad.pct > 20 ? [{ rule: "off-grid-spacing" as const, detail: `paddings off a 4px grid: ${gridValues(pad.top)}` }] : []),
     ...(mar.n > 10 && mar.pct > 20 ? [{ rule: "off-grid-spacing" as const, detail: `vertical margins off a 4px grid: ${gridValues(mar.top)}` }] : []),
-    ...(indistinct.length > 0 ? [{ rule: "indistinct-link" as const, detail: `links with no underline in the body-text colour ${dominantBody}` }] : []),
+    ...(indistinct.length > 0 ? [{ rule: "indistinct-link" as const, detail: indistinctDetail(dominantBody ?? "") }] : []),
     ...chromeDefects,
   ];
   return { report, score, signatures, defects };
