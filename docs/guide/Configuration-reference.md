@@ -8,6 +8,7 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 
 | Command | What it does |
 |---|---|
+| `scenescout <url>` | A first look with no setup: the check's measurements, read-only and capped, opening with the three issues to look at first; exit 0 it looked, 2 could not run |
 | `scenescout install` | Installs the skill, downloads the browser, registers the MCP server and puts `scenescout` on your PATH |
 | `scenescout doctor` | Checks the setup and prints the fix for anything missing |
 | `scenescout serve` | Runs the MCP server on stdio; this is what a client starts |
@@ -19,6 +20,18 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `scenescout watch [path]` | Opens the live view in a browser |
 
 `scenescout --version` prints the version, and `scenescout --help` the usage. Every command also prints the usage on `--help` or `-h` and exits 0 without doing anything else, so `scenescout install --help` installs nothing. `install`, `doctor`, `scan`, `status` and `watch` refuse an option or an extra argument they do not take, and exit 1 naming it.
+
+### `scenescout <url>`
+
+A first look: an address in place of a command, first on the line, as in `npx -y scenescout http://localhost:3000 --max-routes 10`. It runs the check's crawl and measurements in `read-only` mode and never gates. It writes `report.md` and `check.json` to `scenescout-report/` in the current directory, with a `.gitignore` that keeps that folder out of commits, or to a temporary folder when that cannot be written. When the headless Chromium build is missing it downloads that and nothing else: no skill, no MCP registration, nothing on the PATH. It always drives Chromium, whatever `SCENESCOUT_BROWSER` says, and reads nothing from the directory it runs in: no flows, no memory, no source routes. Exit 0 once it has looked, whatever it found; 2 when it could not run (the address could not be reached, a bad option, no browser) or could not write its report, whose summary it still prints.
+
+| Option | Default | |
+|---|---|---|
+| `--max-routes` | `20` | The most pages to look at, 1 to 150 |
+| `--max-minutes` | `3` | No page is started after this many minutes, 1 to 30. The start page is always looked at |
+| `--out` | `./scenescout-report` | Where the report goes. A folder named here is used as given, with no `.gitignore` added and never swapped for a temporary one; one that cannot be written ends the run before it starts |
+
+The address must be written in full, with `http://` or `https://`; one without its scheme is refused with the line to type. An option of `scenescout check` is refused with a pointer to `check`, which has it.
 
 ### `scenescout install`
 
@@ -160,8 +173,8 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | Variable | Read by | |
 |---|---|---|
 | `SCENESCOUT_BROWSER` | the server, `check`, `ci`, `login`, `doctor` | The default browser: `chromium` (default), `firefox` or `webkit` |
-| `SCENESCOUT_ACTION_TIMEOUT_MS` | the server, `check`, `ci`, `login` | How long one action may take, 1000 to 120000 (default 5000). An option wins over it |
-| `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login` | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
+| `SCENESCOUT_ACTION_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long one action may take, 1000 to 120000 (default 5000). An option wins over it |
+| `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
 | `SCENESCOUT_LIVE` | the server | `off` keeps the live view closed |
 | `SCENESCOUT_REFRESH_BROKER` | the server | `off` turns off the refresh broker for role sessions |
 | `ANTHROPIC_API_KEY` | `ci` | The Anthropic key. The only way to give one |

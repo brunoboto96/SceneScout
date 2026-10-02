@@ -1,0 +1,5 @@
+---
+"scenescout": minor
+---
+
+Add `scenescout <url>`, a first look at any app with nothing set up: `npx -y scenescout http://localhost:3000`. It runs the deterministic check's crawl and measurements in read-only mode, visiting up to 20 pages and starting none after 3 minutes (`--max-routes`, `--max-minutes`), with no model and no API key. When the headless Chromium build is missing it downloads that and nothing else: no skill, no MCP registration, nothing on the PATH. It writes `report.md` and `check.json` to `scenescout-report/` in the current folder (a temporary folder when that cannot be written, or `--out`), and the summary and the report open with the three issues to look at first: the highest severity, then the most pages affected, with one failure seen several ways (a missing image is a failed request, a broken image and a console line) taking one of the three places. It exits 0 once it has looked, whatever it found, and 2 when it could not run, such as when the address cannot be reached, or could not write the report. The guide's Start here page and the README's quickstart now lead with it.

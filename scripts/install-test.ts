@@ -54,7 +54,18 @@ import {
 
 import { explorePrompt, loadPlaybook, PLAYBOOK_RELATIVE_PATH, SERVER_INSTRUCTIONS, stripFrontMatter } from "../src/playbook.ts";
 
-import { dispatch, HAND_PARSED, SUBCOMMANDS, type CliHandlers, type Subcommand } from "../src/commands.ts";
+import { dispatch, HAND_PARSED, looksLikeUrl, SUBCOMMANDS, type CliHandlers, type Subcommand } from "../src/commands.ts";
+import {
+  downloadLine,
+  FIRST_RUN_DEFAULTS,
+  FIRST_RUN_DIRNAME,
+  firstRunCheckOptions,
+  firstRunDownloads,
+  MAX_FIRST_RUN_MINUTES,
+  parseFirstRunArgs,
+  writeFirstRunReport,
+} from "../src/first-run.ts";
+import { MAX_CHECK_ROUTES } from "../src/engine/check.ts";
 import { firstMessageHint, manualFor, parseClients, registerInFile, registerWithClient, vscodeAddArgs, vscodeBinary } from "../src/clients.ts";
 
 function tmp(prefix: string): string {
@@ -1139,6 +1150,9 @@ async function dispatched(argv: string[]): Promise<{ ran: string[]; exit: number
         throw new Exit(1);
       },
       commands,
+      firstRun: (args) => {
+        ran.push(["(first run)", ...args].join(" "));
+      },
     });
   } catch (err) {
     if (err instanceof Exit) return { ran, exit: err.code, said };
@@ -1271,4 +1285,211 @@ test("reading a command's flags from cli.ts gives the same answer with CRLF line
     assert.deepEqual([...flagsReadBy(source, "install")], ["--skip-browser"]);
     assert.deepEqual([...flagsReadBy(source, "doctor")], ["--engine"]);
   }
+});
+
+// ── The first run: `scenescout <url>` ──────────────────────────────────────────
+
+test("an address as the first argument is a first run; a subcommand is still its subcommand, and any other word gets the usage", async () => {
+  const firstRuns: string[][] = [
+    ["http://127.0.0.1:3000"],
+    ["https://app.example.com/start?tab=1", "--max-routes", "5", "--max-minutes=2", "--out", "here"],
+    // Its own parser refuses these with a reason, which beats the generic usage.
+    ["localhost:3000"],
+    ["example.com"],
+    ["127.0.0.1:8080/app"],
+    ["[::1]:3000"],
+    ["ftp://files.example.com"],
+    ["http://127.0.0.1:3000", "--nope"],
+  ];
+  for (const argv of firstRuns) assert.deepEqual(await dispatched(argv), { ran: [`(first run) ${argv.join(" ")}`], exit: null, said: [] }, argv.join(" "));
+  // A subcommand given an address is that subcommand, never a first run.
+  assert.deepEqual((await dispatched(["check", "http://127.0.0.1:3000"])).ran, ["check http://127.0.0.1:3000"]);
+  // Help after an address is the usage, and nothing runs.
+  for (const help of ["--help", "-h"]) assert.deepEqual(await dispatched(["http://127.0.0.1:3000", help]), { ran: [], exit: 0, said: ["usage"] });
+  // Words that are neither: the usage, exit 1, as before. The address comes first, so options before it are not a first run.
+  for (const argv of [
+    ["instal"],
+    ["chek", "http://127.0.0.1:3000"],
+    ["-x"],
+    ["localhost-ish"],
+    ["hello world"],
+    ["--max-routes", "5", "http://127.0.0.1:3000"],
+  ]) {
+    assert.deepEqual(await dispatched(argv), { ran: [], exit: 1, said: ["usage"] }, argv.join(" "));
+  }
+});
+
+test("what reads as an address: a scheme, or a host with a dot, a port or the name localhost", () => {
+  const yes = [
+    "http://x",
+    "HTTPS://X.TEST",
+    "ftp://x",
+    "localhost",
+    "LOCALHOST:3000",
+    "localhost/app",
+    "example.com",
+    "a.b.c/d?e#f",
+    "10.0.0.2:80",
+    "[::1]:8080",
+    "web:3000",
+  ];
+  const no = [undefined, "", "check", "instal", "--help", "-h", "-x", "localhost-ish", "hello world", "./dist", "/abs/path", "C:\\temp", "x:y"];
+  for (const arg of yes) assert.equal(looksLikeUrl(arg), true, String(arg));
+  for (const arg of no) assert.equal(looksLikeUrl(arg), false, String(arg));
+  // No subcommand reads as an address, so the order they are tried in can never matter.
+  for (const command of SUBCOMMANDS) assert.equal(looksLikeUrl(command), false, command);
+});
+
+test("a first run's options: the defaults, both spellings, and an out folder resolved from where it runs", () => {
+  const plain = parseFirstRunArgs(["http://127.0.0.1:3000"], "/p");
+  assert.deepEqual(plain, { ok: true, options: { url: "http://127.0.0.1:3000/", maxRoutes: 20, maxMinutes: 3 } });
+  assert.deepEqual(FIRST_RUN_DEFAULTS, { maxRoutes: 20, maxMinutes: 3 });
+  const given = parseFirstRunArgs(["https://app.example.com/start", "--max-routes", "5", "--max-minutes=10", "--out", "reports/first"], "/p");
+  assert.deepEqual(given, { ok: true, options: { url: "https://app.example.com/start", maxRoutes: 5, maxMinutes: 10, outDir: "/p/reports/first" } });
+  // An absolute --out is kept as given.
+  assert.deepEqual(parseFirstRunArgs(["http://127.0.0.1:3000", "--out=/abs/out"], "/p"), {
+    ok: true,
+    options: { url: "http://127.0.0.1:3000/", maxRoutes: 20, maxMinutes: 3, outDir: "/abs/out" },
+  });
+});
+
+test("a first run's caps have bounds, and each mistake is a sentence naming the option", () => {
+  const error = (args: string[]): string => {
+    const r = parseFirstRunArgs(["http://127.0.0.1:3000", ...args], "/p");
+    assert.equal(r.ok, false, args.join(" "));
+    return (r as { error: string }).error;
+  };
+  for (const bad of ["0", "-1", `${MAX_CHECK_ROUTES + 1}`, "2.5", "lots", ""]) {
+    assert.match(
+      error([`--max-routes=${bad}`]),
+      bad === "" ? /--max-routes needs a value/ : new RegExp(`--max-routes must be a whole number from 1 to ${MAX_CHECK_ROUTES}`),
+      bad,
+    );
+  }
+  for (const bad of ["0", `${MAX_FIRST_RUN_MINUTES + 1}`, "0.5"]) {
+    assert.match(error(["--max-minutes", bad]), new RegExp(`--max-minutes must be a whole number from 1 to ${MAX_FIRST_RUN_MINUTES}`), bad);
+  }
+  // The edges are accepted.
+  for (const [flag, value] of [
+    ["--max-routes", "1"],
+    ["--max-routes", `${MAX_CHECK_ROUTES}`],
+    ["--max-minutes", "1"],
+    ["--max-minutes", `${MAX_FIRST_RUN_MINUTES}`],
+  ]) {
+    assert.equal(parseFirstRunArgs(["http://127.0.0.1:3000", flag, value], "/p").ok, true, `${flag} ${value}`);
+  }
+  assert.match(error(["--max-routes"]), /--max-routes needs a value/);
+  assert.match(error(["--out", "--max-routes", "3"]), /--out needs a value/);
+  assert.match(error(["--verbose"]), /unknown option --verbose: a first look takes only --max-routes, --max-minutes, --out/);
+  assert.match(error(["-v"]), /unknown option -v/);
+  // An option of check is pointed at check, which has it.
+  assert.match(error(["--storage-state", "s.json"]), /--storage-state is an option of scenescout check/);
+  assert.match(error(["--fail-on", "high"]), /--fail-on is an option of scenescout check/);
+  assert.match(error(["http://127.0.0.1:4000"]), /give one address, not 2/);
+});
+
+test("a first run takes a whole http or https address, and says how to write one it cannot take", () => {
+  const error = (arg: string): string => {
+    const r = parseFirstRunArgs([arg], "/p");
+    assert.equal(r.ok, false, arg);
+    return (r as { error: string }).error;
+  };
+  // Not guessed, but the line to type is given: plain http for a local dev server, https elsewhere.
+  assert.equal(error("localhost:3000"), "write the address in full, with its scheme: scenescout http://localhost:3000");
+  assert.equal(error("127.0.0.1:8080/app"), "write the address in full, with its scheme: scenescout http://127.0.0.1:8080/app");
+  assert.equal(error("example.com"), "write the address in full, with its scheme: scenescout https://example.com");
+  // The line to type survives being pasted: a query is quoted.
+  assert.equal(error("example.com/a?b=1&c=2"), "write the address in full, with its scheme: scenescout 'https://example.com/a?b=1&c=2'");
+  assert.match(error("ftp://files.example.com"), /only http and https addresses can be looked at \(got ftp:\)/);
+  assert.match(error("file:///etc/passwd"), /only http and https/);
+  assert.match(error("http://user:secret@127.0.0.1:3000"), /put no credentials in the address/);
+  assert.match(error("http://[nope"), /not a URL/);
+  assert.match((parseFirstRunArgs([], "/p") as { error: string }).error, /give the address to look at/);
+});
+
+test("a first run is a check that is read-only, never gated, in Chromium, with its caps and nothing read from a project", () => {
+  const options = firstRunCheckOptions({ url: "http://127.0.0.1:3000/", maxRoutes: 7, maxMinutes: 2 }, "/empty-project");
+  assert.deepEqual(options, {
+    url: "http://127.0.0.1:3000/",
+    projectDir: "/empty-project",
+    failOn: "never",
+    mode: "read-only",
+    browser: "chromium",
+    maxRoutes: 7,
+    timeBudgetMs: 120_000,
+    ignore: [],
+    flows: "off",
+    retest: false,
+    flowWrites: "never",
+    onRefusedStep: "report",
+    gateRetests: "never",
+  });
+});
+
+test("a first run downloads only the headless Chromium build a check launches, and only when it is missing", () => {
+  const exe = { chromium: "/c/ms-playwright/chromium-9/chrome", firefox: "/c/ms-playwright/firefox-7/firefox", webkit: "/c/ms-playwright/webkit-3/pw_run.sh" };
+  const shellMarker = path.join("/c/ms-playwright/chromium_headless_shell-9", "INSTALLATION_COMPLETE");
+  const on = (...present: string[]) => browserPresence(exe, (p) => present.includes(p));
+  // A clean machine: the shell alone, not the full browser and not the other engines.
+  assert.deepEqual(firstRunDownloads(on()), ["chromium-headless-shell"]);
+  assert.deepEqual(firstRunDownloads(on(exe.firefox, exe.webkit)), ["chromium-headless-shell"], "another engine on disk does not stand in for it");
+  assert.deepEqual(firstRunDownloads(on(exe.chromium)), ["chromium-headless-shell"], "the full browser alone does not launch headless");
+  // Already there: nothing to download, the full browser or not.
+  assert.deepEqual(firstRunDownloads(on(shellMarker)), []);
+  assert.deepEqual(firstRunDownloads(on(exe.chromium, shellMarker)), []);
+  assert.match(downloadLine(["chromium-headless-shell"]), /Downloading it once \(chromium-headless-shell, about 200 MB on disk\)/);
+});
+
+test("a first look's report goes to scenescout-report/ where it runs, its .gitignore written first, and a second look replaces only its own files", () => {
+  const cwd = tmp("sc-first-cwd-");
+  const files = { "report.md": "# SceneScout first look\n", "check.json": "{}\n" };
+  const where = writeFirstRunReport(files, { cwd, tmpdir: tmp("sc-first-tmp-") });
+  const dir = path.join(cwd, FIRST_RUN_DIRNAME);
+  assert.deepEqual(where, { dir });
+  assert.deepEqual(fs.readdirSync(dir).sort(), [".gitignore", "check.json", "report.md"]);
+  assert.ok(fs.readFileSync(path.join(dir, ".gitignore"), "utf8").split("\n").includes("*"), "the folder ignores itself");
+  // A second look: its two files are replaced, anything else in the folder, its own .gitignore included, is left as it was.
+  fs.writeFileSync(path.join(dir, "notes.txt"), "mine");
+  fs.writeFileSync(path.join(dir, ".gitignore"), "# kept\n");
+  writeFirstRunReport({ "report.md": "second\n", "check.json": "{}\n" }, { cwd, tmpdir: tmp("sc-first-tmp-") });
+  assert.equal(fs.readFileSync(path.join(dir, "report.md"), "utf8"), "second\n");
+  assert.equal(fs.readFileSync(path.join(dir, "notes.txt"), "utf8"), "mine");
+  assert.equal(fs.readFileSync(path.join(dir, ".gitignore"), "utf8"), "# kept\n");
+});
+
+test("a first look that cannot write where it runs writes to a temporary folder and says why; --out is used as given or not at all", () => {
+  const files = { "report.md": "r\n", "check.json": "{}\n" };
+  // A file where the folder would go: it fails the same way on every platform, as root too.
+  const cwd = tmp("sc-first-cwd-");
+  fs.writeFileSync(path.join(cwd, FIRST_RUN_DIRNAME), "not a folder");
+  const tmpdir = tmp("sc-first-tmp-");
+  const fallback = writeFirstRunReport(files, { cwd, tmpdir });
+  assert.equal(path.dirname(fallback.dir), tmpdir);
+  assert.deepEqual(fs.readdirSync(fallback.dir).sort(), ["check.json", "report.md"]);
+  assert.match(fallback.note ?? "", /could not be written \((EEXIST|ENOTDIR)\), so the report is in a temporary folder/);
+  assert.equal(fs.readFileSync(path.join(cwd, FIRST_RUN_DIRNAME), "utf8"), "not a folder", "what was there is left alone");
+  // --out: written as given, with no .gitignore, and no other place tried.
+  const out = path.join(tmp("sc-first-out-"), "looks", "today");
+  assert.deepEqual(writeFirstRunReport(files, { cwd: tmp("sc-first-cwd-"), tmpdir, outDir: out }), { dir: out });
+  assert.deepEqual(fs.readdirSync(out).sort(), ["check.json", "report.md"]);
+  const blocked = path.join(tmp("sc-first-out-"), "taken");
+  fs.writeFileSync(blocked, "a file");
+  assert.throws(() => writeFirstRunReport(files, { cwd: tmp("sc-first-cwd-"), tmpdir, outDir: blocked }), /taken could not be written \((EEXIST|ENOTDIR)\)/);
+  // Nowhere at all: both reasons, so neither is lost.
+  const noTmp = path.join(tmp("sc-first-tmp-"), "a-file");
+  fs.writeFileSync(noTmp, "x");
+  assert.throws(
+    () => writeFirstRunReport(files, { cwd, tmpdir: noTmp }),
+    /could not be written \((EEXIST|ENOTDIR)\), and neither could a temporary folder \(ENOTDIR\)/,
+  );
+});
+
+test("a first look whose report fails partway has still written the .gitignore that keeps the folder out of commits", () => {
+  const cwd = tmp("sc-first-cwd-");
+  const dir = path.join(cwd, FIRST_RUN_DIRNAME);
+  // A folder where report.md would go: the folder and its .gitignore can be made, the report cannot.
+  fs.mkdirSync(path.join(dir, "report.md"), { recursive: true });
+  const fallback = writeFirstRunReport({ "report.md": "r\n", "check.json": "{}\n" }, { cwd, tmpdir: tmp("sc-first-tmp-") });
+  assert.notEqual(fallback.dir, dir);
+  assert.ok(fs.readFileSync(path.join(dir, ".gitignore"), "utf8").split("\n").includes("*"), "written before the files that failed");
 });
