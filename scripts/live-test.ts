@@ -166,8 +166,16 @@ function request(port: number, path: string, opts: { host?: string; method?: str
   });
 }
 
-/** Open a stream and resolve once `frames` parts have arrived. The caller closes it. */
-function openStream(port: number, path: string, frames: number): Promise<{ status: number; type: string; seen: Buffer; close: () => void }> {
+/**
+ * Open a stream and resolve once `frames` parts have arrived. The caller closes it. `progress.parts` counts the parts as
+ * they arrive, for a test that has to act once a viewer is watching, before the stream resolves.
+ */
+function openStream(
+  port: number,
+  path: string,
+  frames: number,
+  progress: { parts: number } = { parts: 0 },
+): Promise<{ status: number; type: string; seen: Buffer; close: () => void }> {
   return new Promise((resolve, reject) => {
     const req = http.request({ host: "127.0.0.1", port, path, headers: { Host: `127.0.0.1:${port}` } }, (res) => {
       let seen = Buffer.alloc(0);
@@ -181,7 +189,8 @@ function openStream(port: number, path: string, frames: number): Promise<{ statu
         seen = Buffer.concat([seen, c]);
         // Count whole parts (a JPEG's end marker, then the part's closing CRLF), not headers:
         // a header can arrive before the picture it announces.
-        if (seen.toString("latin1").split("\u00ff\u00d9\r\n").length - 1 >= frames) done();
+        progress.parts = seen.toString("latin1").split("\u00ff\u00d9\r\n").length - 1;
+        if (progress.parts >= frames) done();
       });
     });
     req.on("error", (err) => {
@@ -221,13 +230,20 @@ function fakeProvider(sessions: string[], feed: ActivityLine[] = []) {
   return { provider, calls, frame: (jpeg: Buffer) => push?.(jpeg) };
 }
 
-async function until(label: string, cond: () => boolean, timeoutMs = 2000): Promise<void> {
+/** Poll until `cond` holds. The bound only decides how long a genuine hang takes to report: a passing wait returns at once. */
+async function until(label: string, cond: () => boolean, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!cond()) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for: ${label}`);
     await new Promise((r) => setTimeout(r, 10));
   }
 }
+
+/**
+ * A fixed window, only where the check is that something did NOT happen and the server gives no signal to wait on
+ * instead. A slow machine can only make it miss a late event, never fail a check that should pass.
+ */
+const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 test("the server listens on loopback only", async () => {
   const live = new LiveServer(fakeProvider(["admin"]).provider);
@@ -373,9 +389,10 @@ test("a stream runs only while somebody watches: first viewer starts it, last on
     assert.ok(first.seen.includes(JPEG), "the first part is the current picture, not a wait for the next repaint");
     assert.equal(calls.startStream, 1);
 
-    const secondOpen = openStream(port, `/${token}/stream/admin.mjpg`, 2);
-    await until("the second viewer to join", () => calls.startStream === 1 && calls.screenshot >= 1);
-    await new Promise((r) => setTimeout(r, 50));
+    const secondProgress = { parts: 0 };
+    const secondOpen = openStream(port, `/${token}/stream/admin.mjpg`, 2, secondProgress);
+    // A viewer is sent the current picture once it is watching: from then on, a pushed frame reaches it.
+    await until("the second viewer to be sent the current picture", () => secondProgress.parts >= 1);
     const pushed = Buffer.from([0xff, 0xd8, 0xff, 9, 9, 9, 0xff, 0xd9]);
     frame(pushed);
     const second = await secondOpen;
@@ -383,7 +400,8 @@ test("a stream runs only while somebody watches: first viewer starts it, last on
     assert.equal(calls.startStream, 1, "two viewers share one screencast");
 
     first.close();
-    await new Promise((r) => setTimeout(r, 50));
+    // Nothing tells the test when the server has seen the first viewer go, and the check is that nothing stops.
+    await settle(200);
     assert.equal(calls.stop, 0, "one viewer leaving does not stop it for the other");
     second.close();
     await until("the screencast to stop", () => calls.stop === 1);
@@ -625,11 +643,11 @@ function openEvents(
   path: string,
   wanted: string,
   count: number,
+  events: Array<{ event: string; data: string }> = [],
 ): Promise<{ status: number; type: string; events: Array<{ event: string; data: string }>; close: () => void }> {
   return new Promise((resolve, reject) => {
     const req = http.request({ host: "127.0.0.1", port, path, headers: { Host: `127.0.0.1:${port}` } }, (res) => {
       let text = "";
-      const events: Array<{ event: string; data: string }> = [];
       const done = (): void => resolve({ status: res.statusCode ?? 0, type: String(res.headers["content-type"]), events, close: () => req.destroy() });
       if (res.statusCode !== 200) {
         res.resume();
@@ -676,13 +694,22 @@ test("one events connection carries frames for several sessions, each tagged wit
   const live = new LiveServer(provider);
   try {
     const { port, token } = await live.start();
-    const opened = openEvents(port, `/${token}/events?sessions=admin%2Cqa%2Ccannot-stream%2Cadmin`, "frame", 4);
-    await until("both screencasts to start", () => pushes.size === 2);
-    await new Promise((r) => setTimeout(r, 50));
+    const seen: Array<{ event: string; data: string }> = [];
+    const opened = openEvents(port, `/${token}/events?sessions=admin%2Cqa%2Ccannot-stream%2Cadmin`, "frame", 4, seen);
+    const framesSeen = () => seen.filter((e) => e.event === "frame").map((e) => JSON.parse(e.data) as { session: string; jpeg: string });
+    const sent = (session: string, jpeg: Buffer) => framesSeen().some((f) => f.session === session && Buffer.from(f.jpeg, "base64").equals(jpeg));
+    // Each session is sent its current picture once the connection is watching it, in list order (a name given twice
+    // counts once), and the session that cannot stream, last in that list, is named unavailable: once all of that has
+    // come, a pushed frame reaches its session.
+    await until(
+      "every session named to be answered",
+      () => framesSeen().some((f) => f.session === "admin") && framesSeen().some((f) => f.session === "qa") && seen.some((e) => e.event === "unavailable"),
+    );
     const adminFrame = Buffer.from([0xff, 0xd8, 0xff, 1, 0xff, 0xd9]);
     const qaFrame = Buffer.from([0xff, 0xd8, 0xff, 2, 0xff, 0xd9]);
     pushes.get("admin")?.(adminFrame);
     pushes.get("qa")?.(qaFrame);
+    await until("both pushed frames to arrive", () => sent("admin", adminFrame) && sent("qa", qaFrame));
     const conn = await opened;
     assert.equal(conn.status, 200);
     assert.match(conn.type, /^text\/event-stream/);
@@ -800,10 +827,13 @@ test("a status file caught mid-write describes only the sessions that are whole"
 function streamingProvider(sessions: string[]) {
   const pushes = new Map<string, (jpeg: Buffer) => void>();
   const stops: string[] = [];
+  /** Sessions a screencast was asked for, in order, counted before a held start waits. */
+  const asked: string[] = [];
   let gate: (() => void) | null = null;
   const provider: LiveProvider = {
     ...fakeProvider(sessions).provider,
     startStream: async (session, onFrame) => {
+      asked.push(session);
       if (gate) await new Promise<void>((r) => (gate = r));
       pushes.set(session, onFrame);
       return async () => {
@@ -812,7 +842,7 @@ function streamingProvider(sessions: string[]) {
       };
     },
   };
-  return { provider, pushes, stops, hold: () => (gate = () => {}), release: () => gate?.() };
+  return { provider, pushes, stops, asked, hold: () => (gate = () => {}), release: () => gate?.() };
 }
 
 test("dropping a session ends its MJPEG viewer, tells its events viewers, and stops its screencast alone", async () => {
@@ -847,7 +877,7 @@ test("dropping a session ends its MJPEG viewer, tells its events viewers, and st
 });
 
 test("a viewer that disconnects while its screencast is still starting leaves nothing running", async () => {
-  const { provider, stops, hold, release } = streamingProvider(["admin"]);
+  const { provider, stops, asked, hold, release } = streamingProvider(["admin"]);
   const live = new LiveServer(provider);
   try {
     const { port, token } = await live.start();
@@ -855,9 +885,11 @@ test("a viewer that disconnects while its screencast is still starting leaves no
     const req = http.request({ host: "127.0.0.1", port, path: `/${token}/stream/admin.mjpg`, headers: { Host: `127.0.0.1:${port}` } });
     req.on("error", () => {});
     req.end();
-    await new Promise((r) => setTimeout(r, 50));
+    await until("the screencast to be asked for, and held starting", () => asked.length === 1);
     req.destroy();
-    await new Promise((r) => setTimeout(r, 50));
+    // No signal says when the server has seen the viewer go. Either order ends in one stop, so a slow machine only
+    // tries the other order (gone after the start), never fails the check.
+    await settle(200);
     release();
     await until("the screencast that nobody watches to stop", () => stops.length === 1);
   } finally {
