@@ -35,6 +35,8 @@ export interface ReplaySession {
 export interface FindingEvidence {
   id: string;
   frames: Array<{ at: string; action: string; detail: string; frame: string }>;
+  /** The picture taken when it was filed (capture.ts FindingPicture), shown above the frames. */
+  picture?: { file: string; width?: number; height?: number; caption: string };
 }
 
 export interface ReplayInput {
@@ -67,6 +69,16 @@ export interface ReplayInput {
 /** Most frames one recorded session keeps. A long run is thousands of actions, and a project folder is not a video store. */
 export const RECORD_MAX_FRAMES = 600;
 
+/** A name reduced to one plain path segment: letters, digits, dot, dash and underscore, never leading with a dot or dash. */
+export function plainSegment(text: string, fallback: string): string {
+  return (
+    text
+      .replace(/[^a-z0-9._-]+/gi, "-")
+      .replace(/^[.-]+/, "")
+      .slice(0, 60) || fallback
+  );
+}
+
 /**
  * Where a recorded frame is stored, relative to the memory directory — and
  * the path the live view serves it at, so it is always written with forward
@@ -75,12 +87,7 @@ export const RECORD_MAX_FRAMES = 600;
  * nothing about where the engine writes.
  */
 export function framePath(session: string, index: number, action: string): string {
-  const plain = (text: string, fallback: string): string =>
-    text
-      .replace(/[^a-z0-9._-]+/gi, "-")
-      .replace(/^[.-]+/, "")
-      .slice(0, 60) || fallback;
-  return `recordings/${plain(session, "session")}/${String(index).padStart(4, "0")}-${plain(action, "step")}.jpg`;
+  return `recordings/${plainSegment(session, "session")}/${String(index).padStart(4, "0")}-${plainSegment(action, "step")}.jpg`;
 }
 
 /**
@@ -200,8 +207,20 @@ export function evidenceFor(steps: readonly ActivityLine[], foundAt: string, mos
   }));
 }
 
+/** A finding's own picture, shown open under it: the evidence a reader looks for first. */
+function renderPicture(p: NonNullable<FindingEvidence["picture"]>, id: string, framePrefix = "", savedAt = ""): string {
+  const src = escapeHtml(framePrefix + p.file);
+  return (
+    `<figure class="picture"><a class="frame" href="${src}" target="_blank" rel="noreferrer" data-testid="finding-picture-open" data-finding="${escapeHtml(id)}">` +
+    `<img loading="lazy" ${GONE} src="${src}"${p.width && p.height ? ` width="${p.width}" height="${p.height}"` : ""} alt="What the finding is about, when it was filed">` +
+    `<p class="gone-note">This picture is not beside this file. Pictures live in the run's <code>recordings/</code> folder, which travels with it.</p></a>` +
+    `<figcaption>${escapeHtml(p.caption)}${savedAt ? `<span class="onDisk">${escapeHtml(savedAt + "/" + p.file)}</span>` : ""}</figcaption></figure>`
+  );
+}
+
 function renderEvidence(e: FindingEvidence, framePrefix = "", savedAt = ""): string {
-  if (e.frames.length === 0) return "";
+  const picture = e.picture ? renderPicture(e.picture, e.id, framePrefix, savedAt) : "";
+  if (e.frames.length === 0) return picture;
   const shots = e.frames
     .map(
       (f) =>
@@ -212,7 +231,7 @@ function renderEvidence(e: FindingEvidence, framePrefix = "", savedAt = ""): str
         `</figcaption></figure>`,
     )
     .join("");
-  return `<details class="evidence"><summary>Evidence — the ${e.frames.length} step${e.frames.length === 1 ? "" : "s"} on screen before this was filed</summary><div class="shots">${shots}</div></details>`;
+  return `${picture}<details class="evidence"><summary>Evidence — the ${e.frames.length} step${e.frames.length === 1 ? "" : "s"} on screen before this was filed</summary><div class="shots">${shots}</div></details>`;
 }
 
 /** The report's sections the header links to, by heading. */
@@ -375,6 +394,10 @@ ol.steps { list-style:none; margin:0; padding:0; }
 .step .d { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .step .frame { display:block; margin:4px 0 10px; }
 .step .frame img { max-width:min(100%,720px); max-height:360px; object-fit:cover; object-position:top; border:1px solid var(--line); border-radius:6px; display:block; }
+figure.picture { margin:6px 0 14px; max-width:min(100%,720px); }
+figure.picture img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:6px; display:block; background:var(--panel); }
+figure.picture figcaption { margin-top:4px; color:var(--muted); font-size:12px; }
+figure.picture figcaption .onDisk { display:block; font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
 details.evidence { margin:6px 0 18px; padding:8px 12px; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
 details.evidence > summary { cursor:pointer; color:var(--muted); font-size:13px; }
 details.evidence .shots { display:flex; flex-wrap:wrap; gap:14px; margin-top:12px; }

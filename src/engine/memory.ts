@@ -2,6 +2,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import type { RecordedDecision } from "./calibration.js";
+import type { PictureShot } from "./capture.js";
 import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
@@ -121,6 +122,15 @@ export interface Finding {
    * Absent until a filing from another route merges in.
    */
   seenOn?: string[];
+  /**
+   * The picture taken when it was filed, as a path relative to the project's
+   * .scenescout/ folder (capture.ts findingPicturePath): the element it named,
+   * or the page. Replaced when a regression reopens it. Absent when pictures
+   * were off, or on findings filed before they existed.
+   */
+  picture?: string;
+  /** What that picture shows (capture.ts PictureShot), kept apart so `picture` stays a plain path. */
+  pictureShot?: PictureShot;
 }
 
 /** Most other routes one finding records it was seen on; the oldest go first. */
@@ -644,6 +654,14 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
       evidence: newer.evidence ?? older.evidence,
       regressedAt: newer.regressedAt ?? older.regressedAt,
     };
+    // A picture and its shot travel together, from whichever side has one, the newer first.
+    const pictured = newer.picture ? newer : older.picture ? older : null;
+    delete merged.picture;
+    delete merged.pictureShot;
+    if (pictured?.picture) {
+      merged.picture = pictured.picture;
+      if (pictured.pictureShot) merged.pictureShot = pictured.pictureShot;
+    }
     // The tier is not "later knowledge wins": a defect on either side is a decision
     // about the convention, and a store still holding the worth-a-look must not undo it.
     const tier = mergeTier(older, newer);
@@ -1841,6 +1859,16 @@ export class MemoryStore {
     this.data.laneRoutes = { ...(this.data.laneRoutes ?? {}), [lane]: after };
     this.flush();
     return added;
+  }
+
+  /** Keep a finding's picture: its path relative to .scenescout/, and what it shows. Returns the finding, or null when there is no such id. */
+  setPicture(id: string, picture: string, shot: PictureShot): Finding | null {
+    const f = this.data.findings.find((x) => x.id === id);
+    if (!f) return null;
+    f.picture = picture;
+    f.pictureShot = shot;
+    this.flush();
+    return f;
   }
 
   /** Mark a finding resolved; returns it or null. */

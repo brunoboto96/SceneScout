@@ -438,6 +438,8 @@ export function childEnv(env: Record<string, string | undefined>): Record<string
   for (const [k, v] of Object.entries(env)) if (v !== undefined && !drop.has(k)) out[k] = v;
   // Nobody watches a CI run: the live view would only hold a port open.
   out.SCENESCOUT_LIVE = "off";
+  // The loop is text-only (toolResultText), so a finding's picture is kept for the report, never sent back. A choice the job made is its own.
+  if (!out.SCENESCOUT_EVIDENCE?.trim()) out.SCENESCOUT_EVIDENCE = "file";
   return out;
 }
 

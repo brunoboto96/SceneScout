@@ -93,7 +93,27 @@ import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { formatScan, scanProject } from "./scan.js";
-import { CAPTURE_MARGIN, CAPTURES_DIRNAME, captureFileName, captureResultText, MAX_CAPTURE_MARGIN } from "./engine/capture.js";
+import {
+  CAPTURE_MARGIN,
+  CAPTURES_DIRNAME,
+  captureFileName,
+  captureResultText,
+  describePicture,
+  EVIDENCE_ENV,
+  EVIDENCE_LIMITS,
+  EVIDENCE_MARGIN,
+  EVIDENCE_MODES,
+  evidenceFrame,
+  evidenceSettings,
+  findingPicturePath,
+  MAX_CAPTURE_MARGIN,
+  RECORD_ENV,
+  recordChoice,
+  returnsInline,
+  type EvidenceMode,
+  type EvidenceSettings,
+} from "./engine/capture.js";
+import { decodePng, fitPicture } from "./engine/png.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
 const engines = new Map<string, BrowserEngine>();
@@ -867,10 +887,17 @@ server.registerTool(
         ),
       record: z
         .boolean()
-        .default(false)
+        .optional()
         .describe(
           "Keep a frame of the page after every action, under .scenescout/recordings/, and show it beside that step in report.html. " +
-            "Off by default: a recording is pictures of the app under test sitting in the project folder. Turn it on for QA work, where the run is evidence and not only a report.",
+            `Default: the ${RECORD_ENV} environment variable (on or off), else off: a recording is pictures of the app under test sitting in the project folder. Turn it on for QA work, where the run is evidence and not only a report.`,
+        ),
+      evidence: z
+        .enum(EVIDENCE_MODES)
+        .optional()
+        .describe(
+          "What happens to the picture each scout_finding takes of what it is about. 'inline': kept under .scenescout/recordings/, shown in report.html, and returned in the scout_finding result so the conversation shows it. 'file': kept and shown in the report only. 'off': none taken. " +
+            `Default: the ${EVIDENCE_ENV} environment variable, else 'inline', or 'file' in a CI job. Pictures are bounded in size and in how many one session returns (see the configuration reference).`,
         ),
       actionTimeoutMs: z
         .number()
@@ -922,6 +949,7 @@ server.registerTool(
       objective,
       task,
       record,
+      evidence,
       trustedEmbeds,
       readPosts,
       paceMs,
@@ -942,6 +970,7 @@ server.registerTool(
       objective?: string;
       task?: string;
       record?: boolean;
+      evidence?: EvidenceMode;
       trustedEmbeds?: string[];
       readPosts?: string[];
       paceMs?: number;
@@ -1013,6 +1042,8 @@ server.registerTool(
         if (previous && previous !== store && ![...engines.values()].some((e) => e !== eng && e.memory === previous)) previous.endRun();
         // Before the browser starts: a value it cannot use refuses the attach rather than being replaced.
         const dedupNote = configureDedup(store, dedup);
+        const recording = recordChoice(record, process.env);
+        const pictures = evidenceSettings(evidence, process.env);
         const viewport = viewportWidth && viewportHeight ? { width: viewportWidth, height: viewportHeight } : undefined;
         const out = await eng.attach({
           url,
@@ -1030,7 +1061,7 @@ server.registerTool(
           objective: objective ?? task,
           paceMs,
           task: objective ? task : undefined,
-          record,
+          record: recording,
           trustedEmbeds,
           readPosts,
           actionTimeoutMs,
@@ -1044,15 +1075,21 @@ server.registerTool(
           await ensureLive(eng.memory.dir);
           writeStatus(target, "idle", "scout_attach");
         }
+        // A new attach is a new count of pictures returned.
+        evidenceFor.set(eng, { ...pictures, shown: 0 });
         // Recording writes pictures of the app under test into the project, so
         // a run doing it says where they go rather than leaving the person to
         // find a folder of screenshots later.
         const recordNote =
-          record && eng.memory?.dir
+          recording && eng.memory?.dir
             ? `\n\n📸 RECORDING: a frame of the page after each action, under ${path.join(eng.memory.dir, "recordings", target)}/ (at most ${RECORD_MAX_FRAMES}). scout_report writes them into report.html beside report.md.`
             : "";
+        const picturesNote =
+          pictures.mode !== "off" && eng.memory?.dir
+            ? `\n📷 FINDING PICTURES: ${pictures.mode} (${pictures.source}): each scout_finding keeps a picture of what it names under ${path.join(eng.memory.dir, "recordings")}/ for report.html${pictures.mode === "inline" ? `, and returns the first ${pictures.inlineMax} in its result` : ""}.`
+            : "";
         return text(
-          out + conflictNote + recordNote + dedupNote + describePace(eng.pace) + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine(),
+          out + conflictNote + recordNote + picturesNote + dedupNote + describePace(eng.pace) + (engines.size > 1 ? `\n${sessionLines()}` : "") + liveLine(),
           target,
         );
       } catch (err) {
@@ -1095,6 +1132,62 @@ function configureDedup(store: MemoryStore, asked: DedupMode | undefined): strin
   store.dedupJudge = new DedupJudge(ask, { label: plan.label, log: logLine, redact: withoutKeys });
   store.dedupOff = undefined;
   return plan.note;
+}
+
+/** Each session's finding-picture settings from its last attach, and how many pictures its results have carried since. */
+const evidenceFor = new WeakMap<BrowserEngine, EvidenceSettings & { shown: number }>();
+
+type ImageContent = { type: "image"; data: string; mimeType: string };
+
+/**
+ * Take, bound and keep a filed finding's picture (capture.ts decides whether
+ * and of what; png.ts fits it). Returns the line the result adds and, when the
+ * result carries it, the picture. A picture that cannot be taken or kept never
+ * fails the filing, which is already recorded: the line says why there is none.
+ */
+async function findingPicture(eng: BrowserEngine, filed: FiledFinding, ref: string | undefined): Promise<{ line: string; image?: ImageContent }> {
+  const settings = evidenceFor.get(eng);
+  const dir = eng.memory?.dir;
+  if (!settings || !dir) return { line: "" };
+  const { finding, isNew } = filed;
+  const plan = evidenceFrame({
+    mode: settings.mode,
+    ref,
+    pageOpen: eng.alive,
+    isNew,
+    hasPicture: !!finding.picture,
+    regressed: !isNew && !!finding.regressedAt && finding.regressedAt === finding.foundAt,
+  });
+  if (!plan.take) return { line: settings.mode === "off" ? "" : `\nNo picture taken: ${plan.why}.` };
+  try {
+    const shot = await eng.captureEvidence(plan.frame === "element" ? plan.ref : undefined, EVIDENCE_MARGIN);
+    const fitted = fitPicture(decodePng(shot.png), settings.maxPx, settings.maxBytes);
+    if (!fitted) return { line: `\nNo picture kept: none small enough to be readable fits in ${Math.round(settings.maxBytes / 1024)} KB.` };
+    const rel = findingPicturePath(eng.sessionKey, finding.id);
+    const file = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, fitted.png);
+    const picture = {
+      width: fitted.width,
+      height: fitted.height,
+      frame: shot.frame,
+      ...(shot.label ? { label: shot.label } : {}),
+      at: new Date().toISOString(),
+    };
+    eng.memory?.setPicture(finding.id, rel, picture);
+    const said = `\n📷 Picture (${describePicture(picture)}${fitted.shrunk ? ", shrunk to fit" : ""}): ${file}${shot.note ? ` — ${shot.note}` : ""}`;
+    if (!returnsInline(settings.mode, settings.shown, settings.inlineMax)) {
+      const capped =
+        settings.mode === "inline"
+          ? ` Not shown here: this session has returned its ${settings.inlineMax} (${EVIDENCE_LIMITS.inline.env} sets how many); it is in report.html.`
+          : "";
+      return { line: said + capped };
+    }
+    settings.shown += 1;
+    return { line: said, image: { type: "image", data: fitted.png.toString("base64"), mimeType: "image/png" } };
+  } catch (err) {
+    return { line: `\nNo picture kept: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 /** What scout_finding tells the agent about what filing did. */
@@ -1720,7 +1813,7 @@ server.registerTool(
   "scout_finding",
   {
     description:
-      "Record a structured finding (bug, UX issue, or improvement). Deduplicates across runs; automatically captures the recent action trace as the repro. Use for anything worth reporting: crashes, oracle violations you confirmed, dead ends, confusing UX, permission leaks, missing testids — and design-audit improvement opportunities (ux-polish) with their concrete measurements.",
+      "Record a structured finding (bug, UX issue, or improvement). Deduplicates across runs; automatically captures the recent action trace as the repro, and a picture of what it is about (the element `ref` names, else the viewport), kept for report.html and returned in this result as an image. Use for anything worth reporting: crashes, oracle violations you confirmed, dead ends, confusing UX, permission leaks, missing testids — and design-audit improvement opportunities (ux-polish) with their concrete measurements.",
     inputSchema: {
       severity: z.enum(["high", "medium", "low"]),
       category: z.enum(FINDING_CATEGORIES).describe("Pick the closest — use 'other' only when nothing fits"),
@@ -1740,6 +1833,13 @@ server.registerTool(
         .describe(
           "Only for a WORTH-A-LOOK finding: the observation is real, and it is a defect only under a convention of this project you cannot see. Name that convention, e.g. 'a 4px spacing scale' or 'test ids on every control'. The report lists it under \"Worth a look\", apart from the defects, and does not count it as one. Not for \"I could not tell\": leave that unfiled or look closer. Omit for a defect.",
         ),
+      ref: z
+        .string()
+        .max(20)
+        .optional()
+        .describe(
+          "The ref, from the latest scout_snapshot, of the element the finding is about. Its picture (the element plus a margin) is kept with the finding and shown in report.html. Omit it and the picture is the viewport.",
+        ),
       session: sessionParam,
     },
   },
@@ -1753,6 +1853,7 @@ server.registerTool(
         detail,
         evidence,
         convention,
+        ref,
       }: {
         severity: "high" | "medium" | "low";
         category: string;
@@ -1760,6 +1861,7 @@ server.registerTool(
         detail: string;
         evidence?: string;
         convention?: string;
+        ref?: string;
       },
       session,
     ) => {
@@ -1778,7 +1880,10 @@ server.registerTool(
           session: eng.sessionKey,
         });
         if (filed.judgeError) logLine(`dedup judge: ${filed.judgeError}; the rule decided`);
-        return text(filedText(filed, category), session);
+        const picture = await findingPicture(eng, filed, ref);
+        const result = text(filedText(filed, category) + picture.line, session);
+        if (picture.image) result.content.push(picture.image);
+        return result;
       } catch (err) {
         return errorText(err);
       }
