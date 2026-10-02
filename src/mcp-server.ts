@@ -1154,14 +1154,13 @@ async function findingPicture(eng: BrowserEngine, filed: FiledFinding, ref: stri
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, fitted.png);
     const picture = {
-      file: rel,
       width: fitted.width,
       height: fitted.height,
       frame: shot.frame,
       ...(shot.label ? { label: shot.label } : {}),
       at: new Date().toISOString(),
     };
-    eng.memory?.setPicture(finding.id, picture);
+    eng.memory?.setPicture(finding.id, rel, picture);
     const said = `\n📷 Picture (${describePicture(picture)}${fitted.shrunk ? ", shrunk to fit" : ""}): ${file}${shot.note ? ` — ${shot.note}` : ""}`;
     if (!returnsInline(settings.mode, settings.shown, settings.inlineMax)) {
       const capped =

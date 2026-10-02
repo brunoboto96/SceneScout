@@ -327,10 +327,13 @@ export function findingPicturePath(session: string, id: string): string {
   return `recordings/${plain}/finding-${safeId}.png`;
 }
 
-/** A finding's picture, as memory.json keeps it. */
-export interface FindingPicture {
-  /** Relative to the project's .scenescout/ folder (findingPicturePath). */
-  file: string;
+/**
+ * What a finding's picture shows, kept on the finding beside its path as
+ * `pictureShot`. The path itself is `picture`: a plain string, relative to
+ * the project's .scenescout/ folder, which is the form every reader of a
+ * finding (the reports among them) takes a picture in.
+ */
+export interface PictureShot {
   width: number;
   height: number;
   /** What it shows: the element the filing named, or the viewport. */
@@ -341,16 +344,26 @@ export interface FindingPicture {
   at: string;
 }
 
-/** Reads a finding's picture back from disk, or null for anything that is not one: the report links only what it can trust. */
-export function readFindingPicture(v: unknown): FindingPicture | null {
-  if (!v || typeof v !== "object") return null;
-  const o = v as Partial<FindingPicture>;
-  if (typeof o.file !== "string" || !/^recordings\/[a-z0-9._-]+\/finding-[0-9a-f]+\.png$/i.test(o.file)) return null;
-  if (!Number.isInteger(o.width) || !Number.isInteger(o.height) || (o.frame !== "element" && o.frame !== "viewport")) return null;
+/** A finding's picture as the report shows it: its path, and what it shows when that was kept. */
+export interface FindingPicture extends Partial<PictureShot> {
+  /** Relative to the project's .scenescout/ folder (findingPicturePath). */
+  file: string;
+}
+
+/**
+ * A finding's picture read back from disk, or null when its path is not one
+ * of the engine's picture paths: the report links only what it can trust.
+ * A shot that does not read is left out, and the path still stands.
+ */
+export function readFindingPicture(f: { picture?: unknown; pictureShot?: unknown }): FindingPicture | null {
+  const file = f.picture;
+  if (typeof file !== "string" || !/^recordings\/[a-z0-9._-]+\/finding-[0-9a-f]+\.png$/i.test(file)) return null;
+  const o = (f.pictureShot && typeof f.pictureShot === "object" ? f.pictureShot : {}) as Partial<PictureShot>;
+  if (!Number.isInteger(o.width) || !Number.isInteger(o.height) || (o.frame !== "element" && o.frame !== "viewport")) return { file };
   return {
-    file: o.file,
-    width: o.width!,
-    height: o.height!,
+    file,
+    width: o.width,
+    height: o.height,
     frame: o.frame,
     ...(typeof o.label === "string" && o.label ? { label: o.label } : {}),
     at: typeof o.at === "string" ? o.at : "",
@@ -359,6 +372,7 @@ export function readFindingPicture(v: unknown): FindingPicture | null {
 
 /** What a picture frames, in words for the report and the tool result. */
 export function describePicture(p: Pick<FindingPicture, "frame" | "label" | "width" | "height">): string {
+  if (!p.frame || !p.width || !p.height) return "what the page showed";
   const what =
     p.frame === "element" ? (p.label ? `"${p.label.replace(/\s+/g, " ").slice(0, 80)}" and around it` : "the element and around it") : "the page as it was";
   return `${p.width}×${p.height}, ${what}`;

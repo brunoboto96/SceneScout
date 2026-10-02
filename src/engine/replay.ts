@@ -35,7 +35,7 @@ export interface FindingEvidence {
   id: string;
   frames: Array<{ at: string; action: string; detail: string; frame: string }>;
   /** The picture taken when it was filed (capture.ts FindingPicture), shown above the frames. */
-  picture?: { file: string; width: number; height: number; caption: string };
+  picture?: { file: string; width?: number; height?: number; caption: string };
 }
 
 export interface ReplayInput {
@@ -211,7 +211,7 @@ function renderPicture(p: NonNullable<FindingEvidence["picture"]>, id: string, f
   const src = escapeHtml(framePrefix + p.file);
   return (
     `<figure class="picture"><a class="frame" href="${src}" target="_blank" rel="noreferrer" data-testid="finding-picture-open" data-finding="${escapeHtml(id)}">` +
-    `<img loading="lazy" ${GONE} src="${src}" width="${p.width}" height="${p.height}" alt="What the finding is about, when it was filed">` +
+    `<img loading="lazy" ${GONE} src="${src}"${p.width && p.height ? ` width="${p.width}" height="${p.height}"` : ""} alt="What the finding is about, when it was filed">` +
     `<p class="gone-note">This picture is not beside this file. Pictures live in the run's <code>recordings/</code> folder, which travels with it.</p></a>` +
     `<figcaption>${escapeHtml(p.caption)}${savedAt ? `<span class="onDisk">${escapeHtml(savedAt + "/" + p.file)}</span>` : ""}</figcaption></figure>`
   );

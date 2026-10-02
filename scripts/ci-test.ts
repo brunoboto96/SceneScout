@@ -3133,16 +3133,21 @@ test("evidence: a picture's path is under the session's recordings, and nothing 
   assert.equal(findingPicturePath("default", "a1b2c3d4e5"), "recordings/default/finding-a1b2c3d4e5.png");
   assert.equal(findingPicturePath("../../etc", "a1b2"), "recordings/etc/finding-a1b2.png");
   assert.equal(findingPicturePath("", "../x"), "recordings/session/finding-finding.png");
-  // What memory.json holds is read back only when it is one of these paths.
-  const ok = { file: "recordings/default/finding-a1b2.png", width: 300, height: 120, frame: "element", label: "Save", at: "2026-01-01T00:00:00Z" };
-  assert.deepEqual(readFindingPicture(ok), ok);
-  assert.equal(readFindingPicture({ ...ok, file: "../memory.json" }), null);
-  assert.equal(readFindingPicture({ ...ok, file: "recordings/default/0001-click.jpg" }), null, "a frame is not a finding's picture");
-  assert.equal(readFindingPicture({ ...ok, frame: "page" }), null);
-  assert.equal(readFindingPicture({ ...ok, width: "300" }), null);
-  assert.equal(readFindingPicture(undefined), null);
-  assert.equal(describePicture(ok), '300×120, "Save" and around it');
-  assert.equal(describePicture({ ...ok, frame: "viewport", label: undefined }), "300×120, the page as it was");
+  // What memory.json holds: `picture`, a plain path relative to .scenescout/, read back only when it is one of these
+  // paths, and `pictureShot`, what it shows, which may be missing without losing the path.
+  const shot = { width: 300, height: 120, frame: "element", label: "Save", at: "2026-01-01T00:00:00Z" };
+  const ok = { picture: "recordings/default/finding-a1b2.png", pictureShot: shot };
+  assert.deepEqual(readFindingPicture(ok), { file: ok.picture, ...shot });
+  assert.equal(readFindingPicture({ ...ok, picture: "../memory.json" }), null);
+  assert.equal(readFindingPicture({ ...ok, picture: "recordings/default/0001-click.jpg" }), null, "a frame is not a finding's picture");
+  assert.equal(readFindingPicture({ ...ok, picture: { file: ok.picture } }), null, "an object is not a path");
+  assert.equal(readFindingPicture({}), null);
+  assert.deepEqual(readFindingPicture({ picture: ok.picture }), { file: ok.picture }, "no shot: the path still stands");
+  assert.deepEqual(readFindingPicture({ ...ok, pictureShot: { ...shot, frame: "page" } }), { file: ok.picture });
+  assert.deepEqual(readFindingPicture({ ...ok, pictureShot: { ...shot, width: "300" } }), { file: ok.picture });
+  assert.equal(describePicture(readFindingPicture(ok)!), '300×120, "Save" and around it');
+  assert.equal(describePicture({ file: ok.picture }), "what the page showed");
+  assert.equal(describePicture({ ...shot, frame: "viewport", label: undefined }), "300×120, the page as it was");
 });
 
 test("png: the compact encoding reads back exactly, three channels when opaque and four when not", () => {

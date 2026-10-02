@@ -261,6 +261,16 @@ async function findingPictureCheck(client: Client): Promise<void> {
     if (!/<figure class="picture">/.test(html) || !/src="recordings\/pictures\/finding-[0-9a-f]+\.png"/.test(html))
       fail(`report.html does not show the findings' pictures:\n${report.slice(0, 300)}`);
     if (!/- \*\*Picture:\*\* `recordings\/pictures\/finding-[0-9a-f]+\.png`/.test(md)) fail("report.md does not name the findings' pictures");
+    // memory.json keeps `picture` as a plain path relative to .scenescout/, which is how every reader of a finding takes it.
+    const stored = JSON.parse(fs.readFileSync(path.join(projectDir, ".scenescout", "memory.json"), "utf8")) as { findings: Array<{ picture?: unknown }> };
+    const paths = stored.findings.map((f) => f.picture).filter((p) => p !== undefined);
+    if (
+      paths.length < 2 ||
+      !paths.every(
+        (p) => typeof p === "string" && /^recordings\/pictures\/finding-[0-9a-f]+\.png$/.test(p) && fs.existsSync(path.join(projectDir, ".scenescout", p)),
+      )
+    )
+      fail(`memory.json does not keep each picture as a path relative to .scenescout/: ${JSON.stringify(paths)}`);
     // Taking a picture is no step anyone took: the next finding's repro trace does not list it.
     if (/^\d+\. capture /m.test(md)) fail(`a finding's picture appears as a step in a repro trace:\n${md}`);
     console.log("✓ report.html shows each finding's picture, and report.md names it");

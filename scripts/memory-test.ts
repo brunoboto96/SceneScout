@@ -332,7 +332,9 @@ test("merging two processes' copies of a finding keeps the routes either saw it 
 });
 
 test("a finding's picture is kept, and survives a merge with another process's copy that has none", () => {
-  const picture = { file: "recordings/default/finding-x.png", width: 320, height: 180, frame: "viewport" as const, at: "2026-01-02T00:00:00Z" };
+  // `picture` is a plain path relative to .scenescout/, the form every reader of a finding takes; what it shows is apart.
+  const picture = "recordings/default/finding-x.png";
+  const pictureShot = { width: 320, height: 180, frame: "viewport" as const, at: "2026-01-02T00:00:00Z" };
   const finding = {
     id: "x",
     severity: "low" as const,
@@ -346,15 +348,21 @@ test("a finding's picture is kept, and survives a merge with another process's c
     runs: 1,
   };
   // The other process re-found it later (so its copy is newer) without a picture: the picture is not lost.
-  const mine: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [{ ...finding, picture }] };
+  const mine: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [{ ...finding, picture, pictureShot }] };
   const theirs: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [{ ...finding, foundAt: "2026-01-02" }] };
-  assert.deepEqual(mergeMemory(mine, theirs).findings[0].picture, picture);
-  assert.deepEqual(mergeMemory(theirs, mine).findings[0].picture, picture);
-  assert.equal("picture" in mergeMemory({ ...mine, findings: [finding] }, theirs).findings[0], false, "neither has one: no field");
+  for (const merged of [mergeMemory(mine, theirs), mergeMemory(theirs, mine)]) {
+    assert.equal(merged.findings[0].picture, picture);
+    assert.deepEqual(merged.findings[0].pictureShot, pictureShot, "the shot travels with its picture");
+  }
+  const neither = mergeMemory({ ...mine, findings: [finding] }, theirs).findings[0];
+  assert.ok(!("picture" in neither) && !("pictureShot" in neither), "neither has one: no field");
   const store = freshStore();
   const [filed] = store.addFinding({ ...base, title: "A picture is kept", detail: "d" });
-  assert.equal(store.setPicture(filed.id, picture)?.picture, picture);
-  assert.equal(store.setPicture("no-such-id", picture), null);
+  const kept = store.setPicture(filed.id, picture, pictureShot);
+  assert.equal(kept?.picture, picture);
+  assert.equal(typeof kept?.picture, "string");
+  assert.deepEqual(kept?.pictureShot, pictureShot);
+  assert.equal(store.setPicture("no-such-id", picture, pictureShot), null);
 });
 
 test("dedup: two bugs on one endpoint that answered 2xx stay two findings", () => {

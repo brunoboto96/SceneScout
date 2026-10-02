@@ -154,7 +154,7 @@ export function formatWorthALook(items: readonly Finding[], sessionStart: string
 
 /** A finding's picture as a bullet, its path relative to report.md, or nothing when it has none. */
 export function pictureLine(f: Finding): string[] {
-  const p = readFindingPicture(f.picture);
+  const p = readFindingPicture(f);
   return p ? [`- **Picture:** \`${p.file}\` (${describePicture(p)})`] : [];
 }
 
@@ -204,11 +204,19 @@ export function findingEvidence(memory: MemoryStore, sessions: readonly ReplaySe
       // running at once, the run's whole log interleaves them, and the steps
       // before a finding would come from whichever lane acted last.
       const own = f.session ? sessions.find((s) => s.session === f.session) : undefined;
-      const picture = readFindingPicture(f.picture);
+      const picture = readFindingPicture(f);
       return {
         id: f.id,
         frames: evidenceFor(own ? own.steps : all, f.foundAt),
-        ...(picture ? { picture: { file: picture.file, width: picture.width, height: picture.height, caption: describePicture(picture) } } : {}),
+        ...(picture
+          ? {
+              picture: {
+                file: picture.file,
+                ...(picture.width && picture.height ? { width: picture.width, height: picture.height } : {}),
+                caption: describePicture(picture),
+              },
+            }
+          : {}),
       };
     })
     .filter((e) => e.frames.length > 0 || !!e.picture);
