@@ -67,17 +67,17 @@ npx -y scenescout install --client cursor     # or vscode, codex, gemini, copilo
 /plugin install scenescout@scenescout-marketplace
 ```
 
-Then download the browser once with `npx -y scenescout install --browser-only`, and start a new chat to use SceneScout. The command becomes `/scenescout:scenescout`.
+Then start a new chat to use SceneScout; the test browser downloads on first use (to have it ready beforehand: `npx -y scenescout install --browser-only`). The command becomes `/scenescout:scenescout`.
 
 ### As a Claude Desktop extension
 
 Download `scenescout-X.Y.Z.mcpb` from the [latest release](https://github.com/brunoboto96/SceneScout/releases/latest) and open it, or in Claude Desktop choose Settings > Extensions > Advanced settings > Install Extension and pick the file. It is ready as soon as it is installed: start a new chat and ask *"Use SceneScout to test http://localhost:3000"*. Tell it which folder to keep its notes and report in, for example a new folder in Documents.
 
-The extension carries the engine; the browser it drives is downloaded once, from a terminal, with `npx -y scenescout install --browser-only`. If the browser is missing, SceneScout says so on the first test and gives that command. `npx -y scenescout doctor` recognises the extension and checks it.
+The extension carries the engine, and the test browser downloads on first use: the first test says "Getting the test browser ready", downloads it once (about 200 MB) and carries on. No terminal step is needed. If the download fails, SceneScout says why and gives the command to run by hand, `npx -y scenescout install --browser-only`. `npx -y scenescout doctor` recognises the extension and checks it.
 
 ### A client that `install` does not know
 
-Run `npx -y scenescout install --browser-only`, then add a stdio server to the client's configuration whose command is `npx -y scenescout serve`. Most clients accept this shape:
+Add a stdio server to the client's configuration whose command is `npx -y scenescout serve`. Most clients accept this shape (the first test downloads the browser it drives, once; `npx -y scenescout install --browser-only` does it beforehand):
 
 ```json
 {

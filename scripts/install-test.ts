@@ -38,8 +38,12 @@ import {
   type Runner,
   type RunResult,
 } from "../src/installer.ts";
+import { atLeastVersion, downloadEnv, installerFailure } from "../src/installer.ts";
 import { parse as parseYaml } from "yaml";
 import {
+  attachDownloadLine,
+  BROWSER_DOWNLOAD_ENV,
+  browserDownloadDecision,
   browserPresence,
   defaultAttachNote,
   defaultEngine,
@@ -744,6 +748,57 @@ test("doctor flags an extension missing its server, and one whose browser build 
   const unread = tmp("sc-ext-");
   fakeExtension(unread, "ext", ourManifest("3.9.0"));
   assert.deepEqual(failing(unread), []);
+});
+
+test("doctor does not fail an extension that downloads its browser on first use, and still names the command", () => {
+  const packageRoot = fakePackage();
+  const cache = tmp("sc-cache-");
+  const ownShell = path.join(cache, "chromium_headless_shell-1243");
+  fs.mkdirSync(ownShell);
+  fs.writeFileSync(path.join(ownShell, "INSTALLATION_COMPLETE"), "");
+  const check = (extensionVersion: string, version?: string) => {
+    const root = tmp("sc-ext-");
+    fakeExtension(root, "ext", ourManifest(extensionVersion), { shellRevision: "1300" });
+    return diagnose({
+      packageRoot,
+      claudeDir: tmp("sc-claude-"),
+      nodeVersion: "v22.1.0",
+      defaultBrowser: { target: "chromium-headless-shell", path: ownShell },
+      scope: "engine",
+      headlessShellDir: ownShell,
+      desktopExtension: findDesktopExtension([root]),
+      version,
+      run: scripted([]).run,
+    }).find((c) => c.name === "browser downloaded (desktop extension)");
+  };
+  // As new as this copy, or newer: it downloads on its first test, so nothing is wrong.
+  for (const ext of ["3.16.0", "3.17.2", "4.0.0"]) {
+    const c = check(ext, "3.16.0");
+    assert.equal(c?.ok, true, ext);
+    assert.match(
+      c?.detail ?? "",
+      /the test browser downloads on first use \(one-time, about 200 MB\)\. To have it ready now: npx -y scenescout@[\d.]+ install --browser-only/,
+    );
+  }
+  // Older than this copy, or a version doctor cannot tell: it may not, so the check fails with the command.
+  for (const [ext, own] of [
+    ["3.15.9", "3.16.0"],
+    ["3.16.0", undefined],
+  ] as const) {
+    const c = check(ext, own);
+    assert.equal(c?.ok, false, `${ext} against ${own}`);
+    assert.equal(c?.fix, `npx -y scenescout@${ext} install --browser-only`);
+  }
+});
+
+test("versions compare by number, and an unknown one is never taken as new", () => {
+  assert.equal(atLeastVersion("3.16.0", "3.16.0"), true);
+  assert.equal(atLeastVersion("3.16.10", "3.16.9"), true);
+  assert.equal(atLeastVersion("3.9.0", "3.16.0"), false);
+  assert.equal(atLeastVersion("4.0.0-beta.1", "3.16.0"), true);
+  assert.equal(atLeastVersion(null, "3.16.0"), false);
+  assert.equal(atLeastVersion("3.16.0", undefined), false);
+  assert.equal(atLeastVersion("latest", "3.16.0"), false);
 });
 
 test("after a plugin install, install says to start a new chat, in plain words", () => {
@@ -1975,4 +2030,59 @@ test("--out is used as given: created only when written, marked, no .gitignore, 
     assert.equal(reportFolderProblem(path.join(locked, "report"), true), `--out ${path.join(locked, "report")} cannot be written (EACCES).`);
     fs.chmodSync(locked, 0o755);
   }
+});
+
+test("an attach downloads a missing browser itself outside CI, tells CI to keep its install step, and never downloads when set off", () => {
+  const rows: Array<[NodeJS.ProcessEnv, "download" | "refuse" | "tell"]> = [
+    [{}, "download"],
+    [{ CI: "false" }, "download"],
+    [{ CI: "0" }, "download"],
+    [{ CI: "" }, "download"],
+    [{ CI: "true" }, "tell"],
+    [{ CI: "1" }, "tell"],
+    [{ GITHUB_ACTIONS: "true" }, "tell"],
+    [{ CI: "true", [BROWSER_DOWNLOAD_ENV]: "on" }, "download"],
+    [{ CI: "true", [BROWSER_DOWNLOAD_ENV]: "auto" }, "tell"],
+    [{ [BROWSER_DOWNLOAD_ENV]: "off" }, "refuse"],
+    [{ [BROWSER_DOWNLOAD_ENV]: " OFF " }, "refuse"],
+    [{ CI: "true", [BROWSER_DOWNLOAD_ENV]: "off" }, "refuse"],
+    [{ [BROWSER_DOWNLOAD_ENV]: "" }, "download"],
+  ];
+  for (const [env, want] of rows) assert.equal(browserDownloadDecision(env), want, JSON.stringify(env));
+  // A setting it does not know refuses the attach rather than reading as a default that might download.
+  assert.throws(() => browserDownloadDecision({ [BROWSER_DOWNLOAD_ENV]: "never" }), /SCENESCOUT_BROWSER_DOWNLOAD="never" is not a setting.*auto, on, off/);
+  // The same CI rule the evidence pictures default by (isCiEnv), not a second one.
+  assert.equal(browserDownloadDecision({ CI: "false", GITHUB_ACTIONS: "true" }), "tell");
+  assert.equal(browserDownloadDecision({ GITHUB_ACTIONS: "false" }), "download");
+});
+
+test("the download line says in plain words what is happening and how big it is", () => {
+  assert.equal(
+    attachDownloadLine("chromium-headless-shell"),
+    "Getting the test browser ready — a one-time download of about 200 MB (chromium-headless-shell). The test carries on once it is done.",
+  );
+  assert.match(attachDownloadLine("firefox"), /about 270 MB \(firefox\)/);
+});
+
+test("the browser download runs as Node inside a host's Electron runtime, and is left alone elsewhere", () => {
+  const env = { PATH: "/usr/bin" };
+  assert.deepEqual(downloadEnv(env, undefined), env);
+  assert.deepEqual(downloadEnv(env, "30.0.0"), { PATH: "/usr/bin", ELECTRON_RUN_AS_NODE: "1" });
+  assert.equal("ELECTRON_RUN_AS_NODE" in env, false, "the server's own environment is not changed");
+});
+
+test("a failed browser download is explained by the installer's cause, not its stack trace", () => {
+  const refused = [
+    "Downloading WebKit 26.6 (playwright webkit v2359) from http://127.0.0.1:9/builds/webkit.zip",
+    "Error: connect ECONNREFUSED 127.0.0.1:9",
+    "  errno: -61,",
+    "}",
+    "Failed to install browsers",
+    "Error: Failed to download WebKit 26.6 (playwright webkit v2359), caused by",
+    "    at ChildProcess.emit (node:events:508:28)",
+  ].join("\n");
+  assert.equal(installerFailure(refused), "connect ECONNREFUSED 127.0.0.1:9");
+  assert.equal(installerFailure("Failed to install browsers\n    at x (y.js:1)\n"), "Failed to install browsers");
+  assert.equal(installerFailure(""), null);
+  assert.equal(installerFailure("}\n    at x (y.js:1)\n"), null);
 });
