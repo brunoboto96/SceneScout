@@ -764,6 +764,35 @@ export function describeControl(el: { role: string; testid: string | null; xpath
   return `${el.role}${el.testid ? ` [testid=${el.testid}]` : ` at ${el.xpath}`}`;
 }
 
+/**
+ * The element on top of a control at the point a click aims at, as the page
+ * reported it just before a forced click (browser.ts readCoverAt): its role
+ * (explicit, else implied by its tag), tag, visible text and test id.
+ */
+export interface CoverFacts {
+  role: string | null;
+  tag: string;
+  text: string;
+  testid: string | null;
+}
+
+/**
+ * What a forced click's note says about the element on top of its target:
+ * `covered by status "Could not save…" [testid=toast-error]`. With
+ * `afterBlock`, the write policy refused a request after the tester last
+ * looked at the page, so the covering element may be the app's response to
+ * the engine's own refusal (an error toast) and in no snapshot.
+ */
+export function describeCover(cover: CoverFacts, afterBlock: boolean): string {
+  const text = cover.text.replace(/\s+/g, " ").trim();
+  const shown = text.length > 60 ? `${text.slice(0, 59)}…` : text;
+  const who = cover.role ?? `<${cover.tag}>`;
+  return (
+    `covered by ${who}${shown ? ` ${JSON.stringify(shown)}` : ""}${cover.testid ? ` [testid=${cover.testid}]` : ""}` +
+    (afterBlock ? " (after a write-policy block since the last snapshot: it may be the app's response to the engine's own refusal)" : "")
+  );
+}
+
 /** A placeholder-only field's evidence: the control, then its placeholder, capped so a paragraph of hint text stays one line. */
 export function placeholderEvidence(el: { role: string; testid: string | null; xpath: string; name: string }): string {
   const text = el.name.length > 80 ? `${el.name.slice(0, 79)}…` : el.name;

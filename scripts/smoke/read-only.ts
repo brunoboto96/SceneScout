@@ -787,6 +787,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     const switchClick = await engine.click(switchRef);
     check("forced click on the intercepted switch still reports success", switchClick.startsWith("OK: click"), switchClick);
     check("forced-click note explains the fallback was used", switchClick.includes("forced click was used instead"), switchClick);
+    check("...and names nothing as covering it: the thumb on top belongs to the switch's own label", !switchClick.includes("covered by"), switchClick);
     // White-box: reach into the private `page` field rather than growing the
     // public API just to verify this regression.
     const switchChecked = await (engine as unknown as { page: import("playwright").Page }).page.locator("#fake-switch").isChecked();

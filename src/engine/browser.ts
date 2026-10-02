@@ -63,8 +63,10 @@ import {
   mainRegionLine,
   mainRegionTag,
   type MainRegion,
+  describeCover,
+  type CoverFacts,
 } from "./collector.js";
-import { OracleMonitor, formatViolations, httpErrorDetail, requestKey } from "./oracles.js";
+import { OracleMonitor, formatViolations, httpErrorDetail, planStopsAt, requestKey, type PlanViolationRule } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, journeyTime, measureJourney } from "./journey.js";
 import {
@@ -126,6 +128,10 @@ import {
   tracksForm,
   type FormFacts,
   type FormProbe,
+  APP_FILLED_TYPES,
+  matchOption,
+  normaliseDateValue,
+  type SelectOption,
 } from "./forms.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { DEFAULT_TIME_LIMITS, explainTimeout, limitHint, resolveTimeLimits, type LimitKind, type TimeLimits } from "./limits.js";
@@ -490,6 +496,66 @@ async function readSelectOptions(loc: Locator): Promise<Array<{ value: string; l
   return loc.evaluate(describeSelect, undefined, { timeout: 1000 }).catch(() => null);
 }
 
+/**
+ * Runs in the page against one dropdown: every option, disabled and
+ * placeholder ones included, in document order, so a requested value can be
+ * matched (forms.ts matchOption) before anything is picked. Null when the node
+ * is not a select (or a label for one).
+ */
+function listSelectOptions(node: Element): SelectOption[] | null {
+  const target = node instanceof HTMLLabelElement ? (node.control ?? node.querySelector("select")) : node;
+  if (!(target instanceof HTMLSelectElement)) return null;
+  return Array.from(target.options).map((o) => ({
+    value: o.value,
+    // Whole, not cut short: an exact label has to match all of it.
+    label: (o.label || o.textContent || "").trim(),
+    disabled: o.disabled || (o.parentElement instanceof HTMLOptGroupElement && o.parentElement.disabled),
+  }));
+}
+
+/**
+ * Runs in the page against a click target, just before a forced click: what
+ * is on top of it at its centre, where the click aims. Null when nothing is
+ * (the target, something inside it, or one of its own labels is the top hit)
+ * or the centre is out of view. The hit is named by the nearest element at or
+ * above it with a role or a test id, never one that holds the target too.
+ */
+function readCoverAt(node: Element): CoverFacts | null {
+  const r = node.getBoundingClientRect();
+  const x = r.left + r.width / 2;
+  const y = r.top + r.height / 2;
+  if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return null;
+  const hit = document.elementFromPoint(x, y);
+  // A hit that holds the target (its wrapper, under a target with pointer-events: none) is not on top of it.
+  if (!hit || node.contains(hit) || hit.contains(node)) return null;
+  const labels = (node as HTMLInputElement).labels;
+  if (labels && Array.from(labels).some((l) => l.contains(hit))) return null;
+  let named: Element = hit;
+  for (let n: Element | null = hit; n && n !== document.body && !n.contains(node); n = n.parentElement) {
+    if (n.getAttribute("role") || n.getAttribute("data-testid")) {
+      named = n;
+      break;
+    }
+  }
+  const tag = named.tagName.toLowerCase();
+  const implied: Record<string, string> = {
+    button: "button",
+    a: "link",
+    dialog: "dialog",
+    img: "image",
+    nav: "navigation",
+    header: "banner",
+    footer: "contentinfo",
+    aside: "complementary",
+  };
+  return {
+    role: named.getAttribute("role") || implied[tag] || null,
+    tag,
+    text: ((named as HTMLElement).innerText || named.textContent || "").trim().slice(0, 120),
+    testid: named.getAttribute("data-testid"),
+  };
+}
+
 /** Runs in the page against one file input (or the one a chooser belongs to). */
 function describeFileInput(node: Element): FileInputMeta {
   const input = node as HTMLInputElement;
@@ -566,6 +632,8 @@ export class BrowserEngine {
   private currentFingerprint = "";
   /** URL at the time of the last snapshot — refs are valid only while it matches. */
   private snapshotUrl = "";
+  /** When the last snapshot was taken (0 before the first): what a forced click's covering element is compared against. */
+  private snapshotAt = 0;
   /** Last snapshot's identity map (per route) — enables stable refs + diff snapshots. */
   private lastSnap: { route: string; byKey: Map<string, { ref: string; label: string; disabled: boolean; state: string[] }> } | null = null;
   /** Non-parameterized routes discovered by the project scan — the objective completion contract. */
@@ -2198,6 +2266,7 @@ export class BrowserEngine {
     const { elements, truncated, forms } = await this.collect();
     const url = page.url();
     this.snapshotUrl = url;
+    this.snapshotAt = Date.now();
     const route = normalizePath(url);
     const fp = fingerprintState(url, trackedElements(elements));
     this.currentFingerprint = fp;
@@ -2841,21 +2910,41 @@ export class BrowserEngine {
    * the viewport" describe a control that is actually unreachable, and those
    * timeouts are left to fail as real failures.
    */
-  private async resilientClick(locator: import("playwright").Locator, timeout: number, clicks = 1): Promise<{ forced: boolean }> {
+  private async resilientClick(
+    locator: import("playwright").Locator,
+    timeout: number,
+    clicks = 1,
+  ): Promise<{ forced: boolean; cover: CoverFacts | null; coverReadAt: number }> {
     const clickCount = Math.max(1, Math.min(3, clicks));
     try {
       await locator.click({ timeout, clickCount });
-      return { forced: false };
+      return { forced: false, cover: null, coverReadAt: 0 };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!/Timeout/i.test(msg)) throw err;
       const diagnostic = actionabilityDiagnostic(msg);
       if (!diagnostic || !/intercepts pointer events|is not stable/i.test(diagnostic)) throw err;
+      // What is on top at the click point, read before the forced click can
+      // change it (a toast the click dismisses). Only a name for the note: a
+      // read that fails leaves the note unnamed, never the click undone.
+      const cover = await locator.evaluate(readCoverAt, undefined, { timeout: FORCED_CLICK_TIMEOUT_MS }).catch(() => null);
+      // A block the forced click itself causes comes after the cover was there, so it cannot explain it.
+      const coverReadAt = Date.now();
       // A shorter budget here: the forced click skips the wait that
       // consumed the first `timeout`, so it needs very little of its own.
       await locator.click({ timeout: Math.min(timeout, FORCED_CLICK_TIMEOUT_MS), force: true, clickCount });
-      return { forced: true };
+      return { forced: true, cover, coverReadAt };
     }
+  }
+
+  /**
+   * Whether the write policy refused a request between `since` and `until`
+   * (timestamps). Only the latest block is kept, so a later block outside the
+   * window hides an earlier one inside it: the note then stays unsuffixed.
+   */
+  private blockedBetween(since: number, until: number): boolean {
+    const at = this.oracles.lastWriteBlockAt;
+    return at !== null && at >= since && at <= until;
   }
 
   /**
@@ -2982,7 +3071,8 @@ export class BrowserEngine {
     // button or an input can submit a form; nothing else is asked.
     const form = !el.frame && (el.tag === "button" || el.tag === "input") ? await this.probeForm(clickTarget) : null;
     const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
-    const { forced } = await this.resilientClick(clickTarget, this.limits.actionMs, clicks);
+    const { forced, cover, coverReadAt } = await this.resilientClick(clickTarget, this.limits.actionMs, clicks);
+    const coverNote = cover ? describeCover(cover, this.blockedBetween(this.snapshotAt, coverReadAt)) : null;
     this.memory!.markExercised(this.currentFingerprint, el.key, clicks > 1 ? `click×${clicks}` : "click");
     this.noteFormSubmit(formState, "click", form);
     const result = await this.afterAction(clicks > 1 ? `click×${clicks}` : "click", `${el.role} "${el.name}"`, clickContext);
@@ -3004,7 +3094,10 @@ export class BrowserEngine {
       return result + `\nℹ ${clicks}× rapid click fired no duplicate state-changing requests — double-submit appears guarded on this control.`;
     }
     const forcedNote = forced
-      ? `\nℹ NOTE: the strict click timed out waiting for this element to be the stable, unobstructed top hit at its coordinates, so a forced click was used instead (which still landed — this succeeded). Something is likely rendered on top of it (an icon, a decorative layer, an animating wrapper) or it delegates via a label; cross-check against any GEOMETRY overlap on this element before treating that as a real bug.`
+      ? `\nℹ NOTE: the strict click timed out waiting for this element to be the stable, unobstructed top hit at its coordinates, so a forced click was used instead (which still landed — this succeeded). ` +
+        (coverNote
+          ? `At its centre it is ${coverNote}; look at that element before treating this as a layout bug.`
+          : `Something is likely rendered on top of it (an icon, a decorative layer, an animating wrapper) or it delegates via a label; cross-check against any GEOMETRY overlap on this element before treating that as a real bug.`)
       : "";
     // Not when the write policy blocked the submission: a native form POST or a
     // beacon is not counted as xhr/fetch, so an aborted one looks exactly like
@@ -3037,28 +3130,42 @@ export class BrowserEngine {
    * the action aborts rather than risk a silent content-destroying replace.
    */
   private async fillOrAppend(locator: import("playwright").Locator, text: string, replace: boolean): Promise<string> {
-    let state: { existing: string; caretAppendable: boolean };
+    let state: { existing: string; caretAppendable: boolean; type: string };
     try {
       state = (await locator.evaluate(
         (node) => {
           const n = node as HTMLInputElement & HTMLElement;
-          if (n.isContentEditable) return { existing: (n.innerText || n.textContent || "").trim(), caretAppendable: true };
+          const type = n.tagName === "INPUT" ? n.type.toLowerCase() : "";
+          if (n.isContentEditable) return { existing: (n.innerText || n.textContent || "").trim(), caretAppendable: true, type };
           if (typeof n.value === "string") {
             // selectionStart is null on number/date/email-style inputs — caret
             // placement is unsupported there, so append must go via fill().
-            return { existing: n.value, caretAppendable: typeof n.selectionStart === "number" };
+            return { existing: n.value, caretAppendable: typeof n.selectionStart === "number", type };
           }
-          return { existing: "", caretAppendable: false };
+          return { existing: "", caretAppendable: false, type };
         },
         undefined,
         { timeout: this.limits.actionMs },
-      )) as { existing: string; caretAppendable: boolean };
+      )) as { existing: string; caretAppendable: boolean; type: string };
     } catch (err) {
       throw new Error(
         `Could not read the field's existing content before typing — aborting rather than risk overwriting it (${err instanceof Error ? err.message.split("\n")[0] : err}). Take a new scout_snapshot and retry.`,
       );
     }
-    const { existing, caretAppendable } = state;
+    const { existing, caretAppendable, type } = state;
+    if (APP_FILLED_TYPES.has(type)) {
+      // A date or time field holds one value in one format: anything else is
+      // refused by the browser as a bare "Malformed value", and appending to
+      // what it holds can only produce that. So the value is put in the
+      // field's format, or refused naming it, and always replaces.
+      const date = normaliseDateValue(type, text);
+      if ("refused" in date) throw new Error(`Not typed: ${date.refused}`);
+      await locator.fill(date.value, { timeout: this.limits.actionMs });
+      return (
+        (date.note ? ` (${date.note})` : "") +
+        (existing && existing !== date.value ? ` (replaced existing content ${JSON.stringify(existing.slice(0, 60))}: a ${type} field holds one value)` : "")
+      );
+    }
     if (replace || !existing || text === "") {
       await locator.fill(text, { timeout: this.limits.actionMs });
       return existing && (replace || text === "") ? ` (replaced existing content ${JSON.stringify(existing.slice(0, 60))})` : "";
@@ -3461,6 +3568,25 @@ export class BrowserEngine {
       .catch(() => null);
   }
 
+  /**
+   * What a select is asked to pick, settled against the dropdown's options
+   * BEFORE the pick (forms.ts matchOption): a value naming no option, or more
+   * than one, is refused at once instead of waiting out the action limit. The
+   * pick goes by index, so the option chosen is the one matched. A control
+   * whose options cannot be read (not a native select) keeps selectOption's
+   * own matching, and its label as chosenOptionLabel reads it.
+   */
+  private static async resolveSelectPick(
+    loc: import("playwright").Locator,
+    value: string,
+  ): Promise<{ refused: string } | { arg: string | { index: number }; label: string | null; option: SelectOption | null }> {
+    const options = await loc.evaluate(listSelectOptions, undefined, { timeout: 1000 }).catch(() => null);
+    if (!options) return { arg: value, label: await BrowserEngine.chosenOptionLabel(loc, value), option: null };
+    const match = matchOption(options, value);
+    if ("refused" in match) return match;
+    return { arg: { index: match.index }, label: match.option.label, option: match.option };
+  }
+
   /** Record a dropdown's options and the ones picked, by the values selectOption reported. */
   private recordSelectChoice(fingerprint: string, key: string, options: Array<{ value: string; label: string }>, picked: string[]): void {
     const labels = options.map((o) => o.label);
@@ -3478,28 +3604,25 @@ export class BrowserEngine {
     const { el, liveLabel, live } = await this.resolveForAction(ref);
     const refusal = this.actionPolicyCheck(el, liveLabel, live);
     if (refusal) return refusal;
-    if (this.readOnly) {
-      // Bulk-action dropdowns fire on change — vet the chosen option itself.
-      const optionLabel = (await this.scopeOf(el)
-        .evaluate(
-          `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return ''; const v = ${JSON.stringify(value)}; ` +
-            `const opts = Array.from(node.options || []); ` +
-            `const o = opts.find(o => o.value === v || o.label === v || (o.textContent || '').trim() === v); ` +
-            `return o ? (o.label || o.textContent || '').trim().slice(0, 120) : ''; })()`,
-        )
-        .catch(() => null)) as string | null;
-      // The dropdown itself is not judged by its options (destructiveLabelOf), so the pick is the check: one that cannot be read is refused.
-      if (pickIsDestructive(value, el.testid, optionLabel)) {
-        this.logAction({ action: "select:refused", target: optionLabel || value, url: page.url() });
-        return destructiveRefusal(optionLabel || value, this.mode);
-      }
-    }
     const loc = this.scopeOf(el).locator(`xpath=${el.xpath}`);
+    const pick = await BrowserEngine.resolveSelectPick(loc, value);
+    if ("refused" in pick) {
+      this.logAction({ action: "select:no-match", target: `${el.name || el.testid || "dropdown"}: ${value}`.slice(0, 200), url: page.url() });
+      return `NOT SELECTED: ${pick.refused} Nothing was changed.`;
+    }
+    // Bulk-action dropdowns fire on change — vet the chosen option itself. The
+    // dropdown is not judged by its options (destructiveLabelOf), so the pick is the check: one that cannot be read is refused.
+    if (this.readOnly && pickIsDestructive(value, el.testid, pick.label)) {
+      this.logAction({ action: "select:refused", target: pick.label || value, url: page.url() });
+      return destructiveRefusal(pick.label || value, this.mode);
+    }
     const options = el.tag === "select" ? await readSelectOptions(loc) : null;
-    const picked = await loc.selectOption(value, { timeout: this.limits.actionMs });
+    const picked = await loc.selectOption(pick.arg, { timeout: this.limits.actionMs });
     this.memory!.markExercised(this.currentFingerprint, el.key, "select");
     if (options) this.recordSelectChoice(this.currentFingerprint, el.key, options, picked);
-    return this.afterAction("select", `${el.role} "${el.name}" = ${value}`);
+    const matched =
+      pick.option && pick.option.value !== value ? ` (matched option ${JSON.stringify(pick.option.value)}, labelled ${JSON.stringify(pick.option.label)})` : "";
+    return this.afterAction("select", `${el.role} "${el.name}" = ${value}${matched}`);
   }
 
   /**
@@ -4547,6 +4670,10 @@ export class BrowserEngine {
    * time by semantic locator (testid= / text= / label=), never by snapshot
    * ref, so the plan is immune to DOM drift. Aborts on the first oracle
    * violation or policy refusal so the driver re-enters at the interesting moment.
+   * With onViolation "continue", a new error status (or its console echo) is
+   * listed on its step's line and the plan goes on (oracles.ts planStopsAt):
+   * for a sweep of independent steps, where a later step does not depend on
+   * an earlier one. A failed step or a policy refusal still stops it.
    */
   async runPlan(
     steps: Array<{
@@ -4556,9 +4683,13 @@ export class BrowserEngine {
       pressEnter?: boolean;
       replace?: boolean;
     }>,
+    onViolation: PlanViolationRule = "stop",
   ): Promise<string> {
     const page = this.requirePage();
     const transcript: string[] = [];
+    const planStartedAt = Date.now();
+    /** Steps the plan went on past a new violation at (onViolation "continue"). */
+    const continuedPast: number[] = [];
     const resolveTarget = (target: string) => {
       const parsed = parseTarget(target);
       if (!parsed) throw new Error(`Plan targets must be ${TARGET_HELP} (got: ${target})`);
@@ -4585,6 +4716,8 @@ export class BrowserEngine {
       let preTestid: string | null = null;
       let preLabel = "";
       let forcedClick = false;
+      let cover: CoverFacts | null = null;
+      let coverReadAt = 0;
       // What a type step has to say about the field it typed into; it goes on
       // the step's own line, so it cannot read as the previous step's.
       let note = "";
@@ -4652,10 +4785,16 @@ export class BrowserEngine {
           preLabel = label;
           // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
           const isSelect = step.action === "select" && (await loc.evaluate((n) => n.tagName.toLowerCase() === "select").catch(() => false));
+          // The option a select step means, settled before anything is picked: one naming none fails the step at once.
+          const pick = step.action === "select" ? await BrowserEngine.resolveSelectPick(loc, step.value ?? "") : null;
+          if (pick && "refused" in pick) {
+            transcript.push(`${desc} → FAILED: ${pick.refused}`);
+            break;
+          }
           if (
             this.readOnly &&
             (step.action === "click" || step.action === "select" || step.action === "upload") &&
-            (isSelect ? pickIsDestructive(step.value, preTestid, await BrowserEngine.chosenOptionLabel(loc, step.value)) : isDestructive(label, step.value))
+            (isSelect ? pickIsDestructive(step.value, preTestid, pick ? pick.label : null) : isDestructive(label, step.value))
           ) {
             transcript.push(`${desc} → ${destructiveRefusal(label || step.target, this.mode)}`);
             break;
@@ -4666,7 +4805,7 @@ export class BrowserEngine {
               preState = await this.stateHolding(probe, preState, preState !== null && preState === lastCapture);
               form = { kind: "click", probe };
             }
-            forcedClick = (await this.resilientClick(loc, this.limits.actionMs)).forced;
+            ({ forced: forcedClick, cover, coverReadAt } = await this.resilientClick(loc, this.limits.actionMs));
           } else if (step.action === "hover") {
             const { before, bodyBefore, churning } = await this.hoverBaselines();
             await loc.hover({ timeout: this.limits.actionMs });
@@ -4698,7 +4837,7 @@ export class BrowserEngine {
             }
           } else if (step.action === "select") {
             const options = await readSelectOptions(loc);
-            const picked = await loc.selectOption(step.value ?? "", { timeout: this.limits.actionMs });
+            const picked = await loc.selectOption(pick && !("refused" in pick) ? pick.arg : (step.value ?? ""), { timeout: this.limits.actionMs });
             if (options) chose = { options, picked };
           } else if (step.action === "upload") {
             const r = await this.performUpload(loc, planUploadOptions(step.value));
@@ -4771,16 +4910,25 @@ export class BrowserEngine {
         await this.scanForContradictions();
         const violations = this.oracles.drain();
         const mutations = this.drainDialogs() + this.drainMutations() + this.drainBlocked() + this.drainCreated();
+        const forcedNote = !forcedClick
+          ? ""
+          : cover
+            ? ` (forced — the strict click timed out because at its centre it is ${describeCover(cover, this.blockedBetween(Math.max(planStartedAt, this.snapshotAt), coverReadAt))}; a forced click still landed)`
+            : " (forced — the strict click timed out on this element's hit-test/stability check but a forced click still landed; something may render on top of it or delegate via a label, cross-check GEOMETRY overlaps before calling it a bug)";
         // Abort only on NEW violations: a known-failing endpoint repeating on
         // every navigation must not make every plan abort at step 1.
-        if (violations.some((v) => !v.repeat)) {
+        if (planStopsAt(violations, onViolation)) {
           transcript.push(`${desc} → OK${note}, but oracle fired:${formatViolations(violations)}${mutations}`);
           transcript.push(`PLAN ABORTED at step ${i + 1} — investigate before continuing.`);
           break;
         }
-        const forcedNote = forcedClick
-          ? " (forced — the strict click timed out on this element's hit-test/stability check but a forced click still landed; something may render on top of it or delegate via a label, cross-check GEOMETRY overlaps before calling it a bug)"
-          : "";
+        if (violations.some((v) => !v.repeat)) {
+          continuedPast.push(i + 1);
+          transcript.push(
+            `${desc} → OK (${page.url()})${note}${forcedNote}, oracle fired (continuing: onViolation "continue"):${formatViolations(violations)}${mutations}`,
+          );
+          continue;
+        }
         transcript.push(`${desc} → OK (${page.url()})${note}${mutations}${forcedNote}`);
       } catch (err) {
         const fullMsg = err instanceof Error ? err.message : String(err);
@@ -4806,7 +4954,11 @@ export class BrowserEngine {
     // Count step lines, not transcript lines — hover reveals and scroll
     // positions push informational entries that are not steps.
     const ran = transcript.filter((l) => /^\d+\. /.test(l)).length;
-    return `PLAN (${ran}/${Math.min(steps.length, 20)} steps ran):\n${transcript.join("\n")}\nTake scout_snapshot to see the resulting state.`;
+    const continued =
+      continuedPast.length > 0
+        ? `\nCONTINUED PAST new oracle violations at step${continuedPast.length > 1 ? "s" : ""} ${continuedPast.join(", ")} (onViolation "continue"); each is listed on its step's line and kept for the report.`
+        : "";
+    return `PLAN (${ran}/${Math.min(steps.length, 20)} steps ran):\n${transcript.join("\n")}${continued}\nTake scout_snapshot to see the resulting state.`;
   }
 
   /** A plan's or a flow's target as a Playwright locator (every match; callers pick). */

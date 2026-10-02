@@ -42,6 +42,7 @@ import {
   inertKeys,
   mainRegionLine,
   mainRegionTag,
+  describeCover,
 } from "../src/engine/collector.ts";
 import { EventEmitter } from "node:events";
 import vm from "node:vm";
@@ -67,6 +68,7 @@ import {
   formatViolations,
   isPolicyInduced,
   isRouteCancellation,
+  planStopsAt,
   redactViolation,
 } from "../src/engine/oracles.ts";
 import {
@@ -1179,4 +1181,34 @@ test("OracleMonitor: a contradiction keeps the severity its rule gave it", () =>
     monitor.drain().map((v) => v.severity),
     ["medium", "high"],
   );
+});
+
+test("a plan stops at a new violation by default; with continue, only at one that is not an error status or its echo", () => {
+  const http = { kind: "http_error" as const };
+  const consoleEcho = { kind: "console_error" as const };
+  const crash = { kind: "page_error" as const };
+  const contradiction = { kind: "refused_empty" as const };
+  assert.equal(planStopsAt([], "stop"), false, "nothing new, nothing to stop for");
+  assert.equal(planStopsAt([{ ...http, repeat: true }], "stop"), false, "a repeat never stops a plan");
+  assert.equal(planStopsAt([http], "stop"), true);
+  assert.equal(planStopsAt([http], "continue"), false, "a sweep goes on past an error status");
+  assert.equal(planStopsAt([http, consoleEcho], "continue"), false, "...and past the console's echo of it");
+  assert.equal(planStopsAt([http, crash], "continue"), true, "an uncaught exception stops it either way");
+  assert.equal(planStopsAt([contradiction], "continue"), true, "a page contradicting the server stops it either way");
+  assert.equal(planStopsAt([{ ...crash, repeat: true }, http], "continue"), false, "a repeated exception does not count against the rule");
+  for (const kind of ["request_failed", "dom_injection", "false_success", "postmessage_token"] as const) {
+    assert.equal(planStopsAt([{ kind }], "continue"), true, `${kind} stops a plan run with continue`);
+  }
+});
+
+test("a forced click names what covers its target, and says when a write-policy block came first", () => {
+  const toast = { role: "status", tag: "div", text: "Could not save\n  the record", testid: "toast-error" };
+  assert.equal(describeCover(toast, false), 'covered by status "Could not save the record" [testid=toast-error]');
+  assert.match(
+    describeCover(toast, true),
+    /^covered by status "Could not save the record" \[testid=toast-error\] \(after a write-policy block since the last snapshot/,
+  );
+  assert.equal(describeCover({ role: null, tag: "div", text: "", testid: null }, false), "covered by <div>", "an unnamed layer is named by its tag");
+  const long = describeCover({ role: null, tag: "aside", text: "x".repeat(200), testid: null }, false);
+  assert.ok(long.length < 90 && long.endsWith('…"'), long);
 });

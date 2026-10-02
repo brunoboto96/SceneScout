@@ -48,6 +48,7 @@ import * as ciRun from "./smoke/ci.ts";
 import * as timeLimits from "./smoke/time-limits.ts";
 import * as snapshotContents from "./smoke/snapshot.ts";
 import * as settleAfterLeaving from "./smoke/settle.ts";
+import * as actionResults from "./smoke/action-results.ts";
 
 const suites = [
   readOnly,
@@ -69,6 +70,7 @@ const suites = [
   frames,
   snapshotContents,
   settleAfterLeaving,
+  actionResults,
   unload,
   timeLimits,
   checkGate,

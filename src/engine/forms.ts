@@ -398,3 +398,153 @@ export function formatNeverSubmittedEmpty(forms: ReadonlyArray<{ route: string; 
     ...(forms.length > 15 ? [`  … +${forms.length - 15} more`] : []),
   ];
 }
+
+/** One `<option>` of a dropdown as the page holds it, in document order. */
+export interface SelectOption {
+  value: string;
+  label: string;
+  disabled: boolean;
+}
+
+/** The option a select asked for resolves to, or why none does. */
+export type OptionMatch = { option: SelectOption; index: number } | { refused: string };
+
+/**
+ * Which option of a dropdown a requested value means, decided before any pick
+ * so a value that names none fails at once instead of waiting out the action
+ * limit. Tried in order, first tier with a match wins:
+ *   1. an option whose value is exactly the request;
+ *   2. an option whose label is exactly the request;
+ *   3. a value or label equal to it ignoring case and surrounding space;
+ *   4. a label that starts with it, ignoring case ("Low" for "Low — minor impact").
+ * In tiers 1 and 2 the first match is taken, as the browser takes it. Tiers 3
+ * and 4 are guesses, so they must find exactly one option; two or more is
+ * refused, naming them. A disabled option is refused: no user can choose it.
+ */
+export function matchOption(options: readonly SelectOption[], requested: string): OptionMatch {
+  const indexed = options.map((option, index) => ({ option, index }));
+  const fold = (s: string) => s.trim().toLowerCase();
+  const want = fold(requested);
+  const tiers: Array<{ hits: typeof indexed; guess: boolean }> = [
+    { hits: indexed.filter(({ option }) => option.value === requested), guess: false },
+    { hits: indexed.filter(({ option }) => option.label === requested), guess: false },
+    { hits: indexed.filter(({ option }) => fold(option.value) === want || fold(option.label) === want), guess: true },
+    { hits: want === "" ? [] : indexed.filter(({ option }) => fold(option.label).startsWith(want)), guess: true },
+  ];
+  for (const { hits, guess } of tiers) {
+    if (hits.length === 0) continue;
+    if (guess && hits.length > 1) {
+      return { refused: `${JSON.stringify(requested)} matches more than one option: ${listOptions(hits.map((h) => h.option))}. Pass one of the values.` };
+    }
+    const hit = hits[0];
+    if (hit.option.disabled) return { refused: `option ${describeOption(hit.option)} is disabled, so it cannot be chosen.` };
+    return hit;
+  }
+  return { refused: `no option matches ${JSON.stringify(requested)}; options: ${listOptions(options)}.` };
+}
+
+function describeOption(o: SelectOption): string {
+  const cap = (t: string) => (t.length > 60 ? `${t.slice(0, 59)}…` : t);
+  const shown = o.value === "" ? '""' : cap(o.value);
+  return o.label && o.label !== o.value ? `${shown} (${JSON.stringify(cap(o.label))})` : shown;
+}
+
+/** The options as a refusal lists them: value, then label where it differs; at most 15. */
+function listOptions(options: readonly SelectOption[]): string {
+  if (options.length === 0) return "none";
+  const shown = options.slice(0, 15).map((o) => describeOption(o) + (o.disabled ? " [disabled]" : ""));
+  return shown.join(", ") + (options.length > 15 ? `, … +${options.length - 15} more` : "");
+}
+
+/** The format each date and time input type takes, with an example, for a refusal. */
+const DATE_FORMATS: Readonly<Record<string, string>> = {
+  date: "YYYY-MM-DD (e.g. 2026-09-20)",
+  "datetime-local": "YYYY-MM-DDTHH:MM (e.g. 2026-09-20T10:00)",
+  time: "HH:MM or HH:MM:SS, 24-hour (e.g. 14:30)",
+  month: "YYYY-MM (e.g. 2026-09)",
+  week: "YYYY-Www (e.g. 2026-W38)",
+};
+
+function realDate(y: number, m: number, d: number): boolean {
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+}
+
+function realTime(h: number, min: number, sec: number | null): boolean {
+  return h < 24 && min < 60 && (sec === null || sec < 60);
+}
+
+const pad = (n: number, width = 2) => String(n).padStart(width, "0");
+
+/** ISO 8601 week of a calendar date, as `YYYY-Www`. */
+function isoWeek(y: number, m: number, d: number): string {
+  const t = new Date(Date.UTC(y, m - 1, d));
+  const day = t.getUTCDay() || 7;
+  t.setUTCDate(t.getUTCDate() + 4 - day);
+  const yearStart = Date.UTC(t.getUTCFullYear(), 0, 1);
+  const week = Math.ceil(((t.getTime() - yearStart) / 86_400_000 + 1) / 7);
+  return `${t.getUTCFullYear()}-W${pad(week)}`;
+}
+
+/** What to type into a field, or why it cannot take the value. `note` says what was changed, when anything was. */
+export type DateValue = { value: string; note?: string } | { refused: string };
+
+/**
+ * A value for a date or time input (`date`, `datetime-local`, `time`, `month`,
+ * `week`), in the one format the browser accepts there. Anything else fails
+ * the fill with a bare "Malformed value", so an obvious near miss is put in
+ * that format — a date into a date-and-time field gets T00:00, a space between
+ * date and time becomes "T", a date into a month field keeps its month — and
+ * anything else is refused, naming the format. Any other type, and an empty
+ * value (which clears the field), pass through unchanged.
+ */
+export function normaliseDateValue(type: string, text: string): DateValue {
+  const format = DATE_FORMATS[type];
+  if (!format || text === "") return { value: text };
+  const v = text.trim();
+  const refused = { refused: `a ${type} field takes ${format}; ${JSON.stringify(text)} is not in that form.` };
+  const changed = (value: string): DateValue => (value === text ? { value } : { value, note: `entered as ${value}, the form a ${type} field takes` });
+  const dateRe = /^(\d{4})-(\d{1,2})-(\d{1,2})/;
+  const timeRe = /^(\d{1,2}):(\d{2})(?::(\d{2})(\.\d{1,3})?)?$/;
+  const timeOf = (s: string): string | null => {
+    const t = timeRe.exec(s);
+    if (!t) return null;
+    const [h, min, sec] = [Number(t[1]), Number(t[2]), t[3] === undefined ? null : Number(t[3])];
+    if (!realTime(h, min, sec)) return null;
+    return `${pad(h)}:${pad(min)}${sec === null ? "" : `:${pad(sec)}${t[4] ?? ""}`}`;
+  };
+  if (type === "time") {
+    const t = timeOf(v);
+    return t ? changed(t) : refused;
+  }
+  if (type === "week") {
+    const w = /^(\d{4})-[Ww](\d{1,2})$/.exec(v);
+    if (w) {
+      const week = Number(w[2]);
+      return week >= 1 && week <= 53 ? changed(`${w[1]}-W${pad(week)}`) : refused;
+    }
+  }
+  if (type === "month") {
+    const m = /^(\d{4})-(\d{1,2})$/.exec(v);
+    if (m) return Number(m[2]) >= 1 && Number(m[2]) <= 12 ? changed(`${m[1]}-${pad(Number(m[2]))}`) : refused;
+  }
+  const d = dateRe.exec(v);
+  if (!d) return refused;
+  const [y, mo, day] = [Number(d[1]), Number(d[2]), Number(d[3])];
+  if (!realDate(y, mo, day)) return refused;
+  const date = `${d[1]}-${pad(mo)}-${pad(day)}`;
+  const rest = v.slice(d[0].length);
+  // What may follow the date: nothing, or a time after "T" or a space.
+  const time = rest === "" ? "" : /^[T ]/.test(rest) ? timeOf(rest.slice(1)) : null;
+  if (time === null) return refused;
+  switch (type) {
+    case "date":
+      return changed(date);
+    case "month":
+      return changed(date.slice(0, 7));
+    case "week":
+      return changed(isoWeek(y, mo, day));
+    default:
+      return changed(`${date}T${time || "00:00"}`);
+  }
+}
