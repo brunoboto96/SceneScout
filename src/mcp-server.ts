@@ -749,7 +749,7 @@ server.registerTool(
               .map((u) => `  · ${u}`)
               .join("\n") +
             (unfiled.length > MAX_UNFILED_NAMED ? `\n  … +${unfiled.length - MAX_UNFILED_NAMED} more` : "") +
-            `\nFile each with scout_finding (the same evidence), or confirm which finding already covers it, before closing the lane's session. A judged defect that is never filed is not in the report.`
+            `\nFile each with scout_finding (the same evidence), or have the lane name the finding's id in the decision's "finding", before closing the lane's session. A judged defect that is never filed is not in the report.`
           : "";
       laneLedger.fold(lane, engines.get(lane)?.attached === true);
       // A lane that lost its sign-in and re-attached from its role's profile
