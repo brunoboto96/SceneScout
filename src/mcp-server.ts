@@ -86,6 +86,7 @@ import {
   NAV_TIMEOUT_ENV,
   watchdogFor,
 } from "./engine/limits.js";
+import { MAX_READ_POSTS, READ_POSTS_ENV } from "./engine/policy.js";
 import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
@@ -283,6 +284,18 @@ const liveProvider: LiveProvider = {
   startStream: async (session, onFrame, onEnd) => (await engines.get(session)?.startScreencast(onFrame, onEnd)) ?? null,
 };
 
+/** The pages any live session saw observe refuse a script's POST on, merged across sessions (the gap ledger names them). */
+function observeRefusedPosts(): Array<{ route: string; endpoints: string[] }> {
+  const merged = new Map<string, Set<string>>();
+  for (const e of engines.values())
+    for (const [route, endpoints] of e.observeRefusedPosts) {
+      const set = merged.get(route) ?? new Set<string>();
+      for (const endpoint of endpoints) set.add(endpoint);
+      merged.set(route, set);
+    }
+  return [...merged].map(([route, endpoints]) => ({ route, endpoints: [...endpoints] }));
+}
+
 /** What the report needs to know beyond memory: the one place it is built, so the live view and scout_report cannot drift apart. */
 function reportExtras(eng: BrowserEngine): ReportExtras {
   const unvisited = eng.unvisitedKnownRoutes();
@@ -295,6 +308,8 @@ function reportExtras(eng: BrowserEngine): ReportExtras {
     unvisitedRoutes: unvisited,
     mode: eng.mode,
     trustedEmbeds: [...eng.trustedEmbeds],
+    readPosts: eng.readPosts.map((e) => e.entry),
+    observeRefusedPosts: observeRefusedPosts(),
     policyAttributed: eng.oracleLog.policyAttributed,
     version: PKG_VERSION,
     attachedSessions: [...engines.keys()],
@@ -793,7 +808,7 @@ server.registerTool(
   "scout_attach",
   {
     description:
-      "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass `role` to sign in with a login the user saved by `scenescout login <url> --role <name>`, or a Playwright storage-state JSON as storageStatePath. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
+      "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted, and POSTs the user named in readPosts) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass `role` to sign in with a login the user saved by `scenescout login <url> --role <name>`, or a Playwright storage-state JSON as storageStatePath. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
     inputSchema: {
       url: z.string().describe("Base URL of the running app, e.g. http://localhost:3000"),
       projectPath: z.string().describe("Absolute path to the project (memory + report live in .scenescout/ here)"),
@@ -853,6 +868,14 @@ server.registerTool(
           'Origins of embedded frames (e.g. "https://pay.example.com") whose writes out of the app may go out — ONLY when the user named them, typically a provider in test mode, and only in safe-write mode. ' +
             "Never add one yourself. Hostile input, repeated-click probes and uploads stay refused in them.",
         ),
+      readPosts: z
+        .array(z.string().max(300))
+        .max(MAX_READ_POSTS)
+        .optional()
+        .describe(
+          `POST endpoints that only read, e.g. ["POST /api/search", "POST https://api.example.com/reports/query"], which observe mode then lets out — ONLY when the user named them. Never add one yourself, even when the gap ledger lists a refused POST: ask the user. ` +
+            `Exact paths; * stands for one path segment. Still refused when the path or body looks destructive or the body is a GraphQL mutation. Observe mode only. Default: the ${READ_POSTS_ENV} environment variable, else none.`,
+        ),
       record: z
         .boolean()
         .default(false)
@@ -911,6 +934,7 @@ server.registerTool(
       task,
       record,
       trustedEmbeds,
+      readPosts,
       paceMs,
       actionTimeoutMs,
       navTimeoutMs,
@@ -930,6 +954,7 @@ server.registerTool(
       task?: string;
       record?: boolean;
       trustedEmbeds?: string[];
+      readPosts?: string[];
       paceMs?: number;
       actionTimeoutMs?: number;
       navTimeoutMs?: number;
@@ -1018,6 +1043,7 @@ server.registerTool(
           task: objective ? task : undefined,
           record,
           trustedEmbeds,
+          readPosts,
           actionTimeoutMs,
           navTimeoutMs,
           memoryStore: store,
@@ -1866,6 +1892,7 @@ server.registerTool(
           designAudits: auditsThisRun,
           unvisitedRoutes: unvisited,
           mode: eng.mode,
+          observeRefusedPosts: observeRefusedPosts(),
         });
         if (lvl === "extensive" && gapList.length > 0) {
           gates.push(
@@ -1893,6 +1920,8 @@ server.registerTool(
           unvisitedRoutes: unvisited,
           mode: eng.mode,
           trustedEmbeds: [...eng.trustedEmbeds],
+          readPosts: eng.readPosts.map((e) => e.entry),
+          observeRefusedPosts: observeRefusedPosts(),
           policyAttributed: eng.oracleLog.policyAttributed,
           // Which sessions are still open decides whether a quiet one is holding a browser, and how long its trailing idle runs.
           attachedSessions: [...engines.keys()],

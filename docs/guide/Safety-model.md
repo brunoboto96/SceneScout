@@ -8,7 +8,7 @@ Only test apps you own or are authorised to test.
 
 | Mode | How to ask for it | What leaves the page |
 |---|---|---|
-| `observe` | `--observe`, `scout_attach {mode: "observe"}` | `GET` requests only, plus what a session needs to exist: signing in, signing out and refreshing a token. Signing up, changing or resetting a password and creating users are refused like any other write |
+| `observe` | `--observe`, `scout_attach {mode: "observe"}` | `GET` requests only, plus what a session needs to exist: signing in, signing out and refreshing a token, and any `POST` you name as a read. Signing up, changing or resetting a password and creating users are refused like any other write |
 | `read-only` (default) | nothing | Ordinary form submissions (a plain `POST`) go through. `PUT`, `PATCH`, `DELETE`, destructive-looking `POST`s and clicks on destructive-labelled controls (delete, revoke, archive and the like) are refused |
 | `safe-write` | `--safe-write` | Anything that creates. Changes and deletes only on records this run created, never on data that was there before |
 | `destructive` | `--allow-destructive` | Everything |
@@ -31,8 +31,21 @@ In `observe` and `read-only` a click is also refused before it happens when the 
 
 - A button, link, menu item, tab or option is judged by its name.
 - A dropdown is not judged by its options: a filter offering "All, Create, Delete" can be set to "Create", and choosing "Delete" is refused.
-- A row, card or panel is judged by its own text, not by the buttons inside it, which are listed and judged on their own. A control covering the row's centre, where a click on it would land, is judged with it.
+- A row, card, heading or panel is judged by its test id and by the control covering its centre, where a click on it would land. Its text is the record it shows ("Archive Test Widget", "Final sign-off recorded"), so it counts only for a clickable element whose own text is a short command of at most four words and no sentence, such as a clickable box reading "Delete". A heading is never judged by its text. The buttons inside a row are listed and judged on their own.
+- Removing a filter chip ("Remove Status: Open filter") drops a condition from the view, so it is allowed. "Remove member" is refused.
+- "Sign off" is refused as a command: at the start of a label, or joined to another verb ("Save and sign off"). Elsewhere it is the approval noun ("Needs sign-off", "Manager sign-off") and is allowed.
 - "Discard changes", "Discard your edits" and the like drop only what was typed and never sent, so they are allowed. "Discard draft", "Discard record" and a bare "Discard" are refused, and a write the confirm sends is judged on the network like any other: `discard` in a request path is treated as destructive.
+
+## POST endpoints that only read
+
+Some apps read data through `POST`: a search page, a report query, a GraphQL `query`. `observe` refuses every `POST`, so such a page shows the refusal as its error and cannot be tested. The gap ledger names each page where that happened, with the endpoint.
+
+When you know an endpoint only reads, name it: `scout_attach {mode: "observe", readPosts: ["POST /api/search"]}`, or set `SCENESCOUT_READ_POSTS` for `check`, `ci` and a first look. Nothing is named by default, and the agent must not add an endpoint you did not name.
+
+- An entry is `POST /path` for the app's own origin, or `POST https://host/path` for an API on another origin. The path is exact, a trailing slash aside; `*` stands for one path segment, such as an id. The query string is not part of it.
+- A named endpoint is still refused when its path or body looks destructive, when its body is a GraphQL `mutation` or `subscription` or a persisted query (a hash with no query text, so what it runs cannot be read), or when its body is too long to check.
+- Each one let out is logged as `write-policy:read-post`, and the report lists the endpoints you named.
+- It applies in `observe` only. `read-only` and `safe-write` already let a `POST` out unless it looks destructive.
 
 ## Leaving a page with unsent input
 

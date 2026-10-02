@@ -40,6 +40,13 @@ import {
   ESCAPE_REFUSAL,
   pickIsDestructive,
   LABEL_HEAD_WORDS,
+  COMMAND_TEXT_WORDS,
+  MAX_READ_POSTS,
+  graphqlWriteOperation,
+  matchReadPost,
+  readPostAllowed,
+  readPostEntries,
+  readPostsSetting,
   POLICY_REFUSAL_HEADER,
   policyRefusal,
   WRITE_MODES,
@@ -229,18 +236,55 @@ test("'sign off' is destructive as a verb, not as the noun approval apps use", (
     "Sign off now",
     "(Sign off)",
     "\n  Sign off",
-    "Confirm sign off",
     "Save and sign off now",
     "Approve and sign off",
+    "Save & sign off",
+    "Review, then sign off",
+    "sign-off-button",
   ]) {
     assert.equal(isDestructive(label), true, `expected destructive: ${label}`);
   }
-  // The noun is told by the word before it, the way the reset rule is told by
-  // the word after. A label that leads with the noun ("Sign-off required")
-  // still matches, and a status chip worded that way pays for it.
-  for (const label of ["Needs sign-off", "Awaiting sign off", "Send for sign-off", "2 orders pending sign-off", "Requires sign-off from a manager"]) {
+  // The noun is told by position, not by the word before it: any modifier can
+  // come first. A label that leads with the noun ("Sign-off required") still
+  // matches, and a status chip worded that way pays for it; a chip that is not
+  // a control is not judged by its text at all (destructiveLabelOf).
+  for (const label of [
+    "Needs sign-off",
+    "Awaiting sign off",
+    "Send for sign-off",
+    "2 orders pending sign-off",
+    "Requires sign-off from a manager",
+    "Manager sign-off",
+    "Pending manager sign-off",
+    "Final sign-off recorded for order 12",
+    "Approved without the required second-reviewer sign-off",
+    // "Confirm" is the verb and the sign-off its object: confirming an approval.
+    "Confirm sign off",
+  ]) {
     assert.equal(isDestructive(label), false, `expected safe: ${label}`);
   }
+});
+
+test("removing a filter chip is not destructive; removing a record is", () => {
+  for (const label of [
+    "Remove Status: Open filter",
+    "Remove filter",
+    "Remove all filters",
+    "Remove tag filter",
+    "Remove Owner: me chip",
+    "filter-remove",
+    "chip-remove-status",
+  ])
+    assert.equal(isDestructive(label), false, `expected safe: ${label}`);
+  for (const label of [
+    "Remove member",
+    "Remove",
+    "Remove user from team",
+    "remove-member",
+    "Remove Status: Open",
+    "Remove member. Use the filter to find others.",
+  ])
+    assert.equal(isDestructive(label), true, `expected destructive: ${label}`);
 });
 
 test("isDestructive ignores empty and absent labels", () => {
@@ -1202,6 +1246,140 @@ test("a control is judged by its own label: a dropdown by the pick, a row by its
   assert.equal(destructiveLabelOf({ tag: "a", role: "link", name: "Remove member", testid: null, ownText: "" }), "Remove member");
   assert.equal(destructiveLabelOf({ tag: "button", role: "button", name: "Open", testid: "row-delete" }), "row-delete");
   assert.equal(destructiveLabelOf({ tag: "button", role: "button", name: "Discard changes", testid: null }), null);
+});
+
+test("an element that is not a control is not judged by the record text it shows", () => {
+  // A row whose title is a record's free text, an event card, a heading: their text is data.
+  const row = { tag: "tr", role: "generic", name: "", testid: "finding-row-4", interactive: true, centre: [] as string[] };
+  assert.equal(destructiveLabelOf({ ...row, ownText: "Order 4 was approved without the required second-reviewer sign-off" }), null, "record prose");
+  assert.equal(destructiveLabelOf({ ...row, ownText: "Archive Test Widget created 2 days ago by Sam" }), null, "a long row naming Archive");
+  assert.equal(destructiveLabelOf({ ...row, ownText: "Archive Test Widget", interactive: false }), null, "listed for its test id only");
+  assert.equal(destructiveLabelOf({ ...row, ownText: "Final sign-off recorded for order 12." }), null, "an event card");
+  // ...while a row whose centre is a Delete button is refused, and so is a click target saying Delete.
+  assert.equal(destructiveLabelOf({ ...row, ownText: "Archive Test Widget created 2 days ago by Sam", centre: ["Delete"] }), "Delete");
+  assert.equal(
+    destructiveLabelOf({ ...row, ownText: "Archive Test Widget", interactive: false, testid: "row-delete" }),
+    "row-delete",
+    "its test id still counts",
+  );
+  assert.equal(
+    destructiveLabelOf({ tag: "div", role: "generic", name: "Archive item", testid: null, ownText: "Archive item", interactive: true }),
+    "Archive item",
+  );
+  // The boundary, from the constant: a click target's text counts up to COMMAND_TEXT_WORDS words.
+  const words = (n: number) => ["Delete", ...Array.from({ length: n - 1 }, (_, i) => `w${i}`)].join(" ");
+  assert.equal(destructiveLabelOf({ tag: "div", role: "generic", name: "", testid: null, ownText: words(COMMAND_TEXT_WORDS) }), words(COMMAND_TEXT_WORDS));
+  assert.equal(destructiveLabelOf({ tag: "div", role: "generic", name: "", testid: null, ownText: words(COMMAND_TEXT_WORDS + 1) }), null);
+  assert.equal(destructiveLabelOf({ tag: "div", role: "generic", name: "", testid: null, ownText: "Delete. It." }), null, "a sentence is not a command");
+  // A heading is never judged by its text, however short; its test id and centre still are.
+  for (const h of [
+    { tag: "h1", role: "generic" },
+    { tag: "div", role: "heading" },
+  ]) {
+    assert.equal(destructiveLabelOf({ ...h, name: "Archive Test Widget", testid: null, ownText: "Archive Test Widget", interactive: true }), null, h.tag);
+    assert.equal(destructiveLabelOf({ ...h, name: "Archive", testid: "delete-heading", ownText: "Archive" }), "delete-heading", h.tag);
+  }
+  // A facet checkbox is a labelled control, judged whole: the noun passes, the verb does not.
+  assert.equal(destructiveLabelOf({ tag: "input", role: "checkbox", name: "Pending manager sign-off", testid: null }), null);
+  assert.equal(destructiveLabelOf({ tag: "button", role: "button", name: "Sign off", testid: null }), "Sign off");
+  // A filter chip's remove button against a member's.
+  assert.equal(destructiveLabelOf({ tag: "button", role: "button", name: "Remove Status: Open filter", testid: null }), null);
+  assert.equal(destructiveLabelOf({ tag: "button", role: "button", name: "Remove member", testid: null }), "Remove member");
+});
+
+test("observe lets out only the POST endpoints the user named as reads", () => {
+  // Nothing by default: no option and no environment variable.
+  assert.deepEqual(readPostsSetting(undefined, undefined), []);
+  assert.deepEqual(readPostsSetting(undefined, "POST /api/search, POST /api/reports/query\nPOST /graphql"), [
+    "POST /api/search",
+    "POST /api/reports/query",
+    "POST /graphql",
+  ]);
+  assert.deepEqual(readPostsSetting([], "POST /api/search"), [], "an option, even empty, wins over the environment");
+
+  const parsed = readPostEntries([
+    "POST /api/search",
+    "post /api/reports/*/query/",
+    "POST https://api.example.com/v2/search",
+    "POST /graphql",
+    "PUT /api/search",
+    "/api/search",
+    "POST api/search",
+    "POST /api/search?x=1",
+    "POST /api/sea*",
+    "POST https://api.example.com/v2/search#frag",
+    "POST /api/search",
+  ]);
+  assert.deepEqual(
+    parsed.entries.map((e) => e.entry),
+    ["POST /api/search", "POST /api/reports/*/query", "POST https://api.example.com/v2/search", "POST /graphql"],
+  );
+  assert.deepEqual(parsed.rejected, [
+    "PUT /api/search",
+    "/api/search",
+    "POST api/search",
+    "POST /api/search?x=1",
+    "POST /api/sea*",
+    "POST https://api.example.com/v2/search#frag",
+  ]);
+  const many = readPostEntries(Array.from({ length: MAX_READ_POSTS + 2 }, (_, i) => `POST /api/q${i}`));
+  assert.equal(many.entries.length, MAX_READ_POSTS);
+  assert.equal(many.overflow.length, 2);
+
+  const app = "http://app.test:3000/";
+  const { entries } = parsed;
+  assert.equal(matchReadPost(entries, app, "http://app.test:3000/api/search?page=2")?.entry, "POST /api/search", "the query string is not the path");
+  assert.equal(matchReadPost(entries, app, "http://app.test:3000/api/search/"), entries[0], "a trailing slash is ignored");
+  assert.equal(matchReadPost(entries, app, "http://app.test:3000/api/reports/7/query")?.entry, "POST /api/reports/*/query");
+  assert.equal(matchReadPost(entries, app, "http://app.test:3000/api/reports/7/8/query"), null, "* is one segment");
+  assert.equal(matchReadPost(entries, app, "http://app.test:3000/api/search/save"), null, "exact, not a prefix");
+  assert.equal(matchReadPost(entries, app, "http://other.test/api/search"), null, "an entry with no origin is the app's own");
+  assert.equal(matchReadPost(entries, app, "https://api.example.com/v2/search")?.entry, "POST https://api.example.com/v2/search");
+
+  const judge = (mode: (typeof WRITE_MODES)[number], url: string, body: string | null, method = "POST") =>
+    readPostAllowed({ mode, method, url, appUrl: app, body, destructiveWire: isDestructiveWire(new URL(url).pathname, body), entries })?.entry ?? null;
+  const search = "http://app.test:3000/api/search";
+  // The contrastive pairs: one endpoint, the body flips it; one body, the listing flips it.
+  assert.equal(judge("observe", search, '{"q":"widgets"}'), "POST /api/search", "a listed read goes out in observe");
+  assert.equal(judge("observe", search, '{"action":"delete","ids":[3]}'), null, "the same path with a destructive body is refused");
+  assert.equal(judge("observe", "http://app.test:3000/api/orders", '{"q":"widgets"}'), null, "a POST nobody named is refused");
+  assert.equal(judge("observe", search, '{"q":"widgets"}', "PUT"), null, "only POST");
+  assert.equal(judge("read-only", search, '{"q":"widgets"}'), null, "observe only: read-only judges POSTs by its own rule");
+  assert.equal(
+    readPostAllowed({ mode: "observe", method: "POST", url: search, appUrl: app, body: "{}", destructiveWire: false, entries: [] }),
+    null,
+    "nothing named",
+  );
+  // GraphQL on a listed endpoint: a query reads, a mutation or subscription does not.
+  const gql = "http://app.test:3000/graphql";
+  assert.equal(judge("observe", gql, JSON.stringify({ query: "query Widgets { widgets { id } }" })), "POST /graphql");
+  assert.equal(judge("observe", gql, JSON.stringify({ query: "{ widgets { id } }" })), "POST /graphql", "an anonymous query");
+  assert.equal(judge("observe", gql, JSON.stringify({ query: "mutation RenameWidget($id: ID!) { renameWidget(id: $id) { id } }" })), null);
+  assert.equal(judge("observe", gql, JSON.stringify({ query: "mutation\n{ renameWidget(id: 1) { id } }" })), null, "an escaped newline");
+  assert.equal(judge("observe", gql, JSON.stringify([{ query: "{ a }" }, { query: "subscription { onWidget { id } }" }])), null, "a batch with one write");
+  assert.equal(judge("observe", gql, "mutation { renameWidget(id: 1) { id } }"), null, "a raw application/graphql body");
+  assert.equal(judge("observe", search, JSON.stringify({ query: "mutation testing" })), "POST /api/search", "search text is not an operation");
+  assert.equal(graphqlWriteOperation('{"query":"query { a }","variables":{"note":"mutation {"}}'), true, "the safe direction: a keyword anywhere refuses");
+  assert.equal(judge("observe", search, "x".repeat(100_001)), null, "a body too long to vet is refused");
+  assert.equal(judge("observe", gql, "query=mutation%20Rename%7B+renameWidget(id%3A1)%7Bid%7D%7D"), null, "a form-encoded mutation");
+  assert.equal(judge("observe", gql, "query=%7B+widgets%7Bid%7D%7D"), "POST /graphql", "a form-encoded query");
+  assert.equal(
+    judge("observe", gql, JSON.stringify({ operationName: "Rename", extensions: { persistedQuery: { sha256Hash: "ab12" } } })),
+    null,
+    "a persisted query cannot be read",
+  );
+  assert.equal(judge("observe", search, JSON.stringify({ filters: "f".repeat(3000), action: "delete" })), null, "a command past the first 2000 characters");
+  assert.equal(judge("observe", search, JSON.stringify({ filters: "f".repeat(3000), q: "widget" })), "POST /api/search", "the contrast: a long plain search");
+});
+
+test("an unseen POST named as a read goes out in observe, as the route handler lets it", () => {
+  const base = { mode: "observe", method: "POST", pathname: "/api/search", destructiveWire: false, foreign: null, offApp: null, owned: false } as const;
+  assert.deepEqual(judgeUnseenWrite({ ...base, readPost: true }), { allow: true });
+  assert.deepEqual(judgeUnseenWrite({ ...base, readPost: false }), { allow: false });
+  assert.deepEqual(judgeUnseenWrite({ ...base, readPost: true, foreign: "https://chat.example.com" }), {
+    allow: false,
+    why: "sent from a frame of https://chat.example.com",
+  });
 });
 
 test("a blocked endpoint is explained once per session; repeats are counted on one line", () => {

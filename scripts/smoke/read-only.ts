@@ -1078,6 +1078,85 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     await engine.close().catch(() => {});
   }
   await labelsAndLeaving({ baseUrl, projectDir, stats } as SmokeContext);
+  await readPosts({ baseUrl, projectDir, stats } as SmokeContext);
+}
+
+/**
+ * A search page that loads its results with a POST. Observe refuses it until
+ * the user names the endpoint as a read; then the search goes out and the page
+ * works, while the same path carrying a delete command or a GraphQL mutation,
+ * and a POST to an endpoint nobody named, are still refused.
+ */
+async function readPosts({ baseUrl, projectDir, stats }: SmokeContext): Promise<void> {
+  const writesTo = (key: string): number => stats.writes[key] ?? 0;
+  const lineOf = (snap: string, testid: string): string => snap.match(new RegExp(`[^\\n]*\\[testid=${testid}[,\\]][^\\n]*`))?.[0] ?? "";
+  const loaded = async (engine: InstanceType<typeof BrowserEngine>): Promise<string> => {
+    let snap = "";
+    const done = await eventually(
+      async () => {
+        snap = await engine.snapshot(true);
+        return !/Loading…|Pending/.test(snap);
+      },
+      WAIT_MS,
+      200,
+    );
+    if (!done) throw new Error(`read-posts fixture: the page's requests never settled:\n${snap}`);
+    return snap;
+  };
+
+  console.log("observe: a search read through POST is refused until it is named as a read");
+  const plain = new BrowserEngine();
+  try {
+    await plain.attach({ url: baseUrl, projectDir, mode: "observe" });
+    const before = writesTo("POST /api/search");
+    await plain.navigate("/read-posts.html");
+    const snap = await loaded(plain);
+    check("unnamed, the search POST never reaches the server", writesTo("POST /api/search") === before, JSON.stringify(stats.writes));
+    check("...and the page shows the refusal as its error", lineOf(snap, "search-results").includes("Search failed: status 403"), snap);
+    check(
+      "...and the page is kept for the gap ledger with its endpoint",
+      plain.observeRefusedPosts.get("/read-posts.html")?.has("POST /api/search") === true,
+      JSON.stringify([...plain.observeRefusedPosts].map(([r, e]) => [r, [...e]])),
+    );
+  } finally {
+    await plain.close().catch(() => {});
+  }
+
+  console.log("observe: the same page with POST /api/search named as a read");
+  const named = new BrowserEngine();
+  try {
+    const out = await named.attach({ url: baseUrl, projectDir, mode: "observe", readPosts: ["POST /api/search"] });
+    check("the attach says which POSTs are reads", out.includes("Read POSTs: POST /api/search"), out);
+    const before = { search: writesTo("POST /api/search"), notes: writesTo("POST /api/notes") };
+    await named.navigate("/read-posts.html");
+    const snap = await loaded(named);
+    check(
+      "the search goes out and the page shows its results",
+      lineOf(snap, "search-results").includes("Results: Widget A, Widget B") && writesTo("POST /api/search") > before.search,
+      snap,
+    );
+    check(
+      "the same path with a delete command or a GraphQL mutation is still refused",
+      lineOf(snap, "search-delete").includes("refused: status 403") &&
+        lineOf(snap, "search-graphql").includes("refused: status 403") &&
+        writesTo("POST /api/search (delete)") === 0 &&
+        writesTo("POST /api/search (mutation)") === 0,
+      `${snap}\n${JSON.stringify(stats.writes)}`,
+    );
+    check(
+      "a POST nobody named is still refused",
+      lineOf(snap, "notes-save").includes("refused: status 403") && writesTo("POST /api/notes") === before.notes,
+      `${snap}\n${JSON.stringify(stats.writes)}`,
+    );
+    const logged = named.memory!.actionLog.filter((e) => e.action === "write-policy:read-post");
+    check("each read POST let out is logged", logged.length >= 1 && logged.every((e) => (e.target ?? "").includes("POST /api/search")), JSON.stringify(logged));
+    check(
+      "the page is not kept for the gap ledger once its search is a named read",
+      !named.observeRefusedPosts.get("/read-posts.html")?.has("POST /api/search"),
+    );
+  } finally {
+    await named.close().catch(() => {});
+  }
 }
 
 /**

@@ -222,6 +222,10 @@ export interface ReportExtras {
   mode?: WriteMode;
   /** Origins trusted with their embeds' writes; they only counted in safe-write. */
   trustedEmbeds?: string[];
+  /** POST endpoints the user named as reads; they only count in observe. */
+  readPosts?: string[];
+  /** In observe: pages whose scripts sent a POST observe refused, and the endpoints. */
+  observeRefusedPosts?: Array<{ route: string; endpoints: string[] }>;
   /** The engine's version, for the HTML's header. */
   version?: string;
   /** Sessions attached right now. Only these can be holding a browser, so only these are warned about. */
@@ -484,6 +488,26 @@ export function coverageView(memory: MemoryStore, session: string, scope: "sessi
 }
 
 /**
+ * The gap-ledger line for pages whose scripts sent a POST that observe
+ * refused, or null. Some apps read through POST (a search, a report query); a
+ * page loading its data that way cannot be tested in observe until the user
+ * names the endpoint in `readPosts`. The engine cannot tell a read from a
+ * write, so it names the endpoints and leaves the choice to the user.
+ */
+export function observeRefusedPostsGap(pages: ReadonlyArray<{ route: string; endpoints: readonly string[] }> | undefined): string | null {
+  const list = (pages ?? []).filter((p) => p.endpoints.length > 0);
+  if (list.length === 0) return null;
+  const shown = list
+    .slice(0, 8)
+    .map((p) => `${p.route} (${p.endpoints.join(", ")})`)
+    .join("; ");
+  return (
+    `${list.length} page(s) sent a POST that observe refused, so whatever it loads is untested: ${shown}${list.length > 8 ? " …" : ""}. ` +
+    `If one of these only reads (a search or query sent as POST), the user can name it in readPosts ("POST /path") and the page can be tested in observe; anything that writes stays refused.`
+  );
+}
+
+/**
  * The GAP LEDGER — an explicit enumeration of what was NOT tested. This is
  * what turns "extensive" from a vibe into a verifiable claim: a run is only
  * as trustworthy as its list of known gaps, and an empty ledger is the only
@@ -552,6 +576,8 @@ export function computeGaps(memory: MemoryStore, extras?: ReportExtras): string[
           : ""),
     );
   }
+  const refusedPosts = observeRefusedPostsGap(extras?.observeRefusedPosts);
+  if (refusedPosts) gaps.push(refusedPosts);
   const journeyTotal = Object.values(facts).reduce((a, f) => a + (f.journeysCompleted ?? 0), 0);
   if (journeyTotal === 0) {
     gaps.push(
@@ -827,6 +853,19 @@ export function generateReport(
     );
     lines.push(``);
     for (const o of extras.trustedEmbeds) lines.push(`- \`${o}\``);
+    lines.push(``);
+  }
+
+  if (extras?.readPosts && extras.readPosts.length > 0) {
+    lines.push(`## Read POSTs`);
+    lines.push(``);
+    lines.push(
+      extras.mode === "observe"
+        ? `Named by the user as endpoints that only read, so observe let them out unless the path or body looked destructive or the body was a GraphQL mutation:`
+        : `Named as reads, but not applied: they only count in observe mode, and this run was ${extras.mode ?? "read-only"}:`,
+    );
+    lines.push(``);
+    for (const e of extras.readPosts) lines.push(`- \`${e}\``);
     lines.push(``);
   }
 

@@ -27,6 +27,7 @@ import {
   formatUnchosenOptions,
   describeAge,
   generateReport,
+  observeRefusedPostsGap,
   replayDocument,
   reportEvidence,
 } from "../src/engine/report.ts";
@@ -146,6 +147,19 @@ test("ledger: touching one control clears the nothing-exercised gap for that rou
   store.visitState("/form#b", "http://x/form?open=1", "/form", ["textbox:name", "button:save", "button:cancel"]);
   store.markExercised("/form#a", "button:save", "click");
   assert.ok(!computeGaps(store).some((g) => g.includes("NOTHING exercised")));
+});
+
+test("ledger: a page whose POST observe refused is named, with the endpoint and how to name it as a read", () => {
+  const store = freshStore();
+  store.visitState("/search#a", "http://x/search", "/search", ["textbox:query"]);
+  const refused = [{ route: "/search", endpoints: ["POST /api/search"] }];
+  const gaps = computeGaps(store, { routesVisited: 1, routesTotal: 1, designAudits: 0, mode: "observe", observeRefusedPosts: refused });
+  const line = gaps.find((g) => g.includes("observe refused"));
+  assert.ok(line, `expected the refused POST in the ledger, got: ${JSON.stringify(gaps)}`);
+  assert.ok(line.includes("/search (POST /api/search)") && line.includes("readPosts"), line);
+  // The contrast: nothing refused (or the endpoint named as a read, so never refused), no line.
+  assert.ok(!computeGaps(store, { routesVisited: 1, routesTotal: 1, designAudits: 0, mode: "observe" }).some((g) => g.includes("observe refused")));
+  assert.equal(observeRefusedPostsGap([{ route: "/search", endpoints: [] }]), null);
 });
 
 test("ledger: an abandoned journey does not count as task ease being measured", () => {
