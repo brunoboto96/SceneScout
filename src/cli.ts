@@ -120,7 +120,9 @@ Usage:
                                      --baselines dir: where targets.json and the baselines are (default
                                       .scenescout/baselines, which git ignores; name a folder you commit to share
                                       them); --baseline-threshold N: the % of a picture's pixels that may change
-                                      before its baseline is not met; update rewrites only those past it (default 0))
+                                      before its baseline is not met; update rewrites those past it, and any taken
+                                      on another OS (default 0.1, so small anti-aliasing noise between machines
+                                      passes; 0 counts every changed pixel))
                                     Exit code: 0 passed, 1 failed the gate, 2 could not run.
   scenescout ci <url>               An exploratory run with no person present: a model reached through its API
                                     drives the tools by the SceneScout method and the run ends in the report.

@@ -61,7 +61,7 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `--gate-retests` | `high` | Which still-reproducing re-tested findings fail the gate: `never`, `high` or `all` |
 | `--baseline` | `off` | `compare` pictures each page or element listed in the baselines' `targets.json` and files `visual-change` when one no longer looks like its baseline; `update` writes new baselines ([visual baselines](Ways-to-use-it.md#visual-baselines)) |
 | `--baselines` | `<project>/.scenescout/baselines` | The folder holding `targets.json` and the baselines. The default is ignored by git; name a folder the project commits to share them |
-| `--baseline-threshold` | `0` | The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; `update` rewrites only the baselines past it. A change of size always counts |
+| `--baseline-threshold` | `0.1` | The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; `update` rewrites the baselines past it (and any taken on another operating system). Not 0 by default, so anti-aliasing noise between machines and browser builds does not fail the gate; `0` counts every changed pixel (a colour channel off by more than 8 in 255). A change of size always counts |
 
 ### `scenescout ci`
 

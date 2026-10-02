@@ -30,8 +30,17 @@ export type BaselineMode = (typeof BASELINE_MODES)[number];
 export const TARGETS_FILE = "targets.json";
 /** The most targets one check takes pictures of: each one is a page load. */
 export const MAX_BASELINE_TARGETS = 100;
-/** The share of pixels, in percent, that may change before a baseline counts as not met: none, by default. */
-const DEFAULT_BASELINE_THRESHOLD = 0;
+/**
+ * The share of pixels, in percent, that may change before a baseline counts
+ * as not met. Not 0: two pictures of an unchanged page taken by one browser
+ * build on one machine compare at 0%, but a run on another machine, or after
+ * a browser or font update, can anti-alias text and curved edges a pixel
+ * differently, and a gate that fails on that noise teaches a team to ignore
+ * it. 0.1% is 1,152 pixels of a 1280×900 page and 64 of a 320×200 picture, so
+ * a smaller change passes unless the project lowers the threshold. A change of
+ * size always counts.
+ */
+const DEFAULT_BASELINE_THRESHOLD = 0.1;
 /** The element a target names when it names none: the page's viewport, from the top. */
 const PAGE_ELEMENT = "page";
 /** Where the pictures of an unmet baseline go, beside report.md. */
@@ -424,7 +433,9 @@ function diffSummary(d: DiffResult): BaselineDiff {
  * kept beside the report. update rewrites what compare would not accept and
  * leaves alone a baseline compare would (none of its pixels changed, or no
  * more than the threshold allows), so an update that changes nothing changes
- * no file and noise under the threshold does not churn the folder.
+ * no file and noise under the threshold does not churn the folder. A baseline
+ * taken on another operating system is rewritten however close it came, so
+ * retaking baselines where the check runs replaces every one of them.
  */
 export function judgeBaseline(o: {
   mode: Exclude<BaselineMode, "off">;
@@ -440,11 +451,17 @@ export function judgeBaseline(o: {
   const differs = captureDifferences(stored.meta.capture, now.capture);
   if (differs.length > 0) return cannotUse(`it was taken with other settings: ${differs.join(", ")}`);
   const { platform } = stored.meta;
-  const note = platform !== now.platform ? { platformNote: `its baseline was taken on ${platform} and this check ran on ${now.platform}` } : {};
+  const otherSystem = platform !== now.platform;
   const d = diffImages(stored.image, now.image);
   const diff = diffSummary(d);
+  if (mode === "update") {
+    if (otherSystem) return { status: "updated", detail: `replaced one taken on ${platform}`, diff };
+    if (!isChange(d, o.threshold)) return { status: "matches", diff };
+    // With the count, as describeChange gives it.
+    return { status: "updated", detail: `it was ${d.percent}% different (${d.changed} of ${d.total} pixels)`, diff };
+  }
+  const note = otherSystem ? { platformNote: `its baseline was taken on ${platform} and this check ran on ${now.platform}` } : {};
   if (!isChange(d, o.threshold)) return { status: "matches", diff, ...note };
-  if (mode === "update") return { status: "updated", detail: `it was ${d.percent}% different`, diff, ...note };
   return { status: "changed", diff, diffImage: d.image, ...note };
 }
 

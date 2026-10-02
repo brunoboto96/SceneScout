@@ -24,7 +24,7 @@ and which failure direction was chosen deliberately.
 | [0013](0013-a-convention-is-the-projects-to-decide.md) | What is a defect only under a project's convention is reported as "worth a look", naming the convention: never scored, counted as a defect or gated |
 | [0014](0014-an-unattended-run-reports-and-never-gates.md) | `scenescout ci` drives the MCP server with a model's API and no person present; it reports and never gates, stops at the first cap reached and still writes the report, never prints a key, and runs `destructive` only with `--allow-destructive` as well |
 | [0015](0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md) | A `/scenescout qa` comment tests the pull request's deployed preview: the job that holds the key checks out nothing and runs SceneScout from an exact release, reached only through a keyless gate that checks the commenter and refuses forks by default |
-| [0016](0016-a-visual-baseline-changes-only-when-asked.md) | A visual baseline is a picture the project lists in `targets.json`, kept per browser with the settings it was taken with, in a git-ignored folder unless the project names one it commits; an unmet one is a high `visual-change` issue, and only `--baseline update` writes one |
+| [0019](0019-a-visual-baseline-changes-only-when-asked.md) | A visual baseline is a picture the project lists in `targets.json`, kept per browser with the settings it was taken with, in a git-ignored folder unless the project names one it commits; an unmet one is a high `visual-change` issue, and only `--baseline update` writes one |
 
 ## Writing a new one
 

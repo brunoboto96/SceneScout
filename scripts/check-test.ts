@@ -619,7 +619,8 @@ test("arguments: the defaults", () => {
     gateRetests: "high",
     // Off unless asked for: a check writes no picture and compares none by default.
     baseline: "off",
-    baselineThreshold: 0,
+    // 0.1, not 0: a gate that fails on anti-aliasing noise between runs teaches a team to ignore it.
+    baselineThreshold: 0.1,
   });
 });
 
@@ -913,6 +914,12 @@ test("action: its defaults are the CLI's defaults, and an empty input is left to
   assert.ok(viaAction.ok && direct.ok);
   assert.deepEqual(viaAction.options, direct.options);
   assert.ok(!args.some((a) => a.startsWith("--max-routes") || a.startsWith("--paths") || a.startsWith("--out")));
+  // An input whose CLI default is not the empty string says what that default is, and it is the parser's.
+  const threshold = String((parseThreshold(undefined) as { value: number }).value);
+  assert.ok(
+    (action.inputs["baseline-threshold"].description as string).includes(`Empty means ${threshold},`),
+    `the baseline-threshold input should say "Empty means ${threshold},"`,
+  );
 });
 
 test("action: a missing url or an unknown browser stops it before anything is downloaded", () => {
@@ -1826,7 +1833,7 @@ test("baselines: compare — none yet is listed and never fails; the same pictur
   assert.equal(same.status, "matches");
   assert.equal(same.diff?.percent, 0);
   assert.equal(same.diffImage, undefined, "no picture is kept for a match");
-  // One pixel of a hundred: a change at the default threshold, within a 1% one, a change again just under it.
+  // One pixel of a hundred: a change at a threshold of 0, within a 1% one, a change again just under it.
   const onePixel = { ...now, image: picture(10, 10, [[3, 4]]) };
   const changed = judgeBaseline({ mode: "compare", threshold: 0, stored, now: onePixel });
   assert.equal(changed.status, "changed");
@@ -1880,7 +1887,7 @@ test("baselines: update — writes a missing, unusable or changed baseline, and 
   // As compare judges it: past the threshold is written, within it is left, so noise under the threshold changes no file.
   const onePixel = { ...now, image: picture(10, 10, [[0, 0]]) };
   const moved = judgeBaseline({ mode: "update", threshold: 0, stored, now: onePixel });
-  assert.deepEqual([moved.status, moved.detail, moved.diffImage], ["updated", "it was 1% different", undefined]);
+  assert.deepEqual([moved.status, moved.detail, moved.diffImage], ["updated", "it was 1% different (1 of 100 pixels)", undefined]);
   assert.equal(judgeBaseline({ mode: "update", threshold: 1, stored, now: onePixel }).status, "matches");
   // A change of size is written whatever the threshold.
   assert.equal(judgeBaseline({ mode: "update", threshold: 100, stored, now: { ...now, image: picture(11, 10) } }).status, "updated");
@@ -1908,26 +1915,42 @@ test("baselines: only pictures named as a check names them are cleared from the 
 });
 
 test("baselines: a baseline from another operating system is still compared, with a note that text is drawn differently there", () => {
-  const stored = { meta: storedMeta({ platform: "darwin" }), image: picture(10, 10) };
-  const r = judgeBaseline({ mode: "compare", threshold: 0, stored, now: { capture: capture(), platform: "linux", image: picture(10, 10) } });
+  const now = { capture: capture(), platform: "linux", image: picture(10, 10) };
+  const fromMac = { meta: storedMeta({ platform: "darwin" }), image: picture(10, 10) };
+  const fromHere = { meta: storedMeta(), image: picture(10, 10) };
+  const r = judgeBaseline({ mode: "compare", threshold: 0, stored: fromMac, now });
   assert.equal(r.status, "matches");
   assert.equal(r.platformNote, "its baseline was taken on darwin and this check ran on linux");
-  assert.equal(
-    judgeBaseline({
-      mode: "compare",
-      threshold: 0,
-      stored: { ...stored, meta: storedMeta() },
-      now: { capture: capture(), platform: "linux", image: picture(10, 10) },
-    }).platformNote,
-    undefined,
-  );
+  assert.equal(judgeBaseline({ mode: "compare", threshold: 0, stored: fromHere, now }).platformNote, undefined);
+  // Asked to update where the check runs, a baseline from another system is replaced however close it came;
+  // the same picture taken on this system, within the threshold, is left as it was.
+  const retaken = judgeBaseline({ mode: "update", threshold: 0.1, stored: fromMac, now });
+  assert.deepEqual([retaken.status, retaken.detail, retaken.platformNote], ["updated", "replaced one taken on darwin", undefined]);
+  assert.equal(judgeBaseline({ mode: "update", threshold: 0.1, stored: fromHere, now }).status, "matches");
 });
 
-test("baselines: --baseline-threshold is a percentage from 0 to 100, and 0 when not given", () => {
-  assert.deepEqual(parseThreshold(undefined), { ok: true, value: 0 });
+test("baselines: --baseline-threshold is a percentage from 0 to 100, and 0.1 when not given", () => {
+  assert.deepEqual(parseThreshold(undefined), { ok: true, value: 0.1 });
+  assert.deepEqual(parseThreshold("0"), { ok: true, value: 0 }, "0 stays available: every changed pixel counts");
   assert.deepEqual(parseThreshold("0.5"), { ok: true, value: 0.5 });
   assert.deepEqual(parseThreshold("100"), { ok: true, value: 100 });
   for (const bad of ["", " ", "-0.1", "100.1", "5%", "NaN", "Infinity"]) assert.ok(!parseThreshold(bad).ok, bad);
+});
+
+test("baselines: at the default threshold an unchanged picture reads 0%, a few anti-aliased pixels pass, and a restyle past 0.1% does not", () => {
+  const threshold = (parseThreshold(undefined) as { value: number }).value;
+  const stored = { meta: storedMeta({}, picture(100, 100)), image: picture(100, 100) };
+  const now = (paint: Array<[number, number]>) => ({ capture: capture(), platform: "linux", image: picture(100, 100, paint) });
+  const pixels = (n: number): Array<[number, number]> => Array.from({ length: n }, (_, i): [number, number] => [i, 0]);
+  const same = judgeBaseline({ mode: "compare", threshold, stored, now: now([]) });
+  assert.deepEqual([same.status, same.diff?.percent], ["matches", 0], "an unchanged picture still reads 0%");
+  // 10,000 pixels: 10 is exactly 0.1% and passes; 11 is past it.
+  assert.equal(judgeBaseline({ mode: "compare", threshold, stored, now: now(pixels(3)) }).status, "matches", "the odd anti-aliased pixel passes");
+  assert.equal(judgeBaseline({ mode: "compare", threshold, stored, now: now(pixels(10)) }).status, "matches");
+  const restyled = judgeBaseline({ mode: "compare", threshold, stored, now: now(pixels(11)) });
+  assert.deepEqual([restyled.status, restyled.diff?.percent], ["changed", 0.11]);
+  // The same three pixels at 0: every changed pixel counts.
+  assert.equal(judgeBaseline({ mode: "compare", threshold: 0, stored, now: now(pixels(3)) }).status, "changed");
 });
 
 /** A run of baselines as check-run hands it to the rules. */

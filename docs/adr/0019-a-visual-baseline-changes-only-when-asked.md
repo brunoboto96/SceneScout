@@ -1,4 +1,4 @@
-# 16. A visual baseline is the project's choice, is kept per browser, and changes only when asked
+# 19. A visual baseline is the project's choice, is kept per browser, and changes only when asked
 
 Status: accepted
 
@@ -50,7 +50,7 @@ repeatable, and what an unmet one does to the gate.
   runs after the crawl and before saved flows, so a picture is of the page as a
   visit finds it, and the motion setting is put back before the flows run.
 - **An unmet baseline is high, like a broken flow.** A change past
-  `--baseline-threshold` (default 0%), any change of size, a baseline that
+  `--baseline-threshold` (default 0.1%), any change of size, a baseline that
   cannot be used, and a target that could not be pictured are each one
   `visual-change` issue, high. ADR 11 keeps
   the default gate for what proves a page broken; a baseline, like a saved flow,
@@ -59,12 +59,24 @@ repeatable, and what an unmet one does to the gate.
   without failing; `--ignore visual-change` drops them. No baseline yet is
   listed and never fails. The fingerprint is the target and the browser, not
   the evidence, so the same element changing by another amount is one alert.
+- **0.1% may change by default, not 0.** Two pictures of an unchanged page
+  taken by one browser build on one machine compare at 0% (the smoke suite
+  holds that on all three engines), but a run on another machine, or after a
+  browser or font update, can anti-alias text and curved edges a pixel
+  differently, and a gate that fails on that noise teaches a team to ignore
+  it, which is worse than a gate that lets a very small change through. 0.1% is
+  1,152 pixels of a 1280×900 page and 64 of a 320×200 picture; a smaller change
+  (a character of small text on a large element) passes unless the project
+  lowers `--baseline-threshold`. A change of size always counts, and each pixel
+  also has the diff's allowance of 8 in 255 per colour channel.
 - **Only `--baseline update` writes a baseline**, and it rewrites only what
-  compare would not accept: a baseline within `--baseline-threshold` (at the
-  default 0%, one where no pixel changed beyond the diff's allowance of 8 in 255
-  per colour channel) is left alone, so an update that changes nothing changes
-  no file and noise under the threshold does not churn the folder. This is the
-  behaviour of Playwright's `--update-snapshots=changed`. `compare` never writes
+  compare would not accept: a baseline within `--baseline-threshold` is left
+  alone, so an update that changes nothing changes no file and noise under the
+  threshold does not churn the folder. This is the behaviour of Playwright's
+  `--update-snapshots=changed`. One taken on another operating system is
+  rewritten however close it came, so retaking baselines where the check runs
+  replaces them all (Playwright keeps a file per platform instead; here a
+  folder holds one platform's baselines, and the report names any other). `compare` never writes
   a baseline; it writes the baseline, the picture now and the diff of a changed
   target beside the report, after removing the pictures an earlier run left
   there (only files named as a check names them, so nothing else in a project's
@@ -75,7 +87,8 @@ repeatable, and what an unmet one does to the gate.
 - Baselines taken on one machine rarely hold on another operating system. The
   documented answer is to take them where the check runs (a hand-started
   workflow that keeps the folder as an artifact), not to raise the threshold
-  until noise passes.
+  until the differences between operating systems pass: the default 0.1% is for
+  the smaller noise between machines and browser builds of one operating system.
 - A target removed from `targets.json` leaves its files behind; an update does
   not delete what it was not asked about.
 - Content that changes on its own (dates, random images, animation driven by

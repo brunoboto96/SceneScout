@@ -92,7 +92,7 @@ inputs:
     required: false
     default: ""
   baseline-threshold:
-    description: The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; update rewrites only the baselines past it. Empty means 0.
+    description: The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; update rewrites the baselines past it, and any taken on another operating system. Empty means 0.1, so anti-aliasing noise between machines and browser builds does not fail the gate; 0 counts every pixel whose colour changed by more than 8 in 255 on a channel.
     required: false
     default: ""
   working-directory:

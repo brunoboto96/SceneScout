@@ -169,13 +169,14 @@ export async function run(): Promise<void> {
     const restyled = await checkWith("compare", "restyled");
     const card = of(restyled, "testid=plan");
     check(
-      "restyled, the card and the page are reported with the share of their pixels that changed, and the gate fails",
+      "restyled, the card and the page are each past the default 0.1% and reported with the share of their pixels that changed, and the gate fails",
       restyled.status === 1 &&
         card?.status === "changed" &&
-        (card.diff?.percent ?? 0) > 0 &&
+        (card.diff?.percent ?? 0) > 0.1 &&
         of(restyled, "page")?.status === "changed" &&
+        (of(restyled, "page")?.diff?.percent ?? 0) > 0.1 &&
         visual(restyled).length === 2 &&
-        visual(restyled).every((i) => i.severity === "high" && /% of its pixels changed \(\d+ of \d+; allowed: 0%\) — diff: visual\//.test(i.evidence)),
+        visual(restyled).every((i) => i.severity === "high" && /% of its pixels changed \(\d+ of \d+; allowed: 0\.1%\) — diff: visual\//.test(i.evidence)),
       `${restyled.status} ${JSON.stringify(restyled.results)} ${JSON.stringify(restyled.issues)}`,
     );
     check(

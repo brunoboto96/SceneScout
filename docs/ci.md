@@ -93,7 +93,7 @@ Every option of `scenescout check` is an input with the same name. `scenescout c
 | `gate-retests` | `high` | `never` or `all` (below) |
 | `baseline` | `off` | `compare` or `update` the visual baselines listed in `targets.json` (below) |
 | `baselines` | `<project>/.scenescout/baselines` | The folder holding `targets.json` and the baselines; name one the repository commits (below) |
-| `baseline-threshold` | 0 | The percentage of a picture's pixels that may change, 0 to 100 (below) |
+| `baseline-threshold` | 0.1 | The percentage of a picture's pixels that may change, 0 to 100 (below) |
 
 And the action's own:
 
@@ -279,7 +279,7 @@ Re-tests are reported in `report.md` and `check.json`. Whether one fails the gat
 
 ## Visual baselines
 
-`--baseline compare` (the action's `baseline: compare`) pictures each page or element listed in the baselines folder's `targets.json` and compares it, pixel by pixel, with the baseline the project approved. `--baseline update` writes new baselines, and nothing else ever does. The [guide](guide/Ways-to-use-it.md#visual-baselines) describes `targets.json`, how each picture is taken and what each outcome means; this section is about running it in CI. Why it works this way: [ADR 16](adr/0016-a-visual-baseline-changes-only-when-asked.md).
+`--baseline compare` (the action's `baseline: compare`) pictures each page or element listed in the baselines folder's `targets.json` and compares it, pixel by pixel, with the baseline the project approved. `--baseline update` writes new baselines, and nothing else ever does. The [guide](guide/Ways-to-use-it.md#visual-baselines) describes `targets.json`, how each picture is taken and what each outcome means; this section is about running it in CI. Why it works this way: [ADR 19](adr/0019-a-visual-baseline-changes-only-when-asked.md).
 
 **Commit the baselines.** The default folder, `.scenescout/baselines/`, is ignored by git, so a runner would start without it, `targets.json` included, and the check would stop with exit 2. Keep the baselines and `targets.json` in a folder the repository commits, and name it:
 
@@ -291,7 +291,7 @@ Re-tests are reported in `report.md` and `check.json`. Whether one fails the gat
           baselines: tests/visual
 ```
 
-**Take them on the runner.** Each operating system draws text differently, so baselines taken on a laptop seldom match pictures taken on a Linux runner, and the report says when a baseline was taken on another system. Take them where the check runs: a workflow started by hand that updates them and keeps the folder as an artifact, which you download and commit.
+**Take them on the runner.** Each operating system draws text differently, so baselines taken on a laptop seldom match pictures taken on a Linux runner, and the report says when a baseline was taken on another system. Take them where the check runs: a workflow started by hand that updates them and keeps the folder as an artifact, which you download and commit. An update replaces every baseline taken on another system, however close it came, so one run on the runner retakes them all.
 
 ```yaml
 on:
@@ -331,7 +331,7 @@ The check step fails if a target could not be pictured, since that target's base
 
 An element larger than the window is pictured where it is inside the window, and its result's `partial` says so: list smaller elements within it to hold the rest.
 
-**Allowing small changes.** `baseline-threshold` (`--baseline-threshold`) is the percentage of a picture's pixels that may change before its baseline is not met; the default is 0. A change of size always counts. `update` rewrites only the baselines past the threshold, as compare would judge them, so noise under it leaves the folder untouched. Each pixel is already allowed a difference of 8 in 255 on each colour channel, which absorbs a colour rounded one step differently. `fail-on: never` reports everything without failing the job, visual changes included.
+**Allowing small changes.** `baseline-threshold` (`--baseline-threshold`) is the percentage of a picture's pixels that may change before its baseline is not met. The default is 0.1, not 0: two pictures of an unchanged page taken by one browser build on one machine compare at 0%, but a run on another machine, or after a browser or font update, can anti-alias text and curved edges a pixel differently, and a gate that fails on that noise teaches a team to ignore it. 0.1% is 1,152 pixels of a 1280×900 page and 64 of a 320×200 picture, so a smaller change, such as a character of small text on a large element, passes; set `0` to count every changed pixel. A change of size always counts. `update` rewrites the baselines past the threshold, as compare would judge them, and leaves the rest alone, so noise under it leaves the folder untouched; a baseline taken on another operating system it always replaces. Each pixel is already allowed a difference of 8 in 255 on each colour channel, which absorbs a colour rounded one step differently. `fail-on: never` reports everything without failing the job, visual changes included.
 
 ## Worth a look
 
