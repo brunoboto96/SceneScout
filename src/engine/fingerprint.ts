@@ -151,6 +151,37 @@ export function elementKey(el: InteractableInfo): string {
 }
 
 /**
+ * Element keys made unique within one snapshot: the first holder of a base key
+ * keeps it, later ones get `~1`, `~2` in document order.
+ */
+export function ordinalKeys(baseKeys: readonly string[]): string[] {
+  const counts = new Map<string, number>();
+  return baseKeys.map((base) => {
+    const count = counts.get(base) ?? 0;
+    counts.set(base, count + 1);
+    return count === 0 ? base : `${base}~${count}`;
+  });
+}
+
+/**
+ * Each key the earlier name rule gave a control that the current rule names
+ * differently, as current key → earlier key, from both rules' base keys in
+ * document order. Ordinals are worked out under each rule separately, so when
+ * one of two unnamed image buttons gains a name, the other's move from `~1`
+ * to the bare key is listed too. Only keys in `tracked` are listed: an
+ * element coverage does not count needs no alias.
+ */
+export function keyAliases(bases: ReadonlyArray<{ base: string; prior: string; tracked: boolean }>): Record<string, string> {
+  const now = ordinalKeys(bases.map((b) => b.base));
+  const before = ordinalKeys(bases.map((b) => b.prior));
+  const out: Record<string, string> = {};
+  bases.forEach((b, i) => {
+    if (b.tracked && now[i] !== before[i]) out[now[i]] = before[i];
+  });
+  return out;
+}
+
+/**
  * Fingerprint a UI state: normalized route + hash of the set of interactable
  * element classes. Same page with different data → same fingerprint; a page
  * whose available actions changed (modal opened, different role) → new one.

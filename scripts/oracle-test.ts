@@ -592,9 +592,10 @@ test("the accessible name follows the computation's order: aria-labelledby, aria
     alt: "",
     live: false,
     text: "",
+    content: "",
     ...over,
   });
-  const cases: Array<[string, Partial<NameFacts>, { name: string; from: "placeholder" | "fallback" | null }]> = [
+  const cases: Array<[string, Partial<NameFacts>, { name: string; from: "placeholder" | "fallback" | null; prior?: string }]> = [
     // Each source wins over every one after it.
     ["aria-labelledby before aria-label", { labelledBy: "Caption", ariaLabel: "Aria", labels: ["Label"] }, { name: "Caption", from: null }],
     ["aria-label before a label", { ariaLabel: "Aria", labels: ["Label"], title: "Title" }, { name: "Aria", from: null }],
@@ -617,6 +618,17 @@ test("the accessible name follows the computation's order: aria-labelledby, aria
     ["an icon button with a title", { tag: "button", inputType: "", title: "Download file" }, { name: "Download file", from: null }],
     ["an icon button with neither text nor title", { tag: "button", inputType: "" }, { name: "", from: null }],
     ["a button's text before its title", { tag: "button", inputType: "", text: "Save", title: "Save the draft" }, { name: "Save", from: null }],
+    // An image-only link or button is named by its image content, as the accessible-name computation names it;
+    // `prior` is the name it had before image content counted, which its earlier coverage key was made from.
+    ["an image link by its alt text", { tag: "a", inputType: "", content: " Home " }, { name: "Home", from: null, prior: "" }],
+    ["an image link with an empty alt stays unnamed", { tag: "a", inputType: "", content: "" }, { name: "", from: null }],
+    [
+      "image content before title",
+      { tag: "button", inputType: "", content: "Search", title: "Find things" },
+      { name: "Search", from: null, prior: "Find things" },
+    ],
+    ["text before image content", { tag: "a", inputType: "", text: "Home", content: "Logo" }, { name: "Home", from: null }],
+    ["a field is not named by image content", { tag: "input", inputType: "text", content: "Logo", nameAttr: "q" }, { name: "q", from: "fallback" }],
     // A live region is named by what it announces.
     [
       "a live region by its text",
