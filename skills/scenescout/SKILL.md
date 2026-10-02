@@ -106,7 +106,7 @@ The engine is self-healing (orphaned browsers reaped, wedged calls time out with
 - **Always pass `evidence`** to `scout_finding` — a canonical machine signature like `GET /api/reports/dashboard 403` or `widget dashboard-summary-widget shows 0`. It's what deduplicates the same bug across runs when titles get rephrased.
 - File judgment findings too: confusing flows, no-feedback actions, state lost on refresh, permission leaks (low-privilege role reaching admin surface), `missing-testid` (low, where the project's test-id convention is known; worth a look otherwise), unnamed interactables (a11y, low).
 - Respect refusals — never retry or route around a policy refusal; note it and move on.
-- Duplicates are fine; `scout_finding` dedups across runs.
+- Duplicates are fine; `scout_finding` dedups across runs. When it says a model judge merged your filing into another finding, your title, category, severity and evidence are kept on that finding; refile only if it is a different defect, with a title that says what differs. Pass `scout_attach {dedup: "judge"}` only when the user asks for model-judged dedup: it sends finding titles, categories and evidence, and the page's path, to a model provider, and needs a key in the server's environment.
 
 ## Finishing
 

@@ -4,9 +4,10 @@
  * CLI is run against a fake API server on this machine that answers the way
  * each provider's API does. Checks the tool round trips, the report written
  * on an early stop and on a start that fails, the provider rule, that the
- * key never reaches the output, and a run asked to show or compare one element
+ * key never reaches the output, a run asked to show or compare one element
  * (--show, --compare-url) against two deployments of one page that differ in
- * one button's colours.
+ * one button's colours, and the dedup judge asked by the server through the
+ * run (a sampling request over the server's stdio).
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -16,7 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCi, type ModelClient } from "../../dist/ci-run.js";
-import { parseCiArgs, type ResolvedProvider } from "../../dist/engine/ci.js";
+import { parseCiArgs, type ResolvedProvider, type ToolSpec } from "../../dist/engine/ci.js";
 import { capturedName, parseCaptureResult } from "../../dist/engine/capture.js";
 import { decodePng } from "../../dist/engine/png.js";
 import type { ModelTurn, ToolOutcome } from "../../dist/engine/provider.js";
@@ -62,6 +63,7 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     await earlyStop(baseUrl, path.join(work, "early-stop"));
     await cannotStart(path.join(work, "cannot-start"));
     await showAndCompare(baseUrl, work);
+    await judgedDedup(baseUrl, path.join(work, "dedup"));
     await overTheWire(baseUrl, work);
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
@@ -139,6 +141,57 @@ async function cannotStart(project: string): Promise<void> {
     `${result.stop} ${exitCode}`,
   );
   check("ci: it still writes a summary saying so, and no report", written.includes("summary.md") && !written.includes("report.md"), written.join());
+}
+
+// ── the dedup judge, through the server ─────────────────────────────────────
+
+async function judgedDedup(baseUrl: string, project: string): Promise<void> {
+  fs.mkdirSync(project, { recursive: true });
+  // Two filings on one page the rule keeps apart: no evidence, nothing quoted, titles too unalike.
+  const model = new Scripted([
+    turn([
+      [
+        "f1",
+        "scout_finding",
+        { severity: "medium", category: "ux-confusing", title: "The save button gives no feedback", detail: "Pressed it; nothing changed." },
+      ],
+    ]),
+    turn([["f2", "scout_finding", { severity: "medium", category: "ux-confusing", title: "Clicking save shows nothing", detail: "No toast, no spinner." }]]),
+    turn([], "Filed two findings."),
+  ]);
+  const asked: string[] = [];
+  const judge = async (_system: string, _tools: readonly ToolSpec[], kickoff: string): Promise<ModelTurn> => {
+    asked.push(kickoff);
+    return { text: "", calls: [{ id: "j1", name: "judge_pair", input: { verdict: "same", confidence: 0.9 } }], usage: { ...usage, input: 300, output: 25 } };
+  };
+  const { result, exitCode } = await runCi(options(baseUrl, project), RESOLVED, { makeClient: () => model, judge, judgeEffort: "none", version: "0.0.0-test" });
+  const report = read(path.join(project, ".scenescout", "ci"), "report.md");
+  check(
+    "ci dedup: the server asks the run's judge about a filing the rule keeps apart, and merges it on a same",
+    exitCode === 0 && asked.length === 1 && result.findings.length === 1 && result.dedup?.by === "judge" && result.dedup.calls === 1,
+    JSON.stringify({ exitCode, asked: asked.length, findings: result.findings.map((f) => f.title), dedup: result.dedup }),
+  );
+  check(
+    "ci dedup: the question carries both findings' titles and none of their detail",
+    /The save button gives no feedback/.test(asked[0] ?? "") && /Clicking save shows nothing/.test(asked[0] ?? "") && !/Pressed it/.test(asked[0] ?? ""),
+    asked[0],
+  );
+  check(
+    "ci dedup: the model is told its filing was merged by the judge",
+    /the dedup judge read it as the same defect .* \(p_same 0\.90\)/.test(model.received[1]?.[0]?.text ?? ""),
+    model.received[1]?.[0]?.text,
+  );
+  check(
+    "ci dedup: the report keeps what the judge merged, and says what the judge did",
+    /Merged by the dedup judge\*\* \(p_same 0\.90, [\d-]+\): \[medium\] Clicking save shows nothing/.test(report) &&
+      /\| Finding dedup \| the rule, then the model judge \(the CI run's model\) for filings the rule kept apart: 1 call\(s\), 1 same/.test(report),
+    report.slice(0, 1500),
+  );
+  check(
+    "ci dedup: the judge's tokens are in the run's usage",
+    result.spend.usage.input === 3 * usage.input + 300 && result.spend.usage.output === 3 * usage.output + 25,
+    JSON.stringify(result.spend.usage),
+  );
 }
 
 // ── show and compare ────────────────────────────────────────────────────────
@@ -350,6 +403,64 @@ async function overTheWire(baseUrl: string, work: string): Promise<void> {
     );
   } finally {
     refusing.close();
+  }
+
+  // The dedup judge as the CLI wires it: the run's model at the lowest effort, through --base-url, with the judge's output cap.
+  const finding = (id: string, title: string) => ({
+    type: "function_call",
+    id: `fc_${id}`,
+    call_id: `call_${id}`,
+    name: "scout_finding",
+    arguments: JSON.stringify({ severity: "medium", category: "ux-confusing", title, detail: "Filed over the wire." }),
+  });
+  let explorationTurns = 0;
+  const judging = await fakeApi((req) => {
+    const usage = { input_tokens: 300, input_tokens_details: { cached_tokens: 0 }, output_tokens: 25 };
+    if (req.body.tools.some((t: { name: string }) => t.name === "judge_pair"))
+      return {
+        status: 200,
+        body: {
+          output: [{ type: "function_call", call_id: "j1", name: "judge_pair", arguments: JSON.stringify({ verdict: "same", confidence: 0.9 }) }],
+          usage,
+        },
+      };
+    explorationTurns += 1;
+    const output =
+      explorationTurns === 1
+        ? [finding("1", "The save button gives no feedback")]
+        : explorationTurns === 2
+          ? [finding("2", "Clicking save shows nothing")]
+          : [{ type: "message", content: [{ type: "output_text", text: "Done." }] }];
+    return { status: 200, body: { output, usage } };
+  });
+  const pj = path.join(work, "wire-judge");
+  fs.mkdirSync(pj);
+  try {
+    const r = await runCli([baseUrl, "--project", pj, "--base-url", judging.base, "--effort", "low"], { OPENAI_API_KEY: KEY });
+    const judged = judging.requests.filter((q) => q.body.tools.some((t: { name: string }) => t.name === "judge_pair"));
+    check(
+      "ci cli: the judge asks the run's model through --base-url, at effort none whatever --effort says, with its own output cap",
+      r.status === 0 &&
+        judged.length === 1 &&
+        judged[0].path === "/v1/responses" &&
+        judged[0].auth === `Bearer ${KEY}` &&
+        judged[0].body.reasoning?.effort === "none" &&
+        judged[0].body.max_output_tokens === 2000 &&
+        judging.requests.some((q) => q.body.reasoning?.effort === "low"),
+      `${r.out.slice(-800)}\n${JSON.stringify(judged.map((q) => q.body.reasoning))}`,
+    );
+    const json = JSON.parse(read(path.join(pj, ".scenescout", "ci"), "ci.json") || "{}") as {
+      findings?: unknown[];
+      dedup?: { by: string; calls: number; effort: string };
+    };
+    check(
+      "ci cli: the two near-duplicates are one finding, and ci.json says the judge made the call",
+      json.findings?.length === 1 && json.dedup?.by === "judge" && json.dedup.calls === 1 && json.dedup.effort === "none",
+      JSON.stringify({ findings: json.findings?.length, dedup: json.dedup }),
+    );
+    check("ci cli: the run prints that the judge is on", /duplicates judged by the model at effort none/.test(r.out), r.out.slice(0, 600));
+  } finally {
+    judging.close();
   }
 
   // Both keys and no --provider: refused before any request is sent.
