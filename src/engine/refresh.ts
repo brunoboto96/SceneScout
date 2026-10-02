@@ -319,6 +319,21 @@ export function planRefresh(sent: TokenSlot, current: readonly TokenSlot[]): Ref
   return same ? { kind: "swap", to: same } : { kind: "unknown" };
 }
 
+/**
+ * How much of the rotated profile a swap loads while the page's request is
+ * held. Loading the whole storage state opens a page to restore each
+ * origin's storage, and Chromium does not finish that while one of its own
+ * navigations is held, so a form post or link to a refresh endpoint would
+ * wait out the action limit. A held navigation therefore loads the cookies
+ * alone, which need no page and are all that navigation can carry; the rest
+ * of the profile is loaded at the next refresh a script sends.
+ */
+export type ProfileLoad = "cookies" | "storage";
+
+export function profileLoadWhileHeld(isNavigation: boolean): ProfileLoad {
+  return isNavigation ? "cookies" : "storage";
+}
+
 /** Replace a spent token with the current one in a body, URL or header value, in whichever wire form it appears. */
 export function swapToken(text: string, from: string, to: string): string {
   let out = text.split(from).join(to);
@@ -364,13 +379,32 @@ export function rotationStored(state: unknown, sent: TokenSlot): boolean {
  * The same goes for IndexedDB, which a storage state holds only when it was
  * asked for: an origin the page's state has no IndexedDB entry for keeps the
  * one on disk. An origin whose state does list IndexedDB, even an empty list,
- * is the page's as it now is. A profile that could not be read (null) leaves
- * the page's state as it is.
+ * is the page's as it now is. With `storageFrom` "disk" the origins
+ * (localStorage and IndexedDB) are the profile's on disk and only the cookies
+ * are the page's (writeBackStorageFrom). A profile that could not be read
+ * (null) leaves the page's state as it is.
  */
-export function profileAfterRotation(pageState: unknown, profileOnDisk: unknown): unknown {
+export function profileAfterRotation(pageState: unknown, profileOnDisk: unknown, storageFrom: "page" | "disk" = "page"): unknown {
   if (profileOnDisk === null) return pageState;
   const disk = splitProfile(profileOnDisk);
+  if (storageFrom === "disk" && pageState && typeof pageState === "object") {
+    return withSessionStorage({ ...(pageState as object), origins: disk.storageState.origins ?? [] }, disk.sessionStorage);
+  }
   return withSessionStorage(withIndexedDB(pageState, disk.storageState.origins), disk.sessionStorage);
+}
+
+/**
+ * Where a write-back takes each origin's storage from (profileAfterRotation's
+ * `storageFrom`). A swap that loaded only the profile's cookies while it held
+ * a navigation (profileLoadWhileHeld) left the page's storage as it was
+ * before the other session's rotation, so writing that back would put spent
+ * tokens over the current ones on disk: the storage stays the profile's, and
+ * only the cookies, where the rotation it presented lives, are the page's.
+ * A token presented from storage is the page's to store, so its storage is
+ * taken from the page as it is now.
+ */
+export function writeBackStorageFrom(loaded: ProfileLoad, presented: TokenSlot): "page" | "disk" {
+  return loaded === "cookies" && presented.cookie !== undefined ? "disk" : "page";
 }
 
 /** `state` with each disk origin's IndexedDB carried over where the state has none of its own (profileAfterRotation). */
