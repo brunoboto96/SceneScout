@@ -24,7 +24,8 @@ import { CLAIM_SCAN_SCRIPT, findContradictions, type PageState, type WatchedRequ
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
-import { captureClip } from "./capture.js";
+import { captureClip, cutByViewport } from "./capture.js";
+import { STOP_ANIMATIONS_SCRIPT, type PictureSettings } from "./baseline.js";
 import {
   COLLECT_INTERACTABLES_SCRIPT,
   VISIBLE_SRC,
@@ -101,7 +102,7 @@ import {
   type FormProbe,
 } from "./forms.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
-import { DEFAULT_TIME_LIMITS, explainTimeout, limitHint, resolveTimeLimits, type LimitKind, type TimeLimits } from "./limits.js";
+import { DEFAULT_TIME_LIMITS, explainTimeout, firstLineOf, isTimeoutMessage, limitHint, resolveTimeLimits, type LimitKind, type TimeLimits } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { boundedTeardown } from "./teardown.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
@@ -198,6 +199,8 @@ export interface AttachOptions {
   /** Which browser to drive. Default: the SCENESCOUT_BROWSER environment variable, else Chromium. */
   browser?: BrowserEngineName;
   viewport?: { width: number; height: number };
+  /** CSS pixels to device pixels. Default: the browser's own (1). `scenescout check --baseline` names it, so its pictures are comparable. */
+  deviceScaleFactor?: number;
   /** The session's objective: the whole remit this session was given, shown to whoever is watching the run. */
   objective?: string;
   /**
@@ -1138,6 +1141,7 @@ export class BrowserEngine {
       this.context = await this.browser.newContext({
         storageState: profile?.storageState as BrowserContextOptions["storageState"],
         viewport: opts.viewport ?? { width: 1280, height: 900 },
+        ...(opts.deviceScaleFactor !== undefined ? { deviceScaleFactor: opts.deviceScaleFactor } : {}),
         serviceWorkers: serviceWorkerPolicy(this.engineName),
       });
       const restoreSession = sessionStorageInitScript(profile?.sessionStorage ?? []);
@@ -3724,11 +3728,7 @@ export class BrowserEngine {
         // on every discovery round). Deliberately not written to memory: one outage
         // must not count a route as covered in every later run's gap ledger.
         if (!opts.measureOnly) this.loadFailedRoutes.add(normalizePath(url));
-        // The browser commits its own error page for this failure tens of
-        // milliseconds after goto has thrown, and that commit interrupts the next
-        // navigation, charging this route's failure to the next one. Wait for it;
-        // a browser that shows no error page simply lets the wait time out.
-        await page.waitForEvent("framenavigated", { predicate: (f) => f === page.mainFrame(), timeout: 1500 }).catch(() => undefined);
+        await this.errorPageCommitted(page);
         summary.push(`${path} — LOAD FAILED`);
         // The page a re-attach went back to never loaded, so nothing says whether it worked.
         if (this.authLoss.reattaching) this.authLoss.abortReattach(`the page it went back to, ${path}, did not load (${reason})`);
@@ -4203,11 +4203,6 @@ export class BrowserEngine {
         await (this.page ?? page).waitForTimeout(100).catch(() => {});
       }
     };
-    const firstLine = (err: unknown): string =>
-      (err instanceof Error ? err.message : String(err))
-        .split("\n")[0]
-        .replace(/^[a-z]+\.[a-zA-Z]+: /, "")
-        .trim();
     try {
       for (const [i, step] of steps.entries()) {
         const n = i + 1;
@@ -4286,7 +4281,7 @@ export class BrowserEngine {
             if (!last.ok) failure = last.reason;
           }
         } catch (err) {
-          failure = firstLine(explainTimeout(err, "action", this.limits.actionMs));
+          failure = firstLineOf(explainTimeout(err, "action", this.limits.actionMs));
         }
         await this.scanForInjections().catch(() => {});
         await this.scanForContradictions().catch(() => {});
@@ -4448,6 +4443,112 @@ export class BrowserEngine {
     // Found by key, the refs were rebuilt without a snapshot: none of them may be acted on.
     if (target.key) this.refs.clear();
     return { png, key: el.key, label: el.name, url: page.url() };
+  }
+
+  /**
+   * After a navigation threw. The browser commits its own error page for the
+   * failure tens of milliseconds after goto has thrown, and that commit
+   * interrupts the next navigation, charging this failure to the next page.
+   * Wait for it; a browser that shows no error page simply lets the wait time
+   * out, which is not an error.
+   */
+  private async errorPageCommitted(page: Page): Promise<void> {
+    await page.waitForEvent("framenavigated", { predicate: (f) => f === page.mainFrame(), timeout: 1500 }).catch(() => undefined);
+  }
+
+  /** The browser this session drives. */
+  get browserEngine(): BrowserEngineName {
+    return this.engineName;
+  }
+
+  /** Whether the page and its browser are still there: a failure after either is gone is the engine's, not the page's. */
+  get alive(): boolean {
+    return !!this.page && !this.page.isClosed() && !!this.browser?.isConnected();
+  }
+
+  /** True when `p` settles in time, false when it times out. Any other failure is thrown, so a closed page never reads as a slow one. */
+  private static async inTime(p: Promise<unknown>): Promise<boolean> {
+    try {
+      await p;
+      return true;
+    } catch (err) {
+      if (err instanceof Error && isTimeoutMessage(err.message)) return false;
+      throw err;
+    }
+  }
+
+  /**
+   * A picture for `scenescout check --baseline`: the page at `pathOnApp`
+   * loaded afresh (from a blank page, so a target that differs from the last
+   * only by its #fragment is still a new load), told the motion preference
+   * `how` names, read once its fonts have loaded and its animations are
+   * stopped, then either the viewport from the top (no target) or one element,
+   * found the way a saved flow finds its target, with `how.margin` around it.
+   * The screenshot is taken with `how`'s animation and caret settings, at one
+   * picture pixel per CSS pixel. Reads only. Throws a sentence when it cannot
+   * take the picture. `cut` says when an element reaches outside the window.
+   * What is compared and what it means is baseline.ts, which also holds the
+   * settings; the rectangle is capture.ts. Call endBaselineCaptures when done.
+   */
+  async captureForBaseline(
+    pathOnApp: string,
+    target: FlowTarget | null,
+    how: PictureSettings,
+  ): Promise<{ png: Buffer; viewport: { width: number; height: number }; deviceScaleFactor: number; cut: string | null }> {
+    const page = this.requirePage();
+    const action = <T>(p: Promise<T>): Promise<T> => p.catch((err: unknown) => Promise.reject(explainTimeout(err, "action", this.limits.actionMs)));
+    const within = `within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
+    // Before the load, so a page that reads the preference once, as it starts, reads it too.
+    await page.emulateMedia({ reducedMotion: how.reducedMotion });
+    let resp: import("playwright").Response | null;
+    try {
+      await page.goto("about:blank", { timeout: this.limits.crawlNavMs });
+      resp = await page.goto(`${this.baseUrl}${pathOnApp}`, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
+    } catch (err) {
+      await this.errorPageCommitted(page);
+      throw explainTimeout(err, "nav", this.limits.crawlNavMs);
+    }
+    const status = resp?.status() ?? null;
+    if (status !== null && status >= 400) throw new Error(`the page answered HTTP ${status}`);
+    await this.settle();
+    // A sign-in page pictured as the page's baseline would be written by an update and compared from then on.
+    const landed = await this.landedUrl(page);
+    if (this.authLoss.isLoginRedirect(pathOnApp, landed, this.baseUrl)) {
+      throw new Error(`the page sent the browser to sign-in (${new URL(landed).pathname}): the session is missing or expired`);
+    }
+    // Text drawn in a fallback font, then again when the web font arrives, would differ from one run to the next.
+    const fonts = page.waitForFunction("!document.fonts || document.fonts.status === 'loaded'", null, { timeout: this.limits.actionMs });
+    if (!(await BrowserEngine.inTime(fonts))) throw new Error(`its fonts were still loading, not done ${within}`);
+    // Stopped before anything is measured, not only for the screenshot: a target that itself moves would be cropped mid-movement.
+    if (how.animations === "disabled") await page.evaluate(STOP_ANIMATIONS_SCRIPT);
+    const viewport = page.viewportSize() ?? ((await page.evaluate("({ width: innerWidth, height: innerHeight })")) as { width: number; height: number });
+    const deviceScaleFactor = Number(await page.evaluate("window.devicePixelRatio"));
+    const settings = { type: "png", animations: how.animations, caret: how.caret, scale: "css", timeout: this.limits.actionMs } as const;
+    let png: Buffer;
+    let cut: string | null = null;
+    if (!target) {
+      await page.evaluate("window.scrollTo(0, 0)");
+      png = await action(page.screenshot(settings));
+    } else {
+      const locator = BrowserEngine.locatorFor(page, target).first();
+      if (!(await BrowserEngine.inTime(locator.waitFor({ state: "visible", timeout: this.limits.actionMs })))) {
+        throw new Error(`nothing visible matches it ${within}`);
+      }
+      await action(locator.scrollIntoViewIfNeeded({ timeout: this.limits.actionMs }));
+      const box = await action(locator.boundingBox({ timeout: this.limits.actionMs }));
+      if (!box) throw new Error("it is not displayed");
+      const clip = captureClip(box, how.margin, viewport);
+      if (!clip) throw new Error("it is outside the viewport");
+      cut = cutByViewport(box, viewport);
+      png = await action(page.screenshot({ ...settings, clip }));
+    }
+    this.logAction({ action: "capture", target: target ? `baseline ${pathOnApp}` : `baseline ${pathOnApp} (page)`, url: page.url() });
+    return { png, viewport, deviceScaleFactor, cut };
+  }
+
+  /** Stop telling the page to reduce motion, so what runs after the baselines (saved flows) sees the page as a user does. */
+  async endBaselineCaptures(): Promise<void> {
+    await this.requirePage().emulateMedia({ reducedMotion: null });
   }
 
   /**

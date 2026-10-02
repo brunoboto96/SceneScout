@@ -12,10 +12,22 @@
  */
 import { createHash } from "node:crypto";
 import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
+import {
+  BASELINE_MODES,
+  baselineEvidence,
+  baselineFingerprint,
+  countStatuses,
+  describeChange,
+  parseThreshold,
+  VISUAL_RULE,
+  type BaselineMode,
+  type BaselineResult,
+  type BaselineRun,
+} from "./baseline.js";
 import type { DesignDefect } from "./design.js";
 import { flowStepEvidence, type FlowRun, type SkippedFlowFile } from "./flow.js";
 import { parseLimitFlag } from "./limits.js";
-import { redactSecrets } from "./memory.js";
+import { redactRoute, redactSecrets } from "./memory.js";
 import { httpErrorDetail, httpStatusOf, type OracleViolation } from "./oracles.js";
 import type { CheckRetest } from "./verify.js";
 
@@ -118,6 +130,11 @@ export const CHECK_RULES = {
     title: "Saved flow broke",
     help: "A step of a flow saved in .scenescout/flows could not be done, or what it expected was not there. The evidence names the flow, the step and what happened instead.",
   },
+  [VISUAL_RULE]: {
+    severity: "high",
+    title: "Differs from its visual baseline",
+    help: "A page or element listed in the baselines' targets.json no longer looks like its baseline (--baseline compare): more of its pixels changed than --baseline-threshold allows, or its size changed. It is also filed when the page or element could not be captured at all, or its baseline cannot be used (half there, unreadable, or taken with other settings). An intended change is approved by running the check with --baseline update (and committing the new baseline, where the project keeps baselines in a folder it commits).",
+  },
 } as const satisfies Record<string, { severity: CheckSeverity; title: string; help: string }>;
 
 /**
@@ -164,7 +181,12 @@ export interface CheckObservation {
 export interface CheckIssue {
   rule: DefectRule;
   severity: CheckSeverity;
-  /** The fact, stable across runs: no snapshot refs, no ports. What dedup and fingerprints key on. */
+  /**
+   * The fact, stable across runs: no snapshot refs, no ports. What dedup and
+   * fingerprints key on, except for an unmet visual baseline, whose evidence
+   * carries this run's share of changed pixels and whose fingerprint is the
+   * target's (checkFindings).
+   */
   evidence: string;
   /** Every route it was seen on, first first. */
   routes: string[];
@@ -241,18 +263,27 @@ export function geometryRule(line: string): CheckRule | null {
  *
  * A fact under a worth-a-look rule goes to `worthALook` instead, deduplicated
  * the same way; the two lists never share an entry.
+ *
+ * Visual baselines add one issue per target that is not met (baseline.ts
+ * decides which). Each target is its own fact already, so these skip the
+ * dedup, and their fingerprint comes from the target, not the evidence: the
+ * evidence carries this run's percentage, and the same target changing by a
+ * different amount is still the same alert.
  */
 export function checkFindings(
   routes: readonly RouteHealth[],
   origin: string,
   ignore: readonly CheckRule[] = [],
   flows: readonly FlowRun[] = [],
+  baselines: BaselineRun | null = null,
 ): { issues: CheckIssue[]; worthALook: CheckObservation[] } {
   const byKey = new Map<string, CheckIssue>();
   const looks = new Map<string, CheckObservation>();
+  /** Evidence as it is written: no origin, no secret, and bounded. */
+  const cleanEvidence = (evidence: string): string => redactSecrets(withoutOrigin(evidence, origin)).slice(0, 300);
   const add = (rule: CheckRule, evidence: string, route: string, opts: { severity?: CheckSeverity; embed?: string } = {}): void => {
     if (ignore.includes(rule)) return;
-    const clean = redactSecrets(withoutOrigin(evidence, origin)).slice(0, 300);
+    const clean = cleanEvidence(evidence);
     const key = `${rule}\u0000${clean}`;
     const found = byKey.get(key) ?? looks.get(key);
     if (found) {
@@ -298,8 +329,22 @@ export function checkFindings(
     // A refused step is not the app's defect: the check reports it as "could not run" (refusedFlowReason).
     if (f.outcome.status === "failed") add("flow-step-failed", flowStepEvidence(f), f.outcome.path);
   }
+  const visual: CheckIssue[] = [];
+  if (baselines && !ignore.includes(VISUAL_RULE)) {
+    for (const r of baselines.results) {
+      const evidence = baselineEvidence(r, baselines);
+      if (evidence === null) continue;
+      visual.push({
+        rule: VISUAL_RULE,
+        severity: CHECK_RULES[VISUAL_RULE].severity,
+        evidence: cleanEvidence(evidence),
+        routes: [r.path],
+        fingerprint: baselineFingerprint(baselines.engine, r),
+      });
+    }
+  }
   return {
-    issues: [...byKey.values()].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.rule.localeCompare(b.rule)),
+    issues: [...byKey.values(), ...visual].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.rule.localeCompare(b.rule)),
     worthALook: [...looks.values()].sort((a, b) => a.rule.localeCompare(b.rule)),
   };
 }
@@ -349,15 +394,8 @@ export function withoutOwnResponse(r: RouteHealth): RouteHealth {
   return { ...r, violations: r.violations.filter((v) => !(v.kind === "http_error" && v.detail === own)) };
 }
 
-/**
- * Routes are links the app printed, and a link can carry a token
- * (`?reset=…`, `?api_key=…`). Evidence is redacted where issues are built;
- * this does the same for every route string before anything is written.
- */
-export function redactRoute(route: string): string {
-  // The trailing "[n secrets redacted]" note belongs to prose; in a route it would read as part of the path.
-  return redactSecrets(route).replace(/ \[\d+ secrets? redacted\]$/, "");
-}
+/** Lives beside redactSecrets so the baselines' file names (baseline.ts) use it too; exported here as before. */
+export { redactRoute };
 
 export function redactRoutes(routes: readonly RouteHealth[]): RouteHealth[] {
   const clean = redactRoute;
@@ -367,6 +405,17 @@ export function redactRoutes(routes: readonly RouteHealth[]): RouteHealth[] {
     url: clean(r.url),
     violations: r.violations.map((v) => ({ ...v, url: clean(v.url) })),
   }));
+}
+
+/**
+ * The same redaction for visual baselines: a target's path, and the reason a
+ * picture could not be taken, which can quote a URL the app redirected to.
+ */
+export function redactBaselineRun(run: BaselineRun): BaselineRun {
+  return {
+    ...run,
+    results: run.results.map((r) => ({ ...r, path: redactRoute(r.path), ...(r.detail !== undefined ? { detail: redactSecrets(r.detail) } : {}) })),
+  };
 }
 
 /** The same redaction for what flows measured: the page paths and the request URLs their violations quote. */
@@ -440,6 +489,12 @@ export interface CheckOptions extends CheckSettings {
   ignore: CheckRule[];
   /** The flows directory to replay; "off" for none; absent for the project's own when it has one. */
   flows?: string;
+  /** off; compare the targets in the baselines folder with their baselines; or update those baselines. */
+  baseline: BaselineMode;
+  /** The baselines folder; absent for the project's own, inside .scenescout/ (baseline.ts). */
+  baselinesDir?: string;
+  /** The percentage of a picture's pixels that may change before its baseline is not met. */
+  baselineThreshold: number;
 }
 
 /**
@@ -464,6 +519,9 @@ export const CHECK_OPTION_NAMES = [
   "gate-retests",
   "action-timeout-ms",
   "nav-timeout-ms",
+  "baseline",
+  "baselines",
+  "baseline-threshold",
 ] as const;
 
 export const MAX_CHECK_ROUTES = 150;
@@ -546,6 +604,16 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
   if (!onRefusedStep) return { ok: false, error: `--on-refused-step must be one of ${ON_REFUSED_STEP.join(", ")}` };
   const gateRetests = oneOf("gate-retests", GATE_RETESTS, DEFAULT_SETTINGS.gateRetests);
   if (!gateRetests) return { ok: false, error: `--gate-retests must be one of ${GATE_RETESTS.join(", ")}` };
+  const baseline = oneOf("baseline", BASELINE_MODES, "off");
+  if (!baseline) return { ok: false, error: `--baseline must be one of ${BASELINE_MODES.join(", ")}` };
+  const threshold = parseThreshold(flags.get("baseline-threshold"));
+  if (!threshold.ok) return threshold;
+  const baselinesDir = flags.get("baselines");
+  if (baselinesDir !== undefined && baselinesDir.trim() === "") return { ok: false, error: "--baselines needs a directory" };
+  // A setting that would do nothing is a mistake to point out, not to ignore: the check would run without the baselines asked for.
+  if (baseline === "off" && (baselinesDir !== undefined || flags.has("baseline-threshold"))) {
+    return { ok: false, error: "--baselines and --baseline-threshold apply only with --baseline compare or --baseline update" };
+  }
 
   const resolve = (p: string): string => (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) ? p : `${cwd.replace(/[\\/]$/, "")}/${p}`);
   return {
@@ -568,6 +636,9 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
       flowWrites,
       onRefusedStep,
       gateRetests,
+      baseline,
+      ...(baselinesDir !== undefined ? { baselinesDir: resolve(baselinesDir) } : {}),
+      baselineThreshold: threshold.value,
     },
   };
 }
@@ -596,6 +667,8 @@ export interface CheckResult {
   settings: CheckSettings;
   /** Entries of the flows directory that were not replayed, each with its reason. */
   skippedFlows: SkippedFlowFile[];
+  /** What --baseline compare or update did with each target; absent or null when it was off. */
+  baselines?: BaselineRun | null;
 }
 
 /**
@@ -659,7 +732,8 @@ const SARIF_LEVEL: Record<CheckSeverity, "error" | "warning" | "note"> = { high:
  * SARIF 2.1.0, for code-scanning dashboards. A UI check has no source file to
  * point at, so each result's location is the route, relative to the checked
  * app (the APP base id). Fingerprints come from the evidence, not the
- * location, so a preview deployment on a new URL does not reopen every alert.
+ * location, so a preview deployment on a new URL does not reopen every alert;
+ * an unmet visual baseline's comes from its target and browser instead.
  */
 const RETEST_SARIF_RULE = {
   id: "open-finding-reproduces",
@@ -790,6 +864,83 @@ function routeList(routes: readonly string[]): string {
   return shown.join(", ") + (routes.length > 3 ? ` and ${routes.length - 3} more` : "");
 }
 
+const BASELINE_MARK: Record<BaselineResult["status"], string> = {
+  matches: "✓",
+  changed: "✗",
+  "no-baseline": "○",
+  unusable: "✗",
+  "not-captured": "⊘",
+  updated: "↻",
+};
+
+/** One target's line in the report. */
+function baselineLine(r: BaselineResult, run: BaselineRun): string {
+  const what = `${BASELINE_MARK[r.status]} ${code(r.element)} on ${code(r.path)}`;
+  const notes = [r.platformNote, r.partial]
+    .filter(Boolean)
+    .map((n) => ` _(${cell(n!)})_`)
+    .join("");
+  switch (r.status) {
+    case "matches":
+      return `- ${what}: ${run.mode === "update" ? `within the threshold of its baseline (${r.diff?.percent ?? 0}% changed), which was left as it was` : `matches (${r.diff?.percent ?? 0}% changed)`}${notes}`;
+    case "changed": {
+      const files = r.files ? ` — expected ${code(r.files.expected)}, now ${code(r.files.actual)}, diff ${code(r.files.diff)}` : "";
+      return `- ${what}: ${r.diff ? describeChange(r.diff, run.threshold) : "it no longer matches its baseline"}${files}${notes}`;
+    }
+    case "no-baseline":
+      return `- ${what}: no baseline yet${notes}`;
+    case "unusable":
+      return `- ${what}: its baseline cannot be used: ${cell(r.detail ?? "no reason given")}`;
+    case "not-captured":
+      return `- ${what}: could not be captured: ${cell(r.detail ?? "no reason given")}${run.mode === "update" ? "; its baseline was not written" : ""}`;
+    case "updated":
+      return `- ${what}: baseline written to ${code(r.baseline)} (${cell(r.detail ?? "updated")})${notes}`;
+  }
+}
+
+/** The report's section on visual baselines: every target and what became of it. */
+function formatBaselines(run: BaselineRun): string[] {
+  const c = countStatuses(run.results);
+  const counts = (
+    [
+      ["changed", "changed"],
+      ["unusable", "unusable"],
+      ["not-captured", "not captured"],
+      ["no-baseline", "no baseline yet"],
+      ["updated", "updated"],
+      ["matches", run.mode === "update" ? "left as they were" : "match"],
+    ] as const
+  )
+    .filter(([k]) => c[k] > 0)
+    .map(([k, label]) => `${c[k]} ${label}`)
+    .join(" · ");
+  const lines = [
+    `## Visual baselines (${run.results.length})`,
+    "",
+    `${run.mode === "update" ? "Updated" : "Compared"} in ${run.engine}, baselines in ${code(run.dir)} · ${run.threshold}% of a picture's pixels may change · ${counts}`,
+    "",
+    ...run.results.map((r) => baselineLine(r, run)),
+  ];
+  if (c.changed > 0)
+    lines.push(
+      "",
+      "The pictures are beside this report, under `visual/` (in the job's artifact on CI): the baseline, the picture now, and the changed pixels in red.",
+    );
+  if (c["no-baseline"] > 0 || c.unusable > 0) {
+    lines.push(
+      "",
+      "A target with no baseline yet is listed and never fails; one whose baseline cannot be used fails until it is taken again. Run the check with `--baseline update` to take them.",
+    );
+  }
+  if (run.results.some((r) => r.platformNote)) {
+    lines.push(
+      "",
+      "_Some baselines were taken on another operating system. Each one draws text differently, so a change there may be the system's rather than the app's: take baselines where the check runs._",
+    );
+  }
+  return lines;
+}
+
 /** The human report: the verdict first, then what failed it, then everything else. */
 export function formatCheck(result: CheckResult): string {
   const { passed, counts, failing, retestsFailing, couldNotRun } = summarise(result);
@@ -801,6 +952,8 @@ export function formatCheck(result: CheckResult): string {
   );
   lines.push("");
   const unaudited = unauditedRoutes(result.routes).length;
+  // Nothing compared is not a match: a target with no baseline yet is named beside the verdict, as an unmeasured design is.
+  const uncompared = result.baselines?.mode === "compare" ? countStatuses(result.baselines.results)["no-baseline"] : 0;
   const failingText =
     retestsFailing > 0
       ? `${failing} failing the gate (${failing - retestsFailing} issue(s), ${retestsFailing} re-tested finding(s))`
@@ -811,6 +964,7 @@ export function formatCheck(result: CheckResult): string {
         ? `${couldNotRun > 0 ? "passed" : "**PASSED**"} — ${counts.high} high · ${counts.medium} medium · ${counts.low} low`
         : `${couldNotRun > 0 ? "failed" : "**FAILED**"} — ${failingText} · ${counts.high} high · ${counts.medium} medium · ${counts.low} low`) +
       (unaudited > 0 ? ` · design not measured on ${unaudited} route(s)` : "") +
+      (uncompared > 0 ? ` · ${uncompared} visual target(s) not compared: no baseline yet` : "") +
       (result.worthALook.length > 0 ? ` · ${result.worthALook.length} worth a look, never gated` : ""),
   );
   // Right under the verdict: what a green check was allowed to do is part of what it means.
@@ -868,6 +1022,7 @@ export function formatCheck(result: CheckResult): string {
     }
     for (const s of result.skippedFlows) lines.push(`- skipped ${code(s.file)}: ${cell(s.reason)}`);
   }
+  if (result.baselines) lines.push("", ...formatBaselines(result.baselines));
   if (result.retest && result.retest.open > 0) {
     const { open, results } = result.retest;
     lines.push("", `## Open findings re-tested (${results.length} of ${open})`, "");
@@ -948,6 +1103,7 @@ export function toSummaryJson(result: CheckResult, toolVersion: string): object 
     })),
     skippedFlows: result.skippedFlows,
     retest: result.retest,
+    baselines: result.baselines ?? null,
     issues: result.issues,
     // Apart from `issues` and `counts`, which the gate reads: none of these is counted or gated.
     worthALook: result.worthALook,

@@ -1,8 +1,9 @@
 # Runs `scenescout check` against an app the workflow has already started, and
 # fails the step the way the CLI's exit code says: 1 when the gate fails, 2 (with
 # a "could not run" annotation) when there is no verdict to give. The report
-# goes on the job summary, and report.md, check.json and check.sarif are kept as
-# an artifact. How to use it: docs/ci.md.
+# goes on the job summary, and report.md, check.json and check.sarif (and the
+# pictures of any visual baseline not met) are kept as an artifact. How to use
+# it: docs/ci.md.
 #
 # Every input that is not listed in ACTION_ONLY_INPUTS (action/check-action.mjs)
 # is passed to the CLI as `--<name>=<value>`, so those inputs are named exactly
@@ -82,6 +83,18 @@ inputs:
     description: never, high or all. Which re-tested findings that still reproduce fail the gate; high means those filed at high severity. Empty means high.
     required: false
     default: ""
+  baseline:
+    description: off, compare or update. compare pictures each page or element listed in the baselines' targets.json and fails the gate when one no longer looks like its baseline; update writes new baselines. Empty means off.
+    required: false
+    default: ""
+  baselines:
+    description: The folder holding targets.json and the baselines, relative to working-directory. Empty means <project>/.scenescout/baselines, which git ignores; name a folder the repository commits to share baselines.
+    required: false
+    default: ""
+  baseline-threshold:
+    description: The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; update rewrites only the baselines past it. Empty means 0.
+    required: false
+    default: ""
   working-directory:
     description: The directory the check runs in; relative paths in the other inputs are resolved against it.
     required: false
@@ -103,7 +116,7 @@ inputs:
     required: false
     default: "true"
   upload-artifact:
-    description: Keep report.md, check.json and check.sarif as a workflow artifact.
+    description: Keep report.md, check.json and check.sarif as a workflow artifact, with the pictures of any visual baseline that was not met.
     required: false
     default: "true"
   artifact-name:
@@ -248,6 +261,7 @@ runs:
           ${{ steps.run.outputs.report }}
           ${{ steps.run.outputs.json }}
           ${{ steps.run.outputs.sarif }}
+          ${{ steps.run.outputs.visual }}
         # The default output folder is .scenescout/, which the upload would otherwise skip as hidden.
         include-hidden-files: true
         if-no-files-found: warn

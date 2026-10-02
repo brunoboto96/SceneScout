@@ -44,12 +44,13 @@ import {
   resolveClaudeDir,
   spawnRunner,
 } from "./installer.js";
-import { defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
+import { baselinesDirOf, defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
 import { httpClient, runCi } from "./ci-run.js";
 import { runLogin, runScriptedLogin, savedLine } from "./login-run.js";
 import { credentialRedactor, LOGIN_ENV, readScriptedLogin } from "./engine/scripted-login.js";
 import { parseLoginArgs } from "./engine/profiles.js";
 import { detectProvider, EXIT_CI, KEY_ENV, parseCiArgs, redactKeys, secretValues } from "./engine/ci.js";
+import { VISUAL_DIRNAME } from "./engine/baseline.js";
 import { EXIT, exitCodeOf, formatCheck, parseCheckArgs, refusedFlowReason, toSarif, toSummaryJson, unmeasuredReason } from "./engine/check.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME, writeSelfIgnore } from "./engine/memory.js";
 import {
@@ -112,7 +113,14 @@ Usage:
                                      --on-refused-step report|stop: report (default) marks a flow whose step was
                                       refused "could not run", keeps every other verdict and exits 2; stop exits 2 there;
                                      --gate-retests never|high|all: which still-reproducing findings fail the gate
-                                      (default high: those filed high))
+                                      (default high: those filed high);
+                                     --baseline off|compare|update: compare each page or element listed in the
+                                      baselines' targets.json with its baseline picture, or write new baselines
+                                      (update; only when asked) (default off);
+                                     --baselines dir: where targets.json and the baselines are (default
+                                      .scenescout/baselines, which git ignores; name a folder you commit to share
+                                      them); --baseline-threshold N: the % of a picture's pixels that may change
+                                      before its baseline is not met; update rewrites only those past it (default 0))
                                     Exit code: 0 passed, 1 failed the gate, 2 could not run.
   scenescout ci <url>               An exploratory run with no person present: a model reached through its API
                                     drives the tools by the SceneScout method and the run ends in the report.
@@ -597,6 +605,10 @@ async function check(args: string[]): Promise<never> {
   }
   console.log("\n" + markdown);
   console.log(`Wrote report.md, check.sarif and check.json to ${outDir}`);
+  const pictured = result.baselines?.results.filter((r) => r.files).length ?? 0;
+  if (pictured > 0) console.log(`Wrote the pictures of ${pictured} changed baseline(s) under ${path.join(outDir, VISUAL_DIRNAME)}`);
+  const written = result.baselines?.results.filter((r) => r.status === "updated").length ?? 0;
+  if (written > 0) console.log(`Wrote ${written} baseline(s) to ${baselinesDirOf(options)}`);
   // --on-refused-step report: everything else has its verdict in the files, and the exit code still says the run was incomplete.
   if (refused) console.error(`scenescout check: could not run a saved flow: ${refused}`);
   process.exit(exitCodeOf(result));

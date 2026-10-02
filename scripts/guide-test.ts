@@ -372,6 +372,8 @@ test("the defaults the reference gives for check and ci are the parsers' default
     "on-refused-step": c.onRefusedStep,
     "gate-retests": c.gateRetests,
     retest: c.retest ? "on" : "off",
+    baseline: c.baseline,
+    "baseline-threshold": c.baselineThreshold,
   };
   for (const [option, value] of Object.entries(expectCheck)) assert.equal(defaults("check").get(option), `\`${value}\``, `check --${option}`);
   const o = ci.options;

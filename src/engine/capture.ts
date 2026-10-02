@@ -34,6 +34,18 @@ export function captureClip(box: Box, margin: number, viewport: { width: number;
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
+/**
+ * Whether an element itself (its margin aside) reaches outside the viewport
+ * once scrolled into view, so only the part inside is pictured: then a phrase
+ * saying so, for the report; null when all of it is in the picture. A pixel of
+ * slack, for boxes at fractional positions.
+ */
+export function cutByViewport(box: Box, viewport: { width: number; height: number }): string | null {
+  const inside = box.x >= -1 && box.y >= -1 && box.x + box.width <= viewport.width + 1 && box.y + box.height <= viewport.height + 1;
+  if (inside) return null;
+  return `only the part inside the ${viewport.width}×${viewport.height} window is pictured: the element is ${Math.round(box.width)}×${Math.round(box.height)}`;
+}
+
 /** A capture's file name: lower-case letters, digits and dashes, then .png. Nothing else reaches the path. */
 export function captureFileName(name: string | undefined): string {
   const base = String(name ?? "")

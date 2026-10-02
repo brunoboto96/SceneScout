@@ -164,6 +164,14 @@ export function limitHint(kind: LimitKind, ms: number): string {
  * line; the call log below it is kept. An error that already carries a hint is
  * returned as it is.
  */
+/** An error's first line, without the driver's "page.goto: " prefix: what a report shows of it. */
+export function firstLineOf(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err))
+    .split("\n")[0]
+    .replace(/^[a-z]+\.[a-zA-Z]+: /, "")
+    .trim();
+}
+
 export function explainTimeout(err: unknown, kind: LimitKind, ms: number): unknown {
   if (!(err instanceof Error) || !isTimeoutMessage(err.message) || err.message.includes(HINT_MARK)) return err;
   const [first, ...rest] = err.message.split("\n");

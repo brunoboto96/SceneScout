@@ -59,6 +59,9 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `--flow-writes` | `never` | `never` replays flows under observe's rule; `allow` replays them under `--mode` |
 | `--on-refused-step` | `report` | `report` marks a flow whose step was refused "could not run" and exits 2 with every other verdict kept; `stop` exits 2 at that step with no results |
 | `--gate-retests` | `high` | Which still-reproducing re-tested findings fail the gate: `never`, `high` or `all` |
+| `--baseline` | `off` | `compare` pictures each page or element listed in the baselines' `targets.json` and files `visual-change` when one no longer looks like its baseline; `update` writes new baselines ([visual baselines](Ways-to-use-it.md#visual-baselines)) |
+| `--baselines` | `<project>/.scenescout/baselines` | The folder holding `targets.json` and the baselines. The default is ignored by git; name a folder the project commits to share them |
+| `--baseline-threshold` | `0` | The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; `update` rewrites only the baselines past it. A change of size always counts |
 
 ### `scenescout ci`
 
@@ -152,6 +155,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `clipped-text` | low | Text clipped |
 | `image-aspect` | low | Image distorted |
 | `flow-step-failed` | high | Saved flow broke |
+| `visual-change` | high | Differs from its visual baseline (only with `--baseline`) |
 | `off-grid-spacing` | worth a look | Spacing off a 4px grid |
 | `indistinct-link` | worth a look | Link styled like body text |
 
@@ -207,12 +211,15 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `flow-writes` | empty | As `--flow-writes` |
 | `on-refused-step` | empty | As `--on-refused-step` |
 | `gate-retests` | empty | As `--gate-retests` |
+| `baseline` | empty | As `--baseline` |
+| `baselines` | empty | As `--baselines`, relative to `working-directory` |
+| `baseline-threshold` | empty | As `--baseline-threshold` |
 | `working-directory` | `.` | Where the check runs; other relative paths are resolved from here |
 | `version` | empty | The scenescout npm version to run; empty means the version of the action's ref |
 | `cli` | empty | A built `dist/cli.js` to run instead of the npm package, for testing the action itself |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
-| `upload-artifact` | `true` | Keep the three files as an artifact |
+| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met |
 | `artifact-name` | empty | Empty means `scenescout-check-<job id>`; give each matrix cell its own |
 | `upload-sarif` | `false` | Upload `check.sarif` to code scanning; needs `security-events: write` |
 

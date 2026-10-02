@@ -408,12 +408,15 @@ With the default settings its saved flows send no HTTP write (they replay under 
 - `--flow-writes never|allow` (default `never`): `never` replays flows under observe's rule whatever `--mode` says; `allow` replays them under `--mode`, so in `read-only` a flow's form submissions are sent to the target on every run.
 - `--on-refused-step report|stop` (default `report`): `report` marks a flow whose step was refused "could not run", keeps every other verdict and exits 2; `stop` exits 2 at that step with no results.
 - `--gate-retests never|high|all` (default `high`): which still-reproducing re-tested findings fail the gate.
+- `--baseline off|compare|update` (default `off`), with `--baselines <dir>` and `--baseline-threshold <percent>` (default `0`): visual baselines, below.
 
 The defaults are what an unconfigured check does, for a first try or an AI agent running it unattended: its flows send no HTTP write and it never silently hides a result. Each setting is a choice for the project; the report and `check.json` print the values a check ran with.
 
 `scenescout check --help` lists every option. Why the defaults are what they are: [ADR 11](docs/adr/0011-a-gate-is-deterministic-and-fails-only-on-what-it-can-prove.md).
 
 It also replays the flows saved in `.scenescout/flows/*.json`, with no model: the steps `scout_run_plan` takes (navigate, click, type, select, press) plus `expect-text`, `expect-url` and `expect-request`. A flow whose step breaks fails the gate, naming the flow and the step. And it re-tests the open findings earlier runs left in the project's memory that a page load can reproduce, reporting each as still reproducing or possibly fixed; by default a finding filed high that still reproduces fails the gate. [docs/ci.md](docs/ci.md#saved-flows) has the flow format; [ADR 12](docs/adr/0012-a-check-replays-saved-flows-and-reports-re-tests.md) says why it works this way.
+
+With `--baseline compare` it also holds pages and elements to approved pictures: list them in a `targets.json`, take the baselines once with `--baseline update`, and a later check that finds one changed past `--baseline-threshold` fails the gate with the share of pixels changed and a diff picture beside the report. Baselines are kept per browser, in a git-ignored folder unless `--baselines` names one the project commits, and only `--baseline update` ever writes one. [The guide](docs/guide/Ways-to-use-it.md#visual-baselines) has the details; [ADR 16](docs/adr/0016-a-visual-baseline-changes-only-when-asked.md) says why.
 
 Beyond those flows it explores nothing and fills no forms. That is the exploratory run's job, and its findings belong in a report, not a gate.
 
@@ -678,6 +681,7 @@ src/
     expiry.ts       how long a saved sign-in lasts: cookie dates and JWT exp, checked before lanes start
     report.ts       the gap ledger + report generation
     check.ts        the check's rules, gate, report and SARIF
+    baseline.ts     visual baselines: targets.json, where each picture is kept, when one is met
     ci.ts           a CI run's options, provider choice, caps, key redaction, tools and files
     provider.ts     the Anthropic and OpenAI message shapes, and retries
     replay.ts       the run as one page: steps, tasks, frames under each finding
