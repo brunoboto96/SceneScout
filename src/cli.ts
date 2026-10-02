@@ -46,11 +46,11 @@ import {
   spawnRunner,
 } from "./installer.js";
 import { defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
-import { httpClient, runCi } from "./ci-run.js";
+import { httpClient, httpJudgeAsk, runCi } from "./ci-run.js";
 import { runLogin, runScriptedLogin, savedLine } from "./login-run.js";
 import { credentialRedactor, LOGIN_ENV, readScriptedLogin } from "./engine/scripted-login.js";
 import { parseLoginArgs } from "./engine/profiles.js";
-import { detectProvider, EXIT_CI, KEY_ENV, parseCiArgs, redactKeys, secretValues } from "./engine/ci.js";
+import { detectProvider, EXIT_CI, judgeEffort, KEY_ENV, parseCiArgs, redactKeys, secretValues } from "./engine/ci.js";
 import {
   EXIT,
   exitCodeOf,
@@ -173,7 +173,11 @@ Usage:
                                      --project dir (default: here); --out dir (default: .scenescout/ci);
                                      --show "the Save button": instead of exploring, capture that element as a PNG
                                       under shots/; --compare-url https://…: with --show, capture it there too and
-                                      write a diff picture)
+                                      write a diff picture;
+                                     --dedup judge|rule: judge (default) also asks the run's model, at its lowest
+                                      effort, whether a filed finding the rule keeps apart is one already on its
+                                      page (titles, categories, evidence and the page's path are sent);
+                                      rule asks nothing)
                                     Exit code: 0 the run ran (findings never change it), 2 could not run.
   scenescout login <url> --role <name>
                                     Open a visible browser at the URL, sign in there (SSO, MFA, anything), then
@@ -736,11 +740,17 @@ async function ci(args: string[]): Promise<never> {
   if (!provider.ok) return fail(provider.error);
   const resolved = provider.resolved;
   const key = (process.env[KEY_ENV[resolved.provider]] ?? "").trim();
-  say(`Exploring ${options.url} with ${resolved.provider} ${resolved.model} (effort ${resolved.effort}), ${options.mode} mode, level ${options.level} …`);
+  // The dedup judge asks the run's model at the lowest effort its API takes; --dedup rule asks nothing.
+  const judge = options.dedup === "judge" && !options.show ? { ...resolved, effort: judgeEffort(resolved.provider) } : null;
+  say(
+    `Exploring ${options.url} with ${resolved.provider} ${resolved.model} (effort ${resolved.effort}), ${options.mode} mode, level ${options.level}` +
+      `${judge ? `, duplicates judged by the model at effort ${judge.effort}` : ""} …`,
+  );
   let run;
   try {
     run = await runCi(options, resolved, {
       makeClient: (system, tools, kickoff) => httpClient(resolved, key, system, tools, kickoff),
+      ...(judge ? { judge: httpJudgeAsk(judge, key), judgeEffort: judge.effort } : {}),
       log: say,
       secrets,
       version: packageVersion(),

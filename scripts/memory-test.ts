@@ -36,6 +36,12 @@ import {
   isEmbedKey,
   isWorthALook,
   mergeTier,
+  MAX_JUDGED_MERGES,
+  judgedMergesOf,
+  type DuplicateJudge,
+  type Finding,
+  type FindingInput,
+  type JudgeVerdict,
 } from "../src/engine/memory.ts";
 import {
   FORMS_READ_FAILED,
@@ -1731,4 +1737,251 @@ test("isSubmitLike: submit words count as whole words of the name or test id", (
     ["link", "Sign in", null, false],
   ];
   for (const [role, name, testid, want] of cases) assert.equal(isSubmitLike(role, name, testid), want, `${role} ${name} ${testid}`);
+});
+
+// ---------------------------------------------------------------------------
+// The dedup judge, as the store asks it (fileFinding)
+// ---------------------------------------------------------------------------
+
+/** Two filings the rule keeps apart on one page: no evidence, no shared literal, titles too unalike. */
+const quiet = { severity: "medium" as const, category: "ux-confusing", detail: "", url: "http://x/orders", state: "/orders#f1" };
+const SAVE = { ...quiet, title: "The save button gives no feedback" };
+const SILENT = { ...quiet, title: "Clicking save shows nothing", state: "/orders#f2" };
+
+/** A judge that answers from a script and records what it was shown. */
+function scriptedJudge(answer: (incoming: FindingInput, stored: readonly Readonly<Finding>[]) => JudgeVerdict | Promise<JudgeVerdict>) {
+  const asked: Array<{ incoming: string; stored: string[] }> = [];
+  const judge: DuplicateJudge = {
+    judge: async (incoming, stored) => {
+      asked.push({ incoming: incoming.title, stored: stored.map((f) => f.title) });
+      return answer(incoming, stored);
+    },
+    describe: () => null,
+  };
+  return { judge, asked };
+}
+
+test("dedup judge: a filing the rule keeps apart is merged when the judge says it is the same, and what was filed is kept on the finding", async () => {
+  const ruleOnly = freshStore();
+  await ruleOnly.fileFinding(SAVE);
+  const apart = await ruleOnly.fileFinding(SILENT);
+  assert.equal(apart.isNew, true, "the rule keeps the two apart: this is the case the judge is for");
+
+  const store = freshStore();
+  const first = await store.fileFinding(SAVE);
+  const { judge, asked } = scriptedJudge(() => ({ sameAs: first.finding.id, pSame: 0.93 }));
+  store.dedupJudge = judge;
+  const filed = await store.fileFinding({ ...SILENT, severity: "high", evidence: "no toast after POST /api/orders 200" });
+  assert.equal(filed.isNew, false);
+  assert.deepEqual(filed.judged, { pSame: 0.93 });
+  assert.equal(store.findings.length, 1);
+  assert.equal(filed.finding.runs, 2);
+  assert.deepEqual(asked, [{ incoming: SILENT.title, stored: [SAVE.title] }]);
+  const [merge] = filed.finding.judgedMerges ?? [];
+  assert.deepEqual(
+    { ...merge, at: undefined },
+    { title: SILENT.title, category: "ux-confusing", severity: "high", evidence: "no toast after POST /api/orders 200", pSame: 0.93, at: undefined },
+  );
+  // Kept on disk, so a later run and the report see it.
+  const reread = openStore(path.dirname(store.dir));
+  assert.equal(reread.findings[0].judgedMerges?.[0].title, SILENT.title);
+});
+
+test("dedup judge: the rule decides first, so a filing it merges never reaches the judge, and the judge's 'none' keeps a filing apart", async () => {
+  const store = freshStore();
+  const { judge, asked } = scriptedJudge(() => null);
+  store.dedupJudge = judge;
+  await store.fileFinding({ ...base, title: "Reports load fails", detail: "x", evidence: "GET /api/reports 500" });
+  const byRule = await store.fileFinding({ ...base, title: "The reports page errors", detail: "y", evidence: "GET /api/reports 500" });
+  assert.equal(byRule.isNew, false);
+  assert.equal(byRule.judged, undefined);
+  assert.equal(byRule.finding.judgedMerges, undefined, "a merge the rule makes records nothing, as before");
+  assert.deepEqual(asked, [{ incoming: "Reports load fails", stored: [] }], "the second filing, which the rule merged, was never put to the judge");
+  await store.fileFinding(SAVE);
+  const kept = await store.fileFinding(SILENT);
+  assert.equal(kept.isNew, true);
+  assert.equal(asked.length, 3, "the judge was asked about each filing the rule kept apart");
+  assert.equal(store.findings.length, 3);
+});
+
+test("dedup judge: a filing that lands while the judge is asked is compared by the rule, and a finding resolved meanwhile is never merged into", async () => {
+  const store = freshStore();
+  const first = await store.fileFinding(SAVE);
+  // While the judge is out, another session files the same text: the rule merges the two, as it would have with no judge.
+  store.dedupJudge = scriptedJudge(() => {
+    store.addFinding({ ...SILENT, state: "/orders#f3" });
+    return null;
+  }).judge;
+  const raced = await store.fileFinding(SILENT);
+  assert.equal(raced.isNew, false);
+  assert.equal(raced.finding.title, SILENT.title);
+  assert.equal(store.findings.length, 2);
+
+  // The judge chose a finding someone resolved before its answer came back: the filing stays apart.
+  store.dedupJudge = scriptedJudge(() => {
+    first.finding.status = "resolved";
+    return { sameAs: first.finding.id, pSame: 0.9 };
+  }).judge;
+  const late = await store.fileFinding({ ...quiet, title: "Pressing save does nothing visible", state: "/orders#f4" });
+  assert.equal(late.isNew, true);
+  assert.equal(first.finding.runs, 1);
+});
+
+test("dedup judge: a judge that throws leaves the rule's decision and says why; with no judge fileFinding files as addFinding does", async () => {
+  const store = freshStore();
+  await store.fileFinding(SAVE);
+  store.dedupJudge = {
+    judge: async () => {
+      throw new Error("judge fault");
+    },
+    describe: () => null,
+  };
+  const filed = await store.fileFinding(SILENT);
+  assert.equal(filed.isNew, true);
+  assert.equal(filed.judgeError, "judge fault");
+
+  // The contrast: no judge, the same two filings as addFinding sees them.
+  const a = freshStore();
+  const b = freshStore();
+  const viaFile = [await a.fileFinding(SAVE), await a.fileFinding(SILENT)].map((f) => f.isNew);
+  const viaAdd = [b.addFinding(SAVE), b.addFinding(SILENT)].map(([, isNew]) => isNew);
+  assert.deepEqual(viaFile, viaAdd);
+  // The run's end turns the judge off: the next run asks for it again or goes without.
+  store.dedupJudge = scriptedJudge(() => null).judge;
+  store.dedupChoice = "judge";
+  store.endRun();
+  assert.equal(store.dedupJudge, null);
+  assert.equal(store.dedupChoice, undefined);
+});
+
+test("dedup judge: two stores writing one memory keep every judged merge, once, at most the cap", () => {
+  const finding = (judgedMerges: Finding["judgedMerges"], foundAt: string): Finding => ({
+    id: "x",
+    severity: "low",
+    category: "c",
+    title: "t",
+    detail: "d",
+    url: "u",
+    state: "/a#1",
+    repro: [],
+    foundAt,
+    runs: 2,
+    ...(judgedMerges ? { judgedMerges } : {}),
+  });
+  const m = (title: string, at: string) => ({ title, category: "c", severity: "low" as const, pSame: 0.9, at });
+  const mine = { version: 1 as const, states: {}, findings: [finding([m("one", "2026-01-01"), m("two", "2026-01-02")], "2026-01-03")] };
+  const theirs = { version: 1 as const, states: {}, findings: [finding([m("one", "2026-01-01"), m("three", "2026-01-04")], "2026-01-01")] };
+  const once = mergeMemory(mine, theirs);
+  assert.deepEqual(
+    once.findings[0].judgedMerges?.map((x) => x.title),
+    ["one", "two", "three"],
+  );
+  assert.deepEqual(mergeMemory(once, theirs).findings[0].judgedMerges, once.findings[0].judgedMerges, "merging the same document again changes nothing");
+  const many = Array.from({ length: MAX_JUDGED_MERGES + 3 }, (_, i) => m(`m${i}`, `2026-02-${String(i + 1).padStart(2, "0")}`));
+  const capped = mergeMemory({ ...mine, findings: [finding(many, "2026-03-01")] }, theirs).findings[0].judgedMerges!;
+  assert.equal(capped.length, MAX_JUDGED_MERGES);
+  assert.equal(capped.at(-1)!.title, `m${MAX_JUDGED_MERGES + 2}`, "the newest are kept");
+  assert.equal(
+    mergeMemory({ ...mine, findings: [finding(undefined, "2026-01-03")] }, { ...theirs, findings: [finding(undefined, "2026-01-01")] }).findings[0]
+      .judgedMerges,
+    undefined,
+  );
+});
+
+test("dedup judge: only what a judge may answer is merged: an open finding on the filing's page, called the same at better than even", async () => {
+  const store = freshStore();
+  const elsewhere = await store.fileFinding({ ...SAVE, state: "/settings#f1" });
+  const here = await store.fileFinding(SAVE);
+  const verdicts = [
+    { sameAs: elsewhere.finding.id, pSame: 0.95 }, // another page
+    { sameAs: here.finding.id, pSame: 0.3 }, // below even: a contradiction, not a merge
+    { sameAs: "no-such-id", pSame: 0.95 },
+  ];
+  for (const [i, verdict] of verdicts.entries()) {
+    store.dedupJudge = scriptedJudge(() => verdict).judge;
+    // Each has its own title and names its own request, so the rule keeps them apart from each other too.
+    const filed = await store.fileFinding({ ...SILENT, title: `${SILENT.title} (case ${i})`, evidence: `no toast after POST /api/orders/${i} 200` });
+    assert.equal(filed.isNew, true, JSON.stringify(verdict));
+  }
+  // The contrast: the same answer naming the finding on this page, at 0.95, merges.
+  store.dedupJudge = scriptedJudge(() => ({ sameAs: here.finding.id, pSame: 0.95 })).judge;
+  assert.equal((await store.fileFinding({ ...SILENT, title: `${SILENT.title} (case 9)`, evidence: "no toast after POST /api/orders/9 200" })).isNew, false);
+});
+
+test("dedup judge: a merge made after another process rewrote memory.json lands on the finding as it now is, and stays on disk", async () => {
+  const store = freshStore();
+  const first = await store.fileFinding(SAVE);
+  store.dedupJudge = scriptedJudge(() => {
+    // Another process writes the file while the judge is out, and this store folds it in (as any save would), replacing its objects.
+    const other = openStore(path.dirname(store.dir));
+    other.addFinding({ ...quiet, title: "Another process's finding on the settings page", state: "/settings#f9" });
+    store.flush();
+    return { sameAs: first.finding.id, pSame: 0.9 };
+  }).judge;
+  const filed = await store.fileFinding(SILENT);
+  assert.equal(filed.isNew, false);
+  const kept = store.findings.find((f) => f.id === first.finding.id)!;
+  assert.equal(kept.runs, 2);
+  assert.deepEqual(
+    judgedMergesOf(kept).map((m) => m.title),
+    [SILENT.title],
+  );
+  assert.ok(
+    store.findings.some((f) => f.title === "Another process's finding on the settings page"),
+    "and the other process's finding is kept",
+  );
+  const reread = openStore(path.dirname(store.dir));
+  const onDisk = reread.findings.find((f) => f.id === first.finding.id)!;
+  assert.equal(onDisk.runs, 2);
+  assert.deepEqual(
+    judgedMergesOf(onDisk).map((m) => m.title),
+    [SILENT.title],
+  );
+});
+
+test("dedup judge: when a load folds two copies of one finding together, both copies' judged merges are kept", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
+  dirs.push(dir);
+  fs.mkdirSync(path.join(dir, MEMORY_DIRNAME), { recursive: true });
+  const copy = (id: string, title: string, merged: string, at: string): Finding => ({
+    id,
+    severity: "medium",
+    category: "http-error",
+    title,
+    detail: "",
+    url: "http://x/a",
+    state: "/a#f1",
+    repro: [],
+    foundAt: at,
+    runs: 1,
+    evidence: "POST /api/things 500",
+    judgedMerges: [{ title: merged, category: "http-error", severity: "medium", pSame: 0.9, at }],
+  });
+  // One defect filed twice under different titles: the same failing request, so the load's rule folds them into one.
+  const memory = {
+    version: 1,
+    states: {},
+    findings: [
+      copy("one", "Saving a thing fails", "Save errors out", "2026-01-01T00:00:00.000Z"),
+      copy("two", "The thing will not save", "Save is broken", "2026-01-02T00:00:00.000Z"),
+    ],
+  };
+  fs.writeFileSync(path.join(dir, MEMORY_DIRNAME, "memory.json"), JSON.stringify(memory));
+  const store = openStore(dir);
+  assert.equal(store.findings.length, 1);
+  assert.deepEqual(
+    judgedMergesOf(store.findings[0]).map((m) => m.title),
+    ["Save errors out", "Save is broken"],
+  );
+});
+
+test("dedup judge: a judged merge read back malformed is dropped, not printed or trusted", () => {
+  const good = { title: "Save is broken", category: "http-error", severity: "medium" as const, pSame: 0.9, at: "2026-01-01" };
+  const f = { judgedMerges: [good, { ...good, pSame: "0.9" }, { ...good, severity: "urgent" }, { title: "no rest" }, null, "text"] } as unknown as Pick<
+    Finding,
+    "judgedMerges"
+  >;
+  assert.deepEqual(judgedMergesOf(f), [good]);
+  assert.deepEqual(judgedMergesOf({ judgedMerges: "not a list" } as unknown as Pick<Finding, "judgedMerges">), []);
+  assert.deepEqual(judgedMergesOf({}), []);
 });

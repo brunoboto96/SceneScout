@@ -211,7 +211,11 @@ at medium with a note rather than high: some client-side routers can only stop
 a route change by throwing.
 
 Dedup is on machine signatures rather than prose, because titles get rephrased
-between runs ([ADR 4](adr/0004-dedup-on-machine-signals-not-prose.md)).
+between runs ([ADR 4](adr/0004-dedup-on-machine-signals-not-prose.md)). Where
+a model is asked for (by default in `scenescout ci`), a filing the rule keeps
+apart is then put to it against the open findings on the same page, and a
+"same" merges it, kept on the finding it joined
+([ADR 17](adr/0017-a-model-judges-only-the-merges-the-rule-misses.md)).
 
 ---
 
