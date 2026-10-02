@@ -2,6 +2,7 @@
 /**
  * SceneScout CLI.
  *
+ *   scenescout <url>                A first look with no setup: observe mode, capped, never a gate
  *   scenescout scan <projectPath>   Print project discovery results
  *   scenescout serve                Run the MCP server on stdio
  *   scenescout install              Install the skill, download the browser, register the MCP server
@@ -50,7 +51,32 @@ import { runLogin, runScriptedLogin, savedLine } from "./login-run.js";
 import { credentialRedactor, LOGIN_ENV, readScriptedLogin } from "./engine/scripted-login.js";
 import { parseLoginArgs } from "./engine/profiles.js";
 import { detectProvider, EXIT_CI, KEY_ENV, parseCiArgs, redactKeys, secretValues } from "./engine/ci.js";
-import { EXIT, exitCodeOf, formatCheck, parseCheckArgs, refusedFlowReason, toSarif, toSummaryJson, unmeasuredReason } from "./engine/check.js";
+import {
+  EXIT,
+  exitCodeOf,
+  formatCheck,
+  parseCheckArgs,
+  refusedFlowReason,
+  toSarif,
+  toSummaryJson,
+  unmeasuredReason,
+  type CheckResult,
+} from "./engine/check.js";
+import {
+  downloadLine,
+  EXIT_FIRST_RUN,
+  FIRST_RUN_DIRNAME,
+  firstRunCheckOptions,
+  firstRunDownloads,
+  firstRunSummary,
+  formatFirstRun,
+  modeSentence,
+  parseFirstRunArgs,
+  reportFolderProblem,
+  unreachableReason,
+  writeFirstRunReport,
+  type FirstRunFacts,
+} from "./first-run.js";
 import { LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME, writeSelfIgnore } from "./engine/memory.js";
 import {
   formatStatus,
@@ -80,6 +106,18 @@ function usage(exitCode = 1): never {
   console.log(`SceneScout ${packageVersion()} — AI exploratory UI testing engine (MCP)
 
 Usage:
+  scenescout <url> [options]        A first look, with no setup: visits the app's pages and measures them (no
+                                    model, no API key), writes ${FIRST_RUN_DIRNAME}/ in this folder and prints
+                                    the three issues to look at first. Downloads Chromium if it is missing and
+                                    changes nothing else: no skill, no MCP registration, nothing on PATH.
+                                    The address comes first, its options after it.
+                                    (--max-routes N (default 20), --max-minutes N (default 3): no page is started
+                                     past either; --mode observe|read-only (default observe: nothing but reads
+                                     leaves the page, sign-in and token refresh apart; read-only lets a plain POST
+                                     through); --out dir: where the report goes. ${FIRST_RUN_DIRNAME}/ is written
+                                     only when it is new, empty or an earlier first look's)
+                                    Exit code: 0 it looked, whatever it found; 2 could not run (the URL could
+                                    not be reached, a bad argument, no browser) or could not write the report.
   scenescout scan <projectPath>     Discover framework, routes, auth states
   scenescout serve                  Run the MCP server (stdio)
   scenescout install                One-step setup: skill + Chromium + MCP registration
@@ -604,6 +642,85 @@ async function check(args: string[]): Promise<never> {
   process.exit(exitCodeOf(result));
 }
 
+/** `scenescout <url>`: a first look. Exit 0 once it has looked, whatever it found; 2 when it could not look or could not write its report. */
+async function firstRun(args: string[]): Promise<never> {
+  const fail = (message: string): never => {
+    console.error(`scenescout: ${message}`);
+    process.exit(EXIT_FIRST_RUN.couldNotRun);
+  };
+  const parsed = parseFirstRunArgs(args, process.cwd());
+  if (!parsed.ok) return fail(parsed.error);
+  const options = parsed.options;
+  // Found out now, not after the look; and nothing is created until the look has something to write.
+  const folderProblem = reportFolderProblem(options.outDir ?? path.join(process.cwd(), FIRST_RUN_DIRNAME), options.outDir !== undefined);
+  if (folderProblem) return fail(folderProblem);
+  console.log(`SceneScout ${packageVersion()} — a first look at ${options.url}`);
+  console.log(
+    `It opens pages and measures them and submits no form: up to ${options.maxRoutes} pages, starting none after ${options.maxMinutes} minute(s). No model, no API key.`,
+  );
+  console.log(modeSentence(options.mode));
+  // Only the build a headless Chromium launch needs. Nothing else install does happens here: no skill, no registration, nothing on PATH.
+  const downloads = firstRunDownloads(await presentBrowsers());
+  if (downloads.length > 0) {
+    console.log(downloadLine(downloads));
+    const began = Date.now();
+    if (!downloadBrowsers(downloads)) {
+      return fail(
+        `Chromium could not be downloaded. Check the network or proxy and run this again, or download it by hand: npx playwright install ${downloads.join(" ")}`,
+      );
+    }
+    // The installer's exit code is not the build: look again before saying it is there.
+    const still = firstRunDownloads(await presentBrowsers());
+    if (still.length > 0)
+      return fail(`the download finished, but ${still.join(", ")} is still not where Playwright looks for it. Run: npx playwright install ${still.join(" ")}`);
+    console.log(`✓ Chromium downloaded in ${Math.round((Date.now() - began) / 1000)} s.`);
+  }
+  // An empty project of its own: nothing is read from, or written to, the folder this runs in except the report.
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-first-run-"));
+  // Also on an exit the finally below never reaches, such as Ctrl+C, which the browser's driver answers with process.exit.
+  const removeProject = (): void => fs.rmSync(projectDir, { recursive: true, force: true });
+  process.once("exit", removeProject);
+  const began = Date.now();
+  let result: CheckResult | undefined;
+  let error = "";
+  try {
+    console.log(`\nLooking at ${options.url} …`);
+    result = await runCheck(firstRunCheckOptions(options, projectDir), (line) => console.log(line));
+  } catch (err) {
+    error = err instanceof Error ? err.message : String(err);
+  } finally {
+    process.off("exit", removeProject);
+    removeProject();
+  }
+  if (!result) return fail(`could not run: ${error}`);
+  const unreachable = unreachableReason(result.routes);
+  if (unreachable) return fail(`could not reach ${options.url}: ${unreachable}`);
+  const facts: FirstRunFacts = { result, options, elapsedMs: Date.now() - began };
+  const files = {
+    "report.md": formatFirstRun(facts),
+    "check.json": JSON.stringify(toSummaryJson(result, packageVersion()), null, 2) + "\n",
+  };
+  // The look is done whatever happens to the files: its summary is printed either way.
+  let written: { dir: string; note?: string } | undefined;
+  let notWritten = "";
+  try {
+    written = writeFirstRunReport(files, { cwd: process.cwd(), tmpdir: os.tmpdir(), outDir: options.outDir });
+  } catch (err) {
+    notWritten = err instanceof Error ? err.message : String(err);
+  }
+  if (written?.note) console.log(written.note);
+  let where = `not written: ${notWritten}`;
+  if (written) {
+    const report = path.join(written.dir, "report.md");
+    const relative = path.relative(process.cwd(), report);
+    where = relative.startsWith("..") || path.isAbsolute(relative) ? report : relative;
+  }
+  console.log("");
+  for (const line of firstRunSummary(facts, where)) console.log(line);
+  if (!written) return fail(`could not write the report: ${notWritten}`);
+  process.exit(EXIT_FIRST_RUN.ran);
+}
+
 /** `scenescout ci`: exit 0 when the run ran, 2 when it could not. Findings never change the exit code. */
 async function ci(args: string[]): Promise<never> {
   const secrets = secretValues(process.env);
@@ -714,6 +831,12 @@ try {
         watch(path.resolve(positional[0] ?? process.cwd()), !a.includes("--no-open"));
       },
     },
+    // Anything unforeseen is still "could not run" (2), not the exit 1 the other commands share below.
+    firstRun: (a) =>
+      firstRun(a).catch((err: unknown) => {
+        console.error(`scenescout: could not run: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(EXIT_FIRST_RUN.couldNotRun);
+      }),
   });
 } catch (err) {
   console.error(`scenescout ${command ?? ""}: ${err instanceof Error ? err.message : String(err)}`);
