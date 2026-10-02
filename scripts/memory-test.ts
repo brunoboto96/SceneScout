@@ -40,6 +40,7 @@ import {
   describeMerge,
   MAX_JUDGED_MERGES,
   judgedMergesOf,
+  MAX_SEEN_ON,
   type DuplicateJudge,
   type Finding,
   type FindingInput,
@@ -66,7 +67,7 @@ import {
   type FieldFacts,
   type FormProbe,
 } from "../src/engine/forms.ts";
-import { coverageView } from "../src/engine/report.ts";
+import { coverageView, generateReport } from "../src/engine/report.ts";
 
 /** One styled element for a design audit; override only what a case is about. */
 function designRecord(over: Partial<StyleRecord>): StyleRecord {
@@ -266,6 +267,70 @@ test("dedup: the same endpoint failure found from TWO DIFFERENT pages is one bug
   assert.equal(new2, false, "same METHOD+path+status is the same bug, whichever page it was filed from");
 });
 
+test("a finding merged from another route records that route; a re-filing on a known route adds nothing", () => {
+  // One root cause in a shared component, filed from each page that shows it:
+  // the merge kept the first page only, so the report understated where the
+  // defect happens.
+  const store = freshStore();
+  const first = {
+    ...base,
+    state: "/things/:id#f1",
+    url: "http://x/things/7",
+    title: "Things page shows a 403 for the user list",
+    detail: "x",
+    evidence: "GET /api/users 403",
+  };
+  const [finding] = store.addFinding(first);
+  assert.equal(finding.seenOn, undefined, "one route: no field");
+  const [, , , onOthers] = store.addFinding({
+    ...first,
+    state: "/others/:id#f2",
+    url: "http://x/others/3",
+    title: "Others page cannot list users",
+    evidence: "GET /api/users 403 on load",
+  });
+  assert.deepEqual(finding.seenOn, ["/others/:id"]);
+  assert.equal(onOthers.seenOn, "/others/:id", "the merge note names the newly recorded route");
+  assert.match(describeMerge(onOthers, undefined), /\/others\/:id, is recorded as another route/);
+  for (const state of ["/others/:id#f9", "/things/:id#f3"]) {
+    const [, , , again] = store.addFinding({ ...first, state, title: "Users list refused again", evidence: "GET /api/users 403" });
+    assert.equal(again.seenOn, undefined, `${state}: a route already recorded says nothing`);
+  }
+  assert.deepEqual(finding.seenOn, ["/others/:id"], "neither the known route nor the finding's own is added");
+  assert.equal(store.findings.length, 1);
+
+  // At most MAX_SEEN_ON, the oldest dropped.
+  for (let i = 0; i < MAX_SEEN_ON + 3; i++) store.addFinding({ ...first, state: `/page-${i}#f`, title: `Page ${i} refused`, evidence: "GET /api/users 403" });
+  assert.equal(finding.seenOn?.length, MAX_SEEN_ON);
+  assert.equal(finding.seenOn?.at(-1), `/page-${MAX_SEEN_ON + 2}`);
+
+  // The report names every route.
+  const report = generateReport(store, [], undefined, { write: false }).markdown;
+  assert.match(report, /- \*\*Where:\*\* `\/things\/:id#f1` \(http:\/\/x\/things\/7\); also seen on `\/page-3`, /);
+});
+
+test("merging two processes' copies of a finding keeps the routes either saw it on, and is idempotent", () => {
+  const finding = {
+    id: "x",
+    severity: "low" as const,
+    category: "c",
+    title: "t",
+    detail: "d",
+    url: "u",
+    state: "/a#1",
+    repro: [],
+    foundAt: "2026-01-02",
+    runs: 1,
+  };
+  const a: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [{ ...finding, seenOn: ["/b"] }] };
+  const b: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [{ ...finding, foundAt: "2026-01-01", seenOn: ["/c", "/b"] }] };
+  const once = mergeMemory(a, b);
+  assert.deepEqual(once.findings[0].seenOn?.slice().sort(), ["/b", "/c"]);
+  assert.deepEqual(mergeMemory(once, b).findings[0].seenOn?.slice().sort(), ["/b", "/c"]);
+  const neither = mergeMemory({ ...a, findings: [finding] }, { ...b, findings: [{ ...finding }] });
+  assert.equal("seenOn" in neither.findings[0], false, "no routes on either side: no field");
+});
+
 test("dedup: two bugs on one endpoint that answered 2xx stay two findings", () => {
   // Seen in two real runs, in both directions: a double submit and an
   // accepted negative quantity both had evidence naming `POST /api/orders`
@@ -386,17 +451,58 @@ test("dedup: a finding with no METHOD+path evidence is untouched by the endpoint
   assert.ok(new1 && new2, "non-endpoint evidence must not collide");
 });
 
-test("dedup tier 2: a literal quoted in a TITLE bridges differing evidence", () => {
-  const store = freshStore();
-  const [, new1] = store.addFinding({ ...base, title: 'Save shows "Document not found anymore"', detail: "x", evidence: "PUT /api/docs/1 404" });
-  const [, new2] = store.addFinding({
+test("dedup tier 2: a literal quoted in a TITLE bridges to the other finding's detail only when one side has no evidence", () => {
+  const first = { ...base, title: 'Save shows "Document not found anymore"', detail: "x", evidence: "PUT /api/docs/1 404" };
+  const second = { ...base, title: "Editing fails with an error toast", detail: 'Toast says "Document not found anymore" after save.' };
+  for (const [evidence, merges, why] of [
+    [undefined, true, "one states the string in its title, the other in its detail and has no evidence: same bug"],
+    ['toast "Document not found anymore"', true, "the literal is in the other finding's evidence: same bug"],
+    ["toast document-not-found", false, "both carry differing evidence and the literal is only in the detail: kept apart"],
+  ] as const) {
+    const store = freshStore();
+    const [, new1] = store.addFinding(first);
+    const [, new2] = store.addFinding({ ...second, evidence });
+    assert.equal(new1, true);
+    assert.equal(new2, !merges, why);
+  }
+});
+
+test("dedup: a control label quoted in one title and the other's detail does not merge two evidenced defects", () => {
+  // A filter option's label names the control two defects were found
+  // through. One finding quotes it in its title, the other mentions it in its
+  // detail; their evidence shares nothing. Merged, the second was lost from
+  // the report. The pair differs in one fact: where the second quotes it.
+  const widgets = {
     ...base,
-    title: "Editing fails with an error toast",
-    detail: 'Toast says "Document not found anymore" after save.',
-    evidence: "toast document-not-found",
+    category: "data-inconsistency",
+    title: "Four summary widgets ignore the selected time window",
+    detail: 'With "Last 7 days" selected, the open, overdue, closed and pending counts stay at their all-time values.',
+    evidence: "widget-open=42 widget-overdue=9 widget-closed=118 widget-pending=7 unchanged by window=7d",
+  };
+  const undated = {
+    ...base,
+    category: "data-inconsistency",
+    title: '"Last 7 days" window lists undated rows under the later group',
+    detail: "Rows with no due date are counted as later than the window.",
+    evidence: "window=7d group-later count=8 rows without due date",
+  };
+  const store = freshStore();
+  store.addFinding(widgets);
+  const [kept, isNew] = store.addFinding(undated);
+  assert.equal(isNew, true, "the label is in one title and the other's detail only: two defects");
+  assert.equal(kept.title, undated.title);
+  assert.equal(store.findings.length, 2);
+
+  // The contrast: the same bug filed twice, with the literal in both titles.
+  const again = freshStore();
+  again.addFinding(undated);
+  const [, twice] = again.addFinding({
+    ...undated,
+    title: 'Undated rows counted as later in the "Last 7 days" window',
+    evidence: "group-later shows 8 undated rows for window=7d",
   });
-  assert.equal(new1, true);
-  assert.equal(new2, false, "one states the string in its title, the other in its detail — same bug");
+  assert.equal(twice, false, "the literal in both titles: one defect filed twice");
+  assert.equal(again.findings.length, 1);
 });
 
 test("dedup: a quoted control name shared by two findings of different kinds does not merge them", () => {
@@ -434,20 +540,20 @@ test("dedup: a quoted control name shared by two findings of different kinds doe
     category: "visual",
     title: "The fixed footer hides a form control",
     detail: 'At load the footer sits over "Save notes" until the page is scrolled.',
-    evidence: "footer overlaps order-save at scrollY=0",
+    evidence: 'footer overlaps "Save notes" at scrollY=0',
   });
   assert.equal(again, false, "same kind, same quoted literal, same route: merged as before");
   assert.equal(store.findings.length, 2);
 
   // A label quoted in BOTH titles is still a place on the page, not a bug: a
-  // data finding titled with the same control joins the data finding about
-  // it, and never the layout one.
+  // data finding titled with the same control as the layout one, naming the
+  // refused request, joins the data finding about it and never the layout one.
   const [into, bothTitles] = store.addFinding({
     ...base,
     category: "data-inconsistency",
     title: 'Clicking "Save notes" shows Saved. on a 403',
     detail: "No status check.",
-    evidence: "save notes 403 claimed saved",
+    evidence: "PUT /api/orders/1042 403 claimed saved",
   });
   assert.equal(bothTitles, false);
   assert.equal(into.category, "data-inconsistency", "merged into the data finding about the same button");
@@ -545,13 +651,14 @@ test("retroMerge: duplicates stored by an older build collapse on load", () => {
     JSON.stringify({
       version: 1,
       states: {},
-      findings: [dup("aaa", "Reports endpoint 403 for User", 2), dup("bbb", "User role denied by reports endpoint", 3, "resolved")],
+      findings: [dup("aaa", "Reports endpoint 403 for User", 2), { ...dup("bbb", "User role denied by reports endpoint", 3, "resolved"), state: "/b#f2" }],
     }),
   );
   const store = openStore(dir);
   assert.equal(store.findings.length, 1, "duplicates should merge to one entry");
   assert.equal(store.findings[0]?.runs, 5, "run counts should sum");
   assert.equal(store.findings[0]?.status, "resolved", "resolved status should survive the merge");
+  assert.deepEqual(store.findings[0]?.seenOn, ["/b"], "the folded copy's route is kept");
 });
 
 test("regression reopen: re-finding a resolved bug by evidence reopens it flagged", () => {
@@ -1472,7 +1579,7 @@ test("dedup: two different defects on one element stay two, and a rewording of o
         category: "visual",
         title: "The export link is cut off by the report panel",
         detail: 'The "Export as CSV" link sits below the panel\'s fixed height.',
-        evidence: "testid=report-export unreachable: clipped by overflow-hidden ancestor of testid=report-panel",
+        evidence: '"Export as CSV" unreachable: clipped by overflow-hidden ancestor of testid=report-panel',
       },
       true,
       "the same claim reworded, same kind: one finding",
@@ -1634,7 +1741,7 @@ test("dedup: one fact flips the literal merge within a family — whether the tw
   for (const [evidence, merges, why] of [
     [unknownId.evidence, false, "a different request: a different bug"],
     ["POST /api/orders/1037/request-approval 409 after a reload", true, "the same request on another order: the same bug"],
-    ["order-request-approval enabled after reload", true, "evidence naming no request still merges on the quoted literal"],
+    ['"Request manager approval" enabled after reload', true, "evidence naming no request still merges on the quoted literal"],
   ] as const) {
     const store = freshStore();
     store.addFinding(pending);

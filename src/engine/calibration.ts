@@ -34,6 +34,8 @@ export interface RecordedDecision {
   evidence: string | null;
   /** The convention that would decide a "worth_a_look"; absent on other verdicts and on decisions recorded before the tier existed. */
   convention?: string | null;
+  /** The finding id the lane said it filed this as; absent on decisions recorded before the field existed. */
+  finding?: string | null;
   at: string;
 }
 
@@ -314,8 +316,12 @@ export const MAX_UNFILED_NAMED = 10;
  * report, while the lane's session is still open.
  *
  * The check exists to catch unfiled defects, so a false "filed" costs more
- * than a false alarm, which only asks someone to look. A decision counts as
- * filed by one of three rules, tried in order:
+ * than a false alarm, which only asks someone to look. A decision that names
+ * the finding it was filed as (`finding`, the id scout_finding returned) is
+ * filed when the project holds a defect with that id: the lane's own link,
+ * exact, where matching evidence the lane may have reworded is not. An id the
+ * project does not hold is named in the line and the evidence is tried.
+ * Otherwise a decision counts as filed by one of three rules, tried in order:
  *
  * 1. Failing signatures. When the decision's evidence names one or more
  *    failing requests (the store's `failingSignatures`), it is filed only when
@@ -339,14 +345,20 @@ export const MAX_UNFILED_NAMED = 10;
  *    request does, and sends the decision to rule 1's verdict.
  * 3. Text. Evidence naming no failing request is matched on its text: the
  *    same evidence, a restatement of part of it, or shared identifiers and
- *    near-identical wording. The calibration join refuses a text match,
- *    because there a miss is scored against the lane.
+ *    near-identical wording, with the ids in paths templated on both sides.
+ *    The calibration join refuses a text match, because there a miss is
+ *    scored against the lane.
  */
-export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdict" | "observation" | "evidence">[], findings: readonly Finding[]): string[] {
+export function unfiledDefects(
+  decisions: readonly (Pick<RecordedDecision, "verdict" | "observation" | "evidence"> & { finding?: string | null })[],
+  findings: readonly Finding[],
+): string[] {
   const keys: StatedRequest[] = [];
   const filed: Filed[] = [];
   // A defect filed only as worth a look is not in the report's findings, so it is still unfiled.
-  for (const f of findings.filter((x) => !isWorthALook(x))) {
+  const defects = findings.filter((x) => !isWorthALook(x));
+  const ids = new Set(defects.map((f) => f.id));
+  for (const f of defects) {
     const text = `${f.evidence ?? ""} ${f.title}`;
     const requests = statedRequests(f.evidence ?? "");
     // The store's signatures, and the finding's own failing requests as
@@ -359,6 +371,7 @@ export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdi
       words: words(text),
       evidenceWords: words(f.evidence ?? ""),
       evidence: squash(f.evidence ?? ""),
+      templated: squash(templateIds(f.evidence ?? "")),
       raw: f.evidence ?? "",
       requests,
     });
@@ -366,23 +379,27 @@ export function unfiledDefects(decisions: readonly Pick<RecordedDecision, "verdi
   const out: string[] = [];
   for (const d of decisions) {
     if (d.verdict !== "defect") continue;
-    if (d.evidence) {
-      const evidence = d.evidence;
-      const joined = [...joinKeys(evidence)];
-      const failing = joined.flatMap((sig) => statedRequests(sig));
-      if (failing.length > 0 && failing.every((sig) => keys.some((k) => requestsPair(sig, k)))) continue;
-      if (filed.some((f) => restatesRequest(evidence, failing, f))) continue;
-      // A failing-endpoint signature is the store's own identity for a bug. When
-      // the decision has one and no finding covers it, nothing else is a match.
-      if (joined.length > 0) {
-        out.push(`${d.observation} — ${d.evidence}`);
-        continue;
-      }
-      if (filed.some((f) => matchesText(evidence, f))) continue;
-    }
-    out.push(d.evidence ? `${d.observation} — ${d.evidence}` : d.observation);
+    // The lane's own link to its filing: exact, so tried first. An id the
+    // project does not hold falls through to the evidence, and is named.
+    if (d.finding && ids.has(d.finding)) continue;
+    if (d.evidence && coveredByEvidence(d.evidence, keys, filed)) continue;
+    const look = d.finding ? findings.some((f) => f.id === d.finding) : false;
+    const unknown = !d.finding ? "" : look ? ` (finding ${d.finding} is filed only as worth a look)` : ` (finding ${d.finding} is not in this project)`;
+    out.push(`${d.evidence ? `${d.observation} — ${d.evidence}` : d.observation}${unknown}`);
   }
   return out;
+}
+
+/** Rules 1 to 3: whether a finding's evidence covers the decision's. */
+function coveredByEvidence(evidence: string, keys: readonly StatedRequest[], filed: readonly Filed[]): boolean {
+  const joined = [...joinKeys(evidence)];
+  const failing = joined.flatMap((sig) => statedRequests(sig));
+  if (failing.length > 0 && failing.every((sig) => keys.some((k) => requestsPair(sig, k)))) return true;
+  if (filed.some((f) => restatesRequest(evidence, failing, f))) return true;
+  // A failing-endpoint signature is the store's own identity for a bug. When
+  // the decision has one and no finding covers it, nothing else is a match.
+  if (joined.length > 0) return false;
+  return filed.some((f) => matchesText(evidence, f));
 }
 
 interface Filed {
@@ -390,15 +407,34 @@ interface Filed {
   words: Set<string>;
   evidenceWords: Set<string>;
   evidence: string;
+  /** The evidence with its path ids templated (templateIds), for the text rule. */
+  templated: string;
   /** The evidence as written, so a path in it can be put into a decision's text. */
   raw: string;
   requests: StatedRequest[];
 }
 
-/** Rule 3: the same evidence, a restatement of part of it, or shared identifiers and wording. */
+/**
+ * Rule 3: the same evidence, a restatement of part of it, or shared
+ * identifiers and wording — each with the ids in its paths templated, so a
+ * lane that reported the pages it visited (`/things/5,/1,/2`) matches the
+ * finding it filed against the route (`/things/:id`).
+ */
 function matchesText(reported: string, f: Filed): boolean {
-  const text = squash(reported);
-  return (text !== "" && f.evidence === text) || restates(text, f) || covers(identifiers(reported), words(reported), f);
+  const text = squash(templateIds(reported));
+  return (text !== "" && f.templated === text) || restates(text, f.templated) || covers(identifiers(reported), words(reported), f);
+}
+
+/**
+ * Text with every id segment of a path written `:id`: a number, a list of
+ * numbers (`/5,/1,/2`, `/5,1`), or a template (`{thingId}`, `:id`, `*`). Only
+ * after a slash that follows a path segment holding a letter, so a ratio
+ * (`3/4`, `3.1:1`) or a count in the text is left alone.
+ */
+export function templateIds(text: string): string {
+  return text
+    .replace(/(?<=[A-Za-z_}][\w.}-]*)\/\d+(?:\s*,\s*\/?\d+)*(?=$|[/\s,;:)?#\]])/g, "/:id")
+    .replace(/(?<=[A-Za-z_}][\w.}-]*)\/(?:\{[^}/\s]+\}|:[A-Za-z_][A-Za-z0-9_]*|\*)(?=$|[/\s,;)?#\]])/g, "/:id");
 }
 
 /**
@@ -417,7 +453,7 @@ function restatesRequest(evidence: string, failing: readonly StatedRequest[], f:
     if (!paired) continue;
     if (!failing.every((sig) => sig.method === r.method && templatedPathsMatch(sig.segments, r.segments))) continue;
     const aligned = squash(evidence.slice(0, r.start) + f.raw.slice(paired.start, paired.end) + evidence.slice(r.end));
-    if (aligned !== "" && (f.evidence === aligned || restates(aligned, f) || addsOnlyExpectedStatus(aligned, f.evidence, r.status))) return true;
+    if (aligned !== "" && (f.evidence === aligned || restates(aligned, f.evidence) || addsOnlyExpectedStatus(aligned, f.evidence, r.status))) return true;
   }
   return false;
 }
@@ -448,7 +484,9 @@ const MIN_RESTATED = 24;
 
 /** A test id, captured without its attribute; and a kebab-case id of three or more parts. Lowercase text only. */
 const TESTID_RE = /testid=["']?([a-z0-9_-]+)/g;
-const KEBAB_ID_RE = /\b[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}\b/g;
+// Underscores inside a part too: `row-stage-pending_review` is one id, where
+// without them it ended mid-word and yielded none.
+const KEBAB_ID_RE = /\b[a-z][a-z0-9_]*(?:-[a-z0-9_]+){2,}\b/g;
 
 /**
  * Whether the reported evidence appears word for word inside a finding's
@@ -460,8 +498,8 @@ const KEBAB_ID_RE = /\b[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}\b/g;
  * refuses. One direction only: a short FILED evidence found inside a longer
  * report proves nothing about the rest of the report.
  */
-function restates(reported: string, f: Filed): boolean {
-  if (reported.length < MIN_RESTATED || !f.evidence.includes(reported)) return false;
+function restates(reported: string, filed: string): boolean {
+  if (reported.length < MIN_RESTATED || !filed.includes(reported)) return false;
   const rest = reported.replace(TESTID_RE, " ").replace(KEBAB_ID_RE, " ");
   return words(rest).size >= 2;
 }
