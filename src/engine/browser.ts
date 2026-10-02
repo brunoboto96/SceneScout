@@ -19,7 +19,7 @@ import {
 import fs from "node:fs";
 import path from "node:path";
 import { elementKey, fingerprintState, isNonPageRoute, normalizePath, type InteractableInfo } from "./fingerprint.js";
-import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
+import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, reachedRoutes, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
 import { normalizeTask } from "./task.js";
 import { CLAIM_SCAN_SCRIPT, findContradictions, INFRASTRUCTURE_WRITE_RE, OPEN_DIALOGS_SCRIPT, type PageState, type WatchedRequest } from "./claims.js";
@@ -466,19 +466,21 @@ function xpathLookup(xpath: string): string {
 
 /**
  * Runs in the page against one dropdown, BEFORE a choice: its options' values
- * and labels. Read first because a dropdown may reset itself (a bulk-action or
- * "jump to" menu) or remove itself on change. Skips disabled and hidden
- * options, and a placeholder or "all" option with an empty value — the state
- * the page loads in, which is not an option anyone owes a choice.
+ * and labels, and which are selected. Read first because a dropdown may reset
+ * itself (a bulk-action or "jump to" menu) or remove itself on change. Skips
+ * disabled and hidden options, and a placeholder or "all" option with an empty
+ * value — the state the page loads in, which is not an option anyone owes a
+ * choice. The option selected before the choice is the value the page already
+ * asked the server for, which is not owed one either.
  */
-function describeSelect(node: Element): Array<{ value: string; label: string }> | null {
+function describeSelect(node: Element): Array<{ value: string; label: string; selected: boolean }> | null {
   // A plan may target the dropdown by its <label>; selectOption follows a label to its control, so this does too.
   const target = node instanceof HTMLLabelElement ? (node.control ?? node.querySelector("select")) : node;
   const select = target as HTMLSelectElement | null;
   if (!select || !select.options) return null;
   return Array.from(select.options)
     .filter((o) => !o.disabled && !o.hidden && o.value !== "")
-    .map((o) => ({ value: o.value, label: (o.label || o.textContent || "").trim().slice(0, 80) }))
+    .map((o) => ({ value: o.value, label: (o.label || o.textContent || "").trim().slice(0, 80), selected: o.selected }))
     .filter((o) => o.label !== "");
 }
 
@@ -486,7 +488,7 @@ function describeSelect(node: Element): Array<{ value: string; label: string }> 
  * A dropdown's options, read without waiting: a select that is not there to
  * read is not worth stalling the action for.
  */
-async function readSelectOptions(loc: Locator): Promise<Array<{ value: string; label: string }> | null> {
+async function readSelectOptions(loc: Locator): Promise<Array<{ value: string; label: string; selected: boolean }> | null> {
   return loc.evaluate(describeSelect, undefined, { timeout: 1000 }).catch(() => null);
 }
 
@@ -3461,12 +3463,13 @@ export class BrowserEngine {
       .catch(() => null);
   }
 
-  /** Record a dropdown's options and the ones picked, by the values selectOption reported. */
-  private recordSelectChoice(fingerprint: string, key: string, options: Array<{ value: string; label: string }>, picked: string[]): void {
+  /** Record a dropdown's options, the one it held before, and the ones picked, by the values selectOption reported. */
+  private recordSelectChoice(fingerprint: string, key: string, options: Array<{ value: string; label: string; selected?: boolean }>, picked: string[]): void {
     const labels = options.map((o) => o.label);
+    const loaded = options.filter((o) => o.selected).map((o) => o.label);
     const chosen = picked.map((v) => options.find((o) => o.value === v)?.label).filter((l): l is string => !!l);
-    if (chosen.length === 0) this.memory!.recordSelectChoice(fingerprint, key, labels, "");
-    for (const label of chosen) this.memory!.recordSelectChoice(fingerprint, key, labels, label);
+    if (chosen.length === 0) this.memory!.recordSelectChoice(fingerprint, key, labels, "", loaded);
+    for (const label of chosen) this.memory!.recordSelectChoice(fingerprint, key, labels, label, loaded);
   }
 
   async select(ref: string, value: string): Promise<string> {
@@ -4271,17 +4274,20 @@ export class BrowserEngine {
    *
    * Visited/attempted keys are stored NORMALIZED, so the normalized form of
    * each known route is compared too — normalizePath is idempotent, so this
-   * only adds matches for routes that genuinely were reached.
+   * only adds matches for routes that genuinely were reached. Reached is
+   * memory's reachedRoutes, the gap ledger's own rule: stored routes are read
+   * through today's route identity, and a base path is reached by one of its
+   * tabs or sections.
    */
   unvisitedKnownRoutes(): string[] {
     if (!this.memory) return [];
     const all = this.allKnownRoutes();
     if (all.length === 0) return [];
-    const visited = new Set(Object.values(this.memory.states).map((s) => s.route));
+    const reached = reachedRoutes(Object.values(this.memory.states).map((s) => s.route));
     const attempted = this.memory.attemptedByRole(this.role);
     return all.filter((r) => {
       const n = normalizePath(r);
-      return !visited.has(r) && !(r in attempted) && !visited.has(n) && !(n in attempted);
+      return !reached(r) && !(r in attempted) && !(n in attempted);
     });
   }
 
@@ -4589,7 +4595,7 @@ export class BrowserEngine {
       // the step's own line, so it cannot read as the previous step's.
       let note = "";
       // A select step's options and choice, recorded against the dropdown the bookkeeping below finds.
-      let chose: { options: Array<{ value: string; label: string }>; picked: string[] } | null = null;
+      let chose: { options: Array<{ value: string; label: string; selected: boolean }>; picked: string[] } | null = null;
       let preState: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
       // The form this step may submit, read before it went (forms.ts).
       let form: { kind: "click" | "enter"; probe: FormProbe | null } | null = null;

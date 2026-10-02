@@ -42,6 +42,24 @@ check("uuid normalized", normalizePath("http://x/doc/6f9619ff-8b86-4d01-b42d-00c
 check("long hex normalized", normalizePath("http://x/t/deadbeefdeadbeef") === "/t/:id");
 check("plain routes untouched", normalizePath("http://x/admin/settings") === "/admin/settings");
 check("query strings ignored", normalizePath("http://x/list?page=2") === "/list");
+
+console.log("fingerprint normalization — code-shaped record ids");
+// Each record addressed by a code (WID-2025-001) used to become its own route.
+check("prefixed code id collapses", normalizePath("http://x/widgets/WID-2025-001") === "/widgets/:id");
+check(
+  "prefixed code id with a section tab collapses, tab kept",
+  normalizePath("http://x/widgets/WID-2025-004?section=history") === "/widgets/:id?section=history",
+);
+check("mixed letters and digits collapse", normalizePath("http://x/orders/A1B2C3") === "/orders/:id");
+check("prefix glued to digits collapses", normalizePath("http://x/invoices/INV2024") === "/invoices/:id");
+// The contrast: words and slugs that carry a digit or two stay what they are.
+check("a slug stays", normalizePath("http://x/blog/how-to-guide") === "/blog/how-to-guide");
+check("a slug with a year stays", normalizePath("http://x/blog/how-to-2024-guide") === "/blog/how-to-2024-guide");
+check("a word with a digit stays", normalizePath("http://x/settings/2fa") === "/settings/2fa");
+check("a version stays", normalizePath("http://x/docs/v2") === "/docs/v2");
+check("a product slug with a model number stays", normalizePath("http://x/products/phone-15-pro") === "/products/phone-15-pro");
+check("a code-shaped first segment is a page, not an id", normalizePath("http://x/WID-2025-001") === "/WID-2025-001");
+check("an already-collapsed route is unchanged", normalizePath("/widgets/:id?section=history") === "/widgets/:id?section=history");
 const fpA = fingerprintState("http://x/orders/1", [{ role: "button", name: "Save", testid: "save" }]);
 const fpB = fingerprintState("http://x/orders/2", [{ role: "button", name: "Save", testid: "save" }]);
 const fpC = fingerprintState("http://x/orders/1", [{ role: "button", name: "Delete", testid: "del" }]);
