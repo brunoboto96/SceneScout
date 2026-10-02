@@ -6,10 +6,19 @@
  * command runner) as an argument, so a test can point it at a temp dir and a
  * fake `claude` binary instead of mutating the developer's real ~/.claude.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
-import { engineOf, type InstallTarget } from "./browsers.js";
+import {
+  BROWSER_ENGINES,
+  browserPresence,
+  engineOf,
+  playwrightInstallArgs,
+  type BrowserEngineName,
+  type BrowserPresence,
+  type InstallTarget,
+} from "./browsers.js";
 
 export const SKILL_NAME = "scenescout";
 export const MCP_NAME = "scenescout";
@@ -462,4 +471,94 @@ export function diagnose(opts: {
     }
   }
   return checks;
+}
+
+/** Which browser builds are on disk, going by the paths Playwright reports for the version we depend on. */
+export async function presentBrowsers(): Promise<BrowserPresence> {
+  const executables: Record<BrowserEngineName, string | null> = { chromium: null, firefox: null, webkit: null };
+  try {
+    const playwright = await import("playwright");
+    for (const name of BROWSER_ENGINES) executables[name] = playwright[name].executablePath() || null;
+  } catch {
+    // Playwright cannot be loaded: every build reads as absent, which is what doctor should say.
+  }
+  return browserPresence(executables);
+}
+
+/**
+ * The reason Playwright's installer gives for a failed download: its first
+ * `Error:` line, which names the cause (a refused connection, a proxy, a full
+ * disk) where its last lines are a stack trace. Null when it gave none.
+ */
+export function installerFailure(stderr: string): string | null {
+  const lines = stderr.split(/\r?\n/).map((l) => l.trim());
+  const first = lines.find((l) => /^Error: \S/.test(l)) ?? lines.find((l) => l !== "" && !l.startsWith("at ") && /fail/i.test(l));
+  return first
+    ? first
+        .replace(/^Error: /, "")
+        .replace(/, caused by$/, "")
+        .slice(0, 300)
+    : null;
+}
+
+/** How long a browser download may run before it is stopped and reported as failed. */
+export const BROWSER_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * The environment Playwright's installer runs in. A host that runs this server
+ * inside its own Electron binary (a desktop app's bundled runtime) makes
+ * process.execPath that binary, which starts the app instead of a script
+ * unless told to behave as Node.
+ */
+export function downloadEnv(env: NodeJS.ProcessEnv, electron: string | undefined): NodeJS.ProcessEnv {
+  return electron ? { ...env, ELECTRON_RUN_AS_NODE: "1" } : env;
+}
+
+/**
+ * Download browser builds through the playwright CLI that ships with our own
+ * dependency. `inherit` shows its progress on this terminal; `stderr` keeps
+ * stdout clean for a server whose stdout is its protocol channel.
+ */
+export function downloadBrowsers(targets: readonly InstallTarget[], output: "inherit" | "stderr"): Promise<{ ok: boolean; detail?: string }> {
+  return new Promise((resolve) => {
+    let cli: string;
+    try {
+      cli = path.join(path.dirname(createRequire(import.meta.url).resolve("playwright/package.json")), "cli.js");
+    } catch (err) {
+      resolve({ ok: false, detail: `Playwright's installer could not be found: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}` });
+      return;
+    }
+    let seen = "";
+    let timedOut = false;
+    const child = spawn(process.execPath, [cli, ...playwrightInstallArgs(targets)], {
+      stdio: output === "inherit" ? "inherit" : ["ignore", process.stderr, "pipe"],
+      env: downloadEnv(process.env, process.versions.electron),
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      process.stderr.write(chunk);
+      if (seen.length < 20_000) seen += chunk.toString();
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, BROWSER_DOWNLOAD_TIMEOUT_MS);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ ok: false, detail: err.message });
+    });
+    // A stopped download may leave a child of the installer holding the pipe, so `close` may never come: answer on `exit`.
+    child.on("exit", () => {
+      if (timedOut) resolve({ ok: false, detail: `stopped after ${BROWSER_DOWNLOAD_TIMEOUT_MS / 60_000} minutes` });
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ ok: true });
+      else if (timedOut) resolve({ ok: false, detail: `stopped after ${BROWSER_DOWNLOAD_TIMEOUT_MS / 60_000} minutes` });
+      else
+        resolve({
+          ok: false,
+          detail: installerFailure(seen) ?? (signal ? `the installer was stopped by ${signal}` : `the installer exited with code ${code}`),
+        });
+    });
+  });
 }

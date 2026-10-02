@@ -15,7 +15,8 @@ import { needsTask, normalizeTask, taskRefusal, TASK_MAX } from "../src/engine/t
 import test from "node:test";
 import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
 import { revealedLines } from "../src/engine/hover.ts";
-import { explainLaunchFailure, isMissingBrowser } from "../src/engine/launch.ts";
+import { explainLaunchFailure, isMissingBrowser, readyBrowser, type BrowserReadyDeps } from "../src/engine/launch.ts";
+import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles } from "./smoke/leaks.ts";
@@ -399,4 +400,98 @@ test("the refusal names the parameter, the shape of a good task, and how long it
   assert.match(refusal, /task:"…"/);
   assert.match(refusal, /stays set until you pass a different one/);
   assert.match(refusal, /scout_journey/);
+});
+
+/** readyBrowser's dependencies with the download faked: `on` is which builds are on disk, and a good download adds its targets. */
+function fakeBrowsers(env: NodeJS.ProcessEnv, on: InstallTarget[], download: { ok: boolean; detail?: string; lands?: boolean } = { ok: true }) {
+  const disk = new Set<string>();
+  const exe = { chromium: "/c/chromium-1200/chrome", firefox: "/c/firefox-1500/firefox", webkit: "/c/webkit-2200/pw_run.sh" };
+  const put = (t: InstallTarget): void => {
+    if (t === "chromium" || t === "chromium-headless-shell") disk.add("/c/chromium_headless_shell-1200/INSTALLATION_COMPLETE");
+    if (t === "chromium") disk.add(exe.chromium);
+    if (t === "firefox" || t === "webkit") disk.add(exe[t]);
+  };
+  for (const t of on) put(t);
+  const downloads: InstallTarget[][] = [];
+  const said: string[] = [];
+  let clock = 0;
+  const deps: BrowserReadyDeps = {
+    env,
+    present: async () => browserPresence(exe, (p) => disk.has(p)),
+    download: async (targets) => {
+      downloads.push(targets);
+      clock += 42_000;
+      if (download.ok && download.lands !== false) for (const t of targets) put(t);
+      return { ok: download.ok, detail: download.detail };
+    },
+    say: (line) => said.push(line),
+    now: () => clock,
+  };
+  return { deps, downloads, said };
+}
+
+test("the first attach downloads the one build it needs, says so while it does, then carries on", async () => {
+  const f = fakeBrowsers({}, []);
+  const note = await readyBrowser({ engine: "chromium", headed: false }, f.deps);
+  assert.deepEqual(f.downloads, [["chromium-headless-shell"]], "only the build a headless Chromium launch needs");
+  assert.match(f.said[0], /^Getting the test browser ready — a one-time download of about 200 MB/);
+  assert.equal(note, "The test browser is ready (chromium-headless-shell, downloaded once in 42 s; later tests start straight away).");
+  // The next attach finds it and says nothing.
+  assert.equal(await readyBrowser({ engine: "chromium", headed: false }, f.deps), null);
+  assert.equal(f.downloads.length, 1);
+
+  // A headed run needs the full browser; a firefox attach needs firefox, whatever else is there.
+  const headed = fakeBrowsers({}, ["chromium-headless-shell"]);
+  await readyBrowser({ engine: "chromium", headed: true }, headed.deps);
+  assert.deepEqual(headed.downloads, [["chromium"]]);
+  const ff = fakeBrowsers({}, ["chromium"]);
+  await readyBrowser({ engine: "firefox", headed: false }, ff.deps);
+  assert.deepEqual(ff.downloads, [["firefox"]]);
+});
+
+test("a build already on disk is never downloaded again, whatever the setting", async () => {
+  for (const env of [{}, { CI: "true" }, { SCENESCOUT_BROWSER_DOWNLOAD: "off" }]) {
+    const f = fakeBrowsers(env, ["chromium"]);
+    assert.equal(await readyBrowser({ engine: "chromium", headed: true }, f.deps), null);
+    assert.deepEqual(f.downloads, []);
+    assert.deepEqual(f.said, []);
+  }
+});
+
+test("CI and the off setting download nothing and name the command to run by hand", async () => {
+  const ci = fakeBrowsers({ CI: "true" }, []);
+  await assert.rejects(readyBrowser({ engine: "chromium", headed: false }, ci.deps), (err: Error) => {
+    assert.match(err.message, /In CI SceneScout downloads a browser only when asked/);
+    assert.match(err.message, /SCENESCOUT_BROWSER_DOWNLOAD=on/);
+    assert.match(err.message, /npx -y scenescout install --browser-only --browsers chromium-headless-shell/);
+    return true;
+  });
+  assert.deepEqual(ci.downloads, []);
+
+  const off = fakeBrowsers({ SCENESCOUT_BROWSER_DOWNLOAD: "off" }, []);
+  await assert.rejects(
+    readyBrowser({ engine: "webkit", headed: false }, off.deps),
+    /SCENESCOUT_BROWSER_DOWNLOAD=off keeps SceneScout from downloading it.*--browsers webkit/s,
+  );
+  assert.deepEqual(off.downloads, []);
+
+  // CI that asks for it gets the download.
+  const asked = fakeBrowsers({ CI: "true", SCENESCOUT_BROWSER_DOWNLOAD: "on" }, []);
+  await readyBrowser({ engine: "chromium", headed: false }, asked.deps);
+  assert.equal(asked.downloads.length, 1);
+});
+
+test("a failed download says why and what to run by hand", async () => {
+  const failed = fakeBrowsers({}, [], { ok: false, detail: "getaddrinfo ENOTFOUND cdn.example.com" });
+  await assert.rejects(readyBrowser({ engine: "chromium", headed: false }, failed.deps), (err: Error) => {
+    assert.match(err.message, /^The test browser could not be downloaded \(getaddrinfo ENOTFOUND cdn.example.com\)\. Check the network or proxy/);
+    assert.match(err.message, /npx -y scenescout install --browser-only --browsers chromium-headless-shell/);
+    return true;
+  });
+  // The installer reporting success is not the build being there.
+  const missing = fakeBrowsers({}, [], { ok: true, lands: false });
+  await assert.rejects(
+    readyBrowser({ engine: "firefox", headed: false }, missing.deps),
+    /download finished, but the firefox build is still not where Playwright looks.*--browsers firefox/s,
+  );
 });

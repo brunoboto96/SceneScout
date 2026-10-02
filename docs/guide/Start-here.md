@@ -71,7 +71,7 @@ Then download the browser once with `npx -y scenescout install --browser-only`. 
 
 ### A client that `install` does not know
 
-Run `npx -y scenescout install --browser-only`, then add a stdio server to the client's configuration whose command is `npx -y scenescout serve`. Most clients accept this shape:
+Add a stdio server to the client's configuration whose command is `npx -y scenescout serve`. Most clients accept this shape (the first test downloads the browser it drives, once; `npx -y scenescout install --browser-only` does it beforehand):
 
 ```json
 {

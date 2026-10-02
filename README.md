@@ -495,7 +495,7 @@ Run `npx -y scenescout doctor` first — it checks every setup item below (every
 | The `scout_*` tools don't appear | The MCP server isn't registered, or points at an old path. `npx -y scenescout install` re-registers it; `claude mcp list` should show `scenescout` as connected. |
 | *"Executable not found in $PATH"* | The server was registered with a bare `node`. `npx -y scenescout install` registers an absolute path. |
 | Installed as a plugin, and the tools fail with *"Executable not found in $PATH: npx"* | A plugin starts the server with a bare `npx`, which Claude Code can only find if it was launched from an environment that has Node on its `PATH`. Under nvm or fnm that means starting Claude Code from a terminal, not from a dock or launcher. Or use `npx -y scenescout install` instead, which registers the absolute path of `npx`. |
-| *"… build has not been downloaded yet"* on attach | The browser download was skipped or failed, or the run asked for a browser you did not install. Run the command the message names, for example `npx -y scenescout install --browser-only --browsers firefox`. On Linux, system libraries may be missing too: `npx playwright install --with-deps chromium`. |
+| *"… build has not been downloaded yet"* on attach | The attach downloads a missing browser itself, once, except in CI or with `SCENESCOUT_BROWSER_DOWNLOAD=off`; there, or when that download failed, it names the command to run. Run the command the message names, for example `npx -y scenescout install --browser-only --browsers firefox`. On Linux, system libraries may be missing too: `npx playwright install --with-deps chromium`. |
 | Tools broke after moving the folder or changing node version | The registration stores absolute paths. `npx -y scenescout install` refreshes them. |
 | Attach fails or every route lands on the login page | Your app isn't running at `--url`, or the `--role` session has expired. For a saved login, run `scenescout login <url> --role <name>` again; for a storage-state file, regenerate it the way your project's Playwright setup does. |
 
@@ -538,6 +538,8 @@ npx -y scenescout install --browser-only --browsers firefox,webkit   # add two m
 ```
 
 Sizes vary by platform. The builds go to Playwright's shared cache, so a build another tool already fetched is not downloaded again.
+
+The first attach that needs a build which is not on disk downloads it itself, once, and says so ("Getting the test browser ready"). It does not in CI unless `SCENESCOUT_BROWSER_DOWNLOAD=on` is set, and never with `SCENESCOUT_BROWSER_DOWNLOAD=off`, for a machine where nothing may be downloaded.
 
 To drive another browser, pass `browser` when attaching (`scout_attach { browser: "firefox" }`), or set `SCENESCOUT_BROWSER=webkit` in the server's environment to change the default. `scenescout doctor` checks the browser named by that variable in the shell it runs from, so check another one with `SCENESCOUT_BROWSER=webkit scenescout doctor`. Two things differ outside Chromium:
 

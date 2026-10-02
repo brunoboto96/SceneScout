@@ -207,6 +207,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | Variable | Read by | |
 |---|---|---|
 | `SCENESCOUT_BROWSER` | the server, `check`, `ci`, `login`, `doctor` | The default browser: `chromium` (default), `firefox` or `webkit` |
+| `SCENESCOUT_BROWSER_DOWNLOAD` | the server | Whether an attach downloads the browser build it needs when it is missing: `auto` (default) downloads it once, except in CI, where `CI` or `GITHUB_ACTIONS` is set; `on` downloads in CI too; `off` never downloads and names the command to run instead |
 | `SCENESCOUT_ACTION_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long one action may take, 1000 to 120000 (default 5000). An option wins over it |
 | `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
 | `SCENESCOUT_LIVE` | the server | `off` keeps the live view closed |
@@ -235,6 +236,8 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `JIRA_PROJECT_KEY` | `export --to jira` | As `--jira-project` |
 | `JIRA_ISSUE_TYPE` | `export --to jira` | As `--jira-issue-type` |
 | `CLAUDE_CONFIG_DIR` | `install`, `doctor` | Where Claude Code keeps its configuration; the skill goes into its `skills/` folder. Default `~/.claude` |
+| `CI` | the server | Set by CI services; any value but empty, `false` or `0` keeps an attach from downloading a missing browser unless `SCENESCOUT_BROWSER_DOWNLOAD=on` |
+| `GITHUB_ACTIONS` | the server | Set by GitHub Actions; `true` counts as CI, as `CI` does |
 | `GITHUB_STEP_SUMMARY` | `check`, `ci` | Set by GitHub Actions; the report or summary is appended to it |
 | `GITHUB_WORKFLOW_REF` | `check`, `ci` | Set by GitHub Actions; with no `--sarif-file-anchor`, its workflow file is the file SARIF results point at |
 | `GITHUB_WORKSPACE` | `check`, `ci` | Set by GitHub Actions; the repository root that SARIF file paths are relative to |

@@ -301,3 +301,41 @@ export function defaultAttachNote(opts: { selected: readonly InstallTarget[]; de
     `Pass browser: "${engine}" when attaching, or set ${DEFAULT_ENGINE_ENV}=${engine} in the MCP server's environment.`
   );
 }
+
+/** Environment variable deciding whether an attach downloads a missing browser build itself. */
+export const BROWSER_DOWNLOAD_ENV = "SCENESCOUT_BROWSER_DOWNLOAD";
+/** `auto` downloads except in CI; `on` downloads in CI too; `off` never downloads, for a machine where nothing may be fetched. */
+export const BROWSER_DOWNLOAD_SETTINGS = ["auto", "on", "off"] as const;
+export type BrowserDownloadSetting = (typeof BROWSER_DOWNLOAD_SETTINGS)[number];
+export const DEFAULT_BROWSER_DOWNLOAD: BrowserDownloadSetting = "auto";
+
+/** Whether this process runs in CI. Every common CI service sets CI; "false" and "0" are how a job says it is not one. */
+export function inCi(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.CI?.trim().toLowerCase();
+  if (raw !== undefined && raw !== "" && raw !== "false" && raw !== "0") return true;
+  return env.GITHUB_ACTIONS === "true";
+}
+
+/**
+ * What an attach does when the build it needs is not on disk: download it
+ * itself, refuse because the setting says never, or tell CI to keep its
+ * explicit install step (a CI job downloads only when it asks to, so a
+ * pipeline's browser is never fetched behind its back). An unknown setting
+ * refuses the attach rather than being read as a default.
+ */
+export function browserDownloadDecision(env: NodeJS.ProcessEnv): "download" | "refuse" | "tell" {
+  const raw = env[BROWSER_DOWNLOAD_ENV]?.trim().toLowerCase() || DEFAULT_BROWSER_DOWNLOAD;
+  if (!(BROWSER_DOWNLOAD_SETTINGS as readonly string[]).includes(raw)) {
+    throw new Error(
+      `${BROWSER_DOWNLOAD_ENV}="${env[BROWSER_DOWNLOAD_ENV]}" is not a setting SceneScout knows. Use one of: ${BROWSER_DOWNLOAD_SETTINGS.join(", ")}.`,
+    );
+  }
+  if (raw === "off") return "refuse";
+  if (raw === "on") return "download";
+  return inCi(env) ? "tell" : "download";
+}
+
+/** The plain-words line shown while an attach downloads the build it needs. */
+export function attachDownloadLine(target: InstallTarget): string {
+  return `Getting the test browser ready — a one-time download of about ${APPROX_DISK_MB[target]} MB (${target}). The test carries on once it is done.`;
+}
