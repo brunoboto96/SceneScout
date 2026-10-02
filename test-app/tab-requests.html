@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Tab requests</title></head>
+<body>
+  <h1>Things</h1>
+  <!-- Two tabs that switch on the client, with no page load. "Archived"
+       fetches its list; "Drafts" renders its empty state without asking the
+       server. The pair differs only in whether a request was made. -->
+  <div role="tablist">
+    <button type="button" data-testid="tab-archived">Archived</button>
+    <button type="button" data-testid="tab-drafts">Drafts</button>
+  </div>
+  <p data-testid="tab-list">Pick a tab.</p>
+  <script>
+    const list = document.querySelector('[data-testid="tab-list"]');
+    document.querySelector('[data-testid="tab-archived"]').addEventListener('click', async () => {
+      history.pushState({}, '', '/tab-requests.html#archived');
+      const res = await fetch('/api/allow?tab=archived');
+      const data = await res.json();
+      list.textContent = data.items.length ? data.items.length + ' things' : 'Nothing here yet.';
+    });
+    document.querySelector('[data-testid="tab-drafts"]').addEventListener('click', () => {
+      history.pushState({}, '', '/tab-requests.html#drafts');
+      list.textContent = 'Nothing here yet.';
+    });
+  </script>
+</body>
+</html>
