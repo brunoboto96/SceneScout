@@ -30,6 +30,7 @@ interface Result {
   status: string;
   detail?: string;
   partial?: string;
+  unsteady?: string;
   baseline: string;
   diff?: { percent: number; changedPixels: number; sizeChanged: boolean };
   files?: { expected: string; actual: string; diff: string };
@@ -95,6 +96,7 @@ export async function run(): Promise<void> {
         { path: "/card.html", element: "testid=plan" },
         { path: "/card.html", element: "testid=notes" },
         { path: "/card.html", element: "testid=saved" },
+        { path: "/card.html", element: "testid=meter" },
       ],
     }),
   );
@@ -117,7 +119,7 @@ export async function run(): Promise<void> {
     const first = await checkWith("compare", "first");
     check(
       "with no baselines yet, compare lists each target as having none, files nothing and passes",
-      first.status === 0 && first.results.length === 4 && first.results.every((r) => r.status === "no-baseline") && visual(first).length === 0,
+      first.status === 0 && first.results.length === 5 && first.results.every((r) => r.status === "no-baseline") && visual(first).length === 0,
       `${first.status} ${JSON.stringify(first.results)}\n${first.out.slice(-600)}`,
     );
 
@@ -126,7 +128,9 @@ export async function run(): Promise<void> {
       `update writes a PNG and a JSON per target, in the ${BROWSER} folder`,
       taken.status === 0 &&
         taken.results.every((r) => r.status === "updated" && r.baseline.startsWith(`${BROWSER}/`)) &&
-        ["page", "testid=plan", "testid=notes", "testid=saved"].every((e) => fs.existsSync(stored(e, "png")) && fs.existsSync(stored(e, "json"))),
+        ["page", "testid=plan", "testid=notes", "testid=saved", "testid=meter"].every(
+          (e) => fs.existsSync(stored(e, "png")) && fs.existsSync(stored(e, "json")),
+        ),
       `${taken.status} ${JSON.stringify(taken.results)}\n${taken.out.slice(-600)}`,
     );
     const meta = JSON.parse(fs.readFileSync(stored("testid=plan", "json"), "utf8")) as {
@@ -159,8 +163,11 @@ export async function run(): Promise<void> {
 
     const same = await checkWith("compare", "same");
     check(
-      "unchanged, every target matches at 0%, the block whose dot slides forever and the banner still sliding into place included, and the gate passes",
-      same.status === 0 && same.results.length === 4 && same.results.every((r) => r.status === "matches" && r.diff?.percent === 0) && visual(same).length === 0,
+      "unchanged, every target matches at 0%, the block whose dot slides forever, the banner still sliding into place and the meter a script is still filling included, and the gate passes",
+      same.status === 0 &&
+        same.results.length === 5 &&
+        same.results.every((r) => r.status === "matches" && r.diff?.percent === 0 && !r.unsteady) &&
+        visual(same).length === 0,
       `${same.status} ${JSON.stringify(same.results)}`,
     );
     check("...and writes no pictures", !fs.existsSync(path.join(same.dir, "visual")));
@@ -207,7 +214,7 @@ export async function run(): Promise<void> {
       "...and the SARIF has it as an error result, and the report a section listing every target",
       /"ruleId": "visual-change"/.test(sarif) &&
         /"level": "error"/.test(sarif) &&
-        /## Visual baselines \(4\)/.test(report) &&
+        /## Visual baselines \(5\)/.test(report) &&
         /✗ `testid=plan` on `\/card\.html`/.test(report),
       report.slice(0, 1500),
     );
