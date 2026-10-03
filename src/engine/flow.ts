@@ -23,6 +23,7 @@ import type { Page } from "playwright";
 import { z } from "zod";
 import { beaconResourceType, BROWSER_ENGINES } from "../browsers.js";
 import type { RouteHealth } from "./check.js";
+import { FIXTURE_KINDS } from "./fixtures.js";
 import { MEMORY_DIRNAME, SELF_IGNORE_KEEP } from "./memory.js";
 import { validateRoleName } from "./profiles.js";
 
@@ -236,6 +237,16 @@ const SINGLE_STEP_SCHEMAS = [
   z.object({ action: z.literal("type"), target, value: z.string(), pressEnter: z.boolean().optional(), replace: z.boolean().optional() }).strict(),
   z.object({ action: z.literal("select"), target, value: z.string() }).strict(),
   z.object({ action: z.literal("press"), value: z.string().min(1, "names the key to press, e.g. Enter") }).strict(),
+  // A small valid file generated for the input (its kind from `fixture`, else the input's accept attribute), as
+  // scout_upload attaches one. `target` is the file input or the control that opens its chooser; absent, the page's only file input.
+  z
+    .object({
+      action: z.literal("upload"),
+      target: target.optional(),
+      fixture: z.enum(FIXTURE_KINDS).optional(),
+      name: z.string().min(1).max(120).optional(),
+    })
+    .strict(),
   z.object({ action: z.literal("expect-text"), text: z.string().min(1, "is the text that must be visible") }).strict(),
   z.object({ action: z.literal("expect-element"), target, state: z.enum(ELEMENT_STATES) }).strict(),
   z.object({ action: z.literal("expect-url"), pattern: z.string().min(1).refine(isRegex, { message: "is not a valid regular expression" }) }).strict(),
@@ -440,6 +451,8 @@ export function describeStep(step: FlowStep): string {
       return `type into ${step.target}${step.pressEnter ? " and press Enter" : ""}`;
     case "press":
       return `press ${step.value}`;
+    case "upload":
+      return `upload ${step.fixture ? `a ${step.fixture} file` : "a file"}${step.name ? ` named ${JSON.stringify(step.name)}` : ""} ${step.target ? `to ${step.target}` : "to the page's file input"}`;
     case "expect-text":
       return `expect text ${JSON.stringify(step.text)}`;
     case "expect-element":

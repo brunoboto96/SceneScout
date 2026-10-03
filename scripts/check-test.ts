@@ -1473,7 +1473,7 @@ test("flows: every mistake names the file and the field", () => {
     [bad([]), /^f\.json: steps needs at least one step/],
     [
       bad([nav, { action: "hover", target: "testid=x" }]),
-      /^f\.json: steps\[1\]\.action must be one of navigate, click, type, select, press, expect-text, expect-element, expect-url, expect-request, repeat/,
+      /^f\.json: steps\[1\]\.action must be one of navigate, click, type, select, press, upload, expect-text, expect-element, expect-url, expect-request, repeat/,
     ],
     [bad([nav, { action: "click" }]), /^f\.json: steps\[1\]\.target is required/],
     [bad([nav, { action: "click", target: "#save" }]), /^f\.json: steps\[1\]\.target must be testid=…, text=…, label=… or role=/],
@@ -1647,6 +1647,26 @@ test("flows: ${env:NAME} values come from the environment, a missing one is name
   ]);
   assert.equal(maskEnvValues("/search?q=123456 by Ada", values), "/search?q=[$SIGN_CODE] by Ada");
   assert.equal(maskEnvValues(JSON.stringify({ reason: 'typed pa"ss\\word' }), values), JSON.stringify({ reason: "typed [$QUOTED]" }));
+});
+
+test("flows: an upload step takes an optional target, fixture kind and file name", () => {
+  const nav = { action: "navigate", target: "/" };
+  const ok = (step: Record<string, unknown>) => parseFlow(JSON.stringify({ steps: [nav, step] }), "f.json");
+  const bare = ok({ action: "upload" });
+  assert.ok(bare.ok, bare.ok ? "" : bare.error);
+  assert.equal(describeStep(bare.flow.steps[1]), "upload a file to the page's file input");
+  const full = ok({ action: "upload", target: "testid=doc", fixture: "pdf", name: "a.pdf" });
+  assert.ok(full.ok, full.ok ? "" : full.error);
+  assert.equal(describeStep(full.flow.steps[1]), 'upload a pdf file named "a.pdf" to testid=doc');
+  for (const [step, re] of [
+    [{ action: "upload", fixture: "exe" }, /steps\[1\]\.fixture/],
+    [{ action: "upload", target: "#file" }, /steps\[1\]\.target must be testid=/],
+    [{ action: "upload", path: "/etc/passwd" }, /steps\[1\] unknown field\(s\) "path"/],
+  ] as const) {
+    const parsed = ok(step);
+    assert.ok(!parsed.ok, JSON.stringify(step));
+    assert.match(parsed.error, re, JSON.stringify(step));
+  }
 });
 
 test("flows: targets are scout_run_plan's, plus role with an optional name", () => {

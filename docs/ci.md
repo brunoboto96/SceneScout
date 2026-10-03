@@ -260,6 +260,7 @@ A flow has a `name` (the file name when left out) and its `steps`. The first ste
 | `type` | `target`, `value`, `pressEnter`?, `replace`? | Appends unless `replace` is true |
 | `select` | `target`, `value` | |
 | `press` | `value` | A key, e.g. `Escape` |
+| `upload` | `target`?, `fixture`?, `name`? | Attaches a small valid file generated on the spot (`pdf`, `png`, `txt`, `csv` or `json`; without `fixture`, the kind the input's `accept` asks for) to `target`, a file input or the control that opens its chooser, or to the page's only file input. Nothing is read from disk. Submitting it is a write, so it reaches the server only under `--flow-writes allow` |
 | `expect-text` | `text` | Visible on the page |
 | `expect-element` | `target`, `state` | The target is `visible`, `hidden` (also when nothing matches), `enabled`, `disabled`, `checked` or `unchecked`. A failure says what it is instead, e.g. `testid=receipt is visible, expected hidden` |
 | `expect-url` | `pattern` | A regular expression, tested against path, query and hash (never the origin) |
