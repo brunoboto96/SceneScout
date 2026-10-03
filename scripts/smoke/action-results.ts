@@ -8,7 +8,8 @@
  * format, not with the browser's bare "Malformed value". A click forced past
  * something on top of its target names that element, and says when a
  * write-policy block came first; a click forced on a moving button whose own
- * icon is the top hit names nothing. A plan run with onViolation "continue"
+ * icon is the top hit names nothing. A button that sits still is not reported
+ * as forced. A plan run with onViolation "continue"
  * runs past a refused panel and still stops at an uncaught error; without it,
  * it stops at the refusal.
  */
@@ -114,9 +115,30 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     const snap3 = await engine.snapshot(true);
     const wobble = /(e\d+) button "Refresh/.exec(snap3)?.[1];
     if (!wobble) throw new Error(`ref not found for Refresh in:\n${snap3.slice(0, 1500)}`);
+    const steady = /(e\d+) button "Steady/.exec(snap3)?.[1];
+    if (!steady) throw new Error(`ref not found for Steady in:\n${snap3.slice(0, 1500)}`);
+    // The page counts consecutive frames whose boxes match. A strict click lands
+    // when it finds one such pair; a forced click is only the timeout fallback.
+    const motionBefore = (await page().evaluate("window.__wobbleMotion")) as { same: number; differ: number };
     const wobbled = await engine.click(wobble);
-    check("a moving button is clicked with a forced click (the contrast's precondition)", wobbled.includes("forced click was used instead"), wobbled);
+    const motionAfter = (await page().evaluate("window.__wobbleMotion")) as { same: number; differ: number };
+    const same = motionAfter.same - motionBefore.same;
+    const differ = motionAfter.differ - motionBefore.differ;
+    const forced = wobbled.includes("forced click was used instead");
+    if (differ > 0 && same === 0) {
+      check("a button whose box changes every frame is clicked with a forced click", forced, wobbled);
+    } else {
+      check(
+        "a strict click that finds the button still is not reported as forced",
+        wobbled.startsWith("OK:") && !forced,
+        `${wobbled}\nframes sharing a box: ${same}, frames that moved: ${differ}`,
+      );
+    }
     check("...and its own icon on top is not named as covering it", !wobbled.includes("covered by"), wobbled);
+    check("...and the click landed", (await page().locator('[data-testid="pager-log"]').textContent()) === "clicked wobble-btn", wobbled);
+    const held = await engine.click(steady);
+    check("a stable button is not reported as forced", held.startsWith('OK: click button "Steady"') && !held.includes("forced click was used instead"), held);
+    check("...and that click landed too", (await page().locator('[data-testid="pager-log"]').textContent()) === "clicked steady-btn", held);
 
     // A sweep of independent tabs, one of them refused.
     const stopped = await engine.runPlan([
