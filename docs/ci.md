@@ -270,6 +270,8 @@ A `target` is `testid=…`, `text=…`, `label=…` or `role=<role>[name="…"]`
 
 A flow file that is not valid stops the check before it starts, with exit 2 and the file and field named (`bad.json: steps[1].target is required`).
 
+**A flow can run as a role.** Give it `"role": "<name>"` and it runs in its own browser, signed in with the profile `scenescout login <url> --role <name> --project <dir>` saved in the project the check reads (`--project`). A flow with no `role` runs in the check's own session (`--storage-state`, or signed out). Flows run in file-name order, so a journey that needs two people is two flows: `01-submit.json` as one role, `02-approve.json` as another, the second finding by its visible text what the first created. A role with no saved profile stops the check before it starts, with exit 2 and the command that saves one; a profile that no longer signs in stops it the same way when the flow is reached.
+
 Flows run in the crawl's browser context, one after another in file-name order, so cookies, storage and a signed-in session carry from the crawl to each flow and from one flow to the next; each starts from the page its first step names.
 
 A flow's result also lists the WebSocket connections its page opened: the write rule covers HTTP only, and messages sent over a socket are not inspected. A request a page sends with `keepalive` or `navigator.sendBeacon` while it is being left (on `pagehide`, or a beacon on a timer that fires during the unload, including as the flow leaves its page) is judged by the same rule in every browser and refused under `never`; a beacon is then listed as a background request, and a keepalive fetch is charged to the step, or to the last step, it lands in.

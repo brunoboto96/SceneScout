@@ -40,6 +40,7 @@ import { httpErrorDetail } from "../src/engine/oracles.ts";
 import {
   describeStep,
   elementStateMatches,
+  flowRoles,
   loadFlows,
   matchRequest,
   notActionable,
@@ -1588,6 +1589,20 @@ test("flows: a repeat step holds actions and a condition, and every mistake in o
     repeatFailure({ action: "expect-text", text: "Done" }, 3, 'no visible text "Done"'),
     'expect text "Done" still did not hold after repeating 3 time(s): no visible text "Done"',
   );
+});
+
+test("flows: a flow may name the role it runs as, which must be a role name", () => {
+  const steps = [{ action: "navigate", target: "/" }];
+  const named = parseFlow(JSON.stringify({ role: "qa", steps }), "f.json");
+  assert.ok(named.ok && named.flow.role === "qa", named.ok ? "" : named.error);
+  const unnamed = parseFlow(JSON.stringify({ steps }), "f.json");
+  assert.ok(unnamed.ok && !("role" in unnamed.flow));
+  for (const bad of ["", "../admin", "a b", "x".repeat(41)]) {
+    const parsed = parseFlow(JSON.stringify({ role: bad, steps }), "f.json");
+    assert.ok(!parsed.ok, bad);
+    assert.match(parsed.error, /^f\.json: role /, bad);
+  }
+  assert.deepEqual(flowRoles([{ role: "qa" }, {}, { role: "admin" }, { role: "qa" }]), ["qa", "admin"]);
 });
 
 test("flows: targets are scout_run_plan's, plus role with an optional name", () => {

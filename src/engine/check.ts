@@ -1272,12 +1272,13 @@ export function formatCheck(result: CheckResult): string {
     lines.push("", `## Flows (${result.flows.length})`, "");
     for (const f of result.flows) {
       const o = f.outcome;
+      const as = f.role === undefined ? "" : ` as ${code(f.role)}`;
       lines.push(
         o.status === "passed"
-          ? `- ✓ ${cell(f.name)} (${code(f.file)}): ${f.steps} step(s) passed`
+          ? `- ✓ ${cell(f.name)} (${code(f.file)})${as}: ${f.steps} step(s) passed`
           : o.status === "refused"
-            ? `- ⊘ ${cell(f.name)} (${code(f.file)}): could not run — step ${o.step} of ${f.steps}, ${cell(o.did)}: ${cell(o.reason)} _(--flow-writes ${result.settings.flowWrites})_`
-            : `- ✗ ${cell(f.name)} (${code(f.file)}): step ${o.step} of ${f.steps}, ${cell(o.did)}: ${cell(o.reason)}`,
+            ? `- ⊘ ${cell(f.name)} (${code(f.file)})${as}: could not run — step ${o.step} of ${f.steps}, ${cell(o.did)}: ${cell(o.reason)} _(--flow-writes ${result.settings.flowWrites})_`
+            : `- ✗ ${cell(f.name)} (${code(f.file)})${as}: step ${o.step} of ${f.steps}, ${cell(o.did)}: ${cell(o.reason)}`,
       );
       if (f.refusedBackground.length > 0)
         lines.push(`  - refused background requests (beacons and pings, not charged to a step): ${f.refusedBackground.map(code).join(", ")}`);
@@ -1365,6 +1366,7 @@ export function toSummaryJson(result: CheckResult, toolVersion: string): object 
     flows: result.flows.map((f) => ({
       name: f.name,
       file: f.file,
+      ...(f.role === undefined ? {} : { role: f.role }),
       steps: f.steps,
       status: f.outcome.status,
       ...(f.outcome.status === "passed" ? {} : { step: f.outcome.step, did: f.outcome.did, reason: f.outcome.reason, path: f.outcome.path }),

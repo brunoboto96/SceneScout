@@ -43,7 +43,8 @@ import {
   type CheckResult,
   type RouteHealth,
 } from "./engine/check.js";
-import { loadFlows, resolveFlowsDir, type Flow, type FlowRun, type SkippedFlowFile } from "./engine/flow.js";
+import { flowRoles, loadFlows, resolveFlowsDir, type Flow, type FlowRun, type SkippedFlowFile } from "./engine/flow.js";
+import { resolveAttachAuth } from "./engine/profiles.js";
 import { MemoryStore, MEMORY_DIRNAME, writeSelfIgnore, type Finding } from "./engine/memory.js";
 import { decodePng, encodePng, type RgbaImage } from "./engine/png.js";
 import { firstLineOf } from "./engine/limits.js";
@@ -126,7 +127,12 @@ export async function runCheck(
   // Also on an exit the finally below never reaches, such as Ctrl+C, which the browser's driver answers with process.exit.
   const removeScratch = (): void => fs.rmSync(scratch, { recursive: true, force: true });
   process.once("exit", removeScratch);
+  // A flow that names a role whose sign-in is not saved would only fail after the crawl: refuse before anything starts,
+  // naming the command that saves it.
+  for (const role of flowRoles(inputs.flows)) resolveAttachAuth({ projectDir: options.projectDir, url: options.url, role });
   const engine = new BrowserEngine();
+  /** One browser per role a flow runs as, each attached once, on first use, and closed with the check's own. */
+  const roleEngines = new Map<string, BrowserEngine>();
   const start = new URL(options.url);
   // From the start of the run, browser launch included: the budget is wall-clock time a person waits.
   const deadline = options.timeBudgetMs !== undefined ? Date.now() + options.timeBudgetMs : undefined;
@@ -194,11 +200,40 @@ export async function runCheck(
         ? await takeBaselines(engine, options, options.baseline, inputs.baselineTargets, log)
         : null;
     const flowRuns: FlowRun[] = [];
+    // A flow that names a role runs in that role's own browser, so the check's session (and what its crawl found) is
+    // left as it was.
+    const engineFor = async (role: string | undefined): Promise<BrowserEngine> => {
+      if (role === undefined) return engine;
+      const known = roleEngines.get(role);
+      if (known) return known;
+      const roleEngine = new BrowserEngine();
+      roleEngines.set(role, roleEngine);
+      const roleDir = path.join(scratch, `role-${role}`);
+      fs.mkdirSync(roleDir, { recursive: true });
+      const attachedAs = await roleEngine.attach({
+        url: start.origin,
+        projectDir: options.projectDir,
+        memoryStore: new MemoryStore(roleDir),
+        mode: options.mode,
+        role,
+        ...(options.browser ? { browser: options.browser } : {}),
+        actionTimeoutMs: options.actionTimeoutMs,
+        navTimeoutMs: options.navTimeoutMs,
+        objective: `Deterministic check: replay the saved flows that run as ${role}`,
+        task: `Replaying flows as ${role}`,
+      });
+      const lost = attachedAs.split("\n").find((line) => line.startsWith("⚠ AUTH FAILED"));
+      if (lost) throw new Error(`the saved sign-in for role "${role}" no longer signs in: ${lost.replace(/ Continuing now tests a logged-out app\.$/, "")}`);
+      return roleEngine;
+    };
     for (const flow of inputs.flows) {
+      const runner = await engineFor(flow.role);
       // --flow-writes never: observe's rule, whatever --mode lets the crawl do.
-      const replay = await engine.replayFlow(flow.steps, options.flowWrites === "never" ? "observe" : options.mode);
-      flowRuns.push({ name: flow.name, file: flow.file, steps: flow.steps.length, ...replay });
-      log(`  flow ${flow.name}: ${replay.outcome.status}${replay.outcome.status === "passed" ? "" : ` at step ${replay.outcome.step}`}`);
+      const replay = await runner.replayFlow(flow.steps, options.flowWrites === "never" ? "observe" : options.mode);
+      flowRuns.push({ name: flow.name, file: flow.file, steps: flow.steps.length, ...(flow.role === undefined ? {} : { role: flow.role }), ...replay });
+      log(
+        `  flow ${flow.name}${flow.role === undefined ? "" : ` (as ${flow.role})`}: ${replay.outcome.status}${replay.outcome.status === "passed" ? "" : ` at step ${replay.outcome.step}`}`,
+      );
       // --on-refused-step stop: nothing after a refused step runs, and the check ends without a verdict.
       if (replay.outcome.status === "refused" && options.onRefusedStep === "stop") break;
     }
@@ -248,6 +283,8 @@ export async function runCheck(
       baselines: pictured,
     };
   } finally {
+    for (const [role, roleEngine] of roleEngines)
+      await roleEngine.close().catch((err: unknown) => log(`closing the browser for role ${role} failed: ${err instanceof Error ? err.message : String(err)}`));
     await engine.close().catch((err: unknown) => log(`closing the browser failed: ${err instanceof Error ? err.message : String(err)}`));
     process.off("exit", removeScratch);
     removeScratch();
