@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { asLf } from "./checkout.ts";
 import {
   CLAUDE_CODE_NOT_NEEDED,
   DESKTOP_EXTENSION_NAME,
@@ -1593,7 +1594,7 @@ test("the top level: help, version, and an unknown or missing command", async ()
  * its closing brace would run on into the next function and borrow its flags.
  */
 function flagsReadBy(source: string, command: string): Set<string> {
-  const text = source.replace(/\r\n/g, "\n");
+  const text = asLf(source);
   const start = text.indexOf(`async function ${command}(flags: string[])`);
   assert.ok(start >= 0, `cli.ts has no ${command}(flags) function`);
   const end = text.indexOf("\n}\n", start);
