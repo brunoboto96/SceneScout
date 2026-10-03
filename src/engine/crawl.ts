@@ -75,3 +75,43 @@ export function crawlLine(
     (allFlags.length ? ` · ${allFlags.join(" ")}` : "")
   );
 }
+
+/** The media types a browser renders as a page: anything else a route answers with is a file, a feed or data. */
+export const PAGE_MEDIA_TYPES: readonly string[] = ["text/html", "application/xhtml+xml"];
+
+/**
+ * A Content-Type header's media type, lowercased and without its parameters
+ * ("text/HTML; charset=utf-8" → "text/html"); undefined when there is none.
+ */
+export function mediaTypeOf(header: string | null | undefined): string | undefined {
+  const type = (header ?? "").split(";")[0].trim().toLowerCase();
+  return type === "" ? undefined : type;
+}
+
+/**
+ * Whether a route's document answered as something other than a page: an RSS
+ * or Atom feed, XML, JSON, plain text, a PDF, an image. Decided from the
+ * response's content type, not the path, because a feed at `/feed`, a licence
+ * file or a raw-file view has no extension to give it away, and a path ending
+ * `.xml` can be served as HTML. Such a route has no controls by nature, so the
+ * page rules (a dead end among them) do not apply to it, and it is not a page
+ * for the route count. Only a response that succeeded counts: the body of a
+ * 4xx or 5xx describes the error, not the route, and the error is reported as
+ * the route's own. A response with no content type is read as a page, the
+ * behaviour before the type was consulted.
+ */
+export function isNonPageResource(r: { status: number | null; contentType?: string | null }): boolean {
+  if (r.status === null || r.status >= 400) return false;
+  return isFileMediaType(r.contentType);
+}
+
+/**
+ * Whether a response's content type names something other than a page, whatever
+ * its status. A browser may take such a response as a download and fail the
+ * navigation, so this is what says the route answered (with its status) rather
+ * than failed to load.
+ */
+export function isFileMediaType(contentType: string | null | undefined): boolean {
+  const type = mediaTypeOf(contentType);
+  return type !== undefined && !PAGE_MEDIA_TYPES.includes(type);
+}

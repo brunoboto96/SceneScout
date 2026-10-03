@@ -2781,3 +2781,20 @@ test("a workspace comes only from a file: root, read as the platform reads it", 
   ];
   for (const [name, platform, roots, want] of cases) assert.equal(workspaceFromRoots(roots, platform), want, name);
 });
+
+test("a route that answered with a feed or a file is remembered as such, across runs and merges", () => {
+  const store = freshStore();
+  store.markResource("/feed", "application/rss+xml");
+  store.markResource("/feed", "application/rss+xml");
+  store.flush();
+  const again = openStore(path.dirname(store.dir));
+  assert.deepEqual(again.resourceRoutes, { "/feed": "application/rss+xml" });
+  // Answering as a page later puts it back.
+  again.clearResource("/feed");
+  again.clearResource("/never-marked");
+  again.flush();
+  assert.deepEqual(openStore(path.dirname(store.dir)).resourceRoutes, {});
+  const a: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [], resourceRoutes: { "/feed": "application/rss+xml" } };
+  const b: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [], resourceRoutes: { "/LICENSE": "text/plain" } };
+  assert.deepEqual(mergeMemory(a, b).resourceRoutes, { "/LICENSE": "text/plain", "/feed": "application/rss+xml" });
+});

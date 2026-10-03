@@ -398,6 +398,18 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end(fs.readFileSync(path.join(appDir, "check-signin.html")));
       return;
     }
+    // Routes that answer with something other than a page, at paths with no extension to give them away:
+    // a feed, a plain-text file, and a feed that is missing.
+    if (urlPath === "/check-feed" || urlPath === "/check-feed-gone") {
+      res.writeHead(urlPath === "/check-feed" ? 200 : 404, { "content-type": "application/rss+xml; charset=utf-8" });
+      res.end('<?xml version="1.0"?><rss version="2.0"><channel><title>Updates</title><link>/</link><description>d</description></channel></rss>');
+      return;
+    }
+    if (urlPath === "/check-licence") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      res.end("Permission is granted to use this fixture for any purpose.\n");
+      return;
+    }
     // A link that answers with no content: the navigation starts and never commits.
     if (urlPath === "/no-content") {
       res.writeHead(204);

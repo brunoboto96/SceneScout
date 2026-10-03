@@ -24,6 +24,7 @@ import {
   type BaselineResult,
   type BaselineRun,
 } from "./baseline.js";
+import { isNonPageResource } from "./crawl.js";
 import type { DesignDefect } from "./design.js";
 import { flowStepEvidence, type FlowRun, type SkippedFlowFile } from "./flow.js";
 import { parseLimitFlag } from "./limits.js";
@@ -45,6 +46,8 @@ export interface RouteHealth {
   url: string;
   /** The document's HTTP status; null when the page never loaded. */
   status: number | null;
+  /** The document's media type (crawl.ts mediaTypeOf), when it answered with one. */
+  contentType?: string;
   loadError?: string;
   /** Sent to a sign-in page: auth missing or expired. */
   loginRedirect: boolean;
@@ -61,6 +64,29 @@ export interface RouteHealth {
   design: DesignDefect[];
   /** Why the design audit could not measure this page, when it could not. */
   auditError?: string;
+}
+
+/** A route that answered with a file, a feed or data rather than a page (crawl.ts isNonPageResource). */
+export interface ResourceRoute {
+  path: string;
+  status: number;
+  contentType: string;
+}
+
+/**
+ * The routes that answered as pages, and those that answered as something
+ * else. Only the pages are checked against the page rules and counted as
+ * routes; the rest are listed apart, so a feed or a licence file is neither a
+ * dead end nor a page the check claims to have measured.
+ */
+export function splitResources(routes: readonly RouteHealth[]): { pages: RouteHealth[]; resources: ResourceRoute[] } {
+  const pages: RouteHealth[] = [];
+  const resources: ResourceRoute[] = [];
+  for (const r of routes) {
+    if (isNonPageResource(r) && r.status !== null && r.contentType) resources.push({ path: r.path, status: r.status, contentType: r.contentType });
+    else pages.push(r);
+  }
+  return { pages, resources };
 }
 
 export const CHECK_RULES = {
@@ -352,6 +378,9 @@ export function checkFindings(
   };
   for (const r of routes) {
     const route = r.path;
+    // A feed, a text file or an image is not a page: it has no controls to judge. Only one that answered without an
+    // error is one (crawl.ts isNonPageResource), so a feed that fails reaches the route's own error below.
+    if (isNonPageResource(r)) continue;
     if (r.loadError !== undefined) {
       add("route-load-failed", `${route}: ${r.loadError}`, route);
       continue;
@@ -769,7 +798,10 @@ export interface CheckResult {
   generatedAt: string;
   mode: CheckOptions["mode"];
   failOn: FailOn;
+  /** The routes that answered as pages: the ones checked and counted. */
   routes: RouteHealth[];
+  /** Routes that answered with a feed, a file or data: listed, never checked as pages. Absent in results written before they were told apart. */
+  resources?: ResourceRoute[];
   issues: CheckIssue[];
   /** Observations that are defects only under a convention of the project: listed apart, never counted or gated. */
   worthALook: CheckObservation[];
@@ -1116,6 +1148,22 @@ export function routesTable(result: Pick<CheckResult, "routes" | "issues">): str
   return lines;
 }
 
+/** The routes that answered with a feed, a file or data, as their own table; nothing when there were none. */
+export function resourcesTable(resources: readonly ResourceRoute[] | undefined): string[] {
+  if (!resources || resources.length === 0) return [];
+  const lines = [
+    "",
+    "## Not pages",
+    "",
+    "Answered with a feed, a file or data, so not checked as pages.",
+    "",
+    "| Route | Status | Content type |",
+    "|---|---|---|",
+  ];
+  for (const r of resources) lines.push(`| ${cell(r.path)} | ${r.status} | ${cell(r.contentType)} |`);
+  return lines;
+}
+
 /** The routes known and not visited, as one line; nothing when every known route was visited. */
 export function unvisitedLine(unvisited: readonly string[], why: string): string[] {
   if (unvisited.length === 0) return [];
@@ -1153,6 +1201,7 @@ export function formatCheck(result: CheckResult): string {
   lines.push(...issueSections(result.issues));
   lines.push(...worthALookSection(result.worthALook));
   lines.push(...routesTable(result));
+  lines.push(...resourcesTable(result.resources));
   lines.push(...unvisitedLine(result.unvisited, "over --max-routes"));
   if (result.flows.length > 0 || result.skippedFlows.length > 0) {
     lines.push("", `## Flows (${result.flows.length})`, "");
@@ -1243,6 +1292,7 @@ export function toSummaryJson(result: CheckResult, toolVersion: string): object 
       controls: r.elements,
       ...(r.auditError !== undefined ? { designNotMeasured: r.auditError } : {}),
     })),
+    resources: result.resources ?? [],
     unvisited: result.unvisited,
     ...(result.timeBudget ? { timeBudget: result.timeBudget } : {}),
     ignored: result.ignored,

@@ -36,6 +36,7 @@ import {
   redactRoute,
   redactRoutes,
   settingsOf,
+  splitResources,
   unmeasuredReason,
   withoutOwnResponse,
   type CheckOptions,
@@ -46,6 +47,7 @@ import { loadFlows, resolveFlowsDir, type Flow, type FlowRun, type SkippedFlowFi
 import { MemoryStore, MEMORY_DIRNAME, writeSelfIgnore, type Finding } from "./engine/memory.js";
 import { decodePng, encodePng, type RgbaImage } from "./engine/png.js";
 import { firstLineOf } from "./engine/limits.js";
+import { isNonPageResource } from "./engine/crawl.js";
 import { checkRetestPlan, retestResults, wellFormedFindings } from "./engine/verify.js";
 
 /** What a check reads from the project before it starts: its saved flows, the findings earlier runs left, and the targets of any visual baselines. */
@@ -150,6 +152,8 @@ export async function runCheck(
     const authFailed = attached.split("\n").find((line) => line.startsWith("⚠ AUTH FAILED"));
     if (authFailed) throw new Error(authFailed.replace(/ Continuing now tests a logged-out app\.$/, "").replace(/re-attach/, "run the check again"));
     const routes: RouteHealth[] = [];
+    // A feed or a file the crawl followed is not a page, so it does not use up --max-routes.
+    const pagesSoFar = (): number => routes.filter((r) => !isNonPageResource(r)).length;
     const crawl = async (paths: string[] | undefined, limit: number, deadline?: number): Promise<void> => {
       await engine.crawl(paths, { inspect: true, limit, deadline });
       routes.push(...engine.lastCrawlHealth);
@@ -160,14 +164,14 @@ export async function runCheck(
       // The start page first, whatever else is known: it is the one route the user named. The
       // time budget does not apply to it, so a run always measures at least the page it was given.
       await crawl([`${start.pathname}${start.search}${start.hash}`], 1);
-      for (let round = 0; round < MAX_DISCOVERY_ROUNDS && routes.length < options.maxRoutes; round++) {
+      for (let round = 0; round < MAX_DISCOVERY_ROUNDS && pagesSoFar() < options.maxRoutes; round++) {
         if (engine.crawlableRoutes().length === 0 || pastDeadline()) break;
-        await crawl(undefined, options.maxRoutes - routes.length, deadline);
-        log(`  ${routes.length} route(s) checked`);
+        await crawl(undefined, options.maxRoutes - pagesSoFar(), deadline);
+        log(`  ${pagesSoFar()} route(s) checked`);
       }
     }
     // Out of time with routes still to visit; a cap of routes reached first is --max-routes's to report.
-    const timeLimitReached = pastDeadline() && routes.length < options.maxRoutes && engine.crawlableRoutes().length > 0;
+    const timeLimitReached = pastDeadline() && pagesSoFar() < options.maxRoutes && engine.crawlableRoutes().length > 0;
     // Pages of open findings the crawl did not load exactly: loaded now, so each re-test has its own measurement.
     // Kept apart from `routes`: they are measured only to re-test, never checked against the page rules, and do not count
     // towards --max-routes. With --paths the check stays on the paths it was given.
@@ -216,7 +220,7 @@ export async function runCheck(
           ),
         }
       : null;
-    const measured = redactRoutes(routes.map(withoutOwnResponse));
+    const { pages: measured, resources } = splitResources(redactRoutes(routes.map(withoutOwnResponse)));
     const flows = redactFlowRuns(flowRuns);
     const pictured = baselines ? redactBaselineRun(baselines) : null;
     const { issues, worthALook } = checkFindings(measured, start.origin, options.ignore, flows, pictured, options.ignorePaths);
@@ -226,6 +230,7 @@ export async function runCheck(
       mode: options.mode,
       failOn: options.failOn,
       routes: measured,
+      resources,
       issues,
       worthALook,
       // Routes that failed to load are issues already; "not visited" is only what --max-routes (or the time budget) left out.
