@@ -526,12 +526,36 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
   assert.equal(hooks.hooks, undefined, "no settings hooks: everything is in the module");
   const register = fs.readFileSync(path.join(dir, "hooks", "register.js"), "utf8");
   // A hooks module may import only its own files by relative path, and the bare `claude-code`.
-  for (const m of register.matchAll(/^import[^"']*["']([^"']+)["']/gm)) assert.match(m[1], /^\.\/|^claude-code$/, `register.js imports ${m[1]}`);
-  // The command matcher is a literal for the validator, so it is held equal to the constant the pane uses.
-  assert.ok(register.includes('on("command.run", { command: "scenescout-pane" }'), "the command hook matches /scenescout-pane");
-  assert.ok(register.includes('if (lane.model) {\n    on("agent.spawn"'), "the spawn hook is registered only when a lane model is set");
+  const imports = [...register.matchAll(/^import[^"']*["']([^"']+)["']/gm)].map((m) => m[1]);
+  assert.deepEqual(imports, ["./pane.js"], "register.js imports only its own rules, by relative path");
   // Nothing in the main plugin's default component directories comes from the mod.
   assert.ok(!fs.existsSync(path.join(root, "hooks")), "the main plugin carries no hooks of its own, so blocking mods costs it nothing");
+});
+
+test("the mod registers its hooks as the settings say: the pane always, the spawn hook only with a lane model", async () => {
+  // Calls the module's own register with a stand-in `on`, so what is checked is what Claude Code would be handed.
+  const { register } = (await import("../mods/scenescout-mod/hooks/register.js")) as { register: (on: unknown, options: unknown) => void };
+  const { COMMAND, PANE_ID } = (await import("../mods/scenescout-mod/hooks/pane.js")) as { COMMAND: string; PANE_ID: string };
+  const hooksFor = (options: unknown): Array<[string, unknown]> => {
+    const seen: Array<[string, unknown]> = [];
+    register((event: string, matcherOrHook: unknown) => {
+      seen.push([event, typeof matcherOrHook === "function" ? null : matcherOrHook]);
+      return { catch: () => undefined };
+    }, options);
+    return seen;
+  };
+  const pane: Array<[string, unknown]> = [
+    ["session.start", null],
+    ["command.run", { command: COMMAND }],
+    ["ui.close", null],
+    ["ui.render", { component: "Pane" }],
+  ];
+  assert.equal(COMMAND, "scenescout-pane");
+  assert.match(PANE_ID, /^[A-Za-z0-9_-]{1,64}$/);
+  assert.deepEqual(hooksFor({ lane_model: "", mcp_server: "" }), pane, "the default: no spawn hook");
+  assert.deepEqual(hooksFor({}), pane, "settings absent: no spawn hook");
+  assert.deepEqual(hooksFor({ lane_model: "sonnet; rm -rf" }), pane, "a value that is not a model name: no spawn hook");
+  assert.deepEqual(hooksFor({ lane_model: "sonnet", mcp_server: "" }), [...pane, ["agent.spawn", null]]);
 });
 
 test("the versioning step formats the files it rewrites", () => {
