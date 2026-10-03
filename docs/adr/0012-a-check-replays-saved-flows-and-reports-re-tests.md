@@ -230,3 +230,16 @@ seconds with the command that saves it, never after a full crawl. Flows still
 run in file-name order and share nothing but the app's own data, so a later
 flow finds what an earlier one created by what the page shows.
 
+## Amendment, 3 October 2026: values from the environment
+
+A `type` or `select` value may hold `${env:NAME}`, resolved from the
+environment before the check starts; a name that is not set stops it with
+exit 2, never mid-flow. Signing a record or confirming an action often needs a
+one-time code or a password, and a flow file is committed. Substituting only
+values keeps the rule small: an `expect-*` step matches its text as written,
+so a flow cannot assert a secret onto the page. Every substituted value of
+four characters or more is masked as `[$NAME]` across the whole result before
+anything is written or printed, since a page can echo what was typed into an
+address or an error. Shorter values are not masked: they would rewrite
+ordinary words and numbers in the report.
+

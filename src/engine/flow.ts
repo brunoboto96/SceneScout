@@ -581,6 +581,64 @@ export interface FlowRun extends FlowReplay {
   role?: string;
 }
 
+/** A value taken from the environment when the flow runs: `${env:NAME}` in a type or select step's value. */
+const ENV_REF = /\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}/g;
+/** Shortest substituted value masked in the check's output. Shorter ones would mask ordinary words and numbers. */
+export const MIN_MASKED_ENV_VALUE = 4;
+
+/** Every step that takes a value, the steps inside a repeat included. */
+function valueSteps(steps: readonly FlowStep[]): Array<Extract<FlowStep, { value: string }>> {
+  return steps.flatMap((s) =>
+    s.action === "repeat" ? valueSteps(s.steps) : "value" in s && s.action !== "press" ? [s as Extract<FlowStep, { value: string }>] : [],
+  );
+}
+
+/** The environment variables a flow's values name, each once. */
+export function flowEnvNames(flow: Pick<Flow, "steps">): string[] {
+  return [...new Set(valueSteps(flow.steps).flatMap((s) => [...s.value.matchAll(ENV_REF)].map((m) => m[1])))];
+}
+
+/**
+ * The flow with every `${env:NAME}` in a type or select value replaced by that
+ * variable, and the values used, for masking; or the names that are not set.
+ * A secret such as a one-time code or a password then lives in the CI's secret
+ * store, not in the flow file.
+ */
+export function resolveFlowEnv(
+  flow: Flow,
+  env: Readonly<Record<string, string | undefined>>,
+): { ok: true; flow: Flow; values: Map<string, string> } | { ok: false; missing: string[] } {
+  const names = flowEnvNames(flow);
+  const missing = names.filter((n) => env[n] === undefined);
+  if (missing.length > 0) return { ok: false, missing };
+  const values = new Map(names.map((n) => [n, env[n]!] as const));
+  const sub = (steps: readonly FlowStep[]): FlowStep[] =>
+    steps.map((s) => {
+      if (s.action === "repeat") return { ...s, steps: sub(s.steps) as typeof s.steps };
+      if (s.action === "type" || s.action === "select") return { ...s, value: s.value.replace(ENV_REF, (_, n: string) => values.get(n)!) };
+      return s;
+    });
+  return { ok: true, flow: { ...flow, steps: sub(flow.steps) }, values };
+}
+
+/**
+ * Text with every substituted value long enough to mask replaced by the name
+ * it came from, `[$NAME]`. Applied to the check's whole result before anything
+ * is written, so a value the page echoed into a URL or an error is not saved.
+ */
+export function maskEnvValues(text: string, values: ReadonlyMap<string, string>): string {
+  let out = text;
+  // Longest first, so a value inside a longer one does not split it.
+  for (const [name, value] of [...values].sort((a, b) => b[1].length - a[1].length)) {
+    if (value.length < MIN_MASKED_ENV_VALUE) continue;
+    out = out.split(value).join(`[$${name}]`);
+    // The same value as JSON writes it, for text that is a serialised result.
+    const escaped = JSON.stringify(value).slice(1, -1);
+    if (escaped !== value) out = out.split(escaped).join(`[$${name}]`);
+  }
+  return out;
+}
+
 /** The roles a set of flows run as, each once, in the order they first appear. */
 export function flowRoles(flows: readonly Pick<Flow, "role">[]): string[] {
   return [...new Set(flows.flatMap((f) => (f.role === undefined ? [] : [f.role])))];

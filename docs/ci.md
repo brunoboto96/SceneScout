@@ -270,6 +270,8 @@ A `target` is `testid=…`, `text=…`, `label=…` or `role=<role>[name="…"]`
 
 A flow file that is not valid stops the check before it starts, with exit 2 and the file and field named (`bad.json: steps[1].target is required`).
 
+**A value can come from the environment.** Write `${env:NAME}` in a `type` or `select` step's `value` (whole or in part) and the check types the variable's value, so a one-time code or a password lives in the CI's secret store rather than in the flow file. A variable that is not set stops the check before it starts, with exit 2 and the flow and variable named. Wherever the page echoes a value of four or more characters (an address, an error), everything the check writes and prints shows `[$NAME]` instead. Only values are substituted: `expect-*` steps match their text as written.
+
 **A flow can run as a role.** Give it `"role": "<name>"` and it runs in its own browser, signed in with the profile `scenescout login <url> --role <name> --project <dir>` saved in the project the check reads (`--project`). A flow with no `role` runs in the check's own session (`--storage-state`, or signed out). Flows run in file-name order, so a journey that needs two people is two flows: `01-submit.json` as one role, `02-approve.json` as another, the second finding by its visible text what the first created. A role with no saved profile stops the check before it starts, with exit 2 and the command that saves one; a profile that no longer signs in stops it the same way when the flow is reached.
 
 Flows run in the crawl's browser context, one after another in file-name order, so cookies, storage and a signed-in session carry from the crawl to each flow and from one flow to the next; each starts from the page its first step names.

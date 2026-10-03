@@ -623,6 +623,52 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     `${unsaved.status} ${unsaved.out.slice(-600)}`,
   );
 
+  // ${env:NAME}: the value is typed from the environment, and where the page echoes it (here the address a GET form
+  // goes to, which a failing step reports) the check writes the variable's name instead. The flow fails on purpose.
+  const secret = "s3cr3t-flow-value";
+  process.env.SCENESCOUT_SMOKE_FLOW_VALUE = secret;
+  try {
+    const envOut = await checkWith(
+      project("flow-env", {
+        "search.json": {
+          steps: [
+            { action: "navigate", target: "/check-flow-search.html" },
+            { action: "type", target: "testid=search-query", value: "${env:SCENESCOUT_SMOKE_FLOW_VALUE}", pressEnter: true },
+            { action: "expect-text", text: "Some results" },
+          ],
+        },
+      }),
+    );
+    const written = ["check.json", "report.md", "check.sarif"].map((f) => fs.readFileSync(path.join(work, "flow-env", "out", f), "utf8")).join("\n");
+    check(
+      "env values: a flow types a value from the environment, and nothing the check writes or prints contains it, only its name",
+      envOut.status === 1 &&
+        envOut.summary?.flows[0]?.status === "failed" &&
+        /q=\[\$SCENESCOUT_SMOKE_FLOW_VALUE\]/.test(JSON.stringify(envOut.summary?.flows)) &&
+        !written.includes(secret) &&
+        !envOut.out.includes(secret),
+      `${envOut.status} ${JSON.stringify(envOut.summary?.flows)}`,
+    );
+  } finally {
+    delete process.env.SCENESCOUT_SMOKE_FLOW_VALUE;
+  }
+  const envMissing = await checkWith(
+    project("flow-env-missing", {
+      "search.json": {
+        steps: [
+          { action: "navigate", target: "/check-flow-search.html" },
+          { action: "type", target: "testid=search-query", value: "${env:SCENESCOUT_SMOKE_UNSET_VALUE}" },
+        ],
+      },
+    }),
+  );
+  check(
+    "...and a flow naming a variable that is not set stops the check before it starts, exit 2 naming the flow and the variable",
+    envMissing.status === 2 &&
+      /flow "search" \(search\.json\) takes \$\{env:SCENESCOUT_SMOKE_UNSET_VALUE\} from the environment, which is not set/.test(envMissing.out),
+    `${envMissing.status} ${envMissing.out.slice(-600)}`,
+  );
+
   // A step that would write. The same flow, under the default and under --flow-writes allow, both in read-only mode,
   // which on its own would let an ordinary POST through.
   const addFlow = {
