@@ -229,7 +229,7 @@ Before a parallel run, `scout_lane_brief` checks that the planner's saved login 
 
 ## 📺 Watching a run live
 
-When a session attaches, the engine starts a small live view and hands the agent its address on a `Live view:` line, which the agent passes on to you. From a terminal, `scenescout watch` opens the same page. There is one card per session:
+When a session attaches, the engine starts a small live view and hands the agent its address on a `Live view:` line, which the agent passes on to you. On a desktop the engine also opens it in your default browser, and opens the report when it is written; nothing opens in CI or over SSH, and `SCENESCOUT_OPEN=none` (or `live`, `report`, `both`) chooses otherwise. From a terminal, `scenescout watch` opens the same page. There is one card per session:
 
 <p align="center"><img src="examples/screenshots/live-view.png" alt="The live view during a run of three parallel agents against the demo app: one card per session, each with its role and objective, the task it is on, the tool it is running, the page it is on, a live thumbnail, and a feed of the actions it just took, tinted one colour per task" width="880" /></p>
 

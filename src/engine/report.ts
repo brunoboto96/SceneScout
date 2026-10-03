@@ -738,7 +738,7 @@ export function generateReport(
   oracleLog: OracleViolation[],
   extras?: ReportExtras,
   opts: { write?: boolean } = {},
-): { markdown: string; path: string; summary: string } {
+): { markdown: string; path: string; summary: string; html?: string } {
   const cov = memory.coverage();
   const findings = [...memory.findings].sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 
@@ -1136,5 +1136,5 @@ export function generateReport(
     `Gap ledger${gaps.length === 0 ? ": EMPTY — nothing known left untested" : ` (${gaps.length}):`}`,
     ...gaps.map((g) => `  ⚠ ${g}`),
   ];
-  return { markdown, path: outPath, summary: summaryLines.join("\n") };
+  return { markdown, path: outPath, summary: summaryLines.join("\n"), ...(htmlWritten ? { html: htmlPath } : {}) };
 }

@@ -35,6 +35,18 @@ import {
   statusFileName,
 } from "../src/engine/live.ts";
 import { LIVE_PAGE } from "../src/engine/live-page.ts";
+import {
+  decideOpen,
+  OPEN_CHOICES,
+  OPEN_ENV,
+  openableTarget,
+  openChoiceFromEnv,
+  openerCommand,
+  openInBrowser,
+  type OpenChoice,
+  type OpenContext,
+  type Spawner,
+} from "../src/engine/open.ts";
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]);
 const T0 = Date.parse("2030-01-01T00:00:00.000Z");
@@ -1377,4 +1389,111 @@ test("the timeline can be walked from the keyboard", () => {
   // an arrow key in a text box belongs to the text box.
   assert.match(keys, /if \(focused && !reportOpen && e\.target !== document\.getElementById\('filter'\)\)/);
   assert.match(keys, /timelineLines\.length === 0/, "a run with no timeline is not walked");
+});
+
+// ---- Opening the live view and the report (engine/open.ts) ----------------
+
+test("open: the default opens both on a local desktop session and nothing in CI, over SSH or with no display; a setting wins", () => {
+  const ctx = (over: Partial<OpenContext> = {}): OpenContext => ({ env: {}, platform: "darwin", ...over });
+  const cases: Array<[string, OpenChoice | undefined, OpenContext, boolean, boolean]> = [
+    ["macOS desktop", undefined, ctx(), true, true],
+    ["Windows desktop", undefined, ctx({ platform: "win32" }), true, true],
+    ["Linux with X", undefined, ctx({ platform: "linux", env: { DISPLAY: ":0" } }), true, true],
+    ["Linux with Wayland", undefined, ctx({ platform: "linux", env: { WAYLAND_DISPLAY: "wayland-0" } }), true, true],
+    ["Linux with no display", undefined, ctx({ platform: "linux" }), false, false],
+    ["FreeBSD with no display", undefined, ctx({ platform: "freebsd" }), false, false],
+    ["CI", undefined, ctx({ env: { CI: "true" } }), false, false],
+    ["CI=1 on a Linux desktop", undefined, ctx({ platform: "linux", env: { CI: "1", DISPLAY: ":0" } }), false, false],
+    ["CI=false is not CI", undefined, ctx({ env: { CI: "false" } }), true, true],
+    ["CI=0 is not CI", undefined, ctx({ env: { CI: "0" } }), true, true],
+    ["empty CI is not CI", undefined, ctx({ env: { CI: "" } }), true, true],
+    ["GITHUB_ACTIONS=true is CI", undefined, ctx({ env: { GITHUB_ACTIONS: "true" } }), false, false],
+    ["macOS over SSH", undefined, ctx({ env: { SSH_CONNECTION: "10.0.0.1 5000 10.0.0.2 22" } }), false, false],
+    ["Windows over SSH", undefined, ctx({ platform: "win32", env: { SSH_TTY: "/dev/pts/0" } }), false, false],
+    ["Linux desktop over SSH with X forwarding", undefined, ctx({ platform: "linux", env: { DISPLAY: "localhost:10.0", SSH_CONNECTION: "a" } }), false, false],
+    ["set to live", "live", ctx(), true, false],
+    ["set to report", "report", ctx(), false, true],
+    ["set to both, in CI", "both", ctx({ env: { CI: "true" } }), true, true],
+    ["set to none on a desktop", "none", ctx(), false, false],
+  ];
+  for (const [name, choice, c, live, report] of cases) {
+    const d = decideOpen(choice, c);
+    assert.deepEqual([d.live, d.report], [live, report], name);
+    assert.ok(d.why.length > 0, `${name}: says why`);
+  }
+});
+
+test("open: SCENESCOUT_OPEN is read, and a value outside the choices is refused", () => {
+  assert.equal(openChoiceFromEnv({}), undefined);
+  assert.equal(openChoiceFromEnv({ [OPEN_ENV]: "  " }), undefined);
+  for (const c of OPEN_CHOICES) assert.equal(openChoiceFromEnv({ [OPEN_ENV]: c }), c);
+  assert.throws(() => openChoiceFromEnv({ [OPEN_ENV]: "yes" }), /SCENESCOUT_OPEN must be one of live, report, both, none/);
+});
+
+test("open: only a loopback address or an absolute file path is opened", () => {
+  const ok = [
+    "http://127.0.0.1:4567/abc123/",
+    "http://localhost:80/x",
+    "http://[::1]:9000/t/",
+    "/srv/project/.scenescout/report.html",
+    "C:\\work\\project\\.scenescout\\report.html",
+  ];
+  const refused = [
+    "https://127.0.0.1:4567/abc/",
+    "http://example.com/abc/",
+    "http://127.0.0.1.example.com/abc/",
+    "http://user:pass@127.0.0.1:4567/",
+    "file:///etc/passwd",
+    "javascript:alert(1)",
+    "relative/report.html",
+    "-a Calculator",
+    "/srv/report.html\nrm -rf /",
+    "",
+  ];
+  for (const t of ok) assert.equal(openableTarget(t), true, t);
+  for (const t of refused) assert.equal(openableTarget(t), false, t);
+});
+
+test("open: each platform's opener is run directly, with the target as one argument", () => {
+  const url = "http://127.0.0.1:4567/tok/";
+  assert.deepEqual(openerCommand("darwin", url), { command: "open", args: [url] });
+  assert.deepEqual(openerCommand("linux", url), { command: "xdg-open", args: [url] });
+  assert.deepEqual(openerCommand("freebsd", url), { command: "xdg-open", args: [url] });
+  assert.deepEqual(openerCommand("win32", url), { command: "rundll32", args: ["url.dll,FileProtocolHandler", url] });
+});
+
+test("open: the opener is spawned without a shell, detached, and a refused target spawns nothing", () => {
+  const calls: Array<{ command: string; args: string[]; options: unknown }> = [];
+  let errorListener: ((err: Error) => void) | undefined;
+  let unrefs = 0;
+  const spawn: Spawner = (command, args, options) => {
+    calls.push({ command, args, options });
+    return {
+      on: (_event, listener) => {
+        errorListener = listener;
+      },
+      unref: () => {
+        unrefs++;
+      },
+    };
+  };
+  const errors: string[] = [];
+  const deps = { platform: "linux" as NodeJS.Platform, spawn, onError: (why: string) => errors.push(why) };
+
+  assert.deepEqual(openInBrowser("/srv/project/.scenescout/report.html", deps), { ok: true });
+  assert.deepEqual(calls, [
+    { command: "xdg-open", args: ["/srv/project/.scenescout/report.html"], options: { shell: false, stdio: "ignore", detached: true } },
+  ]);
+  assert.equal(unrefs, 1);
+  errorListener?.(new Error("spawn xdg-open ENOENT"));
+  assert.deepEqual(errors, ["xdg-open could not start: spawn xdg-open ENOENT"]);
+
+  const refused = openInBrowser("https://example.com/", deps);
+  assert.equal(refused.ok, false);
+  assert.equal(calls.length, 1, "a refused target never reaches the opener");
+
+  const throwing: Spawner = () => {
+    throw new Error("EPERM");
+  };
+  assert.deepEqual(openInBrowser("http://127.0.0.1:1/t/", { ...deps, spawn: throwing }), { ok: false, why: "xdg-open could not start: EPERM" });
 });
