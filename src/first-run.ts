@@ -33,6 +33,7 @@ import {
   MAX_CHECK_ROUTES,
   MAX_DISCOVERY_ROUNDS,
   resolveArgPath,
+  resourcesTable,
   routesTable,
   SEVERITY_RANK,
   SHARED_CHROME_ROUTE,
@@ -628,6 +629,7 @@ export function formatFirstRun(facts: FirstRunFacts): string {
   lines.push(...issueSections(result.issues));
   lines.push(...worthALookSection(result.worthALook, false));
   lines.push(...routesTable(result));
+  lines.push(...resourcesTable(result.resources));
   const why = stopReason(result, facts.options.maxRoutes);
   lines.push(...unvisitedLine(result.unvisited, why ? UNVISITED_WHY[why] : "not reached"));
   lines.push(

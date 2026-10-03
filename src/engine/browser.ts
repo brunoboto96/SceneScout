@@ -117,7 +117,7 @@ import {
 } from "./flow.js";
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { describePace, InFlightRequests, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
-import { crawledRoute, crawlLine, mainStateFlag } from "./crawl.js";
+import { crawledRoute, crawlLine, isFileMediaType, isNonPageResource, mainStateFlag, mediaTypeOf } from "./crawl.js";
 import {
   authToRemember,
   BODY_FETCH_MAX,
@@ -4891,7 +4891,9 @@ export class BrowserEngine {
   /** The full route contract: scanned filesystem routes ∪ link-discovered route classes. */
   allKnownRoutes(): string[] {
     const discovered = this.memory ? Object.keys(this.memory.discoveredRoutes) : [];
-    return [...new Set([...this.knownRoutes, ...discovered])].filter((r) => !isNonPageRoute(r));
+    // A route that answered with a feed or a file is not a page, whatever its path looks like.
+    const resources = new Set(Object.keys(this.memory?.resourceRoutes ?? {}).map(normalizePath));
+    return [...new Set([...this.knownRoutes, ...discovered])].filter((r) => !isNonPageRoute(r) && !resources.has(normalizePath(r)));
   }
 
   /**
@@ -5021,26 +5023,77 @@ export class BrowserEngine {
       this.actionStartedAt = Date.now();
       this.oracles.drain(false); // discard pre-route leftovers WITHOUT marking their signatures as reported
       let status: number | string = "ERR";
+      // The main document's response, as the browser received it. Kept apart from goto's own result: a browser that
+      // treats a PDF, a feed or an attachment as a download throws from goto, and this is then the only record of it.
+      const answered: { last: { url: string; status: number; contentType: string | undefined } | null } = { last: null };
+      const asked = new URL(url).href;
+      const onResponse = (r: Response): void => {
+        if (r.frame() !== page.mainFrame() || !r.request().isNavigationRequest()) return;
+        // A late event from the page before is not this route's: its redirect chain must start at the URL asked for.
+        let first = r.request();
+        for (let from = first.redirectedFrom(); from; from = from.redirectedFrom()) first = from;
+        if (first.url() !== asked) return;
+        answered.last = { url: r.url(), status: r.status(), contentType: mediaTypeOf(r.headers()["content-type"]) };
+      };
+      page.on("response", onResponse);
+      let resource: { url: string; status: number; contentType: string } | null = null;
       try {
         const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
         status = resp?.status() ?? "no-response";
+        const contentType = mediaTypeOf(resp?.headers()["content-type"]);
+        if (resp && isNonPageResource({ status: resp.status(), contentType })) resource = { url: page.url(), status: resp.status(), contentType: contentType! };
       } catch (err) {
-        const explained = explainTimeout(err, "nav", this.limits.crawlNavMs);
-        const reason = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
-        // Not retried by later crawls in this process (a check would otherwise try it
-        // on every discovery round). Deliberately not written to memory: one outage
-        // must not count a route as covered in every later run's gap ledger.
-        if (!opts.measureOnly) this.loadFailedRoutes.add(normalizePath(url));
-        await this.errorPageCommitted(page);
-        summary.push(`${path} — LOAD FAILED`);
-        // The page a re-attach went back to never loaded, so nothing says whether it worked.
-        if (this.authLoss.reattaching) this.authLoss.abortReattach(`the page it went back to, ${path}, did not load (${reason})`);
-        problems.push(`${path}: ${reason}`);
+        // A browser that took the answer as a download failed the navigation, but the route did answer, with its status:
+        // a feed that is missing is the route's 404, not a page that did not load.
+        const seen = answered.last;
+        if (seen && isFileMediaType(seen.contentType)) resource = { url: seen.url, status: seen.status, contentType: seen.contentType! };
+        else {
+          const explained = explainTimeout(err, "nav", this.limits.crawlNavMs);
+          const reason = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
+          // Not retried by later crawls in this process (a check would otherwise try it
+          // on every discovery round). Deliberately not written to memory: one outage
+          // must not count a route as covered in every later run's gap ledger.
+          if (!opts.measureOnly) this.loadFailedRoutes.add(normalizePath(url));
+          await this.errorPageCommitted(page);
+          summary.push(`${path} — LOAD FAILED`);
+          // The page a re-attach went back to never loaded, so nothing says whether it worked.
+          if (this.authLoss.reattaching) this.authLoss.abortReattach(`the page it went back to, ${path}, did not load (${reason})`);
+          problems.push(`${path}: ${reason}`);
+          this.crawlHealth.push({
+            path,
+            url,
+            status: null,
+            loadError: reason,
+            loginRedirect: false,
+            elements: 0,
+            unnamed: [],
+            placeholderOnly: [],
+            violations: [],
+            geometry: [],
+            brokenImages: [],
+            design: [],
+          });
+          continue;
+        }
+      } finally {
+        page.off("response", onResponse);
+      }
+      // A feed, a file or data: recorded as what it is and left there. It has no controls to collect or audit, and one
+      // that answered leaves the route contract, so it is neither a dead end nor a gap.
+      if (resource) {
+        if (!opts.measureOnly) {
+          // Only a file that answered leaves the contract; a failing one is attempted with its status, as a failing page is.
+          if (isNonPageResource(resource)) memory.markResource(normalizePath(url), resource.contentType);
+          else memory.markAttempted(normalizePath(url), `status:${resource.status}`, this.role);
+        }
+        this.oracles.drain(false);
+        summary.push(`${path} — ${resource.status} · not a page (${resource.contentType})`);
+        if (!isNonPageResource(resource)) problems.push(`${path} → HTTP ${resource.status} (${resource.contentType})`);
         this.crawlHealth.push({
           path,
-          url,
-          status: null,
-          loadError: reason,
+          url: resource.url,
+          status: resource.status,
+          contentType: resource.contentType,
           loginRedirect: false,
           elements: 0,
           unnamed: [],
@@ -5069,6 +5122,9 @@ export class BrowserEngine {
           aliases,
         );
         for (const f of forms) memory.recordForm(fp, f.key, f.guarded, this.sessionKey);
+        // A route remembered as a feed or a file that now answers as a page (a route class whose ids serve both, or
+        // one that served a plain-text maintenance reply once) is a page again, so it rejoins the contract.
+        memory.clearResource(normalizePath(url));
         memory.recordRoleAccess(this.role, route, "reached");
       }
       // If we landed somewhere else (auth wall, canonical redirect), the

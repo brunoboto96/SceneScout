@@ -175,6 +175,32 @@ async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server
   );
   check("...and fails the default gate", links.status === 1, links.out.slice(-600));
 
+  // A feed and a plain-text file linked from a page are not pages, and an HTML page with no controls still is a dead end.
+  await runCli([`${baseUrl}/check-resources.html`, "--project", work, "--out", path.join(work, "resources"), "--fail-on", "never"]);
+  const resourceSummary = JSON.parse(fs.readFileSync(path.join(work, "resources", "check.json"), "utf8")) as Summary & {
+    unvisited: string[];
+    resources: Array<{ path: string; status: number; contentType: string }>;
+  };
+  const deadEnds = resourceSummary.issues.filter((i) => i.rule === "dead-end").flatMap((i) => i.routes);
+  check(
+    "a feed and a plain-text file that answer 200 are listed as not pages, with their content types, and not as routes",
+    JSON.stringify(resourceSummary.resources.map((r) => `${r.path} ${r.status} ${r.contentType}`).sort()) ===
+      JSON.stringify(["/check-feed 200 application/rss+xml", "/check-licence 200 text/plain"]) &&
+      !resourceSummary.routes.some((r) => r.path === "/check-feed" || r.path === "/check-licence") &&
+      !resourceSummary.unvisited.some((p) => p === "/check-feed" || p === "/check-licence"),
+    JSON.stringify({ routes: resourceSummary.routes, resources: resourceSummary.resources, unvisited: resourceSummary.unvisited }),
+  );
+  check(
+    "...neither is a dead end, while the HTML page with no controls is",
+    JSON.stringify(deadEnds) === JSON.stringify(["/check-no-links.html"]),
+    JSON.stringify(resourceSummary.issues),
+  );
+  check(
+    "...and the feed that answers 404 is still reported, as the route's client error",
+    resourceSummary.issues.some((i) => i.rule === "route-client-error" && i.routes.includes("/check-feed-gone")),
+    JSON.stringify(resourceSummary.issues),
+  );
+
   // The same field labelled every way that counts, then by its placeholder alone, then by nothing but its name attribute.
   await runCli([`${baseUrl}/field-labels.html`, "--project", work, "--out", path.join(work, "labels"), "--paths", "/field-labels.html"]);
   const labelIssues = (JSON.parse(fs.readFileSync(path.join(work, "labels", "check.json"), "utf8")) as Summary).issues.filter((i) =>
