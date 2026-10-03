@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Check: a form that guards unsaved changes</title></head>
+<body>
+  <!-- For `scenescout check`'s saved flows. Typing marks the form dirty, and a dirty form asks to confirm leaving
+       (beforeunload), as an unsaved-changes guard does. A flow that fails after typing here must not leave the next
+       flow unable to navigate. -->
+  <h1>New record</h1>
+  <label>Title <input data-testid="guarded-title" type="text"></label>
+  <script>
+    let dirty = false;
+    document.querySelector('[data-testid="guarded-title"]').addEventListener("input", () => {
+      dirty = true;
+    });
+    window.addEventListener("beforeunload", (event) => {
+      if (!dirty) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
+  </script>
+</body>
+</html>
