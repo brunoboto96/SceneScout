@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Framed editor, bare button</title>
+  <style>
+    body { font-family: system-ui, sans-serif; color: #111111; background: #ffffff; margin: 0; padding: 16px; }
+    .bare { outline: none; padding: 8px 16px; min-height: 32px; }
+    iframe { width: 360px; height: 120px; border: 1px solid #767676; }
+  </style>
+</head>
+<body>
+  <!-- A pair for the focus-indicator rule. focus-frame.html and
+       focus-frame-bare.html hold the same same-origin frame, whose document
+       has one default-styled button; here the frame is the page's only tab
+       stop. Tab moves focus into the frame's document, so the frame element
+       is not the control the user sees focused and is not reported; the
+       button inside it shows the browser's focus ring. focus-frame-bare.html
+       adds one button styled outline: none with nothing in its place, and
+       that button is reported. -->
+  <h1>Things</h1>
+  <p>Edit the selected thing in the panel below.</p>
+  <button type="button" class="bare" data-testid="focus-frame-archive-action">Archive</button>
+  <iframe src="/focus-frame-child.html" title="Thing editor" data-testid="focus-frame-editor"></iframe>
+</body>
+</html>

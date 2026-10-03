@@ -93,7 +93,7 @@ export const NAME_FACTS_SRC = `(el) => {
     const tag = el.tagName.toLowerCase();
     const role = el.getAttribute("role") || "";
     const inputType = tag === "input" ? el.type : "";
-    const byId = (id) => { const n = document.getElementById(id); return n ? n.textContent || "" : ""; };
+    const byId = (id) => { const n = (el.ownerDocument || document).getElementById(id); return n ? n.textContent || "" : ""; };
     const labels = [];
     for (const label of Array.from(el.labels || [])) {
       const own = label.contains(el) ? el.textContent || "" : "";

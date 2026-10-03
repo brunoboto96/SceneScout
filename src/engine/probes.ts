@@ -10,7 +10,7 @@
 import type { Page } from "playwright";
 import { ACCESSIBLE_NAME_SRC, DIALOG_LIKE_SEL } from "./collector.js";
 import { focusAdvanceKey, isBrowserEngine } from "../browsers.js";
-import type { FocusSample } from "./design.js";
+import { focusedControl, type FocusSample } from "./design.js";
 
 /**
  * Scroll ONE named region rather than the page. The page-level heuristic
@@ -299,8 +299,11 @@ export async function probeOverlays(page: Page): Promise<string[]> {
  * focusless. As Tab advances, the previous stop is naturally blurred, so
  * each stop's focused style (captured at visit time) can be diffed against
  * its blurred style (captured in one pass at the end) without fighting the
- * tab order. Best-effort: any failure returns an empty sample set rather
- * than failing the audit.
+ * tab order. A Tab onto a frame is followed into a same-origin frame's
+ * document and the control focused there is sampled; a press that leaves
+ * focus inside a frame it cannot read is skipped (design.ts focusedControl).
+ * Best-effort: any failure returns an empty sample set rather than failing
+ * the audit.
  */
 export async function probeFocusIndicators(page: Page): Promise<FocusSample[]> {
   const name = page.context().browser()?.browserType().name();
@@ -311,26 +314,42 @@ export async function probeFocusIndicators(page: Page): Promise<FocusSample[]> {
     for (let i = 0; i < 15; i++) {
       await page.keyboard.press(advanceKey);
       const info = (await page.evaluate(`(() => {
-        const el = document.activeElement;
-        if (!el || el === document.body || el === document.documentElement) return null;
+        const el = (${focusedControl.toString()})(document);
+        if (el === null || el === "frame") return el;
         if (el.hasAttribute("data-scout-focus-probe")) return "wrapped";
         el.setAttribute("data-scout-focus-probe", "${i}");
-        const s = getComputedStyle(el);
+        const s = el.ownerDocument.defaultView.getComputedStyle(el);
         const tid = el.getAttribute("data-testid");
         // Named as the snapshot names it, so an icon button reads by its aria-label here too.
         const name = (${ACCESSIBLE_NAME_SRC})(el).slice(0, 30);
         return { label: tid ? "[" + tid + "]" : "<" + el.tagName.toLowerCase() + "> " + JSON.stringify(name), focused: ${styleSig} };
-      })()`)) as { label: string; focused: string } | "wrapped" | null;
+      })()`)) as { label: string; focused: string } | "frame" | "wrapped" | null;
       if (info === null || info === "wrapped") break;
+      if (info === "frame") continue;
       stops.push({ i, ...info });
     }
-    await page.evaluate("document.activeElement && document.activeElement.blur && document.activeElement.blur()");
+    // Blur from the innermost focused element out, so a control focused inside a frame loses focus too.
+    await page.evaluate(`(() => {
+      const chain = [];
+      for (let d = document; d; ) {
+        const a = d.activeElement;
+        if (!a || a === d.body || a === d.documentElement) break;
+        chain.push(a);
+        d = /^i?frame$/i.test(a.tagName) ? a.contentDocument : null;
+      }
+      for (const a of chain.reverse()) if (a.blur) a.blur();
+    })()`);
+    // The marked stops live in the page and in every same-origin frame the walk followed focus into.
     const blurred = (await page.evaluate(`(() => {
       const out = {};
-      for (const el of document.querySelectorAll("[data-scout-focus-probe]")) {
-        const s = getComputedStyle(el);
-        out[el.getAttribute("data-scout-focus-probe")] = ${styleSig};
-        el.removeAttribute("data-scout-focus-probe");
+      const docs = [document];
+      for (let k = 0; k < docs.length; k++) {
+        for (const f of docs[k].querySelectorAll("iframe, frame")) if (f.contentDocument) docs.push(f.contentDocument);
+        for (const el of docs[k].querySelectorAll("[data-scout-focus-probe]")) {
+          const s = el.ownerDocument.defaultView.getComputedStyle(el);
+          out[el.getAttribute("data-scout-focus-probe")] = ${styleSig};
+          el.removeAttribute("data-scout-focus-probe");
+        }
       }
       return out;
     })()`)) as Record<string, string>;

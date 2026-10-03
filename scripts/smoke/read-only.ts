@@ -320,6 +320,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       /CONTRAST failures[\s\S]*design-hero-heading[^\n]*1\.00:1/.test(heroPlain) && heroPlain.includes("design-hero-lede"),
       heroPlain,
     );
+    await focusIntoFrames(engine);
     await engine.navigate("/");
 
     console.log("overlay/modal oracle (app modals, not native dialogs)");
@@ -1392,4 +1393,32 @@ async function labelsAndLeaving({ baseUrl, projectDir, stats }: SmokeContext): P
   } finally {
     await ro.close().catch(() => {});
   }
+}
+
+/**
+ * The focus-indicator rule against a same-origin frame. focus-frame.html's only tab stop is the frame, and
+ * focus-frame-bare.html is the same page with one button styled outline: none beside it. Tab moves focus into
+ * the frame's document, so the frame element is never reported; the rule measures the control focused inside it,
+ * which focus-frame-inner-bare.html shows by giving that control outline: none.
+ */
+async function focusIntoFrames(engine: BrowserEngine): Promise<void> {
+  console.log("design audit: a frame is not a tab stop of its own; the control focused inside it is");
+  const focusLines = (audit: string): string => audit.match(/[^\n]*NO visible focus indicator[^\n]*/g)?.join("\n") ?? "";
+  await engine.navigate("/focus-frame.html");
+  const framed = await engine.designAudit();
+  check("a page whose only tab stop is a frame has no focus-indicator issue", focusLines(framed) === "", framed);
+  await engine.navigate("/focus-frame-bare.html");
+  const bare = await engine.designAudit();
+  check(
+    "the same page with a button styled outline: none reports that button, and only that button",
+    /focus-frame-archive-action/.test(focusLines(bare)) && !/focus-frame-editor|<iframe>|Thing editor/.test(focusLines(bare)),
+    bare,
+  );
+  await engine.navigate("/focus-frame-inner-bare.html");
+  const inner = await engine.designAudit();
+  check(
+    "a control styled outline: none inside a same-origin frame is reported by its own name, read in the frame's document",
+    /<button> "Publish thing"/.test(focusLines(inner)) && !/focus-frame-editor|<iframe>/.test(focusLines(inner)),
+    inner,
+  );
 }
