@@ -3,8 +3,9 @@
  * which of them it already holds, and files the rest. The rules (which
  * findings, what an issue says, the marker, the plan) live in
  * engine/export.ts; this file only reads the project's files and talks HTTP.
- * It writes nothing to the project, and the credentials it sends are never
- * printed: every line goes out through a redactor that knows them.
+ * The one file it writes is the record of the issues it filed, beside the
+ * memory, and the credentials it sends are never printed: every line goes out
+ * through a redactor that knows them.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -25,17 +26,24 @@ import {
   MARKER_LABEL,
   MAX_RATE_WAIT_MS,
   oneLine,
+  parseExportRecord,
   planExport,
   planJiraUpdate,
   rateLimit,
+  recordKey,
+  recordWith,
   rememberFiled,
   selectFindings,
   ticketsToLink,
   trackerCredentials,
   trackerMessage,
   TRACKER_LABEL,
+  uncertainHolds,
   uploadName,
+  EXPORT_RECORD_FILE,
+  UNCERTAIN_HOLD_MS,
   type ExportOptions,
+  type ExportRecord,
   type FailedCriterion,
   type FiledIssue,
   type GithubTarget,
@@ -111,6 +119,8 @@ interface HttpRequest {
    * create is not; its failures are settled by asking for the marker again.
    */
   idempotent: boolean;
+  /** Answer null, rather than fail, when the thing is not there: a 404, a 410, or a redirect to where it moved. */
+  missingOk?: boolean;
 }
 type Send = (r: HttpRequest) => Promise<unknown>;
 
@@ -181,6 +191,7 @@ function client(base: string, headers: Record<string, string>, h: Http): Send {
         }
         throw new ExportError(`${what} failed: ${failureOf(err, h.timeoutMs)}`, !r.idempotent);
       }
+      if (r.missingOk && (res.status === 404 || res.status === 410 || (res.status >= 300 && res.status < 400))) return null;
       if (res.status >= 300 && res.status < 400)
         throw new ExportError(
           `${what} was answered with a redirect (HTTP ${res.status}), which is refused: credentials are never sent on to another address. A repository or site that moved needs its new address`,
@@ -251,17 +262,26 @@ interface Listing {
   unmarked: number;
 }
 
+/** An issue read back by its number, and the findings its marker names. */
+interface ReadBack {
+  issue: FiledIssue;
+  ids: string[];
+}
+
 interface TrackerApi {
   /** "GitHub owner/name", "Jira KEY". */
   label: string;
   /**
    * Whether an issue shows in `existing` as soon as it is created. GitHub's
-   * issue list does; Jira's search can take minutes, so a create that may
-   * have been carried out is never re-sent to Jira.
+   * label filter lags, but its newest issues, listed with no filter, do not,
+   * and `existing` reads those too. Jira's search can take minutes, so a
+   * create that may have been carried out is never re-sent to Jira.
    */
   consistentListing: boolean;
   /** The labelled issues and the findings their markers name: closed issues too, unless `includeClosed` is false. */
   existing(includeClosed: boolean): Promise<Listing>;
+  /** One issue, read by its number, which shows it at once; null when it is gone or has moved. */
+  read(ref: string, number: number): Promise<ReadBack | null>;
   create(f: Finding, ctx: IssueContext, extras: Extras): Promise<Created>;
   /** Bring an issue filed earlier up to date, as `plan` says. Jira only. */
   update?(f: Finding, ctx: IssueContext, issue: FiledIssue, plan: JiraUpdatePlan, extras: Extras): Promise<Updated>;
@@ -274,48 +294,76 @@ function githubApi({ repo }: GithubTarget, send: Send): TrackerApi {
     .split("/")
     .map((p) => encodeURIComponent(p))
     .join("/")}/issues`;
+  /** An issue as the API gives it, read; null for a pull request, which the issues API lists too. */
+  const readIssue = (issue: unknown): (ReadBack & { labelled: boolean }) | null => {
+    if (isRecord(issue) && issue.pull_request) return null;
+    const number = isRecord(issue) ? Number(issue.number) : NaN;
+    // An entry that cannot be read, or one without its body, could be a filed finding: guessing "not filed" files it twice.
+    if (!isRecord(issue) || !Number.isInteger(number) || !("body" in issue))
+      throw new ExportError("GitHub listed an issue without its number or its body, so which findings are filed cannot be told");
+    const labels: unknown[] = Array.isArray(issue.labels) ? issue.labels : [];
+    return {
+      issue: { ref: `#${number}`, number, url: oneLine(issue.html_url, 300), open: issue.state !== "closed" },
+      ids: findingIdsInGithubBody(issue.body),
+      // GitHub's label filter ignores case, so a repository's "SceneScout" label is this one.
+      labelled: labels.some((l) => (typeof l === "string" ? l : isRecord(l) ? String(l.name ?? "") : "").toLowerCase() === MARKER_LABEL),
+    };
+  };
   return {
     label: `GitHub ${repo}`,
     consistentListing: true,
-    // Listed by label rather than found through the search API: search is
-    // indexed with a delay, so an export run right after another would not
-    // see the issues it had just filed and would file them again.
+    // Listed by label rather than found through the search API, which is
+    // indexed with a delay. The label filter lags behind a create too, so the
+    // newest issues are also listed with no filter, which shows an issue as
+    // soon as it is made: an export run right after another, or the check
+    // after a create that may have been made, finds the issue just filed.
     async existing(includeClosed) {
       const map = new Map<string, FiledIssue>();
+      const seen = new Set<number>();
       let issues = 0;
       let unmarked = 0;
+      const take = (read: ReadBack): void => {
+        if (seen.has(read.issue.number)) return;
+        seen.add(read.issue.number);
+        issues++;
+        if (read.ids.length === 0) unmarked++;
+        for (const id of read.ids) rememberFiled(map, id, read.issue);
+      };
+      const state = includeClosed ? "all" : "open";
+      const newest = await send({ method: "GET", path: `${root}?state=${state}&sort=created&direction=desc&per_page=100`, idempotent: true });
+      if (!Array.isArray(newest)) throw new ExportError("GitHub's list of issues was not a list");
+      for (const entry of newest) {
+        const read = readIssue(entry);
+        if (read?.labelled) take(read);
+      }
       for (let page = 1; page <= MAX_PAGES; page++) {
         const body = await send({
           method: "GET",
-          path: `${root}?labels=${encodeURIComponent(MARKER_LABEL)}&state=${includeClosed ? "all" : "open"}&per_page=100&page=${page}`,
+          path: `${root}?labels=${encodeURIComponent(MARKER_LABEL)}&state=${state}&per_page=100&page=${page}`,
           idempotent: true,
         });
         if (!Array.isArray(body)) throw new ExportError("GitHub's list of issues was not a list");
-        for (const issue of body) {
-          // The issues API lists pull requests too.
-          if (isRecord(issue) && issue.pull_request) continue;
-          const number = isRecord(issue) ? Number(issue.number) : NaN;
-          // An entry that cannot be read, or one without its body, could be a filed finding: guessing "not filed" files it twice.
-          if (!isRecord(issue) || !Number.isInteger(number) || !("body" in issue))
-            throw new ExportError("GitHub listed an issue without its number or its body, so which findings are filed cannot be told");
-          issues++;
-          const ids = findingIdsInGithubBody(issue.body);
-          if (ids.length === 0) unmarked++;
-          for (const id of ids) rememberFiled(map, id, { ref: `#${number}`, number, url: oneLine(issue.html_url, 300), open: issue.state !== "closed" });
+        for (const entry of body) {
+          const read = readIssue(entry);
+          if (read) take(read);
         }
         if (body.length < 100) return { map, issues, unmarked };
       }
       throw new ExportError(`${MAX_PAGES * 100} or more issues carry the ${MARKER_LABEL} label, too many to check them all for this export's findings`);
+    },
+    async read(_ref, number) {
+      const body = await send({ method: "GET", path: `${root}/${number}`, idempotent: true, missingOk: true });
+      if (body === null) return null;
+      const read = readIssue(body);
+      return read && read.issue.number === number ? { issue: read.issue, ids: read.ids } : null;
     },
     async create(f, ctx) {
       const body = await send({ method: "POST", path: root, json: githubIssue(f, ctx), idempotent: false });
       const number = isRecord(body) ? Number(body.number) : NaN;
       if (!isRecord(body) || !Number.isInteger(number)) throw new ExportError("GitHub answered the create without an issue number", true);
       const issue: FiledIssue = { ref: `#${number}`, number, url: oneLine(body.html_url, 300), open: true };
-      const labels: unknown[] = Array.isArray(body.labels) ? body.labels : [];
-      const names = labels.map((l) => (typeof l === "string" ? l : isRecord(l) ? String(l.name ?? "") : "").toLowerCase());
       // GitHub drops the labels of an issue created by an account that cannot set them, and says nothing.
-      if (!names.includes(MARKER_LABEL))
+      if (!readIssue({ body: null, ...body })?.labelled)
         return {
           issue,
           problems: [],
@@ -390,6 +438,22 @@ function jiraApi({ baseUrl, projectKey, issueType, linkType }: JiraTarget, send:
     );
   const namesOf = (attachments: unknown): string[] =>
     (Array.isArray(attachments) ? attachments : []).flatMap((a) => (isRecord(a) && typeof a.filename === "string" ? [a.filename] : []));
+  const FIELDS = ["summary", "description", "status", "attachment", "issuelinks"];
+  /** An issue as the API gives it, read. */
+  const readIssue = (issue: unknown, what: string): ReadBack => {
+    const key = isRecord(issue) ? String(issue.key ?? "") : "";
+    const number = keyNumber(key);
+    const fields = isRecord(issue) && isRecord(issue.fields) ? issue.fields : null;
+    // A field configuration can hide the description; without it, every finding would read as unfiled and be filed again.
+    if (number === null || !fields || !("description" in fields))
+      throw new ExportError(`Jira ${what} an issue without its key or its description, so which findings are filed cannot be told`);
+    const status = isRecord(fields.status) && isRecord(fields.status.statusCategory) ? fields.status.statusCategory.key : undefined;
+    const jira = { summary: fields.summary, description: fields.description, attachments: namesOf(fields.attachment), links: keysOf(fields.issuelinks) };
+    return {
+      issue: { ref: key, number, url: `${baseUrl}/browse/${key}`, open: status !== "done", jira },
+      ids: findingIdsInJiraDescription(fields.description),
+    };
+  };
   return {
     label: `Jira ${projectKey}`,
     consistentListing: false,
@@ -404,23 +468,15 @@ function jiraApi({ baseUrl, projectKey, issueType, linkType }: JiraTarget, send:
         const body = await send({
           method: "POST",
           path: "/rest/api/3/search/jql",
-          json: { jql, fields: ["summary", "description", "status", "attachment", "issuelinks"], maxResults: 100, ...(nextPageToken ? { nextPageToken } : {}) },
+          json: { jql, fields: FIELDS, maxResults: 100, ...(nextPageToken ? { nextPageToken } : {}) },
           idempotent: true,
         });
         if (!isRecord(body) || !Array.isArray(body.issues)) throw new ExportError("Jira's search answered without a list of issues");
-        for (const issue of body.issues) {
-          const key = isRecord(issue) ? String(issue.key ?? "") : "";
-          const number = keyNumber(key);
-          const fields = isRecord(issue) && isRecord(issue.fields) ? issue.fields : null;
-          // A field configuration can hide the description; without it, every finding would read as unfiled and be filed again.
-          if (number === null || !fields || !("description" in fields))
-            throw new ExportError(`Jira listed an issue without its key or its description, so which findings are filed cannot be told`);
+        for (const entry of body.issues) {
+          const { issue, ids } = readIssue(entry, "listed");
           issues++;
-          const status = isRecord(fields.status) && isRecord(fields.status.statusCategory) ? fields.status.statusCategory.key : undefined;
-          const ids = findingIdsInJiraDescription(fields.description);
           if (ids.length === 0) unmarked++;
-          const jira = { summary: fields.summary, description: fields.description, attachments: namesOf(fields.attachment), links: keysOf(fields.issuelinks) };
-          for (const id of ids) rememberFiled(map, id, { ref: key, number, url: `${baseUrl}/browse/${key}`, open: status !== "done", jira });
+          for (const id of ids) rememberFiled(map, id, issue);
         }
         nextPageToken = typeof body.nextPageToken === "string" && body.nextPageToken ? body.nextPageToken : undefined;
         if (!nextPageToken || body.isLast === true) return { map, issues, unmarked };
@@ -428,6 +484,14 @@ function jiraApi({ baseUrl, projectKey, issueType, linkType }: JiraTarget, send:
       throw new ExportError(
         `more than ${MAX_PAGES} pages of issues in ${projectKey} carry the ${MARKER_LABEL} label, too many to check them all for this export's findings`,
       );
+    },
+    async read(ref) {
+      // Read by key, which Jira answers from the issue itself rather than from its search, so a new issue shows at once.
+      const body = await send({ method: "GET", path: `${issuePath(ref)}?fields=${FIELDS.join(",")}`, idempotent: true, missingOk: true });
+      if (body === null) return null;
+      const read = readIssue(body, "answered with");
+      // An issue moved to another project answers under its new key: it is no longer this project's.
+      return read.issue.ref === ref ? read : null;
     },
     async create(f, ctx, extras) {
       const body = await send({
@@ -546,6 +610,44 @@ function pictureOf(f: Finding, memoryDir: string): Frame | null {
   return found && found.stat.size <= MAX_FRAME_BYTES ? { ...picture, file: found.file, upload: uploadName(picture.rel, picture.at) } : null;
 }
 
+/** The record of the issues earlier exports filed; none yet is an empty one, and one that cannot be read ends the export. */
+function readRecord(recordPath: string): ExportRecord {
+  let text: string | null;
+  try {
+    text = fs.readFileSync(recordPath, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT")
+      throw new ExportError(`could not read ${recordPath}: ${err instanceof Error ? err.message : String(err)}`);
+    text = null;
+  }
+  const parsed = parseExportRecord(text);
+  if (!parsed.ok)
+    throw new ExportError(
+      `could not read ${recordPath}: ${parsed.error}. It records the issues earlier exports filed, so an export straight after another does not file them again; move it aside to start a new record`,
+    );
+  return parsed.value;
+}
+
+/**
+ * Set one finding's entry in the record, read afresh so the entries of an
+ * export that finished meanwhile are kept, and written whole or not at all.
+ * It takes no lock: two exports from one project at the same moment can each
+ * drop the other's latest entry. Exports are meant to run one at a time per
+ * project, and an entry lost that way costs only the read-back, since the
+ * listing still finds the issue once it catches up.
+ */
+function writeRecord(recordPath: string, key: string, id: string, entry: Parameters<typeof recordWith>[3]): void {
+  const text = recordWith(readRecord(recordPath), key, id, entry);
+  const temp = `${recordPath}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temp, text, { mode: 0o600 });
+    fs.renameSync(temp, recordPath);
+  } catch (err) {
+    fs.rmSync(temp, { force: true });
+    throw err;
+  }
+}
+
 // ── the export ──────────────────────────────────────────────────────────────
 
 const OUTCOME_WORDS: Record<PlanEntry["outcome"], string> = { file: "would file", "already-filed": "already filed", "over-cap": "over the cap" };
@@ -609,7 +711,12 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
     // A closed issue counts as filed unless --refile-closed.
     const includeClosed = !o.refileClosed;
     let existing: Map<string, FiledIssue> | null = null;
+    const recordPath = path.join(memoryDir, EXPORT_RECORD_FILE);
+    const key = recordKey(o);
+    let candidates = selection.candidates;
+    let heldBack = 0;
     if (tracker) {
+      const recorded = readRecord(recordPath)[key] ?? {};
       const found = await tracker.existing(includeClosed);
       existing = found.map;
       say(
@@ -617,11 +724,47 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
           `${includeClosed ? " (open or closed)" : ""}${found.unmarked ? `, ${found.unmarked} of them with no marker` : ""}` +
           `${includeClosed ? "" : "; a finding whose issue was closed is filed again (--refile-closed)"}.`,
       );
+      // The listing can lag behind a create, so an issue an earlier export recorded is read back by its number before its finding counts as unfiled.
+      let readBack = 0;
+      for (const f of candidates) {
+        const entry = recorded[f.id];
+        if (!entry || "uncertain" in entry || existing.has(f.id)) continue;
+        const read = await tracker.read(entry.ref, entry.number);
+        // Gone, moved, or no longer carrying the marker: the finding is filed again, as the listing says.
+        if (!read || !read.ids.includes(f.id) || (!includeClosed && !read.issue.open)) continue;
+        rememberFiled(existing, f.id, read.issue);
+        readBack++;
+      }
+      if (readBack > 0) say(`  ${readBack} more finding(s) found filed by the issue number recorded in ${recordPath}, as the listing does not show them yet.`);
+      // A Jira create that may have been made, and that the search does not show yet, holds its finding back for a while rather than file it twice.
+      if (!tracker.consistentListing) {
+        const held = candidates.filter((f) => !existing!.has(f.id) && recorded[f.id] && uncertainHolds(recorded[f.id], http.now()));
+        for (const f of held) {
+          const until = new Date(Date.parse(recorded[f.id].at) + UNCERTAIN_HOLD_MS).toISOString();
+          say(`  ${"held back".padEnd(13)}  ${findingLine(f)}`);
+          // A dry run says so and files nothing anyway, so a hold is not a failure of it.
+          if (!o.dryRun)
+            problems.push(
+              `finding ${f.id} was held back: an export at ${recorded[f.id].at} may have filed it before an error, and ${tracker.label}'s search does not show it yet. An export after ${until} files it if it is still not found`,
+            );
+        }
+        candidates = candidates.filter((f) => !held.includes(f));
+        heldBack = held.length;
+      }
     } else if (!credentials.ok) {
       say(`Not compared with ${TRACKER_LABEL[o.to]}: ${credentials.error}. A finding filed earlier is listed below as one to file.`);
     }
+    const record = (f: Finding, entry: Parameters<typeof recordWith>[3], ref: string): void => {
+      try {
+        writeRecord(recordPath, key, f.id, entry);
+      } catch (err) {
+        problems.push(
+          `${ref}: not recorded in ${recordPath} (${err instanceof Error ? err.message : String(err)}), so an export straight after this one may not see it yet`,
+        );
+      }
+    };
 
-    plan = planExport(selection.candidates, existing, o.maxIssues);
+    plan = planExport(candidates, existing, o.maxIssues);
     const steps = o.screenshots ? framedSteps(memoryDir) : { steps: [], unreadable: 0 };
     if (steps.unreadable > 0) say(`Skipped ${steps.unreadable} session-log line(s) or file(s) that could not be read while looking for screenshots.`);
     const contextOf = (f: Finding): { ctx: IssueContext; extras: Extras } => {
@@ -705,9 +848,17 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
       }
       if (writes > 0 && pauseMs > 0) await http.wait(pauseMs);
       const { ctx, extras } = contextOf(f);
-      const done = await fileOne(tracker, f, ctx, extras, includeClosed, http);
+      let done: Awaited<ReturnType<typeof fileOne>>;
+      try {
+        done = await fileOne(tracker, f, ctx, extras, includeClosed, http);
+      } catch (err) {
+        if (err instanceof ExportError && err.uncertain && !tracker.consistentListing)
+          record(f, { uncertain: true, at: new Date(http.now()).toISOString() }, `finding ${f.id}`);
+        throw err;
+      }
       writes++;
       filed.push({ id: f.id, issue: done.issue });
+      record(f, { ref: done.issue.ref, number: done.issue.number, url: done.issue.url, at: new Date(http.now()).toISOString() }, done.issue.ref);
       say(
         `  ${`filed ${done.issue.ref}`.padEnd(13)}  ${findingLine(f)}  ${done.issue.url}${done.confirmed ? " (found by its marker after the tracker's error)" : ""}`,
       );
@@ -718,7 +869,8 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
 
     const count = (outcome: PlanEntry["outcome"]): number => plan.filter((e) => e.outcome === outcome).length;
     const over = count("over-cap");
-    const overText = over ? `; ${over} over the cap of ${o.maxIssues} (--max-issues): export again to file them` : "";
+    const overText =
+      (over ? `; ${over} over the cap of ${o.maxIssues} (--max-issues): export again to file them` : "") + (heldBack ? `; ${heldBack} held back` : "");
     say(
       o.dryRun
         ? `Would file ${count("file")}; ${count("already-filed")} already filed${overText}.`
@@ -735,7 +887,7 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
     if (err instanceof ExportError && err.uncertain)
       complain(
         o.to === "jira"
-          ? "Jira may have made that issue before the error, and its search can take minutes to show a new one, so it was not sent again. Export again later: the issue is found by its marker if it exists, and filed if it does not."
+          ? `Jira may have made that issue before the error, and its search can take minutes to show a new one, so it was not sent again. Export again later: the issue is found by its marker if it exists, and filed if it does not. An export within ${UNCERTAIN_HOLD_MS / 60_000} minutes holds that finding back unless it finds the issue.`
           : "The tracker may have made that issue before the error. The next export finds it by its marker and does not file it again.",
       );
     for (const p of problems) complain(`scenescout export: ${p}`);
@@ -752,8 +904,9 @@ const GITHUB_HEADERS = { accept: "application/vnd.github+json", "x-github-api-ve
  * on (a timeout, a 5xx, an answer cut off) is not simply sent again: the
  * issues are listed again first, and if one already carries this finding's
  * marker, that is the issue. Only when none does is the create repeated, and
- * only where the listing shows a new issue at once (GitHub); in Jira, whose
- * search lags, the export stops instead.
+ * only where the listing shows a new issue at once (GitHub, through its
+ * newest issues read with no label filter); in Jira, whose search lags, the
+ * export stops instead, and records the finding as held back for a while.
  */
 async function fileOne(
   tracker: TrackerApi,

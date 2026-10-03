@@ -27,6 +27,7 @@ import {
   credentialSecrets,
   DEFAULT_SEVERITY_MAP,
   EXIT_EXPORT,
+  EXPORT_RECORD_FILE,
   findingIdsInGithubBody,
   findingIdsInJiraDescription,
   failedCriteriaByFinding,
@@ -45,14 +46,19 @@ import {
   jiraRevision,
   MARKER_LABEL,
   parseExportArgs,
+  parseExportRecord,
   planExport,
   planJiraUpdate,
   rateLimit,
+  recordKey,
+  recordWith,
   rememberFiled,
   selectFindings,
   ticketsToLink,
   trackerCredentials,
   trackerMessage,
+  UNCERTAIN_HOLD_MS,
+  uncertainHolds,
   uploadName,
   type ExportOptions,
   type FiledIssue,
@@ -785,10 +791,15 @@ interface GhOptions {
   urlSuffix?: string;
   /** Leave the body out of listed issues, as an API that does not return it would. */
   omitBody?: boolean;
+  /** Leave a new issue out of the label-filtered list until `settle()`, as GitHub's eventually consistent label filter does. */
+  lag?: boolean;
+  /** With `lag`, leave it out of the unfiltered list too, as when more than 100 newer issues and pull requests push it off the first page. */
+  lagEverywhere?: boolean;
 }
 
-async function standInGitHub(opts: GhOptions = {}): Promise<StandIn & { issues: GhIssue[] }> {
+async function standInGitHub(opts: GhOptions = {}): Promise<StandIn & { issues: GhIssue[]; settle: () => void }> {
   const issues: GhIssue[] = [];
+  const unsettled = new Set<number>();
   const prefix = opts.prefix ?? "";
   const view = (i: GhIssue) => ({
     number: i.number,
@@ -802,13 +813,22 @@ async function standInGitHub(opts: GhOptions = {}): Promise<StandIn & { issues: 
     // A tracker that quotes the credentials back in an error: the export must still never print them.
     if (s.headers.authorization !== `Bearer ${GH_TOKEN}`) return send(401, { message: `Bad credentials: ${String(s.headers.authorization)}` });
     const u = new URL(s.url, "http://x");
+    const one = new RegExp(`^${prefix}/repos/owner/app/issues/(\\d+)$`).exec(u.pathname);
+    if (s.method === "GET" && one) {
+      // Read by number, an issue shows as soon as it is made.
+      const issue = issues.find((i) => i.number === Number(one[1]));
+      return issue ? send(200, view(issue)) : send(404, { message: "Not Found" });
+    }
     if (u.pathname !== `${prefix}/repos/owner/app/issues`) return send(404, { message: "Not Found" });
     if (s.method === "GET") {
       const state = u.searchParams.get("state") ?? "open";
       const label = u.searchParams.get("labels");
       const page = Number(u.searchParams.get("page") ?? 1);
       const per = Number(u.searchParams.get("per_page") ?? 30);
-      const list = issues.filter((i) => (state === "all" || i.state === state) && (!label || i.labels.includes(label)));
+      const list = issues.filter(
+        (i) => (state === "all" || i.state === state) && (!label || i.labels.includes(label)) && !((label || opts.lagEverywhere) && unsettled.has(i.number)),
+      );
+      if (u.searchParams.get("direction") === "desc") list.reverse();
       return send(200, list.slice((page - 1) * per, page * per).map(view));
     }
     const input = JSON.parse(s.raw.toString("utf8")) as { title: string; body: string; labels: string[] };
@@ -818,9 +838,10 @@ async function standInGitHub(opts: GhOptions = {}): Promise<StandIn & { issues: 
     }
     const issue: GhIssue = { number: issues.length + 1, title: input.title, body: input.body, labels: opts.dropLabels ? [] : input.labels, state: "open" };
     issues.push(issue);
+    if (opts.lag) unsettled.add(issue.number);
     send(201, view(issue));
   });
-  return Object.assign(stand, { issues });
+  return Object.assign(stand, { issues, settle: () => unsettled.clear() });
 }
 
 interface JiraIssue {
@@ -840,12 +861,32 @@ interface JiraOptions {
   tickets?: string[];
   /** The link types the site has. */
   linkTypes?: string[];
+  /** Leave a new issue out of the search until `settle()`, as Jira's search index does for a while. */
+  lag?: boolean;
 }
 
-async function standInJira(opts: JiraOptions = {}): Promise<StandIn & { issues: JiraIssue[] }> {
+async function standInJira(opts: JiraOptions = {}): Promise<StandIn & { issues: JiraIssue[]; settle: () => void }> {
   const issues: JiraIssue[] = [];
+  const unsettled = new Set<string>();
   const tickets = new Set(opts.tickets ?? []);
   const linkTypes = new Set(opts.linkTypes ?? ["Relates", "Blocks"]);
+  const viewOf = (i: JiraIssue, fields: readonly string[]) => ({
+    key: i.key,
+    fields: {
+      ...(fields.includes("summary") ? { summary: i.fields.summary } : {}),
+      ...(opts.omitDescription ? {} : { description: i.fields.description }),
+      status: { statusCategory: { key: i.done ? "done" : "new" } },
+      ...(fields.includes("attachment") ? { attachment: i.attachments.map((filename, n) => ({ id: String(n + 1), filename })) } : {}),
+      ...(fields.includes("issuelinks")
+        ? {
+            issuelinks: (i.links ?? []).map((l) => {
+              const [type, key] = l.split(":");
+              return { type: { name: type }, inwardIssue: { key, fields: {} } };
+            }),
+          }
+        : {}),
+    },
+  });
   const stand = await serve((s, send, violations) => {
     if (s.headers.authorization !== `Basic ${JIRA_BASIC}`)
       return send(401, { errorMessages: [`Client must be authenticated: ${String(s.headers.authorization)}`] });
@@ -857,31 +898,22 @@ async function standInJira(opts: JiraOptions = {}): Promise<StandIn & { issues: 
         return send(400, { errorMessages: ["The query is not this project's"] });
       }
       const open = /statusCategory != Done/.test(input.jql);
-      const list = issues.filter((i) => (i.fields.labels as string[]).includes("scenescout") && (!open || !i.done));
+      const list = issues.filter((i) => (i.fields.labels as string[]).includes("scenescout") && (!open || !i.done) && !unsettled.has(i.key));
       const from = Number(input.nextPageToken ?? 0);
       const page = list.slice(from, from + input.maxResults);
       const more = from + input.maxResults < list.length;
       return send(200, {
-        issues: page.map((i) => ({
-          key: i.key,
-          fields: {
-            ...(input.fields.includes("summary") ? { summary: i.fields.summary } : {}),
-            ...(opts.omitDescription ? {} : { description: i.fields.description }),
-            status: { statusCategory: { key: i.done ? "done" : "new" } },
-            ...(input.fields.includes("attachment") ? { attachment: i.attachments.map((filename, n) => ({ id: String(n + 1), filename })) } : {}),
-            ...(input.fields.includes("issuelinks")
-              ? {
-                  issuelinks: (i.links ?? []).map((l) => {
-                    const [type, key] = l.split(":");
-                    return { type: { name: type }, inwardIssue: { key, fields: {} } };
-                  }),
-                }
-              : {}),
-          },
-        })),
+        issues: page.map((i) => viewOf(i, input.fields)),
         ...(more ? { nextPageToken: String(from + input.maxResults) } : {}),
         isLast: !more,
       });
+    }
+    const read = /^\/rest\/api\/3\/issue\/(QA-\d+)$/.exec(p);
+    if (s.method === "GET" && read) {
+      // Read by key, an issue shows as soon as it is made.
+      const issue = issues.find((i) => i.key === read[1]);
+      const fields = (new URL(s.url, "http://x").searchParams.get("fields") ?? "").split(",");
+      return issue ? send(200, viewOf(issue, fields)) : send(404, { errorMessages: ["Issue does not exist or you do not have permission to see it."] });
     }
     if (s.method === "POST" && p === "/rest/api/3/issue") {
       const { fields } = JSON.parse(s.raw.toString("utf8")) as { fields: Record<string, unknown> };
@@ -891,6 +923,7 @@ async function standInJira(opts: JiraOptions = {}): Promise<StandIn & { issues: 
       }
       const key = `QA-${issues.length + 1}`;
       issues.push({ key, fields, done: false, attachments: [] });
+      if (opts.lag) unsettled.add(key);
       return send(201, { id: String(10000 + issues.length), key, self: `https://example.atlassian.net/rest/api/3/issue/${key}` });
     }
     const edit = /^\/rest\/api\/3\/issue\/(QA-\d+)$/.exec(p);
@@ -934,7 +967,7 @@ async function standInJira(opts: JiraOptions = {}): Promise<StandIn & { issues: 
     }
     send(404, { errorMessages: ["Not found"] });
   });
-  return Object.assign(stand, { issues });
+  return Object.assign(stand, { issues, settle: () => unsettled.clear() });
 }
 
 function projectWith(findings: Finding[]): string {
@@ -1122,7 +1155,8 @@ test("GitHub: a 5xx on a read is retried with backoff; a refusal is not retried"
     const run = await exportOnce(GH, { GH_TOKEN, GITHUB_API_URL: gh.url }, projectWith(THREE));
     assert.equal(run.exitCode, EXIT_EXPORT.done, run.err.join("\n"));
     assert.deepEqual(run.waits, [backoffMs(1, () => 0)]);
-    assert.equal(gh.seen.length, 2);
+    // The newest issues, sent twice, then the labelled ones.
+    assert.equal(gh.seen.length, 3);
 
     gh.faults.push({ method: "POST", path: /\/issues$/, status: 422, body: { message: "Validation Failed", errors: [{ field: "labels", code: "invalid" }] } });
     const refused = await exportOnce([...GH, "--yes"], { GH_TOKEN, GITHUB_API_URL: gh.url }, projectWith(THREE));
@@ -1156,7 +1190,8 @@ test("GitHub: a create that failed before the tracker made the issue is sent aga
     assert.equal(run.exitCode, EXIT_EXPORT.done, run.err.join("\n"));
     assert.equal(gh.issues.length, 1);
     assert.equal(posts(gh).length, 2);
-    assert.equal(gh.seen.filter((s) => s.method === "GET").length, 2, "listed once to plan, and once more before sending it again");
+    // Each listing is two reads: the newest issues, then the labelled ones.
+    assert.equal(gh.seen.filter((s) => s.method === "GET").length, 4, "listed once to plan, and once more before sending it again");
   } finally {
     await gh.close();
   }
@@ -2196,6 +2231,233 @@ test("Jira: an update whose every link fails says nothing was updated, and fails
     assert.ok(run.out.some((l) => l.startsWith("Filed 0; 1 already filed.")));
     assert.match(run.err.join("\n"), /QA-1: not linked to PROJ-12/);
     assert.equal(jira.issues[0].edits, undefined);
+  } finally {
+    await jira.close();
+  }
+});
+
+// ── a listing that lags behind a create ─────────────────────────────────────
+
+const recordOf = (dir: string): string => path.join(dir, ".scenescout", EXPORT_RECORD_FILE);
+
+test("record: read back as written, refused when it cannot be read, keyed by tracker and place", () => {
+  assert.deepEqual(parseExportRecord(null), { ok: true, value: {} });
+  const filed = { ref: "#3", number: 3, url: "https://github.example/owner/app/issues/3", at: "2026-10-03T10:00:00.000Z" };
+  const text = recordWith({}, "github https://api.github.com owner/app", "aaa0000001", filed);
+  const read = parseExportRecord(text);
+  assert.deepEqual(read, { ok: true, value: { "github https://api.github.com owner/app": { aaa0000001: filed } } });
+  // Another entry is added beside the first, and the record passed in is left as it was.
+  const before = read.ok ? read.value : {};
+  const again = parseExportRecord(recordWith(before, "jira https://example.atlassian.net QA", "bbb0000002", { uncertain: true, at: filed.at }));
+  assert.ok(again.ok && Object.keys(again.value).length === 2);
+  assert.equal(Object.keys(before).length, 1);
+  for (const bad of [
+    "{",
+    "[]",
+    '{"version":2,"trackers":{}}',
+    '{"version":1}',
+    '{"version":1,"trackers":{"k":{"aaa0000001":{"ref":"#1"}}}}',
+    '{"version":1,"trackers":{"k":{"no spaces":{"uncertain":true,"at":"x"}}}}',
+  ])
+    assert.equal(parseExportRecord(bad).ok, false, bad);
+
+  const gh = (apiUrl: string, repo: string) => recordKey({ to: "github", github: { repo, apiUrl } });
+  assert.equal(gh("https://api.github.com/", "owner/app"), gh("https://api.github.com", "owner/app"));
+  assert.notEqual(gh("https://api.github.com", "owner/app"), gh("https://api.github.com", "owner/other"));
+  assert.notEqual(gh("https://api.github.com", "owner/app"), gh("https://ghe.example/api/v3", "owner/app"));
+  const jiraKey = recordKey({
+    to: "jira",
+    jira: { baseUrl: "https://example.atlassian.net", projectKey: "QA", issueType: "Bug", linkType: null, update: true },
+  });
+  assert.match(jiraKey, /^jira https:\/\/example\.atlassian\.net QA$/);
+});
+
+test("record: a create that may have been made holds its finding back for a while, and never for good", () => {
+  const at = Date.parse("2026-10-03T10:00:00.000Z");
+  const uncertain = { uncertain: true as const, at: new Date(at).toISOString() };
+  assert.equal(uncertainHolds(uncertain, at + 1000), true);
+  assert.equal(uncertainHolds(uncertain, at + UNCERTAIN_HOLD_MS - 1), true);
+  assert.equal(uncertainHolds(uncertain, at + UNCERTAIN_HOLD_MS), false);
+  // A clock set far ahead, or a time that cannot be read, does not hold a finding back for good.
+  assert.equal(uncertainHolds(uncertain, at - 2 * UNCERTAIN_HOLD_MS), false);
+  assert.equal(uncertainHolds({ uncertain: true, at: "not a time" }, at), false);
+  assert.equal(uncertainHolds({ ref: "#1", number: 1, url: "u", at: uncertain.at }, at), false);
+});
+
+test("GitHub: an export straight after another files nothing, though the labelled list does not show the new issues yet", async () => {
+  const gh = await standInGitHub({ lag: true });
+  try {
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    const dir = projectWith(THREE);
+    const first = await exportOnce([...GH, "--yes"], env, dir);
+    assert.equal(first.exitCode, EXIT_EXPORT.done, first.err.join("\n"));
+    assert.equal(gh.issues.length, 3);
+    const second = await exportOnce([...GH, "--yes"], env, dir);
+    assert.equal(second.exitCode, EXIT_EXPORT.done, second.err.join("\n"));
+    assert.equal(gh.issues.length, 3, "nothing filed twice");
+    assert.match(second.out.join("\n"), /Filed 0; 3 already filed/);
+
+    // On another machine there is no record: the newest issues, listed with no label filter, show them.
+    fs.rmSync(recordOf(dir));
+    const fresh = await exportOnce([...GH, "--yes"], env, dir);
+    assert.equal(fresh.exitCode, EXIT_EXPORT.done, fresh.err.join("\n"));
+    assert.equal(gh.issues.length, 3, "nothing filed twice from a fresh record either");
+  } finally {
+    await gh.close();
+  }
+});
+
+test("GitHub: with no list showing the new issues yet, the numbers the record holds are what keep a second export from filing them", async () => {
+  const gh = await standInGitHub({ lag: true, lagEverywhere: true });
+  try {
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    const dir = projectWith(THREE);
+    const first = await exportOnce([...GH, "--yes"], env, dir);
+    assert.equal(first.exitCode, EXIT_EXPORT.done, first.err.join("\n"));
+    const second = await exportOnce([...GH, "--yes"], env, dir);
+    assert.equal(second.exitCode, EXIT_EXPORT.done, second.err.join("\n"));
+    assert.equal(gh.issues.length, 3, "nothing filed twice");
+    assert.match(second.out.join("\n"), /3 more finding\(s\) found filed by the issue number recorded in/);
+    assert.deepEqual(
+      gh.seen.filter((x) => x.method === "GET" && /\/issues\/\d+$/.test(x.url)).map((x) => x.url.split("/").at(-1)),
+      ["1", "2", "3"],
+    );
+  } finally {
+    await gh.close();
+  }
+});
+
+test("GitHub: a dry run with credentials reads the tracker and writes no record", async () => {
+  const gh = await standInGitHub();
+  try {
+    const dir = projectWith(THREE);
+    const run = await exportOnce(GH, { GH_TOKEN, GITHUB_API_URL: gh.url }, dir);
+    assert.equal(run.exitCode, EXIT_EXPORT.done, run.err.join("\n"));
+    assert.ok(gh.seen.length > 0, "the tracker was asked");
+    assert.equal(fs.existsSync(recordOf(dir)), false);
+  } finally {
+    await gh.close();
+  }
+});
+
+test("GitHub: a create that failed after the tracker made the issue is found by its marker while the labelled list lags", async () => {
+  const gh = await standInGitHub({ lag: true });
+  try {
+    gh.faults.push({ method: "POST", path: /\/issues$/, status: 500, body: { message: "Server Error" }, then: "answer" });
+    const dir = projectWith(THREE);
+    const run = await exportOnce([...GH, "--yes", "--only", "aaa0000001"], { GH_TOKEN, GITHUB_API_URL: gh.url }, dir);
+    assert.equal(run.exitCode, EXIT_EXPORT.done, run.err.join("\n"));
+    assert.equal(gh.issues.length, 1, "one issue, not two");
+    assert.deepEqual(run.filed, ["#1"]);
+    // Found that way, it is recorded like any other.
+    const record = parseExportRecord(fs.readFileSync(recordOf(dir), "utf8"));
+    assert.ok(record.ok && Object.values(record.value)[0].aaa0000001 && "number" in Object.values(record.value)[0].aaa0000001);
+  } finally {
+    await gh.close();
+  }
+});
+
+test("GitHub: a recorded issue that is gone, closed under --refile-closed, or carries another marker is filed again", async () => {
+  const gh = await standInGitHub({ lag: true });
+  try {
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    const dir = projectWith(THREE);
+    const first = await exportOnce([...GH, "--yes"], env, dir);
+    assert.equal(first.exitCode, EXIT_EXPORT.done, first.err.join("\n"));
+    gh.settle();
+    // #1 is deleted, #2 closed, and #3 rewritten to carry no marker.
+    gh.issues.splice(0, 1);
+    gh.issues[0].state = "closed";
+    gh.issues[1].body = "Rewritten by hand.";
+    const second = await exportOnce([...GH, "--yes", "--refile-closed"], env, dir);
+    assert.equal(second.exitCode, EXIT_EXPORT.done, second.err.join("\n"));
+    assert.equal(posts(gh).length, 6, "each of the three filed again");
+  } finally {
+    await gh.close();
+  }
+});
+
+test("export: a record that cannot be read ends the export before anything is filed", async () => {
+  const gh = await standInGitHub();
+  try {
+    const dir = projectWith(THREE);
+    fs.writeFileSync(recordOf(dir), "{ not json");
+    const run = await exportOnce([...GH, "--yes"], { GH_TOKEN, GITHUB_API_URL: gh.url }, dir);
+    assert.equal(run.exitCode, EXIT_EXPORT.couldNotExport);
+    assert.match(run.err.join("\n"), /could not read .*exported\.json: it is not JSON.*move it aside/);
+    assert.equal(posts(gh).length, 0);
+    // A dry run with no credentials asks the tracker nothing, so it does not need the record either.
+    const dry = await exportOnce(GH, {}, dir);
+    assert.equal(dry.exitCode, EXIT_EXPORT.done, dry.err.join("\n"));
+  } finally {
+    await gh.close();
+  }
+});
+
+test("Jira: an export straight after another files nothing, though the search does not show the new issues yet", async () => {
+  const jira = await standInJira({ lag: true });
+  try {
+    const env = JIRA_ENV(jira.url);
+    const dir = projectWith(THREE);
+    const first = await exportOnce(["--to", "jira", "--yes"], env, dir);
+    assert.equal(first.exitCode, EXIT_EXPORT.done, first.err.join("\n"));
+    assert.equal(jira.issues.length, 3);
+    const second = await exportOnce(["--to", "jira", "--yes"], env, dir);
+    assert.equal(second.exitCode, EXIT_EXPORT.done, second.err.join("\n"));
+    assert.equal(jira.issues.length, 3, "nothing filed twice");
+    assert.match(second.out.join("\n"), /3 more finding\(s\) found filed by the issue number recorded in/);
+    assert.match(second.out.join("\n"), /Filed 0; 3 already filed/);
+  } finally {
+    await jira.close();
+  }
+});
+
+test("Jira: a finding whose create may have been made is held back while the search does not show it, then found or filed", async () => {
+  const jira = await standInJira({ lag: true });
+  try {
+    const env = JIRA_ENV(jira.url);
+    const dir = projectWith([THREE[0]]);
+    const at = Date.parse("2026-10-03T10:00:00.000Z");
+    // Made, then answered with a 500.
+    jira.faults.push({ method: "POST", path: /\/rest\/api\/3\/issue$/, status: 500, body: { errorMessages: ["Internal error"] }, then: "answer" });
+    const first = await exportOnce(["--to", "jira", "--yes"], env, dir, { now: () => at });
+    assert.equal(first.exitCode, EXIT_EXPORT.couldNotExport);
+    assert.equal(jira.issues.length, 1);
+
+    const soon = await exportOnce(["--to", "jira", "--yes"], env, dir, { now: () => at + 60_000 });
+    assert.equal(soon.exitCode, EXIT_EXPORT.couldNotExport, "held back, so not done");
+    assert.equal(jira.issues.length, 1, "not filed twice while the search lags");
+    assert.match(soon.out.join("\n"), /Filed 0; 0 already filed; 1 held back\./);
+    assert.match(soon.out.join("\n"), /held back\s+high\s+Saving a thing answers 500  \[finding aaa0000001\]/);
+    assert.match(soon.err.join("\n"), /finding aaa0000001 was held back: .*An export after 2026-10-03T10:15:00\.000Z files it/);
+    // A dry run lists the hold and files nothing either way, so it is not a failure there.
+    const dry = await exportOnce(["--to", "jira"], env, dir, { now: () => at + 60_000 });
+    assert.equal(dry.exitCode, EXIT_EXPORT.done, dry.err.join("\n"));
+    assert.match(dry.out.join("\n"), /held back\s+high/);
+
+    jira.settle();
+    const later = await exportOnce(["--to", "jira", "--yes"], env, dir, { now: () => at + UNCERTAIN_HOLD_MS + 1 });
+    assert.equal(later.exitCode, EXIT_EXPORT.done, later.err.join("\n"));
+    assert.equal(jira.issues.length, 1, "found by its marker once the search shows it");
+  } finally {
+    await jira.close();
+  }
+});
+
+test("Jira: a create that failed before Jira made the issue is filed by an export after the hold", async () => {
+  const jira = await standInJira({ lag: true });
+  try {
+    const env = JIRA_ENV(jira.url);
+    const dir = projectWith([THREE[0]]);
+    const at = Date.parse("2026-10-03T10:00:00.000Z");
+    // Refused with a 503 and never made.
+    jira.faults.push({ method: "POST", path: /\/rest\/api\/3\/issue$/, status: 503, body: { errorMessages: ["Unavailable"] } });
+    const first = await exportOnce(["--to", "jira", "--yes"], env, dir, { now: () => at });
+    assert.equal(first.exitCode, EXIT_EXPORT.couldNotExport);
+    assert.equal(jira.issues.length, 0);
+    const later = await exportOnce(["--to", "jira", "--yes"], env, dir, { now: () => at + UNCERTAIN_HOLD_MS + 1 });
+    assert.equal(later.exitCode, EXIT_EXPORT.done, later.err.join("\n"));
+    assert.equal(jira.issues.length, 1);
   } finally {
     await jira.close();
   }
