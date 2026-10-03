@@ -45,6 +45,7 @@ import {
   notActionable,
   parseFlow,
   parseTarget,
+  repeatFailure,
   requestPathMatches,
   resolveFlowsDir,
   splitRefusals,
@@ -1468,7 +1469,7 @@ test("flows: every mistake names the file and the field", () => {
     [bad([]), /^f\.json: steps needs at least one step/],
     [
       bad([nav, { action: "hover", target: "testid=x" }]),
-      /^f\.json: steps\[1\]\.action must be one of navigate, click, type, select, press, expect-text, expect-element, expect-url, expect-request/,
+      /^f\.json: steps\[1\]\.action must be one of navigate, click, type, select, press, expect-text, expect-element, expect-url, expect-request, repeat/,
     ],
     [bad([nav, { action: "click" }]), /^f\.json: steps\[1\]\.target is required/],
     [bad([nav, { action: "click", target: "#save" }]), /^f\.json: steps\[1\]\.target must be testid=…, text=…, label=… or role=/],
@@ -1553,6 +1554,40 @@ test("flows: an element state holds or says what is true instead, in both direct
     if (actual === null) assert.ok(verdict.ok, label);
     else assert.deepEqual(verdict, { ok: false, actual }, label);
   }
+});
+
+test("flows: a repeat step holds actions and a condition, and every mistake in one is named", () => {
+  const nav = { action: "navigate", target: "/" };
+  const next = { action: "click", target: "testid=next" };
+  const enabled = { action: "expect-element", target: "testid=continue", state: "enabled" };
+  const ok = parseFlow(JSON.stringify({ steps: [nav, { action: "repeat", steps: [next], until: enabled, max: 50 }] }), "f.json");
+  assert.ok(ok.ok, ok.ok ? "" : ok.error);
+  assert.equal(describeStep(ok.flow.steps[1]), "repeat click testid=next until expect testid=continue to be enabled (at most 50 times)");
+  const bad = (repeat: Record<string, unknown>) => JSON.stringify({ steps: [nav, { action: "repeat", steps: [next], until: enabled, max: 5, ...repeat }] });
+  const cases: Array<[string, RegExp]> = [
+    [bad({ max: 0 }), /steps\[1\]\.max/],
+    [bad({ max: 101 }), /steps\[1\]\.max is at most 100/],
+    [bad({ max: undefined }), /steps\[1\]\.max is required/],
+    [bad({ steps: [] }), /steps\[1\]\.steps needs at least one step to repeat/],
+    [bad({ steps: [nav] }), /steps\[1\]\.steps may only hold click, type, select and press steps/],
+    [
+      bad({ until: { action: "expect-request", request: "GET /api/x", status: 200 } }),
+      /steps\[1\]\.until must be an expect-text, expect-element or expect-url step/,
+    ],
+    [bad({ until: next }), /steps\[1\]\.until must be an expect-text/],
+    [bad({ until: undefined }), /steps\[1\]\.until is required/],
+  ];
+  for (const [text, re] of cases) {
+    const parsed = parseFlow(text, "f.json");
+    assert.ok(!parsed.ok, text);
+    assert.match(parsed.error, re, text);
+  }
+  // A repeat never nests: its steps are single steps.
+  assert.ok(!parseFlow(bad({ steps: [{ action: "repeat", steps: [next], until: enabled, max: 2 }] }), "f.json").ok);
+  assert.equal(
+    repeatFailure({ action: "expect-text", text: "Done" }, 3, 'no visible text "Done"'),
+    'expect text "Done" still did not hold after repeating 3 time(s): no visible text "Done"',
+  );
 });
 
 test("flows: targets are scout_run_plan's, plus role with an optional name", () => {

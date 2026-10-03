@@ -226,7 +226,10 @@ const target = z
     }
   });
 
-const STEP_SCHEMAS = [
+/** Most times a repeat step may run its steps. A longer loop is a page that should be reached another way. */
+export const MAX_REPEATS = 100;
+
+const SINGLE_STEP_SCHEMAS = [
   z.object({ action: z.literal("navigate"), target: z.string().regex(/^\//, "must be a path on the app, starting with /") }).strict(),
   z.object({ action: z.literal("click"), target }).strict(),
   z.object({ action: z.literal("type"), target, value: z.string(), pressEnter: z.boolean().optional(), replace: z.boolean().optional() }).strict(),
@@ -244,9 +247,36 @@ const STEP_SCHEMAS = [
     .strict(),
 ] as const;
 
+const singleStepSchema = z.discriminatedUnion("action", [...SINGLE_STEP_SCHEMAS]);
+type SingleStep = z.infer<typeof singleStepSchema>;
+const isRepeatable = (s: SingleStep): boolean => s.action === "click" || s.action === "type" || s.action === "select" || s.action === "press";
+const isRepeatCondition = (s: SingleStep): boolean => s.action === "expect-text" || s.action === "expect-element" || s.action === "expect-url";
+
+/**
+ * Repeat some actions until a condition holds: paging through a document until
+ * the Continue button is enabled, pressing Next until the last slide shows. The
+ * condition is checked first, so a page already in the wanted state runs the
+ * actions no times; it fails when the condition still does not hold after `max`.
+ */
+const repeatSchema = z
+  .object({
+    action: z.literal("repeat"),
+    steps: z
+      .array(singleStepSchema)
+      .min(1, "needs at least one step to repeat")
+      .max(10, "holds at most 10 steps")
+      .refine((steps) => steps.every(isRepeatable), { message: "may only hold click, type, select and press steps" }),
+    until: singleStepSchema.refine(isRepeatCondition, { message: "must be an expect-text, expect-element or expect-url step" }),
+    max: z.number().int().min(1).max(MAX_REPEATS, `is at most ${MAX_REPEATS}`),
+  })
+  .strict();
+
+const STEP_SCHEMAS = [...SINGLE_STEP_SCHEMAS, repeatSchema] as const;
 const stepSchema = z.discriminatedUnion("action", [...STEP_SCHEMAS]);
 
 export type FlowStep = z.infer<typeof stepSchema>;
+/** A step that acts or asserts once: every step but repeat, which holds them. */
+export type FlowSingleStep = Exclude<FlowStep, { action: "repeat" }>;
 export const FLOW_ACTIONS = STEP_SCHEMAS.map((s) => s.shape.action.value);
 
 const flowSchema = z
@@ -401,7 +431,17 @@ export function describeStep(step: FlowStep): string {
       return `expect the URL to match /${step.pattern}/`;
     case "expect-request":
       return `expect ${step.request} → ${step.status}`;
+    case "repeat":
+      return `repeat ${step.steps.map(describeStep).join(", then ")} until ${describeStep(step.until)} (at most ${step.max} times)`;
   }
+}
+
+/**
+ * Why a repeat step failed when its condition never held: what never became
+ * true, how many times the actions ran, and what the last check found.
+ */
+export function repeatFailure(until: FlowSingleStep, max: number, reason: string): string {
+  return `${describeStep(until)} still did not hold after repeating ${max} time(s): ${reason}`;
 }
 
 /** Whether a step acts on the page (and so opens a new window for expect-request) rather than reading it. */
