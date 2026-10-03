@@ -132,6 +132,7 @@ import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "./eng
 import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
+import { formElicitationSupported, INTAKE_FORM_MESSAGE, INTAKE_TOOL, intakeFormSchema, intakeFromForm, intakeReplyText, type FormOutcome } from "./intake.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
 import { livePrompt, loginPrompt, LOGIN_PROMPT, LIVE_PROMPT, LOGIN_PROMPT_ARGUMENTS, LIVE_PROMPT_ARGUMENTS } from "./prompts.js";
 import { formatScan, scanProject } from "./scan.js";
@@ -663,6 +664,52 @@ server.registerTool(
   async () => {
     try {
       return { content: [{ type: "text" as const, text: loadPlaybook(PACKAGE_ROOT) }] };
+    } catch (err) {
+      return errorText(err);
+    }
+  },
+);
+
+// The start-of-run questions as one form, where the client can show one (MCP
+// elicitation, form mode); otherwise, or when the person declines or closes it,
+// the questions come back as text for the agent to ask in chat. The mapping is
+// intake.ts's; this only shows the form and reports how it ended.
+/** How long the form waits for the person before the questions go back to chat. */
+const INTAKE_FORM_WAIT_MS = 10 * 60_000;
+server.registerTool(
+  INTAKE_TOOL,
+  {
+    description:
+      "Ask the start-of-run questions (the site's address, whether and how to sign in, what to check, whether the site holds real data) when the person gave no settings. " +
+      "Where this client can show a form, the person answers there and this returns the settings to use: the scout_login and scout_attach calls, in order. " +
+      "Otherwise, or when they decline or close the form, it returns the questions for you to ask in chat. Never asks for a password. Touches no browser.",
+    inputSchema: {
+      url: z.string().max(2048).optional().describe("The site's address, when the person already said it: the form starts with it filled in"),
+    },
+  },
+  async ({ url }: { url?: string }, extra) => {
+    let outcome: FormOutcome;
+    if (!formElicitationSupported(server.server.getClientCapabilities())) outcome = { kind: "unsupported" };
+    else {
+      try {
+        const result = await server.server.elicitInput(
+          { mode: "form", message: INTAKE_FORM_MESSAGE, requestedSchema: intakeFormSchema(url) },
+          { timeout: INTAKE_FORM_WAIT_MS, signal: extra.signal, relatedRequestId: extra.requestId },
+        );
+        outcome =
+          result.action === "accept"
+            ? { kind: "accepted", content: result.content ?? {} }
+            : result.action === "decline"
+              ? { kind: "declined" }
+              : { kind: "cancelled" };
+      } catch (err) {
+        // A client that advertised forms and then failed one: the questions still get asked, in chat, with why.
+        outcome = { kind: "failed", error: err instanceof Error ? err.message : String(err) };
+        console.error(`[scenescout] ${INTAKE_TOOL}: the form failed, asking in chat instead: ${outcome.error}`);
+      }
+    }
+    try {
+      return { content: [{ type: "text" as const, text: intakeReplyText(intakeFromForm(outcome)) }] };
     } catch (err) {
       return errorText(err);
     }

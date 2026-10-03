@@ -205,7 +205,7 @@ The agent scans the project (if there is one), attaches read-only, explores, and
 
 **Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (who to explore as: a login saved with `scenescout login`, a storage state found by the scan, or a path to a Playwright storage-state JSON) · `--focus <text>` (a ticket or a sentence to check) · `--observe` / `--read-only` / `--safe-write` / `--allow-destructive`.
 
-**No flags at all** (`/scenescout` on its own) and the agent asks four plain questions instead: the address, whether and how you sign in, what to check (tickets or a description), and whether the site holds real data. Real data, or not being sure, means nothing but `GET` requests leave the page; you are never asked to pick a mode. Any flag skips the questions. See [Plain questions instead of flags](docs/guide/Ways-to-use-it.md#plain-questions-instead-of-flags).
+**No flags at all** (`/scenescout` on its own) and the agent asks four plain questions instead: the address, whether and how you sign in, what to check (tickets or a description), and whether the site holds real data. Where your client can show a form, `scout_intake` asks them as one form, never for a password; otherwise the agent asks in chat. Real data, or not being sure, means nothing but `GET` requests leave the page; you are never asked to pick a mode. Any flag skips the questions. See [Plain questions instead of flags](docs/guide/Ways-to-use-it.md#plain-questions-instead-of-flags).
 
 ### 🔑 Signing in as a role
 
@@ -329,11 +329,11 @@ Snapshots are cheap: re-snapshotting a route returns only *what changed*, with s
 
 ## 🧰 The toolbox
 
-34 deterministic tools. The agent picks; you rarely call these by hand.
+35 deterministic tools. The agent picks; you rarely call these by hand.
 
 | Phase | Tools | What they do |
 |---|---|---|
-| **Set up** | `scout_playbook` `scout_scan` `scout_attach` `scout_session` | Hand the testing method to an agent that has no skill loaded; discover routes; launch a browser in a write-mode; keep several authenticated roles alive at once |
+| **Set up** | `scout_playbook` `scout_intake` `scout_scan` `scout_attach` `scout_session` | Hand the testing method to an agent that has no skill loaded; ask the start-of-run questions as one form where the client can show one; discover routes; launch a browser in a write-mode; keep several authenticated roles alive at once |
 | **Explore** | `scout_crawl` `scout_coverage` | Sweep every route in one call; ask what's still untested |
 | **Look** | `scout_snapshot` `scout_hover` `scout_screenshot` `scout_capture` | Read the structured scene (diffed); reveal tooltips/hover cards; capture pixels only when needed; save one element as a PNG to show someone |
 | **Ask the server** | `scout_request` `scout_network` | Call the app's own API as this session, with the UI bypassed — the check that turns a hidden button into a proven refusal; list the requests the page itself made since it loaded |

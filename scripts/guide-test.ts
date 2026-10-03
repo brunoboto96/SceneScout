@@ -34,8 +34,16 @@ import { SCRIPT_FLAGS } from "../src/engine/scripted-login.ts";
 import { looksLikeUrl, SUBCOMMANDS } from "../src/commands.ts";
 import { FIRST_RUN_DEFAULTS, FIRST_RUN_OPTION_NAMES, parseFirstRunArgs } from "../src/first-run.ts";
 import {
+  FORM_CHOICES,
   flagsGiven,
+  formElicitationSupported,
+  INTAKE_FORM_MESSAGE,
   INTAKE_QUESTIONS,
+  INTAKE_TOOL,
+  intakeFormSchema,
+  intakeFromForm,
+  intakeReplyText,
+  splitTickets,
   INTAKE_ROLE,
   SIGN_IN_HINT,
   introQuestions,
@@ -748,6 +756,210 @@ test("the skill and the guide ask the same questions, map them the same way and 
     .map((r) => r[0])
     .join(" ");
   assert.deepEqual(flagsGiven(flagRows), [...INTAKE_FLAGS], "the guide's flag table names every flag");
+});
+
+// ── The plain questions as one form (MCP elicitation) ───────────────────────
+
+test("a form is offered only to a client that declared form-mode elicitation", () => {
+  const table: Array<[unknown, boolean, string]> = [
+    [undefined, false, "no capabilities at all"],
+    [{}, false, "no elicitation capability"],
+    [{ elicitation: {} }, true, "an empty elicitation object is form mode (backwards compatibility)"],
+    [{ elicitation: { form: {} } }, true, "form declared"],
+    [{ elicitation: { form: {}, url: {} } }, true, "both modes declared"],
+    [{ elicitation: { url: {} } }, false, "URL mode only: a form must not be sent"],
+    [{ roots: {}, sampling: {} }, false, "other capabilities only"],
+  ];
+  for (const [caps, want, why] of table) assert.equal(formElicitationSupported(caps as Parameters<typeof formElicitationSupported>[0]), want, why);
+});
+
+test("the form asks the four questions in the shapes form mode allows, and never for a credential", () => {
+  const schema = intakeFormSchema();
+  assert.deepEqual(Object.keys(schema.properties), ["address", "signIn", "whatToCheck", "details", "realData"]);
+  assert.deepEqual(schema.required, ["address", "signIn", "whatToCheck", "realData"]);
+  // A flat object of strings and single-choice lists; nothing nested, no arrays.
+  const allowedKeys = new Set(["type", "title", "description", "minLength", "maxLength", "format", "default", "oneOf"]);
+  for (const [name, field] of Object.entries(schema.properties)) {
+    assert.equal(field.type, "string", name);
+    for (const key of Object.keys(field)) assert.ok(allowedKeys.has(key), `${name}.${key} is not in form mode's subset`);
+    assert.ok(!("format" in field), `${name} has no format a client might render as a secret field`);
+  }
+  // The only fields a person types into are the address and the description or tickets, and neither asks for a credential.
+  const typed = Object.entries(schema.properties).filter(([, f]) => !("oneOf" in f));
+  assert.deepEqual(
+    typed.map(([n]) => n),
+    ["address", "details"],
+  );
+  for (const [name, f] of typed) assert.doesNotMatch(`${f.title} ${f.description}`, /password|passcode|code|token|secret|api key/i, name);
+  assert.match(INTAKE_FORM_MESSAGE, /never asks for a password/);
+  // The questions are the plain ones, word for word, where a form can ask them as they are.
+  const ask = (id: string) => INTAKE_QUESTIONS.find((q) => q.id === id)!.ask;
+  assert.equal(schema.properties.address.description, ask("address"));
+  assert.equal(schema.properties.signIn.description, ask("sign-in"));
+  assert.equal(schema.properties.realData.description, ask("real-data"));
+  // Choices cover every answer settingsFromAnswers takes, and the least-harm answer is where the form starts.
+  assert.deepEqual(
+    FORM_CHOICES.signIn.map((c) => c.const),
+    ["none", ...Object.keys(SIGN_IN_HINT)],
+  );
+  assert.deepEqual(
+    FORM_CHOICES.realData.map((c) => c.const),
+    ["yes", "no", "unsure"],
+  );
+  assert.equal(schema.properties.realData.default, "unsure");
+  assert.equal(schema.properties.whatToCheck.default, "everything");
+  // A known address starts filled in; an unknown one has no default.
+  assert.equal(intakeFormSchema(" http://localhost:3000 ").properties.address.default, "http://localhost:3000");
+  assert.ok(!("default" in schema.properties.address));
+  assert.ok(!("default" in intakeFormSchema("  ").properties.address));
+});
+
+test("each way a form round ends maps to settings or to questions for the chat", () => {
+  const full = { address: " https://app.example.com ", signIn: "none", whatToCheck: "everything", realData: "unsure" };
+  type Row = [name: string, outcome: Parameters<typeof intakeFromForm>[0], want: ReturnType<typeof intakeFromForm>];
+  const askAll = (why: string) => ({ kind: "ask" as const, questions: [...INTAKE_QUESTIONS], known: [], why });
+  const settings = (a: Parameters<typeof settingsFromAnswers>[0]) => ({ kind: "settings" as const, settings: settingsFromAnswers(a) });
+  const q = (id: string) => INTAKE_QUESTIONS.filter((x) => x.id === id);
+  const table: Row[] = [
+    ["no form in this client", { kind: "unsupported" }, askAll("this client cannot show a form")],
+    ["declined", { kind: "declined" }, askAll("the person declined the form")],
+    ["cancelled", { kind: "cancelled" }, askAll("the person closed the form without answering")],
+    ["failed", { kind: "failed", error: "timed out" }, askAll("the form failed: timed out")],
+    [
+      "everything, not sure about data",
+      { kind: "accepted", content: full },
+      settings({ address: "https://app.example.com", signIn: "none", whatToCheck: "everything", realData: "unsure" }),
+    ],
+    [
+      "single sign-on, no real data, a description",
+      { kind: "accepted", content: { ...full, signIn: "sso", realData: "no", whatToCheck: "description", details: " the checkout flow " } },
+      settings({ address: "https://app.example.com", signIn: "sso", whatToCheck: { description: "the checkout flow" }, realData: "no" }),
+    ],
+    [
+      "tickets pasted with a rule between them",
+      {
+        kind: "accepted",
+        content: { ...full, signIn: "one-time-code", realData: "yes", whatToCheck: "tickets", details: "T1 Export\n---\nT2 Filters\n  -----  \n" },
+      },
+      settings({ address: "https://app.example.com", signIn: "one-time-code", whatToCheck: { tickets: ["T1 Export", "T2 Filters"] }, realData: "yes" }),
+    ],
+    [
+      "tickets chosen with the box empty: ask for them in chat, keep the rest",
+      { kind: "accepted", content: { ...full, signIn: "password", whatToCheck: "tickets", details: "  " } },
+      {
+        kind: "ask",
+        questions: q("what-to-check"),
+        known: ["Address: https://app.example.com", "Sign-in: an email and password", "What to check: tickets, not given yet", "Real data: not sure"],
+        why: "the form came back without every answer",
+      },
+    ],
+    [
+      "a description chosen with nothing described",
+      { kind: "accepted", content: { ...full, whatToCheck: "description" } },
+      {
+        kind: "ask",
+        questions: q("what-to-check"),
+        known: ["Address: https://app.example.com", "Sign-in: no sign-in", "What to check: description, not given yet", "Real data: not sure"],
+        why: "the form came back without every answer",
+      },
+    ],
+    [
+      "everything left chosen with tickets pasted: ask, never drop them",
+      { kind: "accepted", content: { ...full, details: "T1 Export" } },
+      {
+        kind: "ask",
+        questions: q("what-to-check"),
+        known: [
+          "Address: https://app.example.com",
+          "Sign-in: no sign-in",
+          "What to check: everything was chosen, but there is text in the box too",
+          "Real data: not sure",
+        ],
+        why: "the form came back without every answer",
+      },
+    ],
+    [
+      "everything with the box left blank",
+      { kind: "accepted", content: { ...full, details: "   " } },
+      settings({ address: "https://app.example.com", signIn: "none", whatToCheck: "everything", realData: "unsure" }),
+    ],
+    [
+      "a blank address and a value the form never offered",
+      { kind: "accepted", content: { ...full, address: "   ", realData: "maybe" } },
+      {
+        kind: "ask",
+        questions: [...q("address"), ...q("real-data")],
+        known: ["Sign-in: no sign-in", "What to check: everything"],
+        why: "the form came back without every answer",
+      },
+    ],
+    [
+      "an accept with no content",
+      { kind: "accepted", content: {} },
+      { kind: "ask", questions: [...INTAKE_QUESTIONS], known: [], why: "the form came back without every answer" },
+    ],
+  ];
+  for (const [name, outcome, want] of table) assert.deepEqual(intakeFromForm(outcome), want, name);
+  // Real data never reaches a laxer mode than read-only through the form either.
+  for (const realData of ["yes", "no", "unsure"]) {
+    const r = intakeFromForm({ kind: "accepted", content: { ...full, realData } });
+    assert.equal(r.kind === "settings" && r.settings.attach.mode, realData === "no" ? "read-only" : "observe", realData);
+  }
+  assert.deepEqual(splitTickets("one ticket, no rule"), ["one ticket, no rule"]);
+  assert.deepEqual(splitTickets("a -- b --- c"), ["a -- b --- c"], "dashes inside a line are not a rule");
+});
+
+test("scout_intake's text: the calls in order, or the questions word for word", () => {
+  const signedIn = intakeReplyText(
+    intakeFromForm({
+      kind: "accepted",
+      content: { address: "http://localhost:3000", signIn: "sso", whatToCheck: "tickets", details: "T1\n---\nT2", realData: "no" },
+    }),
+  );
+  const order = [
+    'Tell the person: "A browser window will open: ',
+    'scout_login {"url":"http://localhost:3000","role":"user"}',
+    "scout_attach {",
+    "scout_tickets {",
+    "Keep to this area: T1; T2",
+  ];
+  let at = -1;
+  for (const part of order) {
+    const i = signedIn.indexOf(part);
+    assert.ok(i > at, `${part} comes next in:\n${signedIn}`);
+    at = i;
+  }
+  assert.match(signedIn, /"mode":"read-only","role":"user"/);
+  assert.match(signedIn, /do not ask the questions again/);
+  const plain = intakeReplyText(
+    intakeFromForm({ kind: "accepted", content: { address: "http://x.test", signIn: "none", whatToCheck: "everything", realData: "yes" } }),
+  );
+  assert.doesNotMatch(plain, /scout_login|scout_tickets|Keep to/);
+  assert.match(plain, /scout_attach \{"url":"http:\/\/x\.test","mode":"observe","objective":"Explore the whole site"\}/);
+  // Every fallback ends with the four questions exactly as the skill and the explore prompt list them.
+  for (const kind of ["unsupported", "declined", "cancelled"] as const) {
+    const t = intakeReplyText(intakeFromForm({ kind }));
+    assert.ok(t.endsWith(introQuestions()), kind);
+    assert.match(t, /in chat, in one message/);
+  }
+  const partial = intakeReplyText(
+    intakeFromForm({ kind: "accepted", content: { address: "http://x.test", signIn: "none", whatToCheck: "tickets", realData: "yes" } }),
+  );
+  assert.ok(partial.endsWith(`1. ${INTAKE_QUESTIONS[2].ask}`), "only the missing question is asked");
+  assert.match(partial, /Already answered in the form:\n- Address: http:\/\/x\.test/);
+});
+
+test("the skill calls scout_intake first and keeps asking in chat as the fallback", () => {
+  const skill = read("skills/scenescout/SKILL.md");
+  const noFlags = section(skill, "## Starting a run: plain questions, or flags")
+    .split("\n")
+    .find((l) => l.startsWith("**No flags given**"))!;
+  assert.ok(noFlags.includes(`call \`${INTAKE_TOOL}\``), "the skill calls the tool");
+  assert.match(noFlags, /declines or closes the form, it returns the questions instead: ask them in one message/);
+  assert.match(noFlags, /With no `scout_intake` tool, ask them yourself/);
+  const guide = section(pages.get("Ways-to-use-it.md")!, "### Plain questions instead of flags");
+  assert.ok(guide.includes(`\`${INTAKE_TOOL}\``), "the guide names the tool");
+  assert.match(guide, /never asks for a password/);
 });
 
 test("the suite is wired into npm test and listed in AGENTS.md", () => {
