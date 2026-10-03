@@ -114,6 +114,7 @@ import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js"
 import { formatJourney, journeyTime, measureJourney } from "./journey.js";
 import {
   describeStep,
+  elementStateMatches,
   FLOW_AFTER_LAST_STEP_MS,
   isAction,
   matchRequest,
@@ -121,6 +122,7 @@ import {
   splitRefusals,
   TARGET_HELP,
   urlMatches,
+  type ElementFacts,
   type FlowReplay,
   type FlowStep,
   type FlowTarget,
@@ -5584,6 +5586,24 @@ export class BrowserEngine {
   }
 
   /**
+   * What an expect-element step asks of its target, read once: whether any
+   * match is visible, and, for the first visible match (or the first match when
+   * none is), whether it is enabled and checked. Null when nothing matches.
+   * The verdict is flow.ts's elementStateMatches, so the rules stay testable.
+   */
+  private static async elementFacts(matches: import("playwright").Locator): Promise<ElementFacts | null> {
+    const total = await matches.count().catch(() => 0);
+    if (total === 0) return null;
+    const visible = matches.filter({ visible: true });
+    const anyVisible = (await visible.count().catch(() => 0)) > 0;
+    const el = anyVisible ? visible.first() : matches.first();
+    const enabled = await el.isEnabled({ timeout: 1000 }).catch(() => null);
+    // isChecked throws for an element that is not a checkbox, radio or [role=checkbox]: it has no checked state.
+    const checked = await el.isChecked({ timeout: 1000 }).catch(() => null);
+    return { visible: anyVisible, enabled, checked };
+  }
+
+  /**
    * Replay one saved flow for `scenescout check`. Acts and reports only: the
    * schema, the matching rules and what an outcome means live in flow.ts and
    * check.ts. It stops at the first step that breaks, or that the write policy
@@ -5724,6 +5744,15 @@ export class BrowserEngine {
               .catch(() => false);
             if (!ok)
               failure = `no visible text ${JSON.stringify(step.text)} within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
+          } else if (step.action === "expect-element") {
+            const matches = BrowserEngine.locatorFor(current, parseTarget(step.target)!);
+            const until = Date.now() + this.limits.actionMs;
+            let verdict = elementStateMatches(step.state, await BrowserEngine.elementFacts(matches));
+            while (!verdict.ok && Date.now() < until) {
+              await current.waitForTimeout(100).catch(() => {});
+              verdict = elementStateMatches(step.state, await BrowserEngine.elementFacts(matches));
+            }
+            if (!verdict.ok) failure = `${step.target} ${verdict.actual}, expected ${step.state}, after ${this.limits.actionMs / 1000}s`;
           } else if (step.action === "expect-url") {
             const ok = await poll(() => urlMatches(step.pattern, this.page?.url() ?? ""));
             if (!ok) failure = `the page is at ${here()}, which does not match /${step.pattern}/`;
