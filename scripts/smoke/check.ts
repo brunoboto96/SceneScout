@@ -774,13 +774,15 @@ async function flowWriteEdges({
     `${leave.status} ${JSON.stringify(leave.flows)} writes=${JSON.stringify(stats.writes)}`,
   );
 
+  // A write that goes out only as the flow leaves the page: after the last step's own checks on any machine, since
+  // nothing but the engine leaving the page sends it. The contrast to the beacon above: same moment, sent as a fetch.
   const itemsBefore = writes("POST /api/items");
   const late = await runFlows("flow-late-write", {
     "late.json": {
       steps: [
         { action: "navigate", target: "/check-flow-writes.html" },
-        { action: "click", target: "testid=writes-save-later" },
-        { action: "expect-text", text: "Saving shortly" },
+        { action: "click", target: "testid=writes-save-as-you-leave" },
+        { action: "expect-text", text: "Will save as you leave" },
       ],
     },
   });
@@ -792,6 +794,29 @@ async function flowWriteEdges({
       /^after the last step\b.*POST \/api\/items/.test(late.flows[0].reason ?? "") &&
       writes("POST /api/items") === itemsBefore,
     `${late.status} ${JSON.stringify(late.flows)} ${late.out.slice(-600)}`,
+  );
+
+  // A debounced save: a timer the click starts. Which step it lands in depends on how long the click's own step takes,
+  // so only what holds wherever it lands is checked. On a fast machine it lands after the last step, so a check that
+  // stopped looking once the last step's checks ran would let this flow pass.
+  const debouncedBefore = writes("POST /api/items");
+  const debounced = await runFlows("flow-debounced-write", {
+    "debounced.json": {
+      steps: [
+        { action: "navigate", target: "/check-flow-writes.html" },
+        { action: "click", target: "testid=writes-save-later" },
+        { action: "expect-text", text: "Saving shortly" },
+      ],
+    },
+  });
+  check(
+    "a debounced save a step set off is refused in whichever step it lands, the last one or after it included, and never reaches the server",
+    debounced.status === 2 &&
+      debounced.flows?.[0]?.status === "refused" &&
+      [2, 3].includes(debounced.flows[0].step ?? 0) &&
+      /POST \/api\/items/.test(debounced.flows[0].reason ?? "") &&
+      writes("POST /api/items") === debouncedBefore,
+    `${debounced.status} ${JSON.stringify(debounced.flows)} ${debounced.out.slice(-600)}`,
   );
 
   const form = await runFlows("flow-form-post", {

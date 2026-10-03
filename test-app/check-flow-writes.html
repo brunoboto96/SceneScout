@@ -6,7 +6,12 @@
        while a flow runs, and which of them a step is charged with.
        - A form posted with Enter.
        - "Save later": a save that goes out 500 ms after the "Saving shortly"
-         it announces, so after a flow's last step that waits for that text.
+         it announces, the way a debounced save does. A timer cannot say which
+         step it lands in: on a slow machine the click's own step outlasts it.
+       - "Save as you leave": a save sent with fetch on pagehide, so it goes
+         out only when the flow leaves the page, after the last step's checks
+         whatever the machine's speed. The contrast to "Save on leave": same
+         moment, sent as a fetch instead of a beacon.
        - "Add remotely" (with ?other=<origin>): a fetch POST to another
          origin, as an app whose API is on another port does, then "Added".
        - ?beacon=<origin>: a sendBeacon to that origin on a timer, the way
@@ -30,6 +35,7 @@
   <button type="button" data-testid="writes-save-later">Save later</button>
   <button type="button" data-testid="writes-add-remote">Add remotely</button>
   <button type="button" data-testid="writes-save-on-leave">Save on leave</button>
+  <button type="button" data-testid="writes-save-as-you-leave">Save as you leave</button>
   <button type="button" data-testid="writes-sign-in-on-leave">Sign in on leave</button>
   <a href="/check-flow.html" target="_blank" data-testid="writes-open-tab">Open things in a new tab</a>
   <p data-testid="writes-status" role="status"></p>
@@ -50,6 +56,10 @@
     document.querySelector('[data-testid="writes-save-on-leave"]').addEventListener("click", () => {
       status.textContent = "Will save on leave";
       addEventListener("pagehide", () => navigator.sendBeacon("/api/leave", "{}"));
+    });
+    document.querySelector('[data-testid="writes-save-as-you-leave"]').addEventListener("click", () => {
+      status.textContent = "Will save as you leave";
+      addEventListener("pagehide", () => fetch("/api/items", { method: "POST", keepalive: true, headers: { "content-type": "application/json" }, body: "{}" }).catch(() => {}));
     });
     document.querySelector('[data-testid="writes-sign-in-on-leave"]').addEventListener("click", () => {
       status.textContent = "Will sign in on leave";
