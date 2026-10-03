@@ -1,0 +1,29 @@
+{
+  "app": "holdout",
+  "run": "ci-dedup-holdout-4",
+  "date": "2026-10-03",
+  "note": "Unattended run of 3.18.0 at 498dbdf with the dedup judge on (the ci default); gpt-6-luna, effort low, default caps. Out-of-sample pairs for the dedup judge; see Finding dedup.",
+  "findings": [
+    {
+      "title": "Home notices request fails with HTTP 500",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Fines register shows an empty list when loading is forbidden",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; fines-rows shows empty list"
+    },
+    {
+      "title": "Book detail spacing uses inconsistent off-grid padding values",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "book detail spacing: 0% on 4px grid; padding 6px×4,14px×4,7px×2,9px×2",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    }
+  ],
+  "decisions": []
+}

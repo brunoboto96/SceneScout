@@ -4,6 +4,7 @@
  *
  *   npm run dedup-bench                                   the store's rule only
  *   npm run dedup-bench -- --judge [--efforts none,low] [--cap 200] [--provider openai|anthropic] [--model <id>] [--pairs <file>]
+ *   npm run dedup-bench -- --since <YYYY-MM-DD> [...]      only the runs archived on or after that date
  *
  * Pairs are two findings on one page from the same app's archived runs,
  * labelled "same" when the key classifies both to one entry (engine/dedup.ts).
@@ -27,6 +28,7 @@ import { httpClient } from "../src/ci-run.ts";
 import { parseKey, type AnswerKey, type RunArchive } from "../src/engine/bench.ts";
 import { addUsage, checkBaseUrl, detectProvider, KEY_ENV, NO_USAGE, redactKeys, secretValues, type ProviderName, type Usage } from "../src/engine/ci.ts";
 import {
+  archivesSince,
   buildPairs,
   decideDuplicate,
   formatPairScore,
@@ -55,6 +57,7 @@ const { values } = parseArgs({
     model: { type: "string" },
     "base-url": { type: "string" },
     pairs: { type: "string" },
+    since: { type: "string" },
   },
 });
 const cap = Number(values.cap);
@@ -73,11 +76,25 @@ const keys: Record<string, AnswerKey> = Object.fromEntries(
   Object.entries(KEYS).map(([app, file]) => [app, parseKey(JSON.parse(fs.readFileSync(file, "utf8")))]),
 );
 const runsDir = path.join(root, "bench", "runs");
-const archives: RunArchive[] = fs
+const allArchives: RunArchive[] = fs
   .readdirSync(runsDir)
   .filter((f) => f.endsWith(".json"))
   .sort()
   .map((f) => JSON.parse(fs.readFileSync(path.join(runsDir, f), "utf8")) as RunArchive);
+let archives = allArchives;
+if (values.since !== undefined) {
+  try {
+    archives = archivesSince(allArchives, values.since);
+  } catch (err) {
+    console.error(`--since: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  if (archives.length === 0) {
+    console.error(`No archived run is dated on or after ${values.since}.`);
+    process.exit(1);
+  }
+  console.log(`Runs archived on or after ${values.since}: ${archives.map((a) => a.run).join(", ")}`);
+}
 
 const set = buildPairs(archives, keys);
 console.log(
