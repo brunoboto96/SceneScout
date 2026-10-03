@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Framed modal</title>
+  <style>
+    body { font-family: system-ui, sans-serif; color: #111111; background: #ffffff; margin: 0; padding: 16px; overflow: hidden; }
+    .tall { min-height: 2400px; }
+    .frame-host { position: fixed; inset: 0; background: transparent; z-index: 100; }
+    .frame-host iframe { width: 100%; height: 100%; border: 0; background: transparent; }
+  </style>
+</head>
+<body>
+  <!-- A pair for the leaked scroll-lock oracle. iframe-modal.html and
+       iframe-modal-leaked.html are identical, body scroll lock and pinned
+       full-viewport same-origin frame included, except that here the frame
+       holds an open modal and there it holds an empty document. The top
+       document holds no dialog and no dimming backdrop of its own in either.
+       Here the lock is the modal's and must not be reported; there nothing is
+       open and the same lock is a leaked one. -->
+  <h1>Things</h1>
+  <p>This list shows every thing in the workspace, newest first, with its owner and its state.</p>
+  <div class="tall">
+    <p>The first thing in the list, created this morning by the first owner.</p>
+  </div>
+  <p>The last thing in the list, below the fold.</p>
+  <div class="frame-host" data-testid="framed-modal-host">
+    <iframe src="/iframe-modal-frame.html" title="Edit thing" data-testid="framed-modal-frame"></iframe>
+  </div>
+</body>
+</html>
