@@ -277,6 +277,34 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
         ctxRecords.some((r) => r.inputType === "search" && r.inFilter === false),
       JSON.stringify(ctxRecords.filter((r) => r.tag === "input")),
     );
+
+    console.log("design audit: text over a positioned image is not measured against the page");
+    // The contrastive pair differs only in the <img> under the hero text.
+    await engine.navigate("/design-hero-image.html");
+    const heroImage = await engine.designAudit();
+    const heroRecords = ((await (engine as any).page.evaluate(collect)) as { records: Array<{ testid: string | null; bg: string }> }).records;
+    check(
+      "white text over a dark positioned image is not a contrast failure",
+      !heroImage.includes("design-hero-heading") && !heroImage.includes("design-hero-lede"),
+      heroImage,
+    );
+    check(
+      "and its background reads as an image, not the page's white",
+      heroRecords.filter((r) => r.testid === "design-hero-heading" || r.testid === "design-hero-lede").every((r) => r.bg === "image"),
+      JSON.stringify(heroRecords),
+    );
+    check(
+      "pale text on an opaque card over the same image is still measured against the card",
+      /CONTRAST failures[\s\S]*design-hero-card-note/.test(heroImage),
+      heroImage,
+    );
+    await engine.navigate("/design-hero-plain.html");
+    const heroPlain = await engine.designAudit();
+    check(
+      "the same text on the plain white page is still reported, at 1.00:1",
+      /CONTRAST failures[\s\S]*design-hero-heading[^\n]*1\.00:1/.test(heroPlain) && heroPlain.includes("design-hero-lede"),
+      heroPlain,
+    );
     await engine.navigate("/");
 
     console.log("overlay/modal oracle (app modals, not native dialogs)");
