@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Edit thing</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: transparent; font-family: system-ui, sans-serif; color: #111111; }
+    .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); display: flex; align-items: center; justify-content: center; }
+    .card { background: #ffffff; padding: 16px; width: 320px; border-radius: 4px; }
+    button { padding: 8px 16px; min-height: 32px; }
+  </style>
+</head>
+<body>
+  <!-- The modal iframe-modal.html opens: its backdrop and its dialog live in this document, not the top one. -->
+  <div class="backdrop">
+    <div class="card" role="dialog" aria-modal="true" aria-labelledby="edit-title">
+      <h2 id="edit-title">Edit thing</h2>
+      <p>Change the name of this thing and save it.</p>
+      <button type="button" data-testid="framed-modal-close-action">Close</button>
+    </div>
+  </div>
+</body>
+</html>
