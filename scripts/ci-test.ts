@@ -326,9 +326,11 @@ test("provider: detected from the one key present; both keys need --provider; a 
   assert.deepEqual(overridden.resolved, { provider: "openai", model: "other", effort: "none", baseUrl: "https://llm.example.com/v1" });
 });
 
-test("the server's environment has no key in it, and no live view", () => {
+test("the server's environment has no key in it, no live view, and opens nothing in a browser unless the user set it", () => {
   const env = childEnv({ OPENAI_API_KEY: OPENAI_KEY, ANTHROPIC_API_KEY: ANTHROPIC_KEY, PATH: "/bin", HOME: "/h" });
-  assert.deepEqual(env, { PATH: "/bin", HOME: "/h", SCENESCOUT_LIVE: "off", SCENESCOUT_EVIDENCE: "file" });
+  assert.deepEqual(env, { PATH: "/bin", HOME: "/h", SCENESCOUT_LIVE: "off", SCENESCOUT_OPEN: "none", SCENESCOUT_EVIDENCE: "file" });
+  assert.equal(childEnv({ SCENESCOUT_OPEN: "" }).SCENESCOUT_OPEN, "none", "set but empty is unset");
+  assert.equal(childEnv({ SCENESCOUT_OPEN: "report" }).SCENESCOUT_OPEN, "report", "a user's setting wins");
   // The loop is text-only, so a finding's picture is kept on file; a job that chose otherwise keeps its choice.
   assert.equal(childEnv({ SCENESCOUT_EVIDENCE: "off" }).SCENESCOUT_EVIDENCE, "off");
   assert.equal(childEnv({ SCENESCOUT_EVIDENCE: " " }).SCENESCOUT_EVIDENCE, "file");
