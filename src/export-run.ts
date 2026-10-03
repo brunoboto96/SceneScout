@@ -1,6 +1,7 @@
 /**
- * Runs `scenescout export`: reads the project's findings, asks the tracker
- * which of them it already holds, and files the rest. The rules (which
+ * Runs `scenescout export`: reads the project's findings (or a check.json or
+ * ci.json given with --from), asks the tracker which of them it already
+ * holds, and files the rest. The rules (which
  * findings, what an issue says, the marker, the plan) live in
  * engine/export.ts; this file only reads the project's files and talks HTTP.
  * The one file it writes is the record of the issues it filed, beside the
@@ -34,6 +35,8 @@ import {
   recordWith,
   rememberFiled,
   selectFindings,
+  findingsFromResult,
+  type ResultSource,
   ticketsToLink,
   trackerCredentials,
   trackerMessage,
@@ -530,7 +533,9 @@ function jiraApi({ baseUrl, projectKey, issueType, linkType }: JiraTarget, send:
 /** The project's memory, refused unless it is one this version reads: a file it cannot read exported nothing and said so with exit 0. */
 function readMemory(memoryPath: string): unknown {
   if (!fs.existsSync(memoryPath))
-    throw new ExportError(`no findings to export: ${memoryPath} does not exist. Run SceneScout on this project first, or pass --project`);
+    throw new ExportError(
+      `no findings to export: ${memoryPath} does not exist. Run SceneScout on this project first, pass --project, or export a check.json or ci.json with --from`,
+    );
   let memory: unknown;
   try {
     memory = JSON.parse(fs.readFileSync(memoryPath, "utf8"));
@@ -541,6 +546,31 @@ function readMemory(memoryPath: string): unknown {
     throw new ExportError(`${memoryPath} is not a memory file this version reads (version ${isRecord(memory) ? oneLine(memory.version, 20) : "unknown"})`);
   if (!Array.isArray(memory.findings)) throw new ExportError(`${memoryPath} holds no list of findings`);
   return memory;
+}
+
+/**
+ * A check.json or a ci.json, its findings in the shape memory.json holds
+ * them. A file it cannot read, or one some other command wrote, is refused
+ * rather than exported as nothing.
+ */
+function readResult(file: string): ResultSource {
+  let text: string;
+  let writtenAt: string;
+  try {
+    text = fs.readFileSync(file, "utf8");
+    writtenAt = fs.statSync(file).mtime.toISOString();
+  } catch (err) {
+    throw new ExportError(`could not read --from ${file}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    throw new ExportError(`could not read --from ${file}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const parsed = findingsFromResult(raw, writtenAt);
+  if (!parsed.ok) throw new ExportError(`--from ${file}: ${parsed.error}`);
+  return parsed.value;
 }
 
 /** Every step with a frame, from every session log in the memory directory. Logs and lines that cannot be read are counted, not fatal. */
@@ -638,6 +668,8 @@ function readRecord(recordPath: string): ExportRecord {
  */
 function writeRecord(recordPath: string, key: string, id: string, entry: Parameters<typeof recordWith>[3]): void {
   const text = recordWith(readRecord(recordPath), key, id, entry);
+  // An export --from a check or ci result may be the first thing to write in a project's .scenescout folder.
+  fs.mkdirSync(path.dirname(recordPath), { recursive: true });
   const temp = `${recordPath}.${process.pid}.tmp`;
   try {
     fs.writeFileSync(temp, text, { mode: 0o600 });
@@ -679,11 +711,15 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
   };
   try {
     const memoryDir = path.join(o.projectDir, MEMORY_DIRNAME);
-    const memoryPath = path.join(memoryDir, "memory.json");
-    const memory = readMemory(memoryPath);
+    // A check.json or a ci.json names no frames, picture or tickets: its issues carry none of them.
+    const result = o.from ? readResult(o.from) : null;
+    const sourcePath = o.from ?? path.join(memoryDir, "memory.json");
+    const memory = result ? { findings: result.findings } : readMemory(sourcePath);
+    const screenshots = o.screenshots && !result;
     const selection = selectFindings(memory, o);
     const criteria = failedCriteriaByFinding(memory);
-    if (selection.unknownOnly.length > 0) throw new ExportError(`--only names no finding of this project: ${selection.unknownOnly.join(", ")}`);
+    if (selection.unknownOnly.length > 0)
+      throw new ExportError(`--only names no finding ${result ? `in ${sourcePath}` : "of this project"}: ${selection.unknownOnly.join(", ")}`);
     say(o.dryRun ? `SceneScout export to ${where}: a dry run, so nothing is filed. Pass --yes to file.` : `SceneScout export to ${where}.`);
     const c = selection.counts;
     const left = [
@@ -691,9 +727,10 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
       c.worthALook ? `${c.worthALook} worth a look (--include-worth-a-look exports them)` : "",
     ].filter(Boolean);
     say(
-      `Findings in ${memoryPath}: ${c.open} open, ${c.resolved} resolved${selection.unreadable.length ? `, ${selection.unreadable.length} unreadable` : ""}. ` +
+      `Findings in ${sourcePath}${result ? ` (scenescout ${result.kind})` : ""}: ${c.open} open, ${c.resolved} resolved${selection.unreadable.length ? `, ${selection.unreadable.length} unreadable` : ""}. ` +
         `${selection.candidates.length} to export${left.length ? `; left out: ${left.join(", ")}` : ""}.`,
     );
+    if (result && o.screenshots) say(`  No screenshots: a ${result.kind} result names none.`);
     if (selection.unreadable.length > 0)
       say(`  Not exported, as this version cannot read them: ${selection.unreadable.slice(0, 20).join(", ")}${selection.unreadable.length > 20 ? " …" : ""}`);
     for (const { id, reason } of selection.leftOut) say(`  not exported  ${id}: ${reason}`);
@@ -765,18 +802,18 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
     };
 
     plan = planExport(candidates, existing, o.maxIssues);
-    const steps = o.screenshots ? framedSteps(memoryDir) : { steps: [], unreadable: 0 };
+    const steps = screenshots ? framedSteps(memoryDir) : { steps: [], unreadable: 0 };
     if (steps.unreadable > 0) say(`Skipped ${steps.unreadable} session-log line(s) or file(s) that could not be read while looking for screenshots.`);
     const contextOf = (f: Finding): { ctx: IssueContext; extras: Extras } => {
-      const found = o.screenshots ? framesOf(f, steps.steps, memoryDir) : { frames: [], dropped: 0 };
+      const found = screenshots ? framesOf(f, steps.steps, memoryDir) : { frames: [], dropped: 0 };
       droppedFrames += found.dropped;
-      const picture = o.screenshots ? pictureOf(f, memoryDir) : null;
+      const picture = screenshots ? pictureOf(f, memoryDir) : null;
       const failed: FailedCriterion[] = criteria.get(f.id) ?? [];
       return {
         ctx: {
           severityName: o.severityMap[f.severity],
           labels: o.labels,
-          screenshots: o.screenshots ? found.frames.map((x) => x.rel) : "off",
+          screenshots: screenshots ? found.frames.map((x) => x.rel) : "off",
           framesLeftOut: found.dropped,
           picture: picture?.rel ?? null,
           ...(picture?.at ? { pictureAt: picture.at } : {}),
@@ -798,7 +835,8 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
         const issue = entry.issue;
         const already = `  ${OUTCOME_WORDS[entry.outcome].padEnd(13)}  ${findingLine(f)}  as ${issue.ref}${issue.open ? "" : " (closed)"}`;
         // Only an open Jira issue filed earlier is brought up to date; a closed one is the team's decision and left alone.
-        if (o.to !== "jira" || !o.jira.update || !issue.open || !issue.jira || !tracker?.update) {
+        // An export --from a result never updates: the file holds less than the memory that may have filed the issue.
+        if (o.to !== "jira" || !o.jira.update || result || !issue.open || !issue.jira || !tracker?.update) {
           say(already);
           continue;
         }
@@ -841,7 +879,7 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
       }
       // Listed, not filed: over the cap, or a dry run (the only way to be here with no tracker, as --yes needs credentials).
       if (entry.outcome === "over-cap" || o.dryRun || !tracker) {
-        const shown = entry.outcome === "file" && o.screenshots ? contextOf(f).ctx : null;
+        const shown = entry.outcome === "file" && screenshots ? contextOf(f).ctx : null;
         const shots = shown && shown.screenshots !== "off" ? shown.screenshots.length + (shown.picture ? 1 : 0) : 0;
         say(`  ${OUTCOME_WORDS[entry.outcome].padEnd(13)}  ${findingLine(f)}${shots ? `  with ${shots} screenshot(s)` : ""}`);
         continue;
