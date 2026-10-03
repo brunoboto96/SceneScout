@@ -49,6 +49,7 @@ export async function run({ baseUrl, foreignBaseUrl, stats }: SmokeContext): Pro
     await runAll({ baseUrl, server, base, work });
     await framedModalLock({ baseUrl, work });
     await flowsAndRetests({ baseUrl, stats, work });
+    await startPageOnly({ baseUrl, work });
     await flowWriteEdges({ baseUrl, foreignBaseUrl, stats, work });
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
@@ -359,6 +360,26 @@ async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server
   } finally {
     await engine.close();
   }
+}
+
+/**
+ * A check that reached only its start page, which showed one control and linked nowhere, has no verdict: that is an
+ * app measured before it drew. The pair differs in one control, so the guard is the only thing that tells them apart.
+ */
+async function startPageOnly({ baseUrl, work }: { baseUrl: string; work: string }): Promise<void> {
+  const run = (page: string) => {
+    const dir = path.join(work, `shell-${page}`);
+    fs.mkdirSync(dir, { recursive: true });
+    return runCli([`${baseUrl}/${page}`, "--project", dir, "--out", path.join(dir, "out")]);
+  };
+  const undrawn = await run("check-shell-undrawn.html");
+  check(
+    "a check that measured only a start page with one control and no links exits 2 saying so, not 0",
+    undrawn.status === 2 && /could not measure .*only the start page was measured, and it showed 1 control\(s\)/.test(undrawn.out),
+    `${undrawn.status} ${undrawn.out.slice(-600)}`,
+  );
+  const drawn = await run("check-shell-drawn.html");
+  check("...and the same page with two controls is measured and passes", drawn.status === 0, `${drawn.status} ${drawn.out.slice(-600)}`);
 }
 
 type FlowSummary = Summary & {

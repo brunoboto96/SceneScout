@@ -632,7 +632,7 @@ async function check(args: string[]): Promise<never> {
     console.error(`scenescout check: could not run: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(EXIT.error);
   }
-  const unmeasured = unmeasuredReason(result.routes, !options.paths);
+  const unmeasured = unmeasuredReason(result.routes, !options.paths, result.unvisited);
   if (unmeasured) {
     console.error(`scenescout check: could not measure ${options.url}: ${unmeasured}`);
     process.exit(EXIT.error);
