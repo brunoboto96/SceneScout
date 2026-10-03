@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Image aspect (cover)</title>
+    <style>
+      body { margin: 0; font: 16px/1.5 sans-serif; background: rgb(255, 255, 255); color: rgb(17, 24, 39); }
+      main { padding: 16px; }
+      .photo { width: 200px; height: 200px; object-fit: cover; }
+    </style>
+  </head>
+  <body>
+    <!-- The same page as image-aspect-fill.html with one line changed: the photo class sets object-fit: cover, so the 200×100 picture is cropped to its 200×200 box rather than stretched. Nothing is distorted, and the design audit must not report image-aspect. The fit comes from a class, not an inline style, so the audit has to read the computed value. -->
+    <main>
+      <h1>Gallery</h1>
+      <img class="photo" alt="Product photo" data-testid="gallery-photo" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAABkCAIAAABM5OhcAAAAzElEQVR42u3SMREAMAgAsVI1SEQisjDBwJBI+PvI6gfbvgQYC2NhLDAWxsJYYCyMhbHAWBgLY4GxMBbGAmNhLIwFxsJYGAuMhbEwFhgLY2EsMBbGwlhgLIyFscBYGAtjgbEwFsYCY2EsjAXGwlgYC4yFsTAWGAtjYSwwFsbCWGAsjIWxwFgYC2OBsTAWxgJjYSyMBcbCWBgLjIWxMBYYC2NhLDAWxsJYYCyMhbHAWBgLY4GxMBbGwlhgLIyFscBYGAtjgbEwFsYCY3HbANg+AjAeL/mnAAAAAElFTkSuQmCC" />
+    </main>
+  </body>
+</html>

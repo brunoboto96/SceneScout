@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Image aspect (fill)</title>
+    <style>
+      body { margin: 0; font: 16px/1.5 sans-serif; background: rgb(255, 255, 255); color: rgb(17, 24, 39); }
+      main { padding: 16px; }
+      .photo { width: 200px; height: 200px; object-fit: fill; }
+    </style>
+  </head>
+  <body>
+    <!-- The photo is a 200×100 picture in a 200×200 box. Under object-fit: fill the browser stretches it to the box, so the design audit reports it as image-aspect. image-aspect-cover.html is the same page with one line changed, object-fit: cover, which crops instead of stretching and is not reported. -->
+    <main>
+      <h1>Gallery</h1>
+      <img class="photo" alt="Product photo" data-testid="gallery-photo" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAABkCAIAAABM5OhcAAAAzElEQVR42u3SMREAMAgAsVI1SEQisjDBwJBI+PvI6gfbvgQYC2NhLDAWxsJYYCyMhbHAWBgLY4GxMBbGAmNhLIwFxsJYGAuMhbEwFhgLY2EsMBbGwlhgLIyFscBYGAtjgbEwFsYCY2EsjAXGwlgYC4yFsTAWGAtjYSwwFsbCWGAsjIWxwFgYC2OBsTAWxgJjYSyMBcbCWBgLjIWxMBYYC2NhLDAWxsJYYCyMhbHAWBgLY4GxMBbGwlhgLIyFscBYGAtjgbEwFsYCY3HbANg+AjAeL/mnAAAAAElFTkSuQmCC" />
+    </main>
+  </body>
+</html>

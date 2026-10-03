@@ -278,6 +278,19 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       JSON.stringify(ctxRecords.filter((r) => r.tag === "input")),
     );
 
+    console.log("design audit: a picture out of its box's proportions is distorted only under object-fit: fill");
+    // The same 2:1 picture in the same square box; the two pages differ only in the class's object-fit.
+    await engine.navigate("/image-aspect-fill.html");
+    const fillAudit = await engine.designAudit();
+    await engine.navigate("/image-aspect-cover.html");
+    const coverAudit = await engine.designAudit();
+    check(
+      "a stretched image under object-fit: fill is reported as distorted",
+      /IMAGES \(1 distorted\):\n {2}⚠ \[gallery-photo\] — rendered 200×200 vs natural 200×100/.test(fillAudit),
+      fillAudit,
+    );
+    check("the same image under object-fit: cover, set by a class, is not", !coverAudit.includes("IMAGES ("), coverAudit);
+
     console.log("design audit: text over a positioned image is not measured against the page");
     // The contrastive pair differs only in the <img> under the hero text.
     await engine.navigate("/design-hero-image.html");
