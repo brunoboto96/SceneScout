@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * Copy the version from package.json into .claude-plugin/plugin.json and into
+ * Copy the version from package.json into .claude-plugin/plugin.json, the
+ * optional mod's manifest (mods/scenescout-mod/.claude-plugin/plugin.json) and
  * the desktop extension's manifest (desktop-extension/manifest.json).
  *
  * Claude Code only offers a plugin update when the plugin's own version
- * changes, and a desktop extension shows the version its manifest names, so
- * both must move with the package. Runs as part of `npm run version-packages`,
+ * changes, and the mod is a plugin of its own; a desktop extension shows the
+ * version its manifest names. All three must move with the package. Runs as part of `npm run version-packages`,
  * right after Changesets has bumped package.json. install-test asserts the
  * versions are equal.
  *
@@ -21,7 +22,11 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 
-for (const relative of [path.join(".claude-plugin", "plugin.json"), path.join("desktop-extension", "manifest.json")]) {
+for (const relative of [
+  path.join(".claude-plugin", "plugin.json"),
+  path.join("mods", "scenescout-mod", ".claude-plugin", "plugin.json"),
+  path.join("desktop-extension", "manifest.json"),
+]) {
   const file = path.join(root, relative);
   const json = JSON.parse(fs.readFileSync(file, "utf8"));
   if (json.version === pkg.version) continue;

@@ -43,11 +43,13 @@ import {
   STATUS_PANE_URI,
   STATUS_POLL_MS,
   STATUS_POLL_TOOL,
+  STATUS_TOOL,
   type PaneFinding,
   type PaneFindings,
   type PaneInput,
 } from "../src/engine/status-pane.ts";
 import { statusPanePage } from "../src/engine/status-pane-page.ts";
+import * as mod from "../mods/scenescout-mod/hooks/pane.js";
 import {
   decideOpen,
   OPEN_CHOICES,
@@ -1660,4 +1662,209 @@ test("the pane's page: its script parses, it loads nothing from outside, and eve
   assert.ok(script.includes("event.source !== window.parent"));
   assert.doesNotMatch(script, /innerHTML|insertAdjacentHTML|document\.write/);
   assert.ok(STATUS_PANE_URI.startsWith("ui://") && MCP_APP_MIME === "text/html;profile=mcp-app");
+});
+
+// ---- The optional Claude Code mod's pane and lane model ---------------------
+// The mod is a plugin of its own and cannot import the engine, so the names and
+// the format it copies are held equal here, and its rules run against what the
+// server really returns.
+
+type El = { type: string; props: Record<string, unknown> };
+const els = {
+  Box: (props: Record<string, unknown>): El => ({ type: "Box", props }),
+  Text: (props: Record<string, unknown>): El => ({ type: "Text", props }),
+  Link: (props: Record<string, unknown>): El => ({ type: "Link", props }),
+};
+function walk(node: unknown, visit: (el: El) => void): void {
+  if (!node || typeof node !== "object") return;
+  const el = node as El;
+  visit(el);
+  for (const child of (el.props?.children as unknown[] | undefined) ?? []) walk(child, visit);
+}
+function drawnText(tree: unknown): string[] {
+  const lines: string[] = [];
+  walk(tree, (el) => {
+    if (el.type === "Text") lines.push((el.props.children as unknown[]).filter((c) => typeof c === "string").join(""));
+  });
+  return lines;
+}
+function drawnTypes(tree: unknown): Set<string> {
+  const types = new Set<string>();
+  walk(tree, (el) => types.add(el.type));
+  return types;
+}
+function serverResult(data: ReturnType<typeof paneData>) {
+  return { content: [{ type: "text", text: paneText(data) }], structuredContent: { ...data }, isError: false };
+}
+
+test("the mod polls the server's own tools at the pane's rate and formats durations the same way", () => {
+  assert.equal(mod.STATUS_POLL_TOOL, STATUS_POLL_TOOL);
+  assert.equal(mod.STATUS_TOOL, STATUS_TOOL);
+  assert.equal(mod.POLL_MS, STATUS_POLL_MS);
+  for (const ms of [-5, 0, 999, 59_999, 60_000, 185_000, 3_599_999, 3_600_000, 7_380_000]) assert.equal(mod.formatDuration(ms), formatDuration(ms), String(ms));
+  // Pane and command names: letters, digits, _ and -, at most 64 characters.
+  for (const name of [mod.COMMAND, mod.PANE_ID]) assert.match(name, /^[A-Za-z0-9_-]{1,64}$/);
+});
+
+test("the mod tries the configured server first, then both default names, and the pair that answered last before all", () => {
+  const cases: Array<{ name: string; configured: unknown; want: string[] }> = [
+    { name: "nothing configured", configured: "", want: ["scenescout", "plugin:scenescout:scenescout"] },
+    { name: "absent", configured: undefined, want: ["scenescout", "plugin:scenescout:scenescout"] },
+    { name: "a custom name goes first", configured: "  my-scout ", want: ["my-scout", "scenescout", "plugin:scenescout:scenescout"] },
+    { name: "a default named again is not tried twice", configured: "plugin:scenescout:scenescout", want: ["plugin:scenescout:scenescout", "scenescout"] },
+    { name: "not text", configured: 42, want: ["scenescout", "plugin:scenescout:scenescout"] },
+  ];
+  for (const c of cases) assert.deepEqual(mod.serverCandidates(c.configured), c.want, c.name);
+
+  const servers = mod.serverCandidates("");
+  assert.deepEqual(mod.callPlan(servers, null), [
+    ["scenescout", STATUS_POLL_TOOL],
+    ["scenescout", STATUS_TOOL],
+    ["plugin:scenescout:scenescout", STATUS_POLL_TOOL],
+    ["plugin:scenescout:scenescout", STATUS_TOOL],
+  ]);
+  const plan = mod.callPlan(servers, ["plugin:scenescout:scenescout", STATUS_TOOL]);
+  assert.deepEqual(plan[0], ["plugin:scenescout:scenescout", STATUS_TOOL]);
+  assert.equal(plan.length, 4, "the pair that answered is moved, not added");
+});
+
+test("the mod reads the server's result: structured data, text alone, or the error", () => {
+  const data = paneData(paneInput({ sessions: [paneSession({ session: "lane-1" })], findings: [finding("high")], runStart: RUN_START }));
+  const structured = mod.readResult(serverResult(data), PANE_NOW);
+  assert.equal(structured.kind, "data");
+  assert.deepEqual(structured.data, { ...data });
+
+  // A host that drops structuredContent (the tool declares no output schema) still leaves the text, whose first line carries the address.
+  const textOnly = mod.readResult({ content: [{ type: "text", text: paneText(data) }], isError: false }, PANE_NOW);
+  assert.equal(textOnly.kind, "text");
+  assert.equal(textOnly.liveUrl, "http://127.0.0.1:4321/tok_abcdefghijklmnop/");
+
+  const cases: Array<{ name: string; result: Record<string, unknown>; error: RegExp }> = [
+    { name: "the server's own error", result: { content: [{ type: "text", text: "Error: no project" }], isError: true }, error: /no project/ },
+    { name: "an error with no text", result: { content: [], isError: true }, error: /reported an error/ },
+    { name: "nothing at all", result: { content: [], isError: false }, error: /nothing to show/ },
+    { name: "a shape that is not the pane's", result: { content: [], structuredContent: { sessions: "x" }, isError: false }, error: /nothing to show/ },
+  ];
+  for (const c of cases) {
+    const view = mod.readResult(c.result, PANE_NOW);
+    assert.equal(view.kind, "error", c.name);
+    assert.match(view.error ?? "", c.error, c.name);
+  }
+  const none = mod.unreachable(["scenescout scout_status_poll: not connected"], PANE_NOW);
+  assert.match(none.error, /^No SceneScout server answered\. Tried scenescout scout_status_poll: not connected\. /);
+  assert.match(none.error, /mcp_server/);
+});
+
+test("the pane's link is the live view on localhost, and anything else is not a link", () => {
+  const cases: Array<{ url: unknown; want: string | null }> = [
+    { url: "http://127.0.0.1:4321/tok_abcdefghijklmnop/", want: "http://localhost:4321/tok_abcdefghijklmnop/" },
+    { url: "http://127.0.0.1:4321/", want: null },
+    { url: "http://evil.test:4321/tok/", want: null },
+    { url: "http://127.0.0.1:4321/tok/../x", want: null },
+    { url: "https://127.0.0.1:4321/tok/", want: null },
+    { url: null, want: null },
+  ];
+  for (const c of cases) assert.equal(mod.linkHref(c.url), c.want, String(c.url));
+});
+
+test("the pane draws sessions, findings by severity, coverage and the live view, with no image and no field", () => {
+  const data = paneData(
+    paneInput({
+      sessions: [
+        paneSession({ session: "lane-1", phase: "running", tool: "scout_type", task: "Fill the new-thing form", objective: "Forms" }),
+        paneSession({ session: "lane-2", phase: "running", since: new Date(PANE_NOW - 200_000).toISOString() }),
+      ],
+      findings: [finding("high"), finding("medium"), finding("low", { tier: "worth_a_look" })],
+      runStart: RUN_START,
+      coverage: { routesVisited: 2, routesTotal: 4, states: 3, elementsExercised: 9, elementsTotal: 20 },
+    }),
+  );
+  const tree = mod.renderPane(els, mod.readResult(serverResult(data), PANE_NOW));
+  const text = drawnText(tree);
+  const links: El[] = [];
+  walk(tree, (el) => el.type === "Link" && links.push(el));
+  assert.deepEqual(
+    links.map((l) => l.props),
+    [{ href: "http://localhost:4321/tok_abcdefghijklmnop/", label: "Open the live view" }],
+  );
+  assert.ok(text.includes("http://127.0.0.1:4321/tok_abcdefghijklmnop/"), "the address the server gave is shown to copy");
+  assert.ok(text.includes("Sessions (2)"), text.join("\n"));
+  assert.ok(text.includes("lane-1 (admin): running scout_type for 5s"), text.join("\n"));
+  assert.ok(text.includes("  task: Fill the new-thing form") && text.includes("  objective: Forms"));
+  assert.ok(
+    text.some((l) => l.startsWith("lane-2") && l.includes("STUCK in")),
+    "a stuck session says so",
+  );
+  assert.ok(text.includes("Open findings 2:") && text.includes("1 high") && text.includes("1 medium") && text.includes("0 low"));
+  assert.ok(text.includes("1 worth a look"));
+  assert.ok(text.includes("Coverage: routes 2/4 · 3 states · 9/20 elements exercised"));
+  // Box, Text and Link draw in the terminal and the Code tab alike; Image is terminal-only, and the pane takes no input.
+  assert.deepEqual([...drawnTypes(tree)].sort(), ["Box", "Link", "Text"]);
+});
+
+test("the pane says why there is nothing to show: loading, no server, no session, no live view", () => {
+  const cases: Array<{ name: string; view: Parameters<typeof mod.renderPane>[1]; want: RegExp }> = [
+    { name: "first poll pending", view: { kind: "loading" }, want: /Asking the SceneScout server/ },
+    { name: "no server answered", view: mod.unreachable([], PANE_NOW), want: /No SceneScout server answered/ },
+    { name: "no session yet", view: mod.readResult(serverResult(paneData(paneInput({ live: null }))), PANE_NOW), want: /No session is attached/ },
+    { name: "live view off", view: mod.readResult(serverResult(paneData(paneInput({ live: null, liveOff: true }))), PANE_NOW), want: /SCENESCOUT_LIVE=off/ },
+  ];
+  // Text alone, with no address: the server's own reason is shown, not a generic one.
+  cases.push({
+    name: "text alone, live view off",
+    view: mod.readResult({ content: [{ type: "text", text: paneText(paneData(paneInput({ live: null, liveOff: true }))) }] }, PANE_NOW),
+    want: /^not available\. The live view is off: SCENESCOUT_LIVE=off/,
+  });
+  for (const c of cases) {
+    const tree = mod.renderPane(els, c.view);
+    assert.ok(
+      drawnText(tree).some((l) => c.want.test(l)),
+      `${c.name}: ${drawnText(tree).join(" | ")}`,
+    );
+    assert.ok(!drawnTypes(tree).has("Link"), `${c.name}: no link without an address`);
+  }
+  // Text alone: the address becomes the link, and the rest of the server's lines are drawn as they are.
+  const data = paneData(paneInput({ sessions: [paneSession({ session: "lane-1" })] }));
+  const tree = mod.renderPane(els, mod.readResult({ content: [{ type: "text", text: paneText(data) }] }, PANE_NOW));
+  const text = drawnText(tree);
+  assert.ok(text.includes("1 session:"), text.join("\n"));
+  let href = "";
+  walk(tree, (el) => {
+    if (el.type === "Link") href = String(el.props.href);
+  });
+  assert.equal(href, "http://localhost:4321/tok_abcdefghijklmnop/");
+  // Where nothing draws, the command prints the server's own text.
+  assert.equal(mod.fallbackText(mod.readResult(serverResult(data), PANE_NOW)), paneText(data));
+  assert.match(mod.fallbackText(mod.unreachable([], PANE_NOW)), /No SceneScout server answered/);
+});
+
+test("the lane model is set only when configured, only on a SceneScout lane, and never on a fork", () => {
+  const settings: Array<{ value: unknown; want: string | null; error?: RegExp }> = [
+    { value: "", want: null },
+    { value: "   ", want: null },
+    { value: undefined, want: null },
+    { value: "sonnet", want: "sonnet" },
+    { value: " claude-sonnet-4-5 ", want: "claude-sonnet-4-5" },
+    { value: "claude-opus-4-1[1m]", want: "claude-opus-4-1[1m]" },
+    { value: "sonnet; rm -rf", want: null, error: /is not a model alias or id/ },
+    { value: 7, want: null, error: /not text/ },
+  ];
+  for (const c of settings) {
+    const got = mod.laneModelSetting(c.value);
+    assert.equal(got.model, c.want, String(c.value));
+    if (c.error) assert.match(got.error ?? "", c.error, String(c.value));
+    else assert.equal(got.error, undefined, String(c.value));
+  }
+
+  const lane = { prompt: 'Attach with scout_attach { session: "orders" } and report with scout_lane_report.', fork: false };
+  const spawns: Array<{ name: string; spawn: Record<string, unknown>; configured: string | null; want: string | null }> = [
+    { name: "nothing configured: the default does nothing", spawn: lane, configured: null, want: null },
+    { name: "a lane gets the configured model", spawn: lane, configured: "sonnet", want: "sonnet" },
+    { name: "the setting wins over the planner's choice", spawn: { ...lane, model: "opus" }, configured: "sonnet", want: "sonnet" },
+    { name: "already on it: no rewrite", spawn: { ...lane, model: "sonnet" }, configured: "sonnet", want: null },
+    { name: "a lane named only by its report", spawn: { prompt: "Hand back scout_lane_report's object.", fork: false }, configured: "haiku", want: "haiku" },
+    { name: "a subagent that is not a lane", spawn: { prompt: "Search the code for the router.", fork: false }, configured: "sonnet", want: null },
+    { name: "a fork inherits whatever is set", spawn: { ...lane, fork: true }, configured: "sonnet", want: null },
+  ];
+  for (const c of spawns) assert.equal(mod.spawnModel(c.spawn, c.configured), c.want, c.name);
 });

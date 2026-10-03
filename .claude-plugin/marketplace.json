@@ -10,6 +10,11 @@
       "name": "scenescout",
       "source": "./",
       "description": "Exploratory UI testing: browser tools that let Claude explore a running web app like a curious user, find what is broken or confusing, and write a coverage-checked report."
+    },
+    {
+      "name": "scenescout-mod",
+      "source": "./mods/scenescout-mod",
+      "description": "Optional Claude Code mod: a run pane that refreshes itself (/scenescout-pane) and an opt-in model for lane agents. Runs unsandboxed in the Claude Code CLI and the desktop Code tab; install scenescout first."
     }
   ]
 }
