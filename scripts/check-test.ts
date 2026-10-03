@@ -114,6 +114,7 @@ import {
   gateFailures,
   geometryRule,
   issuesFromRoutes,
+  needsSignInText,
   parseCheckArgs,
   redactBaselineRun,
   redactFlowRuns,
@@ -2720,6 +2721,61 @@ function firstRunFacts(over: Partial<CheckResult> = {}, maxRoutes = 20): FirstRu
     elapsedMs: 41_000,
   };
 }
+
+test("with no session, a route sent to sign-in is a coverage gap, not an issue; with one, the same bounce is still reported", () => {
+  // A contrastive pair: the same routes, and the only difference is whether the check was given a signed-in session.
+  const routes = [
+    route({ path: "/", geometry: ["e9 something new the oracle learned to say"] }),
+    route({ path: "/things/new", loginRedirect: true, url: `${ORIGIN}/login?next=/things/new`, elements: 2 }),
+    route({ path: "/things/7/edit", loginRedirect: true, url: `${ORIGIN}/login`, elements: 0 }),
+  ];
+  const signedOut = checkFindings(routes, ORIGIN, [], [], null, [], false);
+  const signedIn = checkFindings(routes, ORIGIN, [], [], null, [], true);
+  assert.deepEqual(rules(signedOut.issues), ["layout-issue"], "no auth-redirect, and a sign-in page with no controls is no dead end");
+  assert.deepEqual(signedOut.needsSignIn, ["/things/new", "/things/7/edit"]);
+  assert.deepEqual(
+    signedIn.issues.filter((i) => i.rule === "auth-redirect").flatMap((i) => i.routes),
+    ["/things/new", "/things/7/edit"],
+  );
+  assert.deepEqual(signedIn.needsSignIn, []);
+  assert.deepEqual(checkFindings(routes, ORIGIN, [], [], null, [{ path: "/things/new" }], false).needsSignIn, ["/things/7/edit"], "--ignore-path exempts it");
+  assert.deepEqual(checkFindings(routes, ORIGIN, ["auth-redirect"], [], null, [], false).needsSignIn, signedOut.needsSignIn, "--ignore does not");
+  // A caller that does not say is treated as signed in, so nothing is hidden by default.
+  assert.deepEqual(rules(issuesFromRoutes(routes, ORIGIN)), rules(signedIn.issues));
+  assert.deepEqual(rules(issuesFromRoutes(routes, ORIGIN, [], [], [], false)), ["layout-issue"]);
+
+  // The first look never has a session: its top three hold none of these, where a signed-in check's would lead with them.
+  assert.ok(!rules(firstLook(signedOut.issues, routes.length)).includes("auth-redirect"));
+  assert.equal(firstLook(signedIn.issues, routes.length)[0]?.rule, "auth-redirect");
+
+  // The report says it once, with how to cover them, and does not count them against the gate.
+  const report = (needsSignIn: string[] | undefined, issues: CheckIssue[]) =>
+    formatCheck({ ...result(issues, "medium"), routes, ...(needsSignIn ? { needsSignIn } : {}) });
+  const out = report(signedOut.needsSignIn, signedOut.issues);
+  assert.equal(out.match(/2 routes need sign-in; give a role to cover them/g)?.length, 1, out);
+  assert.match(out, /## Needs sign-in \(2\)/);
+  assert.match(out, /`--storage-state`/);
+  assert.match(out, /\*\*PASSED\*\*.* · 2 route\(s\) need sign-in, not covered/);
+  assert.deepEqual((toSummaryJson({ ...result(signedOut.issues), needsSignIn: signedOut.needsSignIn }, "1") as { needsSignIn?: string[] }).needsSignIn, [
+    "/things/new",
+    "/things/7/edit",
+  ]);
+  const withSession = report(undefined, signedIn.issues);
+  assert.match(withSession, /\*\*FAILED\*\*/);
+  assert.doesNotMatch(withSession, /need sign-in/);
+  assert.equal("needsSignIn" in (toSummaryJson(result(signedIn.issues), "1") as object), false);
+  assert.equal(needsSignInText(1, "x"), "1 route needs sign-in; give a role to cover them: x.");
+
+  // The first look's summary names the gap once, with the login command; a start page that bounced has its own note instead.
+  const look = firstRunSummary(firstRunFacts({ routes, issues: signedOut.issues, needsSignIn: signedOut.needsSignIn }), "r");
+  assert.equal(
+    look.filter((l) => l.startsWith(`2 pages need sign-in; give a role to cover them: npx -y scenescout login ${ORIGIN}/ --role <name>`)).length,
+    1,
+    look.join("\n"),
+  );
+  const walledStart = firstRunSummary(firstRunFacts({ routes: [route({ loginRedirect: true, url: `${ORIGIN}/login` })], needsSignIn: ["/"] }), "r");
+  assert.ok(!walledStart.some((l) => /need sign-in; give a role/.test(l)), walledStart.join("\n"));
+});
 
 const threeIssues = (): CheckIssue[] =>
   issuesFromRoutes(

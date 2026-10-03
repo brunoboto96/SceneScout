@@ -285,6 +285,34 @@ async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server
     walledStart.out.slice(-800),
   );
 
+  // One walled route among public ones, checked with no session and then with one. Signed out, being sent to sign-in
+  // is the route working: a coverage gap, never an issue. With a session, the same bounce means the session was lost.
+  const oneWalled = async (name: string, extra: string[]) => {
+    const dir = path.join(work, name);
+    const r = await runCli([baseUrl, "--project", work, "--out", dir, "--paths", "/check-links.html,/check-walled/new", ...extra]);
+    const summary = JSON.parse(fs.readFileSync(path.join(dir, "check.json"), "utf8")) as Summary & { needsSignIn?: string[] };
+    return { ...r, summary, report: fs.readFileSync(path.join(dir, "report.md"), "utf8") };
+  };
+  const signedOut = await oneWalled("walled-signed-out", []);
+  const stateFile = path.join(work, "signed-in-state.json");
+  fs.writeFileSync(stateFile, JSON.stringify({ cookies: [], origins: [] }));
+  const signedIn = await oneWalled("walled-signed-in", ["--storage-state", stateFile]);
+  const bounced = (s: Summary) => s.issues.filter((i) => i.rule === "auth-redirect").flatMap((i) => i.routes);
+  check(
+    "with no session, a route sent to sign-in is not an issue: it is counted once as needing sign-in",
+    bounced(signedOut.summary).length === 0 &&
+      JSON.stringify(signedOut.summary.needsSignIn) === JSON.stringify(["/check-walled/new"]) &&
+      /1 route needs sign-in; give a role to cover them/.test(signedOut.report),
+    JSON.stringify(signedOut.summary.issues) + signedOut.out.slice(-600),
+  );
+  check(
+    "...and with a session, the same bounce is still an auth-redirect issue, with no gap listed",
+    JSON.stringify(bounced(signedIn.summary)) === JSON.stringify(["/check-walled/new"]) &&
+      signedIn.summary.needsSignIn === undefined &&
+      !/needs? sign-in; give a role/.test(signedIn.report),
+    JSON.stringify(signedIn.summary.issues) + signedIn.out.slice(-600),
+  );
+
   // A route that failed to load stays unvisited in the project's memory: one outage is not coverage.
   const projectDir = path.join(work, "memory-project");
   fs.mkdirSync(projectDir);
