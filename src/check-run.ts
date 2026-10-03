@@ -223,7 +223,9 @@ export async function runCheck(
     const { pages: measured, resources } = splitResources(redactRoutes(routes.map(withoutOwnResponse)));
     const flows = redactFlowRuns(flowRuns);
     const pictured = baselines ? redactBaselineRun(baselines) : null;
-    const { issues, worthALook } = checkFindings(measured, start.origin, options.ignore, flows, pictured, options.ignorePaths);
+    // Signed in only when given a session: with none, a route that sends the browser to sign-in needs one, and is not a lost session.
+    const signedIn = options.storageStatePath !== undefined;
+    const { issues, worthALook, needsSignIn } = checkFindings(measured, start.origin, options.ignore, flows, pictured, options.ignorePaths, signedIn);
     return {
       url: redactRoute(options.url),
       generatedAt: new Date().toISOString(),
@@ -233,6 +235,7 @@ export async function runCheck(
       resources,
       issues,
       worthALook,
+      ...(signedIn ? {} : { needsSignIn }),
       // Routes that failed to load are issues already; "not visited" is only what --max-routes (or the time budget) left out.
       unvisited: options.paths ? [] : engine.crawlableRoutes().map(redactRoute),
       ...(options.timeBudgetMs !== undefined ? { timeBudget: { ms: options.timeBudgetMs, reached: timeLimitReached } } : {}),

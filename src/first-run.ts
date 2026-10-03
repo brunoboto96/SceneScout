@@ -32,6 +32,7 @@ import {
   issueSections,
   MAX_CHECK_ROUTES,
   MAX_DISCOVERY_ROUNDS,
+  needsSignInText,
   resolveArgPath,
   resourcesTable,
   routesTable,
@@ -556,6 +557,17 @@ function notes({ result, options }: FirstRunFacts, code: (s: string) => string):
         `The start page moved to ${to}, so its links count as another site's and were not followed. To look further, run it there: ${code(`npx -y scenescout ${shellArg(`${to}/`)}`)}.`,
       );
     }
+  }
+  // A first look never has a session, so a page behind sign-in is a page it could not cover, not an issue.
+  const walled = result.needsSignIn?.length ?? 0;
+  if (walled > 0 && !start?.loginRedirect) {
+    out.push(
+      needsSignInText(
+        walled,
+        `${code(`npx -y scenescout login ${shellArg(result.url)} --role <name>`)} saves a sign-in, and an agent run then attaches as that role`,
+        "page",
+      ),
+    );
   }
   const left = result.unvisited.length;
   switch (stopReason(result, options.maxRoutes)) {
