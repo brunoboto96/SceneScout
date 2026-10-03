@@ -30,13 +30,135 @@ const LEGACY_MCP_NAMES = ["scenecraft"];
 export type RunResult = { status: number | null; stdout: string; stderr: string; missing: boolean };
 export type Runner = (command: string, args: string[], opts?: { cwd?: string }) => RunResult;
 
+/** What `spawnRunner` starts. A Windows batch shim is `cmd.exe /d /s /c` plus one already-quoted line. */
+export type SpawnPlan = { command: string; args: string[]; windowsVerbatimArguments?: true };
+
+/** Windows' own PATHEXT when the variable is unset. Each entry includes its dot. */
+const WINDOWS_PATH_EXT = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC";
+
+/** cmd.exe meta characters. A caret in front of one of these keeps it literal. */
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
+
+/** A `.cmd` or `.bat` file. Node refuses to spawn one directly (EINVAL) unless a shell starts it. */
+export function isBatchShim(file: string): boolean {
+  return /\.(?:cmd|bat)$/i.test(file);
+}
+
+function escapeCmdMeta(value: string): string {
+  return value.replace(CMD_META, "^$1");
+}
+
+/**
+ * The file Windows would run for `command`, or null when nothing matches.
+ *
+ * The current directory is tried before PATH. A name that already contains a
+ * dot is tried as written, then with each PATHEXT suffix; a name without a
+ * dot only gains those suffixes. Suffixes stay in PATHEXT order, so an
+ * `.exe` listed ahead of `.cmd` wins when both exist.
+ */
+export function resolveWindowsCommand(
+  command: string,
+  opts: { cwd: string; pathEnv: string; pathExt?: string; exists: (file: string) => boolean },
+): string | null {
+  const listed = (opts.pathExt?.trim() || WINDOWS_PATH_EXT).split(";").filter((ext) => ext !== "");
+  const exts = path.win32.basename(command).includes(".") ? ["", ...listed] : listed;
+  const rooted = path.win32.isAbsolute(command) || /[\\/]/.test(command);
+  const dirs = rooted ? [""] : [opts.cwd, ...windowsPathDirs(opts.pathEnv)];
+  for (const dir of dirs) {
+    const base = rooted ? (path.win32.isAbsolute(command) ? command : path.win32.join(opts.cwd, command)) : path.win32.join(dir, command);
+    for (const ext of exts) {
+      const candidate = base + ext;
+      if (opts.exists(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+function windowsPathDirs(pathEnv: string): string[] {
+  const dirs: string[] = [];
+  for (const raw of pathEnv.split(";")) {
+    const dir = raw.trim();
+    if (!dir) continue;
+    dirs.push(dir.length >= 2 && dir.startsWith('"') && dir.endsWith('"') ? dir.slice(1, -1) : dir);
+  }
+  return dirs;
+}
+
+/**
+ * One argument on a `cmd /c` line that a batch shim forwards with `%*`.
+ *
+ * Quoted for the program that finally runs (backslashes before a quote follow
+ * CommandLineToArgvW). Every cmd meta character is then caret-escaped twice:
+ * once for `cmd.exe /c`, and once for the shim line that expands `%*`. A JSON
+ * value and a path containing spaces each stay a single argument.
+ */
+function escapeCmdArgument(arg: string): string {
+  let value = `${arg}`;
+  // Backslashes that escape a following quote, then a trailing run that the
+  // wrapping quote would otherwise swallow. The match does not backtrack.
+  value = value.replace(/(?=(\\+?)?)\1"/g, '$1$1\\"');
+  value = value.replace(/(?=(\\+?)?)\1$/, "$1$1");
+  value = escapeCmdMeta(escapeCmdMeta(`"${value}"`));
+  return value;
+}
+
+/** The string after `cmd.exe /d /s /c`. The outer quotes exist for `/s` to strip. */
+function windowsBatchCommandLine(command: string, args: string[]): string {
+  const program = escapeCmdMeta(path.win32.normalize(command));
+  return `"${[program, ...args.map(escapeCmdArgument)].join(" ")}"`;
+}
+
+/**
+ * How to start `command`. On Windows a resolved `.cmd` or `.bat` goes through
+ * `cmd.exe`, because node will not spawn those itself. Everywhere else, and
+ * for an executable, the command and its arguments pass through unchanged.
+ */
+export function planSpawn(opts: { command: string; args: string[]; platform: NodeJS.Platform; resolved?: string | null; comSpec?: string }): SpawnPlan {
+  if (opts.platform === "win32" && opts.resolved && isBatchShim(opts.resolved)) {
+    return {
+      command: opts.comSpec?.trim() || "cmd.exe",
+      args: ["/d", "/s", "/c", windowsBatchCommandLine(opts.resolved, opts.args)],
+      windowsVerbatimArguments: true,
+    };
+  }
+  return { command: opts.command, args: opts.args };
+}
+
+/** `planSpawn` for this platform, resolving a Windows batch shim before choosing cmd.exe. */
+export function commandSpawnPlan(
+  command: string,
+  args: string[],
+  opts: { platform: NodeJS.Platform; cwd: string; pathEnv?: string; pathExt?: string; comSpec?: string; exists: (file: string) => boolean },
+): SpawnPlan {
+  if (opts.platform !== "win32") return { command, args };
+  return planSpawn({
+    command,
+    args,
+    platform: "win32",
+    resolved: resolveWindowsCommand(command, { cwd: opts.cwd, pathEnv: opts.pathEnv ?? "", pathExt: opts.pathExt, exists: opts.exists }),
+    comSpec: opts.comSpec,
+  });
+}
+
 /** Real runner. `missing` separates "the binary is not installed" from "it ran and failed". */
 export const spawnRunner: Runner = (command, args, opts) => {
-  const r = spawnSync(command, args, { encoding: "utf8", timeout: 60_000, cwd: opts?.cwd });
+  const planned = commandSpawnPlan(command, args, {
+    platform: process.platform,
+    cwd: opts?.cwd ?? process.cwd(),
+    pathEnv: process.env.PATH,
+    pathExt: process.env.PATHEXT,
+    comSpec: process.env.ComSpec,
+    exists: (file) => fs.existsSync(file),
+  });
+  const r = spawnSync(planned.command, planned.args, {
+    encoding: "utf8",
+    timeout: 60_000,
+    cwd: opts?.cwd,
+    windowsVerbatimArguments: planned.windowsVerbatimArguments,
+  });
   const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
-  // On Windows node refuses to start a .cmd or .bat file directly (EINVAL). For
-  // the caller that is the same situation as a missing binary: nothing ran, and
-  // the command has to be handed to the person instead.
+  // A batch shim is started through cmd.exe above. EINVAL still means a shim
+  // was spawned directly and nothing ran: the same outcome as a missing binary.
   const missing = code === "ENOENT" || (process.platform === "win32" && code === "EINVAL");
   // With `encoding` set, a command that never ran still yields "" for stderr: the error is the only account of it.
   const stderr = r.stderr || (code === "ETIMEDOUT" ? "npm did not finish within 60 s" : r.error ? String(r.error.message) : "");
@@ -326,7 +448,8 @@ export function planCommand(opts: { packageRoot: string; nodePath: string; versi
     const mine = samePath(opts.resolved, path.join(opts.packageRoot, "dist", "cli.js"));
     if (mine || !checkout) return { action: "present", at: opts.resolved };
   }
-  // npm on Windows is a .cmd shim, which node cannot start directly.
+  // Putting `scenescout` on PATH stays a manual npm command on Windows. Client
+  // registration is separate: spawnRunner starts a `.cmd` shim itself.
   if (opts.platform === "win32") return { action: "manual", manual, why: "this step cannot start npm on Windows" };
   const beside = path.join(path.dirname(opts.nodePath), "npm");
   // The npm beside the running node installs into that node's prefix, which is

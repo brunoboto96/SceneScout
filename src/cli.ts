@@ -527,11 +527,9 @@ async function install(flags: string[]): Promise<void> {
         for (const note of reg.notes) console.log(`· ${note}`);
       } else {
         failed = true;
-        // On Windows a client installed through npm is a .cmd shim, which node cannot start directly.
-        const windowsNote = process.platform === "win32" ? " (or it is installed as a .cmd shim, which cannot be started from here)" : "";
         console.log(
           reg.status === "client-missing"
-            ? `· ${label} was not found on this machine${windowsNote}, so nothing was registered with it.`
+            ? `· ${label} was not found on this machine, so nothing was registered with it.`
             : `✗ Registering with ${label} failed: ${reg.detail}`,
         );
         console.log(`  To do it by hand, ${reg.manual}\n`);
