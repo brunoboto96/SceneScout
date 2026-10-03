@@ -38,6 +38,8 @@ import { analyzeDesign, type DesignPayload, type StyleRecord } from "../src/engi
 import { isFileMediaType, isNonPageResource, mediaTypeOf } from "../src/engine/crawl.ts";
 import { httpErrorDetail } from "../src/engine/oracles.ts";
 import {
+  describeStep,
+  elementStateMatches,
   loadFlows,
   matchRequest,
   parseFlow,
@@ -1450,7 +1452,7 @@ test("flows: every mistake names the file and the field", () => {
     [bad([]), /^f\.json: steps needs at least one step/],
     [
       bad([nav, { action: "hover", target: "testid=x" }]),
-      /^f\.json: steps\[1\]\.action must be one of navigate, click, type, select, press, expect-text, expect-url, expect-request/,
+      /^f\.json: steps\[1\]\.action must be one of navigate, click, type, select, press, expect-text, expect-element, expect-url, expect-request/,
     ],
     [bad([nav, { action: "click" }]), /^f\.json: steps\[1\]\.target is required/],
     [bad([nav, { action: "click", target: "#save" }]), /^f\.json: steps\[1\]\.target must be testid=…, text=…, label=… or role=/],
@@ -1461,6 +1463,9 @@ test("flows: every mistake names the file and the field", () => {
     [bad([nav, { action: "expect-request", request: "/api/x", status: 200 }]), /^f\.json: steps\[1\]\.request must be a method and a path/],
     [bad([nav, { action: "expect-request", request: "GET /api/x", status: "ok" }]), /^f\.json: steps\[1\]\.status/],
     [bad([nav, { action: "type", target: "label=Name" }]), /^f\.json: steps\[1\]\.value is required/],
+    [bad([nav, { action: "expect-element", target: "testid=x" }]), /^f\.json: steps\[1\]\.state is required/],
+    [bad([nav, { action: "expect-element", target: "testid=x", state: "gone" }]), /^f\.json: steps\[1\]\.state/],
+    [bad([nav, { action: "expect-element", state: "hidden" }]), /^f\.json: steps\[1\]\.target is required/],
     [bad([nav], { steps2: [] }), /^f\.json: \(the whole file\) unknown field\(s\) "steps2"/],
     [bad(Array.from({ length: 51 }, () => nav)), /^f\.json: steps holds at most 50 steps/],
   ];
@@ -1468,6 +1473,56 @@ test("flows: every mistake names the file and the field", () => {
     const parsed = parseFlow(text, "f.json");
     assert.ok(!parsed.ok, text);
     assert.match(parsed.error, re, text);
+  }
+});
+
+test("flows: expect-element parses with each state, and the report names it", () => {
+  for (const state of ["visible", "hidden", "enabled", "disabled", "checked", "unchecked"]) {
+    const parsed = parseFlow(
+      JSON.stringify({
+        steps: [
+          { action: "navigate", target: "/" },
+          { action: "expect-element", target: "testid=receipt", state },
+        ],
+      }),
+      "f.json",
+    );
+    assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+    assert.equal(describeStep(parsed.flow.steps[1]), `expect testid=receipt to be ${state}`);
+  }
+});
+
+test("flows: an element state holds or says what is true instead, in both directions", () => {
+  const shown = { visible: true, enabled: true, checked: null };
+  const off = { visible: true, enabled: false, checked: null };
+  const box = (checked: boolean) => ({ visible: true, enabled: true, checked });
+  const notShown = { visible: false, enabled: true, checked: null };
+  const cases: Array<[Parameters<typeof elementStateMatches>[0], Parameters<typeof elementStateMatches>[1], string | null]> = [
+    ["visible", shown, null],
+    ["visible", notShown, "is not visible"],
+    ["visible", null, "matches nothing"],
+    // Hidden is the absence of a visible element: nothing matching counts.
+    ["hidden", null, null],
+    ["hidden", notShown, null],
+    ["hidden", shown, "is visible"],
+    ["enabled", shown, null],
+    ["enabled", off, "is disabled"],
+    ["disabled", off, null],
+    ["disabled", shown, "is enabled"],
+    ["disabled", null, "matches nothing"],
+    // A hidden control is never reported as enabled or disabled: its state is not what a user sees.
+    ["disabled", { visible: false, enabled: false, checked: null }, "is not visible"],
+    ["checked", box(true), null],
+    ["checked", box(false), "is unchecked"],
+    ["unchecked", box(false), null],
+    ["unchecked", box(true), "is checked"],
+    ["checked", shown, "cannot be checked"],
+  ];
+  for (const [state, facts, actual] of cases) {
+    const verdict = elementStateMatches(state, facts);
+    const label = `${state} ${JSON.stringify(facts)}`;
+    if (actual === null) assert.ok(verdict.ok, label);
+    else assert.deepEqual(verdict, { ok: false, actual }, label);
   }
 });
 
