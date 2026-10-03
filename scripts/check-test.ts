@@ -70,7 +70,10 @@ import {
   parseThreshold,
   readStoredBaseline,
   routeFolder,
+  NEXT_FRAME_SCRIPT,
   STOP_ANIMATIONS_SCRIPT,
+  steadyPicture,
+  unsteadyNote,
   VISUAL_DIRNAME,
   visualFiles,
   type BaselineMeta,
@@ -2512,6 +2515,75 @@ test("baselines: the script that stops animations finishes the finite ones and c
   const document = { getAnimations: () => [animation("slide-in", 400), animation("spinner", Infinity), animation("detached", null)] };
   assert.equal(vm.runInNewContext(STOP_ANIMATIONS_SCRIPT, { document }), true);
   assert.deepEqual(calls, ["finish slide-in", "cancel spinner", "cancel detached"]);
+});
+
+test("baselines: a picture is kept once two taken a frame apart are the same, never the first one alone", async () => {
+  // The pictures a page gives while it is still drawing: a frame from before the stop, then a script's last steps.
+  const sequence = (...pictures: string[]) => {
+    let i = 0;
+    const log: string[] = [];
+    return {
+      log,
+      take: async () => {
+        const png = Buffer.from(pictures[Math.min(i, pictures.length - 1)]);
+        log.push(`take ${png.toString()}`);
+        i += 1;
+        return png;
+      },
+      nextFrame: async () => void log.push("frame"),
+    };
+  };
+  const still = sequence("a", "a");
+  assert.deepEqual(await steadyPicture(still.take, still.nextFrame, 5000), { png: Buffer.from("a"), steady: true, takes: 2 });
+  assert.deepEqual(still.log, ["take a", "frame", "take a"], "a frame passes between two pictures");
+
+  const settling = sequence("stale", "step 1", "step 2", "done", "done");
+  const kept = await steadyPicture(settling.take, settling.nextFrame, 5000);
+  assert.deepEqual(kept, { png: Buffer.from("done"), steady: true, takes: 5 });
+
+  // Two the same that are not next to each other are not still: a-b-a is a page that keeps moving.
+  const flicker = sequence("a", "b", "a", "b", "a", "a");
+  assert.equal((await steadyPicture(flicker.take, flicker.nextFrame, 5000)).takes, 6);
+
+  // A page that never holds still: the last picture once the budget is spent, said to be unsteady.
+  let clock = 0;
+  let n = 0;
+  const moving = { take: async () => Buffer.from(`frame ${n++}`), nextFrame: async () => void (clock += 400) };
+  const gaveUp = await steadyPicture(moving.take, moving.nextFrame, 1000, () => clock);
+  assert.deepEqual(gaveUp, { png: Buffer.from("frame 3"), steady: false, takes: 4 });
+  assert.equal(
+    unsteadyNote(5000),
+    "the picture was still changing after about 5s, so the last one taken is used: something on the page keeps moving, and a comparison of it may not repeat",
+  );
+});
+
+test("baselines: the next-frame script waits for two animation frames, and for a second when frames never come", async () => {
+  const frames: Array<() => void> = [];
+  const timers: Array<{ fn: () => void; ms: number }> = [];
+  const page = { requestAnimationFrame: (fn: () => void) => frames.push(fn), setTimeout: (fn: () => void, ms: number) => timers.push({ fn, ms }) };
+  const drawn = vm.runInNewContext(NEXT_FRAME_SCRIPT, { ...page, Promise }) as Promise<boolean>;
+  assert.equal(frames.length, 1);
+  frames.shift()!();
+  assert.equal(frames.length, 1, "the first frame asks for a second");
+  frames.shift()!();
+  assert.equal(await drawn, true);
+  assert.deepEqual(
+    timers.map((t) => t.ms),
+    [1000],
+  );
+
+  const noFrames = vm.runInNewContext(NEXT_FRAME_SCRIPT, { requestAnimationFrame: () => 0, setTimeout: (fn: () => void) => fn(), Promise }) as Promise<boolean>;
+  assert.equal(await noFrames, false);
+});
+
+test("baselines: a picture that never held still says so on its line of the report", () => {
+  const r = result([]);
+  const note = unsteadyNote(5000);
+  const report = formatCheck({ ...r, baselines: baselineRun([{ ...changedPlan, unsteady: note }]) });
+  assert.match(
+    report,
+    /_\(the picture was still changing after about 5s, so the last one taken is used: something on the page keeps moving, and a comparison of it may not repeat\)_/,
+  );
 });
 
 test("action: the pictures of changed baselines are kept with the results, and only when this run wrote them", () => {

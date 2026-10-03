@@ -359,7 +359,12 @@ async function takeBaselines(
         stored,
         now: { capture, platform: process.platform, image },
       });
-      const result: BaselineResult = { ...own, ...verdict, ...(shot.cut ? { partial: shot.cut } : {}) };
+      const result: BaselineResult = {
+        ...own,
+        ...verdict,
+        ...(shot.cut ? { partial: shot.cut } : {}),
+        ...(shot.unsteady ? { unsteady: shot.unsteady } : {}),
+      };
       if (verdict.status === "updated") {
         fs.mkdirSync(path.dirname(at(dir, files.png)), { recursive: true });
         fs.writeFileSync(at(dir, files.png), shot.png);
