@@ -39,6 +39,10 @@ inputs:
     description: Rules to drop, comma-separated (`scenescout check --help` lists them).
     required: false
     default: ""
+  ignore-path:
+    description: Paths to exempt, comma-separated. A path starting with / drops every rule on that route; rule:/path drops that one rule there. Matched exactly. Empty means none.
+    required: false
+    default: ""
   storage-state:
     description: A Playwright storage-state file to check while signed in, relative to working-directory.
     required: false

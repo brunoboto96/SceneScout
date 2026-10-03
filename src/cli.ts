@@ -134,7 +134,8 @@ Usage:
                                     so it can gate a pull request. Writes report.md, check.sarif and check.json.
                                     (--fail-on high|medium|low|never (default high); --mode observe|read-only;
                                      --max-routes N (default 50); --paths /a,/b to check only those;
-                                     --ignore rule,rule; --storage-state file to check signed in;
+                                     --ignore rule,rule; --ignore-path /a,rule:/b to exempt a path, or one rule on it;
+                                     --storage-state file to check signed in;
                                      --project dir (default: here); --out dir (default: .scenescout/check);
                                      --browser chromium|firefox|webkit;
                                      --action-timeout-ms N (default 5000), --nav-timeout-ms N (default 20000;

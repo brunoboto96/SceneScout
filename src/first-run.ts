@@ -176,6 +176,7 @@ export function firstRunCheckOptions(o: FirstRunOptions, projectDir: string): Ch
     maxRoutes: o.maxRoutes,
     timeBudgetMs: o.maxMinutes * 60_000,
     ignore: [],
+    ignorePaths: [],
     flows: "off",
     retest: false,
     flowWrites: "never",
