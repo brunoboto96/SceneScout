@@ -42,7 +42,7 @@ Run `npx -y scenescout doctor` first (`--engine` for clients other than Claude C
 
 | Symptom | Cause and fix |
 |---|---|
-| `scenescout check` exits 2 | It could not run, or not all of it: the app never answered, only the sign-in page was reached, a saved flow is not valid (the file and field are named), a flow step was refused by the write policy, or `--baseline` found no `targets.json`, or one that is not valid, in the baselines folder. Read it as a setup problem, not a defect |
+| `scenescout check` exits 2 | It could not run, or not all of it: the app never answered, only the sign-in page was reached, only a start page with at most one control was reached (check again, or raise `--nav-timeout-ms` if the app is slow to draw), a saved flow is not valid (the file and field are named), a flow step was refused by the write policy, or `--baseline` found no `targets.json`, or one that is not valid, in the baselines folder. Read it as a setup problem, not a defect |
 | A visual baseline fails on CI but passes locally | The baseline was taken on another operating system, which draws text differently (the report says so). Take baselines where the check runs ([visual baselines](Ways-to-use-it.md#visual-baselines)) |
 | A visual baseline "cannot be used" | Its files are half there or unreadable, or it was taken with other settings, often by another version of SceneScout. Take it again with `--baseline update` |
 | A flow is marked "could not run" | A step sent a write under `--flow-writes never`, often telemetry or a heartbeat landing during the step. Stop the telemetry in the test environment, or use `--flow-writes allow` |

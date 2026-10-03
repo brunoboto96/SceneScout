@@ -190,7 +190,7 @@ export async function runCheck(
     if (options.baseline !== "off" && !inputs.baselineTargets)
       throw new Error(`--baseline ${options.baseline} was given no targets: read them with readCheckInputs`);
     const baselines =
-      options.baseline !== "off" && inputs.baselineTargets && unmeasuredReason(routes, !options.paths) === null
+      options.baseline !== "off" && inputs.baselineTargets && unmeasuredReason(routes, !options.paths, options.paths ? [] : engine.crawlableRoutes()) === null
         ? await takeBaselines(engine, options, options.baseline, inputs.baselineTargets, log)
         : null;
     const flowRuns: FlowRun[] = [];
