@@ -203,6 +203,7 @@ import {
   READ_POSTS_ENV,
   readPostAllowed,
   matchReadPost,
+  refusedPostPage,
   readPostEntries,
   readPostsSetting,
   type ReadPost,
@@ -1853,7 +1854,8 @@ export class BrowserEngine {
         const pathname = pathnameOf(url);
         const refuse = (why?: string) => {
           const answered = answersWithRefusal(req.resourceType());
-          if (rule === "observe" && method === "POST" && !why && answered && !BENIGN_MUTATION_RE.test(url)) this.noteObserveRefusedPost(url, req.postData());
+          if (rule === "observe" && method === "POST" && !why && answered && !BENIGN_MUTATION_RE.test(url))
+            this.noteObserveRefusedPost(url, req.postData(), this.sentByMainFrame(req) ? req.headers()["referer"] : undefined);
           this.noteBlocked({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered, why, type: req.resourceType() });
           this.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}${why ? ` (${why})` : ""}`, url: this.page?.url() ?? "" });
           this.refusedByPolicy.add(req);
@@ -2860,15 +2862,26 @@ export class BrowserEngine {
 
   /**
    * Remember in project memory, for the gap ledger, a script's POST that
-   * observe refused on the page the session is on. Not one that looks
-   * destructive, nor one to an endpoint already named as a read (its body was
-   * a mutation): naming it would change nothing.
+   * observe refused, charged to the page that sent it (policy.ts
+   * refusedPostPage). Not one that looks destructive, nor one to an endpoint
+   * already named as a read (its body was a mutation): naming it would change
+   * nothing.
    */
-  private noteObserveRefusedPost(url: string, body: string | null): void {
-    const pageUrl = this.page?.url();
+  private noteObserveRefusedPost(url: string, body: string | null, referer: string | undefined): void {
+    const pageUrl = refusedPostPage(this.baseUrl, referer, this.page?.url());
     if (!pageUrl || !this.memory || isDestructiveWire(pathnameOf(url), body) || matchReadPost(this.readPosts, this.baseUrl, url)) return;
     const endpoint = this.refusedPostEndpoint(url);
     if (endpoint) this.memory.noteObserveRefusedPost(normalizePath(pageUrl), endpoint);
+  }
+
+  /** Whether the session's page sent `req` from its top document, not from a frame or a service worker. */
+  private sentByMainFrame(req: Request): boolean {
+    try {
+      return !!this.page && req.frame() === this.page.mainFrame();
+    } catch {
+      // A service worker's request has no frame.
+      return false;
+    }
   }
 
   /** A POST to this endpoint went out, so the pages observe refused it on are no longer a gap for it. */

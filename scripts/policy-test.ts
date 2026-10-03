@@ -44,6 +44,7 @@ import {
   MAX_READ_POSTS,
   graphqlWriteOperation,
   matchReadPost,
+  refusedPostPage,
   readPostAllowed,
   readPostEntries,
   readPostsSetting,
@@ -1456,4 +1457,29 @@ test("a leave confirmation is the caller's choice, the mode's when unsaid; other
     dialogNote({ type: "confirm", message: "Remove  this\nitem?", response: "dismiss" }),
     '\nℹ DIALOG (confirm): "Remove this item?" — dismissed by the engine.',
   );
+});
+
+test("refusedPostPage: a refused POST is charged to the page that sent it, not to a session page URL that lags", () => {
+  const app = "http://app.test:3000/";
+  const sent = "http://app.test:3000/search?q=1";
+  // The race: the page's script sent its POST before the session heard the page commit, so the session still reports "/".
+  assert.equal(refusedPostPage(app, sent, "http://app.test:3000/"), sent, "the Referer names the page that sent it");
+  assert.equal(refusedPostPage(app, sent, sent), sent);
+  // No Referer, or one that cannot place it, and the session's page stands in.
+  assert.equal(refusedPostPage(app, undefined, "http://app.test:3000/list"), "http://app.test:3000/list");
+  assert.equal(refusedPostPage(app, "not a url", "http://app.test:3000/list"), "http://app.test:3000/list");
+  assert.equal(
+    refusedPostPage(app, "http://other.test/search", "http://app.test:3000/list"),
+    "http://app.test:3000/list",
+    "another site's page is not the app's",
+  );
+  // An origin-only referrer policy reduces every Referer to "/": the session's page says more.
+  assert.equal(refusedPostPage(app, "http://app.test:3000/", "http://app.test:3000/list"), "http://app.test:3000/list");
+  assert.equal(refusedPostPage(app, "http://app.test:3000/", undefined), "http://app.test:3000/");
+  assert.equal(
+    refusedPostPage(app, "http://app.test:3000/?tab=2", "http://app.test:3000/list"),
+    "http://app.test:3000/?tab=2",
+    "a query is more than the origin",
+  );
+  assert.equal(refusedPostPage(app, undefined, undefined), undefined);
 });

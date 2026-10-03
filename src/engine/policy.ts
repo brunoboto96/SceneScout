@@ -971,6 +971,35 @@ export function matchReadPost(entries: readonly ReadPost[], appUrl: string, url:
   );
 }
 
+/**
+ * The page a script's POST was sent from, for the gap ledger's list of pages
+ * observe refused a POST on. The Referer of a request the top document sent,
+ * when it is a page of the app; otherwise the page the session drives when the
+ * request is seen. A frame's Referer is its own document, which the session
+ * never navigates to, so the caller passes none for a frame's request.
+ *
+ * The Referer comes first because the session's page URL can lag: a page's
+ * script can send its first request before the browser has told Playwright
+ * that the page committed, so the session still reports the page it came
+ * from. A Referer that is the app's bare origin is set aside for the session's
+ * page: an app whose referrer policy sends only the origin would otherwise
+ * charge every page's POST to "/". The price is that the app's root page,
+ * whose own Referer is that bare origin, still relies on the session's page
+ * URL, lag and all.
+ */
+export function refusedPostPage(appUrl: string, referer: string | undefined, pageUrl: string | undefined): string | undefined {
+  if (!referer) return pageUrl;
+  let from: URL;
+  try {
+    from = new URL(referer);
+    if (from.origin !== new URL(appUrl).origin) return pageUrl;
+  } catch {
+    return pageUrl;
+  }
+  const bareOrigin = from.pathname === "/" && !from.search;
+  return bareOrigin && pageUrl ? pageUrl : referer;
+}
+
 /** The longest body read for a GraphQL operation; a longer one cannot be vetted and is refused. */
 export const MAX_READ_POST_BODY = 100_000;
 
