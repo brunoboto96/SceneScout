@@ -205,6 +205,8 @@ jobs:
         with:
           name: desktop-extension
           path: .mcpb-build/*.mcpb
+          # .mcpb-build is a hidden directory, which the upload skips unless asked.
+          include-hidden-files: true
           if-no-files-found: error
 
   # A separate job holds the permission to change the release, and runs no

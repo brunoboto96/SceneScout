@@ -14,14 +14,19 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { asLf } from "./checkout.ts";
 import {
   CLAUDE_CODE_NOT_NEEDED,
   DESKTOP_EXTENSION_NAME,
   desktopExtensionRoots,
   diagnose,
   doctorAllGood,
+  commandSpawnPlan,
   ensureCommand,
   findDesktopExtension,
+  isBatchShim,
+  planSpawn,
+  resolveWindowsCommand,
   installClosing,
   findOnUserPath,
   installSkill,
@@ -554,7 +559,7 @@ test("the bundle build ships what the server reads at runtime, and the release a
   assert.match(script, /"ci", "--omit=dev", "--ignore-scripts"/, "production dependencies only, and no install scripts");
   assert.equal(pkg.scripts.mcpb, "node scripts/build-mcpb.mjs");
 
-  type Step = { uses?: string; run?: string; with?: Record<string, string> };
+  type Step = { uses?: string; run?: string; with?: Record<string, string | boolean> };
   type Job = { needs?: string | string[]; if?: string; permissions?: Record<string, string>; steps: Step[] };
   const wf = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8")) as { jobs: Record<string, Job> };
   const build = wf.jobs["desktop-extension"];
@@ -567,6 +572,9 @@ test("the bundle build ships what the server reads at runtime, and the release a
     build.steps.some((s) => /npx -y @anthropic-ai\/mcpb@\d+\.\d+\.\d+ validate/.test(s.run ?? "")),
     "validated against the manifest schema with a pinned MCPB tool",
   );
+  const upload = build.steps.find((s) => /^actions\/upload-artifact@/.test(s.uses ?? ""));
+  assert.equal(upload?.with?.path, ".mcpb-build/*.mcpb", "the bundle the build writes");
+  assert.equal(String(upload?.with?.["include-hidden-files"]), "true", ".mcpb-build is a hidden directory, which the upload skips unless asked");
   const attach = wf.jobs["attach-desktop-extension"];
   assert.ok(attach, "release.yml attaches the bundle");
   assert.deepEqual(attach.permissions, { contents: "write" });
@@ -1455,6 +1463,152 @@ test("the npm beside the running node is preferred: it installs where this shell
   assert.equal(bare.action === "run" && bare.command, "npm");
 });
 
+/** One cmd.exe caret pass: `^x` becomes `x`. */
+function caretUnescape(value: string): string {
+  let out = "";
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === "^" && i + 1 < value.length) {
+      out += value[++i];
+    } else out += value[i];
+  }
+  return out;
+}
+
+/**
+ * CommandLineToArgvW, the parse the program at the end of a shim performs.
+ * Used to check that a batch command line still holds the original arguments.
+ */
+function commandLineArgv(line: string): string[] {
+  const args: string[] = [];
+  let cur = "";
+  let quoted = false;
+  let token = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === "\\") {
+      let slashes = 1;
+      while (line[i + 1] === "\\") {
+        slashes++;
+        i++;
+      }
+      if (line[i + 1] === '"') {
+        cur += "\\".repeat(Math.floor(slashes / 2));
+        i++;
+        token = true;
+        if (slashes % 2 === 1) cur += '"';
+        else quoted = !quoted;
+      } else {
+        cur += "\\".repeat(slashes);
+        token = true;
+      }
+    } else if (c === '"') {
+      quoted = !quoted;
+      token = true;
+    } else if (c === " " && !quoted) {
+      if (token) args.push(cur);
+      cur = "";
+      token = false;
+    } else {
+      cur += c;
+      token = true;
+    }
+  }
+  if (token) args.push(cur);
+  return args;
+}
+
+/** Arguments a double-escaped batch line carries, after both cmd parses and the final argv parse. */
+function argsThroughBatch(line: string): string[] {
+  assert.equal(line.startsWith('"') && line.endsWith('"'), true, "cmd /s strips one pair of wrapping quotes");
+  const parsed = commandLineArgv(caretUnescape(caretUnescape(line.slice(1, -1))));
+  return parsed.slice(1);
+}
+
+test("a Windows batch shim is started through cmd.exe; an executable with the same arguments is not", () => {
+  const json = JSON.stringify({
+    name: "scenescout",
+    command: "C:\\Program Files\\nodejs\\node.exe",
+    args: ["C:\\Users\\A B\\mcp-server.js"],
+  });
+  const vscodeArgs = ["--add-mcp", json];
+  const exe = planSpawn({ command: "D:\\App\\code.exe", args: vscodeArgs, platform: "win32", resolved: "D:\\App\\code.exe" });
+  assert.deepEqual(exe, { command: "D:\\App\\code.exe", args: vscodeArgs }, "an .exe is spawned directly, so node quotes the JSON itself");
+
+  const cmd = planSpawn({ command: "D:\\App\\code.cmd", args: vscodeArgs, platform: "win32", resolved: "D:\\App\\code.cmd" });
+  assert.equal(cmd.command, "cmd.exe");
+  assert.equal(cmd.windowsVerbatimArguments, true);
+  assert.deepEqual(cmd.args.slice(0, 3), ["/d", "/s", "/c"]);
+  const line = cmd.args[3];
+  assert.deepEqual(argsThroughBatch(line), vscodeArgs, "the JSON argument, quotes and spaces included, is one argument after both parses");
+  // Two caret escapes, not one: a single escape would leave a raw quote or a single caret.
+  assert.match(line, /\^\^\^"/);
+  assert.equal(line.includes('{"name"'), false, "the JSON's quotes are not left for cmd to split on");
+
+  const spaced = ["C:\\Program Files (x86)\\nodejs\\node.exe", "C:\\Users\\A B\\mcp-server.js"];
+  const client = planSpawn({
+    command: "codex",
+    args: ["mcp", "add", "scenescout", "--", ...spaced],
+    platform: "win32",
+    resolved: "D:\\npm\\codex.cmd",
+    comSpec: "C:\\Windows\\System32\\cmd.exe",
+  });
+  assert.equal(client.command, "C:\\Windows\\System32\\cmd.exe");
+  const clientLine = client.args[3];
+  assert.deepEqual(argsThroughBatch(clientLine), ["mcp", "add", "scenescout", "--", ...spaced]);
+  assert.match(clientLine, /\^\^\^\(/, "a parenthesis in a path is escaped for the shim's second parse");
+  assert.equal(clientLine.includes("Program Files"), false);
+  assert.ok(clientLine.includes("D:\\npm\\codex.cmd"), "cmd runs the resolved shim, not the bare name");
+
+  assert.deepEqual(planSpawn({ command: "codex", args: ["mcp"], platform: "darwin", resolved: "D:\\npm\\codex.cmd" }), {
+    command: "codex",
+    args: ["mcp"],
+  });
+  assert.equal(isBatchShim("D:\\npm\\CODE.CMD"), true);
+  assert.equal(isBatchShim("D:\\npm\\code.exe"), false);
+});
+
+test("Windows resolves a bare client name to the shim on PATH, and an executable ahead of it in PATHEXT wins", () => {
+  const files = new Set([
+    "C:\\cwd\\codex.cmd",
+    "D:\\npm\\codex.cmd",
+    "D:\\npm\\gemini.cmd",
+    "D:\\apps\\code.cmd",
+    "D:\\apps\\code.exe",
+    "D:\\apps with space\\copilot.bat",
+  ]);
+  const exists = (file: string) => files.has(file);
+  const base = { cwd: "C:\\cwd", pathEnv: 'D:\\npm;"D:\\apps with space";D:\\apps', pathExt: ".com;.exe;.bat;.cmd", exists };
+  assert.equal(resolveWindowsCommand("codex", base), "C:\\cwd\\codex.cmd", "the current directory is searched before PATH");
+  assert.equal(resolveWindowsCommand("gemini", base), "D:\\npm\\gemini.cmd");
+  assert.equal(resolveWindowsCommand("copilot", base), "D:\\apps with space\\copilot.bat", "a quoted PATH entry is unquoted");
+  assert.equal(resolveWindowsCommand("code", base), "D:\\apps\\code.exe", ".exe comes before .cmd in PATHEXT");
+  assert.equal(resolveWindowsCommand("missing", base), null);
+  assert.equal(resolveWindowsCommand("D:\\apps\\code.cmd", base), "D:\\apps\\code.cmd");
+
+  const launch = ["C:\\Program Files\\nodejs\\node.exe", "C:\\Users\\A B\\mcp-server.js"];
+  const throughShim = commandSpawnPlan("codex", ["mcp", "add", "scenescout", "--", ...launch], {
+    platform: "win32",
+    cwd: "C:\\empty",
+    pathEnv: "D:\\npm",
+    pathExt: ".com;.exe;.bat;.cmd",
+    exists,
+  });
+  assert.equal(throughShim.command, "cmd.exe");
+  assert.deepEqual(argsThroughBatch(throughShim.args[3]), ["mcp", "add", "scenescout", "--", ...launch]);
+
+  const throughExe = commandSpawnPlan("code", vscodeAddArgs(launch), {
+    platform: "win32",
+    cwd: "C:\\empty",
+    pathEnv: "D:\\apps",
+    pathExt: ".com;.exe;.bat;.cmd",
+    exists,
+  });
+  assert.deepEqual(throughExe, { command: "code", args: vscodeAddArgs(launch) }, "code.exe is not wrapped, even though code.cmd sits beside it");
+
+  const absentCmd = commandSpawnPlan("windsurf", ["mcp"], { platform: "win32", cwd: "C:\\empty", pathEnv: "D:\\npm", exists });
+  assert.deepEqual(absentCmd, { command: "windsurf", args: ["mcp"] }, "an unknown name is spawned as given, so a missing binary stays ENOENT");
+});
+
 test("on Windows the step hands over the command instead of failing to start npm", () => {
   const plan = planCommand({ packageRoot: fakePackage(), nodePath: "C:\\node\\node.exe", version: "1.0.0", resolved: null, platform: "win32" });
   assert.equal(plan.action, "manual");
@@ -1655,7 +1809,7 @@ test("the top level: help, version, and an unknown or missing command", async ()
  * its closing brace would run on into the next function and borrow its flags.
  */
 function flagsReadBy(source: string, command: string): Set<string> {
-  const text = source.replace(/\r\n/g, "\n");
+  const text = asLf(source);
   const start = text.indexOf(`async function ${command}(flags: string[])`);
   assert.ok(start >= 0, `cli.ts has no ${command}(flags) function`);
   const end = text.indexOf("\n}\n", start);

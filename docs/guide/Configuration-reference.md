@@ -257,6 +257,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `CLAUDE_CONFIG_DIR` | `install`, `doctor` | Where Claude Code keeps its configuration; the skill goes into its `skills/` folder. Default `~/.claude` |
 | `APPDATA` | `doctor` | On Windows, where Claude Desktop keeps its installed extensions (`Claude\Claude Extensions` inside it). Set by Windows |
 | `LOCALAPPDATA` | `doctor` | On Windows, where the Microsoft Store build of Claude Desktop keeps its data (`Packages\Claude_…`). Set by Windows |
+| `PATHEXT` | `install`, `doctor` | On Windows, the extensions searched when a client command has none of its own, so an npm-installed client is found. Set by Windows |
 | `XDG_CONFIG_HOME` | `doctor` | On Linux, the configuration folder searched for Claude Desktop's extensions. Default `~/.config` |
 | `GITHUB_STEP_SUMMARY` | `check`, `ci` | Set by GitHub Actions; the report or summary is appended to it |
 | `GITHUB_WORKFLOW_REF` | `check`, `ci` | Set by GitHub Actions; with no `--sarif-file-anchor`, its workflow file is the file SARIF results point at |
