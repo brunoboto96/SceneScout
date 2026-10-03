@@ -1,5 +1,22 @@
 # scenescout
 
+## 3.18.0
+
+### Minor Changes
+
+- 1a6ce12: Ask the start-of-run questions as one form where the client can show one. A new `scout_intake` tool checks whether the client declared MCP elicitation in form mode and, if it did, asks the address, whether and how to sign in, what to check and whether the site holds real data in a single form, then returns the `scout_login` and `scout_attach` calls the answers choose. With no form support, or when the person declines or closes the form, it returns the questions for the agent to ask in chat, as before. The form never asks for a password or a code: signing in stays in the window `scout_login` opens. The skill and the `explore` prompt call `scout_intake` before setup.
+
+### Patch Changes
+
+- 96bee5c: `scenescout check` and the first look no longer report a feed, a plain-text file, XML, JSON, a PDF or an image as a dead end. A route's response content type now decides whether it is a page: one served as anything but `text/html` or `application/xhtml+xml` is listed under "Not pages" in the report and as `resources` in `check.json`, is not checked against the page rules, and does not count towards the routes checked or `--max-routes`. One that answers 4xx or 5xx is still reported as the route's error.
+- 952fbf3: A check or first look with no signed-in session no longer reports each route that redirects to sign-in as an `auth-redirect` issue. It lists them once as a coverage gap ("N routes need sign-in; give a role to cover them"), under "Needs sign-in" in the report and as `needsSignIn` in `check.json`. With `--storage-state`, a redirect to sign-in is still reported as a lost session.
+- 6073a0d: A link or button with no text is now named by a descendant's `aria-label` (an icon element inside the link) and by an image's `title` when its alt text is empty, as the browser names it, so `unnamed-control` no longer reports those controls. Coverage recorded for them under their earlier keys carries over.
+- cd0639b: Text drawn over a positioned `<img>`, `<picture>`, `<video>` or `<canvas>` is no longer reported as a contrast failure measured against the page background (often as 1.00:1). Like text over a CSS background image, it has no single background colour, so the design audit and `scenescout check` leave it unmeasured.
+- 680e4f5: The focus-indicator rule no longer reports an iframe as a control with no visible focus indicator. A Tab onto a frame moves focus into the frame's document, so the design audit and `scenescout check` now follow focus into a same-origin frame and measure the control focused there, reported by its own name. A press that leaves focus inside another site's frame is skipped.
+- fe16d4c: A page that locks scrolling behind a modal opened inside a full-viewport frame is no longer reported as a leaked scroll lock. The overlay probe now counts a visible iframe that covers the viewport, is pinned itself or through a fixed ancestor, and is neither faded out nor click-through as an open overlay, provided that, when the frame is same-origin, a dialog or a dimming backdrop is showing inside it. A frame left mounted after its modal closed does not justify the lock, so that page is still reported at high severity.
+- 96b74aa: The design audit's `image-aspect` rule no longer reports an image that keeps its proportions through `object-fit: cover`, `contain`, `scale-down` or `none`, whether set inline or by a class. Only an image stretched to its box under `fill`, the default, is reported as distorted.
+- 7fc6013: The gap ledger's list of pages whose POST observe refused now names the page that sent the POST. A page whose script posted as it loaded could be listed as the page the session came from, because the browser had not yet reported the new page; the request's Referer now decides, with the session's page as the fallback.
+
 ## 3.17.0
 
 ### Minor Changes
