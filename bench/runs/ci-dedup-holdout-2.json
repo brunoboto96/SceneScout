@@ -1,0 +1,43 @@
+{
+  "app": "holdout",
+  "run": "ci-dedup-holdout-2",
+  "date": "2026-10-03",
+  "note": "Unattended run of 3.18.0 at 498dbdf with the dedup judge on (the ci default); gpt-6-luna, effort low, default caps. Out-of-sample pairs for the dedup judge; see Finding dedup.",
+  "findings": [
+    {
+      "title": "Home notices remain stuck loading after the notices API returns 500",
+      "severity": "medium",
+      "category": "network",
+      "evidence": "GET /api/notices 500; home-notices remains Loading notices"
+    },
+    {
+      "title": "Fines register showed an empty list when its request was forbidden",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; refused_empty empty list without error"
+    },
+    {
+      "title": "Catalogue spacing uses mostly off-grid padding values",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "catalogue spacing: 66% off 4px grid; 9px×58; 1px×16",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    },
+    {
+      "title": "App-shell navigation links blend into body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "shared shell navigation links un-underlined body text rgba(93,99,87,1)",
+      "tier": "worth_a_look",
+      "convention": "links must be visually distinguishable from body text"
+    },
+    {
+      "title": "Checkout reports success after the loan request is refused",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/loans 403 (write-policy stand-in); checkout status reports Checked out to NOT-A-CARD"
+    }
+  ],
+  "decisions": []
+}

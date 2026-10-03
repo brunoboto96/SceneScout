@@ -2090,7 +2090,9 @@ test("dedup benchmark workflow: dispatched only, reads the repository, and the k
   assert.ok(!NAMES_A_KEY.test(JSON.stringify(job.env ?? {})), "no key in the job's env");
   const steps = job.steps ?? [];
   const judge = steps.find((s) =>
-    /npm run -s dedup-bench -- --judge --efforts "\$EFFORTS" --provider "\$PROVIDER" --pairs "\$OUT\/pairs\.jsonl"/.test(s.run ?? ""),
+    /npm run -s dedup-bench -- --judge --efforts "\$EFFORTS" --provider "\$PROVIDER" --pairs "\$OUT\/pairs\.jsonl" \$\{SINCE:\+--since "\$SINCE"\}/.test(
+      s.run ?? "",
+    ),
   );
   assert.ok(judge, "it runs the judge at the dispatched efforts");
   assert.deepEqual(
@@ -2110,6 +2112,12 @@ test("dedup benchmark workflow: dispatched only, reads the repository, and the k
   const accepts = (efforts: string) =>
     spawnSync("bash", ["-eo", "pipefail", "-c", judge.run!.split("\n")[0]], { env: { PATH: process.env.PATH, EFFORTS: efforts } }).status === 0;
   for (const e of ["none,low", "low", "none,low,medium"]) assert.ok(accepts(e), `refuses ${e}`);
+  assert.equal(inputs.since.default, "", "every archived run unless a date is given");
+  assert.equal(judge.env?.SINCE, "${{ inputs.since }}");
+  const acceptsSince = (since: string) =>
+    spawnSync("bash", ["-eo", "pipefail", "-c", judge.run!.split("\n")[1]], { env: { PATH: process.env.PATH, SINCE: since } }).status === 0;
+  for (const d of ["", "2026-10-03"]) assert.ok(acceptsSince(d), `refuses since=${JSON.stringify(d)}`);
+  for (const d of ["2026-10", "x; curl evil", "2026-10-03 --judge"]) assert.ok(!acceptsSince(d), `accepts since=${JSON.stringify(d)}`);
   for (const e of ["", "none, low", "low;echo hi", "$(id)", "low,"]) assert.ok(!accepts(e), `accepts ${JSON.stringify(e)}`);
   const upload = steps.findIndex((s) => /^actions\/upload-artifact@[0-9a-f]{40}$/.test((s.uses ?? "").split(" ")[0]));
   assert.ok(upload > steps.indexOf(judge), "the scorecard is uploaded, after the key check, by an action pinned by commit");

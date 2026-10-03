@@ -24,6 +24,10 @@ on:
         type: choice
         options: [openai]
         default: openai
+      since:
+        description: Only the runs archived on or after this date (YYYY-MM-DD), to score out of sample. Empty means every archived run.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -51,16 +55,18 @@ jobs:
           OPENAI_API_KEY: ${{ inputs.provider == 'openai' && secrets.OPENAI_API_KEY || '' }}
           EFFORTS: ${{ inputs.efforts }}
           PROVIDER: ${{ inputs.provider }}
+          SINCE: ${{ inputs.since }}
           OUT: ${{ runner.temp }}/dedup-bench
         run: |
           if ! [[ "$EFFORTS" =~ ^[a-z]+(,[a-z]+)*$ ]]; then echo "::error::efforts must be a comma-separated list of effort names, not $EFFORTS"; exit 1; fi
+          if ! [[ "$SINCE" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})?$ ]]; then echo "::error::since must be empty or a date, YYYY-MM-DD, not $SINCE"; exit 1; fi
           # Without the key the script scores the rule alone and reports the judge as not run: fail rather than record that as a result.
           if [ -z "$OPENAI_API_KEY" ]; then echo "::error::the OPENAI_API_KEY secret is not set"; exit 1; fi
           mkdir -p "$OUT"
-          npm run -s dedup-bench -- --judge --efforts "$EFFORTS" --provider "$PROVIDER" --pairs "$OUT/pairs.jsonl" | tee "$OUT/scorecard.txt"
+          npm run -s dedup-bench -- --judge --efforts "$EFFORTS" --provider "$PROVIDER" --pairs "$OUT/pairs.jsonl" ${SINCE:+--since "$SINCE"} | tee "$OUT/scorecard.txt"
           # The script redacts the key from what it prints; this is the check before anything leaves the runner.
           if grep -qF -- "$OPENAI_API_KEY" "$OUT/scorecard.txt" "$OUT/pairs.jsonl"; then echo "::error::the key appears in the scorecard or the per-pair lines; nothing is uploaded"; rm -f "$OUT/scorecard.txt" "$OUT/pairs.jsonl"; exit 1; fi
-          { echo "### Dedup benchmark, judge at efforts $EFFORTS"; echo; echo '```'; cat "$OUT/scorecard.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### Dedup benchmark, judge at efforts $EFFORTS${SINCE:+, runs since $SINCE}"; echo; echo '```'; cat "$OUT/scorecard.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep the scorecard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

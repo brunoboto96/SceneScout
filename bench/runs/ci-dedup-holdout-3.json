@@ -1,0 +1,33 @@
+{
+  "app": "holdout",
+  "run": "ci-dedup-holdout-3",
+  "date": "2026-10-03",
+  "note": "Unattended run of 3.18.0 at 498dbdf with the dedup judge on (the ci default); gpt-6-luna, effort low, default caps. Out-of-sample pairs for the dedup judge; see Finding dedup.",
+  "findings": [
+    {
+      "title": "Fines page reports an empty list when the fines request is forbidden",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403 with empty list rendered"
+    },
+    {
+      "title": "Home notices request fails with HTTP 500",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Catalogue controls lack a visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "catalogue page audit: no visually dominant action; task-clarity 92"
+    },
+    {
+      "title": "Account export link is visually indistinguishable from body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "account-export link: no underline and body-text color"
+    }
+  ],
+  "decisions": []
+}

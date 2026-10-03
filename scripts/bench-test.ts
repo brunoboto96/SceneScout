@@ -47,6 +47,7 @@ import type { RecordedDecision } from "../src/engine/calibration.ts";
 import { HttpModelClient } from "../src/ci-run.ts";
 import { NO_USAGE, redactKeys } from "../src/engine/ci.ts";
 import {
+  archivesSince,
   buildPairs,
   clientAnswersJudge,
   decideDuplicate,
@@ -995,6 +996,24 @@ test("dedup pairs: alsoOn pages pair, and what cannot be labelled is counted, no
     { identicalText: set.identicalText, unmatched: set.unmatched, ambiguous: set.ambiguous, nonDefect: set.nonDefect, withoutKey: set.archivesWithoutKey },
     { identicalText: 1, unmatched: 1, ambiguous: 1, nonDefect: 1, withoutKey: 1 },
   );
+});
+
+test("dedup pairs: --since keeps the runs dated on or after it, before pairing, so no pair joins a new finding to an old one", () => {
+  const old = { ...arch("r1", [{ title: "Export fails", evidence: "POST /api/export 500" }]), date: "2026-10-02" };
+  const fresh = { ...arch("r2", [{ title: "Export button breaks: POST /api/export 500 on click" }]), date: "2026-10-03" };
+  const later = { ...arch("r3", [{ title: "Export sends a double submit" }]), date: "2026-10-04" };
+  assert.deepEqual(
+    archivesSince([old, fresh, later], "2026-10-03").map((a) => a.run),
+    ["r2", "r3"],
+  );
+  const set = buildPairs(archivesSince([old, fresh, later], "2026-10-03"), { pairs: pageKey });
+  assert.deepEqual(
+    set.pairs.map((p) => `${p.a.run}~${p.b.run}`),
+    ["r2~r3"],
+    "the old run's finding is in no pair",
+  );
+  assert.equal(buildPairs([old, fresh, later], { pairs: pageKey }).pairs.length, 3, "without the filter it pairs with both");
+  for (const bad of ["2026-10", "10/03/2026", ""]) assert.throws(() => archivesSince([old], bad), /YYYY-MM-DD/);
 });
 
 test("dedup pairs: the sample is capped, the same whatever order the pairs arrive in, and a bad cap is refused", () => {

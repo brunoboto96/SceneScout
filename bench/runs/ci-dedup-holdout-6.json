@@ -1,0 +1,59 @@
+{
+  "app": "holdout",
+  "run": "ci-dedup-holdout-6",
+  "date": "2026-10-03",
+  "note": "Unattended run of 3.18.0 at 498dbdf with the dedup judge on (the ci default); gpt-6-luna, effort low, default caps. Out-of-sample pairs for the dedup judge; see Finding dedup.",
+  "findings": [
+    {
+      "title": "Fines request failure is presented as an empty list",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; refused_empty on /fines.html"
+    },
+    {
+      "title": "Bare book detail route requests nonexistent book 0",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/books/0 404; GET /api/books/0/reviews 404"
+    },
+    {
+      "title": "Book detail padding values drift from a 4px spacing grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "book detail spacing audit: 0% on 4px grid; 6px×4, 14px×4, 7px×2, 9px×2",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    },
+    {
+      "title": "Catalogue provides no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "catalogue design audit: no visually dominant action; 21 interactive elements in first viewport",
+      "tier": "worth_a_look",
+      "convention": "a clear primary action on catalogue pages"
+    },
+    {
+      "title": "Shared navigation links blend into body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "shared chrome audit: links with no underline in body-text colour rgba(93, 99, 87, 1)",
+      "tier": "worth_a_look",
+      "convention": "links are visually distinguishable from body text"
+    },
+    {
+      "title": "Account export link is visually indistinguishable from body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "account design audit: account-export link no underline and same color as body text",
+      "tier": "worth_a_look",
+      "convention": "links are visually distinguishable from body text"
+    },
+    {
+      "title": "Home notices remain stuck loading after API returns 500",
+      "severity": "medium",
+      "category": "network",
+      "evidence": "GET /api/notices 500; home-notices remains “Loading notices…”"
+    }
+  ],
+  "decisions": []
+}

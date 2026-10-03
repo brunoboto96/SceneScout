@@ -1,0 +1,33 @@
+{
+  "app": "holdout",
+  "run": "ci-dedup-holdout-7",
+  "date": "2026-10-03",
+  "note": "Unattended run of 3.18.0 at 498dbdf with the dedup judge on (the ci default); gpt-6-luna, effort low, default caps. Out-of-sample pairs for the dedup judge; see Finding dedup.",
+  "findings": [
+    {
+      "title": "Fines load refusal is rendered as an empty register",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; fines register empty-list state without load-specific error"
+    },
+    {
+      "title": "Home notices fail to load with HTTP 500",
+      "severity": "medium",
+      "category": "network",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Shell navigation links blend into body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "shared chrome links underline=none, colour=rgba(93, 99, 87, 1)"
+    },
+    {
+      "title": "Catalogue has no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "catalogue page audit: no visually dominant action; 21 interactive elements in first viewport"
+    }
+  ],
+  "decisions": []
+}
