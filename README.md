@@ -761,6 +761,7 @@ test-app/           fixtures for the real-browser smoke tests
 skills/scenescout/   the testing method (SKILL.md): a skill in Claude Code, served by the server everywhere else
 docs/how-it-works.md  what happens at each stage, in diagrams
 docs/benchmark.md   measuring whether a change made runs better
+docs/validation.md  scorecards from runs against public open-source apps
 docs/adr/           why it's built this way
 ```
 
@@ -773,6 +774,8 @@ docs/adr/           why it's built this way
 **[How it works, stage by stage](docs/how-it-works.md)** — diagrams of the run lifecycle, what happens inside one action, the write policy on the wire, how a violation becomes a finding, how a parallel run is split and folded, how roles hand work to each other, where a run's time goes, and how a lane's confidence is checked afterwards.
 
 **[Measuring whether a change helped](docs/benchmark.md)** — the demo app's answer key, the scorecard (recall, precision, judged-not-filed, severity, calibration), and the results log of every run, including what did not help.
+
+**[Validation on public open-source apps](docs/validation.md)** — runs against three well-known open-source web apps, with a scorecard for each: issues by severity, how many were real and how many were false positives, and the engine problems the runs exposed.
 
 The load-bearing choices are recorded as ADRs — read the relevant one before changing a rule it covers:
 
