@@ -9,6 +9,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { NAME_RULE } from "../src/engine/memory.ts";
 import {
   brokenImageIssues,
   displayName,
@@ -35,6 +36,7 @@ import {
   stripForeignHref,
   frameToPageRect,
   pickName,
+  contentSays,
   type NameFacts,
   stateFlags,
   stateChange,
@@ -595,9 +597,10 @@ test("the accessible name follows the computation's order: aria-labelledby, aria
     live: false,
     text: "",
     content: "",
+    content2: "",
     ...over,
   });
-  const cases: Array<[string, Partial<NameFacts>, { name: string; from: "placeholder" | "fallback" | null; prior?: string }]> = [
+  const cases: Array<[string, Partial<NameFacts>, { name: string; from: "placeholder" | "fallback" | null; priors?: string[] }]> = [
     // Each source wins over every one after it.
     ["aria-labelledby before aria-label", { labelledBy: "Caption", ariaLabel: "Aria", labels: ["Label"] }, { name: "Caption", from: null }],
     ["aria-label before a label", { ariaLabel: "Aria", labels: ["Label"], title: "Title" }, { name: "Aria", from: null }],
@@ -621,13 +624,20 @@ test("the accessible name follows the computation's order: aria-labelledby, aria
     ["an icon button with neither text nor title", { tag: "button", inputType: "" }, { name: "", from: null }],
     ["a button's text before its title", { tag: "button", inputType: "", text: "Save", title: "Save the draft" }, { name: "Save", from: null }],
     // An image-only link or button is named by its image content, as the accessible-name computation names it;
-    // `prior` is the name it had before image content counted, which its earlier coverage key was made from.
-    ["an image link by its alt text", { tag: "a", inputType: "", content: " Home " }, { name: "Home", from: null, prior: "" }],
+    // `priors` are the names it had under rule 1 (no content) and rule 2 (image content only), which its earlier coverage keys were made from.
+    ["an image link by its alt text", { tag: "a", inputType: "", content: " Home ", content2: " Home " }, { name: "Home", from: null, priors: ["", "Home"] }],
     ["an image link with an empty alt stays unnamed", { tag: "a", inputType: "", content: "" }, { name: "", from: null }],
     [
       "image content before title",
-      { tag: "button", inputType: "", content: "Search", title: "Find things" },
-      { name: "Search", from: null, prior: "Find things" },
+      { tag: "button", inputType: "", content: "Search", content2: "Search", title: "Find things" },
+      { name: "Search", from: null, priors: ["Find things", "Search"] },
+    ],
+    // Named only from rule 3 on (a descendant's aria-label, an image's title): rule 2 gave the title, or nothing.
+    ["an icon link by a descendant's aria-label", { tag: "a", inputType: "", content: "Feed" }, { name: "Feed", from: null, priors: ["", ""] }],
+    [
+      "an avatar link by its image's title, over the link's own title",
+      { tag: "a", inputType: "", content: "Profile", title: "Open" },
+      { name: "Profile", from: null, priors: ["Open", "Open"] },
     ],
     ["text before image content", { tag: "a", inputType: "", text: "Home", content: "Logo" }, { name: "Home", from: null }],
     ["a field is not named by image content", { tag: "input", inputType: "text", content: "Logo", nameAttr: "q" }, { name: "q", from: "fallback" }],
@@ -644,6 +654,30 @@ test("the accessible name follows the computation's order: aria-labelledby, aria
   ];
   for (const [label, over, want] of cases) assert.deepEqual(pickName(facts(over)), want, label);
   assert.equal(pickName(facts({ labels: ["x".repeat(200)] })).name.length, 80, "a name is capped");
+  // One prior per earlier rule: a rule bump that adds no prior would drop that step's key aliases.
+  assert.equal(pickName(facts({ tag: "a", inputType: "", content: "Feed" })).priors?.length, NAME_RULE - 1);
+});
+
+test("what a control's descendant says toward its name: each case beside the same markup without the word", () => {
+  const d = (over: Partial<Parameters<typeof contentSays>[0]>) => contentSays({ tag: "i", ariaLabel: null, alt: null, title: "", svgTitle: "", ...over });
+  const cases: Array<[string, string, string]> = [
+    // <a><i aria-label="Feed"><svg aria-hidden="true"></svg></i></a> is named "Feed"; without the aria-label it is unnamed.
+    ["an icon element's aria-label", d({ ariaLabel: "Feed" }), "Feed"],
+    ["an icon element with no aria-label", d({}), ""],
+    ["a blank aria-label says nothing", d({ ariaLabel: "  " }), ""],
+    // <a><img alt="" title="Profile"></a> is named "Profile"; without the title it is unnamed.
+    ["an image with an empty alt, by its title", d({ tag: "img", alt: "", title: "Profile" }), "Profile"],
+    ["an image with an empty alt and no title", d({ tag: "img", alt: "" }), ""],
+    ["an image with no alt, by its title", d({ tag: "img", title: "Profile" }), "Profile"],
+    // The order the accessible-name computation reads an image in: aria-label, alt, title.
+    ["an image's alt before its title", d({ tag: "img", alt: "Avatar", title: "Profile" }), "Avatar"],
+    ["an image's aria-label before its alt", d({ tag: "img", ariaLabel: "Account", alt: "Avatar" }), "Account"],
+    ["an svg by its <title>", d({ tag: "svg", svgTitle: "Settings" }), "Settings"],
+    ["an svg's aria-label before its <title>", d({ tag: "svg", ariaLabel: "Gear", svgTitle: "Settings" }), "Gear"],
+    // Only an image's title counts: a generic element's title is not read.
+    ["a generic element's title says nothing", d({ title: "Tooltip" }), ""],
+  ];
+  for (const [label, got, want] of cases) assert.equal(got, want, label);
 });
 
 test("an element listed for its test id is not an unnamed control; an icon button with no name still is", () => {

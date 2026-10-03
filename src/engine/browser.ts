@@ -22,14 +22,25 @@ import {
   elementKey,
   fingerprintState,
   isNonPageRoute,
-  keyAliases,
+  keyAliasSteps,
   normalizePath,
   ordinalKeys,
   refsSurviveUrlChange,
   routeBase,
   type InteractableInfo,
 } from "./fingerprint.js";
-import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, reachedRoutes, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
+import {
+  AUTH_LOSS_PREFIX,
+  JOURNEY_END,
+  JOURNEY_START,
+  MemoryStore,
+  NAME_RULE,
+  reachedRoutes,
+  redactSecrets,
+  TASK_SET,
+  type ActionLogEntry,
+  type KeyAliasSteps,
+} from "./memory.js";
 import type { SessionDescription } from "./live.js";
 import { normalizeTask } from "./task.js";
 import {
@@ -2250,8 +2261,8 @@ export class BrowserEngine {
     prev: PrevSnap | null;
     /** For each element, its key in `prev`, or null when it is new since (collector.ts matchPrevious). */
     matched: Array<string | null>;
-    /** Each listed key the earlier name rule made differently, current → earlier (fingerprint.ts keyAliases). */
-    aliases: Record<string, string>;
+    /** For each step between name rules, each listed key the rule before made differently, current → earlier (memory.ts KeyAliasSteps). */
+    aliases: KeyAliasSteps;
   }> {
     const page = this.requirePage();
     type RawElement = {
@@ -2268,8 +2279,8 @@ export class BrowserEngine {
       chrome?: boolean;
       coveredBy?: string | null;
       nameFrom?: NameFrom | null;
-      /** The name before image content counted, when image content named it (collector.ts PICK_NAME_SRC); not kept on the listed element. */
-      priorName?: string;
+      /** Its name under each earlier name rule, rule 1 first, when content named it (collector.ts PICK_NAME_SRC); not kept on the listed element. */
+      priorNames?: string[];
       focusable?: boolean;
       focusMoves?: boolean;
       passThrough?: boolean;
@@ -2324,16 +2335,16 @@ export class BrowserEngine {
     // A live region listed for what it says is known by its role, not its
     // text, so a new message reads as the same region saying something else.
     const baseKeyOf = (el: RawElement, name: string, tag?: FrameTag) => frameElementKey(el.liveOnly ? `live:${el.role}` : elementKey({ ...el, name }), tag);
+    // Each element's base key under every name rule, rule 1 first, so each step between two rules gets its own aliases.
     const bases = all.map(({ raw: el, tag }) => ({
-      base: baseKeyOf(el, el.name, tag),
-      prior: baseKeyOf(el, el.priorName ?? el.name, tag),
+      byRule: Array.from({ length: NAME_RULE }, (_, i) => baseKeyOf(el, i < NAME_RULE - 1 ? (el.priorNames?.[i] ?? el.name) : el.name, tag)),
       tracked: !el.liveOnly,
     }));
-    const keys = ordinalKeys(bases.map((b) => b.base));
-    const aliases = keyAliases(bases);
+    const keys = ordinalKeys(bases.map((b) => b.byRule[NAME_RULE - 1]));
+    const aliases = keyAliasSteps(bases);
     const built = all.map(({ raw: el, frame, tag }, i) => {
       const key = keys[i];
-      const { ownText: _ownText, centre: _centre, cut: _cut, priorName: _priorName, ...listed } = el;
+      const { ownText: _ownText, centre: _centre, cut: _cut, priorNames: _priorNames, ...listed } = el;
       const full: SnapshotElement = {
         ...listed,
         ...(tag ? { frame: tag } : {}),
