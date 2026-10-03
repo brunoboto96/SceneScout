@@ -439,6 +439,40 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     `${missing.status} ${JSON.stringify(missing.summary?.flows)}`,
   );
 
+  // A visible control the step cannot use: the failure names its state, not an action timeout with a hint to raise
+  // the limit. The usable controls on the same page pass, so the state is the only difference.
+  const blockedFlow = (steps: unknown[]) => ({ steps: [{ action: "navigate", target: "/check-flow-blocked.html" }, ...steps] });
+  const usable = await checkWith(
+    project("flow-usable", {
+      "usable.json": blockedFlow([
+        { action: "type", target: "testid=blocked-note", value: "hello" },
+        { action: "click", target: "testid=blocked-save" },
+        { action: "expect-text", text: "Saved" },
+      ]),
+    }),
+  );
+  check(
+    "a flow typing into an editable field and clicking an enabled button passes",
+    usable.status === 0 && usable.summary?.flows[0]?.status === "passed",
+    `${usable.status} ${JSON.stringify(usable.summary?.flows)} ${usable.out.slice(-600)}`,
+  );
+  const disabled = await checkWith(project("flow-disabled", { "disabled.json": blockedFlow([{ action: "click", target: "testid=blocked-archive" }]) }));
+  check(
+    "...a click on a visible but disabled button fails leading with that state, then the action limit's hint",
+    disabled.status === 1 &&
+      disabled.summary?.flows[0]?.step === 2 &&
+      /^testid=blocked-archive is visible but disabled after \S+ — the action limit \(\d+ ms\) ran out/.test(disabled.summary.flows[0].reason ?? ""),
+    `${disabled.status} ${JSON.stringify(disabled.summary?.flows)}`,
+  );
+  const readOnly = await checkWith(
+    project("flow-read-only", { "read-only.json": blockedFlow([{ action: "type", target: "testid=blocked-reference", value: "x" }]) }),
+  );
+  check(
+    "...and typing into a read-only field fails saying it is read-only",
+    readOnly.status === 1 && /^testid=blocked-reference is visible but read-only after/.test(readOnly.summary?.flows[0]?.reason ?? ""),
+    `${readOnly.status} ${JSON.stringify(readOnly.summary?.flows)}`,
+  );
+
   // expect-element: one flow asserting every state before and after, and its twin differing in one expectation
   // (the receipt stays hidden after Complete), so the failure can only be the step reading the receipt.
   const stateSteps = [

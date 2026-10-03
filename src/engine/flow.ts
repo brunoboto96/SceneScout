@@ -158,6 +158,18 @@ export function parseTarget(target: string): FlowTarget | null {
 }
 
 /**
+ * Why a step cannot act on a target that is visible, or null when it can: a
+ * click or a select needs the control enabled, typing needs it editable. The
+ * report leads with this, then the action limit's hint, which still applies
+ * when the app enables the control later than the limit allows.
+ */
+export function notActionable(action: "click" | "type" | "select", facts: { enabled: boolean; editable: boolean | null }): string | null {
+  if (!facts.enabled) return "is visible but disabled";
+  if (action === "type" && facts.editable === false) return "is visible but read-only";
+  return null;
+}
+
+/**
  * The states an expect-element step can ask of its target. `hidden` also holds
  * when nothing matches: "the receipt was never shown" and "the dialog closed"
  * are both the absence of a visible element.

@@ -42,6 +42,7 @@ import {
   elementStateMatches,
   loadFlows,
   matchRequest,
+  notActionable,
   parseFlow,
   parseTarget,
   requestPathMatches,
@@ -1474,6 +1475,19 @@ test("flows: every mistake names the file and the field", () => {
     assert.ok(!parsed.ok, text);
     assert.match(parsed.error, re, text);
   }
+});
+
+test("flows: a visible target that cannot be acted on says why, and one that can says nothing", () => {
+  assert.equal(notActionable("click", { enabled: false, editable: null }), "is visible but disabled");
+  assert.equal(notActionable("select", { enabled: false, editable: null }), "is visible but disabled");
+  assert.equal(notActionable("type", { enabled: false, editable: false }), "is visible but disabled");
+  assert.equal(notActionable("type", { enabled: true, editable: false }), "is visible but read-only");
+  assert.equal(notActionable("click", { enabled: true, editable: null }), null);
+  assert.equal(notActionable("type", { enabled: true, editable: true }), null);
+  // Read-only only matters to typing: a read-only field can still be clicked.
+  assert.equal(notActionable("click", { enabled: true, editable: false }), null);
+  // Not an editable element at all (a click target typed into): left to the action itself.
+  assert.equal(notActionable("type", { enabled: true, editable: null }), null);
 });
 
 test("flows: expect-element parses with each state, and the report names it", () => {
