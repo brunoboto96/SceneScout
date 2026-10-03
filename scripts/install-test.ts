@@ -2001,6 +2001,7 @@ test("a first run is a check in its mode, never gated, in Chromium, with its cap
     maxRoutes: 7,
     timeBudgetMs: 120_000,
     ignore: [],
+    ignorePaths: [],
     flows: "off",
     retest: false,
     flowWrites: "never",

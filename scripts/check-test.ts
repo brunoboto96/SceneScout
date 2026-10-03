@@ -432,6 +432,44 @@ test("--ignore drops a rule entirely", () => {
   );
 });
 
+test("an error page can be exempted while the same server error on another path still fails the gate", () => {
+  const shared = { kind: "console_error" as const, severity: "medium" as const, detail: "Failed to load resource", url: ORIGIN };
+  const intended = route({ path: "/error", status: 500, elements: 0, violations: [shared] });
+  const broken = route({ path: "/records/12", status: 500, elements: 0, violations: [shared] });
+  const pages = [intended, broken];
+  const open = issuesFromRoutes(pages, ORIGIN);
+  assert.equal(gateFailures(open, "high").length, 2, "both 500s fail the default gate");
+  assert.deepEqual(
+    open.filter((i) => i.rule === "console-error").map((i) => i.routes),
+    [["/error", "/records/12"]],
+    "the same console error is one issue seen on both routes",
+  );
+
+  const exemptPage = issuesFromRoutes(pages, ORIGIN, [], [], [{ path: "/error" }]);
+  assert.deepEqual(
+    exemptPage.map((i) => ({ rule: i.rule, routes: i.routes })),
+    [
+      { rule: "route-server-error", routes: ["/records/12"] },
+      { rule: "console-error", routes: ["/records/12"] },
+    ],
+  );
+  assert.equal(gateFailures(exemptPage, "high").length, 1);
+  assert.equal(gateFailures(issuesFromRoutes(pages, ORIGIN, [], [], [{ path: "/error/details" }]), "high").length, 2, "a longer path is a different route");
+
+  const exemptRule = issuesFromRoutes(pages, ORIGIN, [], [], [{ path: "/error", rule: "route-server-error" }]);
+  assert.deepEqual(exemptRule.find((i) => i.rule === "route-server-error")?.routes, ["/records/12"]);
+  assert.deepEqual(exemptRule.find((i) => i.rule === "console-error")?.routes, ["/error", "/records/12"]);
+  assert.equal(gateFailures(exemptRule, "high").length, 1);
+
+  const report = formatCheck({ ...result(exemptPage), ignoredPaths: [{ path: "/error" }, { path: "/records/12", rule: "route-server-error" }] });
+  assert.match(report, /Paths exempted by --ignore-path: \/error, route-server-error:\/records\/12/);
+  assert.match(report, /\*\*FAILED\*\*/);
+
+  const colonPath = parseCheckArgs(["http://127.0.0.1:3000", "--ignore-path", "/files/a:b"], "/work");
+  assert.ok(colonPath.ok);
+  if (colonPath.ok) assert.deepEqual(colonPath.options.ignorePaths, [{ path: "/files/a:b" }]);
+});
+
 test("shared-chrome design defects are filed once, against the shell rather than a page", () => {
   const defect = { rule: "contrast" as const, detail: '<a> "Home" — 2.1:1', chrome: true };
   const issues = issuesFromRoutes([route({ path: "/a", design: [defect] }), route({ path: "/b", design: [defect] })], ORIGIN);
@@ -467,6 +505,7 @@ function result(issues: CheckIssue[], failOn: CheckResult["failOn"] = "high"): C
     worthALook: [],
     unvisited: [],
     ignored: [],
+    ignoredPaths: [],
     flows: [],
     retest: null,
     settings: { ...DEFAULT_SETTINGS },
@@ -844,6 +883,7 @@ test("arguments: the defaults", () => {
     mode: "read-only",
     maxRoutes: 50,
     ignore: [],
+    ignorePaths: [],
     // Spelled out, not read from DEFAULT_SETTINGS: a default that drifts to allow, stop or never must fail here.
     retest: true,
     flowWrites: "never",
@@ -869,6 +909,8 @@ test("arguments: every option, in both spellings, with relative paths resolved a
       "/a, /b",
       "--ignore",
       "contrast,tiny-target",
+      "--ignore-path",
+      "/error, route-server-error:/records/12",
       "--storage-state",
       "auth/user.json",
       "--project",
@@ -904,6 +946,7 @@ test("arguments: every option, in both spellings, with relative paths resolved a
     maxRoutes: 10,
     paths: ["/a", "/b"],
     ignore: ["contrast", "tiny-target"],
+    ignorePaths: [{ path: "/error" }, { path: "/records/12", rule: "route-server-error" }],
     flows: "/work/ci/flows",
     retest: false,
     flowWrites: "allow",
@@ -935,6 +978,11 @@ test("arguments: each mistake is refused with a sentence", () => {
     [["http://x", "--paths", "orders"], /each starting with \//],
     [["http://x", "--paths", " , "], /--paths is empty/],
     [["http://x", "--ignore", "contrast,nope"], /unknown rule\(s\) in --ignore: nope/],
+    [["http://x", "--ignore-path", " , "], /--ignore-path is empty/],
+    [["http://x", "--ignore-path", "error"], /--ignore-path entries are paths starting with \//],
+    [["http://x", "--ignore-path", "route-server-error:error"], /--ignore-path entries are paths starting with \//],
+    [["http://x", "--ignore-path", "nope:/error,also:/records/12"], /unknown rule\(s\) in --ignore-path: nope, also/],
+    [["http://x", "--ignore-path", "/error:route-server-error"], /names a rule as rule:\/path/],
     [["http://x", "--browser", "ie"], /--browser must be one of/],
     [["http://x", "--level", "high"], /unknown option --level/],
     [["http://x", "--fail-on"], /--fail-on needs a value/],
@@ -1097,6 +1145,7 @@ test("action: the arguments it builds are ones the CLI accepts, carrying every o
     "max-routes": "10",
     paths: "/a,/b",
     ignore: "contrast",
+    "ignore-path": "/error,route-server-error:/records/12",
     "storage-state": "auth/user.json",
     browser: "webkit",
     project: "site",
@@ -1127,6 +1176,7 @@ test("action: the arguments it builds are ones the CLI accepts, carrying every o
     maxRoutes: 10,
     paths: ["/a", "/b"],
     ignore: ["contrast"],
+    ignorePaths: [{ path: "/error" }, { path: "/records/12", rule: "route-server-error" }],
     flows: "off",
     retest: false,
     flowWrites: "allow",
@@ -2232,6 +2282,16 @@ test("baselines: a change, and a target that could not be pictured, are each one
   assert.equal(issues[1].evidence, "testid=gone on /plans could not be captured: page.goto: net::ERR_CONNECTION_REFUSED at /plans");
   assert.ok(!checkFindings([route()], ORIGIN, [], [], baselineRun(otherStatuses)).issues.length, "no baseline yet, a match and an update are not issues");
   assert.deepEqual(checkFindings([route()], ORIGIN, ["visual-change"], [], baselineRun([changedPlan])).issues, [], "--ignore takes it like any rule");
+  assert.deepEqual(
+    checkFindings([route()], ORIGIN, [], [], baselineRun([changedPlan]), [{ path: "/plans" }]).issues,
+    [],
+    "a path exemption takes the picture on that route",
+  );
+  assert.equal(
+    checkFindings([route()], ORIGIN, [], [], baselineRun([changedPlan]), [{ path: "/other" }]).issues.length,
+    1,
+    "another path leaves the picture in the gate",
+  );
   // Under update the sentence says the baseline was not written.
   assert.match(
     checkFindings([route()], ORIGIN, [], [], baselineRun([missingPlan], { mode: "update" })).issues[0].evidence,

@@ -178,6 +178,17 @@ export type WorthALookRule = keyof typeof WORTH_A_LOOK_RULES;
 export type CheckRule = DefectRule | WorthALookRule;
 export const CHECK_RULE_IDS = [...Object.keys(CHECK_RULES), ...Object.keys(WORTH_A_LOOK_RULES)] as CheckRule[];
 
+/**
+ * One `--ignore-path` entry. A path on its own drops every rule filed against
+ * that route; a rule narrows the exemption to that rule, so a page meant to
+ * answer HTTP 500 can be left out while the same status on another path still
+ * fails the gate. Matched exactly, the way `--paths` names a route.
+ */
+export interface IgnoredPath {
+  path: string;
+  rule?: CheckRule;
+}
+
 export function isWorthALookRule(rule: string): rule is WorthALookRule {
   return Object.prototype.hasOwnProperty.call(WORTH_A_LOOK_RULES, rule);
 }
@@ -289,6 +300,10 @@ export function geometryRule(line: string): CheckRule | null {
  * dedup, and their fingerprint comes from the target, not the evidence: the
  * evidence carries this run's percentage, and the same target changing by a
  * different amount is still the same alert.
+ *
+ * `--ignore-path` drops a fact on the route it names, or one rule there,
+ * before the fact is filed. A fact also seen on a route that is not exempted
+ * stays, on that route alone.
  */
 export function checkFindings(
   routes: readonly RouteHealth[],
@@ -296,13 +311,16 @@ export function checkFindings(
   ignore: readonly CheckRule[] = [],
   flows: readonly FlowRun[] = [],
   baselines: BaselineRun | null = null,
+  ignorePaths: readonly IgnoredPath[] = [],
 ): { issues: CheckIssue[]; worthALook: CheckObservation[] } {
   const byKey = new Map<string, CheckIssue>();
   const looks = new Map<string, CheckObservation>();
+  /** A route (and, when named, one rule on it) that --ignore-path exempts. */
+  const exempt = (rule: CheckRule, route: string): boolean => ignorePaths.some((e) => e.path === route && (e.rule === undefined || e.rule === rule));
   /** Evidence as it is written: no origin, no secret, and bounded. */
   const cleanEvidence = (evidence: string): string => redactSecrets(withoutOrigin(evidence, origin)).slice(0, 300);
   const add = (rule: CheckRule, evidence: string, route: string, opts: { severity?: CheckSeverity; embed?: string; flow?: string } = {}): void => {
-    if (ignore.includes(rule)) return;
+    if (ignore.includes(rule) || exempt(rule, route)) return;
     const clean = cleanEvidence(evidence);
     const key = `${rule}\u0000${clean}`;
     const issue = byKey.get(key);
@@ -356,6 +374,7 @@ export function checkFindings(
   const visual: CheckIssue[] = [];
   if (baselines && !ignore.includes(VISUAL_RULE)) {
     for (const r of baselines.results) {
+      if (exempt(VISUAL_RULE, r.path)) continue;
       const evidence = baselineEvidence(r, baselines);
       if (evidence === null) continue;
       visual.push({
@@ -379,8 +398,9 @@ export function issuesFromRoutes(
   origin: string,
   ignore: readonly CheckRule[] = [],
   flows: readonly FlowRun[] = [],
+  ignorePaths: readonly IgnoredPath[] = [],
 ): CheckIssue[] {
-  return checkFindings(routes, origin, ignore, flows).issues;
+  return checkFindings(routes, origin, ignore, flows, null, ignorePaths).issues;
 }
 
 /**
@@ -519,6 +539,8 @@ export interface CheckOptions extends CheckSettings {
   maxRoutes: number;
   paths?: string[];
   ignore: CheckRule[];
+  /** Paths (or one rule on a path) that do not become issues. Empty when --ignore-path was not passed. */
+  ignorePaths: IgnoredPath[];
   /** The flows directory to replay; "off" for none; absent for the project's own when it has one. */
   flows?: string;
   /** off; compare the targets in the baselines folder with their baselines; or update those baselines. */
@@ -546,6 +568,7 @@ export const CHECK_OPTION_NAMES = [
   "max-routes",
   "paths",
   "ignore",
+  "ignore-path",
   "flows",
   "retest",
   "flow-writes",
@@ -632,6 +655,49 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
   const ignore = list(flags.get("ignore")) ?? [];
   const unknownRules = ignore.filter((r) => !(CHECK_RULE_IDS as readonly string[]).includes(r));
   if (unknownRules.length > 0) return { ok: false, error: `unknown rule(s) in --ignore: ${unknownRules.join(", ")}. Rules: ${CHECK_RULE_IDS.join(", ")}` };
+  const ignorePathList = list(flags.get("ignore-path"));
+  if (ignorePathList && ignorePathList.length === 0) return { ok: false, error: "--ignore-path is empty" };
+  const ignorePaths: IgnoredPath[] = [];
+  const unknownPathRules: string[] = [];
+  const badPathEntries: string[] = [];
+  const ruleAfterPath: string[] = [];
+  for (const entry of ignorePathList ?? []) {
+    if (entry.startsWith("/")) {
+      // `/path:rule` would otherwise be a path that never matches. A colon is
+      // still allowed in a path when what follows it is not a rule id.
+      const suffix = entry.slice(entry.lastIndexOf(":") + 1);
+      if (entry.includes(":") && (CHECK_RULE_IDS as readonly string[]).includes(suffix)) {
+        ruleAfterPath.push(entry);
+        continue;
+      }
+      ignorePaths.push({ path: entry });
+      continue;
+    }
+    const colon = entry.indexOf(":");
+    const rule = colon > 0 ? entry.slice(0, colon) : "";
+    const path = colon > 0 ? entry.slice(colon + 1) : "";
+    if (path.startsWith("/") && (CHECK_RULE_IDS as readonly string[]).includes(rule)) {
+      ignorePaths.push({ path, rule: rule as CheckRule });
+      continue;
+    }
+    if (path.startsWith("/") && rule) {
+      unknownPathRules.push(rule);
+      continue;
+    }
+    badPathEntries.push(entry);
+  }
+  if (unknownPathRules.length > 0) {
+    return { ok: false, error: `unknown rule(s) in --ignore-path: ${unknownPathRules.join(", ")}. Rules: ${CHECK_RULE_IDS.join(", ")}` };
+  }
+  if (ruleAfterPath.length > 0) {
+    return { ok: false, error: `--ignore-path names a rule as rule:/path (got ${ruleAfterPath.join(", ")})` };
+  }
+  if (badPathEntries.length > 0) {
+    return {
+      ok: false,
+      error: `--ignore-path entries are paths starting with /, or one rule on a path as rule:/path (got ${badPathEntries.join(", ")})`,
+    };
+  }
   const retest = flags.get("retest") ?? "on";
   if (retest !== "on" && retest !== "off") return { ok: false, error: "--retest must be on or off" };
   const flows = flags.get("flows");
@@ -675,6 +741,7 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
       maxRoutes,
       ...(paths ? { paths } : {}),
       ignore: ignore as CheckRule[],
+      ignorePaths,
       ...(flows !== undefined ? { flows: flows === "off" ? "off" : resolve(flows) } : {}),
       retest: retest === "on",
       flowWrites,
@@ -707,6 +774,8 @@ export interface CheckResult {
   /** Present only when the options gave a time budget: how long it was, and whether it ran out with routes still to visit. */
   timeBudget?: { ms: number; reached: boolean };
   ignored: CheckRule[];
+  /** What --ignore-path exempted, in the order given. */
+  ignoredPaths: IgnoredPath[];
   /** Every saved flow replayed, in file order. */
   flows: FlowRun[];
   /** Open findings from the project's memory, re-tested by loading their page. Null when --retest off or there is no memory. */
@@ -1137,6 +1206,10 @@ export function formatCheck(result: CheckResult): string {
     );
   }
   if (result.ignored.length > 0) lines.push("", `Rules ignored by --ignore: ${result.ignored.join(", ")}`);
+  if (result.ignoredPaths.length > 0) {
+    const shown = result.ignoredPaths.map((e) => (e.rule ? `${e.rule}:${e.path}` : e.path));
+    lines.push("", `Paths exempted by --ignore-path: ${shown.join(", ")}`);
+  }
   lines.push(
     "",
     result.flows.length > 0
@@ -1169,6 +1242,7 @@ export function toSummaryJson(result: CheckResult, toolVersion: string): object 
     unvisited: result.unvisited,
     ...(result.timeBudget ? { timeBudget: result.timeBudget } : {}),
     ignored: result.ignored,
+    ignoredPaths: result.ignoredPaths,
     flows: result.flows.map((f) => ({
       name: f.name,
       file: f.file,

@@ -63,6 +63,7 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--max-routes` | `50` | The most routes to visit, 1 to 150 |
 | `--paths` | every route found | Check only these paths, comma-separated, each starting with `/` |
 | `--ignore` | none | Rules to drop, comma-separated (see [check rules](#check-rules)) |
+| `--ignore-path` | none | Paths to exempt, comma-separated. A path starting with `/` drops every rule on that route; `rule:/path` drops that one rule there. Matched exactly, so a page meant to answer HTTP 500 can be exempted while a 500 on another path still fails the gate |
 | `--storage-state` | none | A Playwright storage-state file, to check while signed in |
 | `--browser` | `chromium` | `chromium`, `firefox` or `webkit` |
 | `--action-timeout-ms` | `5000` | How long one click, keystroke or pick may take, 1000 to 120000 |
@@ -165,7 +166,7 @@ Every issue carries the `scenescout` label, which a later export lists issues by
 
 ### Check rules
 
-What `scenescout check` measures, with each rule's severity. `--ignore` takes these ids.
+What `scenescout check` measures, with each rule's severity. `--ignore` takes these ids, and `--ignore-path` takes one as `rule:/path`.
 
 | Rule | Severity | |
 |---|---|---|
@@ -281,6 +282,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `max-routes` | empty | As `--max-routes` |
 | `paths` | empty | As `--paths` |
 | `ignore` | empty | As `--ignore` |
+| `ignore-path` | empty | As `--ignore-path` |
 | `storage-state` | empty | As `--storage-state`, relative to `working-directory` |
 | `browser` | `chromium` | As `--browser` |
 | `action-timeout-ms` | empty | As `--action-timeout-ms` |

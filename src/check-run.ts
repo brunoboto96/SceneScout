@@ -219,7 +219,7 @@ export async function runCheck(
     const measured = redactRoutes(routes.map(withoutOwnResponse));
     const flows = redactFlowRuns(flowRuns);
     const pictured = baselines ? redactBaselineRun(baselines) : null;
-    const { issues, worthALook } = checkFindings(measured, start.origin, options.ignore, flows, pictured);
+    const { issues, worthALook } = checkFindings(measured, start.origin, options.ignore, flows, pictured, options.ignorePaths);
     return {
       url: redactRoute(options.url),
       generatedAt: new Date().toISOString(),
@@ -232,6 +232,7 @@ export async function runCheck(
       unvisited: options.paths ? [] : engine.crawlableRoutes().map(redactRoute),
       ...(options.timeBudgetMs !== undefined ? { timeBudget: { ms: options.timeBudgetMs, reached: timeLimitReached } } : {}),
       ignored: options.ignore,
+      ignoredPaths: options.ignorePaths,
       flows,
       skippedFlows: inputs.skippedFlows ?? [],
       retest,
