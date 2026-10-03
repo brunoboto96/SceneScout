@@ -121,6 +121,17 @@ export function buildPairs(archives: readonly RunArchive[], keys: Readonly<Recor
 }
 
 /**
+ * The archives dated on or after `since` (YYYY-MM-DD), so a decider can be
+ * scored out of sample: on pairs from runs made after it was tuned, none of
+ * whose findings it has seen. Filtered before pairing, so a pair never joins
+ * a new finding to an old one.
+ */
+export function archivesSince<A extends Pick<RunArchive, "date">>(archives: readonly A[], since: string): A[] {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(since)) throw new Error(`The date must be YYYY-MM-DD, not ${JSON.stringify(since)}.`);
+  return archives.filter((a) => a.date >= since);
+}
+
+/**
  * At most `cap` pairs, chosen by a hash of their texts: the same pairs every
  * time for the same archives, whatever order they were built in, and no
  * preference for the runs that happen to be listed first.

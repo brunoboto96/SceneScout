@@ -1,0 +1,45 @@
+{
+  "app": "demo",
+  "run": "ci-dedup-demo-6",
+  "date": "2026-10-03",
+  "note": "Unattended run of 3.18.0 at 498dbdf with the dedup judge on (the ci default); gpt-6-luna, effort low, default caps. Out-of-sample pairs for the dedup judge; see Finding dedup.",
+  "findings": [
+    {
+      "title": "Dashboard chart image fails to load",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "New-order email field loses its accessible label after typing",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new.html new-order-email placeholder-only accessible name"
+    },
+    {
+      "title": "New-order helper text has insufficient contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new.html helper text contrast 1.73:1; required 4.5:1"
+    },
+    {
+      "title": "Order detail route requests a null order and returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/orders/null 404"
+    },
+    {
+      "title": "Empty create-order submit gives no visible feedback",
+      "severity": "medium",
+      "category": "ux-confusing",
+      "evidence": "orders-new.html empty Create order submit: zero requests and no feedback"
+    },
+    {
+      "title": "Dashboard bulk-import badge overlaps All orders link",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "Dashboard geometry: e217 All orders overlaps e218 New: bulk import (85%)"
+    }
+  ],
+  "decisions": []
+}

@@ -1,0 +1,57 @@
+{
+  "app": "demo",
+  "run": "ci-dedup-demo-4",
+  "date": "2026-10-03",
+  "note": "Unattended run of 3.18.0 at 498dbdf with the dedup judge on (the ci default); gpt-6-luna, effort low, default caps. Out-of-sample pairs for the dedup judge; see Finding dedup.",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Email field has only a placeholder for its label",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new-order-email placeholder-only label; helper contrast 1.73:1"
+    },
+    {
+      "title": "New-order helper text has very low contrast",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "new-order helper text contrast 1.73:1"
+    },
+    {
+      "title": "Invalid confirmation email accepted when creating order",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/orders accepted invalid email address"
+    },
+    {
+      "title": "Reports page has no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "reports page task-clarity score 92; no dominant action"
+    },
+    {
+      "title": "Export CSV crashes on missing report rows",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports-export-csv: Cannot read properties of undefined (reading 'rows')"
+    },
+    {
+      "title": "Sticky bar covers Save notes button",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order-save covered by order-stickybar at current scroll position"
+    },
+    {
+      "title": "Scheduled reports page has no usable controls or navigation",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html: 0 interactables; main 72 chars"
+    }
+  ],
+  "decisions": []
+}

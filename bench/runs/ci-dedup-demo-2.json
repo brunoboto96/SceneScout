@@ -1,0 +1,39 @@
+{
+  "app": "demo",
+  "run": "ci-dedup-demo-2",
+  "date": "2026-10-03",
+  "note": "Unattended run of 3.18.0 at 498dbdf with the dedup judge on (the ci default); gpt-6-luna, effort low, default caps. Out-of-sample pairs for the dedup judge; see Finding dedup.",
+  "findings": [
+    {
+      "title": "Dashboard weekly chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard action links overlap the bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "Dashboard geometry overlap: dash-all-orders × dash-new-badge 85%"
+    },
+    {
+      "title": "New-order email field loses its accessible name after typing",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new-order-email labelled only by placeholder"
+    },
+    {
+      "title": "New-order helper text has insufficient contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new-order helper contrast 1.73:1 (184,192,202 on 246,248,250)"
+    },
+    {
+      "title": "Scheduled reports page has no way to navigate onward",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html main Scheduled reports; 0 interactables"
+    }
+  ],
+  "decisions": []
+}

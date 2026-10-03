@@ -1,0 +1,49 @@
+{
+  "app": "holdout",
+  "run": "ci-dedup-holdout-8",
+  "date": "2026-10-03",
+  "note": "Unattended run of 3.18.0 at 498dbdf with the dedup judge on (the ci default); gpt-6-luna, effort low, default caps. Out-of-sample pairs for the dedup judge; see Finding dedup.",
+  "findings": [
+    {
+      "title": "Fines page displays an empty list when the fines API is forbidden",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; refused_empty (1)"
+    },
+    {
+      "title": "Home notices remain stuck loading after the notices API returns 500",
+      "severity": "medium",
+      "category": "network",
+      "evidence": "GET /api/notices 500; home-notices remains Loading notices…"
+    },
+    {
+      "title": "Catalogue offers no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "catalogue.html design audit: no visually dominant action; task-clarity 92/100"
+    },
+    {
+      "title": "Catalogue spacing uses many values off a 4px grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "catalogue.html design audit: spacing 37% on 4px grid; off-grid padding 9px×16, 7px×2, 1px×2",
+      "tier": "worth_a_look",
+      "convention": "a consistent 4px spacing scale"
+    },
+    {
+      "title": "Checkout form spacing is entirely off the 4px grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "checkout.html design audit: spacing 0% on 4px grid; 7px×4, 9px×4, 6px×4, 14px×4",
+      "tier": "worth_a_look",
+      "convention": "a consistent 4px spacing scale"
+    },
+    {
+      "title": "Event signup confirmation page has no way back to the library",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "events-joined.html snapshot: main h1 Your seat is saved; 0 interactables; DEAD END"
+    }
+  ],
+  "decisions": []
+}

@@ -1,0 +1,57 @@
+{
+  "app": "demo",
+  "run": "ci-dedup-demo-5",
+  "date": "2026-10-03",
+  "note": "Unattended run of 3.18.0 at 498dbdf with the dedup judge on (the ci default); gpt-6-luna, effort low, default caps. Out-of-sample pairs for the dedup judge; see Finding dedup.",
+  "findings": [
+    {
+      "title": "Dashboard chart image fails to load",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard actions overlap the bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "Dashboard geometry: e16 All orders overlaps e17 New: bulk import (85%)"
+    },
+    {
+      "title": "Rapid double-click sends two order-creation requests",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/orders fired twice on double-click of Create order"
+    },
+    {
+      "title": "Empty order submission gives no visible validation feedback",
+      "severity": "low",
+      "category": "ux-confusing",
+      "evidence": "Empty click Create order: zero network requests; status remained empty"
+    },
+    {
+      "title": "New-order helper text fails WCAG contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "New order helper text contrast 1.73:1 (required 4.5:1)"
+    },
+    {
+      "title": "Optional confirmation email field has placeholder-only labeling",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "new-order-email labelled only by placeholder"
+    },
+    {
+      "title": "Scheduled reports page has no interactive controls",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactable elements"
+    },
+    {
+      "title": "Rapid double-click creates duplicate orders",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/orders fired twice; orders #1044 and #1043 are duplicate QA Sample Customer orders"
+    }
+  ],
+  "decisions": []
+}

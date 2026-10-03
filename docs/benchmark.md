@@ -1098,6 +1098,20 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | rule | c1786bc817 | 8/13 | 9/9 (100%) | — | done | 86 | 1,804,634 (1,760,945) / 6,753 | 1m 24s | $0.025 |
 | 2026-10-02 | demo | 3.14.1 | manual | openai · gpt-6-luna · low | rule | c1786bc817 | 5/13 | 5/5 (100%) | — | done | 37 | 803,803 (777,552) / 2,177 | 1m 24s | $0.011 |
 | 2026-10-02 | holdout | 3.14.1 | manual | openai · gpt-6-luna · low · 4 lanes | rule | b5a7933f32 | 7/10 | 7/9 (50%–86%) | — | done | 86 | 1,801,743 (1,776,235) / 7,040 | 1m 13s | $0.024 |
+| 2026-10-03 | demo | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 5/5 (100%) | — | done | 38 | 989,487 (958,583) / 1,988 | 1m 34s | $0.014 |
+| 2026-10-03 | demo | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 4/4 (80%–100%) | — | done | 30 | 757,486 (749,475) / 1,454 | 1m 08s | $0.009 |
+| 2026-10-03 | demo | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 4/4 (80%–100%) | — | done | 33 | 856,648 (846,179) / 1,762 | 1m 25s | $0.010 |
+| 2026-10-03 | demo | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 5/13 | 6/7 (75%–88%) | — | done | 33 | 871,173 (861,009) / 2,131 | 1m 22s | $0.011 |
+| 2026-10-03 | demo | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 5/13 | 6/6 (75%–100%) | — | done | 40 | 1,058,022 (1,045,955) / 3,026 | 2m 03s | $0.013 |
+| 2026-10-03 | demo | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 4/4 (67%–100%) | — | done | 38 | 1,038,682 (1,026,279) / 2,917 | 1m 44s | $0.013 |
+| 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 2/10 | 2/4 (40%–60%) | — | turns | 40 | 1,103,020 (1,068,616) / 2,488 | 1m 43s | $0.015 |
+| 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 2/10 | 2/3 (67%) | — | turns | 40 | 1,122,825 (1,088,204) / 3,194 | 1m 47s | $0.016 |
+| 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/3 (25%–50%) | — | done | 39 | 1,041,177 (1,031,224) / 1,972 | 1m 20s | $0.012 |
+| 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (50%) | — | turns | 40 | 1,077,952 (1,046,244) / 2,142 | 1m 41s | $0.015 |
+| 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (33%–67%) | — | turns | 40 | 1,134,628 (1,121,793) / 2,916 | 1m 54s | $0.014 |
+| 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (33%–67%) | — | turns | 40 | 1,087,728 (1,075,597) / 2,692 | 1m 55s | $0.013 |
+| 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (33%–67%) | — | done | 33 | 894,594 (883,315) / 2,479 | 1m 39s | $0.011 |
+| 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 2/10 | 2/3 (50%–75%) | — | turns | 40 | 1,088,692 (1,077,975) / 2,432 | 1m 51s | $0.013 |
 
 <!-- ci-results:end -->
 
@@ -1436,9 +1450,8 @@ findings on the same page (at most three calls per filing), and merges on a
 won above was a merge the rule missed. `scenescout ci` judges by default with
 the run's model at the lowest effort its API takes (`--dedup rule` turns it
 off); the MCP server judges only when `SCENESCOUT_DEDUP=judge` or
-`scout_attach {dedup: "judge"}` asks for it. Not yet measured: the judge as
-wired, on pairs from runs made after this change, which is the check that the
-gain above holds in the store.
+`scout_attach {dedup: "judge"}` asks for it. Measured out of sample in
+[judge run 3](#judge-run-3-out-of-sample-the-lead-holds).
 
 **A literal in one title and the other's detail
 ([#318](https://github.com/brunoboto96/SceneScout/issues/318)).** When both
@@ -1451,6 +1464,76 @@ merges). The archives keep no finding's detail, so the pairs cannot see this
 rule either way; `memory-test` holds it with a contrastive pair. A variant
 that also stopped a title literal matching the other's evidence lost 4
 correct demo merges (440 to 436, no wrong merge avoided) and was not taken.
+
+### Judge run 3: out of sample, the lead holds
+
+The check #229 asked for: the judge against the rule on pairs from runs made
+after the judge was wired in, none of whose findings either run 1 or run 2
+saw. Fourteen `scenescout ci` runs were dispatched on 2026-10-03 with the
+`ci-benchmark` workflow at main 498dbdf (3.18.0), gpt-6-luna at effort low,
+default caps, dedup by the judge (the `ci` default): six of the demo
+(`ci-dedup-demo-1` to `-6`) and eight of the held-out app (`ci-dedup-holdout-1`
+to `-8`), more of the held-out app because it gives fewer pairs per run. Their
+rows are in the [unattended table](#unattended-runs-scenescout-ci). The
+`dedup-bench` workflow then judged every pair from those runs alone
+(`--since 2026-10-03`, a new option that filters the archives before pairing,
+so no pair joins a new finding to an old one) at effort none, the effort `ci`
+uses. Keys `c1786bc817` and `b5a7933f32`, unchanged. 41 findings placed on a
+page; left out: 4 identical text, 21 unmatched, 0 ambiguous, 12 known
+non-defect. Every pair fits under the cap, so the sample is every pair.
+
+| App | Pairs (same / different) | Decider | Accuracy [95% interval] | Brier [95% interval] | ECE [equal-count buckets over p_same] | Wrong merges | Missed merges |
+|---|---|---|---|---|---|---:|---:|
+| Demo | 82 (41 / 41) | current rule | 56.1% [46–66%] | 0.439 [0.341–0.537] (skill −0.76) | 0.439 [n=77 stated 0 actual 0.47; n=5 stated 1 actual 1.00] | 0 | 36 |
+| Demo | 82 | judge, effort none | 93.9% [88–98%] | 0.055 [0.019–0.108] (skill 0.78) | 0.064 [n=38 stated 0.01 actual 0.00; n=41 stated 0.80 actual 0.93; n=3 stated 1.00 actual 1.00] | 0 | 5 |
+| Held-out | 56 (28 / 28) | current rule | 82.1% [71–91%] | 0.179 [0.089–0.286] (skill 0.29) | 0.179 [n=38 stated 0 actual 0.26; n=18 stated 1 actual 1.00] | 0 | 10 |
+| Held-out | 56 | judge, effort none | 100.0% [100–100%] | 0.000 [0.000–0.000] (skill 1.00) | 0.011 [n=28 stated 0.01 actual 0.00; n=24 stated 0.98 actual 1.00; n=4 stated 1.00 actual 1.00] | 0 | 0 |
+
+The intervals are a bootstrap over pairs (4,000 resamples), computed from
+the per-pair file; the judge's ECE interval under four equal-count buckets
+is 0.024–0.117 on the demo and 0.007–0.012 held-out. **Read them as too
+narrow.** The pairs cluster by the two key entries they join: the demo's 82
+come from 10 such clusters, the largest 18 pairs, and the held-out app's 56
+from 4, the largest 28. Resampling whole clusters instead widens the
+rule-minus-judge Brier difference to 0.11–0.73 on the demo, still above
+zero, and to 0.00–0.71 held-out, which touches zero: four clusters are too
+few to rule out that the held-out gap is one or two entries' doing. Held-out
+Brier is 0.000 to three places, not exactly 0: the judge stated 0.01 or less
+on every "different" pair and 0.98 or more on every "same".
+
+**Pair by pair**, from the per-pair file: the judge is right on 31 demo pairs
+and 10 held-out pairs where the rule is wrong, all of them merges the rule
+missed, and wrong on none where the rule is right. Neither decider merged
+wrongly. The judge's five errors are all on the demo and all one key entry:
+pairs of findings about the low-contrast hint on the new-order form that it
+calls different (p_same 0.02 to 0.12), which looks like run 2's off-grid
+spacing case, a key entry broader than one finding's wording.
+
+**Against the in-sample figures.** The judge's demo Brier is 0.055 here
+against 0.019 in run 2, and its accuracy 93.9% against 98.0%; held-out it is
+0.000 against 0.007. The rule did worse here than in sample on the demo
+(0.439 against 0.180), because these pairs are half "same" where run 2's
+sample was a fifth: the rule's errors are nearly all missed merges, so a
+pair set with more "same" pairs costs it more. The comparison that matters
+is within this table, on the same pairs: the judge's lead holds on both apps.
+
+**Limits.** One judge pass, so no run-to-run noise is measured (in run 2 the
+judge changed no verdict between efforts). 21 findings are unmatched (the
+key does not recognise them) and are in no pair; they are listed by
+`npm run bench -- --all` as unlabelled and await a person's judgement before
+they go in a key. Within-run pairs (8 demo, 4 held-out) passed through the
+store's judge already, which kept them apart; over cross-run pairs alone
+the figures move little (demo judge 0.048 against rule 0.459, 74 pairs;
+held-out 0.000 against 0.192, 52 pairs). The labels come from the key, not a person.
+
+**Decision: the judge stays the default in `scenescout ci`.** Its Brier beats
+the rule's on new pairs on both apps, it never loses a pair the rule wins,
+and it made no wrong merge. The held-out gain rests on four clusters of
+pairs, so it is a direction there, not a measured size. Cost in these runs:
+the store's judge made 0 to 7 calls per run (40 in all, about 360 input and
+26 output tokens each), inside each run's usage; scoring the 138 pairs cost
+49,514 input and 3,562 output tokens, about $0.007 at the table price. The
+fourteen runs together cost about $0.18 by their own estimates.
 
 ## Rejected and not-yet-tried
 

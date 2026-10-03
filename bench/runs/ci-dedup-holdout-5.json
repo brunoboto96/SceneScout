@@ -1,0 +1,33 @@
+{
+  "app": "holdout",
+  "run": "ci-dedup-holdout-5",
+  "date": "2026-10-03",
+  "note": "Unattended run of 3.18.0 at 498dbdf with the dedup judge on (the ci default); gpt-6-luna, effort low, default caps. Out-of-sample pairs for the dedup judge; see Finding dedup.",
+  "findings": [
+    {
+      "title": "Fines request is refused but the register can present an empty list as if no fines exist",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; refused_empty on /fines.html"
+    },
+    {
+      "title": "Shared navigation links blend into body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "shared chrome: 13 elements, link color rgba(93, 99, 87, 1), no underline"
+    },
+    {
+      "title": "Availability-only catalogue filter retains an all-on-loan title",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "catalogue available-only=true retains catalogue-book-2 with status all on loan"
+    },
+    {
+      "title": "Home notices remain stuck loading after the notices API returns 500",
+      "severity": "medium",
+      "category": "network",
+      "evidence": "GET /api/notices 500; home-notices remains “Loading notices…”"
+    }
+  ],
+  "decisions": []
+}
