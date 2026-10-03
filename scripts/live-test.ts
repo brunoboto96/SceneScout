@@ -36,6 +36,19 @@ import {
 } from "../src/engine/live.ts";
 import { LIVE_PAGE } from "../src/engine/live-page.ts";
 import {
+  countFindings,
+  MCP_APP_MIME,
+  paneData,
+  paneText,
+  STATUS_PANE_URI,
+  STATUS_POLL_MS,
+  STATUS_POLL_TOOL,
+  type PaneFinding,
+  type PaneFindings,
+  type PaneInput,
+} from "../src/engine/status-pane.ts";
+import { statusPanePage } from "../src/engine/status-pane-page.ts";
+import {
   decideOpen,
   OPEN_CHOICES,
   OPEN_ENV,
@@ -1496,4 +1509,155 @@ test("open: the opener is spawned without a shell, detached, and a refused targe
     throw new Error("EPERM");
   };
   assert.deepEqual(openInBrowser("http://127.0.0.1:1/t/", { ...deps, spawn: throwing }), { ok: false, why: "xdg-open could not start: EPERM" });
+});
+
+// ---- the run-status pane (MCP Apps) -------------------------------------------
+
+const PANE_NOW = Date.parse("2026-10-03T10:00:00.000Z");
+const paneSession = (over: Partial<SessionStatus>): SessionStatus => ({
+  session: "default",
+  role: "admin",
+  phase: "idle",
+  tool: "scout_click",
+  url: "http://localhost:3000/things",
+  since: new Date(PANE_NOW - 5_000).toISOString(),
+  at: new Date(PANE_NOW).toISOString(),
+  ...over,
+});
+const paneInput = (over: Partial<PaneInput> = {}): PaneInput => ({
+  nowMs: PANE_NOW,
+  version: "9.9.9",
+  live: { port: 4321, token: "tok_abcdefghijklmnop" },
+  liveError: null,
+  liveOff: false,
+  sessions: [],
+  findings: null,
+  coverage: null,
+  ...over,
+});
+const RUN_START = "2026-10-03T09:00:00.000Z";
+const finding = (severity: "high" | "medium" | "low", over: Partial<PaneFinding> = {}): PaneFinding => ({
+  severity,
+  foundAt: "2026-10-03T09:30:00.000Z",
+  ...over,
+});
+
+test("the pane counts open defects by severity, and keeps worth-a-look, resolved and earlier runs apart", () => {
+  const cases: Array<{ name: string; findings: PaneFinding[]; want: PaneFindings }> = [
+    { name: "none", findings: [], want: { open: 0, high: 0, medium: 0, low: 0, thisRun: 0, worthALook: 0, resolved: 0 } },
+    {
+      name: "one of each severity, this run",
+      findings: [finding("high"), finding("medium"), finding("low")],
+      want: { open: 3, high: 1, medium: 1, low: 1, thisRun: 3, worthALook: 0, resolved: 0 },
+    },
+    {
+      name: "an earlier run's finding is open but not this run's",
+      findings: [finding("high", { foundAt: "2026-10-02T09:00:00.000Z" })],
+      want: { open: 1, high: 1, medium: 0, low: 0, thisRun: 0, worthALook: 0, resolved: 0 },
+    },
+    {
+      name: "resolved is not open, whatever its severity",
+      findings: [finding("high", { status: "resolved" })],
+      want: { open: 0, high: 0, medium: 0, low: 0, thisRun: 0, worthALook: 0, resolved: 1 },
+    },
+    {
+      name: "worth a look is never counted as a defect",
+      findings: [finding("medium", { tier: "worth_a_look" }), finding("medium", { status: "open" })],
+      want: { open: 1, high: 0, medium: 1, low: 0, thisRun: 1, worthALook: 1, resolved: 0 },
+    },
+  ];
+  for (const c of cases) assert.deepEqual(countFindings(c.findings, RUN_START), c.want, c.name);
+});
+
+test("the pane's data carries each session's objective, task, state and the live view's address", () => {
+  const data = paneData(
+    paneInput({
+      sessions: [
+        paneSession({ session: "a", phase: "running", tool: "scout_crawl", objective: "Cover the settings area", task: "Open each tab", budgetMs: 600_000 }),
+        paneSession({ session: "b", phase: "running", since: new Date(PANE_NOW - 200_000).toISOString() }),
+        paneSession({ session: "c" }),
+      ],
+      findings: [finding("high")],
+      runStart: RUN_START,
+      coverage: { routesVisited: 3, routesTotal: 8, states: 5, elementsExercised: 12, elementsTotal: 40 },
+    }),
+  );
+  assert.equal(data.liveUrl, "http://127.0.0.1:4321/tok_abcdefghijklmnop/");
+  assert.equal(data.liveNote, undefined);
+  assert.equal(data.at, new Date(PANE_NOW).toISOString());
+  assert.deepEqual(
+    data.sessions.map((s) => [s.session, s.state, s.forMs, s.objective, s.task]),
+    [
+      ["a", "running", 5_000, "Cover the settings area", "Open each tab"],
+      ["b", "stuck", 200_000, undefined, undefined],
+      ["c", "idle", 5_000, undefined, undefined],
+    ],
+  );
+  assert.equal(data.findings?.high, 1);
+  assert.deepEqual(data.coverage, { routesVisited: 3, routesTotal: 8, states: 5, elementsExercised: 12, elementsTotal: 40 });
+});
+
+test("the pane returns only what the live view shows: the board's fields, counts and coverage, and no other token", () => {
+  const data = paneData(
+    paneInput({
+      sessions: [paneSession({ mode: "safe-write", browser: "chromium", headed: false, budgetMs: 30_000, taskSince: new Date(PANE_NOW).toISOString() })],
+      findings: [finding("low")],
+      runStart: RUN_START,
+    }),
+  );
+  assert.deepEqual(Object.keys(data).sort(), ["at", "coverage", "findings", "liveUrl", "sessions", "version"]);
+  assert.deepEqual(Object.keys(data.sessions[0]).sort(), ["forMs", "role", "session", "state", "tool", "url"]);
+  // The token appears once, inside the loopback address the live view already hands out.
+  const json = JSON.stringify(data);
+  assert.equal(json.split("tok_abcdefghijklmnop").length - 1, 1);
+});
+
+test("without a live address the pane and its text say why", () => {
+  const cases: Array<{ name: string; input: Partial<PaneInput>; note: RegExp }> = [
+    { name: "before the first attach", input: { live: null }, note: /starts with the first scout_attach/ },
+    { name: "SCENESCOUT_LIVE=off", input: { live: null, liveOff: true }, note: /SCENESCOUT_LIVE=off/ },
+    { name: "the port would not open", input: { live: null, liveError: "EADDRINUSE" }, note: /could not start: EADDRINUSE/ },
+  ];
+  for (const c of cases) {
+    const data = paneData(paneInput(c.input));
+    assert.equal(data.liveUrl, null, c.name);
+    assert.match(data.liveNote ?? "", c.note, c.name);
+    assert.match(paneText(data).split("\n")[0], /^Live view: not available\./, c.name);
+  }
+});
+
+test("the text fallback stands alone: the address first, then sessions, findings and coverage", () => {
+  const text = paneText(
+    paneData(
+      paneInput({
+        sessions: [paneSession({ session: "lane-1", phase: "running", tool: "scout_type", task: "Fill the new-thing form", objective: "Forms" })],
+        findings: [finding("high"), finding("low", { tier: "worth_a_look" })],
+        runStart: RUN_START,
+        coverage: { routesVisited: 2, routesTotal: 4, states: 3, elementsExercised: 9, elementsTotal: 20 },
+      }),
+    ),
+  );
+  const lines = text.split("\n");
+  // The attach result's `Live view:` form, so a client that finds the address there finds it here.
+  assert.match(lines[0], /^Live view: http:\/\/127\.0\.0\.1:4321\/tok_abcdefghijklmnop\/ /);
+  assert.ok(lines.includes("- lane-1 (admin): running scout_type for 5s on http://localhost:3000/things"), text);
+  assert.ok(lines.includes("  task: Fill the new-thing form"), text);
+  assert.ok(lines.includes("  objective: Forms"), text);
+  assert.ok(lines.includes("Open findings: 1 (1 high, 0 medium, 0 low), 1 this run; 1 worth a look"), text);
+  assert.ok(lines.includes("Coverage: routes 2/4 · 3 states · 9/20 elements exercised"), text);
+  assert.match(paneText(paneData(paneInput())), /\nNo session is attached\.$/);
+});
+
+test("the pane's page: its script parses, it loads nothing from outside, and every control has a test id", () => {
+  const page = statusPanePage("9.9.9");
+  const script = page.slice(page.indexOf("<script>") + "<script>".length, page.lastIndexOf("</script>"));
+  assert.doesNotThrow(() => new Function(script));
+  assert.ok(script.includes(JSON.stringify(STATUS_POLL_TOOL)) && script.includes(String(STATUS_POLL_MS)), "the script polls the app-only tool");
+  // The resource declares no outside origin, so nothing in it may need one.
+  assert.doesNotMatch(page, /\b(?:src|href)=|@import|url\(|https?:\/\/(?!127\.0\.0\.1)/);
+  for (const m of page.matchAll(/<(button|a|input|select|textarea)\b[^>]*>/g)) assert.match(m[0], /data-testid="status-pane-[a-z-]+"/, m[0]);
+  // It answers only its parent window, and puts data on the page as text.
+  assert.ok(script.includes("event.source !== window.parent"));
+  assert.doesNotMatch(script, /innerHTML|insertAdjacentHTML|document\.write/);
+  assert.ok(STATUS_PANE_URI.startsWith("ui://") && MCP_APP_MIME === "text/html;profile=mcp-app");
 });
