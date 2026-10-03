@@ -124,7 +124,11 @@ export const CHECK_RULES = {
     title: "Field labelled only by its placeholder",
     help: "The field has no label, aria-label, aria-labelledby or title. Its placeholder is not a label: it disappears as soon as the user types, and some assistive technology does not announce it.",
   },
-  contrast: { severity: "low", title: "Text contrast below WCAG", help: "Text needs 4.5:1 (3:1 when large) against its background." },
+  contrast: {
+    severity: "low",
+    title: "Text contrast below WCAG",
+    help: "Text needs 4.5:1 (3:1 when large) against its background. Text over an image, gradient, video or canvas has no single background colour and is not measured.",
+  },
   "focus-indicator": { severity: "low", title: "No visible focus indicator", help: "Tabbing to the control changes nothing on screen." },
   "horizontal-scroll": { severity: "medium", title: "Page scrolls sideways", help: "Content is wider than the viewport." },
   "tiny-target": {

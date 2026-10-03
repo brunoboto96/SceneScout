@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Hero on a plain background</title>
+  <style>
+    body { margin: 0; font: 16px/1.5 sans-serif; background: rgb(255, 255, 255); color: rgb(17, 24, 39); }
+    .hero { position: relative; height: 320px; overflow: hidden; }
+    .hero img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    .hero .copy { position: relative; padding: 96px 32px; }
+    .hero h1 { margin: 0; color: rgb(255, 255, 255); }
+    .hero p { margin: 8px 0 0; color: rgb(255, 255, 255); }
+    .hero .card { position: absolute; right: 32px; bottom: 24px; padding: 8px 12px; background: rgb(255, 255, 255); }
+    .hero .card span { color: rgb(200, 200, 200); }
+  </style>
+</head>
+<body>
+  <!-- design-hero-image.html with its image removed: the same white text on
+       the page's white background, which is a contrast failure. -->
+  <section class="hero">
+    <div class="copy">
+      <h1 data-testid="design-hero-heading">Plan your next trip</h1>
+      <p data-testid="design-hero-lede">Routes, timetables and fares in one place.</p>
+    </div>
+    <div class="card"><span data-testid="design-hero-card-note">Fares from the station</span></div>
+  </section>
+</body>
+</html>
