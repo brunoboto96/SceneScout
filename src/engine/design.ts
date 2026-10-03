@@ -539,6 +539,9 @@ function contrastFailures(records: StyleRecord[]): string[] {
   const out: string[] = [];
   for (const r of records) {
     if (!r.text || r.bg === "image" || r.bg === "unknown" || r.color === "unknown") continue;
+    // Text whose own colour is fully transparent is not painted: a selectable text layer laid over a rendered
+    // document (a PDF viewer's), or text hidden for screen readers. Its 1:1 ratio is not what anyone sees.
+    if (parseRgb(r.color)?.[3] === 0) continue;
     const ratio = contrastRatio(r.color, r.bg);
     if (ratio === null) continue;
     const isLarge = r.fontSize >= 24 || (r.fontSize >= 18.7 && r.fontWeight >= 700);
