@@ -24,6 +24,7 @@ import { z } from "zod";
 import { beaconResourceType, BROWSER_ENGINES } from "../browsers.js";
 import type { RouteHealth } from "./check.js";
 import { MEMORY_DIRNAME, SELF_IGNORE_KEEP } from "./memory.js";
+import { validateRoleName } from "./profiles.js";
 
 /** Most steps one flow may hold. A longer flow is several flows, and each would fail more usefully on its own. */
 export const MAX_FLOW_STEPS = 50;
@@ -283,6 +284,18 @@ const flowSchema = z
   .object({
     name: z.string().min(1).max(100).optional(),
     description: z.string().max(500).optional(),
+    /**
+     * Who walks the flow: a role whose sign-in `scenescout login --role` saved in the project. Absent, the flow runs
+     * in the check's own session. Flows run in file-name order, so one role's flow can pick up what another's left.
+     */
+    role: z
+      .string()
+      .optional()
+      .superRefine((role, ctx) => {
+        if (role === undefined) return;
+        const checked = validateRoleName(role);
+        if (!checked.ok) ctx.addIssue({ code: z.ZodIssueCode.custom, message: checked.error });
+      }),
     steps: z.array(stepSchema).min(1, "needs at least one step").max(MAX_FLOW_STEPS, `holds at most ${MAX_FLOW_STEPS} steps`),
   })
   .strict()
@@ -295,6 +308,8 @@ const flowSchema = z
 
 export interface Flow {
   name: string;
+  /** The role whose saved sign-in the flow runs as; absent, the check's own session. */
+  role?: string;
   /** The file it was read from, relative to the flows directory. */
   file: string;
   steps: FlowStep[];
@@ -339,7 +354,9 @@ export function parseJsonFile<T extends z.ZodTypeAny>(text: string, file: string
 export function parseFlow(text: string, file: string): { ok: true; flow: Flow } | { ok: false; error: string } {
   const parsed = parseJsonFile(text, file, flowSchema);
   if (!parsed.ok) return parsed;
-  return { ok: true, flow: { name: parsed.data.name ?? file.replace(/\.json$/i, ""), file, steps: parsed.data.steps } };
+  const flow: Flow = { name: parsed.data.name ?? file.replace(/\.json$/i, ""), file, steps: parsed.data.steps };
+  if (parsed.data.role !== undefined) flow.role = parsed.data.role;
+  return { ok: true, flow };
 }
 
 /** An entry of the flows directory that was not replayed, and why. */
@@ -560,6 +577,13 @@ export interface FlowRun extends FlowReplay {
   name: string;
   file: string;
   steps: number;
+  /** The role it ran as, when it named one. */
+  role?: string;
+}
+
+/** The roles a set of flows run as, each once, in the order they first appear. */
+export function flowRoles(flows: readonly Pick<Flow, "role">[]): string[] {
+  return [...new Set(flows.flatMap((f) => (f.role === undefined ? [] : [f.role])))];
 }
 
 /** The step a run stopped at, as the evidence of its issue or the reason the check could not run. */
