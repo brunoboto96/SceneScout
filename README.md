@@ -229,7 +229,7 @@ Before a parallel run, `scout_lane_brief` checks that the planner's saved login 
 
 ## 📺 Watching a run live
 
-When a session attaches, the engine starts a small live view and hands the agent its address on a `Live view:` line, which the agent passes on to you. On a desktop the engine also opens it in your default browser, and opens the report when it is written; nothing opens in CI or over SSH, and `SCENESCOUT_OPEN=none` (or `live`, `report`, `both`) chooses otherwise. From a terminal, `scenescout watch` opens the same page. There is one card per session:
+When a session attaches, the engine starts a small live view and hands the agent its address on a `Live view:` line, which the agent passes on to you. On a local desktop it also opens that page in your default browser as the session attaches, and opens `report.html` when `scout_report` writes it, whether or not the browser window is shown. Nothing opens in CI, over SSH, or on Linux with no display. `SCENESCOUT_OPEN` (`live`, `report`, `both` or `none`) in the server's environment chooses otherwise, and `scout_attach {open}` wins over it. `scenescout ci` opens nothing unless `SCENESCOUT_OPEN` is set. From a terminal, `scenescout watch` opens the same page. There is one card per session:
 
 <p align="center"><img src="examples/screenshots/live-view.png" alt="The live view during a run of three parallel agents against the demo app: one card per session, each with its role and objective, the task it is on, the tool it is running, the page it is on, a live thumbnail, and a feed of the actions it just took, tinted one colour per task" width="880" /></p>
 
@@ -378,7 +378,7 @@ That refusal *is* the guarantee: an extensive report can only exist when nothing
 - 🟢 **`read-only` by default.** Destructive-labeled elements (delete/revoke/archive/…) **and** all `PUT/PATCH/DELETE` + destructive `POST`s are blocked at the network layer — see [`src/engine/policy.ts`](src/engine/policy.ts). Non-destructive `POST`s are allowed, because submitting forms is how a tester finds validation bugs — so read-only means *nothing existing is changed or removed*, not *nothing is ever created*.
 - 🟡 **`safe-write`** (`--safe-write`) lets the agent create data and edit/delete **only what it created** this run — never pre-existing records.
 - 🔴 **`destructive`** (`--allow-destructive`) allows everything, and only ever when *you* confirm the environment is disposable. The skill will never choose this itself.
-- 📂 Findings, memory, and reports live in a `.scenescout/` folder where you ran it. It ignores itself in git, so a stray `git add -A` never commits test data.
+- 📂 Findings, memory, and reports live in a `.scenescout/` folder in the project. A client with no project folder, such as a desktop chat, gets one folder per tested site under `Documents/SceneScout/<host>/` by default, and the attach says where; `SCENESCOUT_PROJECTS_DIR` moves it. The folder ignores itself in git, so a stray `git add -A` never commits test data.
 
 A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app bug. The server never sees a blocked request, but a page's own `fetch` or XHR is answered with a `403` in its place rather than dropped, so the page's handling of a refusal really runs: a page that then claims success is reported as a `false_success` ([ADR 9](docs/adr/0009-a-refused-write-is-answered-not-dropped.md)).
 
@@ -387,6 +387,8 @@ A control is judged by its own label: a dropdown by the option picked, a row by 
 ---
 
 ## 📋 What you get
+
+`.scenescout/report.md` and `report.html` open **In plain words**: a short summary, then each problem this run found, worst first, with its impact, the steps that led to it, what was expected, what happened and a picture when there is one. The technical detail (id, category, evidence, route) stays one click away.
 
 `.scenescout/report.md` — a deduplicated, worst-first report with:
 
@@ -398,9 +400,9 @@ A control is judged by its own label: a dropdown by the option picked, a row by 
 - ⏱️ **How the run was paced** — how closely each session kept working, and apart from that, how long finished lanes held their browsers waiting to be collected, so neither hides the other.
 - 🎯 **How well the lanes judged** — on a parallel run, whether the confidence each lane stated matched what the project went on to file, beside what later re-tests found ([ADR 10](docs/adr/0010-a-confidence-is-checked-not-trusted.md)).
 
-`.scenescout/report.html` — the same report as one self-contained page, with every session's trail beside it, and on a [recorded run](#-recording-a-run-and-reading-it-back) the screenshots under each finding.
+`.scenescout/report.html` — the same report as one self-contained page, with every session's trail beside it. Each finding shows a picture of the element it is about, or of the page as it was. A [recorded run](#-recording-a-run-and-reading-it-back) also shows the screenshots around each finding.
 
-👀 Watch a run live: `node dist/cli.js status <project-path>`.
+👀 Watch a run live: `npx scenescout watch`, or `npx scenescout status <project-path>` for the same information as text.
 
 ---
 
@@ -787,6 +789,7 @@ The load-bearing choices are recorded as ADRs — read the relevant one before c
 - [11 · A gate is deterministic, and fails only on what it can prove](docs/adr/0011-a-gate-is-deterministic-and-fails-only-on-what-it-can-prove.md)
 - [12 · A check replays saved flows and re-tests open findings, within settings whose defaults do the least harm](docs/adr/0012-a-check-replays-saved-flows-and-reports-re-tests.md)
 - [13 · What depends on a project's convention is the project's to decide](docs/adr/0013-a-convention-is-the-projects-to-decide.md)
+- [21 · Update the docs in the same pull request, unless the change has no user-facing surface](docs/adr/0021-update-the-docs-in-the-pull-request.md)
 
 ---
 

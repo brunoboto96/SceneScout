@@ -8,7 +8,10 @@ so edit the rules here and nowhere else.
 
 Decisions with a cost behind them are recorded as ADRs in [docs/adr/](docs/adr/) —
 read the relevant one before changing a rule it covers, and add a record when you
-make a decision a future change would otherwise undo blindly.
+make a decision a future change would otherwise undo blindly. A pull request
+that changes what a user can do or see updates the README and `docs/` in that
+same pull request ([ADR 21](docs/adr/0021-update-the-docs-in-the-pull-request.md)).
+A change with no user-facing surface does not.
 
 ## Stay project-agnostic
 

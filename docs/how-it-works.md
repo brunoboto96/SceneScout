@@ -46,6 +46,14 @@ The loop back from `N` is the point of the whole design: the report refuses
 rather than papering over what was not done. See
 [ADR 1](adr/0001-completion-is-a-contract-not-a-vibe.md).
 
+On a local desktop session, headed or headless, attach also opens the live
+view in the default browser, and `scout_report` opens `report.html` when it
+writes it. Nothing opens in CI, over SSH, or on Linux with no display.
+`SCENESCOUT_OPEN` (`live`, `report`, `both` or `none`) chooses, and a
+`scout_attach` `open` wins over it. `scenescout ci` sets `none` unless the
+environment already has a value. Opening the page does not change who can
+reach it: the live view stays on loopback, behind its token.
+
 ---
 
 ## 2. Inside one action
