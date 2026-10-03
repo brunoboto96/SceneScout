@@ -132,6 +132,22 @@ test("shell failures are still reported — once, and told to be filed once", ()
   assert.ok(!report.includes("CONTRAST failures"), "and it is kept out of the page's own contrast section");
 });
 
+test("transparent text is not a contrast failure, and faint text still is", () => {
+  // A PDF viewer's text layer: every span transparent over the page it sits on, laid over the rendered canvas.
+  const layer = Array.from({ length: 30 }, (_, i) =>
+    rec({ tag: "span", text: `Line ${i} of the document`, color: "rgba(0, 0, 0, 0)", bg: "rgb(255, 255, 255)" }),
+  );
+  const clean = analyzeDesign(payload([rec({ text: "content" }), ...layer]), VIEWPORT);
+  assert.ok(!clean.report.includes("CONTRAST failures"), "an unpainted text layer is never reported");
+  assert.equal(clean.score?.a11y, 100);
+  // The same spans painted faintly are text a reader sees, and fail.
+  const faint = analyzeDesign(
+    payload([rec({ text: "content" }), rec({ tag: "span", text: "Watermark", color: "rgba(0, 0, 0, 0.1)", bg: "rgb(255, 255, 255)" })]),
+    VIEWPORT,
+  );
+  assert.ok(faint.report.includes("CONTRAST failures"), "a translucent but painted colour is measured");
+});
+
 test("a page's own contrast failure is never excused as chrome", () => {
   const own = rec({ tag: "span", text: "Medium", color: "rgb(245,159,10)", bg: "rgb(254,247,235)" });
   const chrome = new Set([styleSignature(BAD_BADGE)]);
