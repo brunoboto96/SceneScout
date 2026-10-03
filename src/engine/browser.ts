@@ -5587,8 +5587,8 @@ export class BrowserEngine {
   /**
    * Wait up to the action limit for a visible target to accept `action`, and
    * say why it never did (flow.ts notActionable), or null once it can. Without
-   * this a disabled control failed as an action timeout with a hint to raise
-   * the limit, though waiting could never help.
+   * this a disabled control failed as a bare action timeout that never said the
+   * control was there but disabled.
    */
   private async waitUntilActionable(loc: import("playwright").Locator, action: "click" | "type" | "select"): Promise<string | null> {
     const read = async () =>
@@ -5710,7 +5710,8 @@ export class BrowserEngine {
             if (!found) {
               failure = `nothing visible matches ${step.target} within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
             } else if (blocked) {
-              failure = `${step.target} ${blocked} after ${this.limits.actionMs / 1000}s`;
+              // The state first, since it is what is true; the hint still applies when the app enables it late.
+              failure = `${step.target} ${blocked} after ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
             } else {
               const label = (
                 (await loc.getAttribute("aria-label").catch(() => null)) ??

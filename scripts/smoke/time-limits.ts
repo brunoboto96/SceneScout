@@ -109,8 +109,10 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     await engine.attach({ url: baseUrl, projectDir, navTimeoutMs: HIGH_MS, actionTimeoutMs: LOW_MS });
     const slowFlow = await engine.replayFlow([...flowSteps], "observe");
     check(
-      "a saved flow's click held up longer than the action limit fails at that step, naming the limit",
-      slowFlow.outcome.status === "failed" && slowFlow.outcome.step === 3 && /action limit \(1000 ms\) ran out/.test(slowFlow.outcome.reason),
+      "a saved flow's click on a control still disabled when the action limit runs out fails at that step, naming the state and the limit",
+      slowFlow.outcome.status === "failed" &&
+        slowFlow.outcome.step === 3 &&
+        /^testid=slow-go is visible but disabled after 1s — the action limit \(1000 ms\) ran out/.test(slowFlow.outcome.reason),
       JSON.stringify(slowFlow.outcome).slice(0, 400),
     );
     await engine.attach({ url: baseUrl, projectDir, navTimeoutMs: LOW_MS });

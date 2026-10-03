@@ -158,8 +158,8 @@ export function parseTarget(target: string): FlowTarget | null {
 /**
  * Why a step cannot act on a target that is visible, or null when it can: a
  * click or a select needs the control enabled, typing needs it editable. The
- * report says this instead of an action timeout, which would send the reader to
- * raise a limit that can never help.
+ * report leads with this, then the action limit's hint, which still applies
+ * when the app enables the control later than the limit allows.
  */
 export function notActionable(action: "click" | "type" | "select", facts: { enabled: boolean; editable: boolean | null }): string | null {
   if (!facts.enabled) return "is visible but disabled";

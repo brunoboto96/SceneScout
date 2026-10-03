@@ -458,11 +458,10 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
   );
   const disabled = await checkWith(project("flow-disabled", { "disabled.json": blockedFlow([{ action: "click", target: "testid=blocked-archive" }]) }));
   check(
-    "...a click on a visible but disabled button fails saying it is disabled, with no hint to raise the action limit",
+    "...a click on a visible but disabled button fails leading with that state, then the action limit's hint",
     disabled.status === 1 &&
       disabled.summary?.flows[0]?.step === 2 &&
-      /^testid=blocked-archive is visible but disabled after/.test(disabled.summary.flows[0].reason ?? "") &&
-      !/raise it|action limit/.test(disabled.summary.flows[0].reason ?? ""),
+      /^testid=blocked-archive is visible but disabled after \S+ — the action limit \(\d+ ms\) ran out/.test(disabled.summary.flows[0].reason ?? ""),
     `${disabled.status} ${JSON.stringify(disabled.summary?.flows)}`,
   );
   const readOnly = await checkWith(
