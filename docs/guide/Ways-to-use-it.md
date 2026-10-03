@@ -11,7 +11,7 @@ SceneScout has six ways in. They share one engine and one write policy, and all 
 | [`scenescout ci`](#scenescout-ci-an-unattended-exploratory-run) | A model through its API | An API key | No | Exploration on a schedule or on pushes |
 | [`/scenescout qa`](#scenescout-qa-on-a-pull-request) | A model, started by a PR comment | An API key | No | An on-demand review of a PR's preview deployment |
 
-After a run that files findings (any of these but `scenescout check`, which files none), `scenescout export` files them as GitHub or Jira issues, each once: [Filing findings as issues](#filing-findings-as-issues).
+After a run, `scenescout export` files its findings as GitHub or Jira issues, each once: those in the project's memory by default, or a `scenescout check` or `scenescout ci` result with `--from`. See [Filing findings as issues](#filing-findings-as-issues).
 
 ## An interactive run
 
@@ -288,7 +288,7 @@ Pull requests from forks are refused by default, with a reply saying why. `SCENE
 
 ## Filing findings as issues
 
-`scenescout export` turns the project's open findings into issues in GitHub or Jira, where the team already works. It reads `.scenescout/memory.json`, where an interactive run, parallel lanes and `scenescout ci` keep their findings (`scenescout check` only reads it).
+`scenescout export` turns the project's open findings into issues in GitHub or Jira, where the team already works. By default it reads `.scenescout/memory.json`, where an interactive run, parallel lanes and `scenescout ci` keep their findings. `scenescout check` writes nothing there, and a `scenescout ci` job's memory is gone when the job ends unless the workflow keeps it, so `--from` exports a `check.json` or a `ci.json` instead:
 
 ```bash
 export GH_TOKEN=…                  # or GITHUB_TOKEN; read from the environment only
@@ -300,6 +300,12 @@ npx -y scenescout export --to github --repo owner/app --yes    # files it
 export JIRA_EMAIL=you@example.com JIRA_API_TOKEN=…   # an Atlassian API token, used with the email as basic auth
 npx -y scenescout export --to jira --jira-url https://your-site.atlassian.net --jira-project QA --yes
 ```
+
+```bash
+npx -y scenescout export --to github --repo owner/app --from scenescout-check/check.json --yes
+```
+
+- **From a check or ci result.** `--from` takes a `check.json` or a `ci.json`, and refuses any other file. A check's issues and its worth-a-look observations become findings whose id is `check-` and the issue's fingerprint, which a later check of the same defect gives again, so a later export of a later check's result finds the issue it filed. A `ci.json` finding keeps the id it has in the run's memory, so an export from memory and one from that run's `ci.json` file it once. Such an issue has the same body, marker and label as any other, says which pages it was seen on, and has no screenshots, since neither file names any. An export `--from` a file lists a Jira issue filed earlier and never updates it, since the file holds less than the memory that may have filed it. The findings a check re-tested from memory are not in `issues`; export them from memory. The record of filed issues is still kept in the project's `.scenescout/` folder (`--project`).
 
 - **A dry run unless `--yes`.** Without it, the export lists each finding as "would file", "already filed" or "over the cap", and sends the tracker nothing but reads. With no credentials set, a dry run still lists the findings, without checking which are already filed.
 - **Each finding once.** Every issue carries the `scenescout` label and a marker holding the finding's id: an HTML comment in a GitHub issue's description, a last line in a Jira one. Before filing, the export reads the issues with that label, open or closed, and skips each finding whose marker is on one, naming the issue, so a second export of the same run files only what the first left over the cap. A closed issue counts, so a finding closed as won't-fix is not filed again on every export; `--refile-closed` files a finding again when its issue is closed, so that a defect that comes back after its fix gets a new issue. Keep the label and the marker on filed issues: they are how the next export finds them.
@@ -320,6 +326,20 @@ In a GitHub Actions job, run it as a step after `scenescout ci`, with the job's 
 ```yaml
       - run: npx -y scenescout export --to github --repo "$GITHUB_REPOSITORY" --yes
         env:
+          GH_TOKEN: ${{ github.token }}
+```
+
+After the check action, export its `check.json` the same way (after the ci action, its `ci.json`: both actions give the file's path as the `json` output). Neither action has an export input of its own: filing issues needs a token that can write issues, which the check itself never needs, so it is a separate step that only the workflows that want it grant `issues: write` to. Keep the `.scenescout/` folder between runs, as above, so the record of filed issues survives:
+
+```yaml
+      - uses: brunoboto96/SceneScout@v3
+        id: check
+        with:
+          url: http://127.0.0.1:3000
+      - if: always() && steps.check.outputs.json != ''
+        run: npx -y scenescout export --to github --repo "$GITHUB_REPOSITORY" --from "$CHECK_JSON" --yes
+        env:
+          CHECK_JSON: ${{ steps.check.outputs.json }}
           GH_TOKEN: ${{ github.token }}
 ```
 

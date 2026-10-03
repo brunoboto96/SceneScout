@@ -218,8 +218,9 @@ Usage:
                                     from SCENESCOUT_LOGIN_<FLAG>, e.g. SCENESCOUT_LOGIN_SUCCESS_URL;
                                     --timeout seconds (default 60))
   scenescout export --to github|jira
-                                    File the project's open findings (from .scenescout/memory.json) as issues,
-                                    each once: a finding whose marker is already on an issue is skipped. A dry run
+                                    File the project's open findings (from .scenescout/memory.json, or from a
+                                    check.json or ci.json given with --from file) as issues, each once: a finding
+                                    whose marker is already on an issue is skipped. A dry run
                                     that lists what it would file unless --yes is given. Credentials come from the
                                     environment only: GH_TOKEN or GITHUB_TOKEN; JIRA_EMAIL and JIRA_API_TOKEN.
                                     (--repo owner/name for GitHub (GITHUB_API_URL for GitHub Enterprise Server);
@@ -237,7 +238,8 @@ Usage:
                                       in Jira (default severity: high… / High, Medium, Low); --labels a,b;
                                      --screenshots on|off (default on: the finding's picture and the run's frames,
                                       attached in Jira, named on GitHub);
-                                     --project dir (default: here); --dry-run; --yes)
+                                     --project dir (default: here; its .scenescout folder keeps the record of
+                                      filed issues); --from check.json|ci.json; --dry-run; --yes)
                                     Exit code: 0 done (findings over the cap wait for the next export), 2 could not
                                     export (it lists what it filed before it stopped), or a screenshot was not
                                     attached or a ticket not linked.

@@ -28,6 +28,8 @@ import {
   DEFAULT_SEVERITY_MAP,
   EXIT_EXPORT,
   EXPORT_RECORD_FILE,
+  CHECK_FINDING_PREFIX,
+  findingsFromResult,
   findingIdsInGithubBody,
   findingIdsInJiraDescription,
   failedCriteriaByFinding,
@@ -2458,6 +2460,239 @@ test("Jira: a create that failed before Jira made the issue is filed by an expor
     const later = await exportOnce(["--to", "jira", "--yes"], env, dir, { now: () => at + UNCERTAIN_HOLD_MS + 1 });
     assert.equal(later.exitCode, EXIT_EXPORT.done, later.err.join("\n"));
     assert.equal(jira.issues.length, 1);
+  } finally {
+    await jira.close();
+  }
+});
+
+// ── --from: a check.json or a ci.json as the source ─────────────────────────
+
+const FP_SERVER = "0123456789abcdef0123456789abcdef";
+const FP_CLIENT = "fedcba9876543210fedcba9876543210";
+const FP_LOOK = "00112233445566778899aabbccddeeff";
+
+/** A check.json in the shape `scenescout check` writes it, with made-up routes and evidence. */
+function checkJson(over: { generatedAt?: string; issues?: unknown[] } = {}) {
+  return {
+    tool: "scenescout-check",
+    version: "0.0.0-test",
+    url: "http://127.0.0.1:4173/",
+    generatedAt: over.generatedAt ?? "2026-10-01T08:00:00.000Z",
+    mode: "observe",
+    gate: { failOn: "high", passed: false, failing: 1, retestsFailing: 0, couldNotRun: false },
+    counts: { high: 1, medium: 1, low: 0 },
+    routes: [],
+    issues: over.issues ?? [
+      { rule: "server-error", severity: "high", evidence: "GET /api/things 500", routes: ["/things", "/things/new"], fingerprint: FP_SERVER },
+      { rule: "client-error", severity: "medium", evidence: "GET /api/widgets 404", routes: ["/widgets"], flow: "flows/widgets.json", fingerprint: FP_CLIENT },
+    ],
+    worthALook: [
+      { rule: "off-grid-spacing", evidence: "7 of 20 spacings off a 4px grid", routes: ["/things"], convention: "a 4px spacing scale", fingerprint: FP_LOOK },
+    ],
+    retest: null,
+  };
+}
+
+/** A ci.json in the shape `scenescout ci` writes it, with made-up findings. */
+function ciJson() {
+  return {
+    tool: "scenescout",
+    command: "ci",
+    version: "0.0.0-test",
+    url: "http://127.0.0.1:4173/",
+    counts: { high: 1, medium: 1, low: 0, worthALook: 0 },
+    findings: [
+      {
+        id: "aaa0000001",
+        severity: "high",
+        category: "http-error",
+        title: "Saving a thing answers 500",
+        path: "/things/new",
+        evidence: "POST /api/things 500",
+      },
+      { id: "bbb0000002", severity: "medium", category: "dead-end", title: "The list keeps a deleted row", path: "/things" },
+    ],
+  };
+}
+
+function writeJson(dir: string, name: string, value: unknown): string {
+  const file = path.join(dir, name);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(value, null, 2));
+  return file;
+}
+
+/** A project folder with no .scenescout in it yet: what a CI job that ran only a check has. */
+const bareProject = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-export-test-"));
+
+test("options: --from is resolved against the working directory, and an empty one is refused", () => {
+  assert.equal(options([...GH, "--from", "out/check.json"]).from, "/p/out/check.json");
+  assert.equal(options([...GH, "--from", "/abs/ci.json"]).from, "/abs/ci.json");
+  assert.equal(options(GH).from, undefined);
+  const empty = parse([...GH, "--from="]);
+  assert.ok(!empty.ok && /--from needs the path of a check.json or a ci.json/.test(empty.error));
+});
+
+test("from: a check's issues and worth-a-look observations become findings keyed on their fingerprint", () => {
+  const read = findingsFromResult(checkJson(), "2026-10-01T09:00:00.000Z");
+  assert.ok(read.ok);
+  assert.equal(read.value.kind, "check");
+  const [server, client, look] = read.value.findings as Finding[];
+  assert.equal(server.id, `${CHECK_FINDING_PREFIX}${FP_SERVER}`);
+  assert.equal(server.severity, "high");
+  assert.equal(server.category, "server-error");
+  assert.equal(server.title, "Request failed with a server error: GET /api/things 500");
+  assert.equal(server.url, "http://127.0.0.1:4173/things");
+  assert.equal(server.evidence, "GET /api/things 500");
+  assert.equal(server.foundAt, "2026-10-01T08:00:00.000Z");
+  assert.match(server.detail, /Seen on 2 pages: \/things, \/things\/new\./);
+  assert.deepEqual(server.repro, ["Open /things"]);
+  assert.deepEqual(client.repro, ["Replay the saved flow flows/widgets.json"]);
+  assert.equal(look.tier, "worth_a_look");
+  assert.equal(look.convention, "a 4px spacing scale");
+  // An entry that does not read is kept as it is, so the selection counts it rather than losing it.
+  const broken = findingsFromResult(checkJson({ issues: [{ rule: "server-error", severity: "high" }] }), "2026-10-01T09:00:00.000Z");
+  assert.ok(broken.ok);
+  const sel = selectFindings({ findings: broken.value.findings }, { minSeverity: "low", includeWorthALook: false });
+  assert.deepEqual(sel.unreadable, ["#1"]);
+  // The shared chrome is no path: its address is the checked site.
+  const chrome = findingsFromResult(
+    checkJson({
+      issues: [{ rule: "page-error", severity: "high", evidence: "TypeError: x is undefined", routes: ["(shared chrome)"], fingerprint: FP_SERVER }],
+    }),
+    "",
+  );
+  assert.ok(chrome.ok);
+  assert.equal((chrome.value.findings[0] as Finding).url, "http://127.0.0.1:4173/");
+});
+
+test("from: a ci.json's findings keep their memory id; any other file is refused", () => {
+  const read = findingsFromResult(ciJson(), "2026-10-01T09:00:00.000Z");
+  assert.ok(read.ok);
+  assert.equal(read.value.kind, "ci");
+  const [first, second] = read.value.findings as Finding[];
+  assert.equal(first.id, "aaa0000001");
+  assert.equal(first.url, "http://127.0.0.1:4173/things/new");
+  assert.equal(first.foundAt, "2026-10-01T09:00:00.000Z");
+  assert.equal(second.evidence, undefined);
+  const look = findingsFromResult({ ...ciJson(), findings: [{ ...ciJson().findings[0], tier: "worth-a-look", convention: "a 4px spacing scale" }] }, "");
+  assert.ok(look.ok && (look.value.findings[0] as Finding).tier === "worth_a_look");
+  for (const other of [{ version: 1, findings: [] }, { tool: "scenescout", command: "check" }, [], null, { tool: "scenescout-check" }]) {
+    const refused = findingsFromResult(other, "");
+    assert.ok(!refused.ok, JSON.stringify(other));
+  }
+});
+
+test("GitHub: --from a check.json files its issues with the usual marker, and a later check's result files nothing twice", async () => {
+  const gh = await standInGitHub({ lag: true, lagEverywhere: true });
+  try {
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    const dir = bareProject();
+    const first = await exportOnce([...GH, "--yes", "--from", writeJson(dir, "out/check.json", checkJson())], env, dir);
+    assert.equal(first.exitCode, EXIT_EXPORT.done, first.err.join("\n"));
+    assert.deepEqual(first.filed, ["#1", "#2"]);
+    assert.match(first.out.join("\n"), /Findings in .*check\.json \(scenescout check\): 3 open, 0 resolved\. 2 to export; left out: 1 worth a look/);
+    assert.deepEqual(
+      gh.issues.map((i) => findingIdsInGithubBody(i.body)),
+      [[`check-${FP_SERVER}`], [`check-${FP_CLIENT}`]],
+    );
+    const body = gh.issues[0].body;
+    assert.ok(body.startsWith(githubMarker(`check-${FP_SERVER}`)));
+    assert.match(body, /\| Category \| server-error \|/);
+    assert.match(body, /Seen on 2 pages: \/things, \/things\/new\./);
+    assert.doesNotMatch(body, /### Screenshots/, "a check names no frames, so the issue claims none");
+    assert.deepEqual(gh.issues[0].labels, ["scenescout", "severity: high"]);
+    assert.match(first.out.join("\n"), /No screenshots: a check result names none\./);
+    assert.ok(fs.existsSync(recordOf(dir)), "the record is kept in the project's .scenescout folder, made for it");
+
+    // The next check finds the same defects (same fingerprints) at a later time: nothing is filed again,
+    // though no listing shows the new issues yet.
+    // Its evidence may read differently (an unmet baseline's share of changed pixels does); the fingerprint decides.
+    const reworded = checkJson().issues.map((i, n) => (n === 0 ? { ...(i as object), evidence: "GET /api/things 503" } : i));
+    const later = writeJson(dir, "out/check.json", checkJson({ generatedAt: "2026-10-02T08:00:00.000Z", issues: reworded }));
+    const second = await exportOnce([...GH, "--yes", "--from", later], env, dir);
+    assert.equal(second.exitCode, EXIT_EXPORT.done, second.err.join("\n"));
+    assert.equal(gh.issues.length, 2, "nothing filed twice");
+    assert.match(second.out.join("\n"), /Filed 0; 2 already filed/);
+
+    // With the listing caught up and no record (another machine), the markers alone keep it at two.
+    gh.settle();
+    fs.rmSync(recordOf(dir));
+    const fresh = await exportOnce([...GH, "--yes", "--from", later, "--include-worth-a-look"], env, dir);
+    assert.equal(fresh.exitCode, EXIT_EXPORT.done, fresh.err.join("\n"));
+    assert.deepEqual(fresh.filed, ["#3"], "only the worth-a-look observation, asked for now, is new");
+    assert.deepEqual(findingIdsInGithubBody(gh.issues[2].body), [`check-${FP_LOOK}`]);
+  } finally {
+    await gh.close();
+  }
+});
+
+test("Jira: --from a ci.json files its findings, and an export of the same run from memory or ci.json files nothing twice", async () => {
+  const jira = await standInJira({ lag: true });
+  try {
+    const env = JIRA_ENV(jira.url);
+    const dir = projectWith(THREE);
+    const ci = writeJson(dir, "scenescout-ci/ci.json", ciJson());
+    const first = await exportOnce(["--to", "jira", "--yes", "--from", ci], env, dir);
+    assert.equal(first.exitCode, EXIT_EXPORT.done, first.err.join("\n"));
+    assert.equal(jira.issues.length, 2);
+    assert.deepEqual(
+      jira.issues.map((i) => findingIdsInJiraDescription(i.fields.description)),
+      [["aaa0000001"], ["bbb0000002"]],
+    );
+    assert.deepEqual(
+      jira.issues.map((i) => i.attachments),
+      [[], []],
+      "a ci.json names no screenshots",
+    );
+
+    const again = await exportOnce(["--to", "jira", "--yes", "--from", ci], env, dir);
+    assert.equal(again.exitCode, EXIT_EXPORT.done, again.err.join("\n"));
+    assert.equal(jira.issues.length, 2, "nothing filed twice");
+    assert.match(again.out.join("\n"), /Filed 0; 2 already filed/);
+
+    // The run's memory holds the same ids: only the finding the ci.json did not carry is new.
+    const fromMemory = await exportOnce(["--to", "jira", "--yes", "--jira-update", "off"], env, dir);
+    assert.equal(fromMemory.exitCode, EXIT_EXPORT.done, fromMemory.err.join("\n"));
+    assert.equal(jira.issues.length, 3);
+    assert.deepEqual(findingIdsInJiraDescription(jira.issues[2].fields.description), ["ccc0000003"]);
+  } finally {
+    await jira.close();
+  }
+});
+
+test("export: --from a file that is missing, not JSON, or neither a check.json nor a ci.json is refused before any request", async () => {
+  const dir = bareProject();
+  const missing = await exportOnce([...GH, "--from", path.join(dir, "nope.json")], { GH_TOKEN }, dir);
+  assert.equal(missing.exitCode, EXIT_EXPORT.couldNotExport);
+  assert.match(missing.err.join("\n"), /could not read --from .*nope\.json/);
+  fs.writeFileSync(path.join(dir, "bad.json"), "{");
+  const bad = await exportOnce([...GH, "--from", path.join(dir, "bad.json")], { GH_TOKEN }, dir);
+  assert.match(bad.err.join("\n"), /could not read --from .*bad\.json/);
+  const memory = writeJson(dir, "memory.json", { version: 1, states: {}, findings: THREE });
+  const other = await exportOnce([...GH, "--from", memory], { GH_TOKEN }, dir);
+  assert.equal(other.exitCode, EXIT_EXPORT.couldNotExport);
+  assert.match(other.err.join("\n"), /is not a check\.json or a ci\.json/);
+  const typo = await exportOnce([...GH, "--from", writeJson(dir, "check.json", checkJson()), "--only", "nosuchid"], {}, dir);
+  assert.match(typo.err.join("\n"), /--only names no finding in .*check\.json: nosuchid/);
+});
+
+test("Jira: --from a ci.json lists an issue the run's memory filed and never rewrites it with the file's thinner text", async () => {
+  const jira = await standInJira();
+  try {
+    const env = JIRA_ENV(jira.url);
+    const dir = projectWith(THREE);
+    const fromMemory = await exportOnce(["--to", "jira", "--yes"], env, dir);
+    assert.equal(fromMemory.exitCode, EXIT_EXPORT.done, fromMemory.err.join("\n"));
+    assert.equal(jira.issues.length, 3);
+    const fromCi = await exportOnce(["--to", "jira", "--yes", "--from", writeJson(dir, "ci.json", ciJson())], env, dir);
+    assert.equal(fromCi.exitCode, EXIT_EXPORT.done, fromCi.err.join("\n"));
+    assert.equal(jira.issues.length, 3, "nothing filed twice");
+    assert.deepEqual(
+      jira.issues.map((i) => i.edits),
+      [undefined, undefined, undefined],
+    );
+    assert.match(fromCi.out.join("\n"), /Filed 0; 2 already filed\./);
   } finally {
     await jira.close();
   }
