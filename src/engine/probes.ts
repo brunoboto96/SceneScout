@@ -170,6 +170,12 @@ export async function probeOverlays(page: Page): Promise<string[]> {
         const s = getComputedStyle(el);
         return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
       };
+      // A translucent background or a blur: what dims the page behind a modal.
+      const darkens = (s) => {
+        const m = (s.backgroundColor || "").match(/rgba?\\((\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)(?:\\s*,\\s*([0-9.]+))?/);
+        const alpha = m ? (m[4] === undefined ? 1 : Number(m[4])) : 0;
+        return (alpha > 0.05 && alpha < 0.98) || ((s.backdropFilter || "") + "").includes("blur");
+      };
       // Backdrops: fixed, near-full-viewport, visually darkening/blurring.
       const backdrops = [];
       for (const el of document.querySelectorAll("body *")) {
@@ -178,10 +184,7 @@ export async function probeOverlays(page: Page): Promise<string[]> {
         if (s.position !== "fixed") continue;
         const r = el.getBoundingClientRect();
         if (r.width < vw * 0.9 || r.height < vh * 0.9) continue;
-        const m = (s.backgroundColor || "").match(/rgba?\\((\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)(?:\\s*,\\s*([0-9.]+))?/);
-        const alpha = m ? (m[4] === undefined ? 1 : Number(m[4])) : 0;
-        const darkens = (alpha > 0.05 && alpha < 0.98) || ((s.backdropFilter || "") + "").includes("blur");
-        if (darkens) backdrops.push(el);
+        if (darkens(s)) backdrops.push(el);
       }
       const hasContent = (el) => {
         const t = (el.textContent || "").trim();
@@ -195,12 +198,47 @@ export async function probeOverlays(page: Page): Promise<string[]> {
       const dialogsAll = [...document.querySelectorAll('${DIALOG_LIKE_SEL}')].filter((d) => visible(d));
       // Leaked modal scroll-lock: content extends past the fold, the page
       // itself cannot scroll (overflow hidden on body/html), and NO overlay
-      // of any kind — dialog-like panel OR backdrop — is up to justify the
+      // of any kind — dialog-like panel, backdrop or framed modal — is up to justify the
       // lock; everything below the fold is unreachable and the page looks
       // perfectly healthy otherwise.
+      // A modal can also live inside a frame: the top document then holds only
+      // a pinned wrapper around a full-viewport iframe, and the dialog and its
+      // backdrop are in the frame's document, out of reach of the selectors
+      // above. Such an iframe justifies the lock when it is visible, covers the
+      // viewport, is pinned (itself or through a fixed ancestor) and is not
+      // faded out or click-through, and, when its document can be read (same
+      // origin), something in it is open: a dialog-like panel or a dimming
+      // backdrop. A frame left mounted after its modal closed holds neither.
+      // Another site's frame cannot be read, so its geometry has to do.
+      const frameOverlay = (f) => {
+        if (!visible(f)) return false;
+        const r = f.getBoundingClientRect();
+        if (r.width < vw * 0.9 || r.height < vh * 0.9) return false;
+        let pinned = false;
+        for (let e = f; e && e !== document.body; e = e.parentElement) {
+          const s = getComputedStyle(e);
+          if (Number(s.opacity) === 0 || s.pointerEvents === "none") return false;
+          if (s.position === "fixed") pinned = true;
+        }
+        if (!pinned) return false;
+        // contentDocument is null for another site's frame.
+        const doc = f.contentDocument;
+        const win = doc && doc.defaultView;
+        if (!win) return true;
+        const fw = win.innerWidth, fh = win.innerHeight;
+        const shown = (el) => { const b = el.getBoundingClientRect(); const s = win.getComputedStyle(el); return b.width > 0 && b.height > 0 && s.visibility !== "hidden" && s.display !== "none"; };
+        if ([...doc.querySelectorAll('${DIALOG_LIKE_SEL}')].some(shown)) return true;
+        return [...doc.querySelectorAll("body *")].some((el) => {
+          const s = win.getComputedStyle(el);
+          if (s.position !== "fixed" || !shown(el)) return false;
+          const b = el.getBoundingClientRect();
+          return b.width >= fw * 0.9 && b.height >= fh * 0.9 && darkens(s);
+        });
+      };
+      const framedOverlay = [...document.querySelectorAll("iframe")].some(frameOverlay);
       const docH = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
       const ovLock = [getComputedStyle(document.documentElement).overflowY, document.body ? getComputedStyle(document.body).overflowY : ""].some((o) => o === "hidden" || o === "clip");
-      if (ovLock && docH > vh + 50 && dialogsAll.length === 0 && backdrops.length === 0) {
+      if (ovLock && docH > vh + 50 && dialogsAll.length === 0 && backdrops.length === 0 && !framedOverlay) {
         issues.push("OVERLAY: page scrolling is DISABLED (overflow hidden on body/html) with " + Math.round(docH - vh) + "px of content below the fold and NO open dialog to justify it — likely a leaked modal scroll-lock; users cannot reach the rest of the page");
       }
       if (backdrops.length === 0) return issues;

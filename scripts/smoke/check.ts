@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { createDemoServer } from "../../demo-app/server.mjs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { writeRedirectHopsJudged } from "../../dist/browsers.js";
+import { firstLook } from "../../dist/first-run.js";
 import { BROWSER, check, eventually, settle, until, type SmokeContext } from "./harness.ts";
 
 export const title = "check (deterministic gate)";
@@ -46,11 +47,48 @@ export async function run({ baseUrl, foreignBaseUrl, stats }: SmokeContext): Pro
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "scout-check-"));
   try {
     await runAll({ baseUrl, server, base, work });
+    await framedModalLock({ baseUrl, work });
     await flowsAndRetests({ baseUrl, stats, work });
     await flowWriteEdges({ baseUrl, foreignBaseUrl, stats, work });
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
   }
+}
+
+/**
+ * The leaked scroll-lock oracle against a modal that lives in a frame: two
+ * pages with the same body scroll lock, the same content below the fold and
+ * the same pinned, full-viewport same-origin iframe. In one the frame holds an
+ * open modal; in the other its modal has closed and left an empty document.
+ * Only the second is a leaked lock, filed high and picked first by the first look.
+ */
+async function framedModalLock({ baseUrl, work }: { baseUrl: string; work: string }): Promise<void> {
+  console.log("check: a scroll lock held by a modal inside a full-viewport frame");
+  const checkPage = async (page: string): Promise<{ status: number | null; out: string; summary: Summary }> => {
+    const dir = path.join(work, page);
+    const r = await runCli([`${baseUrl}/${page}.html`, "--project", work, "--out", dir, "--paths", `/${page}.html`]);
+    return { ...r, summary: JSON.parse(fs.readFileSync(path.join(dir, "check.json"), "utf8")) as Summary };
+  };
+  const framed = await checkPage("iframe-modal");
+  const leaked = await checkPage("iframe-modal-leaked");
+  const overlays = (s: Summary) => s.issues.filter((i) => i.rule === "blocking-overlay");
+  const picked = (s: Summary) => firstLook(s.issues as Parameters<typeof firstLook>[0], s.routes.length).map((i) => `${i.severity} ${i.rule}`);
+  check(
+    "a scroll lock behind a modal open in a full-viewport frame is not a leaked lock",
+    overlays(framed.summary).length === 0 && framed.status === 0,
+    JSON.stringify(framed.summary.issues) + framed.out.slice(-600),
+  );
+  check(
+    "...and the first look does not pick a blocking overlay there",
+    !picked(framed.summary).some((p) => p.endsWith("blocking-overlay")),
+    JSON.stringify(picked(framed.summary)),
+  );
+  check(
+    "the same lock and frame with the modal closed is still a leaked lock, filed high",
+    overlays(leaked.summary).some((i) => i.severity === "high" && /leaked modal scroll-lock/.test(i.evidence)) && leaked.status !== 0,
+    JSON.stringify(leaked.summary.issues) + leaked.out.slice(-600),
+  );
+  check("...and the first look picks it first", picked(leaked.summary)[0] === "high blocking-overlay", JSON.stringify(picked(leaked.summary)));
 }
 
 async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server: http.Server; base: string; work: string }): Promise<void> {
