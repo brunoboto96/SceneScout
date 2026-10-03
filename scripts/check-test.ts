@@ -35,6 +35,7 @@ import {
 } from "../action/check-action.mjs";
 import { brokenImageIssues, geometryIssues } from "../src/engine/collector.ts";
 import { analyzeDesign, type DesignPayload, type StyleRecord } from "../src/engine/design.ts";
+import { isFileMediaType, isNonPageResource, mediaTypeOf } from "../src/engine/crawl.ts";
 import { httpErrorDetail } from "../src/engine/oracles.ts";
 import {
   loadFlows,
@@ -121,6 +122,7 @@ import {
   withoutOwnResponse,
   summarise,
   SHARED_CHROME_ROUTE,
+  splitResources,
   toSarif,
   toSummaryJson,
   unmeasuredReason,
@@ -422,6 +424,72 @@ test("an error page and a sign-in bounce are not dead ends; an empty 200 is", ()
   assert.deepEqual(rules(route({ status: 503, elements: 0 })), ["route-server-error"]);
   assert.deepEqual(rules(route({ loginRedirect: true, url: `${ORIGIN}/login`, elements: 0 })), ["auth-redirect"]);
   assert.deepEqual(rules(route({ elements: 0 })), ["dead-end"]);
+});
+
+test("whether a route answered as a page is decided by its content type, not its path", () => {
+  const cases: Array<[number | null, string | undefined, boolean, string]> = [
+    [200, "application/rss+xml", true, "an RSS feed"],
+    [200, "application/atom+xml", true, "an Atom feed"],
+    [200, "application/xml", true, "a sitemap"],
+    [200, "text/xml", true, "XML served as text"],
+    [200, "application/json", true, "JSON"],
+    [200, "text/plain", true, "robots.txt or a licence file"],
+    [200, "application/pdf", true, "a PDF"],
+    [200, "image/png", true, "an image"],
+    [304, "application/rss+xml", true, "a feed the cache confirmed"],
+    [200, "text/html", false, "a page"],
+    [200, "application/xhtml+xml", false, "an XHTML page"],
+    [404, "text/plain", false, "a plain-text 404: the error is the route's, not a file"],
+    [500, "application/rss+xml", false, "a feed that failed"],
+    [null, "application/rss+xml", false, "nothing answered"],
+    [200, undefined, false, "no content type: read as a page, as before"],
+  ];
+  for (const [status, contentType, expected, what] of cases) assert.equal(isNonPageResource({ status, contentType }), expected, what);
+  // Whatever the status, a file's content type says the route answered: a browser that downloads a missing feed has still been told 404.
+  assert.equal(isFileMediaType("application/rss+xml"), true);
+  assert.equal(isFileMediaType("text/html; charset=utf-8"), false);
+  assert.equal(isFileMediaType(undefined), false);
+  assert.equal(mediaTypeOf("Text/HTML; charset=utf-8"), "text/html");
+  assert.equal(mediaTypeOf("  "), undefined);
+  assert.equal(mediaTypeOf(undefined), undefined);
+});
+
+test("a feed or a text file with no controls is not a dead end; the same route served as HTML is", () => {
+  const rules = (r: RouteHealth): string[] => issuesFromRoutes([r], ORIGIN).map((i) => i.rule);
+  const feed = { path: "/feed", elements: 0 };
+  assert.deepEqual(rules(route({ ...feed, contentType: "application/rss+xml" })), []);
+  assert.deepEqual(rules(route({ ...feed, contentType: "text/plain" })), []);
+  assert.deepEqual(rules(route({ ...feed, contentType: "application/xml" })), []);
+  assert.deepEqual(rules(route({ ...feed, contentType: "text/html" })), ["dead-end"]);
+  assert.deepEqual(rules(route({ ...feed, contentType: "application/xhtml+xml" })), ["dead-end"]);
+  // A feed that fails is still reported, as the route's own error.
+  assert.deepEqual(rules(route({ ...feed, status: 404, contentType: "application/rss+xml" })), ["route-client-error"]);
+  assert.deepEqual(rules(route({ ...feed, status: 502, contentType: "text/plain" })), ["route-server-error"]);
+});
+
+test("routes that are not pages are listed apart, and do not count as routes checked", () => {
+  const page = route({ path: "/" });
+  const feed = route({ path: "/feed", elements: 0, contentType: "application/rss+xml" });
+  const failing = route({ path: "/broken-feed", status: 500, elements: 0, contentType: "application/rss+xml" });
+  const { pages, resources } = splitResources([page, feed, failing]);
+  assert.deepEqual(
+    pages.map((r) => r.path),
+    ["/", "/broken-feed"],
+  );
+  assert.deepEqual(resources, [{ path: "/feed", status: 200, contentType: "application/rss+xml" }]);
+  const r: CheckResult = { ...result([]), routes: pages, resources };
+  const report = formatCheck(r);
+  assert.match(report, /· 2 route\(s\) ·/);
+  assert.match(report, /## Not pages[\s\S]*\| \/feed \| 200 \| application\/rss\+xml \|/);
+  assert.doesNotMatch(report.split("## Not pages")[0], /\| \/feed \|/);
+  assert.doesNotMatch(formatCheck(result([])), /## Not pages/);
+  const json = toSummaryJson(r, "1") as { routes: Array<{ path: string }>; resources: unknown[] };
+  assert.deepEqual(
+    json.routes.map((x) => x.path),
+    ["/", "/broken-feed"],
+  );
+  assert.deepEqual(json.resources, resources);
+  assert.deepEqual((toSummaryJson(result([]), "1") as { resources: unknown[] }).resources, []);
 });
 
 test("--ignore drops a rule entirely", () => {

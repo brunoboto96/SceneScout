@@ -506,6 +506,8 @@ interface MemoryFile {
   discoveredRoutes?: Record<string, string>;
   /** Routes we tried to reach but landed elsewhere (auth-redirects): route → outcome. Attempts satisfy the coverage contract — a role that CAN'T see /admin shouldn't block the report forever. */
   attemptedRoutes?: Record<string, string>;
+  /** Routes that answered with a feed, a file or data rather than a page: route → media type. Not pages, so never part of the route contract. */
+  resourceRoutes?: Record<string, string>;
   /** Latest design-audit quality score per route — worst pages first in the report, trends across runs. */
   pageScores?: Record<string, PageScore>;
   /** Per-route testing facts backing the gap ledger. */
@@ -687,6 +689,7 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
   const unionRecord = <T>(a?: Record<string, T>, b?: Record<string, T>): Record<string, T> | undefined => (a || b ? { ...(b ?? {}), ...(a ?? {}) } : undefined);
   out.discoveredRoutes = unionRecord(mine.discoveredRoutes, theirs.discoveredRoutes);
   out.attemptedRoutes = unionRecord(mine.attemptedRoutes, theirs.attemptedRoutes);
+  out.resourceRoutes = unionRecord(mine.resourceRoutes, theirs.resourceRoutes);
   out.designElements = unionRecord(mine.designElements, theirs.designElements);
 
   out.pageScores = { ...(theirs.pageScores ?? {}) };
@@ -1600,6 +1603,34 @@ export class MemoryStore {
 
   get discoveredRoutes(): Record<string, string> {
     return this.data.discoveredRoutes ?? {};
+  }
+
+  /**
+   * Record that a route answered with a feed, a file or data (crawl.ts
+   * isNonPageResource). A route harvested from a link joins the contract before
+   * anything knows what it serves; this takes it back out, for every role and
+   * every later run, so a feed linked from every page is not a gap forever.
+   */
+  markResource(route: string, mediaType: string): void {
+    const map = this.data.resourceRoutes ?? {};
+    if (map[route] !== mediaType) {
+      map[route] = mediaType;
+      this.data.resourceRoutes = map;
+      this.save();
+    }
+  }
+
+  /** A route that has since answered as a page is one again: back into the contract. */
+  clearResource(route: string): void {
+    const map = this.data.resourceRoutes;
+    if (map && route in map) {
+      delete map[route];
+      this.save();
+    }
+  }
+
+  get resourceRoutes(): Record<string, string> {
+    return this.data.resourceRoutes ?? {};
   }
 
   /**

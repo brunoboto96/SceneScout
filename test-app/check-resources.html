@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Check: links that are not pages</title></head>
+<body>
+  <!-- For `scenescout check`: links to a feed, a plain-text file and a missing
+       feed, none of whose paths says what it serves, and to an HTML page with
+       no controls. Only the HTML page is a dead end; the missing feed is a
+       client error. -->
+  <h1>Resources</h1>
+  <a href="/check-feed" data-testid="check-resources-feed">Feed</a>
+  <a href="/check-licence" data-testid="check-resources-licence">Licence</a>
+  <a href="/check-feed-gone" data-testid="check-resources-feed-gone">Old feed</a>
+  <a href="/check-no-links.html" data-testid="check-resources-no-links">A page with no way on</a>
+</body>
+</html>
