@@ -10,10 +10,9 @@
       /* An overlay over its slot's button: every click aimed at the button lands on it. */
       .over { position: absolute; inset: 0; background: rgba(180, 30, 30, 0.9); color: #fff; font-size: 12px; display: flex; align-items: center; justify-content: center; }
       .hidden { display: none; }
-      /* A button that never stops moving: the strict click waits for it to be still and gives up. Its own icon sits at its centre. */
-      @keyframes wobble { from { transform: translateX(0); } to { transform: translateX(6px); } }
-      .wobble { animation: wobble 0.15s infinite alternate; padding: 10px 24px; }
-      .wobble svg { width: 16px; height: 16px; vertical-align: middle; }
+      /* Both buttons carry an icon at the centre. One is shifted every frame; the other stays put. */
+      .wobble, .steady { padding: 10px 24px; }
+      .wobble svg, .steady svg { width: 16px; height: 16px; vertical-align: middle; }
     </style>
   </head>
   <body>
@@ -51,6 +50,7 @@
         <div class="over hidden" role="status" data-testid="toast-error">Could not save the record</div>
       </span>
       <button type="button" class="wobble" data-testid="wobble-btn">Refresh <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="currentColor" /></svg></button>
+      <button type="button" class="steady" data-testid="steady-btn">Steady <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="currentColor" /></svg></button>
     </div>
     <p data-testid="pager-log"></p>
 
@@ -72,9 +72,30 @@
           .then((r) => { if (!r.ok) fail(); })
           .catch(fail);
       });
-      for (const id of ["older-page", "next-page", "wobble-btn"]) {
+      for (const id of ["older-page", "next-page", "wobble-btn", "steady-btn"]) {
         document.querySelector(`[data-testid="${id}"]`).addEventListener("click", () => log("pager-log", `clicked ${id}`));
       }
+      // A shift of a few pixels can leave two frames on the same device pixel, which is still.
+      // Moving the layout box by more than a pixel on every frame cannot.
+      const wobble = document.querySelector('[data-testid="wobble-btn"]');
+      const motion = { same: 0, differ: 0 };
+      let last = null;
+      let side = 0;
+      const jump = () => {
+        side = side === 0 ? 24 : 0;
+        wobble.style.position = "relative";
+        wobble.style.left = side + "px";
+        const r = wobble.getBoundingClientRect();
+        const key = r.x + "|" + r.y + "|" + r.width + "|" + r.height;
+        if (last !== null) {
+          if (last === key) motion.same += 1;
+          else motion.differ += 1;
+        }
+        last = key;
+        window.__wobbleMotion = motion;
+        requestAnimationFrame(jump);
+      };
+      requestAnimationFrame(jump);
       for (const tab of document.querySelectorAll('[role="tab"]')) {
         tab.addEventListener("click", () => {
           log("tab-log", `opened ${tab.textContent}`);
