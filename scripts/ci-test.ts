@@ -16,6 +16,7 @@ import test from "node:test";
 import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { asCrlf, asLf, joinPath, readText, samePlace } from "./checkout.ts";
 import { z } from "zod";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -1870,6 +1871,54 @@ test("action: this repository runs it against the demo app and a stand-in API, g
   assert.equal(lanes.with?.["base-url"], step.with?.["base-url"], "the lanes run uses the stand-in API too");
   const checked = job.steps!.find((s) => /\$\{\{ steps\.lanes\.outputs\.low \}\}/.test(JSON.stringify(s)));
   assert.ok(checked && /test "\$LOW" = 1/.test(checked.run ?? ""), "the finding every lane filed is counted once");
+});
+
+test("the suite runs on Windows for every pull request", () => {
+  const workflow = parseYaml(readText(path.join(REPO, ".github", "workflows", "test.yml"))) as Record<string, any>;
+  assert.ok("pull_request" in workflow.on, "test.yml does not run on pull_request");
+  const pull = workflow.on.pull_request;
+  const filters = pull && typeof pull === "object" ? pull : {};
+  assert.equal(filters.paths, undefined, "a paths filter would skip some pull requests");
+  assert.equal(filters["paths-ignore"], undefined, "a paths-ignore filter would skip some pull requests");
+  const cells = workflow.jobs.suite.strategy.matrix.include as Array<{ os: string; node: number }>;
+  assert.ok(
+    cells.some((c) => c.os === "windows-latest"),
+    "the suite matrix has no windows-latest cell",
+  );
+  const suites = (workflow.jobs.suite.steps as Array<{ name?: string; run?: string; if?: string }>).find((s) => s.name === "All suites");
+  assert.equal(suites?.run, "npm test");
+  assert.equal(suites?.if, undefined, "the suites step must run on the Windows cell too");
+  const needs = workflow.jobs.test.needs as string[];
+  assert.ok(needs.includes("suite"), "the required test check does not wait for the suite, so a Windows failure would not fail it");
+});
+
+test("the same lines compare equal as LF and as CRLF, and one different line does not", () => {
+  const lines = "alpha\nbeta\n";
+  const crlf = asCrlf(lines);
+  assert.equal(crlf, "alpha\r\nbeta\r\n");
+  assert.equal(asCrlf(crlf), crlf, "CRLF passed through asCrlf must not gain a second CR");
+  assert.equal(asLf(crlf), lines);
+  assert.equal(asLf("alpha\rbeta\r\n"), lines);
+  assert.notEqual(asLf(asCrlf("alpha\ngamma\n")), lines);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-"));
+  try {
+    const file = path.join(dir, "note.txt");
+    fs.writeFileSync(file, crlf);
+    assert.equal(readText(file), lines);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the same place matches with either separator and, on Windows, either case", () => {
+  assert.equal(joinPath("win32", "C:\\work", "app", "file.txt"), "C:\\work\\app\\file.txt");
+  assert.equal(joinPath("posix", "/work", "app", "file.txt"), "/work/app/file.txt");
+  assert.equal(samePlace("win32", "C:\\Work\\App", "c:/work/app"), true);
+  assert.equal(samePlace("win32", "C:\\Work\\App\\", "c:/work/app"), true);
+  assert.equal(samePlace("posix", "/Work/App", "/work/app"), false);
+  assert.equal(samePlace("posix", "/work/app/", "/work/app"), true);
+  assert.equal(samePlace("win32", "C:\\work\\app", "C:\\work\\other"), false);
+  assert.equal(samePlace("posix", "/work/app", "/work/other"), false);
 });
 
 type WorkflowStep = { uses?: string; run?: string; env?: Record<string, string>; with?: Record<string, string> };

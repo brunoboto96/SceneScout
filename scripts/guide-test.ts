@@ -43,11 +43,12 @@ import {
   settingsFromAnswers,
   SKILL_FLAGS as INTAKE_FLAGS,
 } from "../src/intake.ts";
+import { asLf } from "./checkout.ts";
 import { GUIDE_DIR, toWikiPage } from "./guide-wiki.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** Line endings as a Windows checkout may have them (\r\n) become \n, so every parser below sees one shape. */
-const lf = (text: string): string => text.replace(/\r\n?/g, "\n");
+const lf = asLf;
 const read = (rel: string): string => lf(fs.readFileSync(path.join(REPO, rel), "utf8"));
 const readYaml = (rel: string) => parseYaml(read(rel)) as Record<string, any>;
 
