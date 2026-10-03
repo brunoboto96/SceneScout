@@ -293,7 +293,7 @@ When the project's `.scenescout/memory.json` holds findings earlier exploratory 
 - **possibly fixed**: the page loaded and it did not (possibly, because the page may not have asked for it this time);
 - **not re-tested**: the page did not load, or sent the browser to sign-in.
 
-Re-tests are reported in `report.md` and `check.json`. Whether one fails the gate is `--gate-retests` (below); "possibly fixed" and "not re-tested" never do. The check reads the memory and never writes it, so nothing is resolved; `scout_verify` in an exploratory run does that, and re-tests the findings that need an interaction. `--retest off` skips all of this. The memory is ignored by git unless a project commits it, so without that this applies to checks run where the memory lives.
+Re-tests are reported in `report.md` and `check.json`. Whether one fails the gate is `--gate-retests` (below); "possibly fixed" and "not re-tested" never do. The check reads the memory and never writes it, so nothing is resolved; `scout_verify` in an exploratory run does that, and re-tests the findings that need an interaction. `--retest off` skips all of this. The memory is ignored by git unless a project commits it, so without that this applies to checks run where the memory lives. Checks that share one `--project` re-test the same open findings, so a later check can fail on a finding an earlier one recorded. Give each role its own `--project` when those findings should stay separate.
 
 ## Visual baselines
 
@@ -448,7 +448,7 @@ In any system, treat exit code 2 differently from 1 if you can: 2 means the job 
 
 ## An unattended exploratory run
 
-`scenescout ci <url>` is an exploratory run with nobody present. A model reached through its API drives the same `scout_*` tools, by the same method a coding agent follows, and the run ends in the same report. It needs an API key and costs what the model's API charges; `scenescout check` needs neither. Why it works this way: [ADR 14](adr/0014-an-unattended-run-reports-and-never-gates.md).
+`scenescout ci <url>` is an exploratory run with nobody present. A model reached through its API drives the same `scout_*` tools, by the same method a coding agent follows, and the run ends in the same report. It needs an API key and costs what the model's API charges; `scenescout check` needs neither. It starts its server with `SCENESCOUT_OPEN=none`, so it does not open the live view or the report in a browser; a `SCENESCOUT_OPEN` already set in the environment is kept. Why it works this way: [ADR 14](adr/0014-an-unattended-run-reports-and-never-gates.md).
 
 It reports and never gates:
 
