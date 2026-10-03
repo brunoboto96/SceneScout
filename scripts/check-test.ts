@@ -38,6 +38,8 @@ import { analyzeDesign, type DesignPayload, type StyleRecord } from "../src/engi
 import { isFileMediaType, isNonPageResource, mediaTypeOf } from "../src/engine/crawl.ts";
 import { httpErrorDetail } from "../src/engine/oracles.ts";
 import {
+  describeStep,
+  elementStateMatches,
   loadFlows,
   matchRequest,
   notActionable,
@@ -71,7 +73,10 @@ import {
   parseThreshold,
   readStoredBaseline,
   routeFolder,
+  NEXT_FRAME_SCRIPT,
   STOP_ANIMATIONS_SCRIPT,
+  steadyPicture,
+  unsteadyNote,
   VISUAL_DIRNAME,
   visualFiles,
   type BaselineMeta,
@@ -1448,7 +1453,7 @@ test("flows: every mistake names the file and the field", () => {
     [bad([]), /^f\.json: steps needs at least one step/],
     [
       bad([nav, { action: "hover", target: "testid=x" }]),
-      /^f\.json: steps\[1\]\.action must be one of navigate, click, type, select, press, expect-text, expect-url, expect-request/,
+      /^f\.json: steps\[1\]\.action must be one of navigate, click, type, select, press, expect-text, expect-element, expect-url, expect-request/,
     ],
     [bad([nav, { action: "click" }]), /^f\.json: steps\[1\]\.target is required/],
     [bad([nav, { action: "click", target: "#save" }]), /^f\.json: steps\[1\]\.target must be testid=…, text=…, label=… or role=/],
@@ -1459,6 +1464,9 @@ test("flows: every mistake names the file and the field", () => {
     [bad([nav, { action: "expect-request", request: "/api/x", status: 200 }]), /^f\.json: steps\[1\]\.request must be a method and a path/],
     [bad([nav, { action: "expect-request", request: "GET /api/x", status: "ok" }]), /^f\.json: steps\[1\]\.status/],
     [bad([nav, { action: "type", target: "label=Name" }]), /^f\.json: steps\[1\]\.value is required/],
+    [bad([nav, { action: "expect-element", target: "testid=x" }]), /^f\.json: steps\[1\]\.state is required/],
+    [bad([nav, { action: "expect-element", target: "testid=x", state: "gone" }]), /^f\.json: steps\[1\]\.state/],
+    [bad([nav, { action: "expect-element", state: "hidden" }]), /^f\.json: steps\[1\]\.target is required/],
     [bad([nav], { steps2: [] }), /^f\.json: \(the whole file\) unknown field\(s\) "steps2"/],
     [bad(Array.from({ length: 51 }, () => nav)), /^f\.json: steps holds at most 50 steps/],
   ];
@@ -1480,6 +1488,56 @@ test("flows: a visible target that cannot be acted on says why, and one that can
   assert.equal(notActionable("click", { enabled: true, editable: false }), null);
   // Not an editable element at all (a click target typed into): left to the action itself.
   assert.equal(notActionable("type", { enabled: true, editable: null }), null);
+});
+
+test("flows: expect-element parses with each state, and the report names it", () => {
+  for (const state of ["visible", "hidden", "enabled", "disabled", "checked", "unchecked"]) {
+    const parsed = parseFlow(
+      JSON.stringify({
+        steps: [
+          { action: "navigate", target: "/" },
+          { action: "expect-element", target: "testid=receipt", state },
+        ],
+      }),
+      "f.json",
+    );
+    assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+    assert.equal(describeStep(parsed.flow.steps[1]), `expect testid=receipt to be ${state}`);
+  }
+});
+
+test("flows: an element state holds or says what is true instead, in both directions", () => {
+  const shown = { visible: true, enabled: true, checked: null };
+  const off = { visible: true, enabled: false, checked: null };
+  const box = (checked: boolean) => ({ visible: true, enabled: true, checked });
+  const notShown = { visible: false, enabled: true, checked: null };
+  const cases: Array<[Parameters<typeof elementStateMatches>[0], Parameters<typeof elementStateMatches>[1], string | null]> = [
+    ["visible", shown, null],
+    ["visible", notShown, "is not visible"],
+    ["visible", null, "matches nothing"],
+    // Hidden is the absence of a visible element: nothing matching counts.
+    ["hidden", null, null],
+    ["hidden", notShown, null],
+    ["hidden", shown, "is visible"],
+    ["enabled", shown, null],
+    ["enabled", off, "is disabled"],
+    ["disabled", off, null],
+    ["disabled", shown, "is enabled"],
+    ["disabled", null, "matches nothing"],
+    // A hidden control is never reported as enabled or disabled: its state is not what a user sees.
+    ["disabled", { visible: false, enabled: false, checked: null }, "is not visible"],
+    ["checked", box(true), null],
+    ["checked", box(false), "is unchecked"],
+    ["unchecked", box(false), null],
+    ["unchecked", box(true), "is checked"],
+    ["checked", shown, "cannot be checked"],
+  ];
+  for (const [state, facts, actual] of cases) {
+    const verdict = elementStateMatches(state, facts);
+    const label = `${state} ${JSON.stringify(facts)}`;
+    if (actual === null) assert.ok(verdict.ok, label);
+    else assert.deepEqual(verdict, { ok: false, actual }, label);
+  }
 });
 
 test("flows: targets are scout_run_plan's, plus role with an optional name", () => {
@@ -2526,6 +2584,75 @@ test("baselines: the script that stops animations finishes the finite ones and c
   const document = { getAnimations: () => [animation("slide-in", 400), animation("spinner", Infinity), animation("detached", null)] };
   assert.equal(vm.runInNewContext(STOP_ANIMATIONS_SCRIPT, { document }), true);
   assert.deepEqual(calls, ["finish slide-in", "cancel spinner", "cancel detached"]);
+});
+
+test("baselines: a picture is kept once two taken a frame apart are the same, never the first one alone", async () => {
+  // The pictures a page gives while it is still drawing: a frame from before the stop, then a script's last steps.
+  const sequence = (...pictures: string[]) => {
+    let i = 0;
+    const log: string[] = [];
+    return {
+      log,
+      take: async () => {
+        const png = Buffer.from(pictures[Math.min(i, pictures.length - 1)]);
+        log.push(`take ${png.toString()}`);
+        i += 1;
+        return png;
+      },
+      nextFrame: async () => void log.push("frame"),
+    };
+  };
+  const still = sequence("a", "a");
+  assert.deepEqual(await steadyPicture(still.take, still.nextFrame, 5000), { png: Buffer.from("a"), steady: true, takes: 2 });
+  assert.deepEqual(still.log, ["take a", "frame", "take a"], "a frame passes between two pictures");
+
+  const settling = sequence("stale", "step 1", "step 2", "done", "done");
+  const kept = await steadyPicture(settling.take, settling.nextFrame, 5000);
+  assert.deepEqual(kept, { png: Buffer.from("done"), steady: true, takes: 5 });
+
+  // Two the same that are not next to each other are not still: a-b-a is a page that keeps moving.
+  const flicker = sequence("a", "b", "a", "b", "a", "a");
+  assert.equal((await steadyPicture(flicker.take, flicker.nextFrame, 5000)).takes, 6);
+
+  // A page that never holds still: the last picture once the budget is spent, said to be unsteady.
+  let clock = 0;
+  let n = 0;
+  const moving = { take: async () => Buffer.from(`frame ${n++}`), nextFrame: async () => void (clock += 400) };
+  const gaveUp = await steadyPicture(moving.take, moving.nextFrame, 1000, () => clock);
+  assert.deepEqual(gaveUp, { png: Buffer.from("frame 3"), steady: false, takes: 4 });
+  assert.equal(
+    unsteadyNote(5000),
+    "the picture was still changing after about 5s, so the last one taken is used: something on the page keeps moving, and a comparison of it may not repeat",
+  );
+});
+
+test("baselines: the next-frame script waits for two animation frames, and for a second when frames never come", async () => {
+  const frames: Array<() => void> = [];
+  const timers: Array<{ fn: () => void; ms: number }> = [];
+  const page = { requestAnimationFrame: (fn: () => void) => frames.push(fn), setTimeout: (fn: () => void, ms: number) => timers.push({ fn, ms }) };
+  const drawn = vm.runInNewContext(NEXT_FRAME_SCRIPT, { ...page, Promise }) as Promise<boolean>;
+  assert.equal(frames.length, 1);
+  frames.shift()!();
+  assert.equal(frames.length, 1, "the first frame asks for a second");
+  frames.shift()!();
+  assert.equal(await drawn, true);
+  assert.deepEqual(
+    timers.map((t) => t.ms),
+    [1000],
+  );
+
+  const noFrames = vm.runInNewContext(NEXT_FRAME_SCRIPT, { requestAnimationFrame: () => 0, setTimeout: (fn: () => void) => fn(), Promise }) as Promise<boolean>;
+  assert.equal(await noFrames, false);
+});
+
+test("baselines: a picture that never held still says so on its line of the report", () => {
+  const r = result([]);
+  const note = unsteadyNote(5000);
+  const report = formatCheck({ ...r, baselines: baselineRun([{ ...changedPlan, unsteady: note }]) });
+  assert.match(
+    report,
+    /_\(the picture was still changing after about 5s, so the last one taken is used: something on the page keeps moving, and a comparison of it may not repeat\)_/,
+  );
 });
 
 test("action: the pictures of changed baselines are kept with the results, and only when this run wrote them", () => {

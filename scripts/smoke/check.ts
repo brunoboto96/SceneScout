@@ -473,6 +473,39 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     `${readOnly.status} ${JSON.stringify(readOnly.summary?.flows)}`,
   );
 
+  // expect-element: one flow asserting every state before and after, and its twin differing in one expectation
+  // (the receipt stays hidden after Complete), so the failure can only be the step reading the receipt.
+  const stateSteps = [
+    { action: "navigate", target: "/check-flow-state.html" },
+    { action: "expect-element", target: "testid=state-complete", state: "disabled" },
+    { action: "expect-element", target: "testid=state-receipt", state: "hidden" },
+    { action: "expect-element", target: "testid=state-nowhere", state: "hidden" },
+    { action: "expect-element", target: "label=I have read it", state: "unchecked" },
+    { action: "click", target: "label=I have read it" },
+    { action: "expect-element", target: "label=I have read it", state: "checked" },
+    { action: "expect-element", target: 'role=button[name="Complete"]', state: "enabled" },
+    { action: "click", target: 'role=button[name="Complete"]' },
+  ];
+  const stateHolds = await checkWith(
+    project("flow-state", { "state.json": { steps: [...stateSteps, { action: "expect-element", target: "testid=state-receipt", state: "visible" }] } }),
+  );
+  check(
+    "expect-element: a flow asserting disabled, hidden (also of nothing), unchecked, checked, enabled and visible passes on the page that does all of them",
+    stateHolds.status === 0 && stateHolds.summary?.flows[0]?.status === "passed",
+    `${stateHolds.status} ${JSON.stringify(stateHolds.summary?.flows)} ${stateHolds.out.slice(-600)}`,
+  );
+  const stateBroken = await checkWith(
+    project("flow-state-broken", { "state.json": { steps: [...stateSteps, { action: "expect-element", target: "testid=state-receipt", state: "hidden" }] } }),
+  );
+  check(
+    "...and its twin, expecting the receipt still hidden after Complete, fails at that step saying what is true instead",
+    stateBroken.status === 1 &&
+      stateBroken.summary?.flows[0]?.status === "failed" &&
+      stateBroken.summary.flows[0].step === 10 &&
+      /^testid=state-receipt is visible, expected hidden/.test(stateBroken.summary.flows[0].reason ?? ""),
+    `${stateBroken.status} ${JSON.stringify(stateBroken.summary?.flows)}`,
+  );
+
   // A step that would write. The same flow, under the default and under --flow-writes allow, both in read-only mode,
   // which on its own would let an ordinary POST through.
   const addFlow = {
@@ -808,13 +841,15 @@ async function flowWriteEdges({
     `${leave.status} ${JSON.stringify(leave.flows)} writes=${JSON.stringify(stats.writes)}`,
   );
 
+  // A write that goes out only as the flow leaves the page: after the last step's own checks on any machine, since
+  // nothing but the engine leaving the page sends it. The contrast to the beacon above: same moment, sent as a fetch.
   const itemsBefore = writes("POST /api/items");
   const late = await runFlows("flow-late-write", {
     "late.json": {
       steps: [
         { action: "navigate", target: "/check-flow-writes.html" },
-        { action: "click", target: "testid=writes-save-later" },
-        { action: "expect-text", text: "Saving shortly" },
+        { action: "click", target: "testid=writes-save-as-you-leave" },
+        { action: "expect-text", text: "Will save as you leave" },
       ],
     },
   });
@@ -826,6 +861,29 @@ async function flowWriteEdges({
       /^after the last step\b.*POST \/api\/items/.test(late.flows[0].reason ?? "") &&
       writes("POST /api/items") === itemsBefore,
     `${late.status} ${JSON.stringify(late.flows)} ${late.out.slice(-600)}`,
+  );
+
+  // A debounced save: a timer the click starts. Which step it lands in depends on how long the click's own step takes,
+  // so only what holds wherever it lands is checked. On a fast machine it lands after the last step, so a check that
+  // stopped looking once the last step's checks ran would let this flow pass.
+  const debouncedBefore = writes("POST /api/items");
+  const debounced = await runFlows("flow-debounced-write", {
+    "debounced.json": {
+      steps: [
+        { action: "navigate", target: "/check-flow-writes.html" },
+        { action: "click", target: "testid=writes-save-later" },
+        { action: "expect-text", text: "Saving shortly" },
+      ],
+    },
+  });
+  check(
+    "a debounced save a step set off is refused in whichever step it lands, the last one or after it included, and never reaches the server",
+    debounced.status === 2 &&
+      debounced.flows?.[0]?.status === "refused" &&
+      [2, 3].includes(debounced.flows[0].step ?? 0) &&
+      /POST \/api\/items/.test(debounced.flows[0].reason ?? "") &&
+      writes("POST /api/items") === debouncedBefore,
+    `${debounced.status} ${JSON.stringify(debounced.flows)} ${debounced.out.slice(-600)}`,
   );
 
   const form = await runFlows("flow-form-post", {

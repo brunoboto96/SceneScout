@@ -11,7 +11,7 @@ SceneScout has six ways in. They share one engine and one write policy, and all 
 | [`scenescout ci`](#scenescout-ci-an-unattended-exploratory-run) | A model through its API | An API key | No | Exploration on a schedule or on pushes |
 | [`/scenescout qa`](#scenescout-qa-on-a-pull-request) | A model, started by a PR comment | An API key | No | An on-demand review of a PR's preview deployment |
 
-After a run that files findings (any of these but `scenescout check`, which files none), `scenescout export` files them as GitHub or Jira issues, each once: [Filing findings as issues](#filing-findings-as-issues).
+After a run, `scenescout export` files its findings as GitHub or Jira issues, each once: those in the project's memory by default, or a `scenescout check` or `scenescout ci` result with `--from`. See [Filing findings as issues](#filing-findings-as-issues).
 
 ## An interactive run
 
@@ -175,7 +175,7 @@ An intended change is approved by running the check with `--baseline update` and
 
 **Where baselines live.** `.scenescout/baselines/` is ignored by git, so baselines kept there stay on the machine that took them. To share them, name a folder the project commits: `--baselines tests/visual` (the action's `baselines` input).
 
-**What keeps a picture repeatable.** Every picture is taken in a 1280×900 window at one picture pixel per CSS pixel, after a fresh page load from a blank page, with the page told to reduce motion, once its fonts have loaded, with CSS animations and transitions stopped before anything is measured and the text caret hidden. Baselines are kept per browser: Chromium's are never compared with WebKit's. An element larger than the window is pictured where it is inside the window, and the report says so.
+**What keeps a picture repeatable.** Every picture is taken in a 1280×900 window at one picture pixel per CSS pixel, after a fresh page load from a blank page, with the page told to reduce motion, once its fonts have loaded, with CSS animations and transitions stopped before anything is measured and the text caret hidden. The picture is taken again, a frame later, until two in a row are the same, so a script still drawing after the load (a count-up, an entrance) is pictured once it has finished; a page that never holds still within the action limit keeps its last picture, and the report says so. Baselines are kept per browser: Chromium's are never compared with WebKit's. An element larger than the window is pictured where it is inside the window, and the report says so.
 
 **Why 0.1% and not 0.** Two pictures of an unchanged page taken by one browser build on one machine compare at 0%, but a run on another machine, or after a browser or font update, can anti-alias text and curved edges a pixel differently, and a gate that fails on that noise teaches a team to ignore it. 0.1% is 1,152 pixels of a 1280×900 page and 64 of a 320×200 picture, so a smaller change, such as a character of small text on a large element, passes unless you lower the threshold: `--baseline-threshold 0` counts every changed pixel (one whose colour differs by more than 8 in 255 on a channel), and a change of size always counts.
 
@@ -288,7 +288,7 @@ Pull requests from forks are refused by default, with a reply saying why. `SCENE
 
 ## Filing findings as issues
 
-`scenescout export` turns the project's open findings into issues in GitHub or Jira, where the team already works. It reads `.scenescout/memory.json`, where an interactive run, parallel lanes and `scenescout ci` keep their findings (`scenescout check` only reads it).
+`scenescout export` turns the project's open findings into issues in GitHub or Jira, where the team already works. By default it reads `.scenescout/memory.json`, where an interactive run, parallel lanes and `scenescout ci` keep their findings. `scenescout check` writes nothing there, and a `scenescout ci` job's memory is gone when the job ends unless the workflow keeps it, so `--from` exports a `check.json` or a `ci.json` instead:
 
 ```bash
 export GH_TOKEN=…                  # or GITHUB_TOKEN; read from the environment only
@@ -301,10 +301,16 @@ export JIRA_EMAIL=you@example.com JIRA_API_TOKEN=…   # an Atlassian API token,
 npx -y scenescout export --to jira --jira-url https://your-site.atlassian.net --jira-project QA --yes
 ```
 
+```bash
+npx -y scenescout export --to github --repo owner/app --from scenescout-check/check.json --yes
+```
+
+- **From a check or ci result.** `--from` takes a `check.json` or a `ci.json`, and refuses any other file. A check's issues and its worth-a-look observations become findings whose id is `check-` and the issue's fingerprint, which a later check of the same defect gives again, so a later export of a later check's result finds the issue it filed. A `ci.json` finding keeps the id it has in the run's memory, so an export from memory and one from that run's `ci.json` file it once. Such an issue has the same body, marker and label as any other, says which pages it was seen on, and has no screenshots, since neither file names any. An export `--from` a file lists a Jira issue filed earlier and never updates it, since the file holds less than the memory that may have filed it. The findings a check re-tested from memory are not in `issues`; export them from memory. The record of filed issues is still kept in the project's `.scenescout/` folder (`--project`).
+
 - **A dry run unless `--yes`.** Without it, the export lists each finding as "would file", "already filed" or "over the cap", and sends the tracker nothing but reads. With no credentials set, a dry run still lists the findings, without checking which are already filed.
 - **Each finding once.** Every issue carries the `scenescout` label and a marker holding the finding's id: an HTML comment in a GitHub issue's description, a last line in a Jira one. Before filing, the export reads the issues with that label, open or closed, and skips each finding whose marker is on one, naming the issue, so a second export of the same run files only what the first left over the cap. A closed issue counts, so a finding closed as won't-fix is not filed again on every export; `--refile-closed` files a finding again when its issue is closed, so that a defect that comes back after its fix gets a new issue. Keep the label and the marker on filed issues: they are how the next export finds them.
-- **The same finding in a later run.** The marker holds the finding's id, which the project's memory keeps from run to run, so a later run's export skips what an earlier one filed. On a CI runner the memory is gone after the job unless the workflow keeps `.scenescout/memory.json` (for example with `actions/cache`); a fresh memory gives the same defect a new id whenever a run words it differently, and so a new issue.
-- **Jira's search can lag.** Jira finds the labelled issues through its search, which can take a little while to show a new issue. Leave a few minutes between two exports to the same Jira project. A create that Jira may have carried out before an error is never sent again in the same export: the next export finds the issue by its marker, or files it if it was not made. GitHub's issue list shows a new issue at once, so there the export looks again straight away.
+- **The same finding in a later run.** The marker holds the finding's id, which the project's memory keeps from run to run, so a later run's export skips what an earlier one filed. On a CI runner the memory is gone after the job unless the workflow keeps the whole `.scenescout/` folder (for example with `actions/cache`), which holds both `memory.json` and the export's record `exported.json`; a fresh memory gives the same defect a new id whenever a run words it differently, and so a new issue.
+- **A listing can lag behind a create.** GitHub's label-filtered issue list and Jira's search can each take a while to show a new issue. So the export records each issue it files in `.scenescout/exported.json`, beside the memory, and an export straight after it on the same machine reads those issues back by number, which shows them at once, rather than file them again. On GitHub the export also reads the newest 100 issues and pull requests with no label filter, which shows a new issue at once, so a fresh machine or another CI job finds an issue filed moments earlier. Jira has no such list: on a fresh machine, leave a few minutes between two exports to the same Jira project. A create that may have been carried out before an error (a timeout, a 5xx, an answer cut off) is never sent again blindly: on GitHub the export looks for the issue's marker straight away and sends the create again only when no issue carries it; in Jira it stops, and for 15 minutes a later export on that machine holds that finding back, exiting 2, unless it finds the issue; a dry run lists it as held back and exits 0. Run one export at a time per project. A record that cannot be read ends the export before anything is filed; move it aside to start a new one.
 - **What goes.** Open defects, worst first. `--min-severity` leaves out the less severe, `--only` names finding ids, and `--include-worth-a-look` adds the worth-a-look observations. One export files at most `--max-issues` (default 20); the next export files the rest.
 - **What an issue says.** The finding's title and description, its severity, category, page and address, the steps that led to it, its machine evidence, and when it was last found. All of that comes from the run, and some of it from the app's own pages, so it is made inert: an `@mention`, a link, a `#123` reference, HTML or Markdown in it is shown as text and does nothing.
 - **Updates in Jira.** A later export brings each open Jira issue it filed up to date rather than filing another: a new summary and description when the finding reads differently (found again, a new picture, a ticket it now fails), and the picture, frames and ticket links the issue lacks. The marker records a revision of the summary and description it wrote, so an issue someone has edited in Jira since (a word, a pasted picture, a mention, a link) keeps their edit, and gets only the files and links it lacks. Pictures and frames are attached under the time they were taken, so a retaken picture or a later run's frame is added beside the earlier one. Priority, labels and everything else set in triage are never changed, a closed issue is left alone, and nothing is removed. An issue filed by an earlier version has no revision and keeps its text. `--jira-update off` only lists filed issues. A rewrite is an edit, so Jira tells the issue's watchers as it does for any other.
@@ -320,6 +326,20 @@ In a GitHub Actions job, run it as a step after `scenescout ci`, with the job's 
 ```yaml
       - run: npx -y scenescout export --to github --repo "$GITHUB_REPOSITORY" --yes
         env:
+          GH_TOKEN: ${{ github.token }}
+```
+
+After the check action, export its `check.json` the same way (after the ci action, its `ci.json`: both actions give the file's path as the `json` output). Neither action has an export input of its own: filing issues needs a token that can write issues, which the check itself never needs, so it is a separate step that only the workflows that want it grant `issues: write` to. Keep the `.scenescout/` folder between runs, as above, so the record of filed issues survives:
+
+```yaml
+      - uses: brunoboto96/SceneScout@v3
+        id: check
+        with:
+          url: http://127.0.0.1:3000
+      - if: always() && steps.check.outputs.json != ''
+        run: npx -y scenescout export --to github --repo "$GITHUB_REPOSITORY" --from "$CHECK_JSON" --yes
+        env:
+          CHECK_JSON: ${{ steps.check.outputs.json }}
           GH_TOKEN: ${{ github.token }}
 ```
 

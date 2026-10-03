@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Check: element state in a saved flow</title></head>
+<body>
+  <!-- For `scenescout check`'s expect-element step. Complete stays disabled until the box is ticked, and the receipt
+       stays hidden until Complete is pressed, so a flow can assert both states before and after. -->
+  <h1>Confirm and complete</h1>
+  <label><input type="checkbox" data-testid="state-confirm"> I have read it</label>
+  <button type="button" data-testid="state-complete" disabled>Complete</button>
+  <p data-testid="state-receipt" hidden>Completed</p>
+  <script>
+    const confirm = document.querySelector('[data-testid="state-confirm"]');
+    const complete = document.querySelector('[data-testid="state-complete"]');
+    const receipt = document.querySelector('[data-testid="state-receipt"]');
+    confirm.addEventListener("change", () => {
+      complete.disabled = !confirm.checked;
+    });
+    complete.addEventListener("click", () => {
+      receipt.hidden = false;
+    });
+  </script>
+</body>
+</html>

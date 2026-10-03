@@ -190,3 +190,15 @@ into a pass, which is the one thing a saved flow exists to catch. If five
 seconds proves too short for real apps, the timeout is what changes. A
 re-test that cannot tell says `not-reached` rather than `possibly-fixed`: a
 finding reported as fixed that is not costs more than one reported as unknown.
+
+## Amendment, 3 October 2026: expect-element
+
+A fourth assertion, `expect-element`, takes a target and a state: `visible`,
+`hidden`, `enabled`, `disabled`, `checked` or `unchecked`. Rewriting a scripted
+browser journey as a flow showed the three assertions above cannot say that
+something has gone (a dialog closed, a receipt never shown) or what state a
+control is in (a submit button disabled until a box is ticked), and those are
+often the point of the journey. `hidden` holds when nothing matches, because
+"never shown" and "closed" are both the absence of a visible element. The rule
+that turns what the page shows into a verdict is `elementStateMatches` in
+`flow.ts`, table-tested in `check-test`; the browser only reads the facts.

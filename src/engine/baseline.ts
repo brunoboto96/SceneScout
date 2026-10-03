@@ -106,6 +106,55 @@ export const STOP_ANIMATIONS_SCRIPT = `(() => {
   return true;
 })()`;
 
+/**
+ * Page-side source that resolves once the page has drawn a frame after this
+ * call (two animation frames: the first starts one, the second runs once it
+ * is done). A page whose frames are not running at all resolves after
+ * NEXT_FRAME_WAIT_MS instead; the browser side bounds the wait by the same
+ * time, for a page too busy to run either.
+ */
+export const NEXT_FRAME_WAIT_MS = 1000;
+export const NEXT_FRAME_SCRIPT = `new Promise((resolve) => {
+  requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+  setTimeout(() => resolve(false), ${NEXT_FRAME_WAIT_MS});
+})`;
+
+/**
+ * A picture of a page that has stopped changing: pictures are taken, a frame
+ * apart, until two in a row are the same, and that one is kept. Stopping CSS
+ * animations does not make a page still. A frame drawn before the stop took
+ * effect, or a script that draws for a moment after the load (a count-up, an
+ * entrance), each make the first picture depend on how fast the machine is,
+ * and a baseline taken on a fast run then fails on a slow one. No new
+ * picture is started once `budgetMs` has passed (the one in progress still
+ * finishes): a page that never holds still keeps its last picture, and
+ * `steady` is false so the result can say so. `take` and `nextFrame` are the
+ * browser's (BrowserEngine.captureForBaseline); the loop is table-tested.
+ */
+export async function steadyPicture(
+  take: () => Promise<Buffer>,
+  nextFrame: () => Promise<void>,
+  budgetMs: number,
+  now: () => number = Date.now,
+): Promise<{ png: Buffer; steady: boolean; takes: number }> {
+  const until = now() + budgetMs;
+  let last = await take();
+  let takes = 1;
+  for (;;) {
+    await nextFrame();
+    const png = await take();
+    takes += 1;
+    if (png.equals(last)) return { png, steady: true, takes };
+    last = png;
+    if (now() >= until) return { png, steady: false, takes };
+  }
+}
+
+/** What a result says when its picture never held still (steadyPicture): a comparison of it may not repeat. */
+export function unsteadyNote(budgetMs: number): string {
+  return `the picture was still changing after about ${budgetMs / 1000}s, so the last one taken is used: something on the page keeps moving, and a comparison of it may not repeat`;
+}
+
 // ---------------------------------------------------------------------------
 // targets.json
 // ---------------------------------------------------------------------------
@@ -359,6 +408,8 @@ export interface BaselineResult {
   platformNote?: string;
   /** The element reaches outside the window, so only the part inside it is pictured (capture.ts). */
   partial?: string;
+  /** The picture never held still within the action limit, so the last one taken is used (steadyPicture). */
+  unsteady?: string;
   /** The comparison, when one was made. */
   diff?: BaselineDiff;
   /** Its baseline's PNG, relative to the baselines folder. */

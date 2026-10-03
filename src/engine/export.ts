@@ -13,6 +13,7 @@
  */
 import { createHash } from "node:crypto";
 import { readFindingPicture } from "./capture.js";
+import { CHECK_RULES, WORTH_A_LOOK_RULES } from "./check.js";
 import { readFindings } from "./ci.js";
 import { isWorthALook, redactSecrets, type ActionLogEntry, type Finding } from "./memory.js";
 import { retryAfterMs } from "./provider.js";
@@ -36,6 +37,7 @@ export const EXPORT_OPTION_NAMES = [
   "jira-link-type",
   "jira-update",
   "project",
+  "from",
   "min-severity",
   "only",
   "max-issues",
@@ -102,6 +104,11 @@ export type ExportTarget = { to: "github"; github: GithubTarget } | { to: "jira"
 
 export type ExportOptions = ExportTarget & {
   projectDir: string;
+  /**
+   * A check.json or a ci.json to export instead of the project's memory.
+   * The record of filed issues stays in the project's `.scenescout/` folder.
+   */
+  from?: string;
   minSeverity: Severity;
   /** Only these finding ids; absent means every finding the other filters let through. */
   only?: string[];
@@ -204,7 +211,8 @@ export function parseExportArgs(args: readonly string[], cwd: string, env: Reado
   const flags = new Map<string, string>();
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (!a.startsWith("--")) return { ok: false, error: `unexpected argument ${a}: export takes options only (the findings come from --project)` };
+    if (!a.startsWith("--"))
+      return { ok: false, error: `unexpected argument ${a}: export takes options only (the findings come from --project, or --from a check.json or ci.json)` };
     const eq = a.indexOf("=");
     const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
     if (CREDENTIAL_FLAGS.has(name))
@@ -296,6 +304,8 @@ export function parseExportArgs(args: readonly string[], cwd: string, env: Reado
   if (!labels.ok) return labels;
   const screenshots = flags.get("screenshots") ?? "on";
   if (screenshots !== "on" && screenshots !== "off") return { ok: false, error: "--screenshots must be on or off" };
+  const from = flags.get("from");
+  if (from !== undefined && from.trim() === "") return { ok: false, error: "--from needs the path of a check.json or a ci.json" };
   if (flags.has("dry-run") && flags.has("yes")) return { ok: false, error: "--dry-run and --yes contradict each other: give one" };
 
   const resolve = (p: string): string => (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) ? p : `${cwd.replace(/[\\/]$/, "")}/${p}`);
@@ -304,6 +314,7 @@ export function parseExportArgs(args: readonly string[], cwd: string, env: Reado
     options: {
       ...target,
       projectDir: resolve(flags.get("project") ?? cwd),
+      ...(from !== undefined ? { from: resolve(from) } : {}),
       minSeverity: minSeverity as Severity,
       ...(only ? { only } : {}),
       maxIssues,
@@ -406,6 +417,122 @@ export function selectFindings(memory: unknown, o: Pick<ExportOptions, "minSever
 function timeOf(iso: unknown): number {
   const t = typeof iso === "string" ? Date.parse(iso) : NaN;
   return Number.isNaN(t) ? 0 : t;
+}
+
+// ── a check.json or a ci.json as the source ─────────────────────────────────
+
+/** The prefix of a check issue's finding id: the issue's fingerprint follows it. */
+export const CHECK_FINDING_PREFIX = "check-";
+const MAX_ROUTES_NAMED = 10;
+
+/** What `--from` read: which command wrote it, and its findings in the shape memory.json holds them. */
+export type ResultSource = { kind: "check" | "ci"; findings: unknown[] };
+
+/** A route of a check, as an address on the checked site; the site itself for a route that is not a path, such as the shared chrome. */
+function addressOf(base: string, route: string): string {
+  if (!route.startsWith("/")) return base;
+  try {
+    return new URL(route, base).href;
+  } catch {
+    return route;
+  }
+}
+
+/**
+ * A check.json issue or worth-a-look observation as a finding. Its id is its
+ * fingerprint, which the check keys on the rule and the evidence and so keeps
+ * from run to run: a later check of the same defect re-exports to the same
+ * issue. Null for an entry that does not read.
+ */
+function checkEntryFinding(entry: unknown, base: string, generatedAt: string, look: boolean): Finding | null {
+  if (!isObject(entry) || typeof entry.rule !== "string" || typeof entry.evidence !== "string" || typeof entry.fingerprint !== "string") return null;
+  const id = `${CHECK_FINDING_PREFIX}${entry.fingerprint}`;
+  if (!FINDING_ID_RE.test(id)) return null;
+  const routes = (Array.isArray(entry.routes) ? entry.routes : []).filter((r): r is string => typeof r === "string");
+  const severity = look ? "low" : entry.severity;
+  if (!SEVERITIES.includes(severity as Severity)) return null;
+  if (look && typeof entry.convention !== "string") return null;
+  const rules: Record<string, { title: string; help: string }> = look ? WORTH_A_LOOK_RULES : CHECK_RULES;
+  const rule = Object.prototype.hasOwnProperty.call(rules, entry.rule) ? rules[entry.rule] : null;
+  const first = routes[0] ?? "";
+  const named = routes.slice(0, MAX_ROUTES_NAMED).join(", ") + (routes.length > MAX_ROUTES_NAMED ? `, and ${routes.length - MAX_ROUTES_NAMED} more` : "");
+  const embed = typeof entry.embed === "string" ? entry.embed : null;
+  const flow = typeof entry.flow === "string" ? entry.flow : null;
+  return {
+    id,
+    severity: severity as Severity,
+    category: entry.rule,
+    title: `${rule?.title ?? entry.rule}: ${oneLine(entry.evidence, 120)}`,
+    detail: [
+      rule?.help ?? "",
+      routes.length ? `Seen on ${routes.length === 1 ? "1 page" : `${routes.length} pages`}: ${named}.` : "",
+      embed ? `In a frame from ${embed}.` : "",
+      `Found by scenescout check (rule ${entry.rule}).`,
+    ]
+      .filter(Boolean)
+      .join(" "),
+    evidence: entry.evidence,
+    url: addressOf(base, first),
+    state: first,
+    repro: flow ? [`Replay the saved flow ${flow}`] : first ? [`Open ${first}`] : [],
+    foundAt: generatedAt,
+    runs: 1,
+    status: "open",
+    ...(look ? { tier: "worth_a_look" as const, convention: entry.convention as string } : {}),
+  };
+}
+
+/** A ci.json finding as a finding: the same id as in the run's memory, so an export from either files it once. Null for an entry that does not read. */
+function ciEntryFinding(entry: unknown, base: string, writtenAt: string): Finding | null {
+  if (!isObject(entry) || typeof entry.id !== "string" || typeof entry.title !== "string" || !SEVERITIES.includes(entry.severity as Severity)) return null;
+  const route = typeof entry.path === "string" ? entry.path : "";
+  const look = entry.tier === "worth-a-look";
+  return {
+    id: entry.id,
+    severity: entry.severity as Severity,
+    category: typeof entry.category === "string" ? entry.category : "other",
+    title: entry.title,
+    detail: "",
+    ...(typeof entry.evidence === "string" ? { evidence: entry.evidence } : {}),
+    url: addressOf(base, route),
+    state: route,
+    repro: [],
+    foundAt: writtenAt,
+    runs: 1,
+    status: "open",
+    ...(look ? { tier: "worth_a_look" as const, convention: typeof entry.convention === "string" ? entry.convention : "" } : {}),
+  };
+}
+
+/**
+ * The findings of a check.json or a ci.json, as `--from` exports them. An
+ * entry that does not read is kept as it is, so selectFindings counts it as
+ * unreadable rather than it vanishing. `writtenAt` dates a ci.json's findings,
+ * which carry no time of their own: the time the file was written.
+ */
+export function findingsFromResult(raw: unknown, writtenAt: string): Parsed<ResultSource> {
+  if (!isObject(raw)) return { ok: false, error: "it is not a check.json or a ci.json" };
+  const base = typeof raw.url === "string" ? raw.url : "";
+  if (raw.tool === "scenescout-check") {
+    if (!Array.isArray(raw.issues)) return { ok: false, error: "it is a check.json with no list of issues" };
+    const generatedAt = typeof raw.generatedAt === "string" ? raw.generatedAt : writtenAt;
+    const looks = Array.isArray(raw.worthALook) ? raw.worthALook : [];
+    return {
+      ok: true,
+      value: {
+        kind: "check",
+        findings: [
+          ...raw.issues.map((e) => checkEntryFinding(e, base, generatedAt, false) ?? e),
+          ...looks.map((e) => checkEntryFinding(e, base, generatedAt, true) ?? e),
+        ],
+      },
+    };
+  }
+  if (raw.tool === "scenescout" && raw.command === "ci") {
+    if (!Array.isArray(raw.findings)) return { ok: false, error: "it is a ci.json with no list of findings" };
+    return { ok: true, value: { kind: "ci", findings: raw.findings.map((e) => ciEntryFinding(e, base, writtenAt) ?? e) } };
+  }
+  return { ok: false, error: "it is not a check.json or a ci.json (its tool field names neither scenescout check nor scenescout ci)" };
 }
 
 // ── the tickets a finding fails ─────────────────────────────────────────────
@@ -967,6 +1094,84 @@ export function planExport(candidates: readonly Finding[], existing: ReadonlyMap
 export function rememberFiled(map: Map<string, FiledIssue>, id: string, issue: FiledIssue): void {
   const held = map.get(id);
   if (!held || (issue.open && !held.open) || (issue.open === held.open && issue.number < held.number)) map.set(id, issue);
+}
+
+// ── the local record of what was filed ──────────────────────────────────────
+
+/**
+ * A tracker's listing of labelled issues can lag behind a create: GitHub's
+ * label filter and Jira's search are both eventually consistent. So each
+ * export keeps, beside the memory, the issue it filed for each finding, and
+ * a later export on the same machine reads that issue back by its number,
+ * which is consistent, before it trusts the listing's silence.
+ */
+export const EXPORT_RECORD_FILE = "exported.json";
+
+/** How long a Jira create that may have been made holds its finding back, unless the issue turns up sooner. Jira's search can take minutes. */
+export const UNCERTAIN_HOLD_MS = 15 * 60_000;
+
+/** One finding's issue in one tracker: filed (`number` set), or a create whose result is not known (`uncertain`). */
+export type RecordEntry = { ref: string; number: number; url: string; at: string } | { uncertain: true; at: string };
+/** Tracker → finding id → its issue. */
+export type ExportRecord = Record<string, Record<string, RecordEntry>>;
+
+/** The key a tracker's entries are kept under: the API's address and the repository or project, so two trackers never share an entry. */
+export function recordKey(t: ExportTarget): string {
+  return t.to === "github"
+    ? `github ${t.github.apiUrl.replace(/\/+$/, "")} ${t.github.repo}`
+    : `jira ${t.jira.baseUrl.replace(/\/+$/, "")} ${t.jira.projectKey}`;
+}
+
+/**
+ * The record file's text, read. None yet is an empty record. A file that
+ * cannot be read is refused rather than taken as empty: empty would let an
+ * export file again what the lagging listing does not show yet.
+ */
+export function parseExportRecord(text: string | null): Parsed<ExportRecord> {
+  if (text === null) return { ok: true, value: {} };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, error: `it is not JSON (${err instanceof Error ? err.message : String(err)})` };
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "it is not an object" };
+  const { version, trackers } = raw as { version?: unknown; trackers?: unknown };
+  if (version !== 1) return { ok: false, error: `it is version ${oneLine(version, 20)}, which this version does not read` };
+  if (!trackers || typeof trackers !== "object" || Array.isArray(trackers)) return { ok: false, error: "it holds no trackers" };
+  const value: ExportRecord = {};
+  for (const [key, entries] of Object.entries(trackers as Record<string, unknown>)) {
+    if (!entries || typeof entries !== "object" || Array.isArray(entries)) return { ok: false, error: `its entry for ${oneLine(key, 80)} is not an object` };
+    const kept: Record<string, RecordEntry> = {};
+    for (const [id, e] of Object.entries(entries as Record<string, unknown>)) {
+      const x = e && typeof e === "object" ? (e as Record<string, unknown>) : {};
+      if (!FINDING_ID_RE.test(id) || typeof x.at !== "string") return { ok: false, error: `its entry for finding ${oneLine(id, 80)} cannot be read` };
+      if (x.uncertain === true) kept[id] = { uncertain: true, at: x.at };
+      else if (typeof x.ref === "string" && Number.isInteger(x.number) && typeof x.url === "string")
+        kept[id] = { ref: x.ref, number: x.number as number, url: x.url, at: x.at };
+      else return { ok: false, error: `its entry for finding ${id} cannot be read` };
+    }
+    value[key] = kept;
+  }
+  return { ok: true, value };
+}
+
+/** The record with one finding's entry set, as the text to write. The record passed in is not changed. */
+export function recordWith(record: ExportRecord, key: string, id: string, entry: RecordEntry): string {
+  const trackers: ExportRecord = { ...record, [key]: { ...(record[key] ?? {}), [id]: entry } };
+  return JSON.stringify({ version: 1, trackers }, null, 2) + "\n";
+}
+
+/**
+ * Whether a create that may have been made still holds its finding back: for
+ * UNCERTAIN_HOLD_MS after it. A time that cannot be read, or one further
+ * ahead than that (a clock set wrong), holds nothing, so no finding is held
+ * back for good.
+ */
+export function uncertainHolds(entry: RecordEntry, nowMs: number): boolean {
+  if (!("uncertain" in entry)) return false;
+  const at = Date.parse(entry.at);
+  return Number.isFinite(at) && Math.abs(nowMs - at) < UNCERTAIN_HOLD_MS;
 }
 
 // ── talking to a tracker ────────────────────────────────────────────────────

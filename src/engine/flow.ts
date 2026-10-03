@@ -8,8 +8,10 @@
  * gate naming the flow and the step (ADR 12).
  *
  * The steps are `scout_run_plan`'s steps, so a plan that worked in an
- * exploratory run can be saved as it is, plus three assertions a plan has no
- * need for: text is visible, the URL matches, a request answered with a status.
+ * exploratory run can be saved as it is, plus four assertions a plan has no
+ * need for: text is visible, an element is in a state (visible, hidden,
+ * enabled, disabled, checked or unchecked), the URL matches, and a request
+ * answered with a status.
  *
  * Everything here is pure: the schema and its error messages, the target
  * grammar, and the rules that decide whether a URL or a request matched. The
@@ -167,6 +169,39 @@ export function notActionable(action: "click" | "type" | "select", facts: { enab
   return null;
 }
 
+/**
+ * The states an expect-element step can ask of its target. `hidden` also holds
+ * when nothing matches: "the receipt was never shown" and "the dialog closed"
+ * are both the absence of a visible element.
+ */
+export const ELEMENT_STATES = ["visible", "hidden", "enabled", "disabled", "checked", "unchecked"] as const;
+export type ElementState = (typeof ELEMENT_STATES)[number];
+
+/** What an element is, as far as an expect-element step asks. Null for a property the element does not have (a button is never checked). */
+export interface ElementFacts {
+  visible: boolean;
+  enabled: boolean | null;
+  checked: boolean | null;
+}
+
+/**
+ * Whether an element in the state `facts` describes satisfies `state`, and if
+ * not, what is true instead, in the words the report uses. `facts` is null when
+ * nothing matches the target.
+ */
+export function elementStateMatches(state: ElementState, facts: ElementFacts | null): { ok: true } | { ok: false; actual: string } {
+  if (state === "hidden") return !facts || !facts.visible ? { ok: true } : { ok: false, actual: "is visible" };
+  if (!facts) return { ok: false, actual: "matches nothing" };
+  if (!facts.visible) return { ok: false, actual: "is not visible" };
+  if (state === "visible") return { ok: true };
+  if (state === "enabled" || state === "disabled") {
+    if (facts.enabled === null) return { ok: false, actual: "cannot be enabled or disabled" };
+    return facts.enabled === (state === "enabled") ? { ok: true } : { ok: false, actual: facts.enabled ? "is enabled" : "is disabled" };
+  }
+  if (facts.checked === null) return { ok: false, actual: "cannot be checked" };
+  return facts.checked === (state === "checked") ? { ok: true } : { ok: false, actual: facts.checked ? "is checked" : "is unchecked" };
+}
+
 const REQUEST_RE = /^(GET|POST|PUT|PATCH|DELETE|HEAD) (\/\S*)$/;
 
 function isRegex(pattern: string): boolean {
@@ -198,6 +233,7 @@ const STEP_SCHEMAS = [
   z.object({ action: z.literal("select"), target, value: z.string() }).strict(),
   z.object({ action: z.literal("press"), value: z.string().min(1, "names the key to press, e.g. Enter") }).strict(),
   z.object({ action: z.literal("expect-text"), text: z.string().min(1, "is the text that must be visible") }).strict(),
+  z.object({ action: z.literal("expect-element"), target, state: z.enum(ELEMENT_STATES) }).strict(),
   z.object({ action: z.literal("expect-url"), pattern: z.string().min(1).refine(isRegex, { message: "is not a valid regular expression" }) }).strict(),
   z
     .object({
@@ -359,6 +395,8 @@ export function describeStep(step: FlowStep): string {
       return `press ${step.value}`;
     case "expect-text":
       return `expect text ${JSON.stringify(step.text)}`;
+    case "expect-element":
+      return `expect ${step.target} to be ${step.state}`;
     case "expect-url":
       return `expect the URL to match /${step.pattern}/`;
     case "expect-request":
