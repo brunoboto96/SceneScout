@@ -1083,7 +1083,7 @@ async function main(): Promise<void> {
     }
   }
   const reference = fs.readFileSync(path.join(guideDir, "Configuration-reference.md"), "utf8").replace(/\r\n?/g, "\n");
-  const attachSection = reference.split("\n## `scout_attach` options\n")[1] ?? "";
+  const attachSection = (reference.split("\n## `scout_attach` options\n")[1] ?? "").split("\n## ")[0];
   const listed = [...attachSection.matchAll(/^\| `([A-Za-z]+)` \|/gm)].map((m) => m[1]).sort();
   const attachParams = [...(schemaOf.get("scout_attach") ?? [])].sort();
   if (JSON.stringify(listed) !== JSON.stringify(attachParams)) {
