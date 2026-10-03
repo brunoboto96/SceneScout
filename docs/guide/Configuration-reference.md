@@ -440,3 +440,12 @@ Clients that list the server's prompts offer these as commands, beside `scout_pl
 | `explore` | `url` (optional), `level` (optional), `focus` (optional) | Start an exploratory session: load the method, and use whatever of the address, level and focus was given. With no arguments, ask the plain questions first |
 | `live` | none | Return the loopback live-view URL for the current session. Where the host can open a URL, it may open that address |
 | `login` | `role` (required), `url` (optional) | Call `scout_login` for that role and wait the way that tool waits. The person signs in in the window it opens. `url` is the app's address when you have it |
+
+## Claude Code mod settings
+
+The optional `scenescout-mod` plugin ([The Claude Code mod](Ways-to-use-it.md#the-claude-code-mod)) asks for these when it is installed, and `/plugin configure scenescout-mod@scenescout-marketplace` or its `/config` rows change them. Both are empty by default, and neither is a credential. `guide-test` holds this table to the mod's manifest.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `lane_model` | empty: subagents are left alone | The model a SceneScout lane agent starts on, as an alias (`sonnet`, `haiku`, `opus`) or a full model id. A subagent counts as a lane when its prompt names `scout_attach` or `scout_lane_report`; a fork keeps its parent's model |
+| `mcp_server` | empty: tries `scenescout`, then `plugin:scenescout:scenescout` | The SceneScout server's name as `/mcp` lists it, tried first when the pane polls |
