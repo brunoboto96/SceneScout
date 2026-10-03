@@ -43,7 +43,7 @@ import {
   type CheckResult,
   type RouteHealth,
 } from "./engine/check.js";
-import { flowRoles, loadFlows, resolveFlowsDir, type Flow, type FlowRun, type SkippedFlowFile } from "./engine/flow.js";
+import { flowRoles, loadFlows, maskEnvValues, resolveFlowEnv, resolveFlowsDir, type Flow, type FlowRun, type SkippedFlowFile } from "./engine/flow.js";
 import { resolveAttachAuth } from "./engine/profiles.js";
 import { MemoryStore, MEMORY_DIRNAME, writeSelfIgnore, type Finding } from "./engine/memory.js";
 import { decodePng, encodePng, type RgbaImage } from "./engine/png.js";
@@ -130,6 +130,17 @@ export async function runCheck(
   // A flow that names a role whose sign-in is not saved would only fail after the crawl: refuse before anything starts,
   // naming the command that saves it.
   for (const role of flowRoles(inputs.flows)) resolveAttachAuth({ projectDir: options.projectDir, url: options.url, role });
+  // ${env:NAME} in a flow's values, from the environment; an unset name stops the check before anything starts.
+  const envValues = new Map<string, string>();
+  const runFlows = inputs.flows.map((flow) => {
+    const resolved = resolveFlowEnv(flow, process.env);
+    if (!resolved.ok)
+      throw new Error(
+        `flow "${flow.name}" (${flow.file}) takes ${resolved.missing.map((n) => `\${env:${n}}`).join(", ")} from the environment, which is not set`,
+      );
+    for (const [name, value] of resolved.values) envValues.set(name, value);
+    return resolved.flow;
+  });
   const engine = new BrowserEngine();
   /** One browser per role a flow runs as, each attached once, on first use, and closed with the check's own. */
   const roleEngines = new Map<string, BrowserEngine>();
@@ -226,7 +237,7 @@ export async function runCheck(
       if (lost) throw new Error(`the saved sign-in for role "${role}" no longer signs in: ${lost.replace(/ Continuing now tests a logged-out app\.$/, "")}`);
       return roleEngine;
     };
-    for (const flow of inputs.flows) {
+    for (const flow of runFlows) {
       const runner = await engineFor(flow.role);
       // --flow-writes never: observe's rule, whatever --mode lets the crawl do.
       const replay = await runner.replayFlow(flow.steps, options.flowWrites === "never" ? "observe" : options.mode);
@@ -261,7 +272,7 @@ export async function runCheck(
     // Signed in only when given a session: with none, a route that sends the browser to sign-in needs one, and is not a lost session.
     const signedIn = options.storageStatePath !== undefined;
     const { issues, worthALook, needsSignIn } = checkFindings(measured, start.origin, options.ignore, flows, pictured, options.ignorePaths, signedIn);
-    return {
+    const result: CheckResult = {
       url: redactRoute(options.url),
       generatedAt: new Date().toISOString(),
       mode: options.mode,
@@ -282,6 +293,8 @@ export async function runCheck(
       settings: settingsOf(options),
       baselines: pictured,
     };
+    // A value taken from the environment (a code, a password) is never written, wherever the page echoed it.
+    return envValues.size > 0 ? (JSON.parse(maskEnvValues(JSON.stringify(result), envValues)) as CheckResult) : result;
   } finally {
     for (const [role, roleEngine] of roleEngines)
       await roleEngine.close().catch((err: unknown) => log(`closing the browser for role ${role} failed: ${err instanceof Error ? err.message : String(err)}`));

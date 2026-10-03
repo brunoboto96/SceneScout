@@ -40,14 +40,17 @@ import { httpErrorDetail } from "../src/engine/oracles.ts";
 import {
   describeStep,
   elementStateMatches,
+  flowEnvNames,
   flowRoles,
   loadFlows,
+  maskEnvValues,
   matchRequest,
   notActionable,
   parseFlow,
   parseTarget,
   repeatFailure,
   requestPathMatches,
+  resolveFlowEnv,
   resolveFlowsDir,
   splitRefusals,
   statusMatches,
@@ -1603,6 +1606,47 @@ test("flows: a flow may name the role it runs as, which must be a role name", ()
     assert.match(parsed.error, /^f\.json: role /, bad);
   }
   assert.deepEqual(flowRoles([{ role: "qa" }, {}, { role: "admin" }, { role: "qa" }]), ["qa", "admin"]);
+});
+
+test("flows: ${env:NAME} values come from the environment, a missing one is named, and the values are masked in output", () => {
+  const parsed = parseFlow(
+    JSON.stringify({
+      steps: [
+        { action: "navigate", target: "/" },
+        { action: "type", target: "label=Code", value: "${env:SIGN_CODE}" },
+        { action: "type", target: "label=Note", value: "for ${env:WHO} today" },
+        { action: "press", value: "Enter" },
+        {
+          action: "repeat",
+          steps: [{ action: "select", target: "label=Pick", value: "${env:WHO}" }],
+          until: { action: "expect-text", text: "${env:NOT_SUBSTITUTED}" },
+          max: 2,
+        },
+      ],
+    }),
+    "f.json",
+  );
+  assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+  // Only values are substituted: an expect step's text is matched as written.
+  assert.deepEqual(flowEnvNames(parsed.flow), ["SIGN_CODE", "WHO"]);
+  assert.deepEqual(resolveFlowEnv(parsed.flow, { SIGN_CODE: "123456" }), { ok: false, missing: ["WHO"] });
+  const resolved = resolveFlowEnv(parsed.flow, { SIGN_CODE: "123456", WHO: "Ada" });
+  assert.ok(resolved.ok);
+  const steps = resolved.flow.steps as Array<Record<string, unknown>>;
+  assert.equal(steps[1].value, "123456");
+  assert.equal(steps[2].value, "for Ada today");
+  assert.equal((steps[4].steps as Array<Record<string, unknown>>)[0].value, "Ada");
+  assert.equal((steps[4].until as Record<string, unknown>).text, "${env:NOT_SUBSTITUTED}");
+  // The file's own flow is unchanged: the resolved one is a copy.
+  assert.equal((parsed.flow.steps[1] as { value: string }).value, "${env:SIGN_CODE}");
+  // Masking: every value long enough, raw and as JSON writes it; a short one is left, since it would mask ordinary text.
+  const values = new Map([
+    ["SIGN_CODE", "123456"],
+    ["WHO", "Ada"],
+    ["QUOTED", 'pa"ss\\word'],
+  ]);
+  assert.equal(maskEnvValues("/search?q=123456 by Ada", values), "/search?q=[$SIGN_CODE] by Ada");
+  assert.equal(maskEnvValues(JSON.stringify({ reason: 'typed pa"ss\\word' }), values), JSON.stringify({ reason: "typed [$QUOTED]" }));
 });
 
 test("flows: targets are scout_run_plan's, plus role with an optional name", () => {
