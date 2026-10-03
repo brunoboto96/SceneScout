@@ -553,7 +553,7 @@ test("the bundle build ships what the server reads at runtime, and the release a
   assert.match(script, /"ci", "--omit=dev", "--ignore-scripts"/, "production dependencies only, and no install scripts");
   assert.equal(pkg.scripts.mcpb, "node scripts/build-mcpb.mjs");
 
-  type Step = { uses?: string; run?: string; with?: Record<string, string> };
+  type Step = { uses?: string; run?: string; with?: Record<string, string | boolean> };
   type Job = { needs?: string | string[]; if?: string; permissions?: Record<string, string>; steps: Step[] };
   const wf = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8")) as { jobs: Record<string, Job> };
   const build = wf.jobs["desktop-extension"];
@@ -566,6 +566,9 @@ test("the bundle build ships what the server reads at runtime, and the release a
     build.steps.some((s) => /npx -y @anthropic-ai\/mcpb@\d+\.\d+\.\d+ validate/.test(s.run ?? "")),
     "validated against the manifest schema with a pinned MCPB tool",
   );
+  const upload = build.steps.find((s) => /^actions\/upload-artifact@/.test(s.uses ?? ""));
+  assert.equal(upload?.with?.path, ".mcpb-build/*.mcpb", "the bundle the build writes");
+  assert.equal(String(upload?.with?.["include-hidden-files"]), "true", ".mcpb-build is a hidden directory, which the upload skips unless asked");
   const attach = wf.jobs["attach-desktop-extension"];
   assert.ok(attach, "release.yml attaches the bundle");
   assert.deepEqual(attach.permissions, { contents: "write" });
