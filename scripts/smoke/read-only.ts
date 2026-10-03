@@ -2,6 +2,8 @@
  * Read-only exploration: snapshots, oracles, policy refusals, design audit, scroll, crawl, plans, the completion contract, findings and the report.
  */
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { feedForSession } from "../../dist/engine/live.js";
 import { computeGaps, generateReport } from "../../dist/engine/report.js";
@@ -1200,6 +1202,31 @@ async function readPosts({ baseUrl, projectDir, stats }: SmokeContext): Promise<
     "after the session closed, the report's gap ledger still names the page and its endpoint",
     closedGaps.some((g) => g.includes("observe refused") && /\/read-posts\.html \([^)]*POST \/api\/search[,)]/.test(g)),
     JSON.stringify(closedGaps),
+  );
+
+  // A page's script can send its POST before the browser has told Playwright the page committed, so the session
+  // still reports the page it came from. Held there for the whole visit, the refusal is still the new page's.
+  console.log("observe: a refused POST is charged to the page that sent it, while the session's page URL still lags");
+  const lagging = new BrowserEngine();
+  // A project of its own, so no refusal an earlier session recorded can stand in for this one's.
+  const laggingDir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-lagging-"));
+  try {
+    await lagging.attach({ url: baseUrl, projectDir: laggingDir, mode: "observe" });
+    const page = (lagging as unknown as { page: { url: () => string } }).page;
+    const stale = page.url();
+    page.url = () => stale;
+    await lagging.navigate("/read-posts.html");
+    await eventually(async () => lagging.memory!.observeRefusedPosts.some((p) => p.endpoints.includes("POST /api/search")), WAIT_MS, 100);
+  } finally {
+    await lagging.close().catch(() => {});
+  }
+  const laggingGaps = computeGaps(lagging.memory!);
+  fs.rmSync(laggingDir, { recursive: true, force: true });
+  check(
+    "a page URL that lags the browser does not charge the refused POST to the page before",
+    laggingGaps.some((g) => /\/read-posts\.html \([^)]*POST \/api\/search[,)]/.test(g)) &&
+      !laggingGaps.some((g) => / \/ \([^)]*POST \/api\/search[,)]/.test(g)),
+    JSON.stringify(laggingGaps),
   );
 
   console.log("observe: the same page with POST /api/search named as a read");
