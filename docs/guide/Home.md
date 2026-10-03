@@ -11,7 +11,7 @@ This guide is for a developer who wants to use SceneScout on their own project. 
 | [Signing in](Signing-in.md) | Saved logins per role, what a profile holds, expiry, re-attach, the refresh broker, scripted sign-in for CI |
 | [Safety model](Safety-model.md) | The four write modes, what is refused and why, embedded third-party frames, keys and forks in CI |
 | [Recipes](Recipes.md) | Setups for seven kinds of project, from a server-rendered app to a monorepo with preview deployments |
-| [Configuration reference](Configuration-reference.md) | Every CLI option, environment variable, GitHub Action input and repository variable, with defaults |
+| [Configuration reference](Configuration-reference.md) | Every CLI option, environment variable, GitHub Action input, repository variable and MCP prompt, with defaults |
 | [Measuring it](Measuring-it.md) | The benchmark, answer keys, the held-out app, lane calibration and how to read a scorecard |
 | [Troubleshooting](Troubleshooting.md) | Symptoms and fixes, and questions that come up often |
 

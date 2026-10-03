@@ -66,6 +66,7 @@ import {
 
 import { INTAKE_QUESTIONS, introQuestions } from "../src/intake.ts";
 import { explorePrompt, loadPlaybook, PLAYBOOK_RELATIVE_PATH, SERVER_INSTRUCTIONS, stripFrontMatter } from "../src/playbook.ts";
+import { livePrompt, loginPrompt, LOGIN_PROMPT_ARGUMENTS, LIVE_PROMPT_ARGUMENTS } from "../src/prompts.ts";
 
 import { dispatch, HAND_PARSED, looksLikeUrl, SUBCOMMANDS, type CliHandlers, type Subcommand } from "../src/commands.ts";
 import {
@@ -1137,6 +1138,67 @@ test("the server instructions stay short and the explore prompt states what was 
     assert.match(prompt, /Target: ask me for the URL/);
     for (const q of INTAKE_QUESTIONS) assert.ok(!prompt.includes(q.ask), `a setting given skips: ${q.ask}`);
   }
+});
+
+test("the live prompt returns the loopback address and takes no password", () => {
+  assert.deepEqual(LIVE_PROMPT_ARGUMENTS, []);
+  for (const none of [undefined, {}]) {
+    const prompt = livePrompt(none);
+    assert.match(prompt, /127\.0\.0\.1/);
+    assert.match(prompt, /scout_session with no arguments/);
+    assert.match(prompt, /Do not ask for a password/);
+    assert.doesNotMatch(prompt, /password\s*[:=]/i);
+  }
+  assert.throws(() => livePrompt({ session: "default" }), /the live prompt takes no arguments/);
+  assert.throws(
+    () => livePrompt({ password: "hunter2" }),
+    (err: Error) => {
+      assert.match(err.message, /does not take password/);
+      assert.doesNotMatch(err.message, /hunter2/);
+      return true;
+    },
+  );
+});
+
+test("the login prompt tells the model to call scout_login for the role and refuses a password", () => {
+  assert.deepEqual(
+    LOGIN_PROMPT_ARGUMENTS.map((arg) => [arg.name, arg.required]),
+    [
+      ["role", true],
+      ["url", false],
+    ],
+  );
+  assert.ok(!LOGIN_PROMPT_ARGUMENTS.some((arg) => /password|secret|token|credential/i.test(arg.name)));
+
+  const asked = loginPrompt({ role: "Admin", url: "http://localhost:3000" });
+  assert.match(asked, /scout_login/);
+  assert.match(asked, /\{"role":"admin","url":"http:\/\/localhost:3000"\}/);
+  assert.match(asked, /same role \("admin"\)/);
+  assert.match(asked, /Never pass a password/);
+  assert.doesNotMatch(asked, /password\s*[:=]/i);
+
+  const noUrl = loginPrompt({ role: "admin" });
+  assert.match(noUrl, /ask for the app's address/);
+  assert.doesNotMatch(noUrl, /"url":/);
+
+  assert.throws(() => loginPrompt(undefined), /give a role name/);
+  assert.throws(() => loginPrompt({ role: "../admin" }), /not allowed/);
+  assert.throws(
+    () => loginPrompt({ role: "admin", password: "hunter2" }),
+    (err: Error) => {
+      assert.match(err.message, /does not take password/);
+      assert.doesNotMatch(err.message, /hunter2/);
+      return true;
+    },
+  );
+  assert.throws(
+    () => loginPrompt({ role: "admin", url: "http://user:hunter2@localhost" }),
+    (err: Error) => {
+      assert.match(err.message, /no credentials in the URL/);
+      assert.doesNotMatch(err.message, /hunter2/);
+      return true;
+    },
+  );
 });
 
 const LAUNCH = ["/opt/node/bin/npx", "-y", "scenescout", "serve"];
