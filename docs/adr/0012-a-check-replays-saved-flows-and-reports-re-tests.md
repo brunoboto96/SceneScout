@@ -243,3 +243,14 @@ anything is written or printed, since a page can echo what was typed into an
 address or an error. Shorter values are not masked: they would rewrite
 ordinary words and numbers in the report.
 
+## Amendment, 3 October 2026: upload
+
+Upload is now a flow step, reversing its exclusion above. It was left out
+because uploading writes; since flows replay under `--flow-writes never` by
+default, an upload's submission is refused like any other write unless the
+check passes `--flow-writes allow`, so that reason no longer holds. Without it,
+any journey that starts from an attached file (a document to approve, an
+import to review) could not be saved. The step attaches a generated fixture,
+as `scout_upload` does, and never a file from disk: a check runs unattended,
+and a flow file naming a path is a way to send whatever is at that path.
+

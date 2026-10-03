@@ -669,6 +669,35 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     `${envMissing.status} ${envMissing.out.slice(-600)}`,
   );
 
+  // upload: a generated file attached to the page's only file input, its kind taken from the input's accept attribute,
+  // and a named fixture to a named input. Nothing is sent: the page reads the file it was given.
+  const uploaded = await checkWith(
+    project("flow-upload", {
+      "upload.json": {
+        steps: [
+          { action: "navigate", target: "/check-flow-upload.html" },
+          { action: "upload" },
+          { action: "expect-text", text: "(application/pdf)" },
+          { action: "upload", target: "testid=upload-input", fixture: "png", name: "scan.png" },
+          { action: "expect-text", text: "Attached scan.png (image/png)" },
+        ],
+      },
+    }),
+  );
+  check(
+    "upload: a flow attaches a generated file matched to the input's accept attribute, then a named fixture under a chosen name",
+    uploaded.status === 0 && uploaded.summary?.flows[0]?.status === "passed",
+    `${uploaded.status} ${JSON.stringify(uploaded.summary?.flows)} ${uploaded.out.slice(-600)}`,
+  );
+  const noInput = await checkWith(
+    project("flow-upload-none", { "upload.json": { steps: [{ action: "navigate", target: "/check-flow.html" }, { action: "upload" }] } }),
+  );
+  check(
+    "...and an upload step on a page with no file input fails at that step saying so",
+    noInput.status === 1 && noInput.summary?.flows[0]?.step === 2 && /^No file input on this page/.test(noInput.summary.flows[0].reason ?? ""),
+    `${noInput.status} ${JSON.stringify(noInput.summary?.flows)}`,
+  );
+
   // A step that would write. The same flow, under the default and under --flow-writes allow, both in read-only mode,
   // which on its own would let an ordinary POST through.
   const addFlow = {

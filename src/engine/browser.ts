@@ -5721,6 +5721,11 @@ export class BrowserEngine {
             // The oracle stores its details redacted (redactViolation), so the comparison is redacted too.
             collect(redactSecrets(httpErrorDetail("GET", current.url().replace(/#.*$/, ""), status)));
           }
+        } else if (step.action === "upload") {
+          const loc = step.target ? BrowserEngine.locatorFor(current, parseTarget(step.target)!).first() : null;
+          const outcome = await this.performUpload(loc, { ...(step.fixture ? { fixture: step.fixture } : {}), ...(step.name ? { name: step.name } : {}) });
+          if (outcome.refused) failure = outcome.refused.split("\n")[0];
+          else await this.settle();
         } else if (step.action === "press") {
           refusal = await this.vetFocusedActivation(step.value);
           if (!refusal) {
