@@ -277,6 +277,19 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
         ctxRecords.some((r) => r.inputType === "search" && r.inFilter === false),
       JSON.stringify(ctxRecords.filter((r) => r.tag === "input")),
     );
+
+    console.log("design audit: a picture out of its box's proportions is distorted only under object-fit: fill");
+    // The same 2:1 picture in the same square box; the two pages differ only in the class's object-fit.
+    await engine.navigate("/image-aspect-fill.html");
+    const fillAudit = await engine.designAudit();
+    await engine.navigate("/image-aspect-cover.html");
+    const coverAudit = await engine.designAudit();
+    check(
+      "a stretched image under object-fit: fill is reported as distorted",
+      /IMAGES \(1 distorted\):\n {2}⚠ \[gallery-photo\] — rendered 200×200 vs natural 200×100/.test(fillAudit),
+      fillAudit,
+    );
+    check("the same image under object-fit: cover, set by a class, is not", !coverAudit.includes("IMAGES ("), coverAudit);
     await engine.navigate("/");
 
     console.log("overlay/modal oracle (app modals, not native dialogs)");

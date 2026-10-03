@@ -122,7 +122,8 @@ export interface DesignPagePayload {
   scrollW: number;
   clientW: number;
   headings: Array<{ level: number; size: number; text: string }>;
-  images: Array<{ label: string; nw: number; nh: number; rw: number; rh: number }>;
+  /** `fit` is the computed object-fit, so a class sets it as surely as an inline style. */
+  images: PageImage[];
   /** Interactive elements intersecting the initial viewport — cognitive-density signal. */
   density: number;
   /** Filled engine-side (needs trusted keyboard events, not in-page JS). */
@@ -378,7 +379,7 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     if (img.naturalWidth <= 1 || img.naturalHeight <= 1 || r.width < 24 || r.height < 24) continue;
     const tid = img.getAttribute("data-testid");
     const label = tid ? "[" + tid + "]" : (img.getAttribute("alt") || (img.getAttribute("src") || "").split("/").pop() || "img").slice(0, 40);
-    images.push({ label, nw: img.naturalWidth, nh: img.naturalHeight, rw: Math.round(r.width), rh: Math.round(r.height) });
+    images.push({ label, nw: img.naturalWidth, nh: img.naturalHeight, rw: Math.round(r.width), rh: Math.round(r.height), fit: window.getComputedStyle(img).objectFit || "fill" });
   }
   const page = {
     scrollW: Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0),
@@ -717,6 +718,31 @@ export interface DesignScore {
   craft: number;
   consistency: number;
   clarity: number;
+}
+
+/** An image the audit measured: its natural size, its rendered box and its computed object-fit. */
+export interface PageImage {
+  label: string;
+  nw: number;
+  nh: number;
+  rw: number;
+  rh: number;
+  fit: string;
+}
+
+/** Past this, a stretched image reads as distorted rather than as rounding. */
+export const ASPECT_TOLERANCE = 0.12;
+
+/**
+ * How far an image is stretched out of its proportions, or null when it is not.
+ * Only `fill`, the default, stretches the picture to its box: `cover` and `contain`
+ * scale it uniformly and crop or letterbox, `none` draws it at its own size and
+ * `scale-down` is one of those two. So a mismatched box is distortion only under `fill`.
+ */
+export function aspectDistortion(img: PageImage): number | null {
+  if (img.fit !== "fill") return null;
+  const off = Math.abs(img.rw / img.rh / (img.nw / img.nh) - 1);
+  return off > ASPECT_TOLERANCE ? off : null;
 }
 
 /**
@@ -1073,7 +1099,10 @@ export function analyzeDesign(
   if (affordances.length > 0) sections.push(`AFFORDANCES:\n` + affordances.map((s) => `  ${s}`).join("\n"));
 
   // ---- 12. IMAGES: aspect-ratio distortion (rendered box fights the source's proportions).
-  const distorted = page.images.map((img) => ({ img, off: Math.abs(img.rw / img.rh / (img.nw / img.nh) - 1) })).filter(({ off }) => off > 0.12);
+  const distorted = page.images.flatMap((img) => {
+    const off = aspectDistortion(img);
+    return off === null ? [] : [{ img, off }];
+  });
   if (distorted.length > 0) {
     sections.push(
       `IMAGES (${distorted.length} distorted):\n` +
