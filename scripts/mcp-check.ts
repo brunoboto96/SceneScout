@@ -967,7 +967,49 @@ async function main(): Promise<void> {
     console.error(`MCP CHECK FAILED — an unknown level was not refused with the choices. Got: ${JSON.stringify(refused)}`);
     process.exit(1);
   }
+  const promptTextOf = (result: { messages: Array<{ content: { type: string; text?: string } }> }): string =>
+    result.messages.map((m) => (m.content.type === "text" ? (m.content.text ?? "") : "")).join("\n");
+  const liveListed = prompts.find((p) => p.name === "live");
+  const loginListed = prompts.find((p) => p.name === "login");
+  const liveGot = await client.getPrompt({ name: "live" });
+  const liveText = promptTextOf(liveGot);
+  const loginGot = await client.getPrompt({ name: "login", arguments: { role: "admin", url: "http://localhost:3000" } });
+  const loginText = promptTextOf(loginGot);
+  const loginBare = await client.getPrompt({ name: "login" }).then(
+    () => "",
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  );
+  const loginSecret = await client.getPrompt({ name: "login", arguments: { role: "admin", password: "hunter2" } }).then(
+    () => "accepted",
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  );
+  const loginArgs = loginListed?.arguments ?? [];
+  if (
+    prompts
+      .map((p) => p.name)
+      .sort()
+      .join(",") !== "explore,live,login" ||
+    (liveListed?.arguments ?? []).length !== 0 ||
+    !liveText.includes("127.0.0.1") ||
+    !/scout_session with no arguments/.test(liveText) ||
+    /password\s*[:=]/i.test(liveText) ||
+    loginArgs.map((a) => `${a.name}:${a.required === true}`).join(",") !== "role:true,url:false" ||
+    loginArgs.some((a) => /password|secret|token|credential/i.test(a.name)) ||
+    !loginText.includes('{"role":"admin","url":"http://localhost:3000"}') ||
+    !/scout_login/.test(loginText) ||
+    !/give a role name/.test(loginBare) ||
+    loginSecret.includes("hunter2") ||
+    !/does not take password/.test(loginSecret)
+  ) {
+    console.error(
+      `MCP CHECK FAILED — live or login prompt is missing, takes a password, or does not say what to call.\n` +
+        `live: ${JSON.stringify(liveText.slice(0, 200))}\nlogin: ${JSON.stringify(loginText.slice(0, 200))}\n` +
+        `no role: ${JSON.stringify(loginBare)}\npassword arg: ${JSON.stringify(loginSecret)}`,
+    );
+    process.exit(1);
+  }
   console.log("✓ the method reaches a client through instructions, scout_playbook and the explore prompt");
+  console.log("✓ live and login prompts are listed, name no password, and tell the model what to return or call");
 
   // The SKILL is the agent's entire methodology — a tool it never mentions is
   // effectively unshipped, however well the engine implements it. scout_scroll
@@ -1042,7 +1084,7 @@ async function main(): Promise<void> {
     }
   }
   const reference = asLf(fs.readFileSync(path.join(guideDir, "Configuration-reference.md"), "utf8"));
-  const attachSection = reference.split("\n## `scout_attach` options\n")[1] ?? "";
+  const attachSection = (reference.split("\n## `scout_attach` options\n")[1] ?? "").split("\n## ")[0];
   const listed = [...attachSection.matchAll(/^\| `([A-Za-z]+)` \|/gm)].map((m) => m[1]).sort();
   const attachParams = [...(schemaOf.get("scout_attach") ?? [])].sort();
   if (JSON.stringify(listed) !== JSON.stringify(attachParams)) {
@@ -1057,12 +1099,41 @@ async function main(): Promise<void> {
     else if (JSON.stringify(listedRequired) !== JSON.stringify(required))
       guideGaps.push(`Configuration-reference.md marks ${tool} options [${listedRequired.join(", ")}] required, the server requires [${required.join(", ")}]`);
   }
+  // Prompt names and arguments, held to prompts/list the same way tool options are held to their schemas.
+  const promptSection = (reference.split("\n## MCP prompts\n")[1] ?? "").split("\n## ")[0];
+  const promptRows = [...promptSection.matchAll(/^\| `([a-z]+)` \| ([^|\n]+) \|/gm)];
+  const listedPrompts = new Map<string, Array<{ name: string; required: boolean }>>();
+  if (!promptSection) guideGaps.push("Configuration-reference.md has no MCP prompts section");
+  for (const row of promptRows) {
+    const cell = row[2].trim();
+    const args =
+      cell === "none"
+        ? []
+        : [...cell.matchAll(/`([A-Za-z][A-Za-z0-9]*)`\s*\((required|optional)\)/g)].map((m) => ({
+            name: m[1],
+            required: m[2] === "required",
+          }));
+    if (cell !== "none" && args.length === 0)
+      guideGaps.push(`Configuration-reference.md prompt ${row[1]} has arguments that are not \`name\` (required|optional)`);
+    listedPrompts.set(row[1], args);
+  }
+  const servedPrompts = new Map(prompts.map((p) => [p.name, p]));
+  const listedNames = [...listedPrompts.keys()].sort().join(",");
+  const servedNames = [...servedPrompts.keys()].sort().join(",");
+  if (listedNames !== servedNames) guideGaps.push(`Configuration-reference.md lists prompts [${listedNames}], the server has [${servedNames}]`);
+  for (const [name, args] of listedPrompts) {
+    const served = (servedPrompts.get(name)?.arguments ?? []).map((a) => ({ name: a.name, required: a.required === true }));
+    if (JSON.stringify(args) !== JSON.stringify(served))
+      guideGaps.push(`Configuration-reference.md lists ${name} arguments ${JSON.stringify(args)}, the server has ${JSON.stringify(served)}`);
+    if (args.some((a) => /password|secret|token|credential/i.test(a.name)))
+      guideGaps.push(`Configuration-reference.md prompt ${name} takes a credential argument`);
+  }
   if (guideGaps.length > 0) {
     console.error(`MCP CHECK FAILED — the guide disagrees with the server's tools:\n  ${guideGaps.join("\n  ")}`);
     process.exit(1);
   }
   console.log(
-    "✓ the guide names only tools and parameters the server has, and lists every scout_attach option, and which scout_attach and scout_login options are required",
+    "✓ the guide names only tools and parameters the server has, lists every scout_attach option, which scout_attach and scout_login options are required, and the same prompts the server lists",
   );
 
   const result = await client.callTool({ name: "scout_scan", arguments: { projectPath: packageRoot } });

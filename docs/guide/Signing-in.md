@@ -39,6 +39,8 @@ scout_login { url: "http://localhost:3000/login", role: "admin", projectPath: "/
 
 `projectPath` is optional, as for `scout_attach`: left out, the sign-in is saved in the folder an attach with no `projectPath` uses for that site, so the attach after it finds it, and the result says which folder that is. The agent tells you a window has opened. You sign in as usual, and the window saves and closes by itself. The call returns once the sign-in is saved, or after `waitSeconds` (default 120) with the window still open. The agent then calls `scout_login` again with the same role to keep waiting. The window closes after 15 minutes without saving if nobody signs in. A window needs a desktop. On a machine with no display, run `scenescout login` where you can see the window.
 
+Clients that list the server's prompts also have `login`. It takes the role, and the app's address when you have it, and the agent calls `scout_login` and waits the way that tool already waits. It has no password argument: you still sign in yourself in the window.
+
 Then ask the agent to test as that role (`/scenescout --role admin`, or `scout_attach {role: "admin"}`). A role with no saved login is refused with the command to run; when SceneScout chose the project folder itself, the command names it with `--project`, so the login is saved where the next attach looks. Record one login per role you want to compare:
 
 ```bash

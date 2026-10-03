@@ -49,6 +49,8 @@ Invoke the skill with no flags (`/scenescout`, or the `explore` prompt with no a
 
 You are never asked to choose a write mode. `safe-write` and `destructive` are used only when you ask for them. Any flag skips the questions, and what the flags leave out takes its default.
 
+The same clients list two more prompts. `live` takes nothing and asks the agent for the loopback live-view URL of the current session. `login` takes a role, and the app's address when you have it, and asks the agent to call `scout_login` for that role. Neither takes a password.
+
 ### Next to the code, or against a URL
 
 SceneScout needs only a URL, but it does better from inside the app's repository:
