@@ -1,0 +1,27 @@
+{
+  "name": "scenescout-mod",
+  "description": "Optional Claude Code mod for SceneScout: a run pane that refreshes itself, opened with /scenescout-pane, and an opt-in setting for the model lane agents run on. Needs the scenescout plugin or server.",
+  "version": "3.18.0",
+  "author": {
+    "name": "brunoboto96",
+    "url": "https://github.com/brunoboto96"
+  },
+  "homepage": "https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Ways-to-use-it.md#the-claude-code-mod",
+  "repository": "https://github.com/brunoboto96/SceneScout",
+  "license": "MIT",
+  "keywords": ["testing", "qa", "exploratory-testing", "mod", "claude-code"],
+  "userConfig": {
+    "lane_model": {
+      "type": "string",
+      "title": "Lane agents' model",
+      "description": "The model a SceneScout lane agent runs on, as an alias (sonnet, haiku, opus) or a full model id. Empty leaves the choice to Claude Code and the planner.",
+      "default": ""
+    },
+    "mcp_server": {
+      "type": "string",
+      "title": "SceneScout server name",
+      "description": "The SceneScout MCP server's name as /mcp lists it, when it is not 'scenescout' or the plugin's own 'plugin:scenescout:scenescout'. Empty tries those two.",
+      "default": ""
+    }
+  }
+}

@@ -70,7 +70,7 @@ SceneScout needs only a URL, but it does better from inside the app's repository
 - **Sweep independent pages.** "Open every tab of the record page and list what fails." A plan stops at its first new violation, which suits a form whose steps depend on each other. For tabs, filters or pages that do not, the agent passes `scout_run_plan {onViolation: "continue"}`: an error status is listed on its step's line and the next step runs. A failed step, a write-policy refusal or an uncaught error still stops it, and a saved flow always stops.
 - **Show one element.** "Show me the new filter bar." `scout_capture` saves a PNG of that element; it shows, it does not judge.
 - **Slow it down.** "Pause five seconds between actions so I can follow." That is `scout_attach {paceMs: 5000}`, or `scout_session {paceMs: 5000}` mid-run.
-- **Watch it in the chat.** "Show me how the run is going." The agent calls `scout_status`. In a client that renders MCP Apps (claude.ai, Claude Desktop chat, ChatGPT, VS Code, Cursor) that opens a pane in the conversation which refreshes every few seconds: each session's objective and task, open findings by severity, coverage, and a button for the live view. Every other client, Claude Code included, gets the same as text with the live view's address.
+- **Watch it in the chat.** "Show me how the run is going." The agent calls `scout_status`. In a client that renders MCP Apps (claude.ai, Claude Desktop chat, ChatGPT, VS Code, Cursor) that opens a pane in the conversation which refreshes every few seconds: each session's objective and task, open findings by severity, coverage, and a button for the live view. Every other client, Claude Code included, gets the same as text with the live view's address; in Claude Code, the optional [mod](#the-claude-code-mod) draws the pane beside the transcript instead.
 - **Another browser.** "Run the same pass in WebKit." `scout_attach {browser: "webkit"}`; the first such attach downloads WebKit, once.
 - **A phone-sized viewport.** `scout_attach {viewportWidth: 390, viewportHeight: 844}`, then a design audit on the key pages.
 - **Fewer duplicate findings.** "Ask a model whether two findings are the same defect." That is `scout_attach {dedup: "judge"}`, or `SCENESCOUT_DEDUP=judge` in the server's environment, with `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` there too. A filing the rule keeps apart is then compared with the open findings on its page, and each pair's titles, categories and evidence, and the page's path, are sent to that provider. It is off by default.
@@ -98,6 +98,22 @@ Practical limits:
 - A saved login serves any number of sessions of that role, each in its own browser.
 
 [How it works](../how-it-works.md#5-a-run-split-across-parallel-lanes) has the sequence in a diagram.
+
+## The Claude Code mod
+
+An optional extra for Claude Code, installed as a second plugin from the same marketplace. It adds only what an MCP server cannot do in Claude Code, which draws no MCP Apps: a run pane beside the transcript, and a choice of model for lane agents. The `scenescout` plugin, its skill, its server, the `scout_status` text and the `live` and `login` prompts work the same without it, so an organisation that blocks mods loses nothing.
+
+```text
+/plugin install scenescout@scenescout-marketplace
+/plugin install scenescout-mod@scenescout-marketplace
+```
+
+- **Where it runs.** The Claude Code CLI and the Code tab of the Claude Desktop app, with Claude Code v2.1.287 or later. It does not run in the chat tab or in other clients, and draws nothing in the VS Code extension's chat panel or in `claude -p`, where `/scenescout-pane` prints the server's status text instead.
+- **The pane.** `/scenescout-pane` opens it. Every 2.5 seconds it asks the SceneScout server for the same data the `scout_status` pane shows: each session with its task and objective, open findings by severity, coverage, and a link to the live view. It has no image and no text field, and asks for no password. Esc closes it, and it stops polling once closed.
+- **Lane agents' model.** Set `lane_model` (`/plugin configure scenescout-mod@scenescout-marketplace`, or the `/config` row) to an alias such as `sonnet` or a full model id, and a subagent whose prompt names `scout_attach` or `scout_lane_report` starts on that model, over the one the planner chose. A fork keeps its parent's model. Left empty, which is the default, the mod does not handle subagents at all.
+- **Finding the server.** The pane calls the server named `scenescout` (how `scenescout install` registers it) or `plugin:scenescout:scenescout` (how the plugin starts it). If yours is named otherwise, set `mcp_server` to the name `/mcp` lists.
+
+**Trust.** A mod is JavaScript that runs inside Claude Code with your permissions, unsandboxed: it could read your files and environment and see your session. This one only calls the SceneScout server's status tool, draws the pane, and changes a lane's model when you set one; `claude plugin validate` on its directory lists every event it handles and every call it makes. Install it only if you are comfortable running it, and leave it out where your organisation's policy says no.
 
 ## `scenescout check`: a gate in CI
 

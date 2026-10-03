@@ -154,6 +154,8 @@ Either way it downloads the browser and registers the server with the client you
 
 Then start a new chat to use SceneScout; the test browser downloads on first use (to have it ready beforehand: `npx -y scenescout install --browser-only`). The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release lands here the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
 
+An optional second plugin, `scenescout-mod@scenescout-marketplace`, adds a run pane (`/scenescout-pane`) and a setting for the model lane agents run on, in the Claude Code CLI and the desktop Code tab. It is a mod: unsandboxed JavaScript that runs inside Claude Code, so it is opt-in. [The Claude Code mod](docs/guide/Ways-to-use-it.md#the-claude-code-mod).
+
 **Using Claude Desktop?** Install the extension: download `scenescout-X.Y.Z.mcpb` from the [latest release](https://github.com/brunoboto96/SceneScout/releases/latest) and open it (or Settings > Extensions > Advanced settings > Install Extension). It works as soon as it is installed, with no terminal step: the test browser downloads on first use. Start a new chat and ask *"Use SceneScout to test http://localhost:3000"*. [More in the guide](docs/guide/Start-here.md#as-a-claude-desktop-extension).
 
 **A client that is not in that list?** [Add the server to its config by hand](#-other-mcp-clients); the test browser downloads on first use.
