@@ -1,6 +1,6 @@
 # Configuration reference
 
-Every command-line option, environment variable, GitHub Action input, `/scenescout qa` repository setting and `scout_attach` option, with its default. A test (`guide-test`, and `mcp-check` for `scout_attach`) compares these tables with the code, so an option added or removed in one place and not the other fails the build. `scenescout --help` prints the same options in short.
+Every command-line option, environment variable, GitHub Action input, `/scenescout qa` repository setting, `scout_attach` option and MCP prompt, with its default. A test (`guide-test`, and `mcp-check` for `scout_attach`, `scout_login` and the MCP prompts) compares these tables with the code, so an option added or removed in one place and not the other fails the build. `scenescout --help` prints the same options in short.
 
 An option takes its value after a space or an equals sign: `--fail-on high` or `--fail-on=high`. Relative paths are resolved from the directory the command runs in.
 
@@ -427,3 +427,13 @@ What an agent can pass when it attaches a session. You rarely set these by hand;
 | `navTimeoutMs` | `SCENESCOUT_NAV_TIMEOUT_MS`, else `20000` | 1000 to 300000 |
 | `dedup` | `SCENESCOUT_DEDUP`, else `rule` | `judge` asks a model whether a filing the rule keeps apart from everything recorded is one of the open findings on its page; it needs a key in the server's environment and sends the findings' titles, categories and evidence, and the page's path, to the provider. For the whole run |
 | `open` | `SCENESCOUT_OPEN`, else by context | `live`, `report`, `both` or `none`: open the live view on this attach and `report.html` when `scout_report` writes it. Unset, both open on a local desktop session, headed or headless, and nothing opens in CI, over SSH, or on Linux with no display |
+
+## MCP prompts
+
+Clients that list the server's prompts offer these as commands, beside `scout_playbook` and the tools. None of them takes a password or any other credential. `mcp-check` holds this table to the prompts the server lists.
+
+| Prompt | Arguments | What it asks the agent to do |
+|---|---|---|
+| `explore` | `url` (optional), `level` (optional), `focus` (optional) | Start an exploratory session: load the method, and use whatever of the address, level and focus was given. With no arguments, ask the plain questions first |
+| `live` | none | Return the loopback live-view URL for the current session. Where the host can open a URL, it may open that address |
+| `login` | `role` (required), `url` (optional) | Call `scout_login` for that role and wait the way that tool waits. The person signs in in the window it opens. `url` is the app's address when you have it |

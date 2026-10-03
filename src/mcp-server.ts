@@ -121,6 +121,7 @@ import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL, SERVER_INSTRUCTIONS } from "./playbook.js";
+import { livePrompt, loginPrompt, LOGIN_PROMPT, LIVE_PROMPT, LOGIN_PROMPT_ARGUMENTS, LIVE_PROMPT_ARGUMENTS } from "./prompts.js";
 import { formatScan, scanProject } from "./scan.js";
 import {
   CAPTURE_MARGIN,
@@ -656,10 +657,11 @@ server.registerTool(
   },
 );
 
-// The same method as a prompt, for clients that list server prompts as commands.
-// Registered on the protocol server directly: the SDK's prompt helper rejects a
-// request that carries no `arguments` object, which is exactly what a client
-// sends when the person typed none, and every argument here is optional.
+// Prompts, for clients that list server prompts as commands. Registered on the
+// protocol server directly: the SDK's prompt helper rejects a request that
+// carries no `arguments` object, which is exactly what a client sends when the
+// person typed none. `explore` and `live` accept that; `login` then says the
+// role is missing. None of them takes a password.
 server.server.registerCapabilities({ prompts: {} });
 server.server.setRequestHandler(ListPromptsRequestSchema, () => ({
   prompts: [
@@ -669,14 +671,31 @@ server.server.setRequestHandler(ListPromptsRequestSchema, () => ({
       description: "Start an exploratory test session: loads the SceneScout method and states the target.",
       arguments: EXPLORE_PROMPT_ARGUMENTS,
     },
+    {
+      name: LIVE_PROMPT,
+      title: "Watch the live view",
+      description: "Return the loopback live-view URL for the current session. Takes no arguments and no password.",
+      arguments: LIVE_PROMPT_ARGUMENTS,
+    },
+    {
+      name: LOGIN_PROMPT,
+      title: "Sign in as a role",
+      description:
+        "Call scout_login for a role and wait the way that tool waits. The person signs in in the window it opens. Takes the role, and the app URL when you have it. Never a password.",
+      arguments: LOGIN_PROMPT_ARGUMENTS,
+    },
   ],
 }));
 server.server.setRequestHandler(GetPromptRequestSchema, (request) => {
-  if (request.params.name !== PLAYBOOK_PROMPT) throw new McpError(ErrorCode.InvalidParams, `Unknown prompt: ${request.params.name}`);
+  const name = request.params.name;
   let message: string;
   try {
-    message = explorePrompt(loadPlaybook(PACKAGE_ROOT), request.params.arguments);
+    if (name === PLAYBOOK_PROMPT) message = explorePrompt(loadPlaybook(PACKAGE_ROOT), request.params.arguments);
+    else if (name === LIVE_PROMPT) message = livePrompt(request.params.arguments);
+    else if (name === LOGIN_PROMPT) message = loginPrompt(request.params.arguments);
+    else throw new McpError(ErrorCode.InvalidParams, `Unknown prompt: ${name}`);
   } catch (err) {
+    if (err instanceof McpError) throw err;
     throw new McpError(ErrorCode.InvalidParams, err instanceof Error ? err.message : String(err));
   }
   return { messages: [{ role: "user" as const, content: { type: "text" as const, text: message } }] };

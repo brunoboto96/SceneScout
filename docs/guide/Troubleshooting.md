@@ -14,7 +14,7 @@ Run `npx -y scenescout doctor` first (`--engine` for clients other than Claude C
 | "Getting the test browser ready" on the first attach | The browser the test drives was not on this machine, so the server is downloading it, once. The attach carries on when it is done. To have it ready beforehand, run `npx -y scenescout install --browser-only`. On a machine where the server may download nothing, set `SCENESCOUT_BROWSER_DOWNLOAD=off` in its environment and put the browser there another way |
 | "In CI SceneScout downloads a browser only when asked" | A CI job keeps its explicit install step: add `npx -y scenescout install --browser-only --browsers <build>` before the tests, or set `SCENESCOUT_BROWSER_DOWNLOAD=on` to let the attach download it |
 | The tools broke after moving a folder or changing Node version | The registration stores absolute paths. Run `npx -y scenescout install` again |
-| The agent starts clicking without the method | In a client with no skill, the server's instructions tell the agent to call `scout_playbook` first; how closely a model follows them varies. Tell it to call `scout_playbook`, or use the client's `explore` prompt |
+| The agent starts clicking without the method | In a client with no skill, the server's instructions tell the agent to call `scout_playbook` first; how closely a model follows them varies. Tell it to call `scout_playbook`, or use the client's `explore` prompt. `live` and `login` are the prompts for the live-view address and for signing in as a role; neither takes a password |
 
 ## During a run
 
