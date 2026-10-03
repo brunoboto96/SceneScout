@@ -477,13 +477,61 @@ test("the plugin manifest ships the same version and starts the published server
   const server = plugin.mcpServers.scenescout;
   assert.deepEqual([server.command, ...server.args], ["npx", "-y", pkg.name, "serve"]);
   assert.ok("scenescout" in pkg.bin);
-  // The install command in the README is `scenescout@<marketplace name>`.
+  // The install command in the README is `scenescout@<marketplace name>`; the
+  // optional mod is listed after it as a plugin of its own.
   assert.deepEqual(
     marketplace.plugins.map((p) => p.name),
-    [plugin.name],
+    [plugin.name, "scenescout-mod"],
   );
+  assert.equal(marketplace.plugins[0].source, "./");
   assert.notEqual(marketplace.name, plugin.name, "a marketplace may not share its plugin's name");
   assert.ok(fs.existsSync(path.join(root, "skills", "scenescout", "SKILL.md")), "plugins load skills from skills/<name>/SKILL.md");
+});
+
+test("the optional mod is a plugin of its own: listed, versioned with the package, and adding no server", () => {
+  // Organisations that block mods must lose nothing: the main plugin keeps the
+  // skill and the server, and the mod's own directory holds only the mod.
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const read = (relative: string) => JSON.parse(fs.readFileSync(path.join(root, relative), "utf8"));
+  const pkg = read("package.json") as { version: string };
+  const marketplace = read(".claude-plugin/marketplace.json") as { plugins: Array<{ name: string; source: string; description: string }> };
+  const entry = marketplace.plugins.find((p) => p.name === "scenescout-mod");
+  assert.ok(entry, "the marketplace lists the mod");
+  assert.equal(entry.source, "./mods/scenescout-mod");
+  assert.match(entry.description, /optional/i, "the listing says the mod is optional");
+  const dir = path.join(root, entry.source);
+  const mod = read(path.join(entry.source, ".claude-plugin", "plugin.json")) as {
+    name: string;
+    version: string;
+    mcpServers?: unknown;
+    userConfig: Record<string, { type: string; title: string; description: string; default?: unknown; sensitive?: boolean }>;
+  };
+  assert.equal(mod.name, entry.name, "the plugin's name is the one the marketplace installs");
+  assert.equal(mod.version, pkg.version, "Claude Code offers the mod's update only when its own version moves");
+  assert.equal(mod.mcpServers, undefined, "the mod polls the scenescout plugin's server; a second server would be a second engine");
+  // userConfig options are strict objects: an unknown key stops the plugin loading.
+  const allowed = new Set(["type", "title", "description", "required", "default", "options", "multiple", "sensitive", "min", "max"]);
+  assert.deepEqual(Object.keys(mod.userConfig).sort(), ["lane_model", "mcp_server"]);
+  for (const [key, option] of Object.entries(mod.userConfig)) {
+    assert.match(key, /^[A-Za-z_][A-Za-z0-9_]*$/, `${key}: a userConfig key is an identifier`);
+    for (const field of Object.keys(option)) assert.ok(allowed.has(field), `${key}.${field} is not a userConfig field`);
+    assert.equal(option.type, "string");
+    assert.ok(option.title && option.description, `${key} has the title and description the dialog shows`);
+    assert.notEqual(option.sensitive, true, `${key}: the mod asks for no secret`);
+    assert.equal(option.default, "", `${key}: empty by default, so the mod does nothing until it is set`);
+  }
+  // hooks.json names one module, inside the plugin, and that module exists.
+  const hooks = read(path.join(entry.source, "hooks", "hooks.json")) as { modules: string[]; hooks?: unknown };
+  assert.deepEqual(hooks.modules, ["./register.js"]);
+  assert.equal(hooks.hooks, undefined, "no settings hooks: everything is in the module");
+  const register = fs.readFileSync(path.join(dir, "hooks", "register.js"), "utf8");
+  // A hooks module may import only its own files by relative path, and the bare `claude-code`.
+  for (const m of register.matchAll(/^import[^"']*["']([^"']+)["']/gm)) assert.match(m[1], /^\.\/|^claude-code$/, `register.js imports ${m[1]}`);
+  // The command matcher is a literal for the validator, so it is held equal to the constant the pane uses.
+  assert.ok(register.includes('on("command.run", { command: "scenescout-pane" }'), "the command hook matches /scenescout-pane");
+  assert.ok(register.includes('if (lane.model) {\n    on("agent.spawn"'), "the spawn hook is registered only when a lane model is set");
+  // Nothing in the main plugin's default component directories comes from the mod.
+  assert.ok(!fs.existsSync(path.join(root, "hooks")), "the main plugin carries no hooks of its own, so blocking mods costs it nothing");
 });
 
 test("the versioning step formats the files it rewrites", () => {
@@ -499,8 +547,10 @@ test("the versioning step formats the files it rewrites", () => {
   assert.ok(sync >= 0, "version-packages must sync the plugin version");
   assert.ok(format > sync, "version-packages must run Prettier over plugin.json and package.json after the sync");
   assert.ok(steps[format].includes("desktop-extension/manifest.json"), "and over the desktop extension's manifest, which the sync rewrites too");
+  assert.ok(steps[format].includes("mods/scenescout-mod/.claude-plugin/plugin.json"), "and over the mod's manifest, which the sync rewrites too");
   const syncScript = fs.readFileSync(path.join(root, "scripts", "sync-plugin-version.mjs"), "utf8");
   assert.match(syncScript, /path\.join\("desktop-extension", "manifest\.json"\)/, "the sync moves the desktop extension's version with the package");
+  assert.match(syncScript, /path\.join\("mods", "scenescout-mod", "\.claude-plugin", "plugin\.json"\)/, "the sync moves the mod's version with the package");
 });
 
 // ── The desktop extension (.mcpb) ────────────────────────────────────────────

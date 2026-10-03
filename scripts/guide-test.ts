@@ -968,3 +968,9 @@ test("the suite is wired into npm test and listed in AGENTS.md", () => {
   assert.match(pkg.scripts["test:unit"], /npm run guide-test\b/);
   assert.match(read("AGENTS.md"), /`guide-test` for/);
 });
+
+test("the mod settings table lists exactly the settings the mod's manifest asks for", () => {
+  const manifest = JSON.parse(read("mods/scenescout-mod/.claude-plugin/plugin.json")) as { userConfig: Record<string, unknown> };
+  const listed = sorted(tableIn(REFERENCE, "## Claude Code mod settings").map((r) => nameIn(r[0])));
+  assert.deepEqual(listed, sorted(Object.keys(manifest.userConfig)));
+});
