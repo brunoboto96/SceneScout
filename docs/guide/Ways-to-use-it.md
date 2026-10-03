@@ -47,6 +47,8 @@ Invoke the skill with no flags (`/scenescout`, or the `explore` prompt with no a
 | Real data: yes, or not sure | `observe`: nothing but `GET` requests leave the page, so nothing is created or changed |
 | Real data: no | `read-only`: ordinary forms are submitted, deletes and other destructive requests are blocked |
 
+Where your client can show a form (MCP elicitation in form mode, as Claude Code and VS Code offer), the agent calls `scout_intake` and the four questions appear as one form: pick how you sign in, what to check and whether the data is real, and the agent goes straight to the settings your answers choose. The form never asks for a password or a code; signing in happens later, in the browser window `scout_login` opens. To upload a file of tickets, pick tickets and leave the box empty, and the agent asks for the file in chat. Where the client has no forms, or you decline or close the form, the agent asks the same questions in chat.
+
 You are never asked to choose a write mode. `safe-write` and `destructive` are used only when you ask for them. Any flag skips the questions, and what the flags leave out takes its default.
 
 The same clients list two more prompts. `live` takes nothing and asks the agent for the loopback live-view URL of the current session. `login` takes a role, and the app's address when you have it, and asks the agent to call `scout_login` for that role. Neither takes a password.

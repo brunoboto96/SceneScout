@@ -9,9 +9,9 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { ElicitRequestSchema, ListRootsRequestSchema, type ElicitRequest, type ElicitResult } from "@modelcontextprotocol/sdk/types.js";
 import { spawnSync } from "node:child_process";
-import { introQuestions } from "../dist/intake.js";
+import { INTAKE_FORM_MESSAGE, introQuestions } from "../dist/intake.js";
 import { shellQuote, writeProfile } from "../dist/engine/profiles.js";
 import { siteFolderName } from "../dist/engine/project-folder.js";
 import { MCP_APP_MIME, STATUS_PANE_URI, STATUS_POLL_TOOL, STATUS_TOOL } from "../dist/engine/status-pane.js";
@@ -24,6 +24,7 @@ const packageRoot = path.join(here, "..");
 
 const EXPECTED_TOOLS = [
   "scout_playbook",
+  "scout_intake",
   "scout_lane_report",
   "scout_scan",
   "scout_attach",
@@ -927,6 +928,85 @@ async function defaultFolderCheck(): Promise<void> {
   }
 }
 
+/**
+ * scout_intake over the wire, from clients that differ only in what they
+ * declare and answer: no elicitation, URL mode only, form mode (and the empty
+ * object that means it) answering accept, decline and cancel. Uses the SDK's
+ * own client-side elicitation handler, so the request shape is the one a real
+ * client receives and validates.
+ */
+async function intakeCheck(): Promise<void> {
+  const env = Object.fromEntries(
+    Object.entries({ ...process.env, SCENESCOUT_LIVE: "off", SCENESCOUT_OPEN: "none" }).filter((e): e is [string, string] => typeof e[1] === "string"),
+  );
+  /** Call scout_intake from a client declaring `elicitation` (or none) whose form handler answers `answer`; return the reply and the forms it was shown. */
+  const intakeFrom = async (
+    elicitation: Record<string, object> | undefined,
+    answer?: ElicitResult,
+    args: Record<string, unknown> = {},
+  ): Promise<{ reply: string; forms: ElicitRequest["params"][] }> => {
+    const client = new Client({ name: "ft-check-intake", version: "0.0.1" }, elicitation ? { capabilities: { elicitation } } : undefined);
+    const forms: ElicitRequest["params"][] = [];
+    if (elicitation)
+      client.setRequestHandler(ElicitRequestSchema, async (request) => {
+        forms.push(request.params);
+        return answer ?? { action: "cancel" };
+      });
+    await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env }));
+    try {
+      return { reply: textOf(await client.callTool({ name: "scout_intake", arguments: args })), forms };
+    } finally {
+      await client.close();
+    }
+  };
+  const asksInChat = (label: string, got: { reply: string; forms: unknown[] }, why: RegExp, formsShown: number): void => {
+    if (!got.reply.endsWith(introQuestions()) || !why.test(got.reply))
+      fail(`scout_intake from ${label} did not hand the four questions back for the chat (${why}):\n${got.reply}`);
+    if (got.forms.length !== formsShown) fail(`scout_intake from ${label} showed ${got.forms.length} forms, expected ${formsShown}`);
+  };
+
+  asksInChat("a client with no elicitation", await intakeFrom(undefined), /this client cannot show a form/, 0);
+  // URL mode only: a form must never be sent to it, so the handler is never reached.
+  asksInChat("a client with URL elicitation only", await intakeFrom({ url: {} }, { action: "accept", content: {} }), /this client cannot show a form/, 0);
+  asksInChat("a client whose person declined", await intakeFrom({ form: {} }, { action: "decline" }), /declined the form/, 1);
+  asksInChat("a client whose person closed the form", await intakeFrom({ form: {} }, { action: "cancel" }), /closed the form without answering/, 1);
+
+  const accepted = await intakeFrom(
+    { form: {} },
+    {
+      action: "accept",
+      content: { address: "http://localhost:3000", signIn: "sso", whatToCheck: "description", details: "the settings page", realData: "no" },
+    },
+    { url: "http://localhost:3000" },
+  );
+  const form = accepted.forms[0] as
+    { mode?: string; message: string; requestedSchema: { properties: Record<string, { default?: string; oneOf?: unknown[] }> } } | undefined;
+  if (!form || form.mode !== "form" || form.message !== INTAKE_FORM_MESSAGE)
+    fail(`scout_intake did not send one form-mode request with its message: ${JSON.stringify(accepted.forms)}`);
+  const fields = Object.keys(form.requestedSchema.properties);
+  if (fields.join() !== "address,signIn,whatToCheck,details,realData") fail(`the form's fields are ${fields.join()}`);
+  if (form.requestedSchema.properties.address.default !== "http://localhost:3000") fail("the address the agent passed did not start filled in");
+  if (/password|secret|token/i.test(fields.join())) fail(`the form has a field for a credential: ${fields.join()}`);
+  const order = ["scout_login {", "scout_attach {", '"mode":"read-only"', '"role":"user"', '"objective":"the settings page"'];
+  if (!order.every((part) => accepted.reply.includes(part)) || accepted.reply.indexOf("scout_login") > accepted.reply.indexOf("scout_attach"))
+    fail(`an accepted form did not return the sign-in and attach settings in order:\n${accepted.reply}`);
+  // The empty object is form mode by the specification, and an answer the schema refuses still ends in the chat.
+  const empty = await intakeFrom({}, { action: "accept", content: { address: "http://x.test", signIn: "none", whatToCheck: "everything", realData: "yes" } });
+  if (empty.forms.length !== 1 || !empty.reply.includes('"mode":"observe"')) fail(`an empty elicitation capability was not offered the form:\n${empty.reply}`);
+  asksInChat(
+    "a client answering with a value the form never offered",
+    await intakeFrom(
+      { form: {} },
+      { action: "accept", content: { address: "http://x.test", signIn: "fingerprint", whatToCheck: "everything", realData: "yes" } },
+    ),
+    /the form failed: .*(?:schema|must be equal)/,
+    1,
+  );
+  console.log(
+    "✓ scout_intake shows one form to a client declaring form elicitation, maps an accept to settings, and hands the questions to the chat on no form, URL only, decline, cancel or a refused answer",
+  );
+}
+
 async function main(): Promise<void> {
   // On a desktop the server opens the live view and the report by default; a check opens nothing.
   const transport = new StdioClientTransport({ command: "node", args: [serverPath], env: { ...getDefaultEnvironment(), SCENESCOUT_OPEN: "none" } });
@@ -1208,6 +1288,7 @@ async function main(): Promise<void> {
   await defaultFolderCheck();
   await findingPictureCapCheck();
   await openCheck();
+  await intakeCheck();
   console.log("\nMCP CHECK PASSED");
 }
 

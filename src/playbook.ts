@@ -86,7 +86,7 @@ export function explorePrompt(playbook: string, args: Record<string, unknown> | 
   }
   // Nothing asked for at all: the person has chosen no settings, so the run starts with the plain questions.
   if (given("url") === undefined && level === undefined && given("focus") === undefined) {
-    return `${playbook}\n\n---\n\nRun an exploratory test session following the method above. I gave no settings: before setup, ask me these questions in one message, then choose the settings from my answers as the method says.\n${introQuestions()}`;
+    return `${playbook}\n\n---\n\nRun an exploratory test session following the method above. I gave no settings: before setup, call scout_intake, which asks me these questions in a form where this client can show one; when it returns them as text instead, ask me them in one message, then choose the settings from my answers as the method says.\n${introQuestions()}`;
   }
   const asks = [
     given("url") ? `Target: ${given("url")}` : "Target: ask me for the URL of the running app, or find it from the project.",
