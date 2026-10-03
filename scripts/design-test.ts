@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   analyzeDesign,
+  aspectDistortion,
   contrastRatio,
   distinguishingLayer,
   elevationKey,
@@ -18,6 +19,7 @@ import {
   namesFilter,
   shadowLayers,
   styleSignature,
+  type PageImage,
 } from "../src/engine/design.ts";
 import { formatJourney, measureJourney } from "../src/engine/journey.ts";
 
@@ -662,4 +664,39 @@ test("an icon button the snapshot names by its image's alt text is not listed; t
   const blank = page("");
   assert.ok(blank.report.includes(`<button> "(no text)" — control with no accessible name`), blank.report);
   assert.ok((blank.score?.a11y ?? 100) < 100, blank.report);
+});
+
+// ---------------------------------------------------------------------------
+// image-aspect — only object-fit: fill stretches a picture out of its proportions
+// ---------------------------------------------------------------------------
+
+test("a 2:1 image in a square box is distorted under fill and not under any object-fit that keeps its proportions", () => {
+  const img = (fit: string): PageImage => ({ label: "[hero]", nw: 200, nh: 100, rw: 200, rh: 200, fit });
+  const cases: Array<[string, boolean]> = [
+    ["fill", true],
+    ["cover", false],
+    ["contain", false],
+    ["scale-down", false],
+    ["none", false],
+  ];
+  for (const [fit, distorted] of cases) assert.equal(aspectDistortion(img(fit)) !== null, distorted, fit);
+  // The same fit with a box that matches the picture is not distortion either.
+  assert.equal(aspectDistortion({ ...img("fill"), rh: 100 }), null);
+});
+
+test("analyzeDesign files image-aspect for a stretched fill image and not for the same image under cover", () => {
+  const audit = (fit: string) => {
+    const p = payload([rec({ text: "content" })]);
+    p.page.images = [{ label: "[hero]", nw: 5000, nh: 3500, rw: 1280, rh: 475, fit }];
+    return analyzeDesign(p, VIEWPORT);
+  };
+  const fill = audit("fill");
+  assert.ok(
+    fill.defects.some((d) => d.rule === "image-aspect" && d.detail.startsWith("[hero] — rendered 1280×475")),
+    JSON.stringify(fill.defects),
+  );
+  assert.ok(fill.report.includes("IMAGES (1 distorted)"), fill.report);
+  const cover = audit("cover");
+  assert.ok(!cover.defects.some((d) => d.rule === "image-aspect"), JSON.stringify(cover.defects));
+  assert.ok(!cover.report.includes("IMAGES ("), cover.report);
 });
