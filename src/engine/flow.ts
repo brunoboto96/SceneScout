@@ -155,6 +155,18 @@ export function parseTarget(target: string): FlowTarget | null {
   return name === undefined ? { by: "role", role: role[1].toLowerCase() } : { by: "role", role: role[1].toLowerCase(), name };
 }
 
+/**
+ * Why a step cannot act on a target that is visible, or null when it can: a
+ * click or a select needs the control enabled, typing needs it editable. The
+ * report says this instead of an action timeout, which would send the reader to
+ * raise a limit that can never help.
+ */
+export function notActionable(action: "click" | "type" | "select", facts: { enabled: boolean; editable: boolean | null }): string | null {
+  if (!facts.enabled) return "is visible but disabled";
+  if (action === "type" && facts.editable === false) return "is visible but read-only";
+  return null;
+}
+
 const REQUEST_RE = /^(GET|POST|PUT|PATCH|DELETE|HEAD) (\/\S*)$/;
 
 function isRegex(pattern: string): boolean {

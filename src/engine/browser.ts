@@ -117,6 +117,7 @@ import {
   FLOW_AFTER_LAST_STEP_MS,
   isAction,
   matchRequest,
+  notActionable,
   parseTarget,
   splitRefusals,
   TARGET_HELP,
@@ -5584,6 +5585,30 @@ export class BrowserEngine {
   }
 
   /**
+   * Wait up to the action limit for a visible target to accept `action`, and
+   * say why it never did (flow.ts notActionable), or null once it can. Without
+   * this a disabled control failed as an action timeout with a hint to raise
+   * the limit, though waiting could never help.
+   */
+  private async waitUntilActionable(loc: import("playwright").Locator, action: "click" | "type" | "select"): Promise<string | null> {
+    const read = async () =>
+      notActionable(action, {
+        enabled: await loc.isEnabled({ timeout: 1000 }).catch(() => true),
+        editable: action === "type" ? await loc.isEditable({ timeout: 1000 }).catch(() => null) : null,
+      });
+    const until = Date.now() + this.limits.actionMs;
+    let reason = await read();
+    while (reason && Date.now() < until) {
+      await loc
+        .page()
+        .waitForTimeout(100)
+        .catch(() => {});
+      reason = await read();
+    }
+    return reason;
+  }
+
+  /**
    * Replay one saved flow for `scenescout check`. Acts and reports only: the
    * schema, the matching rules and what an outcome means live in flow.ts and
    * check.ts. It stops at the first step that breaks, or that the write policy
@@ -5681,8 +5706,11 @@ export class BrowserEngine {
               .waitFor({ state: "visible", timeout: this.limits.actionMs })
               .then(() => true)
               .catch(() => false);
+            const blocked = found ? await this.waitUntilActionable(loc, step.action) : null;
             if (!found) {
               failure = `nothing visible matches ${step.target} within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
+            } else if (blocked) {
+              failure = `${step.target} ${blocked} after ${this.limits.actionMs / 1000}s`;
             } else {
               const label = (
                 (await loc.getAttribute("aria-label").catch(() => null)) ??
