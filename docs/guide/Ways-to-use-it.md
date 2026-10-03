@@ -121,6 +121,8 @@ It writes `report.md`, `check.json` and `check.sarif` to `.scenescout/check/` (o
 
 **Worth a look.** Two rules measure something exactly that is a defect only under a convention the check cannot see: `off-grid-spacing` (a 4px spacing scale) and `indistinct-link` (links styled like body text). They are listed under "Worth a look", never counted and never fail the gate at any `--fail-on`, and appear in SARIF at level `note`.
 
+**Needs sign-in.** With no `--storage-state`, a route that sends the browser to the sign-in page is doing what it should for a visitor who is not signed in, so it is not an `auth-redirect` issue. Those routes are listed once under "Needs sign-in" (and as `needsSignIn` in `check.json`): "N routes need sign-in; give a role to cover them". Pass `--storage-state` with a signed-in session, such as a profile saved by `scenescout login`, to measure them. `--ignore-path` takes a route off that list. Given a session, a route that still sends the browser to sign-in means the session was lost or expired, and is an `auth-redirect` issue.
+
 **Saved flows.** Every `.scenescout/flows/*.json` is replayed after the crawl with no model involved. A flow is the steps `scout_run_plan` takes, plus assertions:
 
 ```json

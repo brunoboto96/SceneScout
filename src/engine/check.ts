@@ -49,7 +49,7 @@ export interface RouteHealth {
   /** The document's media type (crawl.ts mediaTypeOf), when it answered with one. */
   contentType?: string;
   loadError?: string;
-  /** Sent to a sign-in page: auth missing or expired. */
+  /** Sent to a sign-in page: with a signed-in session, it was missing or expired; with none, the route needs one. */
   loginRedirect: boolean;
   /** Interactable controls on the page. */
   elements: number;
@@ -114,7 +114,11 @@ export const CHECK_RULES = {
     title: "Credential posted to any origin",
     help: 'The page called postMessage with targetOrigin "*" and a token-shaped value in the message, so whatever origin the receiving window holds can read it. The value is never reported: its path in the message, its shape and its first four characters are.',
   },
-  "auth-redirect": { severity: "medium", title: "Sent to sign-in", help: "The route redirected to a sign-in page; the session is missing or expired." },
+  "auth-redirect": {
+    severity: "medium",
+    title: "Sent to sign-in",
+    help: "The route redirected to a sign-in page although the check was given a signed-in session, so the session is missing or expired. With no session given, such a route is listed as needing sign-in instead.",
+  },
   "dead-end": { severity: "medium", title: "Dead end", help: "The page has no controls at all: no navigation and no way back." },
   "blocking-overlay": {
     severity: "high",
@@ -334,6 +338,12 @@ export function geometryRule(line: string): CheckRule | null {
  * `--ignore-path` drops a fact on the route it names, or one rule there,
  * before the fact is filed. A fact also seen on a route that is not exempted
  * stays, on that route alone.
+ *
+ * A route that sends the browser to sign-in is an `auth-redirect` issue only
+ * when the check was `signedIn`: then a session it was given was lost. With
+ * no session, sending a signed-out visitor to sign-in is the route working,
+ * so it goes to `needsSignIn` instead, a coverage gap rather than a defect.
+ * The default is signed in, so a caller that does not say never hides one.
  */
 export function checkFindings(
   routes: readonly RouteHealth[],
@@ -342,7 +352,9 @@ export function checkFindings(
   flows: readonly FlowRun[] = [],
   baselines: BaselineRun | null = null,
   ignorePaths: readonly IgnoredPath[] = [],
-): { issues: CheckIssue[]; worthALook: CheckObservation[] } {
+  signedIn = true,
+): { issues: CheckIssue[]; worthALook: CheckObservation[]; needsSignIn: string[] } {
+  const needsSignIn: string[] = [];
   const byKey = new Map<string, CheckIssue>();
   const looks = new Map<string, CheckObservation>();
   /** A route (and, when named, one rule on it) that --ignore-path exempts. */
@@ -387,7 +399,10 @@ export function checkFindings(
     }
     if (r.status !== null && r.status >= 500) add("route-server-error", `${route} → HTTP ${r.status}`, route);
     else if (r.status !== null && r.status >= 400) add("route-client-error", `${route} → HTTP ${r.status}`, route);
-    if (r.loginRedirect) add("auth-redirect", `${route} → ${withoutOrigin(r.url, origin) || "/"}`, route);
+    if (r.loginRedirect && !signedIn) {
+      // An --ignore-path exemption takes the route off the list too; --ignore auth-redirect does not, since this is coverage, not that rule.
+      if (!exempt("auth-redirect", route) && !needsSignIn.includes(route)) needsSignIn.push(route);
+    } else if (r.loginRedirect) add("auth-redirect", `${route} → ${withoutOrigin(r.url, origin) || "/"}`, route);
     else if (r.elements === 0 && (r.status === null || r.status < 400)) add("dead-end", `${route}: 0 controls`, route);
     for (const v of r.violations) add(violationRule(v), v.detail, route, { embed: v.embed });
     for (const line of r.geometry) {
@@ -422,6 +437,7 @@ export function checkFindings(
   return {
     issues: [...byKey.values(), ...visual].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.rule.localeCompare(b.rule)),
     worthALook: [...looks.values()].sort((a, b) => a.rule.localeCompare(b.rule)),
+    needsSignIn,
   };
 }
 
@@ -432,8 +448,9 @@ export function issuesFromRoutes(
   ignore: readonly CheckRule[] = [],
   flows: readonly FlowRun[] = [],
   ignorePaths: readonly IgnoredPath[] = [],
+  signedIn = true,
 ): CheckIssue[] {
-  return checkFindings(routes, origin, ignore, flows, null, ignorePaths).issues;
+  return checkFindings(routes, origin, ignore, flows, null, ignorePaths, signedIn).issues;
 }
 
 /**
@@ -805,6 +822,12 @@ export interface CheckResult {
   issues: CheckIssue[];
   /** Observations that are defects only under a convention of the project: listed apart, never counted or gated. */
   worthALook: CheckObservation[];
+  /**
+   * Routes that sent a check with no signed-in session to sign-in: not
+   * measured, and not issues. Absent when the check had a session, or in
+   * results written before these were told apart from auth-redirect issues.
+   */
+  needsSignIn?: string[];
   /** Routes the engine knew of but did not reach within --max-routes (or, for a first run, its time budget). */
   unvisited: string[];
   /** Present only when the options gave a time budget: how long it was, and whether it ran out with routes still to visit. */
@@ -1164,6 +1187,26 @@ export function resourcesTable(resources: readonly ResourceRoute[] | undefined):
   return lines;
 }
 
+/** The coverage gap a check with no session leaves, in one sentence: how many routes (or pages) need sign-in, and `cover`, what covers them. */
+export function needsSignInText(count: number, cover: string, noun = "route"): string {
+  return `${count} ${noun}${count === 1 ? " needs" : "s need"} sign-in; give a role to cover them: ${cover}.`;
+}
+
+/** The routes that sent a check with no session to sign-in, as their own section; nothing when there were none. */
+export function needsSignInSection(result: Pick<CheckResult, "url" | "needsSignIn">): string[] {
+  const routes = result.needsSignIn ?? [];
+  if (routes.length === 0) return [];
+  const cover = `pass ${code("--storage-state")} with a signed-in session, such as the profile ${code(`scenescout login ${result.url} --role <name>`)} saves`;
+  return [
+    "",
+    `## Needs sign-in (${routes.length})`,
+    "",
+    `${needsSignInText(routes.length, cover)} The check had no session, so sending it to sign-in is these routes working, not a defect: what is behind them was not measured.`,
+    "",
+    `${routes.slice(0, 20).map(code).join(", ")}${routes.length > 20 ? " …" : ""}`,
+  ];
+}
+
 /** The routes known and not visited, as one line; nothing when every known route was visited. */
 export function unvisitedLine(unvisited: readonly string[], why: string): string[] {
   if (unvisited.length === 0) return [];
@@ -1194,12 +1237,14 @@ export function formatCheck(result: CheckResult): string {
         : `${couldNotRun > 0 ? "failed" : "**FAILED**"} — ${failingText} · ${counts.high} high · ${counts.medium} medium · ${counts.low} low`) +
       (unaudited > 0 ? ` · design not measured on ${unaudited} route(s)` : "") +
       (uncompared > 0 ? ` · ${uncompared} visual target(s) not compared: no baseline yet` : "") +
-      (result.worthALook.length > 0 ? ` · ${result.worthALook.length} worth a look, never gated` : ""),
+      (result.worthALook.length > 0 ? ` · ${result.worthALook.length} worth a look, never gated` : "") +
+      (result.needsSignIn?.length ? ` · ${result.needsSignIn.length} route(s) need sign-in, not covered` : ""),
   );
   // Right under the verdict: what a green check was allowed to do is part of what it means.
   lines.push("", `Settings — ${describeSettings(result)}`);
   lines.push(...issueSections(result.issues));
   lines.push(...worthALookSection(result.worthALook));
+  lines.push(...needsSignInSection(result));
   lines.push(...routesTable(result));
   lines.push(...resourcesTable(result.resources));
   lines.push(...unvisitedLine(result.unvisited, "over --max-routes"));
@@ -1312,5 +1357,7 @@ export function toSummaryJson(result: CheckResult, toolVersion: string): object 
     issues: result.issues,
     // Apart from `issues` and `counts`, which the gate reads: none of these is counted or gated.
     worthALook: result.worthALook,
+    // Routes a check with no session was sent to sign-in from: a coverage gap. Absent when the check had a session.
+    ...(result.needsSignIn ? { needsSignIn: result.needsSignIn } : {}),
   };
 }
