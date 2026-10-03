@@ -23,8 +23,9 @@ export interface StateRecord {
   elements: Record<string, { exercised: boolean; lastAction?: string; absentStreak?: number; inert?: boolean }>;
   /**
    * The name rule its element keys were made under (NAME_RULE). Absent on a
-   * record written before image content named a control: its keys are read
-   * through the route's key aliases (MemoryFile.keyAliases).
+   * record written before image content named a control (rule 1). A record
+   * under an earlier rule is read through the route's key aliases, one rule
+   * at a time (keysUnderRule).
    */
   nameRule?: number;
 }
@@ -32,9 +33,18 @@ export interface StateRecord {
 /**
  * The element-name rule current keys are made under. 2: a link or button with
  * no text is named by its image content (an <img>'s alt text, an <svg>'s
- * aria-label or <title>) before its title attribute.
+ * aria-label or <title>) before its title attribute. 3: that content also
+ * counts a descendant's aria-label and an <img>'s title when its alt is empty
+ * (collector.ts CONTENT_SAYS_SRC).
  */
-export const NAME_RULE = 2;
+export const NAME_RULE = 3;
+
+/**
+ * Key aliases for each step between name rules, as a snapshot reads them:
+ * the rule a step leads to (2 for rule 1 → 2) → current key → the key the
+ * same control had under the rule before (fingerprint.ts keyAliases).
+ */
+export type KeyAliasSteps = Readonly<Record<number, Readonly<Record<string, string>>>>;
 
 /**
  * The kinds a finding can be. One list: scout_finding's input schema, the lane
@@ -535,14 +545,20 @@ interface MemoryFile {
    */
   laneRoutes?: Record<string, string[]>;
   /**
-   * Element keys a control had under an earlier name rule: route → earlier
-   * key → current key, learned from snapshots that list both (collector.ts
-   * PICK_NAME_SRC `prior`). Coverage reads a state written under the earlier
-   * rule through these, so a control that gained a name keeps what was
-   * recorded for it, and its earlier key is not left behind as an
-   * unexercised control nobody can reach.
+   * Element keys a control had under name rule 1: route → rule-1 key → its
+   * rule-2 key, learned from snapshots that list both (collector.ts
+   * PICK_NAME_SRC `priors`). Coverage reads a state written under an earlier
+   * rule through these and ruleKeyAliases, so a control that gained a name
+   * keeps what was recorded for it, and its earlier key is not left behind as
+   * an unexercised control nobody can reach.
    */
   keyAliases?: Record<string, Record<string, string>>;
+  /**
+   * The same for each later step: the rule it leads to ("3") → route → key
+   * under the rule before → key under that rule. Rule 2's step is keyAliases,
+   * which memories written before rule 3 already hold.
+   */
+  ruleKeyAliases?: Record<string, Record<string, Record<string, string>>>;
   /**
    * Pages whose scripts sent a POST observe refused: route → endpoint
    * ("POST /api/search") → when it was last refused or cleared. Kept here, not
@@ -586,6 +602,21 @@ export function rekeyed(elements: StateRecord["elements"], aliases: Readonly<Rec
   return out;
 }
 
+/** A route's aliases for the step that leads to `rule`: key under rule - 1 → key under rule. */
+function stepAliases(data: MemoryFile, rule: number, route: string): Readonly<Record<string, string>> | undefined {
+  return rule === 2 ? data.keyAliases?.[route] : data.ruleKeyAliases?.[String(rule)]?.[route];
+}
+
+/**
+ * A state's elements moved from the keys of name rule `from` to those of rule
+ * `to`, one step at a time, each through the route's aliases for that step.
+ */
+function keysUnderRule(elements: StateRecord["elements"], from: number, to: number, data: MemoryFile, route: string): StateRecord["elements"] {
+  let out = elements;
+  for (let rule = from + 1; rule <= to; rule++) out = rekeyed(out, stepAliases(data, rule, route));
+  return out;
+}
+
 /**
  * Fold another process's memory into ours, losing nothing from either side.
  *
@@ -608,6 +639,13 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
     out.keyAliases[route] = { ...aliases, ...(out.keyAliases[route] ?? {}) };
   }
   if (Object.keys(out.keyAliases).length === 0) delete out.keyAliases;
+  out.ruleKeyAliases = {};
+  for (const rule of new Set([...Object.keys(theirs.ruleKeyAliases ?? {}), ...Object.keys(mine.ruleKeyAliases ?? {})])) {
+    const step: Record<string, Record<string, string>> = { ...(theirs.ruleKeyAliases?.[rule] ?? {}) };
+    for (const [route, aliases] of Object.entries(mine.ruleKeyAliases?.[rule] ?? {})) step[route] = { ...aliases, ...(step[route] ?? {}) };
+    out.ruleKeyAliases[rule] = step;
+  }
+  if (Object.keys(out.ruleKeyAliases).length === 0) delete out.ruleKeyAliases;
 
   out.states = { ...theirs.states };
   for (const [fp, ours] of Object.entries(mine.states)) {
@@ -617,11 +655,10 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
       continue;
     }
     const nameRule = Math.max(ours.nameRule ?? 0, other.nameRule ?? 0);
-    // When one side is under the current name rule and the other is not, the
-    // other's keys are moved to current ones before the union, as a revisit
-    // moves them (MemoryStore visitState).
-    const current = (side: StateRecord) =>
-      nameRule >= NAME_RULE && (side.nameRule ?? 1) < NAME_RULE ? rekeyed(side.elements, out.keyAliases?.[routeIdentity(side.route)]) : side.elements;
+    // When one side is under a later name rule than the other, the other's
+    // keys are moved to that rule's before the union, as a revisit moves them
+    // (MemoryStore visitState).
+    const current = (side: StateRecord) => keysUnderRule(side.elements, side.nameRule ?? 1, Math.max(nameRule, 1), out, routeIdentity(side.route));
     const elements = { ...current(other) };
     for (const [key, el] of Object.entries(current(ours))) {
       const prev = elements[key];
@@ -2176,9 +2213,10 @@ export class MemoryStore {
    * listed keys a user cannot act on (collector inertKeys): they stay known,
    * so a click on one still registers, but coverage does not count them.
    * `session` names who visited, for this run's per-session coverage.
-   * `aliases` maps a listed key to the key the same control had under the
-   * earlier name rule (fingerprint.ts keyAliases); the route keeps them so
-   * states written before the rule changed are read under current keys.
+   * `aliases` maps, for each step between name rules, a listed key to the
+   * key the same control had under the rule before (KeyAliasSteps); the route
+   * keeps them so states written before a rule changed are read under
+   * current keys.
    */
   visitState(
     fingerprint: string,
@@ -2187,7 +2225,7 @@ export class MemoryStore {
     elementKeys: string[],
     inertKeys: readonly string[] = [],
     session?: string,
-    aliases: Readonly<Record<string, string>> = {},
+    aliases: KeyAliasSteps = {},
   ): boolean {
     this.runStates.add(fingerprint);
     if (session) {
@@ -2212,7 +2250,7 @@ export class MemoryStore {
     // of base keys, so a rename that only moves ordinals (an image button
     // named like a text button beside it) leaves it unchanged. Its keys are
     // moved to the current ones before it is marked current.
-    if ((rec.nameRule ?? 1) < NAME_RULE) rec.elements = rekeyed(rec.elements, this.data.keyAliases?.[routeIdentity(route)]);
+    if ((rec.nameRule ?? 1) < NAME_RULE) rec.elements = keysUnderRule(rec.elements, rec.nameRule ?? 1, NAME_RULE, this.data, routeIdentity(route));
     rec.nameRule = NAME_RULE;
     const present = new Set(elementKeys);
     const inert = new Set(inertKeys);
@@ -2240,13 +2278,15 @@ export class MemoryStore {
    * hand out ordinals differently, and the states written under the earlier
    * rule do not change, so neither should what their keys are read as.
    */
-  private learnAliases(route: string, aliases: Readonly<Record<string, string>>): void {
-    const pairs = Object.entries(aliases);
-    if (pairs.length === 0) return;
-    const byRoute = (this.data.keyAliases ??= {});
+  private learnAliases(route: string, steps: KeyAliasSteps): void {
     const id = routeIdentity(route);
-    const known = (byRoute[id] ??= {});
-    for (const [key, prior] of pairs) if (!Object.hasOwn(known, prior)) known[prior] = key;
+    for (const [rule, aliases] of Object.entries(steps)) {
+      const pairs = Object.entries(aliases);
+      if (pairs.length === 0) continue;
+      const byRoute = rule === "2" ? (this.data.keyAliases ??= {}) : ((this.data.ruleKeyAliases ??= {})[rule] ??= {});
+      const known = (byRoute[id] ??= {});
+      for (const [key, prior] of pairs) if (!Object.hasOwn(known, prior)) known[prior] = key;
+    }
   }
 
   markExercised(fingerprint: string, key: string, action: string): void {
@@ -2618,7 +2658,7 @@ export class MemoryStore {
       const route = routeIdentity(rec.route);
       const keys = only && !only.has(fp) ? null : bucket(listed, route);
       // A state written under an earlier name rule is read under current keys.
-      const elements = (rec.nameRule ?? 1) < NAME_RULE ? rekeyed(rec.elements, this.data.keyAliases?.[route]) : rec.elements;
+      const elements = keysUnderRule(rec.elements, rec.nameRule ?? 1, NAME_RULE, this.data, route);
       for (const [key, v] of Object.entries(elements)) {
         if (v.inert) bucket(inert, route).add(key);
         if (v.exercised) bucket(exercised, route).add(key);

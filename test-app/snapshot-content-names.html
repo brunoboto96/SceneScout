@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Snapshot: names from content</title>
+</head>
+<body>
+  <!--
+    Controls with no text, named by what they hold, each beside the same markup without the word that names it.
+    An icon element with an aria-label names the link around it; an image with an empty alt names it by its title.
+  -->
+  <main>
+    <h1>Names from content</h1>
+    <nav aria-label="Shortcuts">
+      <a href="#feed" data-testid="content-feed-link"><i aria-label="Feed"><svg width="16" height="16" aria-hidden="true"><path d="M2 8H14" stroke="currentColor"/></svg></i></a>
+      <a href="#feed" data-testid="content-icon-link"><i><svg width="16" height="16" aria-hidden="true"><path d="M2 8H14" stroke="currentColor"/></svg></i></a>
+      <a href="#profile" data-testid="content-avatar-title-link"><img alt="" title="Profile" width="16" height="16" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2216%22 height=%2216%22/%3E"></a>
+      <a href="#profile" data-testid="content-avatar-link"><img alt="" width="16" height="16" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2216%22 height=%2216%22/%3E"></a>
+      <button type="button" data-testid="content-hidden-label-button"><span aria-hidden="true"><i aria-label="Close"></i></span></button>
+    </nav>
+  </main>
+</body>
+</html>

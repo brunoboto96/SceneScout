@@ -132,6 +132,30 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       known.join(", "),
     );
 
+    // ── names a control takes from what it holds ───────────────────────────
+    await engine.navigate("/snapshot-content-names.html");
+    const contentNames = await engine.snapshot(true);
+    const nameIn = (testid: string): string | null =>
+      lineOf(contentNames, new RegExp(`\\[testid=${testid}[\\],]`)).match(/^\s*e\d+ \w+ "([^"]*)"/)?.[1] ?? null;
+    check("a link holding an icon element with an aria-label is named by it", nameIn("content-feed-link") === "Feed", contentNames);
+    check("...and the same link without the aria-label is unnamed", nameIn("content-icon-link") === "(unnamed)", contentNames);
+    check("a link around an image with an empty alt is named by the image's title", nameIn("content-avatar-title-link") === "Profile", contentNames);
+    check("...and the same link without the title is unnamed", nameIn("content-avatar-link") === "(unnamed)", contentNames);
+    check("an aria-label inside an aria-hidden part names nothing", nameIn("content-hidden-label-button") === "(unnamed)", contentNames);
+    // The collector's rule against Playwright's own accessible-name computation, for each of the five.
+    const page = (engine as unknown as { page: import("playwright").Page }).page;
+    for (const testid of ["content-feed-link", "content-icon-link", "content-avatar-title-link", "content-avatar-link", "content-hidden-label-button"]) {
+      const aria = await page.getByTestId(testid).ariaSnapshot();
+      const want = aria.match(/^- \w+(?: "([^"]*)")?/)?.[1] ?? "(unnamed)";
+      check(`${testid}: the snapshot's name is the one Playwright computes`, nameIn(testid) === want, `${aria}\n${lineOf(contentNames, new RegExp(testid))}`);
+    }
+    const contentAudit = await engine.designAudit();
+    check(
+      "the design audit reports the three contrasts as unnamed, and neither named link",
+      (contentAudit.match(/control with no accessible name/g) ?? []).length === 3,
+      contentAudit,
+    );
+
     // ── controls out of view inside a sideways-scrolling container ─────────
     await engine.navigate("/snapshot-sideways.html");
     const sideways = await engine.snapshot(true);
