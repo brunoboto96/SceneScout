@@ -439,6 +439,39 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     `${missing.status} ${JSON.stringify(missing.summary?.flows)}`,
   );
 
+  // expect-element: one flow asserting every state before and after, and its twin differing in one expectation
+  // (the receipt stays hidden after Complete), so the failure can only be the step reading the receipt.
+  const stateSteps = [
+    { action: "navigate", target: "/check-flow-state.html" },
+    { action: "expect-element", target: "testid=state-complete", state: "disabled" },
+    { action: "expect-element", target: "testid=state-receipt", state: "hidden" },
+    { action: "expect-element", target: "testid=state-nowhere", state: "hidden" },
+    { action: "expect-element", target: "label=I have read it", state: "unchecked" },
+    { action: "click", target: "label=I have read it" },
+    { action: "expect-element", target: "label=I have read it", state: "checked" },
+    { action: "expect-element", target: 'role=button[name="Complete"]', state: "enabled" },
+    { action: "click", target: 'role=button[name="Complete"]' },
+  ];
+  const stateHolds = await checkWith(
+    project("flow-state", { "state.json": { steps: [...stateSteps, { action: "expect-element", target: "testid=state-receipt", state: "visible" }] } }),
+  );
+  check(
+    "expect-element: a flow asserting disabled, hidden (also of nothing), unchecked, checked, enabled and visible passes on the page that does all of them",
+    stateHolds.status === 0 && stateHolds.summary?.flows[0]?.status === "passed",
+    `${stateHolds.status} ${JSON.stringify(stateHolds.summary?.flows)} ${stateHolds.out.slice(-600)}`,
+  );
+  const stateBroken = await checkWith(
+    project("flow-state-broken", { "state.json": { steps: [...stateSteps, { action: "expect-element", target: "testid=state-receipt", state: "hidden" }] } }),
+  );
+  check(
+    "...and its twin, expecting the receipt still hidden after Complete, fails at that step saying what is true instead",
+    stateBroken.status === 1 &&
+      stateBroken.summary?.flows[0]?.status === "failed" &&
+      stateBroken.summary.flows[0].step === 10 &&
+      /^testid=state-receipt is visible, expected hidden/.test(stateBroken.summary.flows[0].reason ?? ""),
+    `${stateBroken.status} ${JSON.stringify(stateBroken.summary?.flows)}`,
+  );
+
   // A step that would write. The same flow, under the default and under --flow-writes allow, both in read-only mode,
   // which on its own would let an ordinary POST through.
   const addFlow = {

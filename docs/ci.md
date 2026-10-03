@@ -261,6 +261,7 @@ A flow has a `name` (the file name when left out) and its `steps`. The first ste
 | `select` | `target`, `value` | |
 | `press` | `value` | A key, e.g. `Escape` |
 | `expect-text` | `text` | Visible on the page |
+| `expect-element` | `target`, `state` | The target is `visible`, `hidden` (also when nothing matches), `enabled`, `disabled`, `checked` or `unchecked`. A failure says what it is instead, e.g. `testid=receipt is visible, expected hidden` |
 | `expect-url` | `pattern` | A regular expression, tested against path, query and hash (never the origin) |
 | `expect-request` | `request`, `status` | A method and path (`*` is one segment) answered with that status, or a class such as `"2xx"`, since the last action |
 
