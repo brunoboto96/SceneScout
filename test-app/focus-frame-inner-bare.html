@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Framed editor, bare button inside</title>
+  <style>
+    body { font-family: system-ui, sans-serif; color: #111111; background: #ffffff; margin: 0; padding: 16px; }
+    iframe { width: 360px; height: 120px; border: 1px solid #767676; }
+  </style>
+</head>
+<body>
+  <!-- focus-frame.html with the frame's button styled outline: none. The
+       focus-indicator rule follows Tab into a same-origin frame and measures
+       the control focused there, so this button is reported by its own name
+       and the frame element is not. The button has no data-testid on purpose:
+       its name comes from aria-labelledby, which must be looked up in the
+       frame's document, not the top one. -->
+  <h1>Things</h1>
+  <p>Edit the selected thing in the panel below.</p>
+  <iframe title="Thing editor" data-testid="focus-frame-editor" srcdoc="<!DOCTYPE html><html lang='en'><head><style>body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; } button { outline: none; padding: 8px 16px; min-height: 32px; }</style></head><body><span id='publish-name'>Publish thing</span><button type='button' aria-labelledby='publish-name'>Go</button></body></html>"></iframe>
+</body>
+</html>

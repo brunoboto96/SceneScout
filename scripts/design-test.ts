@@ -15,10 +15,13 @@ import {
   contrastRatio,
   distinguishingLayer,
   elevationKey,
+  focusedControl,
   grayCensus,
   namesFilter,
   shadowLayers,
   styleSignature,
+  type FocusDocument,
+  type FocusElement,
   type PageImage,
 } from "../src/engine/design.ts";
 import { formatJourney, measureJourney } from "../src/engine/journey.ts";
@@ -699,4 +702,25 @@ test("analyzeDesign files image-aspect for a stretched fill image and not for th
   const cover = audit("cover");
   assert.ok(!cover.defects.some((d) => d.rule === "image-aspect"), JSON.stringify(cover.defects));
   assert.ok(!cover.report.includes("IMAGES ("), cover.report);
+});
+
+/** A document whose active element is `focused`, or its body when nothing is. */
+function doc(focused: FocusElement | null): FocusDocument {
+  const body = { tagName: "BODY" };
+  return { activeElement: focused ?? body, body, documentElement: { tagName: "HTML" } };
+}
+const frame = (inner: FocusDocument | null, tagName = "IFRAME"): FocusElement => ({ tagName, contentDocument: inner });
+
+test("the focus walk measures the control focused inside a same-origin frame, never the frame element", () => {
+  const button = { tagName: "BUTTON" };
+  const cases: Array<[string, FocusDocument, FocusElement | "frame" | null]> = [
+    ["a button in the page", doc(button), button],
+    ["nothing focused in the page ends the sampling", doc(null), null],
+    ["a button inside a same-origin iframe", doc(frame(doc(button))), button],
+    ["a button inside a frame of a frameset", doc(frame(doc(button), "FRAME")), button],
+    ["a button two same-origin frames deep", doc(frame(doc(frame(doc(button))))), button],
+    ["focus inside another site's frame is skipped", doc(frame(null)), "frame"],
+    ["a same-origin frame with nothing focused inside is skipped", doc(frame(doc(null))), "frame"],
+  ];
+  for (const [name, d, want] of cases) assert.equal(focusedControl(d), want, name);
 });
