@@ -454,13 +454,33 @@ export function issuesFromRoutes(
 }
 
 /**
+ * Fewest controls a start page must show for a check that measured nothing
+ * else to count as having measured the app (unmeasuredReason).
+ */
+export const START_PAGE_MIN_CONTROLS = 2;
+
+/**
  * Why a check has nothing to give a verdict on, or null when it measured the
  * app. Neither case is a pass: a gate that goes green on a login page or a
  * dead server would pass every pull request while the app was down.
  */
-export function unmeasuredReason(routes: readonly RouteHealth[], startIsFirst: boolean): string | null {
+export function unmeasuredReason(routes: readonly RouteHealth[], startIsFirst: boolean, unvisited: readonly string[] = []): string | null {
   const loaded = routes.filter((r) => r.loadError === undefined);
   if (loaded.length === 0) return "no page loaded. Is the app running at that URL?";
+  // A start page measured before the app drew it (a client-rendered shell still loading, a blank page) links nowhere,
+  // so the crawl ends there and every rule is silent: a pass that checked nothing. A real one-page app has controls.
+  const start = routes[0];
+  // `unvisited` empty: the page linked nowhere. A crawl that --max-routes cut short did find more, and measured what it was asked to.
+  if (
+    startIsFirst &&
+    unvisited.length === 0 &&
+    loaded.length === 1 &&
+    start === loaded[0] &&
+    !start.loginRedirect &&
+    start.elements < START_PAGE_MIN_CONTROLS
+  ) {
+    return `only the start page was measured, and it showed ${start.elements} control(s) and linked nowhere, so the app may not have finished drawing. Check again, raise --nav-timeout-ms if the app is slow to render, pass --project so routes come from the source, or name them with --paths.`;
+  }
   // Without --paths the first route is the start page. When it bounces, what follows is the sign-in
   // page's own links (sign-up, forgot password): pages that load, but not the app.
   // With --paths there is no start page, only a list, and one walled path among public ones is an auth-redirect issue.

@@ -1091,6 +1091,21 @@ test("a check that reached no page, or only the sign-in page, has no verdict to 
   assert.equal(unmeasuredReason([route({ status: null, loadError: "x", elements: 0 }), route({ path: "/b" })], true), null);
 });
 
+test("a check that measured only a start page with almost nothing on it has no verdict, and one with a real page does", () => {
+  // The start page measured before the app drew it: one control, no links, nothing else visited.
+  assert.match(unmeasuredReason([route({ elements: 1 })], true) ?? "", /only the start page was measured, and it showed 1 control\(s\)/);
+  assert.match(unmeasuredReason([route({ elements: 0 })], true) ?? "", /showed 0 control\(s\)/);
+  // The same page with the app drawn, or a second page reached, is a measurement.
+  assert.equal(unmeasuredReason([route({ elements: 2 })], true), null);
+  assert.equal(unmeasuredReason([route({ elements: 1 }), route({ path: "/b" })], true), null);
+  // A second route that failed to load does not count as measured.
+  assert.match(unmeasuredReason([route({ elements: 1 }), route({ path: "/b", status: null, loadError: "x", elements: 0 })], true) ?? "", /only the start page/);
+  // A start page that linked onward, with --max-routes stopping the crawl there, measured what it was asked to.
+  assert.equal(unmeasuredReason([route({ elements: 1 })], true, ["/next"]), null);
+  // With --paths the person named what to check: one sparse page among them is a page, not an unmeasured app.
+  assert.equal(unmeasuredReason([route({ elements: 1 })], false), null);
+});
+
 test("a page the design audit could not measure is disclosed in the verdict and the JSON, not read as clean", () => {
   const r: CheckResult = { ...result([]), routes: [route(), route({ path: "/b", auditError: "no visible styled elements to measure" })] };
   assert.match(formatCheck(r), /\*\*PASSED\*\*[^\n]*design not measured on 1 route\(s\)/);
