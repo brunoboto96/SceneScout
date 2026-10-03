@@ -5648,6 +5648,10 @@ export class BrowserEngine {
     // The write policy judges by writeRule, so the flow's rule holds from here until the flow has handed back (finally).
     const crawlMode = this.mode;
     this.setMode(mode);
+    // A flow's navigate means leave, and so does handing back: a page that asks to confirm leaving (an unsaved-changes
+    // guard on a form a failed step left half filled) is left, or it would cancel the next flow's first navigate.
+    const leaveBefore = this.leaveChoice;
+    this.leaveChoice = true;
     const context = this.context!;
     const violations: FlowReplay["violations"] = [];
     const here = (): string => {
@@ -5871,6 +5875,7 @@ export class BrowserEngine {
         Promise.allSettled(context.pages().map(async (p) => (p === this.page ? undefined : (await this.leftSettled(p), await p.close().catch(() => {}))))),
         5000,
       );
+      this.leaveChoice = leaveBefore;
       page.off("websocket", onSocket);
       context.off("response", onResponse);
       this.refs.clear();

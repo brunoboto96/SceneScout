@@ -698,6 +698,32 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     `${noInput.status} ${JSON.stringify(noInput.summary?.flows)}`,
   );
 
+  // A flow that fails after typing into a form with an unsaved-changes guard leaves that page asking to confirm
+  // leaving. The flow after it, in the same session, must still be able to navigate.
+  const guarded = await checkWith(
+    project("flow-guarded", {
+      "01-fails-on-a-dirty-form.json": {
+        steps: [
+          { action: "navigate", target: "/check-flow-guarded.html" },
+          { action: "type", target: "testid=guarded-title", value: "half filled" },
+          { action: "expect-text", text: "Never shown" },
+        ],
+      },
+      "02-navigates-next.json": {
+        steps: [
+          { action: "navigate", target: "/check-flow.html" },
+          { action: "expect-text", text: "Things" },
+        ],
+      },
+    }),
+  );
+  const guardedByFile = (file: string) => guarded.summary?.flows.find((f) => f.file === file);
+  check(
+    "a flow that fails on a form guarding unsaved changes does not stop the next flow navigating",
+    guardedByFile("01-fails-on-a-dirty-form.json")?.status === "failed" && guardedByFile("02-navigates-next.json")?.status === "passed",
+    `${guarded.status} ${JSON.stringify(guarded.summary?.flows)}`,
+  );
+
   // A step that would write. The same flow, under the default and under --flow-writes allow, both in read-only mode,
   // which on its own would let an ordinary POST through.
   const addFlow = {

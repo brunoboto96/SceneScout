@@ -269,6 +269,8 @@ A flow has a `name` (the file name when left out) and its `steps`. The first ste
 
 A `target` is `testid=…`, `text=…`, `label=…` or `role=<role>[name="…"]`. Each step waits up to five seconds, and a click is never forced through something covering its control. A control that is shown but stays disabled (or, for `type`, read-only) for that long fails the step saying so first, for example `testid=save is visible but disabled after 5s`, followed by the action limit's hint, which helps when the app enables it later than that. These are the steps `scout_run_plan` takes, so a plan an agent used to walk a flow can be saved as it is, with `expect-*` steps added where the outcome shows. That is how flows are made: written by hand, or by an agent asked to keep a flow it just walked.
 
+While a flow replays, a page that asks to confirm leaving (an unsaved-changes guard) is left, so a flow that fails half way through a form does not stop the next one navigating.
+
 A flow file that is not valid stops the check before it starts, with exit 2 and the file and field named (`bad.json: steps[1].target is required`).
 
 **A value can come from the environment.** Write `${env:NAME}` in a `type` or `select` step's `value` (whole or in part) and the check types the variable's value, so a one-time code or a password lives in the CI's secret store rather than in the flow file. A variable that is not set stops the check before it starts, with exit 2 and the flow and variable named. Wherever the page echoes a value of four or more characters (an address, an error), everything the check writes and prints shows `[$NAME]` instead. Only values are substituted: `expect-*` steps match their text as written.
