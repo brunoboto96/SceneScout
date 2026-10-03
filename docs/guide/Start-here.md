@@ -175,6 +175,8 @@ scenescout watch            # open the live view for the project in this folder
 scenescout status           # the same information as text
 ```
 
+Ask the agent how the run is going and it calls `scout_status`. In a client that renders MCP Apps, that puts a small pane in the conversation which refreshes itself every few seconds: each session's objective and task, open findings by severity, coverage, and a button that opens the live view. It shows nothing the live view does not, and loads nothing from outside. A client without MCP Apps gets the same as text, starting with the live view's address.
+
 The page is served on `127.0.0.1` only, behind a token that changes on each start, and answers `GET` and nothing else. No frame it shows is written to disk. `SCENESCOUT_LIVE=off` in the server's environment keeps it closed.
 
 A client that lists the server's prompts has `live`. It takes no arguments and no password: the agent returns the loopback address already printed in a tool result, and may open it where the host can open a URL.
