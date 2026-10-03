@@ -48,8 +48,8 @@ import {
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
-import { captureClip, cutByViewport } from "./capture.js";
-import { STOP_ANIMATIONS_SCRIPT, type PictureSettings } from "./baseline.js";
+import { captureClip, cutByViewport, type Box } from "./capture.js";
+import { NEXT_FRAME_SCRIPT, NEXT_FRAME_WAIT_MS, STOP_ANIMATIONS_SCRIPT, steadyPicture, unsteadyNote, type PictureSettings } from "./baseline.js";
 import {
   COLLECT_INTERACTABLES_SCRIPT,
   COLLECTOR_CAP,
@@ -5948,7 +5948,9 @@ export class BrowserEngine {
    * stopped, then either the viewport from the top (no target) or one element,
    * found the way a saved flow finds its target, with `how.margin` around it.
    * The screenshot is taken with `how`'s animation and caret settings, at one
-   * picture pixel per CSS pixel. Reads only. Throws a sentence when it cannot
+   * picture pixel per CSS pixel, and again a frame later until two in a row
+   * are the same (steadyPicture); `unsteady` says so when the page never held
+   * still within the action limit. Reads only. Throws a sentence when it cannot
    * take the picture. `cut` says when an element reaches outside the window.
    * What is compared and what it means is baseline.ts, which also holds the
    * settings; the rectangle is capture.ts. Call endBaselineCaptures when done.
@@ -5957,7 +5959,7 @@ export class BrowserEngine {
     pathOnApp: string,
     target: FlowTarget | null,
     how: PictureSettings,
-  ): Promise<{ png: Buffer; viewport: { width: number; height: number }; deviceScaleFactor: number; cut: string | null }> {
+  ): Promise<{ png: Buffer; viewport: { width: number; height: number }; deviceScaleFactor: number; cut: string | null; unsteady: string | null }> {
     const page = this.requirePage();
     const action = <T>(p: Promise<T>): Promise<T> => p.catch((err: unknown) => Promise.reject(explainTimeout(err, "action", this.limits.actionMs)));
     const within = `within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
@@ -5987,11 +5989,10 @@ export class BrowserEngine {
     const viewport = page.viewportSize() ?? ((await page.evaluate("({ width: innerWidth, height: innerHeight })")) as { width: number; height: number });
     const deviceScaleFactor = Number(await page.evaluate("window.devicePixelRatio"));
     const settings = { type: "png", animations: how.animations, caret: how.caret, scale: "css", timeout: this.limits.actionMs } as const;
-    let png: Buffer;
+    let clip: Box | undefined;
     let cut: string | null = null;
     if (!target) {
       await page.evaluate("window.scrollTo(0, 0)");
-      png = await action(page.screenshot(settings));
     } else {
       const locator = BrowserEngine.locatorFor(page, target).first();
       if (!(await BrowserEngine.inTime(locator.waitFor({ state: "visible", timeout: this.limits.actionMs })))) {
@@ -6000,13 +6001,20 @@ export class BrowserEngine {
       await action(locator.scrollIntoViewIfNeeded({ timeout: this.limits.actionMs }));
       const box = await action(locator.boundingBox({ timeout: this.limits.actionMs }));
       if (!box) throw new Error("it is not displayed");
-      const clip = captureClip(box, how.margin, viewport);
+      clip = captureClip(box, how.margin, viewport) ?? undefined;
       if (!clip) throw new Error("it is outside the viewport");
       cut = cutByViewport(box, viewport);
-      png = await action(page.screenshot({ ...settings, clip }));
     }
+    // Two pictures in a row the same, a frame apart: the page has drawn the stop and stopped changing (steadyPicture).
+    const { png, steady } = await steadyPicture(
+      () => action(page.screenshot(clip ? { ...settings, clip } : settings)),
+      // Bounded here too, since a page whose main thread is stuck never runs the script's own fallback. A wait that
+      // fails (the page navigated) is not the picture's error: the next take reports what is wrong with the page.
+      () => BrowserEngine.settleWithin(page.evaluate(NEXT_FRAME_SCRIPT), NEXT_FRAME_WAIT_MS),
+      this.limits.actionMs,
+    );
     this.logAction({ action: "capture", target: target ? `baseline ${pathOnApp}` : `baseline ${pathOnApp} (page)`, url: page.url() });
-    return { png, viewport, deviceScaleFactor, cut };
+    return { png, viewport, deviceScaleFactor, cut, unsteady: steady ? null : unsteadyNote(this.limits.actionMs) };
   }
 
   /** Stop telling the page to reduce motion, so what runs after the baselines (saved flows) sees the page as a user does. */

@@ -8,7 +8,10 @@
        baseline must still match at 0% when the card's does not. Its dot slides forever from a different point on
        every load, so two pictures of it match only when animations are stopped for a baseline's picture. The
        saved banner is itself still sliding into place when the page has loaded, so its picture holds only when
-       animations are stopped before it is measured. The tall block reaches below the window. -->
+       animations are stopped before it is measured. The meter fills from a script, one step per frame, for a moment
+       after the page has loaded, as a count-up or an entrance drawn by script does: stopping CSS animations does not
+       stop it, so its picture holds only when it is taken once the page has stopped changing. The tall block reaches
+       below the window. -->
   <style>
     body { font: 16px/1.4 sans-serif; margin: 0; background: #ffffff; color: #1f2937; }
     main { padding: 32px; }
@@ -19,6 +22,8 @@
     @keyframes slide { from { transform: translateX(0); } to { transform: translateX(240px); } }
     .saved { width: 320px; margin-top: 32px; padding: 12px 16px; background: #ecfdf5; color: #065f46; animation: arrive 30s linear; }
     @keyframes arrive { from { transform: translateX(-200px); } to { transform: translateX(0); } }
+    .meter { width: 320px; height: 12px; margin-top: 32px; background: #e5e7eb; }
+    .meter span { display: block; width: 0; height: 100%; background: #7c3aed; }
     .tall { width: 320px; height: 1400px; margin-top: 32px; background: linear-gradient(#f9fafb, #e5e7eb); }
   </style>
 </head>
@@ -34,12 +39,21 @@
       <p>Live</p>
     </section>
     <section class="saved" data-testid="saved">Saved</section>
+    <section class="meter" data-testid="meter"><span></span></section>
     <section class="tall" data-testid="tall"></section>
   </main>
   <script>
     // Caught at a different point of its slide on every load, as a spinner or a carousel would be.
     document.querySelector(".dot").style.animationDelay = "-" + (Math.random() * 2).toFixed(3) + "s";
     document.querySelector(".saved").style.animationDelay = "-" + (Math.random() * 20).toFixed(3) + "s";
+    // Filled 8px a frame to 320px: 40 frames, each one different from the last, whatever the machine's speed.
+    const fill = document.querySelector(".meter span");
+    const grow = () => {
+      const width = fill.offsetWidth + 8;
+      fill.style.width = width + "px";
+      if (width < 320) requestAnimationFrame(grow);
+    };
+    requestAnimationFrame(grow);
   </script>
 </body>
 </html>
