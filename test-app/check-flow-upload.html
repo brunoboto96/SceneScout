@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Check: an upload step</title></head>
+<body>
+  <!-- For `scenescout check`'s upload step. The page's only file input names the file it was given and its size, so a
+       flow can assert the upload landed; the input accepts PDFs, so a flow naming no fixture is given a PDF. -->
+  <h1>Attach a document</h1>
+  <label>Document <input type="file" data-testid="upload-input" accept="application/pdf,.pdf"></label>
+  <p data-testid="upload-status" role="status">No file chosen</p>
+  <script>
+    const input = document.querySelector('[data-testid="upload-input"]');
+    input.addEventListener("change", () => {
+      const f = input.files[0];
+      document.querySelector('[data-testid="upload-status"]').textContent = f ? `Attached ${f.name} (${f.type || "unknown type"})` : "No file chosen";
+    });
+  </script>
+</body>
+</html>
