@@ -177,20 +177,47 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     const p = parseColor(c);
     return p ? "rgba(" + p[0] + ", " + p[1] + ", " + p[2] + ", " + p[3] + ")" : "unknown";
   };
+  // Replaced content that paints pixels the audit cannot read: an <img>,
+  // <picture>, <video> or <canvas>, often absolutely positioned under a hero
+  // heading as a sibling or cousin of the text rather than its ancestor.
+  let media = null;
+  const mediaUnder = (el, within) => {
+    if (media === null) media = Array.from(document.querySelectorAll("img, picture, video, canvas")).slice(0, 300);
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    for (const m of media) {
+      // The text's own subtree holds inline icons, not its background; and an
+      // image outside the opaque ancestor the text sits on is treated as hidden
+      // behind it. An opaque overlay that is NOT an ancestor (a sibling scrim)
+      // is not seen, so text on it over an image is skipped, not measured.
+      if (el.contains(m) || (within && !within.contains(m))) continue;
+      const mr = m.getBoundingClientRect();
+      if (mr.width === 0 || mr.height === 0 || cx < mr.left || cx > mr.right || cy < mr.top || cy > mr.bottom) continue;
+      const ms = window.getComputedStyle(m);
+      if (ms.visibility === "hidden" || ms.display === "none" || ms.opacity === "0") continue;
+      return true;
+    }
+    return false;
+  };
   // Effective background: COMPOSITE translucent ancestor layers (a chip with
   // rgba(...,0.12) over white is nearly white — treating it as opaque produces
   // false WCAG failures). Stops at the first opaque layer; white fallback.
+  // "image" when an ancestor's background-image or a media element under the
+  // text's centre paints behind it: no single colour stands for that, so the
+  // contrast check skips it rather than report a ratio against the page.
   const effBg = (el) => {
     const layers = [];
     let node = el;
+    let opaque = null;
     for (let i = 0; node && i < 20; i++, node = node.parentElement) {
       const s = window.getComputedStyle(node);
       if (s.backgroundImage && s.backgroundImage !== "none") return "image";
       const c = parseColor(s.backgroundColor);
       if (!c || c[3] === 0) continue;
       layers.push(c);
-      if (c[3] >= 1) break;
+      if (c[3] >= 1) { opaque = node; break; }
     }
+    if (mediaUnder(el, opaque)) return "image";
     let base = [255, 255, 255];
     for (let i = layers.length - 1; i >= 0; i--) {
       const [r, g, b, a] = layers[i];
