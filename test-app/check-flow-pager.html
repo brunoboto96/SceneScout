@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Check: a repeat step</title></head>
+<body>
+  <!-- For `scenescout check`'s repeat step. A five-page document read one page at a time: Continue is enabled only on
+       the last page, as a read-to-the-end gate is. Clicks on Next are counted, so a flow that clicks too often shows. -->
+  <h1>Read the document</h1>
+  <p data-testid="pager-page">Page 1 of 5</p>
+  <button type="button" data-testid="pager-next">Next page</button>
+  <button type="button" data-testid="pager-continue" disabled>Continue</button>
+  <p data-testid="pager-status" role="status"></p>
+  <script>
+    let page = 1;
+    let nexts = 0;
+    const label = document.querySelector('[data-testid="pager-page"]');
+    const next = document.querySelector('[data-testid="pager-next"]');
+    const go = document.querySelector('[data-testid="pager-continue"]');
+    const status = document.querySelector('[data-testid="pager-status"]');
+    next.addEventListener("click", () => {
+      nexts += 1;
+      if (page < 5) page += 1;
+      label.textContent = `Page ${page} of 5`;
+      go.disabled = page < 5;
+      status.textContent = `Next pressed ${nexts} time(s)`;
+    });
+    go.addEventListener("click", () => {
+      status.textContent = `Finished after ${nexts} press(es) of Next`;
+    });
+  </script>
+</body>
+</html>

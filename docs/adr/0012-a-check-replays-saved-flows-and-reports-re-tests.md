@@ -202,3 +202,18 @@ often the point of the journey. `hidden` holds when nothing matches, because
 "never shown" and "closed" are both the absence of a visible element. The rule
 that turns what the page shows into a verdict is `elementStateMatches` in
 `flow.ts`, table-tested in `check-test`; the browser only reads the facts.
+
+## Amendment, 3 October 2026: repeat
+
+A `repeat` step runs up to ten click, type, select or press steps until an
+`expect-text`, `expect-element` or `expect-url` step holds, at most `max` times
+(up to 100). It exists because a read-to-the-end gate (Continue enabled only
+after paging through every page of a document) needs the same click an unknown
+number of times, and a flow written with a fixed number of clicks breaks the
+day the document changes length. The condition is checked first, so a page
+already in the wanted state runs the actions no times. Each check waits up to
+one second rather than the action limit, since the next round is what it waits
+for. A repeat holds only single steps; it never nests, and `expect-request` is
+not a condition, since what a round sent is not what the page shows. The steps
+inside run through the same code as any other step, write policy included.
+

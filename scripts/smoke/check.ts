@@ -506,6 +506,59 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     `${stateBroken.status} ${JSON.stringify(stateBroken.summary?.flows)}`,
   );
 
+  // repeat: page through until Continue is enabled. Four presses of Next reach page 5; a cap of 2 cannot, and a
+  // condition that already holds runs the actions no times.
+  const pager = (max: number) => ({
+    steps: [
+      { action: "navigate", target: "/check-flow-pager.html" },
+      {
+        action: "repeat",
+        steps: [{ action: "click", target: "testid=pager-next" }],
+        until: { action: "expect-element", target: "testid=pager-continue", state: "enabled" },
+        max,
+      },
+      { action: "click", target: "testid=pager-continue" },
+      { action: "expect-text", text: "Finished after 4 press(es) of Next" },
+    ],
+  });
+  const paged = await checkWith(project("flow-repeat", { "pager.json": pager(20) }));
+  check(
+    "repeat: a flow pressing Next until Continue is enabled presses it exactly as often as needed, then continues",
+    paged.status === 0 && paged.summary?.flows[0]?.status === "passed",
+    `${paged.status} ${JSON.stringify(paged.summary?.flows)} ${paged.out.slice(-600)}`,
+  );
+  const capped = await checkWith(project("flow-repeat-capped", { "pager.json": pager(2) }));
+  check(
+    "...and the same flow capped at 2 repeats fails at the repeat step, naming what never held and how often it tried",
+    capped.status === 1 &&
+      capped.summary?.flows[0]?.step === 2 &&
+      /^expect testid=pager-continue to be enabled still did not hold after repeating 2 time\(s\): testid=pager-continue is disabled/.test(
+        capped.summary.flows[0].reason ?? "",
+      ),
+    `${capped.status} ${JSON.stringify(capped.summary?.flows)}`,
+  );
+  const already = await checkWith(
+    project("flow-repeat-none", {
+      "pager.json": {
+        steps: [
+          { action: "navigate", target: "/check-flow-pager.html" },
+          {
+            action: "repeat",
+            steps: [{ action: "click", target: "testid=pager-next" }],
+            until: { action: "expect-text", text: "Page 1 of 5" },
+            max: 3,
+          },
+          { action: "expect-element", target: "testid=pager-status", state: "hidden" },
+        ],
+      },
+    }),
+  );
+  check(
+    "...and a repeat whose condition already holds runs its actions no times",
+    already.status === 0 && already.summary?.flows[0]?.status === "passed",
+    `${already.status} ${JSON.stringify(already.summary?.flows)}`,
+  );
+
   // A step that would write. The same flow, under the default and under --flow-writes allow, both in read-only mode,
   // which on its own would let an ordinary POST through.
   const addFlow = {

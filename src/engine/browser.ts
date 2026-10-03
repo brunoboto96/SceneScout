@@ -120,11 +120,13 @@ import {
   matchRequest,
   notActionable,
   parseTarget,
+  repeatFailure,
   splitRefusals,
   TARGET_HELP,
   urlMatches,
   type ElementFacts,
   type FlowReplay,
+  type FlowSingleStep,
   type FlowStep,
   type FlowTarget,
   type SeenRequest,
@@ -729,6 +731,9 @@ function actionabilityDiagnostic(message: string): string | null {
 const SCREENCAST_PAGELESS_TICKS = 20;
 /** A frame for the record is worth a moment, not a stall: the action has already happened. */
 const RECORD_SHOT_TIMEOUT_MS = 2500;
+
+/** How long a repeat step waits for its condition after each round of its actions, before running them again. */
+const REPEAT_CHECK_MS = 1000;
 
 export class BrowserEngine {
   private browser: Browser | null = null;
@@ -5680,125 +5685,148 @@ export class BrowserEngine {
         if (v.detail !== except)
           violations.push({ path, violation: { kind: v.kind, severity: v.severity, detail: v.detail, url: v.url, ...(v.embed ? { embed: v.embed } : {}) } });
     };
-    const poll = async (done: () => boolean): Promise<boolean> => {
-      const until = Date.now() + this.limits.actionMs;
+    const poll = async (done: () => boolean, ms: number = this.limits.actionMs): Promise<boolean> => {
+      const until = Date.now() + ms;
       for (;;) {
         if (done()) return true;
         if (Date.now() >= until) return false;
         await (this.page ?? page).waitForTimeout(100).catch(() => {});
       }
     };
+    /**
+     * Run one step that acts or asserts once, with the bookkeeping every step gets: the requests it caused, the
+     * writes the policy refused while it ran, and the oracles' violations. `actionMs` is how long it may wait; a
+     * repeat's condition is checked with a shorter wait, since the next repeat is what it waits for.
+     */
+    const runStep = async (step: FlowSingleStep, actionMs: number = this.limits.actionMs): Promise<{ failure: string | null; refusal: string | null }> => {
+      if (isAction(step)) seen = [];
+      let failure: string | null = null;
+      let refusal: string | null = null;
+      this.actionStartedAt = Date.now();
+      if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "press") await this.beginInput();
+      try {
+        const current = this.requirePage();
+        if (step.action === "navigate") {
+          const resolved = resolveTarget(this.baseUrl, step.target);
+          if (!("url" in resolved)) throw new Error(resolved.problem);
+          const url = resolved.url;
+          const resp = await current
+            .goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs })
+            .catch((err: unknown) => Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs)));
+          await this.settle();
+          const status = resp?.status() ?? null;
+          if (status !== null && status >= 400) {
+            failure = `the page answered HTTP ${status}`;
+            // The page's own status is this step's failure; the oracle's record of the same response is not a second issue.
+            // The oracle stores its details redacted (redactViolation), so the comparison is redacted too.
+            collect(redactSecrets(httpErrorDetail("GET", current.url().replace(/#.*$/, ""), status)));
+          }
+        } else if (step.action === "press") {
+          refusal = await this.vetFocusedActivation(step.value);
+          if (!refusal) {
+            await current.keyboard.press(step.value);
+            await this.settle();
+          }
+        } else if (step.action === "click" || step.action === "type" || step.action === "select") {
+          const loc = BrowserEngine.locatorFor(current, parseTarget(step.target)!).first();
+          const found = await loc
+            .waitFor({ state: "visible", timeout: actionMs })
+            .then(() => true)
+            .catch(() => false);
+          const blocked = found ? await this.waitUntilActionable(loc, step.action) : null;
+          if (!found) {
+            failure = `nothing visible matches ${step.target} within ${actionMs / 1000}s — ${limitHint("action", actionMs)}`;
+          } else if (blocked) {
+            // The state first, since it is what is true; the hint still applies when the app enables it late.
+            failure = `${step.target} ${blocked} after ${actionMs / 1000}s — ${limitHint("action", actionMs)}`;
+          } else {
+            const label = (
+              (await loc.getAttribute("aria-label").catch(() => null)) ??
+              (await loc.textContent({ timeout: 1000 }).catch(() => null)) ??
+              ""
+            ).trim();
+            // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
+            const isSelect = step.action === "select" && (await loc.evaluate((n) => n.tagName.toLowerCase() === "select").catch(() => false));
+            const testid = await loc.getAttribute("data-testid").catch(() => null);
+            if (
+              this.readOnly &&
+              step.action !== "type" &&
+              (isSelect
+                ? pickIsDestructive(step.value, testid, await BrowserEngine.chosenOptionLabel(loc, step.value))
+                : isDestructive(label, step.action === "select" ? step.value : undefined))
+            ) {
+              refusal = destructiveRefusal(label || step.target, this.mode);
+            } else if (step.action === "click") {
+              await loc.click({ timeout: actionMs });
+            } else if (step.action === "select") {
+              await loc.selectOption(step.value, { timeout: actionMs });
+            } else {
+              await this.noteProbe(step.value, step.target);
+              await this.fillOrAppend(loc, step.value, step.replace ?? false);
+              if (step.pressEnter) {
+                const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
+                const submitLabel = ((await submit.textContent({ timeout: 1000 }).catch(() => "")) ?? "").trim();
+                if (this.readOnly && isDestructive(submitLabel)) refusal = destructiveRefusal(submitLabel, this.mode);
+                else await loc.press("Enter", { timeout: actionMs });
+              }
+            }
+            if (!refusal) await this.settle();
+          }
+        } else if (step.action === "expect-text") {
+          const visible = current.getByText(step.text, { exact: false }).filter({ visible: true }).first();
+          const ok = await visible
+            .waitFor({ state: "visible", timeout: actionMs })
+            .then(() => true)
+            .catch(() => false);
+          if (!ok) failure = `no visible text ${JSON.stringify(step.text)} within ${actionMs / 1000}s — ${limitHint("action", actionMs)}`;
+        } else if (step.action === "expect-element") {
+          const matches = BrowserEngine.locatorFor(current, parseTarget(step.target)!);
+          const until = Date.now() + actionMs;
+          let verdict = elementStateMatches(step.state, await BrowserEngine.elementFacts(matches));
+          while (!verdict.ok && Date.now() < until) {
+            await current.waitForTimeout(100).catch(() => {});
+            verdict = elementStateMatches(step.state, await BrowserEngine.elementFacts(matches));
+          }
+          if (!verdict.ok) failure = `${step.target} ${verdict.actual}, expected ${step.state}, after ${actionMs / 1000}s`;
+        } else if (step.action === "expect-url") {
+          const ok = await poll(() => urlMatches(step.pattern, this.page?.url() ?? ""), actionMs);
+          if (!ok) failure = `the page is at ${here()}, which does not match /${step.pattern}/`;
+        } else {
+          let last: ReturnType<typeof matchRequest> = { ok: false, reason: "" };
+          await poll(() => (last = matchRequest(step, seen)).ok, actionMs);
+          if (!last.ok) failure = last.reason;
+        }
+      } catch (err) {
+        failure = firstLineOf(explainTimeout(err, "action", actionMs));
+      }
+      await this.scanForInjections().catch(() => {});
+      await this.scanForContradictions().catch(() => {});
+      // What the write policy refused of the app's own requests while this step ran is the step's, whatever caused it.
+      const blocked = ownRefusals();
+      if (!refusal && blocked.length > 0) refusal = `the ${this.writeRule.at()} write policy refused ${blocked.join(", ")}`;
+      collect();
+      return { failure, refusal };
+    };
+    /** A repeat step: its condition first, then its actions and the condition again, at most `max` times. */
+    const runRepeat = async (step: Extract<FlowStep, { action: "repeat" }>): Promise<{ failure: string | null; refusal: string | null }> => {
+      for (let k = 0; ; k++) {
+        // A short wait every time, the first look included: an instant one misses what is already on the page.
+        const check = await runStep(step.until, Math.min(REPEAT_CHECK_MS, this.limits.actionMs));
+        if (check.refusal) return check;
+        if (!check.failure) return { failure: null, refusal: null };
+        if (k === step.max) return { failure: repeatFailure(step.until, step.max, check.failure), refusal: null };
+        for (const inner of step.steps) {
+          const r = await runStep(inner);
+          if (r.refusal || r.failure)
+            return { failure: r.failure && `repeat ${k + 1} of at most ${step.max}, ${describeStep(inner)}: ${r.failure}`, refusal: r.refusal };
+        }
+      }
+    };
     try {
       for (const [i, step] of steps.entries()) {
         const n = i + 1;
         const did = describeStep(step);
-        if (isAction(step)) seen = [];
-        let failure: string | null = null;
-        let refusal: string | null = null;
-        this.actionStartedAt = Date.now();
-        if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "press") await this.beginInput();
-        try {
-          const current = this.requirePage();
-          if (step.action === "navigate") {
-            const resolved = resolveTarget(this.baseUrl, step.target);
-            if (!("url" in resolved)) throw new Error(resolved.problem);
-            const url = resolved.url;
-            const resp = await current
-              .goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs })
-              .catch((err: unknown) => Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs)));
-            await this.settle();
-            const status = resp?.status() ?? null;
-            if (status !== null && status >= 400) {
-              failure = `the page answered HTTP ${status}`;
-              // The page's own status is this step's failure; the oracle's record of the same response is not a second issue.
-              // The oracle stores its details redacted (redactViolation), so the comparison is redacted too.
-              collect(redactSecrets(httpErrorDetail("GET", current.url().replace(/#.*$/, ""), status)));
-            }
-          } else if (step.action === "press") {
-            refusal = await this.vetFocusedActivation(step.value);
-            if (!refusal) {
-              await current.keyboard.press(step.value);
-              await this.settle();
-            }
-          } else if (step.action === "click" || step.action === "type" || step.action === "select") {
-            const loc = BrowserEngine.locatorFor(current, parseTarget(step.target)!).first();
-            const found = await loc
-              .waitFor({ state: "visible", timeout: this.limits.actionMs })
-              .then(() => true)
-              .catch(() => false);
-            const blocked = found ? await this.waitUntilActionable(loc, step.action) : null;
-            if (!found) {
-              failure = `nothing visible matches ${step.target} within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
-            } else if (blocked) {
-              // The state first, since it is what is true; the hint still applies when the app enables it late.
-              failure = `${step.target} ${blocked} after ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
-            } else {
-              const label = (
-                (await loc.getAttribute("aria-label").catch(() => null)) ??
-                (await loc.textContent({ timeout: 1000 }).catch(() => null)) ??
-                ""
-              ).trim();
-              // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
-              const isSelect = step.action === "select" && (await loc.evaluate((n) => n.tagName.toLowerCase() === "select").catch(() => false));
-              const testid = await loc.getAttribute("data-testid").catch(() => null);
-              if (
-                this.readOnly &&
-                step.action !== "type" &&
-                (isSelect
-                  ? pickIsDestructive(step.value, testid, await BrowserEngine.chosenOptionLabel(loc, step.value))
-                  : isDestructive(label, step.action === "select" ? step.value : undefined))
-              ) {
-                refusal = destructiveRefusal(label || step.target, this.mode);
-              } else if (step.action === "click") {
-                await loc.click({ timeout: this.limits.actionMs });
-              } else if (step.action === "select") {
-                await loc.selectOption(step.value, { timeout: this.limits.actionMs });
-              } else {
-                await this.noteProbe(step.value, step.target);
-                await this.fillOrAppend(loc, step.value, step.replace ?? false);
-                if (step.pressEnter) {
-                  const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
-                  const submitLabel = ((await submit.textContent({ timeout: 1000 }).catch(() => "")) ?? "").trim();
-                  if (this.readOnly && isDestructive(submitLabel)) refusal = destructiveRefusal(submitLabel, this.mode);
-                  else await loc.press("Enter", { timeout: this.limits.actionMs });
-                }
-              }
-              if (!refusal) await this.settle();
-            }
-          } else if (step.action === "expect-text") {
-            const visible = current.getByText(step.text, { exact: false }).filter({ visible: true }).first();
-            const ok = await visible
-              .waitFor({ state: "visible", timeout: this.limits.actionMs })
-              .then(() => true)
-              .catch(() => false);
-            if (!ok)
-              failure = `no visible text ${JSON.stringify(step.text)} within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
-          } else if (step.action === "expect-element") {
-            const matches = BrowserEngine.locatorFor(current, parseTarget(step.target)!);
-            const until = Date.now() + this.limits.actionMs;
-            let verdict = elementStateMatches(step.state, await BrowserEngine.elementFacts(matches));
-            while (!verdict.ok && Date.now() < until) {
-              await current.waitForTimeout(100).catch(() => {});
-              verdict = elementStateMatches(step.state, await BrowserEngine.elementFacts(matches));
-            }
-            if (!verdict.ok) failure = `${step.target} ${verdict.actual}, expected ${step.state}, after ${this.limits.actionMs / 1000}s`;
-          } else if (step.action === "expect-url") {
-            const ok = await poll(() => urlMatches(step.pattern, this.page?.url() ?? ""));
-            if (!ok) failure = `the page is at ${here()}, which does not match /${step.pattern}/`;
-          } else {
-            let last: ReturnType<typeof matchRequest> = { ok: false, reason: "" };
-            await poll(() => (last = matchRequest(step, seen)).ok);
-            if (!last.ok) failure = last.reason;
-          }
-        } catch (err) {
-          failure = firstLineOf(explainTimeout(err, "action", this.limits.actionMs));
-        }
-        await this.scanForInjections().catch(() => {});
-        await this.scanForContradictions().catch(() => {});
-        // What the write policy refused of the app's own requests while this step ran is the step's, whatever caused it.
-        const blocked = ownRefusals();
-        if (!refusal && blocked.length > 0) refusal = `the ${this.writeRule.at()} write policy refused ${blocked.join(", ")}`;
-        collect();
+        const { failure, refusal } = step.action === "repeat" ? await runRepeat(step) : await runStep(step);
         if (refusal) return done({ status: "refused", step: n, did, reason: refusal.split("\n")[0], path: here() });
         if (failure) return done({ status: "failed", step: n, did, reason: failure, path: here() });
       }
