@@ -182,6 +182,22 @@ export function keyAliases(bases: ReadonlyArray<{ base: string; prior: string; t
 }
 
 /**
+ * keyAliases for every step between name rules, from each element's base key
+ * under each rule, rule 1 first and the current rule last: rule r (from 2)
+ * → the step's aliases, current key under r → key under r - 1. A step that
+ * renamed nothing is left out.
+ */
+export function keyAliasSteps(bases: ReadonlyArray<{ byRule: readonly string[]; tracked: boolean }>): Record<number, Record<string, string>> {
+  const rules = bases.length > 0 ? bases[0].byRule.length : 0;
+  const out: Record<number, Record<string, string>> = {};
+  for (let i = 1; i < rules; i++) {
+    const step = keyAliases(bases.map((b) => ({ base: b.byRule[i], prior: b.byRule[i - 1], tracked: b.tracked })));
+    if (Object.keys(step).length > 0) out[i + 1] = step;
+  }
+  return out;
+}
+
+/**
  * Fingerprint a UI state: normalized route + hash of the set of interactable
  * element classes. Same page with different data → same fingerprint; a page
  * whose available actions changed (modal opened, different role) → new one.

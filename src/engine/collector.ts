@@ -43,6 +43,36 @@ export const XPATH_OF_SRC = `(el) => {
   }`;
 
 /**
+ * What one descendant of a control says toward the control's name, as
+ * page-side source, in the order the accessible-name computation reads it
+ * when a name comes from content: its aria-label; for an <img>, its alt text,
+ * and when that is empty or missing, its title (an avatar with alt="" and a
+ * title names the link around it); for an <svg>, its <title>. Anything else
+ * says nothing. Kept apart from NAME_FACTS_SRC so the order can be
+ * table-tested without a browser (contentSays).
+ */
+export const CONTENT_SAYS_SRC = `(d) => {
+    if (d.ariaLabel && d.ariaLabel.trim()) return d.ariaLabel;
+    if (d.tag === "img") return d.alt && d.alt.trim() ? d.alt : d.title;
+    if (d.tag === "svg") return d.svgTitle;
+    return "";
+  }`;
+
+/** The facts CONTENT_SAYS_SRC reads of one descendant. */
+export interface ContentFacts {
+  tag: string;
+  ariaLabel: string | null;
+  alt: string | null;
+  title: string;
+  svgTitle: string;
+}
+
+/** CONTENT_SAYS_SRC run outside a page, from the same source the page runs. */
+export function contentSays(facts: ContentFacts): string {
+  return (new Function(`return (${CONTENT_SAYS_SRC});`)() as (d: ContentFacts) => string)(facts);
+}
+
+/**
  * What an element's accessible name is read from, as page-side source: every
  * candidate source, read from the DOM and nothing decided. PICK_NAME_SRC
  * decides, so the order can be table-tested without a browser.
@@ -51,10 +81,13 @@ export const XPATH_OF_SRC = `(el) => {
  * holds the control, and a select's options or a textarea's contents are not
  * its label.
  *
- * `content` is what the element's image content says, which the text cannot
- * hold: the alt text of the first descendant <img>, else the aria-label or
- * <title> of a descendant <svg> or role="img", in document order, skipping
- * anything inside an aria-hidden part of the element.
+ * `content` is what the element's content says that its text cannot hold:
+ * the first descendant, in document order, that CONTENT_SAYS_SRC finds a word
+ * in (an aria-label, an image's alt or title, an svg's <title>), skipping
+ * anything inside an aria-hidden part of the element. `content2` is what the
+ * same content said under name rule 2 (memory.ts NAME_RULE), which read only
+ * an <img>'s alt and an <svg>'s or role="img"'s aria-label or <title>: it is
+ * read so a control renamed since keeps its coverage.
  */
 export const NAME_FACTS_SRC = `(el) => {
     const tag = el.tagName.toLowerCase();
@@ -66,16 +99,27 @@ export const NAME_FACTS_SRC = `(el) => {
       const own = label.contains(el) ? el.textContent || "" : "";
       labels.push((label.textContent || "").replace(own, ""));
     }
+    const says = ${CONTENT_SAYS_SRC};
     let content = "";
-    for (const d of el.querySelectorAll("img, svg, [role='img']")) {
+    let content2 = "";
+    for (const d of el.querySelectorAll("img, svg, [role='img'], [aria-label]")) {
       const hidden = d.closest('[aria-hidden="true"]');
       if (hidden && el.contains(hidden)) continue;
-      const title = d.tagName.toLowerCase() === "svg" ? d.querySelector(":scope > title") : null;
-      const said = (d.tagName === "IMG" ? d.getAttribute("alt") : d.getAttribute("aria-label") || (title ? title.textContent : "")) || "";
-      if (said.trim()) {
-        content = said;
-        break;
+      const svgTitle = d.tagName.toLowerCase() === "svg" ? d.querySelector(":scope > title") : null;
+      const said = says({
+        tag: d.tagName.toLowerCase(),
+        ariaLabel: d.getAttribute("aria-label"),
+        alt: d.getAttribute("alt"),
+        title: d.getAttribute("title") || "",
+        svgTitle: svgTitle ? svgTitle.textContent || "" : "",
+      });
+      if (!content && said.trim()) content = said;
+      // Name rule 2, frozen: what this content said before a descendant's aria-label and an image's title counted.
+      if (!content2 && d.matches("img, svg, [role='img']")) {
+        const said2 = (d.tagName === "IMG" ? d.getAttribute("alt") : d.getAttribute("aria-label") || (svgTitle ? svgTitle.textContent : "")) || "";
+        if (said2.trim()) content2 = said2;
       }
+      if (content && content2) break;
     }
     const live = /^(status|alert|log|timer|marquee)$/.test(role) || tag === "output" ||
       (el.hasAttribute("aria-live") && el.getAttribute("aria-live") !== "off");
@@ -94,6 +138,7 @@ export const NAME_FACTS_SRC = `(el) => {
       live,
       text: el.innerText || el.textContent || "",
       content,
+      content2,
     };
   }`;
 
@@ -109,15 +154,18 @@ export const NAME_FACTS_SRC = `(el) => {
  * fallback stays.
  *
  * - A select is never named by its options: their text is its value, not its name.
- * - Other elements are named by their text; with none, by their image content
+ * - Other elements are named by their text; with none, by their content
  *   (a link holding only a logo with alt text, a button holding only an svg
- *   with a <title>); and with neither, by title (an icon-only button with a
- *   tooltip). Text and image content are not joined: a control with both is
- *   named by its text, as it was before image content counted.
- * - A name taken from image content carries `prior`, the name the rule gave
- *   before image content counted (the title, or nothing). The name is half of
- *   the coverage key, so the key under the earlier rule is kept beside the new
- *   one and coverage recorded under it carries over (memory.ts keyAliases).
+ *   with a <title>, a link around an icon element with an aria-label or an
+ *   avatar with a title); and with neither, by title (an icon-only button
+ *   with a tooltip). Text and content are not joined: a control with both is
+ *   named by its text, as it was before content counted.
+ * - A name taken from content carries `priors`, the name each earlier rule
+ *   gave (memory.ts NAME_RULE), rule 1 first: rule 1 read no content (the
+ *   title, or nothing), rule 2 read only image content. The name is half of
+ *   the coverage key, so the key under each earlier rule is kept beside the
+ *   new one and coverage recorded under it carries over (memory.ts keyAliases,
+ *   ruleKeyAliases).
  * - A live region (status, alert, log, timer, an aria-live region, <output>)
  *   is named by the text it announces, which is what matters after an action.
  * - A whitespace-only aria-label ends the name with nothing, as it always has
@@ -149,7 +197,11 @@ export const PICK_NAME_SRC = `(f) => {
       return { name: (clean(f.nameAttr) || t || f.tag).slice(0, 80), from: "fallback" };
     }
     if (clean(f.text)) return named(clean(f.text));
-    if (clean(f.content)) return { ...named(clean(f.content)), prior: clean(f.title).slice(0, 80) };
+    if (clean(f.content)) {
+      // The name under rule 1 (no content) and under rule 2 (content2), so coverage keys can be carried across.
+      const title = clean(f.title).slice(0, 80);
+      return { ...named(clean(f.content)), priors: [title, clean(f.content2) ? clean(f.content2).slice(0, 80) : title] };
+    }
     return named(clean(f.title));
   }`;
 
@@ -168,14 +220,15 @@ export interface NameFacts {
   live: boolean;
   text: string;
   content: string;
+  content2: string;
 }
 
-/** A name PICK_NAME_SRC chose, and the name the earlier rule gave when the two can differ. */
+/** A name PICK_NAME_SRC chose, and the names the earlier rules gave when they can differ. */
 export interface PickedName {
   name: string;
   from: NameFrom | null;
-  /** Present only when image content named the element: the name before image content counted. */
-  prior?: string;
+  /** Present only when content named the element: its name under rule 1, then rule 2 (memory.ts NAME_RULE). */
+  priors?: string[];
 }
 
 /**
@@ -701,7 +754,7 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
       name: named.name,
       ...policyText(el),
       nameFrom: named.from,
-      ...(named.prior !== undefined ? { priorName: named.prior } : {}),
+      ...(named.priors ? { priorNames: named.priors } : {}),
       testid: el.getAttribute("data-testid"),
       interactive,
       affords: affords && (affords.tabStop || affords.clickHandler || affords.pointer) ? affords : null,

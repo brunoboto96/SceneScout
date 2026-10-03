@@ -57,7 +57,7 @@ import {
   type JudgeVerdict,
   NAME_RULE,
 } from "../src/engine/memory.ts";
-import { keyAliases } from "../src/engine/fingerprint.ts";
+import { keyAliases, keyAliasSteps } from "../src/engine/fingerprint.ts";
 import { analyzeDesign, type StyleRecord } from "../src/engine/design.ts";
 import {
   FORMS_READ_FAILED,
@@ -760,7 +760,7 @@ test("keyAliases: a control that gained a name maps to its earlier key, ordinals
 test("coverage recorded under a control's earlier empty-name key carries over to its new name, and the earlier key is not left behind", () => {
   const store = freshStore();
   legacyState(store, "/a#old", "/a", { "button:": { exercised: true, lastAction: "click" }, "button:save": { exercised: false } });
-  store.visitState("/a#new", "http://x/a", "/a", ["button:search", "button:save"], [], undefined, { "button:search": "button:" });
+  store.visitState("/a#new", "http://x/a", "/a", ["button:search", "button:save"], [], undefined, { 2: { "button:search": "button:" } });
   const cov = store.coverage();
   assert.equal(cov.elementsTotal, 2, "the search button once, not once per key");
   assert.equal(cov.elementsExercised, 1, "and still exercised");
@@ -777,7 +777,7 @@ test("coverage recorded under a control's earlier empty-name key carries over to
 test("two unnamed image buttons that shared one key split, each keeping what was recorded for it", () => {
   const store = freshStore();
   legacyState(store, "/a#old", "/a", { "button:": { exercised: true }, "button:~1": { exercised: false } });
-  store.visitState("/a#new", "http://x/a", "/a", ["button:search", "button:"], [], undefined, { "button:search": "button:", "button:": "button:~1" });
+  store.visitState("/a#new", "http://x/a", "/a", ["button:search", "button:"], [], undefined, { 2: { "button:search": "button:", "button:": "button:~1" } });
   const cov = store.coverage();
   assert.equal(cov.elementsTotal, 2);
   assert.deepEqual(cov.unexercised, [{ state: "/a", keys: ["button:"], total: 2 }], "the still-unnamed button was never exercised");
@@ -787,7 +787,7 @@ test("a state recorded under the current rule is never re-read through an alias"
   // `button:` here is a button that is still unnamed now; an alias learned for the old key must not rename it.
   const store = freshStore();
   legacyState(store, "/a#old", "/a", { "button:": { exercised: true } });
-  store.visitState("/a#new", "http://x/a", "/a", ["button:search"], [], undefined, { "button:search": "button:" });
+  store.visitState("/a#new", "http://x/a", "/a", ["button:search"], [], undefined, { 2: { "button:search": "button:" } });
   store.visitState("/a#other", "http://x/a?x=1", "/a", ["button:"]);
   assert.equal(store.states["/a#other"].nameRule, NAME_RULE);
   const cov = store.coverage();
@@ -809,8 +809,7 @@ test("an earlier state reached again under the same fingerprint has its keys mov
     "button:~1": { exercised: false },
   });
   store.visitState("/a#same", "http://x/a", "/a", ["button:search", "button:search~1", "button:"], [], undefined, {
-    "button:search~1": "button:",
-    "button:": "button:~1",
+    2: { "button:search~1": "button:", "button:": "button:~1" },
   });
   const els = store.states["/a#same"].elements;
   assert.equal(els["button:search~1"]?.exercised, true, "the image button keeps its click");
@@ -837,8 +836,8 @@ test("an earlier state reached again under the same fingerprint has its keys mov
 test("the first alias a route learns stands, and aliases survive a reload and a merge", () => {
   const store = freshStore();
   legacyState(store, "/a#old", "/a", { "button:": { exercised: true } });
-  store.visitState("/a#new", "http://x/a", "/a", ["button:search"], [], undefined, { "button:search": "button:" });
-  store.visitState("/a#modal", "http://x/a?m=1", "/a", ["button:close"], [], undefined, { "button:close": "button:" });
+  store.visitState("/a#new", "http://x/a", "/a", ["button:search"], [], undefined, { 2: { "button:search": "button:" } });
+  store.visitState("/a#modal", "http://x/a?m=1", "/a", ["button:close"], [], undefined, { 2: { "button:close": "button:" } });
   assert.equal(
     store
       .coverage()
@@ -862,6 +861,84 @@ test("the first alias a route learns stands, and aliases survive a reload and a 
   assert.deepEqual(merged.keyAliases, { "/a": { "button:": "button:search" }, "/b": { "link:": "link:home" } });
   const shared = mergeMemory({ ...theirs, states: { "/b#1": { ...theirs.states["/b#1"], nameRule: undefined } } }, theirs);
   assert.equal(shared.states["/b#1"].nameRule, NAME_RULE, "either side's current rule is kept");
+});
+
+// A descendant's aria-label and an image's title name a control under rule 3; rule 2 read neither.
+
+test("keyAliasSteps: each step between name rules lists only the controls that step renamed", () => {
+  // An image button named by its alt from rule 2 on, and an icon link named by a descendant's aria-label from rule 3 on.
+  const bases = [
+    { byRule: ["button:", "button:search", "button:search"], tracked: true },
+    { byRule: ["link:", "link:", "link:feed"], tracked: true },
+    { byRule: ["link:home", "link:home", "link:home"], tracked: true },
+  ];
+  assert.deepEqual(keyAliasSteps(bases), { 2: { "button:search": "button:" }, 3: { "link:feed": "link:" } });
+  // Nothing renamed, no step listed.
+  assert.deepEqual(keyAliasSteps([{ byRule: ["link:home", "link:home", "link:home"], tracked: true }]), {});
+});
+
+test("coverage recorded under rule 2 for a control rule 3 names carries over", () => {
+  const rule2 = (store: MemoryStore) => {
+    store.states["/a#old"] = {
+      url: "http://x/a",
+      route: "/a",
+      firstSeen: "2026-01-01T00:00:00.000Z",
+      visits: 1,
+      elements: { "link:": { exercised: true, lastAction: "click" }, "link:home": { exercised: false } },
+      nameRule: 2,
+    };
+  };
+  const store = freshStore();
+  rule2(store);
+  store.visitState("/a#new", "http://x/a", "/a", ["link:feed", "link:home"], [], undefined, { 3: { "link:feed": "link:" } });
+  assert.equal(store.coverage().elementsTotal, 2, "the icon link once, not once per key");
+  assert.equal(store.coverage().elementsExercised, 1);
+  assert.deepEqual(store.coverage().unexercised, [{ state: "/a", keys: ["link:home"], total: 2 }]);
+
+  // The contrast: with no step-3 alias the renamed link reads as new and its rule-2 key stays as a gap.
+  const plain = freshStore();
+  rule2(plain);
+  plain.visitState("/a#new", "http://x/a", "/a", ["link:feed", "link:home"]);
+  assert.equal(plain.coverage().elementsTotal, 3);
+
+  // Reached again under the same fingerprint, the rule-2 record is moved to rule-3 keys before it is marked current.
+  const same = freshStore();
+  rule2(same);
+  same.visitState("/a#old", "http://x/a", "/a", ["link:feed", "link:home"], [], undefined, { 3: { "link:feed": "link:" } });
+  assert.equal(same.states["/a#old"].nameRule, NAME_RULE);
+  assert.equal(same.states["/a#old"].elements["link:feed"]?.exercised, true);
+  assert.equal(same.states["/a#old"].elements["link:"], undefined);
+});
+
+test("a rule-1 state is moved through every step, one rule at a time", () => {
+  // Under rule 1 an image button and an icon link were both unnamed: button: and button:~1 (both buttons here).
+  // Rule 2 names the image button, so the icon one moves to button:; rule 3 names the icon one too.
+  const store = freshStore();
+  legacyState(store, "/a#old", "/a", { "button:": { exercised: false }, "button:~1": { exercised: true, lastAction: "click" } });
+  store.visitState("/a#new", "http://x/a", "/a", ["button:search", "button:feed"], [], undefined, {
+    2: { "button:search": "button:", "button:": "button:~1" },
+    3: { "button:feed": "button:" },
+  });
+  const cov = store.coverage();
+  assert.equal(cov.elementsTotal, 2);
+  assert.deepEqual(cov.unexercised, [{ state: "/a", keys: ["button:search"], total: 2 }], "the icon button keeps its click, the image button does not get it");
+
+  // A merge with another process moves a rule-2 side through step 3 the same way, and keeps both sides' step aliases.
+  const theirs = {
+    version: 1 as const,
+    states: { "/a#same": { url: "u", route: "/a", firstSeen: "2026-01-01", visits: 1, elements: { "link:": { exercised: true } }, nameRule: 2 } },
+    findings: [],
+  };
+  const mine = {
+    version: 1 as const,
+    states: { "/a#same": { url: "u", route: "/a", firstSeen: "2026-01-02", visits: 1, elements: { "link:feed": { exercised: false } }, nameRule: NAME_RULE } },
+    findings: [],
+    ruleKeyAliases: { "3": { "/a": { "link:": "link:feed" } } },
+  };
+  const merged = mergeMemory(mine, { ...theirs, ruleKeyAliases: { "3": { "/b": { "button:": "button:close" } } } });
+  assert.equal(merged.states["/a#same"].elements["link:feed"].exercised, true);
+  assert.equal(merged.states["/a#same"].elements["link:"], undefined);
+  assert.deepEqual(merged.ruleKeyAliases, { "3": { "/a": { "link:": "link:feed" }, "/b": { "button:": "button:close" } } });
 });
 
 test("coverage counts the controls on a page, not the wrappers and badges it lists for their test ids", () => {
