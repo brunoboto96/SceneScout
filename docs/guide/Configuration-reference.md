@@ -16,7 +16,7 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `scenescout check <url>` | The deterministic check; exit 0 passed, 1 failed the gate, 2 could not run |
 | `scenescout ci <url>` | An unattended exploratory run driven by a model's API; exit 0 ran, 2 could not run |
 | `scenescout login <url> --role <name>` | Saves a sign-in as a role's profile; exit 0 saved, 1 not |
-| `scenescout export --to <tracker>` | Files the project's open findings as GitHub or Jira issues, each once; a dry run unless `--yes`; exit 0 done, 2 could not export |
+| `scenescout export --to <tracker>` | Files the project's open findings, or a `check.json` or `ci.json` (`--from`), as GitHub or Jira issues, each once; a dry run unless `--yes`; exit 0 done, 2 could not export |
 | `scenescout status [path]` | What every session of a running engine is doing, as text |
 | `scenescout watch [path]` | Opens the live view in a browser |
 
@@ -142,7 +142,8 @@ Each `--script` option can also come from an environment variable, below; the op
 | `--jira-issue-type` | `Bug` | The Jira issue type to create; also from `JIRA_ISSUE_TYPE` |
 | `--jira-link-type` | `Relates` | The issue link type from a Jira issue to each ticket whose acceptance criterion the finding fails (`scout_criterion`), when the ticket's id is a Jira key. `none` links nothing; also from `JIRA_LINK_TYPE` |
 | `--jira-update` | `on` | `on` brings each open Jira issue filed earlier up to date: its summary and description while nobody has edited them in Jira since, and the picture, frames and ticket links it lacks. `off` only lists it |
-| `--project` | the current directory | The project whose `.scenescout/memory.json` holds the findings |
+| `--project` | the current directory | The project whose `.scenescout/memory.json` holds the findings, and whose `.scenescout/exported.json` records the issues filed |
+| `--from` | the project's memory | A `check.json` from `scenescout check` or a `ci.json` from `scenescout ci` to export instead. Their issues carry no screenshots |
 | `--min-severity` | `low` | The least severe finding to file: `high`, `medium` or `low` |
 | `--only` | every finding the other options let through | Only these finding ids, comma-separated |
 | `--max-issues` | `20` | The most issues one export files, 1 to 100. The next export files the rest |
