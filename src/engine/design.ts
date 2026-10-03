@@ -117,6 +117,44 @@ export interface FocusSample {
   indicator: boolean;
 }
 
+/** The part of a document the focus walk reads (a DOM Document, page-side). */
+export interface FocusDocument {
+  activeElement: FocusElement | null;
+  body: unknown;
+  documentElement: unknown;
+}
+
+/** The part of an element the focus walk reads; `contentDocument` is null for another site's frame. */
+export interface FocusElement {
+  tagName: string;
+  contentDocument?: FocusDocument | null;
+}
+
+/**
+ * The control a Tab press focused, as the focus-indicator rule measures it. It runs
+ * page-side (probes.ts embeds its source), so it is plain JavaScript once compiled.
+ *
+ * A Tab that lands on an iframe or frame moves focus into the frame's document: the
+ * frame element is not the control the user sees focused, and its own outline staying
+ * the same says nothing. So the walk follows focus into a same-origin frame and returns
+ * the element focused there. It returns "frame" when focus is inside a frame it cannot
+ * follow (another site's, whose document is not readable) or a frame whose document has
+ * nothing focused: that press is skipped, not sampled. It returns null when nothing in
+ * the page is focused, which ends the sampling.
+ */
+export function focusedControl(doc: FocusDocument): FocusElement | "frame" | null {
+  let d = doc;
+  let el = d.activeElement;
+  while (el && /^i?frame$/i.test(el.tagName)) {
+    const inner = el.contentDocument ?? null;
+    if (!inner) return "frame";
+    d = inner;
+    el = inner.activeElement;
+  }
+  if (!el || el === d.body || el === d.documentElement) return d === doc ? null : "frame";
+  return el;
+}
+
 export interface DesignPagePayload {
   /** Document scroll width vs window width — horizontal overflow detection. */
   scrollW: number;
