@@ -1,5 +1,0 @@
----
-"scenescout": minor
----
-
-`scenescout login` no longer needs Enter in a terminal: the window saves the role's profile and closes by itself once the person is signed in, meaning back on the app, with no password or code field on the page, past any return from a single sign-on provider, and holding a session cookie or storage entry it did not hold when the window opened. A round trip through an identity provider on another site, a sign-in popup still open on one, and the app's own page before it has exchanged the provider's code are never taken for the end. Enter still saves at once; `--save enter` makes it the only way, as before, and `--success-url` names the signed-in address instead. The new `scout_login { url, role, projectPath }` tool opens the same window from a conversation and returns once the sign-in is saved, or after `waitSeconds` (default 120) with the window still open, so the agent can call it again; a window nobody finishes closes after 15 minutes, saving nothing. A role with no saved login now names `scout_login` beside the command when an attach is refused.
