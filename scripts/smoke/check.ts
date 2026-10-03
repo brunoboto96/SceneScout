@@ -15,7 +15,8 @@ import { createDemoServer } from "../../demo-app/server.mjs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { writeRedirectHopsJudged } from "../../dist/browsers.js";
 import { firstLook } from "../../dist/first-run.js";
-import { BROWSER, check, eventually, settle, until, type SmokeContext } from "./harness.ts";
+import { BROWSER, check, eventually, settle, SIGN_IN_COOKIE, until, type SmokeContext } from "./harness.ts";
+import { writeProfile } from "../../dist/engine/profiles.js";
 
 export const title = "check (deterministic gate)";
 
@@ -578,6 +579,48 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     "...and a repeat whose condition already holds runs its actions no times",
     already.status === 0 && already.summary?.flows[0]?.status === "passed",
     `${already.status} ${JSON.stringify(already.summary?.flows)}`,
+  );
+
+  // Roles: a flow naming a role runs in a browser signed in with that role's saved profile; the same flow naming none
+  // runs in the check's own session, which here is signed out. Only the role differs between the two.
+  const rolesProject = project("flow-roles", {});
+  const host = new URL(baseUrl).hostname;
+  writeProfile(rolesProject, "member", {
+    cookies: [{ name: SIGN_IN_COOKIE, value: "member", domain: host, path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Lax" }],
+    origins: [],
+  });
+  const accountFlow = (role?: string) => ({
+    ...(role ? { role } : {}),
+    steps: [
+      { action: "navigate", target: "/cookie-account" },
+      { action: "expect-text", text: "Signed in as a member" },
+    ],
+  });
+  const flowsDir = path.join(rolesProject, ".scenescout", "flows");
+  fs.writeFileSync(path.join(flowsDir, "01-as-member.json"), JSON.stringify(accountFlow("member")));
+  fs.writeFileSync(path.join(flowsDir, "02-own-session.json"), JSON.stringify(accountFlow()));
+  const roles = await checkWith(rolesProject);
+  const byFile = (file: string) => roles.summary?.flows.find((f) => f.file === file) as (FlowSummary["flows"][number] & { role?: string }) | undefined;
+  check(
+    "roles: a flow naming a role runs signed in with that role's saved profile, and the report and JSON say which role",
+    byFile("01-as-member.json")?.status === "passed" &&
+      byFile("01-as-member.json")?.role === "member" &&
+      /as `member`/.test(roles.out + fs.readFileSync(path.join(rolesProject, "out", "report.md"), "utf8")),
+    `${roles.status} ${JSON.stringify(roles.summary?.flows)} ${roles.out.slice(-600)}`,
+  );
+  check(
+    "...and the same flow naming no role runs in the check's own signed-out session, where it fails",
+    byFile("02-own-session.json")?.status === "failed" && byFile("02-own-session.json")?.role === undefined && roles.status === 1,
+    `${roles.status} ${JSON.stringify(roles.summary?.flows)}`,
+  );
+  const unsaved = await checkWith(project("flow-roles-unsaved", { "as-admin.json": accountFlow("admin") }));
+  check(
+    "...and a flow naming a role with no saved sign-in stops the check before it starts, exit 2 naming the command that saves it",
+    unsaved.status === 2 &&
+      /no sign-in is saved for role "admin"/.test(unsaved.out) &&
+      /scenescout login .*--role admin/.test(unsaved.out) &&
+      unsaved.summary === null,
+    `${unsaved.status} ${unsaved.out.slice(-600)}`,
   );
 
   // A step that would write. The same flow, under the default and under --flow-writes allow, both in read-only mode,

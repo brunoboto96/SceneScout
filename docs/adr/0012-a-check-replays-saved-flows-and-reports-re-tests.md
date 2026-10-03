@@ -217,3 +217,16 @@ for. A repeat holds only single steps; it never nests, and `expect-request` is
 not a condition, since what a round sent is not what the page shows. The steps
 inside run through the same code as any other step, write policy included.
 
+## Amendment, 3 October 2026: a flow can run as a role
+
+A flow may name a `role`. It then runs in a browser of its own, attached with
+the profile `scenescout login --role` saved in the project, the same profile
+`scout_attach { role }` loads. Journeys that pass between people (one role
+submits, another approves) were otherwise impossible to save, since a check
+held one session. A browser per role, rather than re-attaching the check's
+own, leaves the crawl's session and what it found untouched. Every role a
+flow names is resolved before the check starts, so a missing profile fails in
+seconds with the command that saves it, never after a full crawl. Flows still
+run in file-name order and share nothing but the app's own data, so a later
+flow finds what an earlier one created by what the page shows.
+
