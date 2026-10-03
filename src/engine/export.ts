@@ -969,6 +969,84 @@ export function rememberFiled(map: Map<string, FiledIssue>, id: string, issue: F
   if (!held || (issue.open && !held.open) || (issue.open === held.open && issue.number < held.number)) map.set(id, issue);
 }
 
+// ── the local record of what was filed ──────────────────────────────────────
+
+/**
+ * A tracker's listing of labelled issues can lag behind a create: GitHub's
+ * label filter and Jira's search are both eventually consistent. So each
+ * export keeps, beside the memory, the issue it filed for each finding, and
+ * a later export on the same machine reads that issue back by its number,
+ * which is consistent, before it trusts the listing's silence.
+ */
+export const EXPORT_RECORD_FILE = "exported.json";
+
+/** How long a Jira create that may have been made holds its finding back, unless the issue turns up sooner. Jira's search can take minutes. */
+export const UNCERTAIN_HOLD_MS = 15 * 60_000;
+
+/** One finding's issue in one tracker: filed (`number` set), or a create whose result is not known (`uncertain`). */
+export type RecordEntry = { ref: string; number: number; url: string; at: string } | { uncertain: true; at: string };
+/** Tracker → finding id → its issue. */
+export type ExportRecord = Record<string, Record<string, RecordEntry>>;
+
+/** The key a tracker's entries are kept under: the API's address and the repository or project, so two trackers never share an entry. */
+export function recordKey(t: ExportTarget): string {
+  return t.to === "github"
+    ? `github ${t.github.apiUrl.replace(/\/+$/, "")} ${t.github.repo}`
+    : `jira ${t.jira.baseUrl.replace(/\/+$/, "")} ${t.jira.projectKey}`;
+}
+
+/**
+ * The record file's text, read. None yet is an empty record. A file that
+ * cannot be read is refused rather than taken as empty: empty would let an
+ * export file again what the lagging listing does not show yet.
+ */
+export function parseExportRecord(text: string | null): Parsed<ExportRecord> {
+  if (text === null) return { ok: true, value: {} };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, error: `it is not JSON (${err instanceof Error ? err.message : String(err)})` };
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "it is not an object" };
+  const { version, trackers } = raw as { version?: unknown; trackers?: unknown };
+  if (version !== 1) return { ok: false, error: `it is version ${oneLine(version, 20)}, which this version does not read` };
+  if (!trackers || typeof trackers !== "object" || Array.isArray(trackers)) return { ok: false, error: "it holds no trackers" };
+  const value: ExportRecord = {};
+  for (const [key, entries] of Object.entries(trackers as Record<string, unknown>)) {
+    if (!entries || typeof entries !== "object" || Array.isArray(entries)) return { ok: false, error: `its entry for ${oneLine(key, 80)} is not an object` };
+    const kept: Record<string, RecordEntry> = {};
+    for (const [id, e] of Object.entries(entries as Record<string, unknown>)) {
+      const x = e && typeof e === "object" ? (e as Record<string, unknown>) : {};
+      if (!FINDING_ID_RE.test(id) || typeof x.at !== "string") return { ok: false, error: `its entry for finding ${oneLine(id, 80)} cannot be read` };
+      if (x.uncertain === true) kept[id] = { uncertain: true, at: x.at };
+      else if (typeof x.ref === "string" && Number.isInteger(x.number) && typeof x.url === "string")
+        kept[id] = { ref: x.ref, number: x.number as number, url: x.url, at: x.at };
+      else return { ok: false, error: `its entry for finding ${id} cannot be read` };
+    }
+    value[key] = kept;
+  }
+  return { ok: true, value };
+}
+
+/** The record with one finding's entry set, as the text to write. The record passed in is not changed. */
+export function recordWith(record: ExportRecord, key: string, id: string, entry: RecordEntry): string {
+  const trackers: ExportRecord = { ...record, [key]: { ...(record[key] ?? {}), [id]: entry } };
+  return JSON.stringify({ version: 1, trackers }, null, 2) + "\n";
+}
+
+/**
+ * Whether a create that may have been made still holds its finding back: for
+ * UNCERTAIN_HOLD_MS after it. A time that cannot be read, or one further
+ * ahead than that (a clock set wrong), holds nothing, so no finding is held
+ * back for good.
+ */
+export function uncertainHolds(entry: RecordEntry, nowMs: number): boolean {
+  if (!("uncertain" in entry)) return false;
+  const at = Date.parse(entry.at);
+  return Number.isFinite(at) && Math.abs(nowMs - at) < UNCERTAIN_HOLD_MS;
+}
+
 // ── talking to a tracker ────────────────────────────────────────────────────
 
 /** The longest a rate limit may ask an export to wait before it gives up and says when to try again. */
