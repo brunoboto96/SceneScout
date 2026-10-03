@@ -12,7 +12,7 @@ The exploratory side can run in CI too, with a model's API in place of a person 
 |---|---|---|
 | 0 | Passed the gate | Pass |
 | 1 | Failed it: something at the `--fail-on` severity or worse | Fail: the app has a defect |
-| 2 | Could not run, or not all of it: a bad argument, an app that never answered, a saved session that no longer signs in, only the sign-in page reached, a saved flow that is not valid, or a flow step the write policy refused | Fail, and read it as a setup problem; with a refused flow step the report still has the rest's verdict |
+| 2 | Could not run, or not all of it: a bad argument, an app that never answered, a saved session that no longer signs in, only the sign-in page reached, only a start page with at most one control reached (the app had not finished drawing), a saved flow that is not valid, or a flow step the write policy refused | Fail, and read it as a setup problem; with a refused flow step the report still has the rest's verdict |
 
 ## GitHub Actions
 
