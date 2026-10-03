@@ -175,6 +175,8 @@ scenescout watch            # open the live view for the project in this folder
 scenescout status           # the same information as text
 ```
 
+Ask the agent how the run is going and it calls `scout_status`. In a client that renders MCP Apps, that puts a small pane in the conversation which refreshes itself every few seconds: each session's objective and task, open findings by severity, coverage, and a button that opens the live view. It shows nothing the live view does not, and loads nothing from outside. A client without MCP Apps gets the same as text, starting with the live view's address.
+
 The page is served on `127.0.0.1` only, behind a token that changes on each start, and answers `GET` and nothing else. No frame it shows is written to disk. `SCENESCOUT_LIVE=off` in the server's environment keeps it closed.
 
 On a desktop, the engine also opens the live view in your default browser as a session attaches, and the report when `scout_report` writes it, whether or not the browser window is shown. In CI, over SSH, or on Linux with no display, nothing opens. To choose yourself, set `SCENESCOUT_OPEN` to `live`, `report`, `both` or `none` in the server's environment (`none` if you want no tabs), or ask the agent (`scout_attach {open: "none"}`). Opening the page changes nothing about who can reach it.

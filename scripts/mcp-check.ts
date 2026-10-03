@@ -14,6 +14,7 @@ import { spawnSync } from "node:child_process";
 import { introQuestions } from "../dist/intake.js";
 import { shellQuote, writeProfile } from "../dist/engine/profiles.js";
 import { siteFolderName } from "../dist/engine/project-folder.js";
+import { MCP_APP_MIME, STATUS_PANE_URI, STATUS_POLL_TOOL, STATUS_TOOL } from "../dist/engine/status-pane.js";
 import { asLf } from "./checkout.ts";
 import { revokeFixtureTokens, settle, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE, WAIT_MS } from "./smoke/harness.ts";
 
@@ -53,6 +54,8 @@ const EXPECTED_TOOLS = [
   "scout_close",
   "scout_tickets",
   "scout_criterion",
+  "scout_status",
+  "scout_status_poll",
 ];
 
 type ToolText = { content: Array<{ type: string; text?: string }> };
@@ -107,6 +110,24 @@ async function liveViewCheck(client: Client): Promise<string> {
     const snapped = textOf(await client.callTool({ name: "scout_snapshot", arguments: { session: "watched" } }));
     if (/needs a task/.test(snapped)) fail("scout_snapshot should not need a task");
     console.log("✓ a tool that acts needs a task, and it reaches the live view");
+
+    // The status pane's text and its poll carry the same address and the session's task.
+    const statusText = textOf(await client.callTool({ name: STATUS_TOOL }));
+    if (LIVE_LINE.exec(statusText)?.[1] !== url) fail(`${STATUS_TOOL}'s text does not carry the live view's address:\n${statusText}`);
+    if (!statusText.includes("task: Walk the two static pages")) fail(`${STATUS_TOOL}'s text does not show the session's task:\n${statusText}`);
+    const polled = (await client.callTool({ name: STATUS_POLL_TOOL, arguments: {} })) as {
+      structuredContent?: {
+        liveUrl?: string;
+        sessions?: Array<{ session: string; task?: string }>;
+        findings?: { open: number };
+        coverage?: { states: number };
+      };
+    };
+    const pane = polled.structuredContent;
+    if (pane?.liveUrl !== url) fail(`the pane's poll does not carry the live view's address: ${JSON.stringify(pane?.liveUrl)}`);
+    if (pane.sessions?.find((s) => s.session === "watched")?.task !== "Walk the two static pages" || !pane.findings || !pane.coverage)
+      fail(`the pane's poll does not carry the session's task, the findings and the coverage: ${JSON.stringify(pane).slice(0, 400)}`);
+    console.log(`✓ ${STATUS_TOOL} and the pane's poll carry the live view's address, the session's task, findings and coverage`);
 
     const facts = (await (await fetch(`${url}api/status`)).json()) as { report?: { path: string; written: boolean } };
     if (facts.report?.path !== path.join(projectDir, ".scenescout", "report.md"))
@@ -921,6 +942,30 @@ async function main(): Promise<void> {
   }
   console.log(`✓ server exposes ${names.length} tools`);
 
+  // The run-status pane, an MCP App (SEP-1865). The SDK this server is built on
+  // has no notion of visibility, so the host is what keeps an app-only tool from
+  // the model; what the server owes it is the _meta that says so.
+  type UiMeta = { ui?: { resourceUri?: string; visibility?: string[] } };
+  const statusTool = tools.find((t) => t.name === STATUS_TOOL);
+  const pollTool = tools.find((t) => t.name === STATUS_POLL_TOOL);
+  if ((statusTool?._meta as UiMeta | undefined)?.ui?.resourceUri !== STATUS_PANE_URI)
+    fail(`${STATUS_TOOL} does not link the pane through _meta.ui.resourceUri: ${JSON.stringify(statusTool?._meta)}`);
+  if (JSON.stringify((pollTool?._meta as UiMeta | undefined)?.ui?.visibility) !== JSON.stringify(["app"]))
+    fail(`${STATUS_POLL_TOOL} is not marked app-only (_meta.ui.visibility ["app"]), so a host would list it to the model: ${JSON.stringify(pollTool?._meta)}`);
+  const { resources } = await client.listResources();
+  const paneResource = resources.find((r) => r.uri === STATUS_PANE_URI);
+  if (paneResource?.mimeType !== MCP_APP_MIME) fail(`the pane's resource is not listed as ${MCP_APP_MIME}: ${JSON.stringify(resources)}`);
+  const read = await client.readResource({ uri: STATUS_PANE_URI });
+  const paneContent = read.contents[0] as { uri: string; mimeType?: string; text?: string; _meta?: { ui?: { csp?: Record<string, unknown> } } } | undefined;
+  if (paneContent?.mimeType !== MCP_APP_MIME || !paneContent.text?.startsWith("<!doctype html>"))
+    fail(`reading the pane's resource does not return an HTML document as ${MCP_APP_MIME}: ${JSON.stringify(paneContent).slice(0, 200)}`);
+  if (Object.keys(paneContent._meta?.ui?.csp ?? { unset: true }).length !== 0)
+    fail(`the pane's resource declares outside origins: ${JSON.stringify(paneContent._meta)}`);
+  const unattached = textOf(await client.callTool({ name: STATUS_TOOL }));
+  if (!/^Live view: not available\. The live view starts with the first scout_attach\.\nNo session is attached\.$/.test(unattached))
+    fail(`${STATUS_TOOL} before any attach does not say where the live view comes from:\n${unattached}`);
+  console.log(`✓ ${STATUS_TOOL} links a ${MCP_APP_MIME} resource, its poll tool is app-only, and its text stands alone`);
+
   // A client with no skill loader gets the method from the server, three ways.
   // Each is checked over the wire, because each is a different client's only route to it.
   const skillBody = fs.readFileSync(path.join(packageRoot, "skills", "scenescout", "SKILL.md"), "utf8");
@@ -975,7 +1020,13 @@ async function main(): Promise<void> {
   // that but a human noticing.
   const skillPath = path.join(packageRoot, "skills", "scenescout", "SKILL.md");
   const skill = fs.readFileSync(skillPath, "utf8");
-  const undocumented = names.filter((t) => !skill.includes(t));
+  // An app-only tool is for the pane, not the agent, so the skill need not name it.
+  const appOnly = (t: (typeof tools)[number]): boolean => {
+    const visibility = (t._meta as { ui?: { visibility?: string[] } } | undefined)?.ui?.visibility;
+    return Array.isArray(visibility) && !visibility.includes("model");
+  };
+  const forTheModel = tools.filter((t) => !appOnly(t)).map((t) => t.name);
+  const undocumented = forTheModel.filter((t) => !skill.includes(t));
   if (undocumented.length > 0) {
     console.error(
       `MCP CHECK FAILED — the skill never mentions: ${undocumented.join(", ")}\n` +
@@ -983,7 +1034,7 @@ async function main(): Promise<void> {
     );
     process.exit(1);
   }
-  console.log(`✓ skill documents all ${names.length} tools`);
+  console.log(`✓ skill documents all ${forTheModel.length} tools the model sees`);
 
   // The reverse direction: a tool name the skill mentions but the server does
   // not register. The skill's first step stops the run when its probe tool is
