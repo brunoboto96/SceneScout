@@ -1,5 +1,17 @@
 # scenescout
 
+## 3.17.0
+
+### Minor Changes
+
+- b0709f0: `scenescout check` accepts `--ignore-path`: a path drops every rule filed on that route, and `rule:/path` drops that one rule there. A page meant to answer HTTP 500 can stay off the gate while the same status on another path still fails `--fail-on high`. The GitHub Action takes the same input.
+- 547d006: Add the `live` and `login` MCP prompts. `live` returns the current session's loopback live-view URL. `login` takes a role and tells the agent to call `scout_login`, with no password argument.
+- 7ba8712: Add `scout_status`, a run-status pane built as an MCP App (`io.modelcontextprotocol/ui`, specification 2026-01-26). In a client that renders MCP Apps it shows each session's objective and task, open findings by severity, coverage and a button for the live view, and refreshes itself every 2.5 seconds through the app-only `scout_status_poll` tool. Every other client gets the same as text, starting with the live view's loopback address. The pane's page loads nothing from outside and shows only what the live view already shows.
+
+### Patch Changes
+
+- 745a38e: On Windows, `scenescout install --client` starts an npm-installed client (a `.cmd` or `.bat` shim) through `cmd.exe`, so registration runs the client's own command instead of stopping and printing it to run by hand.
+
 ## 3.16.0
 
 ### Minor Changes
