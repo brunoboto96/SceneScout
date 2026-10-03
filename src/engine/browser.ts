@@ -118,6 +118,7 @@ import {
   FLOW_AFTER_LAST_STEP_MS,
   isAction,
   matchRequest,
+  notActionable,
   parseTarget,
   splitRefusals,
   TARGET_HELP,
@@ -5586,6 +5587,30 @@ export class BrowserEngine {
   }
 
   /**
+   * Wait up to the action limit for a visible target to accept `action`, and
+   * say why it never did (flow.ts notActionable), or null once it can. Without
+   * this a disabled control failed as a bare action timeout that never said the
+   * control was there but disabled.
+   */
+  private async waitUntilActionable(loc: import("playwright").Locator, action: "click" | "type" | "select"): Promise<string | null> {
+    const read = async () =>
+      notActionable(action, {
+        enabled: await loc.isEnabled({ timeout: 1000 }).catch(() => true),
+        editable: action === "type" ? await loc.isEditable({ timeout: 1000 }).catch(() => null) : null,
+      });
+    const until = Date.now() + this.limits.actionMs;
+    let reason = await read();
+    while (reason && Date.now() < until) {
+      await loc
+        .page()
+        .waitForTimeout(100)
+        .catch(() => {});
+      reason = await read();
+    }
+    return reason;
+  }
+
+  /**
    * What an expect-element step asks of its target, read once: whether any
    * match is visible, and, for the first visible match (or the first match when
    * none is), whether it is enabled and checked. Null when nothing matches.
@@ -5701,8 +5726,12 @@ export class BrowserEngine {
               .waitFor({ state: "visible", timeout: this.limits.actionMs })
               .then(() => true)
               .catch(() => false);
+            const blocked = found ? await this.waitUntilActionable(loc, step.action) : null;
             if (!found) {
               failure = `nothing visible matches ${step.target} within ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
+            } else if (blocked) {
+              // The state first, since it is what is true; the hint still applies when the app enables it late.
+              failure = `${step.target} ${blocked} after ${this.limits.actionMs / 1000}s — ${limitHint("action", this.limits.actionMs)}`;
             } else {
               const label = (
                 (await loc.getAttribute("aria-label").catch(() => null)) ??

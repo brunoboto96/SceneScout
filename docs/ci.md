@@ -265,7 +265,7 @@ A flow has a `name` (the file name when left out) and its `steps`. The first ste
 | `expect-url` | `pattern` | A regular expression, tested against path, query and hash (never the origin) |
 | `expect-request` | `request`, `status` | A method and path (`*` is one segment) answered with that status, or a class such as `"2xx"`, since the last action |
 
-A `target` is `testid=…`, `text=…`, `label=…` or `role=<role>[name="…"]`. Each step waits up to five seconds, and a click is never forced through something covering its control. These are the steps `scout_run_plan` takes, so a plan an agent used to walk a flow can be saved as it is, with `expect-*` steps added where the outcome shows. That is how flows are made: written by hand, or by an agent asked to keep a flow it just walked.
+A `target` is `testid=…`, `text=…`, `label=…` or `role=<role>[name="…"]`. Each step waits up to five seconds, and a click is never forced through something covering its control. A control that is shown but stays disabled (or, for `type`, read-only) for that long fails the step saying so first, for example `testid=save is visible but disabled after 5s`, followed by the action limit's hint, which helps when the app enables it later than that. These are the steps `scout_run_plan` takes, so a plan an agent used to walk a flow can be saved as it is, with `expect-*` steps added where the outcome shows. That is how flows are made: written by hand, or by an agent asked to keep a flow it just walked.
 
 A flow file that is not valid stops the check before it starts, with exit 2 and the file and field named (`bad.json: steps[1].target is required`).
 

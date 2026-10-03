@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Check: a flow step on a control it cannot use</title></head>
+<body>
+  <!-- For `scenescout check`'s saved flows. Archive is shown but never enabled and Reference is shown but read-only,
+       so a flow acting on them can only fail because of their state; Note and Save are the usable pair. -->
+  <h1>Record</h1>
+  <label>Reference <input data-testid="blocked-reference" type="text" value="REF-1" readonly></label>
+  <label>Note <input data-testid="blocked-note" type="text"></label>
+  <button type="button" data-testid="blocked-archive" disabled>Archive</button>
+  <button type="button" data-testid="blocked-save">Save</button>
+  <p data-testid="blocked-status" role="status"></p>
+  <script>
+    document.querySelector('[data-testid="blocked-save"]').addEventListener("click", () => {
+      document.querySelector('[data-testid="blocked-status"]').textContent = "Saved";
+    });
+  </script>
+</body>
+</html>
