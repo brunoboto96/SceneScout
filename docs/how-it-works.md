@@ -195,6 +195,14 @@ or is not — and the page half is never enough alone. A page that shows an erro
 raises neither, which is why the false-positive rate stays low enough to report
 at high severity.
 
+`refused_empty` also pairs the sentence with the read. An empty state that names
+what is missing ("No comments yet") is about the request for that thing: it is
+high when a refused read's path names it, not reported when a data read that
+succeeded fetched it (a genuinely empty section beside an unrelated refusal),
+and medium when no read on the page names it either way. Sentences that name
+nothing in particular ("No results") and empty rendered lists pair with any
+refused read at high.
+
 `false_success` also pairs the write with the claim. The write must be one the
 action sent: a request already in flight when the action began, one sent with
 no input pending (a page load, a scroll) or one to the page's own

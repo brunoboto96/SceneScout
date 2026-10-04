@@ -199,6 +199,159 @@ export function classify(text: string): Claim | null {
   return null;
 }
 
+/**
+ * Words in an empty-state sentence that name nothing in particular: the
+ * generic nouns for "the things", the verbs that follow them ("No results
+ * found", "No entries recorded yet") and the adjectives in front of them ("No
+ * new items", "No matching records"). Stemmed, as `stem` leaves them.
+ */
+const GENERIC_EMPTY_WORDS = new Set([
+  "result",
+  "item",
+  "record",
+  "row",
+  "data",
+  "entry",
+  "match",
+  "thing",
+  "one",
+  "yet",
+  "found",
+  "show",
+  "display",
+  "here",
+  "recorded",
+  "added",
+  "created",
+  "saved",
+  "available",
+  "been",
+  "matching",
+  "more",
+  "new",
+  "recent",
+  "upcoming",
+  "open",
+  "pending",
+  "other",
+  "further",
+  "api",
+  "v1",
+  "v2",
+  "v3",
+]);
+
+/** Words that end the subject of an empty-state sentence: "No results | for your search". */
+const SUBJECT_STOP_WORDS = new Set([
+  "for",
+  "your",
+  "you",
+  "to",
+  "in",
+  "on",
+  "of",
+  "at",
+  "by",
+  "with",
+  "that",
+  "this",
+  "which",
+  "from",
+  "match",
+  "matches",
+  "yet",
+  "found",
+  "here",
+  "available",
+  "left",
+  "anymore",
+  "have",
+  "has",
+  "had",
+  "been",
+  "was",
+  "were",
+  "is",
+  "are",
+  "such",
+]);
+
+/** Crude singular form, enough to match "comments" to "/comment/" and "entries" to "/entry". */
+function stem(word: string): string {
+  const w = word.toLowerCase();
+  if (w.endsWith("ies") && w.length > 4) return `${w.slice(0, -3)}y`;
+  if (w.endsWith("yses")) return `${w.slice(0, -4)}ysis`;
+  if (w.endsWith("uses")) return w.slice(0, -2);
+  if (w.endsWith("es") && /(?:ss|x|ch|sh)es$/.test(w)) return w.slice(0, -2);
+  if (w.endsWith("s") && !/(?:ss|us|is)$/.test(w) && w.length > 3) return w.slice(0, -1);
+  return w;
+}
+
+/** A word or a path segment as stems, split on hyphens and underscores the same way on both sides. */
+function stems(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .map(stem);
+}
+
+/**
+ * The words naming what an empty-state sentence says is missing: "comment"
+ * for "No comments yet", "corrective action" for "No corrective actions
+ * recorded yet", "order" for "There are no orders". Empty for sentences that
+ * name nothing in particular ("No results for your search", "Nothing to show",
+ * "This list is empty"). Read from where the empty-state phrase starts, so a
+ * "no" earlier in the text ("No longer available. No results.") is not taken.
+ */
+export function emptyStateSubject(text: string): string[] {
+  const at = EMPTY_RE.exec(text)?.index ?? 0;
+  const m = /\bno\s+((?:[a-z][a-z-]*\s+){0,3}[a-z][a-z-]*)/i.exec(text.slice(at));
+  if (!m) return [];
+  const words: string[] = [];
+  for (const word of m[1].split(/\s+/)) {
+    if (SUBJECT_STOP_WORDS.has(word.toLowerCase())) break;
+    words.push(...stems(word));
+  }
+  return words.filter((w) => w.length > 2 && !GENERIC_EMPTY_WORDS.has(w));
+}
+
+/** Whether a request's path names one of these subject words. */
+function pathNames(req: WatchedRequest, subject: readonly string[]): boolean {
+  let path: string;
+  try {
+    path = new URL(req.url).pathname;
+  } catch {
+    path = req.url;
+  }
+  const segments = new Set(stems(path));
+  return subject.some((w) => segments.has(w));
+}
+
+/** How an empty-state sentence relates to the page's refused reads (#413). */
+export type EmptyStatePairing =
+  /** It names nothing in particular, or names what this refused read fetched: reported at high. */
+  | { certain: true; read: WatchedRequest }
+  /** It names something a read on the page loaded successfully, and no refused read: it is about that, and is not reported. */
+  | { unrelated: true }
+  /** It names something no read on the page names either way: reported at medium, since it may or may not be about the refused read. */
+  | { certain: false; read: WatchedRequest; subject: string[] };
+
+/**
+ * Pairs one empty-state sentence with the refused reads it could be about.
+ * `loaded` are the page's reads that succeeded: positive evidence that a
+ * sentence naming what they fetched is a genuinely empty section rather than
+ * a refusal hidden behind an empty state.
+ */
+export function pairEmptyState(text: string, refusedReads: readonly WatchedRequest[], loaded: readonly WatchedRequest[]): EmptyStatePairing {
+  const subject = emptyStateSubject(text);
+  if (subject.length === 0) return { certain: true, read: refusedReads[0] };
+  const named = refusedReads.find((r) => pathNames(r, subject));
+  if (named) return { certain: true, read: named };
+  if (loaded.some((r) => pathNames(r, subject))) return { unrelated: true };
+  return { certain: false, read: refusedReads[0], subject };
+}
+
 /** The page's visible claims, plus the structural signal that a rendered list has no rows. */
 export interface PageState {
   /** Short pieces of visible text, in document order. */
@@ -310,18 +463,45 @@ export function findContradictions(
   const out: Contradiction[] = [];
 
   const reads = refused.filter((r) => !WRITING_METHODS.has(r.method.toUpperCase()));
-  const saysEmpty = claims.includes("empty") || page.emptyLists > 0;
-  if (reads.length > 0 && saysEmpty) {
-    const worst = reads[0];
-    const how = claims.includes("empty") ? "an empty state" : `an empty list (${page.emptyLists})`;
-    out.push({
-      kind: "refused_empty",
-      detail:
-        `${say(worst)} was refused, and the page shows ${how} with no error. ` +
-        `The user is told there is nothing to see when the truth is that nothing could be loaded.` +
-        standIn(worst),
-      evidence: `refused-empty ${say(worst)}`,
-    });
+  if (reads.length > 0) {
+    // An empty-state sentence that names what is missing is evidence about
+    // requests for that thing (#413). "No comments yet" beside a refused
+    // history read, with the comments read loaded fine, is a genuinely empty
+    // comments section, not a refusal shown as an empty state.
+    // Positive evidence only: a data read the page made that succeeded. The
+    // page's own document, its images and scripts, and redirects say nothing
+    // about which section of it is empty.
+    const loaded = requests.filter(
+      (r) =>
+        (r.resourceType === "xhr" || r.resourceType === "fetch") &&
+        r.status !== null &&
+        r.status >= 200 &&
+        r.status < 300 &&
+        !WRITING_METHODS.has(r.method.toUpperCase()),
+    );
+    const pairings = page.texts.filter((_, i) => claims[i] === "empty").map((t) => ({ text: t, pairing: pairEmptyState(t, reads, loaded) }));
+    // A sentence naming what a refused read fetched points at that read; a generic one points at none in particular.
+    const certain =
+      pairings.find((p) => "certain" in p.pairing && p.pairing.certain && emptyStateSubject(p.text).length > 0) ??
+      pairings.find((p) => "certain" in p.pairing && p.pairing.certain);
+    const possible = pairings.find((p) => "certain" in p.pairing && !p.pairing.certain);
+    const hit = certain ?? (page.emptyLists > 0 ? undefined : possible);
+    if (hit || page.emptyLists > 0) {
+      const read = hit && "read" in hit.pairing ? hit.pairing.read : reads[0];
+      const how = hit ? "an empty state" : `an empty list (${page.emptyLists})`;
+      const unsure = hit !== undefined && hit === possible;
+      out.push({
+        kind: "refused_empty",
+        detail:
+          `${say(read)} was refused, and the page shows ${how} with no error. ` +
+          (unsure
+            ? `The empty state ("${hit.text}") names something no request on the page was for, so it may be about another section; the user may be told there is nothing to see when nothing could be loaded.`
+            : `The user is told there is nothing to see when the truth is that nothing could be loaded.`) +
+          standIn(read),
+        evidence: `refused-empty ${say(read)}`,
+        ...(unsure ? { severity: "medium" as const } : {}),
+      });
+    }
   }
 
   // Only writes this action sent, and not the page's own infrastructure.
