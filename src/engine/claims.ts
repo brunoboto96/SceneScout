@@ -206,17 +206,74 @@ export function classify(text: string): Claim | null {
  * new items", "No matching records"). Stemmed, as `stem` leaves them.
  */
 const GENERIC_EMPTY_WORDS = new Set([
-  "result", "item", "record", "row", "data", "entry", "match", "thing", "one",
-  "yet", "found", "show", "display", "here", "recorded", "added", "created", "saved", "available", "been",
-  "matching", "more", "new", "recent", "upcoming", "open", "pending", "other", "further",
-  "api", "v1", "v2", "v3",
+  "result",
+  "item",
+  "record",
+  "row",
+  "data",
+  "entry",
+  "match",
+  "thing",
+  "one",
+  "yet",
+  "found",
+  "show",
+  "display",
+  "here",
+  "recorded",
+  "added",
+  "created",
+  "saved",
+  "available",
+  "been",
+  "matching",
+  "more",
+  "new",
+  "recent",
+  "upcoming",
+  "open",
+  "pending",
+  "other",
+  "further",
+  "api",
+  "v1",
+  "v2",
+  "v3",
 ]);
 
 /** Words that end the subject of an empty-state sentence: "No results | for your search". */
 const SUBJECT_STOP_WORDS = new Set([
-  "for", "your", "you", "to", "in", "on", "of", "at", "by", "with", "that", "this", "which", "from",
-  "match", "matches", "yet", "found", "here", "available", "left", "anymore",
-  "have", "has", "had", "been", "was", "were", "is", "are", "such",
+  "for",
+  "your",
+  "you",
+  "to",
+  "in",
+  "on",
+  "of",
+  "at",
+  "by",
+  "with",
+  "that",
+  "this",
+  "which",
+  "from",
+  "match",
+  "matches",
+  "yet",
+  "found",
+  "here",
+  "available",
+  "left",
+  "anymore",
+  "have",
+  "has",
+  "had",
+  "been",
+  "was",
+  "were",
+  "is",
+  "are",
+  "such",
 ]);
 
 /** Crude singular form, enough to match "comments" to "/comment/" and "entries" to "/entry". */
@@ -232,7 +289,11 @@ function stem(word: string): string {
 
 /** A word or a path segment as stems, split on hyphens and underscores the same way on both sides. */
 function stems(text: string): string[] {
-  return text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).map(stem);
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .map(stem);
 }
 
 /**
@@ -282,11 +343,7 @@ export type EmptyStatePairing =
  * sentence naming what they fetched is a genuinely empty section rather than
  * a refusal hidden behind an empty state.
  */
-export function pairEmptyState(
-  text: string,
-  refusedReads: readonly WatchedRequest[],
-  loaded: readonly WatchedRequest[],
-): EmptyStatePairing {
+export function pairEmptyState(text: string, refusedReads: readonly WatchedRequest[], loaded: readonly WatchedRequest[]): EmptyStatePairing {
   const subject = emptyStateSubject(text);
   if (subject.length === 0) return { certain: true, read: refusedReads[0] };
   const named = refusedReads.find((r) => pathNames(r, subject));
@@ -415,7 +472,12 @@ export function findContradictions(
     // page's own document, its images and scripts, and redirects say nothing
     // about which section of it is empty.
     const loaded = requests.filter(
-      (r) => (r.resourceType === "xhr" || r.resourceType === "fetch") && r.status !== null && r.status >= 200 && r.status < 300 && !WRITING_METHODS.has(r.method.toUpperCase()),
+      (r) =>
+        (r.resourceType === "xhr" || r.resourceType === "fetch") &&
+        r.status !== null &&
+        r.status >= 200 &&
+        r.status < 300 &&
+        !WRITING_METHODS.has(r.method.toUpperCase()),
     );
     const pairings = page.texts.filter((_, i) => claims[i] === "empty").map((t) => ({ text: t, pairing: pairEmptyState(t, reads, loaded) }));
     // A sentence naming what a refused read fetched points at that read; a generic one points at none in particular.

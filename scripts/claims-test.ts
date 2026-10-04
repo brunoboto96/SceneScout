@@ -197,7 +197,16 @@ test("an empty state naming what the refused read fetched is high, and names tha
 });
 
 test("an empty state that names nothing in particular pairs with any refused read at high", () => {
-  for (const text of ["No results", "No items found", "Nothing to show", "This list is empty", "No records found", "0 results", "No results for your search", "No entries match your filters"]) {
+  for (const text of [
+    "No results",
+    "No items found",
+    "Nothing to show",
+    "This list is empty",
+    "No records found",
+    "0 results",
+    "No results for your search",
+    "No entries match your filters",
+  ]) {
     const found = findContradictions([history, commentsLoaded], page({ texts: [text] }));
     assert.equal(found[0]?.kind, "refused_empty", text);
     assert.equal(found[0]?.severity, undefined, text);

@@ -424,7 +424,8 @@ export function checkFindings(
     for (const d of r.design) add(d.rule, d.detail, d.chrome ? SHARED_CHROME_ROUTE : route);
   }
   for (const f of flows) {
-    for (const { path, violation } of f.violations) add(violationRule(violation), violation.detail, path, { embed: violation.embed, flow: f.file, severity: violationSeverity(violation) });
+    for (const { path, violation } of f.violations)
+      add(violationRule(violation), violation.detail, path, { embed: violation.embed, flow: f.file, severity: violationSeverity(violation) });
     // A refused step is not the app's defect: the check reports it as "could not run" (refusedFlowReason).
     if (f.outcome.status === "failed") add("flow-step-failed", flowStepEvidence(f), f.outcome.path, { flow: f.file });
   }
