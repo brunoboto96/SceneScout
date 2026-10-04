@@ -207,6 +207,8 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `indistinct-link` | worth a look | Link styled like body text |
 | `scrolled-out-controls` | worth a look | Controls scrolled out of view sideways |
 
+`refused-empty` is reported at medium instead when the empty state names something that no request on the page was for, since it may be about another section (see how-it-works).
+
 ## Environment variables
 
 | Variable | Read by | |

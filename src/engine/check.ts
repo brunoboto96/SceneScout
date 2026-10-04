@@ -271,6 +271,15 @@ function withoutOrigin(text: string, origin: string): string {
   return origin ? text.split(origin).join("") : text;
 }
 
+/**
+ * A violation's own severity where it is lower than its rule's: a refused read
+ * beside an empty state that may be about another section is medium (#413).
+ * Every other violation takes its rule's severity.
+ */
+function violationSeverity(v: RouteHealth["violations"][number]): CheckSeverity | undefined {
+  return v.kind === "refused_empty" && v.severity === "medium" ? "medium" : undefined;
+}
+
 function violationRule(v: RouteHealth["violations"][number]): CheckRule {
   switch (v.kind) {
     case "page_error":
@@ -404,7 +413,7 @@ export function checkFindings(
       if (!exempt("auth-redirect", route) && !needsSignIn.includes(route)) needsSignIn.push(route);
     } else if (r.loginRedirect) add("auth-redirect", `${route} → ${withoutOrigin(r.url, origin) || "/"}`, route);
     else if (r.elements === 0 && (r.status === null || r.status < 400)) add("dead-end", `${route}: 0 controls`, route);
-    for (const v of r.violations) add(violationRule(v), v.detail, route, { embed: v.embed });
+    for (const v of r.violations) add(violationRule(v), v.detail, route, { embed: v.embed, severity: violationSeverity(v) });
     for (const line of r.geometry) {
       const rule = geometryRule(line);
       if (rule) add(rule, stripRefs(line), route);
@@ -415,7 +424,7 @@ export function checkFindings(
     for (const d of r.design) add(d.rule, d.detail, d.chrome ? SHARED_CHROME_ROUTE : route);
   }
   for (const f of flows) {
-    for (const { path, violation } of f.violations) add(violationRule(violation), violation.detail, path, { embed: violation.embed, flow: f.file });
+    for (const { path, violation } of f.violations) add(violationRule(violation), violation.detail, path, { embed: violation.embed, flow: f.file, severity: violationSeverity(violation) });
     // A refused step is not the app's defect: the check reports it as "could not run" (refusedFlowReason).
     if (f.outcome.status === "failed") add("flow-step-failed", flowStepEvidence(f), f.outcome.path, { flow: f.file });
   }

@@ -17,6 +17,7 @@ import {
   CLAIM_TEXT_MAX,
   classify,
   COUNTER_RE,
+  emptyStateSubject,
   findContradictions,
   INFRASTRUCTURE_WRITE_RE,
   isBackgroundRequest,
@@ -138,6 +139,91 @@ test("a refusal with nothing on screen contradicting it is not a contradiction",
   // The HTTP oracle already reports the refusal itself. This rule only fires
   // on the page disagreeing with it.
   assert.deepEqual(findContradictions([req({ status: 403 })], page({ texts: ["Orders", "Acme Ltd", "Beta Corp"] })), []);
+});
+
+// ── which empty state a refused read is about (#413) ────────────────────────
+// A record page: its history tab's read is refused by design for this role,
+// and other sections are legitimately empty.
+const history = req({ url: "http://app.test/api/records/9/history", status: 403 });
+const commentsLoaded = req({ url: "http://app.test/api/records/9/comments", status: 200 });
+
+test("an empty state about something that loaded fine is not paired with a refused read", () => {
+  assert.deepEqual(findContradictions([history, commentsLoaded], page({ texts: ["History", "No comments yet"] })), []);
+});
+
+test("only a data read that succeeded is evidence an empty state is about something else", () => {
+  // The page's own document, its images and scripts, and redirects name the
+  // page, not the section the sentence is about.
+  const invoicesRead = req({ url: "http://app.test/api/billing/list", status: 403 });
+  for (const other of [
+    req({ url: "http://app.test/invoices", status: 200, resourceType: "document" }),
+    req({ url: "http://app.test/img/empty-invoices.svg", status: 200, resourceType: "image" }),
+    req({ url: "http://app.test/_next/static/chunks/pages/invoices-1a2b.js", status: 200, resourceType: "script" }),
+    req({ url: "http://app.test/api/invoices", status: 302 }),
+  ]) {
+    const found = findContradictions([invoicesRead, other], page({ texts: ["No invoices yet"] }));
+    assert.equal(found[0]?.severity, "medium", other.url);
+  }
+  // A page-load read is background and still counts as evidence.
+  const loadedOnLoad = req({ url: "http://app.test/api/invoices", status: 200, background: true });
+  assert.deepEqual(findContradictions([invoicesRead, loadedOnLoad], page({ texts: ["No invoices yet"] })), []);
+});
+
+test("a named empty state names its refused read even after a generic one", () => {
+  const comments = req({ url: "http://app.test/api/records/9/comments", status: 403 });
+  const found = findContradictions([history, comments], page({ texts: ["No results", "No comments yet"] }));
+  assert.equal(found[0]?.evidence, "refused-empty GET /api/records/9/comments 403");
+});
+
+test("an empty state naming something no request was for is reported at medium, not dropped", () => {
+  const found = findContradictions([history, commentsLoaded], page({ texts: ["No analysis yet"] }));
+  assert.equal(found.length, 1);
+  assert.equal(found[0].kind, "refused_empty");
+  assert.equal(found[0].severity, "medium");
+  assert.match(found[0].detail, /"No analysis yet"/);
+  // A real refused-read bug with an endpoint the sentence does not name stays visible.
+  const invoices = findContradictions([req({ url: "http://app.test/api/billing/list", status: 403 })], page({ texts: ["No invoices yet"] }));
+  assert.equal(invoices[0]?.severity, "medium");
+});
+
+test("an empty state naming what the refused read fetched is high, and names that read", () => {
+  const comments = req({ url: "http://app.test/api/records/9/comments?page=1", status: 403 });
+  const found = findContradictions([history, comments], page({ texts: ["No comments yet"] }));
+  assert.equal(found.length, 1);
+  assert.equal(found[0].severity, undefined, "high");
+  assert.equal(found[0].evidence, "refused-empty GET /api/records/9/comments?page=1 403");
+  const orders = findContradictions([req({ url: "http://app.test/api/v2/purchase-orders", status: 500 })], page({ texts: ["There are no orders"] }));
+  assert.equal(orders[0]?.severity, undefined);
+});
+
+test("an empty state that names nothing in particular pairs with any refused read at high", () => {
+  for (const text of ["No results", "No items found", "Nothing to show", "This list is empty", "No records found", "0 results", "No results for your search", "No entries match your filters"]) {
+    const found = findContradictions([history, commentsLoaded], page({ texts: [text] }));
+    assert.equal(found[0]?.kind, "refused_empty", text);
+    assert.equal(found[0]?.severity, undefined, text);
+  }
+});
+
+test("an empty list is not attributed to a request, so it still counts at high", () => {
+  const found = findContradictions([history, commentsLoaded], page({ texts: ["No comments yet"], emptyLists: 1 }));
+  assert.equal(found[0]?.kind, "refused_empty");
+  assert.equal(found[0]?.severity, undefined);
+});
+
+test("the subject of an empty-state sentence", () => {
+  assert.deepEqual(emptyStateSubject("No comments yet"), ["comment"]);
+  assert.deepEqual(emptyStateSubject("There are no orders"), ["order"]);
+  assert.deepEqual(emptyStateSubject("No corrective actions recorded yet"), ["corrective", "action"]);
+  assert.deepEqual(emptyStateSubject("You have no journal entries yet"), ["journal"], "entries is a generic noun");
+  assert.deepEqual(emptyStateSubject("No statuses found"), ["status"]);
+  assert.deepEqual(emptyStateSubject("No analyses yet"), ["analysis"]);
+  assert.deepEqual(emptyStateSubject("No e-mails yet"), ["mail"]);
+  assert.deepEqual(emptyStateSubject("No results for your search"), []);
+  assert.deepEqual(emptyStateSubject("No new items"), []);
+  assert.deepEqual(emptyStateSubject("Nothing to show"), []);
+  assert.deepEqual(emptyStateSubject("Feature no longer offered. No results."), [], "the subject is read where the empty-state phrase starts");
+  assert.deepEqual(emptyStateSubject("No documents have been uploaded yet"), ["document"]);
+  assert.deepEqual(emptyStateSubject("No API keys found"), ["key"]);
 });
 
 test("an empty state with every request succeeding is an ordinary empty list", () => {

@@ -1416,8 +1416,12 @@ export class BrowserEngine {
       }
     }
     for (const found of findContradictions(requests, state, before, acted && actedNow ? { before: acted.before, after: actedNow } : null)) {
-      if (this.contradictionsReported.has(found.evidence)) continue;
-      this.contradictionsReported.add(found.evidence);
+      // Once per refused request a session, except that a high reading of it
+      // replaces an earlier medium one (#413).
+      const severity = found.severity ?? "high";
+      const earlier = this.contradictionsReported.get(found.evidence);
+      if (earlier === "high" || earlier === severity) continue;
+      this.contradictionsReported.set(found.evidence, severity);
       this.oracles.noteContradiction(found, url);
     }
   }
@@ -1454,7 +1458,7 @@ export class BrowserEngine {
   }
 
   /** Contradiction signatures already reported this session — the same refused endpoint on every page must not flood the run. */
-  private contradictionsReported = new Set<string>();
+  private contradictionsReported = new Map<string, "high" | "medium">();
 
   private async scanForInjections(): Promise<void> {
     const page = this.page;
@@ -1590,7 +1594,7 @@ export class BrowserEngine {
     this.blockNotices.reset();
     this.dialogsSeen = [];
     this.watchedResponses = [];
-    this.contradictionsReported = new Set();
+    this.contradictionsReported = new Map();
     this.tokenPostsReported = new Set();
     this.pendingCreations = new Set();
     this.baseUrl = opts.url.replace(/\/$/, "");
