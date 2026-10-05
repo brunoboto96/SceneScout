@@ -1,0 +1,35 @@
+{
+  "app": "holdout",
+  "run": "ci-holdout-3-19-2-3",
+  "date": "2026-10-05",
+  "note": "Unattended scenescout ci run (scheduled) of v3.19.2; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Fines access refusal is shown as an empty list",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403 with empty-list state"
+    },
+    {
+      "title": "Member list endpoint returns forbidden",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/members 403"
+    },
+    {
+      "title": "Missing-book reviews 404 is presented as no reviews",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/books/0/reviews 404 with No reviews yet"
+    },
+    {
+      "title": "Catalogue padding is inconsistent with a 4px spacing grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "catalogue spacing: 66% padding off 4px grid; 9px×58; 1px×16",
+      "tier": "worth_a_look",
+      "convention": "a consistent 4px spacing scale"
+    }
+  ],
+  "decisions": []
+}
