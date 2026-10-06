@@ -197,7 +197,7 @@ export function formatBriefs(briefs: readonly LaneBrief[], opts: BriefOptions = 
     ...(opts.seedNote ? [opts.seedNote, `Each lane's routes are listed in the order to take them: start with the first.`] : []),
     ...(opts.roleOrder && opts.roleOrder.length > 1
       ? [
-          `Saved roles, in this run's order (the ones earlier seeded runs started with last): ${opts.roleOrder.join(", ")}. Run as the first, unless the goal names another.`,
+          `Saved roles, in this run's order (the ones earlier seeded runs ran as last): ${opts.roleOrder.join(", ")}. To follow it, attach the lanes as the first rather than the role below, unless the goal names one.`,
         ]
       : []),
     ``,

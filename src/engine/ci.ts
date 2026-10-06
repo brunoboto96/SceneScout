@@ -318,7 +318,9 @@ export function parseCiArgs(
   // A run asked to show an element explores nothing, so a seed in the environment does not apply to it.
   const seed: ReturnType<typeof resolveSeed> = show ? { ok: true } : resolveSeed(flags.get("seed"), env, generate);
   if (!seed.ok) return seed;
-  const exclusion = resolveSeedExclusion(flags.get("seed-exclusion"), env);
+  if (flags.has("seed-exclusion") && !seed.seed) return { ok: false, error: "--seed-exclusion applies to a seeded run: give --seed as well" };
+  // Read only for a seeded run, so a stray SCENESCOUT_SEED_EXCLUSION never stops an unseeded one.
+  const exclusion: ReturnType<typeof resolveSeedExclusion> = seed.seed ? resolveSeedExclusion(flags.get("seed-exclusion"), env) : { ok: true, value: "back" };
   if (!exclusion.ok) return exclusion;
 
   const resolve = (p: string): string => (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) ? p : `${cwd.replace(/[\\/]$/, "")}/${p}`);

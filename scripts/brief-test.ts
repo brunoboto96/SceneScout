@@ -206,6 +206,8 @@ test("schedule: what earlier seeded runs began with goes to the back, least-chos
   );
   assert.deepEqual(scheduleOrder([], { seed: "s1", exclusion: "skip" }), []);
   assert.deepEqual(scheduleOrder(ITEMS, { seed: "s1" }), seededOrder(ITEMS, "s1"), "no history: the seed's order");
+  // A record keeps a route without its query string: a route with one is still found in the history.
+  assert.equal(scheduleOrder(["/search?q=x", "/z"], { seed: "s1", earlier: new Map([["/search", 1]]) })[1], "/search?q=x");
 });
 
 const record = (seed: string, at: string, routes: string[], roles?: string[]): ScheduleRecord => ({
@@ -264,7 +266,10 @@ test("schedule: records merge as a set, oldest first and capped, and a malformed
   const many = Array.from({ length: MAX_SCHEDULES + 5 }, (_, i) => record(`s${i}`, `2026-01-01T00:00:${String(i).padStart(3, "0")}`, []));
   assert.equal(unionSchedules(many, []).length, MAX_SCHEDULES);
   assert.equal(unionSchedules(many, [])[0].seed, "s5", "the oldest go first");
-  assert.deepEqual(readSchedules({ schedules: [a[0], { seed: 1 }, null, { seed: "x", at: "t", routes: [2] }] }), a);
+  assert.deepEqual(
+    readSchedules({ schedules: [a[0], { seed: 1 }, null, { seed: "x", at: "t", routes: [2] }, { ...a[0], roles: "admin" }, { ...a[0], source: "other" }] }),
+    a,
+  );
   assert.deepEqual(readSchedules({}), []);
 });
 
@@ -302,7 +307,7 @@ test("seeded brief: it opens with the seed, says to take the routes in order, an
   const out = formatBriefs(lanes, { seedNote: "Seed: s1, earlier seeded runs' starting choices moved to the back.", roleOrder: ["clerk", "admin"] });
   assert.match(out, /^LANE PLAN — 2 lane\(s\) over 2 route\(s\)\.\nSeed: s1/);
   assert.match(out, /listed in the order to take them: start with the first/);
-  assert.match(out, /Saved roles, in this run's order .*: clerk, admin\. Run as the first/);
+  assert.match(out, /Saved roles, in this run's order .*: clerk, admin\. To follow it, attach the lanes as the first/);
   const plain = formatBriefs(planLanes(["/orders/a", "/stock/a"], 2));
   assert.doesNotMatch(plain, /Seed:|Saved roles/, "unseeded, the brief is unchanged");
   assert.doesNotMatch(formatBriefs(lanes, { roleOrder: ["only"] }), /Saved roles/, "one role is no choice");

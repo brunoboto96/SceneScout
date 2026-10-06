@@ -1,0 +1,51 @@
+{
+  "app": "holdout",
+  "run": "ci-seed-holdout-off-1",
+  "date": "2026-10-06",
+  "note": "scenescout ci, unseeded control for the seeded schedule (issue 418), commit 3acef27",
+  "findings": [
+    {
+      "title": "Home notices API returns HTTP 500",
+      "severity": "high",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Fines permission failure is presented as an empty list",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403 → fines-rows empty"
+    },
+    {
+      "title": "Book detail renders an empty reviews state after reviews API 404",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/books/0/reviews 404 → book-reviews \"No reviews yet.\""
+    },
+    {
+      "title": "Available-only catalogue filter retains an on-loan book",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "catalogue-available checked; catalogue-rows includes A Field Guide to Moss (all on loan)"
+    },
+    {
+      "title": "Account data export link is unreachable due to clipping",
+      "severity": "high",
+      "category": "visual",
+      "evidence": "account-export UNREACHABLE inside overflow-hidden ancestor"
+    },
+    {
+      "title": "Checkout reports success after loan request returns HTTP 403",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/loans 403 → checkout-msg \"Checked out The Salt Road to NOT-A-CARD\""
+    },
+    {
+      "title": "Catalogue spacing values are inconsistent with a 4px rhythm",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "catalogue spacing audit: 66% off 4px grid; 9px×58, 1px×16, 7px×2"
+    }
+  ],
+  "decisions": []
+}

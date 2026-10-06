@@ -1,0 +1,27 @@
+{
+  "app": "holdout",
+  "run": "ci-seed-holdout-h418b",
+  "date": "2026-10-06",
+  "note": "scenescout ci --seed h418b (issue 418), commit 3acef27",
+  "findings": [
+    {
+      "title": "Member role sees staff-only members route but gets access-denied alert",
+      "severity": "low",
+      "category": "permission-leak",
+      "evidence": "GET /members.html displays members-error access-denied"
+    },
+    {
+      "title": "Place hold on book page fails for librarian with 400",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "POST /api/holds → HTTP 400 on Place hold"
+    },
+    {
+      "title": "Event signup success page has no path back to library",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /events-joined.html renders zero interactable elements"
+    }
+  ],
+  "decisions": []
+}

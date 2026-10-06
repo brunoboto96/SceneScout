@@ -7,7 +7,7 @@ import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
 import type { InjectionProbe } from "./injection.js";
-import { readSchedules, unionSchedules, type ScheduleRecord } from "./schedule.js";
+import { readSchedules, recordedForm, unionSchedules, type ScheduleRecord } from "./schedule.js";
 import { addReading, addVerdict, MAX_TICKETS_KEPT, mergeTicketData, type CriterionVerdict, type StoredTicket, type Ticket } from "./tickets.js";
 
 export interface StateRecord {
@@ -1984,7 +1984,7 @@ export class MemoryStore {
 
   /** Record what a seeded run began with. Routes are stored without a query string, as a lane's are. */
   addSchedule(record: ScheduleRecord): void {
-    const clean: ScheduleRecord = { ...record, routes: record.routes.map((r) => redactSecrets(stripRouteQuery(r))).filter((r) => r.length > 0) };
+    const clean: ScheduleRecord = { ...record, routes: record.routes.map((r) => redactSecrets(recordedForm(r))).filter((r) => r.length > 0) };
     this.data.schedules = unionSchedules(this.schedules, [clean]);
     this.flush();
   }
@@ -2750,7 +2750,7 @@ export function recordScheduleOnDisk(projectDir: string, record: ScheduleRecord)
   if (!exists) fs.mkdirSync(path.dirname(file), { recursive: true });
   const doc = exists ? (JSON.parse(fs.readFileSync(file, "utf8")) as MemoryFile) : ({ version: 1, states: {}, findings: [] } as MemoryFile);
   if (!doc || doc.version !== 1) throw new Error(`${file} is not a memory file this version reads`);
-  const clean: ScheduleRecord = { ...record, routes: record.routes.map((r) => redactSecrets(stripRouteQuery(r))).filter((r) => r.length > 0) };
+  const clean: ScheduleRecord = { ...record, routes: record.routes.map((r) => redactSecrets(recordedForm(r))).filter((r) => r.length > 0) };
   doc.schedules = unionSchedules(readSchedules(doc), [clean]);
   const tmp = `${file}.${process.pid}.schedule.tmp`;
   try {

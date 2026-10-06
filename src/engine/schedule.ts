@@ -17,6 +17,7 @@
  * are table-tested (scripts/brief-test.ts) without a browser.
  */
 import { createHash, randomBytes } from "node:crypto";
+import { stripRouteQuery } from "./fingerprint.js";
 
 /** Turns seeding on for every run that does not pass a seed itself: a seed, or `auto` for a fresh one each run. */
 export const SEED_ENV = "SCENESCOUT_SEED";
@@ -119,13 +120,19 @@ export interface ScheduleInput {
  * chosen equally often, so the order is never empty while there are items.
  */
 export function scheduleOrder<T>(items: readonly T[], s: ScheduleInput, key: (item: T) => string = String): T[] {
-  const times = (item: T): number => s.earlier?.get(key(item)) ?? 0;
+  // A record holds a route as recordedForm leaves it (memory.ts), so it is looked up the same way.
+  const times = (item: T): number => s.earlier?.get(recordedForm(key(item))) ?? 0;
   const ordered = seededOrder(items, s.seed, key);
   // A stable sort: within one count, the seed's order stands.
   const byCount = [...ordered].sort((a, b) => times(a) - times(b));
   if ((s.exclusion ?? DEFAULT_SEED_EXCLUSION) === "back" || byCount.length === 0) return byCount;
   const least = times(byCount[0]);
   return byCount.filter((item) => times(item) === least);
+}
+
+/** A choice as a record keeps it: a route without its query string or fragment, which can carry a token (fingerprint.ts). */
+export function recordedForm(choice: string): string {
+  return stripRouteQuery(choice);
 }
 
 /** What one seeded run began with, as the project's memory keeps it. */
@@ -169,6 +176,8 @@ export function startsOf(orders: ReadonlyArray<readonly string[]>): string[] {
   return [...new Set(orders.flatMap((o) => o.slice(0, RECORDED_STARTS)))];
 }
 
+const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
+
 /** Schedules from a parsed memory file, checked just enough to be used. Anything malformed is left out. */
 export function readSchedules(raw: unknown): ScheduleRecord[] {
   const list = raw && typeof raw === "object" ? (raw as { schedules?: unknown }).schedules : undefined;
@@ -179,8 +188,10 @@ export function readSchedules(raw: unknown): ScheduleRecord[] {
       typeof r === "object" &&
       typeof (r as ScheduleRecord).seed === "string" &&
       typeof (r as ScheduleRecord).at === "string" &&
-      Array.isArray((r as ScheduleRecord).routes) &&
-      (r as ScheduleRecord).routes.every((x) => typeof x === "string"),
+      ((r as ScheduleRecord).source === "ci" || (r as ScheduleRecord).source === "lane-brief") &&
+      (SEED_EXCLUSIONS as readonly string[]).includes((r as ScheduleRecord).exclusion) &&
+      isStrings((r as ScheduleRecord).routes) &&
+      ((r as ScheduleRecord).roles === undefined || isStrings((r as ScheduleRecord).roles)),
   );
 }
 

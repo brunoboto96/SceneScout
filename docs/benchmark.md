@@ -1112,6 +1112,18 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (33%–67%) | — | turns | 40 | 1,087,728 (1,075,597) / 2,692 | 1m 55s | $0.013 |
 | 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (33%–67%) | — | done | 33 | 894,594 (883,315) / 2,479 | 1m 39s | $0.011 |
 | 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 2/10 | 2/3 (50%–75%) | — | turns | 40 | 1,088,692 (1,077,975) / 2,432 | 1m 51s | $0.013 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | done | 39 | 1,046,088 (1,013,708) / 1,967 | 1m 53s | $0.014 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (100%) | — | done | 31 | 799,468 (769,468) / 1,665 | 1m 37s | $0.012 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 4/4 (67%–100%) | — | turns | 40 | 1,079,657 (1,068,983) / 2,560 | 1m 58s | $0.013 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 1/13 | 1/1 (50%–100%) | — | turns | 40 | 1,045,157 (1,036,421) / 1,319 | 1m 31s | $0.012 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | turns | 40 | 1,065,286 (1,056,116) / 1,814 | 1m 45s | $0.012 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 4/4 (67%–100%) | — | turns | 40 | 1,095,132 (1,063,319) / 2,200 | 3m 11s | $0.015 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 3/10 | 3/4 (43%–86%) | — | turns | 40 | 1,096,506 (1,085,563) / 2,298 | 1m 31s | $0.013 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (50%) | — | done | 30 | 778,996 (771,292) / 1,420 | 1m 06s | $0.009 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (33%–67%) | — | done | 32 | 835,274 (827,133) / 1,492 | 1m 08s | $0.010 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 2/10 | 2/3 (67%) | — | turns | 40 | 1,096,791 (1,086,245) / 1,620 | 1m 46s | $0.013 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/1 (33%–100%) | — | turns | 40 | 1,058,668 (1,049,621) / 1,333 | 1m 31s | $0.012 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 3/10 | 3/3 (100%) | — | turns | 40 | 1,116,515 (1,104,332) / 1,497 | 1m 37s | $0.013 |
 
 <!-- ci-results:end -->
 
@@ -1262,6 +1274,66 @@ seen came with six runs in flight on one organisation's limit. [The lanes
 section of the CI guide](ci.md#lanes) says so. Lanes
 2 was not run: the eighth run went to the raised caps instead, the cause the
 action logs pointed at.
+
+### A seeded exploration schedule (issue 418)
+
+`scenescout ci --seed` crawls first and tells the model to take the routes in
+an order shuffled by the seed, the routes earlier seeded runs on the project
+started with last. One layer changed: the seed. Held fixed: the engine at
+commit `3acef27` (the seed built in, so both arms ran the same code),
+gpt-6-luna at effort `low`, the default caps (40 turns, 1,500,000 tokens, 20
+minutes), `read-only`, level `medium`, the dedup judge, and a fresh app and
+project per run, dispatched through the benchmark workflow's new `seed` input.
+The seeds were chosen before any run: `b418a` to `b418c` on the demo,
+`h418a` to `h418c` on the held-out app. Three runs per arm per app; pass@3 is
+the expected defects found by at least one of the three runs, pass^3 those
+found by all three. The rows are the `ci-seed-*` archives in the table above.
+
+| | Recall per run | pass@3 | pass^3 | Labelled precision | Turns | Cost (3 runs) |
+|---|---|---:|---:|---:|---|---:|
+| Demo, unseeded | 3, 3, 4 of 13 | 5 | 2 | 10/10 (3 unlabelled) | 39, 31, 40 | $0.039 |
+| Demo, seeded | 1, 5, 4 of 13 | 6 | 0 | 10/10 (5 unlabelled) | 40, 40, 40 (the cap) | $0.039 |
+| Held-out, unseeded | 3, 1, 1 of 10 | 3 | 1 | 5/8 (4 unlabelled) | 40, 30, 32 | $0.032 |
+| Held-out, seeded | 2, 1, 3 of 10 | 5 | 0 | 6/7 (2 unlabelled) | 40, 40, 40 (the cap) | $0.038 |
+
+- **pass@3 rose a little, within the noise.** +1 on the demo (the seeded runs
+  found the badge covering a dashboard button, the export crash and the
+  sticky bar covering Save, which no unseeded run did, and missed the double
+  submit and the e-mail field with no label) and +2 on the held-out app.
+  Both are inside the ±3 the [lanes comparison](#lanes-one-loop-against-four-task-40)
+  takes as one configuration's spread, from three runs an arm.
+- **pass^3 fell on both apps,** from 2 to 0 on the demo and from 1 to 0 on
+  the held-out app. Every unseeded demo run found the chart image's 404 and
+  the scheduled-reports dead end; no defect was found by all three seeded
+  runs. The issue's condition, that pass^k must not fall, is not met.
+- **Why, as far as the runs show.** An unseeded run starts on the landing
+  page, where several planted defects are, and every run meets them. A
+  seeded run is sent first to the head of its order: `b418a` started with the
+  orders list, the sign-in page and the inventory, and found 1 of 13. Every
+  seeded run also ended at the 40-turn cap, where two of three unseeded runs
+  per app ended by themselves: following an order of twelve routes spends the
+  budget moving between them.
+- **Precision held.** No labelled false positive on the demo in either arm;
+  6/7 seeded against 5/8 unseeded on the held-out app. Unlabelled findings are
+  left for a person to judge and the key was not changed. One unseeded demo
+  run filed "Optional email field has no persistent accessible label", which
+  may be the key's `new-order-email-no-label` in other words; it was not
+  counted.
+- **Cost.** The same: about $0.012 a run in both arms, about 1.0 to 1.1
+  million tokens. Twelve runs cost $0.148 in all.
+- **What this did not measure.** Every run had a fresh project, so no run
+  had an earlier seeded run's choices to move to the back: the exclusion
+  across runs never engaged, and is covered by the table tests in `ci-test`
+  and `brief-test` only. Measuring it needs k seeded runs sharing one
+  project's memory, scored by what each run added.
+
+**Decision: seeding stays opt-in.** With no seed a run is unchanged, and
+`SCENESCOUT_SEED` is unset by default. A seed is worth using to repeat a run's
+order exactly, or to vary where successive runs start; on this evidence it
+does not yet find more across three runs than leaving the run to itself, and
+it loses the defects every unseeded run finds on the landing page. Next
+experiments, before any default changes: seeded runs that share one memory,
+and a seeded order that keeps the landing page first.
 
 ## Finding dedup as a measured decision (task 15)
 

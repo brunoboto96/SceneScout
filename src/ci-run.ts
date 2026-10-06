@@ -570,19 +570,6 @@ function takesSession(t: { inputSchema?: unknown }): boolean {
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
- * A run split into lanes (--lanes): plan, then run every lane at once, then
- * fold what they did. The plan is a snapshot and a crawl from the planner's
- * session (no model call: only their time counts), the crawl repeated while it
- * finds routes, and the split brief.ts makes of them. Each lane attaches its
- * own session on the run's target URL, as the planner did (the engine resolves
- * every path against the URL a session attached with), opens its first route,
- * runs the agent loop there with its own conversation, draws its turns from
- * the run's one budget, and is closed when it ends. Their findings are already
- * one: every session files into the project's one memory, whose dedup folds a
- * defect two lanes filed. `outcome` is absent when there was nothing to split,
- * and the run explores in one loop instead.
- */
-/**
  * The planning crawl a run split into lanes, or a seeded run, starts with: a
  * snapshot from the planner's session (attaching harvests no links; a snapshot
  * of the page it landed on does), then a crawl repeated while it finds routes,
@@ -592,6 +579,8 @@ async function planningCrawl(o: {
   host: ToolHost;
   log: (line: string) => void;
   timeLeft: () => number;
+  /** What the log calls the step: "Lanes" for a run in lanes, as it always has, "Seed" for a seeded single loop. */
+  label: string;
 }): Promise<{ notes: Map<string, string[]>; planningFailed?: string }> {
   // What went wrong while planning, so a plan left with nothing to split says why rather than blaming the app.
   let planningFailed: string | undefined;
@@ -603,7 +592,7 @@ async function planningCrawl(o: {
       return r.text;
     } catch (err) {
       planningFailed = `the planning ${what} failed: ${messageOf(err).slice(0, 300)}`;
-      o.log(`Planning: ${planningFailed}.`);
+      o.log(`${o.label}: ${planningFailed}.`);
       return undefined;
     }
   };
@@ -619,6 +608,19 @@ async function planningCrawl(o: {
   return { notes, ...(planningFailed ? { planningFailed } : {}) };
 }
 
+/**
+ * A run split into lanes (--lanes): plan, then run every lane at once, then
+ * fold what they did. The plan is a snapshot and a crawl from the planner's
+ * session (no model call: only their time counts), the crawl repeated while it
+ * finds routes, and the split brief.ts makes of them. Each lane attaches its
+ * own session on the run's target URL, as the planner did (the engine resolves
+ * every path against the URL a session attached with), opens its first route,
+ * runs the agent loop there with its own conversation, draws its turns from
+ * the run's one budget, and is closed when it ends. Their findings are already
+ * one: every session files into the project's one memory, whose dedup folds a
+ * defect two lanes filed. `outcome` is absent when there was nothing to split,
+ * and the run explores in one loop instead.
+ */
 async function exploreInLanes(o: {
   host: ToolHost;
   listed: ReadonlyArray<{ name: string; description?: string; inputSchema?: unknown }>;
@@ -873,7 +875,9 @@ export async function runCi(
       // A run split into lanes, or a seeded one, crawls first: the lanes are split, and a seeded run's routes ordered, from what it finds.
       const timeLeft = (): number => wallLeftMs(budgetSpend(budget), options.caps, now());
       const plans = !options.show && (options.lanes > 1 || options.seed);
-      const planned = plans ? await planningCrawl({ host, log, timeLeft }) : undefined;
+      const planned = plans ? await planningCrawl({ host, log, timeLeft, label: options.lanes > 1 ? "Lanes" : "Seed" }) : undefined;
+      // When the schedule was planned: its record's time, so a seed used again sees the history this run saw.
+      const plannedAt = new Date().toISOString();
       // Seeded: the order the history and the seed give (schedule.ts). A memory that cannot be read gives no history, said in the log.
       let schedule: ScheduleInput | undefined;
       if (options.seed && planned) {
@@ -940,8 +944,8 @@ export async function runCi(
           try {
             recordScheduleOnDisk(options.projectDir, {
               seed: options.seed.value,
-              // The real clock, as the server's: the report lists schedules recorded since its store opened.
-              at: new Date().toISOString(),
+              // The real clock, as the server's: the report lists schedules recorded since its store opened, which was before planning.
+              at: plannedAt,
               source: "ci",
               exclusion: options.seedExclusion,
               routes: runSchedule.starts,

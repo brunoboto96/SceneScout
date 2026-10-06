@@ -729,11 +729,6 @@ export function withAudience(technical: readonly string[], audience: ReportAudie
   ].join("\n");
 }
 
-/**
- * The report as the run stands now. `write` is what scout_report does at the
- * end; the live view renders the same document on request without touching
- * the disk, so someone can read it while the run is still going.
- */
 /** One seeded run's schedule as a summary cell: its seed, who planned it, and what it started with. */
 export function scheduleCell(r: ScheduleRecord): string {
   const by = r.source === "ci" ? "scenescout ci" : "scout_lane_brief";
@@ -743,6 +738,11 @@ export function scheduleCell(r: ScheduleRecord): string {
   );
 }
 
+/**
+ * The report as the run stands now. `write` is what scout_report does at the
+ * end; the live view renders the same document on request without touching
+ * the disk, so someone can read it while the run is still going.
+ */
 export function generateReport(
   memory: MemoryStore,
   oracleLog: OracleViolation[],

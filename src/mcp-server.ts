@@ -854,7 +854,10 @@ server.registerTool(
         // Seeded only when asked, by the input or the server's environment: unseeded, the split is the stable one.
         const seeded = resolveSeed(seed, process.env, undefined, "seed");
         if (!seeded.ok) return errorText(new Error(seeded.error));
-        const exclusion = resolveSeedExclusion(seedExclusion, process.env, "seedExclusion");
+        // Read only for a seeded brief, so a stray SCENESCOUT_SEED_EXCLUSION never refuses an unseeded one.
+        const exclusion: ReturnType<typeof resolveSeedExclusion> = seeded.seed
+          ? resolveSeedExclusion(seedExclusion, process.env, "seedExclusion")
+          : { ok: true, value: "back" };
         if (!exclusion.ok) return errorText(new Error(exclusion.error));
         const history = seeded.seed ? (eng.memory?.schedules ?? []) : [];
         const schedule = seeded.seed
@@ -876,7 +879,8 @@ server.registerTool(
               source: "lane-brief",
               exclusion: exclusion.value,
               routes: startsOf(briefs.map((b) => b.routes)),
-              ...(roleOrder ? { roles: roleOrder.slice(0, 1) } : {}),
+              // The role the lanes attach with, which is what this run tried; the order is the brief's suggestion for the next.
+              ...(roleOrder && eng.role ? { roles: [eng.role] } : {}),
             });
         }
         laneLedger.nameBriefed(

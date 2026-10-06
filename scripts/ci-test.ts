@@ -3296,8 +3296,8 @@ test("seed: --seed, else SCENESCOUT_SEED, else none; auto is generated; what is 
   assert.deepEqual(ok([], { [SEED_ENV]: "from-env" }), { seed: { value: "from-env", generated: false }, exclusion: "back" });
   assert.deepEqual(ok([], { [SEED_ENV]: "  " }), { seed: undefined, exclusion: "back" }, "an empty variable is unset");
   assert.deepEqual(ok(["--seed", "flag"], { [SEED_ENV]: "env" }).seed, { value: "flag", generated: false }, "the option wins");
-  assert.equal(ok([], { [SEED_EXCLUSION_ENV]: "skip" }).exclusion, "skip");
-  assert.equal(ok(["--seed-exclusion", "back"], { [SEED_EXCLUSION_ENV]: "skip" }).exclusion, "back", "the option wins");
+  assert.equal(ok(["--seed", "s"], { [SEED_EXCLUSION_ENV]: "skip" }).exclusion, "skip");
+  assert.equal(ok(["--seed", "s", "--seed-exclusion", "back"], { [SEED_EXCLUSION_ENV]: "skip" }).exclusion, "back", "the option wins");
   // A run that shows one element explores nothing: a seed flag is refused, a seed in the environment does not apply.
   assert.deepEqual(ok(["--show", "the Save button"], { [SEED_ENV]: "env" }).seed, undefined);
   const bad = (args: string[], env: Record<string, string> = {}): string => {
@@ -3308,8 +3308,11 @@ test("seed: --seed, else SCENESCOUT_SEED, else none; auto is generated; what is 
   assert.match(bad(["--seed", "has space"]), /--seed must be auto or 1 to 64 letters/);
   assert.match(bad(["--seed", "x".repeat(65)]), /--seed must be/);
   assert.match(bad([], { [SEED_ENV]: "a;b" }), /SCENESCOUT_SEED must be/);
-  assert.match(bad(["--seed-exclusion", "drop"]), /--seed-exclusion must be one of back, skip/);
-  assert.match(bad([], { [SEED_EXCLUSION_ENV]: "drop" }), /SCENESCOUT_SEED_EXCLUSION must be one of back, skip/);
+  assert.match(bad(["--seed", "s", "--seed-exclusion", "drop"]), /--seed-exclusion must be one of back, skip/);
+  assert.match(bad(["--seed", "s"], { [SEED_EXCLUSION_ENV]: "drop" }), /SCENESCOUT_SEED_EXCLUSION must be one of back, skip/);
+  assert.match(bad(["--seed-exclusion", "skip"]), /--seed-exclusion applies to a seeded run/);
+  // Unseeded, the exclusion is never read: a stray value in the environment stops nothing.
+  assert.deepEqual(ok([], { [SEED_EXCLUSION_ENV]: "drop" }), { seed: undefined, exclusion: "back" });
   assert.match(bad(["--seed", "s", "--show", "the Save button"]), /--seed orders an exploration, and --show explores nothing/);
 });
 
