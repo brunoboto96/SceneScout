@@ -168,9 +168,8 @@ Usage:
                                      --record [on|off]: keep a frame after each route visit and each flow step
                                       and write replay.html beside the report, role → journey → step (default:
                                       SCENESCOUT_RECORD, else off; the frames go in replay-frames/);
-                                     --video [on|off]: record a WebM of each saved flow, each on a page of its
-                                      own, into replay-videos/, linked from replay.html beside its steps
-                                      (default off))
+                                     --video [on|off]: record a WebM of each saved flow, and only of the flows,
+                                      into replay-videos/, played on replay.html beside its steps (default off))
                                     Exit code: 0 passed, 1 failed the gate, 2 could not run.
   scenescout ci <url>               An exploratory run with no person present: a model reached through its API
                                     drives the tools by the SceneScout method and the run ends in the report.

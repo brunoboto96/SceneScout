@@ -108,7 +108,7 @@ inputs:
     required: false
     default: ""
   video:
-    description: on or off. on records a WebM video of each saved flow, each on a page of its own, into replay-videos/ beside the report, links each from replay.html beside the journey's steps, and keeps them in the artifact. Videos are large; the frames are pictures of the app under test, so record against seeded data. Empty means off.
+    description: on or off. on records a WebM video of each saved flow, and only of the flows, into replay-videos/ beside the report, links each from replay.html beside the journey's steps, and keeps them in the artifact. Videos are large; the frames are pictures of the app under test, so record against seeded data. Empty means off.
     required: false
     default: ""
   working-directory:

@@ -18,6 +18,14 @@ import { escapeHtml, plainSegment, RECORD_MAX_FRAMES } from "./replay.js";
 
 /** The file the page is written to, beside report.md. */
 export const REPLAY_FILE = "replay.html";
+/** The page's generator mark: an earlier run's page is removed only when it carries it, never a file of the same name. */
+export const REPLAY_GENERATOR = "scenescout-check-replay";
+
+/** Whether a replay.html is one a check wrote. */
+export function isGeneratedReplay(html: string): boolean {
+  return html.includes(`<meta name="generator" content="${REPLAY_GENERATOR}">`);
+}
+
 /** The folder beside it that holds the frames the page shows. */
 export const REPLAY_FRAMES_DIRNAME = "replay-frames";
 /** The folder beside it that holds one video per journey (--video). */
@@ -38,6 +46,15 @@ export interface ReplayStep {
   path?: string;
   /** The frame after the step, relative to the page. */
   frame?: string;
+  /** No frame, because the session had already kept as many as it may. */
+  pastCap?: true;
+}
+
+/** What a recorded session kept after one step: its frame, or why it has none. */
+export interface StepShot {
+  frame?: string;
+  /** The session had already kept as many frames as it may. */
+  pastCap?: true;
 }
 
 export interface ReplayJourney {
@@ -60,6 +77,7 @@ export interface ReplayVisit {
   result: ReplayVisitResult;
   reason?: string;
   frame?: string;
+  pastCap?: true;
 }
 
 export interface ReplayRole {
@@ -75,22 +93,30 @@ export interface ReplayRole {
 export interface CheckReplay {
   startedAt: string;
   roles: ReplayRole[];
-  /** Frames left off the page by the cap. */
+  /** Steps and visits with no frame because of the cap: those the session did not take, and those the page drops. */
   framesLeftOut: number;
+  /** The most frames one session keeps; RECORD_MAX_FRAMES unless a test lowered it. */
+  frameCap?: number;
+}
+
+/** A shot's fields as an item carries them. */
+function shotFields(shot: StepShot | null | undefined): StepShot {
+  if (shot?.frame) return { frame: shot.frame };
+  return shot?.pastCap ? { pastCap: true } : {};
 }
 
 /**
  * Each step of a replayed flow with its caption, its result and its frame.
  * The replay stops at the first step that breaks, so every step before it
  * passed, it is the failing one, and those after it never ran (and have no
- * frame). `frames` holds one entry per executed step, null where none was kept.
+ * frame). `frames` holds one entry per executed step: its frame, or why it has none.
  */
-export function journeySteps(steps: readonly FlowStep[], outcome: FlowOutcome, frames: ReadonlyArray<string | null> = []): ReplayStep[] {
+export function journeySteps(steps: readonly FlowStep[], outcome: FlowOutcome, frames: ReadonlyArray<StepShot | null> = []): ReplayStep[] {
   const broke = outcome.status === "passed" ? null : outcome.step;
   return steps.map((step, i) => {
     const n = i + 1;
-    const frame = broke === null || n <= broke ? (frames[i] ?? undefined) : undefined;
-    const base = { n, caption: describeStep(step), ...(frame ? { frame } : {}) };
+    const shot = broke === null || n <= broke ? shotFields(frames[i]) : {};
+    const base = { n, caption: describeStep(step), ...shot };
     if (broke === null || n < broke) return { ...base, result: "passed" as const };
     if (n > broke) return { n, caption: base.caption, result: "not-run" as const };
     // `broke` is set only when the outcome is not "passed".
@@ -103,7 +129,7 @@ export function journeySteps(steps: readonly FlowStep[], outcome: FlowOutcome, f
 export function journeyOf(
   flow: { name: string; file: string; steps: readonly FlowStep[] },
   outcome: FlowOutcome,
-  frames?: ReadonlyArray<string | null>,
+  frames?: ReadonlyArray<StepShot | null>,
 ): ReplayJourney {
   return {
     name: flow.name,
@@ -115,7 +141,7 @@ export function journeyOf(
 }
 
 /** One visited route, from what the crawl measured. */
-export function visitOf(route: { path: string; status: number | null; loadError?: string; loginRedirect: boolean }, frame?: string): ReplayVisit {
+export function visitOf(route: { path: string; status: number | null; loadError?: string; loginRedirect: boolean }, shot?: StepShot | null): ReplayVisit {
   const result: ReplayVisitResult =
     route.loadError !== undefined ? "not-loaded" : route.loginRedirect ? "sign-in" : route.status !== null && route.status >= 400 ? "http-error" : "loaded";
   return {
@@ -123,20 +149,23 @@ export function visitOf(route: { path: string; status: number | null; loadError?
     status: route.status,
     result,
     ...(route.loadError !== undefined ? { reason: route.loadError } : {}),
-    ...(frame ? { frame } : {}),
+    ...shotFields(shot),
   };
 }
 
 /**
  * At most `max` frames per role, the first ones kept: the same cap a recorded
  * session keeps (RECORD_MAX_FRAMES), held here too so the page never shows
- * more than the run was allowed to take, whatever it is handed.
+ * more than the run was allowed to take, whatever it is handed. A step
+ * dropped here is marked past the cap like one the session did not take, and
+ * `framesLeftOut` counts both, so the page says why each has no frame.
  */
-export function capFrames(replay: CheckReplay, max: number = RECORD_MAX_FRAMES): CheckReplay {
-  let leftOut = replay.framesLeftOut;
+export function capFrames(replay: CheckReplay, max: number = replay.frameCap ?? RECORD_MAX_FRAMES): CheckReplay {
+  let leftOut = 0;
   const roles = replay.roles.map((role) => {
     let kept = 0;
-    const take = <T extends { frame?: string }>(item: T): T => {
+    const take = <T extends { frame?: string; pastCap?: true }>(item: T): T => {
+      if (item.pastCap) leftOut += 1;
       if (!item.frame) return item;
       if (kept < max) {
         kept += 1;
@@ -144,7 +173,7 @@ export function capFrames(replay: CheckReplay, max: number = RECORD_MAX_FRAMES):
       }
       leftOut += 1;
       const { frame: _dropped, ...rest } = item;
-      return rest as T;
+      return { ...rest, pastCap: true } as T;
     };
     return {
       ...role,
@@ -152,7 +181,7 @@ export function capFrames(replay: CheckReplay, max: number = RECORD_MAX_FRAMES):
       journeys: role.journeys.map((j) => ({ ...j, steps: j.steps.map(take) })),
     };
   });
-  return { ...replay, roles, framesLeftOut: leftOut };
+  return { ...replay, roles, framesLeftOut: leftOut, frameCap: max };
 }
 
 /** The report's redaction (memory.ts redactRoute) on every path, caption and reason the page shows. */
@@ -256,30 +285,37 @@ function stamp(iso: string): string {
   return iso.length >= 19 ? `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC` : iso;
 }
 
-const GONE = `onerror="this.parentNode.classList.add('gone')"`;
-
-function frameHtml(frame: string | undefined, alt: string): string {
-  if (!frame) return `<p class="noframe">No frame</p>`;
-  const src = escapeHtml(frame);
+/**
+ * A frame, or a line saying why there is none. No script: the note sits in the
+ * same grid cell under the picture, so a picture that loads covers it and one
+ * that is missing (a copy sent without replay-frames/) leaves it showing.
+ */
+function frameHtml(item: { frame?: string; pastCap?: true }, alt: string, cap: number): string {
+  if (!item.frame)
+    return item.pastCap
+      ? `<p class="noframe">No frame: the session had already kept ${cap}, the most one session keeps.</p>`
+      : `<p class="noframe">No frame</p>`;
+  const src = escapeHtml(item.frame);
   return (
-    `<a class="frame" href="${src}" target="_blank" rel="noreferrer" data-testid="replay-frame-open"><img loading="lazy" ${GONE} src="${src}" alt="${escapeHtml(alt)}">` +
-    `<span class="gone-note">This frame is not beside this file. Frames live in the <code>${REPLAY_FRAMES_DIRNAME}/</code> folder, which travels with it.</span></a>`
+    `<a class="frame" href="${src}" target="_blank" rel="noreferrer" data-testid="replay-frame-open">` +
+    `<span class="gone-note">If no picture shows here, this frame is not beside this file. Frames live in the <code>${REPLAY_FRAMES_DIRNAME}/</code> folder, which travels with it.</span>` +
+    `<img loading="lazy" src="${src}" alt="${escapeHtml(alt)}"></a>`
   );
 }
 
-function stepHtml(s: ReplayStep, anchor: string): string {
+function stepHtml(s: ReplayStep, anchor: string, cap: number): string {
   const first = s.result === "failed" || s.result === "refused";
   const detail = [s.reason, s.path ? `on ${s.path}` : ""].filter(Boolean).join(" ");
   return (
     `<li class="step ${s.result}${first ? " first-failing" : ""}"${first ? ` id="${anchor}"` : ""} data-result="${s.result}">` +
     `<div class="caption"><span class="n">${s.n}</span> <span class="what">${escapeHtml(s.caption)}</span> <span class="result r-${s.result}">${RESULT_WORD[s.result]}</span></div>` +
     (detail ? `<p class="why">${escapeHtml(detail)}</p>` : "") +
-    (s.result === "not-run" ? "" : frameHtml(s.frame, `The page after step ${s.n}: ${s.caption}`)) +
+    (s.result === "not-run" ? "" : frameHtml(s, `The page after step ${s.n}: ${s.caption}`, cap)) +
     `</li>`
   );
 }
 
-function journeyHtml(j: ReplayJourney, id: string): string {
+function journeyHtml(j: ReplayJourney, id: string, cap: number): string {
   const ok = j.status === "passed";
   const anchor = `${id}-first-failing`;
   const badge = ok ? `<span class="badge pass">passed</span>` : `<span class="badge fail">${j.status}</span>`;
@@ -293,31 +329,33 @@ function journeyHtml(j: ReplayJourney, id: string): string {
       ? `<figure class="video"><video controls preload="metadata" src="${escapeHtml(j.video)}" data-testid="replay-journey-video"></video>` +
         `<figcaption>The whole journey as it ran. <a href="${escapeHtml(j.video)}" target="_blank" rel="noreferrer" data-testid="replay-video-open">Open the video</a></figcaption></figure>`
       : "") +
-    `<ol class="steps">${j.steps.map((s) => stepHtml(s, anchor)).join("")}</ol></details>`
+    `<ol class="steps">${j.steps.map((s) => stepHtml(s, anchor, cap)).join("")}</ol></details>`
   );
 }
 
-function visitsHtml(visits: readonly ReplayVisit[]): string {
+function visitsHtml(visits: readonly ReplayVisit[], cap: number): string {
   if (visits.length === 0) return "";
   const items = visits
     .map(
       (v) =>
         `<li class="visit ${v.result}"><div class="caption"><span class="what">visit ${escapeHtml(v.path)}</span> <span class="result v-${v.result}">${v.status ?? "—"} · ${VISIT_WORD[v.result]}</span></div>` +
         (v.reason ? `<p class="why">${escapeHtml(v.reason)}</p>` : "") +
-        frameHtml(v.frame, `The page at ${v.path}`) +
+        frameHtml(v, `The page at ${v.path}`, cap) +
         `</li>`,
     )
     .join("");
   return `<details class="visits"><summary data-testid="replay-visits-toggle">Routes visited <span class="count">${visits.length}</span></summary><ol class="steps">${items}</ol></details>`;
 }
 
-function roleHtml(r: ReplayRole, i: number): string {
+function roleHtml(r: ReplayRole, i: number, cap: number): string {
   const failing = r.journeys.filter((j) => j.status !== "passed").length;
   const tally = `${r.journeys.length} journey${r.journeys.length === 1 ? "" : "s"}${failing ? `, ${failing} not passed` : ""}`;
   return (
     `<section class="role" id="role-${i}"><h2>${escapeHtml(r.role)} <span class="count">${r.own ? "the check's own session · " : ""}${tally}</span></h2>` +
-    visitsHtml(r.visits) +
-    (r.journeys.length > 0 ? r.journeys.map((j, k) => journeyHtml(j, `role-${i}-journey-${k}`)).join("") : `<p class="none">No journey ran as this role.</p>`) +
+    visitsHtml(r.visits, cap) +
+    (r.journeys.length > 0
+      ? r.journeys.map((j, k) => journeyHtml(j, `role-${i}-journey-${k}`, cap)).join("")
+      : `<p class="none">No journey ran as this role.</p>`) +
     `</section>`
   );
 }
@@ -353,10 +391,10 @@ ol.steps { list-style:none; margin:10px 0 0; padding:0; }
 .result { margin-left:auto; font-size:12px; font-weight:700; }
 .r-passed, .v-loaded { color:var(--pass); } .r-failed, .r-refused, .v-http-error, .v-not-loaded, .v-sign-in { color:var(--fail); } .r-not-run { color:var(--muted); }
 .why { margin:4px 0; font-size:13px; overflow-wrap:anywhere; }
-a.frame { display:block; margin:6px 0 2px; max-width:min(100%,720px); }
-a.frame img { max-width:100%; max-height:400px; object-fit:cover; object-position:top; border:1px solid var(--line); border-radius:6px; display:block; }
-.gone-note { display:none; padding:12px; border:1px dashed var(--line); border-radius:6px; color:var(--muted); font-size:12px; }
-a.frame.gone img { display:none; } a.frame.gone .gone-note { display:block; }
+a.frame { display:grid; margin:6px 0 2px; max-width:min(100%,720px); color:var(--muted); font-size:12px; }
+a.frame > * { grid-area:1 / 1; }
+a.frame img { position:relative; max-width:100%; max-height:400px; object-fit:cover; object-position:top; border:1px solid var(--line); border-radius:6px; display:block; background:var(--panel); }
+.gone-note { align-self:end; padding:2.6em 12px 12px; border:1px dashed var(--line); border-radius:6px; }
 .noframe, .none { color:var(--muted); font-size:12px; font-style:italic; margin:4px 0; }
 .note { color:var(--muted); font-size:13px; }
 figure.video { margin:10px 0; max-width:min(100%,720px); }
@@ -364,7 +402,7 @@ figure.video video { width:100%; border:1px solid var(--line); border-radius:6px
 figure.video figcaption { color:var(--muted); font-size:12px; margin-top:4px; }
 `;
 
-/** The whole page: one HTML file with no external assets or scripts; its frames sit beside it in replay-frames/. */
+/** The whole page: one HTML file with no scripts, no event handlers and no external assets; its frames and videos sit beside it. */
 export function buildCheckReplayHtml(replay: CheckReplay, meta: ReplayMeta): string {
   const verdict = meta.couldNotRun > 0 ? "could not run every flow" : meta.passed ? "passed" : "failed";
   const badge = `<span class="badge ${meta.passed && meta.couldNotRun === 0 ? "pass" : "fail"}" data-testid="replay-verdict">${verdict}</span>`;
@@ -375,6 +413,7 @@ export function buildCheckReplayHtml(replay: CheckReplay, meta: ReplayMeta): str
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="${REPLAY_GENERATOR}">
 <title>SceneScout check replay — ${escapeHtml(meta.origin)}</title>
 <style>${STYLE}</style>
 </head>
@@ -387,9 +426,11 @@ export function buildCheckReplayHtml(replay: CheckReplay, meta: ReplayMeta): str
 <p class="note">Each role, then each journey it walked, step by step, with the page as it was after the step${
     frames === 0 ? " when the check was recorded (--record)" : ""
   }. Typed values are never shown, and secrets in addresses are redacted as in the report.${
-    replay.framesLeftOut > 0 ? ` ${replay.framesLeftOut} frame(s) past the cap of ${RECORD_MAX_FRAMES} per role are not kept; those steps show no frame.` : ""
+    replay.framesLeftOut > 0
+      ? ` ${replay.framesLeftOut} step(s) and visit(s) have no frame because their session had already kept ${replay.frameCap ?? RECORD_MAX_FRAMES}, the most one session keeps.`
+      : ""
   }</p>
-${replay.roles.map(roleHtml).join("\n") || '<p class="none">Nothing was recorded.</p>'}
+${replay.roles.map((r, i) => roleHtml(r, i, replay.frameCap ?? RECORD_MAX_FRAMES)).join("\n") || '<p class="none">Nothing was recorded.</p>'}
 </main>
 </body>
 </html>

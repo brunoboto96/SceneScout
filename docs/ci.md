@@ -367,7 +367,7 @@ An element larger than the window is pictured where it is inside the window, and
 A green check says the gate passed; a recorded one also shows what passed. `--record` (the action's `record: on`, or `SCENESCOUT_RECORD=on` in the environment) keeps a frame of the page after each route the check visits and after each step of each saved flow, and writes `replay.html` beside `report.md`. It is off by default. `--record off` wins over the variable.
 
 ```yaml
-- uses: brunoboto96/SceneScout@v3.10.0
+- uses: brunoboto96/SceneScout@v3
   with:
     url: http://127.0.0.1:3000
     record: on
@@ -375,19 +375,19 @@ A green check says the gate passed; a recorded one also shows what passed. `--re
 
 The page is organised role → journey → step. The check's own session comes first, with the routes it visited; then each role a saved flow ran as. Every journey (a saved flow) has a pass or fail badge, and each of its steps shows its caption (the action and its target), its result and the frame after it. A journey that broke is open, with the step that broke highlighted and linked from its heading; the steps after it are marked not run and have no frame. The header gives the verdict, the SceneScout version, the app's origin, when the check started and ended, and the commit when `GITHUB_SHA` names one.
 
-**Video.** `--video` (the action's `video: on`) also records a WebM video of each saved flow, using Playwright's video recording. Each flow runs on a page of its own in its role's browser, so its sign-in, cookies and storage carry over and the video holds that journey and nothing else. The replay page plays each video at the top of its journey, above the steps, with a link to open it. It works with or without `--record`: without it the page has the journeys and their videos, and no frames. Off by default, because videos are large.
+**Video.** `--video` (the action's `video: on`) also records a WebM video of each saved flow, using Playwright's page screencast. Filming starts at the flow's first step and stops when the flow hands back, on the same page the flow would use unfilmed, so cookies, localStorage and sessionStorage are exactly what they would be without the video. Only the flows are filmed: the crawl, the re-tests and the baselines are not. The replay page plays each video at the top of its journey, above the steps, with a link to open it. It works with or without `--record`: without it the page has the journeys and their videos, and no frames. Off by default, because videos are large.
 
 ```yaml
-- uses: brunoboto96/SceneScout@v3.10.0
+- uses: brunoboto96/SceneScout@v3
   with:
     url: http://127.0.0.1:3000
     record: on
     video: on
 ```
 
-**What it writes.** `replay.html`, with a `replay-frames/` folder (`--record`) and a `replay-videos/` folder holding `journey-01-<flow>.webm`, `journey-02-<flow>.webm` and so on in the order the flows ran (`--video`), all in the output folder (`--out`, default `.scenescout/check`). The page has no scripts and loads nothing from the network, so it opens from a downloaded artifact or from any static host, as long as the two folders travel with it. Every check removes the page, frames and videos an earlier run left there, so nothing stale is read as this run's. The action uploads them with the other results and publishes the page's path as the `replay` output.
+**What it writes.** `replay.html`, with a `replay-frames/` folder (`--record`) and a `replay-videos/` folder holding `journey-01-<flow>.webm`, `journey-02-<flow>.webm` and so on in the order the flows ran (`--video`), all in the output folder (`--out`, default `.scenescout/check`). The page has no scripts or event handlers and loads nothing from the network, so it opens from a downloaded artifact or from any static host, as long as the two folders travel with it. Every check removes the page, frames and videos an earlier run left there, so nothing stale is read as this run's. The page carries a `<meta name="generator" content="scenescout-check-replay">` mark, and only a `replay.html` with that mark is removed: a file of that name the project keeps in the folder stays. The action uploads them with the other results and publishes the page's path as the `replay` output.
 
-**Size.** A frame is a JPEG of the viewport, usually tens of kilobytes. A check takes at most one per route (up to `--max-routes`) and one per flow step, and each browser session keeps at most 600 frames; a step past that has no frame, and the page says how many were left out. A video is usually several hundred kilobytes to a few megabytes for each minute of a journey, so turn on `--video` for the runs where you will watch them. Record the runs you keep as evidence, such as the main branch or a release, rather than every push.
+**Size.** A frame is a JPEG of the viewport, usually tens of kilobytes. A check takes at most one per route (up to `--max-routes`) and one per flow step, and each browser session keeps at most 600 frames. A step or visit past that has no frame; the page says so beside it, and counts them in its note at the top. A video is usually several hundred kilobytes to a few megabytes for each minute of a journey, and encoding it adds a little time to each flow, so turn on `--video` for the runs where you will watch them. Record the runs you keep as evidence, such as the main branch or a release, rather than every push.
 
 **Privacy.** The frames and videos are pictures of the app under test, and they show whatever the pages showed: names, addresses, anything a seeded account can see. Record against seeded or synthetic data, never production. Typed values never appear in the page's text, and secrets in addresses and reasons are redacted as they are in the report; a field's contents can still show in a frame or a video, as they did on screen (a password field shows dots).
 

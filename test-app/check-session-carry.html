@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Check: sessionStorage between flows</title></head>
+<body>
+  <!-- For `scenescout check --video`: one flow presses Remember, which writes sessionStorage; the next flow loads this page
+       again in the same session and expects it remembered. A tab of its own per flow would start with empty sessionStorage. -->
+  <h1>Remembering</h1>
+  <button type="button" data-testid="carry-remember">Remember</button>
+  <p data-testid="carry-status" role="status"></p>
+  <script>
+    const status = document.querySelector('[data-testid="carry-status"]');
+    const show = () => (status.textContent = sessionStorage.getItem("carried") === "yes" ? "Remembered: yes" : "Remembered: no");
+    document.querySelector('[data-testid="carry-remember"]').addEventListener("click", () => {
+      sessionStorage.setItem("carried", "yes");
+      show();
+    });
+    show();
+  </script>
+</body>
+</html>

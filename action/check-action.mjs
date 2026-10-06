@@ -119,15 +119,27 @@ export function picturesDir(json, outDir, exists = fs.existsSync) {
   return results.some((r) => r && typeof r === "object" && r.files) && exists(dir) ? dir : "";
 }
 
+/** The mark a check writes into its replay page (check-replay.ts REPLAY_GENERATOR); check-test holds the two equal. */
+export const REPLAY_GENERATOR_META = '<meta name="generator" content="scenescout-check-replay">';
+
+/** Whether the file is a replay page a check wrote. False for a missing or unreadable file. */
+export function writtenReplay(file) {
+  try {
+    return fs.readFileSync(file, "utf8").includes(REPLAY_GENERATOR_META);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The replay page of a recorded check and the folders of frames and journey
  * videos beside it, or empty: the folders are kept only with a page this run wrote, which the run
  * step removed beforehand, so frames an earlier run left are never kept as
  * this run's.
  */
-export function replayOutputs(outDir, exists = fs.existsSync) {
+export function replayOutputs(outDir, exists = fs.existsSync, written = writtenReplay) {
   const page = path.join(outDir, "replay.html");
-  if (!exists(page)) return { replay: "", "replay-frames": "", "replay-videos": "" };
+  if (!exists(page) || !written(page)) return { replay: "", "replay-frames": "", "replay-videos": "" };
   const frames = path.join(outDir, "replay-frames");
   const videos = path.join(outDir, "replay-videos");
   return { replay: page, "replay-frames": exists(frames) ? frames : "", "replay-videos": exists(videos) ? videos : "" };
@@ -308,7 +320,9 @@ function run() {
   const outDir = process.env.SCENESCOUT_OUT_DIR;
   if (!cli || !outDir) throw new Error("SCENESCOUT_CLI and SCENESCOUT_OUT_DIR must be set by the resolve step");
   // Results of an earlier run in the same directory must not be read as this run's.
-  for (const f of ["report.md", "check.json", "check.sarif", "replay.html"]) fs.rmSync(path.join(outDir, f), { force: true });
+  for (const f of ["report.md", "check.json", "check.sarif"]) fs.rmSync(path.join(outDir, f), { force: true });
+  // A replay page only when a check wrote it: a file of that name the project keeps there is its own.
+  if (writtenReplay(path.join(outDir, "replay.html"))) fs.rmSync(path.join(outDir, "replay.html"));
   const child = spawnSync(process.execPath, [cli, ...checkArgs(inputs)], { stdio: ["ignore", "inherit", "pipe"], maxBuffer: 64 * 1024 * 1024 });
   const stderr = child.stderr ? child.stderr.toString() : "";
   if (stderr) process.stderr.write(stderr);

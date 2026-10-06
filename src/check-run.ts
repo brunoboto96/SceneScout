@@ -55,6 +55,7 @@ import {
   isReplayFrameFile,
   journeyOf,
   journeyVideoPath,
+  isGeneratedReplay,
   isJourneyVideoFile,
   redactReplay,
   REPLAY_VIDEOS_DIRNAME,
@@ -67,6 +68,7 @@ import {
   visitOf,
   type CheckReplay,
   type ReplayRole,
+  type StepShot,
 } from "./engine/check-replay.js";
 
 /** What a check reads from the project before it starts: its saved flows, the findings earlier runs left, and the targets of any visual baselines. */
@@ -167,8 +169,9 @@ export async function runCheck(
   const startedAt = new Date().toISOString();
   const store = new MemoryStore(scratch);
   if (record) engine.sessionKey = replaySessionKey();
-  // --video: each browser records every page into its own scratch folder, and each flow's own page is saved beside the report.
+  // --video: each flow is filmed on its session's page, from its first step to its hand-back, and saved beside the report.
   const video = options.video === true;
+  const frameCap = options.maxFrames;
   const outDir = options.outDir ?? defaultCheckDir(options.projectDir);
   // The default folder is inside .scenescout/, which ignores itself; its .gitignore goes first, so no frame or video is ever unignored.
   if ((record || video) && !options.outDir) {
@@ -189,8 +192,7 @@ export async function runCheck(
       memoryStore: store,
       mode: options.mode,
       storageStatePath: options.storageStatePath,
-      ...(record ? { record: true } : {}),
-      ...(video ? { videoDir: path.join(scratch, "video") } : {}),
+      ...(record ? { record: true, ...(frameCap !== undefined ? { maxFrames: frameCap } : {}) } : {}),
       ...(options.browser ? { browser: options.browser } : {}),
       actionTimeoutMs: options.actionTimeoutMs,
       navTimeoutMs: options.navTimeoutMs,
@@ -262,8 +264,7 @@ export async function runCheck(
         memoryStore: new MemoryStore(roleDir),
         mode: options.mode,
         role,
-        ...(record ? { record: true } : {}),
-        ...(video ? { videoDir: path.join(roleDir, "video") } : {}),
+        ...(record ? { record: true, ...(frameCap !== undefined ? { maxFrames: frameCap } : {}) } : {}),
         ...(options.browser ? { browser: options.browser } : {}),
         actionTimeoutMs: options.actionTimeoutMs,
         navTimeoutMs: options.navTimeoutMs,
@@ -275,7 +276,7 @@ export async function runCheck(
       return roleEngine;
     };
     /** On a recorded check, the frames each flow's steps left, beside the flow. */
-    const flowFrames: Array<ReadonlyArray<string | null>> = [];
+    const flowFrames: Array<ReadonlyArray<StepShot>> = [];
     /** On a check with --video, each flow's video beside the report (relative to it), or null where none was saved. */
     const flowVideos: Array<string | null> = [];
     for (const flow of runFlows) {
@@ -284,9 +285,9 @@ export async function runCheck(
       const walk = () => runner.replayFlow(flow.steps, options.flowWrites === "never" ? "observe" : options.mode);
       let walked: Awaited<ReturnType<typeof walk>>;
       if (video) {
-        // A page of its own, so the video is this journey's alone; the context, and so the sign-in, is the role's.
+        // Filmed on the session's own page, so the flow runs exactly as it would unfilmed and the video holds it alone.
         const rel = journeyVideoPath(flowRuns.length + 1, flow.file);
-        const own = await runner.onOwnPage(walk, path.join(outDir, ...rel.split("/")));
+        const own = await runner.filming(path.join(outDir, ...rel.split("/")), walk);
         walked = own.value;
         flowVideos.push(own.video ? rel : null);
         if (own.videoError) log(`  flow ${flow.name}: its video could not be saved (${own.videoError})`);
@@ -333,6 +334,7 @@ export async function runCheck(
               .map((flow, i) => ({ flow, outcome: flowRuns[i].outcome, frames: flowFrames[i], video: flowVideos[i] ?? null })),
             scratch,
             say: log,
+            ...(frameCap !== undefined ? { frameCap } : {}),
           })
         : null;
     if (replay) log(`  kept ${replayFrames(replay).length} frame(s) and ${replayVideos(replay).length} video(s) for ${REPLAY_FILE}`);
@@ -521,12 +523,21 @@ async function takeBaselines(
  * Remove what an earlier recorded check left beside the report: replay.html,
  * the frames under replay-frames/ and the journey videos under replay-videos/
  * that a check names as it names them (isReplayFrameFile, isJourneyVideoFile),
- * then any folder that leaves empty. Run before every
+ * then any folder that leaves empty. replay.html goes only when it carries
+ * the check's generator mark (isGeneratedReplay). Run before every
  * check, recorded or not, so a page from an earlier run is never read, or
  * uploaded, as this one's; whatever else the folder holds stays.
  */
 export function clearReplayOutput(outDir: string): void {
-  fs.rmSync(path.join(outDir, REPLAY_FILE), { force: true });
+  // Only a page a check wrote: a file of the same name the project keeps there is its own.
+  const page = path.join(outDir, REPLAY_FILE);
+  let text: string | null = null;
+  try {
+    text = fs.readFileSync(page, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  if (text !== null && isGeneratedReplay(text)) fs.rmSync(page);
   const videos = path.join(outDir, REPLAY_VIDEOS_DIRNAME);
   if (fs.existsSync(videos)) {
     for (const file of fs.readdirSync(videos, { withFileTypes: true }))
@@ -559,32 +570,37 @@ function recordReplay(o: {
   options: CheckOptions;
   startedAt: string;
   ownRole: string;
-  log: ReadonlyArray<{ action: string; target?: string; session?: string; frame?: string }>;
+  log: ReadonlyArray<{ action: string; target?: string; session?: string; frame?: string; framePastCap?: true }>;
   visited: readonly RouteHealth[];
-  flows: Array<{ flow: Flow; outcome: FlowRun["outcome"]; frames: ReadonlyArray<string | null>; video: string | null }>;
+  flows: Array<{ flow: Flow; outcome: FlowRun["outcome"]; frames: ReadonlyArray<StepShot>; video: string | null }>;
   scratch: string;
   say: (line: string) => void;
+  frameCap?: number;
 }): CheckReplay {
   const outDir = o.options.outDir ?? defaultCheckDir(o.options.projectDir);
   /** Where each frame the page names is copied from. */
   const sources = new Map<string, string>();
-  const beside = (recorded: string | null | undefined, memoryDir: string): string | null => {
-    const to = recorded ? replayFramePath(recorded) : null;
-    if (to && recorded) sources.set(to, path.join(memoryDir, ...recorded.split("/")));
-    return to;
+  /** A shot with its frame's path moved to where it is copied beside the page. */
+  const beside = (shot: StepShot | undefined, memoryDir: string): StepShot => {
+    if (!shot?.frame) return shot?.pastCap ? { pastCap: true } : {};
+    const to = replayFramePath(shot.frame);
+    if (!to) return {};
+    sources.set(to, path.join(memoryDir, ...shot.frame.split("/")));
+    return { frame: to };
   };
-  // The crawl's frames, by the path each visit asked for, in the order they were taken.
+  // What the crawl kept for each visit, by the path it asked for, in the order the visits ran.
   const own = replaySessionKey();
-  const crawled = new Map<string, string[]>();
+  const crawled = new Map<string, StepShot[]>();
   for (const e of o.log) {
-    if (e.action !== "crawl" || !e.frame || e.target === undefined || (e.session ?? own) !== own) continue;
-    crawled.set(e.target, [...(crawled.get(e.target) ?? []), e.frame]);
+    if (e.action !== "crawl" || e.target === undefined || (e.session ?? own) !== own) continue;
+    const shot: StepShot = e.frame ? { frame: e.frame } : e.framePastCap ? { pastCap: true } : {};
+    crawled.set(e.target, [...(crawled.get(e.target) ?? []), shot]);
   }
   const ownSession: ReplayRole = {
     role: o.ownRole,
     own: true,
     // A MemoryStore keeps its files, frames included, in the .scenescout folder of the directory it is given.
-    visits: o.visited.map((route) => visitOf(route, beside(crawled.get(route.path)?.shift(), path.join(o.scratch, MEMORY_DIRNAME)) ?? undefined)),
+    visits: o.visited.map((route) => visitOf(route, beside(crawled.get(route.path)?.shift(), path.join(o.scratch, MEMORY_DIRNAME)))),
     journeys: [],
   };
   const roles: ReplayRole[] = [ownSession];
@@ -603,7 +619,7 @@ function recordReplay(o: {
     }
     role.journeys.push(journey);
   }
-  const replay = redactReplay(capFrames({ startedAt: o.startedAt, roles, framesLeftOut: 0 }));
+  const replay = redactReplay(capFrames({ startedAt: o.startedAt, roles, framesLeftOut: 0, ...(o.frameCap !== undefined ? { frameCap: o.frameCap } : {}) }));
   // A frame that cannot be copied is left off the page rather than shown broken.
   const copied = new Set<string>();
   let failed = false;
