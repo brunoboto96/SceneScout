@@ -5683,7 +5683,15 @@ export class BrowserEngine {
       for (const sig of background) if (!refusedBackground.includes(sig) && refusedBackground.length < 20) refusedBackground.push(sig);
       return charged;
     };
-    const done = (outcome: FlowReplay["outcome"]): FlowReplay => ({ outcome, violations, refusedBackground, websockets: [...websockets] });
+    /** On a recorded session, the frame after each step that ran (null where none was kept), for the check's replay page. */
+    const frames: Array<string | null> = [];
+    const done = (outcome: FlowReplay["outcome"]): FlowReplay => ({
+      outcome,
+      violations,
+      refusedBackground,
+      websockets: [...websockets],
+      ...(this.recording ? { frames } : {}),
+    });
     // Nothing from the crawl before this flow is charged to it.
     this.oracles.drain(false);
     this.blockedRequests = [];
@@ -5840,6 +5848,8 @@ export class BrowserEngine {
         const n = i + 1;
         const did = describeStep(step);
         const { failure, refusal } = step.action === "repeat" ? await runRepeat(step) : await runStep(step);
+        // Taken whatever the step's result: the frame of a step that broke is the evidence of how it broke.
+        if (this.recording) frames.push((await this.recordFrame(`flow-${step.action}`)) ?? null);
         if (refusal) return done({ status: "refused", step: n, did, reason: refusal.split("\n")[0], path: here() });
         if (failure) return done({ status: "failed", step: n, did, reason: failure, path: here() });
       }

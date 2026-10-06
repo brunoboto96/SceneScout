@@ -556,6 +556,12 @@ export interface FlowReplay {
   refusedBackground: string[];
   /** WebSocket connections the flow's page opened. The write rule covers HTTP only; frames on a socket are not inspected. */
   websockets: string[];
+  /**
+   * On a recorded session only: the frame kept after each step that ran, in
+   * order, null where none was (the cap reached, a frame that failed). Paths
+   * are relative to the session's memory folder (replay.ts framePath).
+   */
+  frames?: Array<string | null>;
 }
 
 /**

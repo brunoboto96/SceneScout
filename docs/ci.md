@@ -95,6 +95,7 @@ Every option of `scenescout check` is an input with the same name. `scenescout c
 | `baselines` | `<project>/.scenescout/baselines` | The folder holding `targets.json` and the baselines; name one the repository commits (below) |
 | `baseline-threshold` | 0.1 | The percentage of a picture's pixels that may change, 0 to 100 (below) |
 | `sarif-file-anchor` | the workflow file that is running | The repository file a `check.sarif` result points at when no saved flow raised it, relative to the repository root (below) |
+| `record` | `SCENESCOUT_RECORD`, else `off` | `on` keeps a frame after each route visit and each flow step and writes `replay.html` beside the report, kept in the artifact (below) |
 
 And the action's own:
 
@@ -104,13 +105,13 @@ And the action's own:
 | `version` | the ref's release | The scenescout npm version to run |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo`. Set `false` on a runner or container that has them |
-| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met |
+| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and on a recorded check `replay.html` with its `replay-frames/` folder |
 | `artifact-name` | `scenescout-check-<job id>` | A second use in the same job gets `-2`, a third `-3`. Jobs of a matrix share a job id, so give each cell its own name, e.g. `scenescout-check-${{ matrix.browser }}` |
 | `upload-sarif` | `false` | Upload `check.sarif` to code scanning (below) |
 
 ### Outputs
 
-`passed` (`true` or `false`, empty when the check could not run; with `could-not-run` above 0 it describes the rest of the check, so `true` can come with exit code 2), `exit-code`, `failing` (what fails the gate: issues at the gate's severity or worse, plus re-tested findings that `--gate-retests` gates), `could-not-run` (flows a refused step kept from running), `retests-failing` (of `failing`, the re-tested findings), `high`, `medium`, `low`, `worth-a-look` (observations listed as worth a look, below; not in `high`, `medium` or `low`, and never in `failing`), the paths `report`, `json` and `sarif`, and `artifact-name`.
+`passed` (`true` or `false`, empty when the check could not run; with `could-not-run` above 0 it describes the rest of the check, so `true` can come with exit code 2), `exit-code`, `failing` (what fails the gate: issues at the gate's severity or worse, plus re-tested findings that `--gate-retests` gates), `could-not-run` (flows a refused step kept from running), `retests-failing` (of `failing`, the re-tested findings), `high`, `medium`, `low`, `worth-a-look` (observations listed as worth a look, below; not in `high`, `medium` or `low`, and never in `failing`), the paths `report`, `json` and `sarif`, `replay` (the path of `replay.html` on a recorded check, else empty), and `artifact-name`.
 
 A later step can read them, for example to comment on the pull request. To keep the job going after a failed gate, give the step `continue-on-error: true` and look at `steps.scenescout.outputs.exit-code`.
 
@@ -359,6 +360,27 @@ The check step fails if a target could not be pictured, since that target's base
 An element larger than the window is pictured where it is inside the window, and its result's `partial` says so: list smaller elements within it to hold the rest.
 
 **Allowing small changes.** `baseline-threshold` (`--baseline-threshold`) is the percentage of a picture's pixels that may change before its baseline is not met. The default is 0.1, not 0: two pictures of an unchanged page taken by one browser build on one machine compare at 0%, but a run on another machine, or after a browser or font update, can anti-alias text and curved edges a pixel differently, and a gate that fails on that noise teaches a team to ignore it. 0.1% is 1,152 pixels of a 1280×900 page and 64 of a 320×200 picture, so a smaller change, such as a character of small text on a large element, passes; set `0` to count every changed pixel. A change of size always counts. `update` rewrites the baselines past the threshold, as compare would judge them, and leaves the rest alone, so noise under it leaves the folder untouched; a baseline taken on another operating system it always replaces. Each pixel is already allowed a difference of 8 in 255 on each colour channel, which absorbs a colour rounded one step differently. `fail-on: never` reports everything without failing the job, visual changes included.
+
+## Recording a check
+
+A green check says the gate passed; a recorded one also shows what passed. `--record` (the action's `record: on`, or `SCENESCOUT_RECORD=on` in the environment) keeps a frame of the page after each route the check visits and after each step of each saved flow, and writes `replay.html` beside `report.md`. It is off by default. `--record off` wins over the variable.
+
+```yaml
+- uses: brunoboto96/SceneScout@v3.10.0
+  with:
+    url: http://127.0.0.1:3000
+    record: on
+```
+
+The page is organised role → journey → step. The check's own session comes first, with the routes it visited; then each role a saved flow ran as. Every journey (a saved flow) has a pass or fail badge, and each of its steps shows its caption (the action and its target), its result and the frame after it. A journey that broke is open, with the step that broke highlighted and linked from its heading; the steps after it are marked not run and have no frame. The header gives the verdict, the SceneScout version, the app's origin, when the check started and ended, and the commit when `GITHUB_SHA` names one.
+
+**What it writes.** `replay.html` and a `replay-frames/` folder beside it, both in the output folder (`--out`, default `.scenescout/check`). The page has no scripts and loads nothing from the network, so it opens from a downloaded artifact or from any static host, as long as `replay-frames/` travels with it. Every check removes the page and frames an earlier recorded run left there, so nothing stale is read as this run's. The action uploads both with the other results and publishes the page's path as the `replay` output.
+
+**Size.** A frame is a JPEG of the viewport, usually tens of kilobytes. A check takes at most one per route (up to `--max-routes`) and one per flow step, and each browser session keeps at most 600 frames; a step past that has no frame, and the page says how many were left out. Record the runs you keep as evidence, such as the main branch or a release, rather than every push.
+
+**Privacy.** The frames are pictures of the app under test, and they show whatever the pages showed: names, addresses, anything a seeded account can see. Record against seeded or synthetic data, never production. Typed values never appear in the page's text, and secrets in addresses and reasons are redacted as they are in the report; a field's contents can still show in a frame, as they did on screen (a password field shows dots).
+
+**Publishing it.** The artifact keeps the page for the repository's artifact retention, readable by anyone who can read the workflow run. To share it more widely, publish the output folder to a static host behind your team's own access control (an internal pages site, a bucket behind single sign-on) rather than a public one.
 
 ## Worth a look
 

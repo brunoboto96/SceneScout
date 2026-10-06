@@ -277,7 +277,9 @@ Use SceneScout to test http://localhost:3000, record the run
 ```
 
 or, on the tool directly, `scout_attach {record: true}`. `SCENESCOUT_RECORD=on` in
-the server's environment records every run.
+the server's environment records every run. A CI gate records too:
+`scenescout check --record` writes `replay.html`, every journey step by step with
+its frames ([recording a check](docs/ci.md#recording-a-check)).
 
 Then `scout_report` writes two files side by side in `.scenescout/`:
 `report.md` as always, and `report.html` — the whole run as one self-contained
@@ -454,6 +456,7 @@ With the default settings its saved flows send no HTTP write (they replay under 
 - `--on-refused-step report|stop` (default `report`): `report` marks a flow whose step was refused "could not run", keeps every other verdict and exits 2; `stop` exits 2 at that step with no results.
 - `--gate-retests never|high|all` (default `high`): which still-reproducing re-tested findings fail the gate.
 - `--baseline off|compare|update` (default `off`), with `--baselines <dir>` and `--baseline-threshold <percent>` (default `0.1`, so small anti-aliasing noise between machines passes): visual baselines, below.
+- `--record` (or `SCENESCOUT_RECORD=on`; the action's `record: on`) keeps a frame after each route visit and each saved-flow step and writes `replay.html` beside the report: each role, each journey with a pass or fail badge, each step with its caption, result and frame, the first failing step highlighted. Off by default. [docs/ci.md](docs/ci.md#recording-a-check) covers size, privacy and publishing it.
 
 The defaults are what an unconfigured check does, for a first try or an AI agent running it unattended: its flows send no HTTP write and it never silently hides a result. Each setting is a choice for the project; the report and `check.json` print the values a check ran with.
 

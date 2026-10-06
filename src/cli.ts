@@ -39,7 +39,9 @@ import {
   spawnRunner,
 } from "./installer.js";
 import { downloadBrowsers, presentBrowsers } from "./installer.js";
-import { baselinesDirOf, defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
+import { baselinesDirOf, clearReplayOutput, defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
+import { buildCheckReplayHtml, commitOf, REPLAY_FILE, REPLAY_FRAMES_DIRNAME, replayFrames } from "./engine/check-replay.js";
+import { recordChoice } from "./engine/capture.js";
 import { httpClient, httpJudgeAsk, runCi } from "./ci-run.js";
 import { runExport } from "./export-run.js";
 import { runLogin, runScriptedLogin, savedLine } from "./login-run.js";
@@ -53,6 +55,7 @@ import {
   formatCheck,
   parseCheckArgs,
   refusedFlowReason,
+  summarise,
   toSarif,
   toSummaryJson,
   unmeasuredReason,
@@ -161,7 +164,10 @@ Usage:
                                       passes; 0 counts every changed pixel);
                                      --sarif-file-anchor path: the repository file a SARIF result points at when
                                       no saved flow raised it (default: the running workflow's file on GitHub
-                                      Actions, else package.json, else README.md))
+                                      Actions, else package.json, else README.md);
+                                     --record [on|off]: keep a frame after each route visit and each flow step
+                                      and write replay.html beside the report, role → journey → step (default:
+                                      SCENESCOUT_RECORD, else off; the frames go in replay-frames/))
                                     Exit code: 0 passed, 1 failed the gate, 2 could not run.
   scenescout ci <url>               An exploratory run with no person present: a model reached through its API
                                     drives the tools by the SceneScout method and the run ends in the report.
@@ -617,10 +623,14 @@ async function check(args: string[]): Promise<never> {
     console.error(`scenescout check: ${parsed.error}`);
     process.exit(EXIT.error);
   }
-  const options = parsed.options;
+  let options = parsed.options;
   const outDir = options.outDir ?? defaultCheckDir(options.projectDir);
   let inputs: CheckInputs;
   try {
+    // --record, else SCENESCOUT_RECORD, else off.
+    options = { ...options, record: recordChoice(options.record, process.env) };
+    // A replay page an earlier run left must never be read, or uploaded, as this run's.
+    clearReplayOutput(outDir);
     inputs = readCheckInputs(options);
   } catch (err) {
     console.error(`scenescout check: ${err instanceof Error ? err.message : String(err)}`);
@@ -661,6 +671,19 @@ async function check(args: string[]): Promise<never> {
     if (sarifFiles.warning) console.error(`scenescout check: ${sarifFiles.warning}`);
     fs.writeFileSync(path.join(outDir, "check.sarif"), JSON.stringify(toSarif(result, version, sarifFiles), null, 2) + "\n");
     fs.writeFileSync(path.join(outDir, "check.json"), JSON.stringify(toSummaryJson(result, version), null, 2) + "\n");
+    if (result.replay) {
+      const { passed, couldNotRun } = summarise(result);
+      const html = buildCheckReplayHtml(result.replay, {
+        version,
+        origin: new URL(result.url).origin,
+        startedAt: result.replay.startedAt,
+        endedAt: result.generatedAt,
+        commit: commitOf(process.env),
+        passed,
+        couldNotRun,
+      });
+      fs.writeFileSync(path.join(outDir, REPLAY_FILE), html);
+    }
     // On GitHub Actions the verdict also goes on the run's summary page.
     if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, markdown);
   } catch (err) {
@@ -670,6 +693,10 @@ async function check(args: string[]): Promise<never> {
   }
   console.log("\n" + markdown);
   console.log(`Wrote report.md, check.sarif and check.json to ${outDir}`);
+  if (result.replay)
+    console.log(
+      `Wrote ${REPLAY_FILE}, with ${replayFrames(result.replay).length} frame(s) under ${path.join(outDir, REPLAY_FRAMES_DIRNAME)}: open it in a browser to see each step`,
+    );
   const pictured = result.baselines?.results.filter((r) => r.files).length ?? 0;
   if (pictured > 0) console.log(`Wrote the pictures of ${pictured} changed baseline(s) under ${path.join(outDir, VISUAL_DIRNAME)}`);
   const written = result.baselines?.results.filter((r) => r.status === "updated").length ?? 0;
