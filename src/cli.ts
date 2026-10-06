@@ -39,7 +39,7 @@ import {
   spawnRunner,
 } from "./installer.js";
 import { downloadBrowsers, presentBrowsers } from "./installer.js";
-import { baselinesDirOf, clearReplayOutput, defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
+import { baselinesDirOf, clearReplayOutput, replayPageConflict, defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
 import { buildCheckReplayHtml, commitOf, REPLAY_FILE, replayFrames, replayVideos } from "./engine/check-replay.js";
 import { recordChoice } from "./engine/capture.js";
 import { httpClient, httpJudgeAsk, runCi } from "./ci-run.js";
@@ -631,6 +631,9 @@ async function check(args: string[]): Promise<never> {
   try {
     // --record, else SCENESCOUT_RECORD, else off.
     options = { ...options, record: recordChoice(options.record, process.env) };
+    // A replay.html the project keeps there is its own: a recorded check refuses to start rather than overwrite it.
+    const conflict = options.record || options.video ? replayPageConflict(outDir) : null;
+    if (conflict) throw new Error(conflict);
     // A replay page an earlier run left must never be read, or uploaded, as this run's.
     clearReplayOutput(outDir);
     inputs = readCheckInputs(options);

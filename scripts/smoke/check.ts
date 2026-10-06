@@ -1188,6 +1188,21 @@ async function recordedChecks({
     `${unrecorded.status} ${fs.readdirSync(path.join(plain, "out")).join(",")}`,
   );
 
+  // A replay.html the project keeps in the output folder: a recorded check stops before it starts, and leaves it as it was.
+  const kept = project("flow-own-replay", { "details.json": withTyped("/check-flow.html") });
+  fs.mkdirSync(path.join(kept, "out"), { recursive: true });
+  const ownPage = "<!doctype html><title>Our replay notes</title>";
+  fs.writeFileSync(path.join(kept, "out", "replay.html"), ownPage);
+  const refused = await checkWith(kept, ["--record"]);
+  check(
+    "--record refuses to overwrite a replay.html SceneScout did not write: exit 2, the file untouched, nothing else written",
+    refused.status === 2 &&
+      /is not a page SceneScout wrote, so a recorded check will not overwrite it/.test(refused.out) &&
+      fs.readFileSync(path.join(kept, "out", "replay.html"), "utf8") === ownPage &&
+      JSON.stringify(fs.readdirSync(path.join(kept, "out"))) === '["replay.html"]',
+    `${refused.status} ${fs.readdirSync(path.join(kept, "out")).join(",")} ${refused.out.slice(-400)}`,
+  );
+
   const passing = project("flow-recorded", { "details.json": withTyped("/check-flow.html") });
   const recorded = await checkWith(passing, ["--record"]);
   const good = page(passing);

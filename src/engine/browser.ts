@@ -132,6 +132,7 @@ import {
   type SeenRequest,
 } from "./flow.js";
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
+import { film, type Filmed } from "./film.js";
 import { describePace, InFlightRequests, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
 import { crawledRoute, crawlLine, isFileMediaType, isNonPageResource, mainStateFlag, mediaTypeOf } from "./crawl.js";
 import {
@@ -2155,31 +2156,17 @@ export class BrowserEngine {
    * unfilmed. The video is null when it could not be started or saved
    * (`videoError` says why); the work's own result and errors are untouched.
    */
-  async filming<T>(videoTo: string, work: () => Promise<T>): Promise<{ value: T; video: string | null; videoError?: string }> {
+  async filming<T>(videoTo: string, work: () => Promise<T>): Promise<Filmed<T>> {
     const page = this.requirePage();
-    const why = (err: unknown): string => (err instanceof Error ? err.message.split("\n")[0] : String(err));
-    let videoError: string | undefined;
-    let filming = false;
-    try {
-      await fs.promises.mkdir(path.dirname(videoTo), { recursive: true });
-      await page.screencast.start({ path: videoTo, ...(page.viewportSize() ? { size: page.viewportSize()! } : {}) });
-      filming = true;
-    } catch (err) {
-      videoError = `the video could not be started: ${why(err)}`;
-    }
-    let value: T;
-    try {
-      value = await work();
-    } finally {
-      // The page the filming began on, even if the work moved the session to a popup.
-      if (filming) await page.screencast.stop().catch((err: unknown) => (videoError = `the video could not be saved: ${why(err)}`));
-    }
-    if (videoError) return { value, video: null, videoError };
-    const saved = await fs.promises.stat(videoTo).then(
-      (st) => st.size > 0,
-      () => false,
-    );
-    return saved ? { value, video: videoTo } : { value, video: null, videoError: "no video was written" };
+    // The page the filming began on is the one stopped, even if the work moved the session to a popup.
+    return film(page.screencast, videoTo, page.viewportSize(), work, {
+      prepare: (file) => fs.promises.mkdir(path.dirname(file), { recursive: true }).then(() => undefined),
+      written: (file) =>
+        fs.promises.stat(file).then(
+          (st) => st.size > 0,
+          () => false,
+        ),
+    });
   }
 
   private requirePage(): Page {
