@@ -7,6 +7,7 @@ import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
 import type { InjectionProbe } from "./injection.js";
+import { readSchedules, unionSchedules, type ScheduleRecord } from "./schedule.js";
 import { addReading, addVerdict, MAX_TICKETS_KEPT, mergeTicketData, type CriterionVerdict, type StoredTicket, type Ticket } from "./tickets.js";
 
 export interface StateRecord {
@@ -571,6 +572,12 @@ interface MemoryFile {
   tickets?: StoredTicket[];
   /** Each session's verdict on each criterion (scout_criterion). */
   criterionVerdicts?: CriterionVerdict[];
+  /**
+   * What each seeded run began with (schedule.ts): its seed and the routes,
+   * and roles, at the head of the order it handed out. The next seeded run
+   * moves those to the back, so successive runs spread over the app.
+   */
+  schedules?: ScheduleRecord[];
 }
 
 /** One endpoint observe refused on a page; `cleared` once it went out (named as a read, or sent in a looser mode). */
@@ -781,6 +788,11 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
     out.laneRoutes[lane] = unionRoutes(out.laneRoutes[lane] ?? [], routes);
   }
   if (Object.keys(out.laneRoutes).length === 0) delete out.laneRoutes;
+
+  // A ci run records its schedule from its own process, beside the server's writes: a union, as for decisions.
+  const schedules = unionSchedules(readSchedules(theirs), readSchedules(mine));
+  if (schedules.length > 0) out.schedules = schedules;
+  else delete out.schedules;
 
   // Lanes record criterion verdicts in their own processes too.
   const ticketData = mergeTicketData(mine, theirs);
@@ -1960,6 +1972,37 @@ export class MemoryStore {
     return { tickets: this.tickets.filter((t) => t.loadedAt >= this.sessionStart || judged.has(t.id)), verdicts };
   }
 
+  /** What earlier seeded runs began with, oldest first. Empty on a project no seeded run has used. */
+  get schedules(): ScheduleRecord[] {
+    return readSchedules(this.data);
+  }
+
+  /** The schedules recorded since this store opened: this run's seeds, for the report. */
+  schedulesThisRun(): ScheduleRecord[] {
+    return this.schedules.filter((r) => r.at >= this.sessionStart);
+  }
+
+  /** Record what a seeded run began with. Routes are stored without a query string, as a lane's are. */
+  addSchedule(record: ScheduleRecord): void {
+    const clean: ScheduleRecord = { ...record, routes: record.routes.map((r) => redactSecrets(stripRouteQuery(r))).filter((r) => r.length > 0) };
+    this.data.schedules = unionSchedules(this.schedules, [clean]);
+    this.flush();
+  }
+
+  /**
+   * Take in the schedules another process recorded in memory.json since this
+   * store last read or wrote it, and nothing else. A ci run records its
+   * schedule from its own process; the report reads it through this. The
+   * next flush merges the whole document as usual.
+   */
+  foldInSchedules(): void {
+    if (!this.changedUnderUs()) return;
+    const theirs = this.readForMerge();
+    if (!theirs) return;
+    const merged = unionSchedules(this.schedules, readSchedules(theirs));
+    if (merged.length > 0) this.data.schedules = merged;
+  }
+
   /** The routes each lane's report said it covered. Empty on a project that has never run one. */
   get laneRoutes(): Record<string, string[]> {
     return this.data.laneRoutes ?? {};
@@ -2690,4 +2733,38 @@ export class MemoryStore {
     const chromeMinRoutes = Math.min(Math.max(CHROME_MIN_ROUTES, Math.ceil(routeCount * CHROME_ROUTE_SHARE)), CHROME_ABSOLUTE_ROUTES);
     return (key: string): boolean => routeCount >= CHROME_MIN_ROUTES && (routesPerKey.get(key) ?? 0) >= chromeMinRoutes;
   }
+}
+
+/**
+ * Record a seeded run's schedule in a project's memory.json from outside the
+ * server: `scenescout ci` plans in its own process while its server holds the
+ * store. Read, add, and replace atomically under a name of this process's own;
+ * the server merges the file on its next write (mergeMemory unions schedules),
+ * so neither side's records are lost. A memory not written yet is started
+ * with this record; one that does not parse is not replaced: the record is
+ * then lost, and the caller is told.
+ */
+export function recordScheduleOnDisk(projectDir: string, record: ScheduleRecord): void {
+  const file = path.join(projectDir, MEMORY_DIRNAME, "memory.json");
+  const exists = fs.existsSync(file);
+  if (!exists) fs.mkdirSync(path.dirname(file), { recursive: true });
+  const doc = exists ? (JSON.parse(fs.readFileSync(file, "utf8")) as MemoryFile) : ({ version: 1, states: {}, findings: [] } as MemoryFile);
+  if (!doc || doc.version !== 1) throw new Error(`${file} is not a memory file this version reads`);
+  const clean: ScheduleRecord = { ...record, routes: record.routes.map((r) => redactSecrets(stripRouteQuery(r))).filter((r) => r.length > 0) };
+  doc.schedules = unionSchedules(readSchedules(doc), [clean]);
+  const tmp = `${file}.${process.pid}.schedule.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(doc));
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+
+/** The schedules in a project's memory.json, read without opening a store. None when there is no memory yet. */
+export function readSchedulesOnDisk(projectDir: string): ScheduleRecord[] {
+  const file = path.join(projectDir, MEMORY_DIRNAME, "memory.json");
+  if (!fs.existsSync(file)) return [];
+  return readSchedules(JSON.parse(fs.readFileSync(file, "utf8")));
 }

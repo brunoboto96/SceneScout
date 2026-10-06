@@ -9,6 +9,7 @@
  * src/ci-run.ts; the shared budget is engine/ci.ts's. Why: ADR 20.
  */
 import { LANE_RULES, planLanes, type LaneBrief } from "./brief.js";
+import type { ScheduleInput } from "./schedule.js";
 import { CI_TOOLS, type Caps, type CiLevel, type CiMode, type StopReason } from "./ci.js";
 
 /** The session the run attaches first. It plans, holds no lane, and writes the report once every lane is done. */
@@ -111,6 +112,11 @@ export interface LanePlan {
   oneLoop?: string;
 }
 
+/** The routes a run has to plan with: the page it attached on, then every route the planning crawl listed. */
+export function plannedRoutes(target: string, notes: ReadonlyMap<string, readonly string[]>): string[] {
+  return [...new Set([routeOf(target), ...notes.keys()])];
+}
+
 /** The path a target URL opens, as a route: the planning crawl never lists the page the run attached on. */
 function routeOf(url: string): string {
   try {
@@ -149,11 +155,13 @@ export function planCiLanes(o: {
   mode: CiMode;
   /** What failed while planning, if anything: with no route found, that is the reason given, not the app. */
   planningFailed?: string;
+  /** A seeded run's schedule: the split and each lane's order follow the seed (brief.ts). */
+  schedule?: ScheduleInput;
 }): LanePlan {
-  const routes = [...new Set([routeOf(o.target), ...o.notes.keys()])];
+  const routes = plannedRoutes(o.target, o.notes);
   if (o.count < 2) return { lanes: [], oneLoop: "one lane was asked for" };
   if (o.notes.size === 0 && o.planningFailed) return { lanes: [], oneLoop: `${o.planningFailed}, so there was nothing to split` };
-  const briefs = planLanes(routes, o.count, { goal: o.focus, mode: o.mode });
+  const briefs = planLanes(routes, o.count, { goal: o.focus, mode: o.mode, ...(o.schedule ? { schedule: o.schedule } : {}) });
   if (briefs.length < 2) {
     const where = briefs[0]?.modules[0];
     return {
@@ -207,6 +215,8 @@ export function ciLaneKickoff(o: {
   level: CiLevel;
   focus?: string;
   caps: Caps;
+  /** True when the run is seeded: the lane's routes are listed in the order to take them. */
+  seeded?: boolean;
 }): string {
   const { lane } = o;
   const share = Math.max(1, Math.floor(o.caps.turns / o.laneCount));
@@ -215,6 +225,9 @@ export function ciLaneKickoff(o: {
     `Target: ${o.url}`,
     `Your lane: ${lane.objective}`,
     `Your routes (${lane.routes.length}): ${lane.routes.slice(0, LIST_MAX).join(", ")}${lane.routes.length > LIST_MAX ? ` … and ${lane.routes.length - LIST_MAX} more` : ""}`,
+    o.seeded
+      ? `Your routes are listed in this run's seeded order, the ones earlier seeded runs started with last: take them in that order, starting with the first.`
+      : "",
     `Your browser is on ${routeOf(lane.url)}.`,
     lane.crawl.length > 0 ? `What the planning crawl saw on your routes:\n${lane.crawl.map((l) => `  ${l.trim()}`).join("\n")}` : "",
     `Project directory (for scout_scan): ${o.projectDir}`,

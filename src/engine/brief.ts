@@ -23,6 +23,7 @@
  * Pure, so the split and the wording are table-tested.
  */
 import { normalizePath } from "./fingerprint.js";
+import { scheduleOrder, seededOrder, type ScheduleInput } from "./schedule.js";
 
 /** Most lanes worth running at once. Past this the planner spends longer reading reports than the lanes spend testing. */
 export const MAX_LANES = 8;
@@ -69,10 +70,12 @@ export function moduleOf(route: string): string {
  * to the point, is stable — the same routes produce the same split every time,
  * so a re-run of a lane can be given the same brief.
  */
-export function splitRoutes(routes: readonly string[], laneCount: number): Array<{ modules: string[]; routes: string[] }> {
+export function splitRoutes(routes: readonly string[], laneCount: number, schedule?: ScheduleInput): Array<{ modules: string[]; routes: string[] }> {
   const lanes = Math.max(1, Math.min(Math.floor(laneCount) || 1, MAX_LANES));
+  // Seeded with `skip`, routes earlier seeded runs began with are left out while others remain (schedule.ts).
+  const pool = schedule ? scheduleOrder([...new Set(routes)], schedule) : routes;
   const byModule = new Map<string, string[]>();
-  for (const route of routes) {
+  for (const route of pool) {
     const key = moduleOf(route);
     const list = byModule.get(key);
     if (list) list.push(route);
@@ -81,9 +84,12 @@ export function splitRoutes(routes: readonly string[], laneCount: number): Array
   // Biggest first, then by name, and each module's own routes sorted: nothing
   // about the split may depend on the order the routes were discovered in, or
   // a lane that has to be re-run cannot be handed the same brief.
-  const modules = [...byModule.entries()]
+  const sorted = [...byModule.entries()]
     .map(([name, list]) => [name, [...list].sort((a, b) => a.localeCompare(b))] as [string, string[]])
     .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  // Seeded, the modules are dealt in the seed's order instead, so which modules share a lane changes with the seed;
+  // still each to the lane with fewest routes, so the lanes stay within a module of each other.
+  const modules = schedule ? seededOrder(sorted, schedule.seed, ([name]) => name) : sorted;
 
   const out = Array.from({ length: lanes }, () => ({ modules: [] as string[], routes: [] as string[] }));
   for (const [name, list] of modules) {
@@ -92,6 +98,8 @@ export function splitRoutes(routes: readonly string[], laneCount: number): Array
     out[smallest].modules.push(name);
     out[smallest].routes.push(...list);
   }
+  // Seeded, each lane takes its routes in the schedule's order: the least-chosen first, so it lands somewhere earlier runs did not.
+  if (schedule) for (const lane of out) lane.routes = scheduleOrder(lane.routes, { ...schedule, exclusion: "back" });
   // A lane with nothing to do is a browser held open for no reason.
   return out.filter((lane) => lane.routes.length > 0);
 }
@@ -113,6 +121,16 @@ export interface BriefOptions {
   role?: string;
   /** True when that role is a profile saved by `scenescout login`, so each lane can attach by name rather than by a file. */
   roleProfile?: boolean;
+  /**
+   * A seeded schedule (schedule.ts): the modules are dealt, and each lane's
+   * routes ordered, by the seed, with routes earlier seeded runs began with
+   * last (or left out). Absent, the split is the stable one above.
+   */
+  schedule?: ScheduleInput;
+  /** The seed line the brief opens with, when the split was seeded (schedule.ts seedLine). */
+  seedNote?: string;
+  /** The project's saved roles in the schedule's order, when it has more than one: which to run as first. */
+  roleOrder?: readonly string[];
 }
 
 /** How a lane signs in, as scout_attach arguments: by saved role, by a storage-state file, or not at all. */
@@ -123,7 +141,7 @@ function signInArgument(opts: BriefOptions): string {
 
 /** The lanes to run, each with the objective to attach with. */
 export function planLanes(routes: readonly string[], laneCount: number, opts: BriefOptions = {}): LaneBrief[] {
-  return splitRoutes(routes, laneCount).map((lane, i) => ({
+  return splitRoutes(routes, laneCount, opts.schedule).map((lane, i) => ({
     lane: laneName(lane.modules, i),
     objective: laneObjective(lane.modules, opts.goal),
     modules: lane.modules,
@@ -176,6 +194,12 @@ export function formatBriefs(briefs: readonly LaneBrief[], opts: BriefOptions = 
   const mode = opts.mode ?? "read-only";
   const lines = [
     `LANE PLAN — ${briefs.length} lane(s) over ${briefs.reduce((n, b) => n + b.routes.length, 0)} route(s).`,
+    ...(opts.seedNote ? [opts.seedNote, `Each lane's routes are listed in the order to take them: start with the first.`] : []),
+    ...(opts.roleOrder && opts.roleOrder.length > 1
+      ? [
+          `Saved roles, in this run's order (the ones earlier seeded runs started with last): ${opts.roleOrder.join(", ")}. Run as the first, unless the goal names another.`,
+        ]
+      : []),
     ``,
     `Give each lane its own agent. Every lane attaches with its own session name, so the browsers run genuinely in parallel, and lands on its own first route rather than the home page:`,
     `  scout_attach { session: "<lane>", url: "<origin><landing>", projectPath, mode: "${mode}"${signInArgument(opts)}, objective: "<objective>" }`,

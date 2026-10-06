@@ -11,7 +11,23 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 import { formatBriefs, landingOf, laneName, MAX_LANES, moduleOf, planLanes, splitRoutes } from "../src/engine/brief.ts";
+import {
+  earlierChoices,
+  MAX_SCHEDULES,
+  readSchedules,
+  resolveSeed,
+  resolveSeedExclusion,
+  scheduleOrder,
+  SEED_ENV,
+  SEED_EXCLUSION_ENV,
+  seededOrder,
+  seededRank,
+  startsOf,
+  unionSchedules,
+  type ScheduleRecord,
+} from "../src/engine/schedule.ts";
 
 const routesOf = (lanes: ReturnType<typeof splitRoutes>): string[] => lanes.flatMap((l) => l.routes);
 
@@ -148,4 +164,146 @@ test("each lane is told to sign in the way the planner did", () => {
   // A session that never signed in hands its lanes nothing to sign in with.
   const anonymous = attachLine(formatBriefs(lanes, { role: "anonymous" }));
   assert.doesNotMatch(anonymous, /storageStatePath|role: "/);
+});
+
+// ── a seeded schedule (schedule.ts) ─────────────────────────────────────────
+
+const ITEMS = ["/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h"];
+
+test("seeded order: SHA-256 of the seed and the item, so the same seed gives the same order anywhere", () => {
+  assert.equal(seededRank("s", "/a"), createHash("sha256").update("s\u0000/a").digest("hex"));
+  assert.deepEqual(seededOrder(ITEMS, "s1"), seededOrder([...ITEMS].reverse(), "s1"), "the input order does not matter");
+  assert.deepEqual(seededOrder(ITEMS, "s1"), seededOrder(ITEMS, "s1"));
+  assert.deepEqual([...seededOrder(ITEMS, "s1")].sort(), ITEMS, "a permutation: nothing lost, nothing added");
+});
+
+test("seeded order: different seeds give different orders", () => {
+  const orders = new Set(Array.from({ length: 20 }, (_, i) => seededOrder(ITEMS, `seed-${i}`).join(",")));
+  // 8! orders: twenty seeds landing on fewer than nineteen distinct ones would mean the seed barely matters.
+  assert.ok(orders.size >= 19, `${orders.size} distinct orders from 20 seeds`);
+  const firsts = new Set(Array.from({ length: 20 }, (_, i) => seededOrder(ITEMS, `seed-${i}`)[0]));
+  assert.ok(firsts.size >= 4, "and the opening route varies, which is the point");
+});
+
+test("schedule: what earlier seeded runs began with goes to the back, least-chosen first; skip leaves it out until the cycle is done", () => {
+  const earlier = new Map([
+    ["/a", 2],
+    ["/b", 1],
+    ["/c", 1],
+  ]);
+  const back = scheduleOrder(ITEMS, { seed: "s1", earlier, exclusion: "back" });
+  assert.deepEqual(back.slice(0, 5).sort(), ["/d", "/e", "/f", "/g", "/h"], "never-chosen first");
+  assert.deepEqual(back.slice(5, 7).sort(), ["/b", "/c"]);
+  assert.equal(back[7], "/a", "chosen most, last");
+  assert.deepEqual(back.slice(0, 5), seededOrder(["/d", "/e", "/f", "/g", "/h"], "s1"), "each group in the seed's order");
+  assert.deepEqual(scheduleOrder(ITEMS, { seed: "s1", earlier }), back, "back is the default");
+  assert.deepEqual(scheduleOrder(ITEMS, { seed: "s1", earlier, exclusion: "skip" }), back.slice(0, 5));
+  const all = new Map(ITEMS.map((i) => [i, 1]));
+  assert.deepEqual(
+    scheduleOrder(ITEMS, { seed: "s1", earlier: all, exclusion: "skip" }),
+    seededOrder(ITEMS, "s1"),
+    "every route chosen once: the cycle starts over",
+  );
+  assert.deepEqual(scheduleOrder([], { seed: "s1", exclusion: "skip" }), []);
+  assert.deepEqual(scheduleOrder(ITEMS, { seed: "s1" }), seededOrder(ITEMS, "s1"), "no history: the seed's order");
+});
+
+const record = (seed: string, at: string, routes: string[], roles?: string[]): ScheduleRecord => ({
+  seed,
+  at,
+  source: "ci",
+  exclusion: "back",
+  routes,
+  ...(roles ? { roles } : {}),
+});
+
+test("schedule: a seed used again sees the history its first run saw, so it repeats that order", () => {
+  const history = [record("s1", "2026-01-01", ["/a", "/b"]), record("s2", "2026-01-02", ["/c"]), record("s1", "2026-01-03", ["/a", "/b"])];
+  assert.deepEqual(
+    [...earlierChoices(history, "routes")],
+    [
+      ["/a", 2],
+      ["/b", 2],
+      ["/c", 1],
+    ],
+  );
+  assert.deepEqual([...earlierChoices(history, "routes", "s1")], [], "s1's first run came first: nothing was earlier");
+  assert.deepEqual(
+    [...earlierChoices(history, "routes", "s2")],
+    [
+      ["/a", 1],
+      ["/b", 1],
+    ],
+  );
+  assert.deepEqual([...earlierChoices(history, "routes", "new")].length, 3, "a new seed sees everything");
+  assert.deepEqual([...earlierChoices([record("s", "t", [], ["admin"])], "roles")], [["admin", 1]]);
+  assert.deepEqual(startsOf([["/a", "/b", "/c", "/d"], ["/x"], ["/a"]]), ["/a", "/b", "/c", "/x"], "the first three of each order, once each");
+});
+
+test("schedule: the seed is the option, else SCENESCOUT_SEED, else none; auto is generated; exclusion likewise", () => {
+  const gen = () => "feedbeef";
+  assert.deepEqual(resolveSeed(undefined, {}, gen), { ok: true });
+  assert.deepEqual(resolveSeed(undefined, { [SEED_ENV]: "" }, gen), { ok: true });
+  assert.deepEqual(resolveSeed("x.1_y-2", { [SEED_ENV]: "env" }, gen), { ok: true, seed: { value: "x.1_y-2", generated: false } });
+  assert.deepEqual(resolveSeed(undefined, { [SEED_ENV]: "env" }, gen), { ok: true, seed: { value: "env", generated: false } });
+  assert.deepEqual(resolveSeed(undefined, { [SEED_ENV]: "auto" }, gen), { ok: true, seed: { value: "feedbeef", generated: true } });
+  const bad = resolveSeed("no spaces", {}, gen, "seed");
+  assert.ok(!bad.ok && /^seed must be/.test(bad.error));
+  assert.match(resolveSeed("auto", {}).ok ? (resolveSeed("auto", {}) as { seed: { value: string } }).seed.value : "", /^[0-9a-f]{8}$/);
+  assert.deepEqual(resolveSeedExclusion(undefined, {}), { ok: true, value: "back" });
+  assert.deepEqual(resolveSeedExclusion(undefined, { [SEED_EXCLUSION_ENV]: "skip" }), { ok: true, value: "skip" });
+  assert.deepEqual(resolveSeedExclusion("back", { [SEED_EXCLUSION_ENV]: "skip" }), { ok: true, value: "back" });
+  assert.ok(!resolveSeedExclusion("later", {}).ok);
+});
+
+test("schedule: records merge as a set, oldest first and capped, and a malformed one is left out", () => {
+  const a = [record("s1", "2026-01-01", ["/a"])];
+  const b = [record("s2", "2026-01-02", ["/b"]), ...a];
+  assert.deepEqual(unionSchedules(a, b), [a[0], b[0]]);
+  assert.deepEqual(unionSchedules(unionSchedules(a, b), b), unionSchedules(a, b), "idempotent");
+  const many = Array.from({ length: MAX_SCHEDULES + 5 }, (_, i) => record(`s${i}`, `2026-01-01T00:00:${String(i).padStart(3, "0")}`, []));
+  assert.equal(unionSchedules(many, []).length, MAX_SCHEDULES);
+  assert.equal(unionSchedules(many, [])[0].seed, "s5", "the oldest go first");
+  assert.deepEqual(readSchedules({ schedules: [a[0], { seed: 1 }, null, { seed: "x", at: "t", routes: [2] }] }), a);
+  assert.deepEqual(readSchedules({}), []);
+});
+
+test("seeded split: still whole modules and every route once, the same seed the same plan, and unseeded exactly as before", () => {
+  const routes = ["/orders", "/orders/new", "/orders/42", "/stock", "/stock/audit", "/people", "/", "/settings", "/reports"];
+  const before = JSON.stringify(planLanes(routes, 3));
+  for (const seed of ["s1", "s2", "s3"]) {
+    const lanes = splitRoutes(routes, 3, { seed });
+    assert.deepEqual(lanes.flatMap((l) => l.routes).sort(), [...routes].sort(), seed);
+    for (const lane of lanes) assert.deepEqual([...new Set(lane.routes.map(moduleOf))].sort(), [...lane.modules].sort());
+    assert.deepEqual(JSON.stringify(splitRoutes([...routes].reverse(), 3, { seed })), JSON.stringify(lanes));
+  }
+  assert.equal(JSON.stringify(planLanes(routes, 3)), before, "no schedule, no change");
+  const plans = new Set(["s1", "s2", "s3", "s4", "s5", "s6"].map((seed) => JSON.stringify(planLanes(routes, 3, { schedule: { seed } }))));
+  assert.ok(plans.size >= 3, "different seeds deal differently");
+});
+
+test("seeded split: a lane lands on a route earlier seeded runs did not start with, and skip leaves those out of the split", () => {
+  const routes = ["/orders/a", "/orders/b", "/orders/c", "/stock/a", "/stock/b"];
+  const earlier = new Map([
+    ["/orders/a", 1],
+    ["/orders/b", 1],
+    ["/stock/a", 1],
+  ]);
+  const lanes = planLanes(routes, 2, { schedule: { seed: "s1", earlier } });
+  const landing = Object.fromEntries(lanes.map((l) => [l.modules[0], l.landing]));
+  assert.deepEqual(landing, { "/orders": "/orders/c", "/stock": "/stock/b" });
+  for (const l of lanes) assert.ok(!earlier.has(l.routes[0]), `${l.lane} starts fresh`);
+  const skipped = planLanes(routes, 2, { schedule: { seed: "s1", earlier, exclusion: "skip" } });
+  assert.deepEqual(skipped.flatMap((l) => l.routes).sort(), ["/orders/c", "/stock/b"]);
+});
+
+test("seeded brief: it opens with the seed, says to take the routes in order, and orders the saved roles", () => {
+  const lanes = planLanes(["/orders/a", "/stock/a"], 2, { schedule: { seed: "s1" } });
+  const out = formatBriefs(lanes, { seedNote: "Seed: s1, earlier seeded runs' starting choices moved to the back.", roleOrder: ["clerk", "admin"] });
+  assert.match(out, /^LANE PLAN — 2 lane\(s\) over 2 route\(s\)\.\nSeed: s1/);
+  assert.match(out, /listed in the order to take them: start with the first/);
+  assert.match(out, /Saved roles, in this run's order .*: clerk, admin\. Run as the first/);
+  const plain = formatBriefs(planLanes(["/orders/a", "/stock/a"], 2));
+  assert.doesNotMatch(plain, /Seed:|Saved roles/, "unseeded, the brief is unchanged");
+  assert.doesNotMatch(formatBriefs(lanes, { roleOrder: ["only"] }), /Saved roles/, "one role is no choice");
 });

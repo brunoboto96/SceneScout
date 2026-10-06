@@ -32,6 +32,8 @@ import {
   MemoryStore,
   adoptLegacyMemoryDir,
   mergeMemory,
+  readSchedulesOnDisk,
+  recordScheduleOnDisk,
   redactSecrets,
   MAX_STATES_PER_ROUTE,
   pruneStates,
@@ -2874,4 +2876,64 @@ test("a route that answered with a feed or a file is remembered as such, across 
   const a: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [], resourceRoutes: { "/feed": "application/rss+xml" } };
   const b: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [], resourceRoutes: { "/LICENSE": "text/plain" } };
   assert.deepEqual(mergeMemory(a, b).resourceRoutes, { "/LICENSE": "text/plain", "/feed": "application/rss+xml" });
+});
+
+test("a seeded run's schedule: recorded from another process, kept through the server's own writes, and named in the report", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sched-"));
+  try {
+    const store = new MemoryStore(dir);
+    // The server's copy is open before the ci run records anything, as in a real run.
+    await new Promise((r) => setTimeout(r, 5));
+    recordScheduleOnDisk(dir, { seed: "s1", at: new Date().toISOString(), source: "ci", exclusion: "back", routes: ["/a?token=abc", "/b"] });
+    assert.deepEqual(
+      readSchedulesOnDisk(dir).map((r) => r.routes),
+      [["/a", "/b"]],
+      "no query string is stored: an address can carry a token",
+    );
+    assert.deepEqual(store.schedules, [], "the server has not read it yet");
+    store.foldInSchedules();
+    assert.deepEqual(
+      store.schedulesThisRun().map((r) => r.seed),
+      ["s1"],
+    );
+    const report = generateReport(store, [], undefined, { write: false }).markdown;
+    assert.match(report, /\| Exploration schedule \| seed `s1` \(scenescout ci; earlier starts last\), starting with \/a, \/b \|/);
+    // The server's own write afterwards keeps it, and a lane brief's record joins it.
+    store.addSchedule({ seed: "s2", at: new Date().toISOString(), source: "lane-brief", exclusion: "skip", routes: ["/c"], roles: ["clerk"] });
+    store.flush();
+    assert.deepEqual(
+      readSchedulesOnDisk(dir).map((r) => [r.seed, r.source]),
+      [
+        ["s1", "ci"],
+        ["s2", "lane-brief"],
+      ],
+    );
+    // A server that never folded it in still keeps it when it writes: the merge unions schedules.
+    const other = new MemoryStore(dir);
+    recordScheduleOnDisk(dir, { seed: "s3", at: new Date().toISOString(), source: "ci", exclusion: "back", routes: ["/d"] });
+    other.addFinding({ severity: "low", category: "a11y", title: "A field has no label", detail: "d", url: "http://x/a", state: "/a#f" });
+    other.flush();
+    assert.deepEqual(
+      readSchedulesOnDisk(dir).map((r) => r.seed),
+      ["s1", "s2", "s3"],
+    );
+    // An unseeded run's report has no such row.
+    const plain = new MemoryStore(fs.mkdtempSync(path.join(os.tmpdir(), "sched-none-")));
+    assert.doesNotMatch(generateReport(plain, [], undefined, { write: false }).markdown, /Exploration schedule/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merging memory unions the schedules, and doing it twice changes nothing", () => {
+  const r = (seed: string, at: string) => ({ seed, at, source: "ci" as const, exclusion: "back" as const, routes: ["/x"] });
+  const a: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [], schedules: [r("s1", "1")] };
+  const b: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [], schedules: [r("s2", "2")] };
+  const once = mergeMemory(a, b);
+  assert.deepEqual(
+    once.schedules?.map((x) => x.seed),
+    ["s1", "s2"],
+  );
+  assert.deepEqual(mergeMemory(once, b), once);
+  assert.equal(mergeMemory({ version: 1, states: {}, findings: [] }, { version: 1, states: {}, findings: [] }).schedules, undefined);
 });

@@ -64,6 +64,7 @@ import {
   type CiLanes,
   type CiOptions,
   type CiResult,
+  type CiSchedule,
   type LaneResult,
   type JudgeCalls,
   type ResolvedProvider,
@@ -80,11 +81,14 @@ import {
   mergeLaneStops,
   PLAN_CRAWL_ROUNDS,
   planCiLanes,
+  plannedRoutes,
   PLANNER_SESSION,
   type CiLane,
+  type LanePlan,
 } from "./engine/ci-lanes.js";
 import { resolveTimeLimits } from "./engine/limits.js";
-import { MEMORY_DIRNAME, writeSelfIgnore, type Finding } from "./engine/memory.js";
+import { MEMORY_DIRNAME, readSchedulesOnDisk, recordScheduleOnDisk, writeSelfIgnore, type Finding } from "./engine/memory.js";
+import { earlierChoices, scheduleOrder, seedLine, startsOf, type ScheduleInput } from "./engine/schedule.js";
 import { sarifFilesFor } from "./engine/sarif.js";
 import { decodePng, diffImages, encodePng } from "./engine/png.js";
 import {
@@ -578,6 +582,43 @@ const messageOf = (err: unknown): string => (err instanceof Error ? err.message 
  * defect two lanes filed. `outcome` is absent when there was nothing to split,
  * and the run explores in one loop instead.
  */
+/**
+ * The planning crawl a run split into lanes, or a seeded run, starts with: a
+ * snapshot from the planner's session (attaching harvests no links; a snapshot
+ * of the page it landed on does), then a crawl repeated while it finds routes,
+ * up to PLAN_CRAWL_ROUNDS. No model call: only its time counts.
+ */
+async function planningCrawl(o: {
+  host: ToolHost;
+  log: (line: string) => void;
+  timeLeft: () => number;
+}): Promise<{ notes: Map<string, string[]>; planningFailed?: string }> {
+  // What went wrong while planning, so a plan left with nothing to split says why rather than blaming the app.
+  let planningFailed: string | undefined;
+  /** One planner call: its text, or undefined after saying why it failed. */
+  const plannerCall = async (tool: string, maxMs: number, what: string): Promise<string | undefined> => {
+    try {
+      const r = await o.host.call(tool, { session: PLANNER_SESSION }, Math.min(maxMs, o.timeLeft()));
+      if (r.isError) throw new Error(r.text.replace(/^ERROR:\s*/, ""));
+      return r.text;
+    } catch (err) {
+      planningFailed = `the planning ${what} failed: ${messageOf(err).slice(0, 300)}`;
+      o.log(`Planning: ${planningFailed}.`);
+      return undefined;
+    }
+  };
+  if (o.timeLeft() > 0) await plannerCall("scout_snapshot", 120_000, "snapshot");
+  const notes = new Map<string, string[]>();
+  for (let round = 0; round < PLAN_CRAWL_ROUNDS && o.timeLeft() > 0; round += 1) {
+    const text = await plannerCall("scout_crawl", 600_000, "crawl");
+    if (text === undefined) break;
+    const known = notes.size;
+    for (const [route, lines] of crawlNotes(text)) if (!notes.has(route)) notes.set(route, lines);
+    if (crawlFoundNothing(text) || notes.size === known) break;
+  }
+  return { notes, ...(planningFailed ? { planningFailed } : {}) };
+}
+
 async function exploreInLanes(o: {
   host: ToolHost;
   listed: ReadonlyArray<{ name: string; description?: string; inputSchema?: unknown }>;
@@ -589,46 +630,26 @@ async function exploreInLanes(o: {
   budget: Budget;
   attachArgs: (a: { url: string; objective: string; task: string; session: string }) => Record<string, unknown>;
   attachMs: number;
-}): Promise<{ lanes: CiLanes; outcome?: LoopOutcome }> {
+  /** What the planning crawl found. */
+  planned: { notes: Map<string, string[]>; planningFailed?: string };
+  /** A seeded run's schedule. */
+  schedule?: ScheduleInput;
+}): Promise<{ lanes: CiLanes; outcome?: LoopOutcome; plan: LanePlan }> {
   const { host, options, log, now, budget } = o;
   const timeLeft = (): number => wallLeftMs(budgetSpend(budget), options.caps, now());
 
-  // ── plan ──
-  // What went wrong while planning, so a plan left with nothing to split says why rather than blaming the app.
-  let planningFailed: string | undefined;
-  /** One planner call: its text, or undefined after saying why it failed. */
-  const plannerCall = async (tool: string, maxMs: number, what: string): Promise<string | undefined> => {
-    try {
-      const r = await host.call(tool, { session: PLANNER_SESSION }, Math.min(maxMs, timeLeft()));
-      if (r.isError) throw new Error(r.text.replace(/^ERROR:\s*/, ""));
-      return r.text;
-    } catch (err) {
-      planningFailed = `the planning ${what} failed: ${messageOf(err).slice(0, 300)}`;
-      log(`Lanes: ${planningFailed}.`);
-      return undefined;
-    }
-  };
-  // Attaching harvests no links; a snapshot of the page it landed on does, so the first crawl has routes to visit.
-  if (timeLeft() > 0) await plannerCall("scout_snapshot", 120_000, "snapshot");
-  const notes = new Map<string, string[]>();
-  for (let round = 0; round < PLAN_CRAWL_ROUNDS && timeLeft() > 0; round += 1) {
-    const text = await plannerCall("scout_crawl", 600_000, "crawl");
-    if (text === undefined) break;
-    const known = notes.size;
-    for (const [route, lines] of crawlNotes(text)) if (!notes.has(route)) notes.set(route, lines);
-    if (crawlFoundNothing(text) || notes.size === known) break;
-  }
   const plan = planCiLanes({
     target: options.url,
-    notes,
+    notes: o.planned.notes,
     count: options.lanes,
     focus: options.focus,
     mode: options.mode,
-    ...(planningFailed ? { planningFailed } : {}),
+    ...(o.planned.planningFailed ? { planningFailed: o.planned.planningFailed } : {}),
+    ...(o.schedule ? { schedule: o.schedule } : {}),
   });
   if (plan.oneLoop) {
     log(`Lanes: ${plan.oneLoop}. Exploring in one loop.`);
-    return { lanes: { asked: options.lanes, sessions: [], oneLoop: plan.oneLoop } };
+    return { lanes: { asked: options.lanes, sessions: [], oneLoop: plan.oneLoop }, plan };
   }
   log(
     `Lanes: ${plan.lanes.length} of ${options.lanes} asked, sharing the caps: ` +
@@ -710,6 +731,7 @@ async function exploreInLanes(o: {
           level: options.level,
           focus: options.focus,
           caps: options.caps,
+          seeded: !!o.schedule,
         }),
       ),
       host,
@@ -745,6 +767,7 @@ async function exploreInLanes(o: {
   const sessions = settled.map((s) => (s as PromiseFulfilledResult<LaneResult>).value);
   const merged = mergeLaneStops(sessions);
   return {
+    plan,
     lanes: { asked: options.lanes, sessions },
     outcome: { stop: merged.stop, ...(merged.stopDetail ? { stopDetail: merged.stopDetail } : {}), spend: budgetSpend(budget) },
   };
@@ -802,6 +825,7 @@ export async function runCi(
   let reportWritten = false;
   let capture: CaptureOutcome | undefined;
   let lanes: CiLanes | undefined;
+  let runSchedule: CiSchedule | undefined;
   let host: ToolHost | null = null;
   // Set when the exploration ends (or never starts): the report and the close share FINISH_MS from then.
   let finishBy = 0;
@@ -846,10 +870,28 @@ export async function runCi(
       const listed = await host.tools();
       const toolHost = host;
       let captured: CaptureInfo | null = null;
+      // A run split into lanes, or a seeded one, crawls first: the lanes are split, and a seeded run's routes ordered, from what it finds.
+      const timeLeft = (): number => wallLeftMs(budgetSpend(budget), options.caps, now());
+      const plans = !options.show && (options.lanes > 1 || options.seed);
+      const planned = plans ? await planningCrawl({ host, log, timeLeft }) : undefined;
+      // Seeded: the order the history and the seed give (schedule.ts). A memory that cannot be read gives no history, said in the log.
+      let schedule: ScheduleInput | undefined;
+      if (options.seed && planned) {
+        let history: ReturnType<typeof readSchedulesOnDisk> = [];
+        try {
+          history = readSchedulesOnDisk(options.projectDir);
+        } catch (err) {
+          log(`Seed: the project's memory could not be read for earlier seeded runs (${messageOf(err)}), so none is moved to the back.`);
+        }
+        schedule = { seed: options.seed.value, earlier: earlierChoices(history, "routes", options.seed.value), exclusion: options.seedExclusion };
+        log(seedLine(options.seed, options.seedExclusion, "--seed"));
+      }
+      let order: string[] | undefined;
       const oneLoop = (): Promise<LoopOutcome> => {
         const tools = ciTools(listed, options.show ? CAPTURE_TOOLS : undefined);
         const system = options.show ? ciCaptureSystemPrompt() : ciSystemPrompt(loadPlaybook(packageRoot), options);
-        const kickoff = options.show ? ciCaptureKickoff({ url: options.url, show: options.show }) : ciKickoff(options);
+        if (schedule && planned) order = scheduleOrder(plannedRoutes(options.url, planned.notes), schedule);
+        const kickoff = options.show ? ciCaptureKickoff({ url: options.url, show: options.show }) : ciKickoff({ ...options, ...(order ? { order } : {}) });
         return agentLoop({
           client: deps.makeClient(system, tools, kickoff),
           host: toolHost,
@@ -864,12 +906,51 @@ export async function runCi(
           },
         });
       };
-      if (options.lanes > 1 && !options.show) {
-        const split = await exploreInLanes({ host, listed, options, makeClient: deps.makeClient, log, now, budget, attachArgs, attachMs });
+      let lanePlan: LanePlan | undefined;
+      if (options.lanes > 1 && !options.show && planned) {
+        const split = await exploreInLanes({
+          host,
+          listed,
+          options,
+          makeClient: deps.makeClient,
+          log,
+          now,
+          budget,
+          attachArgs,
+          attachMs,
+          planned,
+          ...(schedule ? { schedule } : {}),
+        });
         lanes = split.lanes;
+        lanePlan = split.plan;
         outcome = split.outcome ?? (await oneLoop());
       } else {
         outcome = await oneLoop();
+      }
+      if (options.seed && planned) {
+        const orders = lanePlan && lanePlan.lanes.length > 0 ? lanePlan.lanes.map((l) => l.routes) : order ? [order] : [];
+        runSchedule = {
+          seed: options.seed,
+          exclusion: options.seedExclusion,
+          routes: plannedRoutes(options.url, planned.notes).length,
+          starts: startsOf(orders),
+        };
+        // Recorded once the exploration has run, so the next seeded run moves these to the back. Never fatal: the run is still reported.
+        if (runSchedule.starts.length > 0) {
+          try {
+            recordScheduleOnDisk(options.projectDir, {
+              seed: options.seed.value,
+              // The real clock, as the server's: the report lists schedules recorded since its store opened.
+              at: new Date().toISOString(),
+              source: "ci",
+              exclusion: options.seedExclusion,
+              routes: runSchedule.starts,
+            });
+          } catch (err) {
+            runSchedule.notRecorded = messageOf(err).slice(0, 300);
+            log(`Seed: the schedule could not be recorded in the project's memory: ${runSchedule.notRecorded}`);
+          }
+        }
       }
       log(`Run ended: ${describeStop(outcome.stop, options.caps, outcome.stopDetail)}.`);
       finishBy = now() + FINISH_MS;
@@ -920,6 +1001,7 @@ export async function runCi(
     findings: findingsThisRun(before, readMemoryFindings(options.projectDir)),
     ...(capture ? { capture } : {}),
     ...(lanes ? { lanes } : {}),
+    ...(runSchedule ? { schedule: runSchedule } : {}),
     ...(options.show
       ? {}
       : {

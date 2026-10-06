@@ -49,8 +49,10 @@ import {
   laneSessions,
   mergeLaneStops,
   planCiLanes,
+  plannedRoutes,
   PLANNER_SESSION,
 } from "../src/engine/ci-lanes.ts";
+import { scheduleOrder, SEED_ENV, SEED_EXCLUSION_ENV } from "../src/engine/schedule.ts";
 import {
   clientAnswersJudge,
   DedupJudge,
@@ -171,6 +173,7 @@ test("options: the defaults are the agreed caps, read-only, medium, and the dedu
     mode: "read-only",
     level: "medium",
     dedup: "judge",
+    seedExclusion: "back",
   });
 });
 
@@ -203,6 +206,9 @@ test("options: every option is read, in both spellings", () => {
       "--out=results",
       "--dedup",
       "rule",
+      "--seed=run-7",
+      "--seed-exclusion",
+      "skip",
     ],
     "/work",
   );
@@ -224,6 +230,8 @@ test("options: every option is read, in both spellings", () => {
     storageStatePath: "/work/auth/user.json",
     browser: "webkit",
     dedup: "rule",
+    seed: { value: "run-7", generated: false },
+    seedExclusion: "skip",
   });
 });
 
@@ -1953,7 +1961,7 @@ test("benchmark workflow: started by hand or called, reads the repository and no
   assert.equal(run.with?.cli, "dist/cli.js");
   assert.equal(run.with?.provider, "${{ inputs.provider }}");
   // The run's caps and its lanes are inputs of both triggers, passed to the action's inputs of the same name; empty keeps the CLI's default.
-  for (const cap of ["max-turns", "max-tokens", "lanes"]) {
+  for (const cap of ["max-turns", "max-tokens", "lanes", "seed"]) {
     assert.ok(cap in action.inputs, `the ci action has no ${cap} input`);
     assert.equal(run.with?.[cap], `\${{ inputs.${cap} }}`);
     for (const trigger of ["workflow_dispatch", "workflow_call"]) assert.equal(wf.on[trigger].inputs[cap]?.default, "", `${trigger} ${cap}`);
@@ -3271,4 +3279,127 @@ test("png: a picture is fitted to its longer side, then to its bytes, or refused
   assert.ok(isPng(fitted.png) && decodePng(fitted.png).width === fitted.width);
   // Nothing at the smallest readable size fits in 1 KB of noise: none, rather than a smudge.
   assert.equal(fitPicture(busy, 800, 1024), null);
+});
+
+// ── a seeded schedule (--seed) ──────────────────────────────────────────────
+
+test("seed: --seed, else SCENESCOUT_SEED, else none; auto is generated; what is refused names where it came from", () => {
+  const parse = (args: string[], env: Record<string, string> = {}) => parseCiArgs([TARGET, ...args], "/work", env, () => "c0ffee01");
+  const ok = (args: string[], env: Record<string, string> = {}) => {
+    const p = parse(args, env);
+    assert.ok(p.ok, p.ok ? "" : p.error);
+    return { seed: p.options.seed, exclusion: p.options.seedExclusion };
+  };
+  assert.deepEqual(ok([]), { seed: undefined, exclusion: "back" }, "unseeded unless asked: behaviour unchanged");
+  assert.deepEqual(ok(["--seed", "run-1"]), { seed: { value: "run-1", generated: false }, exclusion: "back" });
+  assert.deepEqual(ok(["--seed=auto"]), { seed: { value: "c0ffee01", generated: true }, exclusion: "back" });
+  assert.deepEqual(ok([], { [SEED_ENV]: "from-env" }), { seed: { value: "from-env", generated: false }, exclusion: "back" });
+  assert.deepEqual(ok([], { [SEED_ENV]: "  " }), { seed: undefined, exclusion: "back" }, "an empty variable is unset");
+  assert.deepEqual(ok(["--seed", "flag"], { [SEED_ENV]: "env" }).seed, { value: "flag", generated: false }, "the option wins");
+  assert.equal(ok([], { [SEED_EXCLUSION_ENV]: "skip" }).exclusion, "skip");
+  assert.equal(ok(["--seed-exclusion", "back"], { [SEED_EXCLUSION_ENV]: "skip" }).exclusion, "back", "the option wins");
+  // A run that shows one element explores nothing: a seed flag is refused, a seed in the environment does not apply.
+  assert.deepEqual(ok(["--show", "the Save button"], { [SEED_ENV]: "env" }).seed, undefined);
+  const bad = (args: string[], env: Record<string, string> = {}): string => {
+    const p = parse(args, env);
+    assert.ok(!p.ok, `accepted ${args.join(" ")}`);
+    return p.error;
+  };
+  assert.match(bad(["--seed", "has space"]), /--seed must be auto or 1 to 64 letters/);
+  assert.match(bad(["--seed", "x".repeat(65)]), /--seed must be/);
+  assert.match(bad([], { [SEED_ENV]: "a;b" }), /SCENESCOUT_SEED must be/);
+  assert.match(bad(["--seed-exclusion", "drop"]), /--seed-exclusion must be one of back, skip/);
+  assert.match(bad([], { [SEED_EXCLUSION_ENV]: "drop" }), /SCENESCOUT_SEED_EXCLUSION must be one of back, skip/);
+  assert.match(bad(["--seed", "s", "--show", "the Save button"]), /--seed orders an exploration, and --show explores nothing/);
+});
+
+test("seed: an unseeded run does not plan and is told no order; a seeded one crawls first and is told where to start", async () => {
+  const kickoffOf = async (args: string[]) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-seed-"));
+    try {
+      const server = standInServer(dir, { crawl: CRAWL_TEXT });
+      const kickoffs: string[] = [];
+      const run = await runStandIn(args, dir, server, (_s, _t, kickoff) => {
+        kickoffs.push(kickoff);
+        return new Scripted([{ text: "Done.", calls: [], usage: use(1) }]);
+      });
+      return { kickoff: kickoffs[0], run, calls: server.calls, dir };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const plain = await kickoffOf([]);
+  assert.ok(!plain.calls.some((c) => c.name === "scout_crawl"), "no planning crawl without a seed");
+  assert.doesNotMatch(plain.kickoff, /Route order/);
+  assert.equal(plain.run.json.seed, undefined);
+  assert.doesNotMatch(plain.run.summary, /\| Seed \|/);
+
+  const seeded = await kickoffOf(["--seed", "s1"]);
+  const order = scheduleOrder(plannedRoutes(TARGET, crawlNotes(CRAWL_TEXT)), { seed: "s1" });
+  assert.equal(order.length, 6);
+  assert.ok(seeded.kickoff.includes(`Route order for this run (6, `) && seeded.kickoff.includes(order.join(", ")), seeded.kickoff);
+  assert.match(seeded.kickoff, /Start with the first route/);
+  assert.deepEqual(seeded.run.json.seed, { value: "s1", generated: false, exclusion: "back", routes: 6, starts: order.slice(0, 3), recorded: true });
+  assert.match(seeded.run.summary, /\| Seed \| `s1`: 6 route\(s\) ordered/);
+  assert.ok(seeded.run.lines.some((l) => /^Seed: s1, earlier seeded runs' starting choices moved to the back/.test(l)));
+});
+
+test("seed: successive seeded runs on one project start elsewhere, and a seed used again repeats its first order", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-seed-spread-"));
+  try {
+    const runOnce = async (seed: string, extra: string[] = []) => {
+      const server = standInServer(dir, { crawl: CRAWL_TEXT });
+      let kickoff = "";
+      const run = await runStandIn(["--seed", seed, ...extra], dir, server, (_s, _t, k) => {
+        kickoff = k;
+        return new Scripted([{ text: "Done.", calls: [], usage: use(1) }]);
+      });
+      return { kickoff, starts: run.json.seed.starts as string[] };
+    };
+    const first = await runOnce("s1");
+    const second = await runOnce("s2");
+    // Six routes, three recorded per run: the second run's opening is the three the first did not start with.
+    assert.deepEqual(new Set([...first.starts, ...second.starts]).size, 6, `${first.starts} / ${second.starts}`);
+    const memory = JSON.parse(fs.readFileSync(path.join(dir, ".scenescout", "memory.json"), "utf8"));
+    assert.deepEqual(
+      memory.schedules.map((r: { seed: string; source: string; routes: string[] }) => [r.seed, r.source, r.routes]),
+      [
+        ["s1", "ci", first.starts],
+        ["s2", "ci", second.starts],
+      ],
+    );
+    // s1 again sees only what came before its first use: the same order, so a run can be repeated.
+    const again = await runOnce("s1");
+    assert.deepEqual(again.starts, first.starts);
+    assert.equal(again.kickoff, first.kickoff);
+    // skip: s1's routes have now been started with twice and s2's once, so a new seed keeps only s2's three, in its own order.
+    const third = await runOnce("s3", ["--seed-exclusion", "skip"]);
+    assert.deepEqual([...third.starts].sort(), [...second.starts].sort());
+    assert.match(third.kickoff, /Route order for this run \(3, /, "the other three are left out of the order");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("seed: a seeded run split into lanes deals the modules by the seed, and each lane is told to take its routes in order", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-seed-lanes-"));
+  try {
+    const server = standInServer(dir, { crawl: CRAWL_TEXT });
+    const kickoffs: string[] = [];
+    const run = await runStandIn(["--lanes", "2", "--seed", "s1"], dir, server, (_s, _t, kickoff) => {
+      kickoffs.push(kickoff);
+      return new Scripted([{ text: "Done.", calls: [], usage: use(1) }]);
+    });
+    assert.equal(kickoffs.length, 2);
+    for (const k of kickoffs) assert.match(k, /listed in this run's seeded order/);
+    const plan = planCiLanes({ target: TARGET, notes: crawlNotes(CRAWL_TEXT), count: 2, mode: "read-only", schedule: { seed: "s1" } });
+    assert.deepEqual(run.json.seed.starts, [...new Set(plan.lanes.flatMap((l) => l.routes.slice(0, 3)))]);
+    assert.equal(
+      server.calls.filter((c) => c.name === "scout_crawl").length,
+      2,
+      "one planning crawl (and the round that finds nothing new), not one per purpose",
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

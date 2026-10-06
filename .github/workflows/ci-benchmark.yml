@@ -49,6 +49,10 @@ on:
         description: Model loops that explore at once, sharing the caps. Empty means the CLI's default.
         type: string
         default: ""
+      seed:
+        description: A seed, or auto for a fresh one, to order the run's routes by (a seeded schedule). Empty means unseeded.
+        type: string
+        default: ""
   workflow_call:
     inputs:
       app:
@@ -79,6 +83,10 @@ on:
         description: Model loops that explore at once, sharing the caps. Empty means the CLI's default.
         type: string
         default: ""
+      seed:
+        description: A seed, or auto for a fresh one, to order the run's routes by (a seeded schedule). Empty means unseeded.
+        type: string
+        default: ""
       ref:
         description: The ref to check out and run, e.g. a release tag. Empty means the calling workflow's.
         type: string
@@ -98,7 +106,7 @@ permissions:
 
 jobs:
   run:
-    name: scenescout ci · ${{ inputs.app }}${{ inputs.lanes != '' && format(' · {0} lanes', inputs.lanes) || '' }}
+    name: scenescout ci · ${{ inputs.app }}${{ inputs.lanes != '' && format(' · {0} lanes', inputs.lanes) || '' }}${{ inputs.seed != '' && format(' · seed {0}', inputs.seed) || '' }}
     runs-on: ubuntu-latest
     # 20 minutes of exploration, up to 4 more to write the report, and the setup before it.
     timeout-minutes: 40
@@ -162,6 +170,7 @@ jobs:
           max-turns: ${{ inputs.max-turns }}
           max-tokens: ${{ inputs.max-tokens }}
           lanes: ${{ inputs.lanes }}
+          seed: ${{ inputs.seed }}
           project: ${{ steps.app.outputs.project }}
           upload-artifact: "false"
           upload-sarif: "false"

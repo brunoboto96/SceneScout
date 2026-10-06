@@ -766,7 +766,7 @@ async function ci(args: string[]): Promise<never> {
     console.error(redactKeys(`scenescout ci: ${message}`, secrets));
     process.exit(EXIT_CI.couldNotRun);
   };
-  const parsed = parseCiArgs(args, process.cwd());
+  const parsed = parseCiArgs(args, process.cwd(), process.env);
   if (!parsed.ok) return fail(parsed.error);
   const options = parsed.options;
   const provider = detectProvider(process.env, options);

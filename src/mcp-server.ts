@@ -93,7 +93,8 @@ import { statusPanePage } from "./engine/status-pane-page.js";
 import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
 import { decideOpen, OPEN_CHOICES, OPEN_ENV, openChoiceFromEnv, openInBrowser, type OpenChoice, type OpenDecision } from "./engine/open.js";
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
-import { parseLoginArgs } from "./engine/profiles.js";
+import { listProfiles, parseLoginArgs } from "./engine/profiles.js";
+import { earlierChoices, resolveSeed, resolveSeedExclusion, scheduleOrder, SEED_EXCLUSIONS, seedLine, startsOf } from "./engine/schedule.js";
 import type { BrowserEngineName } from "./browsers.js";
 import { LOGIN_WINDOW_MAX_MS, savedLine, startLoginWindow, type PendingLogin } from "./login-run.js";
 import { LoginWindows, WAIT_SAYS } from "./engine/signed-in.js";
@@ -794,6 +795,19 @@ server.registerTool(
         .max(240)
         .optional()
         .describe(`How long past the run a saved role's login must still last, in minutes (default ${DEFAULT_EXPIRY_MARGIN_MINUTES}).`),
+      seed: z
+        .string()
+        .max(64)
+        .optional()
+        .describe(
+          'Seed the split: modules are dealt and each lane\'s routes ordered by a shuffle keyed on it, with routes earlier seeded runs began with last, so successive runs spread over the app. "auto" for a fresh seed. The same seed and memory give the same plan. Default SCENESCOUT_SEED, else unseeded (the stable split).',
+        ),
+      seedExclusion: z
+        .enum(SEED_EXCLUSIONS)
+        .optional()
+        .describe(
+          "With a seed: `back` (default) orders routes earlier seeded runs began with last; `skip` leaves them out while others remain. Default SCENESCOUT_SEED_EXCLUSION, else back.",
+        ),
       session: sessionParam,
     },
   },
@@ -806,7 +820,17 @@ server.registerTool(
         routes,
         runMinutes,
         expiryMarginMinutes,
-      }: { lanes: number; goal?: string; routes?: string[]; runMinutes?: number; expiryMarginMinutes?: number },
+        seed,
+        seedExclusion,
+      }: {
+        lanes: number;
+        goal?: string;
+        routes?: string[];
+        runMinutes?: number;
+        expiryMarginMinutes?: number;
+        seed?: string;
+        seedExclusion?: (typeof SEED_EXCLUSIONS)[number];
+      },
       session,
     ) => {
       try {
@@ -827,7 +851,34 @@ server.registerTool(
           if (verdict.kind !== "ok") expiryNote = `⚠ ${verdict.message}\n\n`;
         }
         const all = routes && routes.length > 0 ? routes : eng.allKnownRoutes();
-        const briefs = planLanes(all, lanes, { goal, mode: eng.mode, role: eng.role });
+        // Seeded only when asked, by the input or the server's environment: unseeded, the split is the stable one.
+        const seeded = resolveSeed(seed, process.env, undefined, "seed");
+        if (!seeded.ok) return errorText(new Error(seeded.error));
+        const exclusion = resolveSeedExclusion(seedExclusion, process.env, "seedExclusion");
+        if (!exclusion.ok) return errorText(new Error(exclusion.error));
+        const history = seeded.seed ? (eng.memory?.schedules ?? []) : [];
+        const schedule = seeded.seed
+          ? { seed: seeded.seed.value, earlier: earlierChoices(history, "routes", seeded.seed.value), exclusion: exclusion.value }
+          : undefined;
+        const saved = seeded.seed && eng.memory ? listProfiles(path.dirname(eng.memory.dir)) : [];
+        const roleOrder =
+          seeded.seed && saved.length > 1
+            ? scheduleOrder(saved, { seed: seeded.seed.value, earlier: earlierChoices(history, "roles", seeded.seed.value), exclusion: "back" })
+            : undefined;
+        const briefs = planLanes(all, lanes, { goal, mode: eng.mode, role: eng.role, ...(schedule ? { schedule } : {}) });
+        let seedNote: string | undefined;
+        if (seeded.seed) {
+          seedNote = seedLine(seeded.seed, exclusion.value, "The seed");
+          if (briefs.length > 0)
+            eng.memory?.addSchedule({
+              seed: seeded.seed.value,
+              at: new Date().toISOString(),
+              source: "lane-brief",
+              exclusion: exclusion.value,
+              routes: startsOf(briefs.map((b) => b.routes)),
+              ...(roleOrder ? { roles: roleOrder.slice(0, 1) } : {}),
+            });
+        }
         laneLedger.nameBriefed(
           briefs.map((b) => b.lane),
           (s) => engines.has(s),
@@ -836,7 +887,14 @@ server.registerTool(
         const criteria = eng.memory ? formatCriteriaForLanes(eng.memory.ticketsThisRun().tickets) : "";
         return text(
           expiryNote +
-            formatBriefs(briefs, { goal, mode: eng.mode, role: eng.role, roleProfile: eng.auth.kind === "role" }) +
+            formatBriefs(briefs, {
+              goal,
+              mode: eng.mode,
+              role: eng.role,
+              roleProfile: eng.auth.kind === "role",
+              ...(seedNote ? { seedNote } : {}),
+              ...(roleOrder ? { roleOrder } : {}),
+            }) +
             (criteria ? `\n${criteria}` : ""),
           session,
         );
@@ -2427,6 +2485,8 @@ server.registerTool(
       try {
         const eng = engineFor(session);
         if (!eng.memory) throw new Error("Not attached.");
+        // A ci run records its seed from its own process: the report names it.
+        eng.memory.foldInSchedules();
         const unvisited = eng.unvisitedKnownRoutes();
         const gates: string[] = [];
         if (unvisited.length > 0) {

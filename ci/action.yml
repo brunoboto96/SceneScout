@@ -94,6 +94,14 @@ inputs:
     description: judge or rule. judge (the default when empty) also asks the run's model, at the lowest effort its API takes, whether a finding the rule keeps apart is one already open on the same page, sending the two findings' titles, categories and evidence, and the page's path; rule asks nothing.
     required: false
     default: ""
+  seed:
+    description: A seed, or auto for a fresh one, to order what the run explores by a shuffle keyed on it, with the routes earlier seeded runs started with last. The same seed repeats the order. Empty means SCENESCOUT_SEED, else unseeded.
+    required: false
+    default: ""
+  seed-exclusion:
+    description: With a seed - back (the default when empty) orders the routes earlier seeded runs started with last; skip leaves them out while others remain.
+    required: false
+    default: ""
   sarif-file-anchor:
     description: The repository file, relative to the repository root, that each ci.sarif result points at (code scanning keeps only results located in a repository file). Empty means the workflow file that is running.
     required: false

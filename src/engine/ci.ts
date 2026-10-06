@@ -17,6 +17,7 @@ import { markdownCell } from "./check.js";
 import { parseLimitFlag } from "./limits.js";
 import { isWorthALook, redactSecrets, type Finding } from "./memory.js";
 import { SARIF_ANCHOR_FALLBACKS, checkSarifAnchor, sarifLocation } from "./sarif.js";
+import { generateSeed, resolveSeed, resolveSeedExclusion, type ScheduleRecord, type Seed, type SeedExclusion } from "./schedule.js";
 
 // ── options ─────────────────────────────────────────────────────────────────
 
@@ -114,6 +115,8 @@ export const CI_OPTION_NAMES = [
   "show",
   "compare-url",
   "dedup",
+  "seed",
+  "seed-exclusion",
   "sarif-file-anchor",
 ] as const;
 
@@ -151,6 +154,10 @@ export interface CiOptions {
   dedup: DedupMode;
   /** The repository file each SARIF result points at; absent means sarif.ts's default. */
   sarifFileAnchor?: string;
+  /** Set when the run is seeded (--seed, else SCENESCOUT_SEED): it plans first and starts where the seed's schedule says (schedule.ts). */
+  seed?: Seed;
+  /** With a seed: what happens to routes earlier seeded runs began with. */
+  seedExclusion: SeedExclusion;
 }
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
@@ -169,7 +176,16 @@ export function checkBaseUrl(raw: string): { ok: true; url: string } | { ok: fal
   return { ok: false, error: "--base-url must be https (plain http only to 127.0.0.1 or localhost): the API key is sent to it" };
 }
 
-export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; options: CiOptions } | { ok: false; error: string } {
+/**
+ * `env` is read for the seed alone (SCENESCOUT_SEED, SCENESCOUT_SEED_EXCLUSION),
+ * since a flag wins over it; `generate` makes the seed `auto` asks for.
+ */
+export function parseCiArgs(
+  args: readonly string[],
+  cwd: string,
+  env: Record<string, string | undefined> = {},
+  generate: () => string = generateSeed,
+): { ok: true; options: CiOptions } | { ok: false; error: string } {
   const positional: string[] = [];
   const flags = new Map<string, string>();
   for (let i = 0; i < args.length; i++) {
@@ -298,6 +314,12 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
   if (!(DEDUP_MODES as readonly string[]).includes(dedup)) return { ok: false, error: `--dedup must be one of ${DEDUP_MODES.join(", ")}` };
   const anchor = flags.has("sarif-file-anchor") ? checkSarifAnchor(flags.get("sarif-file-anchor")!) : undefined;
   if (anchor && !anchor.ok) return anchor;
+  if (show && flags.has("seed")) return { ok: false, error: "--seed orders an exploration, and --show explores nothing: give one or the other" };
+  // A run asked to show an element explores nothing, so a seed in the environment does not apply to it.
+  const seed: ReturnType<typeof resolveSeed> = show ? { ok: true } : resolveSeed(flags.get("seed"), env, generate);
+  if (!seed.ok) return seed;
+  const exclusion = resolveSeedExclusion(flags.get("seed-exclusion"), env);
+  if (!exclusion.ok) return exclusion;
 
   const resolve = (p: string): string => (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) ? p : `${cwd.replace(/[\\/]$/, "")}/${p}`);
   return {
@@ -324,6 +346,8 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
       ...(navTimeout.value !== undefined ? { navTimeoutMs: navTimeout.value } : {}),
       dedup: dedup as DedupMode,
       ...(anchor ? { sarifFileAnchor: anchor.value } : {}),
+      ...(seed.seed ? { seed: seed.seed } : {}),
+      seedExclusion: exclusion.value,
     },
   };
 }
@@ -816,10 +840,36 @@ export function ciCaptureKickoff(o: { url: string; show: string }): string {
   return `Target: ${o.url}\nThe element to capture, as the reviewer described it: ${JSON.stringify(o.show)}`;
 }
 
-export function ciKickoff(o: { url: string; projectDir: string; mode: CiMode; level: CiLevel; focus?: string; caps: Caps }): string {
+/** The most routes a seeded run's first message lists in order. */
+const ORDER_LIST_MAX = 40;
+
+/**
+ * The lines a seeded run's first message carries: the order the run's
+ * planning crawl and the seed put the routes in. Empty when the run is not
+ * seeded or the crawl found nothing to order.
+ */
+export function scheduleKickoffLines(order: readonly string[] | undefined): string[] {
+  if (!order || order.length === 0) return [];
+  return [
+    `Route order for this run (${order.length}, from a planning crawl, shuffled by the run's seed with the routes earlier seeded runs started with last): ${order.slice(0, ORDER_LIST_MAX).join(", ")}${order.length > ORDER_LIST_MAX ? ` … and ${order.length - ORDER_LIST_MAX} more` : ""}`,
+    `Start with the first route and take them in this order, so successive runs spread over the app instead of repeating the same opening. The crawl visited them all, so route coverage may already read as complete: spend your turns acting on them, in this order.`,
+  ];
+}
+
+export function ciKickoff(o: {
+  url: string;
+  projectDir: string;
+  mode: CiMode;
+  level: CiLevel;
+  focus?: string;
+  caps: Caps;
+  /** A seeded run's route order (scheduleKickoffLines). */
+  order?: readonly string[];
+}): string {
   return [
     `Run an exploratory test session following the method.`,
     `Target: ${o.url}`,
+    ...scheduleKickoffLines(o.order),
     `Project directory (for scout_scan): ${o.projectDir}`,
     `Level: ${o.level}`,
     `Write mode: ${o.mode}`,
@@ -905,6 +955,20 @@ export interface CiResult {
   lanes?: CiLanes;
   /** How findings were deduplicated, and what the judge's calls cost. Absent on a capture run, which files none. */
   dedup?: CiDedup;
+  /** Present when the run was seeded: the seed and what its schedule started with. */
+  schedule?: CiSchedule;
+}
+
+/** A seeded run's schedule, as the summary and ci.json report it. */
+export interface CiSchedule {
+  seed: Seed;
+  exclusion: SeedExclusion;
+  /** How many routes the planning crawl gave it to order. */
+  routes: number;
+  /** What it recorded as its starting choices: the head of each order it handed out (ScheduleRecord.routes). */
+  starts: ScheduleRecord["routes"];
+  /** Set when the schedule could not be recorded in the project's memory, so the next seeded run will not move these to the back: why. */
+  notRecorded?: string;
 }
 
 /** The dedup judge's calls as the run's client saw them. Their tokens are in the run's usage as well. */
@@ -962,6 +1026,7 @@ export function ciSummaryMarkdown(r: CiResult, secrets: readonly string[] = []):
     `| Model | ${r.provider} ${cell(r.model, secrets)}, effort ${r.effort} |`,
     ...(r.lanes ? [`| Lanes | ${lanesCell(r.lanes, secrets)} |`] : []),
     ...(r.dedup ? [`| Finding dedup | ${dedupLine(r.dedup)} |`] : []),
+    ...(r.schedule ? [`| Seed | ${scheduleSummaryCell(r.schedule, secrets)} |`] : []),
     `| Usage | ${usageLine(r.spend, r.model, r.endedAt, r.price)} |`,
     ``,
   ];
@@ -983,6 +1048,15 @@ export function ciSummaryMarkdown(r: CiResult, secrets: readonly string[] = []):
   // A capture run writes pictures, not a report.
   lines.push(r.capture ? `The pictures are in shots/.` : `The full report, with repro steps and the gap ledger, is report.md.`, ``);
   return lines.join("\n");
+}
+
+function scheduleSummaryCell(sc: CiSchedule, secrets: readonly string[]): string {
+  return (
+    `\`${sc.seed.value}\`${sc.seed.generated ? " (generated)" : ""}: ${sc.routes} route(s) ordered, earlier seeded runs' starts ${sc.exclusion === "skip" ? "skipped" : "last"}` +
+    (sc.starts.length ? `; started with ${cell(sc.starts.join(", "), secrets)}` : "") +
+    (sc.notRecorded ? `; not recorded in memory (${cell(sc.notRecorded, secrets)})` : "") +
+    `. \`--seed ${sc.seed.value}\` repeats it`
+  );
 }
 
 function lanesCell(l: CiLanes, secrets: readonly string[]): string {
@@ -1077,6 +1151,19 @@ export function ciSummaryJson(r: CiResult, version: string, secrets: readonly st
     })),
     ...(r.capture ? { capture: cleanCapture(r.capture, clean) } : {}),
     ...(r.lanes ? { lanes: lanesJson(r.lanes, clean) } : {}),
+    ...(r.schedule
+      ? {
+          seed: {
+            value: r.schedule.seed.value,
+            generated: r.schedule.seed.generated,
+            exclusion: r.schedule.exclusion,
+            routes: r.schedule.routes,
+            starts: r.schedule.starts.map(clean),
+            recorded: !r.schedule.notRecorded,
+            ...(r.schedule.notRecorded ? { notRecorded: clean(r.schedule.notRecorded) } : {}),
+          },
+        }
+      : {}),
   };
 }
 
