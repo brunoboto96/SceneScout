@@ -1174,8 +1174,11 @@ async function recordedChecks({
   const plain = project("flow-unrecorded", { "details.json": withTyped("/check-flow.html") });
   const unrecorded = await checkWith(plain);
   check(
-    "without --record a check writes no replay page and no frames",
-    unrecorded.status === 0 && !fs.existsSync(path.join(plain, "out", "replay.html")) && !fs.existsSync(path.join(plain, "out", "replay-frames")),
+    "without --record or --video a check writes no replay page, no frames and no videos",
+    unrecorded.status === 0 &&
+      !fs.existsSync(path.join(plain, "out", "replay.html")) &&
+      !fs.existsSync(path.join(plain, "out", "replay-frames")) &&
+      !fs.existsSync(path.join(plain, "out", "replay-videos")),
     `${unrecorded.status} ${fs.readdirSync(path.join(plain, "out")).join(",")}`,
   );
 
@@ -1193,6 +1196,29 @@ async function recordedChecks({
     `${recorded.status} srcs=${good.srcs.length} onDisk=${good.onDisk} ${recorded.out.slice(-600)}`,
   );
   check("...and no typed value reaches the page", good.html.length > 0 && !good.html.includes(typed), "the typed value is on the page");
+  check(
+    "...and --record alone records no video",
+    !fs.existsSync(path.join(passing, "out", "replay-videos")) && !good.html.includes("<video "),
+    "a video was written",
+  );
+
+  // --video: one WebM per journey that ran, each on a page of its own, linked from the page beside its steps.
+  const filmed = project("flow-video", { "a-works.json": withTyped("/check-flow.html"), "b-breaks.json": withTyped("/check-flow-broken.html") });
+  const videoRun = await checkWith(filmed, ["--video"]);
+  const videosDir = path.join(filmed, "out", "replay-videos");
+  const videos = fs.existsSync(videosDir) ? fs.readdirSync(videosDir).sort() : [];
+  const shown = page(filmed);
+  const flowsRan = (videoRun.summary as FlowSummary | null)?.flows.map((f) => f.status) ?? [];
+  check(
+    "--video writes one non-empty WebM per journey that ran, and the replay page plays and links each beside its steps",
+    videoRun.status === 1 &&
+      JSON.stringify(flowsRan) === JSON.stringify(["passed", "failed"]) &&
+      JSON.stringify(videos) === JSON.stringify(["journey-01-a-works.webm", "journey-02-b-breaks.webm"]) &&
+      videos.every((v) => fs.statSync(path.join(videosDir, v)).size > 1000) &&
+      videos.every((v) => shown.html.includes(`<video controls preload="metadata" src="replay-videos/${v}"`)) &&
+      shown.srcs.length === 0,
+    `${videoRun.status} flows=${JSON.stringify(flowsRan)} videos=${JSON.stringify(videos)} imgs=${shown.srcs.length} ${videoRun.out.slice(-600)}`,
+  );
 
   const failing = project("flow-recorded-broken", { "details.json": withTyped("/check-flow-broken.html") });
   const broken = await checkWith(failing, ["--record"]);

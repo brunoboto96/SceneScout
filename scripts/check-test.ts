@@ -115,8 +115,11 @@ import {
   buildCheckReplayHtml,
   capFrames,
   commitOf,
+  isJourneyVideoFile,
   isReplayFrameFile,
   journeyOf,
+  journeyVideoPath,
+  replayVideos,
   journeySteps,
   redactReplay,
   replayFramePath,
@@ -1272,6 +1275,7 @@ test("action: the arguments it builds are ones the CLI accepts, carrying every o
     baselines: "tests/visual",
     "baseline-threshold": "0.25",
     record: "on",
+    video: "on",
     cli: "dist/cli.js",
     "upload-sarif": "true",
   };
@@ -1300,6 +1304,7 @@ test("action: the arguments it builds are ones the CLI accepts, carrying every o
     baselinesDir: "/work/tests/visual",
     baselineThreshold: 0.25,
     record: true,
+    video: true,
   });
   for (const own of ACTION_ONLY_INPUTS.filter((n) => n !== "url")) assert.ok(!args.some((a) => a.startsWith(`--${own}`)), own);
 });
@@ -3488,7 +3493,10 @@ test("replay: an earlier run's page and frames are removed before a check, and n
     fs.writeFileSync(path.join(out, "replay-frames", "check", "0001-crawl.jpg"), "x");
     fs.mkdirSync(path.join(out, "replay-frames", "mine"), { recursive: true });
     fs.writeFileSync(path.join(out, "replay-frames", "mine", "notes.txt"), "keep");
+    fs.mkdirSync(path.join(out, "replay-videos"), { recursive: true });
+    fs.writeFileSync(path.join(out, "replay-videos", "journey-01-checkout.webm"), "x");
     clearReplayOutput(out);
+    assert.equal(fs.existsSync(path.join(out, "replay-videos")), false, "an earlier run's journey videos go too");
     assert.equal(fs.existsSync(path.join(out, "replay.html")), false);
     assert.equal(fs.existsSync(path.join(out, "replay-frames", "check")), false);
     assert.equal(fs.readFileSync(path.join(out, "replay-frames", "mine", "notes.txt"), "utf8"), "keep");
@@ -3510,14 +3518,64 @@ test("action: replay.html and its frames are kept only when this run wrote the p
     (...files: string[]) =>
     (p: string) =>
       files.includes(p);
-  assert.deepEqual(replayOutputs(out, has()), { replay: "", "replay-frames": "" });
-  assert.deepEqual(replayOutputs(out, has(path.join(out, "replay-frames"))), { replay: "", "replay-frames": "" }, "frames without a page are an earlier run's");
+  const none = { replay: "", "replay-frames": "", "replay-videos": "" };
+  assert.deepEqual(replayOutputs(out, has()), none);
+  assert.deepEqual(
+    replayOutputs(out, has(path.join(out, "replay-frames"), path.join(out, "replay-videos"))),
+    none,
+    "frames or videos without a page are an earlier run's",
+  );
   assert.deepEqual(replayOutputs(out, has(path.join(out, "replay.html"), path.join(out, "replay-frames"))), {
     replay: path.join(out, "replay.html"),
     "replay-frames": path.join(out, "replay-frames"),
+    "replay-videos": "",
+  });
+  assert.deepEqual(replayOutputs(out, has(path.join(out, "replay.html"), path.join(out, "replay-videos"))), {
+    replay: path.join(out, "replay.html"),
+    "replay-frames": "",
+    "replay-videos": path.join(out, "replay-videos"),
   });
   const steps = action.runs.steps as Array<{ name: string; with?: { path?: string } }>;
   const upload = steps.find((s) => s.name === "Keep the results")!;
   assert.match(upload.with!.path!, /steps\.run\.outputs\.replay \}\}/);
   assert.match(upload.with!.path!, /steps\.run\.outputs\.replay-frames \}\}/);
+  assert.match(upload.with!.path!, /steps\.run\.outputs\.replay-videos \}\}/);
+});
+
+test("--video: alone means on, off leaves it off, anything else is refused; absent is off", () => {
+  const parse = (...args: string[]) => parseCheckArgs(args, "/work");
+  const on = parse("--video", "http://127.0.0.1:3000");
+  assert.ok(on.ok && on.options.video === true && on.options.url === "http://127.0.0.1:3000/");
+  const both = parse("http://127.0.0.1:3000", "--video", "--record");
+  assert.ok(both.ok && both.options.video === true && both.options.record === true);
+  const off = parse("http://127.0.0.1:3000", "--video=off");
+  assert.ok(off.ok && !("video" in off.options));
+  const bad = parse("http://127.0.0.1:3000", "--video=webm");
+  assert.ok(!bad.ok && /--video is on or off/.test(bad.error));
+  const none = parse("http://127.0.0.1:3000");
+  assert.ok(none.ok && !("video" in none.options));
+});
+
+test("replay: each journey's video has a file of its own beside the page, named so nothing in a flow's file name decides where it goes", () => {
+  assert.equal(journeyVideoPath(1, "checkout.json"), "replay-videos/journey-01-checkout.webm");
+  assert.equal(journeyVideoPath(12, "../../etc/passwd.json"), "replay-videos/journey-12-etc-passwd.webm");
+  assert.notEqual(journeyVideoPath(1, "a.json"), journeyVideoPath(2, "a.json"));
+  assert.equal(isJourneyVideoFile("journey-01-checkout.webm"), true);
+  assert.equal(isJourneyVideoFile("holiday.webm"), false);
+});
+
+test("replay page: a journey with a video plays it beside its steps and links it; one without has neither", () => {
+  const withVideo = { ...journeyOf(replayFlow, { status: "passed" }), video: "replay-videos/journey-01-checkout.webm" };
+  const without = journeyOf({ ...replayFlow, name: "browse" }, { status: "passed" });
+  const replay: CheckReplay = { startedAt: "t", roles: [{ role: "anonymous", own: true, visits: [], journeys: [withVideo, without] }], framesLeftOut: 0 };
+  const html = buildCheckReplayHtml(replay, replayMeta);
+  assert.deepEqual(replayVideos(replay), ["replay-videos/journey-01-checkout.webm"]);
+  assert.equal((html.match(/<video /g) ?? []).length, 1);
+  assert.match(html, /<video controls preload="metadata" src="replay-videos\/journey-01-checkout\.webm" data-testid="replay-journey-video">/);
+  assert.match(html, /href="replay-videos\/journey-01-checkout\.webm"[^>]*data-testid="replay-video-open"/);
+  // The video sits inside its own journey, before that journey's steps.
+  const checkout = html.slice(html.indexOf("<b>checkout</b>"), html.indexOf("<b>browse</b>"));
+  assert.ok(checkout.indexOf("<video ") > 0 && checkout.indexOf("<video ") < checkout.indexOf('<ol class="steps">'));
+  assert.match(html, /<dt>Videos<\/dt><dd>1<\/dd>/);
+  assert.ok(!buildCheckReplayHtml({ ...replay, roles: [{ ...replay.roles[0], journeys: [without] }] }, replayMeta).includes("<dt>Videos</dt>"));
 });

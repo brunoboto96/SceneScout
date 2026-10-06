@@ -345,6 +345,13 @@ export interface AttachOptions {
   task?: string;
   /** Keep a frame of the page after each action, under .scenescout/recordings/. Off by default; evidence for QA work. */
   record?: boolean;
+  /**
+   * Record a video of every page this session opens, into this folder
+   * (Playwright's recordVideo). Unset, nothing is recorded. A check sets it
+   * for --video and runs each flow on a page of its own (onOwnPage), so each
+   * journey has a video of its own.
+   */
+  videoDir?: string;
   /** How long one action on the page may take. Default: SCENESCOUT_ACTION_TIMEOUT_MS, else 5000 (see limits.ts). */
   actionTimeoutMs?: number;
   /** How long a page may take to load. Default: SCENESCOUT_NAV_TIMEOUT_MS, else 20000 (see limits.ts). */
@@ -1664,6 +1671,7 @@ export class BrowserEngine {
         viewport: opts.viewport ?? { width: 1280, height: 900 },
         ...(opts.deviceScaleFactor !== undefined ? { deviceScaleFactor: opts.deviceScaleFactor } : {}),
         serviceWorkers: serviceWorkerPolicy(this.engineName),
+        ...(opts.videoDir ? { recordVideo: { dir: opts.videoDir } } : {}),
       });
       const restoreSession = sessionStorageInitScript(profile?.sessionStorage ?? []);
       if (restoreSession) await this.context.addInitScript(restoreSession);
@@ -1972,6 +1980,8 @@ export class BrowserEngine {
     // oracles attached); close foreign-origin popups so exploration cannot
     // silently escape the app under test.
     this.context.on("page", (newPage) => {
+      // A page the engine opened for itself (onOwnPage) is not a popup to adopt or close.
+      if (this.openingOwnPage) return;
       newPage
         .waitForLoadState("domcontentloaded", { timeout: this.limits.backNavMs })
         .then(() => {
@@ -2135,6 +2145,62 @@ export class BrowserEngine {
   private nativeDialogAt = 0;
   /** When a native dialog that asks something (confirm, prompt, a leave confirmation) last opened; an alert only tells. */
   private nativeQuestionAt = 0;
+
+  /** True while onOwnPage opens its page, so the popup handler leaves it alone. */
+  private openingOwnPage = false;
+
+  /** Open a page in this session's context and drive it from now on, wired as attach wires its first page. */
+  private async driveNewPage(): Promise<Page> {
+    const context = this.context;
+    if (!context) throw new Error("Not attached. Call scout_attach first with the app URL and project path.");
+    this.openingOwnPage = true;
+    let page: Page;
+    try {
+      page = await context.newPage();
+    } finally {
+      this.openingOwnPage = false;
+    }
+    this.oracles.attach(page);
+    this.wireDialogHandler(page);
+    this.wireEmbedMoves(page);
+    this.page = page;
+    this.refs.clear();
+    this.snapshotUrl = "";
+    this.forgetSnapshots();
+    return page;
+  }
+
+  /**
+   * Run `work` on a page of its own in this session's context, then close it.
+   * The context is the session's, so its cookies and storage carry over; on a
+   * session attached with `videoDir`, the page's video is this run's alone,
+   * and is saved to `videoTo`. Every page the work left open is closed with
+   * it, and a fresh page is driven afterwards. The video is null when the
+   * session records none or it could not be saved (`videoError` says why).
+   */
+  async onOwnPage<T>(work: () => Promise<T>, videoTo?: string): Promise<{ value: T; video: string | null; videoError?: string }> {
+    const own = await this.driveNewPage();
+    let value: T;
+    try {
+      value = await work();
+    } finally {
+      const context = this.context;
+      // The work may have adopted a popup, or been left on its own page: everything open now is the work's.
+      if (context) await BrowserEngine.settleWithin(Promise.allSettled(context.pages().map((p) => p.close().catch(() => {}))), 10_000);
+      this.page = null;
+      if (context) await this.driveNewPage();
+    }
+    const recording = own.video();
+    if (!recording || !videoTo) return { value, video: null };
+    try {
+      await fs.promises.mkdir(path.dirname(videoTo), { recursive: true });
+      // saveAs waits until the page is closed and the video written.
+      await recording.saveAs(videoTo);
+      return { value, video: videoTo };
+    } catch (err) {
+      return { value, video: null, videoError: err instanceof Error ? err.message.split("\n")[0] : String(err) };
+    }
+  }
 
   private requirePage(): Page {
     if (!this.page || !this.memory) {

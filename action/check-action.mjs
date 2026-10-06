@@ -120,16 +120,17 @@ export function picturesDir(json, outDir, exists = fs.existsSync) {
 }
 
 /**
- * The replay page of a recorded check and the folder of frames beside it, or
- * empty: the folder is kept only with a page this run wrote, which the run
+ * The replay page of a recorded check and the folders of frames and journey
+ * videos beside it, or empty: the folders are kept only with a page this run wrote, which the run
  * step removed beforehand, so frames an earlier run left are never kept as
  * this run's.
  */
 export function replayOutputs(outDir, exists = fs.existsSync) {
   const page = path.join(outDir, "replay.html");
-  if (!exists(page)) return { replay: "", "replay-frames": "" };
+  if (!exists(page)) return { replay: "", "replay-frames": "", "replay-videos": "" };
   const frames = path.join(outDir, "replay-frames");
-  return { replay: page, "replay-frames": exists(frames) ? frames : "" };
+  const videos = path.join(outDir, "replay-videos");
+  return { replay: page, "replay-frames": exists(frames) ? frames : "", "replay-videos": exists(videos) ? videos : "" };
 }
 
 /** A workflow command's message must not break the line it is written on. */

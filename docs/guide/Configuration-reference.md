@@ -80,6 +80,7 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--baseline-threshold` | `0.1` | The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; `update` rewrites the baselines past it (and any taken on another operating system). Not 0 by default, so anti-aliasing noise between machines and browser builds does not fail the gate; `0` counts every changed pixel (a colour channel off by more than 8 in 255). A change of size always counts |
 | `--sarif-file-anchor` | the running workflow's file, else `package.json`, else `README.md` | The repository file, relative to the repository root, that a `check.sarif` result points at when no saved flow raised it. See [SARIF locations](Ways-to-use-it.md#sarif-locations) |
 | `--record` | `SCENESCOUT_RECORD`, else off | Keep a frame after each route visit and each saved-flow step, and write `replay.html` (role → journey → step) beside the report, with the frames in `replay-frames/`. Given alone it means `on`; `--record off` wins over the variable |
+| `--video` | off | Record a WebM of each saved flow, each on a page of its own, into `replay-videos/`, played on `replay.html` beside the journey's steps. Given alone it means `on` |
 
 ### `scenescout ci`
 
@@ -304,12 +305,13 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `baseline-threshold` | empty | As `--baseline-threshold` |
 | `sarif-file-anchor` | empty | As `--sarif-file-anchor`, relative to the repository root; empty means the workflow file that is running |
 | `record` | empty | As `--record` (`on` or `off`); empty means `SCENESCOUT_RECORD`, else off. The replay page and its frames go in the artifact |
+| `video` | empty | As `--video` (`on` or `off`); empty means off. The journey videos go in the artifact |
 | `working-directory` | `.` | Where the check runs; other relative paths are resolved from here |
 | `version` | empty | The scenescout npm version to run; empty means the version of the action's ref |
 | `cli` | empty | A built `dist/cli.js` to run instead of the npm package, for testing the action itself |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
-| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and `replay.html` with its frames on a recorded check |
+| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and `replay.html` with its frames and videos on a recorded check |
 | `artifact-name` | empty | Empty means `scenescout-check-<job id>`; give each matrix cell its own |
 | `upload-sarif` | `false` | Upload `check.sarif` to code scanning; needs `security-events: write` |
 

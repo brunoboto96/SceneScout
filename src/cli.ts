@@ -40,7 +40,7 @@ import {
 } from "./installer.js";
 import { downloadBrowsers, presentBrowsers } from "./installer.js";
 import { baselinesDirOf, clearReplayOutput, defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
-import { buildCheckReplayHtml, commitOf, REPLAY_FILE, REPLAY_FRAMES_DIRNAME, replayFrames } from "./engine/check-replay.js";
+import { buildCheckReplayHtml, commitOf, REPLAY_FILE, replayFrames, replayVideos } from "./engine/check-replay.js";
 import { recordChoice } from "./engine/capture.js";
 import { httpClient, httpJudgeAsk, runCi } from "./ci-run.js";
 import { runExport } from "./export-run.js";
@@ -167,7 +167,10 @@ Usage:
                                       Actions, else package.json, else README.md);
                                      --record [on|off]: keep a frame after each route visit and each flow step
                                       and write replay.html beside the report, role → journey → step (default:
-                                      SCENESCOUT_RECORD, else off; the frames go in replay-frames/))
+                                      SCENESCOUT_RECORD, else off; the frames go in replay-frames/);
+                                     --video [on|off]: record a WebM of each saved flow, each on a page of its
+                                      own, into replay-videos/, linked from replay.html beside its steps
+                                      (default off))
                                     Exit code: 0 passed, 1 failed the gate, 2 could not run.
   scenescout ci <url>               An exploratory run with no person present: a model reached through its API
                                     drives the tools by the SceneScout method and the run ends in the report.
@@ -695,7 +698,7 @@ async function check(args: string[]): Promise<never> {
   console.log(`Wrote report.md, check.sarif and check.json to ${outDir}`);
   if (result.replay)
     console.log(
-      `Wrote ${REPLAY_FILE}, with ${replayFrames(result.replay).length} frame(s) under ${path.join(outDir, REPLAY_FRAMES_DIRNAME)}: open it in a browser to see each step`,
+      `Wrote ${REPLAY_FILE} to ${outDir}, with ${replayFrames(result.replay).length} frame(s) and ${replayVideos(result.replay).length} journey video(s) beside it: open it in a browser to see each step`,
     );
   const pictured = result.baselines?.results.filter((r) => r.files).length ?? 0;
   if (pictured > 0) console.log(`Wrote the pictures of ${pictured} changed baseline(s) under ${path.join(outDir, VISUAL_DIRNAME)}`);

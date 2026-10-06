@@ -20,6 +20,8 @@ import { escapeHtml, plainSegment, RECORD_MAX_FRAMES } from "./replay.js";
 export const REPLAY_FILE = "replay.html";
 /** The folder beside it that holds the frames the page shows. */
 export const REPLAY_FRAMES_DIRNAME = "replay-frames";
+/** The folder beside it that holds one video per journey (--video). */
+export const REPLAY_VIDEOS_DIRNAME = "replay-videos";
 
 /** What became of one step: done, broken, refused by the write policy, or never reached because an earlier one broke. */
 export type ReplayStepResult = "passed" | "failed" | "refused" | "not-run";
@@ -45,6 +47,8 @@ export interface ReplayJourney {
   steps: ReplayStep[];
   /** The step that broke or was refused, when one did. */
   firstFailing?: number;
+  /** The journey's video (--video), relative to the page. */
+  video?: string;
 }
 
 /** What a visited route answered. */
@@ -171,6 +175,25 @@ export function redactReplay(replay: CheckReplay): CheckReplay {
   };
 }
 
+/**
+ * Where the video of the n-th journey run (1-based) goes beside the page. The
+ * flow's file name is reduced to a plain segment, so it decides nothing about
+ * where the file is written; the number keeps two flows' videos apart.
+ */
+export function journeyVideoPath(n: number, file: string): string {
+  return `${REPLAY_VIDEOS_DIRNAME}/journey-${String(n).padStart(2, "0")}-${plainSegment(file.replace(/\.json$/i, ""), "flow")}.webm`;
+}
+
+/** Whether a file under replay-videos/ is a video a check wrote, and so one an earlier run's clean-up may remove. */
+export function isJourneyVideoFile(name: string): boolean {
+  return /^journey-\d{2,}-[a-z0-9._-]+\.webm$/i.test(name);
+}
+
+/** Every journey video the page links, in page order. */
+export function replayVideos(replay: CheckReplay): string[] {
+  return replay.roles.flatMap((r) => r.journeys.flatMap((j) => (j.video ? [j.video] : [])));
+}
+
 /** Every frame the page shows, in page order. */
 export function replayFrames(replay: CheckReplay): string[] {
   return replay.roles.flatMap((r) => [
@@ -266,6 +289,10 @@ function journeyHtml(j: ReplayJourney, id: string): string {
       : `<span class="count">${j.steps.length} step${j.steps.length === 1 ? "" : "s"}</span>`;
   return (
     `<details class="journey ${ok ? "pass" : "fail"}"${ok ? "" : " open"} data-status="${j.status}"><summary data-testid="replay-journey-toggle">${badge} <b>${escapeHtml(j.name)}</b> <span class="file">${escapeHtml(j.file)}</span> ${jump}</summary>` +
+    (j.video
+      ? `<figure class="video"><video controls preload="metadata" src="${escapeHtml(j.video)}" data-testid="replay-journey-video"></video>` +
+        `<figcaption>The whole journey as it ran. <a href="${escapeHtml(j.video)}" target="_blank" rel="noreferrer" data-testid="replay-video-open">Open the video</a></figcaption></figure>`
+      : "") +
     `<ol class="steps">${j.steps.map((s) => stepHtml(s, anchor)).join("")}</ol></details>`
   );
 }
@@ -332,6 +359,9 @@ a.frame img { max-width:100%; max-height:400px; object-fit:cover; object-positio
 a.frame.gone img { display:none; } a.frame.gone .gone-note { display:block; }
 .noframe, .none { color:var(--muted); font-size:12px; font-style:italic; margin:4px 0; }
 .note { color:var(--muted); font-size:13px; }
+figure.video { margin:10px 0; max-width:min(100%,720px); }
+figure.video video { width:100%; border:1px solid var(--line); border-radius:6px; display:block; background:#000; }
+figure.video figcaption { color:var(--muted); font-size:12px; margin-top:4px; }
 `;
 
 /** The whole page: one HTML file with no external assets or scripts; its frames sit beside it in replay-frames/. */
@@ -351,10 +381,12 @@ export function buildCheckReplayHtml(replay: CheckReplay, meta: ReplayMeta): str
 <body>
 <header>
   <h1>SceneScout check replay ${badge}</h1>
-  <dl>${pair("App", meta.origin)}${pair("Started", stamp(meta.startedAt))}${pair("Ended", stamp(meta.endedAt))}${meta.commit ? pair("Commit", meta.commit) : ""}${pair("SceneScout", `v${meta.version}`)}${pair("Frames", String(frames))}</dl>
+  <dl>${pair("App", meta.origin)}${pair("Started", stamp(meta.startedAt))}${pair("Ended", stamp(meta.endedAt))}${meta.commit ? pair("Commit", meta.commit) : ""}${pair("SceneScout", `v${meta.version}`)}${pair("Frames", String(frames))}${replayVideos(replay).length > 0 ? pair("Videos", String(replayVideos(replay).length)) : ""}</dl>
 </header>
 <main>
-<p class="note">Each role, then each journey it walked, step by step, with the page as it was after the step. Typed values are never shown, and secrets in addresses are redacted as in the report.${
+<p class="note">Each role, then each journey it walked, step by step, with the page as it was after the step${
+    frames === 0 ? " when the check was recorded (--record)" : ""
+  }. Typed values are never shown, and secrets in addresses are redacted as in the report.${
     replay.framesLeftOut > 0 ? ` ${replay.framesLeftOut} frame(s) past the cap of ${RECORD_MAX_FRAMES} per role are not kept; those steps show no frame.` : ""
   }</p>
 ${replay.roles.map(roleHtml).join("\n") || '<p class="none">Nothing was recorded.</p>'}

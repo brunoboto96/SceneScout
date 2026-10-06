@@ -638,6 +638,11 @@ export interface CheckOptions extends CheckSettings {
    * command then reads SCENESCOUT_RECORD (capture.ts recordChoice).
    */
   record?: boolean;
+  /**
+   * Record a video (WebM) of each saved flow, each on a page of its own, and
+   * link it from the replay page beside the journey's steps. Off unless --video is given.
+   */
+  video?: boolean;
 }
 
 /**
@@ -668,10 +673,11 @@ export const CHECK_OPTION_NAMES = [
   "baseline-threshold",
   "sarif-file-anchor",
   "record",
+  "video",
 ] as const;
 
 /** Options that may be given alone, meaning on: `--record`, as well as `--record on` and `--record=off`. */
-const SWITCH_OPTIONS: ReadonlySet<string> = new Set(["record"]);
+const SWITCH_OPTIONS: ReadonlySet<string> = new Set(["record", "video"]);
 const SWITCH_ON = ["on", "true", "1"];
 const SWITCH_OFF = ["off", "false", "0"];
 
@@ -828,6 +834,10 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
   if (recordRaw !== undefined && !SWITCH_ON.includes(recordRaw) && !SWITCH_OFF.includes(recordRaw)) {
     return { ok: false, error: "--record is on or off, or given alone for on" };
   }
+  const videoRaw = flags.get("video")?.trim().toLowerCase();
+  if (videoRaw !== undefined && !SWITCH_ON.includes(videoRaw) && !SWITCH_OFF.includes(videoRaw)) {
+    return { ok: false, error: "--video is on or off, or given alone for on" };
+  }
 
   const resolve = (p: string): string => resolveArgPath(cwd, p);
   return {
@@ -856,6 +866,7 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
       baselineThreshold: threshold.value,
       ...(anchor ? { sarifFileAnchor: anchor.value } : {}),
       ...(recordRaw !== undefined ? { record: SWITCH_ON.includes(recordRaw) } : {}),
+      ...(videoRaw !== undefined && SWITCH_ON.includes(videoRaw) ? { video: true } : {}),
     },
   };
 }
