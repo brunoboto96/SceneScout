@@ -119,6 +119,20 @@ export function picturesDir(json, outDir, exists = fs.existsSync) {
   return results.some((r) => r && typeof r === "object" && r.files) && exists(dir) ? dir : "";
 }
 
+/**
+ * The replay page of a recorded check and the folders of frames and journey
+ * videos beside it, or empty: the folders are kept only with a page this run wrote, which the run
+ * step removed beforehand, so frames an earlier run left are never kept as
+ * this run's.
+ */
+export function replayOutputs(outDir, exists = fs.existsSync) {
+  const page = path.join(outDir, "replay.html");
+  if (!exists(page)) return { replay: "", "replay-frames": "", "replay-videos": "" };
+  const frames = path.join(outDir, "replay-frames");
+  const videos = path.join(outDir, "replay-videos");
+  return { replay: page, "replay-frames": exists(frames) ? frames : "", "replay-videos": exists(videos) ? videos : "" };
+}
+
 /** A workflow command's message must not break the line it is written on. */
 export function escapeAnnotation(text) {
   return String(text).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
@@ -294,7 +308,7 @@ function run() {
   const outDir = process.env.SCENESCOUT_OUT_DIR;
   if (!cli || !outDir) throw new Error("SCENESCOUT_CLI and SCENESCOUT_OUT_DIR must be set by the resolve step");
   // Results of an earlier run in the same directory must not be read as this run's.
-  for (const f of ["report.md", "check.json", "check.sarif"]) fs.rmSync(path.join(outDir, f), { force: true });
+  for (const f of ["report.md", "check.json", "check.sarif", "replay.html"]) fs.rmSync(path.join(outDir, f), { force: true });
   const child = spawnSync(process.execPath, [cli, ...checkArgs(inputs)], { stdio: ["ignore", "inherit", "pipe"], maxBuffer: 64 * 1024 * 1024 });
   const stderr = child.stderr ? child.stderr.toString() : "";
   if (stderr) process.stderr.write(stderr);
@@ -321,6 +335,7 @@ function run() {
     json: file("check.json"),
     sarif: file("check.sarif"),
     visual: pictures,
+    ...replayOutputs(outDir),
     ...(summary ?? Object.fromEntries(SUMMARY_OUTPUT_NAMES.map((name) => [name, ""]))),
   });
 }

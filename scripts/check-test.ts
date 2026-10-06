@@ -29,6 +29,7 @@ import {
   npmCommand,
   outDirFor,
   picturesDir,
+  replayOutputs,
   SUMMARY_OUTPUT_NAMES,
   summaryOutputs,
   verdict,
@@ -110,6 +111,26 @@ import {
 } from "../src/first-run.ts";
 import { checkRetestPlan, retestResults, wellFormedFindings, type MeasuredPage } from "../src/engine/verify.ts";
 import { resolveSarifAnchor, sarifFilesFor, workflowFileOf } from "../src/engine/sarif.ts";
+import {
+  buildCheckReplayHtml,
+  capFrames,
+  commitOf,
+  isJourneyVideoFile,
+  isReplayFrameFile,
+  journeyOf,
+  journeyVideoPath,
+  replayVideos,
+  journeySteps,
+  redactReplay,
+  replayFramePath,
+  replayFrames,
+  replaySessionKey,
+  visitOf,
+  type CheckReplay,
+  type ReplayMeta,
+} from "../src/engine/check-replay.ts";
+import { framePath, RECORD_MAX_FRAMES } from "../src/engine/replay.ts";
+import { clearReplayOutput } from "../src/check-run.ts";
 import {
   CHECK_OPTION_NAMES,
   CHECK_RULES,
@@ -1253,6 +1274,8 @@ test("action: the arguments it builds are ones the CLI accepts, carrying every o
     baseline: "update",
     baselines: "tests/visual",
     "baseline-threshold": "0.25",
+    record: "on",
+    video: "on",
     cli: "dist/cli.js",
     "upload-sarif": "true",
   };
@@ -1280,6 +1303,8 @@ test("action: the arguments it builds are ones the CLI accepts, carrying every o
     baseline: "update",
     baselinesDir: "/work/tests/visual",
     baselineThreshold: 0.25,
+    record: true,
+    video: true,
   });
   for (const own of ACTION_ONLY_INPUTS.filter((n) => n !== "url")) assert.ok(!args.some((a) => a.startsWith(`--${own}`)), own);
 });
@@ -3258,4 +3283,299 @@ test("a check's JSON records a time budget only when it had one", () => {
   const budget = toSummaryJson({ ...result([]), timeBudget: { ms: 180_000, reached: true } }, "1.0.0") as { timeBudget?: unknown };
   assert.deepEqual(budget.timeBudget, { ms: 180_000, reached: true });
   assert.equal("timeBudget" in (toSummaryJson(result([]), "1.0.0") as object), false);
+});
+
+// ---------------------------------------------------------------------------
+// A recorded check (--record) and its replay page (engine/check-replay.ts).
+// ---------------------------------------------------------------------------
+
+const replayFlow = {
+  name: "checkout",
+  file: "checkout.json",
+  steps: [
+    { action: "navigate", target: "/cart" },
+    { action: "type", target: "label=Card number", value: "4111 1111 1111 1111" },
+    { action: "click", target: 'role=button[name="Pay"]' },
+    { action: "expect-text", text: "Thank you" },
+  ] as FlowStep[],
+};
+
+test("--record: alone means on, on/off/true/false are taken, anything else is refused; absent leaves it to SCENESCOUT_RECORD", () => {
+  const parse = (...args: string[]) => parseCheckArgs(args, "/work");
+  const on = parse("--record", "http://127.0.0.1:3000");
+  assert.ok(on.ok && on.options.record === true, "--record before the URL records and still checks that URL");
+  assert.ok(on.ok && on.options.url === "http://127.0.0.1:3000/");
+  const last = parse("http://127.0.0.1:3000", "--record");
+  assert.ok(last.ok && last.options.record === true);
+  const off = parse("http://127.0.0.1:3000", "--record", "off");
+  assert.ok(off.ok && off.options.record === false);
+  const eq = parse("http://127.0.0.1:3000", "--record=TRUE");
+  assert.ok(eq.ok && eq.options.record === true);
+  const then = parse("http://127.0.0.1:3000", "--record", "--fail-on", "low");
+  assert.ok(then.ok && then.options.record === true && then.options.failOn === "low");
+  const bad = parse("http://127.0.0.1:3000", "--record=sometimes");
+  assert.ok(!bad.ok && /--record is on or off/.test(bad.error));
+  const none = parse("http://127.0.0.1:3000");
+  assert.ok(none.ok && !("record" in none.options));
+});
+
+test("replay: a passing journey's steps all passed, each with its caption and frame", () => {
+  const steps = journeySteps(replayFlow.steps, { status: "passed" }, ["f1", "f2", "f3", "f4"]);
+  assert.deepEqual(
+    steps.map((s) => [s.n, s.caption, s.result, s.frame]),
+    [
+      [1, "navigate /cart", "passed", "f1"],
+      [2, "type into label=Card number", "passed", "f2"],
+      [3, 'click role=button[name="Pay"]', "passed", "f3"],
+      [4, 'expect text "Thank you"', "passed", "f4"],
+    ],
+  );
+});
+
+test("replay: a journey that fails partway has its earlier steps passed, the failing one with its reason, and the rest not run, with no frame", () => {
+  const outcome = { status: "failed", step: 3, did: 'click role=button[name="Pay"]', reason: "nothing visible matches", path: "/cart" } as const;
+  const journey = journeyOf(replayFlow, outcome, ["f1", "f2", "f3"]);
+  assert.equal(journey.status, "failed");
+  assert.equal(journey.firstFailing, 3);
+  assert.deepEqual(
+    journey.steps.map((s) => [s.n, s.result, s.frame ?? null, s.reason ?? null, s.path ?? null]),
+    [
+      [1, "passed", "f1", null, null],
+      [2, "passed", "f2", null, null],
+      [3, "failed", "f3", "nothing visible matches", "/cart"],
+      [4, "not-run", null, null, null],
+    ],
+  );
+  // A frame handed over for a step that never ran is not shown against it.
+  assert.equal(journeySteps(replayFlow.steps, outcome, ["f1", "f2", "f3", "stray"])[3].frame, undefined);
+  // A refused step is the journey's first failing step too.
+  const refused = journeyOf(replayFlow, { status: "refused", step: 1, did: "navigate /cart", reason: "the write policy refused POST /x", path: "/" }, ["f1"]);
+  assert.deepEqual(
+    refused.steps.map((s) => s.result),
+    ["refused", "not-run", "not-run", "not-run"],
+  );
+  assert.equal(refused.firstFailing, 1);
+  // A step with no frame kept (null) shows none.
+  assert.equal(journeySteps(replayFlow.steps, { status: "passed" }, [null, "f2"])[0].frame, undefined);
+});
+
+test("replay: a typed value is never part of a caption", () => {
+  const captions = journeySteps(replayFlow.steps, { status: "passed" }).map((s) => s.caption);
+  assert.ok(!captions.some((c) => c.includes("4111")), captions.join(" | "));
+});
+
+test("replay: a visit says what the route answered", () => {
+  const base = { path: "/a", status: 200, loginRedirect: false };
+  assert.equal(visitOf(base, "f").result, "loaded");
+  assert.equal(visitOf(base, "f").frame, "f");
+  assert.equal(visitOf({ ...base, status: 404 }).result, "http-error");
+  assert.equal(visitOf({ ...base, loginRedirect: true }).result, "sign-in");
+  const failed = visitOf({ ...base, status: null, loadError: "net::ERR_CONNECTION_REFUSED" });
+  assert.deepEqual([failed.result, failed.reason, "frame" in failed], ["not-loaded", "net::ERR_CONNECTION_REFUSED", false]);
+});
+
+const manyFrames = (role: string, n: number): CheckReplay["roles"][number] => ({
+  role,
+  own: role === "anonymous",
+  visits: [{ path: "/", status: 200, result: "loaded", frame: `${role}-visit` }],
+  journeys: [
+    {
+      name: "long",
+      file: "long.json",
+      status: "passed",
+      steps: Array.from({ length: n }, (_, i) => ({ n: i + 1, caption: `click #${i}`, result: "passed" as const, frame: `${role}-${i}` })),
+    },
+  ],
+});
+
+test("replay: the frame cap holds per role on the page, the first frames kept and the rest counted", () => {
+  const capped = capFrames({ startedAt: "t", roles: [manyFrames("anonymous", RECORD_MAX_FRAMES + 50), manyFrames("member", 3)], framesLeftOut: 0 });
+  const own = capped.roles[0];
+  const framed = [own.visits[0], ...own.journeys[0].steps].filter((x) => x.frame);
+  assert.equal(framed.length, RECORD_MAX_FRAMES);
+  assert.equal(own.visits[0].frame, "anonymous-visit", "the first frame is kept");
+  assert.equal(own.journeys[0].steps[RECORD_MAX_FRAMES - 2].frame, `anonymous-${RECORD_MAX_FRAMES - 2}`);
+  assert.equal(own.journeys[0].steps[RECORD_MAX_FRAMES - 1].frame, undefined, "past the cap, no frame");
+  assert.equal(capped.roles[1].journeys[0].steps.filter((s) => s.frame).length, 3, "another role has a cap of its own");
+  assert.equal(capped.framesLeftOut, 51);
+  // The page shows exactly the frames the capped model keeps.
+  const html = buildCheckReplayHtml(capped, replayMeta);
+  assert.equal((html.match(/<img /g) ?? []).length, replayFrames(capped).length);
+  assert.equal(replayFrames(capped).length, RECORD_MAX_FRAMES + 4);
+  assert.match(html, /51 frame\(s\) past the cap of 600 per role are not kept/);
+});
+
+const replayMeta: ReplayMeta = {
+  version: "9.9.9",
+  origin: "http://127.0.0.1:3000",
+  startedAt: "2026-01-02T03:04:05.000Z",
+  endedAt: "2026-01-02T03:05:06.000Z",
+  commit: "0123456789abcdef0123456789abcdef01234567",
+  passed: false,
+  couldNotRun: 0,
+};
+
+test("replay: secrets in paths, captions and reasons are redacted as in the report", () => {
+  const token = "sk_live_" + "a".repeat(24);
+  const journey = journeyOf(
+    { ...replayFlow, steps: [{ action: "navigate", target: `/reset?token=${token}` }, ...replayFlow.steps.slice(1)] as FlowStep[] },
+    { status: "failed", step: 1, did: "navigate", reason: `the page answered HTTP 500 at /reset?token=${token}`, path: `/reset?token=${token}` },
+    ["f1"],
+  );
+  const replay = redactReplay({
+    startedAt: "t",
+    roles: [{ role: "anonymous", own: true, visits: [visitOf({ path: `/a?api_key=${token}`, status: 200, loginRedirect: false })], journeys: [journey] }],
+    framesLeftOut: 0,
+  });
+  const html = buildCheckReplayHtml(replay, replayMeta);
+  assert.ok(!html.includes(token), "no secret reaches the page");
+  assert.match(html, /redacted|\*\*\*|REDACTED/i);
+});
+
+test("replay page: run metadata, a badge per journey, the first failing step highlighted and linked, and app text escaped", () => {
+  const passing = journeyOf({ ...replayFlow, name: "browse <b>" }, { status: "passed" }, ["replay-frames/check/0001-flow-navigate.jpg"]);
+  const failing = journeyOf(replayFlow, { status: "failed", step: 2, did: "type", reason: "nothing visible <script>", path: "/cart" }, ["a", "b"]);
+  const html = buildCheckReplayHtml(
+    {
+      startedAt: "t",
+      roles: [
+        { role: "anonymous", own: true, visits: [visitOf({ path: "/", status: 200, loginRedirect: false }, "v")], journeys: [passing, failing] },
+        { role: "member", own: false, visits: [], journeys: [] },
+      ],
+      framesLeftOut: 0,
+    },
+    replayMeta,
+  );
+  for (const want of ["http://127.0.0.1:3000", "2026-01-02 03:04:05 UTC", "2026-01-02 03:05:06 UTC", replayMeta.commit!, "v9.9.9"])
+    assert.ok(html.includes(want), want);
+  assert.match(html, /data-testid="replay-verdict">failed</);
+  assert.match(html, /<span class="badge pass">passed<\/span> <b>browse &lt;b&gt;<\/b>/);
+  assert.match(html, /<span class="badge fail">failed<\/span> <b>checkout<\/b>/);
+  assert.equal((html.match(/class="step [a-z-]+ first-failing"/g) ?? []).length, 1);
+  assert.match(html, /<li class="step failed first-failing" id="role-0-journey-1-first-failing"/);
+  assert.match(html, /href="#role-0-journey-1-first-failing" data-testid="replay-first-failing-link">Step 2 failed</);
+  assert.ok(!html.includes("<script>"), "text from the app is escaped");
+  assert.match(html, /nothing visible &lt;script&gt;/);
+  // A failing journey is open; a passing one is folded.
+  assert.match(html, /<details class="journey fail" open/);
+  assert.match(html, /<details class="journey pass" data-status/);
+  assert.match(html, /No journey ran as this role/);
+  // Self-contained: no script, no stylesheet or image from anywhere but beside it.
+  assert.ok(!/<script|<link |src="https?:|href="https?:/.test(html));
+  // Without a commit, no commit row.
+  assert.ok(!buildCheckReplayHtml({ startedAt: "t", roles: [], framesLeftOut: 0 }, { ...replayMeta, commit: undefined }).includes("<dt>Commit</dt>"));
+});
+
+test("replay: the commit is GITHUB_SHA when it is one", () => {
+  assert.equal(commitOf({ GITHUB_SHA: "ABCDEF1234567" }), "abcdef1234567");
+  assert.equal(commitOf({}), undefined);
+  assert.equal(commitOf({ GITHUB_SHA: "not a sha; rm -rf" }), undefined);
+  assert.equal(commitOf({ GITHUB_SHA: "abc" }), undefined);
+});
+
+test("replay: frames are copied only from a recorded frame's own path, into replay-frames/, under distinct session names", () => {
+  const recorded = framePath(replaySessionKey("member"), 3, "flow-click");
+  assert.equal(replayFramePath(recorded), "replay-frames/role-member/0003-flow-click.jpg");
+  assert.equal(replayFramePath(framePath(replaySessionKey(), 1, "crawl")), "replay-frames/check/0001-crawl.jpg");
+  for (const bad of ["recordings/../x/0001-a.jpg", "/etc/passwd", "recordings/check/finding-abc.png", "recordings/a/b/0001-a.jpg", ""])
+    assert.equal(replayFramePath(bad), null, bad);
+  assert.notEqual(replaySessionKey(), replaySessionKey("check"));
+  assert.equal(isReplayFrameFile("0001-crawl.jpg"), true);
+  assert.equal(isReplayFrameFile("notes.txt"), false);
+});
+
+test("replay: an earlier run's page and frames are removed before a check, and nothing else in the folder", () => {
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "replay-clear-"));
+  try {
+    fs.writeFileSync(path.join(out, "replay.html"), "old");
+    fs.writeFileSync(path.join(out, "report.md"), "keep");
+    fs.mkdirSync(path.join(out, "replay-frames", "check"), { recursive: true });
+    fs.writeFileSync(path.join(out, "replay-frames", "check", "0001-crawl.jpg"), "x");
+    fs.mkdirSync(path.join(out, "replay-frames", "mine"), { recursive: true });
+    fs.writeFileSync(path.join(out, "replay-frames", "mine", "notes.txt"), "keep");
+    fs.mkdirSync(path.join(out, "replay-videos"), { recursive: true });
+    fs.writeFileSync(path.join(out, "replay-videos", "journey-01-checkout.webm"), "x");
+    clearReplayOutput(out);
+    assert.equal(fs.existsSync(path.join(out, "replay-videos")), false, "an earlier run's journey videos go too");
+    assert.equal(fs.existsSync(path.join(out, "replay.html")), false);
+    assert.equal(fs.existsSync(path.join(out, "replay-frames", "check")), false);
+    assert.equal(fs.readFileSync(path.join(out, "replay-frames", "mine", "notes.txt"), "utf8"), "keep");
+    assert.equal(fs.readFileSync(path.join(out, "report.md"), "utf8"), "keep");
+    clearReplayOutput(path.join(out, "nothing-here"));
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test("replay: a check result's JSON never carries the replay model", () => {
+  const withReplay = { ...result([]), replay: { startedAt: "t", roles: [], framesLeftOut: 0 } };
+  assert.equal("replay" in (toSummaryJson(withReplay, "1.0.0") as object), false);
+});
+
+test("action: replay.html and its frames are kept only when this run wrote the page", () => {
+  const out = "/o";
+  const has =
+    (...files: string[]) =>
+    (p: string) =>
+      files.includes(p);
+  const none = { replay: "", "replay-frames": "", "replay-videos": "" };
+  assert.deepEqual(replayOutputs(out, has()), none);
+  assert.deepEqual(
+    replayOutputs(out, has(path.join(out, "replay-frames"), path.join(out, "replay-videos"))),
+    none,
+    "frames or videos without a page are an earlier run's",
+  );
+  assert.deepEqual(replayOutputs(out, has(path.join(out, "replay.html"), path.join(out, "replay-frames"))), {
+    replay: path.join(out, "replay.html"),
+    "replay-frames": path.join(out, "replay-frames"),
+    "replay-videos": "",
+  });
+  assert.deepEqual(replayOutputs(out, has(path.join(out, "replay.html"), path.join(out, "replay-videos"))), {
+    replay: path.join(out, "replay.html"),
+    "replay-frames": "",
+    "replay-videos": path.join(out, "replay-videos"),
+  });
+  const steps = action.runs.steps as Array<{ name: string; with?: { path?: string } }>;
+  const upload = steps.find((s) => s.name === "Keep the results")!;
+  assert.match(upload.with!.path!, /steps\.run\.outputs\.replay \}\}/);
+  assert.match(upload.with!.path!, /steps\.run\.outputs\.replay-frames \}\}/);
+  assert.match(upload.with!.path!, /steps\.run\.outputs\.replay-videos \}\}/);
+});
+
+test("--video: alone means on, off leaves it off, anything else is refused; absent is off", () => {
+  const parse = (...args: string[]) => parseCheckArgs(args, "/work");
+  const on = parse("--video", "http://127.0.0.1:3000");
+  assert.ok(on.ok && on.options.video === true && on.options.url === "http://127.0.0.1:3000/");
+  const both = parse("http://127.0.0.1:3000", "--video", "--record");
+  assert.ok(both.ok && both.options.video === true && both.options.record === true);
+  const off = parse("http://127.0.0.1:3000", "--video=off");
+  assert.ok(off.ok && !("video" in off.options));
+  const bad = parse("http://127.0.0.1:3000", "--video=webm");
+  assert.ok(!bad.ok && /--video is on or off/.test(bad.error));
+  const none = parse("http://127.0.0.1:3000");
+  assert.ok(none.ok && !("video" in none.options));
+});
+
+test("replay: each journey's video has a file of its own beside the page, named so nothing in a flow's file name decides where it goes", () => {
+  assert.equal(journeyVideoPath(1, "checkout.json"), "replay-videos/journey-01-checkout.webm");
+  assert.equal(journeyVideoPath(12, "../../etc/passwd.json"), "replay-videos/journey-12-etc-passwd.webm");
+  assert.notEqual(journeyVideoPath(1, "a.json"), journeyVideoPath(2, "a.json"));
+  assert.equal(isJourneyVideoFile("journey-01-checkout.webm"), true);
+  assert.equal(isJourneyVideoFile("holiday.webm"), false);
+});
+
+test("replay page: a journey with a video plays it beside its steps and links it; one without has neither", () => {
+  const withVideo = { ...journeyOf(replayFlow, { status: "passed" }), video: "replay-videos/journey-01-checkout.webm" };
+  const without = journeyOf({ ...replayFlow, name: "browse" }, { status: "passed" });
+  const replay: CheckReplay = { startedAt: "t", roles: [{ role: "anonymous", own: true, visits: [], journeys: [withVideo, without] }], framesLeftOut: 0 };
+  const html = buildCheckReplayHtml(replay, replayMeta);
+  assert.deepEqual(replayVideos(replay), ["replay-videos/journey-01-checkout.webm"]);
+  assert.equal((html.match(/<video /g) ?? []).length, 1);
+  assert.match(html, /<video controls preload="metadata" src="replay-videos\/journey-01-checkout\.webm" data-testid="replay-journey-video">/);
+  assert.match(html, /href="replay-videos\/journey-01-checkout\.webm"[^>]*data-testid="replay-video-open"/);
+  // The video sits inside its own journey, before that journey's steps.
+  const checkout = html.slice(html.indexOf("<b>checkout</b>"), html.indexOf("<b>browse</b>"));
+  assert.ok(checkout.indexOf("<video ") > 0 && checkout.indexOf("<video ") < checkout.indexOf('<ol class="steps">'));
+  assert.match(html, /<dt>Videos<\/dt><dd>1<\/dd>/);
+  assert.ok(!buildCheckReplayHtml({ ...replay, roles: [{ ...replay.roles[0], journeys: [without] }] }, replayMeta).includes("<dt>Videos</dt>"));
 });
