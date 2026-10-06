@@ -17,6 +17,8 @@ import { writeRedirectHopsJudged } from "../../dist/browsers.js";
 import { firstLook } from "../../dist/first-run.js";
 import { BROWSER, check, eventually, settle, SIGN_IN_COOKIE, until, type SmokeContext } from "./harness.ts";
 import { writeProfile } from "../../dist/engine/profiles.js";
+import { readCheckInputs, runCheck } from "../../dist/check-run.js";
+import { parseCheckArgs } from "../../dist/engine/check.js";
 
 export const title = "check (deterministic gate)";
 
@@ -444,7 +446,7 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     JSON.stringify(broken.summary?.issues),
   );
 
-  await recordedChecks({ flowFor, project, checkWith });
+  await recordedChecks({ baseUrl, flowFor, project, checkWith });
 
   const missing = await checkWith(
     project("flow-missing", {
@@ -1151,14 +1153,18 @@ async function flowWriteEdges({
  * gate, so the failing one shows where it broke.
  */
 async function recordedChecks({
+  baseUrl,
   flowFor,
   project,
   checkWith,
 }: {
+  baseUrl: string;
   flowFor: (page: string) => { name: string; steps: Array<Record<string, unknown>> };
   project: (name: string, flows: Record<string, unknown>) => string;
   checkWith: (dir: string, extra?: string[], env?: Record<string, string>) => Promise<{ status: number | null; out: string; summary: unknown }>;
 }): Promise<void> {
+  await sessionCarriesUnderVideo({ project, checkWith });
+  await engineFrameCap({ baseUrl, flowFor, project });
   const typed = "typed-value-5813";
   const withTyped = (page: string) => {
     const flow = flowFor(page);
@@ -1202,7 +1208,7 @@ async function recordedChecks({
     "a video was written",
   );
 
-  // --video: one WebM per journey that ran, each on a page of its own, linked from the page beside its steps.
+  // --video: one WebM per journey that ran, and only of the journeys, linked from the page beside its steps.
   const filmed = project("flow-video", { "a-works.json": withTyped("/check-flow.html"), "b-breaks.json": withTyped("/check-flow-broken.html") });
   const videoRun = await checkWith(filmed, ["--video"]);
   const videosDir = path.join(filmed, "out", "replay-videos");
@@ -1243,5 +1249,82 @@ async function recordedChecks({
     "...--record off wins over it, and removes the page and frames an earlier run left",
     again.status === 0 && !fs.existsSync(path.join(viaEnv, "out", "replay.html")) && !fs.existsSync(path.join(viaEnv, "out", "replay-frames")),
     `${again.status} ${fs.readdirSync(path.join(viaEnv, "out")).join(",")}`,
+  );
+}
+
+/**
+ * --video films each flow on the session's own page, so what one flow leaves in
+ * sessionStorage is there for the next, as it is unfilmed. The same two flows
+ * run with and without --video and must agree.
+ */
+async function sessionCarriesUnderVideo({
+  project,
+  checkWith,
+}: {
+  project: (name: string, flows: Record<string, unknown>) => string;
+  checkWith: (dir: string, extra?: string[], env?: Record<string, string>) => Promise<{ status: number | null; out: string; summary: unknown }>;
+}): Promise<void> {
+  const flows = {
+    "1-remember.json": {
+      name: "remember",
+      steps: [
+        { action: "navigate", target: "/check-session-carry.html" },
+        { action: "click", target: "testid=carry-remember" },
+        { action: "expect-text", text: "Remembered: yes" },
+      ],
+    },
+    "2-still-remembered.json": {
+      name: "still remembered",
+      steps: [
+        { action: "navigate", target: "/check-session-carry.html" },
+        { action: "expect-text", text: "Remembered: yes" },
+      ],
+    },
+  };
+  const statuses = (r: { summary: unknown }) => (r.summary as FlowSummary | null)?.flows.map((f) => f.status) ?? [];
+  const plain = await checkWith(project("carry-plain", flows));
+  const filmedDir = project("carry-video", flows);
+  const filmed = await checkWith(filmedDir, ["--video"]);
+  check(
+    "a flow sees the sessionStorage the flow before it wrote, filmed (--video) as unfilmed",
+    plain.status === 0 &&
+      filmed.status === 0 &&
+      JSON.stringify(statuses(plain)) === '["passed","passed"]' &&
+      JSON.stringify(statuses(filmed)) === '["passed","passed"]' &&
+      fs.readdirSync(path.join(filmedDir, "out", "replay-videos")).length === 2,
+    `plain ${plain.status} ${JSON.stringify(statuses(plain))}; video ${filmed.status} ${JSON.stringify(statuses(filmed))} ${filmed.out.slice(-600)}`,
+  );
+}
+
+/**
+ * The engine's own frame cap, lowered to 3: the check's session keeps three
+ * frames and takes none after them, and every step and visit past it is
+ * marked and counted on the page, not only those the page itself drops.
+ */
+async function engineFrameCap({
+  baseUrl,
+  flowFor,
+  project,
+}: {
+  baseUrl: string;
+  flowFor: (page: string) => { name: string; steps: Array<Record<string, unknown>> };
+  project: (name: string, flows: Record<string, unknown>) => string;
+}): Promise<void> {
+  const dir = project("frame-cap", { "details.json": flowFor("/check-flow.html") });
+  const out = path.join(dir, "out");
+  const parsed = parseCheckArgs([`${baseUrl}/check-flow.html`, "--project", dir, "--out", out, "--paths", "/check-flow.html", "--record"], dir);
+  if (!parsed.ok) throw new Error(parsed.error);
+  const options = { ...parsed.options, maxFrames: 3 };
+  const result = await runCheck(options, () => {}, readCheckInputs(options));
+  const replay = result.replay;
+  const steps = replay?.roles[0]?.journeys[0]?.steps ?? [];
+  const visits = replay?.roles[0]?.visits ?? [];
+  const framed = [...visits, ...steps].filter((x) => x.frame).length;
+  const past = [...visits, ...steps].filter((x) => x.pastCap).length;
+  // One visit and six steps: three framed, four past the cap.
+  check(
+    "a session that reaches its frame cap takes no more, and the page marks and counts every step past it",
+    framed === 3 && past === 4 && replay?.framesLeftOut === 4 && steps.slice(2).every((s) => s.pastCap === true),
+    `framed=${framed} past=${past} leftOut=${replay?.framesLeftOut} ${JSON.stringify(steps.map((s) => [s.frame ?? null, s.pastCap ?? false]))}`,
   );
 }

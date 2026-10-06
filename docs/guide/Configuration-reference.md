@@ -80,7 +80,7 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--baseline-threshold` | `0.1` | The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; `update` rewrites the baselines past it (and any taken on another operating system). Not 0 by default, so anti-aliasing noise between machines and browser builds does not fail the gate; `0` counts every changed pixel (a colour channel off by more than 8 in 255). A change of size always counts |
 | `--sarif-file-anchor` | the running workflow's file, else `package.json`, else `README.md` | The repository file, relative to the repository root, that a `check.sarif` result points at when no saved flow raised it. See [SARIF locations](Ways-to-use-it.md#sarif-locations) |
 | `--record` | `SCENESCOUT_RECORD`, else off | Keep a frame after each route visit and each saved-flow step, and write `replay.html` (role → journey → step) beside the report, with the frames in `replay-frames/`. Given alone it means `on`; `--record off` wins over the variable |
-| `--video` | off | Record a WebM of each saved flow, each on a page of its own, into `replay-videos/`, played on `replay.html` beside the journey's steps. Given alone it means `on` |
+| `--video` | off | Record a WebM of each saved flow, and only of the flows, into `replay-videos/`, played on `replay.html` beside the journey's steps. Given alone it means `on` |
 
 ### `scenescout ci`
 

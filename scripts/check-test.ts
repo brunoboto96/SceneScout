@@ -29,10 +29,12 @@ import {
   npmCommand,
   outDirFor,
   picturesDir,
+  REPLAY_GENERATOR_META,
   replayOutputs,
   SUMMARY_OUTPUT_NAMES,
   summaryOutputs,
   verdict,
+  writtenReplay,
 } from "../action/check-action.mjs";
 import { brokenImageIssues, geometryIssues } from "../src/engine/collector.ts";
 import { analyzeDesign, type DesignPayload, type StyleRecord } from "../src/engine/design.ts";
@@ -115,8 +117,10 @@ import {
   buildCheckReplayHtml,
   capFrames,
   commitOf,
+  isGeneratedReplay,
   isJourneyVideoFile,
   isReplayFrameFile,
+  REPLAY_GENERATOR,
   journeyOf,
   journeyVideoPath,
   replayVideos,
@@ -3320,7 +3324,7 @@ test("--record: alone means on, on/off/true/false are taken, anything else is re
 });
 
 test("replay: a passing journey's steps all passed, each with its caption and frame", () => {
-  const steps = journeySteps(replayFlow.steps, { status: "passed" }, ["f1", "f2", "f3", "f4"]);
+  const steps = journeySteps(replayFlow.steps, { status: "passed" }, [{ frame: "f1" }, { frame: "f2" }, { frame: "f3" }, { frame: "f4" }]);
   assert.deepEqual(
     steps.map((s) => [s.n, s.caption, s.result, s.frame]),
     [
@@ -3334,7 +3338,7 @@ test("replay: a passing journey's steps all passed, each with its caption and fr
 
 test("replay: a journey that fails partway has its earlier steps passed, the failing one with its reason, and the rest not run, with no frame", () => {
   const outcome = { status: "failed", step: 3, did: 'click role=button[name="Pay"]', reason: "nothing visible matches", path: "/cart" } as const;
-  const journey = journeyOf(replayFlow, outcome, ["f1", "f2", "f3"]);
+  const journey = journeyOf(replayFlow, outcome, [{ frame: "f1" }, { frame: "f2" }, { frame: "f3" }]);
   assert.equal(journey.status, "failed");
   assert.equal(journey.firstFailing, 3);
   assert.deepEqual(
@@ -3347,16 +3351,18 @@ test("replay: a journey that fails partway has its earlier steps passed, the fai
     ],
   );
   // A frame handed over for a step that never ran is not shown against it.
-  assert.equal(journeySteps(replayFlow.steps, outcome, ["f1", "f2", "f3", "stray"])[3].frame, undefined);
+  assert.equal(journeySteps(replayFlow.steps, outcome, [{ frame: "f1" }, { frame: "f2" }, { frame: "f3" }, { frame: "stray" }])[3].frame, undefined);
   // A refused step is the journey's first failing step too.
-  const refused = journeyOf(replayFlow, { status: "refused", step: 1, did: "navigate /cart", reason: "the write policy refused POST /x", path: "/" }, ["f1"]);
+  const refused = journeyOf(replayFlow, { status: "refused", step: 1, did: "navigate /cart", reason: "the write policy refused POST /x", path: "/" }, [
+    { frame: "f1" },
+  ]);
   assert.deepEqual(
     refused.steps.map((s) => s.result),
     ["refused", "not-run", "not-run", "not-run"],
   );
   assert.equal(refused.firstFailing, 1);
   // A step with no frame kept (null) shows none.
-  assert.equal(journeySteps(replayFlow.steps, { status: "passed" }, [null, "f2"])[0].frame, undefined);
+  assert.equal(journeySteps(replayFlow.steps, { status: "passed" }, [null, { frame: "f2" }])[0].frame, undefined);
 });
 
 test("replay: a typed value is never part of a caption", () => {
@@ -3366,8 +3372,8 @@ test("replay: a typed value is never part of a caption", () => {
 
 test("replay: a visit says what the route answered", () => {
   const base = { path: "/a", status: 200, loginRedirect: false };
-  assert.equal(visitOf(base, "f").result, "loaded");
-  assert.equal(visitOf(base, "f").frame, "f");
+  assert.equal(visitOf(base, { frame: "f" }).result, "loaded");
+  assert.equal(visitOf(base, { frame: "f" }).frame, "f");
   assert.equal(visitOf({ ...base, status: 404 }).result, "http-error");
   assert.equal(visitOf({ ...base, loginRedirect: true }).result, "sign-in");
   const failed = visitOf({ ...base, status: null, loadError: "net::ERR_CONNECTION_REFUSED" });
@@ -3396,13 +3402,14 @@ test("replay: the frame cap holds per role on the page, the first frames kept an
   assert.equal(own.visits[0].frame, "anonymous-visit", "the first frame is kept");
   assert.equal(own.journeys[0].steps[RECORD_MAX_FRAMES - 2].frame, `anonymous-${RECORD_MAX_FRAMES - 2}`);
   assert.equal(own.journeys[0].steps[RECORD_MAX_FRAMES - 1].frame, undefined, "past the cap, no frame");
+  assert.equal(own.journeys[0].steps[RECORD_MAX_FRAMES - 1].pastCap, true, "and marked as past it");
   assert.equal(capped.roles[1].journeys[0].steps.filter((s) => s.frame).length, 3, "another role has a cap of its own");
   assert.equal(capped.framesLeftOut, 51);
   // The page shows exactly the frames the capped model keeps.
   const html = buildCheckReplayHtml(capped, replayMeta);
   assert.equal((html.match(/<img /g) ?? []).length, replayFrames(capped).length);
   assert.equal(replayFrames(capped).length, RECORD_MAX_FRAMES + 4);
-  assert.match(html, /51 frame\(s\) past the cap of 600 per role are not kept/);
+  assert.match(html, /51 step\(s\) and visit\(s\) have no frame because their session had already kept 600/);
 });
 
 const replayMeta: ReplayMeta = {
@@ -3420,7 +3427,7 @@ test("replay: secrets in paths, captions and reasons are redacted as in the repo
   const journey = journeyOf(
     { ...replayFlow, steps: [{ action: "navigate", target: `/reset?token=${token}` }, ...replayFlow.steps.slice(1)] as FlowStep[] },
     { status: "failed", step: 1, did: "navigate", reason: `the page answered HTTP 500 at /reset?token=${token}`, path: `/reset?token=${token}` },
-    ["f1"],
+    [{ frame: "f1" }],
   );
   const replay = redactReplay({
     startedAt: "t",
@@ -3433,13 +3440,16 @@ test("replay: secrets in paths, captions and reasons are redacted as in the repo
 });
 
 test("replay page: run metadata, a badge per journey, the first failing step highlighted and linked, and app text escaped", () => {
-  const passing = journeyOf({ ...replayFlow, name: "browse <b>" }, { status: "passed" }, ["replay-frames/check/0001-flow-navigate.jpg"]);
-  const failing = journeyOf(replayFlow, { status: "failed", step: 2, did: "type", reason: "nothing visible <script>", path: "/cart" }, ["a", "b"]);
+  const passing = journeyOf({ ...replayFlow, name: "browse <b>" }, { status: "passed" }, [{ frame: "replay-frames/check/0001-flow-navigate.jpg" }]);
+  const failing = journeyOf(replayFlow, { status: "failed", step: 2, did: "type", reason: "nothing visible <script>", path: "/cart" }, [
+    { frame: "a" },
+    { frame: "b" },
+  ]);
   const html = buildCheckReplayHtml(
     {
       startedAt: "t",
       roles: [
-        { role: "anonymous", own: true, visits: [visitOf({ path: "/", status: 200, loginRedirect: false }, "v")], journeys: [passing, failing] },
+        { role: "anonymous", own: true, visits: [visitOf({ path: "/", status: 200, loginRedirect: false }, { frame: "v" })], journeys: [passing, failing] },
         { role: "member", own: false, visits: [], journeys: [] },
       ],
       framesLeftOut: 0,
@@ -3460,8 +3470,10 @@ test("replay page: run metadata, a badge per journey, the first failing step hig
   assert.match(html, /<details class="journey fail" open/);
   assert.match(html, /<details class="journey pass" data-status/);
   assert.match(html, /No journey ran as this role/);
-  // Self-contained: no script, no stylesheet or image from anywhere but beside it.
-  assert.ok(!/<script|<link |src="https?:|href="https?:/.test(html));
+  // Self-contained: no script, no event handler, no stylesheet or image from anywhere but beside it.
+  assert.ok(!/<script|<link |src="https?:|href="https?:/i.test(html));
+  assert.deepEqual(html.match(/\son[a-z]+\s*=/gi), null, "no inline event handler");
+  assert.ok(isGeneratedReplay(html), "the page carries the generator mark");
   // Without a commit, no commit row.
   assert.ok(!buildCheckReplayHtml({ startedAt: "t", roles: [], framesLeftOut: 0 }, { ...replayMeta, commit: undefined }).includes("<dt>Commit</dt>"));
 });
@@ -3487,7 +3499,7 @@ test("replay: frames are copied only from a recorded frame's own path, into repl
 test("replay: an earlier run's page and frames are removed before a check, and nothing else in the folder", () => {
   const out = fs.mkdtempSync(path.join(os.tmpdir(), "replay-clear-"));
   try {
-    fs.writeFileSync(path.join(out, "replay.html"), "old");
+    fs.writeFileSync(path.join(out, "replay.html"), buildCheckReplayHtml({ startedAt: "t", roles: [], framesLeftOut: 0 }, replayMeta));
     fs.writeFileSync(path.join(out, "report.md"), "keep");
     fs.mkdirSync(path.join(out, "replay-frames", "check"), { recursive: true });
     fs.writeFileSync(path.join(out, "replay-frames", "check", "0001-crawl.jpg"), "x");
@@ -3518,19 +3530,21 @@ test("action: replay.html and its frames are kept only when this run wrote the p
     (...files: string[]) =>
     (p: string) =>
       files.includes(p);
+  // A page counts only when it carries the generator mark; these stand-in files all do.
+  const outputs = (exists: (p: string) => boolean) => replayOutputs(out, exists, () => true);
   const none = { replay: "", "replay-frames": "", "replay-videos": "" };
-  assert.deepEqual(replayOutputs(out, has()), none);
+  assert.deepEqual(outputs(has()), none);
   assert.deepEqual(
-    replayOutputs(out, has(path.join(out, "replay-frames"), path.join(out, "replay-videos"))),
+    outputs(has(path.join(out, "replay-frames"), path.join(out, "replay-videos"))),
     none,
     "frames or videos without a page are an earlier run's",
   );
-  assert.deepEqual(replayOutputs(out, has(path.join(out, "replay.html"), path.join(out, "replay-frames"))), {
+  assert.deepEqual(outputs(has(path.join(out, "replay.html"), path.join(out, "replay-frames"))), {
     replay: path.join(out, "replay.html"),
     "replay-frames": path.join(out, "replay-frames"),
     "replay-videos": "",
   });
-  assert.deepEqual(replayOutputs(out, has(path.join(out, "replay.html"), path.join(out, "replay-videos"))), {
+  assert.deepEqual(outputs(has(path.join(out, "replay.html"), path.join(out, "replay-videos"))), {
     replay: path.join(out, "replay.html"),
     "replay-frames": "",
     "replay-videos": path.join(out, "replay-videos"),
@@ -3578,4 +3592,50 @@ test("replay page: a journey with a video plays it beside its steps and links it
   assert.ok(checkout.indexOf("<video ") > 0 && checkout.indexOf("<video ") < checkout.indexOf('<ol class="steps">'));
   assert.match(html, /<dt>Videos<\/dt><dd>1<\/dd>/);
   assert.ok(!buildCheckReplayHtml({ ...replay, roles: [{ ...replay.roles[0], journeys: [without] }] }, replayMeta).includes("<dt>Videos</dt>"));
+});
+
+test("replay: a replay.html the project keeps in the output folder, without the generator mark, survives the clean-up", () => {
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "replay-own-"));
+  try {
+    const mine = "<!doctype html><title>Our replay notes</title><p>kept by hand</p>";
+    fs.writeFileSync(path.join(out, "replay.html"), mine);
+    clearReplayOutput(out);
+    assert.equal(fs.readFileSync(path.join(out, "replay.html"), "utf8"), mine);
+    // The action neither removes nor uploads it either.
+    assert.equal(writtenReplay(path.join(out, "replay.html")), false);
+    assert.deepEqual(replayOutputs(out), { replay: "", "replay-frames": "", "replay-videos": "" });
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test("action: the generator mark it looks for is the one the page carries", () => {
+  assert.equal(REPLAY_GENERATOR_META, `<meta name="generator" content="${REPLAY_GENERATOR}">`);
+  assert.ok(buildCheckReplayHtml({ startedAt: "t", roles: [], framesLeftOut: 0 }, replayMeta).includes(REPLAY_GENERATOR_META));
+});
+
+test("replay: steps and visits the session took no frame for because it was full say so, and are counted", () => {
+  // As the engine hands them over once its cap is reached: frames, then past-cap markers.
+  const journey = journeyOf(replayFlow, { status: "passed" }, [{ frame: "f1" }, { frame: "f2" }, { pastCap: true }, { pastCap: true }]);
+  assert.deepEqual(
+    journey.steps.map((s) => [s.frame ?? null, s.pastCap ?? false]),
+    [
+      ["f1", false],
+      ["f2", false],
+      [null, true],
+      [null, true],
+    ],
+  );
+  const visit = visitOf({ path: "/b", status: 200, loginRedirect: false }, { pastCap: true });
+  const replay = capFrames({ startedAt: "t", roles: [{ role: "anonymous", own: true, visits: [visit], journeys: [journey] }], framesLeftOut: 0, frameCap: 2 });
+  assert.equal(replay.framesLeftOut, 3, "every step and visit past the cap is counted, not only those the page drops");
+  const html = buildCheckReplayHtml(replay, replayMeta);
+  assert.equal((html.match(/No frame: the session had already kept 2, the most one session keeps\./g) ?? []).length, 3);
+  assert.match(html, /3 step\(s\) and visit\(s\) have no frame because their session had already kept 2/);
+  // A step that has no frame for another reason (the picture failed) is not counted.
+  assert.equal(
+    capFrames({ startedAt: "t", roles: [{ ...replay.roles[0], visits: [visitOf({ path: "/", status: 200, loginRedirect: false }, {})] }], framesLeftOut: 0 })
+      .framesLeftOut,
+    2,
+  );
 });

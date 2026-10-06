@@ -639,10 +639,12 @@ export interface CheckOptions extends CheckSettings {
    */
   record?: boolean;
   /**
-   * Record a video (WebM) of each saved flow, each on a page of its own, and
-   * link it from the replay page beside the journey's steps. Off unless --video is given.
+   * Record a video (WebM) of each saved flow, and only of the flows, and play
+   * it on the replay page beside the journey's steps. Off unless --video is given.
    */
   video?: boolean;
+  /** The most frames one recorded session keeps. Not a command-line option: unset is RECORD_MAX_FRAMES, and only tests lower it. */
+  maxFrames?: number;
 }
 
 /**
