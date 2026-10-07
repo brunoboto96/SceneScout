@@ -1207,6 +1207,8 @@ function standInServer(
     /** What a successful scout_navigate returns, when a test needs it to say more than the URL. */
     navigateText?: (url: string, session: string) => string;
     onCrawl?: () => void;
+    /** What scout_run_plan answers; by default every step ran and said OK. */
+    planReply?: (steps: Array<{ action: string; target?: string }>) => string;
   },
 ) {
   fs.mkdirSync(projectDir, { recursive: true });
@@ -1224,6 +1226,7 @@ function standInServer(
     "scout_finding",
     "scout_coverage",
     "scout_report",
+    "scout_run_plan",
   ];
   const listed = [...withSession, "scout_scan"].map((name) => ({
     name,
@@ -1263,6 +1266,15 @@ function standInServer(
             session,
           });
           return { text: isNew ? `Finding recorded: ${f.title} (id ${f.id})` : `Not recorded as new: merged into existing finding ${f.id}`, isError: false };
+        }
+        case "scout_run_plan": {
+          const steps = (args.steps ?? []) as Array<{ action: string; target?: string }>;
+          return {
+            text:
+              o.planReply?.(steps) ??
+              `PLAN (${steps.length}/${steps.length} steps ran):\n${steps.map((st, i) => `${i + 1}. ${st.action} ${st.target ?? ""} → OK`).join("\n")}`,
+            isError: false,
+          };
         }
         case "scout_report":
           fs.writeFileSync(path.join(projectDir, ".scenescout", "report.md"), `# SceneScout Report\n\nWritten from ${session}.\n`);
@@ -3586,4 +3598,75 @@ test("from run: a record that cannot be read, or a replay of one with no steps, 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("from run: a continued run takes the earlier run's path to its first page, and navigates there when the path cannot be repeated", async () => {
+  // Every route the crawl lists was worked on, the most left on /orders/new, which the earlier run reached from /orders by a button.
+  const record = buildRunRecord({
+    runId: "run-path",
+    at: "2026-10-07T09:00:00.000Z",
+    knownRoutes: [],
+    steps: [
+      ...["/", "/stock", "/reports", "/settings"].map((r) => ({ session: "default", url: `http://127.0.0.1:3000${r}`, action: "navigate", target: r })),
+      { session: "default", url: "http://127.0.0.1:3000/orders", action: "navigate", target: "/orders" },
+      { session: "default", url: "http://127.0.0.1:3000/orders/new", action: "click", target: 'button "New order"' },
+    ],
+    unexercised: [{ route: "/orders/new", keys: ["button:save", "textbox:customer"] }],
+    forms: [],
+    filled: [],
+    unchosen: [],
+    gaps: [],
+  });
+  const runOnce = async (planReply?: (steps: Array<{ action: string; target?: string }>) => string) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-from-run-path-"));
+    try {
+      const file = writeRecord(dir, record);
+      const server = standInServer(path.join(dir, "project"), { crawl: CRAWL_TEXT, ...(planReply ? { planReply } : {}) });
+      let kickoff = "";
+      const run = await runStandIn(["--lanes", "1", "--from-run", file], path.join(dir, "project"), server, (_s, _t, k) => {
+        kickoff = k;
+        return new Scripted([{ text: "Done.", calls: [], usage: use(1) }]);
+      });
+      return { kickoff, run, calls: server.calls };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const replayed = await runOnce(
+    (steps) =>
+      `PLAN (2/2 steps ran):\n1. navigate /orders → OK (http://127.0.0.1:3000/orders)\n2. click ${steps[1].target} → OK (http://127.0.0.1:3000/orders/new)`,
+  );
+  const plan = replayed.calls.find((c) => c.name === "scout_run_plan");
+  assert.deepEqual(plan?.args.steps, [
+    { action: "navigate", target: "/orders" },
+    { action: "click", target: 'role=button[name="New order"]' },
+  ]);
+  assert.match(String(plan?.args.task), /Taking the earlier run's path to \/orders\/new/);
+  assert.match(
+    replayed.kickoff,
+    /Your browser reached \/orders\/new the way the earlier run did: navigate \/orders → click role=button\[name="New order"\]\. Start there\./,
+  );
+  assert.deepEqual(replayed.run.json.record.prefixes, [{ session: "default", target: "/orders/new", steps: 2, outcome: "replayed" }]);
+  assert.ok(!replayed.calls.some((c) => c.name === "scout_navigate" && c.args.target === "/orders/new"), "the path, not the address");
+
+  // The contrastive case: the page changed, the plan's click failed, so the run goes there by its address and records why.
+  const fellBack = await runOnce(
+    (steps) => `PLAN (2/2 steps ran):\n1. navigate /orders → OK\n2. click ${steps[1].target} → FAILED: locator.click: Timeout 5000ms exceeded.`,
+  );
+  assert.ok(fellBack.calls.some((c) => c.name === "scout_navigate" && c.args.target === "/orders/new"));
+  assert.match(
+    fellBack.kickoff,
+    /The earlier run's path to \/orders\/new could not be repeated \(2 of 2 step\(s\) ran: 2\. click .*FAILED.*\), so your browser was sent there directly\./,
+  );
+  const [note] = fellBack.run.json.record.prefixes;
+  assert.equal(note.outcome, "navigated");
+  assert.match(note.why, /FAILED/);
+
+  // Every step OK, but the page stayed put: not the path taken either.
+  const stayed = await runOnce(
+    (steps) =>
+      `PLAN (2/2 steps ran):\n1. navigate /orders → OK (http://127.0.0.1:3000/orders)\n2. click ${steps[1].target} → OK (http://127.0.0.1:3000/orders)`,
+  );
+  assert.equal(stayed.run.json.record.prefixes[0].outcome, "navigated");
+  assert.match(stayed.run.json.record.prefixes[0].why, /ended on \/orders, not \/orders\/new/);
 });

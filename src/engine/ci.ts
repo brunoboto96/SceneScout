@@ -1054,6 +1054,7 @@ function cleanRecord(r: RunRecord, clean: (s: string) => string): RunRecord {
       unchosen: l.unchosen.map((d) => ({ key: clean(d.key), options: all(d.options) })),
     })),
     gaps: all(r.gaps),
+    ...(r.prefixes ? { prefixes: r.prefixes.map((n) => ({ ...n, target: clean(n.target), ...(n.why !== undefined ? { why: clean(n.why) } : {}) })) } : {}),
   };
 }
 

@@ -51,6 +51,7 @@ import * as timeLimits from "./smoke/time-limits.ts";
 import * as snapshotContents from "./smoke/snapshot.ts";
 import * as refsAndDiffs from "./smoke/refs.ts";
 import * as targets from "./smoke/targets.ts";
+import * as fromRunPath from "./smoke/from-run-path.ts";
 import * as settleAfterLeaving from "./smoke/settle.ts";
 import * as actionResults from "./smoke/action-results.ts";
 
@@ -76,6 +77,7 @@ const suites = [
   snapshotContents,
   refsAndDiffs,
   targets,
+  fromRunPath,
   settleAfterLeaving,
   actionResults,
   unload,

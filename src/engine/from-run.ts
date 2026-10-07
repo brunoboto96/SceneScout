@@ -118,6 +118,22 @@ export interface RunRecord {
   gaps: string[];
   /** Set when the run itself started from an earlier one: how, and which. */
   followed?: { mode: FromRunMode; runId: string };
+  /**
+   * A continued run's replays of the earlier run's path to a lane's first page
+   * (prefixPlan), each with its outcome (PrefixNote) and why it was not
+   * replayed.
+   */
+  prefixes?: PrefixNote[];
+}
+
+/** How a continued run reached one lane's first page. */
+export interface PrefixNote {
+  session: string;
+  target: string;
+  steps: number;
+  /** replayed: the path ended on the page. navigated: it did not, and the page was opened by its address. unreached: neither worked (or the page is a pattern no address opens). */
+  outcome: "replayed" | "navigated" | "unreached";
+  why?: string;
 }
 
 /** The most steps a record keeps: a replay of more would not fit a model's first message anyway. */
@@ -289,6 +305,23 @@ export function readRunRecord(raw: unknown): RunRecord | null {
     )
   )
     return null;
+  const prefixes = raw.prefixes;
+  if (
+    prefixes !== undefined &&
+    !(
+      Array.isArray(prefixes) &&
+      prefixes.every(
+        (n) =>
+          isObj(n) &&
+          typeof n.session === "string" &&
+          typeof n.target === "string" &&
+          typeof n.steps === "number" &&
+          (n.outcome === "replayed" || n.outcome === "navigated" || n.outcome === "unreached") &&
+          (n.why === undefined || typeof n.why === "string"),
+      )
+    )
+  )
+    return null;
   const followed = raw.followed;
   if (
     followed !== undefined &&
@@ -345,6 +378,8 @@ export interface ContinueItem {
   tier: 1 | 2 | 3;
   /** For tier 2: what the earlier run left there. */
   work?: RouteLeft;
+  /** For a page the earlier run reached by acting on another page: how it got there (pathLine), so the run can get there the same way. */
+  path?: string;
 }
 
 /**
@@ -369,7 +404,9 @@ export function continuePlan(record: RunRecord, routesNow: readonly string[]): C
     const id = identity(route);
     if (!visited.has(id)) return { route, tier: 1 };
     const work = leftBy.get(id);
-    return work && workLeft(work) > 0 ? { route, tier: 2, work } : { route, tier: 3 };
+    const plan = prefixPlan(record, route);
+    const path = plan && "steps" in plan && !plan.direct ? { path: pathLine(plan.steps) } : {};
+    return work && workLeft(work) > 0 ? { route, tier: 2, work, ...path } : { route, tier: 3, ...path };
   });
   return [
     ...items.filter((i) => i.tier === 1).sort(byName),
@@ -421,7 +458,7 @@ export function continueLines(items: readonly ContinueItem[], o: { from: string;
     ...(left.length > 0
       ? [
           `2. Then the routes it left work on, the most first. On each, do this before anything else:`,
-          ...left.slice(0, LINES_MAX.routes).map((i) => `   ${workLine(i.work!)}`),
+          ...left.slice(0, LINES_MAX.routes).flatMap((i) => [`   ${workLine(i.work!)}`, ...(i.path ? [`     (it reached this page by: ${i.path})`] : [])]),
           ...(left.length > LINES_MAX.routes ? [`   … and ${left.length - LINES_MAX.routes} more route(s)`] : []),
         ]
       : [`2. It left no work on the routes it visited.`]),
@@ -432,6 +469,165 @@ export function continueLines(items: readonly ContinueItem[], o: { from: string;
         )}`
       : "",
   ].filter(Boolean);
+}
+
+// ── the path to a page ───────────────────────────────────────────────────────
+
+/** A step scout_run_plan takes: a semantic target, never a snapshot ref. */
+export interface PlanStep {
+  action: "navigate" | "click" | "type" | "select" | "press" | "hover";
+  target?: string;
+  value?: string;
+  pressEnter?: boolean;
+  replace?: boolean;
+}
+
+/** The most steps one scout_run_plan call runs, and so the longest path replayed. */
+export const MAX_PREFIX_STEPS = 20;
+
+/** A route that is a pattern (`/orders/:id`) names no page a browser can open. */
+export const isPattern = (route: string): boolean => /(^|\/)[:*]|\[[^\]]+\]/.test(route);
+
+/** A control as the log names it (`button "Save"`) as a plan target: by role and name, quoted so the name survives. */
+function roleTarget(role: string, name: string): string | null {
+  if (!name.includes('"')) return `role=${role}[name="${name}"]`;
+  if (!name.includes("'")) return `role=${role}[name='${name}']`;
+  return null;
+}
+
+/**
+ * A value to type where the earlier run's was not kept (typed values never
+ * are): one a field of that name accepts, so a form that needs a value moves
+ * on as it did.
+ */
+export function standInValue(fieldName: string): string {
+  const n = fieldName.toLowerCase();
+  if (/e-?mail/.test(n)) return "scout@example.com";
+  if (/phone|tel/.test(n)) return "5550100";
+  if (/qty|quantity|amount|number|count|price|age/.test(n)) return "1";
+  if (/date/.test(n)) return "2026-01-01";
+  if (/url|website|link/.test(n)) return "https://example.com";
+  return "SceneScout test";
+}
+
+/**
+ * One recorded step as a plan step, or a reason it cannot be one. `back`
+ * becomes a navigation to the page it landed on, which the path visited.
+ */
+export function planStepOf(step: RunStep): PlanStep | { cannot: string } {
+  const action = step.action.replace(/^plan:/, "").replace(/×\d+$/, "");
+  const t = step.target ?? "";
+  // A plan step's own target is already a semantic one.
+  const semantic = /^(testid|text|label|role)=/.test(t);
+  const control = /^([a-z]+) "(.*)$/.exec(t);
+  const split = (sep: string): [string, string] | null => {
+    if (!control) return null;
+    const at = control[2].indexOf(sep);
+    return at < 0 ? null : [control[2].slice(0, at), control[2].slice(at + sep.length)];
+  };
+  switch (action) {
+    case "navigate": {
+      if (!t) return { cannot: "a navigation with no address" };
+      try {
+        const u = new URL(t, "http://x");
+        return { action: "navigate", target: `${u.pathname}${u.search}` };
+      } catch {
+        return { cannot: `an address that does not parse (${t.slice(0, 60)})` };
+      }
+    }
+    case "back":
+      return isPattern(step.route) ? { cannot: `going back to ${step.route}, a pattern` } : { action: "navigate", target: step.route };
+    case "press":
+      return t ? { action: "press", value: t } : { cannot: "a key press with no key" };
+    case "click":
+    case "hover": {
+      if (semantic) return { action, target: t };
+      const name = control && control[2].endsWith('"') ? control[2].slice(0, -1) : null;
+      const target = control && name !== null ? roleTarget(control[1], name) : null;
+      return target ? { action, target } : { cannot: `a control the log does not name (${t.slice(0, 60)})` };
+    }
+    case "type": {
+      if (semantic) return { action: "type", target: t, value: standInValue(t), replace: true };
+      const parts = split('" ← ');
+      const target = control && parts ? roleTarget(control[1], parts[0]) : null;
+      if (!target || !parts) return { cannot: `a field the log does not name (${t.slice(0, 60)})` };
+      return { action: "type", target, value: standInValue(parts[0]), replace: true, ...(/ \+ Enter\b/.test(parts[1]) ? { pressEnter: true } : {}) };
+    }
+    case "select": {
+      const parts = split('" = ');
+      const target = control && parts ? roleTarget(control[1], parts[0]) : null;
+      if (!target || !parts) return { cannot: `a dropdown the log does not name (${t.slice(0, 60)})` };
+      return { action: "select", target, value: parts[1].replace(/ \(matched option .*$/, "") };
+    }
+    default:
+      return { cannot: `a ${action} step, which a plan cannot repeat` };
+  }
+}
+
+/**
+ * The path the earlier run took to a page, as plan steps: in the session that
+ * first reached it, from the last page it opened by address up to the step
+ * that landed there, leaving out snapshots. `direct` when the page was itself
+ * opened by address, so no step on another page is needed. Null when the
+ * record never reached the page; `cannot` when a step of the path cannot be
+ * repeated or the path is longer than one plan.
+ */
+export function prefixPlan(record: RunRecord, target: string): { steps: PlanStep[]; direct: boolean; session: string } | { cannot: string } | null {
+  const id = identity(target);
+  const first = record.steps.find((s) => s.route === id && s.action !== "snapshot");
+  if (!first) return null;
+  const mine = record.steps.filter((s) => s.session === first.session);
+  const k = mine.indexOf(first);
+  const isNav = (s: RunStep): boolean => /^(plan:)?navigate$/.test(s.action);
+  let j = k;
+  while (j >= 0 && !isNav(mine[j])) j -= 1;
+  const path = mine.slice(Math.max(j, 0), k + 1).filter((s) => s.action !== "snapshot");
+  // A session that never opened a page by address started where it attached: the first page it was on.
+  // Only a snapshot says which page that was: any other step's route is where the step landed, not where it began.
+  if (j < 0 && mine[0].action !== "snapshot") return { cannot: "the session opened no page by its address before reaching it" };
+  if (j < 0 && isPattern(mine[0].route)) return { cannot: `the session started on ${mine[0].route}, a pattern` };
+  const start: RunStep[] = j < 0 ? [{ session: first.session, route: mine[0].route, action: "navigate", target: mine[0].route }] : [];
+  const all = [...start, ...path];
+  if (all.length > MAX_PREFIX_STEPS) return { cannot: `the path is ${all.length} steps, more than one plan runs (${MAX_PREFIX_STEPS})` };
+  const steps: PlanStep[] = [];
+  for (const s of all) {
+    const p = planStepOf(s);
+    if ("cannot" in p) return { cannot: p.cannot };
+    steps.push(p);
+  }
+  return { steps, direct: steps.every((s) => s.action === "navigate"), session: first.session };
+}
+
+/** A path as one line for a model to follow. */
+export function pathLine(steps: readonly PlanStep[]): string {
+  return steps.map((s) => `${s.action}${s.target ? ` ${s.target}` : ""}${s.value && s.action !== "type" ? ` ${JSON.stringify(s.value)}` : ""}`).join(" → ");
+}
+
+/**
+ * Whether a scout_run_plan reply says the path was taken: every step ran and
+ * ended OK, and the last one ended on the target page. A step can end OK and
+ * leave the page where it was (a stand-in value the form refuses, a button
+ * that now goes elsewhere), so where it ended is checked too.
+ */
+export function prefixOutcome(reply: string, steps: number, target: string): { ok: true } | { ok: false; why: string } {
+  const ran = /^PLAN \((\d+)\/(\d+) steps ran\)/m.exec(reply);
+  if (/^ERROR:/.test(reply))
+    return {
+      ok: false,
+      why: reply
+        .replace(/^ERROR:\s*/, "")
+        .split("\n")[0]
+        .slice(0, 200),
+    };
+  if (!ran) return { ok: false, why: "the plan's reply did not say how many steps ran" };
+  // A step that ran and did not succeed still counts as run: its own line says how it ended, and only "OK" moved the path on.
+  const notOk = reply.split("\n").find((l) => /^\d+\. .* → /.test(l) && !/ → OK\b/.test(l));
+  if (/PLAN ABORTED at step/.test(reply) || Number(ran[1]) < steps || notOk)
+    return { ok: false, why: `${ran[1]} of ${steps} step(s) ran${notOk ? `: ${notOk.trim().slice(0, 160)}` : ""}` };
+  const ends = [...reply.matchAll(/^\d+\. .* → OK \(([^)\s]+)\)/gm)].at(-1)?.[1];
+  if (!ends) return { ok: false, why: "the plan did not say which page it ended on" };
+  if (identity(ends) !== identity(target)) return { ok: false, why: `every step ran, and it ended on ${identity(ends)}, not ${identity(target)}` };
+  return { ok: true };
 }
 
 // ── replay ───────────────────────────────────────────────────────────────────

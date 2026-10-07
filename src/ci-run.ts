@@ -94,9 +94,14 @@ import {
   continueLines,
   continuePlan,
   fromRunLine,
+  isPattern,
+  pathLine,
+  prefixOutcome,
+  prefixPlan,
   replayLines,
   replayPlan,
   type ContinueItem,
+  type PrefixNote,
   type ReplayLane,
   type RunRecord,
 } from "./engine/from-run.js";
@@ -580,6 +585,60 @@ function takesSession(t: { inputSchema?: unknown }): boolean {
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+/**
+ * Take the earlier run's path to a page (from-run.ts prefixPlan) in one
+ * scout_run_plan call, which the write policy governs like any other step.
+ * Nothing happens when the record never reached the page or opened it by its
+ * address. When a step cannot be repeated (the record cannot say it, or the
+ * page changed), the session navigates to the page directly instead, if it is
+ * not a pattern. Returns the note for the record and the line the model is told.
+ */
+async function reachByPath(o: {
+  host: ToolHost;
+  session: string;
+  record: RunRecord;
+  route: string | undefined;
+  timeLeft: () => number;
+  say: (line: string) => void;
+}): Promise<{ note?: PrefixNote; lines: string[] }> {
+  if (!o.route) return { lines: [] };
+  const plan = prefixPlan(o.record, o.route);
+  if (!plan || ("steps" in plan && plan.direct)) return { lines: [] };
+  let why: string;
+  let steps = 0;
+  if ("cannot" in plan) why = `its path cannot be repeated: ${plan.cannot}`;
+  else {
+    steps = plan.steps.length;
+    const r = await o.host
+      .call("scout_run_plan", { session: o.session, steps: plan.steps, task: `Taking the earlier run's path to ${o.route}` }, Math.min(240_000, o.timeLeft()))
+      .catch((err: unknown) => ({ text: `ERROR: ${messageOf(err)}`, isError: true }));
+    const out = prefixOutcome(r.text.replace(/^\[session [^\]\n]*\]\n/, ""), steps, o.route);
+    if (out.ok) {
+      o.say(`reached ${o.route} by the earlier run's path (${steps} step(s)).`);
+      return {
+        note: { session: o.session, target: o.route, steps, outcome: "replayed" },
+        lines: [`Your browser reached ${o.route} the way the earlier run did: ${pathLine(plan.steps)}. Start there.`],
+      };
+    }
+    why = out.why;
+  }
+  o.say(`could not take the earlier run's path to ${o.route} (${why}); navigating to it instead.`);
+  const direct = isPattern(o.route)
+    ? undefined
+    : await o.host
+        .call("scout_navigate", { session: o.session, target: o.route, task: `Opening ${o.route}` }, Math.min(120_000, o.timeLeft()))
+        .catch((err: unknown) => ({ text: `ERROR: ${messageOf(err)}`, isError: true }));
+  const opened = !!direct && !direct.isError && !/^(ERROR|REFUSED):/.test(direct.text.replace(/^\[session [^\]\n]*\]\n/, ""));
+  return {
+    note: { session: o.session, target: o.route, steps, outcome: opened ? "navigated" : "unreached", why: why.slice(0, 300) },
+    lines: [
+      opened
+        ? `The earlier run's path to ${o.route} could not be repeated (${why}), so your browser was sent there directly.`
+        : `The earlier run's path to ${o.route} could not be repeated (${why}); reach it from the page you are on.`,
+    ],
+  };
+}
+
 /** The planning crawl's notes with these routes added, each with no note: routes a record knew that the crawl did not list. */
 function withRoutes(notes: Map<string, string[]>, routes: readonly string[]): Map<string, string[]> {
   const out = new Map(notes);
@@ -594,7 +653,14 @@ function withRoutes(notes: Map<string, string[]>, routes: readonly string[]): Ma
  * ci.json accumulates what the chain covered. Never fatal: without one, ci.json
  * has no record, and the log says why.
  */
-function thisRunsRecord(o: { projectDir: string; since: string; continued?: RunRecord; log: (line: string) => void }): RunRecord | undefined {
+function thisRunsRecord(o: {
+  projectDir: string;
+  since: string;
+  continued?: RunRecord;
+  /** How a continued run reached its lanes' first pages: kept in the record, so a path that could not be repeated is on file. */
+  prefixes?: readonly PrefixNote[];
+  log: (line: string) => void;
+}): RunRecord | undefined {
   let own: RunRecord | undefined;
   try {
     own = readRunRecordsOnDisk(o.projectDir)
@@ -608,7 +674,8 @@ function thisRunsRecord(o: { projectDir: string; since: string; continued?: RunR
     o.log("The report left no run record in the project's memory, so ci.json holds none.");
     return undefined;
   }
-  return o.continued ? carryForward(o.continued, own) : own;
+  const withPrefixes = o.prefixes && o.prefixes.length > 0 ? { ...own, prefixes: [...o.prefixes] } : own;
+  return o.continued ? carryForward(o.continued, withPrefixes) : withPrefixes;
 }
 
 /**
@@ -678,6 +745,8 @@ async function exploreInLanes(o: {
   plan: LanePlan;
   /** What each lane is told about the earlier run it starts from, when it does. */
   laneLines?: (lane: CiLane) => readonly string[];
+  /** A continued run: take the earlier run's path to a lane's first page once it has attached; the lines say where it ended up. */
+  reach?: (session: string, route: string | undefined, say: (line: string) => void) => Promise<string[]>;
 }): Promise<{ lanes: CiLanes; outcome?: LoopOutcome }> {
   const { host, options, log, now, budget, plan } = o;
   const timeLeft = (): number => wallLeftMs(budgetSpend(budget), options.caps, now());
@@ -743,7 +812,9 @@ async function exploreInLanes(o: {
         else on = lane.url;
       }
       say(`attached on ${new URL(on).pathname}, owning ${lane.modules.join(", ")}.`);
-      return await exploreLane(lane, on, say, { ...result, attached: true });
+      // A continued run: the earlier run's path to this lane's first page, when it got there by acting on another.
+      const reached = o.reach && timeLeft() > 0 ? await o.reach(lane.session, lane.routes[0], say) : [];
+      return await exploreLane(lane, on, say, { ...result, attached: true }, reached);
     } catch (err) {
       // Not a cap and not the model's API: the lane itself broke. Reported as the lane's, and the run's (mergeLaneStops), never dropped.
       const why = `the lane failed: ${messageOf(err).slice(0, 300)}`;
@@ -752,7 +823,13 @@ async function exploreInLanes(o: {
     }
   };
 
-  const exploreLane = async (lane: CiLane, on: string, say: (line: string) => void, result: LaneResult): Promise<LaneResult> => {
+  const exploreLane = async (
+    lane: CiLane,
+    on: string,
+    say: (line: string) => void,
+    result: LaneResult,
+    reached: readonly string[] = [],
+  ): Promise<LaneResult> => {
     const outcome = await agentLoop({
       client: o.makeClient(
         system,
@@ -766,7 +843,7 @@ async function exploreInLanes(o: {
           level: options.level,
           focus: options.focus,
           caps: options.caps,
-          ...(o.laneLines ? { fromRun: o.laneLines(lane) } : {}),
+          ...(o.laneLines || reached.length > 0 ? { fromRun: [...(o.laneLines?.(lane) ?? []), ...reached] } : {}),
         }),
       ),
       host,
@@ -942,10 +1019,20 @@ export async function runCi(
           log(`From run: the project's memory could not be told, so the report will not name the earlier run: ${messageOf(err)}`);
         }
       }
-      const oneLoop = (): Promise<LoopOutcome> => {
+      // How a continued run's lanes (or its one loop) reached their first page by the earlier run's path, for the record.
+      const prefixes: PrefixNote[] = [];
+      const reach = continuing
+        ? async (session: string, route: string | undefined, say: (line: string) => void): Promise<string[]> => {
+            const r = await reachByPath({ host: toolHost, session, record: continuing, route, timeLeft, say });
+            if (r.note) prefixes.push(r.note);
+            return r.lines;
+          }
+        : undefined;
+      const oneLoop = async (): Promise<LoopOutcome> => {
         const tools = ciTools(listed, options.show ? CAPTURE_TOOLS : undefined);
         const system = options.show ? ciCaptureSystemPrompt() : ciSystemPrompt(loadPlaybook(packageRoot), options);
-        const fromRun = items ? continueLines(items, { from }) : replay && replay.length > 0 ? replayLines(replay[0], { from }) : undefined;
+        const reached = reach && items && !options.show ? await reach(PLANNER_SESSION, items[0]?.route, (l) => log(`From run: ${l}`)) : [];
+        const fromRun = items ? [...continueLines(items, { from }), ...reached] : replay && replay.length > 0 ? replayLines(replay[0], { from }) : undefined;
         const kickoff = options.show
           ? ciCaptureKickoff({ url: options.url, show: options.show })
           : ciKickoff({ ...options, ...(fromRun && fromRun.length > 0 ? { fromRunLines: fromRun } : {}) });
@@ -1007,6 +1094,7 @@ export async function runCi(
           attachMs,
           plan: lanePlan,
           ...(laneLines ? { laneLines } : {}),
+          ...(reach ? { reach } : {}),
         });
         lanes = split.lanes;
         outcome = split.outcome ?? (await oneLoop());
@@ -1032,6 +1120,7 @@ export async function runCi(
             projectDir: options.projectDir,
             since: startedIso,
             continued: earlier && options.fromRun?.mode === "continue" ? earlier : undefined,
+            prefixes,
             log,
           });
       }

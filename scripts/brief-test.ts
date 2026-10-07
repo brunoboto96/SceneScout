@@ -20,12 +20,18 @@ import {
   foldRecords,
   FROM_RUN_ENV,
   FROM_RUN_MODE_ENV,
+  MAX_PREFIX_STEPS,
   MAX_RECORDS,
+  pathLine,
+  planStepOf,
+  prefixOutcome,
+  prefixPlan,
   readRunRecord,
   recordFromJson,
   replayLines,
   replayPlan,
   resolveFromRun,
+  standInValue,
   unionRecords,
   workLeft,
   workLine,
@@ -452,4 +458,137 @@ test("a brief that starts from an earlier run says so, and gives each lane its o
   assert.match(out, /routes: \/orders\/a\nfirst: \/orders\/a\n/);
   assert.match(out, /routes: \/stock\/a\nfirst: \/stock\/a\n/);
   assert.doesNotMatch(formatBriefs(lanes), /This run|first:/, "a fresh run's brief is unchanged");
+});
+
+// ── the path to a page (prefixPlan) ─────────────────────────────────────────
+
+const pathRecord = (steps: RecordInput["steps"]): RunRecord => recordOf({ steps, unexercised: [], forms: [], filled: [], unchosen: [] });
+const A = "http://app.test";
+
+test("path: a page reached by a step on another is reached by that page and that step; one opened by its address needs no path", () => {
+  const throughStart = pathRecord([
+    { session: "lane-a", url: `${A}/start`, action: "navigate", target: `${A}/start` },
+    { session: "lane-a", url: `${A}/start`, action: "snapshot" },
+    { session: "lane-a", url: `${A}/start`, action: "type", target: 'textbox "Reference" ← "R-1"' },
+    { session: "lane-a", url: `${A}/records/7`, action: "click", target: 'button "Open record"' },
+    { session: "lane-a", url: `${A}/records/7`, action: "click", target: 'button "Edit"' },
+  ]);
+  assert.deepEqual(prefixPlan(throughStart, "/records/:id"), {
+    session: "lane-a",
+    direct: false,
+    steps: [
+      { action: "navigate", target: "/start" },
+      { action: "type", target: 'role=textbox[name="Reference"]', value: "SceneScout test", replace: true },
+      { action: "click", target: 'role=button[name="Open record"]' },
+    ],
+  });
+  // The contrastive record: the same page, opened by its address.
+  const byAddress = pathRecord([
+    { session: "lane-a", url: `${A}/start`, action: "navigate", target: `${A}/start` },
+    { session: "lane-a", url: `${A}/records/7`, action: "navigate", target: `${A}/records/7` },
+  ]);
+  assert.deepEqual(prefixPlan(byAddress, "/records/7"), { session: "lane-a", direct: true, steps: [{ action: "navigate", target: "/records/7" }] });
+  assert.equal(prefixPlan(byAddress, "/elsewhere"), null, "a page the record never reached has no path");
+  // The path starts at the last page opened by address before the target, not at the session's first.
+  const twoHops = pathRecord([
+    { session: "s", url: `${A}/a`, action: "navigate", target: "/a" },
+    { session: "s", url: `${A}/b`, action: "click", target: 'link "B"' },
+    { session: "s", url: `${A}/c`, action: "navigate", target: "/c" },
+    { session: "s", url: `${A}/d`, action: "click", target: 'link "D"' },
+  ]);
+  assert.deepEqual((prefixPlan(twoHops, "/d") as { steps: unknown[] }).steps, [
+    { action: "navigate", target: "/c" },
+    { action: "click", target: 'role=link[name="D"]' },
+  ]);
+  // A session that never navigated starts from the first page it was on.
+  const fromLanding = pathRecord([
+    { session: "s", url: `${A}/`, action: "snapshot" },
+    { session: "s", url: `${A}/x`, action: "click", target: 'link "X"' },
+  ]);
+  assert.deepEqual((prefixPlan(fromLanding, "/x") as { steps: unknown[] }).steps, [
+    { action: "navigate", target: "/" },
+    { action: "click", target: 'role=link[name="X"]' },
+  ]);
+  // Only a snapshot says where a session began: a first step that is a click names where it landed.
+  const fromClick = pathRecord([
+    { session: "s", url: `${A}/x`, action: "click", target: 'link "X"' },
+    { session: "s", url: `${A}/y`, action: "click", target: 'link "Y"' },
+  ]);
+  assert.match((prefixPlan(fromClick, "/y") as { cannot: string }).cannot, /opened no page by its address/);
+  const long = pathRecord([
+    { session: "s", url: `${A}/a`, action: "navigate", target: "/a" },
+    ...Array.from({ length: MAX_PREFIX_STEPS }, (_, i) => ({ session: "s", url: `${A}/a`, action: "click", target: `button "B${i}"` })),
+    { session: "s", url: `${A}/z`, action: "click", target: 'link "Z"' },
+  ]);
+  assert.match((prefixPlan(long, "/z") as { cannot: string }).cannot, /more than one plan runs/);
+  const upload = pathRecord([
+    { session: "s", url: `${A}/a`, action: "navigate", target: "/a" },
+    { session: "s", url: `${A}/z`, action: "upload", target: "report.pdf attached" },
+  ]);
+  assert.match((prefixPlan(upload, "/z") as { cannot: string }).cannot, /upload step, which a plan cannot repeat/);
+});
+
+test("path: each recorded step as a plan step, typed values stood in for, and what a plan cannot repeat said", () => {
+  const step = (action: string, target?: string, route = "/p") => planStepOf({ session: "s", route, action, ...(target !== undefined ? { target } : {}) });
+  assert.deepEqual(step("click×2", 'button "Save"'), { action: "click", target: 'role=button[name="Save"]' });
+  assert.deepEqual(step("click", `button "Say "hi""`), { action: "click", target: `role=button[name='Say "hi"']` });
+  assert.ok("cannot" in step("click", `button "it's "x""`), "a name with both quotes cannot be a role target");
+  assert.deepEqual(step("type", 'textbox "Email" ← (a value) + Enter'), {
+    action: "type",
+    target: 'role=textbox[name="Email"]',
+    value: "scout@example.com",
+    replace: true,
+    pressEnter: true,
+  });
+  assert.deepEqual(step("select", 'combobox "Status" = open (matched option "open", labelled "Open")'), {
+    action: "select",
+    target: 'role=combobox[name="Status"]',
+    value: "open",
+  });
+  assert.deepEqual(step("navigate", "http://app.test/orders?tab=open"), { action: "navigate", target: "/orders?tab=open" });
+  assert.deepEqual(step("back", "", "/orders"), { action: "navigate", target: "/orders" });
+  assert.ok("cannot" in step("back", "", "/orders/:id"), "a pattern is no address");
+  assert.deepEqual(step("press", "Escape"), { action: "press", value: "Escape" });
+  assert.deepEqual(step("plan:click", "testid=save"), { action: "click", target: "testid=save" });
+  assert.deepEqual(standInValue("Quantity"), "1");
+  assert.deepEqual(standInValue("Notes"), "SceneScout test");
+  assert.equal(
+    pathLine([
+      { action: "navigate", target: "/a" },
+      { action: "select", target: "role=combobox", value: "x" },
+    ]),
+    'navigate /a → select role=combobox "x"',
+  );
+});
+
+test("path: a plan's reply counts as the path taken only when every step ran, said OK, and ended on the page", () => {
+  const ok =
+    'PLAN (2/2 steps ran):\n1. navigate /a → OK (http://x/a)\n2. click role=button[name="Go"] → OK (http://x/b/7)\nTake scout_snapshot to see the resulting state.';
+  assert.deepEqual(prefixOutcome(ok, 2, "/b/:id"), { ok: true });
+  // The contrastive reply: every step OK, but the page stayed where it was.
+  assert.deepEqual(prefixOutcome(ok.replace("http://x/b/7", "http://x/a"), 2, "/b/:id"), { ok: false, why: "every step ran, and it ended on /a, not /b/:id" });
+  assert.deepEqual(prefixOutcome(ok.replace(" (http://x/b/7)", "").replace(" (http://x/a)", ""), 2, "/b"), {
+    ok: false,
+    why: "the plan did not say which page it ended on",
+  });
+  const failed = ok.replace("→ OK (http://x/b/7)", "→ FAILED: locator.click: Timeout 5000ms exceeded.");
+  const f = prefixOutcome(failed, 2, "/b/:id");
+  assert.ok(!f.ok && /2 of 2 step\(s\) ran: 2\. click .* FAILED/.test(f.why), JSON.stringify(f));
+  const short = prefixOutcome("PLAN (1/2 steps ran):\n1. navigate /a → OK\nPLAN ABORTED at step 2 — investigate before continuing.", 2, "/b");
+  assert.ok(!short.ok && /^1 of 2/.test(short.why));
+  assert.deepEqual(prefixOutcome("ERROR: Not attached.", 1, "/b"), { ok: false, why: "Not attached." });
+  assert.ok(!prefixOutcome("something else", 1, "/b").ok);
+});
+
+test("path: a continued run is told how the earlier run reached a page it left work on", () => {
+  const r = recordOf({
+    steps: [
+      { session: "s", url: `${A}/orders`, action: "navigate", target: "/orders" },
+      { session: "s", url: `${A}/orders/42`, action: "click", target: 'link "Order 42"' },
+    ],
+    unexercised: [{ route: "/orders/:id", keys: ["button:refund"] }],
+  });
+  const lines = continueLines(continuePlan(r, ["/orders", "/orders/42"]), { from: "x" });
+  assert.ok(lines.includes('     (it reached this page by: navigate /orders → click role=link[name="Order 42"])'), lines.join("\n"));
+  assert.ok(!lines.some((l) => /reached this page by: navigate \/orders\)$/.test(l)), "a page opened by its address gets no path line");
 });
