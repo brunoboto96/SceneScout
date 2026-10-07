@@ -647,7 +647,16 @@ export function githubClient({ token, apiUrl, fetchImpl = fetch, timeoutMs = 15_
         await wait(1000 * 2 ** attempt + Math.floor(Math.random() * 250));
         continue;
       }
-      if (!res.ok) throw Object.assign(new Error(`${method} ${route} failed: HTTP ${res.status}`), { status: res.status });
+      if (!res.ok) {
+        // GitHub's own words for a refusal (e.g. why a dispatch was refused), for the caller to classify; never part of the message.
+        let detail = "";
+        try {
+          detail = String((await res.json())?.message ?? "").slice(0, 300);
+        } catch {
+          // A refusal with no JSON body: the status is all there is.
+        }
+        throw Object.assign(new Error(`${method} ${route} failed: HTTP ${res.status}`), { status: res.status, detail });
+      }
       return res.status === 204 ? null : res.json();
     }
   };

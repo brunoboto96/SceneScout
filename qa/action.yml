@@ -223,6 +223,8 @@ runs:
         name: ${{ steps.dispatch.outputs.artifact }}
         run-id: ${{ steps.dispatch.outputs.run-id }}
         github-token: ${{ inputs.github-token }}
+        # Kept as the zip: the reply reads check.json out of it, capped, and nothing from the archive is ever written to disk.
+        skip-decompress: true
         path: ${{ runner.temp }}/scenescout-qa-check
 
     - name: Post the check's verdict on the pull request
