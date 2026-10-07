@@ -21,6 +21,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { escapeAnnotation, inputsFromEnv, setOutputs } from "./check-action.mjs";
 import { checkWorkflowId, COMMENT_MARKER, githubClient, inert } from "./qa-action.mjs";
+import { fileReader, readZipEntry, zipEntries } from "./zip.mjs";
 
 export { checkWorkflowId };
 
@@ -34,6 +35,8 @@ export const MAX_WAIT_MINUTES = 300;
 export const DISPATCH_INPUTS = ["pr", "focus", "dispatch-id"];
 /** A check.json larger than this is not read. */
 export const MAX_CHECK_JSON_BYTES = 10_000_000;
+/** An artifact larger than this (as the API reports its zip) is not downloaded. */
+export const MAX_ARTIFACT_BYTES = 1_000_000_000;
 /** Journeys, findings and videos listed in the reply; the rest are in the artifact. */
 export const MAX_ROWS = 20;
 
@@ -105,12 +108,58 @@ export function disabledWorkflowMarkdown({ workflow, state }) {
   return reply([`No check was started: the workflow ${workflowName(workflow)} is ${inert(state, 40)}. Enable it in the repository's Actions tab.`]);
 }
 
-export function dispatchFailedMarkdown({ workflow, status }) {
-  const why =
-    status === 403
-      ? "The job's token was refused: the job that dispatches needs `actions: write`."
-      : `The workflow must have a \`workflow_dispatch\` trigger declaring the inputs ${DISPATCH_INPUTS.map((i) => `\`${i}\``).join(", ")}; GitHub refuses an input the workflow does not declare.`;
-  return reply([`No check was started: GitHub refused to dispatch ${workflowName(workflow)}${status ? ` (HTTP ${Number(status)})` : ""}.`, "", why]);
+/**
+ * Why GitHub refused a dispatch, from its status and its own message:
+ * `token` (403), `branch` (the branch is gone: deleted or renamed since the
+ * command), `trigger` (the workflow, as it is on that branch, has no
+ * workflow_dispatch trigger, or the branch has no such workflow file at all,
+ * as on a branch made before the workflow was added), `inputs` (an input the
+ * workflow does not declare), else `other`.
+ */
+export function dispatchRefusal(status, detail) {
+  const d = String(detail ?? "");
+  if (status === 403) return "token";
+  if (/no ref found|ref .*not (found|exist)|branch .*not (found|exist)|not a valid ref/i.test(d)) return "branch";
+  if (/workflow_dispatch|does not have .*trigger|workflow .*not found|could not find workflow/i.test(d)) return "trigger";
+  if (/unexpected inputs?|input/i.test(d)) return "inputs";
+  return "other";
+}
+
+export function dispatchFailedMarkdown({ workflow, status, detail = "", ref = "" }) {
+  const kind = dispatchRefusal(status, detail);
+  const branch = codeSpan(ref);
+  const why = {
+    token: "The job's token was refused: the job that dispatches needs `actions: write`.",
+    branch: `The branch ${branch} no longer exists (deleted or renamed since the command), so there is nothing to run the check on.`,
+    trigger:
+      `The workflow, as it is on the branch ${branch}, has no \`workflow_dispatch\` trigger, or the branch has no such workflow file. ` +
+      "A dispatch runs the workflow as it is on the pull request's branch, so a branch made before the workflow was added (or before it gained the trigger) does not have it: merge the default branch into it.",
+    inputs: `The workflow must declare the \`workflow_dispatch\` inputs ${DISPATCH_INPUTS.map((i) => `\`${i}\``).join(", ")}; GitHub refuses an input the workflow does not declare.`,
+    other: "The job's log has the full answer.",
+  }[kind];
+  const said = detail ? inert(detail, 300) : "";
+  return reply([
+    `No check was started: GitHub refused to dispatch ${workflowName(workflow)}${status ? ` (HTTP ${Number(status)})` : ""}.`,
+    "",
+    why,
+    ...(said ? ["", `GitHub said: ${said}`] : []),
+  ]);
+}
+
+export function noArtifactMarkdown({ workflow, artifact, runUrl, why }) {
+  return reply([
+    `The check ${workflowName(workflow)} ran, but ${why} so there is no verdict here. The run: ${runUrl}`,
+    "",
+    `The artifact read is ${codeSpan(artifact)}: \`SCENESCOUT_QA_CHECK_ARTIFACT\`, else \`scenescout-check\`.`,
+  ]);
+}
+
+export function cancelledCheckMarkdown({ workflow, runUrl }) {
+  return reply([
+    `The check ${workflowName(workflow)} was cancelled before it finished, so there is no verdict here: ${runUrl}`,
+    "",
+    "A newer `/scenescout qa check` on this pull request cancels the older run when the workflow has a concurrency group per pull request, as the example does; that newer check replies on its own.",
+  ]);
 }
 
 export function runNotFoundMarkdown({ workflow, workflowUrl }) {
@@ -205,8 +254,14 @@ export function checkReplyMarkdown({
   const c = json.counts;
   const failing = n(g.failing);
   const couldNotRun = n(g.couldNotRun);
-  const verdict =
-    g.passed === true && couldNotRun === 0
+  const ran = (Array.isArray(json.flows) ? json.flows : []).filter((f) => f && typeof f === "object").length;
+  // A focus that matched no journey is not a pass: the journeys asked for never ran.
+  const noJourneys = String(focus ?? "").trim() !== "" && ran === 0;
+  const verdict = noJourneys
+    ? `**No journeys ran.** The focus matched no journey (saved flow), so this is not a pass${
+        g.passed === true ? "" : `; the rest of the check found ${failing} issue(s) that fail the gate (fail-on: ${inert(g.failOn, 10)})`
+      }.`
+    : g.passed === true && couldNotRun === 0
       ? "**Passed.**"
       : g.passed === true
         ? `**Partly ran.** Nothing that ran failed the gate, but ${couldNotRun} journey(s) could not run.`
@@ -276,46 +331,50 @@ export function checkReplyMarkdown({
 }
 
 /**
- * What a downloaded artifact holds: check.json (parsed, or null, with
- * `problem` saying why there is no verdict to read: missing, too-large,
- * unreadable, not-a-check; empty when there is one), whether a
- * replay.html is beside it, and the journey videos' file names. Only regular
- * files are read, check.json only up to MAX_CHECK_JSON_BYTES, and nothing in
- * the artifact is run.
+ * What a downloaded artifact holds, read from its zip without extracting it
+ * (zip.mjs): check.json (parsed, or null, with `problem` saying why there is
+ * no verdict to read: missing, too-large, unreadable, not-a-check; empty when
+ * there is one), whether replay.html is beside it, and the journey videos'
+ * file names. Entry names are only compared with these fixed names; only
+ * check.json is inflated, up to MAX_CHECK_JSON_BYTES. `dir` holds the one zip
+ * the download step saved.
  */
 export function readCheckArtifact(dir, { log = () => {} } = {}) {
   const out = { json: null, problem: "missing", recording: { replay: false, videos: [] } };
-  if (!dir) return out;
-  const file = (p) => {
-    try {
-      const st = fs.lstatSync(p);
-      return st.isFile() ? st : null;
-    } catch {
-      return null;
-    }
-  };
-  const jsonPath = path.join(dir, "check.json");
-  const st = file(jsonPath);
-  if (st && st.size <= MAX_CHECK_JSON_BYTES) {
-    try {
-      out.json = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
-      out.problem = isCheckJson(out.json) ? "" : "not-a-check";
-    } catch (err) {
-      out.problem = `unreadable: ${err instanceof Error ? err.message : String(err)}`;
-    }
-  } else if (st) out.problem = "too-large";
-  if (out.problem && out.problem !== "missing") log(`::warning title=SceneScout QA check::${escapeAnnotation(`check.json gave no verdict: ${out.problem}`)}`);
-  out.recording.replay = Boolean(file(path.join(dir, "replay.html")));
-  const videosDir = path.join(dir, "replay-videos");
+  let zip = "";
   try {
-    if (fs.lstatSync(videosDir).isDirectory())
-      out.recording.videos = fs
-        .readdirSync(videosDir)
-        .filter((name) => /\.webm$/i.test(name) && file(path.join(videosDir, name)))
-        .sort();
+    zip = fs
+      .readdirSync(String(dir || ""))
+      .map((name) => path.join(dir, name))
+      .find((p) => fs.lstatSync(p).isFile());
   } catch {
-    // No videos folder: the run recorded none.
+    // No folder: nothing was downloaded.
   }
+  if (!zip) return out;
+  let reader;
+  try {
+    reader = fileReader(zip);
+    const entries = zipEntries(reader);
+    const json = entries.find((e) => e.name === "check.json");
+    if (json) {
+      try {
+        out.json = JSON.parse(readZipEntry(reader, json, MAX_CHECK_JSON_BYTES).toString("utf8"));
+        out.problem = isCheckJson(out.json) ? "" : "not-a-check";
+      } catch (err) {
+        out.problem = err?.tooLarge ? "too-large" : `unreadable: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    out.recording.replay = entries.some((e) => e.name === "replay.html");
+    out.recording.videos = entries
+      .map((e) => /^replay-videos\/([^/\\]+\.webm)$/i.exec(e.name)?.[1])
+      .filter(Boolean)
+      .sort();
+  } catch (err) {
+    out.problem = `unreadable: the artifact is not a zip this can read (${err instanceof Error ? err.message : String(err)})`;
+  } finally {
+    reader?.close();
+  }
+  if (out.problem && out.problem !== "missing") log(`::warning title=SceneScout QA check::${escapeAnnotation(`check.json gave no verdict: ${out.problem}`)}`);
   return out;
 }
 
@@ -352,7 +411,9 @@ export async function runDispatch({
   if (!workflow) throw new Error(`check-workflow is not a workflow file name or id: "${inputs["check-workflow"] ?? ""}"`);
   const pr = Number(inputs.pr);
   if (!Number.isInteger(pr) || pr <= 0) throw new Error(`the pr input is not a pull request number: "${inputs.pr}"`);
-  const ref = String(inputs.ref ?? "").trim();
+  const ref = String(inputs.ref ?? "")
+    .trim()
+    .replace(/^refs\/heads\//, "");
   if (!ref) throw new Error("the ref input is empty: the gate names the pull request's head branch");
   const sha = String(inputs.sha ?? "").trim();
   const artifact = checkArtifactName(inputs["artifact-name"]);
@@ -365,7 +426,16 @@ export async function runDispatch({
 
   const done = async (body) => {
     await call("POST", `/repos/${repo}/issues/${pr}/comments`, { body });
-    const outputs = { download: "false", replied: "true", "run-id": "", conclusion: "", "head-sha": "", artifact, "dispatch-id": dispatchId };
+    const outputs = {
+      download: "false",
+      replied: "true",
+      "run-id": "",
+      conclusion: "",
+      "head-sha": "",
+      artifact,
+      "artifact-id": "",
+      "dispatch-id": dispatchId,
+    };
     setOutputs(outputs);
     return outputs;
   };
@@ -383,7 +453,8 @@ export async function runDispatch({
   let dispatched;
   try {
     dispatched = await call("POST", `/repos/${repo}/actions/workflows/${wf}/dispatches`, {
-      ref,
+      // The full ref: a tag of the same name as the branch can never be the one dispatched on.
+      ref: `refs/heads/${ref.replace(/^refs\/heads\//, "")}`,
       inputs: { pr: String(pr), focus: String(inputs.focus ?? ""), "dispatch-id": dispatchId },
       // Without it, the 2022-11-28 API answers 204 with no run id, and the run must be searched for.
       return_run_details: true,
@@ -391,7 +462,7 @@ export async function runDispatch({
   } catch (err) {
     if (err?.status >= 400 && err?.status < 500) {
       log(`::error title=SceneScout QA check::${escapeAnnotation(`dispatching ${workflow} on ${ref} was refused: ${err.message}`)}`);
-      return done(dispatchFailedMarkdown({ workflow, status: err.status }));
+      return done(dispatchFailedMarkdown({ workflow, status: err.status, detail: err.detail, ref }));
     }
     throw err;
   }
@@ -416,6 +487,17 @@ export async function runDispatch({
   for (;;) {
     const run = await call("GET", `/repos/${repo}/actions/runs/${id}`);
     if (run?.status === "completed") {
+      if (run.conclusion === "cancelled") return done(cancelledCheckMarkdown({ workflow, runUrl }));
+      // Looked up before any download: one that is missing, expired or too large is said so, and never fetched.
+      const listed = await call("GET", `/repos/${repo}/actions/runs/${id}/artifacts?name=${encodeURIComponent(artifact)}`);
+      const found = (listed?.artifacts ?? []).find((a) => a && a.name === artifact);
+      if (!found)
+        return done(
+          noArtifactMarkdown({ workflow, artifact, runUrl, why: `it uploaded no artifact by that name (it ended ${inert(run.conclusion ?? "unknown", 40)}),` }),
+        );
+      if (found.expired) return done(noArtifactMarkdown({ workflow, artifact, runUrl, why: "its artifact has expired," }));
+      if (Number(found.size_in_bytes) > MAX_ARTIFACT_BYTES)
+        return done(noArtifactMarkdown({ workflow, artifact, runUrl, why: `its artifact is larger than ${MAX_ARTIFACT_BYTES} bytes and is not downloaded,` }));
       const outputs = {
         download: "true",
         replied: "false",
@@ -423,6 +505,7 @@ export async function runDispatch({
         conclusion: String(run.conclusion ?? ""),
         "head-sha": String(run.head_sha ?? ""),
         artifact,
+        "artifact-id": String(Number(found.id) || ""),
         "dispatch-id": dispatchId,
       };
       setOutputs(outputs);
@@ -450,14 +533,9 @@ export async function runReply({ env = process.env, inputs = inputsFromEnv(), fe
   // The download step runs with continue-on-error: a failure there is not the project's missing check.json.
   const downloadFailed = String(env.DOWNLOAD ?? "") === "failure";
   if (downloadFailed) log(`::warning title=SceneScout QA check::${escapeAnnotation(`the artifact ${artifact} could not be downloaded from run ${runId}`)}`);
-  let artifactUrl = "";
-  try {
-    const listed = await call("GET", `/repos/${repo}/actions/runs/${runId}/artifacts?name=${encodeURIComponent(artifact)}`);
-    const aid = listed?.artifacts?.[0]?.id;
-    if (aid) artifactUrl = `${server}/${repo}/actions/runs/${runId}/artifacts/${Number(aid)}`;
-  } catch (err) {
-    log(`The artifact could not be linked: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  // The dispatch stage found the artifact by name before the download, so its id is known.
+  const aid = Number(dispatch["artifact-id"]) || 0;
+  const artifactUrl = aid ? `${server}/${repo}/actions/runs/${runId}/artifacts/${aid}` : "";
   const body = checkReplyMarkdown({
     json,
     conclusion: dispatch.conclusion,

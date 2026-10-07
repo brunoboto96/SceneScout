@@ -45,6 +45,10 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # One check per pull request: a newer `/scenescout qa check` cancels the older run, and only the newer one gets a verdict.
+    concurrency:
+      group: scenescout-qa-check-${{ github.repository }}-${{ inputs.pr }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -68,7 +72,8 @@ jobs:
 
       # What the focus means is this workflow's choice. Here it keeps the saved
       # flows whose file name contains it; empty, it keeps them all. It reaches
-      # the script through env, never pasted into it.
+      # the script through env, never pasted into it. A focus that matches no
+      # flow runs no journeys; the reply then says so and never calls it a pass.
       - name: Choose the flows the focus names
         id: flows
         env:
@@ -80,6 +85,9 @@ jobs:
             [ -f "$f" ] || continue
             case "$(basename "$f")" in *"$FOCUS"*) cp "$f" "$dir/" ;; esac
           done
+          if [ -n "$FOCUS" ] && [ -z "$(ls -A "$dir")" ]; then
+            echo "::warning title=Focus matched no journeys::no saved flow's file name contains the focus; the check runs no journeys"
+          fi
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       # scenescout check --record --video, uploading its output folder as the

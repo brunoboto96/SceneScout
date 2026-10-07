@@ -50,9 +50,13 @@ import {
   shotUrl,
   teamMembership,
 } from "../action/qa-action.mjs";
+import { bufferReader, readZipEntry, zipEntries } from "../action/zip.mjs";
+import zlib from "node:zlib";
 import {
   checkArtifactName,
   checkReplyMarkdown,
+  dispatchRefusal,
+  MAX_ARTIFACT_BYTES,
   DEFAULT_CHECK_ARTIFACT,
   DISPATCH_INPUTS,
   findDispatchedRun,
@@ -441,6 +445,14 @@ interface Call {
 
 const TEAM_TOKEN = "team-secret";
 
+/** A refusal the stand-in API answers with: a status and GitHub's own message. */
+class Refusal {
+  constructor(
+    readonly status: number,
+    readonly message: string,
+  ) {}
+}
+
 async function withGitHub(routes: (method: string, url: string) => unknown, fn: (apiUrl: string, calls: Call[]) => Promise<void>): Promise<void> {
   const calls: Call[] = [];
   const server = http.createServer((req, res) => {
@@ -458,6 +470,10 @@ async function withGitHub(routes: (method: string, url: string) => unknown, fn: 
       }
       if (typeof answer === "number") {
         res.writeHead(answer).end("{}");
+        return;
+      }
+      if (answer instanceof Refusal) {
+        res.writeHead(answer.status, { "content-type": "application/json" }).end(JSON.stringify({ message: answer.message }));
         return;
       }
       res.writeHead(req.method === "POST" ? 201 : 200, { "content-type": "application/json" }).end(JSON.stringify(answer));
@@ -1729,36 +1745,124 @@ test("check reply: the verdict, each journey, the first failing step, findings h
   );
 });
 
-test("check artifact: check.json, replay.html and the videos are read as data, regular files only", () => {
+/** A zip as upload-artifact makes one: each entry stored or deflated, with a central directory. CRCs are left 0; the reader never needs them. */
+function makeZip(entries: Array<{ name: string; data: Buffer | string; deflate?: boolean; claimSize?: number }>): Buffer {
+  const locals: Buffer[] = [];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+  for (const e of entries) {
+    const raw = Buffer.from(e.data);
+    const data = e.deflate ? zlib.deflateRawSync(raw) : raw;
+    const name = Buffer.from(e.name);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(e.deflate ? 8 : 0, 8);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(e.claimSize ?? raw.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(e.deflate ? 8 : 0, 10);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(e.claimSize ?? raw.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    locals.push(local, name, data);
+    centrals.push(central, name);
+    offset += 30 + name.length + data.length;
+  }
+  const cd = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(cd.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, cd, end]);
+}
+
+/** A download folder holding one artifact zip, as download-artifact leaves it with skip-decompress. */
+function artifactDir(entries: Parameters<typeof makeZip>[0]): string {
   const dir = tempDir();
-  assert.deepEqual(readCheckArtifact(dir), { json: null, problem: "missing", recording: { replay: false, videos: [] } });
-  fs.writeFileSync(path.join(dir, "check.json"), JSON.stringify(CHECK_JSON));
-  fs.writeFileSync(path.join(dir, "replay.html"), "<html></html>");
-  fs.mkdirSync(path.join(dir, "replay-videos"));
-  fs.writeFileSync(path.join(dir, "replay-videos", "journey-02-save.webm"), "x");
-  fs.writeFileSync(path.join(dir, "replay-videos", "journey-01-sign-in.webm"), "x");
-  fs.writeFileSync(path.join(dir, "replay-videos", "notes.txt"), "x");
-  fs.symlinkSync("/etc/hosts", path.join(dir, "replay-videos", "journey-03-link.webm"));
+  fs.writeFileSync(path.join(dir, "scenescout-check.zip"), makeZip(entries));
+  return dir;
+}
+
+test("zip: entries are listed and one is read, stored or deflated, without extracting anything; past the cap it stops", () => {
+  const zip = makeZip([
+    { name: "check.json", data: '{"a":1}', deflate: true },
+    { name: "report.md", data: "# report" },
+  ]);
+  const r = bufferReader(zip);
+  const entries = zipEntries(r);
+  assert.deepEqual(
+    entries.map((e: { name: string }) => e.name),
+    ["check.json", "report.md"],
+  );
+  assert.equal(readZipEntry(r, entries[0], 100).toString(), '{"a":1}');
+  assert.equal(readZipEntry(r, entries[1], 100).toString(), "# report");
+  // A zip bomb: a megabyte of zeros deflates to about a kilobyte, and claims a small size.
+  const bomb = makeZip([{ name: "check.json", data: Buffer.alloc(1_000_000), deflate: true, claimSize: 10 }]);
+  const br = bufferReader(bomb);
+  assert.throws(
+    () => readZipEntry(br, zipEntries(br)[0], 1000),
+    (err: any) => err.tooLarge === true,
+    "inflating stops at the cap",
+  );
+  // An entry that says it is larger than the cap is not even read.
+  const big = makeZip([{ name: "check.json", data: "x", claimSize: 5000 }]);
+  const gr = bufferReader(big);
+  assert.throws(
+    () => readZipEntry(gr, zipEntries(gr)[0], 1000),
+    (err: any) => err.tooLarge === true,
+  );
+  assert.throws(() => zipEntries(bufferReader(Buffer.from("not a zip at all, just text"))), /not a zip/);
+  const zip64 = Buffer.from(makeZip([]));
+  zip64.writeUInt32LE(0xffffffff, zip64.length - 6);
+  assert.throws(() => zipEntries(bufferReader(zip64)), /ZIP64/);
+});
+
+test("check artifact: check.json, replay.html and the videos are read from the zip by fixed names, nothing extracted", () => {
+  assert.deepEqual(readCheckArtifact(tempDir()), { json: null, problem: "missing", recording: { replay: false, videos: [] } });
+  const dir = artifactDir([
+    { name: "check.json", data: JSON.stringify(CHECK_JSON), deflate: true },
+    { name: "replay.html", data: "<html></html>" },
+    { name: "replay-videos/journey-02-save.webm", data: "x" },
+    { name: "replay-videos/journey-01-sign-in.webm", data: "x" },
+    { name: "replay-videos/notes.txt", data: "x" },
+    { name: "replay-videos/nested/journey-03.webm", data: "x" },
+    // A traversal name is only ever compared, never a path: it is not check.json and is not written anywhere.
+    { name: "../check.json", data: "{}" },
+  ]);
   const read = readCheckArtifact(dir);
   assert.deepEqual(read.json, CHECK_JSON);
   assert.equal(read.problem, "");
   assert.deepEqual(read.recording, { replay: true, videos: ["journey-01-sign-in.webm", "journey-02-save.webm"] });
-  fs.writeFileSync(path.join(dir, "check.json"), "{ not json");
-  assert.equal(readCheckArtifact(dir).json, null);
-  assert.match(readCheckArtifact(dir).problem, /^unreadable: /);
-  fs.writeFileSync(path.join(dir, "check.json"), JSON.stringify({ tool: "scenescout", command: "ci" }));
-  assert.equal(readCheckArtifact(dir).problem, "not-a-check", "a ci.json is not a check.json");
+  assert.deepEqual(fs.readdirSync(dir), ["scenescout-check.zip"], "nothing was extracted");
+
+  assert.match(readCheckArtifact(artifactDir([{ name: "check.json", data: "{ not json" }])).problem, /^unreadable: /);
+  assert.equal(readCheckArtifact(artifactDir([{ name: "check.json", data: JSON.stringify({ tool: "scenescout", command: "ci" }) }])).problem, "not-a-check");
+  assert.equal(readCheckArtifact(artifactDir([{ name: "report.md", data: "x" }])).problem, "missing");
+  assert.equal(
+    readCheckArtifact(artifactDir([{ name: "check.json", data: Buffer.alloc(11_000_000), deflate: true }])).problem,
+    "too-large",
+    "a check.json past the cap is not read",
+  );
+  const notZip = tempDir();
+  fs.writeFileSync(path.join(notZip, "artifact"), "plain text");
+  assert.match(readCheckArtifact(notZip).problem, /not a zip/);
 });
 
 /** A stand-in for the Actions API: the workflow, its dispatch and its run, each answer chosen by the test. */
-function actionsApi(opts: { workflow?: number | object; dispatch?: number | object; runs?: object[]; run?: () => object; artifacts?: object }) {
+function actionsApi(opts: { workflow?: number | object; dispatch?: number | object | Refusal; runs?: object[]; run?: () => object; artifacts?: object }) {
   return (method: string, url: string): unknown => {
     if (method === "GET" && url === "/repos/owner/app/actions/workflows/browser-tests.yml") return opts.workflow ?? { id: 5, state: "active" };
     if (method === "POST" && url === "/repos/owner/app/actions/workflows/browser-tests.yml/dispatches") return opts.dispatch ?? { workflow_run_id: 900 };
     if (method === "GET" && url.startsWith("/repos/owner/app/actions/workflows/browser-tests.yml/runs?")) return { workflow_runs: opts.runs ?? [] };
     if (method === "GET" && url === "/repos/owner/app/actions/runs/900")
       return opts.run ? opts.run() : { status: "completed", conclusion: "failure", head_sha: "a".repeat(40) };
-    if (method === "GET" && url.startsWith("/repos/owner/app/actions/runs/900/artifacts?name=")) return opts.artifacts ?? { artifacts: [{ id: 77 }] };
+    if (method === "GET" && url.startsWith("/repos/owner/app/actions/runs/900/artifacts?name="))
+      return opts.artifacts ?? { artifacts: [{ id: 77, name: "scenescout-check", size_in_bytes: 2048, expired: false }] };
     if (method === "POST" && url === "/repos/owner/app/issues/7/comments") return {};
     return undefined;
   };
@@ -1804,12 +1908,13 @@ test("check stage: dispatches the workflow on the head branch with pr, focus and
         conclusion: "failure",
         "head-sha": "a".repeat(40),
         artifact: DEFAULT_CHECK_ARTIFACT,
+        "artifact-id": "77",
         "dispatch-id": "scenescout-42-1",
       });
       const dispatch = calls.find((c) => c.url.endsWith("/dispatches"))!;
       assert.deepEqual(
         dispatch.body,
-        { ref: "feature/save", inputs: { pr: "7", focus: "sign-in", "dispatch-id": "scenescout-42-1" }, return_run_details: true },
+        { ref: "refs/heads/feature/save", inputs: { pr: "7", focus: "sign-in", "dispatch-id": "scenescout-42-1" }, return_run_details: true },
         "asks for the run's id: without return_run_details the API answers 204 with none",
       );
       assert.equal(polls, 3, "waited for the run to complete");
@@ -1851,7 +1956,30 @@ test("check stage: an unknown workflow, a refused dispatch, a run that cannot be
   const cases: Array<[string, Parameters<typeof actionsApi>[0], RegExp]> = [
     ["an unknown workflow", { workflow: 404 }, /has no workflow `browser-tests\.yml`/],
     ["a disabled workflow", { workflow: { id: 5, state: "disabled_manually" } }, /is disabled\\_manually/],
-    ["a workflow without the inputs", { dispatch: 422 }, /refused to dispatch `browser-tests\.yml` \(HTTP 422\)[\s\S]*`pr`, `focus`, `dispatch-id`/],
+    [
+      "a workflow without the inputs",
+      { dispatch: new Refusal(422, 'Unexpected inputs provided: ["dispatch-id"]') },
+      /refused to dispatch `browser-tests\.yml` \(HTTP 422\)[\s\S]*`pr`, `focus`, `dispatch-id`[\s\S]*GitHub said: Unexpected inputs/,
+    ],
+    [
+      "a branch without the workflow file",
+      { dispatch: new Refusal(422, "Workflow does not have 'workflow_dispatch' trigger") },
+      /as it is on the branch `feature\/save`, has no `workflow_dispatch` trigger, or the branch has no such workflow file[\s\S]*merge the default branch into it/,
+    ],
+    ["a deleted branch", { dispatch: new Refusal(422, "No ref found for: refs/heads/feature/save") }, /The branch `feature\/save` no longer exists/],
+    ["a refusal of another kind", { dispatch: new Refusal(422, "Something new") }, /HTTP 422\)[\s\S]*GitHub said: Something new/],
+    [
+      "a cancelled run",
+      { run: () => ({ status: "completed", conclusion: "cancelled" }) },
+      /was cancelled before it finished[\s\S]*concurrency group per pull request/,
+    ],
+    ["a run with no artifact", { artifacts: { artifacts: [] } }, /uploaded no artifact by that name \(it ended failure\)/],
+    ["an expired artifact", { artifacts: { artifacts: [{ id: 77, name: "scenescout-check", expired: true }] } }, /artifact has expired/],
+    [
+      "an artifact too large to download",
+      { artifacts: { artifacts: [{ id: 77, name: "scenescout-check", size_in_bytes: MAX_ARTIFACT_BYTES + 1 }] } },
+      /larger than 1000000000 bytes and is not downloaded/,
+    ],
     ["a token without actions: write", { dispatch: 403 }, /HTTP 403\)[\s\S]*`actions: write`/],
     ["a run that cannot be found", { dispatch: 204, runs: [] }, /its run could not be found[\s\S]*inputs\.dispatch-id/],
     ["a run that outlasts the wait", { run: () => ({ status: "in_progress" }) }, /had not finished after 1 minutes[\s\S]*actions\/runs\/900$/m],
@@ -1880,16 +2008,17 @@ test("check stage: an unknown workflow, a refused dispatch, a run that cannot be
 });
 
 test("reply stage: reads the downloaded check.json, links the run and the artifact, and posts the verdict", async () => {
-  const dir = tempDir();
-  fs.writeFileSync(path.join(dir, "check.json"), JSON.stringify(CHECK_JSON));
-  fs.writeFileSync(path.join(dir, "replay.html"), "<html></html>");
+  const dir = artifactDir([
+    { name: "check.json", data: JSON.stringify(CHECK_JSON), deflate: true },
+    { name: "replay.html", data: "<html></html>" },
+  ]);
   await withGitHub(actionsApi({}), async (api, calls) => {
     const env = {
       GITHUB_REPOSITORY: "owner/app",
       GITHUB_API_URL: api,
       GITHUB_SERVER_URL: "https://github.com",
       RESULTS: dir,
-      DISPATCH: JSON.stringify({ "run-id": "900", conclusion: "failure", "head-sha": "a".repeat(40), artifact: "scenescout-check" }),
+      DISPATCH: JSON.stringify({ "run-id": "900", conclusion: "failure", "head-sha": "a".repeat(40), artifact: "scenescout-check", "artifact-id": "77" }),
     };
     const body = await runReply({ env, inputs: CHECK_INPUTS, log: quiet });
     const post = calls.find((c) => c.method === "POST")!;
@@ -1933,7 +2062,60 @@ test("example check workflow: dispatched with the three inputs, records, uploads
   assert.equal(check!.with?.["upload-artifact"], undefined, "the action's upload stays on");
   // The variable the example reads is the one the comment workflow passes.
   assert.ok(fs.readFileSync(TEMPLATE, "utf8").includes("vars.SCENESCOUT_QA_CHECK_ARTIFACT"));
+  // One check per pull request: a newer command cancels the older run, which the check stage then reports as cancelled.
+  const job = Object.values(wf.jobs as Record<string, Job>)[0];
+  assert.match(String(job.concurrency?.group), /\$\{\{ inputs\.pr \}\}/, "a concurrency group per pull request");
+  assert.equal(job.concurrency?.["cancel-in-progress"], true);
+  // A focus that matches no flow says so in the run's log.
+  assert.match(text, /Focus matched no journeys/);
   // The check action's release has record and video (3.20.0).
   const [maj, min] = check!.uses!.split("@v")[1].split(".").map(Number);
   assert.ok(maj > 3 || (maj === 3 && min >= 20), "a release with record and video");
+});
+
+test("dispatch refusals: told apart by GitHub's own words, so a missing branch or file is never blamed on the inputs", () => {
+  const rows: Array<[number, string, string]> = [
+    [403, "Resource not accessible by integration", "token"],
+    [422, "No ref found for: refs/heads/gone", "branch"],
+    [422, "Workflow does not have 'workflow_dispatch' trigger", "trigger"],
+    [422, 'Unexpected inputs provided: ["dispatch-id"]', "inputs"],
+    [422, "", "other"],
+    [422, "Something new", "other"],
+  ];
+  for (const [status, detail, kind] of rows) assert.equal(dispatchRefusal(status, detail), kind, detail);
+});
+
+test("check stage: dispatches on refs/heads/<branch>, so a tag of the same name is never the one run; the runs list still filters by the short name", async () => {
+  const dir = tempDir();
+  await withGitHub(
+    actionsApi({
+      dispatch: 204,
+      runs: [{ id: 900, event: "workflow_dispatch", head_sha: "a".repeat(40), display_title: "t · scenescout-42-1", created_at: "2026-10-07T10:00:03Z" }],
+    }),
+    async (api, calls) => {
+      await runDispatch({ env: dispatchEnv(dir, api), inputs: { ...CHECK_INPUTS, ref: "refs/heads/feature/save" }, log: quiet, ...fakeClock() });
+      assert.equal(calls.find((c) => c.url.endsWith("/dispatches"))!.body.ref, "refs/heads/feature/save", "never refs/heads/refs/heads/…");
+      const list = calls.find((c) => c.url.includes("/runs?"))!;
+      assert.match(list.url, /[?&]branch=feature%2Fsave&/, "the runs list takes the branch's short name");
+    },
+  );
+});
+
+test("check reply: a focus that matched no journey is never a pass", () => {
+  const none = { ...PASSED_JSON, flows: [] };
+  const focused = checkReplyMarkdown({ ...REPLY_ARGS, conclusion: "success", json: none, focus: "billing" });
+  assert.match(focused, /\*\*No journeys ran\.\*\* The focus matched no journey/);
+  assert.ok(!focused.includes("**Passed.**"), "not called a pass");
+  const failedToo = checkReplyMarkdown({ ...REPLY_ARGS, json: { ...CHECK_JSON, flows: [] }, focus: "billing" });
+  assert.match(failedToo, /No journeys ran\.\*\* .*the rest of the check found 1 issue\(s\) that fail the gate/);
+  // With no focus, a check with no journeys is judged as before: its crawl passed.
+  assert.match(checkReplyMarkdown({ ...REPLY_ARGS, conclusion: "success", json: none, focus: "" }), /\*\*Passed\.\*\*/);
+});
+
+test("check action: the artifact is downloaded as its zip, never extracted", () => {
+  const action = parseYaml(fs.readFileSync(QA_ACTION, "utf8")) as Record<string, any>;
+  const download = (action.runs.steps as Step[]).find((s) => s.uses?.startsWith("actions/download-artifact@") && String((s as any).if).includes("'check'"));
+  assert.ok(download, "the check stage's download step");
+  assert.equal(download!.with?.["skip-decompress"], true);
+  assert.equal(download!.with?.["run-id"], "${{ steps.dispatch.outputs.run-id }}");
 });

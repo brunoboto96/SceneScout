@@ -201,10 +201,21 @@ model's run; this mode involves no model.
   model's key, holds because no key is involved at all.
 - **Forks are always refused, whatever `SCENESCOUT_QA_ALLOW_FORKS` says.** A
   dispatch runs a workflow on a branch of this repository with the
-  repository's secrets, and a fork's branch is not one. A same-repository
-  pull request's author can already run any workflow on their branch by
-  pushing to it, so dispatching there gives them nothing they did not have.
-  The allowlist is the same as for every other form of the command.
+  repository's secrets, and a fork's branch is not one.
+- **The commenter, not the branch's author, starts the run.** Any commenter
+  the allowlist admits, who may have no write access to the repository, can
+  now start the opted-in workflow, with the repository's secrets, on someone
+  else's same-repository branch, as that branch's copy of the workflow file
+  defines it. What runs there is code a person with write access pushed, so
+  it is no more than a push to that branch could run; what is new is who
+  decides when it runs. The allowlist is the same as for every other form of
+  the command, and a project whose workflow reads secrets should keep it to
+  people it would trust to start that workflow by hand.
+- **The verdict is only as trustworthy as the branch.** The workflow that
+  writes `check.json` is the branch's own copy, so the branch's author can
+  make it say anything, a pass included. The reply reports what the run
+  wrote; it does not certify the branch. A gate a merge depends on belongs in
+  the project's required checks, not in this reply.
 - **The `check` job has `actions: write` and `pull-requests: write`, nothing
   else.** `actions: write` is what a dispatch needs, and covers reading the run
   and downloading its artifact. No secret reaches the job. The gate's
@@ -221,7 +232,11 @@ model's run; this mode involves no model.
   produced it, so it is held as a model's words are: read from a regular file
   of bounded size, every string escaped before it reaches the reply. Nothing
   else in the artifact is opened; `replay.html` and the journey videos are only
-  named, and stay in the artifact.
+  named, and stay in the artifact. The artifact is downloaded as its zip and
+  never extracted: entry names are only compared with fixed names, so a name
+  like `../x` writes nothing, and `check.json` is inflated up to its cap, so a
+  zip bomb stops there. An artifact the API reports as over 1 GB is not
+  downloaded at all.
 
 Consequences: a project that opts in keeps a workflow that a dispatch can
 start, which an allowed commenter can now start on any open same-repository
