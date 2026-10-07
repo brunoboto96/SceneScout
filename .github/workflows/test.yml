@@ -215,6 +215,8 @@ jobs:
           cli: dist/cli.js
           base-url: http://127.0.0.1:4180/v1
           max-minutes: "5"
+          # One loop, so this step tests the single-loop path; the default is two lanes, run below.
+          lanes: "1"
           out: ${{ runner.temp }}/ci-run
           upload-sarif: "false"
       - name: The run completed, wrote its files and printed no key

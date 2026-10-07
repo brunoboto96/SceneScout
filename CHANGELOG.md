@@ -1,5 +1,23 @@
 # scenescout
 
+## 3.20.2
+
+### Patch Changes
+
+- f8f7ad2: A recorded `scenescout check` (`--record` or `--video`) no longer overwrites a `replay.html` in the output folder that it did not write: it stops before it starts, with exit code 2 and a message naming the file. With `--video`, a video that fails to start no longer stops every later flow from being filmed.
+
+## 3.20.1
+
+### Patch Changes
+
+- 5d5240e: `scenescout check --video` now films each saved flow on the session's own page, so sessionStorage one flow writes is there for the next, and only the flows are filmed, not the crawl. The replay page marks and counts every step and visit left without a frame because its session reached the frame cap, has no scripts or inline event handlers, and carries a generator mark: a check removes only a `replay.html` that has it, so a file of that name the project keeps in the output folder stays.
+
+## 3.20.0
+
+### Minor Changes
+
+- eb79ce8: `scenescout check --record` (or `SCENESCOUT_RECORD=on`) keeps a frame after each route visit and each saved-flow step and writes `replay.html` beside the report: each role, each journey with a pass or fail badge, each step with its caption, result and frame, the first failing step highlighted, and the run's version, times, origin and commit in the header. `--video` records a WebM of each saved flow, each on a page of its own, and the replay page plays it beside the journey's steps. The GitHub Action gains `record` and `video` inputs and a `replay` output, and keeps the page, its frames and its videos in the uploaded artifact.
+
 ## 3.19.2
 
 ### Patch Changes

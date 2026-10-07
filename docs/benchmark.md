@@ -1112,6 +1112,21 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (33%–67%) | — | turns | 40 | 1,087,728 (1,075,597) / 2,692 | 1m 55s | $0.013 |
 | 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (33%–67%) | — | done | 33 | 894,594 (883,315) / 2,479 | 1m 39s | $0.011 |
 | 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 2/10 | 2/3 (50%–75%) | — | turns | 40 | 1,088,692 (1,077,975) / 2,432 | 1m 51s | $0.013 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | done | 30 | 772,798 (742,188) / 1,205 | 1m 08s | $0.011 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 5/6 (71%–86%) | — | done | 31 | 796,263 (764,439) / 1,745 | 1m 18s | $0.012 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 2/13 | 2/2 (67%–100%) | — | done | 24 | 600,856 (571,309) / 1,292 | 1m 01s | $0.009 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | done | 64 | 1,890,442 (1,874,734) / 3,907 | 2m 28s | $0.022 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 5/6 (63%–88%) | — | done | 56 | 1,595,572 (1,580,917) / 2,462 | 1m 52s | $0.019 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 5/13 | 6/6 (86%–100%) | — | done | 75 | 2,354,928 (2,333,358) / 3,473 | 2m 52s | $0.027 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 6/13 | 6/6 (86%–100%) | — | done | 41 | 1,113,005 (1,101,514) / 2,757 | 1m 35s | $0.014 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 2/13 | 2/2 (50%–100%) | — | done | 30 | 765,740 (757,723) / 1,290 | 1m 05s | $0.009 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 4/4 (67%–100%) | — | done | 39 | 1,034,915 (1,023,304) / 1,745 | 1m 23s | $0.012 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 7/13 | 7/8 (88%) | — | turns | 80 | 2,192,336 (2,147,221) / 5,390 | 3m 37s | $0.029 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 7/7 (78%–100%) | — | turns | 80 | 2,163,003 (2,119,207) / 4,816 | 1m 51s | $0.028 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 5/5 (63%–100%) | — | turns | 80 | 2,207,894 (2,185,807) / 5,935 | 3m 32s | $0.027 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | b5a7933f32 | 5/10 | 5/6 (83%) | — | done | 75 | 2,083,211 (2,060,420) / 5,057 | 1m 29s | $0.025 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | b5a7933f32 | 4/10 | 5/6 (56%–89%) | — | turns | 80 | 2,199,015 (2,175,729) / 4,675 | 1m 38s | $0.026 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | b5a7933f32 | 4/10 | 4/6 (44%–78%) | — | done | 69 | 1,839,108 (1,820,747) / 3,960 | 2m 22s | $0.022 |
 | 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | done | 39 | 1,046,088 (1,013,708) / 1,967 | 1m 53s | $0.014 |
 | 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (100%) | — | done | 31 | 799,468 (769,468) / 1,665 | 1m 37s | $0.012 |
 | 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 4/4 (67%–100%) | — | turns | 40 | 1,079,657 (1,068,983) / 2,560 | 1m 58s | $0.013 |
@@ -1274,6 +1289,104 @@ seen came with six runs in flight on one organisation's limit. [The lanes
 section of the CI guide](ci.md#lanes) says so. Lanes
 2 was not run: the eighth run went to the raised caps instead, the cause the
 action logs pointed at.
+
+### Choosing the defaults (issue 419)
+
+Until this measurement `scenescout ci` defaulted to one loop, 40 turns and
+1,500,000 tokens. The v3.18.0 rows above found 3 to 5 of 13 planted defects
+with it on the demo app and 1 to 2 of 10 on the held-out app; the three
+baseline runs below, of v3.19.2, found 2 to 4 of 13. The defaults are now **two lanes sharing 80
+turns and 3,000,000 tokens** (the time cap stays 20 minutes).
+
+**What was held fixed.** Release v3.19.2 (commit `1a5a903`, which is also the
+base of this change), gpt-6-luna at effort `low`, `read-only`, level `medium`,
+dedup `judge`, a fresh app and project per run. Every run was dispatched
+through the [benchmark workflow](../.github/workflows/ci-benchmark.yml), at
+most two in flight, and the two-lane runs one at a time. Only the turn and
+token caps and the lane count changed. The token cap was scaled with the turn
+cap (37,500 tokens a turn), so the turn cap stayed the cap that could bind:
+the runs used about 27,000 tokens a turn. They are the fifteen rows of
+2026-10-06 in the table above, archived as `ci-caps-<app>-<arm>-<n>`.
+
+**Three runs a configuration on the demo app.** Recall pools the three runs'
+39 defect-runs, with a 95% Wilson interval; the interval treats each
+defect-run as independent, which they are not, so read it as a lower bound on
+the uncertainty. pass@3 is the defects found in at least one of the three
+runs; pass^3 is those found in all three.
+
+| | Recall per run | Pooled recall (95%) | pass@3 | pass^3 | Labelled precision, pooled | Turns used, how it ended | Wall | Cost per run |
+|---|---|---:|---:|---:|---:|---|---|---:|
+| One loop, 40 turns (the old default) | 3, 4, 2 of 13 | 9/39, 23% (13–38%) | 5 | 1 | 10/11 | 30, 31, 24, each ended by itself | 1m 01s to 1m 18s | $0.009 to $0.012 |
+| One loop, 80 turns | 5, 4, 5 | 14/39, 36% (23–52%) | 8 | 2 | 16/17 | 64, 56, 75, each ended by itself | 1m 52s to 2m 52s | $0.019 to $0.027 |
+| One loop, 120 turns | 6, 2, 4 | 12/39, 31% (19–46%) | 6 | 1 | 12/12 | 41, 30, 39, each ended by itself | 1m 05s to 1m 35s | $0.009 to $0.014 |
+| **Two lanes, 80 turns shared** (the new default) | **7, 6, 5** | **18/39, 46% (32–61%)** | 7 | **4** | 19/20 | 80 each, the turn cap | 1m 51s to 3m 37s | $0.027 to $0.029 |
+
+- **The arm for the lanes.** One loop at 80 turns had the best single-loop
+  mean (4.7 against 4.0 at 120) and pass@3, so the lanes arm used its total:
+  80 turns and 3,000,000 tokens, shared by two lanes, about 40 turns each.
+- **One loop does not use a bigger budget reliably.** At 40 turns every run
+  ended by itself before the cap. At 80 it worked longer (56 to 75 turns) and
+  found more; at 120 it stopped at 30 to 41 turns again, and found 2 to 6.
+  The 80 and 120 rows overlap the 40 row; three runs cannot separate them.
+- **Two lanes beat the old default in every run.** Their worst run (5) is
+  above the old default's best (4); with three runs a side that ordering has a
+  one-sided chance of 1 in 20 under no difference. The mean gain is +3.0, at
+  the ±3 bound the [lanes section](#lanes-one-loop-against-four-task-40) set
+  for gaps between releases, and the pooled intervals overlap, so this is a
+  clear but not a large-sample result. The gain is consistency more than
+  reach: pass^3 is 4 against 1, while pass@3 (7) is below one loop at 80
+  turns (8). The four found every time are the chart image's 404, the badge
+  covering a dashboard button, the export crash and the sticky bar covering
+  Save.
+- **The turn cap binds the lanes.** Every two-lane demo run ended at the
+  80-turn cap, each lane after 38 to 42 turns, so more turns would likely
+  find more, at proportionally more cost.
+- **Wall time** rose from about a minute to 2 to 3.5 minutes: two of the
+  three lanes runs took longer than any single-loop run.
+- **Precision held:** 19 of 20 labelled findings correct for the lanes
+  against 10 of 11 for the old default.
+- **429s:** no run was refused (none ended `provider-error`). The engine
+  retries a 429 without logging it, so retried refusals are not counted. Two
+  lanes peaked at about 1.2 million tokens a minute (2.2 million in 111
+  seconds), under the 2,000,000-a-minute limit four lanes approached before;
+  two such runs at once on one key could reach it.
+
+**The held-out app, run after the choice and not tuned on.** Three runs of
+the chosen setting; its key was not read and nothing was changed after them.
+
+| | Recall per run | Pooled recall (95%) | pass@3 | pass^3 | Labelled precision, pooled | Turns | Wall | Cost per run |
+|---|---|---:|---:|---:|---:|---|---|---:|
+| One loop, 40 turns (eight runs of v3.18.0, above) | 2, 2, 1, 1, 1, 1, 1, 2 of 10 | 11/80, 14% (8–23%) | — | — | 11/23 | 33 to 40 | 1m 20s to 1m 55s | $0.011 to $0.016 |
+| Two lanes, 80 turns shared | 5, 4, 4 | 13/30, 43% (27–61%) | 6 | 3 | 14/18 | 75, 80, 69 | 1m 29s to 2m 22s | $0.022 to $0.026 |
+
+The old default's held-out rows are of v3.18.0, not v3.19.2, so the
+comparison crosses a release; the gap (every lanes run above every one of the
+eight) is wider than the noise between releases recorded above. Precision on
+the held-out app is lower than on the demo, as it has been for every
+configuration: 4 of 18 labelled findings were wrong.
+
+**Cost.** About $0.03 a run on gpt-6-luna, about 2.5 times the old default's
+$0.011, and about 2.2 million tokens, nearly all of them cached input. The
+spend for this measurement was $0.29 in all, by the runs' own estimates: twelve
+demo runs and three held-out runs, none discarded.
+
+**What the key missed.** The scores above use the keys unchanged. Eleven of
+the twelve demo runs filed the new-order e-mail field's missing label; the key
+matched it in two ("relies on placeholder for its label", "loses its
+accessible name" and "placeholder-only label" do not match). One lanes run
+filed the scheduled-reports dead end as "leaves users with no available
+action", and three runs filed the settings page's "Saved." with no request
+in words the key's real-but-not-expected entry does not match. Counted by a
+person, recall would be about one higher in most runs of every configuration;
+the comparison between configurations is not changed by it. The matches were
+left for a person to extend, with a re-score of every archived run.
+
+**For the seeded re-measure (issue 418).** In single-loop runs at the 40-turn
+cap the cap was not what stopped the run: all three ended by themselves at 24
+to 31 turns. The same loop given 80 turns worked to 56 to 75, so the budget
+the prompt states may shape how long the model works, but at 120 it stopped at
+30 to 41, so this is not settled. At the new default the turn cap does bind:
+every two-lane demo run reached it.
 
 ### A seeded exploration schedule (issue 418)
 

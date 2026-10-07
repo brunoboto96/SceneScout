@@ -77,16 +77,20 @@ export interface Caps {
   /** Wall time of the exploration, in milliseconds. The report is written after it, within FINISH_MS. */
   wallMs: number;
 }
-export const DEFAULT_CAPS: Caps = { turns: 40, tokens: 1_500_000, wallMs: 20 * 60_000 };
+/** Why these are the defaults: docs/benchmark.md, "Choosing the defaults (issue 419)". */
+export const DEFAULT_CAPS: Caps = { turns: 80, tokens: 3_000_000, wallMs: 20 * 60_000 };
 const CAP_BOUNDS = { turns: [1, 500], tokens: [1_000, 20_000_000], minutes: [1, 360] } as const;
 
 /**
  * How many model loops explore at once, each in its own browser session and
  * its own part of the app (engine/ci-lanes.ts). 1 is the single loop. The most
  * is scout_lane_brief's, since the split is the same one. Why the default is
- * what it is: docs/benchmark.md, "Unattended runs".
+ * what it is: docs/benchmark.md, "Choosing the defaults (issue 419)". Without
+ * --lanes, a run that cannot take this many (--show, or fewer turns than
+ * lanes) runs as one loop rather than failing; --lanes given explicitly is
+ * held to those rules.
  */
-export const DEFAULT_LANES = 1;
+export const DEFAULT_LANES = 2;
 export const MAX_CI_LANES = MAX_LANES;
 
 /** Every option `scenescout ci` accepts; the ci action's inputs are these names (ci-test holds them equal). */
@@ -248,7 +252,9 @@ export function parseCiArgs(
   const turns = whole("max-turns", CAP_BOUNDS.turns, DEFAULT_CAPS.turns);
   const tokens = whole("max-tokens", CAP_BOUNDS.tokens, DEFAULT_CAPS.tokens);
   const minutes = whole("max-minutes", CAP_BOUNDS.minutes, DEFAULT_CAPS.wallMs / 60_000);
-  const lanes = whole("lanes", [1, MAX_CI_LANES], DEFAULT_LANES);
+  // The default split yields to --show and to a turn cap below it; an explicit --lanes is checked against them below.
+  const defaultLanes = flags.has("show") || typeof turns !== "number" ? 1 : Math.min(DEFAULT_LANES, turns);
+  const lanes = whole("lanes", [1, MAX_CI_LANES], defaultLanes);
   for (const v of [turns, tokens, minutes, lanes]) if (typeof v === "string") return { ok: false, error: v };
   // The lanes share the run's turns rather than getting a cap each: fewer turns than lanes would leave a lane none.
   if ((lanes as number) > (turns as number))

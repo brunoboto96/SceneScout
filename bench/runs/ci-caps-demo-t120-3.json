@@ -1,0 +1,51 @@
+{
+  "app": "demo",
+  "run": "ci-caps-demo-t120-3",
+  "date": "2026-10-06",
+  "note": "Issue 419 caps measurement, 1 loop, 120 turns (workflow run 37542736751); see Choosing the defaults.",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "New order email field relies on placeholder for its label",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new-order-email input placeholder-only label"
+    },
+    {
+      "title": "Dashboard link overlaps bulk-import badge",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "Dashboard All orders link overlaps New: bulk import badge by 85%"
+    },
+    {
+      "title": "Orders register spacing departs substantially from 4px grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "orders register spacing 87% off 4px grid: 10px×30,14px×30"
+    },
+    {
+      "title": "Pinned sticky bar covers Save notes button",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order detail Save notes button covered by order-stickybar"
+    },
+    {
+      "title": "Scheduled reports page provides no navigation or actions",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables"
+    },
+    {
+      "title": "Inventory page lacks a visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "inventory page audit: no visually dominant action; task-clarity 92"
+    }
+  ],
+  "decisions": []
+}

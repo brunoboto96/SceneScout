@@ -79,6 +79,8 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--baselines` | `<project>/.scenescout/baselines` | The folder holding `targets.json` and the baselines. The default is ignored by git; name a folder the project commits to share them |
 | `--baseline-threshold` | `0.1` | The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; `update` rewrites the baselines past it (and any taken on another operating system). Not 0 by default, so anti-aliasing noise between machines and browser builds does not fail the gate; `0` counts every changed pixel (a colour channel off by more than 8 in 255). A change of size always counts |
 | `--sarif-file-anchor` | the running workflow's file, else `package.json`, else `README.md` | The repository file, relative to the repository root, that a `check.sarif` result points at when no saved flow raised it. See [SARIF locations](Ways-to-use-it.md#sarif-locations) |
+| `--record` | `SCENESCOUT_RECORD`, else off | Keep a frame after each route visit and each saved-flow step, and write `replay.html` (role → journey → step) beside the report, with the frames in `replay-frames/`. Given alone it means `on`; `--record off` wins over the variable |
+| `--video` | off | Record a WebM of each saved flow, and only of the flows, into `replay-videos/`, played on `replay.html` beside the journey's steps. Given alone it means `on` |
 
 ### `scenescout ci`
 
@@ -88,10 +90,10 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--model` | `claude-sonnet-5` or `gpt-6-luna` | The model id |
 | `--effort` | `low` | `none` (OpenAI only), `low`, `medium`, `high`, `xhigh` or `max` |
 | `--base-url` | the provider's own API | Another endpoint implementing the same API. Must be https, or plain http to `127.0.0.1` or `localhost` |
-| `--max-turns` | `40` | The most model calls |
-| `--max-tokens` | `1500000` | The most tokens, input and output, over the run |
+| `--max-turns` | `80` | The most model calls |
+| `--max-tokens` | `3000000` | The most tokens, input and output, over the run |
 | `--max-minutes` | `20` | The most minutes of exploration; the report is written after |
-| `--lanes` | `1` | Model loops that explore at once, each in its own browser and part of the app, sharing the three caps above; at most `8` |
+| `--lanes` | `2` | Model loops that explore at once, each in its own browser and part of the app, sharing the three caps above; at most `8`. Without `--lanes`, a run with `--show` or a `--max-turns` of 1 is one loop |
 | `--price-in` | the built-in price | US dollars per million input tokens, for the cost estimate |
 | `--price-cached-in` | the built-in price, else `--price-in` | US dollars per million cached input tokens |
 | `--price-out` | the built-in price | US dollars per million output tokens |
@@ -230,7 +232,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_EVIDENCE_MAX_PX` | the server | The longest side of a finding's picture, in pixels, 160 to 2000 (default 800). A larger picture is shrunk to fit |
 | `SCENESCOUT_EVIDENCE_MAX_KB` | the server | The most a finding's picture may take, in kilobytes, 16 to 2048 (default 200). A larger one is shrunk until it fits |
 | `SCENESCOUT_EVIDENCE_INLINE` | the server | How many pictures one session returns in its `scout_finding` results, 0 to 500 (default 10). Later ones are still kept and in the report |
-| `SCENESCOUT_RECORD` | the server | `on` keeps a frame after every action in every session, for teams that want each QA run recorded; `off` (default) does not. A `scout_attach` `record` wins over it |
+| `SCENESCOUT_RECORD` | the server, `check` | `on` keeps a frame after every action in every session, for teams that want each QA run recorded, and records every `check` (`replay.html`); `off` (default) does not. A `scout_attach` `record`, and `check --record`, win over it |
 | `CI` | the server | Set by CI services. When it is set (and not empty, `false` or `0`), finding pictures default to `file`, nothing opens in a browser by default, and an attach does not download a missing browser unless `SCENESCOUT_BROWSER_DOWNLOAD=on` |
 | `GITHUB_ACTIONS` | the server | Set by GitHub Actions. `true` counts as a CI job, as `CI` does |
 | `SCENESCOUT_READ_POSTS` | the server, `check`, `ci`, a first look | POST endpoints that only read, let out in `observe`: entries such as `POST /api/search`, separated by commas or new lines. Unset: none. A `scout_attach` `readPosts` wins over it |
@@ -270,6 +272,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `GITHUB_STEP_SUMMARY` | `check`, `ci` | Set by GitHub Actions; the report or summary is appended to it |
 | `GITHUB_WORKFLOW_REF` | `check`, `ci` | Set by GitHub Actions; with no `--sarif-file-anchor`, its workflow file is the file SARIF results point at |
 | `GITHUB_WORKSPACE` | `check`, `ci` | Set by GitHub Actions; the repository root that SARIF file paths are relative to |
+| `GITHUB_SHA` | `check` | Set by GitHub Actions; the commit a recorded check's `replay.html` names in its header |
 
 Variables the server reads belong in the MCP client's configuration for the server (an `env` entry), not only in your shell.
 
@@ -279,7 +282,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 
 ### Action: check
 
-`uses: brunoboto96/SceneScout@v3`. Outputs: `passed`, `exit-code`, `failing`, `retests-failing`, `could-not-run`, `worth-a-look`, `high`, `medium`, `low`, `report`, `json`, `sarif`, `artifact-name`.
+`uses: brunoboto96/SceneScout@v3`. Outputs: `passed`, `exit-code`, `failing`, `retests-failing`, `could-not-run`, `worth-a-look`, `high`, `medium`, `low`, `report`, `json`, `sarif`, `replay`, `artifact-name`.
 
 | Input | Default | |
 |---|---|---|
@@ -305,12 +308,14 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `baselines` | empty | As `--baselines`, relative to `working-directory` |
 | `baseline-threshold` | empty | As `--baseline-threshold` |
 | `sarif-file-anchor` | empty | As `--sarif-file-anchor`, relative to the repository root; empty means the workflow file that is running |
+| `record` | empty | As `--record` (`on` or `off`); empty means `SCENESCOUT_RECORD`, else off. The replay page and its frames go in the artifact |
+| `video` | empty | As `--video` (`on` or `off`); empty means off. The journey videos go in the artifact |
 | `working-directory` | `.` | Where the check runs; other relative paths are resolved from here |
 | `version` | empty | The scenescout npm version to run; empty means the version of the action's ref |
 | `cli` | empty | A built `dist/cli.js` to run instead of the npm package, for testing the action itself |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
-| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met |
+| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and `replay.html` with its frames and videos on a recorded check |
 | `artifact-name` | empty | Empty means `scenescout-check-<job id>`; give each matrix cell its own |
 | `upload-sarif` | `false` | Upload `check.sarif` to code scanning; needs `security-events: write` |
 

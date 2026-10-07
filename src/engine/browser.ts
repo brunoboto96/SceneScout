@@ -132,6 +132,7 @@ import {
   type SeenRequest,
 } from "./flow.js";
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
+import { film, type Filmed } from "./film.js";
 import { describePace, InFlightRequests, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
 import { crawledRoute, crawlLine, isFileMediaType, isNonPageResource, mainStateFlag, mediaTypeOf } from "./crawl.js";
 import {
@@ -345,6 +346,8 @@ export interface AttachOptions {
   task?: string;
   /** Keep a frame of the page after each action, under .scenescout/recordings/. Off by default; evidence for QA work. */
   record?: boolean;
+  /** Most frames a recorded session keeps (`record`). Default RECORD_MAX_FRAMES; lowered only by tests. */
+  maxFrames?: number;
   /** How long one action on the page may take. Default: SCENESCOUT_ACTION_TIMEOUT_MS, else 5000 (see limits.ts). */
   actionTimeoutMs?: number;
   /** How long a page may take to load. Default: SCENESCOUT_NAV_TIMEOUT_MS, else 20000 (see limits.ts). */
@@ -945,6 +948,8 @@ export class BrowserEngine {
    * checked, a recording shows it.
    */
   private recording = false;
+  /** Most frames this recorded session keeps (attach's maxFrames). */
+  private maxFrames = RECORD_MAX_FRAMES;
   private framesKept = 0;
   /** How many frames could not be written. The first one says so in the log; the rest are counted. */
   private framesFailed = 0;
@@ -1075,9 +1080,15 @@ export class BrowserEngine {
    * caller that is not going through afterAction can still record what the
    * page looked like: `...(await this.frameFor("crawl"))`.
    */
-  private async frameFor(action: string): Promise<{ frame?: string }> {
+  private async frameFor(action: string): Promise<{ frame?: string; framePastCap?: true }> {
+    const pastCap = this.framePastCap();
     const frame = await this.recordFrame(action);
-    return frame ? { frame } : {};
+    return frame ? { frame } : pastCap ? { framePastCap: true } : {};
+  }
+
+  /** On a recorded session, whether the next step gets no frame because the session already keeps as many as it may. */
+  private framePastCap(): boolean {
+    return this.recording && this.framesKept >= this.maxFrames;
   }
 
   /**
@@ -1088,7 +1099,7 @@ export class BrowserEngine {
    */
   private async recordFrame(action: string): Promise<string | undefined> {
     const dir = this.memory?.dir;
-    if (!this.recording || !dir || this.framesKept >= RECORD_MAX_FRAMES) return undefined;
+    if (!this.recording || !dir || this.framesKept >= this.maxFrames) return undefined;
     const jpeg = await this.liveShot(RECORD_SHOT_TIMEOUT_MS);
     if (!jpeg) return undefined;
     const rel = framePath(this.sessionKey, this.framesKept + 1, action);
@@ -1112,8 +1123,8 @@ export class BrowserEngine {
       return undefined;
     }
     this.framesKept += 1;
-    if (this.framesKept === RECORD_MAX_FRAMES) {
-      this.logAction({ action: "record:full", target: `${RECORD_MAX_FRAMES} frames kept; later steps have none`, url: this.page?.url() ?? "" });
+    if (this.framesKept === this.maxFrames) {
+      this.logAction({ action: "record:full", target: `${this.maxFrames} frames kept; later steps have none`, url: this.page?.url() ?? "" });
     }
     return rel;
   }
@@ -1585,6 +1596,7 @@ export class BrowserEngine {
     this.setTask(opts.task ?? "Attaching and taking stock", opts.task !== undefined);
     this.setPace(opts.paceMs);
     this.recording = opts.record === true;
+    this.maxFrames = opts.maxFrames ?? RECORD_MAX_FRAMES;
     // A re-attached engine starts a new recording: numbering from where the
     // last one stopped would run into the cap with frames it never took.
     this.framesKept = 0;
@@ -2135,6 +2147,27 @@ export class BrowserEngine {
   private nativeDialogAt = 0;
   /** When a native dialog that asks something (confirm, prompt, a leave confirmation) last opened; an alert only tells. */
   private nativeQuestionAt = 0;
+
+  /**
+   * Run `work` while the session's page is filmed into `videoTo` (a WebM,
+   * Playwright's page screencast), so the video holds that work and nothing
+   * the session did before or after it. The page, its tab and so its
+   * sessionStorage are the session's own: the work runs exactly as it would
+   * unfilmed. The video is null when it could not be started or saved
+   * (`videoError` says why); the work's own result and errors are untouched.
+   */
+  async filming<T>(videoTo: string, work: () => Promise<T>): Promise<Filmed<T>> {
+    const page = this.requirePage();
+    // The page the filming began on is the one stopped, even if the work moved the session to a popup.
+    return film(page.screencast, videoTo, page.viewportSize(), work, {
+      prepare: (file) => fs.promises.mkdir(path.dirname(file), { recursive: true }).then(() => undefined),
+      written: (file) =>
+        fs.promises.stat(file).then(
+          (st) => st.size > 0,
+          () => false,
+        ),
+    });
+  }
 
   private requirePage(): Page {
     if (!this.page || !this.memory) {
@@ -4992,7 +5025,8 @@ export class BrowserEngine {
   ): Promise<{ geometry: string[]; brokenImages: string[]; design: DesignDefect[]; auditError?: string }> {
     const { geometry, brokenImages } = await this.measureLayout(page, elements, url);
     try {
-      const { defects, sampled } = await this.auditPage();
+      // The crawl has just kept this page's frame; a second of the same page would only use up the session's cap.
+      const { defects, sampled } = await this.auditPage({ frame: false });
       // Nothing styled to read is not a clean page: contrast, focus and target size went unmeasured.
       return sampled > 0
         ? { geometry, brokenImages, design: defects }
@@ -5683,7 +5717,15 @@ export class BrowserEngine {
       for (const sig of background) if (!refusedBackground.includes(sig) && refusedBackground.length < 20) refusedBackground.push(sig);
       return charged;
     };
-    const done = (outcome: FlowReplay["outcome"]): FlowReplay => ({ outcome, violations, refusedBackground, websockets: [...websockets] });
+    /** On a recorded session, the frame after each step that ran (null where none was kept), for the check's replay page. */
+    const frames: NonNullable<FlowReplay["frames"]> = [];
+    const done = (outcome: FlowReplay["outcome"]): FlowReplay => ({
+      outcome,
+      violations,
+      refusedBackground,
+      websockets: [...websockets],
+      ...(this.recording ? { frames } : {}),
+    });
     // Nothing from the crawl before this flow is charged to it.
     this.oracles.drain(false);
     this.blockedRequests = [];
@@ -5840,6 +5882,12 @@ export class BrowserEngine {
         const n = i + 1;
         const did = describeStep(step);
         const { failure, refusal } = step.action === "repeat" ? await runRepeat(step) : await runStep(step);
+        // Taken whatever the step's result: the frame of a step that broke is the evidence of how it broke.
+        if (this.recording) {
+          const pastCap = this.framePastCap();
+          const frame = await this.recordFrame(`flow-${step.action}`);
+          frames.push(frame ? { frame } : pastCap ? { pastCap: true } : {});
+        }
         if (refusal) return done({ status: "refused", step: n, did, reason: refusal.split("\n")[0], path: here() });
         if (failure) return done({ status: "failed", step: n, did, reason: failure, path: here() });
       }
@@ -5901,7 +5949,7 @@ export class BrowserEngine {
   }
 
   /** The design audit's measurements, as data as well as prose; scout_design_audit and a check's crawl share it. */
-  private async auditPage(): Promise<{ url: string; report: string; defects: DesignDefect[]; sampled: number }> {
+  private async auditPage(opts: { frame?: boolean } = {}): Promise<{ url: string; report: string; defects: DesignDefect[]; sampled: number }> {
     const page = this.requirePage();
     await this.settle();
     const payload = (await page.evaluate(DESIGN_COLLECT_SCRIPT)) as DesignPayload;
@@ -5926,7 +5974,12 @@ export class BrowserEngine {
       this.memory?.setPageScore(route, { ...score, at: new Date().toISOString(), url: page.url() });
       this.memory?.markRouteFact(route, { audited: true });
     }
-    this.logAction({ action: "design-audit", url: page.url(), result: score ? `score:${score.overall}` : undefined, ...(await this.frameFor("design-audit")) });
+    this.logAction({
+      action: "design-audit",
+      url: page.url(),
+      result: score ? `score:${score.overall}` : undefined,
+      ...(opts.frame === false ? {} : await this.frameFor("design-audit")),
+    });
     return { url: page.url(), report, defects, sampled: payload.records.length };
   }
 

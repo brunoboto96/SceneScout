@@ -277,7 +277,9 @@ Use SceneScout to test http://localhost:3000, record the run
 ```
 
 or, on the tool directly, `scout_attach {record: true}`. `SCENESCOUT_RECORD=on` in
-the server's environment records every run.
+the server's environment records every run. A CI gate records too:
+`scenescout check --record` writes `replay.html`, every journey step by step with
+its frames ([recording a check](docs/ci.md#recording-a-check)).
 
 Then `scout_report` writes two files side by side in `.scenescout/`:
 `report.md` as always, and `report.html` — the whole run as one self-contained
@@ -454,6 +456,7 @@ With the default settings its saved flows send no HTTP write (they replay under 
 - `--on-refused-step report|stop` (default `report`): `report` marks a flow whose step was refused "could not run", keeps every other verdict and exits 2; `stop` exits 2 at that step with no results.
 - `--gate-retests never|high|all` (default `high`): which still-reproducing re-tested findings fail the gate.
 - `--baseline off|compare|update` (default `off`), with `--baselines <dir>` and `--baseline-threshold <percent>` (default `0.1`, so small anti-aliasing noise between machines passes): visual baselines, below.
+- `--record` (or `SCENESCOUT_RECORD=on`; the action's `record: on`) keeps a frame after each route visit and each saved-flow step and writes `replay.html` beside the report: each role, each journey with a pass or fail badge, each step with its caption, result and frame, the first failing step highlighted. `--video` (the action's `video: on`) adds a WebM of each journey, played on that page beside its steps. Both off by default. [docs/ci.md](docs/ci.md#recording-a-check) covers size, privacy and publishing it.
 
 The defaults are what an unconfigured check does, for a first try or an AI agent running it unattended: its flows send no HTTP write and it never silently hides a result. Each setting is a choice for the project; the report and `check.json` print the values a check ran with.
 
@@ -476,7 +479,7 @@ npx scenescout ci http://127.0.0.1:3000
 
 - **It reports and never gates.** Exit 0 when the run ran, whatever it found; exit 2 when it could not run (no key, a key the API refused, an app that never answered). Two runs of the same app find different things, so a finding is something to read, never a reason to fail a build. `scenescout check` is the gate.
 - **Providers:** the Anthropic Messages API (default model `claude-sonnet-5`) or the OpenAI Responses API (default `gpt-6-luna`), chosen by which key is set; with both set, `--provider` decides. `--model` and `--effort` (default `low`) override; `--base-url` points at another endpoint that implements the same API.
-- **Caps:** at most 40 model turns, 1,500,000 tokens and 20 minutes (`--max-turns`, `--max-tokens`, `--max-minutes`). The first cap reached ends the exploration; the report is still written, and says which cap ended it.
+- **Caps:** at most 80 model turns, 3,000,000 tokens and 20 minutes (`--max-turns`, `--max-tokens`, `--max-minutes`), shared by two model loops that each explore their own part of the app (`--lanes`, default 2). The first cap reached ends the exploration; the report is still written, and says which cap ended it. On the benchmark's demo app a run at these defaults cost about $0.03 on `gpt-6-luna` ([docs/benchmark.md](docs/benchmark.md#choosing-the-defaults-issue-419)).
 - **Mode:** `read-only` by default; `--mode observe` sends no form at all, `--mode safe-write` lets the run create records and change only the ones it created. `--mode destructive` runs only with `--allow-destructive` as well.
 - **Duplicates:** when the dedup rule keeps a filed finding apart, the run's model is asked at its lowest effort whether it is one already open on the same page, and merges it on a "same", keeping the filing's title, category, severity and evidence under that finding. The two findings' titles, categories and evidence, and the page's path, are sent; `--dedup rule` turns it off ([ADR 17](docs/adr/0017-a-model-judges-only-the-merges-the-rule-misses.md)).
 - **Seed (opt-in):** `--seed <seed>` or `--seed auto` crawls first and has the run take the routes in an order shuffled by the seed, with the routes earlier seeded runs on the project started with last, so successive runs spread over the app; the same seed repeats the order, and the seed is named in the report and `ci.json`. `scout_lane_brief {seed}` does the same for a parallel run. On the demo app it did not yet improve what three runs find together enough to change any default ([the measurement](docs/benchmark.md#a-seeded-exploration-schedule-issue-418)).

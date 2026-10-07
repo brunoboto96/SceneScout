@@ -32,6 +32,7 @@ import { redactRoute, redactSecrets } from "./memory.js";
 import { SARIF_ANCHOR_FALLBACKS, checkSarifAnchor, sarifFileFor, sarifLocation, type SarifFiles } from "./sarif.js";
 import { httpErrorDetail, httpStatusOf, type OracleViolation } from "./oracles.js";
 import type { CheckRetest } from "./verify.js";
+import type { CheckReplay } from "./check-replay.js";
 
 export const CHECK_SEVERITIES = ["high", "medium", "low"] as const;
 export type CheckSeverity = (typeof CHECK_SEVERITIES)[number];
@@ -631,6 +632,19 @@ export interface CheckOptions extends CheckSettings {
   baselineThreshold: number;
   /** The repository file a SARIF result with no flow of its own points at; absent means sarif.ts's default. */
   sarifFileAnchor?: string;
+  /**
+   * Keep a frame after each route visit and each journey step, and write the
+   * replay page beside the report. Absent when --record was not given: the
+   * command then reads SCENESCOUT_RECORD (capture.ts recordChoice).
+   */
+  record?: boolean;
+  /**
+   * Record a video (WebM) of each saved flow, and only of the flows, and play
+   * it on the replay page beside the journey's steps. Off unless --video is given.
+   */
+  video?: boolean;
+  /** The most frames one recorded session keeps. Not a command-line option: unset is RECORD_MAX_FRAMES, and only tests lower it. */
+  maxFrames?: number;
 }
 
 /**
@@ -660,7 +674,14 @@ export const CHECK_OPTION_NAMES = [
   "baselines",
   "baseline-threshold",
   "sarif-file-anchor",
+  "record",
+  "video",
 ] as const;
+
+/** Options that may be given alone, meaning on: `--record`, as well as `--record on` and `--record=off`. */
+const SWITCH_OPTIONS: ReadonlySet<string> = new Set(["record", "video"]);
+const SWITCH_ON = ["on", "true", "1"];
+const SWITCH_OFF = ["off", "false", "0"];
 
 export const MAX_CHECK_ROUTES = 150;
 /** Link discovery rounds: each crawl reveals the routes its pages link to. Past a few, a site is paginating rather than revealing. */
@@ -684,6 +705,13 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
     }
     const eq = a.indexOf("=");
     const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
+    // A switch takes the next argument only when it is on or off: `--record http://…` records, and checks that URL.
+    if (eq < 0 && SWITCH_OPTIONS.has(name)) {
+      const next = args[i + 1]?.toLowerCase();
+      if (next !== undefined && [...SWITCH_ON, ...SWITCH_OFF].includes(next)) i += 1;
+      flags.set(name, next !== undefined && [...SWITCH_ON, ...SWITCH_OFF].includes(next) ? next : "on");
+      continue;
+    }
     const value = eq > 0 ? a.slice(eq + 1) : args[i + 1];
     if (value === undefined || (eq < 0 && value.startsWith("--"))) return { ok: false, error: `--${name} needs a value` };
     if (eq < 0) i += 1;
@@ -804,6 +832,14 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
   }
   const anchor = flags.has("sarif-file-anchor") ? checkSarifAnchor(flags.get("sarif-file-anchor")!) : undefined;
   if (anchor && !anchor.ok) return anchor;
+  const recordRaw = flags.get("record")?.trim().toLowerCase();
+  if (recordRaw !== undefined && !SWITCH_ON.includes(recordRaw) && !SWITCH_OFF.includes(recordRaw)) {
+    return { ok: false, error: "--record is on or off, or given alone for on" };
+  }
+  const videoRaw = flags.get("video")?.trim().toLowerCase();
+  if (videoRaw !== undefined && !SWITCH_ON.includes(videoRaw) && !SWITCH_OFF.includes(videoRaw)) {
+    return { ok: false, error: "--video is on or off, or given alone for on" };
+  }
 
   const resolve = (p: string): string => resolveArgPath(cwd, p);
   return {
@@ -831,6 +867,8 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
       ...(baselinesDir !== undefined ? { baselinesDir: resolve(baselinesDir) } : {}),
       baselineThreshold: threshold.value,
       ...(anchor ? { sarifFileAnchor: anchor.value } : {}),
+      ...(recordRaw !== undefined ? { record: SWITCH_ON.includes(recordRaw) } : {}),
+      ...(videoRaw !== undefined && SWITCH_ON.includes(videoRaw) ? { video: true } : {}),
     },
   };
 }
@@ -874,6 +912,8 @@ export interface CheckResult {
   skippedFlows: SkippedFlowFile[];
   /** What --baseline compare or update did with each target; absent or null when it was off. */
   baselines?: BaselineRun | null;
+  /** The replay page's model on a recorded check (--record); absent otherwise. Never written to check.json. */
+  replay?: CheckReplay;
 }
 
 /**

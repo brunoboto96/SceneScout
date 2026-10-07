@@ -53,6 +53,10 @@ on:
         description: A seed, or auto for a fresh one, to order the run's routes by (a seeded schedule). Empty means unseeded.
         type: string
         default: ""
+      seed-history:
+        description: Earlier seeded runs' schedules, as the JSON array of a previous run's memory.json `schedules`, to start this run's memory with. Empty means a fresh memory.
+        type: string
+        default: ""
   workflow_call:
     inputs:
       app:
@@ -153,6 +157,34 @@ jobs:
             sleep 1
           done
           echo "The $APP app did not answer on port $port:"; cat "$RUNNER_TEMP/app.log"; exit 1
+
+      # Benchmark tooling only, for measuring the seed's exclusion across runs:
+      # the project starts with earlier runs' schedules and nothing else, so
+      # the exclusion applies while the memory still holds this run's findings
+      # alone, which is what bench scores. A dispatch input only: the weekly
+      # run always starts fresh.
+      - name: Start the memory with earlier seeded runs' schedules
+        if: ${{ inputs.seed-history != '' }}
+        env:
+          HISTORY: ${{ inputs.seed-history }}
+          SEED: ${{ inputs.seed }}
+          PROJECT: ${{ steps.app.outputs.project }}
+        run: |
+          # Only a seeded run reads the schedules: without a seed this would measure nothing.
+          if [ -z "$SEED" ]; then echo "::error::seed-history applies to a seeded run: give seed as well"; exit 1; fi
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import { readSchedules } from "./dist/engine/schedule.js";
+            const given = JSON.parse(process.env.HISTORY);
+            const schedules = readSchedules({ schedules: given });
+            if (!Array.isArray(given) || given.length === 0 || schedules.length !== given.length) {
+              console.error("seed-history must be a non-empty JSON array of schedule records, as in memory.json");
+              process.exit(1);
+            }
+            fs.mkdirSync(`${process.env.PROJECT}/.scenescout`, { recursive: true });
+            fs.writeFileSync(`${process.env.PROJECT}/.scenescout/memory.json`, JSON.stringify({ version: 1, states: {}, findings: [], schedules }));
+            console.log(`The memory starts with ${schedules.length} earlier schedule(s): ${schedules.map((r) => r.seed).join(", ")}`);
+          '
 
       - name: CI run
         id: run

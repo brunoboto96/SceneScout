@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import zlib from "node:zlib";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { asCrlf, asLf, joinPath, readText, samePlace } from "./checkout.ts";
 import { z } from "zod";
@@ -168,8 +168,8 @@ test("options: the defaults are the agreed caps, read-only, medium, and the dedu
   assert.deepEqual(p.options, {
     url: "http://127.0.0.1:3000/",
     projectDir: "/work",
-    caps: { turns: 40, tokens: 1_500_000, wallMs: 20 * 60_000 },
-    lanes: 1,
+    caps: { turns: 80, tokens: 3_000_000, wallMs: 20 * 60_000 },
+    lanes: 2,
     mode: "read-only",
     level: "medium",
     dedup: "judge",
@@ -271,7 +271,7 @@ test("lanes: shared caps need a turn per lane, and a run that shows one element 
   const u = "http://127.0.0.1:3000";
   const parse = (args: string[]) => parseCiArgs([u, ...args], "/work");
   const four = parse(["--lanes", "4"]);
-  assert.ok(four.ok && four.options.lanes === 4 && four.options.caps.turns === 40, "the caps are not multiplied by the lanes");
+  assert.ok(four.ok && four.options.lanes === 4 && four.options.caps.turns === 80, "the caps are not multiplied by the lanes");
   const short = parse(["--lanes=4", "--max-turns=3"]);
   assert.ok(!short.ok && /--lanes 4 needs --max-turns of at least 4/.test(short.error), JSON.stringify(short));
   assert.ok(parse(["--lanes=4", "--max-turns=4"]).ok, "exactly one turn each is allowed");
@@ -279,6 +279,12 @@ test("lanes: shared caps need a turn per lane, and a run that shows one element 
   assert.ok(!show.ok && /--show explores nothing/.test(show.error), JSON.stringify(show));
   const oneLane = parse(["--lanes=1", "--show", "the Save button"]);
   assert.ok(oneLane.ok && oneLane.options.lanes === 1, "one lane is the single loop, which a capture is");
+  const showDefault = parse(["--show", "the Save button"]);
+  assert.ok(showDefault.ok && showDefault.options.lanes === 1, "without --lanes, a capture runs as the single loop rather than failing on the default split");
+  const oneTurn = parse(["--max-turns=1"]);
+  assert.ok(oneTurn.ok && oneTurn.options.lanes === 1, "without --lanes, the default split never asks for more lanes than turns");
+  const defaultSplit = parse([]);
+  assert.ok(defaultSplit.ok && defaultSplit.options.lanes === 2, "the default is two lanes");
   assert.equal(MAX_CI_LANES, MAX_LANES, "the bound is scout_lane_brief's, since the split is the same");
 });
 
@@ -504,7 +510,7 @@ test("prompt: the method, then the CI rules; the kickoff names the target, level
     /Level: medium/,
     /Write mode: observe/,
     /Focus: orders/,
-    /40 model turns, 1,500,000 tokens and 20 minutes/,
+    /80 model turns, 3,000,000 tokens and 20 minutes/,
   ])
     assert.match(kickoff, part);
 });
@@ -1149,7 +1155,7 @@ test("lanes: every lane gets the same method and rules, and a first message of i
     ciLaneKickoff({ lane: plan.lanes[i], laneCount: 2, url: TARGET, projectDir: "/work", mode: "read-only", level: "medium", caps: DEFAULT_CAPS });
   assert.match(kick(0), /as lane "orders\+1", one of 2 running at once/);
   assert.match(kick(0), /Your routes \(3\): \/orders, \/orders\/new, \/settings/);
-  assert.match(kick(0), /Budget: the run's 40 model turns, 1,500,000 tokens and 20 minutes are shared by the 2 lanes: plan on about 20 turns/);
+  assert.match(kick(0), /Budget: the run's 80 model turns, 3,000,000 tokens and 20 minutes are shared by the 2 lanes: plan on about 40 turns/);
   assert.match(kick(1), /What the planning crawl saw on your routes:\n {2}\/reports — LOAD FAILED/);
   assert.doesNotMatch(kick(0), /\/stock/, "a lane is not told about another lane's routes");
 });
@@ -1817,6 +1823,24 @@ test("action: its defaults are the CLI's defaults, and every input reaches the C
   assert.ok(hasCiCommand(fs.readFileSync(path.join(REPO, "src", "cli.ts"), "utf8")), "the CLI's usage no longer has the line the action looks for");
 });
 
+test("action and help: every default they state is the CLI's", () => {
+  const d = parseCiArgs(["http://127.0.0.1:3000"], "/work");
+  assert.ok(d.ok);
+  const stated = (input: string) => /Empty means (\d+)/.exec((action.inputs as Record<string, { description: string }>)[input].description)?.[1];
+  assert.equal(stated("max-turns"), String(d.options.caps.turns));
+  assert.equal(stated("max-tokens"), String(d.options.caps.tokens));
+  assert.equal(stated("max-minutes"), String(d.options.caps.wallMs / 60_000));
+  assert.equal(stated("lanes"), String(d.options.lanes));
+  // From the ci entry on: the first run's entry above it has a --max-minutes of its own.
+  const cliText = fs.readFileSync(path.join(REPO, "src", "cli.ts"), "utf8");
+  const help = cliText.slice(cliText.indexOf("--max-turns N (default"));
+  const inHelp = (option: string) => new RegExp(`--${option} N \\(default (\\d+)`).exec(help)?.[1];
+  assert.equal(inHelp("max-turns"), String(d.options.caps.turns), "the CLI's help");
+  assert.equal(inHelp("max-tokens"), String(d.options.caps.tokens), "the CLI's help");
+  assert.equal(inHelp("max-minutes"), String(d.options.caps.wallMs / 60_000), "the CLI's help");
+  assert.equal(inHelp("lanes"), String(d.options.lanes), "the CLI's help");
+});
+
 test("action: findings never fail the step; only a run that could not run does", () => {
   assert.deepEqual(ciVerdict({ exitCode: "0", url: "u", error: "" }), { exit: 0, annotation: null });
   const failed = ciVerdict({ exitCode: "2", url: "u", error: "the model's API failed: HTTP 401" });
@@ -1874,7 +1898,8 @@ test("action: this repository runs it against the demo app and a stand-in API, g
     "the job looks for the key in what the run wrote",
   );
   // The same action split into lanes, against the same stand-in, checked for its merged finding.
-  const lanes = job.steps!.find((s) => s.uses === "./ci" && s.with?.lanes !== undefined);
+  assert.equal(String(step.with?.lanes), "1", "the first run is the single loop, which the default of two lanes would not test");
+  const lanes = job.steps!.find((s) => s.uses === "./ci" && Number(s.with?.lanes) >= 2);
   assert.ok(lanes && Number(lanes.with?.lanes) >= 2, "the job also runs the action split into lanes");
   assert.equal(lanes.with?.["base-url"], step.with?.["base-url"], "the lanes run uses the stand-in API too");
   const checked = job.steps!.find((s) => /\$\{\{ steps\.lanes\.outputs\.low \}\}/.test(JSON.stringify(s)));
@@ -1998,6 +2023,47 @@ test("benchmark workflow: started by hand or called, reads the repository and no
     if (/^actions\/setup-node@/.test(s.uses ?? "")) assert.equal(s.with?.cache, undefined, "setup-node caches nothing here");
   }
   assert.equal(String(run.with?.cache), "false", "the ci action keeps the browser out of the cache");
+});
+
+test("benchmark workflow: seed-history starts a dispatched run's memory with earlier schedules and nothing else", () => {
+  const wf = readWorkflow("ci-benchmark.yml");
+  assert.equal(wf.on.workflow_dispatch.inputs["seed-history"].default, "", "a fresh memory unless asked");
+  assert.equal(wf.on.workflow_call.inputs["seed-history"], undefined, "the weekly run always starts fresh");
+  const steps = Object.values(wf.jobs as Record<string, WorkflowJob>).flatMap((j) => j.steps ?? []);
+  const i = steps.findIndex((s) => s.env?.HISTORY === "${{ inputs.seed-history }}");
+  assert.ok(i >= 0 && i < steps.findIndex((s) => s.uses === "./ci"), "it runs before the run");
+  assert.equal(steps[i].if, "${{ inputs.seed-history != '' }}");
+  assert.ok(!NAMES_A_KEY.test(JSON.stringify(steps[i])));
+  const record = { seed: "b1", at: "2026-10-07T10:00:00.000Z", source: "ci", exclusion: "back", routes: ["/orders", "/reports", "/"] };
+  // The step reads the built engine; the test reads the source, so it needs no build.
+  const script = steps[i]
+    .run!.replace("node --input-type=module", "node --import tsx --input-type=module")
+    .replace("./dist/engine/schedule.js", pathToFileURL(path.join(REPO, "src", "engine", "schedule.ts")).href);
+  const runStep = (history: string, seed = "b2") => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-seed-history-"));
+    try {
+      const r = spawnSync("bash", ["-eo", "pipefail", "-c", script], {
+        cwd: REPO,
+        env: { PATH: process.env.PATH, HISTORY: history, SEED: seed, PROJECT: dir },
+        encoding: "utf8",
+      });
+      const file = path.join(dir, ".scenescout", "memory.json");
+      return { status: r.status, memory: fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : undefined };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const ok = runStep(JSON.stringify([record]));
+  assert.equal(ok.status, 0);
+  assert.deepEqual(ok.memory, { version: 1, states: {}, findings: [], schedules: [record] }, "schedules only, so bench still scores this run's findings alone");
+  // Anything the engine would not read as a schedule fails the run rather than starting it fresh unnoticed.
+  for (const bad of ["{}", "[]", JSON.stringify([{ ...record, source: "elsewhere" }]), JSON.stringify([record, { seed: "b2" }]), "not json"]) {
+    const r = runStep(bad);
+    assert.notEqual(r.status, 0, bad);
+    assert.equal(r.memory, undefined, bad);
+  }
+  // Without a seed the run would not read the schedules, and would look like a measurement of them.
+  assert.notEqual(runStep(JSON.stringify([record]), "").status, 0, "seed-history with no seed");
 });
 
 test("ci action: cache false skips both the restore and the save of the browser", () => {
@@ -3316,13 +3382,14 @@ test("seed: --seed, else SCENESCOUT_SEED, else none; auto is generated; what is 
   assert.match(bad(["--seed", "s", "--show", "the Save button"]), /--seed orders an exploration, and --show explores nothing/);
 });
 
-test("seed: an unseeded run does not plan and is told no order; a seeded one crawls first and is told where to start", async () => {
+test("seed: an unseeded one-loop run does not plan and is told no order; a seeded one crawls first and is told where to start", async () => {
+  // One loop: a run in lanes plans whether or not it is seeded.
   const kickoffOf = async (args: string[]) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-seed-"));
     try {
       const server = standInServer(dir, { crawl: CRAWL_TEXT });
       const kickoffs: string[] = [];
-      const run = await runStandIn(args, dir, server, (_s, _t, kickoff) => {
+      const run = await runStandIn(["--lanes", "1", ...args], dir, server, (_s, _t, kickoff) => {
         kickoffs.push(kickoff);
         return new Scripted([{ text: "Done.", calls: [], usage: use(1) }]);
       });
@@ -3347,13 +3414,13 @@ test("seed: an unseeded run does not plan and is told no order; a seeded one cra
   assert.ok(seeded.run.lines.some((l) => /^Seed: s1, earlier seeded runs' starting choices moved to the back/.test(l)));
 });
 
-test("seed: successive seeded runs on one project start elsewhere, and a seed used again repeats its first order", async () => {
+test("seed: successive seeded one-loop runs on one project start elsewhere, and a seed used again repeats its first order", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-seed-spread-"));
   try {
     const runOnce = async (seed: string, extra: string[] = []) => {
       const server = standInServer(dir, { crawl: CRAWL_TEXT });
       let kickoff = "";
-      const run = await runStandIn(["--seed", seed, ...extra], dir, server, (_s, _t, k) => {
+      const run = await runStandIn(["--lanes", "1", "--seed", seed, ...extra], dir, server, (_s, _t, k) => {
         kickoff = k;
         return new Scripted([{ text: "Done.", calls: [], usage: use(1) }]);
       });

@@ -1,0 +1,27 @@
+{
+  "app": "demo",
+  "run": "ci-caps-demo-t40-3",
+  "date": "2026-10-06",
+  "note": "Issue 419 caps measurement, 1 loop, 40 turns (workflow run 37539633899); see Choosing the defaults.",
+  "findings": [
+    {
+      "title": "Scheduled reports route is an inert dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables"
+    },
+    {
+      "title": "Dashboard chart asset returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Inventory page lacks a visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "inventory.html has no visually dominant action"
+    }
+  ],
+  "decisions": []
+}

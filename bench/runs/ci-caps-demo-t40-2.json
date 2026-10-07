@@ -1,0 +1,51 @@
+{
+  "app": "demo",
+  "run": "ci-caps-demo-t40-2",
+  "date": "2026-10-06",
+  "note": "Issue 419 caps measurement, 1 loop, 40 turns (workflow run 37539374305); see Choosing the defaults.",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard navigation badge overlaps All orders link",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard geometry overlap dash-all-orders dash-new-badge 85%"
+    },
+    {
+      "title": "Order detail page requests a null order",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/orders/null 404"
+    },
+    {
+      "title": "Scheduled reports route has no usable controls",
+      "severity": "medium",
+      "category": "dead-end",
+      "evidence": "route /reports-scheduled.html main text only 72 chars and 0 interactables"
+    },
+    {
+      "title": "New order email field loses its accessible name when filled",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new-order-email placeholder-only accessible name"
+    },
+    {
+      "title": "New order helper text has insufficient contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new helper text contrast 1.73:1"
+    },
+    {
+      "title": "Reports page has no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "reports page task-efficiency no visually dominant action; task-clarity 92"
+    }
+  ],
+  "decisions": []
+}

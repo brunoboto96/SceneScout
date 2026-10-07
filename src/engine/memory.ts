@@ -479,6 +479,8 @@ export interface ActionLogEntry {
   session?: string;
   /** The frame kept for this step, relative to the memory directory. Present only on a recorded run. */
   frame?: string;
+  /** On a recorded run, set when this step has no frame because the session already kept as many as it may. */
+  framePastCap?: true;
 }
 
 /** Latest quality score for one route, produced by the design audit. */

@@ -95,6 +95,8 @@ Every option of `scenescout check` is an input with the same name. `scenescout c
 | `baselines` | `<project>/.scenescout/baselines` | The folder holding `targets.json` and the baselines; name one the repository commits (below) |
 | `baseline-threshold` | 0.1 | The percentage of a picture's pixels that may change, 0 to 100 (below) |
 | `sarif-file-anchor` | the workflow file that is running | The repository file a `check.sarif` result points at when no saved flow raised it, relative to the repository root (below) |
+| `record` | `SCENESCOUT_RECORD`, else `off` | `on` keeps a frame after each route visit and each flow step and writes `replay.html` beside the report, kept in the artifact (below) |
+| `video` | `off` | `on` records a WebM video of each saved flow, linked from `replay.html` beside its steps and kept in the artifact (below) |
 
 And the action's own:
 
@@ -104,13 +106,13 @@ And the action's own:
 | `version` | the ref's release | The scenescout npm version to run |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo`. Set `false` on a runner or container that has them |
-| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met |
+| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and on a recorded check `replay.html` with its `replay-frames/` and `replay-videos/` folders |
 | `artifact-name` | `scenescout-check-<job id>` | A second use in the same job gets `-2`, a third `-3`. Jobs of a matrix share a job id, so give each cell its own name, e.g. `scenescout-check-${{ matrix.browser }}` |
 | `upload-sarif` | `false` | Upload `check.sarif` to code scanning (below) |
 
 ### Outputs
 
-`passed` (`true` or `false`, empty when the check could not run; with `could-not-run` above 0 it describes the rest of the check, so `true` can come with exit code 2), `exit-code`, `failing` (what fails the gate: issues at the gate's severity or worse, plus re-tested findings that `--gate-retests` gates), `could-not-run` (flows a refused step kept from running), `retests-failing` (of `failing`, the re-tested findings), `high`, `medium`, `low`, `worth-a-look` (observations listed as worth a look, below; not in `high`, `medium` or `low`, and never in `failing`), the paths `report`, `json` and `sarif`, and `artifact-name`.
+`passed` (`true` or `false`, empty when the check could not run; with `could-not-run` above 0 it describes the rest of the check, so `true` can come with exit code 2), `exit-code`, `failing` (what fails the gate: issues at the gate's severity or worse, plus re-tested findings that `--gate-retests` gates), `could-not-run` (flows a refused step kept from running), `retests-failing` (of `failing`, the re-tested findings), `high`, `medium`, `low`, `worth-a-look` (observations listed as worth a look, below; not in `high`, `medium` or `low`, and never in `failing`), the paths `report`, `json` and `sarif`, `replay` (the path of `replay.html` when `record` or `video` is on, else empty), and `artifact-name`.
 
 A later step can read them, for example to comment on the pull request. To keep the job going after a failed gate, give the step `continue-on-error: true` and look at `steps.scenescout.outputs.exit-code`.
 
@@ -360,6 +362,37 @@ An element larger than the window is pictured where it is inside the window, and
 
 **Allowing small changes.** `baseline-threshold` (`--baseline-threshold`) is the percentage of a picture's pixels that may change before its baseline is not met. The default is 0.1, not 0: two pictures of an unchanged page taken by one browser build on one machine compare at 0%, but a run on another machine, or after a browser or font update, can anti-alias text and curved edges a pixel differently, and a gate that fails on that noise teaches a team to ignore it. 0.1% is 1,152 pixels of a 1280×900 page and 64 of a 320×200 picture, so a smaller change, such as a character of small text on a large element, passes; set `0` to count every changed pixel. A change of size always counts. `update` rewrites the baselines past the threshold, as compare would judge them, and leaves the rest alone, so noise under it leaves the folder untouched; a baseline taken on another operating system it always replaces. Each pixel is already allowed a difference of 8 in 255 on each colour channel, which absorbs a colour rounded one step differently. `fail-on: never` reports everything without failing the job, visual changes included.
 
+## Recording a check
+
+A green check says the gate passed; a recorded one also shows what passed. `--record` (the action's `record: on`, or `SCENESCOUT_RECORD=on` in the environment) keeps a frame of the page after each route the check visits and after each step of each saved flow, and writes `replay.html` beside `report.md`. It is off by default. `--record off` wins over the variable.
+
+```yaml
+- uses: brunoboto96/SceneScout@v3
+  with:
+    url: http://127.0.0.1:3000
+    record: on
+```
+
+The page is organised role → journey → step. The check's own session comes first, with the routes it visited; then each role a saved flow ran as. Every journey (a saved flow) has a pass or fail badge, and each of its steps shows its caption (the action and its target), its result and the frame after it. A journey that broke is open, with the step that broke highlighted and linked from its heading; the steps after it are marked not run and have no frame. The header gives the verdict, the SceneScout version, the app's origin, when the check started and ended, and the commit when `GITHUB_SHA` names one.
+
+**Video.** `--video` (the action's `video: on`) also records a WebM video of each saved flow, using Playwright's page screencast. Filming starts at the flow's first step and stops when the flow hands back, on the same page the flow would use unfilmed, so cookies, localStorage and sessionStorage are exactly what they would be without the video. Only the flows are filmed: the crawl, the re-tests and the baselines are not. A video is filmed at the page's own size, 1280×900. A flow whose video cannot be started or saved still runs and keeps its verdict; the check's log says why it has no video, and the next flow is filmed afresh. The replay page plays each video at the top of its journey, above the steps, with a link to open it. It works with or without `--record`: without it the page has the journeys and their videos, and no frames. Off by default, because videos are large.
+
+```yaml
+- uses: brunoboto96/SceneScout@v3
+  with:
+    url: http://127.0.0.1:3000
+    record: on
+    video: on
+```
+
+**What it writes.** `replay.html`, with a `replay-frames/` folder (`--record`) and a `replay-videos/` folder holding `journey-01-<flow>.webm`, `journey-02-<flow>.webm` and so on in the order the flows ran (`--video`), all in the output folder (`--out`, default `.scenescout/check`). The page has no scripts or event handlers and loads nothing from the network, so it opens from a downloaded artifact or from any static host, as long as the two folders travel with it. Every check removes the page, frames and videos an earlier run left there, so nothing stale is read as this run's. The page carries a `<meta name="generator" content="scenescout-check-replay">` mark, and only a `replay.html` with that mark is removed or replaced. A `replay.html` without it is the project's own: a check that is not recorded leaves it alone, and a recorded one (`--record` or `--video`) stops before it starts, exit code 2, naming the file, rather than overwrite it. Move or rename the file, or pass `--out` to write the check elsewhere. The action uploads them with the other results and publishes the page's path as the `replay` output.
+
+**Size.** A frame is a JPEG of the viewport, usually tens of kilobytes. A check takes at most one per route (up to `--max-routes`) and one per flow step, and each browser session keeps at most 600 frames. A step or visit past that has no frame; the page says so beside it, and counts them in its note at the top. A video is usually several hundred kilobytes to a few megabytes for each minute of a journey, and encoding it adds a little time to each flow, so turn on `--video` for the runs where you will watch them. Record the runs you keep as evidence, such as the main branch or a release, rather than every push.
+
+**Privacy.** The frames and videos are pictures of the app under test, and they show whatever the pages showed: names, addresses, anything a seeded account can see. Record against seeded or synthetic data, never production. Typed values never appear in the page's text, and secrets in addresses and reasons are redacted as they are in the report; a field's contents can still show in a frame or a video, as they did on screen (a password field shows dots).
+
+**Publishing it.** The artifact keeps the page for the repository's artifact retention, readable by anyone who can read the workflow run. To share it more widely, publish the output folder to a static host behind your team's own access control (an internal pages site, a bucket behind single sign-on) rather than a public one.
+
 ## Worth a look
 
 Some rules measure something exactly that is a defect only under a convention of the project the check cannot see. SceneScout does not decide those conventions ([ADR 13](adr/0013-a-convention-is-the-projects-to-decide.md)), so these rules report into a tier of their own:
@@ -489,15 +522,15 @@ Keys never reach the output. The browser and the MCP server run in a child proce
 
 | Option | Default | Counts |
 |---|---|---|
-| `--max-turns` | 40 | Model calls. Several tool calls in one reply are one turn. |
-| `--max-tokens` | 1,500,000 | Input and output tokens over the whole run, cached input included. |
+| `--max-turns` | 80 | Model calls. Several tool calls in one reply are one turn. |
+| `--max-tokens` | 3,000,000 | Input and output tokens over the whole run, cached input included. |
 | `--max-minutes` | 20 | Wall time of the exploration. |
 
 The caps are checked before each model call. No model call, retry or wait between retries runs past the time cap, and no tool call either: each is given only the time left, and a tool call reached after the cap is answered as not run. At most 16 tool calls are run from one model reply; any beyond are answered as not run. Attaching the browser counts towards the time cap. The first cap reached ends the exploration; then the report is written and the browser closed, which share a budget of three minutes, and the files are written, which takes seconds. So the command ends at most about `--max-minutes` plus 4 minutes after it starts. One turn's usage is known only after it, so a run can end up to one turn over the token cap (with `--lanes`, one turn per lane: see [Lanes](#lanes)). The summary, `ci.json` and the action's `stop` output name what ended the run: `done` (the model finished), `turns`, `tokens`, `time`, `provider-error` or `could-not-start`.
 
-Each turn sends the conversation so far, so input tokens grow with every turn: the method and the tool descriptions alone are around 20,000 tokens, and each tool result adds to what every later turn sends. With the defaults a run usually reaches the token or the time cap before the turn cap. Tool results longer than 16,000 characters are cut before they reach the model; the report keeps everything.
+Each turn sends the conversation so far, so input tokens grow with every turn: the method and the tool descriptions alone are around 20,000 tokens, and each tool result adds to what every later turn sends. In [the benchmark](benchmark.md#choosing-the-defaults-issue-419), a run at the defaults used about 27,000 tokens a turn, so it reaches the turn cap, or ends by itself, well before the token or the time cap. Tool results longer than 16,000 characters are cut before they reach the model; the report keeps everything.
 
-What a run costs follows from the token cap. At the defaults on `gpt-6-luna` ($0.10 per million input tokens, $0.01 cached, $0.50 output), a run that reaches the 1,500,000-token cap costs about $0.05 to $0.15, since most of each turn's input repeats the turn before and is read from the provider's cache; with nothing cached, the most it can cost is about $0.18. A run can end up to one turn over the cap, which adds a little. `--max-tokens` is the setting that bounds the cost.
+What a run costs follows from the token cap. At the defaults on `gpt-6-luna` ($0.10 per million input tokens, $0.01 cached, $0.50 output), the benchmark's runs used about 2.2 million tokens and cost about $0.03, since about 98% of each turn's input repeats the turn before and is read from the provider's cache; with nothing cached, a run that reaches the 3,000,000-token cap costs at most about $0.36. A run can end up to one turn over the cap, which adds a little. `--max-tokens` is the setting that bounds the cost.
 
 ### What the run may do
 
@@ -512,19 +545,19 @@ What a run costs follows from the token cap. At the defaults on `gpt-6-luna` ($0
 
 In `destructive` mode the model may send any request the app accepts, including deleting or changing records the run did not create, with nobody watching; it takes two options together so that a mode value copied from another workflow, or chosen by an agent, never enables it. The defaults follow the same rule as the check's: an unconfigured run does the least harm on an app it knows nothing about, and anything more is an option away. Which mode a project's CI uses is the project's decision.
 
-The run attaches to the URL it is given, in the mode it is given (with `--compare-url`, the run itself attaches a second session there after the model is done; with `--lanes`, each lane attaches its own session on the same URL, in the same mode); the model cannot attach elsewhere or change the mode. It gets the scout_* tools a single agent uses to explore, find and report, and not those for attaching, closing, parallel lanes or screenshots. Unless `--lanes` asks for more, it is one model loop: see [Lanes](#lanes).
+The run attaches to the URL it is given, in the mode it is given (with `--compare-url`, the run itself attaches a second session there after the model is done; with `--lanes`, each lane attaches its own session on the same URL, in the same mode); the model cannot attach elsewhere or change the mode. It gets the scout_* tools a single agent uses to explore, find and report, and not those for attaching, closing, parallel lanes or screenshots. By default it is two model loops sharing the caps, each with its own part of the app; `--lanes 1` makes it one: see [Lanes](#lanes).
 
 `--storage-state <file>` explores while signed in; a session that no longer signs in exits 2 before the model is called. `--browser`, `--action-timeout-ms`, `--nav-timeout-ms`, `--project` and `--out` are as for `check`.
 
 ### Lanes
 
-`--lanes <n>` (1 to 8, default 1) splits the exploration between `n` model loops that run at once, each in its own browser session and its own part of the app, as the [parallel lanes](guide/Ways-to-use-it.md#parallel-lanes) of an agent-driven run do. Why it works this way: [ADR 20](adr/0020-an-unattended-run-may-split-into-lanes-that-share-its-caps.md).
+`--lanes <n>` (1 to 8, default 2) splits the exploration between `n` model loops that run at once, each in its own browser session and its own part of the app, as the [parallel lanes](guide/Ways-to-use-it.md#parallel-lanes) of an agent-driven run do. Why it works this way: [ADR 20](adr/0020-an-unattended-run-may-split-into-lanes-that-share-its-caps.md).
 
 1. **Plan.** The run attaches as usual, takes a snapshot of the page it landed on (which is what collects its links) and crawls, up to three rounds, each visiting the routes the pages of the round before linked to. No model is called; the time it takes counts towards `--max-minutes`. The routes found are split the way `scout_lane_brief` splits them: whole modules, a module being a route's first path segment, dealt to the lanes largest first so each lane has about as many routes as the others.
 2. **Explore.** Each lane attaches its own session on the target URL, as the run's first session did (the engine resolves every path against the URL a session attached with), and the run opens the lane's first route in it; a route that does not open leaves the lane on the target. The lane then runs the model loop with a conversation of its own: the method, the rules every lane follows, and a first message naming its routes, what the crawl saw on them and its share of the budget. A lane is not given `scout_report`. A lane that finishes closes its browser.
 3. **Merge.** Every session files into the project's one memory, whose dedup folds a defect two lanes filed into one finding. Once every lane has ended, the run writes one report from the session that planned, and the summary and `ci.json` list each lane: what it owned, its turns and tokens, and what ended it.
 
-The caps are the run's, shared by the lanes rather than given to each. The lanes together make at most `--max-turns` model calls: a turn is taken before its call, so lanes that reach the last turn together cannot all start it. They stop at the same `--max-minutes`. Tokens are counted when a call returns, so a run can end up to one turn per lane over `--max-tokens`, where a single loop can end one turn over. A lane that finishes early leaves the turns it did not use to the lanes still running. `--lanes` must not exceed `--max-turns`, and `--show` takes no lanes.
+The caps are the run's, shared by the lanes rather than given to each. The lanes together make at most `--max-turns` model calls: a turn is taken before its call, so lanes that reach the last turn together cannot all start it. They stop at the same `--max-minutes`. Tokens are counted when a call returns, so a run can end up to one turn per lane over `--max-tokens`, where a single loop can end one turn over. A lane that finishes early leaves the turns it did not use to the lanes still running. `--lanes` must not exceed `--max-turns`, and `--show` takes no lanes. Without `--lanes`, a run with `--show`, or with a `--max-turns` below the default two, is one loop.
 
 What ended a run in lanes: a model API failure in any lane ends it as `provider-error` (exit 2), since that is what the workflow must fix, and a lane that broke after attaching ends it as `could-not-start` (exit 2), with the report still written; otherwise a cap, if any lane was stopped by one; otherwise `done`. A lane whose browser could not attach is listed with the reason, and named in the stop's detail, and does not fail the run, unless no lane could attach.
 
@@ -534,7 +567,7 @@ Each lane is a browser running at the same time as the others, and the run's fir
 
 Lanes spend tokens faster: in [the benchmark](benchmark.md#lanes-one-loop-against-four-task-40), four lanes sent about 1.4 million tokens a minute, about 2.8 times one loop's, so a provider's tokens-per-minute limit is reached sooner, and a call still refused (HTTP 429) after its retries ends the run as `provider-error`.
 
-What lanes find depends on the budget each lane gets. On the demo app at the default caps, four lanes found as many expected defects as one loop (3 of 13 in two runs each, not the same ones): ten turns a lane left each lane on its first page, while one loop ended by itself at 29 turns. With the caps raised to 160 turns and 6,000,000 tokens, four lanes found 8 of 13 in each of two runs on the demo app and 7 of 10 on the held-out app, while one loop given the same caps ended by itself at 37 turns with 5 of 13. That gain, +3, sits at the benchmark's noise bound, so the default stays one loop. The configuration that found the most is `--lanes 4 --max-turns 160 --max-tokens 6000000`: about 2 million tokens and $0.025 a run on `gpt-6-luna`, about 2.3 times one loop's cost, in about the same wall time. Its token rate is near a 2,000,000-tokens-a-minute limit, so run one such job at a time per API key, or the provider refuses calls and the run ends `provider-error`.
+What lanes find depends on the budget each lane gets. The default, two lanes sharing 80 turns and 3,000,000 tokens, was chosen by [measurement](benchmark.md#choosing-the-defaults-issue-419): on the demo app it found 5 to 7 of 13 planted defects in three runs, against 2 to 4 for the earlier default of one loop at 40 turns, and 4 to 5 of 10 on the held-out app, against 1 to 2 for one loop at 40 turns. A run cost about $0.03 on `gpt-6-luna` at effort `low`, about 2.5 times the earlier default's, and took about 1.5 to 3.5 minutes. One loop given 80 or 120 turns found fewer than two lanes did. With four lanes and the caps raised to 160 turns and 6,000,000 tokens, an earlier measurement found 8 of 13 on the demo app and 7 of 10 on the held-out app for about $0.025 a run, but its token rate is near a 2,000,000-tokens-a-minute limit, so run one such job at a time per API key, or the provider refuses calls and the run ends `provider-error`. Two lanes sent at most about 1.2 million tokens a minute (2.2 million in 111 seconds), and no run of them ended refused. On a small or slow app, `--lanes 1 --max-turns 40 --max-tokens 1500000` is the earlier, cheaper configuration.
 
 ### A seeded schedule
 
@@ -712,7 +745,7 @@ A commenter who is not allowed, by any path, gets the 😕 reaction and nothing 
 ### What it costs, and how much it runs
 
 - One run per comment. A new `/scenescout qa` on the same pull request cancels the run already going there, and only the newer one replies. The report job tells that apart from a run cancelled by hand or by its timeout by looking for a later run whose title (the workflow's `run-name`) names the same pull request and whose `qa` job started; keep both as the template has them.
-- The caps of [`scenescout ci`](#caps), set explicitly in the workflow: 40 turns, 1,500,000 tokens and 20 minutes, in `read-only` mode. Edit them there. The `qa` job's `timeout-minutes` must stay at least `max-minutes` plus 5, plus the install.
+- The caps of [`scenescout ci`](#caps), set explicitly in the workflow: 80 turns, 3,000,000 tokens and 20 minutes, in `read-only` mode. Edit them there. The `qa` job's `timeout-minutes` must stay at least `max-minutes` plus 5, plus the install.
 - A comment from an account that is not allowed still starts the `gate` job, which ends in seconds without reading the pull request or reaching the key.
 
 ### Forks
