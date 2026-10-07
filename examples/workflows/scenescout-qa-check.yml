@@ -1,0 +1,94 @@
+# The project's own recorded check, started by a `/scenescout qa check` comment
+# on a pull request. Copy this file to .github/workflows/ in the repository
+# whose app is tested, replace the build and start steps with your app's, and
+# set the repository variable SCENESCOUT_QA_CHECK_WORKFLOW to its file name
+# (scenescout-qa-check.yml). The comment workflow, scenescout-qa.yml, then
+# dispatches it on the pull request's branch, waits for it, reads check.json
+# from its artifact and replies with the verdict.
+#
+# This is an ordinary workflow of the project's: it builds and runs the pull
+# request's branch on the project's runners, as a push to that branch could. It
+# holds no model key, and needs none. The comment workflow never runs it
+# itself, never checks out code and refuses pull requests from forks, whose
+# branches are not in this repository. Where it is documented: docs/ci.md
+# ("The project's own check") of the SceneScout repository; why: its ADR 15.
+#
+# It must be on the default branch to be dispatched, and runs as it is on the
+# pull request's branch.
+name: scenescout-qa-check
+# The dispatch id in the title lets the comment workflow find this run among others.
+run-name: "scenescout-qa-check · #${{ inputs.pr }} · ${{ inputs.dispatch-id }}"
+
+on:
+  # The three inputs every dispatch sends. GitHub refuses a dispatch with an input the workflow does not declare.
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: The pull request's number.
+        required: true
+        type: string
+      focus:
+        description: The words after `/scenescout qa check`. Free text from the comment; treat it as data.
+        required: false
+        default: ""
+        type: string
+      dispatch-id:
+        description: Set by the comment workflow, to find this run.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      # Placeholders: however your app builds and starts.
+      - run: npm ci
+      - run: npm run build
+      - name: Start the app
+        run: |
+          npm start > "$RUNNER_TEMP/app.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -sf -o /dev/null http://127.0.0.1:3000/; then exit 0; fi
+            sleep 1
+          done
+          echo "The app did not start:"; cat "$RUNNER_TEMP/app.log"; exit 1
+
+      # What the focus means is this workflow's choice. Here it keeps the saved
+      # flows whose file name contains it; empty, it keeps them all. It reaches
+      # the script through env, never pasted into it.
+      - name: Choose the flows the focus names
+        id: flows
+        env:
+          FOCUS: ${{ inputs.focus }}
+        run: |
+          dir="$RUNNER_TEMP/flows"
+          mkdir -p "$dir"
+          for f in .scenescout/flows/*.json; do
+            [ -f "$f" ] || continue
+            case "$(basename "$f")" in *"$FOCUS"*) cp "$f" "$dir/" ;; esac
+          done
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      # scenescout check --record --video, uploading its output folder as the
+      # artifact the comment workflow reads. Keep the name equal to the
+      # SCENESCOUT_QA_CHECK_ARTIFACT variable (default scenescout-check).
+      - uses: brunoboto96/SceneScout@v3.20.2
+        with:
+          url: http://127.0.0.1:3000
+          flows: ${{ steps.flows.outputs.dir }}
+          record: "on"
+          video: "on"
+          artifact-name: ${{ vars.SCENESCOUT_QA_CHECK_ARTIFACT || 'scenescout-check' }}

@@ -22,6 +22,8 @@ import {
   ALLOWED_ROLES,
   allowlist,
   cancelledMarkdown,
+  checkDecision,
+  checkWorkflowId,
   captureMarkdown,
   checkPreviewUrl,
   chooseBaseUrl,
@@ -48,6 +50,19 @@ import {
   shotUrl,
   teamMembership,
 } from "../action/qa-action.mjs";
+import {
+  checkArtifactName,
+  checkReplyMarkdown,
+  DEFAULT_CHECK_ARTIFACT,
+  DISPATCH_INPUTS,
+  findDispatchedRun,
+  firstFailingStep,
+  MAX_ROWS,
+  readCheckArtifact,
+  runDispatch,
+  runReply,
+  waitMinutes,
+} from "../action/qa-check.mjs";
 
 const REPO = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TEMPLATE = path.join(REPO, "examples", "workflows", "scenescout-qa.yml");
@@ -522,6 +537,9 @@ test("gate stage: the owner on a same-repository pull request gets eyes and a ru
         login: "Owner",
         show: "",
         base: "",
+        check: "false",
+        ref: "",
+        "check-workflow": "",
       });
       const posts = calls.filter((c) => c.method === "POST");
       assert.deepEqual(
@@ -1203,6 +1221,27 @@ function qaWorkflowProblems(wf: Record<string, any>): string[] {
       problems.push("the shots stage takes no branch or path: they are fixed in the action");
   }
 
+  // `/scenescout qa check`: no key, no checkout, dispatches the workflow the gate checked, and writes nothing but a reply.
+  const check = jobs.check;
+  if (!check) problems.push("no check job");
+  else {
+    if (!needs(check).includes("gate") || !/needs\.gate\.outputs\.check == 'true'/.test(check.if ?? ""))
+      problems.push("the check job runs only when the gate said the comment is a check");
+    if (JSON.stringify(check.permissions) !== JSON.stringify({ actions: "write", "pull-requests": "write" }))
+      problems.push("the check job has actions: write and pull-requests: write and nothing else");
+    const steps = check.steps ?? [];
+    if (steps.length !== 1 || !/^brunoboto96\/SceneScout\/qa@/.test(steps[0].uses ?? "") || steps[0].with?.stage !== "check")
+      problems.push("the check job runs the qa action's check stage and nothing else");
+    else {
+      if (steps[0].with?.["check-workflow"] !== "${{ needs.gate.outputs.check-workflow }}")
+        problems.push("the workflow a check dispatches comes from the gate");
+      if (steps[0].with?.ref !== "${{ needs.gate.outputs.ref }}") problems.push("the branch a check dispatches on comes from the gate");
+      if (steps[0].with?.focus !== "${{ needs.gate.outputs.focus }}") problems.push("the check's focus comes from the gate");
+      const wait = Number(steps[0].with?.["wait-minutes"] || 30);
+      if (!(Number(check["timeout-minutes"]) >= wait + 5)) problems.push("the check job's timeout must leave room to reply after the wait");
+    }
+  }
+
   const report = jobs.report;
   if (!report) problems.push("no report job");
   else {
@@ -1299,6 +1338,26 @@ test("workflow: each unsafe change to the template is caught", () => {
     ["the element from the comment", (wf) => (wf.jobs.qa.steps[0].with.show = "${{ github.event.comment.body }}"), /element to show comes from the gate/],
     ["an unchecked base URL", (wf) => (wf.jobs.qa.steps[0].with["compare-url"] = "${{ vars.SCENESCOUT_QA_BASE_URL }}"), /base URL comes from the gate/],
     ["images from anywhere", (wf) => (wf.jobs.report.steps[0].with.shots = "preview.png,base.png,diff.png"), /only those the shots job pushed/],
+    [
+      "the key in the check job",
+      (wf) => (wf.jobs.check.steps[0].env = { OPENAI_API_KEY: "${{ secrets.OPENAI_API_KEY }}" }),
+      /only the qa job may reference a secret/,
+    ],
+    [
+      "a check job that can push",
+      (wf) => (wf.jobs.check.permissions.contents = "write"),
+      /actions: write and pull-requests: write and nothing else|only the shots job/,
+    ],
+    ["a check job that checks out", (wf) => wf.jobs.check.steps.unshift({ uses: "actions/checkout@v7" }), /check: checks out code/],
+    ["a check job not waiting for the gate", (wf) => delete wf.jobs.check.if, /only when the gate said the comment is a check/],
+    ["a workflow from the comment", (wf) => (wf.jobs.check.steps[0].with["check-workflow"] = "${{ github.event.comment.body }}"), /comes from the gate/],
+    [
+      "a workflow the gate did not check",
+      (wf) => (wf.jobs.check.steps[0].with["check-workflow"] = "${{ vars.SCENESCOUT_QA_CHECK_WORKFLOW }}"),
+      /comes from the gate/,
+    ],
+    ["a branch from the comment", (wf) => (wf.jobs.check.steps[0].with.ref = "main"), /branch a check dispatches on comes from the gate/],
+    ["a wait the job outlasts", (wf) => (wf.jobs.check["timeout-minutes"] = 30), /room to reply/],
   ];
   for (const [what, mutate, expected] of mutations) {
     const wf = template();
@@ -1336,6 +1395,7 @@ const TEMPLATE_NEEDS: Array<{ changeset: string; first: number[]; what: string }
   { changeset: "qa-comment.md", first: [3, 13, 0], what: "qa/" },
   { changeset: "qa-allow-roles-teams.md", first: [3, 14, 0], what: "the gate's allowed-roles, allowed-teams and team-token inputs" },
   { changeset: "qa-show-compare.md", first: [3, 14, 0], what: "show and compare (the ci action's show input, the qa action's shots stage)" },
+  { changeset: "qa-check.md", first: [3, 21, 0], what: "`/scenescout qa check` (the gate's check-workflow input, the qa action's check stage)" },
 ];
 
 test("workflow: the release it pins ships qa/ and every input the template passes, whichever order the pull requests land in", () => {
@@ -1377,7 +1437,7 @@ test("qa action: pinned third-party steps, no input pasted into a script, no sec
   );
   // The template's inputs are the action's.
   const inputs = Object.keys(action.inputs);
-  for (const job of ["gate", "shots", "report"])
+  for (const job of ["gate", "shots", "report", "check"])
     for (const k of Object.keys(template().jobs[job].steps[0].with)) assert.ok(inputs.includes(k), `${job}: ${k} is not an input`);
   // The pictures' branch is not something a workflow can choose.
   assert.ok(!inputs.some((k) => /branch|path/.test(k)), "no input names a branch or a path");
@@ -1390,4 +1450,490 @@ test("docs: every variable and secret the template reads is documented", () => {
   const doc = fs.readFileSync(path.join(REPO, "docs", "ci.md"), "utf8");
   for (const v of new Set(vars)) assert.ok(doc.includes(v), `${v} is not in docs/ci.md`);
   assert.ok(doc.includes("examples/workflows/scenescout-qa.yml"), "docs/ci.md points at the template");
+  assert.ok(doc.includes("examples/workflows/scenescout-qa-check.yml"), "docs/ci.md points at the example check workflow");
+  for (const input of DISPATCH_INPUTS) assert.ok(doc.includes(`\`${input}\``), `docs/ci.md names the dispatch input ${input}`);
+  assert.ok(doc.includes(DEFAULT_CHECK_ARTIFACT), "docs/ci.md gives the artifact's default name");
+});
+
+// ── /scenescout qa check: the project's own recorded check ──────────────────
+
+const CHECK_PR = { ...SAME, head: { ...SAME.head, ref: "feature/save" } };
+
+test("command: `check` as the first word runs the project's check, with the rest as its focus; anything else is unchanged", () => {
+  const rows: Array<[string, unknown]> = [
+    ["/scenescout qa check", { url: "", focus: "", check: { focus: "" } }],
+    ["/scenescout qa check the sign-in journey", { url: "", focus: "", check: { focus: "the sign-in journey" } }],
+    ["/scenescout qa CHECK   sign-in", { url: "", focus: "", check: { focus: "sign-in" } }],
+    ["/scenescout qa check sign\u0007in\nsecond line", { url: "", focus: "", check: { focus: "signin" } }],
+    // Not the check: `check` must be a word of its own, first, with no URL before it.
+    ["/scenescout qa checkout flow", { url: "", focus: "checkout flow" }],
+    ["/scenescout qa the check page", { url: "", focus: "the check page" }],
+    ["/scenescout qa https://pr-7.preview.example.com check", { url: "https://pr-7.preview.example.com", focus: "check" }],
+    ["/scenescout qacheck", null],
+  ];
+  for (const [body, expected] of rows) assert.deepEqual(parseQaCommand(body), expected, body);
+  assert.equal((parseQaCommand(`/scenescout qa check ${"y".repeat(500)}`) as any).check.focus.length, MAX_FOCUS);
+});
+
+test("check workflow: a file name in .github/workflows or an id, never a path", () => {
+  for (const ok of ["browser-tests.yml", "ui.yaml", "e2e.check.yml", "12345"]) assert.equal(checkWorkflowId(ok), ok, ok);
+  for (const bad of ["", "browser-tests", ".github/workflows/x.yml", "../x.yml", "x..yml", "-x.yml", "x.yml\n", "a b.yml", "x.json"])
+    assert.equal(checkWorkflowId(bad), bad === "x.yml\n" ? "x.yml" : "", JSON.stringify(bad));
+  assert.equal(checkArtifactName(""), DEFAULT_CHECK_ARTIFACT);
+  assert.equal(checkArtifactName("ui-check"), "ui-check");
+  assert.equal(checkArtifactName("../x"), DEFAULT_CHECK_ARTIFACT);
+  assert.deepEqual([waitMinutes(""), waitMinutes("10"), waitMinutes("0"), waitMinutes("9999"), waitMinutes("2.5")], [30, 10, 30, 30, 30]);
+});
+
+test("gate: a check needs the variable, refuses forks whatever the fork setting, and starts no model", () => {
+  const allowed = allowlist("", "owner");
+  const decide = (over: Record<string, unknown>) =>
+    gateDecision({
+      command: { url: "", focus: "", check: { focus: "sign-in" } },
+      login: "owner",
+      association: "OWNER",
+      allowed,
+      pr: CHECK_PR,
+      allowForks: false,
+      preview: { source: "none", url: "" },
+      checkWorkflow: "browser-tests.yml",
+      ...over,
+    });
+  const ok = decide({});
+  assert.deepEqual(
+    [ok.run, ok.check, ok.reaction, ok.reply, ok.workflow, ok.ref],
+    [false, true, "eyes", null, "browser-tests.yml", "feature/save"],
+    "no preview is needed, and run stays false: the key job never starts",
+  );
+
+  const stranger = decide({ login: "someone", association: "NONE" });
+  assert.deepEqual(
+    [stranger.run, stranger.check, stranger.reaction, stranger.reply],
+    [false, undefined, "confused", null],
+    "the same allowlist, the same silence",
+  );
+  assert.match(decide({ pr: { ...CHECK_PR, state: "closed" } }).reply ?? "", /not open/);
+
+  const unset = decide({ checkWorkflow: "" });
+  assert.equal(unset.check, false);
+  assert.equal(unset.reaction, "confused");
+  assert.match(unset.reply ?? "", /SCENESCOUT_QA_CHECK_WORKFLOW/, "the reply says how to set it up");
+  assert.match(unset.reply ?? "", /scenescout-qa-check\.yml/);
+  for (const input of DISPATCH_INPUTS) assert.ok((unset.reply ?? "").includes(`\`${input}\``), `the setup reply names the ${input} input`);
+
+  const path = decide({ checkWorkflow: "../../other/repo.yml" });
+  assert.equal(path.check, false);
+  assert.match(path.reply ?? "", /file name/);
+
+  for (const allowForks of [false, true]) {
+    const fork = decide({ pr: { ...FORK, head: { ...FORK.head, ref: "main" } }, allowForks });
+    assert.equal(fork.check, false, `a fork is refused (allow-forks ${allowForks})`);
+    assert.match(fork.reply ?? "", /comes from a fork/);
+  }
+  assert.equal(checkDecision({ pr: { ...SAME, head: { ...SAME.head, ref: "" } }, checkWorkflow: "x.yml" }).check, false, "no branch, no dispatch");
+});
+
+test("gate stage: a check reads no deployment, sets check=true with the branch and the workflow, and run stays false", async () => {
+  const dir = tempDir();
+  await withGitHub(
+    (method, url) => (url === "/repos/owner/app/pulls/7" ? CHECK_PR : method === "POST" ? {} : undefined),
+    async (api, calls) => {
+      const out = await runGate({
+        env: gateEnv(dir, api, "owner", "/scenescout qa check sign-in"),
+        inputs: { "github-token": "test-token", "check-workflow": "browser-tests.yml" },
+        log: quiet,
+      });
+      assert.deepEqual(out, {
+        run: "false",
+        pr: "7",
+        sha: CHECK_PR.head.sha,
+        url: "",
+        focus: "sign-in",
+        login: "owner",
+        show: "",
+        base: "",
+        check: "true",
+        ref: "feature/save",
+        "check-workflow": "browser-tests.yml",
+      });
+      assert.deepEqual(
+        calls.map((c) => `${c.method} ${c.url}`),
+        ["GET /repos/owner/app/pulls/7", "POST /repos/owner/app/issues/comments/55/reactions"],
+        "the pull request and the reaction, and no deployment lookup",
+      );
+      assert.deepEqual(calls[1].body, { content: "eyes" });
+
+      calls.length = 0;
+      const unset = await runGate({ env: gateEnv(dir, api, "owner", "/scenescout qa check"), inputs: { "github-token": "test-token" }, log: quiet });
+      assert.equal(unset.check, "false");
+      const reply = calls.find((c) => c.url === "/repos/owner/app/issues/7/comments");
+      assert.match(reply?.body.body ?? "", /SCENESCOUT_QA_CHECK_WORKFLOW/);
+    },
+  );
+});
+
+test("dispatched run: by its dispatch id in the title, else the head commit since the dispatch, oldest first", () => {
+  const since = Date.parse("2026-10-07T10:00:00Z");
+  const run = (over: Record<string, unknown>) => ({
+    id: 1,
+    event: "workflow_dispatch",
+    head_sha: "a".repeat(40),
+    display_title: "scenescout-qa-check · #7 · other",
+    created_at: "2026-10-07T10:00:05Z",
+    ...over,
+  });
+  const sha = "a".repeat(40);
+  assert.equal(
+    findDispatchedRun([run({ id: 1 }), run({ id: 2, display_title: "scenescout-qa-check · #7 · scenescout-42-1" })], {
+      dispatchId: "scenescout-42-1",
+      sha,
+      since,
+    })?.id,
+    2,
+    "the dispatch id wins over an earlier run of the same commit",
+  );
+  assert.equal(
+    findDispatchedRun([run({ id: 3, created_at: "2026-10-07T10:00:09Z" }), run({ id: 4, created_at: "2026-10-07T10:00:02Z" })], { dispatchId: "x", sha, since })
+      ?.id,
+    4,
+    "without the id in the title, the oldest run of the head commit since the dispatch",
+  );
+  assert.equal(findDispatchedRun([run({ created_at: "2026-10-07T09:50:00Z" })], { dispatchId: "x", sha, since }), null, "a run from before the dispatch");
+  assert.equal(findDispatchedRun([run({ head_sha: "b".repeat(40) })], { dispatchId: "x", sha, since }), null, "another commit");
+  assert.equal(findDispatchedRun([run({ event: "push", display_title: "x" })], { dispatchId: "x", sha, since }), null, "a push run is never the dispatch");
+  assert.equal(findDispatchedRun(undefined, { dispatchId: "x", sha, since }), null);
+  assert.equal(
+    findDispatchedRun([run({ id: 5, display_title: "t · scenescout-42-10", head_sha: "b".repeat(40) })], { dispatchId: "scenescout-42-1", sha, since }),
+    null,
+    "another attempt's id is not this one's",
+  );
+});
+
+/** A check.json as `scenescout check --record --video` writes it, cut to what the reply reads. */
+const CHECK_JSON = {
+  tool: "scenescout-check",
+  version: "3.20.2",
+  url: "http://127.0.0.1:3000",
+  mode: "read-only",
+  gate: { failOn: "high", passed: false, failing: 1, retestsFailing: 0, couldNotRun: 0 },
+  counts: { high: 1, medium: 1, low: 0 },
+  flows: [
+    { name: "Sign in", file: "sign-in.json", steps: 4, status: "passed", refusedBackground: [], websockets: [] },
+    {
+      name: "Save a [thing](https://evil.example) @owner",
+      file: "save.json",
+      role: "editor",
+      steps: 5,
+      status: "failed",
+      step: 3,
+      did: "click the Save button",
+      reason: "expected text Saved was not on the page <img src=x>",
+      path: "/things/new",
+      refusedBackground: [],
+      websockets: [],
+    },
+  ],
+  issues: [
+    { rule: "contrast", severity: "medium", evidence: "Low contrast on the footer", routes: ["/"], fingerprint: "b" },
+    { rule: "flow-broken", severity: "high", evidence: "Save a thing broke at step 3", routes: ["/things/new"], fingerprint: "a" },
+  ],
+  worthALook: [{ rule: "x", evidence: "y", routes: [], convention: "z", fingerprint: "c" }],
+};
+const PASSED_JSON = {
+  ...CHECK_JSON,
+  gate: { failOn: "high", passed: true, failing: 0, retestsFailing: 0, couldNotRun: 0 },
+  counts: { high: 0, medium: 0, low: 0 },
+  flows: [CHECK_JSON.flows[0]],
+  issues: [],
+  worthALook: [],
+};
+const REPLY_ARGS = {
+  conclusion: "failure",
+  workflow: "browser-tests.yml",
+  runUrl: "https://github.com/owner/app/actions/runs/900",
+  artifactUrl: "https://github.com/owner/app/actions/runs/900/artifacts/77",
+  artifact: "scenescout-check",
+  ref: "feature/save",
+  sha: "a".repeat(40),
+  testedSha: "a".repeat(40),
+  login: "owner",
+  focus: "sign-in",
+};
+
+test("check reply: the verdict, each journey, the first failing step, findings high first, the recording, and nothing live", () => {
+  const md = checkReplyMarkdown({ ...REPLY_ARGS, json: CHECK_JSON, recording: { replay: true, videos: ["journey-01-sign-in.webm", "journey-02-save.webm"] } });
+  assert.ok(md.startsWith(COMMENT_MARKER));
+  assert.match(md, /`browser-tests\.yml`, run on `feature\/save` at aaaaaaa\./);
+  assert.match(md, /\*\*Failed\.\*\* 1 issue\(s\) fail the gate \(fail-on: high\)/);
+  assert.match(md, /\| Findings \| 2 \(1 high, 1 medium, 0 low\), 1 worth a look \|/);
+  assert.match(md, /\| Sign in \| — \| passed \|/);
+  assert.match(md, /\| editor \| failed at step 3 \|/);
+  assert.match(md, /\*\*First failing step:\*\* .*step 3: click the Save button\. expected text Saved/);
+  assert.ok(md.indexOf("flow-broken") < md.indexOf("contrast"), "high before medium");
+  assert.match(md, /`replay\.html`/);
+  assert.match(md, /2 journey video\(s\) in `replay-videos\/`/);
+  assert.match(md, /- journey-02-save\.webm/);
+  assert.match(md, /The run: https:\/\/github\.com\/owner\/app\/actions\/runs\/900/);
+  assert.match(md, /The artifact \(`scenescout-check`\): https:\/\/github\.com\/owner\/app\/actions\/runs\/900\/artifacts\/77/);
+  assert.match(md, /Focus passed to the workflow: sign-in/);
+  // The pull request's code wrote check.json: nothing in it may mention, link, embed or add HTML.
+  assert.ok(!/@owner\b/.test(md.replace("@​owner.", "")), "no live mention from check.json");
+  assert.ok(!md.includes("<img"), "no HTML");
+  assert.ok(!md.includes("](https://evil"), "no link from a journey's name");
+  assert.deepEqual(imageUrls(md), [], "the reply renders no image");
+
+  const plain = checkReplyMarkdown({ ...REPLY_ARGS, conclusion: "success", json: PASSED_JSON });
+  assert.match(plain, /\*\*Passed\.\*\*/);
+  assert.ok(
+    !/Recorded|replay|First failing step|### Findings/.test(plain),
+    "no recording section when the run recorded nothing, no failing step, no findings table",
+  );
+
+  const moved = checkReplyMarkdown({ ...REPLY_ARGS, json: PASSED_JSON, testedSha: "b".repeat(40) });
+  assert.match(moved, /at bbbbbbb \(the branch moved after the command, which saw aaaaaaa\)/);
+
+  const partly = checkReplyMarkdown({ ...REPLY_ARGS, json: { ...PASSED_JSON, gate: { ...PASSED_JSON.gate, couldNotRun: 1 } } });
+  assert.match(partly, /\*\*Partly ran\.\*\*/);
+
+  const missing = checkReplyMarkdown({ ...REPLY_ARGS, artifactUrl: "", json: null, problem: "missing" });
+  assert.match(missing, /\*\*No verdict\.\*\* The run ended failure, and the artifact `scenescout-check` holds no check\.json/);
+  // Each reason there is no verdict is told apart: a failed download is not the project's missing file.
+  const why = (problem: string) => checkReplyMarkdown({ ...REPLY_ARGS, json: null, problem });
+  assert.match(why("download-failed"), /could not be downloaded/);
+  assert.match(why("too-large"), /larger than/);
+  assert.match(why("unreadable: Unexpected token"), /not valid JSON/);
+  assert.match(why("not-a-check"), /not one `scenescout check` wrote/);
+
+  // Names sit in code spans, where GitHub shows a backslash as written: they are not backslash-escaped, and a backtick cannot end the span.
+  const names = checkReplyMarkdown({ ...REPLY_ARGS, workflow: "browser_tests.yml", ref: "fix/save_button`@owner", artifact: "ui_check", json: PASSED_JSON });
+  assert.match(names, /`browser_tests\.yml`, run on `fix\/save_button @owner` at/);
+  assert.match(names, /The artifact \(`ui_check`\)/);
+  assert.ok(!names.includes("\\_"), "no backslash escape inside a code span");
+  assert.equal(
+    checkReplyMarkdown({ ...REPLY_ARGS, json: { tool: "scenescout", counts: {}, gate: {} } }).includes("No verdict"),
+    true,
+    "a ci.json is not a check.json",
+  );
+
+  const many = { ...CHECK_JSON, flows: Array.from({ length: MAX_ROWS + 3 }, (_, i) => ({ ...CHECK_JSON.flows[0], name: `J${i}` })) };
+  assert.match(checkReplyMarkdown({ ...REPLY_ARGS, json: many }), /… and 3 more in the artifact\./);
+  assert.equal(
+    firstFailingStep({
+      flows: [
+        { status: "refused", name: "r" },
+        { status: "failed", name: "f" },
+      ],
+    })?.name,
+    "f",
+    "a broken step before a refused one",
+  );
+});
+
+test("check artifact: check.json, replay.html and the videos are read as data, regular files only", () => {
+  const dir = tempDir();
+  assert.deepEqual(readCheckArtifact(dir), { json: null, problem: "missing", recording: { replay: false, videos: [] } });
+  fs.writeFileSync(path.join(dir, "check.json"), JSON.stringify(CHECK_JSON));
+  fs.writeFileSync(path.join(dir, "replay.html"), "<html></html>");
+  fs.mkdirSync(path.join(dir, "replay-videos"));
+  fs.writeFileSync(path.join(dir, "replay-videos", "journey-02-save.webm"), "x");
+  fs.writeFileSync(path.join(dir, "replay-videos", "journey-01-sign-in.webm"), "x");
+  fs.writeFileSync(path.join(dir, "replay-videos", "notes.txt"), "x");
+  fs.symlinkSync("/etc/hosts", path.join(dir, "replay-videos", "journey-03-link.webm"));
+  const read = readCheckArtifact(dir);
+  assert.deepEqual(read.json, CHECK_JSON);
+  assert.equal(read.problem, "");
+  assert.deepEqual(read.recording, { replay: true, videos: ["journey-01-sign-in.webm", "journey-02-save.webm"] });
+  fs.writeFileSync(path.join(dir, "check.json"), "{ not json");
+  assert.equal(readCheckArtifact(dir).json, null);
+  assert.match(readCheckArtifact(dir).problem, /^unreadable: /);
+  fs.writeFileSync(path.join(dir, "check.json"), JSON.stringify({ tool: "scenescout", command: "ci" }));
+  assert.equal(readCheckArtifact(dir).problem, "not-a-check", "a ci.json is not a check.json");
+});
+
+/** A stand-in for the Actions API: the workflow, its dispatch and its run, each answer chosen by the test. */
+function actionsApi(opts: { workflow?: number | object; dispatch?: number | object; runs?: object[]; run?: () => object; artifacts?: object }) {
+  return (method: string, url: string): unknown => {
+    if (method === "GET" && url === "/repos/owner/app/actions/workflows/browser-tests.yml") return opts.workflow ?? { id: 5, state: "active" };
+    if (method === "POST" && url === "/repos/owner/app/actions/workflows/browser-tests.yml/dispatches") return opts.dispatch ?? { workflow_run_id: 900 };
+    if (method === "GET" && url.startsWith("/repos/owner/app/actions/workflows/browser-tests.yml/runs?")) return { workflow_runs: opts.runs ?? [] };
+    if (method === "GET" && url === "/repos/owner/app/actions/runs/900")
+      return opts.run ? opts.run() : { status: "completed", conclusion: "failure", head_sha: "a".repeat(40) };
+    if (method === "GET" && url.startsWith("/repos/owner/app/actions/runs/900/artifacts?name=")) return opts.artifacts ?? { artifacts: [{ id: 77 }] };
+    if (method === "POST" && url === "/repos/owner/app/issues/7/comments") return {};
+    return undefined;
+  };
+}
+
+const CHECK_INPUTS = {
+  "github-token": "test-token",
+  "check-workflow": "browser-tests.yml",
+  pr: "7",
+  ref: "feature/save",
+  sha: "a".repeat(40),
+  focus: "sign-in",
+  login: "owner",
+  "artifact-name": "",
+  "wait-minutes": "1",
+};
+
+function dispatchEnv(dir: string, api: string): NodeJS.ProcessEnv {
+  const out = path.join(dir, "out");
+  fs.writeFileSync(out, "");
+  process.env.GITHUB_OUTPUT = out;
+  return { GITHUB_REPOSITORY: "owner/app", GITHUB_API_URL: api, GITHUB_SERVER_URL: "https://github.com", GITHUB_RUN_ID: "42", GITHUB_RUN_ATTEMPT: "1" };
+}
+
+/** A clock the stage's sleeps move forward, so a wait of minutes takes no time. */
+function fakeClock(start = Date.parse("2026-10-07T10:00:00Z")) {
+  let t = start;
+  return { now: () => t, sleep: async (ms: number) => void (t += ms) };
+}
+
+test("check stage: dispatches the workflow on the head branch with pr, focus and dispatch-id, follows its run and hands it to the download", async () => {
+  const dir = tempDir();
+  let polls = 0;
+  await withGitHub(
+    actionsApi({ run: () => (++polls < 3 ? { status: "in_progress" } : { status: "completed", conclusion: "failure", head_sha: "a".repeat(40) }) }),
+    async (api, calls) => {
+      const clock = fakeClock();
+      const out = await runDispatch({ env: dispatchEnv(dir, api), inputs: CHECK_INPUTS, log: quiet, ...clock });
+      assert.deepEqual(out, {
+        download: "true",
+        replied: "false",
+        "run-id": "900",
+        conclusion: "failure",
+        "head-sha": "a".repeat(40),
+        artifact: DEFAULT_CHECK_ARTIFACT,
+        "dispatch-id": "scenescout-42-1",
+      });
+      const dispatch = calls.find((c) => c.url.endsWith("/dispatches"))!;
+      assert.deepEqual(
+        dispatch.body,
+        { ref: "feature/save", inputs: { pr: "7", focus: "sign-in", "dispatch-id": "scenescout-42-1" }, return_run_details: true },
+        "asks for the run's id: without return_run_details the API answers 204 with none",
+      );
+      assert.equal(polls, 3, "waited for the run to complete");
+      assert.ok(!calls.some((c) => c.method === "POST" && c.url.includes("/comments")), "no reply yet: the reply stage posts the verdict");
+    },
+  );
+});
+
+test("check stage: without the run's id in the dispatch's answer, the run is found by its dispatch id", async () => {
+  const dir = tempDir();
+  await withGitHub(
+    actionsApi({
+      dispatch: 204,
+      runs: [
+        {
+          id: 899,
+          event: "workflow_dispatch",
+          head_sha: "a".repeat(40),
+          display_title: "scenescout-qa-check · #7 · scenescout-41-1",
+          created_at: "2026-10-07T10:00:01Z",
+        },
+        {
+          id: 900,
+          event: "workflow_dispatch",
+          head_sha: "a".repeat(40),
+          display_title: "scenescout-qa-check · #7 · scenescout-42-1",
+          created_at: "2026-10-07T10:00:03Z",
+        },
+      ],
+    }),
+    async (api) => {
+      const out = await runDispatch({ env: dispatchEnv(dir, api), inputs: CHECK_INPUTS, log: quiet, ...fakeClock() });
+      assert.equal(out["run-id"], "900");
+    },
+  );
+});
+
+test("check stage: an unknown workflow, a refused dispatch, a run that cannot be found and a run that outlasts the wait each reply and stop", async () => {
+  const cases: Array<[string, Parameters<typeof actionsApi>[0], RegExp]> = [
+    ["an unknown workflow", { workflow: 404 }, /has no workflow `browser-tests\.yml`/],
+    ["a disabled workflow", { workflow: { id: 5, state: "disabled_manually" } }, /is disabled\\_manually/],
+    ["a workflow without the inputs", { dispatch: 422 }, /refused to dispatch `browser-tests\.yml` \(HTTP 422\)[\s\S]*`pr`, `focus`, `dispatch-id`/],
+    ["a token without actions: write", { dispatch: 403 }, /HTTP 403\)[\s\S]*`actions: write`/],
+    ["a run that cannot be found", { dispatch: 204, runs: [] }, /its run could not be found[\s\S]*inputs\.dispatch-id/],
+    ["a run that outlasts the wait", { run: () => ({ status: "in_progress" }) }, /had not finished after 1 minutes[\s\S]*actions\/runs\/900$/m],
+  ];
+  for (const [what, opts, expected] of cases) {
+    const dir = tempDir();
+    await withGitHub(actionsApi(opts), async (api, calls) => {
+      const out = await runDispatch({ env: dispatchEnv(dir, api), inputs: CHECK_INPUTS, log: quiet, ...fakeClock() });
+      assert.equal(out.download, "false", what);
+      assert.equal(out.replied, "true", what);
+      const replies = calls.filter((c) => c.method === "POST" && c.url === "/repos/owner/app/issues/7/comments");
+      assert.equal(replies.length, 1, `${what}: one reply`);
+      assert.ok(replies[0].body.body.startsWith(COMMENT_MARKER), what);
+      assert.match(replies[0].body.body, expected, what);
+    });
+  }
+  // Inputs the gate would never send fail the stage before any call.
+  await assert.rejects(
+    runDispatch({ env: dispatchEnv(tempDir(), "http://127.0.0.1:9"), inputs: { ...CHECK_INPUTS, "check-workflow": "../x.yml" }, log: quiet }),
+    /not a workflow file name/,
+  );
+  await assert.rejects(
+    runDispatch({ env: dispatchEnv(tempDir(), "http://127.0.0.1:9"), inputs: { ...CHECK_INPUTS, ref: "" }, log: quiet }),
+    /ref input is empty/,
+  );
+});
+
+test("reply stage: reads the downloaded check.json, links the run and the artifact, and posts the verdict", async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, "check.json"), JSON.stringify(CHECK_JSON));
+  fs.writeFileSync(path.join(dir, "replay.html"), "<html></html>");
+  await withGitHub(actionsApi({}), async (api, calls) => {
+    const env = {
+      GITHUB_REPOSITORY: "owner/app",
+      GITHUB_API_URL: api,
+      GITHUB_SERVER_URL: "https://github.com",
+      RESULTS: dir,
+      DISPATCH: JSON.stringify({ "run-id": "900", conclusion: "failure", "head-sha": "a".repeat(40), artifact: "scenescout-check" }),
+    };
+    const body = await runReply({ env, inputs: CHECK_INPUTS, log: quiet });
+    const post = calls.find((c) => c.method === "POST")!;
+    assert.equal(post.url, "/repos/owner/app/issues/7/comments");
+    assert.equal(post.body.body, body);
+    assert.match(body, /\*\*Failed\.\*\*/);
+    assert.match(body, /actions\/runs\/900\/artifacts\/77/);
+    assert.match(body, /`replay\.html`/);
+    await assert.rejects(runReply({ env: { ...env, DISPATCH: "{}" }, inputs: CHECK_INPUTS, log: quiet }), /named no run/);
+    // The download step failed (continue-on-error): the reply says so, rather than that the project wrote no check.json.
+    const failed = await runReply({ env: { ...env, RESULTS: tempDir(), DOWNLOAD: "failure" }, inputs: CHECK_INPUTS, log: quiet });
+    assert.match(failed, /could not be downloaded/);
+  });
+});
+
+const CHECK_EXAMPLE = path.join(REPO, "examples", "workflows", "scenescout-qa-check.yml");
+
+test("example check workflow: dispatched with the three inputs, records, uploads under the variable's name, and never pastes the focus into a script", () => {
+  const text = fs.readFileSync(CHECK_EXAMPLE, "utf8");
+  const wf = parseYaml(text) as Record<string, any>;
+  const on = wf.on ?? wf[true as unknown as string];
+  assert.deepEqual(Object.keys(on), ["workflow_dispatch"], "dispatched, and nothing else");
+  assert.deepEqual(Object.keys(on.workflow_dispatch.inputs).sort(), [...DISPATCH_INPUTS].sort());
+  assert.match(String(wf["run-name"]), /\$\{\{ inputs\.dispatch-id \}\}/, "the run's title carries the dispatch id");
+  assert.deepEqual(wf.permissions, { contents: "read" });
+  assert.ok(!/secrets\./.test(text), "no secret, and no model key");
+  const steps = Object.values(wf.jobs as Record<string, Job>).flatMap((j) => j.steps ?? []);
+  for (const s of steps) {
+    if (s.run) assert.ok(!/\$\{\{/.test(s.run), `an expression pasted into a script: ${s.run}`);
+    if (s.uses && !s.uses.startsWith("brunoboto96/SceneScout@")) assert.match(s.uses, THIRD_PARTY_PINNED, s.uses);
+  }
+  const check = steps.find((s) => /^brunoboto96\/SceneScout@v\d+\.\d+\.\d+$/.test(s.uses ?? ""));
+  assert.ok(check, "the check action, at an exact release");
+  assert.equal(check!.with?.record, "on");
+  assert.equal(check!.with?.video, "on");
+  assert.equal(
+    check!.with?.["artifact-name"],
+    `\${{ vars.SCENESCOUT_QA_CHECK_ARTIFACT || '${DEFAULT_CHECK_ARTIFACT}' }}`,
+    "the name the check job reads, with the same default",
+  );
+  assert.equal(check!.with?.["upload-artifact"], undefined, "the action's upload stays on");
+  // The variable the example reads is the one the comment workflow passes.
+  assert.ok(fs.readFileSync(TEMPLATE, "utf8").includes("vars.SCENESCOUT_QA_CHECK_ARTIFACT"));
+  // The check action's release has record and video (3.20.0).
+  const [maj, min] = check!.uses!.split("@v")[1].split(".").map(Number);
+  assert.ok(maj > 3 || (maj === 3 && min >= 20), "a release with record and video");
 });

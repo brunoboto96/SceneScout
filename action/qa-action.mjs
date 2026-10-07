@@ -10,6 +10,10 @@
  *   node qa-action.mjs shots    put a show or compare run's pictures on the image branch (no key)
  *   node qa-action.mjs report   post the run's results on the pull request (no key)
  *
+ * `/scenescout qa check [focus]` takes another path after the gate: the
+ * check job dispatches the project's own workflow and replies with its
+ * verdict (qa-check.mjs). No model key is involved in that mode.
+ *
  * No stage ever sees a model's API key, checks out the repository or runs
  * any of the pull request's code. They read the event payload, call the
  * GitHub REST API with the job's token (and, in the gate, read team
@@ -33,6 +37,8 @@ export const MAX_LISTED = 20;
 
 /** The words that turn a run into a picture of one element: `show` it, or `compare` it with the base. */
 export const CAPTURE_KINDS = ["show", "compare"];
+/** The word that runs the project's own recorded check instead of a model: `/scenescout qa check [focus]`. */
+export const CHECK_WORD = "check";
 
 /**
  * Reads a comment. Null when it is not the command: only the first line
@@ -42,7 +48,9 @@ export const CAPTURE_KINDS = ["show", "compare"];
  * https://) and an optional focus: the rest, on one line, cut to MAX_FOCUS
  * characters. When the rest begins with `show` or `compare` (any case, a word
  * of its own), it is not a focus but an element to capture, and `capture`
- * holds the kind and the words that describe the element.
+ * holds the kind and the words that describe the element. When the words
+ * after the command begin with `check` (no URL before it), `check.focus`
+ * holds the rest: the project's own check runs instead of a model.
  *
  * The command is matched as the workflow's job filter matches it, so the two
  * never disagree: `startsWith(github.event.comment.body, '/scenescout qa')`
@@ -64,6 +72,8 @@ export function parseQaCommand(body) {
       .slice(0, MAX_FOCUS)
       .trim();
   const kind = String(words[0] ?? "").toLowerCase();
+  // `check` as the first word, with no URL before it: the project's own check, with the rest as the focus passed to it.
+  if (kind === CHECK_WORD && !url) return { url: "", focus: "", check: { focus: clean(words.slice(1)) } };
   if (CAPTURE_KINDS.includes(kind)) return { url, focus: "", capture: { kind, what: clean(words.slice(1)) } };
   return { url, focus: clean(words) };
 }
@@ -267,12 +277,24 @@ export function chooseBaseUrl({ configured, deployment }) {
  * posted to a commenter who may not start a run beyond a reaction, so the
  * command cannot be used to make the bot write on a pull request.
  */
-export function gateDecision({ command, login, association, allowed, teamMember = false, pr, allowForks, preview, base = { source: "none", url: "" } }) {
+export function gateDecision({
+  command,
+  login,
+  association,
+  allowed,
+  teamMember = false,
+  pr,
+  allowForks,
+  preview,
+  base = { source: "none", url: "" },
+  checkWorkflow = "",
+}) {
   if (!command) return { run: false, reason: "not the command", reaction: null, reply: null };
   if (!teamMember && !isAllowed(login, association, allowed))
     return { run: false, reason: `@${login} is not in the list of accounts that may start a QA run`, reaction: "confused", reply: null };
   if (!pr || pr.state !== "open")
     return { run: false, reason: "the pull request is not open", reaction: "confused", reply: "The pull request is not open, so no QA run was started." };
+  if (command.check) return checkDecision({ pr, checkWorkflow });
   if (isFork(pr) && !allowForks)
     return {
       run: false,
@@ -327,6 +349,77 @@ export function gateDecision({ command, login, association, allowed, teamMember 
     return { run: true, reason: "ok", reaction: "eyes", reply: null, url: checked.url, show: capture.what, base: checkedBase.url };
   }
   return { run: true, reason: "ok", reaction: "eyes", reply: null, url: checked.url, show: capture?.what ?? "", base: "" };
+}
+
+/**
+ * A workflow the check may dispatch: a file name in .github/workflows
+ * (`browser-tests.yml`) or a workflow's numeric id. No path, so it can only
+ * name one of the repository's own workflows. Empty when it is not one.
+ */
+export function checkWorkflowId(raw) {
+  const s = String(raw ?? "").trim();
+  if (/^\d{1,20}$/.test(s)) return s;
+  if (/^[A-Za-z0-9][\w.-]*\.ya?ml$/.test(s) && !s.includes("..")) return s;
+  return "";
+}
+
+/**
+ * The gate's decision for `/scenescout qa check`, once the commenter is
+ * allowed and the pull request is open. `run` stays false, because no model
+ * runs; `check` is true when the check job may dispatch the project's
+ * workflow. A fork is always refused here, SCENESCOUT_QA_ALLOW_FORKS or not:
+ * the dispatch runs the workflow on the head branch with the repository's
+ * secrets, and a fork's branch is not in the repository to dispatch on.
+ */
+export function checkDecision({ pr, checkWorkflow }) {
+  const configured = String(checkWorkflow ?? "").trim();
+  if (!configured)
+    return {
+      run: false,
+      check: false,
+      reason: "no check workflow is configured",
+      reaction: "confused",
+      reply: [
+        "No check was started: this repository has not set up `/scenescout qa check`.",
+        "",
+        "It runs the project's own workflow and replies with its verdict. Set the repository variable `SCENESCOUT_QA_CHECK_WORKFLOW` to that workflow's file name (e.g. `browser-tests.yml`). " +
+          "The workflow needs a `workflow_dispatch` trigger with the inputs `pr`, `focus` and `dispatch-id`, and must upload its `scenescout check` output folder as an artifact; " +
+          "`examples/workflows/scenescout-qa-check.yml` in the SceneScout repository is one.",
+      ].join("\n"),
+    };
+  const workflow = checkWorkflowId(configured);
+  if (!workflow)
+    return {
+      run: false,
+      check: false,
+      reason: "SCENESCOUT_QA_CHECK_WORKFLOW is not a workflow file name",
+      reaction: "confused",
+      reply:
+        "No check was started: `SCENESCOUT_QA_CHECK_WORKFLOW` must be a workflow's file name in `.github/workflows/`, such as `browser-tests.yml`, or its numeric id.",
+    };
+  if (isFork(pr))
+    return {
+      run: false,
+      check: false,
+      reason: "the pull request comes from a fork",
+      reaction: "confused",
+      reply: [
+        "No check was started: this pull request comes from a fork.",
+        "",
+        "`/scenescout qa check` runs this repository's workflow on the pull request's branch, with the repository's secrets, and a fork's branch is not in this repository. " +
+          "`SCENESCOUT_QA_ALLOW_FORKS` does not change that.",
+      ].join("\n"),
+    };
+  const ref = String(pr.head?.ref ?? "").trim();
+  if (!ref)
+    return {
+      run: false,
+      check: false,
+      reason: "the pull request's head branch is unknown",
+      reaction: "confused",
+      reply: "No check was started: the pull request's head branch could not be read.",
+    };
+  return { run: false, check: true, reason: "ok", reaction: "eyes", reply: null, workflow, ref };
 }
 
 // ---------------------------------------------------------------------------
@@ -580,7 +673,7 @@ async function deploymentsOf(call, repo, { sha, ref }, environment) {
 export async function runGate({ env = process.env, inputs = inputsFromEnv(), fetchImpl = fetch, log = console.log } = {}) {
   const repo = repoOf(env);
   const event = JSON.parse(fs.readFileSync(String(env.GITHUB_EVENT_PATH ?? ""), "utf8"));
-  const none = { run: "false", pr: "", sha: "", url: "", focus: "", login: "", show: "", base: "" };
+  const none = { run: "false", pr: "", sha: "", url: "", focus: "", login: "", show: "", base: "", check: "false", ref: "", "check-workflow": "" };
   if (!event.issue?.pull_request || event.action !== "created") {
     log("Not a new comment on a pull request; nothing to do.");
     setOutputs(none);
@@ -609,7 +702,7 @@ export async function runGate({ env = process.env, inputs = inputsFromEnv(), fet
   const pr = command && (teamMember || isAllowed(login, association, allowed)) ? await call("GET", `/repos/${repo}/pulls/${number}`) : null;
   let preview = { source: "none", url: "" };
   let base = { source: "none", url: "" };
-  if (pr) {
+  if (pr && !command.check) {
     const sha = String(pr.head?.sha ?? "");
     const needsDeployment = !command.url && !previewUrlFromTemplate(inputs["preview-url"], { pr: number, sha });
     const deployment = needsDeployment && sha ? deploymentUrl(await deploymentsOf(call, repo, { sha }, String(inputs.environment ?? "").trim())) : "";
@@ -631,14 +724,36 @@ export async function runGate({ env = process.env, inputs = inputsFromEnv(), fet
     allowForks: String(inputs["allow-forks"]).trim() === "true",
     preview,
     base,
+    checkWorkflow: inputs["check-workflow"],
   });
-  log(`${decision.run ? "Starting a QA run" : "No QA run"}: ${decision.reason}.`);
+  log(`${decision.run ? "Starting a QA run" : decision.check ? "Starting the project's check" : "No QA run"}: ${decision.reason}.`);
   if (decision.reaction && event.comment?.id)
     await call("POST", `/repos/${repo}/issues/comments/${Number(event.comment.id)}/reactions`, { content: decision.reaction });
   if (decision.reply) await call("POST", `/repos/${repo}/issues/${number}/comments`, { body: `${COMMENT_MARKER}\n${decision.reply}\n` });
   const outputs = decision.run
-    ? { run: "true", pr: String(number), sha: String(pr.head.sha), url: decision.url, focus: command.focus, login, show: decision.show, base: decision.base }
-    : { ...none, pr: String(number) };
+    ? {
+        ...none,
+        run: "true",
+        pr: String(number),
+        sha: String(pr.head.sha),
+        url: decision.url,
+        focus: command.focus,
+        login,
+        show: decision.show,
+        base: decision.base,
+      }
+    : decision.check
+      ? {
+          ...none,
+          check: "true",
+          pr: String(number),
+          sha: String(pr.head.sha),
+          focus: command.check.focus,
+          login,
+          ref: decision.ref,
+          "check-workflow": decision.workflow,
+        }
+      : { ...none, pr: String(number) };
   setOutputs(outputs);
   return outputs;
 }
