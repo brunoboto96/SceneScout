@@ -17,7 +17,7 @@ import { markdownCell } from "./check.js";
 import { parseLimitFlag } from "./limits.js";
 import { isWorthALook, redactSecrets, type Finding } from "./memory.js";
 import { SARIF_ANCHOR_FALLBACKS, checkSarifAnchor, sarifLocation } from "./sarif.js";
-import { generateSeed, resolveSeed, resolveSeedExclusion, type ScheduleRecord, type Seed, type SeedExclusion } from "./schedule.js";
+import { fromRunLine, resolveFromRun, type FromRun, type FromRunMode, type RunRecord } from "./from-run.js";
 
 // ── options ─────────────────────────────────────────────────────────────────
 
@@ -119,8 +119,8 @@ export const CI_OPTION_NAMES = [
   "show",
   "compare-url",
   "dedup",
-  "seed",
-  "seed-exclusion",
+  "from-run",
+  "from-run-mode",
   "sarif-file-anchor",
 ] as const;
 
@@ -158,10 +158,12 @@ export interface CiOptions {
   dedup: DedupMode;
   /** The repository file each SARIF result points at; absent means sarif.ts's default. */
   sarifFileAnchor?: string;
-  /** Set when the run is seeded (--seed, else SCENESCOUT_SEED): it plans first and starts where the seed's schedule says (schedule.ts). */
-  seed?: Seed;
-  /** With a seed: what happens to routes earlier seeded runs began with. */
-  seedExclusion: SeedExclusion;
+  /**
+   * Set when the run starts from an earlier run's record (--from-run, else
+   * SCENESCOUT_FROM_RUN): `continue` starts where it left off, `replay`
+   * follows its route and step order again (from-run.ts).
+   */
+  fromRun?: FromRun;
 }
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
@@ -180,15 +182,11 @@ export function checkBaseUrl(raw: string): { ok: true; url: string } | { ok: fal
   return { ok: false, error: "--base-url must be https (plain http only to 127.0.0.1 or localhost): the API key is sent to it" };
 }
 
-/**
- * `env` is read for the seed alone (SCENESCOUT_SEED, SCENESCOUT_SEED_EXCLUSION),
- * since a flag wins over it; `generate` makes the seed `auto` asks for.
- */
+/** `env` is read for the earlier run alone (SCENESCOUT_FROM_RUN, SCENESCOUT_FROM_RUN_MODE), since a flag wins over it. */
 export function parseCiArgs(
   args: readonly string[],
   cwd: string,
   env: Record<string, string | undefined> = {},
-  generate: () => string = generateSeed,
 ): { ok: true; options: CiOptions } | { ok: false; error: string } {
   const positional: string[] = [];
   const flags = new Map<string, string>();
@@ -320,14 +318,12 @@ export function parseCiArgs(
   if (!(DEDUP_MODES as readonly string[]).includes(dedup)) return { ok: false, error: `--dedup must be one of ${DEDUP_MODES.join(", ")}` };
   const anchor = flags.has("sarif-file-anchor") ? checkSarifAnchor(flags.get("sarif-file-anchor")!) : undefined;
   if (anchor && !anchor.ok) return anchor;
-  if (show && flags.has("seed")) return { ok: false, error: "--seed orders an exploration, and --show explores nothing: give one or the other" };
-  // A run asked to show an element explores nothing, so a seed in the environment does not apply to it.
-  const seed: ReturnType<typeof resolveSeed> = show ? { ok: true } : resolveSeed(flags.get("seed"), env, generate);
-  if (!seed.ok) return seed;
-  if (flags.has("seed-exclusion") && !seed.seed) return { ok: false, error: "--seed-exclusion applies to a seeded run: give --seed as well" };
-  // Read only for a seeded run, so a stray SCENESCOUT_SEED_EXCLUSION never stops an unseeded one.
-  const exclusion: ReturnType<typeof resolveSeedExclusion> = seed.seed ? resolveSeedExclusion(flags.get("seed-exclusion"), env) : { ok: true, value: "back" };
-  if (!exclusion.ok) return exclusion;
+  const runFlags = { path: flags.get("from-run"), mode: flags.get("from-run-mode") };
+  if (show && (runFlags.path !== undefined || runFlags.mode !== undefined))
+    return { ok: false, error: "--from-run starts an exploration from an earlier run, and --show explores nothing: give one or the other" };
+  // A run asked to show an element explores nothing, so an earlier run named in the environment does not apply to it.
+  const fromRun: ReturnType<typeof resolveFromRun> = show ? { ok: true } : resolveFromRun(runFlags, env);
+  if (!fromRun.ok) return fromRun;
 
   const resolve = (p: string): string => (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) ? p : `${cwd.replace(/[\\/]$/, "")}/${p}`);
   return {
@@ -354,8 +350,7 @@ export function parseCiArgs(
       ...(navTimeout.value !== undefined ? { navTimeoutMs: navTimeout.value } : {}),
       dedup: dedup as DedupMode,
       ...(anchor ? { sarifFileAnchor: anchor.value } : {}),
-      ...(seed.seed ? { seed: seed.seed } : {}),
-      seedExclusion: exclusion.value,
+      ...(fromRun.fromRun ? { fromRun: { ...fromRun.fromRun, path: resolve(fromRun.fromRun.path), given: fromRun.fromRun.path } } : {}),
     },
   };
 }
@@ -848,22 +843,6 @@ export function ciCaptureKickoff(o: { url: string; show: string }): string {
   return `Target: ${o.url}\nThe element to capture, as the reviewer described it: ${JSON.stringify(o.show)}`;
 }
 
-/** The most routes a seeded run's first message lists in order. */
-const ORDER_LIST_MAX = 40;
-
-/**
- * The lines a seeded run's first message carries: the order the run's
- * planning crawl and the seed put the routes in. Empty when the run is not
- * seeded or the crawl found nothing to order.
- */
-export function scheduleKickoffLines(order: readonly string[] | undefined): string[] {
-  if (!order || order.length === 0) return [];
-  return [
-    `Route order for this run (${order.length}, from a planning crawl, shuffled by the run's seed with the routes earlier seeded runs started with last): ${order.slice(0, ORDER_LIST_MAX).join(", ")}${order.length > ORDER_LIST_MAX ? ` … and ${order.length - ORDER_LIST_MAX} more` : ""}`,
-    `Start with the first route and take them in this order, so successive runs spread over the app instead of repeating the same opening. The crawl visited them all, so route coverage may already read as complete: spend your turns acting on them, in this order.`,
-  ];
-}
-
 export function ciKickoff(o: {
   url: string;
   projectDir: string;
@@ -871,13 +850,13 @@ export function ciKickoff(o: {
   level: CiLevel;
   focus?: string;
   caps: Caps;
-  /** A seeded run's route order (scheduleKickoffLines). */
-  order?: readonly string[];
+  /** When the run starts from an earlier one: what it is told about it (from-run.ts continueLines or replayLines). */
+  fromRunLines?: readonly string[];
 }): string {
   return [
     `Run an exploratory test session following the method.`,
     `Target: ${o.url}`,
-    ...scheduleKickoffLines(o.order),
+    ...(o.fromRunLines ?? []),
     `Project directory (for scout_scan): ${o.projectDir}`,
     `Level: ${o.level}`,
     `Write mode: ${o.mode}`,
@@ -963,20 +942,20 @@ export interface CiResult {
   lanes?: CiLanes;
   /** How findings were deduplicated, and what the judge's calls cost. Absent on a capture run, which files none. */
   dedup?: CiDedup;
-  /** Present when the run was seeded: the seed and what its schedule started with. */
-  schedule?: CiSchedule;
+  /** Present when the run started from an earlier run's record: how, and which. */
+  fromRun?: CiFromRun;
+  /** What this run left, for a later run to continue or replay from (from-run.ts); absent when its report was not written. */
+  record?: RunRecord;
 }
 
-/** A seeded run's schedule, as the summary and ci.json report it. */
-export interface CiSchedule {
-  seed: Seed;
-  exclusion: SeedExclusion;
-  /** How many routes the planning crawl gave it to order. */
-  routes: number;
-  /** What it recorded as its starting choices: the head of each order it handed out (ScheduleRecord.routes). */
-  starts: ScheduleRecord["routes"];
-  /** Set when the schedule could not be recorded in the project's memory, so the next seeded run will not move these to the back: why. */
-  notRecorded?: string;
+/** How a run started from an earlier one, as the summary and ci.json report it. */
+export interface CiFromRun {
+  mode: FromRunMode;
+  /** The ci.json or project directory the record was read from. */
+  source: string;
+  /** The recorded run, and when its report was written. */
+  runId: string;
+  recordAt: string;
 }
 
 /** The dedup judge's calls as the run's client saw them. Their tokens are in the run's usage as well. */
@@ -1034,7 +1013,7 @@ export function ciSummaryMarkdown(r: CiResult, secrets: readonly string[] = []):
     `| Model | ${r.provider} ${cell(r.model, secrets)}, effort ${r.effort} |`,
     ...(r.lanes ? [`| Lanes | ${lanesCell(r.lanes, secrets)} |`] : []),
     ...(r.dedup ? [`| Finding dedup | ${dedupLine(r.dedup)} |`] : []),
-    ...(r.schedule ? [`| Seed | ${scheduleSummaryCell(r.schedule, secrets)} |`] : []),
+    ...(r.fromRun ? [`| Started from | ${cell(fromRunLine(r.fromRun), secrets)} |`] : []),
     `| Usage | ${usageLine(r.spend, r.model, r.endedAt, r.price)} |`,
     ``,
   ];
@@ -1058,13 +1037,24 @@ export function ciSummaryMarkdown(r: CiResult, secrets: readonly string[] = []):
   return lines.join("\n");
 }
 
-function scheduleSummaryCell(sc: CiSchedule, secrets: readonly string[]): string {
-  return (
-    `\`${sc.seed.value}\`${sc.seed.generated ? " (generated)" : ""}: ${sc.routes} route(s) ordered, earlier seeded runs' starts ${sc.exclusion === "skip" ? "skipped" : "last"}` +
-    (sc.starts.length ? `; started with ${cell(sc.starts.join(", "), secrets)}` : "") +
-    (sc.notRecorded ? `; not recorded in memory (${cell(sc.notRecorded, secrets)})` : "") +
-    `. \`--seed ${sc.seed.value}\` repeats it`
-  );
+/** A run record with every text a page or a person wrote in it passed through `clean`, as everything else ci.json holds is. */
+function cleanRecord(r: RunRecord, clean: (s: string) => string): RunRecord {
+  const all = (xs: readonly string[]): string[] => xs.map(clean);
+  return {
+    ...r,
+    knownRoutes: all(r.knownRoutes),
+    visited: all(r.visited),
+    lanes: r.lanes.map((l) => ({ session: l.session, routes: all(l.routes) })),
+    steps: r.steps.map((s) => ({ ...s, route: clean(s.route), ...(s.target !== undefined ? { target: clean(s.target) } : {}) })),
+    left: r.left.map((l) => ({
+      ...l,
+      route: clean(l.route),
+      unexercised: all(l.unexercised),
+      forms: all(l.forms),
+      unchosen: l.unchosen.map((d) => ({ key: clean(d.key), options: all(d.options) })),
+    })),
+    gaps: all(r.gaps),
+  };
 }
 
 function lanesCell(l: CiLanes, secrets: readonly string[]): string {
@@ -1159,19 +1149,8 @@ export function ciSummaryJson(r: CiResult, version: string, secrets: readonly st
     })),
     ...(r.capture ? { capture: cleanCapture(r.capture, clean) } : {}),
     ...(r.lanes ? { lanes: lanesJson(r.lanes, clean) } : {}),
-    ...(r.schedule
-      ? {
-          seed: {
-            value: r.schedule.seed.value,
-            generated: r.schedule.seed.generated,
-            exclusion: r.schedule.exclusion,
-            routes: r.schedule.routes,
-            starts: r.schedule.starts.map(clean),
-            recorded: !r.schedule.notRecorded,
-            ...(r.schedule.notRecorded ? { notRecorded: clean(r.schedule.notRecorded) } : {}),
-          },
-        }
-      : {}),
+    ...(r.fromRun ? { fromRun: { mode: r.fromRun.mode, source: clean(r.fromRun.source), runId: r.fromRun.runId, recordAt: r.fromRun.recordAt } } : {}),
+    ...(r.record ? { record: cleanRecord(r.record, clean) } : {}),
   };
 }
 

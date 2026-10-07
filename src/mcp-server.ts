@@ -90,15 +90,35 @@ import {
   type PaneData,
 } from "./engine/status-pane.js";
 import { statusPanePage } from "./engine/status-pane-page.js";
-import { formatBriefs, MAX_LANES, planLanes } from "./engine/brief.js";
+import { formatBriefs, MAX_LANES, planLanes, replayBriefs, type LaneBrief } from "./engine/brief.js";
 import { decideOpen, OPEN_CHOICES, OPEN_ENV, openChoiceFromEnv, openInBrowser, type OpenChoice, type OpenDecision } from "./engine/open.js";
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, DEFAULT_RUN_MINUTES, judgeProfileFile } from "./engine/expiry.js";
-import { listProfiles, parseLoginArgs } from "./engine/profiles.js";
-import { earlierChoices, resolveSeed, resolveSeedExclusion, scheduleOrder, SEED_EXCLUSIONS, seedLine, startsOf } from "./engine/schedule.js";
+import { parseLoginArgs } from "./engine/profiles.js";
+import {
+  continueLines,
+  continuePlan,
+  FROM_RUN_ENV,
+  FROM_RUN_MODE_ENV,
+  FROM_RUN_MODES,
+  fromRunLine,
+  replayLines,
+  replayPlan,
+  resolveFromRun,
+} from "./engine/from-run.js";
+import { loadRunRecord } from "./engine/memory.js";
 import type { BrowserEngineName } from "./browsers.js";
 import { LOGIN_WINDOW_MAX_MS, savedLine, startLoginWindow, type PendingLogin } from "./login-run.js";
 import { LoginWindows, WAIT_SAYS } from "./engine/signed-in.js";
-import { computeGaps, coverageView, formatRouteCoverage, generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
+import {
+  computeGaps,
+  coverageView,
+  formatRouteCoverage,
+  generateReport,
+  replayDocument,
+  reportEvidence,
+  runRecordOf,
+  type ReportExtras,
+} from "./engine/report.js";
 import { DEFAULT_REPORT_AUDIENCE, REPORT_AUDIENCES, type ReportAudience } from "./engine/plain.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "./engine/verify.js";
 import {
@@ -795,19 +815,14 @@ server.registerTool(
         .max(240)
         .optional()
         .describe(`How long past the run a saved role's login must still last, in minutes (default ${DEFAULT_EXPIRY_MARGIN_MINUTES}).`),
-      seed: z
+      fromRun: z
         .string()
-        .max(64)
+        .max(1024)
         .optional()
         .describe(
-          'Seed the split: modules are dealt and each lane\'s routes ordered by a shuffle keyed on it, with routes earlier seeded runs began with last, so successive runs spread over the app. "auto" for a fresh seed. The same seed and memory give the same plan. Default SCENESCOUT_SEED, else unseeded (the stable split).',
+          `Start from an earlier run's record: a ci.json, or a project directory (relative to this project). With fromRunMode continue, the lanes take the routes it never worked on first, then the ones it left work on with what to do first, then the rest; with replay, one lane per session it had, following its routes and steps in order. Default ${FROM_RUN_ENV}, else none (the stable split).`,
         ),
-      seedExclusion: z
-        .enum(SEED_EXCLUSIONS)
-        .optional()
-        .describe(
-          "With a seed: `back` (default) orders routes earlier seeded runs began with last; `skip` leaves them out while others remain. Default SCENESCOUT_SEED_EXCLUSION, else back.",
-        ),
+      fromRunMode: z.enum(FROM_RUN_MODES).optional().describe(`With fromRun: continue (default) or replay. Default ${FROM_RUN_MODE_ENV}, else continue.`),
       session: sessionParam,
     },
   },
@@ -820,16 +835,16 @@ server.registerTool(
         routes,
         runMinutes,
         expiryMarginMinutes,
-        seed,
-        seedExclusion,
+        fromRun,
+        fromRunMode,
       }: {
         lanes: number;
         goal?: string;
         routes?: string[];
         runMinutes?: number;
         expiryMarginMinutes?: number;
-        seed?: string;
-        seedExclusion?: (typeof SEED_EXCLUSIONS)[number];
+        fromRun?: string;
+        fromRunMode?: (typeof FROM_RUN_MODES)[number];
       },
       session,
     ) => {
@@ -851,37 +866,36 @@ server.registerTool(
           if (verdict.kind !== "ok") expiryNote = `⚠ ${verdict.message}\n\n`;
         }
         const all = routes && routes.length > 0 ? routes : eng.allKnownRoutes();
-        // Seeded only when asked, by the input or the server's environment: unseeded, the split is the stable one.
-        const seeded = resolveSeed(seed, process.env, undefined, "seed");
-        if (!seeded.ok) return errorText(new Error(seeded.error));
-        // Read only for a seeded brief, so a stray SCENESCOUT_SEED_EXCLUSION never refuses an unseeded one.
-        const exclusion: ReturnType<typeof resolveSeedExclusion> = seeded.seed
-          ? resolveSeedExclusion(seedExclusion, process.env, "seedExclusion")
-          : { ok: true, value: "back" };
-        if (!exclusion.ok) return errorText(new Error(exclusion.error));
-        const history = seeded.seed ? (eng.memory?.schedules ?? []) : [];
-        const schedule = seeded.seed
-          ? { seed: seeded.seed.value, earlier: earlierChoices(history, "routes", seeded.seed.value), exclusion: exclusion.value }
-          : undefined;
-        const saved = seeded.seed && eng.memory ? listProfiles(path.dirname(eng.memory.dir)) : [];
-        const roleOrder =
-          seeded.seed && saved.length > 1
-            ? scheduleOrder(saved, { seed: seeded.seed.value, earlier: earlierChoices(history, "roles", seeded.seed.value), exclusion: "back" })
-            : undefined;
-        const briefs = planLanes(all, lanes, { goal, mode: eng.mode, role: eng.role, ...(schedule ? { schedule } : {}) });
-        let seedNote: string | undefined;
-        if (seeded.seed) {
-          seedNote = seedLine(seeded.seed, exclusion.value, "The seed");
-          if (briefs.length > 0)
-            eng.memory?.addSchedule({
-              seed: seeded.seed.value,
-              at: new Date().toISOString(),
-              source: "lane-brief",
-              exclusion: exclusion.value,
-              routes: startsOf(briefs.map((b) => b.routes)),
-              // The role the lanes attach with, which is what this run tried; the order is the brief's suggestion for the next.
-              ...(roleOrder && eng.role ? { roles: [eng.role] } : {}),
-            });
+        // Started from an earlier run only when asked, by the input or the server's environment: otherwise the split is the stable one.
+        const asked = resolveFromRun({ path: fromRun, mode: fromRunMode }, process.env, { path: "fromRun", mode: "fromRunMode" });
+        if (!asked.ok) return errorText(new Error(asked.error));
+        let briefs: LaneBrief[];
+        let fromRunNote: string | undefined;
+        let laneLines: ((b: LaneBrief) => readonly string[]) | undefined;
+        if (asked.fromRun) {
+          const projectDir = eng.memory ? path.dirname(eng.memory.dir) : process.cwd();
+          const source = path.resolve(projectDir, asked.fromRun.path);
+          const record = loadRunRecord(source);
+          // Named as it was given, so the brief and the report carry no local directory.
+          const note = { at: new Date().toISOString(), mode: asked.fromRun.mode, source: asked.fromRun.path, runId: record.runId, recordAt: record.at };
+          fromRunNote = fromRunLine(note);
+          if (asked.fromRun.mode === "continue") {
+            const items = continuePlan(record, all);
+            // Every route it orders is split, the record's own included, so none is left out of every lane.
+            const order = items.map((i) => i.route);
+            briefs = planLanes(order, lanes, { goal, mode: eng.mode, role: eng.role, order });
+            laneLines = (b) => continueLines(items, { from: note.source, only: b.routes });
+          } else {
+            // A replay has one lane per session the recorded run had, whatever number was asked for.
+            const replay = replayPlan(record);
+            if (replay.length === 0) return errorText(new Error(`The run recorded in ${note.source} took no steps, so there is nothing to replay.`));
+            briefs = replayBriefs(replay, goal);
+            const byLane = new Map(briefs.map((b, i) => [b.lane, replay[i]] as const));
+            laneLines = (b) => replayLines(byLane.get(b.lane)!, { from: note.source });
+          }
+          eng.memory?.noteFromRun(note);
+        } else {
+          briefs = planLanes(all, lanes, { goal, mode: eng.mode, role: eng.role });
         }
         laneLedger.nameBriefed(
           briefs.map((b) => b.lane),
@@ -896,8 +910,8 @@ server.registerTool(
               mode: eng.mode,
               role: eng.role,
               roleProfile: eng.auth.kind === "role",
-              ...(seedNote ? { seedNote } : {}),
-              ...(roleOrder ? { roleOrder } : {}),
+              ...(fromRunNote ? { fromRunNote } : {}),
+              ...(laneLines ? { laneLines } : {}),
             }) +
             (criteria ? `\n${criteria}` : ""),
           session,
@@ -2489,8 +2503,8 @@ server.registerTool(
       try {
         const eng = engineFor(session);
         if (!eng.memory) throw new Error("Not attached.");
-        // A ci run records its seed from its own process: the report names it.
-        eng.memory.foldInSchedules();
+        // A ci run notes the earlier run it started from in its own process: the report names it.
+        eng.memory.foldInFromRuns();
         const unvisited = eng.unvisitedKnownRoutes();
         const gates: string[] = [];
         if (unvisited.length > 0) {
@@ -2570,6 +2584,12 @@ server.registerTool(
           attachedSessions: [...engines.keys()],
         });
         void p;
+        // What this run left, for a later run to continue or replay from (--from-run). Never fatal: the report is written.
+        try {
+          eng.memory.addRunRecord(runRecordOf(eng.memory, all, gapList));
+        } catch (err) {
+          logLine(`the run's record could not be kept, so a later run cannot continue from it: ${err instanceof Error ? err.message : String(err)}`);
+        }
         const openNote = html && openDecisions.get(session)?.report ? openForUser("the report", html) : "";
         return text(summary + openNote, session);
       } catch (err) {

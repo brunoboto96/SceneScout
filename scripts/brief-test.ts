@@ -11,23 +11,27 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createHash } from "node:crypto";
-import { formatBriefs, landingOf, laneName, MAX_LANES, moduleOf, planLanes, splitRoutes } from "../src/engine/brief.ts";
+import { formatBriefs, landingOf, laneName, MAX_LANES, moduleOf, planLanes, replayBriefs, splitRoutes } from "../src/engine/brief.ts";
 import {
-  earlierChoices,
-  MAX_SCHEDULES,
-  readSchedules,
-  resolveSeed,
-  resolveSeedExclusion,
-  scheduleOrder,
-  SEED_ENV,
-  SEED_EXCLUSION_ENV,
-  seededOrder,
-  seededRank,
-  startsOf,
-  unionSchedules,
-  type ScheduleRecord,
-} from "../src/engine/schedule.ts";
+  buildRunRecord,
+  carryForward,
+  continueLines,
+  continuePlan,
+  foldRecords,
+  FROM_RUN_ENV,
+  FROM_RUN_MODE_ENV,
+  MAX_RECORDS,
+  readRunRecord,
+  recordFromJson,
+  replayLines,
+  replayPlan,
+  resolveFromRun,
+  unionRecords,
+  workLeft,
+  workLine,
+  type RecordInput,
+  type RunRecord,
+} from "../src/engine/from-run.ts";
 
 const routesOf = (lanes: ReturnType<typeof splitRoutes>): string[] => lanes.flatMap((l) => l.routes);
 
@@ -166,149 +170,286 @@ test("each lane is told to sign in the way the planner did", () => {
   assert.doesNotMatch(anonymous, /storageStatePath|role: "/);
 });
 
-// ── a seeded schedule (schedule.ts) ─────────────────────────────────────────
+// ── starting from an earlier run (from-run.ts) ──────────────────────────────
 
-const ITEMS = ["/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h"];
-
-test("seeded order: SHA-256 of the seed and the item, so the same seed gives the same order anywhere", () => {
-  assert.equal(seededRank("s", "/a"), createHash("sha256").update("s\u0000/a").digest("hex"));
-  assert.deepEqual(seededOrder(ITEMS, "s1"), seededOrder([...ITEMS].reverse(), "s1"), "the input order does not matter");
-  assert.deepEqual(seededOrder(ITEMS, "s1"), seededOrder(ITEMS, "s1"));
-  assert.deepEqual([...seededOrder(ITEMS, "s1")].sort(), ITEMS, "a permutation: nothing lost, nothing added");
+test("from run: the path option, else SCENESCOUT_FROM_RUN, else none; the mode option, else its variable, else continue", () => {
+  const r = (o: { path?: string; mode?: string }, env: Record<string, string> = {}) => resolveFromRun(o, env);
+  assert.deepEqual(r({}), { ok: true }, "a fresh run unless asked");
+  assert.deepEqual(r({}, { [FROM_RUN_ENV]: "  " }), { ok: true }, "an empty variable is unset");
+  assert.deepEqual(r({ path: "a/ci.json" }), { ok: true, fromRun: { path: "a/ci.json", mode: "continue" } });
+  assert.deepEqual(r({}, { [FROM_RUN_ENV]: "env.json" }), { ok: true, fromRun: { path: "env.json", mode: "continue" } });
+  assert.deepEqual(r({ path: "flag.json" }, { [FROM_RUN_ENV]: "env.json" }), { ok: true, fromRun: { path: "flag.json", mode: "continue" } }, "the option wins");
+  assert.deepEqual(
+    r({ path: "p", mode: "replay" }, { [FROM_RUN_MODE_ENV]: "continue" }),
+    { ok: true, fromRun: { path: "p", mode: "replay" } },
+    "the option wins",
+  );
+  assert.deepEqual(r({ path: "p" }, { [FROM_RUN_MODE_ENV]: "replay" }), { ok: true, fromRun: { path: "p", mode: "replay" } });
+  // The mode is read only for a run that has an earlier one: a stray variable stops nothing.
+  assert.deepEqual(r({}, { [FROM_RUN_MODE_ENV]: "sideways" }), { ok: true });
+  const err = (o: { path?: string; mode?: string }, env: Record<string, string> = {}): string => {
+    const x = r(o, env);
+    assert.ok(!x.ok, JSON.stringify(o));
+    return x.error;
+  };
+  assert.match(err({ path: "p", mode: "sideways" }), /^--from-run-mode must be one of continue, replay/);
+  assert.match(err({ path: "p" }, { [FROM_RUN_MODE_ENV]: "sideways" }), /^SCENESCOUT_FROM_RUN_MODE must be one of/);
+  assert.match(err({ mode: "replay" }), /--from-run-mode applies to a run started from an earlier one: give --from-run as well/);
+  assert.match(err({ path: " " }), /--from-run needs a ci.json or a project directory/);
+  const named = resolveFromRun({ mode: "replay" }, {}, { path: "fromRun", mode: "fromRunMode" });
+  assert.ok(!named.ok && /^fromRunMode applies .* give fromRun/.test(named.error), "the brief's inputs are named as the brief names them");
 });
 
-test("seeded order: different seeds give different orders", () => {
-  const orders = new Set(Array.from({ length: 20 }, (_, i) => seededOrder(ITEMS, `seed-${i}`).join(",")));
-  // 8! orders: twenty seeds landing on fewer than nineteen distinct ones would mean the seed barely matters.
-  assert.ok(orders.size >= 19, `${orders.size} distinct orders from 20 seeds`);
-  const firsts = new Set(Array.from({ length: 20 }, (_, i) => seededOrder(ITEMS, `seed-${i}`)[0]));
-  assert.ok(firsts.size >= 4, "and the opening route varies, which is the point");
+/** A record input: a session "lane-a" that worked on /orders and /orders/42, a planner that only looked, and a crawl of /stock. */
+const input = (over: Partial<RecordInput> = {}): RecordInput => ({
+  runId: "run-1",
+  at: "2026-10-07T10:00:00.000Z",
+  knownRoutes: ["/", "/orders", "/orders/:id", "/stock", "/reports"],
+  steps: [
+    { session: "default", url: "http://app.test/", action: "snapshot" },
+    { session: "default", url: "http://app.test/stock", action: "crawl", target: "/stock" },
+    { session: "lane-a", url: "http://app.test/orders", action: "navigate", target: "http://app.test/orders" },
+    { session: "lane-a", url: "http://app.test/orders", action: "attach" },
+    { session: "lane-a", url: "http://app.test/orders/42", action: "click", target: 'link "Order 42"' },
+    { session: "lane-a", url: "http://app.test/orders/42", action: "type", target: 'textbox "Note" ← "hi"' },
+    { session: "lane-a", url: "http://app.test/orders", action: "back", target: "" },
+  ],
+  unexercised: [
+    { route: "/orders", keys: ["button:export", "link:next"] },
+    { route: "/stock", keys: ["button:adjust"] },
+  ],
+  forms: [{ route: "/orders/:id", key: "form#note" }],
+  filled: ["/orders/:id"],
+  unchosen: [{ route: "/orders", key: "select:status", unchosen: ["Archived", "Draft"] }],
+  gaps: ["1 route(s) never visited in any run: /reports"],
+  ...over,
 });
 
-test("schedule: what earlier seeded runs began with goes to the back, least-chosen first; skip leaves it out until the cycle is done", () => {
-  const earlier = new Map([
-    ["/a", 2],
-    ["/b", 1],
-    ["/c", 1],
+test("record: only the routes a session worked on are visited, in the order reached; a crawl, an attach and a look-only planner are not", () => {
+  const r = buildRunRecord(input());
+  assert.deepEqual(r.visited, ["/orders", "/orders/:id"]);
+  assert.deepEqual(r.lanes, [{ session: "lane-a", routes: ["/orders", "/orders/:id"] }], "the planner only looked, so it is no lane");
+  assert.deepEqual(
+    r.steps.map((s) => [s.action, s.route]),
+    [
+      ["navigate", "/orders"],
+      ["click", "/orders/:id"],
+      ["type", "/orders/:id"],
+      ["back", "/orders"],
+    ],
+  );
+  assert.deepEqual(r.left, [
+    { route: "/orders", unexercised: ["button:export", "link:next"], forms: [], unchosen: [{ key: "select:status", options: ["Archived", "Draft"] }] },
+    { route: "/orders/:id", unexercised: [], forms: ["form#note"], filled: true, unchosen: [] },
   ]);
-  const back = scheduleOrder(ITEMS, { seed: "s1", earlier, exclusion: "back" });
-  assert.deepEqual(back.slice(0, 5).sort(), ["/d", "/e", "/f", "/g", "/h"], "never-chosen first");
-  assert.deepEqual(back.slice(5, 7).sort(), ["/b", "/c"]);
-  assert.equal(back[7], "/a", "chosen most, last");
-  assert.deepEqual(back.slice(0, 5), seededOrder(["/d", "/e", "/f", "/g", "/h"], "s1"), "each group in the seed's order");
-  assert.deepEqual(scheduleOrder(ITEMS, { seed: "s1", earlier }), back, "back is the default");
-  assert.deepEqual(scheduleOrder(ITEMS, { seed: "s1", earlier, exclusion: "skip" }), back.slice(0, 5));
-  const all = new Map(ITEMS.map((i) => [i, 1]));
-  assert.deepEqual(
-    scheduleOrder(ITEMS, { seed: "s1", earlier: all, exclusion: "skip" }),
-    seededOrder(ITEMS, "s1"),
-    "every route chosen once: the cycle starts over",
+  // /stock was only crawled: what is left there is not this run's to hand on, and it is not visited.
+  assert.ok(!r.left.some((l) => l.route === "/stock"));
+  // The contrastive case: the same planner, once it acts, is a lane and its route is visited.
+  const acting = buildRunRecord(
+    input({ steps: [...input().steps, { session: "default", url: "http://app.test/", action: "click", target: 'button "Help"' }] }),
   );
-  assert.deepEqual(scheduleOrder([], { seed: "s1", exclusion: "skip" }), []);
-  assert.deepEqual(scheduleOrder(ITEMS, { seed: "s1" }), seededOrder(ITEMS, "s1"), "no history: the seed's order");
-  // A record keeps a route without its query string: a route with one is still found in the history.
-  assert.equal(scheduleOrder(["/search?q=x", "/z"], { seed: "s1", earlier: new Map([["/search", 1]]) })[1], "/search?q=x");
-});
-
-const record = (seed: string, at: string, routes: string[], roles?: string[]): ScheduleRecord => ({
-  seed,
-  at,
-  source: "ci",
-  exclusion: "back",
-  routes,
-  ...(roles ? { roles } : {}),
-});
-
-test("schedule: a seed used again sees the history its first run saw, so it repeats that order", () => {
-  const history = [record("s1", "2026-01-01", ["/a", "/b"]), record("s2", "2026-01-02", ["/c"]), record("s1", "2026-01-03", ["/a", "/b"])];
+  assert.deepEqual(acting.visited, ["/", "/orders", "/orders/:id"]);
   assert.deepEqual(
-    [...earlierChoices(history, "routes")],
+    acting.lanes.map((l) => l.session),
+    ["default", "lane-a"],
+  );
+  assert.equal(readRunRecord(JSON.parse(JSON.stringify(r))) !== null, true, "a record reads back as one");
+  // What was typed is never kept: the redaction cannot tell a password from a note.
+  assert.equal(r.steps[2].target, 'textbox "Note" ← (a value)');
+  // A refused action did nothing: it is no step, and a session whose only act was refused only looked.
+  const refused = buildRunRecord(
+    input({ steps: [...input().steps, { session: "default", url: "http://app.test/", action: "click:refused", target: 'button "Delete all"' }] }),
+  );
+  assert.deepEqual(refused.steps, r.steps);
+  assert.deepEqual(refused.visited, r.visited);
+  assert.equal(
+    buildRunRecord(input({ steps: [{ session: "a", url: "http://app.test/x", action: "click×2", target: "b" }] })).steps.length,
+    1,
+    "a double click is a step",
+  );
+});
+
+const recordOf = (over: Partial<RecordInput> = {}): RunRecord => buildRunRecord(input(over));
+
+test("continue: never worked on first, then the routes with work left (most first), then the covered ones; the same input the same order", () => {
+  const r = recordOf();
+  const items = continuePlan(r, ["/orders/7", "/stock", "/", "/reports", "/orders", "/people"]);
+  assert.deepEqual(
+    items.map((i) => [i.tier, i.route]),
     [
-      ["/a", 2],
-      ["/b", 2],
-      ["/c", 1],
+      [1, "/"],
+      [1, "/people"],
+      [1, "/reports"],
+      [1, "/stock"],
+      // /orders has 2 controls and 2 options left; /orders/7 is /orders/:id, with 1 form and 1 filled form.
+      [2, "/orders"],
+      [2, "/orders/7"],
     ],
   );
-  assert.deepEqual([...earlierChoices(history, "routes", "s1")], [], "s1's first run came first: nothing was earlier");
+  assert.equal(workLeft(items[4].work!), 4);
+  // Order-independent, and a route only the record knew is not lost.
+  assert.deepEqual(continuePlan(r, ["/people", "/orders", "/reports", "/", "/stock", "/orders/7"]), items);
   assert.deepEqual(
-    [...earlierChoices(history, "routes", "s2")],
+    continuePlan(r, []).map((i) => i.route),
+    ["/", "/reports", "/stock", "/orders", "/orders/:id"],
+  );
+});
+
+test("continue: the one fact that moves a route between tiers is whether work was left on it", () => {
+  // Two records alike but for one unsubmitted form on /orders/:id.
+  const withForm = recordOf({ unexercised: [], unchosen: [], filled: [] });
+  const without = recordOf({ unexercised: [], unchosen: [], filled: [], forms: [] });
+  const tierOf = (r: RunRecord, route: string) => continuePlan(r, ["/orders", "/orders/:id"]).find((i) => i.route === route)?.tier;
+  assert.equal(tierOf(withForm, "/orders/:id"), 2);
+  assert.equal(tierOf(without, "/orders/:id"), 3);
+  assert.equal(tierOf(withForm, "/orders"), 3, "the other route is unchanged");
+  // And a route worked on is never tier 1, whatever was left; one never worked on always is.
+  assert.equal(tierOf(recordOf({ steps: [] }), "/orders/:id"), 1);
+});
+
+test("continue: the message names exactly the forms, options and controls to take first, and a lane is told about its own routes", () => {
+  const items = continuePlan(recordOf(), ["/orders", "/orders/:id", "/stock", "/reports"]);
+  const lines = continueLines(items, { from: "prev/ci.json" });
+  assert.match(lines[0], /continues an earlier one \(prev\/ci\.json\)/);
+  assert.equal(lines[1], "1. Never worked on by it, first: /, /reports, /stock");
+  assert.ok(
+    lines.includes(`   /orders: choose the options never chosen: select:status → "Archived", "Draft"; controls never exercised: button:export, link:next`),
+    lines.join("\n"),
+  );
+  assert.ok(lines.includes(`   /orders/:id: submit the form(s) never submitted: form#note; a form was filled in and never submitted: fill it and submit it`));
+  assert.ok(!lines.some((l) => l.startsWith("3.")), "nothing covered, no third tier");
+  const lane = continueLines(items, { from: "x", only: ["/stock"] });
+  assert.equal(lane[1], "1. Never worked on by it, first: /stock");
+  assert.equal(lane[2], "2. It left no work on the routes it visited.");
+  assert.deepEqual(continueLines(items, { from: "x", only: ["/elsewhere"] }), [], "a lane with none of these routes is told nothing");
+  assert.equal(
+    workLine({ route: "/a", unexercised: Array.from({ length: 10 }, (_, i) => `k${i}`), forms: [], unchosen: [] }),
+    "/a: controls never exercised: k0, k1, k2, k3, k4, k5, k6, k7 … +2",
+  );
+});
+
+test("continue: a chain of records carries forward what earlier runs covered and left", () => {
+  const first = recordOf();
+  // The second run worked on /stock only, and left a control there.
+  const second = buildRunRecord(
+    input({
+      runId: "run-2",
+      at: "2026-10-07T11:00:00.000Z",
+      steps: [{ session: "lane-b", url: "http://app.test/stock", action: "click", target: 'button "Adjust"' }],
+      unexercised: [{ route: "/stock", keys: ["button:count"] }],
+      forms: [],
+      filled: [],
+      unchosen: [],
+    }),
+  );
+  const chained = carryForward(first, second);
+  assert.deepEqual(chained.visited, ["/stock", "/orders", "/orders/:id"]);
+  assert.deepEqual(
+    chained.left.map((l) => l.route),
+    ["/stock", "/orders", "/orders/:id"],
+  );
+  assert.deepEqual(chained.steps, second.steps, "the steps stay the run's own");
+  // A route the later run worked on again takes the later run's word, even when it left nothing there.
+  const third = buildRunRecord(input({ runId: "run-3", at: "2026-10-07T12:00:00.000Z", unexercised: [], forms: [], filled: [], unchosen: [] }));
+  assert.deepEqual(
+    carryForward(chained, third).left.map((l) => l.route),
+    ["/stock"],
+  );
+  assert.deepEqual(foldRecords([third, first, second]), carryForward(carryForward(first, second), third), "folded oldest first, whatever the order kept");
+  assert.equal(foldRecords([]), null);
+});
+
+test("records: read back in full or not at all, found in a ci.json, a memory or bare, and kept as a set", () => {
+  const r = recordOf();
+  for (const bad of [
+    { ...r, version: 2 },
+    { ...r, visited: "/orders" },
+    { ...r, steps: [{ session: "a", route: "/", action: 1 }] },
+    { ...r, left: [{ route: "/", unexercised: [], forms: [], unchosen: [{ key: "k" }] }] },
+    { ...r, followed: { mode: "sideways", runId: "x" } },
+    null,
+  ])
+    assert.equal(readRunRecord(bad), null, JSON.stringify(bad)?.slice(0, 80));
+  assert.deepEqual(recordFromJson({ tool: "scenescout", command: "ci", record: r }, "ci.json"), { ok: true, record: r });
+  const noRecord = recordFromJson({ tool: "scenescout", command: "ci" }, "ci.json");
+  assert.ok(!noRecord.ok && /ci.json holds no run record: its run wrote no report/.test(noRecord.error));
+  const second = { ...recordOf({ runId: "run-2", at: "2026-10-07T11:00:00.000Z" }) };
+  const memory = recordFromJson({ version: 1, states: {}, findings: [], runRecords: [second, r] }, "memory.json");
+  assert.deepEqual(memory, { ok: true, record: carryForward(r, second) });
+  assert.ok(!recordFromJson({ version: 1, states: {}, findings: [] }, "memory.json").ok);
+  assert.deepEqual(recordFromJson(r, "r.json"), { ok: true, record: r });
+  const neither = recordFromJson({ hello: 1 }, "r.json");
+  assert.ok(!neither.ok && /r.json is not a ci.json, a project's memory or a run record/.test(neither.error));
+  assert.deepEqual(unionRecords([r], [second, r]), [r, second]);
+  assert.deepEqual(unionRecords(unionRecords([r], [second]), [second]), [r, second], "idempotent");
+  const many = Array.from({ length: MAX_RECORDS + 3 }, (_, i) => ({ ...r, runId: `r${i}`, at: `2026-10-07T10:00:${String(i).padStart(2, "0")}.000Z` }));
+  assert.equal(unionRecords(many, []).length, MAX_RECORDS);
+  assert.equal(unionRecords(many, [])[0].runId, "r3", "the oldest go first");
+});
+
+test("replay: the same record gives the same plan, in the order the run took its steps, one lane per session that acted", () => {
+  const r = recordOf({
+    steps: [
+      { session: "lane-b", url: "http://app.test/stock", action: "navigate", target: "/stock" },
+      { session: "lane-a", url: "http://app.test/orders", action: "click", target: 'button "Z"' },
+      { session: "lane-b", url: "http://app.test/stock", action: "select", target: 'combobox "Site" = North' },
+      { session: "lane-a", url: "http://app.test/orders/9", action: "click", target: 'link "A"' },
+      { session: "default", url: "http://app.test/", action: "snapshot" },
+    ],
+  });
+  const plan = replayPlan(r);
+  assert.deepEqual(plan, replayPlan(JSON.parse(JSON.stringify(r))), "the same input, the same order");
+  assert.deepEqual(
+    plan.map((l) => [l.session, l.routes, l.steps.map((s) => s.target)]),
     [
-      ["/a", 1],
-      ["/b", 1],
+      ["lane-b", ["/stock"], ["/stock", 'combobox "Site" = North']],
+      ["lane-a", ["/orders", "/orders/:id"], ['button "Z"', 'link "A"']],
+    ],
+    "recorded order, not sorted: lane-b moved first, and button Z came before link A",
+  );
+  const lines = replayLines(plan[1], { from: "prev/ci.json" });
+  assert.match(lines[0], /replays an earlier one \(prev\/ci\.json\): follow its route and step order exactly/);
+  assert.deepEqual(lines.slice(3), ['  1. click button "Z" → /orders', '  2. click link "A" → /orders/:id']);
+  const briefs = replayBriefs(plan);
+  assert.deepEqual(
+    briefs.map((b) => [b.lane, b.routes, b.landing]),
+    [
+      ["stock", ["/stock"], "/stock"],
+      ["orders", ["/orders", "/orders/:id"], "/orders"],
     ],
   );
-  assert.deepEqual([...earlierChoices(history, "routes", "new")].length, 3, "a new seed sees everything");
-  assert.deepEqual([...earlierChoices([record("s", "t", [], ["admin"])], "roles")], [["admin", 1]]);
-  assert.deepEqual(startsOf([["/a", "/b", "/c", "/d"], ["/x"], ["/a"]]), ["/a", "/b", "/c", "/x"], "the first three of each order, once each");
-});
-
-test("schedule: the seed is the option, else SCENESCOUT_SEED, else none; auto is generated; exclusion likewise", () => {
-  const gen = () => "feedbeef";
-  assert.deepEqual(resolveSeed(undefined, {}, gen), { ok: true });
-  assert.deepEqual(resolveSeed(undefined, { [SEED_ENV]: "" }, gen), { ok: true });
-  assert.deepEqual(resolveSeed("x.1_y-2", { [SEED_ENV]: "env" }, gen), { ok: true, seed: { value: "x.1_y-2", generated: false } });
-  assert.deepEqual(resolveSeed(undefined, { [SEED_ENV]: "env" }, gen), { ok: true, seed: { value: "env", generated: false } });
-  assert.deepEqual(resolveSeed(undefined, { [SEED_ENV]: "auto" }, gen), { ok: true, seed: { value: "feedbeef", generated: true } });
-  const bad = resolveSeed("no spaces", {}, gen, "seed");
-  assert.ok(!bad.ok && /^seed must be/.test(bad.error));
-  assert.match(resolveSeed("auto", {}).ok ? (resolveSeed("auto", {}) as { seed: { value: string } }).seed.value : "", /^[0-9a-f]{8}$/);
-  assert.deepEqual(resolveSeedExclusion(undefined, {}), { ok: true, value: "back" });
-  assert.deepEqual(resolveSeedExclusion(undefined, { [SEED_EXCLUSION_ENV]: "skip" }), { ok: true, value: "skip" });
-  assert.deepEqual(resolveSeedExclusion("back", { [SEED_EXCLUSION_ENV]: "skip" }), { ok: true, value: "back" });
-  assert.ok(!resolveSeedExclusion("later", {}).ok);
-});
-
-test("schedule: records merge as a set, oldest first and capped, and a malformed one is left out", () => {
-  const a = [record("s1", "2026-01-01", ["/a"])];
-  const b = [record("s2", "2026-01-02", ["/b"]), ...a];
-  assert.deepEqual(unionSchedules(a, b), [a[0], b[0]]);
-  assert.deepEqual(unionSchedules(unionSchedules(a, b), b), unionSchedules(a, b), "idempotent");
-  const many = Array.from({ length: MAX_SCHEDULES + 5 }, (_, i) => record(`s${i}`, `2026-01-01T00:00:${String(i).padStart(3, "0")}`, []));
-  assert.equal(unionSchedules(many, []).length, MAX_SCHEDULES);
-  assert.equal(unionSchedules(many, [])[0].seed, "s5", "the oldest go first");
   assert.deepEqual(
-    readSchedules({ schedules: [a[0], { seed: 1 }, null, { seed: "x", at: "t", routes: [2] }, { ...a[0], roles: "admin" }, { ...a[0], source: "other" }] }),
-    a,
+    replayBriefs([{ routes: ["/a/1"] }, { routes: ["/a/2"] }]).map((b) => b.lane),
+    ["a", "a-2"],
+    "two sessions in one module get two names",
   );
-  assert.deepEqual(readSchedules({}), []);
 });
 
-test("seeded split: still whole modules and every route once, the same seed the same plan, and unseeded exactly as before", () => {
+test("an order changes which route each lane starts on, never which modules a lane owns or which routes are split", () => {
   const routes = ["/orders", "/orders/new", "/orders/42", "/stock", "/stock/audit", "/people", "/", "/settings", "/reports"];
-  const before = JSON.stringify(planLanes(routes, 3));
-  for (const seed of ["s1", "s2", "s3"]) {
-    const lanes = splitRoutes(routes, 3, { seed });
-    assert.deepEqual(lanes.flatMap((l) => l.routes).sort(), [...routes].sort(), seed);
-    for (const lane of lanes) assert.deepEqual([...new Set(lane.routes.map(moduleOf))].sort(), [...lane.modules].sort());
-    assert.deepEqual(JSON.stringify(splitRoutes([...routes].reverse(), 3, { seed })), JSON.stringify(lanes));
-  }
-  assert.equal(JSON.stringify(planLanes(routes, 3)), before, "no schedule, no change");
-  const plans = new Set(["s1", "s2", "s3", "s4", "s5", "s6"].map((seed) => JSON.stringify(planLanes(routes, 3, { schedule: { seed } }))));
-  assert.ok(plans.size >= 3, "different seeds deal differently");
+  const plain = splitRoutes(routes, 3);
+  const order = ["/stock/audit", "/people", "/orders/new", "/reports"];
+  const ordered = splitRoutes(routes, 3, order);
+  assert.deepEqual(routesOf(ordered).sort(), [...routes].sort(), "every route once");
+  for (const lane of ordered) assert.deepEqual([...new Set(lane.routes.map(moduleOf))].sort(), [...lane.modules].sort(), "whole modules");
+  assert.deepEqual(
+    ordered.map((l) => l.routes[0]),
+    ["/stock/audit", "/people", "/orders/new"],
+    "each lane starts on the first of its routes the order names",
+  );
+  assert.deepEqual(splitRoutes([...routes].reverse(), 3, order), ordered, "the discovery order still does not matter");
+  assert.equal(JSON.stringify(planLanes(routes, 3)), JSON.stringify(planLanes(routes, 3, {})), "without an order, the split is the stable one");
+  assert.deepEqual(plain[0].routes[0], "/orders", "the stable split starts with the biggest module, sorted");
 });
 
-test("seeded split: a lane lands on a route earlier seeded runs did not start with, and skip leaves those out of the split", () => {
-  const routes = ["/orders/a", "/orders/b", "/orders/c", "/stock/a", "/stock/b"];
-  const earlier = new Map([
-    ["/orders/a", 1],
-    ["/orders/b", 1],
-    ["/stock/a", 1],
-  ]);
-  const lanes = planLanes(routes, 2, { schedule: { seed: "s1", earlier } });
-  const landing = Object.fromEntries(lanes.map((l) => [l.modules[0], l.landing]));
-  assert.deepEqual(landing, { "/orders": "/orders/c", "/stock": "/stock/b" });
-  for (const l of lanes) assert.ok(!earlier.has(l.routes[0]), `${l.lane} starts fresh`);
-  const skipped = planLanes(routes, 2, { schedule: { seed: "s1", earlier, exclusion: "skip" } });
-  assert.deepEqual(skipped.flatMap((l) => l.routes).sort(), ["/orders/c", "/stock/b"]);
-});
-
-test("seeded brief: it opens with the seed, says to take the routes in order, and orders the saved roles", () => {
-  const lanes = planLanes(["/orders/a", "/stock/a"], 2, { schedule: { seed: "s1" } });
-  const out = formatBriefs(lanes, { seedNote: "Seed: s1, earlier seeded runs' starting choices moved to the back.", roleOrder: ["clerk", "admin"] });
-  assert.match(out, /^LANE PLAN — 2 lane\(s\) over 2 route\(s\)\.\nSeed: s1/);
-  assert.match(out, /listed in the order to take them: start with the first/);
-  assert.match(out, /Saved roles, in this run's order .*: clerk, admin\. To follow it, attach the lanes as the first/);
-  const plain = formatBriefs(planLanes(["/orders/a", "/stock/a"], 2));
-  assert.doesNotMatch(plain, /Seed:|Saved roles/, "unseeded, the brief is unchanged");
-  assert.doesNotMatch(formatBriefs(lanes, { roleOrder: ["only"] }), /Saved roles/, "one role is no choice");
+test("a brief that starts from an earlier run says so, and gives each lane its own lines", () => {
+  const lanes = planLanes(["/orders/a", "/stock/a"], 2);
+  const out = formatBriefs(lanes, {
+    fromRunNote: "continued from the run recorded in prev/ci.json (its report of t)",
+    laneLines: (b) => [`first: ${b.routes[0]}`],
+  });
+  assert.match(out, /^LANE PLAN — 2 lane\(s\) over 2 route\(s\)\.\nThis run continued from the run recorded in prev\/ci\.json/);
+  assert.match(out, /routes: \/orders\/a\nfirst: \/orders\/a\n/);
+  assert.match(out, /routes: \/stock\/a\nfirst: \/stock\/a\n/);
+  assert.doesNotMatch(formatBriefs(lanes), /This run|first:/, "a fresh run's brief is unchanged");
 });

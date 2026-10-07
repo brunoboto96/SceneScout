@@ -85,7 +85,7 @@ Use SceneScout to test http://127.0.0.1:4173 with four agents in parallel, one a
 
 The method the agent follows:
 
-1. The planner attaches, crawls once so route knowledge is complete, and calls `scout_lane_brief {lanes: 4, goal: "…"}`. It splits the routes into whole modules (everything under `/orders` goes to one lane), balances them by route count, and returns for each lane a session name, an objective, the routes it owns, a landing route and the rules every lane follows. With `seed` it deals the modules and orders each lane's routes by that seed instead ([a seed](#spreading-runs-over-the-app-with-a-seed)).
+1. The planner attaches, crawls once so route knowledge is complete, and calls `scout_lane_brief {lanes: 4, goal: "…"}`. It splits the routes into whole modules (everything under `/orders` goes to one lane), balances them by route count, and returns for each lane a session name, an objective, the routes it owns, a landing route and the rules every lane follows. With `fromRun` it starts from an earlier run's record instead ([starting from an earlier run](#starting-from-an-earlier-run)).
 2. Each lane agent attaches its own session when it starts, files defects with `scout_finding` as it judges them, and hands back one JSON object: the lane report. The instruction for that object comes from `scout_lane_report {lane}`. While other sessions share the project, `scout_coverage` shows a lane only the routes it reached, the controls on the pages it saw (not another role's on the same route) and the forms it saw this run; `scout_coverage {scope: "project"}` shows every lane's, tagged with who saw each. A lane that files the same finding again in the same run corrects its own convention and detail, and the "seen in N runs" count does not move. A filing merged into a finding from another page adds that page to the finding's "also seen on" list in the report. Each decision in the lane report can name the finding id `scout_finding` returned for it, so the fold's check for judged defects nobody filed matches it exactly rather than by its evidence.
 3. The planner passes each reply to `scout_lane_report {lane, reply}`, which checks it and folds it, and only then closes that lane's session with `scout_close`. `scout_close` refuses to close a lane whose report has not been accepted, because the lane's decisions are kept against its session.
 4. The planner writes the report. On a parallel run it adds how the run was paced and whether each lane's stated confidence matched what the project filed.
@@ -246,7 +246,7 @@ npx -y scenescout ci http://127.0.0.1:3000
 - **Provider.** Chosen by which key is set: the Anthropic Messages API or the OpenAI Responses API. With both set, `--provider` decides. `--model`, `--effort` and `--base-url` (another endpoint implementing the same API) override the defaults.
 - **Caps.** 80 model turns, 3,000,000 tokens and 20 minutes by default (`--max-turns`, `--max-tokens`, `--max-minutes`). The first cap reached ends the exploration; the report is still written and says which cap ended it. `--max-tokens` is the setting that bounds the cost.
 - **Lanes.** By default the app is split between two model loops that explore at once, each in its own browser and its own modules, as [parallel lanes](#parallel-lanes) do; `--lanes 1` makes it one loop and `--lanes 4` four. They share the caps above rather than getting them each, so raise `--max-turns` and `--max-tokens` with them. On the benchmark's demo app the defaults found 5 to 7 of 13 planted defects for about $0.03 a run, against 2 to 4 for one loop at 40 turns; `--lanes 4 --max-turns 160 --max-tokens 6000000` found the most (run one at a time per API key). Their findings go into one report.
-- **Seed.** `--seed <seed>` (or `--seed auto`) varies where each run starts and spreads successive runs over the app; see [below](#spreading-runs-over-the-app-with-a-seed). Without it a run explores as it always has.
+- **Starting from an earlier run.** `--from-run <ci.json or project directory>` continues where that run left off, or with `--from-run-mode replay` follows its steps again; see [below](#starting-from-an-earlier-run). Without it a run starts fresh.
 - **Mode.** `read-only` by default. `--mode destructive` also needs `--allow-destructive`.
 - **Duplicates.** By default the run's model is also asked, at its lowest effort, whether a finding the dedup rule keeps apart is one already open on the same page, and merges it when it says so. Each pair asked about sends the two findings' titles, categories and evidence, and the page's path, to the provider, and the calls count in the usage. `--dedup rule` turns it off.
 - **Output.** `report.md`, `report.html`, `summary.md`, `ci.json` and `ci.sarif` in `.scenescout/ci/`, with a usage line: turns, tokens, time and an estimated cost. Each `ci.sarif` result points at the anchor file described under [SARIF locations](#sarif-locations).
@@ -265,22 +265,23 @@ The GitHub Action is `brunoboto96/SceneScout/ci`, with the key passed in the ste
 
 Give the job a `timeout-minutes` of at least `max-minutes` plus 5, plus the time of the steps before it. A pull request from a fork gets no secrets, so run this on pushes, on a schedule, or on pull requests from the same repository. [The full reference](../ci.md#an-unattended-exploratory-run) covers costs and output formats.
 
-### Spreading runs over the app with a seed
+### Starting from an earlier run
 
-Left to itself, a run starts with the same obvious routes every time, so repeated runs keep finding the same things. A seed changes that. It is opt-in: with no seed, nothing below happens.
+Every run that writes its report leaves a record of what it did: the routes it worked on and in what order, each session's steps, and what it left on each route (controls never exercised, forms never submitted, a form filled in and never submitted, dropdown options never chosen), with its gap ledger. It is kept in the project's memory and in `ci.json` under `record`. A later run can start from it. This is opt-in: without `--from-run`, nothing below happens.
 
 ```bash
-npx -y scenescout ci http://127.0.0.1:3000 --seed auto        # a fresh seed, printed so the run can be repeated
-npx -y scenescout ci http://127.0.0.1:3000 --seed 3f9a01c2    # the same order again
+npx -y scenescout ci http://127.0.0.1:3000 --from-run .scenescout/ci/ci.json                    # continue where it left off
+npx -y scenescout ci http://127.0.0.1:3000 --from-run last-run/ci.json --from-run-mode replay     # follow its steps again
 ```
 
-- **What it orders.** A seeded `ci` run crawls first, as a run in lanes does, then is told to take the routes in an order shuffled by the seed (SHA-256 of the seed and each route). In lanes, the seed also decides which modules share a lane and the order each lane takes its routes in, and each lane lands on the first route of its order. In a parallel run driven by an agent, pass the seed to `scout_lane_brief {lanes, seed}`; when the project has more than one saved role, the brief also lists the roles in the seed's order.
-- **Spreading over successive runs.** Each seeded run records the first three routes of each order it handed out in the project's memory. The next seeded run on that project puts those last (`--seed-exclusion back`, the default), the least-chosen first, or leaves them out while any others remain (`--seed-exclusion skip`). A run's crawl and its scope stay the same; only the starting order moves.
-- **Repeating a run.** The same seed gives the same order: a seed used again ignores what it and later runs recorded, so it sees the history its first run saw.
-- **Where it is recorded.** The seed is printed at the start, and named in the report's summary, in `summary.md`, and in `ci.json` under `seed` (its value, whether it was generated, the exclusion, how many routes were ordered and which it started with). A brief from `scout_lane_brief` opens with it.
-- **For every run.** `SCENESCOUT_SEED=auto` seeds every `ci` run and lane brief that does not pass its own seed; `SCENESCOUT_SEED_EXCLUSION` sets the exclusion the same way.
+- **`continue`** (the default mode). The run crawls first, as a run in lanes does, and orders the routes in three tiers: the routes the earlier run never worked on; then the routes it left work on, the most first, each with exactly which forms to submit, which options to choose and which controls to exercise first; then the routes it covered, last. In lanes, each lane is told the tiers of its own routes and lands on the first. A route the planning crawl opened counts as worked on only if a session acted there.
+- **`replay`.** The run follows the earlier run's routes and steps in the order it took them, for reproducing a run or checking a fix. It crawls nothing, and has one lane per session the earlier run had, whatever `--lanes` says. The same record gives the same order every time.
+- **A chain of runs.** A continued run's `ci.json` record carries forward what the run it continued covered and left, so each run in a chain can be given the last one's `ci.json`. Given a project directory, the records of every run on that project are combined the same way.
+- **Where it is recorded.** The log, the report's summary, `summary.md` and `ci.json` (`fromRun`: the mode, the source, and the earlier run's id and report time) name the run it started from.
+- **In a parallel run driven by an agent**, pass `scout_lane_brief {lanes, fromRun, fromRunMode}`; a relative path is read from the project directory.
+- **For every run.** `SCENESCOUT_FROM_RUN` and `SCENESCOUT_FROM_RUN_MODE` set them for every `ci` run and lane brief that does not name its own.
 
-What it measured on the benchmark apps is in [the benchmark results](../benchmark.md#a-seeded-exploration-schedule-issue-418).
+What it measured on the benchmark apps is in [the benchmark results](../benchmark.md#starting-from-an-earlier-run-issue-418).
 
 ## `/scenescout qa` on a pull request
 

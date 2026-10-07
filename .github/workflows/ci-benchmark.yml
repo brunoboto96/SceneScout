@@ -49,14 +49,15 @@ on:
         description: Model loops that explore at once, sharing the caps. Empty means the CLI's default.
         type: string
         default: ""
-      seed:
-        description: A seed, or auto for a fresh one, to order the run's routes by (a seeded schedule). Empty means unseeded.
+      from-run-record:
+        description: The `record` object of an earlier run's ci.json, as JSON, for this run to start from. Empty means a fresh run.
         type: string
         default: ""
-      seed-history:
-        description: Earlier seeded runs' schedules, as the JSON array of a previous run's memory.json `schedules`, to start this run's memory with. Empty means a fresh memory.
-        type: string
-        default: ""
+      from-run-mode:
+        description: With from-run-record, continue where that run left off, or replay its route and step order.
+        type: choice
+        options: [continue, replay]
+        default: continue
   workflow_call:
     inputs:
       app:
@@ -87,10 +88,6 @@ on:
         description: Model loops that explore at once, sharing the caps. Empty means the CLI's default.
         type: string
         default: ""
-      seed:
-        description: A seed, or auto for a fresh one, to order the run's routes by (a seeded schedule). Empty means unseeded.
-        type: string
-        default: ""
       ref:
         description: The ref to check out and run, e.g. a release tag. Empty means the calling workflow's.
         type: string
@@ -110,7 +107,7 @@ permissions:
 
 jobs:
   run:
-    name: scenescout ci · ${{ inputs.app }}${{ inputs.lanes != '' && format(' · {0} lanes', inputs.lanes) || '' }}${{ inputs.seed != '' && format(' · seed {0}', inputs.seed) || '' }}
+    name: scenescout ci · ${{ inputs.app }}${{ inputs.lanes != '' && format(' · {0} lanes', inputs.lanes) || '' }}${{ inputs.from-run-record != '' && format(' · {0}', inputs.from-run-mode) || '' }}
     runs-on: ubuntu-latest
     # 20 minutes of exploration, up to 4 more to write the report, and the setup before it.
     timeout-minutes: 40
@@ -158,33 +155,31 @@ jobs:
           done
           echo "The $APP app did not answer on port $port:"; cat "$RUNNER_TEMP/app.log"; exit 1
 
-      # Benchmark tooling only, for measuring the seed's exclusion across runs:
-      # the project starts with earlier runs' schedules and nothing else, so
-      # the exclusion applies while the memory still holds this run's findings
-      # alone, which is what bench scores. A dispatch input only: the weekly
-      # run always starts fresh.
-      - name: Start the memory with earlier seeded runs' schedules
-        if: ${{ inputs.seed-history != '' }}
+      # Benchmark tooling only, for measuring a run that starts from an earlier
+      # one: the record is written outside the project, so the project's memory
+      # still holds this run's findings alone, which is what bench scores. A
+      # dispatch input only: the weekly run always starts fresh.
+      - name: Write the earlier run's record
+        id: earlier
+        if: ${{ inputs.from-run-record != '' }}
         env:
-          HISTORY: ${{ inputs.seed-history }}
-          SEED: ${{ inputs.seed }}
-          PROJECT: ${{ steps.app.outputs.project }}
+          RECORD: ${{ inputs.from-run-record }}
+          OUT: ${{ runner.temp }}/earlier-run.json
         run: |
-          # Only a seeded run reads the schedules: without a seed this would measure nothing.
-          if [ -z "$SEED" ]; then echo "::error::seed-history applies to a seeded run: give seed as well"; exit 1; fi
           node --input-type=module -e '
             import fs from "node:fs";
-            import { readSchedules } from "./dist/engine/schedule.js";
-            const given = JSON.parse(process.env.HISTORY);
-            const schedules = readSchedules({ schedules: given });
-            if (!Array.isArray(given) || given.length === 0 || schedules.length !== given.length) {
-              console.error("seed-history must be a non-empty JSON array of schedule records, as in memory.json");
+            import { readRunRecord } from "./dist/engine/from-run.js";
+            let given;
+            try { given = JSON.parse(process.env.RECORD); } catch { given = undefined; }
+            const record = readRunRecord(given);
+            if (!record) {
+              console.error("from-run-record must be the record object of a ci.json, as JSON");
               process.exit(1);
             }
-            fs.mkdirSync(`${process.env.PROJECT}/.scenescout`, { recursive: true });
-            fs.writeFileSync(`${process.env.PROJECT}/.scenescout/memory.json`, JSON.stringify({ version: 1, states: {}, findings: [], schedules }));
-            console.log(`The memory starts with ${schedules.length} earlier schedule(s): ${schedules.map((r) => r.seed).join(", ")}`);
+            fs.writeFileSync(process.env.OUT, JSON.stringify(record));
+            console.log(`The run starts from run ${record.runId} (its report of ${record.at}): ${record.visited.length} route(s) worked on, ${record.steps.length} step(s).`);
           '
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
       - name: CI run
         id: run
@@ -202,7 +197,8 @@ jobs:
           max-turns: ${{ inputs.max-turns }}
           max-tokens: ${{ inputs.max-tokens }}
           lanes: ${{ inputs.lanes }}
-          seed: ${{ inputs.seed }}
+          from-run: ${{ steps.earlier.outputs.path }}
+          from-run-mode: ${{ inputs.from-run-record != '' && inputs.from-run-mode || '' }}
           project: ${{ steps.app.outputs.project }}
           upload-artifact: "false"
           upload-sarif: "false"

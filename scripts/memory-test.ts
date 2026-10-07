@@ -32,8 +32,9 @@ import {
   MemoryStore,
   adoptLegacyMemoryDir,
   mergeMemory,
-  readSchedulesOnDisk,
-  recordScheduleOnDisk,
+  loadRunRecord,
+  noteFromRunOnDisk,
+  readRunRecordsOnDisk,
   redactSecrets,
   MAX_STATES_PER_ROUTE,
   pruneStates,
@@ -81,7 +82,8 @@ import {
   type FieldFacts,
   type FormProbe,
 } from "../src/engine/forms.ts";
-import { coverageView, generateReport } from "../src/engine/report.ts";
+import { coverageView, generateReport, runRecordOf } from "../src/engine/report.ts";
+import type { FromRunNote, RunRecord } from "../src/engine/from-run.ts";
 
 /** One styled element for a design audit; override only what a case is about. */
 function designRecord(over: Partial<StyleRecord>): StyleRecord {
@@ -2878,62 +2880,108 @@ test("a route that answered with a feed or a file is remembered as such, across 
   assert.deepEqual(mergeMemory(a, b).resourceRoutes, { "/LICENSE": "text/plain", "/feed": "application/rss+xml" });
 });
 
-test("a seeded run's schedule: recorded from another process, kept through the server's own writes, and named in the report", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sched-"));
+test("a run started from an earlier one: noted from another process, kept through the server's own writes, and named in the report", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "from-run-"));
   try {
     const store = new MemoryStore(dir);
-    // The server's copy is open before the ci run records anything, as in a real run.
+    // The server's copy is open before the ci run notes anything, as in a real run.
     await new Promise((r) => setTimeout(r, 5));
-    recordScheduleOnDisk(dir, { seed: "s1", at: new Date().toISOString(), source: "ci", exclusion: "back", routes: ["/a?token=abc", "/b"] });
+    const note = (at: string, runId: string): FromRunNote => ({ at, mode: "continue", source: "prev/ci.json", runId, recordAt: "2026-10-07T09:00:00.000Z" });
+    noteFromRunOnDisk(dir, note(new Date().toISOString(), "r1"));
+    assert.deepEqual(store.fromRunsThisRun(), [], "the server has not read it yet");
+    store.foldInFromRuns();
     assert.deepEqual(
-      readSchedulesOnDisk(dir).map((r) => r.routes),
-      [["/a", "/b"]],
-      "no query string is stored: an address can carry a token",
-    );
-    assert.deepEqual(store.schedules, [], "the server has not read it yet");
-    store.foldInSchedules();
-    assert.deepEqual(
-      store.schedulesThisRun().map((r) => r.seed),
-      ["s1"],
+      store.fromRunsThisRun().map((n) => n.runId),
+      ["r1"],
     );
     const report = generateReport(store, [], undefined, { write: false }).markdown;
-    assert.match(report, /\| Exploration schedule \| seed `s1` \(scenescout ci; earlier starts last\), starting with \/a, \/b \|/);
-    // The server's own write afterwards keeps it, and a lane brief's record joins it.
-    store.addSchedule({ seed: "s2", at: new Date().toISOString(), source: "lane-brief", exclusion: "skip", routes: ["/c"], roles: ["clerk"] });
-    store.flush();
-    assert.deepEqual(
-      readSchedulesOnDisk(dir).map((r) => [r.seed, r.source]),
-      [
-        ["s1", "ci"],
-        ["s2", "lane-brief"],
-      ],
-    );
-    // A server that never folded it in still keeps it when it writes: the merge unions schedules.
+    assert.match(report, /\| Started from \| continued from the run recorded in prev\/ci\.json \(its report of 2026-10-07T09:00:00\.000Z\) \|/);
+    // A server that never folded it in still keeps it when it writes: the merge unions the notes.
     const other = new MemoryStore(dir);
-    recordScheduleOnDisk(dir, { seed: "s3", at: new Date().toISOString(), source: "ci", exclusion: "back", routes: ["/d"] });
+    noteFromRunOnDisk(dir, note(new Date().toISOString(), "r2"));
     other.addFinding({ severity: "low", category: "a11y", title: "A field has no label", detail: "d", url: "http://x/a", state: "/a#f" });
     other.flush();
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dir, MEMORY_DIRNAME, "memory.json"), "utf8"));
     assert.deepEqual(
-      readSchedulesOnDisk(dir).map((r) => r.seed),
-      ["s1", "s2", "s3"],
+      onDisk.fromRuns.map((n: FromRunNote) => n.runId),
+      ["r1", "r2"],
     );
-    // An unseeded run's report has no such row.
-    const plain = new MemoryStore(fs.mkdtempSync(path.join(os.tmpdir(), "sched-none-")));
-    assert.doesNotMatch(generateReport(plain, [], undefined, { write: false }).markdown, /Exploration schedule/);
+    // A run that started fresh has no such row.
+    const plain = new MemoryStore(fs.mkdtempSync(path.join(os.tmpdir(), "from-run-none-")));
+    assert.doesNotMatch(generateReport(plain, [], undefined, { write: false }).markdown, /Started from/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("merging memory unions the schedules, and doing it twice changes nothing", () => {
-  const r = (seed: string, at: string) => ({ seed, at, source: "ci" as const, exclusion: "back" as const, routes: ["/x"] });
-  const a: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [], schedules: [r("s1", "1")] };
-  const b: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [], schedules: [r("s2", "2")] };
+test("a run's record: what it worked on and left, from the store, kept in memory and read back from a project or a ci.json", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "run-record-"));
+  try {
+    const store = new MemoryStore(dir);
+    const url = "http://app.test/orders";
+    store.visitState("/orders#s1", url, "/orders", ["button:save", "button:export", "select:status", "textbox:note"], [], "lane-a");
+    store.logAction({ action: "navigate", target: url, url, session: "lane-a" });
+    store.markExercised("/orders#s1", "select:status", "select");
+    store.logAction({ action: "select", target: 'combobox "Status" = Open', url, session: "lane-a" });
+    store.recordSelectChoice("/orders#s1", "select:status", ["Open", "Closed", "Archived"], "Open");
+    store.recordForm("/orders#s1", "form#new-order", false, "lane-a");
+    store.recordForm("/orders#s1", "form#search", false, "lane-a");
+    // The contrastive pair: one form submitted, one never.
+    store.recordFormSubmit("/orders#s1", "form#search", false);
+    // A route only crawled is not worked on.
+    store.visitState("/stock#s1", "http://app.test/stock", "/stock", ["button:adjust"], [], "default");
+    store.logAction({ action: "crawl", target: "/stock", url: "http://app.test/stock", session: "default" });
+    assert.deepEqual(store.formsNeverSubmitted(), [{ route: "/orders", key: "form#new-order" }]);
+    const record = runRecordOf(store, ["/orders", "/stock", "/reports"], ["a gap"]);
+    assert.deepEqual(record.visited, ["/orders"]);
+    assert.deepEqual(record.left, [
+      {
+        route: "/orders",
+        unexercised: ["button:save", "button:export", "textbox:note"],
+        forms: ["form#new-order"],
+        // An option was chosen and nothing was submitted from the page: the gap ledger's filled-and-never-submitted line.
+        filled: true,
+        unchosen: [{ key: "select:status", options: ["Closed", "Archived"] }],
+      },
+    ]);
+    assert.deepEqual(record.gaps, ["a gap"]);
+    store.addRunRecord(record);
+    store.flush();
+    assert.deepEqual(readRunRecordsOnDisk(dir), [record]);
+    // From the project directory, from a ci.json, and nothing at all.
+    assert.deepEqual(loadRunRecord(dir), record);
+    const ci = path.join(dir, "ci.json");
+    fs.writeFileSync(ci, JSON.stringify({ tool: "scenescout", command: "ci", record }));
+    assert.deepEqual(loadRunRecord(ci), record);
+    assert.throws(() => loadRunRecord(path.join(dir, "nope.json")), /does not exist: give a ci.json or a project directory/);
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), "run-record-empty-"));
+    assert.throws(() => loadRunRecord(empty), /holds no \.scenescout\/memory\.json, ci\.json or memory\.json/);
+    fs.rmSync(empty, { recursive: true, force: true });
+    fs.writeFileSync(ci, "{not json");
+    assert.throws(() => loadRunRecord(ci), /could not be read as JSON/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merging memory unions the run records and the notes, and doing it twice changes nothing", () => {
+  const rec = (runId: string, at: string): RunRecord => ({ version: 1, runId, at, knownRoutes: [], visited: [], lanes: [], steps: [], left: [], gaps: [] });
+  const a: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [], runRecords: [rec("r1", "1")] };
+  const b: Parameters<typeof mergeMemory>[0] = {
+    version: 1,
+    states: {},
+    findings: [],
+    runRecords: [rec("r2", "2")],
+    fromRuns: [{ at: "2", mode: "replay", source: "s", runId: "r1", recordAt: "1" }],
+  };
   const once = mergeMemory(a, b);
   assert.deepEqual(
-    once.schedules?.map((x) => x.seed),
-    ["s1", "s2"],
+    once.runRecords?.map((x) => x.runId),
+    ["r1", "r2"],
   );
+  assert.equal(once.fromRuns?.length, 1);
   assert.deepEqual(mergeMemory(once, b), once);
-  assert.equal(mergeMemory({ version: 1, states: {}, findings: [] }, { version: 1, states: {}, findings: [] }).schedules, undefined);
+  const none = mergeMemory({ version: 1, states: {}, findings: [] }, { version: 1, states: {}, findings: [] });
+  assert.equal(none.runRecords, undefined);
+  assert.equal(none.fromRuns, undefined);
 });

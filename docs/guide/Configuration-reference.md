@@ -104,8 +104,8 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--show` | none | Capture the element these words describe as a PNG instead of exploring, at most 200 characters |
 | `--compare-url` | none | With `--show`, capture the same element on this URL too and write a diff picture |
 | `--dedup` | `judge` | How a filed finding is told from one already recorded. `judge`: the rule, then, for a filing the rule keeps apart from everything recorded, the run's model at the lowest effort its API takes (`none` on OpenAI, `low` on Anthropic) is asked about the open findings on the same page, and a "same" merges them. Each asked pair's titles, categories and evidence, and the page's path, are sent to the provider, and the calls count in the usage. `rule`: the rule alone |
-| `--seed` | `SCENESCOUT_SEED`, else none | Seed the run's schedule: it crawls first, then is told to take the routes in an order shuffled by the seed, with the routes earlier seeded runs on this project started with last. `auto` makes a fresh seed and prints it. The same seed repeats the order. Unset, the run explores as it always has ([how to use it](Ways-to-use-it.md#spreading-runs-over-the-app-with-a-seed)) |
-| `--seed-exclusion` | `SCENESCOUT_SEED_EXCLUSION`, else `back` | With a seed: `back` orders the routes earlier seeded runs started with last; `skip` leaves them out while any others remain |
+| `--from-run` | `SCENESCOUT_FROM_RUN`, else none | Start from an earlier run's record: its `ci.json`, or a project directory whose memory holds it. Unset, the run starts fresh ([how to use it](Ways-to-use-it.md#starting-from-an-earlier-run)) |
+| `--from-run-mode` | `SCENESCOUT_FROM_RUN_MODE`, else `continue` | With `--from-run`: `continue` takes first the routes the earlier run never worked on, then the ones it left work on (told which controls, forms and options to take first), then the rest; `replay` follows its routes and steps in order, one lane per session it had |
 | `--storage-state` | none | A Playwright storage-state file, to explore while signed in |
 | `--browser` | `chromium` | `chromium`, `firefox` or `webkit` |
 | `--action-timeout-ms` | `5000` | As for `check` |
@@ -241,8 +241,8 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `XDG_DOCUMENTS_DIR` | the server | Linux: the documents folder that holds the default `SceneScout` folder, read before `~/.config/user-dirs.dirs` |
 | `SCENESCOUT_DEDUP` | the server | `judge` asks a model, with a key below, whether a filing the dedup rule keeps apart from everything recorded is one of the open findings on its page; `rule` (default) does not. A `scout_attach` `dedup` wins over it |
 | `SCENESCOUT_DEDUP_PROVIDER` | the server | `anthropic` or `openai`: which key the dedup judge uses when both are set |
-| `SCENESCOUT_SEED` | the server, `ci` | A seed, or `auto` for a fresh one each run, for every `ci` run and `scout_lane_brief` that does not pass its own: the routes are ordered by a shuffle keyed on it, earlier seeded runs' starting routes last. Unset (default): unseeded. `--seed` and the brief's `seed` win over it |
-| `SCENESCOUT_SEED_EXCLUSION` | the server, `ci` | `back` (default) or `skip`: what a seeded run does with the routes earlier seeded runs started with. `--seed-exclusion` and the brief's `seedExclusion` win over it |
+| `SCENESCOUT_FROM_RUN` | the server, `ci` | An earlier run's `ci.json` or project directory, for every `ci` run and `scout_lane_brief` that does not name its own: the run starts from that run's record. Unset (default): a fresh run. `--from-run` and the brief's `fromRun` win over it |
+| `SCENESCOUT_FROM_RUN_MODE` | the server, `ci` | `continue` (default) or `replay`: how a run that starts from an earlier one uses its record. `--from-run-mode` and the brief's `fromRunMode` win over it |
 | `ANTHROPIC_API_KEY` | `ci`; the server with the dedup judge on | The Anthropic key. The only way to give one |
 | `OPENAI_API_KEY` | `ci`; the server with the dedup judge on | The OpenAI key. The only way to give one |
 | `SCENESCOUT_LOGIN_USERNAME` | `login --script` | Required: the test user's username or email |
@@ -344,8 +344,8 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `show` | empty | As `--show` |
 | `compare-url` | empty | As `--compare-url` |
 | `dedup` | empty | As `--dedup`; empty means `judge` |
-| `seed` | empty | As `--seed`; empty means `SCENESCOUT_SEED`, else unseeded |
-| `seed-exclusion` | empty | As `--seed-exclusion`; empty means `back` |
+| `from-run` | empty | As `--from-run`, relative to `working-directory`; empty means `SCENESCOUT_FROM_RUN`, else a fresh run |
+| `from-run-mode` | empty | As `--from-run-mode`; empty means `continue` |
 | `sarif-file-anchor` | empty | As `--sarif-file-anchor`, relative to the repository root; empty means the workflow file that is running |
 | `storage-state` | empty | As `--storage-state`, relative to `working-directory` |
 | `browser` | `chromium` | As `--browser` |

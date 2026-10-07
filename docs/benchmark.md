@@ -1514,6 +1514,10 @@ new defaults, and pass^3 fell at the old ones. Seeding stays off by default;
 see the [rejected list](#rejected-and-not-yet-tried) for what would be worth
 trying instead.
 
+### Starting from an earlier run (issue 418)
+
+Measurement in progress.
+
 ## Finding dedup as a measured decision (task 15)
 
 The store decides whether a newly filed finding is one it already records

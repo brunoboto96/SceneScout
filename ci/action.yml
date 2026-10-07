@@ -94,12 +94,12 @@ inputs:
     description: judge or rule. judge (the default when empty) also asks the run's model, at the lowest effort its API takes, whether a finding the rule keeps apart is one already open on the same page, sending the two findings' titles, categories and evidence, and the page's path; rule asks nothing.
     required: false
     default: ""
-  seed:
-    description: A seed, or auto for a fresh one, to order what the run explores by a shuffle keyed on it, with the routes earlier seeded runs started with last. The same seed repeats the order. Empty means SCENESCOUT_SEED, else unseeded.
+  from-run:
+    description: Start from an earlier run's record - its ci.json, or a project directory - relative to working-directory. With from-run-mode continue (the default) the run takes first the routes it never worked on, then the ones it left work on, told which controls, forms and options to take first, then the rest; with replay it follows that run's routes and steps in order. Empty means SCENESCOUT_FROM_RUN, else a fresh run.
     required: false
     default: ""
-  seed-exclusion:
-    description: With a seed - back (the default when empty) orders the routes earlier seeded runs started with last; skip leaves them out while others remain.
+  from-run-mode:
+    description: With from-run - continue (the default when empty) or replay.
     required: false
     default: ""
   sarif-file-anchor:

@@ -24,7 +24,7 @@ import { formatNeverSubmittedEmpty } from "./forms.js";
 import { DEFAULT_REPORT_AUDIENCE, formatPlainSection, pictureOf, type ReportAudience } from "./plain.js";
 import { formatTicketsPlain, formatTicketsTechnical, ticketSummaryLine, type TicketReportInput } from "./tickets.js";
 import { COLLECTOR_CAP } from "./collector.js";
-import type { ScheduleRecord } from "./schedule.js";
+import { buildRunRecord, fromRunLine, type RunRecord } from "./from-run.js";
 
 function playwrightSkeleton(f: Finding): string {
   const routeClass = f.state.split("#")[0].split("?")[0];
@@ -729,13 +729,27 @@ export function withAudience(technical: readonly string[], audience: ReportAudie
   ].join("\n");
 }
 
-/** One seeded run's schedule as a summary cell: its seed, who planned it, and what it started with. */
-export function scheduleCell(r: ScheduleRecord): string {
-  const by = r.source === "ci" ? "scenescout ci" : "scout_lane_brief";
-  const starts = r.routes.slice(0, 8).join(", ") + (r.routes.length > 8 ? " …" : "");
-  return escapeTableCell(
-    `seed \`${r.seed}\` (${by}; earlier starts ${r.exclusion === "skip" ? "skipped" : "last"})${starts ? `, starting with ${starts}` : ""}${r.roles?.length ? `; role first: ${r.roles.join(", ")}` : ""}`,
-  );
+/**
+ * What this run left, as a record a later run continues or replays from
+ * (from-run.ts): its steps from the action log, and, on the routes it worked
+ * on, the controls never exercised, the forms never submitted, a form filled
+ * and never submitted and the options never chosen, with its gap ledger.
+ */
+export function runRecordOf(memory: MemoryStore, knownRoutes: readonly string[], gaps: readonly string[]): RunRecord {
+  const cov = memory.coverage();
+  const followed = memory.fromRunsThisRun().at(-1);
+  return buildRunRecord({
+    runId: memory.runId,
+    at: new Date().toISOString(),
+    knownRoutes,
+    steps: memory.actionsThisRun(),
+    unexercised: cov.unexercised.map((u) => ({ route: u.state.split("#")[0], keys: u.keys.filter((k) => !isEmbedKey(k)) })),
+    forms: memory.formsNeverSubmitted(),
+    filled: classifyFilledStates(memory, memory.routeFacts).unsubmitted,
+    unchosen: memory.unchosenOptions(),
+    gaps,
+    ...(followed ? { followed: { mode: followed.mode, runId: followed.runId } } : {}),
+  });
 }
 
 /**
@@ -787,8 +801,8 @@ export function generateReport(
   const judged = memory.dedupJudge?.describe() ?? (memory.dedupOff ? `the rule alone: the dedup judge was asked for and is off (${memory.dedupOff})` : null);
   if (judged) lines.push(`| Finding dedup | ${judged.replace(/\|/g, "/")} |`);
   lines.push(`| Elements exercised (informational — denominator grows with every state) | ${cov.elementsExercised}/${cov.elementsTotal} |`);
-  // A seeded run says its seed, so the same schedule can be run again (schedule.ts).
-  for (const sched of memory.schedulesThisRun()) lines.push(`| Exploration schedule | ${scheduleCell(sched)} |`);
+  // A run started from an earlier one's record says how and which, so it can be followed back (from-run.ts).
+  for (const n of memory.fromRunsThisRun()) lines.push(`| Started from | ${escapeTableCell(fromRunLine(n))} |`);
   lines.push(``);
 
   // ---- The tickets the run was given, criterion by criterion. ----

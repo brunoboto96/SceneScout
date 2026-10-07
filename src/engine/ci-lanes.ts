@@ -8,8 +8,7 @@
  * and how the lanes' endings become the run's. The loop that runs them is
  * src/ci-run.ts; the shared budget is engine/ci.ts's. Why: ADR 20.
  */
-import { LANE_RULES, planLanes, type LaneBrief } from "./brief.js";
-import type { ScheduleInput } from "./schedule.js";
+import { LANE_RULES, planLanes, replayBriefs, type LaneBrief } from "./brief.js";
 import { CI_TOOLS, type Caps, type CiLevel, type CiMode, type StopReason } from "./ci.js";
 
 /** The session the run attaches first. It plans, holds no lane, and writes the report once every lane is done. */
@@ -155,13 +154,13 @@ export function planCiLanes(o: {
   mode: CiMode;
   /** What failed while planning, if anything: with no route found, that is the reason given, not the app. */
   planningFailed?: string;
-  /** A seeded run's schedule: the split and each lane's order follow the seed (brief.ts). */
-  schedule?: ScheduleInput;
+  /** A continued run's order (from-run.ts continuePlan): the split and each lane's routes follow it (brief.ts). */
+  order?: readonly string[];
 }): LanePlan {
   const routes = plannedRoutes(o.target, o.notes);
   if (o.count < 2) return { lanes: [], oneLoop: "one lane was asked for" };
   if (o.notes.size === 0 && o.planningFailed) return { lanes: [], oneLoop: `${o.planningFailed}, so there was nothing to split` };
-  const briefs = planLanes(routes, o.count, { goal: o.focus, mode: o.mode, ...(o.schedule ? { schedule: o.schedule } : {}) });
+  const briefs = planLanes(routes, o.count, { goal: o.focus, mode: o.mode, ...(o.order ? { order: o.order } : {}) });
   if (briefs.length < 2) {
     const where = briefs[0]?.modules[0];
     return {
@@ -169,16 +168,29 @@ export function planCiLanes(o: {
       oneLoop: `the planning crawl found ${routes.length} route(s), all in ${where ? `one module (${where})` : "no module"}, so there was nothing to split`,
     };
   }
+  return { lanes: asCiLanes(briefs, o.target, o.notes) };
+}
+
+function asCiLanes(briefs: readonly LaneBrief[], target: string, notes: ReadonlyMap<string, readonly string[]>): CiLane[] {
   const sessions = laneSessions(briefs.map((b) => b.lane));
-  return {
-    lanes: briefs.map((b, i) => ({
-      ...b,
-      session: sessions[i],
-      // On the target's origin whatever the route says: a path written `//host/x` must not become another host.
-      url: `${new URL(o.target).origin}${b.landing.startsWith("/") ? "" : "/"}${b.landing}`,
-      crawl: b.routes.flatMap((r) => o.notes.get(r) ?? []).slice(0, LIST_MAX),
-    })),
-  };
+  return briefs.map((b, i) => ({
+    ...b,
+    session: sessions[i],
+    // On the target's origin whatever the route says: a path written `//host/x` must not become another host.
+    url: `${new URL(target).origin}${b.landing.startsWith("/") ? "" : "/"}${b.landing}`,
+    crawl: b.routes.flatMap((r) => notes.get(r) ?? []).slice(0, LIST_MAX),
+  }));
+}
+
+/**
+ * A replayed run's lanes (from-run.ts replayPlan): one per session the
+ * recorded run had, each with its routes in recorded order, however many lanes
+ * were asked for. With fewer than two the run replays in one loop.
+ */
+export function planReplayLanes(o: { target: string; lanes: ReadonlyArray<{ routes: readonly string[] }>; focus?: string }): LanePlan {
+  if (o.lanes.length < 2)
+    return { lanes: [], oneLoop: `the recorded run had ${o.lanes.length === 1 ? "one session" : "no steps"}, so it is replayed in one loop` };
+  return { lanes: asCiLanes(replayBriefs(o.lanes, o.focus), o.target, new Map()) };
 }
 
 // ── what a lane is told ─────────────────────────────────────────────────────
@@ -215,8 +227,8 @@ export function ciLaneKickoff(o: {
   level: CiLevel;
   focus?: string;
   caps: Caps;
-  /** True when the run is seeded: the lane's routes are listed in the order to take them. */
-  seeded?: boolean;
+  /** When the run starts from an earlier one: what this lane is told about it (from-run.ts continueLines or replayLines). */
+  fromRun?: readonly string[];
 }): string {
   const { lane } = o;
   const share = Math.max(1, Math.floor(o.caps.turns / o.laneCount));
@@ -225,9 +237,7 @@ export function ciLaneKickoff(o: {
     `Target: ${o.url}`,
     `Your lane: ${lane.objective}`,
     `Your routes (${lane.routes.length}): ${lane.routes.slice(0, LIST_MAX).join(", ")}${lane.routes.length > LIST_MAX ? ` … and ${lane.routes.length - LIST_MAX} more` : ""}`,
-    o.seeded
-      ? `Your routes are listed in this run's seeded order, the ones earlier seeded runs started with last: take them in that order, starting with the first.`
-      : "",
+    ...(o.fromRun ?? []),
     `Your browser is on ${routeOf(lane.url)}.`,
     lane.crawl.length > 0 ? `What the planning crawl saw on your routes:\n${lane.crawl.map((l) => `  ${l.trim()}`).join("\n")}` : "",
     `Project directory (for scout_scan): ${o.projectDir}`,
