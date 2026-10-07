@@ -1890,7 +1890,8 @@ test("action: this repository runs it against the demo app and a stand-in API, g
     "the job looks for the key in what the run wrote",
   );
   // The same action split into lanes, against the same stand-in, checked for its merged finding.
-  const lanes = job.steps!.find((s) => s.uses === "./ci" && s.with?.lanes !== undefined);
+  assert.equal(String(step.with?.lanes), "1", "the first run is the single loop, which the default of two lanes would not test");
+  const lanes = job.steps!.find((s) => s.uses === "./ci" && Number(s.with?.lanes) >= 2);
   assert.ok(lanes && Number(lanes.with?.lanes) >= 2, "the job also runs the action split into lanes");
   assert.equal(lanes.with?.["base-url"], step.with?.["base-url"], "the lanes run uses the stand-in API too");
   const checked = job.steps!.find((s) => /\$\{\{ steps\.lanes\.outputs\.low \}\}/.test(JSON.stringify(s)));
