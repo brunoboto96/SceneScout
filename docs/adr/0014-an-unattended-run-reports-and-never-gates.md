@@ -63,7 +63,7 @@ may appear, and what its exit code means.
   redaction of the key values and of key-shaped strings, including an API
   error that echoes the key back, and the suite checks that no key reaches the
   output or the files.
-- **Caps, all overridable: 40 turns, 1,500,000 tokens, 20 minutes.** Checked
+- **Caps, all overridable: 40 turns, 1,500,000 tokens, 20 minutes** (amended 2026-10-06: 80 turns and 3,000,000 tokens, shared by two lanes; see ADR 20). Checked
   before each model call. No model call, retry, backoff wait or tool call runs
   past the time cap: each gets only the time left, and a tool call reached
   after it is answered as not run, as is any beyond 16 from one reply. An
@@ -100,7 +100,10 @@ may appear, and what its exit code means.
   and the tool descriptions alone are around 20,000 tokens. At the defaults the
   token cap or the time cap usually ends a run before the turn cap. On
   `gpt-6-luna` a run at the token cap costs about $0.05 to $0.15 with prompt
-  caching, and at most about $0.18 with none.
+  caching, and at most about $0.18 with none. (Amended 2026-10-06: measured
+  runs end by themselves or at the turn cap, far below the token cap; at the
+  new defaults a run costs about $0.03. See docs/benchmark.md, "Choosing the
+  defaults (issue 419)".)
 - The default level is `medium`. A run that a cap ends before its contract is
   met still writes the report, with the gap ledger listing what was left.
 - A tool result longer than 16,000 characters is cut before the model sees it.

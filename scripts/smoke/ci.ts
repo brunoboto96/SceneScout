@@ -49,8 +49,11 @@ const turn = (calls: Array<[string, string, unknown]>, text = ""): ModelTurn => 
   usage,
 });
 
+// One loop unless a check asks for lanes: the scripted models below answer one conversation.
+const oneLoop = (args: string[]): string[] => (args.some((a) => a.startsWith("--lanes")) ? args : [...args, "--lanes", "1"]);
+
 function options(url: string, projectDir: string, extra: string[] = []) {
-  const p = parseCiArgs([url, "--project", projectDir, ...extra], projectDir);
+  const p = parseCiArgs([url, "--project", projectDir, ...oneLoop(extra)], projectDir);
   if (!p.ok) throw new Error(p.error);
   return p.options;
 }
@@ -392,7 +395,7 @@ function runCli(args: string[], env: Record<string, string>): Promise<{ status: 
   return new Promise((resolve) => {
     execFile(
       process.execPath,
-      [cli, "ci", ...args],
+      [cli, "ci", ...oneLoop(args)],
       { encoding: "utf8", timeout: 300_000, env: { ...clean, GITHUB_STEP_SUMMARY: "", ...env } },
       (err, stdout, stderr) => resolve({ status: err ? (typeof err.code === "number" ? err.code : null) : 0, out: `${stdout}\n${stderr}` }),
     );

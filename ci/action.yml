@@ -39,11 +39,11 @@ inputs:
     required: false
     default: ""
   max-turns:
-    description: The most model calls. Empty means 40.
+    description: The most model calls. Empty means 80.
     required: false
     default: ""
   max-tokens:
-    description: The most tokens, input and output summed over the run. Empty means 1500000.
+    description: The most tokens, input and output summed over the run. Empty means 3000000.
     required: false
     default: ""
   max-minutes:
@@ -51,7 +51,7 @@ inputs:
     required: false
     default: ""
   lanes:
-    description: How many model loops explore at once (1 to 8), each in its own browser and part of the app, sharing the caps above. Empty means 1.
+    description: How many model loops explore at once (1 to 8), each in its own browser and part of the app, sharing the caps above. Empty means 2 (1 with show).
     required: false
     default: ""
   price-in:

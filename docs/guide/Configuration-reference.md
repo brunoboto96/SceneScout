@@ -90,10 +90,10 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--model` | `claude-sonnet-5` or `gpt-6-luna` | The model id |
 | `--effort` | `low` | `none` (OpenAI only), `low`, `medium`, `high`, `xhigh` or `max` |
 | `--base-url` | the provider's own API | Another endpoint implementing the same API. Must be https, or plain http to `127.0.0.1` or `localhost` |
-| `--max-turns` | `40` | The most model calls |
-| `--max-tokens` | `1500000` | The most tokens, input and output, over the run |
+| `--max-turns` | `80` | The most model calls |
+| `--max-tokens` | `3000000` | The most tokens, input and output, over the run |
 | `--max-minutes` | `20` | The most minutes of exploration; the report is written after |
-| `--lanes` | `1` | Model loops that explore at once, each in its own browser and part of the app, sharing the three caps above; at most `8` |
+| `--lanes` | `2` | Model loops that explore at once, each in its own browser and part of the app, sharing the three caps above; at most `8`. Without `--lanes`, a run with `--show` or a `--max-turns` of 1 is one loop |
 | `--price-in` | the built-in price | US dollars per million input tokens, for the cost estimate |
 | `--price-cached-in` | the built-in price, else `--price-in` | US dollars per million cached input tokens |
 | `--price-out` | the built-in price | US dollars per million output tokens |

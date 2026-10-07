@@ -88,8 +88,8 @@ jobs:
           show: ${{ needs.gate.outputs.show }}
           compare-url: ${{ needs.gate.outputs.base }}
           mode: read-only
-          max-turns: "40"
-          max-tokens: "1500000"
+          max-turns: "80"
+          max-tokens: "3000000"
           max-minutes: "20"
           artifact-name: scenescout-qa-${{ needs.gate.outputs.pr }}
           upload-sarif: "false"

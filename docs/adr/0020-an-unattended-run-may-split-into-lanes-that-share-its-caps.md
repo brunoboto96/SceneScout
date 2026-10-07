@@ -72,6 +72,14 @@ what ended a run whose lanes ended differently.
   found 8 of 13 in each of two runs and 7 of 10 on the held-out app, against
   5 of 13 for one loop given the same caps: +3, at the noise bound, so the
   default did not change (docs/benchmark.md, "Lanes: one loop against four").
+- **Amended (2026-10-06): the default is two lanes sharing 80 turns.** Three
+  runs a configuration on the demo app (issue 419): one loop found 2 to 4 of
+  13 at 40 turns, 4 to 5 at 80 and 2 to 6 at 120, and two lanes sharing 80
+  turns and 3,000,000 tokens found 5 to 7, the only configuration whose
+  every run beat every run of the old default. On the held-out app two lanes
+  found 4 to 5 of 10, against 1 to 2 for one loop at 40 turns. The cost is
+  about $0.03 a run, about 2.5 times the old default's (docs/benchmark.md,
+  "Choosing the defaults (issue 419)").
 
 ## Consequences
 
