@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "scenescout",
   "display_name": "SceneScout",
-  "version": "3.21.0",
+  "version": "3.21.1",
   "description": "Exploratory UI testing: Claude explores a running web app like a curious user, finds what is broken or confusing, and writes a coverage-checked report.",
   "long_description": "SceneScout gives Claude a real browser to test a web app with. Ask it to test an address, for example http://localhost:3000, and it visits the pages, tries the forms and buttons, notes what is broken or confusing, and writes a report.\n\nBy default a write policy at the network layer blocks edits and deletions, while ordinary form submissions go through. For a site that holds real data, ask it to observe only: then nothing but reads leaves the page.\n\nThe test browser downloads on first use: the first test fetches it once (about 200 MB) and carries on. If that download fails, SceneScout says why and gives the command to run by hand: `npx -y scenescout install --browser-only`.",
   "author": {
