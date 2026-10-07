@@ -561,6 +561,25 @@ export function clearReplayOutput(outDir: string): void {
 }
 
 /**
+ * Why a recorded check (--record or --video) must not start, or null: a
+ * replay.html in the output folder that a check did not write is the
+ * project's own, and is neither removed nor overwritten. Asked before the
+ * browser starts, so the run is not spent first.
+ */
+export function replayPageConflict(outDir: string): string | null {
+  const page = path.join(outDir, REPLAY_FILE);
+  let text: string;
+  try {
+    text = fs.readFileSync(page, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  if (isGeneratedReplay(text)) return null;
+  return `${page} is not a page SceneScout wrote, so a recorded check will not overwrite it. Move or rename it, or pass --out to write the check somewhere else`;
+}
+
+/**
  * The replay page's model for a recorded check, with its frames copied from
  * the browsers' scratch folders to replay-frames/ beside the report: routes
  * visited in the check's own session, then each flow under the role it ran

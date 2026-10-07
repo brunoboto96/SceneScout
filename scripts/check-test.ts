@@ -134,7 +134,8 @@ import {
   type ReplayMeta,
 } from "../src/engine/check-replay.ts";
 import { framePath, RECORD_MAX_FRAMES } from "../src/engine/replay.ts";
-import { clearReplayOutput } from "../src/check-run.ts";
+import { clearReplayOutput, replayPageConflict } from "../src/check-run.ts";
+import { film, type Screencast } from "../src/engine/film.ts";
 import {
   CHECK_OPTION_NAMES,
   CHECK_RULES,
@@ -3638,4 +3639,79 @@ test("replay: steps and visits the session took no frame for because it was full
       .framesLeftOut,
     2,
   );
+});
+
+test("a recorded check refuses to start over a replay.html it did not write, and goes ahead over its own or none", () => {
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "replay-conflict-"));
+  try {
+    assert.equal(replayPageConflict(out), null, "no page there");
+    fs.writeFileSync(path.join(out, "replay.html"), buildCheckReplayHtml({ startedAt: "t", roles: [], framesLeftOut: 0 }, replayMeta));
+    assert.equal(replayPageConflict(out), null, "a page an earlier check wrote is replaced");
+    const mine = "<!doctype html><title>Our replay notes</title>";
+    fs.writeFileSync(path.join(out, "replay.html"), mine);
+    assert.match(
+      replayPageConflict(out) ?? "",
+      /replay\.html is not a page SceneScout wrote, so a recorded check will not overwrite it\. Move or rename it, or pass --out/,
+    );
+    assert.equal(fs.readFileSync(path.join(out, "replay.html"), "utf8"), mine);
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+});
+
+/** A stand-in screencast that refuses to start while "started", as Playwright's does, and can be told to fail its next start. */
+function fakeScreencast() {
+  const calls: string[] = [];
+  let started = false;
+  let failNextStart = false;
+  const cast: Screencast & { failNext(): void } = {
+    async start(o) {
+      calls.push(`start ${o.path} ${o.size ? `${o.size.width}x${o.size.height}` : "-"}`);
+      if (started) throw new Error("Screencast is already started");
+      started = true;
+      if (failNextStart) {
+        failNextStart = false;
+        throw new Error("encoder unavailable");
+      }
+    },
+    async stop() {
+      calls.push("stop");
+      started = false;
+    },
+    failNext() {
+      failNextStart = true;
+    },
+  };
+  return { cast, calls };
+}
+
+const filmIo = (written = true) => ({ prepare: async () => undefined, written: async () => written });
+
+test("filming: a failed start is stopped, so the next flow films again, and the work runs either way", async () => {
+  const { cast, calls } = fakeScreencast();
+  cast.failNext();
+  const first = await film(cast, "v/1.webm", { width: 1280, height: 900 }, async () => "ran", filmIo());
+  assert.deepEqual(first, { value: "ran", video: null, videoError: "the video could not be started: encoder unavailable" });
+  const second = await film(cast, "v/2.webm", { width: 1280, height: 900 }, async () => "ran again", filmIo());
+  assert.deepEqual(second, { value: "ran again", video: "v/2.webm" }, "the next flow is filmed, not refused as already started");
+  assert.deepEqual(calls, ["start v/1.webm 1280x900", "stop", "start v/2.webm 1280x900", "stop"], "filmed at the page's own size");
+});
+
+test("filming: the work's error is its own, the video is still stopped, and a video never written is said so", async () => {
+  const { cast, calls } = fakeScreencast();
+  await assert.rejects(
+    film(
+      cast,
+      "v/1.webm",
+      null,
+      async () => {
+        throw new Error("the flow broke");
+      },
+      filmIo(),
+    ),
+    /the flow broke/,
+  );
+  assert.deepEqual(calls, ["start v/1.webm -", "stop"]);
+  const empty = await film(cast, "v/2.webm", null, async () => 1, filmIo(false));
+  assert.deepEqual(empty, { value: 1, video: null, videoError: "no video was written" });
 });
