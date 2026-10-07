@@ -125,6 +125,21 @@ export function dispatchRefusal(status, detail) {
   return "other";
 }
 
+/**
+ * GitHub's words about a refusal, fit for the job's log: one line, cut to 300
+ * characters, with anything shaped like a GitHub token or an authorization
+ * header replaced. GitHub does not echo tokens, but the log is kept and read,
+ * so nothing that could be one is written there.
+ */
+export function redactedDetail(detail) {
+  return String(detail ?? "")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, "[redacted]")
+    .replace(/\b(bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{16,}/gi, "$1 [redacted]")
+    .trim()
+    .slice(0, 300);
+}
+
 export function dispatchFailedMarkdown({ workflow, status, detail = "", ref = "" }) {
   const kind = dispatchRefusal(status, detail);
   const branch = codeSpan(ref);
@@ -461,7 +476,10 @@ export async function runDispatch({
     });
   } catch (err) {
     if (err?.status >= 400 && err?.status < 500) {
-      log(`::error title=SceneScout QA check::${escapeAnnotation(`dispatching ${workflow} on ${ref} was refused: ${err.message}`)}`);
+      const said = redactedDetail(err.detail);
+      log(
+        `::error title=SceneScout QA check::${escapeAnnotation(`dispatching ${workflow} on ${ref} was refused: ${err.message}${said ? `; GitHub said: ${said}` : ""}`)}`,
+      );
       return done(dispatchFailedMarkdown({ workflow, status: err.status, detail: err.detail, ref }));
     }
     throw err;

@@ -5,7 +5,7 @@
  * written to disk, entry names are only compared with fixed names, and the one
  * entry that is inflated is held to a byte cap before and while it is inflated
  * (a zip bomb ends at the cap). Only the central directory and that entry are
- * read. Plain zip only: an archive needing ZIP64 (over 4 GB, or over 65535
+ * read, the central directory only up to MAX_CENTRAL_DIRECTORY_BYTES. Plain zip only: an archive needing ZIP64 (over 4 GB, or over 65535
  * entries) is refused, as the size check before the download already refuses
  * anything that large. Table-tested by qa-test.
  */
@@ -17,6 +17,8 @@ const CENTRAL = 0x02014b50;
 const LOCAL = 0x04034b50;
 /** The end-of-central-directory record is within the last 22 bytes plus a comment of at most 65535. */
 const EOCD_SEARCH = 22 + 0xffff;
+/** A central directory larger than this is refused before it is read: an artifact's runs to a few hundred entries, well under it. */
+export const MAX_CENTRAL_DIRECTORY_BYTES = 4_000_000;
 
 /** A reader over a file: its size, and `read(position, length)` returning a Buffer. */
 export function fileReader(file) {
@@ -43,7 +45,7 @@ export function bufferReader(buf) {
  * sizes and where the local header is. Throws on anything that is not a plain
  * zip it can read.
  */
-export function zipEntries(reader) {
+export function zipEntries(reader, { maxCentralDirectory = MAX_CENTRAL_DIRECTORY_BYTES } = {}) {
   const tailLength = Math.min(reader.size, EOCD_SEARCH);
   const tail = reader.read(reader.size - tailLength, tailLength);
   let at = -1;
@@ -57,6 +59,7 @@ export function zipEntries(reader) {
   const cdSize = tail.readUInt32LE(at + 12);
   const cdOffset = tail.readUInt32LE(at + 16);
   if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) throw new Error("a ZIP64 archive, which is not read");
+  if (cdSize > maxCentralDirectory) throw new Error(`a central directory of ${cdSize} bytes, over the ${maxCentralDirectory} read`);
   if (cdOffset + cdSize > reader.size) throw new Error("the central directory lies outside the archive");
   const cd = reader.read(cdOffset, cdSize);
   const entries = [];

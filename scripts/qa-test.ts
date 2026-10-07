@@ -50,13 +50,14 @@ import {
   shotUrl,
   teamMembership,
 } from "../action/qa-action.mjs";
-import { bufferReader, readZipEntry, zipEntries } from "../action/zip.mjs";
+import { bufferReader, MAX_CENTRAL_DIRECTORY_BYTES, readZipEntry, zipEntries } from "../action/zip.mjs";
 import zlib from "node:zlib";
 import {
   checkArtifactName,
   checkReplyMarkdown,
   dispatchRefusal,
   MAX_ARTIFACT_BYTES,
+  redactedDetail,
   DEFAULT_CHECK_ARTIFACT,
   DISPATCH_INPUTS,
   findDispatchedRun,
@@ -2118,4 +2119,46 @@ test("check action: the artifact is downloaded as its zip, never extracted", () 
   assert.ok(download, "the check stage's download step");
   assert.equal(download!.with?.["skip-decompress"], true);
   assert.equal(download!.with?.["run-id"], "${{ steps.dispatch.outputs.run-id }}");
+});
+
+test("zip: a central directory over the cap is refused before it is read", () => {
+  const zip = makeZip([
+    { name: "check.json", data: "{}" },
+    { name: "replay.html", data: "x" },
+  ]);
+  let largest = 0;
+  const reader = bufferReader(zip);
+  const watched = { ...reader, read: (position: number, length: number) => ((largest = Math.max(largest, length)), reader.read(position, length)) };
+  // The directory here is 46 + 10 + 46 + 11 bytes; a cap below that refuses it without reading it.
+  assert.throws(() => zipEntries(watched, { maxCentralDirectory: 50 }), /central directory of 113 bytes, over the 50 read/);
+  assert.ok(largest <= 22 + 0xffff, "only the tail was read");
+  assert.equal(zipEntries(bufferReader(zip)).length, 2, "under the default cap it is read");
+  assert.ok(MAX_CENTRAL_DIRECTORY_BYTES <= 10_000_000, "a few megabytes at most");
+  // An end record claiming a huge directory is refused by the cap, whatever the archive's size.
+  const lying = Buffer.from(zip);
+  lying.writeUInt32LE(MAX_CENTRAL_DIRECTORY_BYTES + 1, lying.length - 10);
+  assert.throws(() => zipEntries(bufferReader(lying)), /over the 4000000 read/);
+});
+
+test("refusal detail: logged in one line, with anything shaped like a token or an authorization value redacted", () => {
+  assert.equal(redactedDetail("No ref found for: refs/heads/gone"), "No ref found for: refs/heads/gone");
+  assert.equal(redactedDetail(`bad credentials ghp_${"a".repeat(36)} here`), "bad credentials [redacted] here");
+  assert.equal(redactedDetail(`github_pat_${"B1_".repeat(10)} x`), "[redacted] x");
+  assert.equal(redactedDetail(`Authorization: Bearer ${"x".repeat(40)}`), "Authorization: Bearer [redacted]");
+  assert.equal(redactedDetail("line one\nline two"), "line one line two");
+  assert.equal(redactedDetail("y".repeat(500)).length, 300);
+  assert.equal(redactedDetail(undefined), "");
+});
+
+test("check stage: GitHub's words about an unclassified refusal reach the job's log, so the reply's pointer to it holds", async () => {
+  const dir = tempDir();
+  const lines: string[] = [];
+  await withGitHub(actionsApi({ dispatch: new Refusal(422, `Something new, token ghs_${"z".repeat(36)}`) }), async (api, calls) => {
+    await runDispatch({ env: dispatchEnv(dir, api), inputs: CHECK_INPUTS, log: (l: string) => lines.push(l), ...fakeClock() });
+    const reply = calls.find((c) => c.method === "POST" && c.url.endsWith("/comments"))!.body.body;
+    assert.match(reply, /The job's log has the full answer/);
+  });
+  const error = lines.find((l) => l.startsWith("::error"))!;
+  assert.match(error, /HTTP 422; GitHub said: Something new, token \[redacted\]/);
+  assert.ok(!error.includes("ghs_"), "no token-shaped text in the log");
 });
