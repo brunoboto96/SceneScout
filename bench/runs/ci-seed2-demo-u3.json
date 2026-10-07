@@ -1,0 +1,57 @@
+{
+  "app": "demo",
+  "run": "ci-seed2-demo-u3",
+  "date": "2026-10-07",
+  "note": "issue 418 re-measure at the two-lane default, unseeded",
+  "findings": [
+    {
+      "title": "Dashboard chart image fails to load",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Pinned order sticky bar covers Save notes control",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order.html order-stickybar covers order-save"
+    },
+    {
+      "title": "Optional confirmation email is labelled only by its placeholder",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "orders-new.html textbox new-order-email has no label"
+    },
+    {
+      "title": "Export CSV throws when report rows are unavailable",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports-export-csv TypeError reading undefined.rows"
+    },
+    {
+      "title": "Scheduled reports page is a dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "reports-scheduled.html has 0 interactables"
+    },
+    {
+      "title": "Approve action fires twice on rapid double-click",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/orders/1042/approve fired twice; second response 409"
+    },
+    {
+      "title": "App shell link styling has no visual distinction from body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "shared chrome links rgba(91,102,117,1) no underline"
+    },
+    {
+      "title": "Settings reports saved but change is lost on reload",
+      "severity": "medium",
+      "category": "data-loss",
+      "evidence": "settings.html Save changes shows Saved then reload reverts; zero network requests"
+    }
+  ],
+  "decisions": []
+}

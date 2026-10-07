@@ -1139,6 +1139,12 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 2/10 | 2/3 (67%) | — | turns | 40 | 1,096,791 (1,086,245) / 1,620 | 1m 46s | $0.013 |
 | 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/1 (33%–100%) | — | turns | 40 | 1,058,668 (1,049,621) / 1,333 | 1m 31s | $0.012 |
 | 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 3/10 | 3/3 (100%) | — | turns | 40 | 1,116,515 (1,104,332) / 1,497 | 1m 37s | $0.013 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 3/13 | 3/3 (50%–100%) | — | done | 68 | 1,806,166 (1,766,595) / 3,105 | 1m 23s | $0.023 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 6/6 (60%–100%) | — | turns | 80 | 2,177,140 (2,156,267) / 3,392 | 2m 40s | $0.025 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 6/7 (75%–88%) | — | turns | 80 | 2,137,143 (2,120,076) / 3,135 | 1m 27s | $0.024 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 6/6 (86%–100%) | — | done | 71 | 1,883,627 (1,842,934) / 3,654 | 1m 35s | $0.024 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 6/6 (75%–100%) | — | done | 68 | 1,835,668 (1,816,267) / 3,416 | 1m 35s | $0.022 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | done | 67 | 1,764,828 (1,747,482) / 3,149 | 1m 28s | $0.021 |
 
 <!-- ci-results:end -->
 
@@ -1440,13 +1446,73 @@ found by all three. The rows are the `ci-seed-*` archives in the table above.
   and `brief-test` only. Measuring it needs k seeded runs sharing one
   project's memory, scored by what each run added.
 
-**Decision: seeding stays opt-in.** With no seed a run is unchanged, and
-`SCENESCOUT_SEED` is unset by default. A seed is worth using to repeat a run's
-order exactly, or to vary where successive runs start; on this evidence it
-does not yet find more across three runs than leaving the run to itself, and
-it loses the defects every unseeded run finds on the landing page. Next
-experiments, before any default changes: seeded runs that share one memory,
-and a seeded order that keeps the landing page first.
+**Decision at the old defaults: not met.** The re-measure below, at the
+defaults [issue 419](#choosing-the-defaults-issue-419) chose, replaces it.
+
+#### Re-measured at the two-lane default, with memory carried over
+
+The first measurement ran one loop at 40 turns, and every run had a fresh
+project, so the exclusion across runs never engaged. This one changes both.
+
+**What was held fixed.** The engine at commit `ac3c1fa` (this branch merged
+with main, so both arms ran the same code), gpt-6-luna at effort `low`, the
+new defaults (two lanes sharing 80 turns, 3,000,000 tokens and 20 minutes),
+`read-only`, level `medium`, the dedup judge, and a fresh demo app per run.
+Runs were dispatched one at a time, alternating the arms (unseeded, seeded,
+unseeded, ...). They are the `ci-seed2-demo-*` rows of 2026-10-07 in the table
+above.
+
+- **Unseeded arm:** three runs, each with a fresh project.
+- **Seeded arm, carried over:** seeds `c418a`, `c418b` and `c418c`, chosen
+  before any run. The first run had a fresh project. Each later run's memory
+  started with the `schedules` of the seeded run before it, through the
+  benchmark workflow's dispatch-only `seed-history` input, so the exclusion
+  applied. Only the schedules were carried, not the findings: bench scores
+  everything in a run's memory, so carrying earlier findings would credit a
+  run with what an earlier run found.
+
+The exclusion worked as designed. `c418a`'s lanes started on six of the
+twelve routes, and `c418b`'s lanes started on exactly the other six. By the
+third run every route had been a start once, so `c418c` ordered all twelve by
+its own shuffle.
+
+| | Recall per run | Pooled recall | pass@3 | pass^3 | Labelled precision | Turns, how it ended | Cost (3 runs) |
+|---|---|---:|---:|---:|---:|---|---:|
+| Unseeded | 3, 6, 5 of 13 | 14/39 | 7 | 3 | 15/16 (8 unlabelled) | 68 done, 80 cap, 80 cap | $0.073 |
+| Seeded, carried over | 5, 5, 5 of 13 | 15/39 | 7 | 3 | 17/17 (4 unlabelled) | 71, 68, 67, each done | $0.067 |
+
+- **pass@3 is unchanged, and so is the set it counts.** Both arms found the
+  same seven defects between them: the chart image's 404, the badge covering
+  a dashboard button, the hint text's contrast, the e-mail field with no
+  label, the export crash, the scheduled-reports dead end and the sticky bar
+  covering Save. Spreading where the lanes start reached no defect the
+  unseeded runs missed.
+- **pass^3 is unchanged in count (3 against 3) but not in content.** Every
+  unseeded run found the 404, the export crash and the sticky bar. Every
+  seeded run found the 404, the badge and the dead end.
+- **The seeded runs varied less**: 5, 5 and 5 against 3, 6 and 5. All three
+  seeded runs ended by themselves, at 67 to 71 turns. Two of the three
+  unseeded runs hit the 80-turn cap. Three runs per arm cannot tell this
+  apart from noise.
+- **Why the order does not matter here.** At the two-lane default the demo's
+  twelve routes are split six and six, and each lane gets about 40 turns, so
+  each lane visits all its routes whatever the order. The six defects no run
+  found need depth on one page rather than a different starting page: an
+  empty submit, a double submit, a sort, an empty list behind a refused read,
+  a role check on an endpoint and a delete that claims success. Starting
+  elsewhere does not reach them.
+- **Precision held.** No labelled false positive in the seeded arm, and one
+  in the unseeded arm. The key was not changed.
+- **Cost.** About $0.022 a run in both arms. Six runs cost $0.140 in all, by
+  the runs' own estimates. None was discarded.
+- **The held-out app was not run.** The demo result was not positive, and
+  the held-out app is only run to confirm a gain.
+
+**Decision: rejected against the issue's criteria.** The issue asks for
+pass@k up and pass^k not down. pass@3 did not rise, at either the old or the
+new defaults, and pass^3 fell at the old ones. Seeding stays off by default;
+see the [rejected list](#rejected-and-not-yet-tried) for what would be worth
+trying instead.
 
 ## Finding dedup as a measured decision (task 15)
 
@@ -1724,6 +1790,14 @@ fourteen runs together cost about $0.18 by their own estimates.
 
 Edits considered and not kept, so they are not retried blind:
 
+- **A seeded exploration schedule as a way to find more across runs (issue
+  418).** Rejected twice on the demo app. At one loop and 40 turns, pass@3
+  rose within the noise and pass^3 fell. At two lanes and 80 turns, with the
+  exclusion across runs applied, pass@3 and pass^3 were both unchanged, and
+  both arms found the same seven defects. On an app small enough for the
+  default budget to visit every route, the starting order changes nothing that
+  is scored. It could still matter on an app with more routes than the budget
+  covers, which neither benchmark app has.
 - **Scoring a run against its accumulated project memory.** Rejected: a
   project remembers findings across runs, so a later run would be credited with
   an earlier one's finds. Every benchmark run uses a fresh project directory.
