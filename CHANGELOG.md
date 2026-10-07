@@ -1,5 +1,12 @@
 # scenescout
 
+## 3.21.0
+
+### Minor Changes
+
+- 64a719b: `scenescout ci` and its GitHub Action now default to two lanes sharing 80 model turns and 3,000,000 tokens (from one loop, 40 turns and 1,500,000 tokens). On the benchmark's demo app the new defaults found 5 to 7 of 13 planted defects in three runs, against 2 to 4 for the old ones, and 4 to 5 of 10 on the held-out app, at about $0.03 a run on `gpt-6-luna` instead of about $0.011. Without `--lanes`, a run with `--show` or with `--max-turns 1` runs as one loop. `--lanes 1 --max-turns 40 --max-tokens 1500000` restores the old behaviour.
+- a4531a8: `/scenescout qa check [focus]` runs a project's own recorded check from a pull-request comment, for projects with no preview deployments. Set the repository variable `SCENESCOUT_QA_CHECK_WORKFLOW` to a workflow that runs `scenescout check --record --video` (`examples/workflows/scenescout-qa-check.yml` is one): the comment workflow dispatches it on the pull request's branch, waits for it, and replies with the verdict, each journey's result, the findings by severity, the first failing step and links to the run and its artifact. No model key is involved, and pull requests from forks are refused. `/scenescout qa`, `show` and `compare` are unchanged.
+
 ## 3.20.2
 
 ### Patch Changes
