@@ -1145,6 +1145,12 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 6/6 (86%–100%) | — | done | 71 | 1,883,627 (1,842,934) / 3,654 | 1m 35s | $0.024 |
 | 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 6/6 (75%–100%) | — | done | 68 | 1,835,668 (1,816,267) / 3,416 | 1m 35s | $0.022 |
 | 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | done | 67 | 1,764,828 (1,747,482) / 3,149 | 1m 28s | $0.021 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 7/7 (78%–100%) | — | done | 73 | 1,987,618 (1,943,666) / 3,885 | 1m 58s | $0.026 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 5/5 (83%–100%) | — | turns | 80 | 2,178,725 (2,159,921) / 3,871 | 1m 41s | $0.025 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 6/6 (60%–100%) | — | turns | 80 | 2,155,125 (2,113,073) / 2,940 | 1m 35s | $0.027 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 3/13 | 4/4 (80%–100%) | — | turns | 80 | 2,205,958 (2,185,475) / 4,927 | 3m 03s | $0.026 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 6/6 (86%–100%) | — | done | 63 | 1,656,792 (1,639,665) / 3,321 | 1m 28s | $0.020 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 7/7 (88%–100%) | — | done | 80 | 2,240,643 (2,217,815) / 20,329 | 6m 40s | $0.035 |
 
 <!-- ci-results:end -->
 
@@ -1516,7 +1522,60 @@ trying instead.
 
 ### Starting from an earlier run (issue 418)
 
-Measurement in progress.
+The seeded schedule above was reworked into `--from-run`: a run reads an
+earlier run's record and, in `continue` mode, takes first the routes it never
+worked on, then the routes it left work on (told exactly which controls, forms
+and options to take first), then the rest. Only `continue` was measured;
+`replay` is held to repeating its input's order by `brief-test` and `ci-test`.
+
+**What was held fixed.** The engine at commit `4ebc18b`, gpt-6-luna at effort
+`low`, the defaults (two lanes sharing 80 turns, 3,000,000 tokens and 20
+minutes), `read-only`, level `medium`, the dedup judge, a fresh demo app and a
+fresh project per run, dispatched one at a time through the benchmark
+workflow and alternating the arms. The rows are the `ci-fromrun-demo-*`
+archives of 2026-10-07 in the table above.
+
+- **Independent arm (`u1`–`u3`):** three runs, nothing carried over.
+- **Continued arm (`c1`–`c3`):** `c1` continued from `u1`'s record, `c2` from
+  `c1`'s and `c3` from `c2`'s, each through the workflow's dispatch-only
+  `from-run-record` input. Only the record was carried, never the memory, so
+  each run is scored on its own findings.
+
+| | Recall per run | Pooled recall | pass@3 | pass^3 | Labelled precision | Turns, how it ended | Cost (3 runs) |
+|---|---|---:|---:|---:|---:|---|---:|
+| Independent | 6, 5, 6 of 13 | 17/39 | 7 | 4 | 18/18 (7 unlabelled) | 73 done, 80 cap, 80 cap | $0.078 |
+| Continued | 3, 6, 6 of 13 | 15/39 | 8 | 1 | 17/17 (2 unlabelled) | 80 cap, 63 done, 80 done | $0.081 |
+
+- **pass@3 rose by one.** The continued arm found the one defect no
+  independent run found: the approve endpoint accepting a clerk (`c1`). That
+  is one of the defects that needs work inside a visited page, which is what
+  `continue` points the run at. One defect in three runs is within the noise.
+- **pass^3 fell from 4 to 1.** Every independent run found the chart image's
+  404, the badge covering a dashboard button, the export crash and the
+  scheduled-reports dead end; only the dead end was found by all three
+  continued runs. `c1` found 3: told to start on the 28 controls `u1` left, it
+  spent its turns there and never filed the dashboard's or the export's
+  defects, which every fresh run finds in passing.
+- **It did the work it was pointed at.** The runs continued from a record with
+  work left (`c1` from `u1`, `c3` from `c2`) left 9 controls unexercised,
+  against 24 to 28 for the others. Exercising them did not turn into findings
+  on this app.
+- **The arms are not independent of each other.** `c1` continued `u1`, so the
+  continued arm had one more run's knowledge than the other; that favours it,
+  and it still did not pass.
+- **Precision held** at 100% labelled in both arms. The key was not changed:
+  the unlabelled findings (a shell link styled as body text, an optional
+  e-mail field's label) are left for a person to judge.
+- **Cost.** $0.159 for the six runs by their own estimates, about $0.026 a
+  run in both arms. None was discarded.
+- **The held-out app was not run.** The demo result was not positive, and
+  the held-out app is only run to confirm a gain.
+
+**Decision: rejected against the issue's criteria** (pass@3 up and pass^3 not
+down): pass@3 rose by one, inside the noise, and pass^3 fell by three. The
+option stays, off by default, because `replay` (reproducing a run or checking
+a fix) does not depend on this measurement, and because `continue` may serve an
+app larger than the default budget covers, which neither benchmark app is.
 
 ## Finding dedup as a measured decision (task 15)
 
@@ -1802,6 +1861,13 @@ Edits considered and not kept, so they are not retried blind:
   default budget to visit every route, the starting order changes nothing that
   is scored. It could still matter on an app with more routes than the budget
   covers, which neither benchmark app has.
+- **Continuing from an earlier run's record (`--from-run`, issue 418).**
+  Rejected as a way to find more across runs on the demo app at the two-lane
+  default: pass@3 rose by one (the approve endpoint accepting a clerk) and
+  pass^3 fell from 4 to 1. A run told to work the controls the last one left
+  does so and stops finding the page-load defects every fresh run finds in
+  passing. Worth trying instead: continue only the routes with forms or
+  options left, after the run's own first pass, rather than in place of it.
 - **Scoring a run against its accumulated project memory.** Rejected: a
   project remembers findings across runs, so a later run would be credited with
   an earlier one's finds. Every benchmark run uses a fresh project directory.
