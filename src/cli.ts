@@ -171,10 +171,10 @@ Usage:
                                      --model id (default claude-sonnet-5 / gpt-6-luna); --effort none|low|medium|
                                       high|xhigh|max (default low; none is OpenAI only); --base-url https://…/v1 for
                                       another endpoint that implements the same API;
-                                     --max-turns N (default 40); --max-tokens N (default 1500000);
+                                     --max-turns N (default 80); --max-tokens N (default 3000000);
                                      --max-minutes N (default 20): the run stops at the first cap reached and still
                                       writes the report;
-                                     --lanes N (default 1, at most 8): split the app between N model loops that
+                                     --lanes N (default 2, 1 with --show; at most 8): split the app between N model loops that
                                       explore at once, each in its own browser, sharing those caps;
                                      --price-in, --price-cached-in, --price-out: US dollars per million tokens,
                                       over the built-in prices, for the cost estimate of any model;

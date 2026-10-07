@@ -166,8 +166,8 @@ test("options: the defaults are the agreed caps, read-only, medium, and the dedu
   assert.deepEqual(p.options, {
     url: "http://127.0.0.1:3000/",
     projectDir: "/work",
-    caps: { turns: 40, tokens: 1_500_000, wallMs: 20 * 60_000 },
-    lanes: 1,
+    caps: { turns: 80, tokens: 3_000_000, wallMs: 20 * 60_000 },
+    lanes: 2,
     mode: "read-only",
     level: "medium",
     dedup: "judge",
@@ -263,7 +263,7 @@ test("lanes: shared caps need a turn per lane, and a run that shows one element 
   const u = "http://127.0.0.1:3000";
   const parse = (args: string[]) => parseCiArgs([u, ...args], "/work");
   const four = parse(["--lanes", "4"]);
-  assert.ok(four.ok && four.options.lanes === 4 && four.options.caps.turns === 40, "the caps are not multiplied by the lanes");
+  assert.ok(four.ok && four.options.lanes === 4 && four.options.caps.turns === 80, "the caps are not multiplied by the lanes");
   const short = parse(["--lanes=4", "--max-turns=3"]);
   assert.ok(!short.ok && /--lanes 4 needs --max-turns of at least 4/.test(short.error), JSON.stringify(short));
   assert.ok(parse(["--lanes=4", "--max-turns=4"]).ok, "exactly one turn each is allowed");
@@ -271,6 +271,12 @@ test("lanes: shared caps need a turn per lane, and a run that shows one element 
   assert.ok(!show.ok && /--show explores nothing/.test(show.error), JSON.stringify(show));
   const oneLane = parse(["--lanes=1", "--show", "the Save button"]);
   assert.ok(oneLane.ok && oneLane.options.lanes === 1, "one lane is the single loop, which a capture is");
+  const showDefault = parse(["--show", "the Save button"]);
+  assert.ok(showDefault.ok && showDefault.options.lanes === 1, "without --lanes, a capture runs as the single loop rather than failing on the default split");
+  const oneTurn = parse(["--max-turns=1"]);
+  assert.ok(oneTurn.ok && oneTurn.options.lanes === 1, "without --lanes, the default split never asks for more lanes than turns");
+  const defaultSplit = parse([]);
+  assert.ok(defaultSplit.ok && defaultSplit.options.lanes === 2, "the default is two lanes");
   assert.equal(MAX_CI_LANES, MAX_LANES, "the bound is scout_lane_brief's, since the split is the same");
 });
 
@@ -496,7 +502,7 @@ test("prompt: the method, then the CI rules; the kickoff names the target, level
     /Level: medium/,
     /Write mode: observe/,
     /Focus: orders/,
-    /40 model turns, 1,500,000 tokens and 20 minutes/,
+    /80 model turns, 3,000,000 tokens and 20 minutes/,
   ])
     assert.match(kickoff, part);
 });
@@ -1141,7 +1147,7 @@ test("lanes: every lane gets the same method and rules, and a first message of i
     ciLaneKickoff({ lane: plan.lanes[i], laneCount: 2, url: TARGET, projectDir: "/work", mode: "read-only", level: "medium", caps: DEFAULT_CAPS });
   assert.match(kick(0), /as lane "orders\+1", one of 2 running at once/);
   assert.match(kick(0), /Your routes \(3\): \/orders, \/orders\/new, \/settings/);
-  assert.match(kick(0), /Budget: the run's 40 model turns, 1,500,000 tokens and 20 minutes are shared by the 2 lanes: plan on about 20 turns/);
+  assert.match(kick(0), /Budget: the run's 80 model turns, 3,000,000 tokens and 20 minutes are shared by the 2 lanes: plan on about 40 turns/);
   assert.match(kick(1), /What the planning crawl saw on your routes:\n {2}\/reports — LOAD FAILED/);
   assert.doesNotMatch(kick(0), /\/stock/, "a lane is not told about another lane's routes");
 });
@@ -1807,6 +1813,24 @@ test("action: its defaults are the CLI's defaults, and every input reaches the C
   assert.throws(() => ciArgs({ url: " " }), /url input is required/);
   assert.equal(ciOutDirFor({ out: "", project: "site" }, "/work"), path.resolve("/work", "site", ".scenescout", "ci"));
   assert.ok(hasCiCommand(fs.readFileSync(path.join(REPO, "src", "cli.ts"), "utf8")), "the CLI's usage no longer has the line the action looks for");
+});
+
+test("action and help: every default they state is the CLI's", () => {
+  const d = parseCiArgs(["http://127.0.0.1:3000"], "/work");
+  assert.ok(d.ok);
+  const stated = (input: string) => /Empty means (\d+)/.exec((action.inputs as Record<string, { description: string }>)[input].description)?.[1];
+  assert.equal(stated("max-turns"), String(d.options.caps.turns));
+  assert.equal(stated("max-tokens"), String(d.options.caps.tokens));
+  assert.equal(stated("max-minutes"), String(d.options.caps.wallMs / 60_000));
+  assert.equal(stated("lanes"), String(d.options.lanes));
+  // From the ci entry on: the first run's entry above it has a --max-minutes of its own.
+  const cliText = fs.readFileSync(path.join(REPO, "src", "cli.ts"), "utf8");
+  const help = cliText.slice(cliText.indexOf("--max-turns N (default"));
+  const inHelp = (option: string) => new RegExp(`--${option} N \\(default (\\d+)`).exec(help)?.[1];
+  assert.equal(inHelp("max-turns"), String(d.options.caps.turns), "the CLI's help");
+  assert.equal(inHelp("max-tokens"), String(d.options.caps.tokens), "the CLI's help");
+  assert.equal(inHelp("max-minutes"), String(d.options.caps.wallMs / 60_000), "the CLI's help");
+  assert.equal(inHelp("lanes"), String(d.options.lanes), "the CLI's help");
 });
 
 test("action: findings never fail the step; only a run that could not run does", () => {

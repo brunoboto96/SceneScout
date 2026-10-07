@@ -1,0 +1,33 @@
+{
+  "app": "demo",
+  "run": "ci-caps-demo-t40-1",
+  "date": "2026-10-06",
+  "note": "Issue 419 caps measurement, 1 loop, 40 turns (workflow run 37539362945); see Choosing the defaults.",
+  "findings": [
+    {
+      "title": "Dashboard chart asset returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Order email field has placeholder-only label",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new.html new-order-email placeholder-only label"
+    },
+    {
+      "title": "Order form helper text has very low contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new.html helper text contrast 1.73:1"
+    },
+    {
+      "title": "Export CSV crashes when report rows are unavailable",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports.html Export CSV TypeError reading rows"
+    }
+  ],
+  "decisions": []
+}
