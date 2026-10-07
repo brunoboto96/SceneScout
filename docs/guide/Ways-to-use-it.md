@@ -280,9 +280,14 @@ An allowed account comments `/scenescout qa` on a pull request, and an unattende
 /scenescout qa [preview URL] [focus]
 /scenescout qa [preview URL] show <element>
 /scenescout qa [preview URL] compare <element>
+/scenescout qa check [focus]
 ```
 
 Only the first line of a new comment is read. `show` replies with a picture of the element on the preview. `compare` also captures it on a base URL (`SCENESCOUT_QA_BASE_URL`, else the newest deployment of the base branch) and replies with both pictures, a diff with changed pixels in red and the share of pixels changed. The pictures are pushed to a `scenescout-shots` branch that holds nothing else, because a comment cannot carry files.
+
+### The project's own check: `/scenescout qa check`
+
+A project without previews can still answer a comment. `/scenescout qa check [focus]` dispatches the project's own workflow (named by the repository variable `SCENESCOUT_QA_CHECK_WORKFLOW`) on the pull request's branch; that workflow builds the app, runs `scenescout check --record --video` and uploads its output folder. The comment workflow waits for the run, reads `check.json` from its artifact and replies with the verdict, each journey's pass or fail, the findings by severity, the first failing step, and a link to the run and the artifact, which holds `replay.html` and the journey videos. No model and no key are involved. Copy [examples/workflows/scenescout-qa-check.yml](../../examples/workflows/scenescout-qa-check.yml) as a start. The same people may start it, and forks are always refused, because a fork's branch is not in the repository to dispatch on. [The full reference](../ci.md#the-projects-own-check-scenescout-qa-check) has the inputs, the artifact's name and the permissions.
 
 ### Who may start a run
 

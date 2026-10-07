@@ -657,11 +657,11 @@ with `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` set from the CI system's secret sto
 
 An account the repository allows comments `/scenescout qa` on a pull request and gets an unattended exploratory run of that pull request's preview, with the results posted as a reply. Why it is shaped this way: [ADR 15](adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md).
 
-**It tests a deployed preview, never the pull request's code.** The job that holds the model's key checks out nothing, builds nothing and runs only SceneScout, from an exact release tag. So the project must already deploy each pull request somewhere reachable over https (a preview environment, a review app, a per-branch deployment). A project without previews can use the [unattended run](#an-unattended-exploratory-run) on pushes or a schedule instead.
+**It tests a deployed preview, never the pull request's code.** The job that holds the model's key checks out nothing, builds nothing and runs only SceneScout, from an exact release tag. So the project must already deploy each pull request somewhere reachable over https (a preview environment, a review app, a per-branch deployment). A project without previews can use the [unattended run](#an-unattended-exploratory-run) on pushes or a schedule instead, or [`/scenescout qa check`](#the-projects-own-check-scenescout-qa-check), which runs the project's own recorded check and needs no preview and no model key.
 
 ### The workflow
 
-Copy [examples/workflows/scenescout-qa.yml](../examples/workflows/scenescout-qa.yml) to `.github/workflows/` and add the key as a repository secret (`OPENAI_API_KEY` in the file; for Anthropic, change the name in the `qa` job's `env` to `ANTHROPIC_API_KEY`). It has three jobs:
+Copy [examples/workflows/scenescout-qa.yml](../examples/workflows/scenescout-qa.yml) to `.github/workflows/` and add the key as a repository secret (`OPENAI_API_KEY` in the file; for Anthropic, change the name in the `qa` job's `env` to `ANTHROPIC_API_KEY`). It has five jobs:
 
 | Job | Holds the key | Permissions | What it does |
 |---|---|---|---|
@@ -669,6 +669,7 @@ Copy [examples/workflows/scenescout-qa.yml](../examples/workflows/scenescout-qa.
 | `qa` | yes | `contents: read` | Runs only when the gate says so. Runs `brunoboto96/SceneScout/ci` at an exact release against the preview's URL, with the caps below, and keeps the results as an artifact. |
 | `shots` | no | `contents: write` | Only after a `show` or `compare` run succeeded. Puts its pictures on the `scenescout-shots` branch so the reply can show them. |
 | `report` | no | `pull-requests: write`, `actions: read` | Posts the results on the pull request, with a link to the artifact, or says the run could not run. |
+| `check` | no | `actions: write`, `pull-requests: write` | Only for `/scenescout qa check`. Dispatches the project's own workflow, waits for its run, downloads its artifact and replies with the verdict. See [below](#the-projects-own-check-scenescout-qa-check). |
 
 Pin both actions (`brunoboto96/SceneScout/qa` and `brunoboto96/SceneScout/ci`) to the same exact release tag, from the first release that has them, or to that release's commit SHA; never to `@v3` or a branch. `issue_comment` runs the workflow file as it is on the default branch, so a pull request cannot change it. SceneScout's own code comes from that release; its npm dependencies are resolved when the action installs it, within the ranges that release declares, since the package ships no lockfile.
 
@@ -678,11 +679,14 @@ Pin both actions (`brunoboto96/SceneScout/qa` and `brunoboto96/SceneScout/ci`) t
 /scenescout qa [preview URL] [focus]
 /scenescout qa [preview URL] show <element>
 /scenescout qa [preview URL] compare <element>
+/scenescout qa check [focus]
 ```
 
 Only the comment's first line is read, and the comment must begin with `/scenescout qa`, in any case, with nothing before it (the job's `startsWith` filter and the gate match it the same way). An optional https URL as the first word overrides where the preview is found; any other words become the run's `focus`, cut to 200 characters. Editing a comment starts nothing: only a new comment does.
 
 When the words after the URL begin with `show` or `compare` (a word of its own, in any case), the rest describes one element, e.g. `/scenescout qa compare the Save button`. `show` replies with a picture of that element on the preview. `compare` also captures it on a base URL and replies with the two side by side, a diff picture with the changed pixels in red, and the share of pixels changed. The base URL is the variable `SCENESCOUT_QA_BASE_URL` when it is set (the production site, say), else the newest successful deployment of the pull request's base branch; it is held to the same rules as the preview's URL. What can be captured, and how, is [Showing one element](#showing-one-element).
+
+When the first word after the command is `check` (a word of its own, in any case, with no URL before it), no model runs: the project's own check does, and the rest of the line is its focus. See [The project's own check](#the-projects-own-check-scenescout-qa-check). Before this mode existed, `/scenescout qa check …` was a preview run with `check …` as its focus; put the focus in other words for that.
 
 ### The pictures in the reply
 
@@ -700,6 +704,9 @@ What the commenter sees:
 | `show` or `compare` with no element named, or `compare` with no https base URL | 😕 | One line saying why no run started, and how to change it |
 | The run is cancelled by hand or reaches the job's timeout | 👀 | One line saying so, with a link to the run |
 | A newer `/scenescout qa` on the same pull request cancels the run | 👀 | None from this run: the newer one replies |
+| `/scenescout qa check` starts the project's check | 👀 | The verdict, when the check's run ends |
+| `/scenescout qa check` with `SCENESCOUT_QA_CHECK_WORKFLOW` unset or not a workflow file name, or from a fork | 😕 | One line saying why no check started, and how to set it up |
+| The check's workflow is unknown or disabled, GitHub refuses the dispatch, its run cannot be found, or it outlasts the wait | 👀 | One line saying which, with a link where there is a run |
 
 The reply names the pull request's head commit when the run was asked for. The preview may have been deployed from an earlier commit, so that is not a claim about what was tested.
 
@@ -716,6 +723,8 @@ All optional, as repository variables (Settings → Secrets and variables → Ac
 | `SCENESCOUT_QA_ENVIRONMENT` | any | Without a template, the preview is the newest successful deployment of the head commit, as the deployments API reports it; this limits it to one environment's deployments. |
 | `SCENESCOUT_QA_ALLOW_FORKS` | off | `true` runs on pull requests from forks. Off, a fork's pull request gets a reply saying why nothing ran. |
 | `SCENESCOUT_QA_BASE_URL` | the base branch's deployment | What `compare` compares the preview with, e.g. `https://www.example.com`. Unset, the newest successful deployment of the pull request's base branch; with neither, `compare` replies saying so. |
+| `SCENESCOUT_QA_CHECK_WORKFLOW` | none | The project's workflow that `/scenescout qa check` dispatches, by its file name in `.github/workflows/` (e.g. `browser-tests.yml`) or its id. Unset, the command replies saying how to set it up. |
+| `SCENESCOUT_QA_CHECK_ARTIFACT` | `scenescout-check` | The name that workflow uploads its check's output folder under. |
 
 And one optional repository secret (Settings → Secrets and variables → Actions → Secrets):
 
@@ -724,6 +733,30 @@ And one optional repository secret (Settings → Secrets and variables → Actio
 | `SCENESCOUT_QA_TEAM_TOKEN` | Read only when `SCENESCOUT_QA_ALLOWED_TEAMS` is set: a token that can read the organization's team membership, either a GitHub App installation token with the organization's Members permission (read), or a personal access token with `read:org`. The workflow's own token cannot read team membership. The template passes it to the `gate` job only; never add it to the `qa` or `report` job. |
 
 The preview's URL is chosen in this order: the URL in the comment, the template, the deployment. It must be `https` and carry no credentials. The run explores the preview signed out: the `qa` job checks out nothing, so it has no saved session to read.
+
+### The project's own check: `/scenescout qa check`
+
+A project that builds and starts its app inside a CI job, and has no preview deployments, can still answer a comment. `/scenescout qa check [focus]` runs the project's **own** workflow, which runs [`scenescout check`](#github-actions) with [recording](#recording-a-check) on, and replies with its verdict. No model is involved and no key is read anywhere in this mode. Why it still keeps [ADR 15](adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md)'s rule: its amendment "The project's own check".
+
+**Setting it up.**
+
+1. Add a workflow to the project that a dispatch can start: [examples/workflows/scenescout-qa-check.yml](../examples/workflows/scenescout-qa-check.yml) is a minimal one. Replace its build and start steps with your app's. It must be on the default branch to be dispatched, and runs as it is on the pull request's branch.
+2. Set the repository variable `SCENESCOUT_QA_CHECK_WORKFLOW` to its file name, e.g. `scenescout-qa-check.yml`.
+3. If the workflow uploads its results under a name other than `scenescout-check`, set `SCENESCOUT_QA_CHECK_ARTIFACT` to that name. The example reads the same variable, so the two stay equal.
+
+**The workflow's contract.** It has a `workflow_dispatch` trigger declaring three string inputs, `pr` (the pull request's number), `focus` (the words after `check`, possibly empty) and `dispatch-id` (set by the `check` job; put it in the workflow's `run-name`, as the example does, so the run can be told apart from others). GitHub refuses a dispatch carrying an input the workflow does not declare, so all three must be there. It runs `scenescout check --record --video` (the action's `record: on` and `video: on`) and uploads the output folder as an artifact, so `check.json` sits at the top of it, with `replay.html`, `replay-frames/` and `replay-videos/` beside it. The check action does that upload itself under its `artifact-name` input. What `focus` means is the workflow's choice: the example keeps the saved flows whose file name contains it. It is text from a comment, so read it through `env`, never paste `${{ inputs.focus }}` into a script.
+
+**What the `check` job does.**
+
+1. Looks the workflow up (`GET /repos/{owner}/{repo}/actions/workflows/{file}`), then dispatches it on the pull request's head branch with the three inputs.
+2. Finds the run. GitHub's dispatch call answers with the new run's id, and that is used when it is there. Otherwise the job lists the workflow's `workflow_dispatch` runs on that branch: first the one whose title carries the dispatch id, then, for a workflow whose `run-name` does not carry it, the oldest run of the pull request's head commit created since the dispatch. Two checks on the same commit at once can only be told apart by the dispatch id, so keep it in the `run-name`.
+3. Waits for the run to complete, polling every 15 seconds, for at most `wait-minutes` (30 in the template; the job's `timeout-minutes` is 40). A run still going then gets a reply with its link, and is left to finish.
+4. Downloads the run's artifact with `actions/download-artifact` (by run id), reads `check.json` (at most 10 MB, regular files only) and notes whether `replay.html` and any `replay-videos/*.webm` are beside it. Nothing in the artifact is run.
+5. Replies: the verdict (passed, failed with the number of issues that fail the gate, or partly ran), the findings by severity, each journey (a saved flow) with its role and its result, the first failing step with what it did and why it broke, up to 20 findings high first, the recording (the page, and each journey video by name), and links to the run and the artifact. Everything from `check.json` is escaped as the preview run's reply is: the pull request's code wrote it, so a journey's name cannot mention anyone, link anywhere or add HTML. A run with no verdict to read gets a reply saying which it was: the artifact could not be downloaded (expired, never uploaded, or under another name), it holds no `check.json`, the file is not valid JSON or larger than 10 MB, or it is not one `scenescout check` wrote; with the run's conclusion and link. Names (the workflow, the branch, the artifact) are shown as code, where nothing renders. The reply names the commit the run tested, and says so when the branch moved after the command.
+
+**Permissions.** The `check` job has `actions: write`, which dispatching a workflow needs and which also covers reading the run and downloading its artifact (`actions: read`), and `pull-requests: write` to reply. Nothing else: no `contents`, no secrets. The gate keeps its own permissions; it only reads the variable and passes the checked workflow name and the head branch on.
+
+**Who and where.** The same allowlist as every other form of the command. Pull requests from forks are always refused, whatever `SCENESCOUT_QA_ALLOW_FORKS` says: the dispatch runs the workflow on a branch of this repository, and a fork's branch is not one. A same-repository pull request's author can already run any workflow on their branch by pushing to it, so dispatching on that branch gives them nothing new.
 
 ### Who may start a run
 
@@ -748,4 +781,4 @@ The workflow refuses pull requests from forks by default, and `SCENESCOUT_QA_ALL
 
 ### This repository
 
-SceneScout has no deployed preview, so it does not run this workflow on its own pull requests. Its test suite (`qa-test`) holds the template to the rules above: the key only in the `qa` job, the team token only in the `gate` job's `team-token` input, that job reached only through the gate, with read-only permissions and no checkout or script of its own, SceneScout from an exact release tag (one that ships `qa/` and the `shots` stage), one run per pull request, and the `shots` job the only one that writes contents, running only the shots stage with no branch of its own choosing. It also runs every keyless stage against a stand-in GitHub API.
+SceneScout has no deployed preview, so it does not run this workflow on its own pull requests. Its test suite (`qa-test`) holds the template to the rules above: the key only in the `qa` job, the team token only in the `gate` job's `team-token` input, that job reached only through the gate, with read-only permissions and no checkout or script of its own, SceneScout from an exact release tag (one that ships `qa/` and the `shots` stage), one run per pull request, and the `shots` job the only one that writes contents, running only the shots stage with no branch of its own choosing. It also runs every keyless stage against a stand-in GitHub API, the `check` job's rules (no key, no checkout, `actions: write` and `pull-requests: write` only, the workflow and branch from the gate) and the example check workflow's shape (the three dispatch inputs, the dispatch id in its title, recording on, the artifact name from the variable, the focus never pasted into a script).

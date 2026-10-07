@@ -359,11 +359,11 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 
 ### Action: qa
 
-`uses: brunoboto96/SceneScout/qa@<exact tag>`, called by the [`/scenescout qa` workflow](../../examples/workflows/scenescout-qa.yml) in three stages. You normally configure it through the repository variables below rather than editing these inputs. Outputs: `run`, `pr`, `sha`, `url`, `focus`, `login`, `show`, `base`, `pushed`.
+`uses: brunoboto96/SceneScout/qa@<exact tag>`, called by the [`/scenescout qa` workflow](../../examples/workflows/scenescout-qa.yml) in four stages. You normally configure it through the repository variables below rather than editing these inputs. Outputs: `run`, `pr`, `sha`, `url`, `focus`, `login`, `show`, `base`, `check`, `ref`, `check-workflow`, `pushed`.
 
 | Input | Default | |
 |---|---|---|
-| `stage` | (required) | `gate`, `shots` or `report` |
+| `stage` | (required) | `gate`, `shots`, `report` or `check` |
 | `github-token` | `${{ github.token }}` | The token for the GitHub API |
 | `allowed` | empty | (gate) Logins that may start a run |
 | `allowed-roles` | empty | (gate) Author associations that may start a run |
@@ -373,12 +373,16 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `preview-url` | empty | (gate) A template for the preview's URL |
 | `environment` | empty | (gate) Only deployments to this environment count |
 | `base-url` | empty | (gate) What `compare` compares the preview with |
+| `check-workflow` | empty | (gate, check) The project's workflow `/scenescout qa check` dispatches |
+| `ref` | empty | (check) The pull request's head branch, from the gate |
+| `focus` | empty | (check) The words after `check`, passed to the workflow |
+| `wait-minutes` | empty | (check) How long to wait for the dispatched run; empty means 30 |
 | `result` | empty | (report) The result of the job that ran the model |
-| `artifact-name` | empty | (shots, report) The name the results were uploaded under |
-| `pr` | empty | (report) The pull request's number |
-| `sha` | empty | (report) The head commit the gate saw |
+| `artifact-name` | empty | (shots, report, check) The name the results were uploaded under; for a check, empty means `scenescout-check` |
+| `pr` | empty | (report, check) The pull request's number |
+| `sha` | empty | (report, check) The head commit the gate saw |
 | `url` | empty | (report) The preview URL the run tested |
-| `login` | empty | (report) Who asked for the run |
+| `login` | empty | (report, check) Who asked for the run |
 | `shots` | empty | (report) The pictures the shots stage pushed |
 
 ## Repository variables and secrets for `/scenescout qa`
@@ -394,6 +398,8 @@ Set under Settings → Secrets and variables → Actions. All optional.
 | `SCENESCOUT_QA_ENVIRONMENT` | variable | any | Limits which deployments count as the preview |
 | `SCENESCOUT_QA_ALLOW_FORKS` | variable | off | `true` runs on pull requests from forks |
 | `SCENESCOUT_QA_BASE_URL` | variable | the base branch's newest deployment | What `compare` compares with |
+| `SCENESCOUT_QA_CHECK_WORKFLOW` | variable | none | The project's workflow `/scenescout qa check` dispatches, by file name (e.g. `browser-tests.yml`); unset, the command replies saying how to set it up |
+| `SCENESCOUT_QA_CHECK_ARTIFACT` | variable | `scenescout-check` | The artifact that workflow uploads its check's output folder as |
 | `SCENESCOUT_QA_TEAM_TOKEN` | secret | none | Reads team membership; passed to the gate job only |
 | `OPENAI_API_KEY` | secret | (required) | The model key, in the template; use `ANTHROPIC_API_KEY` in the `qa` job instead for Anthropic |
 
