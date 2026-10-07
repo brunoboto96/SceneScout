@@ -1,0 +1,27 @@
+{
+  "app": "demo",
+  "run": "ci-fromrun-small-demo-u3",
+  "date": "2026-10-07",
+  "note": "Fresh run at one lane and 18 turns, a budget cut to stand in for a larger app",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard controls overlap",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard e16 All orders overlaps e17 New: bulk import 85%"
+    },
+    {
+      "title": "Scheduled reports page has no available actions or navigation",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables; main heading Scheduled reports"
+    }
+  ],
+  "decisions": []
+}

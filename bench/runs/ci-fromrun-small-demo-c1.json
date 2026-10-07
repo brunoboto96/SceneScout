@@ -1,0 +1,21 @@
+{
+  "app": "demo",
+  "run": "ci-fromrun-small-demo-c1",
+  "date": "2026-10-07",
+  "note": "Continued with the path prefix from the record of ci-fromrun-small-demo-u1, one lane and 18 turns",
+  "findings": [
+    {
+      "title": "Archived orders filter shows empty list after API failure",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/orders?status=archived 500; empty list without error"
+    },
+    {
+      "title": "Pinned order sticky bar covers Save notes button",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order-stickybar covers order-save at current scroll position"
+    }
+  ],
+  "decisions": []
+}

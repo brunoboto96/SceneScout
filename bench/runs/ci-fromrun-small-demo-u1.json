@@ -1,0 +1,21 @@
+{
+  "app": "demo",
+  "run": "ci-fromrun-small-demo-u1",
+  "date": "2026-10-07",
+  "note": "Fresh run at one lane and 18 turns, a budget cut to stand in for a larger app",
+  "findings": [
+    {
+      "title": "Dashboard chart image is missing",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Sticky bar covers the Save notes button",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order detail Save notes covered by order-stickybar"
+    }
+  ],
+  "decisions": []
+}

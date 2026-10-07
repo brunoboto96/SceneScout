@@ -1,0 +1,27 @@
+{
+  "app": "demo",
+  "run": "ci-fromrun-small-demo-u2",
+  "date": "2026-10-07",
+  "note": "Fresh run at one lane and 18 turns, a budget cut to stand in for a larger app",
+  "findings": [
+    {
+      "title": "Dashboard chart image fails to load",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "New-order email field has no persistent accessible label",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new.html input new-order-email placeholder-only label"
+    },
+    {
+      "title": "Scheduled reports page has no way to proceed",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "route /reports-scheduled.html has 0 interactables"
+    }
+  ],
+  "decisions": []
+}

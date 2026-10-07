@@ -1,0 +1,27 @@
+{
+  "app": "demo",
+  "run": "ci-fromrun-small-demo-c2",
+  "date": "2026-10-07",
+  "note": "Continued with the path prefix from the record of ci-fromrun-small-demo-c1, one lane and 18 turns",
+  "findings": [
+    {
+      "title": "Order notes report saved after the save is refused",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "PUT /api/orders/1042 403; UI announces Saved"
+    },
+    {
+      "title": "New-order email field loses its accessible name after entry",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new.html new-order-email placeholder-only label"
+    },
+    {
+      "title": "New-order helper text has insufficient contrast",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "orders-new.html helper text contrast 1.73:1 versus 4.5:1"
+    }
+  ],
+  "decisions": []
+}

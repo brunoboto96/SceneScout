@@ -1151,6 +1151,12 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 3/13 | 4/4 (80%–100%) | — | turns | 80 | 2,205,958 (2,185,475) / 4,927 | 3m 03s | $0.026 |
 | 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 6/6 (86%–100%) | — | done | 63 | 1,656,792 (1,639,665) / 3,321 | 1m 28s | $0.020 |
 | 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 7/7 (88%–100%) | — | done | 80 | 2,240,643 (2,217,815) / 20,329 | 6m 40s | $0.035 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 2/13 | 2/2 (100%) | — | turns | 18 | 450,239 (422,802) / 864 | 45s | $0.007 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 2/13 | 2/2 (67%–100%) | — | turns | 18 | 445,291 (417,994) / 885 | 53s | $0.007 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (100%) | — | turns | 18 | 443,643 (438,786) / 1,123 | 45s | $0.005 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 2/13 | 2/2 (100%) | — | turns | 18 | 444,939 (439,844) / 1,332 | 1m 15s | $0.006 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 1/13 | 2/2 (67%–100%) | — | turns | 18 | 440,837 (436,382) / 811 | 1m 06s | $0.005 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 0/13 | 0/0 (—) | — | done | 12 | 283,535 (280,643) / 407 | 35s | $0.003 |
 
 <!-- ci-results:end -->
 
@@ -1571,11 +1577,65 @@ archives of 2026-10-07 in the table above.
 - **The held-out app was not run.** The demo result was not positive, and
   the held-out app is only run to confirm a gain.
 
-**Decision: rejected against the issue's criteria** (pass@3 up and pass^3 not
-down): pass@3 rose by one, inside the noise, and pass^3 fell by three. The
-option stays, off by default, because `replay` (reproducing a run or checking
-a fix) does not depend on this measurement, and because `continue` may serve an
-app larger than the default budget covers, which neither benchmark app is.
+**Decision at the time: rejected against the issue's criteria** (pass@3 up
+and pass^3 not down): pass@3 rose by one, inside the noise, and pass^3 fell by
+three.
+
+**Correction: pass^3 was the wrong gate for this mode.** `continue` is built
+not to repeat what the run before it covered, so a defect every fresh run finds
+in passing is one a continued run is told to leave until last. The numbers
+above stand; what they measure is pass@3, which rose by one, inside the noise.
+The measurement below uses pass@3 as the gate.
+
+#### Re-measured at a small budget, with the path to each page
+
+At the default budget every demo run reaches all twelve routes, so there is
+nothing left for a continued run to pick up. This measurement cuts the budget
+on purpose, to stand in for an app larger than one run covers. **It is a
+simulation on a small app, not evidence about a large one.** The engine now
+also takes the earlier run's path to a continued run's first page when that
+run reached it by acting on another page (the path prefix).
+
+**What was held fixed.** The engine at commit `2904a3c`, gpt-6-luna at effort
+`low`, **one lane and 18 turns** per run (one lane, since two would leave each
+lane nine), 3,000,000 tokens and 20 minutes, `read-only`, level `medium`, the
+dedup judge, a fresh demo app and project per run, dispatched one at a time and
+alternating the arms. A continued run also makes the planning crawl a fresh
+one-loop run does not; it costs no model turn. The rows are the
+`ci-fromrun-small-demo-*` archives.
+
+- **Fresh arm (`u1`–`u3`):** three runs, nothing carried over.
+- **Continued arm (`c1`–`c3`):** `c1` continued from `u1`'s record, `c2` from
+  `c1`'s and `c3` from `c2`'s.
+
+| | Recall per run | pass@3 | pass^3 | Labelled precision | Pages each run worked on | Turns, how it ended | Cost (3 runs) |
+|---|---|---:|---:|---:|---|---|---:|
+| Fresh | 2, 2, 3 of 13 | 4 | 1 | 7/7 (1 unlabelled) | 6, 5, 4 | 18 cap, 18 cap, 18 cap | $0.020 |
+| Continued | 2, 1, 0 of 13 | 3 | 0 | 4/4 (1 unlabelled) | 11, 4, 4 | 18 cap, 18 cap, 12 done | $0.014 |
+
+- **pass@3 fell by one** (3 against 4). The fresh arm found the chart image's
+  404, the badge, the sticky bar and the dead end. The continued arm found the
+  sticky bar, the empty list behind a refused read (which no fresh run found)
+  and the hint text's contrast.
+- **The continued runs covered more and filed less.** `c1` worked on eleven
+  pages in 18 turns, against four to six for a fresh run, and filed two
+  defects. `c3` was told the earlier runs had covered every page, ended by
+  itself at 12 turns and filed nothing.
+- **The path prefix ran once and worked.** `c2`'s first page was an order's
+  detail page, which `c1` had reached from the orders list; `c2` took the
+  same two steps and landed there. The other continued runs started on a page
+  the earlier run had opened by its address, so they needed no path.
+- **Precision held** at 100% labelled in both arms; the key was not changed.
+- **Cost.** $0.034 for the six runs by their own estimates.
+- **The held-out app was not run.** The demo result was not positive.
+
+**Decision: not shown to help, even where it should.** With the budget cut so
+that one run cannot cover the app, three continued runs found fewer distinct
+defects than three fresh ones (3 against 4, within the noise either way). On
+this app a run finds defects where it looks closely, not where it has not
+been, and a continued run spreads its few turns thin. The option stays, off by
+default: `replay` does not depend on this, and the path prefix is pinned by
+its own tests.
 
 ## Finding dedup as a measured decision (task 15)
 
@@ -1866,8 +1926,12 @@ Edits considered and not kept, so they are not retried blind:
   default: pass@3 rose by one (the approve endpoint accepting a clerk) and
   pass^3 fell from 4 to 1. A run told to work the controls the last one left
   does so and stops finding the page-load defects every fresh run finds in
-  passing. Worth trying instead: continue only the routes with forms or
-  options left, after the run's own first pass, rather than in place of it.
+  passing. That gate (pass^3) was the wrong one for a mode built not to repeat
+  coverage. Re-measured at a budget cut to 18 turns on one lane, to stand in
+  for a larger app, and with the path prefix, pass@3 was 3 against 4: the
+  continued runs reached more pages and filed less. Worth trying instead:
+  continue only the routes with forms or options left, after the run's own
+  first pass, rather than in place of it.
 - **Scoring a run against its accumulated project memory.** Rejected: a
   project remembers findings across runs, so a later run would be credited with
   an earlier one's finds. Every benchmark run uses a fresh project directory.
