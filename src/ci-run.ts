@@ -92,6 +92,7 @@ import { loadRunRecord, MEMORY_DIRNAME, noteFromRunOnDisk, readRunRecordsOnDisk,
 import {
   carryForward,
   continueLines,
+  continueExhausted,
   continuePlan,
   fromRunLine,
   isPattern,
@@ -659,6 +660,8 @@ function thisRunsRecord(o: {
   continued?: RunRecord;
   /** How a continued run reached its lanes' first pages: kept in the record, so a path that could not be repeated is on file. */
   prefixes?: readonly PrefixNote[];
+  /** The run continued a record with no work left, and explored as a fresh run. */
+  continuedFresh?: boolean;
   log: (line: string) => void;
 }): RunRecord | undefined {
   let own: RunRecord | undefined;
@@ -674,7 +677,11 @@ function thisRunsRecord(o: {
     o.log("The report left no run record in the project's memory, so ci.json holds none.");
     return undefined;
   }
-  const withPrefixes = o.prefixes && o.prefixes.length > 0 ? { ...own, prefixes: [...o.prefixes] } : own;
+  const withPrefixes: RunRecord = {
+    ...own,
+    ...(o.prefixes && o.prefixes.length > 0 ? { prefixes: [...o.prefixes] } : {}),
+    ...(o.continuedFresh ? { continuedFresh: true as const } : {}),
+  };
   return o.continued ? carryForward(o.continued, withPrefixes) : withPrefixes;
 }
 
@@ -1004,14 +1011,18 @@ export async function runCi(
       const timeLeft = (): number => wallLeftMs(budgetSpend(budget), options.caps, now());
       const plans = !options.show && !replay && (options.lanes > 1 || !!continuing);
       const planned = plans ? await planningCrawl({ host, log, timeLeft, label: options.lanes > 1 ? "Lanes" : "From run" }) : undefined;
-      const items: ContinueItem[] | undefined = continuing && planned ? continuePlan(continuing, plannedRoutes(options.url, planned.notes)) : undefined;
+      const planItems: ContinueItem[] | undefined = continuing && planned ? continuePlan(continuing, plannedRoutes(options.url, planned.notes)) : undefined;
+      // A record with no work left anywhere: explore as a fresh run (the stable split, the landing page, no path), and say so.
+      const continuedFresh = !!planItems && continueExhausted(planItems);
+      const items = continuedFresh ? undefined : planItems;
       if (options.fromRun && earlier && !options.show) {
         runFromRun = { mode: options.fromRun.mode, source: from, runId: earlier.runId, recordAt: earlier.at };
         log(`From run: ${fromRunLine(runFromRun)}.`);
         if (items)
           log(
-            `From run: ${items.filter((i) => i.tier === 1).length} route(s) it never worked on, ${items.filter((i) => i.tier === 2).length} with work left, ${items.filter((i) => i.tier === 3).length} covered.`,
+            `From run: ${items.filter((i) => i.tier === 1).length} route(s) it never worked on, ${items.filter((i) => i.tier === 2).length} with work left, ${items.filter((i) => i.tier === 3).length} worked through.`,
           );
+        if (continuedFresh) log("From run: the earlier run left no recorded work on any route, so this run explores as a fresh one.");
         // Noted in the project's memory for the report, which the server writes. Never fatal: the run goes on.
         try {
           noteFromRunOnDisk(options.projectDir, { at: new Date().toISOString(), ...runFromRun });
@@ -1021,9 +1032,9 @@ export async function runCi(
       }
       // How a continued run's lanes (or its one loop) reached their first page by the earlier run's path, for the record.
       const prefixes: PrefixNote[] = [];
-      const reach = continuing
+      const reach = items
         ? async (session: string, route: string | undefined, say: (line: string) => void): Promise<string[]> => {
-            const r = await reachByPath({ host: toolHost, session, record: continuing, route, timeLeft, say });
+            const r = await reachByPath({ host: toolHost, session, record: continuing!, route, timeLeft, say });
             if (r.note) prefixes.push(r.note);
             return r.lines;
           }
@@ -1032,7 +1043,11 @@ export async function runCi(
         const tools = ciTools(listed, options.show ? CAPTURE_TOOLS : undefined);
         const system = options.show ? ciCaptureSystemPrompt() : ciSystemPrompt(loadPlaybook(packageRoot), options);
         const reached = reach && items && !options.show ? await reach(PLANNER_SESSION, items[0]?.route, (l) => log(`From run: ${l}`)) : [];
-        const fromRun = items ? [...continueLines(items, { from }), ...reached] : replay && replay.length > 0 ? replayLines(replay[0], { from }) : undefined;
+        const fromRun = planItems
+          ? [...continueLines(planItems, { from }), ...reached]
+          : replay && replay.length > 0
+            ? replayLines(replay[0], { from })
+            : undefined;
         const kickoff = options.show
           ? ciCaptureKickoff({ url: options.url, show: options.show })
           : ciKickoff({ ...options, ...(fromRun && fromRun.length > 0 ? { fromRunLines: fromRun } : {}) });
@@ -1077,8 +1092,8 @@ export async function runCi(
       if (lanePlan && (lanePlan.lanes.length > 0 || options.lanes > 1)) {
         // A replayed lane is told its own session's steps: the plan keeps the recorded sessions' order.
         const replayed = new Map(replay ? lanePlan.lanes.map((l, i) => [l.session, replay[i]] as const) : []);
-        const laneLines = items
-          ? (lane: CiLane): readonly string[] => continueLines(items, { from, only: lane.routes })
+        const laneLines = planItems
+          ? (lane: CiLane): readonly string[] => continueLines(planItems, { from, only: lane.routes })
           : replay
             ? (lane: CiLane): readonly string[] => replayLines(replayed.get(lane.session)!, { from })
             : undefined;
@@ -1121,6 +1136,7 @@ export async function runCi(
             since: startedIso,
             continued: earlier && options.fromRun?.mode === "continue" ? earlier : undefined,
             prefixes,
+            continuedFresh,
             log,
           });
       }

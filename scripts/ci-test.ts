@@ -3478,12 +3478,12 @@ test("from run: a fresh one-loop run plans nothing and is told nothing; a contin
   const items = continuePlan(earlier, ["/", "/orders", "/orders/new", "/stock", "/reports", "/settings"]);
   const lines = continueLines(items, { from: cont.file });
   assert.ok(cont.kickoff.includes(lines.join("\n")), cont.kickoff);
-  assert.match(cont.kickoff, /1\. Never worked on by it, first: \/, \/orders\/new, \/people, \/reports, \/settings, \/stock/);
+  assert.match(cont.kickoff, /- First, the routes it never worked on: \/, \/orders\/new, \/people, \/reports, \/settings, \/stock/);
   assert.match(cont.kickoff, /\/orders: submit the form\(s\) never submitted: form#new-order/);
   assert.deepEqual(cont.run.json.fromRun, { mode: "continue", source: cont.file, runId: "run-earlier", recordAt: "2026-10-07T09:00:00.000Z" });
   assert.match(cont.run.summary, /\| Started from \| continued from the run recorded in .*ci\.json \(its report of 2026-10-07T09:00:00\.000Z\) \|/);
   assert.ok(
-    cont.run.lines.some((l) => /^From run: 6 route\(s\) it never worked on, 1 with work left, 0 covered\.$/.test(l)),
+    cont.run.lines.some((l) => /^From run: 6 route\(s\) it never worked on, 1 with work left, 0 worked through\.$/.test(l)),
     cont.run.lines.join("\n"),
   );
   // The run's record carries the earlier one: this run's route first, then what the earlier run covered and left.
@@ -3669,4 +3669,40 @@ test("from run: a continued run takes the earlier run's path to its first page, 
   );
   assert.equal(stayed.run.json.record.prefixes[0].outcome, "navigated");
   assert.match(stayed.run.json.record.prefixes[0].why, /ended on \/orders, not \/orders\/new/);
+});
+
+test("from run: a record with no work left anywhere makes a fresh run, said in the kickoff and the record, not a run told to stop", async () => {
+  const done = buildRunRecord({
+    runId: "run-done",
+    at: "2026-10-07T09:00:00.000Z",
+    knownRoutes: [],
+    steps: ["/", "/orders", "/orders/new", "/stock", "/reports", "/settings"].map((r) => ({
+      session: "default",
+      url: `http://127.0.0.1:3000${r}`,
+      action: "navigate",
+      target: r,
+    })),
+    unexercised: [],
+    forms: [],
+    filled: [],
+    unchosen: [],
+    gaps: [],
+  });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-from-run-fresh-"));
+  try {
+    const file = writeRecord(dir, done);
+    const server = standInServer(path.join(dir, "project"), { crawl: CRAWL_TEXT });
+    let kickoff = "";
+    const run = await runStandIn(["--lanes", "1", "--from-run", file], path.join(dir, "project"), server, (_s, _t, k) => {
+      kickoff = k;
+      return new Scripted([{ text: "Done.", calls: [], usage: use(1) }]);
+    });
+    assert.match(kickoff, /That is not a reason to stop\. Explore the app as a fresh run would, from the landing page/);
+    assert.doesNotMatch(kickoff, /- First|- Last/, "no order to follow");
+    assert.ok(!server.calls.some((c) => c.name === "scout_run_plan"), "no path to take");
+    assert.equal(run.json.record.continuedFresh, true);
+    assert.ok(run.lines.some((l) => /left no recorded work on any route, so this run explores as a fresh one/.test(l)));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

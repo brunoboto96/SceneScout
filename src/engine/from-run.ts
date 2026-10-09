@@ -124,6 +124,8 @@ export interface RunRecord {
    * replayed.
    */
   prefixes?: PrefixNote[];
+  /** Set when the run was asked to continue a record with no work left on any route, and explored as a fresh run instead. */
+  continuedFresh?: true;
 }
 
 /** How a continued run reached one lane's first page. */
@@ -322,6 +324,7 @@ export function readRunRecord(raw: unknown): RunRecord | null {
     )
   )
     return null;
+  if (raw.continuedFresh !== undefined && raw.continuedFresh !== true) return null;
   const followed = raw.followed;
   if (
     followed !== undefined &&
@@ -372,7 +375,15 @@ export function recordFromJson(raw: unknown, what: string): { ok: true; record: 
 
 // ── continue ─────────────────────────────────────────────────────────────────
 
-/** Where a route goes in a continued run: 1 never worked on, 2 worked on with work left, 3 covered. */
+/**
+ * How much work a page may have left and still count as worked through: none.
+ * A visited page is "covered" only when the record says every control on it
+ * was exercised, every form submitted and every option chosen; visiting it is
+ * not enough.
+ */
+export const EXHAUSTED_AT = 0;
+
+/** Where a route goes in a continued run: 1 never worked on, 2 worked on with work left, 3 worked through (nothing recorded is left). */
 export interface ContinueItem {
   route: string;
   tier: 1 | 2 | 3;
@@ -406,7 +417,7 @@ export function continuePlan(record: RunRecord, routesNow: readonly string[]): C
     const work = leftBy.get(id);
     const plan = prefixPlan(record, route);
     const path = plan && "steps" in plan && !plan.direct ? { path: pathLine(plan.steps) } : {};
-    return work && workLeft(work) > 0 ? { route, tier: 2, work, ...path } : { route, tier: 3, ...path };
+    return work && workLeft(work) > EXHAUSTED_AT ? { route, tier: 2, work, ...path } : { route, tier: 3, ...path };
   });
   return [
     ...items.filter((i) => i.tier === 1).sort(byName),
@@ -441,33 +452,59 @@ export function workLine(l: RouteLeft): string {
  * tiers, and on each route with work left exactly what to take first. Given
  * `only`, the routes outside it are left out: a lane is told about its own.
  */
+/**
+ * Whether a continued run has nothing to continue: every route the plan holds
+ * was worked through. The run then explores as a fresh one would, from the
+ * landing page with nothing left out, rather than being told it is done.
+ */
+export function continueExhausted(items: readonly ContinueItem[]): boolean {
+  return !items.some((i) => i.tier !== 3);
+}
+
+/** What a run (or a lane) is told when nothing it was given has recorded work left: explore as a fresh run, and never stop for it. */
+function freshLines(from: string, lane: boolean): string[] {
+  return [
+    `This run continues an earlier one (${from}), which left no recorded work on ${lane ? "your routes" : "any route"}: every control it saw was exercised, every form submitted, every option chosen.`,
+    `That is not a reason to stop. Explore ${lane ? "your routes" : "the app"} as a fresh run would, from ${lane ? "your first route" : "the landing page"}, with nothing left out, and spend the budget.`,
+  ];
+}
+
+/**
+ * The lines a continued run's first message (or a lane's) carries: the three
+ * tiers, and on each route with work left exactly what to take first. Given
+ * `only`, the routes outside it are left out: a lane is told about its own.
+ * When none of its routes has work left, it is told to explore as a fresh run
+ * (freshLines); it is never told there is nothing to do.
+ */
 export function continueLines(items: readonly ContinueItem[], o: { from: string; only?: readonly string[] }): string[] {
   const only = o.only ? new Set(o.only.map(identity)) : null;
   const mine = only ? items.filter((i) => only.has(identity(i.route))) : items;
+  if (mine.length === 0) return [];
+  if (continueExhausted(mine)) return freshLines(o.from, only !== null);
   const tier = (t: 1 | 2 | 3): ContinueItem[] => mine.filter((i) => i.tier === t);
   const [never, left, covered] = [tier(1), tier(2), tier(3)];
-  if (mine.length === 0) return [];
   return [
     `This run continues an earlier one (${o.from}): take the routes in this order, so the run starts where that one left off.`,
     never.length > 0
-      ? `1. Never worked on by it, first: ${listOf(
+      ? `- First, the routes it never worked on: ${listOf(
           never.map((i) => i.route),
           LINES_MAX.routes,
         )}`
-      : `1. It worked on every route listed.`,
+      : "",
     ...(left.length > 0
       ? [
-          `2. Then the routes it left work on, the most first. On each, do this before anything else:`,
+          `- ${never.length > 0 ? "Then" : "First"}, the routes it left work on, the most first. On each, do this before anything else:`,
           ...left.slice(0, LINES_MAX.routes).flatMap((i) => [`   ${workLine(i.work!)}`, ...(i.path ? [`     (it reached this page by: ${i.path})`] : [])]),
           ...(left.length > LINES_MAX.routes ? [`   … and ${left.length - LINES_MAX.routes} more route(s)`] : []),
         ]
-      : [`2. It left no work on the routes it visited.`]),
+      : []),
     covered.length > 0
-      ? `3. Already covered, last: ${listOf(
+      ? `- Last, the routes it worked through (nothing it recorded is left there): ${listOf(
           covered.map((i) => i.route),
           LINES_MAX.routes,
         )}`
       : "",
+    `This is where to start, not the whole job: when the listed work is done, keep exploring as a fresh run would until the budget is spent.`,
   ].filter(Boolean);
 }
 

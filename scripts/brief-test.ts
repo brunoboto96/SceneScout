@@ -15,9 +15,11 @@ import { formatBriefs, landingOf, laneName, MAX_LANES, moduleOf, planLanes, repl
 import {
   buildRunRecord,
   carryForward,
+  continueExhausted,
   continueLines,
   continuePlan,
   foldRecords,
+  EXHAUSTED_AT,
   FROM_RUN_ENV,
   FROM_RUN_MODE_ENV,
   MAX_PREFIX_STEPS,
@@ -317,16 +319,17 @@ test("continue: the message names exactly the forms, options and controls to tak
   const items = continuePlan(recordOf(), ["/orders", "/orders/:id", "/stock", "/reports"]);
   const lines = continueLines(items, { from: "prev/ci.json" });
   assert.match(lines[0], /continues an earlier one \(prev\/ci\.json\)/);
-  assert.equal(lines[1], "1. Never worked on by it, first: /, /reports, /stock");
+  assert.equal(lines[1], "- First, the routes it never worked on: /, /reports, /stock");
   assert.ok(
     lines.includes(`   /orders: choose the options never chosen: select:status → "Archived", "Draft"; controls never exercised: button:export, link:next`),
     lines.join("\n"),
   );
   assert.ok(lines.includes(`   /orders/:id: submit the form(s) never submitted: form#note; a form was filled in and never submitted: fill it and submit it`));
-  assert.ok(!lines.some((l) => l.startsWith("3.")), "nothing covered, no third tier");
+  assert.ok(!lines.some((l) => l.startsWith("- Last")), "nothing worked through, no last tier");
+  assert.match(lines.at(-1)!, /not the whole job: when the listed work is done, keep exploring as a fresh run would until the budget is spent/);
   const lane = continueLines(items, { from: "x", only: ["/stock"] });
-  assert.equal(lane[1], "1. Never worked on by it, first: /stock");
-  assert.equal(lane[2], "2. It left no work on the routes it visited.");
+  assert.equal(lane[1], "- First, the routes it never worked on: /stock");
+  assert.ok(!lane.some((l) => /no work|nothing to do/i.test(l)), lane.join("\n"));
   assert.deepEqual(continueLines(items, { from: "x", only: ["/elsewhere"] }), [], "a lane with none of these routes is told nothing");
   assert.equal(
     workLine({ route: "/a", unexercised: Array.from({ length: 10 }, (_, i) => `k${i}`), forms: [], unchosen: [] }),
@@ -591,4 +594,74 @@ test("path: a continued run is told how the earlier run reached a page it left w
   const lines = continueLines(continuePlan(r, ["/orders", "/orders/42"]), { from: "x" });
   assert.ok(lines.includes('     (it reached this page by: navigate /orders → click role=link[name="Order 42"])'), lines.join("\n"));
   assert.ok(!lines.some((l) => /reached this page by: navigate \/orders\)$/.test(l)), "a page opened by its address gets no path line");
+});
+
+test("depth: a visited page with untouched controls stays high, a worked-through one goes last, and visiting alone covers nothing", () => {
+  // Two visited pages, alike but for the controls left on one: the record's own words, not the visit, decide.
+  const r = recordOf({
+    steps: [
+      { session: "s", url: "http://app.test/a", action: "navigate", target: "/a" },
+      { session: "s", url: "http://app.test/b", action: "navigate", target: "/b" },
+      { session: "s", url: "http://app.test/c", action: "navigate", target: "/c" },
+    ],
+    knownRoutes: ["/a", "/b", "/c"],
+    unexercised: [
+      { route: "/a", keys: ["button:x"] },
+      { route: "/c", keys: ["button:x", "button:y", "button:z"] },
+    ],
+    forms: [],
+    filled: [],
+    unchosen: [],
+  });
+  const items = continuePlan(r, ["/a", "/b", "/c"]);
+  assert.deepEqual(
+    items.map((i) => [i.route, i.tier]),
+    [
+      ["/c", 2],
+      ["/a", 2],
+      ["/b", 3],
+    ],
+    "the most left first; the page with nothing left last",
+  );
+  assert.equal(continueExhausted(items), false);
+  const lines = continueLines(items, { from: "x" });
+  assert.ok(lines.includes("- Last, the routes it worked through (nothing it recorded is left there): /b"), lines.join("\n"));
+  assert.ok(lines[1].startsWith("- First, the routes it left work on"), "with no unvisited route, the work left comes first");
+});
+
+test("depth: a record with nothing left anywhere falls back to a fresh run, and is never told to stop", () => {
+  const done = recordOf({
+    steps: [
+      { session: "s", url: "http://app.test/a", action: "navigate", target: "/a" },
+      { session: "s", url: "http://app.test/b", action: "navigate", target: "/b" },
+    ],
+    knownRoutes: ["/a", "/b"],
+    unexercised: [],
+    forms: [],
+    filled: [],
+    unchosen: [],
+  });
+  const items = continuePlan(done, ["/a", "/b"]);
+  assert.equal(continueExhausted(items), true);
+  const lines = continueLines(items, { from: "prev/ci.json" });
+  assert.match(lines[0], /which left no recorded work on any route/);
+  assert.match(
+    lines[1],
+    /That is not a reason to stop\. Explore the app as a fresh run would, from the landing page, with nothing left out, and spend the budget\./,
+  );
+  // The contrastive record: one control left on /b, and the run continues instead.
+  const one = recordOf({
+    ...{ steps: done.steps.map((s) => ({ session: s.session, url: `http://app.test${s.route}`, action: s.action, target: s.target })) },
+    knownRoutes: ["/a", "/b"],
+    unexercised: [{ route: "/b", keys: ["button:x"] }],
+    forms: [],
+    filled: [],
+    unchosen: [],
+  });
+  const go = continuePlan(one, ["/a", "/b"]);
+  assert.equal(continueExhausted(go), false);
+  assert.match(continueLines(go, { from: "x" })[1], /^- First, the routes it left work on/);
+  // A lane whose own routes are all worked through explores them fresh, while the run as a whole continues.
+  assert.match(continueLines(go, { from: "x", only: ["/a"] })[1], /Explore your routes as a fresh run would, from your first route/);
+  assert.equal(EXHAUSTED_AT, 0, "worked through means nothing left, not little left");
 });
