@@ -179,10 +179,20 @@ function template(over: object): ReportTemplate {
   return parsed.template;
 }
 
+/** Strips tags, repeating until nothing changes (the form the incomplete multi-character sanitisation check recognises). */
+function stripTags(text: string): string {
+  let previous: string;
+  do {
+    previous = text;
+    text = text.replace(/<[^>]*>/g, "");
+  } while (text !== previous);
+  return text;
+}
+
 /** The text of each cell of the rows of the first table in the section, tags stripped. */
 function rowsOf(html: string, section: string): string[][] {
   const body = html.split(`data-section="${section}"`)[1]?.split("</section>")[0] ?? "";
-  return [...body.matchAll(/<tr[^>]*>(.*?)<\/tr>/g)].map((m) => [...m[1].matchAll(/<t[dh][^>]*>(.*?)<\/t[dh]>/g)].map((c) => c[1].replace(/<[^>]+>/g, "")));
+  return [...body.matchAll(/<tr[^>]*>(.*?)<\/tr>/g)].map((m) => [...m[1].matchAll(/<t[dh][^>]*>(.*?)<\/t[dh]>/g)].map((c) => stripTags(c[1])));
 }
 
 test("golden: the same run, template and evidence always render the same page", () => {
