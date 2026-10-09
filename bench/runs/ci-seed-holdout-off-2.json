@@ -1,0 +1,21 @@
+{
+  "app": "holdout",
+  "run": "ci-seed-holdout-off-2",
+  "date": "2026-10-06",
+  "note": "scenescout ci, unseeded control for the seeded schedule (issue 418), commit 3acef27",
+  "findings": [
+    {
+      "title": "Fines page presents a false empty state when its register request is forbidden",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; fines page empty list"
+    },
+    {
+      "title": "Home notices endpoint fails with HTTP 500",
+      "severity": "high",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    }
+  ],
+  "decisions": []
+}

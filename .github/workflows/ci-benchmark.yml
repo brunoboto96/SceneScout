@@ -49,6 +49,15 @@ on:
         description: Model loops that explore at once, sharing the caps. Empty means the CLI's default.
         type: string
         default: ""
+      from-run-record:
+        description: The `record` object of an earlier run's ci.json, as JSON, for this run to start from. Empty means a fresh run.
+        type: string
+        default: ""
+      from-run-mode:
+        description: With from-run-record, continue where that run left off, or replay its route and step order.
+        type: choice
+        options: [continue, replay]
+        default: continue
   workflow_call:
     inputs:
       app:
@@ -98,7 +107,7 @@ permissions:
 
 jobs:
   run:
-    name: scenescout ci · ${{ inputs.app }}${{ inputs.lanes != '' && format(' · {0} lanes', inputs.lanes) || '' }}
+    name: scenescout ci · ${{ inputs.app }}${{ inputs.lanes != '' && format(' · {0} lanes', inputs.lanes) || '' }}${{ inputs.from-run-record != '' && format(' · {0}', inputs.from-run-mode) || '' }}
     runs-on: ubuntu-latest
     # 20 minutes of exploration, up to 4 more to write the report, and the setup before it.
     timeout-minutes: 40
@@ -146,6 +155,32 @@ jobs:
           done
           echo "The $APP app did not answer on port $port:"; cat "$RUNNER_TEMP/app.log"; exit 1
 
+      # Benchmark tooling only, for measuring a run that starts from an earlier
+      # one: the record is written outside the project, so the project's memory
+      # still holds this run's findings alone, which is what bench scores. A
+      # dispatch input only: the weekly run always starts fresh.
+      - name: Write the earlier run's record
+        id: earlier
+        if: ${{ inputs.from-run-record != '' }}
+        env:
+          RECORD: ${{ inputs.from-run-record }}
+          OUT: ${{ runner.temp }}/earlier-run.json
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import { readRunRecord } from "./dist/engine/from-run.js";
+            let given;
+            try { given = JSON.parse(process.env.RECORD); } catch { given = undefined; }
+            const record = readRunRecord(given);
+            if (!record) {
+              console.error("from-run-record must be the record object of a ci.json, as JSON");
+              process.exit(1);
+            }
+            fs.writeFileSync(process.env.OUT, JSON.stringify(record));
+            console.log(`The run starts from run ${record.runId} (its report of ${record.at}): ${record.visited.length} route(s) worked on, ${record.steps.length} step(s).`);
+          '
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
       - name: CI run
         id: run
         uses: ./ci
@@ -162,6 +197,8 @@ jobs:
           max-turns: ${{ inputs.max-turns }}
           max-tokens: ${{ inputs.max-tokens }}
           lanes: ${{ inputs.lanes }}
+          from-run: ${{ steps.earlier.outputs.path }}
+          from-run-mode: ${{ inputs.from-run-record != '' && inputs.from-run-mode || '' }}
           project: ${{ steps.app.outputs.project }}
           upload-artifact: "false"
           upload-sarif: "false"

@@ -1,0 +1,53 @@
+{
+  "app": "demo",
+  "run": "ci-fromrun-demo-u2",
+  "date": "2026-10-07",
+  "note": "Independent run, fresh project, at the two-lane 80-turn default (issue 418 baseline)",
+  "findings": [
+    {
+      "title": "Dashboard weekly chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard action links overlap the bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard All orders overlaps New: bulk import 85%"
+    },
+    {
+      "title": "Customer register spacing uses ad-hoc padding values",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "customers.html padding grid 0%; 10pxx42,14pxx42",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    },
+    {
+      "title": "Export CSV throws when report rows are unavailable",
+      "severity": "medium",
+      "category": "page-error",
+      "evidence": "reports.html Export CSV: Cannot read properties of undefined (reading 'rows')"
+    },
+    {
+      "title": "Settings reports saved without sending a save request",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "settings save: zero network requests; status Saved."
+    },
+    {
+      "title": "Scheduled reports page offers no way back or onward",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables after in-app link from /reports.html"
+    },
+    {
+      "title": "Archived orders filter shows empty results after API failure",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/orders?status=archived 500; orders list empty with no error"
+    }
+  ],
+  "decisions": []
+}

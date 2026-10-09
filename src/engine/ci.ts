@@ -17,6 +17,7 @@ import { markdownCell } from "./check.js";
 import { parseLimitFlag } from "./limits.js";
 import { isWorthALook, redactSecrets, type Finding } from "./memory.js";
 import { SARIF_ANCHOR_FALLBACKS, checkSarifAnchor, sarifLocation } from "./sarif.js";
+import { fromRunLine, resolveFromRun, type FromRun, type FromRunMode, type RunRecord } from "./from-run.js";
 
 // ── options ─────────────────────────────────────────────────────────────────
 
@@ -118,6 +119,9 @@ export const CI_OPTION_NAMES = [
   "show",
   "compare-url",
   "dedup",
+  "from-run",
+  "from-run-mode",
+  "from-run-turns-per-page",
   "sarif-file-anchor",
 ] as const;
 
@@ -155,6 +159,12 @@ export interface CiOptions {
   dedup: DedupMode;
   /** The repository file each SARIF result points at; absent means sarif.ts's default. */
   sarifFileAnchor?: string;
+  /**
+   * Set when the run starts from an earlier run's record (--from-run, else
+   * SCENESCOUT_FROM_RUN): `continue` starts where it left off, `replay`
+   * follows its route and step order again (from-run.ts).
+   */
+  fromRun?: FromRun;
 }
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
@@ -173,7 +183,12 @@ export function checkBaseUrl(raw: string): { ok: true; url: string } | { ok: fal
   return { ok: false, error: "--base-url must be https (plain http only to 127.0.0.1 or localhost): the API key is sent to it" };
 }
 
-export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; options: CiOptions } | { ok: false; error: string } {
+/** `env` is read for the earlier run alone (SCENESCOUT_FROM_RUN, SCENESCOUT_FROM_RUN_MODE), since a flag wins over it. */
+export function parseCiArgs(
+  args: readonly string[],
+  cwd: string,
+  env: Record<string, string | undefined> = {},
+): { ok: true; options: CiOptions } | { ok: false; error: string } {
   const positional: string[] = [];
   const flags = new Map<string, string>();
   for (let i = 0; i < args.length; i++) {
@@ -304,6 +319,12 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
   if (!(DEDUP_MODES as readonly string[]).includes(dedup)) return { ok: false, error: `--dedup must be one of ${DEDUP_MODES.join(", ")}` };
   const anchor = flags.has("sarif-file-anchor") ? checkSarifAnchor(flags.get("sarif-file-anchor")!) : undefined;
   if (anchor && !anchor.ok) return anchor;
+  const runFlags = { path: flags.get("from-run"), mode: flags.get("from-run-mode"), turnsPerPage: flags.get("from-run-turns-per-page") };
+  if (show && (runFlags.path !== undefined || runFlags.mode !== undefined || runFlags.turnsPerPage !== undefined))
+    return { ok: false, error: "--from-run starts an exploration from an earlier run, and --show explores nothing: give one or the other" };
+  // A run asked to show an element explores nothing, so an earlier run named in the environment does not apply to it.
+  const fromRun: ReturnType<typeof resolveFromRun> = show ? { ok: true } : resolveFromRun(runFlags, env);
+  if (!fromRun.ok) return fromRun;
 
   const resolve = (p: string): string => (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) ? p : `${cwd.replace(/[\\/]$/, "")}/${p}`);
   return {
@@ -330,6 +351,7 @@ export function parseCiArgs(args: readonly string[], cwd: string): { ok: true; o
       ...(navTimeout.value !== undefined ? { navTimeoutMs: navTimeout.value } : {}),
       dedup: dedup as DedupMode,
       ...(anchor ? { sarifFileAnchor: anchor.value } : {}),
+      ...(fromRun.fromRun ? { fromRun: { ...fromRun.fromRun, path: resolve(fromRun.fromRun.path), given: fromRun.fromRun.path } } : {}),
     },
   };
 }
@@ -822,10 +844,20 @@ export function ciCaptureKickoff(o: { url: string; show: string }): string {
   return `Target: ${o.url}\nThe element to capture, as the reviewer described it: ${JSON.stringify(o.show)}`;
 }
 
-export function ciKickoff(o: { url: string; projectDir: string; mode: CiMode; level: CiLevel; focus?: string; caps: Caps }): string {
+export function ciKickoff(o: {
+  url: string;
+  projectDir: string;
+  mode: CiMode;
+  level: CiLevel;
+  focus?: string;
+  caps: Caps;
+  /** When the run starts from an earlier one: what it is told about it (from-run.ts continueLines or replayLines). */
+  fromRunLines?: readonly string[];
+}): string {
   return [
     `Run an exploratory test session following the method.`,
     `Target: ${o.url}`,
+    ...(o.fromRunLines ?? []),
     `Project directory (for scout_scan): ${o.projectDir}`,
     `Level: ${o.level}`,
     `Write mode: ${o.mode}`,
@@ -911,6 +943,20 @@ export interface CiResult {
   lanes?: CiLanes;
   /** How findings were deduplicated, and what the judge's calls cost. Absent on a capture run, which files none. */
   dedup?: CiDedup;
+  /** Present when the run started from an earlier run's record: how, and which. */
+  fromRun?: CiFromRun;
+  /** What this run left, for a later run to continue or replay from (from-run.ts); absent when its report was not written. */
+  record?: RunRecord;
+}
+
+/** How a run started from an earlier one, as the summary and ci.json report it. */
+export interface CiFromRun {
+  mode: FromRunMode;
+  /** The ci.json or project directory the record was read from. */
+  source: string;
+  /** The recorded run, and when its report was written. */
+  runId: string;
+  recordAt: string;
 }
 
 /** The dedup judge's calls as the run's client saw them. Their tokens are in the run's usage as well. */
@@ -968,6 +1014,7 @@ export function ciSummaryMarkdown(r: CiResult, secrets: readonly string[] = []):
     `| Model | ${r.provider} ${cell(r.model, secrets)}, effort ${r.effort} |`,
     ...(r.lanes ? [`| Lanes | ${lanesCell(r.lanes, secrets)} |`] : []),
     ...(r.dedup ? [`| Finding dedup | ${dedupLine(r.dedup)} |`] : []),
+    ...(r.fromRun ? [`| Started from | ${cell(fromRunLine(r.fromRun), secrets)} |`] : []),
     `| Usage | ${usageLine(r.spend, r.model, r.endedAt, r.price)} |`,
     ``,
   ];
@@ -989,6 +1036,28 @@ export function ciSummaryMarkdown(r: CiResult, secrets: readonly string[] = []):
   // A capture run writes pictures, not a report.
   lines.push(r.capture ? `The pictures are in shots/.` : `The full report, with repro steps and the gap ledger, is report.md.`, ``);
   return lines.join("\n");
+}
+
+/** A run record with every text a page or a person wrote in it passed through `clean`, as everything else ci.json holds is. */
+function cleanRecord(r: RunRecord, clean: (s: string) => string): RunRecord {
+  const all = (xs: readonly string[]): string[] => xs.map(clean);
+  return {
+    ...r,
+    knownRoutes: all(r.knownRoutes),
+    visited: all(r.visited),
+    lanes: r.lanes.map((l) => ({ session: l.session, routes: all(l.routes) })),
+    steps: r.steps.map((s) => ({ ...s, route: clean(s.route), ...(s.target !== undefined ? { target: clean(s.target) } : {}) })),
+    left: r.left.map((l) => ({
+      ...l,
+      route: clean(l.route),
+      unexercised: all(l.unexercised),
+      forms: all(l.forms),
+      unchosen: l.unchosen.map((d) => ({ key: clean(d.key), options: all(d.options) })),
+    })),
+    gaps: all(r.gaps),
+    ...(r.assigned ? { assigned: all(r.assigned) } : {}),
+    ...(r.prefixes ? { prefixes: r.prefixes.map((n) => ({ ...n, target: clean(n.target), ...(n.why !== undefined ? { why: clean(n.why) } : {}) })) } : {}),
+  };
 }
 
 function lanesCell(l: CiLanes, secrets: readonly string[]): string {
@@ -1083,6 +1152,8 @@ export function ciSummaryJson(r: CiResult, version: string, secrets: readonly st
     })),
     ...(r.capture ? { capture: cleanCapture(r.capture, clean) } : {}),
     ...(r.lanes ? { lanes: lanesJson(r.lanes, clean) } : {}),
+    ...(r.fromRun ? { fromRun: { mode: r.fromRun.mode, source: clean(r.fromRun.source), runId: r.fromRun.runId, recordAt: r.fromRun.recordAt } } : {}),
+    ...(r.record ? { record: cleanRecord(r.record, clean) } : {}),
   };
 }
 

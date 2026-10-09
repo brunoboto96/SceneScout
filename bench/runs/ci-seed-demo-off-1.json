@@ -1,0 +1,33 @@
+{
+  "app": "demo",
+  "run": "ci-seed-demo-off-1",
+  "date": "2026-10-06",
+  "note": "scenescout ci, unseeded control for the seeded schedule (issue 418), commit 3acef27",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Scheduled reports page has no way to proceed",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html → main has 0 interactables"
+    },
+    {
+      "title": "Order form helper text fails contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new-order-form helper text contrast 1.73:1"
+    },
+    {
+      "title": "Optional email field has no persistent accessible label",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "new-order-email input has placeholder-only label"
+    }
+  ],
+  "decisions": []
+}

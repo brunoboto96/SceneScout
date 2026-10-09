@@ -1,0 +1,47 @@
+{
+  "app": "demo",
+  "run": "ci-fromrun-demo-c1",
+  "date": "2026-10-07",
+  "note": "Continued with from-run-mode continue from the record of ci-fromrun-demo-u1",
+  "findings": [
+    {
+      "title": "Order notes report “Saved” after the save is refused",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "PUT /api/orders/1042 403 → status \"Saved.\""
+    },
+    {
+      "title": "Archived orders failure is presented as an empty list",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/orders?status=archived 500 → empty orders list"
+    },
+    {
+      "title": "Clerk can approve an order through the API",
+      "severity": "high",
+      "category": "permission-leak",
+      "evidence": "POST /api/orders/1038/approve 200 as Clerk"
+    },
+    {
+      "title": "Dashboard chart image fails to load and All orders is obstructed",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "Dashboard /: dash-chart broken /img/weekly-chart.png; dash-all-orders covered by dash-new-badge"
+    },
+    {
+      "title": "Scheduled reports page has no way to navigate or act",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders main text with 0 interactables"
+    },
+    {
+      "title": "Audit log spacing uses repeated off-grid padding values",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "audit.html design audit: 100% padding off 4px grid; 10px×40, 14px×40",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    }
+  ],
+  "decisions": []
+}

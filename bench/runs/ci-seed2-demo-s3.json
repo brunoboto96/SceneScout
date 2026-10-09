@@ -1,0 +1,51 @@
+{
+  "app": "demo",
+  "run": "ci-seed2-demo-s3",
+  "date": "2026-10-07",
+  "note": "issue 418 re-measure at the two-lane default, seed c418c, memory carrying earlier seeded runs' schedules",
+  "findings": [
+    {
+      "title": "Scheduled reports page has no way to proceed",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders zero interactables"
+    },
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "network",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Export CSV crashes on missing rows",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports-export-csv TypeError reading rows"
+    },
+    {
+      "title": "Optional confirmation email is labelled only by placeholder",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new.html textbox new-order-email has placeholder-only label"
+    },
+    {
+      "title": "Pinned order sticky bar covers Save notes control",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order.html stickybar covers order-save button"
+    },
+    {
+      "title": "Dashboard order links overlap the bulk-import badge",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "dashboard e184 All orders overlaps e185 New: bulk import 85%"
+    },
+    {
+      "title": "Scheduled reports page offers no clear next step",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "reports-scheduled.html has 0 first-viewport interactive elements"
+    }
+  ],
+  "decisions": []
+}

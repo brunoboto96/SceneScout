@@ -1,0 +1,8 @@
+{
+  "app": "demo",
+  "run": "ci-fromrun-small-demo-c3",
+  "date": "2026-10-07",
+  "note": "Continued with the path prefix from the record of ci-fromrun-small-demo-c2, one lane and 18 turns",
+  "findings": [],
+  "decisions": []
+}

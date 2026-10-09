@@ -94,6 +94,18 @@ inputs:
     description: judge or rule. judge (the default when empty) also asks the run's model, at the lowest effort its API takes, whether a finding the rule keeps apart is one already open on the same page, sending the two findings' titles, categories and evidence, and the page's path; rule asks nothing.
     required: false
     default: ""
+  from-run:
+    description: Start from an earlier run's record - its ci.json, or a project directory - relative to working-directory. With from-run-mode continue (the default) the run takes first the routes it never worked on, then the ones it left work on, told which controls, forms and options to take first, then the rest; with replay it follows that run's routes and steps in order. Empty means SCENESCOUT_FROM_RUN, else a fresh run.
+    required: false
+    default: ""
+  from-run-mode:
+    description: With from-run - continue (the default when empty) or replay.
+    required: false
+    default: ""
+  from-run-turns-per-page:
+    description: With from-run in continue mode - model turns budgeted per page, which caps how many pages the run (or each lane) takes on. Empty means 7.
+    required: false
+    default: ""
   sarif-file-anchor:
     description: The repository file, relative to the repository root, that each ci.sarif result points at (code scanning keeps only results located in a repository file). Empty means the workflow file that is running.
     required: false
