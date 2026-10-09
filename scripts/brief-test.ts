@@ -15,6 +15,9 @@ import { formatBriefs, landingOf, laneName, MAX_LANES, moduleOf, planLanes, repl
 import {
   buildRunRecord,
   carryForward,
+  DEFAULT_TURNS_PER_PAGE,
+  pageCap,
+  takenPages,
   continueExhausted,
   continueLines,
   continuePlan,
@@ -184,15 +187,19 @@ test("from run: the path option, else SCENESCOUT_FROM_RUN, else none; the mode o
   const r = (o: { path?: string; mode?: string }, env: Record<string, string> = {}) => resolveFromRun(o, env);
   assert.deepEqual(r({}), { ok: true }, "a fresh run unless asked");
   assert.deepEqual(r({}, { [FROM_RUN_ENV]: "  " }), { ok: true }, "an empty variable is unset");
-  assert.deepEqual(r({ path: "a/ci.json" }), { ok: true, fromRun: { path: "a/ci.json", mode: "continue" } });
-  assert.deepEqual(r({}, { [FROM_RUN_ENV]: "env.json" }), { ok: true, fromRun: { path: "env.json", mode: "continue" } });
-  assert.deepEqual(r({ path: "flag.json" }, { [FROM_RUN_ENV]: "env.json" }), { ok: true, fromRun: { path: "flag.json", mode: "continue" } }, "the option wins");
+  assert.deepEqual(r({ path: "a/ci.json" }), { ok: true, fromRun: { path: "a/ci.json", mode: "continue", turnsPerPage: 7 } });
+  assert.deepEqual(r({}, { [FROM_RUN_ENV]: "env.json" }), { ok: true, fromRun: { path: "env.json", mode: "continue", turnsPerPage: 7 } });
   assert.deepEqual(
-    r({ path: "p", mode: "replay" }, { [FROM_RUN_MODE_ENV]: "continue" }),
-    { ok: true, fromRun: { path: "p", mode: "replay" } },
+    r({ path: "flag.json" }, { [FROM_RUN_ENV]: "env.json" }),
+    { ok: true, fromRun: { path: "flag.json", mode: "continue", turnsPerPage: 7 } },
     "the option wins",
   );
-  assert.deepEqual(r({ path: "p" }, { [FROM_RUN_MODE_ENV]: "replay" }), { ok: true, fromRun: { path: "p", mode: "replay" } });
+  assert.deepEqual(
+    r({ path: "p", mode: "replay" }, { [FROM_RUN_MODE_ENV]: "continue" }),
+    { ok: true, fromRun: { path: "p", mode: "replay", turnsPerPage: 7 } },
+    "the option wins",
+  );
+  assert.deepEqual(r({ path: "p" }, { [FROM_RUN_MODE_ENV]: "replay" }), { ok: true, fromRun: { path: "p", mode: "replay", turnsPerPage: 7 } });
   // The mode is read only for a run that has an earlier one: a stray variable stops nothing.
   assert.deepEqual(r({}, { [FROM_RUN_MODE_ENV]: "sideways" }), { ok: true });
   const err = (o: { path?: string; mode?: string }, env: Record<string, string> = {}): string => {
@@ -664,4 +671,77 @@ test("depth: a record with nothing left anywhere falls back to a fresh run, and 
   // A lane whose own routes are all worked through explores them fresh, while the run as a whole continues.
   assert.match(continueLines(go, { from: "x", only: ["/a"] })[1], /Explore your routes as a fresh run would, from your first route/);
   assert.equal(EXHAUSTED_AT, 0, "worked through means nothing left, not little left");
+});
+
+// ── the page cap ─────────────────────────────────────────────────────────────
+
+/** A record that worked on six pages and left work on each, the most on /p1. */
+const sixPages = (assigned?: string[]): RunRecord => ({
+  ...recordOf({
+    steps: ["/p1", "/p2", "/p3", "/p4", "/p5", "/p6"].map((r) => ({ session: "s", url: `http://app.test${r}`, action: "navigate", target: r })),
+    knownRoutes: [],
+    unexercised: ["/p1", "/p2", "/p3", "/p4", "/p5", "/p6"].map((r, i) => ({ route: r, keys: Array.from({ length: 6 - i }, (_, k) => `button:k${k}`) })),
+    forms: [],
+    filled: [],
+    unchosen: [],
+  }),
+  ...(assigned ? { assigned } : {}),
+});
+
+test("page cap: a big budget takes many pages, a small one few, from the turns per page", () => {
+  assert.equal(DEFAULT_TURNS_PER_PAGE, 7);
+  assert.equal(pageCap(18, DEFAULT_TURNS_PER_PAGE), 2, "18 turns: two pages");
+  assert.equal(pageCap(80, DEFAULT_TURNS_PER_PAGE), 11, "80 turns: eleven");
+  assert.equal(pageCap(40, DEFAULT_TURNS_PER_PAGE), 5, "a lane's share of 80 over two lanes: five");
+  assert.equal(pageCap(3, DEFAULT_TURNS_PER_PAGE), 1, "never none");
+  assert.equal(pageCap(18, 3), 6, "the setting moves it");
+  const items = continuePlan(sixPages(), []);
+  // The contrastive pair: the same record, two budgets.
+  assert.deepEqual(takenPages(items, pageCap(80, 7)), ["/p1", "/p2", "/p3", "/p4", "/p5", "/p6"]);
+  assert.deepEqual(takenPages(items, pageCap(18, 7)), ["/p1", "/p2"]);
+  const small = continueLines(items, { from: "x", cap: 2 });
+  assert.match(small[0], /Take on these 2 pages, in order, and work each deeply before anything else: .* Do not spread out over other pages\./);
+  assert.deepEqual(
+    small.slice(1, 3).map((l) => l.trim().split(":")[0]),
+    ["/p1", "/p2"],
+  );
+  assert.equal(small.at(-1), "Only once those are done, with budget left, take the next pages in this order: /p3, /p4, /p5, /p6.");
+  const big = continueLines(items, { from: "x", cap: 11 });
+  assert.match(big[0], /these 6 pages/);
+  assert.match(big.at(-1)!, /keep exploring them and the pages around them until the budget is spent/);
+  assert.deepEqual(takenPages(items, 2, ["/p4", "/p6"]), ["/p4", "/p6"], "a lane takes its own first pages");
+});
+
+test("page cap: the next continued run picks up where the last one's cap ended", () => {
+  // Run 1 took /p1 and /p2; its record carries them as assigned.
+  const second = continuePlan(sixPages(["/p1", "/p2"]), []);
+  assert.deepEqual(takenPages(second, 2), ["/p3", "/p4"]);
+  // Contrastive: the same record without the note starts again at the top.
+  assert.deepEqual(takenPages(continuePlan(sixPages(), []), 2), ["/p1", "/p2"]);
+  // Carried along the chain: after /p3 and /p4, the third run takes /p5 and /p6.
+  const chained = carryForward(sixPages(["/p1", "/p2"]), { ...sixPages(), runId: "run-2", assigned: ["/p3", "/p4"] });
+  assert.deepEqual(chained.assigned, ["/p1", "/p2", "/p3", "/p4"]);
+  assert.deepEqual(takenPages(continuePlan(chained, []), 2), ["/p5", "/p6"]);
+  // Once every page with work has been given out, they come round again by the work left.
+  assert.deepEqual(takenPages(continuePlan(sixPages(["/p1", "/p2", "/p3", "/p4", "/p5", "/p6"]), []), 2), ["/p1", "/p2"]);
+  assert.equal(readRunRecord({ ...sixPages(), assigned: [1] }), null);
+});
+
+test("page cap: the turns per page are the option, else the variable, else 7, and only with a run to continue", () => {
+  assert.deepEqual(resolveFromRun({ path: "p" }, {}), { ok: true, fromRun: { path: "p", mode: "continue", turnsPerPage: 7 } });
+  assert.deepEqual(resolveFromRun({ path: "p" }, { SCENESCOUT_FROM_RUN_TURNS_PER_PAGE: "4" }), {
+    ok: true,
+    fromRun: { path: "p", mode: "continue", turnsPerPage: 4 },
+  });
+  assert.deepEqual(resolveFromRun({ path: "p", turnsPerPage: "9" }, { SCENESCOUT_FROM_RUN_TURNS_PER_PAGE: "4" }), {
+    ok: true,
+    fromRun: { path: "p", mode: "continue", turnsPerPage: 9 },
+  });
+  for (const bad of ["0", "1.5", "x", "201"]) {
+    const r = resolveFromRun({ path: "p", turnsPerPage: bad }, {});
+    assert.ok(!r.ok && /--from-run-turns-per-page must be a whole number from 1 to 200/.test(r.error), bad);
+  }
+  const alone = resolveFromRun({ turnsPerPage: "5" }, {});
+  assert.ok(!alone.ok && /--from-run-turns-per-page applies to a run started from an earlier one/.test(alone.error));
+  assert.deepEqual(resolveFromRun({}, { SCENESCOUT_FROM_RUN_TURNS_PER_PAGE: "x" }), { ok: true }, "read only with a run to continue");
 });

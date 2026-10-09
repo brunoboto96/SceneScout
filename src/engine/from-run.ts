@@ -27,6 +27,18 @@ import { normalizePath } from "./fingerprint.js";
 export const FROM_RUN_ENV = "SCENESCOUT_FROM_RUN";
 /** How to use it: `continue` (the default) or `replay`. */
 export const FROM_RUN_MODE_ENV = "SCENESCOUT_FROM_RUN_MODE";
+/** How many model turns a continued run budgets for each page it takes on: what sets its page cap (pageCap). */
+export const FROM_RUN_TURNS_PER_PAGE_ENV = "SCENESCOUT_FROM_RUN_TURNS_PER_PAGE";
+
+/**
+ * Turns a continued run spends on one page by default: enough to exercise its
+ * controls, submit its forms and try its options, measured against what a run
+ * did with 18 turns (two to three pages worked closely). 18 turns take 2
+ * pages; a two-lane run of 80 turns takes 5 per lane.
+ */
+export const DEFAULT_TURNS_PER_PAGE = 7;
+/** The bounds of the setting. */
+export const TURNS_PER_PAGE_RANGE = { min: 1, max: 200 } as const;
 
 /**
  * `continue`: start where the earlier run left off. `replay`: follow its route
@@ -43,6 +55,8 @@ export interface FromRun {
   mode: FromRunMode;
   /** The path as it was given, when `path` was resolved from it: what reports name, so they carry no local directory. */
   given?: string;
+  /** For continue: turns budgeted per page, which caps how many pages the run takes on (pageCap). */
+  turnsPerPage: number;
 }
 
 /**
@@ -53,22 +67,43 @@ export interface FromRun {
  * given as an option without a path is refused, since it would do nothing.
  */
 export function resolveFromRun(
-  option: { path?: string; mode?: string },
+  option: { path?: string; mode?: string; turnsPerPage?: string },
   env: Record<string, string | undefined>,
-  names: { path: string; mode: string } = { path: "--from-run", mode: "--from-run-mode" },
+  names: { path: string; mode: string; turnsPerPage?: string } = { path: "--from-run", mode: "--from-run-mode", turnsPerPage: "--from-run-turns-per-page" },
 ): { ok: true; fromRun?: FromRun } | { ok: false; error: string } {
+  const perPageName = names.turnsPerPage ?? "--from-run-turns-per-page";
   if (option.path !== undefined && option.path.trim() === "") return { ok: false, error: `${names.path} needs a ci.json or a project directory` };
   const fromEnv = (env[FROM_RUN_ENV] ?? "").trim();
   const runPath = option.path?.trim() ?? (fromEnv || undefined);
   if (runPath === undefined) {
     if (option.mode !== undefined) return { ok: false, error: `${names.mode} applies to a run started from an earlier one: give ${names.path} as well` };
+    if (option.turnsPerPage !== undefined)
+      return { ok: false, error: `${perPageName} applies to a run started from an earlier one: give ${names.path} as well` };
     return { ok: true };
   }
   const modeEnv = (env[FROM_RUN_MODE_ENV] ?? "").trim();
   const [raw, source] = option.mode !== undefined ? [option.mode.trim(), names.mode] : modeEnv ? [modeEnv, FROM_RUN_MODE_ENV] : [DEFAULT_FROM_RUN_MODE, ""];
   if (!(FROM_RUN_MODES as readonly string[]).includes(raw))
     return { ok: false, error: `${source} must be one of ${FROM_RUN_MODES.join(", ")} (got ${JSON.stringify(raw)})` };
-  return { ok: true, fromRun: { path: runPath, mode: raw as FromRunMode } };
+  const perPageEnv = (env[FROM_RUN_TURNS_PER_PAGE_ENV] ?? "").trim();
+  const [perRaw, perSource] =
+    option.turnsPerPage !== undefined
+      ? [option.turnsPerPage.trim(), perPageName]
+      : perPageEnv
+        ? [perPageEnv, FROM_RUN_TURNS_PER_PAGE_ENV]
+        : [String(DEFAULT_TURNS_PER_PAGE), ""];
+  const perPage = Number(perRaw);
+  if (!/^\d+$/.test(perRaw) || perPage < TURNS_PER_PAGE_RANGE.min || perPage > TURNS_PER_PAGE_RANGE.max)
+    return {
+      ok: false,
+      error: `${perSource} must be a whole number from ${TURNS_PER_PAGE_RANGE.min} to ${TURNS_PER_PAGE_RANGE.max} (got ${JSON.stringify(perRaw)})`,
+    };
+  return { ok: true, fromRun: { path: runPath, mode: raw as FromRunMode, turnsPerPage: perPage } };
+}
+
+/** How many pages a continued run (or one lane of it) takes on: its turns over the turns per page, at least one. */
+export function pageCap(turns: number, turnsPerPage: number): number {
+  return Math.max(1, Math.floor(turns / Math.max(1, turnsPerPage)));
 }
 
 // ── the record ───────────────────────────────────────────────────────────────
@@ -126,6 +161,12 @@ export interface RunRecord {
   prefixes?: PrefixNote[];
   /** Set when the run was asked to continue a record with no work left on any route, and explored as a fresh run instead. */
   continuedFresh?: true;
+  /**
+   * The pages continued runs in this chain were given to work (their page
+   * cap's worth each), so the next run takes the next pages in order rather
+   * than the same ones again. Carried forward along the chain.
+   */
+  assigned?: string[];
 }
 
 /** How a continued run reached one lane's first page. */
@@ -261,6 +302,9 @@ export function carryForward(earlier: RunRecord, current: RunRecord): RunRecord 
     knownRoutes: uniqueBy([...current.knownRoutes, ...earlier.knownRoutes], identity).slice(0, MAX_RECORD_ROUTES),
     visited: uniqueBy([...current.visited, ...earlier.visited], identity).slice(0, MAX_RECORD_ROUTES),
     left: uniqueBy([...current.left, ...earlier.left.filter((l) => !worked.has(identity(l.route)))], (l) => identity(l.route)).slice(0, MAX_RECORD_ROUTES),
+    ...(current.assigned || earlier.assigned
+      ? { assigned: uniqueBy([...(earlier.assigned ?? []), ...(current.assigned ?? [])], identity).slice(0, MAX_RECORD_ROUTES) }
+      : {}),
   };
 }
 
@@ -325,6 +369,7 @@ export function readRunRecord(raw: unknown): RunRecord | null {
   )
     return null;
   if (raw.continuedFresh !== undefined && raw.continuedFresh !== true) return null;
+  if (raw.assigned !== undefined && !isStrings(raw.assigned)) return null;
   const followed = raw.followed;
   if (
     followed !== undefined &&
@@ -391,6 +436,8 @@ export interface ContinueItem {
   work?: RouteLeft;
   /** For a page the earlier run reached by acting on another page: how it got there (pathLine), so the run can get there the same way. */
   path?: string;
+  /** Set when an earlier continued run in the chain was already given this page (RunRecord.assigned): it goes after the pages none was. */
+  assigned?: true;
 }
 
 /**
@@ -419,11 +466,28 @@ export function continuePlan(record: RunRecord, routesNow: readonly string[]): C
     const path = plan && "steps" in plan && !plan.direct ? { path: pathLine(plan.steps) } : {};
     return work && workLeft(work) > EXHAUSTED_AT ? { route, tier: 2, work, ...path } : { route, tier: 3, ...path };
   });
-  return [
-    ...items.filter((i) => i.tier === 1).sort(byName),
-    ...items.filter((i) => i.tier === 2).sort((a, b) => workLeft(b.work!) - workLeft(a.work!) || byName(a, b)),
-    ...items.filter((i) => i.tier === 3).sort(byName),
+  // Pages an earlier continued run was already given go after the ones none was, so a chain moves on down the order;
+  // once every page with work has been given out, they come round again by the work left.
+  const given = new Set((record.assigned ?? []).map(identity));
+  for (const i of items) if (i.tier !== 3 && given.has(identity(i.route))) i.assigned = true;
+  const open = (fresh: boolean): ContinueItem[] => [
+    ...items.filter((i) => i.tier === 1 && !i.assigned === fresh).sort(byName),
+    ...items.filter((i) => i.tier === 2 && !i.assigned === fresh).sort((a, b) => workLeft(b.work!) - workLeft(a.work!) || byName(a, b)),
   ];
+  return [...open(true), ...open(false), ...items.filter((i) => i.tier === 3).sort(byName)];
+}
+
+/**
+ * The pages a continued run (or a lane, given `only`) takes on: the first
+ * `cap` in the plan's order that have work left or were never worked on.
+ * Empty when there are none (continueExhausted).
+ */
+export function takenPages(items: readonly ContinueItem[], cap: number, only?: readonly string[]): string[] {
+  const mine = only ? new Set(only.map(identity)) : null;
+  return items
+    .filter((i) => i.tier !== 3 && (!mine || mine.has(identity(i.route))))
+    .slice(0, Math.max(0, cap))
+    .map((i) => i.route);
 }
 
 /** The most routes, and controls per route, a continued run's message spells out. */
@@ -453,6 +517,32 @@ export function workLine(l: RouteLeft): string {
  * `only`, the routes outside it are left out: a lane is told about its own.
  */
 /**
+ * A capped continued run's lines: only its first `cap` pages with work, each
+ * to be worked deeply, and the pages after them in order for when those are
+ * done. A run with few turns that spreads over every page files little on any.
+ */
+function cappedLines(mine: readonly ContinueItem[], from: string, cap: number): string[] {
+  const open = mine.filter((i) => i.tier !== 3);
+  const taken = open.slice(0, Math.max(1, cap));
+  const next = open.slice(taken.length);
+  return [
+    `This run continues an earlier one (${from}). Take on ${taken.length === 1 ? "this page" : `these ${taken.length} pages`}, in order, and work each deeply before anything else: every control never exercised, every form never submitted (fill it and submit it), every option never chosen. Do not spread out over other pages.`,
+    ...taken.flatMap((i) => [
+      i.tier === 1 || !i.work
+        ? `   ${i.route}: never worked on by it: exercise every control, submit every form, choose every option.`
+        : `   ${workLine(i.work)}`,
+      ...(i.path ? [`     (it reached this page by: ${i.path})`] : []),
+    ]),
+    next.length > 0
+      ? `Only once those are done, with budget left, take the next pages in this order: ${listOf(
+          next.map((i) => i.route),
+          LINES_MAX.routes,
+        )}.`
+      : `Once those are done, keep exploring them and the pages around them until the budget is spent.`,
+  ];
+}
+
+/**
  * Whether a continued run has nothing to continue: every route the plan holds
  * was worked through. The run then explores as a fresh one would, from the
  * landing page with nothing left out, rather than being told it is done.
@@ -476,11 +566,12 @@ function freshLines(from: string, lane: boolean): string[] {
  * When none of its routes has work left, it is told to explore as a fresh run
  * (freshLines); it is never told there is nothing to do.
  */
-export function continueLines(items: readonly ContinueItem[], o: { from: string; only?: readonly string[] }): string[] {
+export function continueLines(items: readonly ContinueItem[], o: { from: string; only?: readonly string[]; cap?: number }): string[] {
   const only = o.only ? new Set(o.only.map(identity)) : null;
   const mine = only ? items.filter((i) => only.has(identity(i.route))) : items;
   if (mine.length === 0) return [];
   if (continueExhausted(mine)) return freshLines(o.from, only !== null);
+  if (o.cap !== undefined) return cappedLines(mine, o.from, o.cap);
   const tier = (t: 1 | 2 | 3): ContinueItem[] => mine.filter((i) => i.tier === t);
   const [never, left, covered] = [tier(1), tier(2), tier(3)];
   return [

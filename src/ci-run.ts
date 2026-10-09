@@ -94,6 +94,9 @@ import {
   continueLines,
   continueExhausted,
   continuePlan,
+  DEFAULT_TURNS_PER_PAGE,
+  pageCap,
+  takenPages,
   fromRunLine,
   isPattern,
   pathLine,
@@ -662,6 +665,8 @@ function thisRunsRecord(o: {
   prefixes?: readonly PrefixNote[];
   /** The run continued a record with no work left, and explored as a fresh run. */
   continuedFresh?: boolean;
+  /** The pages a continued run was given to work. */
+  assigned?: readonly string[];
   log: (line: string) => void;
 }): RunRecord | undefined {
   let own: RunRecord | undefined;
@@ -681,6 +686,7 @@ function thisRunsRecord(o: {
     ...own,
     ...(o.prefixes && o.prefixes.length > 0 ? { prefixes: [...o.prefixes] } : {}),
     ...(o.continuedFresh ? { continuedFresh: true as const } : {}),
+    ...(o.assigned && o.assigned.length > 0 ? { assigned: [...new Set(o.assigned)] } : {}),
   };
   return o.continued ? carryForward(o.continued, withPrefixes) : withPrefixes;
 }
@@ -1015,6 +1021,12 @@ export async function runCi(
       // A record with no work left anywhere: explore as a fresh run (the stable split, the landing page, no path), and say so.
       const continuedFresh = !!planItems && continueExhausted(planItems);
       const items = continuedFresh ? undefined : planItems;
+      // How many pages a continued run takes on, from its budget (from-run.ts pageCap): each lane's share of the turns, or the run's.
+      const perPage = options.fromRun?.turnsPerPage ?? DEFAULT_TURNS_PER_PAGE;
+      const cap = items ? pageCap(options.caps.turns, perPage) : undefined;
+      const laneCap = items ? pageCap(Math.floor(options.caps.turns / Math.max(1, options.lanes)), perPage) : undefined;
+      // The pages this run was given, kept in its record so the next continued run takes the next ones.
+      const assigned: string[] = [];
       if (options.fromRun && earlier && !options.show) {
         runFromRun = { mode: options.fromRun.mode, source: from, runId: earlier.runId, recordAt: earlier.at };
         log(`From run: ${fromRunLine(runFromRun)}.`);
@@ -1043,8 +1055,13 @@ export async function runCi(
         const tools = ciTools(listed, options.show ? CAPTURE_TOOLS : undefined);
         const system = options.show ? ciCaptureSystemPrompt() : ciSystemPrompt(loadPlaybook(packageRoot), options);
         const reached = reach && items && !options.show ? await reach(PLANNER_SESSION, items[0]?.route, (l) => log(`From run: ${l}`)) : [];
+        if (items && cap !== undefined) {
+          const mine = takenPages(items, cap);
+          assigned.push(...mine);
+          log(`From run: takes on ${mine.join(", ")} (${cap} page(s) at ${perPage} turns a page).`);
+        }
         const fromRun = planItems
-          ? [...continueLines(planItems, { from }), ...reached]
+          ? [...continueLines(planItems, { from, ...(cap !== undefined ? { cap } : {}) }), ...reached]
           : replay && replay.length > 0
             ? replayLines(replay[0], { from })
             : undefined;
@@ -1093,7 +1110,14 @@ export async function runCi(
         // A replayed lane is told its own session's steps: the plan keeps the recorded sessions' order.
         const replayed = new Map(replay ? lanePlan.lanes.map((l, i) => [l.session, replay[i]] as const) : []);
         const laneLines = planItems
-          ? (lane: CiLane): readonly string[] => continueLines(planItems, { from, only: lane.routes })
+          ? (lane: CiLane): readonly string[] => {
+              if (items && laneCap !== undefined) {
+                const mine = takenPages(items, laneCap, lane.routes);
+                assigned.push(...mine);
+                log(`From run: lane ${lane.session} takes on ${mine.join(", ") || "no page with work left"} (${laneCap} page(s) at ${perPage} turns a page).`);
+              }
+              return continueLines(planItems, { from, only: lane.routes, ...(laneCap !== undefined ? { cap: laneCap } : {}) });
+            }
           : replay
             ? (lane: CiLane): readonly string[] => replayLines(replayed.get(lane.session)!, { from })
             : undefined;
@@ -1137,6 +1161,7 @@ export async function runCi(
             continued: earlier && options.fromRun?.mode === "continue" ? earlier : undefined,
             prefixes,
             continuedFresh,
+            assigned,
             log,
           });
       }

@@ -209,6 +209,7 @@ test("options: every option is read, in both spellings", () => {
       "--from-run=prev/ci.json",
       "--from-run-mode",
       "replay",
+      "--from-run-turns-per-page=5",
     ],
     "/work",
   );
@@ -230,7 +231,7 @@ test("options: every option is read, in both spellings", () => {
     storageStatePath: "/work/auth/user.json",
     browser: "webkit",
     dedup: "rule",
-    fromRun: { path: "/work/prev/ci.json", mode: "replay", given: "prev/ci.json" },
+    fromRun: { path: "/work/prev/ci.json", mode: "replay", given: "prev/ci.json", turnsPerPage: 5 },
   });
 });
 
@@ -3395,12 +3396,17 @@ test("from run: --from-run, else SCENESCOUT_FROM_RUN; the mode likewise; refused
   };
   assert.equal(ok([]), undefined, "a fresh run unless asked: behaviour unchanged");
   // Read relative to the working directory; named as given, so no report carries a local directory.
-  assert.deepEqual(ok(["--from-run", "prev/ci.json"]), { path: "/work/prev/ci.json", mode: "continue", given: "prev/ci.json" });
-  assert.deepEqual(ok([], { [FROM_RUN_ENV]: "/runs/7" }), { path: "/runs/7", mode: "continue", given: "/runs/7" });
-  assert.deepEqual(ok(["--from-run=/a"], { [FROM_RUN_ENV]: "/b", [FROM_RUN_MODE_ENV]: "replay" }), { path: "/a", mode: "replay", given: "/a" });
+  assert.deepEqual(ok(["--from-run", "prev/ci.json"]), { path: "/work/prev/ci.json", mode: "continue", given: "prev/ci.json", turnsPerPage: 7 });
+  assert.deepEqual(ok([], { [FROM_RUN_ENV]: "/runs/7" }), { path: "/runs/7", mode: "continue", given: "/runs/7", turnsPerPage: 7 });
+  assert.deepEqual(ok(["--from-run=/a"], { [FROM_RUN_ENV]: "/b", [FROM_RUN_MODE_ENV]: "replay" }), {
+    path: "/a",
+    mode: "replay",
+    given: "/a",
+    turnsPerPage: 7,
+  });
   assert.deepEqual(
     ok(["--from-run=/a", "--from-run-mode=continue"], { [FROM_RUN_MODE_ENV]: "replay" }),
-    { path: "/a", mode: "continue", given: "/a" },
+    { path: "/a", mode: "continue", given: "/a", turnsPerPage: 7 },
     "the option wins",
   );
   assert.equal(ok([], { [FROM_RUN_MODE_ENV]: "sideways" }), undefined, "a stray mode stops nothing");
@@ -3476,9 +3482,11 @@ test("from run: a fresh one-loop run plans nothing and is told nothing; a contin
     "a continued run crawls first, to know today's routes",
   );
   const items = continuePlan(earlier, ["/", "/orders", "/orders/new", "/stock", "/reports", "/settings"]);
-  const lines = continueLines(items, { from: cont.file });
+  // 80 turns at 7 a page: up to eleven pages, here all seven with work, never worked on first.
+  const lines = continueLines(items, { from: cont.file, cap: 11 });
   assert.ok(cont.kickoff.includes(lines.join("\n")), cont.kickoff);
-  assert.match(cont.kickoff, /- First, the routes it never worked on: \/, \/orders\/new, \/people, \/reports, \/settings, \/stock/);
+  assert.match(cont.kickoff, /Take on these 7 pages, in order/);
+  assert.match(cont.kickoff, /   \/: never worked on by it[\s\S]*   \/stock: never worked on by it/);
   assert.match(cont.kickoff, /\/orders: submit the form\(s\) never submitted: form#new-order/);
   assert.deepEqual(cont.run.json.fromRun, { mode: "continue", source: cont.file, runId: "run-earlier", recordAt: "2026-10-07T09:00:00.000Z" });
   assert.match(cont.run.summary, /\| Started from \| continued from the run recorded in .*ci\.json \(its report of 2026-10-07T09:00:00\.000Z\) \|/);
@@ -3702,6 +3710,30 @@ test("from run: a record with no work left anywhere makes a fresh run, said in t
     assert.ok(!server.calls.some((c) => c.name === "scout_run_plan"), "no path to take");
     assert.equal(run.json.record.continuedFresh, true);
     assert.ok(run.lines.some((l) => /left no recorded work on any route, so this run explores as a fresh one/.test(l)));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("from run: a continued run takes on its budget's worth of pages, says which, and records them for the next run", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-from-run-cap-"));
+  try {
+    const file = writeRecord(dir, earlierRecord());
+    const server = standInServer(path.join(dir, "project"), { crawl: CRAWL_TEXT });
+    let kickoff = "";
+    // 14 turns at 7 a page: two pages.
+    const run = await runStandIn(["--lanes", "1", "--max-turns", "14", "--from-run", file], path.join(dir, "project"), server, (_s, _t, k) => {
+      kickoff = k;
+      return new Scripted([{ text: "Done.", calls: [], usage: use(1) }]);
+    });
+    assert.match(kickoff, /Take on these 2 pages, in order, and work each deeply before anything else/);
+    assert.match(kickoff, /Do not spread out over other pages\./);
+    assert.match(kickoff, /Only once those are done, with budget left, take the next pages in this order: /);
+    assert.deepEqual(run.json.record.assigned, ["/", "/orders/new"]);
+    assert.ok(
+      run.lines.some((l) => l === "From run: takes on /, /orders/new (2 page(s) at 7 turns a page)."),
+      run.lines.join("\n"),
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

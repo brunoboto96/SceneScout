@@ -121,6 +121,7 @@ export const CI_OPTION_NAMES = [
   "dedup",
   "from-run",
   "from-run-mode",
+  "from-run-turns-per-page",
   "sarif-file-anchor",
 ] as const;
 
@@ -318,8 +319,8 @@ export function parseCiArgs(
   if (!(DEDUP_MODES as readonly string[]).includes(dedup)) return { ok: false, error: `--dedup must be one of ${DEDUP_MODES.join(", ")}` };
   const anchor = flags.has("sarif-file-anchor") ? checkSarifAnchor(flags.get("sarif-file-anchor")!) : undefined;
   if (anchor && !anchor.ok) return anchor;
-  const runFlags = { path: flags.get("from-run"), mode: flags.get("from-run-mode") };
-  if (show && (runFlags.path !== undefined || runFlags.mode !== undefined))
+  const runFlags = { path: flags.get("from-run"), mode: flags.get("from-run-mode"), turnsPerPage: flags.get("from-run-turns-per-page") };
+  if (show && (runFlags.path !== undefined || runFlags.mode !== undefined || runFlags.turnsPerPage !== undefined))
     return { ok: false, error: "--from-run starts an exploration from an earlier run, and --show explores nothing: give one or the other" };
   // A run asked to show an element explores nothing, so an earlier run named in the environment does not apply to it.
   const fromRun: ReturnType<typeof resolveFromRun> = show ? { ok: true } : resolveFromRun(runFlags, env);
@@ -1054,6 +1055,7 @@ function cleanRecord(r: RunRecord, clean: (s: string) => string): RunRecord {
       unchosen: l.unchosen.map((d) => ({ key: clean(d.key), options: all(d.options) })),
     })),
     gaps: all(r.gaps),
+    ...(r.assigned ? { assigned: all(r.assigned) } : {}),
     ...(r.prefixes ? { prefixes: r.prefixes.map((n) => ({ ...n, target: clean(n.target), ...(n.why !== undefined ? { why: clean(n.why) } : {}) })) } : {}),
   };
 }

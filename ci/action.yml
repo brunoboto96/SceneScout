@@ -102,6 +102,10 @@ inputs:
     description: With from-run - continue (the default when empty) or replay.
     required: false
     default: ""
+  from-run-turns-per-page:
+    description: With from-run in continue mode - model turns budgeted per page, which caps how many pages the run (or each lane) takes on. Empty means 7.
+    required: false
+    default: ""
   sarif-file-anchor:
     description: The repository file, relative to the repository root, that each ci.sarif result points at (code scanning keeps only results located in a repository file). Empty means the workflow file that is running.
     required: false
