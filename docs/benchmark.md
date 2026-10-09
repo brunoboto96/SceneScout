@@ -1112,6 +1112,57 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (33%–67%) | — | turns | 40 | 1,087,728 (1,075,597) / 2,692 | 1m 55s | $0.013 |
 | 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (33%–67%) | — | done | 33 | 894,594 (883,315) / 2,479 | 1m 39s | $0.011 |
 | 2026-10-03 | holdout | 3.18.0 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 2/10 | 2/3 (50%–75%) | — | turns | 40 | 1,088,692 (1,077,975) / 2,432 | 1m 51s | $0.013 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | done | 30 | 772,798 (742,188) / 1,205 | 1m 08s | $0.011 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 5/6 (71%–86%) | — | done | 31 | 796,263 (764,439) / 1,745 | 1m 18s | $0.012 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 2/13 | 2/2 (67%–100%) | — | done | 24 | 600,856 (571,309) / 1,292 | 1m 01s | $0.009 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | done | 64 | 1,890,442 (1,874,734) / 3,907 | 2m 28s | $0.022 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 5/6 (63%–88%) | — | done | 56 | 1,595,572 (1,580,917) / 2,462 | 1m 52s | $0.019 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 5/13 | 6/6 (86%–100%) | — | done | 75 | 2,354,928 (2,333,358) / 3,473 | 2m 52s | $0.027 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 6/13 | 6/6 (86%–100%) | — | done | 41 | 1,113,005 (1,101,514) / 2,757 | 1m 35s | $0.014 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 2/13 | 2/2 (50%–100%) | — | done | 30 | 765,740 (757,723) / 1,290 | 1m 05s | $0.009 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 4/4 (67%–100%) | — | done | 39 | 1,034,915 (1,023,304) / 1,745 | 1m 23s | $0.012 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 7/13 | 7/8 (88%) | — | turns | 80 | 2,192,336 (2,147,221) / 5,390 | 3m 37s | $0.029 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 7/7 (78%–100%) | — | turns | 80 | 2,163,003 (2,119,207) / 4,816 | 1m 51s | $0.028 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 5/5 (63%–100%) | — | turns | 80 | 2,207,894 (2,185,807) / 5,935 | 3m 32s | $0.027 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | b5a7933f32 | 5/10 | 5/6 (83%) | — | done | 75 | 2,083,211 (2,060,420) / 5,057 | 1m 29s | $0.025 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | b5a7933f32 | 4/10 | 5/6 (56%–89%) | — | turns | 80 | 2,199,015 (2,175,729) / 4,675 | 1m 38s | $0.026 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | b5a7933f32 | 4/10 | 4/6 (44%–78%) | — | done | 69 | 1,839,108 (1,820,747) / 3,960 | 2m 22s | $0.022 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | done | 39 | 1,046,088 (1,013,708) / 1,967 | 1m 53s | $0.014 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (100%) | — | done | 31 | 799,468 (769,468) / 1,665 | 1m 37s | $0.012 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 4/4 (67%–100%) | — | turns | 40 | 1,079,657 (1,068,983) / 2,560 | 1m 58s | $0.013 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 1/13 | 1/1 (50%–100%) | — | turns | 40 | 1,045,157 (1,036,421) / 1,319 | 1m 31s | $0.012 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | turns | 40 | 1,065,286 (1,056,116) / 1,814 | 1m 45s | $0.012 |
+| 2026-10-06 | demo | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 4/4 (67%–100%) | — | turns | 40 | 1,095,132 (1,063,319) / 2,200 | 3m 11s | $0.015 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 3/10 | 3/4 (43%–86%) | — | turns | 40 | 1,096,506 (1,085,563) / 2,298 | 1m 31s | $0.013 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (50%) | — | done | 30 | 778,996 (771,292) / 1,420 | 1m 06s | $0.009 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/2 (33%–67%) | — | done | 32 | 835,274 (827,133) / 1,492 | 1m 08s | $0.010 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 2/10 | 2/3 (67%) | — | turns | 40 | 1,096,791 (1,086,245) / 1,620 | 1m 46s | $0.013 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 1/10 | 1/1 (33%–100%) | — | turns | 40 | 1,058,668 (1,049,621) / 1,333 | 1m 31s | $0.012 |
+| 2026-10-06 | holdout | 3.19.2 | dispatched | openai · gpt-6-luna · low | judge | b5a7933f32 | 3/10 | 3/3 (100%) | — | turns | 40 | 1,116,515 (1,104,332) / 1,497 | 1m 37s | $0.013 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 3/13 | 3/3 (50%–100%) | — | done | 68 | 1,806,166 (1,766,595) / 3,105 | 1m 23s | $0.023 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 6/6 (60%–100%) | — | turns | 80 | 2,177,140 (2,156,267) / 3,392 | 2m 40s | $0.025 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 6/7 (75%–88%) | — | turns | 80 | 2,137,143 (2,120,076) / 3,135 | 1m 27s | $0.024 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 6/6 (86%–100%) | — | done | 71 | 1,883,627 (1,842,934) / 3,654 | 1m 35s | $0.024 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 6/6 (75%–100%) | — | done | 68 | 1,835,668 (1,816,267) / 3,416 | 1m 35s | $0.022 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 5/5 (71%–100%) | — | done | 67 | 1,764,828 (1,747,482) / 3,149 | 1m 28s | $0.021 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 7/7 (78%–100%) | — | done | 73 | 1,987,618 (1,943,666) / 3,885 | 1m 58s | $0.026 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 5/13 | 5/5 (83%–100%) | — | turns | 80 | 2,178,725 (2,159,921) / 3,871 | 1m 41s | $0.025 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 6/6 (60%–100%) | — | turns | 80 | 2,155,125 (2,113,073) / 2,940 | 1m 35s | $0.027 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 3/13 | 4/4 (80%–100%) | — | turns | 80 | 2,205,958 (2,185,475) / 4,927 | 3m 03s | $0.026 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 6/6 (86%–100%) | — | done | 63 | 1,656,792 (1,639,665) / 3,321 | 1m 28s | $0.020 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | c1786bc817 | 6/13 | 7/7 (88%–100%) | — | done | 80 | 2,240,643 (2,217,815) / 20,329 | 6m 40s | $0.035 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 2/13 | 2/2 (100%) | — | turns | 18 | 450,239 (422,802) / 864 | 45s | $0.007 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 2/13 | 2/2 (67%–100%) | — | turns | 18 | 445,291 (417,994) / 885 | 53s | $0.007 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (100%) | — | turns | 18 | 443,643 (438,786) / 1,123 | 45s | $0.005 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 2/13 | 2/2 (100%) | — | turns | 18 | 444,939 (439,844) / 1,332 | 1m 15s | $0.006 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 1/13 | 2/2 (67%–100%) | — | turns | 18 | 440,837 (436,382) / 811 | 1m 06s | $0.005 |
+| 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 0/13 | 0/0 (—) | — | done | 12 | 283,535 (280,643) / 407 | 35s | $0.003 |
+| 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | turns | 18 | 437,701 (410,551) / 921 | 52s | $0.007 |
+| 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 1/13 | 1/1 (100%) | — | turns | 18 | 438,297 (411,768) / 862 | 1m 11s | $0.007 |
+| 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 0/13 | 0/0 (—) | — | turns | 18 | 434,600 (409,308) / 502 | 49s | $0.007 |
+| 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | turns | 18 | 567,914 (526,558) / 16,847 | 2m 38s | $0.018 |
+| 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 0/13 | 0/0 (—) | — | turns | 18 | 431,279 (427,659) / 503 | 54s | $0.005 |
+| 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 1/13 | 1/1 (50%–100%) | — | turns | 18 | 429,063 (425,976) / 592 | 48s | $0.005 |
 | 2026-10-05 | demo | 3.19.2 | scheduled | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 4/4 (80%–100%) | — | done | 35 | 883,537 (852,278) / 1,492 | 1m 31s | $0.012 |
 | 2026-10-05 | holdout | 3.19.2 | scheduled | openai · gpt-6-luna · low | judge | b5a7933f32 | 0/10 | 0/2 (0%–33%) | — | done | 33 | 863,556 (832,225) / 1,559 | 1m 16s | $0.012 |
 
@@ -1264,6 +1315,424 @@ seen came with six runs in flight on one organisation's limit. [The lanes
 section of the CI guide](ci.md#lanes) says so. Lanes
 2 was not run: the eighth run went to the raised caps instead, the cause the
 action logs pointed at.
+
+### Choosing the defaults (issue 419)
+
+Until this measurement `scenescout ci` defaulted to one loop, 40 turns and
+1,500,000 tokens. The v3.18.0 rows above found 3 to 5 of 13 planted defects
+with it on the demo app and 1 to 2 of 10 on the held-out app; the three
+baseline runs below, of v3.19.2, found 2 to 4 of 13. The defaults are now **two lanes sharing 80
+turns and 3,000,000 tokens** (the time cap stays 20 minutes).
+
+**What was held fixed.** Release v3.19.2 (commit `1a5a903`, which is also the
+base of this change), gpt-6-luna at effort `low`, `read-only`, level `medium`,
+dedup `judge`, a fresh app and project per run. Every run was dispatched
+through the [benchmark workflow](../.github/workflows/ci-benchmark.yml), at
+most two in flight, and the two-lane runs one at a time. Only the turn and
+token caps and the lane count changed. The token cap was scaled with the turn
+cap (37,500 tokens a turn), so the turn cap stayed the cap that could bind:
+the runs used about 27,000 tokens a turn. They are the fifteen rows of
+2026-10-06 in the table above, archived as `ci-caps-<app>-<arm>-<n>`.
+
+**Three runs a configuration on the demo app.** Recall pools the three runs'
+39 defect-runs, with a 95% Wilson interval; the interval treats each
+defect-run as independent, which they are not, so read it as a lower bound on
+the uncertainty. pass@3 is the defects found in at least one of the three
+runs; pass^3 is those found in all three.
+
+| | Recall per run | Pooled recall (95%) | pass@3 | pass^3 | Labelled precision, pooled | Turns used, how it ended | Wall | Cost per run |
+|---|---|---:|---:|---:|---:|---|---|---:|
+| One loop, 40 turns (the old default) | 3, 4, 2 of 13 | 9/39, 23% (13–38%) | 5 | 1 | 10/11 | 30, 31, 24, each ended by itself | 1m 01s to 1m 18s | $0.009 to $0.012 |
+| One loop, 80 turns | 5, 4, 5 | 14/39, 36% (23–52%) | 8 | 2 | 16/17 | 64, 56, 75, each ended by itself | 1m 52s to 2m 52s | $0.019 to $0.027 |
+| One loop, 120 turns | 6, 2, 4 | 12/39, 31% (19–46%) | 6 | 1 | 12/12 | 41, 30, 39, each ended by itself | 1m 05s to 1m 35s | $0.009 to $0.014 |
+| **Two lanes, 80 turns shared** (the new default) | **7, 6, 5** | **18/39, 46% (32–61%)** | 7 | **4** | 19/20 | 80 each, the turn cap | 1m 51s to 3m 37s | $0.027 to $0.029 |
+
+- **The arm for the lanes.** One loop at 80 turns had the best single-loop
+  mean (4.7 against 4.0 at 120) and pass@3, so the lanes arm used its total:
+  80 turns and 3,000,000 tokens, shared by two lanes, about 40 turns each.
+- **One loop does not use a bigger budget reliably.** At 40 turns every run
+  ended by itself before the cap. At 80 it worked longer (56 to 75 turns) and
+  found more; at 120 it stopped at 30 to 41 turns again, and found 2 to 6.
+  The 80 and 120 rows overlap the 40 row; three runs cannot separate them.
+- **Two lanes beat the old default in every run.** Their worst run (5) is
+  above the old default's best (4); with three runs a side that ordering has a
+  one-sided chance of 1 in 20 under no difference. The mean gain is +3.0, at
+  the ±3 bound the [lanes section](#lanes-one-loop-against-four-task-40) set
+  for gaps between releases, and the pooled intervals overlap, so this is a
+  clear but not a large-sample result. The gain is consistency more than
+  reach: pass^3 is 4 against 1, while pass@3 (7) is below one loop at 80
+  turns (8). The four found every time are the chart image's 404, the badge
+  covering a dashboard button, the export crash and the sticky bar covering
+  Save.
+- **The turn cap binds the lanes.** Every two-lane demo run ended at the
+  80-turn cap, each lane after 38 to 42 turns, so more turns would likely
+  find more, at proportionally more cost.
+- **Wall time** rose from about a minute to 2 to 3.5 minutes: two of the
+  three lanes runs took longer than any single-loop run.
+- **Precision held:** 19 of 20 labelled findings correct for the lanes
+  against 10 of 11 for the old default.
+- **429s:** no run was refused (none ended `provider-error`). The engine
+  retries a 429 without logging it, so retried refusals are not counted. Two
+  lanes peaked at about 1.2 million tokens a minute (2.2 million in 111
+  seconds), under the 2,000,000-a-minute limit four lanes approached before;
+  two such runs at once on one key could reach it.
+
+**The held-out app, run after the choice and not tuned on.** Three runs of
+the chosen setting; its key was not read and nothing was changed after them.
+
+| | Recall per run | Pooled recall (95%) | pass@3 | pass^3 | Labelled precision, pooled | Turns | Wall | Cost per run |
+|---|---|---:|---:|---:|---:|---|---|---:|
+| One loop, 40 turns (eight runs of v3.18.0, above) | 2, 2, 1, 1, 1, 1, 1, 2 of 10 | 11/80, 14% (8–23%) | — | — | 11/23 | 33 to 40 | 1m 20s to 1m 55s | $0.011 to $0.016 |
+| Two lanes, 80 turns shared | 5, 4, 4 | 13/30, 43% (27–61%) | 6 | 3 | 14/18 | 75, 80, 69 | 1m 29s to 2m 22s | $0.022 to $0.026 |
+
+The old default's held-out rows are of v3.18.0, not v3.19.2, so the
+comparison crosses a release; the gap (every lanes run above every one of the
+eight) is wider than the noise between releases recorded above. Precision on
+the held-out app is lower than on the demo, as it has been for every
+configuration: 4 of 18 labelled findings were wrong.
+
+**Cost.** About $0.03 a run on gpt-6-luna, about 2.5 times the old default's
+$0.011, and about 2.2 million tokens, nearly all of them cached input. The
+spend for this measurement was $0.29 in all, by the runs' own estimates: twelve
+demo runs and three held-out runs, none discarded.
+
+**What the key missed.** The scores above use the keys unchanged. Eleven of
+the twelve demo runs filed the new-order e-mail field's missing label; the key
+matched it in two ("relies on placeholder for its label", "loses its
+accessible name" and "placeholder-only label" do not match). One lanes run
+filed the scheduled-reports dead end as "leaves users with no available
+action", and three runs filed the settings page's "Saved." with no request
+in words the key's real-but-not-expected entry does not match. Counted by a
+person, recall would be about one higher in most runs of every configuration;
+the comparison between configurations is not changed by it. The matches were
+left for a person to extend, with a re-score of every archived run.
+
+**For the seeded re-measure (issue 418).** In single-loop runs at the 40-turn
+cap the cap was not what stopped the run: all three ended by themselves at 24
+to 31 turns. The same loop given 80 turns worked to 56 to 75, so the budget
+the prompt states may shape how long the model works, but at 120 it stopped at
+30 to 41, so this is not settled. At the new default the turn cap does bind:
+every two-lane demo run reached it.
+
+### A seeded exploration schedule (issue 418)
+
+`scenescout ci --seed` crawls first and tells the model to take the routes in
+an order shuffled by the seed, the routes earlier seeded runs on the project
+started with last. One layer changed: the seed. Held fixed: the engine at
+commit `3acef27` (the seed built in, so both arms ran the same code),
+gpt-6-luna at effort `low`, the default caps (40 turns, 1,500,000 tokens, 20
+minutes), `read-only`, level `medium`, the dedup judge, and a fresh app and
+project per run, dispatched through the benchmark workflow's new `seed` input.
+The seeds were chosen before any run: `b418a` to `b418c` on the demo,
+`h418a` to `h418c` on the held-out app. Three runs per arm per app; pass@3 is
+the expected defects found by at least one of the three runs, pass^3 those
+found by all three. The rows are the `ci-seed-*` archives in the table above.
+
+| | Recall per run | pass@3 | pass^3 | Labelled precision | Turns | Cost (3 runs) |
+|---|---|---:|---:|---:|---|---:|
+| Demo, unseeded | 3, 3, 4 of 13 | 5 | 2 | 10/10 (3 unlabelled) | 39, 31, 40 | $0.039 |
+| Demo, seeded | 1, 5, 4 of 13 | 6 | 0 | 10/10 (5 unlabelled) | 40, 40, 40 (the cap) | $0.039 |
+| Held-out, unseeded | 3, 1, 1 of 10 | 3 | 1 | 5/8 (4 unlabelled) | 40, 30, 32 | $0.032 |
+| Held-out, seeded | 2, 1, 3 of 10 | 5 | 0 | 6/7 (2 unlabelled) | 40, 40, 40 (the cap) | $0.038 |
+
+- **pass@3 rose a little, within the noise.** +1 on the demo (the seeded runs
+  found the badge covering a dashboard button, the export crash and the
+  sticky bar covering Save, which no unseeded run did, and missed the double
+  submit and the e-mail field with no label) and +2 on the held-out app.
+  Both are inside the ±3 the [lanes comparison](#lanes-one-loop-against-four-task-40)
+  takes as one configuration's spread, from three runs an arm.
+- **pass^3 fell on both apps,** from 2 to 0 on the demo and from 1 to 0 on
+  the held-out app. Every unseeded demo run found the chart image's 404 and
+  the scheduled-reports dead end; no defect was found by all three seeded
+  runs. The issue's condition, that pass^k must not fall, is not met.
+- **Why, as far as the runs show.** An unseeded run starts on the landing
+  page, where several planted defects are, and every run meets them. A
+  seeded run is sent first to the head of its order: `b418a` started with the
+  orders list, the sign-in page and the inventory, and found 1 of 13. Every
+  seeded run also ended at the 40-turn cap, where two of three unseeded runs
+  per app ended by themselves: following an order of twelve routes spends the
+  budget moving between them.
+- **Precision held.** No labelled false positive on the demo in either arm;
+  6/7 seeded against 5/8 unseeded on the held-out app. Unlabelled findings are
+  left for a person to judge and the key was not changed. One unseeded demo
+  run filed "Optional email field has no persistent accessible label", which
+  may be the key's `new-order-email-no-label` in other words; it was not
+  counted.
+- **Cost.** The same: about $0.012 a run in both arms, about 1.0 to 1.1
+  million tokens. Twelve runs cost $0.148 in all.
+- **What this did not measure.** Every run had a fresh project, so no run
+  had an earlier seeded run's choices to move to the back: the exclusion
+  across runs never engaged, and is covered by the table tests in `ci-test`
+  and `brief-test` only. Measuring it needs k seeded runs sharing one
+  project's memory, scored by what each run added.
+
+**Decision at the old defaults: not met.** The re-measure below, at the
+defaults [issue 419](#choosing-the-defaults-issue-419) chose, replaces it.
+
+#### Re-measured at the two-lane default, with memory carried over
+
+The first measurement ran one loop at 40 turns, and every run had a fresh
+project, so the exclusion across runs never engaged. This one changes both.
+
+**What was held fixed.** The engine at commit `ac3c1fa` (this branch merged
+with main, so both arms ran the same code), gpt-6-luna at effort `low`, the
+new defaults (two lanes sharing 80 turns, 3,000,000 tokens and 20 minutes),
+`read-only`, level `medium`, the dedup judge, and a fresh demo app per run.
+Runs were dispatched one at a time, alternating the arms (unseeded, seeded,
+unseeded, ...). They are the `ci-seed2-demo-*` rows of 2026-10-07 in the table
+above.
+
+- **Unseeded arm:** three runs, each with a fresh project.
+- **Seeded arm, carried over:** seeds `c418a`, `c418b` and `c418c`, chosen
+  before any run. The first run had a fresh project. Each later run's memory
+  started with the `schedules` of the seeded run before it, through the
+  benchmark workflow's dispatch-only `seed-history` input, so the exclusion
+  applied. Only the schedules were carried, not the findings: bench scores
+  everything in a run's memory, so carrying earlier findings would credit a
+  run with what an earlier run found.
+
+The exclusion worked as designed. `c418a`'s lanes started on six of the
+twelve routes, and `c418b`'s lanes started on exactly the other six. By the
+third run every route had been a start once, so `c418c` ordered all twelve by
+its own shuffle.
+
+| | Recall per run | Pooled recall | pass@3 | pass^3 | Labelled precision | Turns, how it ended | Cost (3 runs) |
+|---|---|---:|---:|---:|---:|---|---:|
+| Unseeded | 3, 6, 5 of 13 | 14/39 | 7 | 3 | 15/16 (8 unlabelled) | 68 done, 80 cap, 80 cap | $0.073 |
+| Seeded, carried over | 5, 5, 5 of 13 | 15/39 | 7 | 3 | 17/17 (4 unlabelled) | 71, 68, 67, each done | $0.067 |
+
+- **pass@3 is unchanged, and so is the set it counts.** Both arms found the
+  same seven defects between them: the chart image's 404, the badge covering
+  a dashboard button, the hint text's contrast, the e-mail field with no
+  label, the export crash, the scheduled-reports dead end and the sticky bar
+  covering Save. Spreading where the lanes start reached no defect the
+  unseeded runs missed.
+- **pass^3 is unchanged in count (3 against 3) but not in content.** Every
+  unseeded run found the 404, the export crash and the sticky bar. Every
+  seeded run found the 404, the badge and the dead end.
+- **The seeded runs varied less**: 5, 5 and 5 against 3, 6 and 5. All three
+  seeded runs ended by themselves, at 67 to 71 turns. Two of the three
+  unseeded runs hit the 80-turn cap. Three runs per arm cannot tell this
+  apart from noise.
+- **Why the order does not matter here.** At the two-lane default the demo's
+  twelve routes are split six and six, and each lane gets about 40 turns, so
+  each lane visits all its routes whatever the order. The six defects no run
+  found need depth on one page rather than a different starting page: an
+  empty submit, a double submit, a sort, an empty list behind a refused read,
+  a role check on an endpoint and a delete that claims success. Starting
+  elsewhere does not reach them.
+- **Precision held.** No labelled false positive in the seeded arm, and one
+  in the unseeded arm. The key was not changed.
+- **Cost.** About $0.022 a run in both arms. Six runs cost $0.140 in all, by
+  the runs' own estimates. None was discarded.
+- **The held-out app was not run.** The demo result was not positive, and
+  the held-out app is only run to confirm a gain.
+
+**Decision: rejected against the issue's criteria.** The issue asks for
+pass@k up and pass^k not down. pass@3 did not rise, at either the old or the
+new defaults, and pass^3 fell at the old ones. Seeding stays off by default;
+see the [rejected list](#rejected-and-not-yet-tried) for what would be worth
+trying instead.
+
+### Starting from an earlier run (issue 418)
+
+The seeded schedule above was reworked into `--from-run`: a run reads an
+earlier run's record and, in `continue` mode, takes first the routes it never
+worked on, then the routes it left work on (told exactly which controls, forms
+and options to take first), then the rest. Only `continue` was measured;
+`replay` is held to repeating its input's order by `brief-test` and `ci-test`.
+
+**What was held fixed.** The engine at commit `4ebc18b`, gpt-6-luna at effort
+`low`, the defaults (two lanes sharing 80 turns, 3,000,000 tokens and 20
+minutes), `read-only`, level `medium`, the dedup judge, a fresh demo app and a
+fresh project per run, dispatched one at a time through the benchmark
+workflow and alternating the arms. The rows are the `ci-fromrun-demo-*`
+archives of 2026-10-07 in the table above.
+
+- **Independent arm (`u1`–`u3`):** three runs, nothing carried over.
+- **Continued arm (`c1`–`c3`):** `c1` continued from `u1`'s record, `c2` from
+  `c1`'s and `c3` from `c2`'s, each through the workflow's dispatch-only
+  `from-run-record` input. Only the record was carried, never the memory, so
+  each run is scored on its own findings.
+
+| | Recall per run | Pooled recall | pass@3 | pass^3 | Labelled precision | Turns, how it ended | Cost (3 runs) |
+|---|---|---:|---:|---:|---:|---|---:|
+| Independent | 6, 5, 6 of 13 | 17/39 | 7 | 4 | 18/18 (7 unlabelled) | 73 done, 80 cap, 80 cap | $0.078 |
+| Continued | 3, 6, 6 of 13 | 15/39 | 8 | 1 | 17/17 (2 unlabelled) | 80 cap, 63 done, 80 done | $0.081 |
+
+- **pass@3 rose by one.** The continued arm found the one defect no
+  independent run found: the approve endpoint accepting a clerk (`c1`). That
+  is one of the defects that needs work inside a visited page, which is what
+  `continue` points the run at. One defect in three runs is within the noise.
+- **pass^3 fell from 4 to 1.** Every independent run found the chart image's
+  404, the badge covering a dashboard button, the export crash and the
+  scheduled-reports dead end; only the dead end was found by all three
+  continued runs. `c1` found 3: told to start on the 28 controls `u1` left, it
+  spent its turns there and never filed the dashboard's or the export's
+  defects, which every fresh run finds in passing.
+- **It did the work it was pointed at.** The runs continued from a record with
+  work left (`c1` from `u1`, `c3` from `c2`) left 9 controls unexercised,
+  against 24 to 28 for the others. Exercising them did not turn into findings
+  on this app.
+- **The arms are not independent of each other.** `c1` continued `u1`, so the
+  continued arm had one more run's knowledge than the other; that favours it,
+  and it still did not pass.
+- **Precision held** at 100% labelled in both arms. The key was not changed:
+  the unlabelled findings (a shell link styled as body text, an optional
+  e-mail field's label) are left for a person to judge.
+- **Cost.** $0.159 for the six runs by their own estimates, about $0.026 a
+  run in both arms. None was discarded.
+- **The held-out app was not run.** The demo result was not positive, and
+  the held-out app is only run to confirm a gain.
+
+**Decision at the time: rejected against the issue's criteria** (pass@3 up
+and pass^3 not down): pass@3 rose by one, inside the noise, and pass^3 fell by
+three.
+
+**Correction: pass^3 was the wrong gate for this mode.** `continue` is built
+not to repeat what the run before it covered, so a defect every fresh run finds
+in passing is one a continued run is told to leave until last. The numbers
+above stand; what they measure is pass@3, which rose by one, inside the noise.
+The measurement below uses pass@3 as the gate.
+
+**Correction: the continued arm was counted without the run it started from.**
+A chain is one fresh run and the runs that continue it, so its three runs are
+`u1`, `c1` and `c2`, compared with the fresh arm's `u1`, `u2` and `u3`. The
+table's arm rows are kept as measured. Counted as unions of three runs, the
+fresh arm finds **7** distinct defects and the chain **8** (`u1`'s six, plus the
+approve endpoint and the empty list behind a refused read from `c1`).
+
+#### Re-measured at a small budget, with the path to each page
+
+At the default budget every demo run reaches all twelve routes, so there is
+nothing left for a continued run to pick up. This measurement cuts the budget
+on purpose, to stand in for an app larger than one run covers. **It is a
+simulation on a small app, not evidence about a large one.** The engine now
+also takes the earlier run's path to a continued run's first page when that
+run reached it by acting on another page (the path prefix).
+
+**What was held fixed.** The engine at commit `2904a3c`, gpt-6-luna at effort
+`low`, **one lane and 18 turns** per run (one lane, since two would leave each
+lane nine), 3,000,000 tokens and 20 minutes, `read-only`, level `medium`, the
+dedup judge, a fresh demo app and project per run, dispatched one at a time and
+alternating the arms. A continued run also makes the planning crawl a fresh
+one-loop run does not; it costs no model turn. The rows are the
+`ci-fromrun-small-demo-*` archives.
+
+- **Fresh arm (`u1`–`u3`):** three runs, nothing carried over.
+- **Continued arm (`c1`–`c3`):** `c1` continued from `u1`'s record, `c2` from
+  `c1`'s and `c3` from `c2`'s.
+
+| | Recall per run | pass@3 | pass^3 | Labelled precision | Pages each run worked on | Turns, how it ended | Cost (3 runs) |
+|---|---|---:|---:|---:|---|---|---:|
+| Fresh | 2, 2, 3 of 13 | 4 | 1 | 7/7 (1 unlabelled) | 6, 5, 4 | 18 cap, 18 cap, 18 cap | $0.020 |
+| Continued | 2, 1, 0 of 13 | 3 | 0 | 4/4 (1 unlabelled) | 11, 4, 4 | 18 cap, 18 cap, 12 done | $0.014 |
+
+- **pass@3 fell by one** (3 against 4). The fresh arm found the chart image's
+  404, the badge, the sticky bar and the dead end. The continued arm found the
+  sticky bar, the empty list behind a refused read (which no fresh run found)
+  and the hint text's contrast.
+- **The continued runs covered more and filed less.** `c1` worked on eleven
+  pages in 18 turns, against four to six for a fresh run, and filed two
+  defects. `c3` was told the earlier runs had covered every page, ended by
+  itself at 12 turns and filed nothing.
+- **The path prefix ran once and worked.** `c2`'s first page was an order's
+  detail page, which `c1` had reached from the orders list; `c2` took the
+  same two steps and landed there. The other continued runs started on a page
+  the earlier run had opened by its address, so they needed no path.
+- **Precision held** at 100% labelled in both arms; the key was not changed.
+- **Cost.** $0.034 for the six runs by their own estimates.
+- **The held-out app was not run.** The demo result was not positive.
+
+**Decision at the time: not shown to help, even where it should** (3 against
+4).
+
+**Correction: the same counting fault as above.** Counted as the chain it is,
+`u1` with `c1` and `c2`, the continued arm finds **4** distinct defects (the
+chart image's 404 and the sticky bar from `u1`, the empty list behind a refused
+read from `c1`, the hint text's contrast from `c2`), the same as the fresh
+arm's 4. Also, `c3` stopped early because it was told every page was covered
+when its record still listed work on all nine pages it had: "covered" meant
+visited. That is fixed below.
+
+#### Re-measured with depth: a page is worked through only when nothing is left
+
+**What changed (one layer: the continue order).** A visited page now counts as
+worked through only when its record lists no control, form or option left
+(`EXHAUSTED_AT` is 0). Pages are ordered by the work left, the most first.
+Every message ends by telling the run to keep exploring until the budget is
+spent, and a record with nothing left anywhere makes a fresh-style run
+(`continuedFresh` in the record). Engine at commit `c70db35`; everything else
+as in the small-budget measurement above (one lane, 18 turns, demo app,
+gpt-6-luna at effort `low`). One fresh run `f1`, then `d1` continuing `f1` and
+`d2` continuing `d1`, dispatched one at a time. They are the
+`ci-fromrun-depth-demo-*` archives of 2026-10-09. This is still a simulation of
+a larger app on a small one.
+
+| Run | Recall | Labelled precision | Pages it worked on | Turns, how it ended | Cost |
+|---|---|---:|---:|---|---:|
+| `f1` (fresh) | 3 of 13 | 3/3 (1 unlabelled) | 2 | 18 cap | $0.007 |
+| `d1` (continues `f1`) | 1 of 13 | 1/1 | 12 | 18 cap | $0.007 |
+| `d2` (continues `d1`) | 0 of 13 | none filed | 4 | 18 cap | $0.007 |
+
+| Counted as unions of three runs | pass@3 | pass^3 |
+|---|---:|---:|
+| Fresh arm (`u1`, `u2`, `u3`, above) | 4 | 1 |
+| Depth chain (`f1`, `d1`, `d2`) | 3 | 0 |
+
+- **pass@3 is 3 against 4.** Every defect the chain found, `f1` found
+  first: the chart image's 404, the badge and the hint text's contrast. `d1`
+  and `d2` added none.
+- **The fix did what it was for.** Neither continued run stopped early: both
+  used all 18 turns, and neither record needed the fresh fallback, since the
+  earlier record always had work left.
+- **The continued runs spread thin again.** `d1` worked on all twelve pages in
+  18 turns, against two for `f1`, and filed one defect.
+- **No path was taken.** Each continued run's first page had been opened by
+  its address, so there was nothing to replay.
+- **Precision held**; the key was not changed. **Cost:** $0.021 for the three
+  runs.
+- **The held-out app was not run.** The demo result was not positive.
+
+**Decision: not shown to help.** With "covered" meaning worked through, and
+counted fairly, continued runs still did not add defects at this budget; one
+chain of three runs is noisy, so a difference of one defect is not evidence
+either way. The option stays off by default.
+
+#### Re-measured with a page cap
+
+**What changed (one layer).** A continued run now takes on only as many pages
+as its budget allows: its turns over `--from-run-turns-per-page`, default 7,
+so 2 pages at 18 turns. It is told to work those deeply and not to spread out,
+then to take the next pages in order; the pages it was given are kept in its
+record (`assigned`) so the next run takes the ones after. Engine at commit
+`a9b0e2a`, otherwise as above (one lane, 18 turns, demo app, gpt-6-luna at
+effort `low`). Fresh `g1`, then `k1` continuing `g1` and `k2` continuing `k1`,
+one at a time: the `ci-fromrun-cap-demo-*` archives of 2026-10-09.
+
+| Run | Recall | Labelled precision | Pages given | Pages it worked on | Cost |
+|---|---|---:|---|---:|---:|
+| `g1` (fresh) | 3 of 13 | 3/3 (1 unlabelled) | — | 4 | $0.018 |
+| `k1` (continues `g1`) | 0 of 13 | none filed | `/approvals.html`, `/audit.html` | 8 | $0.005 |
+| `k2` (continues `k1`) | 1 of 13 | 1/1 (1 unlabelled) | `/reports.html`, `/settings.html` | 4 | $0.005 |
+
+| Counted as unions of three runs | pass@3 | pass^3 |
+|---|---:|---:|
+| Fresh arm (`u1`, `u2`, `u3`) | 4 | 1 |
+| Capped chain (`g1`, `k1`, `k2`) | 4 | 0 |
+
+- **pass@3 is 4 against 4.** `k2` found the export crash on `/reports.html`,
+  one of its two pages, which no other small-budget run found; `g1` found the
+  other three.
+- **The cap moved the chain on as intended:** `k2` was given the two pages
+  after `k1`'s. `k1` still worked on eight pages, so the instruction not to
+  spread out was not always followed.
+- **Precision held**; the key was not changed. **Cost:** $0.028 for the three
+  runs.
+- **The held-out app was not run.**
+
+**Decision: not shown to help, not shown to hurt.** Equal at 4 distinct
+defects in one chain of three runs; the option stays off by default.
 
 ## Finding dedup as a measured decision (task 15)
 
@@ -1541,6 +2010,28 @@ fourteen runs together cost about $0.18 by their own estimates.
 
 Edits considered and not kept, so they are not retried blind:
 
+- **A seeded exploration schedule as a way to find more across runs (issue
+  418).** Rejected twice on the demo app. At one loop and 40 turns, pass@3
+  rose within the noise and pass^3 fell. At two lanes and 80 turns, with the
+  exclusion across runs applied, pass@3 and pass^3 were both unchanged, and
+  both arms found the same seven defects. On an app small enough for the
+  default budget to visit every route, the starting order changes nothing that
+  is scored. It could still matter on an app with more routes than the budget
+  covers, which neither benchmark app has.
+- **Continuing from an earlier run's record (`--from-run`, issue 418).**
+  Rejected as a way to find more across runs on the demo app at the two-lane
+  default: pass@3 rose by one (the approve endpoint accepting a clerk) and
+  pass^3 fell from 4 to 1. A run told to work the controls the last one left
+  does so and stops finding the page-load defects every fresh run finds in
+  passing. That gate (pass^3) was the wrong one for a mode built not to repeat
+  coverage, and the first counts left out the fresh run each chain started
+  from; counted as unions of three runs, the chain found 8 against 7 at the
+  default budget and 4 against 4 at a budget cut to 18 turns on one lane. With
+  depth ordering (a page is worked through only when nothing is left), one
+  chain found 3 against 4. Continued runs reach more pages and file less.
+  Worth trying instead:
+  continue only the routes with forms or options left, after the run's own
+  first pass, rather than in place of it.
 - **Scoring a run against its accumulated project memory.** Rejected: a
   project remembers findings across runs, so a later run would be credited with
   an earlier one's finds. Every benchmark run uses a fresh project directory.

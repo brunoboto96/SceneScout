@@ -46,6 +46,7 @@ import {
   type Selectors,
   type StepOptions,
   type SubmittedBy,
+  unansweredSubmit,
 } from "./engine/scripted-login.js";
 import {
   DEFAULT_SAVE_MODE,
@@ -439,6 +440,12 @@ export function savedLine(
 
 /** The attribute the collector tags each visible control with, so a step can act on the one it chose. */
 const TAG = "data-scenescout-login";
+/**
+ * The attribute put on each element a value is typed into. The page drawing
+ * the field again (or another page) drops it, so a later read can tell a
+ * submit the page has not answered yet from the field coming back.
+ */
+const TYPED = "data-scenescout-typed";
 
 /** How often the page is read while waiting for the form to move on. */
 const POLL_MS = 250;
@@ -523,6 +530,8 @@ function collectFields({ selectors, tag: tagging }: { selectors: Selectors; tag:
       maxLength: typeof input.maxLength === "number" ? input.maxLength : -1,
       filled: tag !== "button" && typeof input.value === "string" && input.value.length > 0,
       disabled: input.disabled === true,
+      // The literal, since this runs in the page: TYPED.
+      typed: el.hasAttribute("data-scenescout-typed"),
       ...(forced.has(el) ? { forced: forced.get(el) } : {}),
     });
   }
@@ -637,12 +646,16 @@ export async function runScriptedLogin(
       const chosen = chooseFields(fields);
       return `${pageKey()}|${(Object.keys(chosen) as FieldKind[]).sort().join(",")}`;
     };
-    const stepOpts = (successMatchedNow: boolean): StepOptions => ({
-      hasPassword: config.password !== undefined,
-      ...(config.code ? { code: config.code.kind } : {}),
-      successConfigured: Boolean(config.success.url || config.success.selector),
-      successMatched: successMatchedNow,
-    });
+    const stepOpts = (successMatchedNow: boolean, fields: readonly FieldInfo[]): StepOptions => {
+      const checking = unansweredSubmit(fields, progress.submitted);
+      return {
+        hasPassword: config.password !== undefined,
+        ...(config.code ? { code: config.code.kind } : {}),
+        successConfigured: Boolean(config.success.url || config.success.selector),
+        successMatched: successMatchedNow,
+        ...(checking ? { checking } : {}),
+      };
+    };
     /** The code to type now: the fixed one, or the TOTP code, waiting for the next one when this one is about to expire. */
     const currentCode = async (source: CodeSource): Promise<string> => {
       if (source.kind === "fixed") return source.code;
@@ -653,6 +666,8 @@ export async function runScriptedLogin(
       return code;
     };
     const at = (f: FieldInfo) => page.locator(`[${TAG}="${f.index}"]`);
+    /** Mark the element about to be typed into: see TYPED. */
+    const markTyped = (f: FieldInfo): Promise<void> => at(f).evaluate((el, attr) => el.setAttribute(attr, ""), TYPED, { timeout: limits.actionMs });
     /** A failed action as this run's error: the time limit explained, redacted like everything else it throws. */
     const actionError = (err: unknown): Error => {
       const explained = loginTimeout(err, "action", limits.actionMs);
@@ -671,15 +686,25 @@ export async function runScriptedLogin(
     const submitOpts = { passwordless: config.password === undefined };
     let lastWait = "the sign-in form to appear";
     for (;;) {
-      if (Date.now() > deadline) throw await timedOut(lastWait);
+      // Past the deadline the page is read once more, so a submit it never answered is reported as that, not as a refusal.
+      const late = Date.now() > deadline;
       const fields = await read();
       if (fields === null) {
+        if (late) throw await timedOut(lastWait);
         await page.waitForTimeout(POLL_MS);
         continue;
       }
       const keyAtRead = pageKey();
       const chosen = chooseFields(fields);
-      const step = nextStep(chosen, progress, stepOpts(await successMatched()));
+      const step = nextStep(chosen, progress, {
+        ...stepOpts(await successMatched(), fields),
+        ...(late ? { timedOutAfterS: config.timeoutMs / 1000 } : {}),
+      });
+      if (step.kind === "timeout") {
+        const says = await pageSays();
+        throw fail(`${step.reason} (at ${where()})${says ? `. The page says: "${says}"` : ""}`);
+      }
+      if (late && step.kind !== "refused") throw await timedOut(lastWait);
       if (step.kind === "done") {
         if (config.success.url || config.success.selector) break;
         // No sign-in field left is the signal only once the page has settled:
@@ -689,7 +714,7 @@ export async function runScriptedLogin(
         });
         await page.waitForTimeout(POLL_MS * 2);
         const settled = await read();
-        if (settled !== null && nextStep(chooseFields(settled), progress, stepOpts(false)).kind === "done") break;
+        if (settled !== null && nextStep(chooseFields(settled), progress, stepOpts(false, settled)).kind === "done") break;
         continue;
       }
       if (step.kind === "refused") {
@@ -731,6 +756,7 @@ export async function runScriptedLogin(
               );
               // Cleared only when it holds something: clearing sends Delete, which some boxes take as a step back to the box before.
               if ((await at(box).inputValue({ timeout: limits.actionMs })) !== "") await at(box).fill("", { timeout: limits.actionMs });
+              await markTyped(box);
               // Typed as keys: a box that moves on to the next by itself, or reads keys rather than its value, still gets its character.
               await at(box).pressSequentially(split.chars[i], { timeout: limits.actionMs });
             } catch (err) {
@@ -743,6 +769,7 @@ export async function runScriptedLogin(
           boxOpts = { codeBoxes: boxes.length };
         } else {
           const value = kind === "otp" ? await currentCode(config.code!) : kind === "username" ? config.username : config.password!;
+          await markTyped(field).catch(actionFailed);
           await at(field).fill(value, { timeout: limits.actionMs }).catch(actionFailed);
         }
         typedIds.set(kind, fieldIdentity(field));

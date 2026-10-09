@@ -360,6 +360,12 @@ export interface FieldInfo {
   maxLength: number;
   filled: boolean;
   disabled: boolean;
+  /**
+   * Set when this is the very element a value was typed into in this run (the
+   * page has not drawn it again since). Holding that value still, it is a
+   * submit the page has not answered yet, not the field coming back.
+   */
+  typed?: boolean;
   /** Set when the element matched a configured selector for that kind. */
   forced?: FieldKind | "submit";
 }
@@ -630,7 +636,12 @@ export function afterTyping(
 // ── the steps ───────────────────────────────────────────────────────────────
 
 export type Step =
-  { kind: "done" } | { kind: "fill"; fill: FieldKind[] } | { kind: "refused"; reason: string } | { kind: "wait" } | { kind: "stuck"; reason: string };
+  | { kind: "done" }
+  | { kind: "fill"; fill: FieldKind[] }
+  | { kind: "refused"; reason: string }
+  | { kind: "wait" }
+  | { kind: "stuck"; reason: string }
+  | { kind: "timeout"; reason: string };
 
 /** What makes a field the same field when a form comes back: its name, id, type, autocomplete and label, never its value. */
 export function fieldIdentity(f: FieldInfo): string {
@@ -654,6 +665,35 @@ export interface StepOptions {
   code?: CodeSource["kind"];
   successConfigured: boolean;
   successMatched: boolean;
+  /** Set, to the run's timeout in seconds, once its deadline has passed. */
+  timedOutAfterS?: number;
+  /** A submitted code or password the page still shows unanswered, disabled ones included (unansweredSubmit). */
+  checking?: FieldKind;
+}
+
+/** The very element a value was typed into, still holding it: a submit the page has not answered yet. */
+const unanswered = (f: FieldInfo | undefined): boolean => f !== undefined && f.typed === true && f.filled;
+
+/**
+ * The submitted code or password whose very element is still on the page
+ * holding what was typed, disabled or not: the page has not answered that
+ * submit yet. A disabled field is not chosen for a step, so without this a
+ * page that disables the code field while it checks the code reads as having
+ * no sign-in field left, which is not a sign-in.
+ */
+export function unansweredSubmit(fields: readonly FieldInfo[], submitted: ReadonlyMap<FieldKind, string>): FieldKind | undefined {
+  const all = chooseFields(fields.map((f) => ({ ...f, disabled: false })));
+  return (["otp", "password"] as const).find((k) => submitted.has(k) && unanswered(all[k]));
+}
+
+/** Waiting on a submit the page has not answered, or, past the deadline, the timeout that says so. */
+function awaitAnswer(pending: FieldKind, opts: StepOptions): Step {
+  if (opts.timedOutAfterS === undefined) return { kind: "wait" };
+  const what = pending === "otp" ? "the one-time code" : "the password";
+  return {
+    kind: "timeout",
+    reason: `the sign-in did not finish within ${opts.timedOutAfterS}s: ${what} was submitted and the page still shows it in the same field`,
+  };
 }
 
 /**
@@ -668,6 +708,16 @@ export interface StepOptions {
  * - Refused: a field already submitted is back — the password field after the
  *   password went, the code field after the code went, or the same username
  *   field, empty, after the password went: the provider sent the form back.
+ *   The very element the password or code was typed into, still holding it,
+ *   is not back: the page has not answered the submit yet (a slow check, or a
+ *   redirect that has not started), so the run waits. Back means the page
+ *   answered: it emptied that field, or drew it again (a new element, or
+ *   another page).
+ * - Waiting, too, while that element is on the page disabled (checking): the
+ *   page is checking the value, so no field showing is not yet a sign-in.
+ * - Timed out: the deadline passed (timedOutAfterS) with that element still
+ *   holding what was typed. Nothing says the value was refused, so the reason
+ *   says the sign-in did not finish in time.
  * - A password field with no password configured, or a code field with no
  *   code or TOTP secret configured, is stuck, with the variable to set.
  * - Otherwise fill what is showing and has not been submitted, or wait.
@@ -678,18 +728,20 @@ export function nextStep(onPage: Partial<Record<FieldKind, FieldInfo>>, progress
   const { submitted } = progress;
   const chosen = signInFields(onPage, submitted, opts);
   const sameUsername = chosen.username !== undefined && submitted.get("username") === fieldIdentity(chosen.username);
-  if (submitted.has("password") && chosen.password) {
+  if (submitted.has("password") && chosen.password && !unanswered(chosen.password)) {
     return { kind: "refused", reason: "the password field came back after the password was submitted: the username or password was refused" };
   }
   if (submitted.has("password") && sameUsername && !chosen.username!.filled) {
     return { kind: "refused", reason: "the sign-in form came back after the password was submitted: the username or password was refused" };
   }
-  if (submitted.has("otp") && chosen.otp) {
+  if (submitted.has("otp") && chosen.otp && !unanswered(chosen.otp)) {
     const check = opts.code === "fixed" ? `check ${LOGIN_ENV.otpCode} is the code the app accepts` : "check the TOTP secret and the runner's clock";
     return { kind: "refused", reason: `the one-time-code field came back after a code was submitted: the code was refused (${check})` };
   }
+  const pending = (["otp", "password"] as const).find((k) => submitted.has(k) && unanswered(chosen[k])) ?? opts.checking;
   const usernameIsSignIn = chosen.username !== undefined && (!submitted.has("username") || sameUsername);
   if (!chosen.password && !chosen.otp && !usernameIsSignIn) {
+    if (pending) return awaitAnswer(pending, opts);
     const credentialSent = submitted.has("password") || submitted.has("otp");
     if (progress.submits === 0 || opts.successConfigured || !credentialSent) return { kind: "wait" };
     return { kind: "done" };
@@ -701,7 +753,8 @@ export function nextStep(onPage: Partial<Record<FieldKind, FieldInfo>>, progress
     return { kind: "stuck", reason: `the page asks for a one-time code and neither ${LOGIN_ENV.otpCode} nor ${LOGIN_ENV.totpSecret} is set` };
   }
   const fill = (["username", "password", "otp"] as const).filter((k) => chosen[k] && !submitted.has(k));
-  return fill.length > 0 ? { kind: "fill", fill } : { kind: "wait" };
+  if (fill.length > 0) return { kind: "fill", fill };
+  return pending ? awaitAnswer(pending, opts) : { kind: "wait" };
 }
 
 /**

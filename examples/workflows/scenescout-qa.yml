@@ -4,6 +4,10 @@
 # URL and a few words of focus) and gets a SceneScout report on it, or
 # `/scenescout qa show the Save button` / `compare the Save button` and gets a
 # picture of that element, before and after with the changed pixels marked.
+# `/scenescout qa check [focus]` instead runs the project's own recorded check
+# (the workflow named by SCENESCOUT_QA_CHECK_WORKFLOW, e.g. one shaped like
+# scenescout-qa-check.yml beside this file) and replies with its verdict: no
+# preview and no model key needed.
 #
 # It tests the pull request's DEPLOYED PREVIEW and never builds or runs the pull
 # request's code: the job that holds the model's key checks out nothing and runs
@@ -48,9 +52,12 @@ jobs:
       login: ${{ steps.gate.outputs.login }}
       show: ${{ steps.gate.outputs.show }}
       base: ${{ steps.gate.outputs.base }}
+      check: ${{ steps.gate.outputs.check }}
+      ref: ${{ steps.gate.outputs.ref }}
+      check-workflow: ${{ steps.gate.outputs.check-workflow }}
     steps:
       - id: gate
-        uses: brunoboto96/SceneScout/qa@v3.14.0
+        uses: brunoboto96/SceneScout/qa@v3.21.0
         with:
           stage: gate
           allowed: ${{ vars.SCENESCOUT_QA_ALLOWED }}
@@ -62,6 +69,8 @@ jobs:
           preview-url: ${{ vars.SCENESCOUT_QA_PREVIEW_URL }}
           environment: ${{ vars.SCENESCOUT_QA_ENVIRONMENT }}
           base-url: ${{ vars.SCENESCOUT_QA_BASE_URL }}
+          # `/scenescout qa check`: the project's own workflow to dispatch. Unset, the command replies saying how to set it up.
+          check-workflow: ${{ vars.SCENESCOUT_QA_CHECK_WORKFLOW }}
 
   # The only job that holds the key. It reads nothing but the preview's URL
   # from the gate, checks out nothing, and runs SceneScout from an exact release.
@@ -78,7 +87,7 @@ jobs:
       group: scenescout-qa-${{ github.repository }}-${{ needs.gate.outputs.pr }}
       cancel-in-progress: true
     steps:
-      - uses: brunoboto96/SceneScout/ci@v3.14.0
+      - uses: brunoboto96/SceneScout/ci@v3.21.0
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         with:
@@ -88,8 +97,8 @@ jobs:
           show: ${{ needs.gate.outputs.show }}
           compare-url: ${{ needs.gate.outputs.base }}
           mode: read-only
-          max-turns: "40"
-          max-tokens: "1500000"
+          max-turns: "80"
+          max-tokens: "3000000"
           max-minutes: "20"
           artifact-name: scenescout-qa-${{ needs.gate.outputs.pr }}
           upload-sarif: "false"
@@ -109,7 +118,7 @@ jobs:
       pushed: ${{ steps.shots.outputs.pushed }}
     steps:
       - id: shots
-        uses: brunoboto96/SceneScout/qa@v3.14.0
+        uses: brunoboto96/SceneScout/qa@v3.21.0
         with:
           stage: shots
           artifact-name: scenescout-qa-${{ needs.gate.outputs.pr }}
@@ -124,7 +133,7 @@ jobs:
       pull-requests: write # post the reply
       actions: read # link the run's artifact, and look for a newer run on the same pull request
     steps:
-      - uses: brunoboto96/SceneScout/qa@v3.14.0
+      - uses: brunoboto96/SceneScout/qa@v3.21.0
         with:
           stage: report
           result: ${{ needs.qa.result }}
@@ -134,3 +143,30 @@ jobs:
           url: ${{ needs.gate.outputs.url }}
           login: ${{ needs.gate.outputs.login }}
           shots: ${{ needs.shots.outputs.pushed }}
+
+  # `/scenescout qa check` only. No key, and nothing checked out: dispatches the
+  # project's own workflow on the pull request's branch, waits for its run,
+  # downloads that run's artifact and replies with check.json's verdict. The
+  # project's workflow runs on its own runners under its own permissions.
+  check:
+    needs: gate
+    if: needs.gate.outputs.check == 'true'
+    runs-on: ubuntu-latest
+    # wait-minutes, plus a few for the dispatch, the download and the reply.
+    timeout-minutes: 40
+    permissions:
+      actions: write # dispatch the project's workflow; also read its run and download its artifact
+      pull-requests: write # post the verdict
+    steps:
+      - uses: brunoboto96/SceneScout/qa@v3.21.0
+        with:
+          stage: check
+          check-workflow: ${{ needs.gate.outputs.check-workflow }}
+          # The artifact the project's workflow uploads its check's output folder as. Unset: scenescout-check.
+          artifact-name: ${{ vars.SCENESCOUT_QA_CHECK_ARTIFACT }}
+          wait-minutes: "30"
+          pr: ${{ needs.gate.outputs.pr }}
+          sha: ${{ needs.gate.outputs.sha }}
+          ref: ${{ needs.gate.outputs.ref }}
+          focus: ${{ needs.gate.outputs.focus }}
+          login: ${{ needs.gate.outputs.login }}

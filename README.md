@@ -277,7 +277,12 @@ Use SceneScout to test http://localhost:3000, record the run
 ```
 
 or, on the tool directly, `scout_attach {record: true}`. `SCENESCOUT_RECORD=on` in
-the server's environment records every run.
+the server's environment records every run. A CI gate records too:
+`scenescout check --record` writes `replay.html`, every journey step by step with
+its frames ([recording a check](docs/ci.md#recording-a-check)), and
+`--template <file.json>` also writes it up as a test report laid out as a template
+says, with expected and actual results, deviations, blank sign-off rows and a
+SHA-256 manifest of the evidence ([test reports](docs/ci.md#a-test-report-from-a-template)).
 
 Then `scout_report` writes two files side by side in `.scenescout/`:
 `report.md` as always, and `report.html` — the whole run as one self-contained
@@ -454,6 +459,7 @@ With the default settings its saved flows send no HTTP write (they replay under 
 - `--on-refused-step report|stop` (default `report`): `report` marks a flow whose step was refused "could not run", keeps every other verdict and exits 2; `stop` exits 2 at that step with no results.
 - `--gate-retests never|high|all` (default `high`): which still-reproducing re-tested findings fail the gate.
 - `--baseline off|compare|update` (default `off`), with `--baselines <dir>` and `--baseline-threshold <percent>` (default `0.1`, so small anti-aliasing noise between machines passes): visual baselines, below.
+- `--record` (or `SCENESCOUT_RECORD=on`; the action's `record: on`) keeps a frame after each route visit and each saved-flow step and writes `replay.html` beside the report: each role, each journey with a pass or fail badge, each step with its caption, result and frame, the first failing step highlighted. `--video` (the action's `video: on`) adds a WebM of each journey, played on that page beside its steps. Both off by default. [docs/ci.md](docs/ci.md#recording-a-check) covers size, privacy and publishing it.
 
 The defaults are what an unconfigured check does, for a first try or an AI agent running it unattended: its flows send no HTTP write and it never silently hides a result. Each setting is a choice for the project; the report and `check.json` print the values a check ran with.
 
@@ -476,14 +482,15 @@ npx scenescout ci http://127.0.0.1:3000
 
 - **It reports and never gates.** Exit 0 when the run ran, whatever it found; exit 2 when it could not run (no key, a key the API refused, an app that never answered). Two runs of the same app find different things, so a finding is something to read, never a reason to fail a build. `scenescout check` is the gate.
 - **Providers:** the Anthropic Messages API (default model `claude-sonnet-5`) or the OpenAI Responses API (default `gpt-6-luna`), chosen by which key is set; with both set, `--provider` decides. `--model` and `--effort` (default `low`) override; `--base-url` points at another endpoint that implements the same API.
-- **Caps:** at most 40 model turns, 1,500,000 tokens and 20 minutes (`--max-turns`, `--max-tokens`, `--max-minutes`). The first cap reached ends the exploration; the report is still written, and says which cap ended it.
+- **Caps:** at most 80 model turns, 3,000,000 tokens and 20 minutes (`--max-turns`, `--max-tokens`, `--max-minutes`), shared by two model loops that each explore their own part of the app (`--lanes`, default 2). The first cap reached ends the exploration; the report is still written, and says which cap ended it. On the benchmark's demo app a run at these defaults cost about $0.03 on `gpt-6-luna` ([docs/benchmark.md](docs/benchmark.md#choosing-the-defaults-issue-419)).
 - **Mode:** `read-only` by default; `--mode observe` sends no form at all, `--mode safe-write` lets the run create records and change only the ones it created. `--mode destructive` runs only with `--allow-destructive` as well.
 - **Duplicates:** when the dedup rule keeps a filed finding apart, the run's model is asked at its lowest effort whether it is one already open on the same page, and merges it on a "same", keeping the filing's title, category, severity and evidence under that finding. The two findings' titles, categories and evidence, and the page's path, are sent; `--dedup rule` turns it off ([ADR 17](docs/adr/0017-a-model-judges-only-the-merges-the-rule-misses.md)).
+- **Starting from an earlier run (opt-in):** every run that writes its report leaves a record in `ci.json` and the project's memory: the routes it worked on, its steps, and what it left on each route. `--from-run <ci.json or project directory>` continues where that run left off (routes it never worked on first, then the ones it left work on, with exactly which forms, options and controls to take first), and `--from-run-mode replay` follows its routes and steps in order. `scout_lane_brief {fromRun, fromRunMode}` does the same for a parallel run. On the demo app a chain of continued runs found 8 defects against 7 for fresh runs at the default budget, and 4, 3 and 4 against 4 at a budget cut to stand in for a larger app, within the noise, so it stays off unless asked for ([the measurement](docs/benchmark.md#starting-from-an-earlier-run-issue-418)).
 - **Output**, in `.scenescout/ci/` (or `--out`): `report.md` and `report.html` (the report an agent's run writes), `summary.md` (also appended to the GitHub job summary), `ci.json` and `ci.sarif`, with a usage line: turns, tokens, time and an estimated cost where the model's price is known (`--price-in`, `--price-out` give one for any model).
 
 There is a GitHub Action for it (`uses: brunoboto96/SceneScout/ci@…`). [docs/ci.md](docs/ci.md#an-unattended-exploratory-run) has the workflow and every option; [ADR 14](docs/adr/0014-an-unattended-run-reports-and-never-gates.md) says why it works this way.
 
-On a pull request, an allowed account can comment `/scenescout qa` to run it against that pull request's deployed preview and get the results as a reply. The job that holds the key checks out nothing and runs SceneScout from an exact release tag, so the pull request's code never runs beside the key. [docs/ci.md](docs/ci.md#a-qa-review-from-a-pull-request-comment) has the workflow to copy and what a project configures; [ADR 15](docs/adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md) says why.
+On a pull request, an allowed account can comment `/scenescout qa` to run it against that pull request's deployed preview and get the results as a reply. The job that holds the key checks out nothing and runs SceneScout from an exact release tag, so the pull request's code never runs beside the key. A project without previews can comment `/scenescout qa check` instead: it dispatches the project's own recorded `scenescout check` workflow on the pull request's branch and replies with the verdict, per journey, with no model key involved. [docs/ci.md](docs/ci.md#a-qa-review-from-a-pull-request-comment) has the workflows to copy and what a project configures; [ADR 15](docs/adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md) says why.
 
 ## 📮 Filing findings as issues
 

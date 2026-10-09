@@ -4,6 +4,7 @@
  * about the pages that are fine, and exit with the code its gate promises.
  */
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import type http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -17,6 +18,8 @@ import { writeRedirectHopsJudged } from "../../dist/browsers.js";
 import { firstLook } from "../../dist/first-run.js";
 import { BROWSER, check, eventually, settle, SIGN_IN_COOKIE, until, type SmokeContext } from "./harness.ts";
 import { writeProfile } from "../../dist/engine/profiles.js";
+import { readCheckInputs, runCheck } from "../../dist/check-run.js";
+import { parseCheckArgs } from "../../dist/engine/check.js";
 
 export const title = "check (deterministic gate)";
 
@@ -29,12 +32,12 @@ type Summary = {
 };
 
 /** Asynchronous on purpose: the demo app is served from this process, and a synchronous spawn would stop it answering. */
-function runCli(args: string[]): Promise<{ status: number | null; out: string }> {
+function runCli(args: string[], env: Record<string, string> = {}): Promise<{ status: number | null; out: string }> {
   return new Promise((resolve) => {
     execFile(
       process.execPath,
       [cli, "check", ...args],
-      { encoding: "utf8", timeout: 300_000, env: { ...process.env, GITHUB_STEP_SUMMARY: "" } },
+      { encoding: "utf8", timeout: 300_000, env: { ...process.env, GITHUB_STEP_SUMMARY: "", SCENESCOUT_RECORD: "", ...env } },
       (err, stdout, stderr) => resolve({ status: err ? (typeof err.code === "number" ? err.code : null) : 0, out: `${stdout}\n${stderr}` }),
     );
   });
@@ -411,9 +414,9 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     for (const [file, flow] of Object.entries(flows)) fs.writeFileSync(path.join(dir, ".scenescout", "flows", file), JSON.stringify(flow));
     return dir;
   };
-  const checkWith = async (dir: string, extra: string[] = []) => {
+  const checkWith = async (dir: string, extra: string[] = [], env: Record<string, string> = {}) => {
     const out = path.join(dir, "out");
-    const r = await runCli([`${baseUrl}/check-flow.html`, "--project", dir, "--out", out, "--paths", "/check-flow.html", ...extra]);
+    const r = await runCli([`${baseUrl}/check-flow.html`, "--project", dir, "--out", out, "--paths", "/check-flow.html", ...extra], env);
     const file = path.join(out, "check.json");
     return { ...r, summary: fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, "utf8")) as FlowSummary) : null };
   };
@@ -443,6 +446,8 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     broken.summary?.issues.some((i) => i.rule === "server-error" && /GET \/api\/refuse\/500 → HTTP 500/.test(i.evidence)) === true,
     JSON.stringify(broken.summary?.issues),
   );
+
+  await recordedChecks({ baseUrl, flowFor, project, checkWith });
 
   const missing = await checkWith(
     project("flow-missing", {
@@ -1139,5 +1144,277 @@ async function flowWriteEdges({
       /answered HTTP 500/.test(errPage.flows[0].reason ?? "") &&
       !errPage.issues.some((i) => i.rule === "server-error" && /fail-500/.test(i.evidence)),
     `${errPage.status} ${JSON.stringify(errPage.issues)}`,
+  );
+}
+
+/**
+ * A recorded check with a report template (--record --template): the report
+ * the template names, beside replay.html, with the failed step as a deviation,
+ * the flow's test ID and requirements, and a manifest whose hashes are those of
+ * the files on disk. Without --record the check stops before it starts.
+ */
+async function templateReport({
+  project,
+  checkWith,
+  withTyped,
+  typed,
+}: {
+  project: (name: string, flows: Record<string, unknown>) => string;
+  checkWith: (dir: string, extra?: string[], env?: Record<string, string>) => Promise<{ status: number | null; out: string; summary: unknown }>;
+  withTyped: (page: string) => { name: string; steps: Array<Record<string, unknown>> };
+  typed: string;
+}): Promise<void> {
+  const flow = { ...withTyped("/check-flow-broken.html"), id: "TC-7", requirements: ["REQ-1"] };
+  const dir = project("flow-template", { "details.json": flow });
+  const template = path.join(dir, "template.json");
+  fs.writeFileSync(
+    template,
+    JSON.stringify({
+      file: "test-report.html",
+      title: "Smoke report {date}",
+      documentId: "SR-{run}",
+      sections: [
+        { type: "tests", columns: ["testId", "requirements", "step", "result", "evidence"] },
+        { type: "deviations" },
+        { type: "manifest" },
+        { type: "signoff", roles: ["Reviewer"] },
+      ],
+    }),
+  );
+  const unrecorded = await checkWith(dir, ["--template", template]);
+  check(
+    "--template without --record stops before it starts, exit 2, saying to add --record",
+    unrecorded.status === 2 &&
+      /--template renders the report from a recorded check's frames: add --record/.test(unrecorded.out) &&
+      !fs.existsSync(path.join(dir, "out", "check.json")),
+    `${unrecorded.status} ${unrecorded.out.slice(-400)}`,
+  );
+  const run = await checkWith(dir, ["--record", "--template", template]);
+  const out = path.join(dir, "out");
+  const file = path.join(out, "test-report.html");
+  const html = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  const manifest = [...html.matchAll(/<td class="path">([^<]+)<\/td><td>(\d+)<\/td><td class="hash">([0-9a-f]{64})<\/td>/g)].map((m) => ({
+    path: m[1],
+    sha: m[3],
+  }));
+  const hashesMatch = manifest.every(
+    (e) =>
+      createHash("sha256")
+        .update(fs.readFileSync(path.join(out, ...e.path.split("/"))))
+        .digest("hex") === e.sha,
+  );
+  check(
+    "--record --template writes the template's report beside replay.html: the failed step a deviation, the test ID and requirements shown, each manifest hash that of its file",
+    run.status === 1 &&
+      fs.existsSync(path.join(out, "replay.html")) &&
+      (run.summary as { testReport?: string } | null)?.testReport === "test-report.html" &&
+      (html.match(/data-testid="report-deviation"/g) ?? []).length === 1 &&
+      /<td rowspan="6" class="span">TC-7<\/td><td rowspan="6" class="span">REQ-1<\/td>/.test(html) &&
+      manifest.length >= 6 &&
+      manifest[0].path === "check.json" &&
+      manifest.some((e) => e.path.startsWith("replay-frames/")) &&
+      hashesMatch,
+    `${run.status} manifest=${manifest.length} hashesMatch=${hashesMatch} ${run.out.slice(-600)}`,
+  );
+  check("...and no typed value reaches the report", html.length > 0 && !html.includes(typed), "the typed value is in the report");
+}
+
+/**
+ * A recorded check (--record): replay.html beside the report with one frame per
+ * route visited and per step that ran, the frames on disk beside it, and
+ * nothing of the kind without the flag. Run against the same flow pair as the
+ * gate, so the failing one shows where it broke.
+ */
+async function recordedChecks({
+  baseUrl,
+  flowFor,
+  project,
+  checkWith,
+}: {
+  baseUrl: string;
+  flowFor: (page: string) => { name: string; steps: Array<Record<string, unknown>> };
+  project: (name: string, flows: Record<string, unknown>) => string;
+  checkWith: (dir: string, extra?: string[], env?: Record<string, string>) => Promise<{ status: number | null; out: string; summary: unknown }>;
+}): Promise<void> {
+  await sessionCarriesUnderVideo({ project, checkWith });
+  await engineFrameCap({ baseUrl, flowFor, project });
+  const typed = "typed-value-5813";
+  const withTyped = (page: string) => {
+    const flow = flowFor(page);
+    return { ...flow, steps: flow.steps.map((s) => (s.action === "type" ? { ...s, value: typed } : s)) };
+  };
+  const page = (dir: string) => {
+    const file = path.join(dir, "out", "replay.html");
+    const html = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+    const srcs = [...html.matchAll(/<img [^>]*src="([^"]+)"/g)].map((m) => m[1]);
+    return { html, srcs, onDisk: srcs.filter((src) => fs.existsSync(path.join(dir, "out", ...src.split("/")))).length };
+  };
+
+  const plain = project("flow-unrecorded", { "details.json": withTyped("/check-flow.html") });
+  const unrecorded = await checkWith(plain);
+  check(
+    "without --record or --video a check writes no replay page, no frames and no videos",
+    unrecorded.status === 0 &&
+      !fs.existsSync(path.join(plain, "out", "replay.html")) &&
+      !fs.existsSync(path.join(plain, "out", "replay-frames")) &&
+      !fs.existsSync(path.join(plain, "out", "replay-videos")),
+    `${unrecorded.status} ${fs.readdirSync(path.join(plain, "out")).join(",")}`,
+  );
+
+  // A replay.html the project keeps in the output folder: a recorded check stops before it starts, and leaves it as it was.
+  const kept = project("flow-own-replay", { "details.json": withTyped("/check-flow.html") });
+  fs.mkdirSync(path.join(kept, "out"), { recursive: true });
+  const ownPage = "<!doctype html><title>Our replay notes</title>";
+  fs.writeFileSync(path.join(kept, "out", "replay.html"), ownPage);
+  const refused = await checkWith(kept, ["--record"]);
+  check(
+    "--record refuses to overwrite a replay.html SceneScout did not write: exit 2, the file untouched, nothing else written",
+    refused.status === 2 &&
+      /is not a page SceneScout wrote, so a recorded check will not overwrite it/.test(refused.out) &&
+      fs.readFileSync(path.join(kept, "out", "replay.html"), "utf8") === ownPage &&
+      JSON.stringify(fs.readdirSync(path.join(kept, "out"))) === '["replay.html"]',
+    `${refused.status} ${fs.readdirSync(path.join(kept, "out")).join(",")} ${refused.out.slice(-400)}`,
+  );
+
+  const passing = project("flow-recorded", { "details.json": withTyped("/check-flow.html") });
+  const recorded = await checkWith(passing, ["--record"]);
+  const good = page(passing);
+  check(
+    "--record writes replay.html with one frame per route visited and per step that ran, each on disk beside it",
+    recorded.status === 0 &&
+      good.srcs.length === 7 &&
+      good.onDisk === 7 &&
+      (good.html.match(/data-result="passed"/g) ?? []).length === 6 &&
+      /<span class="badge pass">passed<\/span> <b>show details<\/b>/.test(good.html) &&
+      /<dt>App<\/dt><dd>http:\/\/127\.0\.0\.1:\d+<\/dd>/.test(good.html),
+    `${recorded.status} srcs=${good.srcs.length} onDisk=${good.onDisk} ${recorded.out.slice(-600)}`,
+  );
+  check("...and no typed value reaches the page", good.html.length > 0 && !good.html.includes(typed), "the typed value is on the page");
+  check(
+    "...and --record alone records no video",
+    !fs.existsSync(path.join(passing, "out", "replay-videos")) && !good.html.includes("<video "),
+    "a video was written",
+  );
+
+  // --video: one WebM per journey that ran, and only of the journeys, linked from the page beside its steps.
+  const filmed = project("flow-video", { "a-works.json": withTyped("/check-flow.html"), "b-breaks.json": withTyped("/check-flow-broken.html") });
+  const videoRun = await checkWith(filmed, ["--video"]);
+  const videosDir = path.join(filmed, "out", "replay-videos");
+  const videos = fs.existsSync(videosDir) ? fs.readdirSync(videosDir).sort() : [];
+  const shown = page(filmed);
+  const flowsRan = (videoRun.summary as FlowSummary | null)?.flows.map((f) => f.status) ?? [];
+  check(
+    "--video writes one non-empty WebM per journey that ran, and the replay page plays and links each beside its steps",
+    videoRun.status === 1 &&
+      JSON.stringify(flowsRan) === JSON.stringify(["passed", "failed"]) &&
+      JSON.stringify(videos) === JSON.stringify(["journey-01-a-works.webm", "journey-02-b-breaks.webm"]) &&
+      videos.every((v) => fs.statSync(path.join(videosDir, v)).size > 1000) &&
+      videos.every((v) => shown.html.includes(`<video controls preload="metadata" src="replay-videos/${v}"`)) &&
+      shown.srcs.length === 0,
+    `${videoRun.status} flows=${JSON.stringify(flowsRan)} videos=${JSON.stringify(videos)} imgs=${shown.srcs.length} ${videoRun.out.slice(-600)}`,
+  );
+
+  const failing = project("flow-recorded-broken", { "details.json": withTyped("/check-flow-broken.html") });
+  const broken = await checkWith(failing, ["--record"]);
+  const bad = page(failing);
+  check(
+    "...and a recorded flow that breaks at step 4 has four step frames, that step highlighted, and the last two not run",
+    broken.status === 1 &&
+      bad.srcs.length === 5 &&
+      bad.onDisk === 5 &&
+      (bad.html.match(/class="step failed first-failing"/g) ?? []).length === 1 &&
+      (bad.html.match(/data-result="not-run"/g) ?? []).length === 2 &&
+      /data-testid="replay-first-failing-link">Step 4 failed</.test(bad.html),
+    `${broken.status} srcs=${bad.srcs.length} onDisk=${bad.onDisk} ${broken.out.slice(-600)}`,
+  );
+
+  await templateReport({ project, checkWith, withTyped, typed });
+
+  const viaEnv = project("flow-recorded-env", { "details.json": withTyped("/check-flow.html") });
+  const env = await checkWith(viaEnv, [], { SCENESCOUT_RECORD: "on" });
+  check("SCENESCOUT_RECORD=on records a check given no --record", env.status === 0 && page(viaEnv).srcs.length === 7, `${env.status} ${env.out.slice(-400)}`);
+  // The same folder checked again without recording: the earlier page and its frames are gone, not kept as this run's.
+  const again = await checkWith(viaEnv, ["--record", "off"], { SCENESCOUT_RECORD: "on" });
+  check(
+    "...--record off wins over it, and removes the page and frames an earlier run left",
+    again.status === 0 && !fs.existsSync(path.join(viaEnv, "out", "replay.html")) && !fs.existsSync(path.join(viaEnv, "out", "replay-frames")),
+    `${again.status} ${fs.readdirSync(path.join(viaEnv, "out")).join(",")}`,
+  );
+}
+
+/**
+ * --video films each flow on the session's own page, so what one flow leaves in
+ * sessionStorage is there for the next, as it is unfilmed. The same two flows
+ * run with and without --video and must agree.
+ */
+async function sessionCarriesUnderVideo({
+  project,
+  checkWith,
+}: {
+  project: (name: string, flows: Record<string, unknown>) => string;
+  checkWith: (dir: string, extra?: string[], env?: Record<string, string>) => Promise<{ status: number | null; out: string; summary: unknown }>;
+}): Promise<void> {
+  const flows = {
+    "1-remember.json": {
+      name: "remember",
+      steps: [
+        { action: "navigate", target: "/check-session-carry.html" },
+        { action: "click", target: "testid=carry-remember" },
+        { action: "expect-text", text: "Remembered: yes" },
+      ],
+    },
+    "2-still-remembered.json": {
+      name: "still remembered",
+      steps: [
+        { action: "navigate", target: "/check-session-carry.html" },
+        { action: "expect-text", text: "Remembered: yes" },
+      ],
+    },
+  };
+  const statuses = (r: { summary: unknown }) => (r.summary as FlowSummary | null)?.flows.map((f) => f.status) ?? [];
+  const plain = await checkWith(project("carry-plain", flows));
+  const filmedDir = project("carry-video", flows);
+  const filmed = await checkWith(filmedDir, ["--video"]);
+  check(
+    "a flow sees the sessionStorage the flow before it wrote, filmed (--video) as unfilmed",
+    plain.status === 0 &&
+      filmed.status === 0 &&
+      JSON.stringify(statuses(plain)) === '["passed","passed"]' &&
+      JSON.stringify(statuses(filmed)) === '["passed","passed"]' &&
+      fs.readdirSync(path.join(filmedDir, "out", "replay-videos")).length === 2,
+    `plain ${plain.status} ${JSON.stringify(statuses(plain))}; video ${filmed.status} ${JSON.stringify(statuses(filmed))} ${filmed.out.slice(-600)}`,
+  );
+}
+
+/**
+ * The engine's own frame cap, lowered to 3: the check's session keeps three
+ * frames and takes none after them, and every step and visit past it is
+ * marked and counted on the page, not only those the page itself drops.
+ */
+async function engineFrameCap({
+  baseUrl,
+  flowFor,
+  project,
+}: {
+  baseUrl: string;
+  flowFor: (page: string) => { name: string; steps: Array<Record<string, unknown>> };
+  project: (name: string, flows: Record<string, unknown>) => string;
+}): Promise<void> {
+  const dir = project("frame-cap", { "details.json": flowFor("/check-flow.html") });
+  const out = path.join(dir, "out");
+  const parsed = parseCheckArgs([`${baseUrl}/check-flow.html`, "--project", dir, "--out", out, "--paths", "/check-flow.html", "--record"], dir);
+  if (!parsed.ok) throw new Error(parsed.error);
+  const options = { ...parsed.options, maxFrames: 3 };
+  const result = await runCheck(options, () => {}, readCheckInputs(options));
+  const replay = result.replay;
+  const steps = replay?.roles[0]?.journeys[0]?.steps ?? [];
+  const visits = replay?.roles[0]?.visits ?? [];
+  const framed = [...visits, ...steps].filter((x) => x.frame).length;
+  const past = [...visits, ...steps].filter((x) => x.pastCap).length;
+  // One visit and six steps: three framed, four past the cap.
+  check(
+    "a session that reaches its frame cap takes no more, and the page marks and counts every step past it",
+    framed === 3 && past === 4 && replay?.framesLeftOut === 4 && steps.slice(2).every((s) => s.pastCap === true),
+    `framed=${framed} past=${past} leftOut=${replay?.framesLeftOut} ${JSON.stringify(steps.map((s) => [s.frame ?? null, s.pastCap ?? false]))}`,
   );
 }

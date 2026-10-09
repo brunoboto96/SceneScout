@@ -1,0 +1,71 @@
+{
+  "app": "demo",
+  "run": "ci-fromrun-demo-u1",
+  "date": "2026-10-07",
+  "note": "Independent run, fresh project, at the two-lane 80-turn default (issue 418 baseline)",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard links overlap bulk-import badge",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "dashboard /: e16 All orders overlaps e17 New: bulk import 85%"
+    },
+    {
+      "title": "Shell links are visually indistinguishable from body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "shared shell links rgba(91,102,117,1) no underline"
+    },
+    {
+      "title": "Inventory page spacing is inconsistent with 4px grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "inventory spacing 96% off 4px grid: 14pxx50,10pxx46",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    },
+    {
+      "title": "Save notes button is covered by the sticky bar",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order detail Save notes covered by order-stickybar"
+    },
+    {
+      "title": "Export CSV crashes because report rows are undefined",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports-export-csv TypeError Cannot read properties of undefined (reading 'rows')"
+    },
+    {
+      "title": "New-order form accepts negative item count",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/orders accepted items=-2 and invalid email"
+    },
+    {
+      "title": "Optional confirmation email has no persistent accessible label",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new-order-email placeholder-only accessible name"
+    },
+    {
+      "title": "New-order helper text has very low contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new-order helper text contrast 1.73:1"
+    },
+    {
+      "title": "Scheduled reports page is a dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables and dead-end"
+    }
+  ],
+  "decisions": []
+}

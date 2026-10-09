@@ -11,7 +11,38 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatBriefs, landingOf, laneName, MAX_LANES, moduleOf, planLanes, splitRoutes } from "../src/engine/brief.ts";
+import { formatBriefs, landingOf, laneName, MAX_LANES, moduleOf, planLanes, replayBriefs, splitRoutes } from "../src/engine/brief.ts";
+import {
+  buildRunRecord,
+  carryForward,
+  DEFAULT_TURNS_PER_PAGE,
+  pageCap,
+  takenPages,
+  continueExhausted,
+  continueLines,
+  continuePlan,
+  foldRecords,
+  EXHAUSTED_AT,
+  FROM_RUN_ENV,
+  FROM_RUN_MODE_ENV,
+  MAX_PREFIX_STEPS,
+  MAX_RECORDS,
+  pathLine,
+  planStepOf,
+  prefixOutcome,
+  prefixPlan,
+  readRunRecord,
+  recordFromJson,
+  replayLines,
+  replayPlan,
+  resolveFromRun,
+  standInValue,
+  unionRecords,
+  workLeft,
+  workLine,
+  type RecordInput,
+  type RunRecord,
+} from "../src/engine/from-run.ts";
 
 const routesOf = (lanes: ReturnType<typeof splitRoutes>): string[] => lanes.flatMap((l) => l.routes);
 
@@ -148,4 +179,569 @@ test("each lane is told to sign in the way the planner did", () => {
   // A session that never signed in hands its lanes nothing to sign in with.
   const anonymous = attachLine(formatBriefs(lanes, { role: "anonymous" }));
   assert.doesNotMatch(anonymous, /storageStatePath|role: "/);
+});
+
+// ── starting from an earlier run (from-run.ts) ──────────────────────────────
+
+test("from run: the path option, else SCENESCOUT_FROM_RUN, else none; the mode option, else its variable, else continue", () => {
+  const r = (o: { path?: string; mode?: string }, env: Record<string, string> = {}) => resolveFromRun(o, env);
+  assert.deepEqual(r({}), { ok: true }, "a fresh run unless asked");
+  assert.deepEqual(r({}, { [FROM_RUN_ENV]: "  " }), { ok: true }, "an empty variable is unset");
+  assert.deepEqual(r({ path: "a/ci.json" }), { ok: true, fromRun: { path: "a/ci.json", mode: "continue", turnsPerPage: 7 } });
+  assert.deepEqual(r({}, { [FROM_RUN_ENV]: "env.json" }), { ok: true, fromRun: { path: "env.json", mode: "continue", turnsPerPage: 7 } });
+  assert.deepEqual(
+    r({ path: "flag.json" }, { [FROM_RUN_ENV]: "env.json" }),
+    { ok: true, fromRun: { path: "flag.json", mode: "continue", turnsPerPage: 7 } },
+    "the option wins",
+  );
+  assert.deepEqual(
+    r({ path: "p", mode: "replay" }, { [FROM_RUN_MODE_ENV]: "continue" }),
+    { ok: true, fromRun: { path: "p", mode: "replay", turnsPerPage: 7 } },
+    "the option wins",
+  );
+  assert.deepEqual(r({ path: "p" }, { [FROM_RUN_MODE_ENV]: "replay" }), { ok: true, fromRun: { path: "p", mode: "replay", turnsPerPage: 7 } });
+  // The mode is read only for a run that has an earlier one: a stray variable stops nothing.
+  assert.deepEqual(r({}, { [FROM_RUN_MODE_ENV]: "sideways" }), { ok: true });
+  const err = (o: { path?: string; mode?: string }, env: Record<string, string> = {}): string => {
+    const x = r(o, env);
+    assert.ok(!x.ok, JSON.stringify(o));
+    return x.error;
+  };
+  assert.match(err({ path: "p", mode: "sideways" }), /^--from-run-mode must be one of continue, replay/);
+  assert.match(err({ path: "p" }, { [FROM_RUN_MODE_ENV]: "sideways" }), /^SCENESCOUT_FROM_RUN_MODE must be one of/);
+  assert.match(err({ mode: "replay" }), /--from-run-mode applies to a run started from an earlier one: give --from-run as well/);
+  assert.match(err({ path: " " }), /--from-run needs a ci.json or a project directory/);
+  const named = resolveFromRun({ mode: "replay" }, {}, { path: "fromRun", mode: "fromRunMode" });
+  assert.ok(!named.ok && /^fromRunMode applies .* give fromRun/.test(named.error), "the brief's inputs are named as the brief names them");
+});
+
+/** A record input: a session "lane-a" that worked on /orders and /orders/42, a planner that only looked, and a crawl of /stock. */
+const input = (over: Partial<RecordInput> = {}): RecordInput => ({
+  runId: "run-1",
+  at: "2026-10-07T10:00:00.000Z",
+  knownRoutes: ["/", "/orders", "/orders/:id", "/stock", "/reports"],
+  steps: [
+    { session: "default", url: "http://app.test/", action: "snapshot" },
+    { session: "default", url: "http://app.test/stock", action: "crawl", target: "/stock" },
+    { session: "lane-a", url: "http://app.test/orders", action: "navigate", target: "http://app.test/orders" },
+    { session: "lane-a", url: "http://app.test/orders", action: "attach" },
+    { session: "lane-a", url: "http://app.test/orders/42", action: "click", target: 'link "Order 42"' },
+    { session: "lane-a", url: "http://app.test/orders/42", action: "type", target: 'textbox "Note" ← "hi"' },
+    { session: "lane-a", url: "http://app.test/orders", action: "back", target: "" },
+  ],
+  unexercised: [
+    { route: "/orders", keys: ["button:export", "link:next"] },
+    { route: "/stock", keys: ["button:adjust"] },
+  ],
+  forms: [{ route: "/orders/:id", key: "form#note" }],
+  filled: ["/orders/:id"],
+  unchosen: [{ route: "/orders", key: "select:status", unchosen: ["Archived", "Draft"] }],
+  gaps: ["1 route(s) never visited in any run: /reports"],
+  ...over,
+});
+
+test("record: only the routes a session worked on are visited, in the order reached; a crawl, an attach and a look-only planner are not", () => {
+  const r = buildRunRecord(input());
+  assert.deepEqual(r.visited, ["/orders", "/orders/:id"]);
+  assert.deepEqual(r.lanes, [{ session: "lane-a", routes: ["/orders", "/orders/:id"] }], "the planner only looked, so it is no lane");
+  assert.deepEqual(
+    r.steps.map((s) => [s.action, s.route]),
+    [
+      ["navigate", "/orders"],
+      ["click", "/orders/:id"],
+      ["type", "/orders/:id"],
+      ["back", "/orders"],
+    ],
+  );
+  assert.deepEqual(r.left, [
+    { route: "/orders", unexercised: ["button:export", "link:next"], forms: [], unchosen: [{ key: "select:status", options: ["Archived", "Draft"] }] },
+    { route: "/orders/:id", unexercised: [], forms: ["form#note"], filled: true, unchosen: [] },
+  ]);
+  // /stock was only crawled: what is left there is not this run's to hand on, and it is not visited.
+  assert.ok(!r.left.some((l) => l.route === "/stock"));
+  // The contrastive case: the same planner, once it acts, is a lane and its route is visited.
+  const acting = buildRunRecord(
+    input({ steps: [...input().steps, { session: "default", url: "http://app.test/", action: "click", target: 'button "Help"' }] }),
+  );
+  assert.deepEqual(acting.visited, ["/", "/orders", "/orders/:id"]);
+  assert.deepEqual(
+    acting.lanes.map((l) => l.session),
+    ["default", "lane-a"],
+  );
+  assert.equal(readRunRecord(JSON.parse(JSON.stringify(r))) !== null, true, "a record reads back as one");
+  // What was typed is never kept: the redaction cannot tell a password from a note.
+  assert.equal(r.steps[2].target, 'textbox "Note" ← (a value)');
+  // A refused action did nothing: it is no step, and a session whose only act was refused only looked.
+  const refused = buildRunRecord(
+    input({ steps: [...input().steps, { session: "default", url: "http://app.test/", action: "click:refused", target: 'button "Delete all"' }] }),
+  );
+  assert.deepEqual(refused.steps, r.steps);
+  assert.deepEqual(refused.visited, r.visited);
+  assert.equal(
+    buildRunRecord(input({ steps: [{ session: "a", url: "http://app.test/x", action: "click×2", target: "b" }] })).steps.length,
+    1,
+    "a double click is a step",
+  );
+});
+
+const recordOf = (over: Partial<RecordInput> = {}): RunRecord => buildRunRecord(input(over));
+
+test("continue: never worked on first, then the routes with work left (most first), then the covered ones; the same input the same order", () => {
+  const r = recordOf();
+  const items = continuePlan(r, ["/orders/7", "/stock", "/", "/reports", "/orders", "/people"]);
+  assert.deepEqual(
+    items.map((i) => [i.tier, i.route]),
+    [
+      [1, "/"],
+      [1, "/people"],
+      [1, "/reports"],
+      [1, "/stock"],
+      // /orders has 2 controls and 2 options left; /orders/7 is /orders/:id, with 1 form and 1 filled form.
+      [2, "/orders"],
+      [2, "/orders/7"],
+    ],
+  );
+  assert.equal(workLeft(items[4].work!), 4);
+  // Order-independent, and a route only the record knew is not lost.
+  assert.deepEqual(continuePlan(r, ["/people", "/orders", "/reports", "/", "/stock", "/orders/7"]), items);
+  assert.deepEqual(
+    continuePlan(r, []).map((i) => i.route),
+    ["/", "/reports", "/stock", "/orders", "/orders/:id"],
+  );
+});
+
+test("continue: the one fact that moves a route between tiers is whether work was left on it", () => {
+  // Two records alike but for one unsubmitted form on /orders/:id.
+  const withForm = recordOf({ unexercised: [], unchosen: [], filled: [] });
+  const without = recordOf({ unexercised: [], unchosen: [], filled: [], forms: [] });
+  const tierOf = (r: RunRecord, route: string) => continuePlan(r, ["/orders", "/orders/:id"]).find((i) => i.route === route)?.tier;
+  assert.equal(tierOf(withForm, "/orders/:id"), 2);
+  assert.equal(tierOf(without, "/orders/:id"), 3);
+  assert.equal(tierOf(withForm, "/orders"), 3, "the other route is unchanged");
+  // And a route worked on is never tier 1, whatever was left; one never worked on always is.
+  assert.equal(tierOf(recordOf({ steps: [] }), "/orders/:id"), 1);
+});
+
+test("continue: the message names exactly the forms, options and controls to take first, and a lane is told about its own routes", () => {
+  const items = continuePlan(recordOf(), ["/orders", "/orders/:id", "/stock", "/reports"]);
+  const lines = continueLines(items, { from: "prev/ci.json" });
+  assert.match(lines[0], /continues an earlier one \(prev\/ci\.json\)/);
+  assert.equal(lines[1], "- First, the routes it never worked on: /, /reports, /stock");
+  assert.ok(
+    lines.includes(`   /orders: choose the options never chosen: select:status → "Archived", "Draft"; controls never exercised: button:export, link:next`),
+    lines.join("\n"),
+  );
+  assert.ok(lines.includes(`   /orders/:id: submit the form(s) never submitted: form#note; a form was filled in and never submitted: fill it and submit it`));
+  assert.ok(!lines.some((l) => l.startsWith("- Last")), "nothing worked through, no last tier");
+  assert.match(lines.at(-1)!, /not the whole job: when the listed work is done, keep exploring as a fresh run would until the budget is spent/);
+  const lane = continueLines(items, { from: "x", only: ["/stock"] });
+  assert.equal(lane[1], "- First, the routes it never worked on: /stock");
+  assert.ok(!lane.some((l) => /no work|nothing to do/i.test(l)), lane.join("\n"));
+  assert.deepEqual(continueLines(items, { from: "x", only: ["/elsewhere"] }), [], "a lane with none of these routes is told nothing");
+  assert.equal(
+    workLine({ route: "/a", unexercised: Array.from({ length: 10 }, (_, i) => `k${i}`), forms: [], unchosen: [] }),
+    "/a: controls never exercised: k0, k1, k2, k3, k4, k5, k6, k7 … +2",
+  );
+});
+
+test("continue: a chain of records carries forward what earlier runs covered and left", () => {
+  const first = recordOf();
+  // The second run worked on /stock only, and left a control there.
+  const second = buildRunRecord(
+    input({
+      runId: "run-2",
+      at: "2026-10-07T11:00:00.000Z",
+      steps: [{ session: "lane-b", url: "http://app.test/stock", action: "click", target: 'button "Adjust"' }],
+      unexercised: [{ route: "/stock", keys: ["button:count"] }],
+      forms: [],
+      filled: [],
+      unchosen: [],
+    }),
+  );
+  const chained = carryForward(first, second);
+  assert.deepEqual(chained.visited, ["/stock", "/orders", "/orders/:id"]);
+  assert.deepEqual(
+    chained.left.map((l) => l.route),
+    ["/stock", "/orders", "/orders/:id"],
+  );
+  assert.deepEqual(chained.steps, second.steps, "the steps stay the run's own");
+  // A route the later run worked on again takes the later run's word, even when it left nothing there.
+  const third = buildRunRecord(input({ runId: "run-3", at: "2026-10-07T12:00:00.000Z", unexercised: [], forms: [], filled: [], unchosen: [] }));
+  assert.deepEqual(
+    carryForward(chained, third).left.map((l) => l.route),
+    ["/stock"],
+  );
+  assert.deepEqual(foldRecords([third, first, second]), carryForward(carryForward(first, second), third), "folded oldest first, whatever the order kept");
+  assert.equal(foldRecords([]), null);
+});
+
+test("records: read back in full or not at all, found in a ci.json, a memory or bare, and kept as a set", () => {
+  const r = recordOf();
+  for (const bad of [
+    { ...r, version: 2 },
+    { ...r, visited: "/orders" },
+    { ...r, steps: [{ session: "a", route: "/", action: 1 }] },
+    { ...r, left: [{ route: "/", unexercised: [], forms: [], unchosen: [{ key: "k" }] }] },
+    { ...r, followed: { mode: "sideways", runId: "x" } },
+    null,
+  ])
+    assert.equal(readRunRecord(bad), null, JSON.stringify(bad)?.slice(0, 80));
+  assert.deepEqual(recordFromJson({ tool: "scenescout", command: "ci", record: r }, "ci.json"), { ok: true, record: r });
+  const noRecord = recordFromJson({ tool: "scenescout", command: "ci" }, "ci.json");
+  assert.ok(!noRecord.ok && /ci.json holds no run record: its run wrote no report/.test(noRecord.error));
+  const second = { ...recordOf({ runId: "run-2", at: "2026-10-07T11:00:00.000Z" }) };
+  const memory = recordFromJson({ version: 1, states: {}, findings: [], runRecords: [second, r] }, "memory.json");
+  assert.deepEqual(memory, { ok: true, record: carryForward(r, second) });
+  assert.ok(!recordFromJson({ version: 1, states: {}, findings: [] }, "memory.json").ok);
+  assert.deepEqual(recordFromJson(r, "r.json"), { ok: true, record: r });
+  const neither = recordFromJson({ hello: 1 }, "r.json");
+  assert.ok(!neither.ok && /r.json is not a ci.json, a project's memory or a run record/.test(neither.error));
+  assert.deepEqual(unionRecords([r], [second, r]), [r, second]);
+  assert.deepEqual(unionRecords(unionRecords([r], [second]), [second]), [r, second], "idempotent");
+  const many = Array.from({ length: MAX_RECORDS + 3 }, (_, i) => ({ ...r, runId: `r${i}`, at: `2026-10-07T10:00:${String(i).padStart(2, "0")}.000Z` }));
+  assert.equal(unionRecords(many, []).length, MAX_RECORDS);
+  assert.equal(unionRecords(many, [])[0].runId, "r3", "the oldest go first");
+});
+
+test("replay: the same record gives the same plan, in the order the run took its steps, one lane per session that acted", () => {
+  const r = recordOf({
+    steps: [
+      { session: "lane-b", url: "http://app.test/stock", action: "navigate", target: "/stock" },
+      { session: "lane-a", url: "http://app.test/orders", action: "click", target: 'button "Z"' },
+      { session: "lane-b", url: "http://app.test/stock", action: "select", target: 'combobox "Site" = North' },
+      { session: "lane-a", url: "http://app.test/orders/9", action: "click", target: 'link "A"' },
+      { session: "default", url: "http://app.test/", action: "snapshot" },
+    ],
+  });
+  const plan = replayPlan(r);
+  assert.deepEqual(plan, replayPlan(JSON.parse(JSON.stringify(r))), "the same input, the same order");
+  assert.deepEqual(
+    plan.map((l) => [l.session, l.routes, l.steps.map((s) => s.target)]),
+    [
+      ["lane-b", ["/stock"], ["/stock", 'combobox "Site" = North']],
+      ["lane-a", ["/orders", "/orders/:id"], ['button "Z"', 'link "A"']],
+    ],
+    "recorded order, not sorted: lane-b moved first, and button Z came before link A",
+  );
+  const lines = replayLines(plan[1], { from: "prev/ci.json" });
+  assert.match(lines[0], /replays an earlier one \(prev\/ci\.json\): follow its route and step order exactly/);
+  assert.deepEqual(lines.slice(3), ['  1. click button "Z" → /orders', '  2. click link "A" → /orders/:id']);
+  const briefs = replayBriefs(plan);
+  assert.deepEqual(
+    briefs.map((b) => [b.lane, b.routes, b.landing]),
+    [
+      ["stock", ["/stock"], "/stock"],
+      ["orders", ["/orders", "/orders/:id"], "/orders"],
+    ],
+  );
+  assert.deepEqual(
+    replayBriefs([{ routes: ["/a/1"] }, { routes: ["/a/2"] }]).map((b) => b.lane),
+    ["a", "a-2"],
+    "two sessions in one module get two names",
+  );
+});
+
+test("an order changes which route each lane starts on, never which modules a lane owns or which routes are split", () => {
+  const routes = ["/orders", "/orders/new", "/orders/42", "/stock", "/stock/audit", "/people", "/", "/settings", "/reports"];
+  const plain = splitRoutes(routes, 3);
+  const order = ["/stock/audit", "/people", "/orders/new", "/reports"];
+  const ordered = splitRoutes(routes, 3, order);
+  assert.deepEqual(routesOf(ordered).sort(), [...routes].sort(), "every route once");
+  for (const lane of ordered) assert.deepEqual([...new Set(lane.routes.map(moduleOf))].sort(), [...lane.modules].sort(), "whole modules");
+  assert.deepEqual(
+    ordered.map((l) => l.routes[0]),
+    ["/stock/audit", "/people", "/orders/new"],
+    "each lane starts on the first of its routes the order names",
+  );
+  assert.deepEqual(splitRoutes([...routes].reverse(), 3, order), ordered, "the discovery order still does not matter");
+  assert.equal(JSON.stringify(planLanes(routes, 3)), JSON.stringify(planLanes(routes, 3, {})), "without an order, the split is the stable one");
+  assert.deepEqual(plain[0].routes[0], "/orders", "the stable split starts with the biggest module, sorted");
+});
+
+test("a brief that starts from an earlier run says so, and gives each lane its own lines", () => {
+  const lanes = planLanes(["/orders/a", "/stock/a"], 2);
+  const out = formatBriefs(lanes, {
+    fromRunNote: "continued from the run recorded in prev/ci.json (its report of t)",
+    laneLines: (b) => [`first: ${b.routes[0]}`],
+  });
+  assert.match(out, /^LANE PLAN — 2 lane\(s\) over 2 route\(s\)\.\nThis run continued from the run recorded in prev\/ci\.json/);
+  assert.match(out, /routes: \/orders\/a\nfirst: \/orders\/a\n/);
+  assert.match(out, /routes: \/stock\/a\nfirst: \/stock\/a\n/);
+  assert.doesNotMatch(formatBriefs(lanes), /This run|first:/, "a fresh run's brief is unchanged");
+});
+
+// ── the path to a page (prefixPlan) ─────────────────────────────────────────
+
+const pathRecord = (steps: RecordInput["steps"]): RunRecord => recordOf({ steps, unexercised: [], forms: [], filled: [], unchosen: [] });
+const A = "http://app.test";
+
+test("path: a page reached by a step on another is reached by that page and that step; one opened by its address needs no path", () => {
+  const throughStart = pathRecord([
+    { session: "lane-a", url: `${A}/start`, action: "navigate", target: `${A}/start` },
+    { session: "lane-a", url: `${A}/start`, action: "snapshot" },
+    { session: "lane-a", url: `${A}/start`, action: "type", target: 'textbox "Reference" ← "R-1"' },
+    { session: "lane-a", url: `${A}/records/7`, action: "click", target: 'button "Open record"' },
+    { session: "lane-a", url: `${A}/records/7`, action: "click", target: 'button "Edit"' },
+  ]);
+  assert.deepEqual(prefixPlan(throughStart, "/records/:id"), {
+    session: "lane-a",
+    direct: false,
+    steps: [
+      { action: "navigate", target: "/start" },
+      { action: "type", target: 'role=textbox[name="Reference"]', value: "SceneScout test", replace: true },
+      { action: "click", target: 'role=button[name="Open record"]' },
+    ],
+  });
+  // The contrastive record: the same page, opened by its address.
+  const byAddress = pathRecord([
+    { session: "lane-a", url: `${A}/start`, action: "navigate", target: `${A}/start` },
+    { session: "lane-a", url: `${A}/records/7`, action: "navigate", target: `${A}/records/7` },
+  ]);
+  assert.deepEqual(prefixPlan(byAddress, "/records/7"), { session: "lane-a", direct: true, steps: [{ action: "navigate", target: "/records/7" }] });
+  assert.equal(prefixPlan(byAddress, "/elsewhere"), null, "a page the record never reached has no path");
+  // The path starts at the last page opened by address before the target, not at the session's first.
+  const twoHops = pathRecord([
+    { session: "s", url: `${A}/a`, action: "navigate", target: "/a" },
+    { session: "s", url: `${A}/b`, action: "click", target: 'link "B"' },
+    { session: "s", url: `${A}/c`, action: "navigate", target: "/c" },
+    { session: "s", url: `${A}/d`, action: "click", target: 'link "D"' },
+  ]);
+  assert.deepEqual((prefixPlan(twoHops, "/d") as { steps: unknown[] }).steps, [
+    { action: "navigate", target: "/c" },
+    { action: "click", target: 'role=link[name="D"]' },
+  ]);
+  // A session that never navigated starts from the first page it was on.
+  const fromLanding = pathRecord([
+    { session: "s", url: `${A}/`, action: "snapshot" },
+    { session: "s", url: `${A}/x`, action: "click", target: 'link "X"' },
+  ]);
+  assert.deepEqual((prefixPlan(fromLanding, "/x") as { steps: unknown[] }).steps, [
+    { action: "navigate", target: "/" },
+    { action: "click", target: 'role=link[name="X"]' },
+  ]);
+  // Only a snapshot says where a session began: a first step that is a click names where it landed.
+  const fromClick = pathRecord([
+    { session: "s", url: `${A}/x`, action: "click", target: 'link "X"' },
+    { session: "s", url: `${A}/y`, action: "click", target: 'link "Y"' },
+  ]);
+  assert.match((prefixPlan(fromClick, "/y") as { cannot: string }).cannot, /opened no page by its address/);
+  const long = pathRecord([
+    { session: "s", url: `${A}/a`, action: "navigate", target: "/a" },
+    ...Array.from({ length: MAX_PREFIX_STEPS }, (_, i) => ({ session: "s", url: `${A}/a`, action: "click", target: `button "B${i}"` })),
+    { session: "s", url: `${A}/z`, action: "click", target: 'link "Z"' },
+  ]);
+  assert.match((prefixPlan(long, "/z") as { cannot: string }).cannot, /more than one plan runs/);
+  const upload = pathRecord([
+    { session: "s", url: `${A}/a`, action: "navigate", target: "/a" },
+    { session: "s", url: `${A}/z`, action: "upload", target: "report.pdf attached" },
+  ]);
+  assert.match((prefixPlan(upload, "/z") as { cannot: string }).cannot, /upload step, which a plan cannot repeat/);
+});
+
+test("path: each recorded step as a plan step, typed values stood in for, and what a plan cannot repeat said", () => {
+  const step = (action: string, target?: string, route = "/p") => planStepOf({ session: "s", route, action, ...(target !== undefined ? { target } : {}) });
+  assert.deepEqual(step("click×2", 'button "Save"'), { action: "click", target: 'role=button[name="Save"]' });
+  assert.deepEqual(step("click", `button "Say "hi""`), { action: "click", target: `role=button[name='Say "hi"']` });
+  assert.ok("cannot" in step("click", `button "it's "x""`), "a name with both quotes cannot be a role target");
+  assert.deepEqual(step("type", 'textbox "Email" ← (a value) + Enter'), {
+    action: "type",
+    target: 'role=textbox[name="Email"]',
+    value: "scout@example.com",
+    replace: true,
+    pressEnter: true,
+  });
+  assert.deepEqual(step("select", 'combobox "Status" = open (matched option "open", labelled "Open")'), {
+    action: "select",
+    target: 'role=combobox[name="Status"]',
+    value: "open",
+  });
+  assert.deepEqual(step("navigate", "http://app.test/orders?tab=open"), { action: "navigate", target: "/orders?tab=open" });
+  assert.deepEqual(step("back", "", "/orders"), { action: "navigate", target: "/orders" });
+  assert.ok("cannot" in step("back", "", "/orders/:id"), "a pattern is no address");
+  assert.deepEqual(step("press", "Escape"), { action: "press", value: "Escape" });
+  assert.deepEqual(step("plan:click", "testid=save"), { action: "click", target: "testid=save" });
+  assert.deepEqual(standInValue("Quantity"), "1");
+  assert.deepEqual(standInValue("Notes"), "SceneScout test");
+  assert.equal(
+    pathLine([
+      { action: "navigate", target: "/a" },
+      { action: "select", target: "role=combobox", value: "x" },
+    ]),
+    'navigate /a → select role=combobox "x"',
+  );
+});
+
+test("path: a plan's reply counts as the path taken only when every step ran, said OK, and ended on the page", () => {
+  const ok =
+    'PLAN (2/2 steps ran):\n1. navigate /a → OK (http://x/a)\n2. click role=button[name="Go"] → OK (http://x/b/7)\nTake scout_snapshot to see the resulting state.';
+  assert.deepEqual(prefixOutcome(ok, 2, "/b/:id"), { ok: true });
+  // The contrastive reply: every step OK, but the page stayed where it was.
+  assert.deepEqual(prefixOutcome(ok.replace("http://x/b/7", "http://x/a"), 2, "/b/:id"), { ok: false, why: "every step ran, and it ended on /a, not /b/:id" });
+  assert.deepEqual(prefixOutcome(ok.replace(" (http://x/b/7)", "").replace(" (http://x/a)", ""), 2, "/b"), {
+    ok: false,
+    why: "the plan did not say which page it ended on",
+  });
+  const failed = ok.replace("→ OK (http://x/b/7)", "→ FAILED: locator.click: Timeout 5000ms exceeded.");
+  const f = prefixOutcome(failed, 2, "/b/:id");
+  assert.ok(!f.ok && /2 of 2 step\(s\) ran: 2\. click .* FAILED/.test(f.why), JSON.stringify(f));
+  const short = prefixOutcome("PLAN (1/2 steps ran):\n1. navigate /a → OK\nPLAN ABORTED at step 2 — investigate before continuing.", 2, "/b");
+  assert.ok(!short.ok && /^1 of 2/.test(short.why));
+  assert.deepEqual(prefixOutcome("ERROR: Not attached.", 1, "/b"), { ok: false, why: "Not attached." });
+  assert.ok(!prefixOutcome("something else", 1, "/b").ok);
+});
+
+test("path: a continued run is told how the earlier run reached a page it left work on", () => {
+  const r = recordOf({
+    steps: [
+      { session: "s", url: `${A}/orders`, action: "navigate", target: "/orders" },
+      { session: "s", url: `${A}/orders/42`, action: "click", target: 'link "Order 42"' },
+    ],
+    unexercised: [{ route: "/orders/:id", keys: ["button:refund"] }],
+  });
+  const lines = continueLines(continuePlan(r, ["/orders", "/orders/42"]), { from: "x" });
+  assert.ok(lines.includes('     (it reached this page by: navigate /orders → click role=link[name="Order 42"])'), lines.join("\n"));
+  assert.ok(!lines.some((l) => /reached this page by: navigate \/orders\)$/.test(l)), "a page opened by its address gets no path line");
+});
+
+test("depth: a visited page with untouched controls stays high, a worked-through one goes last, and visiting alone covers nothing", () => {
+  // Two visited pages, alike but for the controls left on one: the record's own words, not the visit, decide.
+  const r = recordOf({
+    steps: [
+      { session: "s", url: "http://app.test/a", action: "navigate", target: "/a" },
+      { session: "s", url: "http://app.test/b", action: "navigate", target: "/b" },
+      { session: "s", url: "http://app.test/c", action: "navigate", target: "/c" },
+    ],
+    knownRoutes: ["/a", "/b", "/c"],
+    unexercised: [
+      { route: "/a", keys: ["button:x"] },
+      { route: "/c", keys: ["button:x", "button:y", "button:z"] },
+    ],
+    forms: [],
+    filled: [],
+    unchosen: [],
+  });
+  const items = continuePlan(r, ["/a", "/b", "/c"]);
+  assert.deepEqual(
+    items.map((i) => [i.route, i.tier]),
+    [
+      ["/c", 2],
+      ["/a", 2],
+      ["/b", 3],
+    ],
+    "the most left first; the page with nothing left last",
+  );
+  assert.equal(continueExhausted(items), false);
+  const lines = continueLines(items, { from: "x" });
+  assert.ok(lines.includes("- Last, the routes it worked through (nothing it recorded is left there): /b"), lines.join("\n"));
+  assert.ok(lines[1].startsWith("- First, the routes it left work on"), "with no unvisited route, the work left comes first");
+});
+
+test("depth: a record with nothing left anywhere falls back to a fresh run, and is never told to stop", () => {
+  const done = recordOf({
+    steps: [
+      { session: "s", url: "http://app.test/a", action: "navigate", target: "/a" },
+      { session: "s", url: "http://app.test/b", action: "navigate", target: "/b" },
+    ],
+    knownRoutes: ["/a", "/b"],
+    unexercised: [],
+    forms: [],
+    filled: [],
+    unchosen: [],
+  });
+  const items = continuePlan(done, ["/a", "/b"]);
+  assert.equal(continueExhausted(items), true);
+  const lines = continueLines(items, { from: "prev/ci.json" });
+  assert.match(lines[0], /which left no recorded work on any route/);
+  assert.match(
+    lines[1],
+    /That is not a reason to stop\. Explore the app as a fresh run would, from the landing page, with nothing left out, and spend the budget\./,
+  );
+  // The contrastive record: one control left on /b, and the run continues instead.
+  const one = recordOf({
+    ...{ steps: done.steps.map((s) => ({ session: s.session, url: `http://app.test${s.route}`, action: s.action, target: s.target })) },
+    knownRoutes: ["/a", "/b"],
+    unexercised: [{ route: "/b", keys: ["button:x"] }],
+    forms: [],
+    filled: [],
+    unchosen: [],
+  });
+  const go = continuePlan(one, ["/a", "/b"]);
+  assert.equal(continueExhausted(go), false);
+  assert.match(continueLines(go, { from: "x" })[1], /^- First, the routes it left work on/);
+  // A lane whose own routes are all worked through explores them fresh, while the run as a whole continues.
+  assert.match(continueLines(go, { from: "x", only: ["/a"] })[1], /Explore your routes as a fresh run would, from your first route/);
+  assert.equal(EXHAUSTED_AT, 0, "worked through means nothing left, not little left");
+});
+
+// ── the page cap ─────────────────────────────────────────────────────────────
+
+/** A record that worked on six pages and left work on each, the most on /p1. */
+const sixPages = (assigned?: string[]): RunRecord => ({
+  ...recordOf({
+    steps: ["/p1", "/p2", "/p3", "/p4", "/p5", "/p6"].map((r) => ({ session: "s", url: `http://app.test${r}`, action: "navigate", target: r })),
+    knownRoutes: [],
+    unexercised: ["/p1", "/p2", "/p3", "/p4", "/p5", "/p6"].map((r, i) => ({ route: r, keys: Array.from({ length: 6 - i }, (_, k) => `button:k${k}`) })),
+    forms: [],
+    filled: [],
+    unchosen: [],
+  }),
+  ...(assigned ? { assigned } : {}),
+});
+
+test("page cap: a big budget takes many pages, a small one few, from the turns per page", () => {
+  assert.equal(DEFAULT_TURNS_PER_PAGE, 7);
+  assert.equal(pageCap(18, DEFAULT_TURNS_PER_PAGE), 2, "18 turns: two pages");
+  assert.equal(pageCap(80, DEFAULT_TURNS_PER_PAGE), 11, "80 turns: eleven");
+  assert.equal(pageCap(40, DEFAULT_TURNS_PER_PAGE), 5, "a lane's share of 80 over two lanes: five");
+  assert.equal(pageCap(3, DEFAULT_TURNS_PER_PAGE), 1, "never none");
+  assert.equal(pageCap(18, 3), 6, "the setting moves it");
+  const items = continuePlan(sixPages(), []);
+  // The contrastive pair: the same record, two budgets.
+  assert.deepEqual(takenPages(items, pageCap(80, 7)), ["/p1", "/p2", "/p3", "/p4", "/p5", "/p6"]);
+  assert.deepEqual(takenPages(items, pageCap(18, 7)), ["/p1", "/p2"]);
+  const small = continueLines(items, { from: "x", cap: 2 });
+  assert.match(small[0], /Take on these 2 pages, in order, and work each deeply before anything else: .* Do not spread out over other pages\./);
+  assert.deepEqual(
+    small.slice(1, 3).map((l) => l.trim().split(":")[0]),
+    ["/p1", "/p2"],
+  );
+  assert.equal(small.at(-1), "Only once those are done, with budget left, take the next pages in this order: /p3, /p4, /p5, /p6.");
+  const big = continueLines(items, { from: "x", cap: 11 });
+  assert.match(big[0], /these 6 pages/);
+  assert.match(big.at(-1)!, /keep exploring them and the pages around them until the budget is spent/);
+  assert.deepEqual(takenPages(items, 2, ["/p4", "/p6"]), ["/p4", "/p6"], "a lane takes its own first pages");
+});
+
+test("page cap: the next continued run picks up where the last one's cap ended", () => {
+  // Run 1 took /p1 and /p2; its record carries them as assigned.
+  const second = continuePlan(sixPages(["/p1", "/p2"]), []);
+  assert.deepEqual(takenPages(second, 2), ["/p3", "/p4"]);
+  // Contrastive: the same record without the note starts again at the top.
+  assert.deepEqual(takenPages(continuePlan(sixPages(), []), 2), ["/p1", "/p2"]);
+  // Carried along the chain: after /p3 and /p4, the third run takes /p5 and /p6.
+  const chained = carryForward(sixPages(["/p1", "/p2"]), { ...sixPages(), runId: "run-2", assigned: ["/p3", "/p4"] });
+  assert.deepEqual(chained.assigned, ["/p1", "/p2", "/p3", "/p4"]);
+  assert.deepEqual(takenPages(continuePlan(chained, []), 2), ["/p5", "/p6"]);
+  // Once every page with work has been given out, they come round again by the work left.
+  assert.deepEqual(takenPages(continuePlan(sixPages(["/p1", "/p2", "/p3", "/p4", "/p5", "/p6"]), []), 2), ["/p1", "/p2"]);
+  assert.equal(readRunRecord({ ...sixPages(), assigned: [1] }), null);
+});
+
+test("page cap: the turns per page are the option, else the variable, else 7, and only with a run to continue", () => {
+  assert.deepEqual(resolveFromRun({ path: "p" }, {}), { ok: true, fromRun: { path: "p", mode: "continue", turnsPerPage: 7 } });
+  assert.deepEqual(resolveFromRun({ path: "p" }, { SCENESCOUT_FROM_RUN_TURNS_PER_PAGE: "4" }), {
+    ok: true,
+    fromRun: { path: "p", mode: "continue", turnsPerPage: 4 },
+  });
+  assert.deepEqual(resolveFromRun({ path: "p", turnsPerPage: "9" }, { SCENESCOUT_FROM_RUN_TURNS_PER_PAGE: "4" }), {
+    ok: true,
+    fromRun: { path: "p", mode: "continue", turnsPerPage: 9 },
+  });
+  for (const bad of ["0", "1.5", "x", "201"]) {
+    const r = resolveFromRun({ path: "p", turnsPerPage: bad }, {});
+    assert.ok(!r.ok && /--from-run-turns-per-page must be a whole number from 1 to 200/.test(r.error), bad);
+  }
+  const alone = resolveFromRun({ turnsPerPage: "5" }, {});
+  assert.ok(!alone.ok && /--from-run-turns-per-page applies to a run started from an earlier one/.test(alone.error));
+  assert.deepEqual(resolveFromRun({}, { SCENESCOUT_FROM_RUN_TURNS_PER_PAGE: "x" }), { ok: true }, "read only with a run to continue");
 });

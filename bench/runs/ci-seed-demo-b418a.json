@@ -1,0 +1,21 @@
+{
+  "app": "demo",
+  "run": "ci-seed-demo-b418a",
+  "date": "2026-10-06",
+  "note": "scenescout ci --seed b418a (issue 418), commit 3acef27",
+  "findings": [
+    {
+      "title": "Optional confirmation email loses its accessible name when populated",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new-order-email has placeholder-only accessible name"
+    },
+    {
+      "title": "New-order helper text fails contrast",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "orders-new helper text contrast 1.73:1 on rgb(246,248,250)"
+    }
+  ],
+  "decisions": []
+}

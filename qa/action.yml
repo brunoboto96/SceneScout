@@ -11,8 +11,12 @@
 #   stage: shots   put a show or compare run's pictures on the scenescout-shots
 #                  branch, under the run's id, so the reply can show them
 #   stage: report  download the run's results and post them on the pull request
+#   stage: check   for `/scenescout qa check`: dispatch the project's own
+#                  workflow on the pull request's branch, wait for its run,
+#                  download its artifact and reply with check.json's verdict.
+#                  No model and no key are involved.
 #
-# The logic is action/qa-action.mjs, table-tested by qa-test.
+# The logic is action/qa-action.mjs and action/qa-check.mjs, table-tested by qa-test.
 name: SceneScout QA
 description: Start a SceneScout QA run from a pull-request comment and post its results, without ever running the pull request's code.
 author: brunoboto96
@@ -22,10 +26,10 @@ branding:
 
 inputs:
   stage:
-    description: gate, shots or report.
+    description: gate, shots, report or check.
     required: true
   github-token:
-    description: The token for the GitHub API. The gate needs pull-requests write and deployments read; the shots stage needs contents write, to push to the scenescout-shots branch; the report needs pull-requests write and actions read (to link the artifact, and to tell a run a newer one cancelled from one cancelled by hand or a timeout).
+    description: The token for the GitHub API. The gate needs pull-requests write and deployments read; the shots stage needs contents write, to push to the scenescout-shots branch; the report needs pull-requests write and actions read (to link the artifact, and to tell a run a newer one cancelled from one cancelled by hand or a timeout); the check stage needs actions write (to dispatch the project's workflow, which also lets it read that run and download its artifact) and pull-requests write (to reply).
     required: false
     default: ${{ github.token }}
   allowed:
@@ -60,20 +64,36 @@ inputs:
     description: (gate) What `/scenescout qa compare` compares the preview with, e.g. https://www.example.com. Empty means the newest successful deployment of the pull request's base branch.
     required: false
     default: ""
+  check-workflow:
+    description: (gate, check) The project's workflow that `/scenescout qa check` dispatches, by its file name in .github/workflows (e.g. browser-tests.yml) or its id. In the gate, empty means the command replies saying how to set it up; the check stage takes the gate's check-workflow output.
+    required: false
+    default: ""
+  ref:
+    description: (check) The pull request's head branch to dispatch the workflow on, from the gate.
+    required: false
+    default: ""
+  focus:
+    description: (check) The words after `/scenescout qa check`, from the gate, passed to the workflow as its focus input.
+    required: false
+    default: ""
+  wait-minutes:
+    description: (check) How long to wait for the dispatched run, in minutes, 1 to 300. Empty means 30. Keep the job's timeout-minutes above it.
+    required: false
+    default: ""
   result:
     description: (report) The result of the job that ran the model - success, failure, cancelled or skipped.
     required: false
     default: ""
   artifact-name:
-    description: (shots, report) The name the run's results were uploaded under.
+    description: (shots, report, check) The name the run's results were uploaded under. In the check stage, the artifact the project's workflow uploads its check's output folder as; empty means scenescout-check.
     required: false
     default: ""
   pr:
-    description: (report) The pull request's number, from the gate.
+    description: (report, check) The pull request's number, from the gate.
     required: false
     default: ""
   sha:
-    description: (report) The head commit the gate saw.
+    description: (report, check) The head commit the gate saw.
     required: false
     default: ""
   url:
@@ -81,7 +101,7 @@ inputs:
     required: false
     default: ""
   login:
-    description: (report) Who asked for the run.
+    description: (report, check) Who asked for the run.
     required: false
     default: ""
   shots:
@@ -114,6 +134,15 @@ outputs:
   base:
     description: (gate) The base URL a compare comment compares with; empty otherwise.
     value: ${{ steps.gate.outputs.base }}
+  check:
+    description: (gate) true when the comment is `/scenescout qa check` and the project's workflow may be dispatched. run stays false then, since no model runs.
+    value: ${{ steps.gate.outputs.check }}
+  ref:
+    description: (gate) The pull request's head branch, for a check.
+    value: ${{ steps.gate.outputs.ref }}
+  check-workflow:
+    description: (gate) The workflow a check dispatches, as the gate checked it.
+    value: ${{ steps.gate.outputs.check-workflow }}
   pushed:
     description: (shots) The pictures pushed, separated by commas.
     value: ${{ steps.shots.outputs.pushed }}
@@ -177,9 +206,41 @@ runs:
         RESULTS: ${{ runner.temp }}/scenescout-qa-results
       run: node "$GITHUB_ACTION_PATH/../action/qa-action.mjs" report
 
+    - name: Dispatch the project's check and wait for its run
+      id: dispatch
+      if: inputs.stage == 'check'
+      shell: bash
+      env:
+        INPUTS: ${{ toJSON(inputs) }}
+      run: node "$GITHUB_ACTION_PATH/../action/qa-check.mjs" dispatch
+
+    - name: Download the check's results
+      id: download
+      if: inputs.stage == 'check' && steps.dispatch.outputs.download == 'true'
+      continue-on-error: true
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: ${{ steps.dispatch.outputs.artifact }}
+        run-id: ${{ steps.dispatch.outputs.run-id }}
+        github-token: ${{ inputs.github-token }}
+        # Kept as the zip: the reply reads check.json out of it, capped, and nothing from the archive is ever written to disk.
+        skip-decompress: true
+        path: ${{ runner.temp }}/scenescout-qa-check
+
+    - name: Post the check's verdict on the pull request
+      if: inputs.stage == 'check' && steps.dispatch.outputs.download == 'true'
+      shell: bash
+      env:
+        INPUTS: ${{ toJSON(inputs) }}
+        DISPATCH: ${{ toJSON(steps.dispatch.outputs) }}
+        # failure when the download failed: the reply says so rather than blame the project's check.json.
+        DOWNLOAD: ${{ steps.download.outcome }}
+        RESULTS: ${{ runner.temp }}/scenescout-qa-check
+      run: node "$GITHUB_ACTION_PATH/../action/qa-check.mjs" reply
+
     - name: Unknown stage
-      if: inputs.stage != 'gate' && inputs.stage != 'shots' && inputs.stage != 'report'
+      if: inputs.stage != 'gate' && inputs.stage != 'shots' && inputs.stage != 'report' && inputs.stage != 'check'
       shell: bash
       run: |
-        echo "::error title=SceneScout QA::the stage input must be gate, shots or report"
+        echo "::error title=SceneScout QA::the stage input must be gate, shots, report or check"
         exit 2

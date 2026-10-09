@@ -1,0 +1,59 @@
+{
+  "app": "demo",
+  "run": "ci-caps-demo-t80-3",
+  "date": "2026-10-06",
+  "note": "Issue 419 caps measurement, 1 loop, 80 turns (workflow run 37540480865); see Choosing the defaults.",
+  "findings": [
+    {
+      "title": "Order email field loses its accessible name after entry",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new-order-email labelled only by placeholder"
+    },
+    {
+      "title": "Order form helper text has very low contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new helper text contrast 1.73:1 vs 4.5:1"
+    },
+    {
+      "title": "Order form spacing misses a consistent 4px grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "orders-new spacing: 50% off 4px grid; 10px×6, 14px×4",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    },
+    {
+      "title": "Export CSV crashes on undefined report rows",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "Export CSV: TypeError reading undefined.rows"
+    },
+    {
+      "title": "Scheduled reports page has no way to continue",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "route /reports-scheduled.html exposes 0 interactables"
+    },
+    {
+      "title": "Pinned sticky bar covers the order notes save button",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order detail geometry: Save notes covered by pinned chrome order-stickybar"
+    },
+    {
+      "title": "Order notes report Saved after server refusal",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "PUT /api/orders/1043 403; UI status Saved."
+    },
+    {
+      "title": "Archived orders failure is presented as an empty list",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/orders?status=archived 500; orders-rows empty without error"
+    }
+  ],
+  "decisions": []
+}

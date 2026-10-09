@@ -2,8 +2,8 @@
 # fails the step the way the CLI's exit code says: 1 when the gate fails, 2 (with
 # a "could not run" annotation) when there is no verdict to give. The report
 # goes on the job summary, and report.md, check.json and check.sarif (and the
-# pictures of any visual baseline not met) are kept as an artifact. How to use
-# it: docs/ci.md.
+# pictures of any visual baseline not met, and on a recorded check replay.html
+# with its frames and journey videos) are kept as an artifact. How to use it: docs/ci.md.
 #
 # Every input that is not listed in ACTION_ONLY_INPUTS (action/check-action.mjs)
 # is passed to the CLI as `--<name>=<value>`, so those inputs are named exactly
@@ -103,6 +103,18 @@ inputs:
     description: The repository file, relative to the repository root, that a check.sarif result points at when no saved flow raised it (code scanning keeps only results located in a repository file). Empty means the workflow file that is running.
     required: false
     default: ""
+  record:
+    description: on or off. on keeps a frame after each route visit and each saved flow's step and writes replay.html beside the report, with the frames in replay-frames/, both kept in the artifact. The frames are pictures of the app under test, so record against seeded data. Empty means SCENESCOUT_RECORD, else off.
+    required: false
+    default: ""
+  video:
+    description: on or off. on records a WebM video of each saved flow, and only of the flows, into replay-videos/ beside the report, links each from replay.html beside the journey's steps, and keeps them in the artifact. Videos are large; the frames are pictures of the app under test, so record against seeded data. Empty means off.
+    required: false
+    default: ""
+  template:
+    description: A report template (JSON), relative to working-directory. On a recorded check (record on) the check also writes a test report laid out as the template says, with each saved flow's steps, expected and actual results, deviations and a SHA-256 manifest of the evidence, kept in the artifact. Needs record on. Empty means none.
+    required: false
+    default: ""
   working-directory:
     description: The directory the check runs in; relative paths in the other inputs are resolved against it.
     required: false
@@ -124,7 +136,7 @@ inputs:
     required: false
     default: "true"
   upload-artifact:
-    description: Keep report.md, check.json and check.sarif as a workflow artifact, with the pictures of any visual baseline that was not met.
+    description: Keep report.md, check.json and check.sarif as a workflow artifact, with the pictures of any visual baseline that was not met, and replay.html with its frames and videos on a recorded check.
     required: false
     default: "true"
   artifact-name:
@@ -173,6 +185,12 @@ outputs:
   sarif:
     description: The path of check.sarif.
     value: ${{ steps.run.outputs.sarif }}
+  replay:
+    description: The path of replay.html, written when record or video is on; empty otherwise.
+    value: ${{ steps.run.outputs.replay }}
+  test-report:
+    description: The path of the test report a template laid out (template input), written on a recorded check; empty otherwise.
+    value: ${{ steps.run.outputs.test-report }}
   artifact-name:
     description: The name the results were uploaded under.
     value: ${{ steps.resolve.outputs.artifact-name }}
@@ -270,6 +288,10 @@ runs:
           ${{ steps.run.outputs.json }}
           ${{ steps.run.outputs.sarif }}
           ${{ steps.run.outputs.visual }}
+          ${{ steps.run.outputs.replay }}
+          ${{ steps.run.outputs.replay-frames }}
+          ${{ steps.run.outputs.replay-videos }}
+          ${{ steps.run.outputs.test-report }}
         # The default output folder is .scenescout/, which the upload would otherwise skip as hidden.
         include-hidden-files: true
         if-no-files-found: warn

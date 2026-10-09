@@ -1,0 +1,27 @@
+{
+  "app": "holdout",
+  "run": "ci-seed-holdout-h418a",
+  "date": "2026-10-06",
+  "note": "scenescout ci --seed h418a (issue 418), commit 3acef27",
+  "findings": [
+    {
+      "title": "Home page notices API fails with HTTP 500",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Fines list API is forbidden for the current member",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/fines 403"
+    },
+    {
+      "title": "Account data export link is clipped and unreachable",
+      "severity": "high",
+      "category": "visual",
+      "evidence": "account-export unreachable overflow-hidden"
+    }
+  ],
+  "decisions": []
+}

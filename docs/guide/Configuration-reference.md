@@ -79,6 +79,9 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--baselines` | `<project>/.scenescout/baselines` | The folder holding `targets.json` and the baselines. The default is ignored by git; name a folder the project commits to share them |
 | `--baseline-threshold` | `0.1` | The percentage of a picture's pixels that may change before its baseline is not met, 0 to 100; `update` rewrites the baselines past it (and any taken on another operating system). Not 0 by default, so anti-aliasing noise between machines and browser builds does not fail the gate; `0` counts every changed pixel (a colour channel off by more than 8 in 255). A change of size always counts |
 | `--sarif-file-anchor` | the running workflow's file, else `package.json`, else `README.md` | The repository file, relative to the repository root, that a `check.sarif` result points at when no saved flow raised it. See [SARIF locations](Ways-to-use-it.md#sarif-locations) |
+| `--record` | `SCENESCOUT_RECORD`, else off | Keep a frame after each route visit and each saved-flow step, and write `replay.html` (role → journey → step) beside the report, with the frames in `replay-frames/`. Given alone it means `on`; `--record off` wins over the variable |
+| `--video` | off | Record a WebM of each saved flow, and only of the flows, into `replay-videos/`, played on `replay.html` beside the journey's steps. Given alone it means `on` |
+| `--template` | none | A report template (JSON). On a recorded check, also write a test report laid out as the template says (`report.html`, or the file the template names) beside `replay.html`: each saved flow's steps with their expected and actual results, the deviations, and a SHA-256 manifest of the evidence. Needs `--record` ([test reports](../ci.md#a-test-report-from-a-template)) |
 
 ### `scenescout ci`
 
@@ -88,10 +91,10 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--model` | `claude-sonnet-5` or `gpt-6-luna` | The model id |
 | `--effort` | `low` | `none` (OpenAI only), `low`, `medium`, `high`, `xhigh` or `max` |
 | `--base-url` | the provider's own API | Another endpoint implementing the same API. Must be https, or plain http to `127.0.0.1` or `localhost` |
-| `--max-turns` | `40` | The most model calls |
-| `--max-tokens` | `1500000` | The most tokens, input and output, over the run |
+| `--max-turns` | `80` | The most model calls |
+| `--max-tokens` | `3000000` | The most tokens, input and output, over the run |
 | `--max-minutes` | `20` | The most minutes of exploration; the report is written after |
-| `--lanes` | `1` | Model loops that explore at once, each in its own browser and part of the app, sharing the three caps above; at most `8` |
+| `--lanes` | `2` | Model loops that explore at once, each in its own browser and part of the app, sharing the three caps above; at most `8`. Without `--lanes`, a run with `--show` or a `--max-turns` of 1 is one loop |
 | `--price-in` | the built-in price | US dollars per million input tokens, for the cost estimate |
 | `--price-cached-in` | the built-in price, else `--price-in` | US dollars per million cached input tokens |
 | `--price-out` | the built-in price | US dollars per million output tokens |
@@ -102,6 +105,9 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--show` | none | Capture the element these words describe as a PNG instead of exploring, at most 200 characters |
 | `--compare-url` | none | With `--show`, capture the same element on this URL too and write a diff picture |
 | `--dedup` | `judge` | How a filed finding is told from one already recorded. `judge`: the rule, then, for a filing the rule keeps apart from everything recorded, the run's model at the lowest effort its API takes (`none` on OpenAI, `low` on Anthropic) is asked about the open findings on the same page, and a "same" merges them. Each asked pair's titles, categories and evidence, and the page's path, are sent to the provider, and the calls count in the usage. `rule`: the rule alone |
+| `--from-run` | `SCENESCOUT_FROM_RUN`, else none | Start from an earlier run's record: its `ci.json`, or a project directory whose memory holds it. Unset, the run starts fresh ([how to use it](Ways-to-use-it.md#starting-from-an-earlier-run)) |
+| `--from-run-mode` | `SCENESCOUT_FROM_RUN_MODE`, else `continue` | With `--from-run`: `continue` takes first the routes the earlier run never worked on, then the ones it left work on (told which controls, forms and options to take first), then the rest; `replay` follows its routes and steps in order, one lane per session it had |
+| `--from-run-turns-per-page` | `SCENESCOUT_FROM_RUN_TURNS_PER_PAGE`, else `7` | With `--from-run` in `continue` mode: model turns budgeted per page. A run takes on its turns divided by this many pages (each lane its share), at least one: 18 turns take 2 pages |
 | `--storage-state` | none | A Playwright storage-state file, to explore while signed in |
 | `--browser` | `chromium` | `chromium`, `firefox` or `webkit` |
 | `--action-timeout-ms` | `5000` | As for `check` |
@@ -228,7 +234,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_EVIDENCE_MAX_PX` | the server | The longest side of a finding's picture, in pixels, 160 to 2000 (default 800). A larger picture is shrunk to fit |
 | `SCENESCOUT_EVIDENCE_MAX_KB` | the server | The most a finding's picture may take, in kilobytes, 16 to 2048 (default 200). A larger one is shrunk until it fits |
 | `SCENESCOUT_EVIDENCE_INLINE` | the server | How many pictures one session returns in its `scout_finding` results, 0 to 500 (default 10). Later ones are still kept and in the report |
-| `SCENESCOUT_RECORD` | the server | `on` keeps a frame after every action in every session, for teams that want each QA run recorded; `off` (default) does not. A `scout_attach` `record` wins over it |
+| `SCENESCOUT_RECORD` | the server, `check` | `on` keeps a frame after every action in every session, for teams that want each QA run recorded, and records every `check` (`replay.html`); `off` (default) does not. A `scout_attach` `record`, and `check --record`, win over it |
 | `CI` | the server | Set by CI services. When it is set (and not empty, `false` or `0`), finding pictures default to `file`, nothing opens in a browser by default, and an attach does not download a missing browser unless `SCENESCOUT_BROWSER_DOWNLOAD=on` |
 | `GITHUB_ACTIONS` | the server | Set by GitHub Actions. `true` counts as a CI job, as `CI` does |
 | `SCENESCOUT_READ_POSTS` | the server, `check`, `ci`, a first look | POST endpoints that only read, let out in `observe`: entries such as `POST /api/search`, separated by commas or new lines. Unset: none. A `scout_attach` `readPosts` wins over it |
@@ -237,6 +243,9 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `XDG_DOCUMENTS_DIR` | the server | Linux: the documents folder that holds the default `SceneScout` folder, read before `~/.config/user-dirs.dirs` |
 | `SCENESCOUT_DEDUP` | the server | `judge` asks a model, with a key below, whether a filing the dedup rule keeps apart from everything recorded is one of the open findings on its page; `rule` (default) does not. A `scout_attach` `dedup` wins over it |
 | `SCENESCOUT_DEDUP_PROVIDER` | the server | `anthropic` or `openai`: which key the dedup judge uses when both are set |
+| `SCENESCOUT_FROM_RUN` | the server, `ci` | An earlier run's `ci.json` or project directory, for every `ci` run and `scout_lane_brief` that does not name its own: the run starts from that run's record. Unset (default): a fresh run. `--from-run` and the brief's `fromRun` win over it |
+| `SCENESCOUT_FROM_RUN_MODE` | the server, `ci` | `continue` (default) or `replay`: how a run that starts from an earlier one uses its record. `--from-run-mode` and the brief's `fromRunMode` win over it |
+| `SCENESCOUT_FROM_RUN_TURNS_PER_PAGE` | the server, `ci` | A whole number from 1 to 200 (default 7): turns a continued `ci` run budgets per page, which caps how many pages it takes on. `--from-run-turns-per-page` wins over it |
 | `ANTHROPIC_API_KEY` | `ci`; the server with the dedup judge on | The Anthropic key. The only way to give one |
 | `OPENAI_API_KEY` | `ci`; the server with the dedup judge on | The OpenAI key. The only way to give one |
 | `SCENESCOUT_LOGIN_USERNAME` | `login --script` | Required: the test user's username or email |
@@ -266,6 +275,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `GITHUB_STEP_SUMMARY` | `check`, `ci` | Set by GitHub Actions; the report or summary is appended to it |
 | `GITHUB_WORKFLOW_REF` | `check`, `ci` | Set by GitHub Actions; with no `--sarif-file-anchor`, its workflow file is the file SARIF results point at |
 | `GITHUB_WORKSPACE` | `check`, `ci` | Set by GitHub Actions; the repository root that SARIF file paths are relative to |
+| `GITHUB_SHA` | `check` | Set by GitHub Actions; the commit a recorded check's `replay.html` names in its header |
 
 Variables the server reads belong in the MCP client's configuration for the server (an `env` entry), not only in your shell.
 
@@ -275,7 +285,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 
 ### Action: check
 
-`uses: brunoboto96/SceneScout@v3`. Outputs: `passed`, `exit-code`, `failing`, `retests-failing`, `could-not-run`, `worth-a-look`, `high`, `medium`, `low`, `report`, `json`, `sarif`, `artifact-name`.
+`uses: brunoboto96/SceneScout@v3`. Outputs: `passed`, `exit-code`, `failing`, `retests-failing`, `could-not-run`, `worth-a-look`, `high`, `medium`, `low`, `report`, `json`, `sarif`, `replay`, `test-report`, `artifact-name`.
 
 | Input | Default | |
 |---|---|---|
@@ -301,12 +311,15 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `baselines` | empty | As `--baselines`, relative to `working-directory` |
 | `baseline-threshold` | empty | As `--baseline-threshold` |
 | `sarif-file-anchor` | empty | As `--sarif-file-anchor`, relative to the repository root; empty means the workflow file that is running |
+| `record` | empty | As `--record` (`on` or `off`); empty means `SCENESCOUT_RECORD`, else off. The replay page and its frames go in the artifact |
+| `video` | empty | As `--video` (`on` or `off`); empty means off. The journey videos go in the artifact |
+| `template` | empty | As `--template`, relative to `working-directory`; needs `record: on`. The test report goes in the artifact |
 | `working-directory` | `.` | Where the check runs; other relative paths are resolved from here |
 | `version` | empty | The scenescout npm version to run; empty means the version of the action's ref |
 | `cli` | empty | A built `dist/cli.js` to run instead of the npm package, for testing the action itself |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
-| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met |
+| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and `replay.html` with its frames and videos on a recorded check |
 | `artifact-name` | empty | Empty means `scenescout-check-<job id>`; give each matrix cell its own |
 | `upload-sarif` | `false` | Upload `check.sarif` to code scanning; needs `security-events: write` |
 
@@ -335,6 +348,9 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `show` | empty | As `--show` |
 | `compare-url` | empty | As `--compare-url` |
 | `dedup` | empty | As `--dedup`; empty means `judge` |
+| `from-run` | empty | As `--from-run`, relative to `working-directory`; empty means `SCENESCOUT_FROM_RUN`, else a fresh run |
+| `from-run-mode` | empty | As `--from-run-mode`; empty means `continue` |
+| `from-run-turns-per-page` | empty | As `--from-run-turns-per-page`; empty means `7` |
 | `sarif-file-anchor` | empty | As `--sarif-file-anchor`, relative to the repository root; empty means the workflow file that is running |
 | `storage-state` | empty | As `--storage-state`, relative to `working-directory` |
 | `browser` | `chromium` | As `--browser` |
@@ -354,11 +370,11 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 
 ### Action: qa
 
-`uses: brunoboto96/SceneScout/qa@<exact tag>`, called by the [`/scenescout qa` workflow](../../examples/workflows/scenescout-qa.yml) in three stages. You normally configure it through the repository variables below rather than editing these inputs. Outputs: `run`, `pr`, `sha`, `url`, `focus`, `login`, `show`, `base`, `pushed`.
+`uses: brunoboto96/SceneScout/qa@<exact tag>`, called by the [`/scenescout qa` workflow](../../examples/workflows/scenescout-qa.yml) in four stages. You normally configure it through the repository variables below rather than editing these inputs. Outputs: `run`, `pr`, `sha`, `url`, `focus`, `login`, `show`, `base`, `check`, `ref`, `check-workflow`, `pushed`.
 
 | Input | Default | |
 |---|---|---|
-| `stage` | (required) | `gate`, `shots` or `report` |
+| `stage` | (required) | `gate`, `shots`, `report` or `check` |
 | `github-token` | `${{ github.token }}` | The token for the GitHub API |
 | `allowed` | empty | (gate) Logins that may start a run |
 | `allowed-roles` | empty | (gate) Author associations that may start a run |
@@ -368,12 +384,16 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `preview-url` | empty | (gate) A template for the preview's URL |
 | `environment` | empty | (gate) Only deployments to this environment count |
 | `base-url` | empty | (gate) What `compare` compares the preview with |
+| `check-workflow` | empty | (gate, check) The project's workflow `/scenescout qa check` dispatches |
+| `ref` | empty | (check) The pull request's head branch, from the gate |
+| `focus` | empty | (check) The words after `check`, passed to the workflow |
+| `wait-minutes` | empty | (check) How long to wait for the dispatched run; empty means 30 |
 | `result` | empty | (report) The result of the job that ran the model |
-| `artifact-name` | empty | (shots, report) The name the results were uploaded under |
-| `pr` | empty | (report) The pull request's number |
-| `sha` | empty | (report) The head commit the gate saw |
+| `artifact-name` | empty | (shots, report, check) The name the results were uploaded under; for a check, empty means `scenescout-check` |
+| `pr` | empty | (report, check) The pull request's number |
+| `sha` | empty | (report, check) The head commit the gate saw |
 | `url` | empty | (report) The preview URL the run tested |
-| `login` | empty | (report) Who asked for the run |
+| `login` | empty | (report, check) Who asked for the run |
 | `shots` | empty | (report) The pictures the shots stage pushed |
 
 ## Repository variables and secrets for `/scenescout qa`
@@ -389,6 +409,8 @@ Set under Settings → Secrets and variables → Actions. All optional.
 | `SCENESCOUT_QA_ENVIRONMENT` | variable | any | Limits which deployments count as the preview |
 | `SCENESCOUT_QA_ALLOW_FORKS` | variable | off | `true` runs on pull requests from forks |
 | `SCENESCOUT_QA_BASE_URL` | variable | the base branch's newest deployment | What `compare` compares with |
+| `SCENESCOUT_QA_CHECK_WORKFLOW` | variable | none | The project's workflow `/scenescout qa check` dispatches, by file name (e.g. `browser-tests.yml`); unset, the command replies saying how to set it up |
+| `SCENESCOUT_QA_CHECK_ARTIFACT` | variable | `scenescout-check` | The artifact that workflow uploads its check's output folder as |
 | `SCENESCOUT_QA_TEAM_TOKEN` | secret | none | Reads team membership; passed to the gate job only |
 | `OPENAI_API_KEY` | secret | (required) | The model key, in the template; use `ANTHROPIC_API_KEY` in the `qa` job instead for Anthropic |
 

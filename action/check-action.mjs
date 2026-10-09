@@ -119,6 +119,69 @@ export function picturesDir(json, outDir, exists = fs.existsSync) {
   return results.some((r) => r && typeof r === "object" && r.files) && exists(dir) ? dir : "";
 }
 
+/** The mark a check writes into its replay page (check-replay.ts REPLAY_GENERATOR); check-test holds the two equal. */
+export const REPLAY_GENERATOR_META = '<meta name="generator" content="scenescout-check-replay">';
+
+/** Whether the file is a replay page a check wrote. False for a missing or unreadable file. */
+export function writtenReplay(file) {
+  try {
+    return fs.readFileSync(file, "utf8").includes(REPLAY_GENERATOR_META);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The replay page of a recorded check and the folders of frames and journey
+ * videos beside it, or empty: the folders are kept only with a page this run wrote, which the run
+ * step removed beforehand, so frames an earlier run left are never kept as
+ * this run's.
+ */
+export function replayOutputs(outDir, exists = fs.existsSync, written = writtenReplay) {
+  const page = path.join(outDir, "replay.html");
+  if (!exists(page) || !written(page)) return { replay: "", "replay-frames": "", "replay-videos": "" };
+  const frames = path.join(outDir, "replay-frames");
+  const videos = path.join(outDir, "replay-videos");
+  return { replay: page, "replay-frames": exists(frames) ? frames : "", "replay-videos": exists(videos) ? videos : "" };
+}
+
+/** The mark a check writes into a template's test report (check-report.ts REPORT_GENERATOR); report-test holds the two equal. */
+export const REPORT_GENERATOR_META = '<meta name="generator" content="scenescout-check-report">';
+
+/**
+ * The test report a check wrote (--template), by path, or empty: the file
+ * check.json records as its `testReport` (a plain file name in the output
+ * folder, never replay.html), and only while it carries the mark. Nothing else
+ * in the folder is looked at, so a copy renamed or kept under another name is
+ * never taken, or removed, as a check's.
+ */
+export function testReportOf(json, outDir, read = (file) => fs.readFileSync(file, "utf8")) {
+  const name = json && typeof json === "object" ? json.testReport : undefined;
+  // check-report.ts isReportFileName, held equal by report-test.
+  if (
+    typeof name !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.html$/.test(name) ||
+    /^(con|prn|aux|nul|com[0-9]|lpt[0-9])\./i.test(name) ||
+    name.toLowerCase() === "replay.html"
+  )
+    return "";
+  const file = path.join(outDir, name);
+  try {
+    return read(file).includes(REPORT_GENERATOR_META) ? file : "";
+  } catch {
+    return "";
+  }
+}
+
+/** The check.json in the folder, parsed, or null when there is none or it cannot be read. */
+function readCheckJson(outDir) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(outDir, "check.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 /** A workflow command's message must not break the line it is written on. */
 export function escapeAnnotation(text) {
   return String(text).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
@@ -293,8 +356,13 @@ function run() {
   const cli = process.env.SCENESCOUT_CLI;
   const outDir = process.env.SCENESCOUT_OUT_DIR;
   if (!cli || !outDir) throw new Error("SCENESCOUT_CLI and SCENESCOUT_OUT_DIR must be set by the resolve step");
+  // The test report an earlier run's check.json says it wrote (--template), while it carries the mark; read before check.json goes.
+  const earlierReport = testReportOf(readCheckJson(outDir), outDir);
+  if (earlierReport) fs.rmSync(earlierReport);
   // Results of an earlier run in the same directory must not be read as this run's.
   for (const f of ["report.md", "check.json", "check.sarif"]) fs.rmSync(path.join(outDir, f), { force: true });
+  // A replay page only when a check wrote it: a file of that name the project keeps there is its own.
+  if (writtenReplay(path.join(outDir, "replay.html"))) fs.rmSync(path.join(outDir, "replay.html"));
   const child = spawnSync(process.execPath, [cli, ...checkArgs(inputs)], { stdio: ["ignore", "inherit", "pipe"], maxBuffer: 64 * 1024 * 1024 });
   const stderr = child.stderr ? child.stderr.toString() : "";
   if (stderr) process.stderr.write(stderr);
@@ -309,10 +377,12 @@ function run() {
   const file = (name) => (fs.existsSync(path.join(outDir, name)) ? path.join(outDir, name) : "");
   let summary = null;
   let pictures = "";
+  let testReport = "";
   if (file("check.json")) {
     const json = JSON.parse(fs.readFileSync(file("check.json"), "utf8"));
     summary = summaryOutputs(json);
     pictures = picturesDir(json, outDir);
+    testReport = testReportOf(json, outDir);
   }
   setOutputs({
     "exit-code": exitCode,
@@ -321,6 +391,8 @@ function run() {
     json: file("check.json"),
     sarif: file("check.sarif"),
     visual: pictures,
+    ...replayOutputs(outDir),
+    "test-report": testReport,
     ...(summary ?? Object.fromEntries(SUMMARY_OUTPUT_NAMES.map((name) => [name, ""]))),
   });
 }

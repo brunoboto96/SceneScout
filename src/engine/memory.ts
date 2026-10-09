@@ -7,6 +7,7 @@ import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
 import type { InjectionProbe } from "./injection.js";
+import { readFromRunNotes, readRunRecords, recordFromJson, unionFromRunNotes, unionRecords, type FromRunNote, type RunRecord } from "./from-run.js";
 import { addReading, addVerdict, MAX_TICKETS_KEPT, mergeTicketData, type CriterionVerdict, type StoredTicket, type Ticket } from "./tickets.js";
 
 export interface StateRecord {
@@ -288,6 +289,8 @@ export interface FormEntry {
   key: string;
   triedEmpty: boolean;
   guarded?: boolean;
+  /** Set once any session submitted it this run, empty or not. */
+  submitted?: boolean;
   /** The sessions that saw it this run. */
   seenBy: Set<string>;
 }
@@ -478,6 +481,8 @@ export interface ActionLogEntry {
   session?: string;
   /** The frame kept for this step, relative to the memory directory. Present only on a recorded run. */
   frame?: string;
+  /** On a recorded run, set when this step has no frame because the session already kept as many as it may. */
+  framePastCap?: true;
 }
 
 /** Latest quality score for one route, produced by the design audit. */
@@ -571,6 +576,15 @@ interface MemoryFile {
   tickets?: StoredTicket[];
   /** Each session's verdict on each criterion (scout_criterion). */
   criterionVerdicts?: CriterionVerdict[];
+  /**
+   * What each run left when it wrote its report (from-run.ts RunRecord): the
+   * routes it worked on and in what order, its steps, and the controls, forms
+   * and options it left on each route. A later run continues or replays from
+   * these (--from-run).
+   */
+  runRecords?: RunRecord[];
+  /** Runs that started from an earlier run's record: how, and which (from-run.ts FromRunNote), for the report. */
+  fromRuns?: FromRunNote[];
 }
 
 /** One endpoint observe refused on a page; `cleared` once it went out (named as a read, or sent in a looser mode). */
@@ -781,6 +795,14 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
     out.laneRoutes[lane] = unionRoutes(out.laneRoutes[lane] ?? [], routes);
   }
   if (Object.keys(out.laneRoutes).length === 0) delete out.laneRoutes;
+
+  // A ci run notes what it started from in its own process, beside the server's writes: a union, as for decisions.
+  const records = unionRecords(readRunRecords(theirs), readRunRecords(mine));
+  if (records.length > 0) out.runRecords = records;
+  else delete out.runRecords;
+  const notes = unionFromRunNotes(readFromRunNotes(theirs), readFromRunNotes(mine));
+  if (notes.length > 0) out.fromRuns = notes;
+  else delete out.fromRuns;
 
   // Lanes record criterion verdicts in their own processes too.
   const ticketData = mergeTicketData(mine, theirs);
@@ -1390,6 +1412,15 @@ export class MemoryStore {
     this.sessionStates.clear();
     this.runStates.clear();
     this.runId = newRunId();
+    this.runStartedAt = new Date().toISOString();
+  }
+
+  /** When this run began: the store opening, or the last endRun. */
+  private runStartedAt = new Date().toISOString();
+
+  /** This run's entries in the action log, in order: what a run record's steps are built from. */
+  actionsThisRun(): ActionLogEntry[] {
+    return this.actionLog.filter((a) => a.at >= this.runStartedAt);
   }
 
   /**
@@ -1517,8 +1548,14 @@ export class MemoryStore {
    */
   recordFormSubmit(fingerprint: string, key: string, empty: boolean): boolean {
     const entry = this.formEntry(fingerprint, key, false);
+    if (entry) entry.submitted = true;
     if (entry && empty) entry.triedEmpty = true;
     return entry !== null;
+  }
+
+  /** Forms seen this run that no session submitted at all, in the order they were first seen. */
+  formsNeverSubmitted(): Array<{ route: string; key: string }> {
+    return [...this.emptySubmits.values()].filter((f) => !f.submitted).map(({ route, key }) => ({ route, key }));
   }
 
   private formEntry(fingerprint: string, key: string, create = true): FormEntry | null {
@@ -1958,6 +1995,42 @@ export class MemoryStore {
     const verdicts = this.criterionVerdicts.filter((v) => v.at >= this.sessionStart);
     const judged = new Set(verdicts.map((v) => v.ticket));
     return { tickets: this.tickets.filter((t) => t.loadedAt >= this.sessionStart || judged.has(t.id)), verdicts };
+  }
+
+  /** What earlier runs left when they wrote their reports, oldest first. Empty on a project none has reported on. */
+  get runRecords(): RunRecord[] {
+    return readRunRecords(this.data);
+  }
+
+  /** Keep what this run left (from-run.ts buildRunRecord), written when its report is. */
+  addRunRecord(record: RunRecord): void {
+    this.data.runRecords = unionRecords(this.runRecords, [record]);
+    this.flush();
+  }
+
+  /** The runs that started from an earlier one's record since this store opened, for the report. */
+  fromRunsThisRun(): FromRunNote[] {
+    return readFromRunNotes(this.data).filter((n) => n.at >= this.sessionStart);
+  }
+
+  /** Note that this run started from an earlier one's record. */
+  noteFromRun(note: FromRunNote): void {
+    this.data.fromRuns = unionFromRunNotes(readFromRunNotes(this.data), [note]);
+    this.flush();
+  }
+
+  /**
+   * Take in the notes another process wrote in memory.json since this store
+   * last read or wrote it, and nothing else. A ci run notes what it started
+   * from in its own process; the report reads it through this. The next flush
+   * merges the whole document as usual.
+   */
+  foldInFromRuns(): void {
+    if (!this.changedUnderUs()) return;
+    const theirs = this.readForMerge();
+    if (!theirs) return;
+    const merged = unionFromRunNotes(readFromRunNotes(this.data), readFromRunNotes(theirs));
+    if (merged.length > 0) this.data.fromRuns = merged;
   }
 
   /** The routes each lane's report said it covered. Empty on a project that has never run one. */
@@ -2690,4 +2763,63 @@ export class MemoryStore {
     const chromeMinRoutes = Math.min(Math.max(CHROME_MIN_ROUTES, Math.ceil(routeCount * CHROME_ROUTE_SHARE)), CHROME_ABSOLUTE_ROUTES);
     return (key: string): boolean => routeCount >= CHROME_MIN_ROUTES && (routesPerKey.get(key) ?? 0) >= chromeMinRoutes;
   }
+}
+
+/**
+ * Note in a project's memory.json, from outside the server, that a run started
+ * from an earlier run's record: `scenescout ci` reads the record in its own
+ * process while its server holds the store. Read, add, and replace atomically
+ * under a name of this process's own; the server merges the file on its next
+ * write (mergeMemory unions the notes), so neither side's are lost. A memory
+ * not written yet is started with this note; one that does not parse is not
+ * replaced, and the caller is told.
+ */
+export function noteFromRunOnDisk(projectDir: string, note: FromRunNote): void {
+  const file = path.join(projectDir, MEMORY_DIRNAME, "memory.json");
+  const exists = fs.existsSync(file);
+  if (!exists) fs.mkdirSync(path.dirname(file), { recursive: true });
+  const doc = exists ? (JSON.parse(fs.readFileSync(file, "utf8")) as MemoryFile) : ({ version: 1, states: {}, findings: [] } as MemoryFile);
+  if (!doc || doc.version !== 1) throw new Error(`${file} is not a memory file this version reads`);
+  doc.fromRuns = unionFromRunNotes(readFromRunNotes(doc), [note]);
+  const tmp = `${file}.${process.pid}.from-run.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(doc));
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+
+/** The records in a project's memory.json, read without opening a store. None when there is no memory yet. */
+export function readRunRecordsOnDisk(projectDir: string): RunRecord[] {
+  const file = path.join(projectDir, MEMORY_DIRNAME, "memory.json");
+  if (!fs.existsSync(file)) return [];
+  return readRunRecords(JSON.parse(fs.readFileSync(file, "utf8")));
+}
+
+/**
+ * The record a run starts from (--from-run): a ci.json, a project directory
+ * (its memory's records folded into one), a memory.json, or a directory holding
+ * a ci.json. Throws, saying what was looked for, when there is none: a run
+ * asked to continue must not quietly start fresh.
+ */
+export function loadRunRecord(given: string): RunRecord {
+  if (!fs.existsSync(given)) throw new Error(`${given} does not exist: give a ci.json or a project directory`);
+  let file = given;
+  if (fs.statSync(given).isDirectory()) {
+    const candidates = [path.join(given, MEMORY_DIRNAME, "memory.json"), path.join(given, "ci.json"), path.join(given, "memory.json")];
+    const found = candidates.find((c) => fs.existsSync(c));
+    if (!found) throw new Error(`${given} holds no ${MEMORY_DIRNAME}/memory.json, ci.json or memory.json`);
+    file = found;
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (err) {
+    throw new Error(`${file} could not be read as JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const read = recordFromJson(raw, file);
+  if (!read.ok) throw new Error(read.error);
+  return read.record;
 }

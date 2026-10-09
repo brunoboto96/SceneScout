@@ -1,0 +1,51 @@
+{
+  "app": "demo",
+  "run": "ci-seed2-demo-u1",
+  "date": "2026-10-07",
+  "note": "issue 418 re-measure at the two-lane default, unseeded",
+  "findings": [
+    {
+      "title": "Dashboard weekly orders chart image returns 404",
+      "severity": "medium",
+      "category": "network",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Approval queue lacks a visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "approvals page has no visually dominant action"
+    },
+    {
+      "title": "Save notes control is covered by the order sticky bar",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order detail Save notes covered by order-stickybar"
+    },
+    {
+      "title": "Inventory lacks a visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "inventory.html dominant action absent"
+    },
+    {
+      "title": "Export CSV crashes while reading missing rows",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "Export CSV: Cannot read properties of undefined (reading 'rows')"
+    },
+    {
+      "title": "Shared navigation links blend into body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "shared shell navigation links body-text color rgba(91,102,117,1)"
+    },
+    {
+      "title": "Optional confirmation email field has placeholder-only label",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "orders-new.html new-order-email placeholder-only label"
+    }
+  ],
+  "decisions": []
+}

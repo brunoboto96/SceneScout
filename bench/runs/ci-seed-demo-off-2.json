@@ -1,0 +1,27 @@
+{
+  "app": "demo",
+  "run": "ci-seed-demo-off-2",
+  "date": "2026-10-06",
+  "note": "scenescout ci, unseeded control for the seeded schedule (issue 418), commit 3acef27",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Scheduled reports page has no navigation or actions",
+      "severity": "medium",
+      "category": "dead-end",
+      "evidence": "route /reports-scheduled.html has 0 interactables when reached via Reports link"
+    },
+    {
+      "title": "Optional confirmation email field has no label",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "form /orders-new.html field tid:new-order-email has placeholder-only naming"
+    }
+  ],
+  "decisions": []
+}

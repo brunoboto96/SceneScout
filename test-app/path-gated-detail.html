@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Record detail</title>
+  </head>
+  <body>
+    <main>
+      <h1 id="heading">Record detail</h1>
+      <button type="button">Edit record</button>
+    </main>
+    <script>
+      // Reached only through the step on the start page: opened by its address, it sends the browser back there.
+      var picked = sessionStorage.getItem("picked-record");
+      if (!picked) location.replace("/path-gated-start.html");
+      else document.getElementById("heading").textContent = "Record " + picked;
+    </script>
+  </body>
+</html>

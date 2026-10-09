@@ -33,10 +33,12 @@ import {
   secondsLeft,
   splitCode,
   totp,
+  unansweredSubmit,
   urlMatches,
   type FieldInfo,
   type FieldKind,
   type Progress,
+  type Step,
   type StepOptions,
   type TotpAlgorithm,
 } from "../src/engine/scripted-login.ts";
@@ -792,6 +794,68 @@ test("a refused code names what to check: the fixed code, or the TOTP secret and
   };
   assert.match(reason({ ...opts, code: "fixed" }), /the code was refused \(check SCENESCOUT_LOGIN_OTP_CODE is the code the app accepts\)$/);
   assert.match(reason(opts), /the code was refused \(check the TOTP secret and the runner's clock\)$/);
+});
+
+test("a submitted field counts as refused only once the page has answered: the very field still holding the value is a page not yet moved on", () => {
+  const user = field({ type: "email", name: "email" });
+  const pw = field({ type: "password", name: "password" });
+  const code = field({ autocomplete: "one-time-code", name: "code" });
+  const afterPassword = progress([
+    ["username", user],
+    ["password", pw],
+  ]);
+  const afterCode = progress([["otp", code]]);
+  const late: StepOptions = { ...opts, code: "fixed", timedOutAfterS: 60 };
+  const cases: Array<[string, Partial<Record<FieldKind, FieldInfo>>, Progress, StepOptions, Step["kind"]]> = [
+    // The element the code was typed into, still holding it, just after the submit: the app has not answered yet.
+    ["the same code field, still filled, just after the submit", chooseFields([{ ...code, typed: true, filled: true }]), afterCode, opts, "wait"],
+    ["the same password field, still filled, just after the submit", chooseFields([{ ...pw, typed: true, filled: true }]), afterPassword, opts, "wait"],
+    // The app emptied the very field it was typed into: it answered, and said no.
+    ["the same code field, emptied by the app", chooseFields([{ ...code, typed: true, filled: false }]), afterCode, opts, "refused"],
+    ["the same password field, emptied by the app", chooseFields([{ ...pw, typed: true, filled: false }]), afterPassword, opts, "refused"],
+    // Drawn again (a new element, or a new page) with nothing typed in it: refused.
+    ["the code field re-rendered, empty", chooseFields([{ ...code }]), afterCode, opts, "refused"],
+    ["the password field re-rendered, empty", chooseFields([{ ...pw }]), afterPassword, opts, "refused"],
+    ["the code field re-rendered, the browser keeping its value", chooseFields([{ ...code, filled: true }]), afterCode, opts, "refused"],
+    // The deadline passed with the same field still holding what was typed: a timeout, not a refusal.
+    ["the same code field, still filled, at the timeout", chooseFields([{ ...code, typed: true, filled: true }]), afterCode, late, "timeout"],
+    ["the same password field, still filled, at the timeout", chooseFields([{ ...pw, typed: true, filled: true }]), afterPassword, late, "timeout"],
+    ["the code field emptied by the app, at the timeout", chooseFields([{ ...code, typed: true }]), afterCode, late, "refused"],
+  ];
+  for (const [what, onPage, sent, o, want] of cases) assert.equal(nextStep(onPage, sent, o).kind, want, what);
+  const timedOut = nextStep(chooseFields([{ ...code, typed: true, filled: true }]), afterCode, late);
+  assert.deepEqual(timedOut, {
+    kind: "timeout",
+    reason: "the sign-in did not finish within 60s: the one-time code was submitted and the page still shows it in the same field",
+  });
+  // A password still shown in its field beside the code field the submit revealed: the code is filled, not the password taken as refused.
+  assert.deepEqual(nextStep(chooseFields([{ ...pw, typed: true, filled: true }, code]), afterPassword, opts), { kind: "fill", fill: ["otp"] });
+});
+
+test("a submitted code or password the page disables while it checks it is not a sign-in: no field showing is not done until the page answers", () => {
+  const code = field({ autocomplete: "one-time-code", name: "code" });
+  const pw = field({ type: "password", name: "password" });
+  const afterCode = progress([["otp", code]]);
+  const afterPassword = progress([["password", pw]]);
+  // What the page shows: the very element typed into, disabled while the app checks it, still holding the value.
+  const cases: Array<[string, FieldInfo[], Progress, FieldKind | undefined]> = [
+    ["the code field, disabled while checked, still holding the code", [{ ...code, typed: true, filled: true, disabled: true }], afterCode, "otp"],
+    ["the password field, disabled, still holding the password", [{ ...pw, typed: true, filled: true, disabled: true }], afterPassword, "password"],
+    ["the same field, enabled again and still holding it", [{ ...code, typed: true, filled: true }], afterCode, "otp"],
+    ["the field emptied by the app", [{ ...code, typed: true, disabled: true }], afterCode, undefined],
+    ["the field drawn again, disabled", [{ ...code, filled: true, disabled: true }], afterCode, undefined],
+    ["a code field that was typed into but not submitted", [{ ...code, typed: true, filled: true, disabled: true }], progress(), undefined],
+    ["no field at all", [], afterCode, undefined],
+  ];
+  for (const [what, fields, sent, want] of cases) assert.equal(unansweredSubmit(fields, sent.submitted), want, what);
+  // A disabled field is not chosen, so the page reads as having no sign-in field: with the code still being checked, that is not done.
+  const checking: StepOptions = { ...opts, code: "fixed", checking: "otp" };
+  assert.deepEqual(nextStep(chooseFields([{ ...code, typed: true, filled: true, disabled: true }]), afterCode, checking), { kind: "wait" });
+  assert.deepEqual(nextStep({}, afterCode, { ...opts, code: "fixed" }), { kind: "done" }, "the contrast: nothing being checked, no field is signed in");
+  assert.deepEqual(nextStep({}, afterCode, { ...checking, timedOutAfterS: 30 }), {
+    kind: "timeout",
+    reason: "the sign-in did not finish within 30s: the one-time code was submitted and the page still shows it in the same field",
+  });
 });
 
 test("the success URL matches as a prefix when absolute, as contained text otherwise", () => {

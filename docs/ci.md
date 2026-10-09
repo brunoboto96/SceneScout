@@ -95,6 +95,9 @@ Every option of `scenescout check` is an input with the same name. `scenescout c
 | `baselines` | `<project>/.scenescout/baselines` | The folder holding `targets.json` and the baselines; name one the repository commits (below) |
 | `baseline-threshold` | 0.1 | The percentage of a picture's pixels that may change, 0 to 100 (below) |
 | `sarif-file-anchor` | the workflow file that is running | The repository file a `check.sarif` result points at when no saved flow raised it, relative to the repository root (below) |
+| `record` | `SCENESCOUT_RECORD`, else `off` | `on` keeps a frame after each route visit and each flow step and writes `replay.html` beside the report, kept in the artifact (below) |
+| `video` | `off` | `on` records a WebM video of each saved flow, linked from `replay.html` beside its steps and kept in the artifact (below) |
+| `template` | none | A report template (JSON): with `record: on`, also writes a test report laid out as the template says, kept in the artifact (below) |
 
 And the action's own:
 
@@ -104,13 +107,13 @@ And the action's own:
 | `version` | the ref's release | The scenescout npm version to run |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo`. Set `false` on a runner or container that has them |
-| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met |
+| `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and on a recorded check `replay.html` with its `replay-frames/` and `replay-videos/` folders |
 | `artifact-name` | `scenescout-check-<job id>` | A second use in the same job gets `-2`, a third `-3`. Jobs of a matrix share a job id, so give each cell its own name, e.g. `scenescout-check-${{ matrix.browser }}` |
 | `upload-sarif` | `false` | Upload `check.sarif` to code scanning (below) |
 
 ### Outputs
 
-`passed` (`true` or `false`, empty when the check could not run; with `could-not-run` above 0 it describes the rest of the check, so `true` can come with exit code 2), `exit-code`, `failing` (what fails the gate: issues at the gate's severity or worse, plus re-tested findings that `--gate-retests` gates), `could-not-run` (flows a refused step kept from running), `retests-failing` (of `failing`, the re-tested findings), `high`, `medium`, `low`, `worth-a-look` (observations listed as worth a look, below; not in `high`, `medium` or `low`, and never in `failing`), the paths `report`, `json` and `sarif`, and `artifact-name`.
+`passed` (`true` or `false`, empty when the check could not run; with `could-not-run` above 0 it describes the rest of the check, so `true` can come with exit code 2), `exit-code`, `failing` (what fails the gate: issues at the gate's severity or worse, plus re-tested findings that `--gate-retests` gates), `could-not-run` (flows a refused step kept from running), `retests-failing` (of `failing`, the re-tested findings), `high`, `medium`, `low`, `worth-a-look` (observations listed as worth a look, below; not in `high`, `medium` or `low`, and never in `failing`), the paths `report`, `json` and `sarif`, `replay` (the path of `replay.html` when `record` or `video` is on, else empty), `test-report` (the path of the test report a `template` laid out, else empty), and `artifact-name`.
 
 A later step can read them, for example to comment on the pull request. To keep the job going after a failed gate, give the step `continue-on-error: true` and look at `steps.scenescout.outputs.exit-code`.
 
@@ -188,7 +191,7 @@ While the app sends the code there may be no field on the page; after the userna
 
 `--timeout <seconds>` bounds the whole sign-in (default 60, 5 to 600). Credentials have no flag, because a flag shows in the process list and the shell history.
 
-Missing or malformed configuration (a credential not set, a password set but empty, a TOTP secret that is not base32, a fixed code that is not 4 to 12 letters or digits, a fixed code and a TOTP secret both set, a timeout out of range) is reported before a browser starts, naming the variable and never its value; a selector that is not valid CSS is reported when the page is first read. The command exits 0 once signed in and saved, and 1 otherwise: a refused password or code, a field named or laid out as a code (one box per character) with no code or secret set, a password field with no password set, or a form it could not move on. A refused sign-in, or one that times out, quotes the error the page shows. Every credential value, as typed and URL-encoded, the username and a fixed code in any case, and each code typed, is replaced by `[redacted]` in everything it prints, including that quoted message, so a page that echoes what was typed does not put the password or the code in the job log.
+Missing or malformed configuration (a credential not set, a password set but empty, a TOTP secret that is not base32, a fixed code that is not 4 to 12 letters or digits, a fixed code and a TOTP secret both set, a timeout out of range) is reported before a browser starts, naming the variable and never its value; a selector that is not valid CSS is reported when the page is first read. The command exits 0 once signed in and saved, and 1 otherwise: a refused password or code, a field named or laid out as a code (one box per character) with no code or secret set, a password field with no password set, or a form it could not move on. A password or code counts as refused only once the page has answered it: it emptied the field, drew it again, or went to another page. While the field it was typed into is still there holding it (disabled while the app checks it, or waiting on a slow redirect), the command keeps waiting, and if that is still so when `--timeout` runs out it reports that the sign-in did not finish in time, not a refusal. An app that leaves a wrong password or code in its field, with an error beside it, therefore fails only when `--timeout` runs out, quoting that error; a shorter `--timeout` makes it fail sooner. A refused sign-in, or one that times out, quotes the error the page shows. Every credential value, as typed and URL-encoded, the username and a fixed code in any case, and each code typed, is replaced by `[redacted]` in everything it prints, including that quoted message, so a page that echoes what was typed does not put the password or the code in the job log.
 
 Not covered: a sign-in form inside an iframe, a code that is emailed or texted and different every time (the test environment has to accept a fixed one), a sign-in link sent by email, a CAPTCHA or other bot check, and push second factors. Use a test-only endpoint or a saved session for those.
 
@@ -275,6 +278,21 @@ A flow file that is not valid stops the check before it starts, with exit 2 and 
 
 **A value can come from the environment.** Write `${env:NAME}` in a `type` or `select` step's `value` (whole or in part) and the check types the variable's value, so a one-time code or a password lives in the CI's secret store rather than in the flow file. A variable that is not set stops the check before it starts, with exit 2 and the flow and variable named. Wherever the page echoes a value of four or more characters (an address, an error), everything the check writes and prints shows `[$NAME]` instead. Only values are substituted: `expect-*` steps match their text as written.
 
+**A flow can carry traceability.** Three optional fields are for a [test report from a template](#a-test-report-from-a-template) and change nothing about how the flow runs: `id`, the test's identifier; `requirements`, the identifiers of the requirements it covers; and `expected` on any step, the result it should bring about, in words. A step with no `expected` shows its assertion when it is an `expect-*` step (`expect text "Order placed"`), and `—` otherwise. `expected` is never checked: a step passes or fails on its action and assertions alone.
+
+```json
+{
+  "name": "place an order",
+  "id": "TC-01",
+  "requirements": ["REQ-012", "REQ-013"],
+  "steps": [
+    { "action": "navigate", "target": "/shop", "expected": "The catalogue lists the products" },
+    { "action": "click", "target": "role=button[name=\"Add to basket\"]", "expected": "The basket shows one item" },
+    { "action": "expect-text", "text": "1 item" }
+  ]
+}
+```
+
 **A flow can run as a role.** Give it `"role": "<name>"` and it runs in its own browser, signed in with the profile `scenescout login <url> --role <name> --project <dir>` saved in the project the check reads (`--project`). A flow with no `role` runs in the check's own session (`--storage-state`, or signed out). Flows run in file-name order, so a journey that needs two people is two flows: `01-submit.json` as one role, `02-approve.json` as another, the second finding by its visible text what the first created. A role with no saved profile stops the check before it starts, with exit 2 and the command that saves one; a profile that no longer signs in stops it the same way when the flow is reached.
 
 Flows run in the crawl's browser context, one after another in file-name order, so cookies, storage and a signed-in session carry from the crawl to each flow and from one flow to the next; each starts from the page its first step names.
@@ -359,6 +377,80 @@ The check step fails if a target could not be pictured, since that target's base
 An element larger than the window is pictured where it is inside the window, and its result's `partial` says so: list smaller elements within it to hold the rest.
 
 **Allowing small changes.** `baseline-threshold` (`--baseline-threshold`) is the percentage of a picture's pixels that may change before its baseline is not met. The default is 0.1, not 0: two pictures of an unchanged page taken by one browser build on one machine compare at 0%, but a run on another machine, or after a browser or font update, can anti-alias text and curved edges a pixel differently, and a gate that fails on that noise teaches a team to ignore it. 0.1% is 1,152 pixels of a 1280×900 page and 64 of a 320×200 picture, so a smaller change, such as a character of small text on a large element, passes; set `0` to count every changed pixel. A change of size always counts. `update` rewrites the baselines past the threshold, as compare would judge them, and leaves the rest alone, so noise under it leaves the folder untouched; a baseline taken on another operating system it always replaces. Each pixel is already allowed a difference of 8 in 255 on each colour channel, which absorbs a colour rounded one step differently. `fail-on: never` reports everything without failing the job, visual changes included.
+
+## Recording a check
+
+A green check says the gate passed; a recorded one also shows what passed. `--record` (the action's `record: on`, or `SCENESCOUT_RECORD=on` in the environment) keeps a frame of the page after each route the check visits and after each step of each saved flow, and writes `replay.html` beside `report.md`. It is off by default. `--record off` wins over the variable.
+
+```yaml
+- uses: brunoboto96/SceneScout@v3
+  with:
+    url: http://127.0.0.1:3000
+    record: on
+```
+
+The page is organised role → journey → step. The check's own session comes first, with the routes it visited; then each role a saved flow ran as. Every journey (a saved flow) has a pass or fail badge, and each of its steps shows its caption (the action and its target), its result and the frame after it. A journey that broke is open, with the step that broke highlighted and linked from its heading; the steps after it are marked not run and have no frame. The header gives the verdict, the SceneScout version, the app's origin, when the check started and ended, and the commit when `GITHUB_SHA` names one.
+
+**Video.** `--video` (the action's `video: on`) also records a WebM video of each saved flow, using Playwright's page screencast. Filming starts at the flow's first step and stops when the flow hands back, on the same page the flow would use unfilmed, so cookies, localStorage and sessionStorage are exactly what they would be without the video. Only the flows are filmed: the crawl, the re-tests and the baselines are not. A video is filmed at the page's own size, 1280×900. A flow whose video cannot be started or saved still runs and keeps its verdict; the check's log says why it has no video, and the next flow is filmed afresh. The replay page plays each video at the top of its journey, above the steps, with a link to open it. It works with or without `--record`: without it the page has the journeys and their videos, and no frames. Off by default, because videos are large.
+
+```yaml
+- uses: brunoboto96/SceneScout@v3
+  with:
+    url: http://127.0.0.1:3000
+    record: on
+    video: on
+```
+
+**What it writes.** `replay.html`, with a `replay-frames/` folder (`--record`) and a `replay-videos/` folder holding `journey-01-<flow>.webm`, `journey-02-<flow>.webm` and so on in the order the flows ran (`--video`), all in the output folder (`--out`, default `.scenescout/check`). The page has no scripts or event handlers and loads nothing from the network, so it opens from a downloaded artifact or from any static host, as long as the two folders travel with it. Every check removes the page, frames and videos an earlier run left there, so nothing stale is read as this run's. The page carries a `<meta name="generator" content="scenescout-check-replay">` mark, and only a `replay.html` with that mark is removed or replaced. A `replay.html` without it is the project's own: a check that is not recorded leaves it alone, and a recorded one (`--record` or `--video`) stops before it starts, exit code 2, naming the file, rather than overwrite it. Move or rename the file, or pass `--out` to write the check elsewhere. The action uploads them with the other results and publishes the page's path as the `replay` output.
+
+**Size.** A frame is a JPEG of the viewport, usually tens of kilobytes. A check takes at most one per route (up to `--max-routes`) and one per flow step, and each browser session keeps at most 600 frames. A step or visit past that has no frame; the page says so beside it, and counts them in its note at the top. A video is usually several hundred kilobytes to a few megabytes for each minute of a journey, and encoding it adds a little time to each flow, so turn on `--video` for the runs where you will watch them. Record the runs you keep as evidence, such as the main branch or a release, rather than every push.
+
+**Privacy.** The frames and videos are pictures of the app under test, and they show whatever the pages showed: names, addresses, anything a seeded account can see. Record against seeded or synthetic data, never production. Typed values never appear in the page's text, and secrets in addresses and reasons are redacted as they are in the report; a field's contents can still show in a frame or a video, as they did on screen (a password field shows dots).
+
+**Publishing it.** The artifact keeps the page for the repository's artifact retention, readable by anyone who can read the workflow run. To share it more widely, publish the output folder to a static host behind your team's own access control (an internal pages site, a bucket behind single sign-on) rather than a public one.
+
+## A test report from a template
+
+A recorded check can also be written up as a test report in the shape a reviewer or an auditor asks for: `--template <file.json>` (the action's `template` input) with `--record`. The template says how the report is laid out; the run supplies everything in it. The report is written beside `replay.html` as `report.html`, or as the file the template names.
+
+```yaml
+- uses: brunoboto96/SceneScout@v3
+  with:
+    url: http://127.0.0.1:3000
+    record: on
+    video: on
+    template: tests/report-template.json
+```
+
+**What it holds.** Each saved flow is a test and each of its steps a row, with the flow's `id` and `requirements` and each step's `expected` ([traceability](#saved-flows)), the actual result (`As expected` for a step that passed, the reason for one that did not), the result, and the frame after the step, shown small and linked. A journey video (`--video`) is linked from its test's heading. Missing values show `—`, so flows with no traceability still render. A result comes from the step's own assertions only, never from a model, and the same run always renders the same report. Every step that failed or was refused is listed again as a deviation, with its step, expected and actual result. The manifest lists the SceneScout version, the target, when the run started and ended, and the size and SHA-256 of `check.json`, `replay.html` and every frame and video the report links, so a reader can tell the files beside it are the ones the run wrote; a file that is not there is listed as not found. The sign-off section has a row per role the template names, with blank name, signature and date: SceneScout signs nothing.
+
+**The template.** A JSON file; [examples/report-template.json](../examples/report-template.json) is a complete one to copy. Unknown fields are refused, as are a token or a column that does not exist, and a template with a mistake stops the check before it starts, with exit 2 and the file and field named.
+
+| Field | |
+|---|---|
+| `title` | The document's title (required) |
+| `subtitle`, `documentId` | A line under the title, and the document ID, e.g. `TR-{run}` |
+| `fields` | Rows of the title block: `[{ "label": "System", "value": "Demo shop {version}" }]` |
+| `file` | The file name to write: a plain name of letters, digits, `.`, `_` and `-`, ending `.html`, never `replay.html` in any case nor a name Windows reserves for a device (`CON.html`, `NUL.html`, `COM1.html`); default `report.html` |
+| `labels` | Replacements for any word the report writes, such as `"pass": "Passed"` or `"deviations": "Observations"`. Every key is listed in `DEFAULT_LABELS` in `src/engine/check-report.ts` |
+| `sections` | The sections, in order (below) |
+
+`title`, `subtitle`, `documentId` and each field's `value` may use the tokens `{date}` (the day the run started, `YYYY-MM-DD`), `{time}` (`HH:MM:SS`), `{run}` (`YYYYMMDD-HHMMSS`), all in UTC, `{version}` (SceneScout's) and `{commit}` (`GITHUB_SHA`, shortened, or `—`).
+
+| Section | Fields | |
+|---|---|---|
+| `summary` | `heading`?, `paragraphs`? | The overall result (a pass only when every test passed and the check's gate passed, so a failed test fails the report even under `--fail-on never`), the target, when the run started and ended, the version, the commit, how many tests passed, failed or could not run, the deviations, and the issues failing the check's gate |
+| `tests` | `columns`, `heading`?, `paragraphs`? | The test table. `columns` is any of `testId`, `requirements`, `step`, `expected`, `actual`, `result` and `evidence`, in the order given, each a name or `{ "key": "evidence", "heading": "Screenshot" }` |
+| `deviations` | `heading`?, `paragraphs`? | Each failed or refused step |
+| `manifest` | `heading`?, `paragraphs`? | The run's facts and each evidence file's SHA-256 |
+| `signoff` | `roles`, `heading`?, `paragraphs`? | One blank row per role: a name such as `"Reviewer"`, or `{ "role": "Approver", "meaning": "I approve these results." }` |
+| `text` | `paragraphs`, `heading`? | Free text, as often as wanted |
+
+Each section but `text` appears at most once. The template carries all the wording: SceneScout has no notion of a particular kind of test or of the document's purpose.
+
+**The file.** One HTML page with no scripts and nothing loaded from the network, like `replay.html`, and laid out to print. Every piece of text from the template and from the app is escaped, and typed values and secrets in addresses are kept out as they are on the replay page. It carries a `<meta name="generator" content="scenescout-check-report">` mark, and `check.json` records its file name as `testReport`. A check removes only the report the earlier run's `check.json` names and the one at the name its own template gives, each only while it carries the mark, so a report a reviewer renamed or copied beside it is never touched. A file of the report's name without the mark is the project's own, so the check stops before it starts rather than overwrite it. The action publishes the report's path, read from `testReport`, as the `test-report` output and keeps it in the artifact with the replay page, frames and videos it links, which must travel with it.
+
+`--template` without `--record` (or `SCENESCOUT_RECORD=on`) stops the check before it starts: the report is built from a recorded run. A PDF can be printed from the page in a browser.
 
 ## Worth a look
 
@@ -489,15 +581,15 @@ Keys never reach the output. The browser and the MCP server run in a child proce
 
 | Option | Default | Counts |
 |---|---|---|
-| `--max-turns` | 40 | Model calls. Several tool calls in one reply are one turn. |
-| `--max-tokens` | 1,500,000 | Input and output tokens over the whole run, cached input included. |
+| `--max-turns` | 80 | Model calls. Several tool calls in one reply are one turn. |
+| `--max-tokens` | 3,000,000 | Input and output tokens over the whole run, cached input included. |
 | `--max-minutes` | 20 | Wall time of the exploration. |
 
 The caps are checked before each model call. No model call, retry or wait between retries runs past the time cap, and no tool call either: each is given only the time left, and a tool call reached after the cap is answered as not run. At most 16 tool calls are run from one model reply; any beyond are answered as not run. Attaching the browser counts towards the time cap. The first cap reached ends the exploration; then the report is written and the browser closed, which share a budget of three minutes, and the files are written, which takes seconds. So the command ends at most about `--max-minutes` plus 4 minutes after it starts. One turn's usage is known only after it, so a run can end up to one turn over the token cap (with `--lanes`, one turn per lane: see [Lanes](#lanes)). The summary, `ci.json` and the action's `stop` output name what ended the run: `done` (the model finished), `turns`, `tokens`, `time`, `provider-error` or `could-not-start`.
 
-Each turn sends the conversation so far, so input tokens grow with every turn: the method and the tool descriptions alone are around 20,000 tokens, and each tool result adds to what every later turn sends. With the defaults a run usually reaches the token or the time cap before the turn cap. Tool results longer than 16,000 characters are cut before they reach the model; the report keeps everything.
+Each turn sends the conversation so far, so input tokens grow with every turn: the method and the tool descriptions alone are around 20,000 tokens, and each tool result adds to what every later turn sends. In [the benchmark](benchmark.md#choosing-the-defaults-issue-419), a run at the defaults used about 27,000 tokens a turn, so it reaches the turn cap, or ends by itself, well before the token or the time cap. Tool results longer than 16,000 characters are cut before they reach the model; the report keeps everything.
 
-What a run costs follows from the token cap. At the defaults on `gpt-6-luna` ($0.10 per million input tokens, $0.01 cached, $0.50 output), a run that reaches the 1,500,000-token cap costs about $0.05 to $0.15, since most of each turn's input repeats the turn before and is read from the provider's cache; with nothing cached, the most it can cost is about $0.18. A run can end up to one turn over the cap, which adds a little. `--max-tokens` is the setting that bounds the cost.
+What a run costs follows from the token cap. At the defaults on `gpt-6-luna` ($0.10 per million input tokens, $0.01 cached, $0.50 output), the benchmark's runs used about 2.2 million tokens and cost about $0.03, since about 98% of each turn's input repeats the turn before and is read from the provider's cache; with nothing cached, a run that reaches the 3,000,000-token cap costs at most about $0.36. A run can end up to one turn over the cap, which adds a little. `--max-tokens` is the setting that bounds the cost.
 
 ### What the run may do
 
@@ -512,19 +604,19 @@ What a run costs follows from the token cap. At the defaults on `gpt-6-luna` ($0
 
 In `destructive` mode the model may send any request the app accepts, including deleting or changing records the run did not create, with nobody watching; it takes two options together so that a mode value copied from another workflow, or chosen by an agent, never enables it. The defaults follow the same rule as the check's: an unconfigured run does the least harm on an app it knows nothing about, and anything more is an option away. Which mode a project's CI uses is the project's decision.
 
-The run attaches to the URL it is given, in the mode it is given (with `--compare-url`, the run itself attaches a second session there after the model is done; with `--lanes`, each lane attaches its own session on the same URL, in the same mode); the model cannot attach elsewhere or change the mode. It gets the scout_* tools a single agent uses to explore, find and report, and not those for attaching, closing, parallel lanes or screenshots. Unless `--lanes` asks for more, it is one model loop: see [Lanes](#lanes).
+The run attaches to the URL it is given, in the mode it is given (with `--compare-url`, the run itself attaches a second session there after the model is done; with `--lanes`, each lane attaches its own session on the same URL, in the same mode); the model cannot attach elsewhere or change the mode. It gets the scout_* tools a single agent uses to explore, find and report, and not those for attaching, closing, parallel lanes or screenshots. By default it is two model loops sharing the caps, each with its own part of the app; `--lanes 1` makes it one: see [Lanes](#lanes).
 
 `--storage-state <file>` explores while signed in; a session that no longer signs in exits 2 before the model is called. `--browser`, `--action-timeout-ms`, `--nav-timeout-ms`, `--project` and `--out` are as for `check`.
 
 ### Lanes
 
-`--lanes <n>` (1 to 8, default 1) splits the exploration between `n` model loops that run at once, each in its own browser session and its own part of the app, as the [parallel lanes](guide/Ways-to-use-it.md#parallel-lanes) of an agent-driven run do. Why it works this way: [ADR 20](adr/0020-an-unattended-run-may-split-into-lanes-that-share-its-caps.md).
+`--lanes <n>` (1 to 8, default 2) splits the exploration between `n` model loops that run at once, each in its own browser session and its own part of the app, as the [parallel lanes](guide/Ways-to-use-it.md#parallel-lanes) of an agent-driven run do. Why it works this way: [ADR 20](adr/0020-an-unattended-run-may-split-into-lanes-that-share-its-caps.md).
 
 1. **Plan.** The run attaches as usual, takes a snapshot of the page it landed on (which is what collects its links) and crawls, up to three rounds, each visiting the routes the pages of the round before linked to. No model is called; the time it takes counts towards `--max-minutes`. The routes found are split the way `scout_lane_brief` splits them: whole modules, a module being a route's first path segment, dealt to the lanes largest first so each lane has about as many routes as the others.
 2. **Explore.** Each lane attaches its own session on the target URL, as the run's first session did (the engine resolves every path against the URL a session attached with), and the run opens the lane's first route in it; a route that does not open leaves the lane on the target. The lane then runs the model loop with a conversation of its own: the method, the rules every lane follows, and a first message naming its routes, what the crawl saw on them and its share of the budget. A lane is not given `scout_report`. A lane that finishes closes its browser.
 3. **Merge.** Every session files into the project's one memory, whose dedup folds a defect two lanes filed into one finding. Once every lane has ended, the run writes one report from the session that planned, and the summary and `ci.json` list each lane: what it owned, its turns and tokens, and what ended it.
 
-The caps are the run's, shared by the lanes rather than given to each. The lanes together make at most `--max-turns` model calls: a turn is taken before its call, so lanes that reach the last turn together cannot all start it. They stop at the same `--max-minutes`. Tokens are counted when a call returns, so a run can end up to one turn per lane over `--max-tokens`, where a single loop can end one turn over. A lane that finishes early leaves the turns it did not use to the lanes still running. `--lanes` must not exceed `--max-turns`, and `--show` takes no lanes.
+The caps are the run's, shared by the lanes rather than given to each. The lanes together make at most `--max-turns` model calls: a turn is taken before its call, so lanes that reach the last turn together cannot all start it. They stop at the same `--max-minutes`. Tokens are counted when a call returns, so a run can end up to one turn per lane over `--max-tokens`, where a single loop can end one turn over. A lane that finishes early leaves the turns it did not use to the lanes still running. `--lanes` must not exceed `--max-turns`, and `--show` takes no lanes. Without `--lanes`, a run with `--show`, or with a `--max-turns` below the default two, is one loop.
 
 What ended a run in lanes: a model API failure in any lane ends it as `provider-error` (exit 2), since that is what the workflow must fix, and a lane that broke after attaching ends it as `could-not-start` (exit 2), with the report still written; otherwise a cap, if any lane was stopped by one; otherwise `done`. A lane whose browser could not attach is listed with the reason, and named in the stop's detail, and does not fail the run, unless no lane could attach.
 
@@ -534,7 +626,18 @@ Each lane is a browser running at the same time as the others, and the run's fir
 
 Lanes spend tokens faster: in [the benchmark](benchmark.md#lanes-one-loop-against-four-task-40), four lanes sent about 1.4 million tokens a minute, about 2.8 times one loop's, so a provider's tokens-per-minute limit is reached sooner, and a call still refused (HTTP 429) after its retries ends the run as `provider-error`.
 
-What lanes find depends on the budget each lane gets. On the demo app at the default caps, four lanes found as many expected defects as one loop (3 of 13 in two runs each, not the same ones): ten turns a lane left each lane on its first page, while one loop ended by itself at 29 turns. With the caps raised to 160 turns and 6,000,000 tokens, four lanes found 8 of 13 in each of two runs on the demo app and 7 of 10 on the held-out app, while one loop given the same caps ended by itself at 37 turns with 5 of 13. That gain, +3, sits at the benchmark's noise bound, so the default stays one loop. The configuration that found the most is `--lanes 4 --max-turns 160 --max-tokens 6000000`: about 2 million tokens and $0.025 a run on `gpt-6-luna`, about 2.3 times one loop's cost, in about the same wall time. Its token rate is near a 2,000,000-tokens-a-minute limit, so run one such job at a time per API key, or the provider refuses calls and the run ends `provider-error`.
+What lanes find depends on the budget each lane gets. The default, two lanes sharing 80 turns and 3,000,000 tokens, was chosen by [measurement](benchmark.md#choosing-the-defaults-issue-419): on the demo app it found 5 to 7 of 13 planted defects in three runs, against 2 to 4 for the earlier default of one loop at 40 turns, and 4 to 5 of 10 on the held-out app, against 1 to 2 for one loop at 40 turns. A run cost about $0.03 on `gpt-6-luna` at effort `low`, about 2.5 times the earlier default's, and took about 1.5 to 3.5 minutes. One loop given 80 or 120 turns found fewer than two lanes did. With four lanes and the caps raised to 160 turns and 6,000,000 tokens, an earlier measurement found 8 of 13 on the demo app and 7 of 10 on the held-out app for about $0.025 a run, but its token rate is near a 2,000,000-tokens-a-minute limit, so run one such job at a time per API key, or the provider refuses calls and the run ends `provider-error`. Two lanes sent at most about 1.2 million tokens a minute (2.2 million in 111 seconds), and no run of them ended refused. On a small or slow app, `--lanes 1 --max-turns 40 --max-tokens 1500000` is the earlier, cheaper configuration.
+
+### Starting from an earlier run
+
+When a run's report is written, the server keeps a record of the run in the project's memory, and `ci.json` carries it under `record`: `knownRoutes`, `visited` (the routes a session acted on, in the order first reached; a route the planning crawl only opened is not one), `lanes` (each session's routes in order), `steps` (each step's session, the route it ended on, its action and target, at most 400), `left` (per route worked on: `unexercised` controls, `forms` seen and never submitted, `filled` when a form was filled in and nothing was submitted, and `unchosen` dropdown options), `gaps` (the gap ledger) and, for a run that itself started from one, `followed` and `prefixes`.
+
+`--from-run <ci.json or project directory>` (or `SCENESCOUT_FROM_RUN`) starts a run from that record. A project directory's records are combined, oldest first. A record that cannot be read stops the run before a browser starts (exit 2), rather than letting it start fresh unnoticed.
+
+- `--from-run-mode continue`, the default: the run makes the same planning crawl as a run in lanes, then orders the routes in three tiers. First the routes the record never worked on, by name; then the routes it left work on, the most first, each with the forms to submit, the options to choose and the controls to exercise first; then the routes it worked through. A route counts as worked through only when the record lists no control, form or option left on it (a visit alone does not), and every message ends by telling the run to keep exploring until the budget is spent. A `ci` run takes on only its first pages in that order: its turns divided by `--from-run-turns-per-page` (or `SCENESCOUT_FROM_RUN_TURNS_PER_PAGE`, default 7), each lane its share of the turns, at least one. It is told to work those deeply and not to spread out, and to take the next pages in order only once they are done. The pages it was given go into its record as `assigned`, carried along the chain, so the next continued run takes the pages after them; once every page with work has been given out, they come round again by the work left. When every route is worked through, the run explores as a fresh run would (the stable split, the landing page, no path) and its record has `continuedFresh: true`. A single loop is told the tiers in its first message; in lanes the modules are dealt by the order, each lane takes its routes in it and lands on its first, and each is told the tiers of its own routes. Its own record carries forward what the earlier record covered and left on routes it did not work on, so a chain of runs accumulates. When the earlier run reached a lane's (or the loop's) first page by acting on another page, the run first takes the same steps, at most 20, from the last page it opened by address, in one `scout_run_plan` under the run's write mode; a typed value is replaced by a stand-in of the field's kind, since none is kept. If a step does not end OK, the session navigates to the page directly (unless it is a pattern) and the record's `prefixes` holds the session, the page, the step count, `replayed` or `navigated`, and why. The tier list gives the earlier run's path to each other page it reached that way.
+- `--from-run-mode replay`: no planning crawl. Each session of the recorded run becomes a lane (one session is one loop), told its routes and its steps in the order they were taken, at most 150 listed. A record with no steps has nothing to replay and stops the run.
+
+The log, the summary's Started from row, the report and `ci.json` (`fromRun`: `mode`, `source`, `runId`, `recordAt`) name the run it started from. A run asked to show an element ignores `SCENESCOUT_FROM_RUN` and refuses `--from-run`. What `continue` measured: [the benchmark](benchmark.md#starting-from-an-earlier-run-issue-418).
 
 ### Finding dedup
 
@@ -624,11 +727,11 @@ with `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` set from the CI system's secret sto
 
 An account the repository allows comments `/scenescout qa` on a pull request and gets an unattended exploratory run of that pull request's preview, with the results posted as a reply. Why it is shaped this way: [ADR 15](adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md).
 
-**It tests a deployed preview, never the pull request's code.** The job that holds the model's key checks out nothing, builds nothing and runs only SceneScout, from an exact release tag. So the project must already deploy each pull request somewhere reachable over https (a preview environment, a review app, a per-branch deployment). A project without previews can use the [unattended run](#an-unattended-exploratory-run) on pushes or a schedule instead.
+**It tests a deployed preview, never the pull request's code.** The job that holds the model's key checks out nothing, builds nothing and runs only SceneScout, from an exact release tag. So the project must already deploy each pull request somewhere reachable over https (a preview environment, a review app, a per-branch deployment). A project without previews can use the [unattended run](#an-unattended-exploratory-run) on pushes or a schedule instead, or [`/scenescout qa check`](#the-projects-own-check-scenescout-qa-check), which runs the project's own recorded check and needs no preview and no model key.
 
 ### The workflow
 
-Copy [examples/workflows/scenescout-qa.yml](../examples/workflows/scenescout-qa.yml) to `.github/workflows/` and add the key as a repository secret (`OPENAI_API_KEY` in the file; for Anthropic, change the name in the `qa` job's `env` to `ANTHROPIC_API_KEY`). It has three jobs:
+Copy [examples/workflows/scenescout-qa.yml](../examples/workflows/scenescout-qa.yml) to `.github/workflows/` and add the key as a repository secret (`OPENAI_API_KEY` in the file; for Anthropic, change the name in the `qa` job's `env` to `ANTHROPIC_API_KEY`). It has five jobs:
 
 | Job | Holds the key | Permissions | What it does |
 |---|---|---|---|
@@ -636,6 +739,7 @@ Copy [examples/workflows/scenescout-qa.yml](../examples/workflows/scenescout-qa.
 | `qa` | yes | `contents: read` | Runs only when the gate says so. Runs `brunoboto96/SceneScout/ci` at an exact release against the preview's URL, with the caps below, and keeps the results as an artifact. |
 | `shots` | no | `contents: write` | Only after a `show` or `compare` run succeeded. Puts its pictures on the `scenescout-shots` branch so the reply can show them. |
 | `report` | no | `pull-requests: write`, `actions: read` | Posts the results on the pull request, with a link to the artifact, or says the run could not run. |
+| `check` | no | `actions: write`, `pull-requests: write` | Only for `/scenescout qa check`. Dispatches the project's own workflow, waits for its run, downloads its artifact and replies with the verdict. See [below](#the-projects-own-check-scenescout-qa-check). |
 
 Pin both actions (`brunoboto96/SceneScout/qa` and `brunoboto96/SceneScout/ci`) to the same exact release tag, from the first release that has them, or to that release's commit SHA; never to `@v3` or a branch. `issue_comment` runs the workflow file as it is on the default branch, so a pull request cannot change it. SceneScout's own code comes from that release; its npm dependencies are resolved when the action installs it, within the ranges that release declares, since the package ships no lockfile.
 
@@ -645,11 +749,14 @@ Pin both actions (`brunoboto96/SceneScout/qa` and `brunoboto96/SceneScout/ci`) t
 /scenescout qa [preview URL] [focus]
 /scenescout qa [preview URL] show <element>
 /scenescout qa [preview URL] compare <element>
+/scenescout qa check [focus]
 ```
 
 Only the comment's first line is read, and the comment must begin with `/scenescout qa`, in any case, with nothing before it (the job's `startsWith` filter and the gate match it the same way). An optional https URL as the first word overrides where the preview is found; any other words become the run's `focus`, cut to 200 characters. Editing a comment starts nothing: only a new comment does.
 
 When the words after the URL begin with `show` or `compare` (a word of its own, in any case), the rest describes one element, e.g. `/scenescout qa compare the Save button`. `show` replies with a picture of that element on the preview. `compare` also captures it on a base URL and replies with the two side by side, a diff picture with the changed pixels in red, and the share of pixels changed. The base URL is the variable `SCENESCOUT_QA_BASE_URL` when it is set (the production site, say), else the newest successful deployment of the pull request's base branch; it is held to the same rules as the preview's URL. What can be captured, and how, is [Showing one element](#showing-one-element).
+
+When the first word after the command is `check` (a word of its own, in any case, with no URL before it), no model runs: the project's own check does, and the rest of the line is its focus. See [The project's own check](#the-projects-own-check-scenescout-qa-check). Before this mode existed, `/scenescout qa check …` was a preview run with `check …` as its focus; put the focus in other words for that.
 
 ### The pictures in the reply
 
@@ -667,6 +774,9 @@ What the commenter sees:
 | `show` or `compare` with no element named, or `compare` with no https base URL | 😕 | One line saying why no run started, and how to change it |
 | The run is cancelled by hand or reaches the job's timeout | 👀 | One line saying so, with a link to the run |
 | A newer `/scenescout qa` on the same pull request cancels the run | 👀 | None from this run: the newer one replies |
+| `/scenescout qa check` starts the project's check | 👀 | The verdict, when the check's run ends |
+| `/scenescout qa check` with `SCENESCOUT_QA_CHECK_WORKFLOW` unset or not a workflow file name, or from a fork | 😕 | One line saying why no check started, and how to set it up |
+| The check's workflow is unknown or disabled, GitHub refuses the dispatch, its run cannot be found, or it outlasts the wait | 👀 | One line saying which, with a link where there is a run |
 
 The reply names the pull request's head commit when the run was asked for. The preview may have been deployed from an earlier commit, so that is not a claim about what was tested.
 
@@ -683,6 +793,8 @@ All optional, as repository variables (Settings → Secrets and variables → Ac
 | `SCENESCOUT_QA_ENVIRONMENT` | any | Without a template, the preview is the newest successful deployment of the head commit, as the deployments API reports it; this limits it to one environment's deployments. |
 | `SCENESCOUT_QA_ALLOW_FORKS` | off | `true` runs on pull requests from forks. Off, a fork's pull request gets a reply saying why nothing ran. |
 | `SCENESCOUT_QA_BASE_URL` | the base branch's deployment | What `compare` compares the preview with, e.g. `https://www.example.com`. Unset, the newest successful deployment of the pull request's base branch; with neither, `compare` replies saying so. |
+| `SCENESCOUT_QA_CHECK_WORKFLOW` | none | The project's workflow that `/scenescout qa check` dispatches, by its file name in `.github/workflows/` (e.g. `browser-tests.yml`) or its id. Unset, the command replies saying how to set it up. |
+| `SCENESCOUT_QA_CHECK_ARTIFACT` | `scenescout-check` | The name that workflow uploads its check's output folder under. |
 
 And one optional repository secret (Settings → Secrets and variables → Actions → Secrets):
 
@@ -691,6 +803,34 @@ And one optional repository secret (Settings → Secrets and variables → Actio
 | `SCENESCOUT_QA_TEAM_TOKEN` | Read only when `SCENESCOUT_QA_ALLOWED_TEAMS` is set: a token that can read the organization's team membership, either a GitHub App installation token with the organization's Members permission (read), or a personal access token with `read:org`. The workflow's own token cannot read team membership. The template passes it to the `gate` job only; never add it to the `qa` or `report` job. |
 
 The preview's URL is chosen in this order: the URL in the comment, the template, the deployment. It must be `https` and carry no credentials. The run explores the preview signed out: the `qa` job checks out nothing, so it has no saved session to read.
+
+### The project's own check: `/scenescout qa check`
+
+A project that builds and starts its app inside a CI job, and has no preview deployments, can still answer a comment. `/scenescout qa check [focus]` runs the project's **own** workflow, which runs [`scenescout check`](#github-actions) with [recording](#recording-a-check) on, and replies with its verdict. No model is involved and no key is read anywhere in this mode. Why it still keeps [ADR 15](adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md)'s rule: its amendment "The project's own check".
+
+**Setting it up.**
+
+1. Add a workflow to the project that a dispatch can start: [examples/workflows/scenescout-qa-check.yml](../examples/workflows/scenescout-qa-check.yml) is a minimal one. Replace its build and start steps with your app's. It must be on the default branch to be dispatched, and runs as it is on the pull request's branch.
+2. Set the repository variable `SCENESCOUT_QA_CHECK_WORKFLOW` to its file name, e.g. `scenescout-qa-check.yml`.
+3. If the workflow uploads its results under a name other than `scenescout-check`, set `SCENESCOUT_QA_CHECK_ARTIFACT` to that name. The example reads the same variable, so the two stay equal.
+
+**The workflow's contract.** It has a `workflow_dispatch` trigger declaring three string inputs, `pr` (the pull request's number), `focus` (the words after `check`, possibly empty) and `dispatch-id` (set by the `check` job; put it in the workflow's `run-name`, as the example does, so the run can be told apart from others). GitHub refuses a dispatch carrying an input the workflow does not declare, so all three must be there. It runs `scenescout check --record --video` (the action's `record: on` and `video: on`) and uploads the output folder as an artifact, so `check.json` sits at the top of it, with `replay.html`, `replay-frames/` and `replay-videos/` beside it. The check action does that upload itself under its `artifact-name` input. What `focus` means is the workflow's choice: the example keeps the saved flows whose file name contains it. It is text from a comment, so read it through `env`, never paste `${{ inputs.focus }}` into a script. When a focus is given and the check ran no journeys, the reply says **No journeys ran** and never calls it a pass. The example also warns in its log when the focus matches no flow.
+
+**One check per pull request.** Give the workflow's job a concurrency group on the `pr` input with `cancel-in-progress: true`, as the example does (`scenescout-qa-check-<repository>-<pr>`). A newer `/scenescout qa check` on the same pull request then cancels the older run, the older command's reply says it was cancelled, and the newer one replies with the verdict. Without it, both runs go to the end and each replies.
+
+**What the `check` job does.**
+
+1. Looks the workflow up (`GET /repos/{owner}/{repo}/actions/workflows/{file}`), then dispatches it on the pull request's head branch with the three inputs. The dispatch names the branch as `refs/heads/<branch>`, so a tag with the same name is never the one run. When GitHub refuses, the reply says why in its own words: the token lacks `actions: write` (403); the branch was deleted or renamed; the workflow, as it is on that branch, has no `workflow_dispatch` trigger or the file is missing there (a branch made before the workflow was added: merge the default branch into it); or the workflow does not declare the three inputs. GitHub's own message is quoted beneath in every case.
+2. Finds the run. GitHub's dispatch call answers with the new run's id, and that is used when it is there. Otherwise the job lists the workflow's `workflow_dispatch` runs on that branch: first the one whose title carries the dispatch id, then, for a workflow whose `run-name` does not carry it, the oldest run of the pull request's head commit created since the dispatch. Two checks on the same commit at once can only be told apart by the dispatch id, so keep it in the `run-name`.
+3. Waits for the run to complete, polling every 15 seconds, for at most `wait-minutes` (30 in the template; the job's `timeout-minutes` is 40). A run still going then gets a reply with its link, and is left to finish. A run that was cancelled gets a reply saying so; with the example's concurrency group that is a newer `/scenescout qa check` on the same pull request, which replies on its own.
+4. Looks the artifact up by name through the API first. An artifact that is missing, expired, or over 1 GB (the zip's size as the API reports it) is not downloaded, and the reply says which. Otherwise it downloads it with `actions/download-artifact` (by run id) **as its zip, with `skip-decompress: true`**, so nothing from the archive is written to disk. The reply stage reads the zip's central directory itself, compares entry names only with fixed names (`check.json`, `replay.html`, `replay-videos/*.webm`), and inflates `check.json` alone, stopping at 10 MB. A name such as `../x` is never a path, and a zip bomb ends at the cap. (download-artifact's own extraction, at the pinned v8.0.1, rewrites `..` path segments and writes no symbolic links, but sets no size limit; keeping the zip whole avoids depending on either.) Nothing in the artifact is run.
+5. Replies: the verdict (passed, failed with the number of issues that fail the gate, or partly ran), the findings by severity, each journey (a saved flow) with its role and its result, the first failing step with what it did and why it broke, up to 20 findings high first, the recording (the page, and each journey video by name), and links to the run and the artifact. Everything from `check.json` is escaped as the preview run's reply is: the pull request's code wrote it, so a journey's name cannot mention anyone, link anywhere or add HTML. A run with no verdict to read gets a reply saying which it was: the artifact could not be downloaded (expired, never uploaded, or under another name), it holds no `check.json`, the file is not valid JSON or larger than 10 MB, or it is not one `scenescout check` wrote; with the run's conclusion and link. Names (the workflow, the branch, the artifact) are shown as code, where nothing renders. The reply names the commit the run tested, and says so when the branch moved after the command.
+
+**Permissions.** The `check` job has `actions: write`, which dispatching a workflow needs and which also covers reading the run and downloading its artifact (`actions: read`), and `pull-requests: write` to reply. Nothing else: no `contents`, no secrets. The gate keeps its own permissions; it only reads the variable and passes the checked workflow name and the head branch on.
+
+**Who and where.** The same allowlist as every other form of the command. Pull requests from forks are always refused, whatever `SCENESCOUT_QA_ALLOW_FORKS` says: the dispatch runs the workflow on a branch of this repository, and a fork's branch is not one. The person who starts the run is the commenter: any allowed account, which may have no write access, can start the workflow, with the repository's secrets, on someone else's same-repository branch, as that branch's copy of the workflow defines it. If the workflow reads secrets, keep the allowlist to people you would trust to start it by hand.
+
+**What the verdict is worth.** The branch's own copy of the workflow writes `check.json`, so the branch's author decides what it says, a pass included. Read the reply as that run's report, not as a certificate; a check a merge depends on belongs in the repository's required status checks.
 
 ### Who may start a run
 
@@ -706,7 +846,7 @@ A commenter who is not allowed, by any path, gets the 😕 reaction and nothing 
 ### What it costs, and how much it runs
 
 - One run per comment. A new `/scenescout qa` on the same pull request cancels the run already going there, and only the newer one replies. The report job tells that apart from a run cancelled by hand or by its timeout by looking for a later run whose title (the workflow's `run-name`) names the same pull request and whose `qa` job started; keep both as the template has them.
-- The caps of [`scenescout ci`](#caps), set explicitly in the workflow: 40 turns, 1,500,000 tokens and 20 minutes, in `read-only` mode. Edit them there. The `qa` job's `timeout-minutes` must stay at least `max-minutes` plus 5, plus the install.
+- The caps of [`scenescout ci`](#caps), set explicitly in the workflow: 80 turns, 3,000,000 tokens and 20 minutes, in `read-only` mode. Edit them there. The `qa` job's `timeout-minutes` must stay at least `max-minutes` plus 5, plus the install.
 - A comment from an account that is not allowed still starts the `gate` job, which ends in seconds without reading the pull request or reaching the key.
 
 ### Forks
@@ -715,4 +855,4 @@ The workflow refuses pull requests from forks by default, and `SCENESCOUT_QA_ALL
 
 ### This repository
 
-SceneScout has no deployed preview, so it does not run this workflow on its own pull requests. Its test suite (`qa-test`) holds the template to the rules above: the key only in the `qa` job, the team token only in the `gate` job's `team-token` input, that job reached only through the gate, with read-only permissions and no checkout or script of its own, SceneScout from an exact release tag (one that ships `qa/` and the `shots` stage), one run per pull request, and the `shots` job the only one that writes contents, running only the shots stage with no branch of its own choosing. It also runs every keyless stage against a stand-in GitHub API.
+SceneScout has no deployed preview, so it does not run this workflow on its own pull requests. Its test suite (`qa-test`) holds the template to the rules above: the key only in the `qa` job, the team token only in the `gate` job's `team-token` input, that job reached only through the gate, with read-only permissions and no checkout or script of its own, SceneScout from an exact release tag (one that ships `qa/` and the `shots` stage), one run per pull request, and the `shots` job the only one that writes contents, running only the shots stage with no branch of its own choosing. It also runs every keyless stage against a stand-in GitHub API, the `check` job's rules (no key, no checkout, `actions: write` and `pull-requests: write` only, the workflow and branch from the gate) and the example check workflow's shape (the three dispatch inputs, the dispatch id in its title, recording on, the artifact name from the variable, the focus never pasted into a script).

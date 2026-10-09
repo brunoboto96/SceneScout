@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Pick a record</title>
+  </head>
+  <body>
+    <main>
+      <h1>Pick a record</h1>
+      <!-- The detail page opens only after this step: no link reaches it, and opening it by its address sends the browser back here. -->
+      <label for="reference">Reference</label>
+      <input id="reference" type="text" />
+      <button id="open" type="button">Open record</button>
+      <p id="status" role="status"></p>
+    </main>
+    <script>
+      document.getElementById("open").addEventListener("click", function () {
+        var ref = document.getElementById("reference").value.trim();
+        if (!ref) {
+          document.getElementById("status").textContent = "Enter a reference first.";
+          return;
+        }
+        sessionStorage.setItem("picked-record", ref);
+        location.assign("/path-gated-detail.html");
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,59 @@
+{
+  "app": "demo",
+  "run": "ci-caps-demo-t80-1",
+  "date": "2026-10-06",
+  "note": "Issue 419 caps measurement, 1 loop, 80 turns (workflow run 37539643767); see Choosing the defaults.",
+  "findings": [
+    {
+      "title": "Dashboard chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard links overlap bulk-import badge",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "dashboard geometry: e16 All orders overlaps e17 New: bulk import (85%)"
+    },
+    {
+      "title": "Confirmation email field relies on placeholder for its label",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new-order-email has placeholder only; design audit identified field name absent after typing"
+    },
+    {
+      "title": "New order helper text has very low contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new order form helper text contrast 1.73:1; measured by design audit"
+    },
+    {
+      "title": "Save notes button is covered by sticky bar",
+      "severity": "high",
+      "category": "visual",
+      "evidence": "order detail geometry: e199 Save notes is COVERED by pinned chrome [order-stickybar]"
+    },
+    {
+      "title": "Reports page has no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "reports page audit: no visually dominant action; task-clarity 92/100",
+      "tier": "worth_a_look",
+      "convention": "a primary action should be visually dominant"
+    },
+    {
+      "title": "Scheduled reports page has no available controls or exit links",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html 200; snapshot: main has heading and 2 paragraphs, interactables 0; DEAD END"
+    },
+    {
+      "title": "Settings reports saved despite sending no request",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "settings Save changes: ZERO network requests; subsequent status text \"Saved.\""
+    }
+  ],
+  "decisions": []
+}

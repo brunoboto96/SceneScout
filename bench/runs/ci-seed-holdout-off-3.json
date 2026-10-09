@@ -1,0 +1,27 @@
+{
+  "app": "holdout",
+  "run": "ci-seed-holdout-off-3",
+  "date": "2026-10-06",
+  "note": "scenescout ci, unseeded control for the seeded schedule (issue 418), commit 3acef27",
+  "findings": [
+    {
+      "title": "Fines page presents a forbidden response as an empty list",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403 rendered as empty list"
+    },
+    {
+      "title": "Catalogue spacing uses inconsistent ad-hoc padding",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "catalogue spacing audit: 66% off-grid; 9px×58; 7 gray values"
+    },
+    {
+      "title": "Home dashboard notices endpoint returns HTTP 500",
+      "severity": "high",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    }
+  ],
+  "decisions": []
+}

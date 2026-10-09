@@ -1,5 +1,54 @@
 # scenescout
 
+## 3.22.0
+
+### Minor Changes
+
+- 072b68b: `scenescout check --record --template <file.json>` (the action's `template` input) also writes the recorded run up as a test report laid out by the template: each saved flow a test and each step a row with its expected and actual result and its frame, failed steps as deviations, a SHA-256 manifest of the evidence and blank sign-off rows. Flows gain optional `id`, `requirements` and a step's `expected` for traceability; an example template is in `examples/report-template.json`.
+
+## 3.21.3
+
+### Patch Changes
+
+- 4c50ea3: `scenescout login --script` no longer reports a correct password or one-time code as refused when the app is slow to leave the page. A submitted field counts as refused only once the page has answered (emptied the field, drawn it again or moved on); while the very field it was typed into still holds it, disabled or not, the run keeps waiting, and at the timeout says the sign-in did not finish in time instead of calling it refused. An app that leaves a wrong password or code in its field, showing an error, used to be reported as refused at once; it is now reported when the timeout runs out, with the page's error quoted.
+
+## 3.21.2
+
+### Patch Changes
+
+- 8e70289: `/scenescout qa check`: when GitHub refuses a dispatch for a reason the reply does not name, the job's log now carries GitHub's own words, with anything shaped like a token redacted, as the reply says it does. Reading the artifact's zip refuses a central directory over 4 MB before reading it. The guide's safety model now covers the check mode: the commenter starts the project's workflow, with its secrets, on a branch in the same repository, and the verdict is only as trustworthy as that branch.
+
+## 3.21.1
+
+### Patch Changes
+
+- 828d177: `/scenescout qa check` follow-ups. Behaviour change: a comment beginning `/scenescout qa check …` used to be a preview run with the focus "check …"; it now always means the project's own check, so give a preview run's focus in other words. The reply no longer calls a run "Passed" when a focus matched no journeys. It says why GitHub refused a dispatch: a deleted branch, a branch whose copy of the workflow lacks the trigger or the file, or undeclared inputs. A cancelled run gets its own reply. The dispatch names the branch as `refs/heads/<branch>`, so a tag of the same name is never run. The artifact is downloaded as its zip and never extracted. Only `check.json` is read from it, capped at 10 MB, and an artifact over 1 GB is not downloaded. The example check workflow runs one check per pull request.
+
+## 3.21.0
+
+### Minor Changes
+
+- 64a719b: `scenescout ci` and its GitHub Action now default to two lanes sharing 80 model turns and 3,000,000 tokens (from one loop, 40 turns and 1,500,000 tokens). On the benchmark's demo app the new defaults found 5 to 7 of 13 planted defects in three runs, against 2 to 4 for the old ones, and 4 to 5 of 10 on the held-out app, at about $0.03 a run on `gpt-6-luna` instead of about $0.011. Without `--lanes`, a run with `--show` or with `--max-turns 1` runs as one loop. `--lanes 1 --max-turns 40 --max-tokens 1500000` restores the old behaviour.
+- a4531a8: `/scenescout qa check [focus]` runs a project's own recorded check from a pull-request comment, for projects with no preview deployments. Set the repository variable `SCENESCOUT_QA_CHECK_WORKFLOW` to a workflow that runs `scenescout check --record --video` (`examples/workflows/scenescout-qa-check.yml` is one): the comment workflow dispatches it on the pull request's branch, waits for it, and replies with the verdict, each journey's result, the findings by severity, the first failing step and links to the run and its artifact. No model key is involved, and pull requests from forks are refused. `/scenescout qa`, `show` and `compare` are unchanged.
+
+## 3.20.2
+
+### Patch Changes
+
+- f8f7ad2: A recorded `scenescout check` (`--record` or `--video`) no longer overwrites a `replay.html` in the output folder that it did not write: it stops before it starts, with exit code 2 and a message naming the file. With `--video`, a video that fails to start no longer stops every later flow from being filmed.
+
+## 3.20.1
+
+### Patch Changes
+
+- 5d5240e: `scenescout check --video` now films each saved flow on the session's own page, so sessionStorage one flow writes is there for the next, and only the flows are filmed, not the crawl. The replay page marks and counts every step and visit left without a frame because its session reached the frame cap, has no scripts or inline event handlers, and carries a generator mark: a check removes only a `replay.html` that has it, so a file of that name the project keeps in the output folder stays.
+
+## 3.20.0
+
+### Minor Changes
+
+- eb79ce8: `scenescout check --record` (or `SCENESCOUT_RECORD=on`) keeps a frame after each route visit and each saved-flow step and writes `replay.html` beside the report: each role, each journey with a pass or fail badge, each step with its caption, result and frame, the first failing step highlighted, and the run's version, times, origin and commit in the header. `--video` records a WebM of each saved flow, each on a page of its own, and the replay page plays it beside the journey's steps. The GitHub Action gains `record` and `video` inputs and a `replay` output, and keeps the page, its frames and its videos in the uploaded artifact.
+
 ## 3.19.2
 
 ### Patch Changes

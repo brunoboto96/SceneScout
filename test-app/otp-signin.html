@@ -21,6 +21,16 @@
       cookie; the page then goes to /otp-account. A wrong code is refused with
       a message that repeats it, the shape of a page that echoes its input,
       and the code is cleared.
+
+      /otp-signin?slow is an app slow to leave the code page: the code field
+      is disabled while the code is checked (about 1 s), enabled again, still
+      holding the right code, once the server has accepted it, and the page
+      goes to /otp-account only about 2 s later. That is a page that has not
+      answered yet, not the code field coming back refused.
+
+      /otp-signin?keep is an app that leaves a wrong code in its field: the
+      error shows and the field keeps what was typed, so nothing on the page
+      says the code was answered.
     -->
     <main>
       <h1>Sign in</h1>
@@ -44,6 +54,10 @@
     <script>
       const DIGITS = 6;
       const split = new URLSearchParams(location.search).has("boxes");
+      const slow = new URLSearchParams(location.search).has("slow");
+      const keep = new URLSearchParams(location.search).has("keep");
+      const SLOW_LEAVE_MS = 2000;
+      const SLOW_CHECK_MS = 1000;
       const email = document.getElementById("email");
       const emailStep = document.getElementById("email-step");
       const codeStep = document.getElementById("code-step");
@@ -78,20 +92,26 @@
         if (busy || code().length !== DIGITS) return;
         busy = true;
         update();
+        if (slow) for (const input of inputs) input.disabled = true;
         const res = await fetch("/otp-signin/verify", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ email: email.value, code: code() }),
         });
         const body = await res.json();
+        if (slow) {
+          // Checking takes long enough for a reader polling the page to see the field gone (disabled) before it is back.
+          await new Promise((resolve) => setTimeout(resolve, SLOW_CHECK_MS));
+          for (const input of inputs) input.disabled = false;
+        }
         if (res.ok) {
           // Still busy: the page is leaving, so nothing submits the code again.
           localStorage.setItem("access_token", body.access_token);
-          location.assign("/otp-account");
+          setTimeout(() => location.assign("/otp-account"), slow ? SLOW_LEAVE_MS : 0);
           return;
         }
         showError(body.error);
-        for (const input of inputs) input.value = "";
+        if (!keep) for (const input of inputs) input.value = "";
         busy = false;
         update();
         inputs[0].focus();

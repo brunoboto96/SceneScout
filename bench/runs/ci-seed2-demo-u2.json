@@ -1,0 +1,69 @@
+{
+  "app": "demo",
+  "run": "ci-seed2-demo-u2",
+  "date": "2026-10-07",
+  "note": "issue 418 re-measure at the two-lane default, unseeded",
+  "findings": [
+    {
+      "title": "Dashboard weekly chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard link and badge overlap",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "dashboard geometry: dash-all-orders overlaps dash-new-badge by 85%"
+    },
+    {
+      "title": "Order detail Save notes control is covered by pinned sticky bar",
+      "severity": "medium",
+      "category": "ux-polish",
+      "evidence": "order detail Save notes covered by order-stickybar"
+    },
+    {
+      "title": "Optional confirmation email field has placeholder-only label",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "orders-new.html textbox new-order-email placeholder-only label"
+    },
+    {
+      "title": "New order helper text fails contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new helper text contrast 1.73:1 rgba(184,192,202,1) on rgb(246,248,250)"
+    },
+    {
+      "title": "Approval request responds with conflict",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "POST /api/orders/1038/approve 409"
+    },
+    {
+      "title": "Scheduled reports page offers no way forward",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables"
+    },
+    {
+      "title": "Settings reports Saved without sending a request",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "settings-save click → ZERO network requests; status Saved."
+    },
+    {
+      "title": "Customer register has no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "customers page task efficiency no dominant action; padding 10px/14px"
+    },
+    {
+      "title": "Export CSV crashes when report rows are missing",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports Export CSV TypeError reading rows"
+    }
+  ],
+  "decisions": []
+}

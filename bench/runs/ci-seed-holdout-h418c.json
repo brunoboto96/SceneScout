@@ -1,0 +1,27 @@
+{
+  "app": "holdout",
+  "run": "ci-seed-holdout-h418c",
+  "date": "2026-10-06",
+  "note": "scenescout ci --seed h418c (issue 418), commit 3acef27",
+  "findings": [
+    {
+      "title": "Hold drop control has no accessible name",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "button holds-drop-32 accessible name empty"
+    },
+    {
+      "title": "Account data export link is unreachable",
+      "severity": "high",
+      "category": "visual",
+      "evidence": "account-export UNREACHABLE overflow-hidden ancestor"
+    },
+    {
+      "title": "Overdue status text fails contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "loans overdue contrast 1.84:1 rgba(238,163,147,1) on rgb(253,241,238)"
+    }
+  ],
+  "decisions": []
+}

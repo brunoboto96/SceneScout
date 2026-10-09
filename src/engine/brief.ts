@@ -69,7 +69,7 @@ export function moduleOf(route: string): string {
  * to the point, is stable — the same routes produce the same split every time,
  * so a re-run of a lane can be given the same brief.
  */
-export function splitRoutes(routes: readonly string[], laneCount: number): Array<{ modules: string[]; routes: string[] }> {
+export function splitRoutes(routes: readonly string[], laneCount: number, order?: readonly string[]): Array<{ modules: string[]; routes: string[] }> {
   const lanes = Math.max(1, Math.min(Math.floor(laneCount) || 1, MAX_LANES));
   const byModule = new Map<string, string[]>();
   for (const route of routes) {
@@ -81,9 +81,16 @@ export function splitRoutes(routes: readonly string[], laneCount: number): Array
   // Biggest first, then by name, and each module's own routes sorted: nothing
   // about the split may depend on the order the routes were discovered in, or
   // a lane that has to be re-run cannot be handed the same brief.
-  const modules = [...byModule.entries()]
+  const sorted = [...byModule.entries()]
     .map(([name, list]) => [name, [...list].sort((a, b) => a.localeCompare(b))] as [string, string[]])
     .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  // Given an order (a run continuing an earlier one, from-run.ts), a route's
+  // place in it decides: the modules are dealt by their earliest route, and
+  // each lane takes its routes in that order, so every lane starts on what the
+  // order puts first. Routes it does not name go after, in the stable order.
+  const rank = order ? new Map(order.map((r, i) => [r, i] as const)) : null;
+  const at = (r: string): number => rank?.get(r) ?? Number.MAX_SAFE_INTEGER;
+  const modules = rank ? [...sorted].sort((a, b) => Math.min(...a[1].map(at)) - Math.min(...b[1].map(at))) : sorted;
 
   const out = Array.from({ length: lanes }, () => ({ modules: [] as string[], routes: [] as string[] }));
   for (const [name, list] of modules) {
@@ -92,6 +99,7 @@ export function splitRoutes(routes: readonly string[], laneCount: number): Array
     out[smallest].modules.push(name);
     out[smallest].routes.push(...list);
   }
+  if (rank) for (const lane of out) lane.routes = [...lane.routes].sort((a, b) => at(a) - at(b));
   // A lane with nothing to do is a browser held open for no reason.
   return out.filter((lane) => lane.routes.length > 0);
 }
@@ -113,6 +121,16 @@ export interface BriefOptions {
   role?: string;
   /** True when that role is a profile saved by `scenescout login`, so each lane can attach by name rather than by a file. */
   roleProfile?: boolean;
+  /**
+   * The order to take the routes in, when the run starts from an earlier one
+   * (from-run.ts): the modules are dealt, and each lane's routes ordered, by
+   * it. Absent, the split is the stable one above.
+   */
+  order?: readonly string[];
+  /** The line the brief opens with when the run starts from an earlier one (from-run.ts fromRunLine). */
+  fromRunNote?: string;
+  /** What each lane is told about the earlier run: its routes' order and the work left on them, or its steps to replay. */
+  laneLines?: (brief: LaneBrief) => readonly string[];
 }
 
 /** How a lane signs in, as scout_attach arguments: by saved role, by a storage-state file, or not at all. */
@@ -123,13 +141,30 @@ function signInArgument(opts: BriefOptions): string {
 
 /** The lanes to run, each with the objective to attach with. */
 export function planLanes(routes: readonly string[], laneCount: number, opts: BriefOptions = {}): LaneBrief[] {
-  return splitRoutes(routes, laneCount).map((lane, i) => ({
+  return splitRoutes(routes, laneCount, opts.order).map((lane, i) => ({
     lane: laneName(lane.modules, i),
     objective: laneObjective(lane.modules, opts.goal),
     modules: lane.modules,
     routes: lane.routes,
     landing: landingOf(lane.routes),
   }));
+}
+
+/**
+ * The lanes of a replay (from-run.ts replayPlan): one per session of the
+ * recorded run, with its routes in the order it took them, not a new split.
+ * Named as a split's lanes are, by what they own, and made unique.
+ */
+export function replayBriefs(lanes: ReadonlyArray<{ routes: readonly string[] }>, goal?: string): LaneBrief[] {
+  const taken = new Set<string>();
+  return lanes.map((l, i) => {
+    const modules = [...new Set(l.routes.map(moduleOf))];
+    const base = laneName(modules, i);
+    let lane = base;
+    for (let k = 2; taken.has(lane); k += 1) lane = `${base.slice(0, LANE_NAME_MAX - `-${k}`.length)}-${k}`;
+    taken.add(lane);
+    return { lane, objective: laneObjective(modules, goal), modules, routes: [...l.routes], landing: landingOf(l.routes) };
+  });
 }
 
 /**
@@ -176,6 +211,9 @@ export function formatBriefs(briefs: readonly LaneBrief[], opts: BriefOptions = 
   const mode = opts.mode ?? "read-only";
   const lines = [
     `LANE PLAN — ${briefs.length} lane(s) over ${briefs.reduce((n, b) => n + b.routes.length, 0)} route(s).`,
+    ...(opts.fromRunNote
+      ? [`This run ${opts.fromRunNote}. Each lane's routes are listed in the order to take them, and what to do first is under each lane: pass it on.`]
+      : []),
     ``,
     `Give each lane its own agent. Every lane attaches with its own session name, so the browsers run genuinely in parallel, and lands on its own first route rather than the home page:`,
     `  scout_attach { session: "<lane>", url: "<origin><landing>", projectPath, mode: "${mode}"${signInArgument(opts)}, objective: "<objective>" }`,
@@ -191,6 +229,7 @@ export function formatBriefs(briefs: readonly LaneBrief[], opts: BriefOptions = 
     lines.push(`owns: ${b.modules.join(", ")} (${b.routes.length} route(s))`);
     lines.push(`landing: ${b.landing}`);
     lines.push(`routes: ${b.routes.slice(0, 20).join(", ")}${b.routes.length > 20 ? ` … and ${b.routes.length - 20} more` : ""}`);
+    for (const l of opts.laneLines?.(b) ?? []) lines.push(l);
     lines.push(``);
   }
   return lines.join("\n");

@@ -1120,10 +1120,1783 @@
       "archive": "ci-dedup-holdout-8"
     },
     {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 3,
+        "labelled": 3,
+        "low": "75%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 30,
+      "tokens": {
+        "input": 772798,
+        "cachedInput": 742188,
+        "output": 1205
+      },
+      "seconds": 68,
+      "costUsd": 0.01108538,
+      "archive": "ci-caps-demo-t40-1"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 4,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 5,
+        "labelled": 6,
+        "low": "71%",
+        "high": "86%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 31,
+      "tokens": {
+        "input": 796263,
+        "cachedInput": 764439,
+        "output": 1745
+      },
+      "seconds": 78,
+      "costUsd": 0.011699290000000001,
+      "archive": "ci-caps-demo-t40-2"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 2,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 2,
+        "labelled": 2,
+        "low": "67%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 24,
+      "tokens": {
+        "input": 600856,
+        "cachedInput": 571309,
+        "output": 1292
+      },
+      "seconds": 61,
+      "costUsd": 0.00931379,
+      "archive": "ci-caps-demo-t40-3"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 5,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 5,
+        "labelled": 5,
+        "low": "71%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 64,
+      "tokens": {
+        "input": 1890442,
+        "cachedInput": 1874734,
+        "output": 3907
+      },
+      "seconds": 148,
+      "costUsd": 0.02227164,
+      "archive": "ci-caps-demo-t80-1"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 4,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 5,
+        "labelled": 6,
+        "low": "63%",
+        "high": "88%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 56,
+      "tokens": {
+        "input": 1595572,
+        "cachedInput": 1580917,
+        "output": 2462
+      },
+      "seconds": 112,
+      "costUsd": 0.01850567,
+      "archive": "ci-caps-demo-t80-2"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 5,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 6,
+        "labelled": 6,
+        "low": "86%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 75,
+      "tokens": {
+        "input": 2354928,
+        "cachedInput": 2333358,
+        "output": 3473
+      },
+      "seconds": 172,
+      "costUsd": 0.02722708,
+      "archive": "ci-caps-demo-t80-3"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 6,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 6,
+        "labelled": 6,
+        "low": "86%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 41,
+      "tokens": {
+        "input": 1113005,
+        "cachedInput": 1101514,
+        "output": 2757
+      },
+      "seconds": 95,
+      "costUsd": 0.01354274,
+      "archive": "ci-caps-demo-t120-1"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 2,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 2,
+        "labelled": 2,
+        "low": "50%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 30,
+      "tokens": {
+        "input": 765740,
+        "cachedInput": 757723,
+        "output": 1290
+      },
+      "seconds": 65,
+      "costUsd": 0.00902393,
+      "archive": "ci-caps-demo-t120-2"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 4,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 4,
+        "labelled": 4,
+        "low": "67%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 39,
+      "tokens": {
+        "input": 1034915,
+        "cachedInput": 1023304,
+        "output": 1745
+      },
+      "seconds": 83,
+      "costUsd": 0.01226664,
+      "archive": "ci-caps-demo-t120-3"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 7,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 7,
+        "labelled": 8,
+        "low": "88%",
+        "high": "88%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 80,
+      "tokens": {
+        "input": 2192336,
+        "cachedInput": 2147221,
+        "output": 5390
+      },
+      "seconds": 217,
+      "costUsd": 0.02867871,
+      "archive": "ci-caps-demo-l2t80-1"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 6,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 7,
+        "labelled": 7,
+        "low": "78%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 80,
+      "tokens": {
+        "input": 2163003,
+        "cachedInput": 2119207,
+        "output": 4816
+      },
+      "seconds": 111,
+      "costUsd": 0.027979669999999998,
+      "archive": "ci-caps-demo-l2t80-2"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 5,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 5,
+        "labelled": 5,
+        "low": "63%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 80,
+      "tokens": {
+        "input": 2207894,
+        "cachedInput": 2185807,
+        "output": 5935
+      },
+      "seconds": 212,
+      "costUsd": 0.02703427,
+      "archive": "ci-caps-demo-l2t80-3"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "holdout",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 5,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 5,
+        "labelled": 6,
+        "low": "83%",
+        "high": "83%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 75,
+      "tokens": {
+        "input": 2083211,
+        "cachedInput": 2060420,
+        "output": 5057
+      },
+      "seconds": 89,
+      "costUsd": 0.0254118,
+      "archive": "ci-caps-holdout-l2t80-1"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "holdout",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 4,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 5,
+        "labelled": 6,
+        "low": "56%",
+        "high": "89%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 80,
+      "tokens": {
+        "input": 2199015,
+        "cachedInput": 2175729,
+        "output": 4675
+      },
+      "seconds": 98,
+      "costUsd": 0.026423389999999998,
+      "archive": "ci-caps-holdout-l2t80-2"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "holdout",
+      "version": "3.19.2",
+      "commit": "1a5a903",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 4,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 4,
+        "labelled": 6,
+        "low": "44%",
+        "high": "78%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 69,
+      "tokens": {
+        "input": 1839108,
+        "cachedInput": 1820747,
+        "output": 3960
+      },
+      "seconds": 142,
+      "costUsd": 0.02202357,
+      "archive": "ci-caps-holdout-l2t80-3"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "3acef27",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 3,
+        "labelled": 3,
+        "low": "75%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 39,
+      "tokens": {
+        "input": 1046088,
+        "cachedInput": 1013708,
+        "output": 1967
+      },
+      "seconds": 113,
+      "costUsd": 0.01435858,
+      "archive": "ci-seed-demo-off-1"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "3acef27",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 3,
+        "labelled": 3,
+        "low": "100%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 31,
+      "tokens": {
+        "input": 799468,
+        "cachedInput": 769468,
+        "output": 1665
+      },
+      "seconds": 97,
+      "costUsd": 0.01152718,
+      "archive": "ci-seed-demo-off-2"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "3acef27",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 4,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 4,
+        "labelled": 4,
+        "low": "67%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 40,
+      "tokens": {
+        "input": 1079657,
+        "cachedInput": 1068983,
+        "output": 2560
+      },
+      "seconds": 118,
+      "costUsd": 0.01303723,
+      "archive": "ci-seed-demo-off-3"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "3acef27",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 1,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 1,
+        "labelled": 1,
+        "low": "50%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 40,
+      "tokens": {
+        "input": 1045157,
+        "cachedInput": 1036421,
+        "output": 1319
+      },
+      "seconds": 91,
+      "costUsd": 0.011897310000000001,
+      "archive": "ci-seed-demo-b418a"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "3acef27",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 5,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 5,
+        "labelled": 5,
+        "low": "71%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 40,
+      "tokens": {
+        "input": 1065286,
+        "cachedInput": 1056116,
+        "output": 1814
+      },
+      "seconds": 105,
+      "costUsd": 0.01238516,
+      "archive": "ci-seed-demo-b418b"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "demo",
+      "version": "3.19.2",
+      "commit": "3acef27",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 4,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 4,
+        "labelled": 4,
+        "low": "67%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 40,
+      "tokens": {
+        "input": 1095132,
+        "cachedInput": 1063319,
+        "output": 2200
+      },
+      "seconds": 191,
+      "costUsd": 0.014914490000000002,
+      "archive": "ci-seed-demo-b418c"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "holdout",
+      "version": "3.19.2",
+      "commit": "3acef27",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 3,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 3,
+        "labelled": 4,
+        "low": "43%",
+        "high": "86%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 40,
+      "tokens": {
+        "input": 1096506,
+        "cachedInput": 1085563,
+        "output": 2298
+      },
+      "seconds": 91,
+      "costUsd": 0.01309893,
+      "archive": "ci-seed-holdout-off-1"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "holdout",
+      "version": "3.19.2",
+      "commit": "3acef27",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 1,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 1,
+        "labelled": 2,
+        "low": "50%",
+        "high": "50%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 30,
+      "tokens": {
+        "input": 778996,
+        "cachedInput": 771292,
+        "output": 1420
+      },
+      "seconds": 66,
+      "costUsd": 0.00919332,
+      "archive": "ci-seed-holdout-off-2"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "holdout",
+      "version": "3.19.2",
+      "commit": "3acef27",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 1,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 1,
+        "labelled": 2,
+        "low": "33%",
+        "high": "67%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 32,
+      "tokens": {
+        "input": 835274,
+        "cachedInput": 827133,
+        "output": 1492
+      },
+      "seconds": 68,
+      "costUsd": 0.00983143,
+      "archive": "ci-seed-holdout-off-3"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "holdout",
+      "version": "3.19.2",
+      "commit": "3acef27",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 2,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 2,
+        "labelled": 3,
+        "low": "67%",
+        "high": "67%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 40,
+      "tokens": {
+        "input": 1096791,
+        "cachedInput": 1086245,
+        "output": 1620
+      },
+      "seconds": 106,
+      "costUsd": 0.012727050000000002,
+      "archive": "ci-seed-holdout-h418a"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "holdout",
+      "version": "3.19.2",
+      "commit": "3acef27",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 1,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 1,
+        "labelled": 1,
+        "low": "33%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 40,
+      "tokens": {
+        "input": 1058668,
+        "cachedInput": 1049621,
+        "output": 1333
+      },
+      "seconds": 91,
+      "costUsd": 0.012067410000000002,
+      "archive": "ci-seed-holdout-h418b"
+    },
+    {
+      "date": "2026-10-06",
+      "app": "holdout",
+      "version": "3.19.2",
+      "commit": "3acef27",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "b5a7933f32",
+      "recall": {
+        "found": 3,
+        "expected": 10
+      },
+      "precision": {
+        "correct": 3,
+        "labelled": 3,
+        "low": "100%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 40,
+      "tokens": {
+        "input": 1116515,
+        "cachedInput": 1104332,
+        "output": 1497
+      },
+      "seconds": 97,
+      "costUsd": 0.013010119999999998,
+      "archive": "ci-seed-holdout-h418c"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "ac3c1fa",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 3,
+        "labelled": 3,
+        "low": "50%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 68,
+      "tokens": {
+        "input": 1806166,
+        "cachedInput": 1766595,
+        "output": 3105
+      },
+      "seconds": 83,
+      "costUsd": 0.023175550000000003,
+      "archive": "ci-seed2-demo-u1"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "ac3c1fa",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 6,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 6,
+        "labelled": 6,
+        "low": "60%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 80,
+      "tokens": {
+        "input": 2177140,
+        "cachedInput": 2156267,
+        "output": 3392
+      },
+      "seconds": 160,
+      "costUsd": 0.025345970000000002,
+      "archive": "ci-seed2-demo-u2"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "ac3c1fa",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 5,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 6,
+        "labelled": 7,
+        "low": "75%",
+        "high": "88%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 80,
+      "tokens": {
+        "input": 2137143,
+        "cachedInput": 2120076,
+        "output": 3135
+      },
+      "seconds": 87,
+      "costUsd": 0.024474960000000004,
+      "archive": "ci-seed2-demo-u3"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "ac3c1fa",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 5,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 6,
+        "labelled": 6,
+        "low": "86%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 71,
+      "tokens": {
+        "input": 1883627,
+        "cachedInput": 1842934,
+        "output": 3654
+      },
+      "seconds": 95,
+      "costUsd": 0.02432564,
+      "archive": "ci-seed2-demo-s1"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "ac3c1fa",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 5,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 6,
+        "labelled": 6,
+        "low": "75%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 68,
+      "tokens": {
+        "input": 1835668,
+        "cachedInput": 1816267,
+        "output": 3416
+      },
+      "seconds": 95,
+      "costUsd": 0.02181077,
+      "archive": "ci-seed2-demo-s2"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "ac3c1fa",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 5,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 5,
+        "labelled": 5,
+        "low": "71%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 67,
+      "tokens": {
+        "input": 1764828,
+        "cachedInput": 1747482,
+        "output": 3149
+      },
+      "seconds": 88,
+      "costUsd": 0.020783919999999997,
+      "archive": "ci-seed2-demo-s3"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "4ebc18b",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 6,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 7,
+        "labelled": 7,
+        "low": "78%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 73,
+      "tokens": {
+        "input": 1987618,
+        "cachedInput": 1943666,
+        "output": 3885
+      },
+      "seconds": 118,
+      "costUsd": 0.02577436,
+      "archive": "ci-fromrun-demo-u1"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "4ebc18b",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 5,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 5,
+        "labelled": 5,
+        "low": "83%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 80,
+      "tokens": {
+        "input": 2178725,
+        "cachedInput": 2159921,
+        "output": 3871
+      },
+      "seconds": 101,
+      "costUsd": 0.02541511,
+      "archive": "ci-fromrun-demo-u2"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "4ebc18b",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 6,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 6,
+        "labelled": 6,
+        "low": "60%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 80,
+      "tokens": {
+        "input": 2155125,
+        "cachedInput": 2113073,
+        "output": 2940
+      },
+      "seconds": 95,
+      "costUsd": 0.02680593,
+      "archive": "ci-fromrun-demo-u3"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "4ebc18b",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 4,
+        "labelled": 4,
+        "low": "80%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 80,
+      "tokens": {
+        "input": 2205958,
+        "cachedInput": 2185475,
+        "output": 4927
+      },
+      "seconds": 183,
+      "costUsd": 0.02636655,
+      "archive": "ci-fromrun-demo-c1"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "4ebc18b",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 6,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 6,
+        "labelled": 6,
+        "low": "86%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 63,
+      "tokens": {
+        "input": 1656792,
+        "cachedInput": 1639665,
+        "output": 3321
+      },
+      "seconds": 88,
+      "costUsd": 0.019769850000000002,
+      "archive": "ci-fromrun-demo-c2"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "4ebc18b",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "lanes": {
+        "asked": 2,
+        "planned": 2,
+        "ran": 2
+      },
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 6,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 7,
+        "labelled": 7,
+        "low": "88%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 80,
+      "tokens": {
+        "input": 2240643,
+        "cachedInput": 2217815,
+        "output": 20329
+      },
+      "seconds": 400,
+      "costUsd": 0.034625449999999995,
+      "archive": "ci-fromrun-demo-c3"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "2904a3c",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 2,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 2,
+        "labelled": 2,
+        "low": "100%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 450239,
+        "cachedInput": 422802,
+        "output": 864
+      },
+      "seconds": 45,
+      "costUsd": 0.007403720000000001,
+      "archive": "ci-fromrun-small-demo-u1"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "2904a3c",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 2,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 2,
+        "labelled": 2,
+        "low": "67%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 445291,
+        "cachedInput": 417994,
+        "output": 885
+      },
+      "seconds": 53,
+      "costUsd": 0.007352140000000001,
+      "archive": "ci-fromrun-small-demo-u2"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "2904a3c",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 3,
+        "labelled": 3,
+        "low": "100%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 443643,
+        "cachedInput": 438786,
+        "output": 1123
+      },
+      "seconds": 45,
+      "costUsd": 0.005435059999999999,
+      "archive": "ci-fromrun-small-demo-u3"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "2904a3c",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 2,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 2,
+        "labelled": 2,
+        "low": "100%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 444939,
+        "cachedInput": 439844,
+        "output": 1332
+      },
+      "seconds": 75,
+      "costUsd": 0.00557394,
+      "archive": "ci-fromrun-small-demo-c1"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "2904a3c",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 1,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 2,
+        "labelled": 2,
+        "low": "67%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 440837,
+        "cachedInput": 436382,
+        "output": 811
+      },
+      "seconds": 66,
+      "costUsd": 0.005214819999999999,
+      "archive": "ci-fromrun-small-demo-c2"
+    },
+    {
+      "date": "2026-10-07",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "2904a3c",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 0,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 0,
+        "labelled": 0,
+        "low": "—",
+        "high": "—"
+      },
+      "brier": null,
+      "stop": "done",
+      "turns": 12,
+      "tokens": {
+        "input": 283535,
+        "cachedInput": 280643,
+        "output": 407
+      },
+      "seconds": 35,
+      "costUsd": 0.0032991299999999995,
+      "archive": "ci-fromrun-small-demo-c3"
+    },
+    {
+      "date": "2026-10-09",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "c70db35",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 3,
+        "labelled": 3,
+        "low": "75%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 437701,
+        "cachedInput": 410551,
+        "output": 921
+      },
+      "seconds": 52,
+      "costUsd": 0.00728101,
+      "archive": "ci-fromrun-depth-demo-f1"
+    },
+    {
+      "date": "2026-10-09",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "c70db35",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 1,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 1,
+        "labelled": 1,
+        "low": "100%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 438297,
+        "cachedInput": 411768,
+        "output": 862
+      },
+      "seconds": 71,
+      "costUsd": 0.00720158,
+      "archive": "ci-fromrun-depth-demo-d1"
+    },
+    {
+      "date": "2026-10-09",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "c70db35",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 0,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 0,
+        "labelled": 0,
+        "low": "—",
+        "high": "—"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 434600,
+        "cachedInput": 409308,
+        "output": 502
+      },
+      "seconds": 49,
+      "costUsd": 0.006873280000000001,
+      "archive": "ci-fromrun-depth-demo-d2"
+    },
+    {
+      "date": "2026-10-09",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "a9b0e2a",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 3,
+        "labelled": 3,
+        "low": "75%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 567914,
+        "cachedInput": 526558,
+        "output": 16847
+      },
+      "seconds": 158,
+      "costUsd": 0.01782468,
+      "archive": "ci-fromrun-cap-demo-g1"
+    },
+    {
+      "date": "2026-10-09",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "a9b0e2a",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 0,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 0,
+        "labelled": 0,
+        "low": "—",
+        "high": "—"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 431279,
+        "cachedInput": 427659,
+        "output": 503
+      },
+      "seconds": 54,
+      "costUsd": 0.00489009,
+      "archive": "ci-fromrun-cap-demo-k1"
+    },
+    {
+      "date": "2026-10-09",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "a9b0e2a",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 1,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 1,
+        "labelled": 1,
+        "low": "50%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 429063,
+        "cachedInput": 425976,
+        "output": 592
+      },
+      "seconds": 48,
+      "costUsd": 0.00486446,
+      "archive": "ci-fromrun-cap-demo-k2"
+    },
+    {
       "date": "2026-10-05",
       "app": "demo",
       "version": "3.19.2",
-      "commit": "cdab552",
+      "commit": "1a5a903",
       "source": "scheduled",
       "provider": "openai",
       "model": "gpt-6-luna",
@@ -1156,7 +2929,7 @@
       "date": "2026-10-05",
       "app": "holdout",
       "version": "3.19.2",
-      "commit": "cdab552",
+      "commit": "1a5a903",
       "source": "scheduled",
       "provider": "openai",
       "model": "gpt-6-luna",
