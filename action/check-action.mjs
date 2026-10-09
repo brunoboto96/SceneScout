@@ -145,7 +145,7 @@ export function replayOutputs(outDir, exists = fs.existsSync, written = writtenR
   return { replay: page, "replay-frames": exists(frames) ? frames : "", "replay-videos": exists(videos) ? videos : "" };
 }
 
-/** The mark a check writes into a template's test report (check-report.ts REPORT_GENERATOR); check-test holds the two equal. */
+/** The mark a check writes into a template's test report (check-report.ts REPORT_GENERATOR); report-test holds the two equal. */
 export const REPORT_GENERATOR_META = '<meta name="generator" content="scenescout-check-report">';
 
 /**
@@ -157,7 +157,14 @@ export const REPORT_GENERATOR_META = '<meta name="generator" content="scenescout
  */
 export function testReportOf(json, outDir, read = (file) => fs.readFileSync(file, "utf8")) {
   const name = json && typeof json === "object" ? json.testReport : undefined;
-  if (typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.html$/.test(name) || name.toLowerCase() === "replay.html") return "";
+  // check-report.ts isReportFileName, held equal by report-test.
+  if (
+    typeof name !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.html$/.test(name) ||
+    /^(con|prn|aux|nul|com[0-9]|lpt[0-9])\./i.test(name) ||
+    name.toLowerCase() === "replay.html"
+  )
+    return "";
   const file = path.join(outDir, name);
   try {
     return read(file).includes(REPORT_GENERATOR_META) ? file : "";

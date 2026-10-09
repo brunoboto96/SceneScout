@@ -16,6 +16,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { readText } from "./checkout.ts";
 import { REPORT_GENERATOR_META, testReportOf } from "../action/check-action.mjs";
 import { clearReplayOutput, prepareTemplateReport, writeTemplateReport } from "../src/check-run.ts";
 import { DEFAULT_SETTINGS, parseCheckArgs, toSummaryJson, type CheckResult } from "../src/engine/check.ts";
@@ -193,7 +194,8 @@ test("golden: the same run, template and evidence always render the same page", 
   }
   assert.equal(
     html,
-    fs.readFileSync(GOLDEN, "utf8"),
+    // As LF: a Windows checkout may store the golden file with CRLF; the page itself always writes LF.
+    readText(GOLDEN),
     "the page matches scripts/golden/check-report.html (UPDATE_GOLDEN=1 rewrites it after an intended change)",
   );
 });
@@ -258,6 +260,10 @@ test("a failed assertion is a fail, and becomes a deviation with its step, expec
   const green = buildTemplateReport({ ...passing, issues: [] }, template({ sections: [{ type: "summary" }, { type: "deviations" }] }), [], META);
   assert.match(green, /data-testid="report-verdict">Pass</);
   assert.match(green, /data-testid="report-no-deviations">No deviations\.</);
+  // --fail-on never: the gate lets the broken flow through, but the report never calls a failed test a pass.
+  const ungated = buildTemplateReport({ ...resultOf(), failOn: "never" }, template({ sections: [{ type: "summary" }] }), [], META);
+  assert.match(ungated, /data-testid="report-verdict">Fail</, "a failed test fails the report whatever the gate says");
+  assert.ok(!html.includes("\r") && !green.includes("\r"), "the page writes LF only, so its bytes are the same on every platform");
 });
 
 test("the expected result is the step's own, else an expect-* step's assertion; an action with none shows —", () => {
@@ -395,6 +401,16 @@ test("an invalid template is refused with the file, the field and what is wrong"
   assert.equal(err({ title: "R", labels: { pass: "OK", passed: "OK" }, sections }), 't.json: labels unknown field(s) "passed"');
   assert.equal(err({ title: "R", file: "../escape.html", sections }), "t.json: file must be a plain file name ending .html, e.g. test-report.html");
   assert.equal(err({ title: "R", file: "replay.html", sections }), "t.json: file must not be replay.html, which the replay page is written to");
+  assert.equal(
+    err({ title: "R", file: "Replay.html", sections }),
+    "t.json: file must not be replay.html, which the replay page is written to",
+    "the same file on a case-insensitive disk",
+  );
+  for (const file of ["CON.html", "nul.html", "Com1.html", "LPT9.html"])
+    assert.equal(err({ title: "R", file, sections }), "t.json: file must not be a name Windows reserves for a device, such as CON.html or NUL.html", file);
+  for (const file of ["report.HTML", "a\\b.html", "C:x.html", ".hidden.html", "x.html."])
+    assert.equal(err({ title: "R", file, sections }), "t.json: file must be a plain file name ending .html, e.g. test-report.html", file);
+  assert.equal(err({ title: "R", file: "console.html", sections }), "ok", "only the device names themselves are reserved");
   assert.equal(err({ title: "R", sections }), "ok");
 });
 
@@ -492,7 +508,8 @@ test("--template: a bad template or a report the project keeps stops the check b
     clearReplayOutput(out);
     assert.ok(fs.existsSync(path.join(out, "TR-20260101-signed.html")), "a renamed report survives a check with no template");
     // A check.json naming anything but a plain report file beside it names nothing to remove.
-    for (const bad of ["../escape.html", "replay.html", "check.json", "/abs.html", 5]) assert.equal(recordedReportFile({ testReport: bad }), null, String(bad));
+    for (const bad of ["../escape.html", "replay.html", "REPLAY.html", "check.json", "/abs.html", "C:\\x.html", "sub/x.html", "CON.html", 5])
+      assert.equal(recordedReportFile({ testReport: bad }), null, String(bad));
     assert.equal(recordedReportFile({ testReport: "earlier.html" }), "earlier.html");
     assert.equal(recordedReportFile(null), null);
   } finally {
@@ -520,6 +537,25 @@ test("action: the template input is forwarded, the report is the one check.json 
   assert.equal(testReportOf({ testReport: "../test-report.html" }, "/o", read), "", "never a path outside the folder");
   assert.equal(testReportOf({}, "/o", read), "", "no testReport, no report: a renamed marked copy is never taken");
   assert.equal(testReportOf(null, "/o", read), "");
+  // The action reads the same names as the CLI's recordedReportFile: each name is taken by both or by neither.
+  const marked = () => REPORT_GENERATOR_META;
+  for (const name of [
+    "test-report.html",
+    "a..html",
+    "replay.html",
+    "Replay.html",
+    "../x.html",
+    "/abs.html",
+    "C:\\x.html",
+    "x\\y.html",
+    "CON.html",
+    "nul.html",
+    "lpt1.html",
+    "PRN.x.html",
+    "x.HTML",
+    ".x.html",
+  ])
+    assert.equal(testReportOf({ testReport: name }, "/o", marked) !== "", recordedReportFile({ testReport: name }) !== null, name);
   const action = parseYaml(fs.readFileSync(path.join(ROOT, "action.yml"), "utf8"));
   assert.ok(action.inputs.template, "the action has a template input");
   assert.match(action.outputs["test-report"].value, /steps\.run\.outputs\.test-report/);

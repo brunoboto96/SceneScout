@@ -431,7 +431,7 @@ A recorded check can also be written up as a test report in the shape a reviewer
 | `title` | The document's title (required) |
 | `subtitle`, `documentId` | A line under the title, and the document ID, e.g. `TR-{run}` |
 | `fields` | Rows of the title block: `[{ "label": "System", "value": "Demo shop {version}" }]` |
-| `file` | The file name to write, ending `.html`; default `report.html` |
+| `file` | The file name to write: a plain name of letters, digits, `.`, `_` and `-`, ending `.html`, never `replay.html` in any case nor a name Windows reserves for a device (`CON.html`, `NUL.html`, `COM1.html`); default `report.html` |
 | `labels` | Replacements for any word the report writes, such as `"pass": "Passed"` or `"deviations": "Observations"`. Every key is listed in `DEFAULT_LABELS` in `src/engine/check-report.ts` |
 | `sections` | The sections, in order (below) |
 
@@ -439,7 +439,7 @@ A recorded check can also be written up as a test report in the shape a reviewer
 
 | Section | Fields | |
 |---|---|---|
-| `summary` | `heading`?, `paragraphs`? | The overall result, the target, when the run started and ended, the version, the commit, how many tests passed, failed or could not run, the deviations, and the issues failing the check's gate |
+| `summary` | `heading`?, `paragraphs`? | The overall result (a pass only when every test passed and the check's gate passed, so a failed test fails the report even under `--fail-on never`), the target, when the run started and ended, the version, the commit, how many tests passed, failed or could not run, the deviations, and the issues failing the check's gate |
 | `tests` | `columns`, `heading`?, `paragraphs`? | The test table. `columns` is any of `testId`, `requirements`, `step`, `expected`, `actual`, `result` and `evidence`, in the order given, each a name or `{ "key": "evidence", "heading": "Screenshot" }` |
 | `deviations` | `heading`?, `paragraphs`? | Each failed or refused step |
 | `manifest` | `heading`?, `paragraphs`? | The run's facts and each evidence file's SHA-256 |

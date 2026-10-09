@@ -44,6 +44,7 @@ them, so the output folder travels as a whole; a PDF is printed from the page.
 ## Failure direction
 
 A report that claims more than the run proved is worse than one that says
-less. A value the run did not supply shows `—` rather than a guess, a file the
-manifest cannot read is listed as not found rather than left out, and nothing
-in the report is worded by a model.
+less. A failed test makes the overall result a fail even when the check's gate
+lets it through (`--fail-on never`). A value the run did not supply shows `—`
+rather than a guess, a file the manifest cannot read is listed as not found
+rather than left out, and nothing in the report is worded by a model.

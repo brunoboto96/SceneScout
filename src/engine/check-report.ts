@@ -35,6 +35,14 @@ export const MISSING = "—";
 /** A report's file name: plain, in the output folder itself, ending .html. */
 export const REPORT_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.html$/;
 
+/** A name Windows reserves for a device whatever its extension (CON.html opens the console): never a report's file. */
+export const WINDOWS_DEVICE_RE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])\./i;
+
+/** Whether a name may be a report's file: plain, ending .html, not replay.html and not a Windows device name. */
+export function isReportFileName(name: string): boolean {
+  return REPORT_FILE_RE.test(name) && !WINDOWS_DEVICE_RE.test(name) && name.toLowerCase() !== REPLAY_FILE;
+}
+
 /**
  * The report file an earlier check.json records it wrote (its `testReport`),
  * or null: anything that is not a plain report file name is ignored, so the
@@ -43,7 +51,7 @@ export const REPORT_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.html$/;
 export function recordedReportFile(checkJson: unknown): string | null {
   if (typeof checkJson !== "object" || checkJson === null) return null;
   const file = (checkJson as { testReport?: unknown }).testReport;
-  return typeof file === "string" && REPORT_FILE_RE.test(file) && file.toLowerCase() !== REPLAY_FILE ? file : null;
+  return typeof file === "string" && isReportFileName(file) ? file : null;
 }
 
 /** Whether an HTML file is a report a check wrote. */
@@ -190,6 +198,7 @@ const templateSchema = z
       .string()
       .regex(REPORT_FILE_RE, "must be a plain file name ending .html, e.g. test-report.html")
       .refine((f) => f.toLowerCase() !== REPLAY_FILE, { message: `must not be ${REPLAY_FILE}, which the replay page is written to` })
+      .refine((f) => !WINDOWS_DEVICE_RE.test(f), { message: "must not be a name Windows reserves for a device, such as CON.html or NUL.html" })
       .optional(),
     title: tokenText("the document's title", 300),
     subtitle: tokenText("a line under the title", 300).optional(),
@@ -360,10 +369,12 @@ function frameCellHtml(step: ReplayStep, L: Labels): string {
 function summaryHtml(section: ReportSection, result: CheckResult, meta: ReportMeta, L: Labels): string {
   const tests = testsOf(result);
   const { passed, couldNotRun, failing } = summarise(result);
-  const overall = couldNotRun > 0 ? L.refused : passed ? L.pass : L.fail;
   const count = (status: ReplayJourney["status"]) => tests.filter((t) => t.journey.status === status).length;
+  // A test that failed fails the report even when the gate let it through (--fail-on never): a pass here is a pass of every test.
+  const green = couldNotRun === 0 && passed && count("failed") === 0;
+  const overall = couldNotRun > 0 ? L.refused : green ? L.pass : L.fail;
   const row = (term: string, value: string, cls = "") => `<tr${cls ? ` class="${cls}"` : ""}><th scope="row">${escapeHtml(term)}</th><td>${value}</td></tr>`;
-  const overallClass = couldNotRun === 0 && passed ? "pass" : "fail";
+  const overallClass = green ? "pass" : "fail";
   return (
     `<section class="summary" data-section="summary">${sectionHead(section, L.summary)}<table class="facts">` +
     row(L.overall, `<span class="verdict ${overallClass}" data-testid="report-verdict">${escapeHtml(overall)}</span>`) +
