@@ -81,6 +81,7 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--sarif-file-anchor` | the running workflow's file, else `package.json`, else `README.md` | The repository file, relative to the repository root, that a `check.sarif` result points at when no saved flow raised it. See [SARIF locations](Ways-to-use-it.md#sarif-locations) |
 | `--record` | `SCENESCOUT_RECORD`, else off | Keep a frame after each route visit and each saved-flow step, and write `replay.html` (role → journey → step) beside the report, with the frames in `replay-frames/`. Given alone it means `on`; `--record off` wins over the variable |
 | `--video` | off | Record a WebM of each saved flow, and only of the flows, into `replay-videos/`, played on `replay.html` beside the journey's steps. Given alone it means `on` |
+| `--template` | none | A report template (JSON). On a recorded check, also write a test report laid out as the template says (`report.html`, or the file the template names) beside `replay.html`: each saved flow's steps with their expected and actual results, the deviations, and a SHA-256 manifest of the evidence. Needs `--record` ([test reports](../ci.md#a-test-report-from-a-template)) |
 
 ### `scenescout ci`
 
@@ -278,7 +279,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 
 ### Action: check
 
-`uses: brunoboto96/SceneScout@v3`. Outputs: `passed`, `exit-code`, `failing`, `retests-failing`, `could-not-run`, `worth-a-look`, `high`, `medium`, `low`, `report`, `json`, `sarif`, `replay`, `artifact-name`.
+`uses: brunoboto96/SceneScout@v3`. Outputs: `passed`, `exit-code`, `failing`, `retests-failing`, `could-not-run`, `worth-a-look`, `high`, `medium`, `low`, `report`, `json`, `sarif`, `replay`, `test-report`, `artifact-name`.
 
 | Input | Default | |
 |---|---|---|
@@ -306,6 +307,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `sarif-file-anchor` | empty | As `--sarif-file-anchor`, relative to the repository root; empty means the workflow file that is running |
 | `record` | empty | As `--record` (`on` or `off`); empty means `SCENESCOUT_RECORD`, else off. The replay page and its frames go in the artifact |
 | `video` | empty | As `--video` (`on` or `off`); empty means off. The journey videos go in the artifact |
+| `template` | empty | As `--template`, relative to `working-directory`; needs `record: on`. The test report goes in the artifact |
 | `working-directory` | `.` | Where the check runs; other relative paths are resolved from here |
 | `version` | empty | The scenescout npm version to run; empty means the version of the action's ref |
 | `cli` | empty | A built `dist/cli.js` to run instead of the npm package, for testing the action itself |

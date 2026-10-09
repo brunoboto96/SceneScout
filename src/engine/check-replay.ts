@@ -39,6 +39,12 @@ export interface ReplayStep {
   n: number;
   /** The action and its target, as the report words it. A typed value is never part of it. */
   caption: string;
+  /**
+   * What the step should bring about: the flow's own `expected` for it, else,
+   * for an expect-* step, its assertion as the report words it. Absent for an
+   * action the flow gave no expected result. Shown by a template-driven test report.
+   */
+  expected?: string;
   result: ReplayStepResult;
   /** Why it failed or was refused. */
   reason?: string;
@@ -60,6 +66,9 @@ export interface StepShot {
 export interface ReplayJourney {
   name: string;
   file: string;
+  /** The flow's test identifier and the requirements it covers, when it names them (a template-driven test report shows them). */
+  id?: string;
+  requirements?: string[];
   status: FlowOutcome["status"];
   steps: ReplayStep[];
   /** The step that broke or was refused, when one did. */
@@ -105,6 +114,12 @@ function shotFields(shot: StepShot | null | undefined): StepShot {
   return shot?.pastCap ? { pastCap: true } : {};
 }
 
+/** What a step should bring about: its own `expected`, else an expect-* step's assertion, else nothing. */
+export function expectedOf(step: FlowStep): string | undefined {
+  if (step.expected !== undefined) return step.expected;
+  return step.action.startsWith("expect-") ? describeStep(step) : undefined;
+}
+
 /**
  * Each step of a replayed flow with its caption, its result and its frame.
  * The replay stops at the first step that breaks, so every step before it
@@ -116,9 +131,10 @@ export function journeySteps(steps: readonly FlowStep[], outcome: FlowOutcome, f
   return steps.map((step, i) => {
     const n = i + 1;
     const shot = broke === null || n <= broke ? shotFields(frames[i]) : {};
-    const base = { n, caption: describeStep(step), ...shot };
+    const expected = expectedOf(step);
+    const base = { n, caption: describeStep(step), ...(expected !== undefined ? { expected } : {}), ...shot };
     if (broke === null || n < broke) return { ...base, result: "passed" as const };
-    if (n > broke) return { n, caption: base.caption, result: "not-run" as const };
+    if (n > broke) return { n, caption: base.caption, ...(expected !== undefined ? { expected } : {}), result: "not-run" as const };
     // `broke` is set only when the outcome is not "passed".
     const failed = outcome as Exclude<FlowOutcome, { status: "passed" }>;
     return { ...base, result: failed.status, reason: failed.reason, path: failed.path };
@@ -127,13 +143,15 @@ export function journeySteps(steps: readonly FlowStep[], outcome: FlowOutcome, f
 
 /** One journey of the page, from a flow and how its replay went. */
 export function journeyOf(
-  flow: { name: string; file: string; steps: readonly FlowStep[] },
+  flow: { name: string; file: string; steps: readonly FlowStep[]; id?: string; requirements?: readonly string[] },
   outcome: FlowOutcome,
   frames?: ReadonlyArray<StepShot | null>,
 ): ReplayJourney {
   return {
     name: flow.name,
     file: flow.file,
+    ...(flow.id !== undefined ? { id: flow.id } : {}),
+    ...(flow.requirements !== undefined ? { requirements: [...flow.requirements] } : {}),
     status: outcome.status,
     steps: journeySteps(flow.steps, outcome, frames),
     ...(outcome.status === "passed" ? {} : { firstFailing: outcome.step }),
@@ -196,6 +214,7 @@ export function redactReplay(replay: CheckReplay): CheckReplay {
         steps: j.steps.map((s) => ({
           ...s,
           caption: redactRoute(s.caption),
+          ...(s.expected !== undefined ? { expected: redactRoute(s.expected) } : {}),
           ...(s.reason !== undefined ? { reason: redactRoute(s.reason) } : {}),
           ...(s.path !== undefined ? { path: redactRoute(s.path) } : {}),
         })),

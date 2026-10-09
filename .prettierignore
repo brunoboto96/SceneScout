@@ -3,6 +3,8 @@ node_modules/
 package-lock.json
 # Fixture pages: their exact markup is what the browser suite asserts against.
 test-app/
+# Golden files: byte-for-byte what a renderer writes, compared as they are.
+scripts/golden/
 # Prose and tables are hand-laid-out; reflowing them is churn, not consistency.
 *.md
 .mcpb-build/

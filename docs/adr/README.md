@@ -30,6 +30,7 @@ and which failure direction was chosen deliberately.
 | [0019](0019-a-visual-baseline-changes-only-when-asked.md) | A visual baseline is a picture the project lists in `targets.json`, kept per browser with the settings it was taken with, in a git-ignored folder unless the project names one it commits; an unmet one is a high `visual-change` issue, and only `--baseline update` writes one |
 | [0020](0020-an-unattended-run-may-split-into-lanes-that-share-its-caps.md) | `scenescout ci --lanes` splits the app between model loops that run at once: planned by a crawl and the split `scout_lane_brief` makes, sharing the run's caps rather than multiplying them, folded into one memory and one report; the default is set by measurement |
 | [0021](0021-update-the-docs-in-the-pull-request.md) | A pull request that changes what a user can do or see updates the README and `docs/` in that same pull request. A change with no user-facing surface does not |
+| [0022](0022-a-test-report-is-laid-out-by-a-template-and-signs-nothing.md) | `check --record --template` renders a recorded run as a test report whose layout and words come from the template; results come from assertions only, a failed step is a deviation, a manifest hashes the evidence, and the signature blocks are blank |
 
 ## Writing a new one
 

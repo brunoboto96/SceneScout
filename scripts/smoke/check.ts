@@ -4,6 +4,7 @@
  * about the pages that are fine, and exit with the code its gate promises.
  */
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import type http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -1147,6 +1148,78 @@ async function flowWriteEdges({
 }
 
 /**
+ * A recorded check with a report template (--record --template): the report
+ * the template names, beside replay.html, with the failed step as a deviation,
+ * the flow's test ID and requirements, and a manifest whose hashes are those of
+ * the files on disk. Without --record the check stops before it starts.
+ */
+async function templateReport({
+  project,
+  checkWith,
+  withTyped,
+  typed,
+}: {
+  project: (name: string, flows: Record<string, unknown>) => string;
+  checkWith: (dir: string, extra?: string[], env?: Record<string, string>) => Promise<{ status: number | null; out: string; summary: unknown }>;
+  withTyped: (page: string) => { name: string; steps: Array<Record<string, unknown>> };
+  typed: string;
+}): Promise<void> {
+  const flow = { ...withTyped("/check-flow-broken.html"), id: "TC-7", requirements: ["REQ-1"] };
+  const dir = project("flow-template", { "details.json": flow });
+  const template = path.join(dir, "template.json");
+  fs.writeFileSync(
+    template,
+    JSON.stringify({
+      file: "test-report.html",
+      title: "Smoke report {date}",
+      documentId: "SR-{run}",
+      sections: [
+        { type: "tests", columns: ["testId", "requirements", "step", "result", "evidence"] },
+        { type: "deviations" },
+        { type: "manifest" },
+        { type: "signoff", roles: ["Reviewer"] },
+      ],
+    }),
+  );
+  const unrecorded = await checkWith(dir, ["--template", template]);
+  check(
+    "--template without --record stops before it starts, exit 2, saying to add --record",
+    unrecorded.status === 2 &&
+      /--template renders the report from a recorded check's frames: add --record/.test(unrecorded.out) &&
+      !fs.existsSync(path.join(dir, "out", "check.json")),
+    `${unrecorded.status} ${unrecorded.out.slice(-400)}`,
+  );
+  const run = await checkWith(dir, ["--record", "--template", template]);
+  const out = path.join(dir, "out");
+  const file = path.join(out, "test-report.html");
+  const html = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  const manifest = [...html.matchAll(/<td class="path">([^<]+)<\/td><td>(\d+)<\/td><td class="hash">([0-9a-f]{64})<\/td>/g)].map((m) => ({
+    path: m[1],
+    sha: m[3],
+  }));
+  const hashesMatch = manifest.every(
+    (e) =>
+      createHash("sha256")
+        .update(fs.readFileSync(path.join(out, ...e.path.split("/"))))
+        .digest("hex") === e.sha,
+  );
+  check(
+    "--record --template writes the template's report beside replay.html: the failed step a deviation, the test ID and requirements shown, each manifest hash that of its file",
+    run.status === 1 &&
+      fs.existsSync(path.join(out, "replay.html")) &&
+      (run.summary as { testReport?: string } | null)?.testReport === "test-report.html" &&
+      (html.match(/data-testid="report-deviation"/g) ?? []).length === 1 &&
+      /<td rowspan="6" class="span">TC-7<\/td><td rowspan="6" class="span">REQ-1<\/td>/.test(html) &&
+      manifest.length >= 6 &&
+      manifest[0].path === "check.json" &&
+      manifest.some((e) => e.path.startsWith("replay-frames/")) &&
+      hashesMatch,
+    `${run.status} manifest=${manifest.length} hashesMatch=${hashesMatch} ${run.out.slice(-600)}`,
+  );
+  check("...and no typed value reaches the report", html.length > 0 && !html.includes(typed), "the typed value is in the report");
+}
+
+/**
  * A recorded check (--record): replay.html beside the report with one frame per
  * route visited and per step that ran, the frames on disk beside it, and
  * nothing of the kind without the flag. Run against the same flow pair as the
@@ -1254,6 +1327,8 @@ async function recordedChecks({
       /data-testid="replay-first-failing-link">Step 4 failed</.test(bad.html),
     `${broken.status} srcs=${bad.srcs.length} onDisk=${bad.onDisk} ${broken.out.slice(-600)}`,
   );
+
+  await templateReport({ project, checkWith, withTyped, typed });
 
   const viaEnv = project("flow-recorded-env", { "details.json": withTyped("/check-flow.html") });
   const env = await checkWith(viaEnv, [], { SCENESCOUT_RECORD: "on" });

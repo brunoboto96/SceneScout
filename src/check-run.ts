@@ -70,6 +70,18 @@ import {
   type ReplayRole,
   type StepShot,
 } from "./engine/check-replay.js";
+import {
+  buildTemplateReport,
+  evidenceFiles,
+  evidenceIndex,
+  isGeneratedReport,
+  readReportTemplate,
+  recordedReportFile,
+  reportFileOf,
+  templateRecordError,
+  type ReportMeta,
+  type ReportTemplate,
+} from "./engine/check-report.js";
 
 /** What a check reads from the project before it starts: its saved flows, the findings earlier runs left, and the targets of any visual baselines. */
 export interface CheckInputs {
@@ -528,7 +540,28 @@ async function takeBaselines(
  * check, recorded or not, so a page from an earlier run is never read, or
  * uploaded, as this one's; whatever else the folder holds stays.
  */
-export function clearReplayOutput(outDir: string): void {
+export function clearReplayOutput(outDir: string, reportFile?: string): void {
+  // The test report the earlier run's check.json says it wrote (--template), and the one this run's template names:
+  // each only when it still carries the mark. A copy renamed or kept under any other name is the project's own.
+  const reports = new Set<string>();
+  try {
+    const earlier = recordedReportFile(JSON.parse(fs.readFileSync(path.join(outDir, "check.json"), "utf8")));
+    if (earlier) reports.add(earlier);
+  } catch {
+    // No earlier check.json, or one that cannot be read: it names no report to remove.
+  }
+  if (reportFile) reports.add(reportFile);
+  for (const name of reports) {
+    const at = path.join(outDir, name);
+    let text: string;
+    try {
+      text = fs.readFileSync(at, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    if (isGeneratedReport(text)) fs.rmSync(at);
+  }
   // Only a page a check wrote: a file of the same name the project keeps there is its own.
   const page = path.join(outDir, REPLAY_FILE);
   let text: string | null = null;
@@ -558,6 +591,39 @@ export function clearReplayOutput(outDir: string): void {
     if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
   }
   if (fs.readdirSync(root).length === 0) fs.rmdirSync(root);
+}
+
+/**
+ * The report template a check was given (--template), read and validated, or
+ * null for none. Throws, before the browser starts, when the check is not
+ * recorded, when the template is not valid, or when the file it would write is
+ * one the project keeps there and a check did not write.
+ */
+export function prepareTemplateReport(options: Pick<CheckOptions, "template" | "record">, outDir: string): ReportTemplate | null {
+  if (options.template === undefined) return null;
+  const needsRecord = templateRecordError(options);
+  if (needsRecord) throw new Error(needsRecord);
+  const template = readReportTemplate(options.template);
+  const file = path.join(outDir, reportFileOf(template));
+  let text: string | null = null;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  if (text !== null && !isGeneratedReport(text))
+    throw new Error(
+      `${file} is not a report SceneScout wrote, so a check will not overwrite it. Move or rename it, name another file in the template's "file", or pass --out to write the check somewhere else`,
+    );
+  return template;
+}
+
+/** Write the template's report beside replay.html, after check.json and the replay page, so the manifest hashes the files as written. Returns its file name. */
+export function writeTemplateReport(outDir: string, result: CheckResult, template: ReportTemplate, meta: ReportMeta): string {
+  const file = reportFileOf(template);
+  const evidence = evidenceIndex(outDir, evidenceFiles(result));
+  fs.writeFileSync(path.join(outDir, file), buildTemplateReport(result, template, evidence, meta));
+  return file;
 }
 
 /**

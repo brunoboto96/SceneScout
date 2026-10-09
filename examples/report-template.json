@@ -1,0 +1,39 @@
+{
+  "file": "test-report.html",
+  "title": "Acceptance test report — Demo Shop",
+  "subtitle": "Executed by scenescout check on {date} at {time} UTC",
+  "documentId": "ATR-{run}",
+  "fields": [
+    { "label": "System under test", "value": "Demo Shop (staging)" },
+    { "label": "Tool version", "value": "SceneScout {version}" },
+    { "label": "Build", "value": "{commit}" }
+  ],
+  "sections": [
+    {
+      "type": "text",
+      "heading": "Purpose",
+      "paragraphs": [
+        "This report records the automated execution of the demo shop's acceptance tests. Each test is a saved flow; each row is one of its steps, with the result the step was expected to bring about and what it did.",
+        "A step passes or fails on its assertions alone. A step that fails is listed again under Deviations."
+      ]
+    },
+    { "type": "summary" },
+    {
+      "type": "tests",
+      "columns": ["testId", "requirements", "step", "expected", "actual", "result", { "key": "evidence", "heading": "Screenshot" }]
+    },
+    {
+      "type": "deviations",
+      "paragraphs": ["Each deviation is assessed by the reviewer before the report is approved."]
+    },
+    { "type": "manifest", "paragraphs": ["The SHA-256 of each file shows it is the one the run wrote."] },
+    {
+      "type": "signoff",
+      "roles": [
+        { "role": "Executed by", "meaning": "I ran these tests as described and the evidence is complete." },
+        { "role": "Reviewed by", "meaning": "I reviewed the results and every deviation." },
+        { "role": "Approved by", "meaning": "I approve the results recorded in this report." }
+      ]
+    }
+  ]
+}
