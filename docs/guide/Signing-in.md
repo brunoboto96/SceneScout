@@ -124,7 +124,7 @@ The pause while the app sends the code is never taken for signed in. If the page
 | `SCENESCOUT_LOGIN_SUCCESS_SELECTOR` or `--success-selector` | A CSS selector visible only when signed in |
 | `SCENESCOUT_LOGIN_USERNAME_SELECTOR`, `_PASSWORD_SELECTOR`, `_OTP_SELECTOR`, `_SUBMIT_SELECTOR` (or `--username-selector` and so on) | A selector for a field or button the rules above do not find |
 
-`--timeout <seconds>` bounds the whole sign-in (default 60, 5 to 600). Credentials have no flag, because a flag shows in the process list and the shell history. The command exits 0 once signed in and saved and 1 otherwise, and a refused sign-in quotes the page's error message with every credential value, the code included, replaced by `[redacted]`.
+`--timeout <seconds>` bounds the whole sign-in (default 60, 5 to 600). Credentials have no flag, because a flag shows in the process list and the shell history. The command exits 0 once signed in and saved and 1 otherwise. A password or code counts as refused only once the page has answered it (emptied the field, drawn it again or moved to another page); a field still holding what was typed when the timeout runs out is reported as a sign-in that did not finish in time. An app that leaves a wrong value in its field therefore fails only at the timeout, with its error quoted. A refused sign-in quotes the page's error message with every credential value, the code included, replaced by `[redacted]`.
 
 Not covered: a sign-in form inside an iframe, a code that is emailed or texted and different every time (the test environment has to accept a fixed one), a sign-in link sent by email, a CAPTCHA, and push second factors. Use a test-only endpoint or a saved session for those.
 
