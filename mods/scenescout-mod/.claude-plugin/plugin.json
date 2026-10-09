@@ -1,7 +1,7 @@
 {
   "name": "scenescout-mod",
   "description": "Optional Claude Code mod for SceneScout: a run pane that refreshes itself, opened with /scenescout-pane, and an opt-in setting for the model lane agents run on. Needs the scenescout plugin or server.",
-  "version": "3.22.0",
+  "version": "3.23.0",
   "author": {
     "name": "brunoboto96",
     "url": "https://github.com/brunoboto96"
