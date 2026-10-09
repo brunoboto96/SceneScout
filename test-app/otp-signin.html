@@ -27,6 +27,10 @@
       holding the right code, once the server has accepted it, and the page
       goes to /otp-account only about 2 s later. That is a page that has not
       answered yet, not the code field coming back refused.
+
+      /otp-signin?keep is an app that leaves a wrong code in its field: the
+      error shows and the field keeps what was typed, so nothing on the page
+      says the code was answered.
     -->
     <main>
       <h1>Sign in</h1>
@@ -51,6 +55,7 @@
       const DIGITS = 6;
       const split = new URLSearchParams(location.search).has("boxes");
       const slow = new URLSearchParams(location.search).has("slow");
+      const keep = new URLSearchParams(location.search).has("keep");
       const SLOW_LEAVE_MS = 2000;
       const SLOW_CHECK_MS = 1000;
       const email = document.getElementById("email");
@@ -106,7 +111,7 @@
           return;
         }
         showError(body.error);
-        for (const input of inputs) input.value = "";
+        if (!keep) for (const input of inputs) input.value = "";
         busy = false;
         update();
         inputs[0].focus();

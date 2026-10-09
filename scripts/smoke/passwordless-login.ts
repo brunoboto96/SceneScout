@@ -114,6 +114,19 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     check("...without the code or the username anywhere in its output", leak.length === 0, leak.join(", "));
     check("...and saves no profile", !fs.existsSync(profilePath(project, "refused")));
 
+    // ---- A wrong code the app leaves in its field: reported at the timeout --------
+    // Nothing on the page says the code was answered (the field is the same element, still holding it), so the run waits it
+    // out and says the sign-in did not finish, quoting the page's error, not that the code was refused.
+    const kept = await signIn([`${url}?keep`, "--role", "kept", "--timeout", "5"], { ...user, SCENESCOUT_LOGIN_OTP_CODE: wrongCode });
+    check(
+      "a wrong code the app leaves in its field exits 1 at the timeout, saying the sign-in did not finish",
+      kept.code === 1 && kept.err.includes("the sign-in did not finish within 5s") && kept.err.includes("still shows it in the same field"),
+      `${kept.code}\n${kept.err}`,
+    );
+    check("...quoting what the page said, the code in it redacted", kept.err.includes("The page says:") && kept.err.includes("[redacted]"), kept.err);
+    check("...with no code in its output", leaked(kept.out + kept.err, secrets).length === 0, kept.err);
+    check("...and saves no profile", !fs.existsSync(profilePath(project, "kept")));
+
     // ---- One box per digit, submitting itself once the last digit is in ---------
     const boxes = await signIn([`${url}?boxes`, "--role", "boxes", "--success-url", "/otp-account"], right);
     check(
