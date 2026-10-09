@@ -1160,6 +1160,9 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | turns | 18 | 437,701 (410,551) / 921 | 52s | $0.007 |
 | 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 1/13 | 1/1 (100%) | — | turns | 18 | 438,297 (411,768) / 862 | 1m 11s | $0.007 |
 | 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 0/13 | 0/0 (—) | — | turns | 18 | 434,600 (409,308) / 502 | 49s | $0.007 |
+| 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | turns | 18 | 567,914 (526,558) / 16,847 | 2m 38s | $0.018 |
+| 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 0/13 | 0/0 (—) | — | turns | 18 | 431,279 (427,659) / 503 | 54s | $0.005 |
+| 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 1/13 | 1/1 (50%–100%) | — | turns | 18 | 429,063 (425,976) / 592 | 48s | $0.005 |
 
 <!-- ci-results:end -->
 
@@ -1693,6 +1696,41 @@ a larger app on a small one.
 counted fairly, continued runs still did not add defects at this budget; one
 chain of three runs is noisy, so a difference of one defect is not evidence
 either way. The option stays off by default.
+
+#### Re-measured with a page cap
+
+**What changed (one layer).** A continued run now takes on only as many pages
+as its budget allows: its turns over `--from-run-turns-per-page`, default 7,
+so 2 pages at 18 turns. It is told to work those deeply and not to spread out,
+then to take the next pages in order; the pages it was given are kept in its
+record (`assigned`) so the next run takes the ones after. Engine at commit
+`a9b0e2a`, otherwise as above (one lane, 18 turns, demo app, gpt-6-luna at
+effort `low`). Fresh `g1`, then `k1` continuing `g1` and `k2` continuing `k1`,
+one at a time: the `ci-fromrun-cap-demo-*` archives of 2026-10-09.
+
+| Run | Recall | Labelled precision | Pages given | Pages it worked on | Cost |
+|---|---|---:|---|---:|---:|
+| `g1` (fresh) | 3 of 13 | 3/3 (1 unlabelled) | — | 4 | $0.018 |
+| `k1` (continues `g1`) | 0 of 13 | none filed | `/approvals.html`, `/audit.html` | 8 | $0.005 |
+| `k2` (continues `k1`) | 1 of 13 | 1/1 (1 unlabelled) | `/reports.html`, `/settings.html` | 4 | $0.005 |
+
+| Counted as unions of three runs | pass@3 | pass^3 |
+|---|---:|---:|
+| Fresh arm (`u1`, `u2`, `u3`) | 4 | 1 |
+| Capped chain (`g1`, `k1`, `k2`) | 4 | 0 |
+
+- **pass@3 is 4 against 4.** `k2` found the export crash on `/reports.html`,
+  one of its two pages, which no other small-budget run found; `g1` found the
+  other three.
+- **The cap moved the chain on as intended:** `k2` was given the two pages
+  after `k1`'s. `k1` still worked on eight pages, so the instruction not to
+  spread out was not always followed.
+- **Precision held**; the key was not changed. **Cost:** $0.028 for the three
+  runs.
+- **The held-out app was not run.**
+
+**Decision: not shown to help, not shown to hurt.** Equal at 4 distinct
+defects in one chain of three runs; the option stays off by default.
 
 ## Finding dedup as a measured decision (task 15)
 

@@ -1,0 +1,21 @@
+{
+  "app": "demo",
+  "run": "ci-fromrun-cap-demo-k2",
+  "date": "2026-10-09",
+  "note": "Continued with a 2-page cap from the record of ci-fromrun-cap-demo-k1, one lane and 18 turns",
+  "findings": [
+    {
+      "title": "Export CSV crashes on missing report rows",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports-export-csv: Cannot read properties of undefined (reading 'rows')"
+    },
+    {
+      "title": "Empty workspace name is reported saved",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "settings-save empty workspace name announces Saved"
+    }
+  ],
+  "decisions": []
+}
