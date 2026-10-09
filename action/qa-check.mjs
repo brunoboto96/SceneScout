@@ -152,7 +152,8 @@ export function dispatchFailedMarkdown({ workflow, status, detail = "", ref = ""
     inputs: `The workflow must declare the \`workflow_dispatch\` inputs ${DISPATCH_INPUTS.map((i) => `\`${i}\``).join(", ")}; GitHub refuses an input the workflow does not declare.`,
     other: "The job's log has the full answer.",
   }[kind];
-  const said = detail ? inert(detail, 300) : "";
+  // Redact first: the reply is public on the pull request, the same as the log.
+  const said = detail ? inert(redactedDetail(detail), 300) : "";
   return reply([
     `No check was started: GitHub refused to dispatch ${workflowName(workflow)}${status ? ` (HTTP ${Number(status)})` : ""}.`,
     "",

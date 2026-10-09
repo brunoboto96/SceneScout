@@ -2157,6 +2157,7 @@ test("check stage: GitHub's words about an unclassified refusal reach the job's 
     await runDispatch({ env: dispatchEnv(dir, api), inputs: CHECK_INPUTS, log: (l: string) => lines.push(l), ...fakeClock() });
     const reply = calls.find((c) => c.method === "POST" && c.url.endsWith("/comments"))!.body.body;
     assert.match(reply, /The job's log has the full answer/);
+    assert.ok(!reply.includes("ghs_"), "no token-shaped text in the public reply");
   });
   const error = lines.find((l) => l.startsWith("::error"))!;
   assert.match(error, /HTTP 422; GitHub said: Something new, token \[redacted\]/);
