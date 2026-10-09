@@ -39,7 +39,18 @@ import {
   spawnRunner,
 } from "./installer.js";
 import { downloadBrowsers, presentBrowsers } from "./installer.js";
-import { baselinesDirOf, clearReplayOutput, replayPageConflict, defaultCheckDir, readCheckInputs, runCheck, type CheckInputs } from "./check-run.js";
+import {
+  baselinesDirOf,
+  clearReplayOutput,
+  replayPageConflict,
+  defaultCheckDir,
+  prepareTemplateReport,
+  readCheckInputs,
+  runCheck,
+  writeTemplateReport,
+  type CheckInputs,
+} from "./check-run.js";
+import { reportFileOf, type ReportTemplate } from "./engine/check-report.js";
 import { buildCheckReplayHtml, commitOf, REPLAY_FILE, replayFrames, replayVideos } from "./engine/check-replay.js";
 import { recordChoice } from "./engine/capture.js";
 import { httpClient, httpJudgeAsk, runCi } from "./ci-run.js";
@@ -169,7 +180,10 @@ Usage:
                                       and write replay.html beside the report, role → journey → step (default:
                                       SCENESCOUT_RECORD, else off; the frames go in replay-frames/);
                                      --video [on|off]: record a WebM of each saved flow, and only of the flows,
-                                      into replay-videos/, played on replay.html beside its steps (default off))
+                                      into replay-videos/, played on replay.html beside its steps (default off);
+                                     --template file.json: on a recorded check, also write a test report laid out
+                                      as the template says (report.html unless it names a file), with the frames,
+                                      deviations and a SHA-256 manifest of the evidence; needs --record)
                                     Exit code: 0 passed, 1 failed the gate, 2 could not run.
   scenescout ci <url>               An exploratory run with no person present: a model reached through its API
                                     drives the tools by the SceneScout method and the run ends in the report.
@@ -628,14 +642,17 @@ async function check(args: string[]): Promise<never> {
   let options = parsed.options;
   const outDir = options.outDir ?? defaultCheckDir(options.projectDir);
   let inputs: CheckInputs;
+  let template: ReportTemplate | null = null;
   try {
     // --record, else SCENESCOUT_RECORD, else off.
     options = { ...options, record: recordChoice(options.record, process.env) };
+    // --template: read and checked before the browser starts, so a bad template never costs a run.
+    template = prepareTemplateReport(options, outDir);
     // A replay.html the project keeps there is its own: a recorded check refuses to start rather than overwrite it.
     const conflict = options.record || options.video ? replayPageConflict(outDir) : null;
     if (conflict) throw new Error(conflict);
     // A replay page an earlier run left must never be read, or uploaded, as this run's.
-    clearReplayOutput(outDir);
+    clearReplayOutput(outDir, template ? reportFileOf(template) : undefined);
     inputs = readCheckInputs(options);
   } catch (err) {
     console.error(`scenescout check: ${err instanceof Error ? err.message : String(err)}`);
@@ -660,7 +677,10 @@ async function check(args: string[]): Promise<never> {
     console.error(`scenescout check: could not run a saved flow: ${refused}`);
     process.exit(EXIT.error);
   }
+  // Recorded in check.json, so the next check removes exactly this file and the action finds it.
+  if (template && result.replay) result = { ...result, testReport: reportFileOf(template) };
   const markdown = formatCheck(result);
+  let reportFile: string | null = null;
   try {
     const version = packageVersion();
     if (!options.outDir) writeSelfIgnore(path.dirname(outDir));
@@ -688,6 +708,7 @@ async function check(args: string[]): Promise<never> {
         couldNotRun,
       });
       fs.writeFileSync(path.join(outDir, REPLAY_FILE), html);
+      if (template) reportFile = writeTemplateReport(outDir, result, template, { version, commit: commitOf(process.env) });
     }
     // On GitHub Actions the verdict also goes on the run's summary page.
     if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, markdown);
@@ -702,6 +723,7 @@ async function check(args: string[]): Promise<never> {
     console.log(
       `Wrote ${REPLAY_FILE} to ${outDir}, with ${replayFrames(result.replay).length} frame(s) and ${replayVideos(result.replay).length} journey video(s) beside it: open it in a browser to see each step`,
     );
+  if (reportFile) console.log(`Wrote ${reportFile} to ${outDir}: the test report the template lays out, with a SHA-256 manifest of its evidence`);
   const pictured = result.baselines?.results.filter((r) => r.files).length ?? 0;
   if (pictured > 0) console.log(`Wrote the pictures of ${pictured} changed baseline(s) under ${path.join(outDir, VISUAL_DIRNAME)}`);
   const written = result.baselines?.results.filter((r) => r.status === "updated").length ?? 0;

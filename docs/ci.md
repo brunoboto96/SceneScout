@@ -97,6 +97,7 @@ Every option of `scenescout check` is an input with the same name. `scenescout c
 | `sarif-file-anchor` | the workflow file that is running | The repository file a `check.sarif` result points at when no saved flow raised it, relative to the repository root (below) |
 | `record` | `SCENESCOUT_RECORD`, else `off` | `on` keeps a frame after each route visit and each flow step and writes `replay.html` beside the report, kept in the artifact (below) |
 | `video` | `off` | `on` records a WebM video of each saved flow, linked from `replay.html` beside its steps and kept in the artifact (below) |
+| `template` | none | A report template (JSON): with `record: on`, also writes a test report laid out as the template says, kept in the artifact (below) |
 
 And the action's own:
 
@@ -112,7 +113,7 @@ And the action's own:
 
 ### Outputs
 
-`passed` (`true` or `false`, empty when the check could not run; with `could-not-run` above 0 it describes the rest of the check, so `true` can come with exit code 2), `exit-code`, `failing` (what fails the gate: issues at the gate's severity or worse, plus re-tested findings that `--gate-retests` gates), `could-not-run` (flows a refused step kept from running), `retests-failing` (of `failing`, the re-tested findings), `high`, `medium`, `low`, `worth-a-look` (observations listed as worth a look, below; not in `high`, `medium` or `low`, and never in `failing`), the paths `report`, `json` and `sarif`, `replay` (the path of `replay.html` when `record` or `video` is on, else empty), and `artifact-name`.
+`passed` (`true` or `false`, empty when the check could not run; with `could-not-run` above 0 it describes the rest of the check, so `true` can come with exit code 2), `exit-code`, `failing` (what fails the gate: issues at the gate's severity or worse, plus re-tested findings that `--gate-retests` gates), `could-not-run` (flows a refused step kept from running), `retests-failing` (of `failing`, the re-tested findings), `high`, `medium`, `low`, `worth-a-look` (observations listed as worth a look, below; not in `high`, `medium` or `low`, and never in `failing`), the paths `report`, `json` and `sarif`, `replay` (the path of `replay.html` when `record` or `video` is on, else empty), `test-report` (the path of the test report a `template` laid out, else empty), and `artifact-name`.
 
 A later step can read them, for example to comment on the pull request. To keep the job going after a failed gate, give the step `continue-on-error: true` and look at `steps.scenescout.outputs.exit-code`.
 
@@ -277,6 +278,21 @@ A flow file that is not valid stops the check before it starts, with exit 2 and 
 
 **A value can come from the environment.** Write `${env:NAME}` in a `type` or `select` step's `value` (whole or in part) and the check types the variable's value, so a one-time code or a password lives in the CI's secret store rather than in the flow file. A variable that is not set stops the check before it starts, with exit 2 and the flow and variable named. Wherever the page echoes a value of four or more characters (an address, an error), everything the check writes and prints shows `[$NAME]` instead. Only values are substituted: `expect-*` steps match their text as written.
 
+**A flow can carry traceability.** Three optional fields are for a [test report from a template](#a-test-report-from-a-template) and change nothing about how the flow runs: `id`, the test's identifier; `requirements`, the identifiers of the requirements it covers; and `expected` on any step, the result it should bring about, in words. A step with no `expected` shows its assertion when it is an `expect-*` step (`expect text "Order placed"`), and `—` otherwise. `expected` is never checked: a step passes or fails on its action and assertions alone.
+
+```json
+{
+  "name": "place an order",
+  "id": "TC-01",
+  "requirements": ["REQ-012", "REQ-013"],
+  "steps": [
+    { "action": "navigate", "target": "/shop", "expected": "The catalogue lists the products" },
+    { "action": "click", "target": "role=button[name=\"Add to basket\"]", "expected": "The basket shows one item" },
+    { "action": "expect-text", "text": "1 item" }
+  ]
+}
+```
+
 **A flow can run as a role.** Give it `"role": "<name>"` and it runs in its own browser, signed in with the profile `scenescout login <url> --role <name> --project <dir>` saved in the project the check reads (`--project`). A flow with no `role` runs in the check's own session (`--storage-state`, or signed out). Flows run in file-name order, so a journey that needs two people is two flows: `01-submit.json` as one role, `02-approve.json` as another, the second finding by its visible text what the first created. A role with no saved profile stops the check before it starts, with exit 2 and the command that saves one; a profile that no longer signs in stops it the same way when the flow is reached.
 
 Flows run in the crawl's browser context, one after another in file-name order, so cookies, storage and a signed-in session carry from the crawl to each flow and from one flow to the next; each starts from the page its first step names.
@@ -392,6 +408,49 @@ The page is organised role → journey → step. The check's own session comes f
 **Privacy.** The frames and videos are pictures of the app under test, and they show whatever the pages showed: names, addresses, anything a seeded account can see. Record against seeded or synthetic data, never production. Typed values never appear in the page's text, and secrets in addresses and reasons are redacted as they are in the report; a field's contents can still show in a frame or a video, as they did on screen (a password field shows dots).
 
 **Publishing it.** The artifact keeps the page for the repository's artifact retention, readable by anyone who can read the workflow run. To share it more widely, publish the output folder to a static host behind your team's own access control (an internal pages site, a bucket behind single sign-on) rather than a public one.
+
+## A test report from a template
+
+A recorded check can also be written up as a test report in the shape a reviewer or an auditor asks for: `--template <file.json>` (the action's `template` input) with `--record`. The template says how the report is laid out; the run supplies everything in it. The report is written beside `replay.html` as `report.html`, or as the file the template names.
+
+```yaml
+- uses: brunoboto96/SceneScout@v3
+  with:
+    url: http://127.0.0.1:3000
+    record: on
+    video: on
+    template: tests/report-template.json
+```
+
+**What it holds.** Each saved flow is a test and each of its steps a row, with the flow's `id` and `requirements` and each step's `expected` ([traceability](#saved-flows)), the actual result (`As expected` for a step that passed, the reason for one that did not), the result, and the frame after the step, shown small and linked. A journey video (`--video`) is linked from its test's heading. Missing values show `—`, so flows with no traceability still render. A result comes from the step's own assertions only, never from a model, and the same run always renders the same report. Every step that failed or was refused is listed again as a deviation, with its step, expected and actual result. The manifest lists the SceneScout version, the target, when the run started and ended, and the size and SHA-256 of `check.json`, `replay.html` and every frame and video the report links, so a reader can tell the files beside it are the ones the run wrote; a file that is not there is listed as not found. The sign-off section has a row per role the template names, with blank name, signature and date: SceneScout signs nothing.
+
+**The template.** A JSON file; [examples/report-template.json](../examples/report-template.json) is a complete one to copy. Unknown fields are refused, as are a token or a column that does not exist, and a template with a mistake stops the check before it starts, with exit 2 and the file and field named.
+
+| Field | |
+|---|---|
+| `title` | The document's title (required) |
+| `subtitle`, `documentId` | A line under the title, and the document ID, e.g. `TR-{run}` |
+| `fields` | Rows of the title block: `[{ "label": "System", "value": "Demo shop {version}" }]` |
+| `file` | The file name to write: a plain name of letters, digits, `.`, `_` and `-`, ending `.html`, never `replay.html` in any case nor a name Windows reserves for a device (`CON.html`, `NUL.html`, `COM1.html`); default `report.html` |
+| `labels` | Replacements for any word the report writes, such as `"pass": "Passed"` or `"deviations": "Observations"`. Every key is listed in `DEFAULT_LABELS` in `src/engine/check-report.ts` |
+| `sections` | The sections, in order (below) |
+
+`title`, `subtitle`, `documentId` and each field's `value` may use the tokens `{date}` (the day the run started, `YYYY-MM-DD`), `{time}` (`HH:MM:SS`), `{run}` (`YYYYMMDD-HHMMSS`), all in UTC, `{version}` (SceneScout's) and `{commit}` (`GITHUB_SHA`, shortened, or `—`).
+
+| Section | Fields | |
+|---|---|---|
+| `summary` | `heading`?, `paragraphs`? | The overall result (a pass only when every test passed and the check's gate passed, so a failed test fails the report even under `--fail-on never`), the target, when the run started and ended, the version, the commit, how many tests passed, failed or could not run, the deviations, and the issues failing the check's gate |
+| `tests` | `columns`, `heading`?, `paragraphs`? | The test table. `columns` is any of `testId`, `requirements`, `step`, `expected`, `actual`, `result` and `evidence`, in the order given, each a name or `{ "key": "evidence", "heading": "Screenshot" }` |
+| `deviations` | `heading`?, `paragraphs`? | Each failed or refused step |
+| `manifest` | `heading`?, `paragraphs`? | The run's facts and each evidence file's SHA-256 |
+| `signoff` | `roles`, `heading`?, `paragraphs`? | One blank row per role: a name such as `"Reviewer"`, or `{ "role": "Approver", "meaning": "I approve these results." }` |
+| `text` | `paragraphs`, `heading`? | Free text, as often as wanted |
+
+Each section but `text` appears at most once. The template carries all the wording: SceneScout has no notion of a particular kind of test or of the document's purpose.
+
+**The file.** One HTML page with no scripts and nothing loaded from the network, like `replay.html`, and laid out to print. Every piece of text from the template and from the app is escaped, and typed values and secrets in addresses are kept out as they are on the replay page. It carries a `<meta name="generator" content="scenescout-check-report">` mark, and `check.json` records its file name as `testReport`. A check removes only the report the earlier run's `check.json` names and the one at the name its own template gives, each only while it carries the mark, so a report a reviewer renamed or copied beside it is never touched. A file of the report's name without the mark is the project's own, so the check stops before it starts rather than overwrite it. The action publishes the report's path, read from `testReport`, as the `test-report` output and keeps it in the artifact with the replay page, frames and videos it links, which must travel with it.
+
+`--template` without `--record` (or `SCENESCOUT_RECORD=on`) stops the check before it starts: the report is built from a recorded run. A PDF can be printed from the page in a browser.
 
 ## Worth a look
 

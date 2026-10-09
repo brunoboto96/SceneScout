@@ -643,6 +643,12 @@ export interface CheckOptions extends CheckSettings {
    * it on the replay page beside the journey's steps. Off unless --video is given.
    */
   video?: boolean;
+  /**
+   * A report template (JSON): on a recorded check, also write a test report
+   * laid out as the template says, beside replay.html (check-report.ts).
+   * Absolute, resolved from the directory the command ran in.
+   */
+  template?: string;
   /** The most frames one recorded session keeps. Not a command-line option: unset is RECORD_MAX_FRAMES, and only tests lower it. */
   maxFrames?: number;
 }
@@ -676,6 +682,7 @@ export const CHECK_OPTION_NAMES = [
   "sarif-file-anchor",
   "record",
   "video",
+  "template",
 ] as const;
 
 /** Options that may be given alone, meaning on: `--record`, as well as `--record on` and `--record=off`. */
@@ -841,6 +848,12 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
     return { ok: false, error: "--video is on or off, or given alone for on" };
   }
 
+  const template = flags.get("template");
+  if (template !== undefined && template.trim() === "") return { ok: false, error: "--template needs the path of a report template (JSON)" };
+  if (template !== undefined && recordRaw !== undefined && SWITCH_OFF.includes(recordRaw)) {
+    return { ok: false, error: "--template renders the report from a recorded check's frames, so it cannot be used with --record off" };
+  }
+
   const resolve = (p: string): string => resolveArgPath(cwd, p);
   return {
     ok: true,
@@ -869,6 +882,7 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
       ...(anchor ? { sarifFileAnchor: anchor.value } : {}),
       ...(recordRaw !== undefined ? { record: SWITCH_ON.includes(recordRaw) } : {}),
       ...(videoRaw !== undefined && SWITCH_ON.includes(videoRaw) ? { video: true } : {}),
+      ...(template !== undefined ? { template: resolve(template) } : {}),
     },
   };
 }
@@ -914,6 +928,12 @@ export interface CheckResult {
   baselines?: BaselineRun | null;
   /** The replay page's model on a recorded check (--record); absent otherwise. Never written to check.json. */
   replay?: CheckReplay;
+  /**
+   * The file name of the test report a template laid out (--template), beside
+   * the report; absent otherwise. Written to check.json, so the next check
+   * removes exactly that file, and the GitHub Action finds it.
+   */
+  testReport?: string;
 }
 
 /**
@@ -1431,5 +1451,6 @@ export function toSummaryJson(result: CheckResult, toolVersion: string): object 
     worthALook: result.worthALook,
     // Routes a check with no session was sent to sign-in from: a coverage gap. Absent when the check had a session.
     ...(result.needsSignIn ? { needsSignIn: result.needsSignIn } : {}),
+    ...(result.testReport ? { testReport: result.testReport } : {}),
   };
 }

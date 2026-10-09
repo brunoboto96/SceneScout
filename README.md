@@ -279,7 +279,10 @@ Use SceneScout to test http://localhost:3000, record the run
 or, on the tool directly, `scout_attach {record: true}`. `SCENESCOUT_RECORD=on` in
 the server's environment records every run. A CI gate records too:
 `scenescout check --record` writes `replay.html`, every journey step by step with
-its frames ([recording a check](docs/ci.md#recording-a-check)).
+its frames ([recording a check](docs/ci.md#recording-a-check)), and
+`--template <file.json>` also writes it up as a test report laid out as a template
+says, with expected and actual results, deviations, blank sign-off rows and a
+SHA-256 manifest of the evidence ([test reports](docs/ci.md#a-test-report-from-a-template)).
 
 Then `scout_report` writes two files side by side in `.scenescout/`:
 `report.md` as always, and `report.html` — the whole run as one self-contained

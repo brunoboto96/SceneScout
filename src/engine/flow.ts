@@ -228,31 +228,43 @@ const target = z
     }
   });
 
+/**
+ * What a step should bring about, in the words of the test it belongs to: the
+ * expected result a template-driven test report (`--template`) shows beside
+ * the step. Documentation only: it is never checked, so a step passes or
+ * fails on its action and its assertions alone.
+ */
+const expected = z.string().trim().min(1, "is the result the step should bring about, in words").max(500).optional();
+
 /** Most times a repeat step may run its steps. A longer loop is a page that should be reached another way. */
 export const MAX_REPEATS = 100;
 
 const SINGLE_STEP_SCHEMAS = [
-  z.object({ action: z.literal("navigate"), target: z.string().regex(/^\//, "must be a path on the app, starting with /") }).strict(),
-  z.object({ action: z.literal("click"), target }).strict(),
-  z.object({ action: z.literal("type"), target, value: z.string(), pressEnter: z.boolean().optional(), replace: z.boolean().optional() }).strict(),
-  z.object({ action: z.literal("select"), target, value: z.string() }).strict(),
-  z.object({ action: z.literal("press"), value: z.string().min(1, "names the key to press, e.g. Enter") }).strict(),
+  z.object({ action: z.literal("navigate"), expected, target: z.string().regex(/^\//, "must be a path on the app, starting with /") }).strict(),
+  z.object({ action: z.literal("click"), expected, target }).strict(),
+  z.object({ action: z.literal("type"), expected, target, value: z.string(), pressEnter: z.boolean().optional(), replace: z.boolean().optional() }).strict(),
+  z.object({ action: z.literal("select"), expected, target, value: z.string() }).strict(),
+  z.object({ action: z.literal("press"), expected, value: z.string().min(1, "names the key to press, e.g. Enter") }).strict(),
   // A small valid file generated for the input (its kind from `fixture`, else the input's accept attribute), as
   // scout_upload attaches one. `target` is the file input or the control that opens its chooser; absent, the page's only file input.
   z
     .object({
       action: z.literal("upload"),
+      expected,
       target: target.optional(),
       fixture: z.enum(FIXTURE_KINDS).optional(),
       name: z.string().min(1).max(120).optional(),
     })
     .strict(),
-  z.object({ action: z.literal("expect-text"), text: z.string().min(1, "is the text that must be visible") }).strict(),
-  z.object({ action: z.literal("expect-element"), target, state: z.enum(ELEMENT_STATES) }).strict(),
-  z.object({ action: z.literal("expect-url"), pattern: z.string().min(1).refine(isRegex, { message: "is not a valid regular expression" }) }).strict(),
+  z.object({ action: z.literal("expect-text"), expected, text: z.string().min(1, "is the text that must be visible") }).strict(),
+  z.object({ action: z.literal("expect-element"), expected, target, state: z.enum(ELEMENT_STATES) }).strict(),
+  z
+    .object({ action: z.literal("expect-url"), expected, pattern: z.string().min(1).refine(isRegex, { message: "is not a valid regular expression" }) })
+    .strict(),
   z
     .object({
       action: z.literal("expect-request"),
+      expected,
       request: z.string().regex(REQUEST_RE, 'must be a method and a path, e.g. "GET /api/things"'),
       status: z.union([z.number().int().min(100).max(599), z.string().regex(/^[1-5]xx$/, 'must be a status such as 200, or a class such as "2xx"')]),
     })
@@ -273,6 +285,7 @@ const isRepeatCondition = (s: SingleStep): boolean => s.action === "expect-text"
 const repeatSchema = z
   .object({
     action: z.literal("repeat"),
+    expected,
     steps: z
       .array(singleStepSchema)
       .min(1, "needs at least one step to repeat")
@@ -295,6 +308,10 @@ const flowSchema = z
   .object({
     name: z.string().min(1).max(100).optional(),
     description: z.string().max(500).optional(),
+    /** The test's identifier in a template-driven test report (--template). Traceability only: the replay never reads it. */
+    id: z.string().trim().min(1, "is the test's identifier").max(100).optional(),
+    /** The requirement identifiers the flow covers, shown beside it in a template-driven test report. */
+    requirements: z.array(z.string().trim().min(1, "is a requirement identifier").max(100)).max(50, "holds at most 50 identifiers").optional(),
     /**
      * Who walks the flow: a role whose sign-in `scenescout login --role` saved in the project. Absent, the flow runs
      * in the check's own session. Flows run in file-name order, so one role's flow can pick up what another's left.
@@ -321,6 +338,10 @@ export interface Flow {
   name: string;
   /** The role whose saved sign-in the flow runs as; absent, the check's own session. */
   role?: string;
+  /** The test's identifier, for a template-driven test report; absent when the flow names none. */
+  id?: string;
+  /** The requirement identifiers it covers, for a template-driven test report; absent when the flow names none. */
+  requirements?: string[];
   /** The file it was read from, relative to the flows directory. */
   file: string;
   steps: FlowStep[];
@@ -367,6 +388,8 @@ export function parseFlow(text: string, file: string): { ok: true; flow: Flow } 
   if (!parsed.ok) return parsed;
   const flow: Flow = { name: parsed.data.name ?? file.replace(/\.json$/i, ""), file, steps: parsed.data.steps };
   if (parsed.data.role !== undefined) flow.role = parsed.data.role;
+  if (parsed.data.id !== undefined) flow.id = parsed.data.id;
+  if (parsed.data.requirements !== undefined) flow.requirements = parsed.data.requirements;
   return { ok: true, flow };
 }
 
