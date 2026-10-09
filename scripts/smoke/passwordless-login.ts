@@ -86,6 +86,21 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       `${detected.code}\n${detected.out}\n${detected.err}`,
     );
 
+    // ---- An app slow to leave the code page: the code field back, still filled --
+    // The field is disabled while the code is checked and enabled again, still holding the right code, about 2 s before the
+    // page leaves. That is a submit the page has not answered yet, not the code coming back refused.
+    for (const [role, extra] of [
+      ["slow", ["--success-url", "/otp-account"]],
+      ["slowdetected", []],
+    ] as const) {
+      const slow = await signIn([`${url}?slow`, "--role", role, ...extra], right);
+      check(
+        `an app slow to leave the code page signs in, not refused (${extra.length > 0 ? "with" : "with no"} success URL)`,
+        slow.code === 0 && fs.existsSync(profilePath(project, role)) && slow.out.includes(`now at ${baseUrl}/otp-account`),
+        `${slow.code}\n${slow.out}\n${slow.err}`,
+      );
+    }
+
     // ---- A wrong code: the page echoes it; the output must not ------------------
     const refused = await signIn([url, "--role", "refused"], { ...user, SCENESCOUT_LOGIN_OTP_CODE: wrongCode });
     check("a wrong code exits 1", refused.code === 1, `${refused.code}\n${refused.out}\n${refused.err}`);
