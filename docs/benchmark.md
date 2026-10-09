@@ -1163,6 +1163,8 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | turns | 18 | 567,914 (526,558) / 16,847 | 2m 38s | $0.018 |
 | 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 0/13 | 0/0 (—) | — | turns | 18 | 431,279 (427,659) / 503 | 54s | $0.005 |
 | 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 1/13 | 1/1 (50%–100%) | — | turns | 18 | 429,063 (425,976) / 592 | 48s | $0.005 |
+| 2026-10-05 | demo | 3.19.2 | scheduled | openai · gpt-6-luna · low | judge | c1786bc817 | 4/13 | 4/4 (80%–100%) | — | done | 35 | 883,537 (852,278) / 1,492 | 1m 31s | $0.012 |
+| 2026-10-05 | holdout | 3.19.2 | scheduled | openai · gpt-6-luna · low | judge | b5a7933f32 | 0/10 | 0/2 (0%–33%) | — | done | 33 | 863,556 (832,225) / 1,559 | 1m 16s | $0.012 |
 
 <!-- ci-results:end -->
 
