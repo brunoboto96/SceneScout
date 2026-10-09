@@ -1,0 +1,15 @@
+{
+  "app": "demo",
+  "run": "ci-fromrun-depth-demo-d1",
+  "date": "2026-10-09",
+  "note": "Continued by depth with the path prefix from the record of ci-fromrun-depth-demo-f1, one lane and 18 turns",
+  "findings": [
+    {
+      "title": "Dashboard chart image fails to load",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "image /img/weekly-chart.png failed to load"
+    }
+  ],
+  "decisions": []
+}

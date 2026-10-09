@@ -1,0 +1,33 @@
+{
+  "app": "demo",
+  "run": "ci-fromrun-depth-demo-f1",
+  "date": "2026-10-09",
+  "note": "Fresh run at one lane and 18 turns, starting the depth-ordered chain",
+  "findings": [
+    {
+      "title": "Dashboard weekly chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard actions overlap the bulk-import badge",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "dashboard /: All orders overlaps New: bulk import (85%)"
+    },
+    {
+      "title": "Confirmation email input has placeholder-only labeling",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "orders-new form field new-order-email has placeholder-only label"
+    },
+    {
+      "title": "New-order helper text has insufficient contrast",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "orders-new helper text contrast 1.73:1 against #f6f8fa"
+    }
+  ],
+  "decisions": []
+}

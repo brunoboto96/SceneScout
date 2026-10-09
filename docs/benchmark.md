@@ -1157,6 +1157,9 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 2/13 | 2/2 (100%) | — | turns | 18 | 444,939 (439,844) / 1,332 | 1m 15s | $0.006 |
 | 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 1/13 | 2/2 (67%–100%) | — | turns | 18 | 440,837 (436,382) / 811 | 1m 06s | $0.005 |
 | 2026-10-07 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 0/13 | 0/0 (—) | — | done | 12 | 283,535 (280,643) / 407 | 35s | $0.003 |
+| 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 3/13 | 3/3 (75%–100%) | — | turns | 18 | 437,701 (410,551) / 921 | 52s | $0.007 |
+| 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 1/13 | 1/1 (100%) | — | turns | 18 | 438,297 (411,768) / 862 | 1m 11s | $0.007 |
+| 2026-10-09 | demo | 3.20.2 | dispatched | openai · gpt-6-luna · low | judge | c1786bc817 | 0/13 | 0/0 (—) | — | turns | 18 | 434,600 (409,308) / 502 | 49s | $0.007 |
 
 <!-- ci-results:end -->
 
@@ -1587,6 +1590,13 @@ in passing is one a continued run is told to leave until last. The numbers
 above stand; what they measure is pass@3, which rose by one, inside the noise.
 The measurement below uses pass@3 as the gate.
 
+**Correction: the continued arm was counted without the run it started from.**
+A chain is one fresh run and the runs that continue it, so its three runs are
+`u1`, `c1` and `c2`, compared with the fresh arm's `u1`, `u2` and `u3`. The
+table's arm rows are kept as measured. Counted as unions of three runs, the
+fresh arm finds **7** distinct defects and the chain **8** (`u1`'s six, plus the
+approve endpoint and the empty list behind a refused read from `c1`).
+
 #### Re-measured at a small budget, with the path to each page
 
 At the default budget every demo run reaches all twelve routes, so there is
@@ -1629,13 +1639,60 @@ one-loop run does not; it costs no model turn. The rows are the
 - **Cost.** $0.034 for the six runs by their own estimates.
 - **The held-out app was not run.** The demo result was not positive.
 
-**Decision: not shown to help, even where it should.** With the budget cut so
-that one run cannot cover the app, three continued runs found fewer distinct
-defects than three fresh ones (3 against 4, within the noise either way). On
-this app a run finds defects where it looks closely, not where it has not
-been, and a continued run spreads its few turns thin. The option stays, off by
-default: `replay` does not depend on this, and the path prefix is pinned by
-its own tests.
+**Decision at the time: not shown to help, even where it should** (3 against
+4).
+
+**Correction: the same counting fault as above.** Counted as the chain it is,
+`u1` with `c1` and `c2`, the continued arm finds **4** distinct defects (the
+chart image's 404 and the sticky bar from `u1`, the empty list behind a refused
+read from `c1`, the hint text's contrast from `c2`), the same as the fresh
+arm's 4. Also, `c3` stopped early because it was told every page was covered
+when its record still listed work on all nine pages it had: "covered" meant
+visited. That is fixed below.
+
+#### Re-measured with depth: a page is worked through only when nothing is left
+
+**What changed (one layer: the continue order).** A visited page now counts as
+worked through only when its record lists no control, form or option left
+(`EXHAUSTED_AT` is 0). Pages are ordered by the work left, the most first.
+Every message ends by telling the run to keep exploring until the budget is
+spent, and a record with nothing left anywhere makes a fresh-style run
+(`continuedFresh` in the record). Engine at commit `c70db35`; everything else
+as in the small-budget measurement above (one lane, 18 turns, demo app,
+gpt-6-luna at effort `low`). One fresh run `f1`, then `d1` continuing `f1` and
+`d2` continuing `d1`, dispatched one at a time. They are the
+`ci-fromrun-depth-demo-*` archives of 2026-10-09. This is still a simulation of
+a larger app on a small one.
+
+| Run | Recall | Labelled precision | Pages it worked on | Turns, how it ended | Cost |
+|---|---|---:|---:|---|---:|
+| `f1` (fresh) | 3 of 13 | 3/3 (1 unlabelled) | 2 | 18 cap | $0.007 |
+| `d1` (continues `f1`) | 1 of 13 | 1/1 | 12 | 18 cap | $0.007 |
+| `d2` (continues `d1`) | 0 of 13 | none filed | 4 | 18 cap | $0.007 |
+
+| Counted as unions of three runs | pass@3 | pass^3 |
+|---|---:|---:|
+| Fresh arm (`u1`, `u2`, `u3`, above) | 4 | 1 |
+| Depth chain (`f1`, `d1`, `d2`) | 3 | 0 |
+
+- **pass@3 is 3 against 4.** Every defect the chain found, `f1` found
+  first: the chart image's 404, the badge and the hint text's contrast. `d1`
+  and `d2` added none.
+- **The fix did what it was for.** Neither continued run stopped early: both
+  used all 18 turns, and neither record needed the fresh fallback, since the
+  earlier record always had work left.
+- **The continued runs spread thin again.** `d1` worked on all twelve pages in
+  18 turns, against two for `f1`, and filed one defect.
+- **No path was taken.** Each continued run's first page had been opened by
+  its address, so there was nothing to replay.
+- **Precision held**; the key was not changed. **Cost:** $0.021 for the three
+  runs.
+- **The held-out app was not run.** The demo result was not positive.
+
+**Decision: not shown to help.** With "covered" meaning worked through, and
+counted fairly, continued runs still did not add defects at this budget; one
+chain of three runs is noisy, so a difference of one defect is not evidence
+either way. The option stays off by default.
 
 ## Finding dedup as a measured decision (task 15)
 
@@ -1927,9 +1984,12 @@ Edits considered and not kept, so they are not retried blind:
   pass^3 fell from 4 to 1. A run told to work the controls the last one left
   does so and stops finding the page-load defects every fresh run finds in
   passing. That gate (pass^3) was the wrong one for a mode built not to repeat
-  coverage. Re-measured at a budget cut to 18 turns on one lane, to stand in
-  for a larger app, and with the path prefix, pass@3 was 3 against 4: the
-  continued runs reached more pages and filed less. Worth trying instead:
+  coverage, and the first counts left out the fresh run each chain started
+  from; counted as unions of three runs, the chain found 8 against 7 at the
+  default budget and 4 against 4 at a budget cut to 18 turns on one lane. With
+  depth ordering (a page is worked through only when nothing is left), one
+  chain found 3 against 4. Continued runs reach more pages and file less.
+  Worth trying instead:
   continue only the routes with forms or options left, after the run's own
   first pass, rather than in place of it.
 - **Scoring a run against its accumulated project memory.** Rejected: a

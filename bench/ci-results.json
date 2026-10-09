@@ -2693,6 +2693,105 @@
       "seconds": 35,
       "costUsd": 0.0032991299999999995,
       "archive": "ci-fromrun-small-demo-c3"
+    },
+    {
+      "date": "2026-10-09",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "c70db35",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 3,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 3,
+        "labelled": 3,
+        "low": "75%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 437701,
+        "cachedInput": 410551,
+        "output": 921
+      },
+      "seconds": 52,
+      "costUsd": 0.00728101,
+      "archive": "ci-fromrun-depth-demo-f1"
+    },
+    {
+      "date": "2026-10-09",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "c70db35",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 1,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 1,
+        "labelled": 1,
+        "low": "100%",
+        "high": "100%"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 438297,
+        "cachedInput": 411768,
+        "output": 862
+      },
+      "seconds": 71,
+      "costUsd": 0.00720158,
+      "archive": "ci-fromrun-depth-demo-d1"
+    },
+    {
+      "date": "2026-10-09",
+      "app": "demo",
+      "version": "3.20.2",
+      "commit": "c70db35",
+      "source": "dispatched",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "dedup": "judge",
+      "key": "c1786bc817",
+      "recall": {
+        "found": 0,
+        "expected": 13
+      },
+      "precision": {
+        "correct": 0,
+        "labelled": 0,
+        "low": "—",
+        "high": "—"
+      },
+      "brier": null,
+      "stop": "turns",
+      "turns": 18,
+      "tokens": {
+        "input": 434600,
+        "cachedInput": 409308,
+        "output": 502
+      },
+      "seconds": 49,
+      "costUsd": 0.006873280000000001,
+      "archive": "ci-fromrun-depth-demo-d2"
     }
   ]
 }
