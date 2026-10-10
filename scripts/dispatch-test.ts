@@ -21,9 +21,7 @@ import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles } from "./smoke/leaks.ts";
-import fs from "node:fs";
-import { parseShard, pickShard, withoutShard } from "./smoke/shards.ts";
-import { shards as smokeShards } from "./smoke/suites.ts";
+import { declaredTitle, parseShard, pickShard, shardProblems, withoutShard } from "./smoke/shards.ts";
 
 /** Stands in for work that takes a while, or yields to the timer queue. No assertion depends on how long one takes. */
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -321,18 +319,22 @@ test("a smoke shard runs its own suites, and every suite belongs to exactly one 
   );
 });
 
-test("every browser suite is in exactly one shard, and the suites that share state share one, in order", () => {
-  const dir = path.join(import.meta.dirname, "smoke");
-  // A suite is a module under scripts/smoke/ that exports its title and run; the rest are helpers.
-  const suiteFiles = fs.readdirSync(dir).filter((f) => f.endsWith(".ts") && /^export const title = /m.test(fs.readFileSync(path.join(dir, f), "utf8")));
-  const titles = smokeShards.flat().map((s) => s.title);
-  assert.equal(new Set(titles).size, titles.length, "a suite is listed twice");
-  assert.equal(titles.length, suiteFiles.length, `${suiteFiles.length} suite files, ${titles.length} suites in the shards`);
-  const shardOf = (title: string) => smokeShards.findIndex((shard) => shard.some((s) => s.title === title));
-  const order = (title: string) => smokeShards[shardOf(title)].findIndex((s) => s.title === title);
-  // "cross-run memory, safe-write, uploads" checks that a second run sees the coverage "read-only exploration" recorded.
-  assert.equal(shardOf("read-only exploration"), shardOf("cross-run memory, safe-write, uploads"));
-  assert.ok(order("read-only exploration") < order("cross-run memory, safe-write, uploads"));
+test("a split that leaves a suite out, lists one twice, or parts the suites that share state is refused", () => {
+  const sh = (...titles: string[]) => titles.map((title) => ({ title }));
+  const files = ["read", "write", "other"];
+  const together: [string, string][] = [["read", "write"]];
+  assert.deepEqual(shardProblems([sh("read", "write"), sh("other")], files, together), []);
+  assert.deepEqual(shardProblems([sh("read", "write")], files, together), ['"other" is in no shard, so it would never run']);
+  assert.deepEqual(shardProblems([sh("read", "write"), sh("other", "read")], files, together), ['"read" is in more than one shard, or twice in one']);
+  assert.deepEqual(shardProblems([sh("read", "write"), sh("other", "gone")], files, together), ['"gone" is in a shard but no suite file declares it']);
+  assert.deepEqual(shardProblems([sh("read"), sh("write", "other")], files, together), ['"read" and "write" share state, so they must be in one shard']);
+  assert.deepEqual(shardProblems([sh("write", "read"), sh("other")], files, together), ['"read" must run before "write", which reads what it recorded']);
+});
+
+test("a suite file's title is read from its source, and a helper module has none", () => {
+  assert.equal(declaredTitle('import x from "y";\nexport const title = "cross-run memory, safe-write, uploads";\n'), "cross-run memory, safe-write, uploads");
+  assert.equal(declaredTitle('export const title = "a \\"quoted\\" name";'), 'a \\"quoted\\" name');
+  assert.equal(declaredTitle("export function check() {}"), undefined);
 });
 
 test("a smoke shard count that is not the runner's fails rather than skipping suites", () => {

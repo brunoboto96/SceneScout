@@ -3,7 +3,7 @@
  * run in this order. Each shard is balanced from the suites' measured times on the CI runners (the minutes beside it),
  * and the suites that share state stay in one shard, in order: "cross-run memory, safe-write, uploads" reads what
  * "read-only exploration" recorded. The second shard is the lightest because its CI job also runs the unit suites and
- * mcp-check. A module of its own, with no side effects, so a unit test can check the split.
+ * mcp-check. The runner checks the split before it runs anything (shardProblems in shards.ts).
  */
 import * as readOnly from "./read-only.ts";
 import * as safeWrite from "./safe-write.ts";

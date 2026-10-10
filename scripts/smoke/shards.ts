@@ -42,3 +42,39 @@ export function pickShard<T>(shards: readonly (readonly T[])[], arg: ShardArg | 
   }
   return [...shards[arg.index - 1]];
 }
+
+/**
+ * What is wrong with a split, as sentences; empty when nothing is. `files` are the titles the suite files under
+ * scripts/smoke/ declare, so a suite left out of every shard is named rather than never run. `together` are pairs that
+ * share state: the first records what the second reads, so they must share a shard, in that order. The smoke runner
+ * checks its real split with this before running anything; it is here, apart from the suites, so it can be
+ * table-tested without loading them (they need the built engine).
+ */
+export function shardProblems(
+  shards: readonly (readonly { title: string }[])[],
+  files: readonly string[],
+  together: readonly (readonly [string, string])[],
+): string[] {
+  const problems: string[] = [];
+  const listed = shards.flat().map((s) => s.title);
+  for (const title of new Set(listed)) if (listed.filter((t) => t === title).length > 1) problems.push(`"${title}" is in more than one shard, or twice in one`);
+  for (const title of files) if (!listed.includes(title)) problems.push(`"${title}" is in no shard, so it would never run`);
+  for (const title of listed) if (!files.includes(title)) problems.push(`"${title}" is in a shard but no suite file declares it`);
+  const at = (title: string): [number, number] => {
+    const shard = shards.findIndex((sh) => sh.some((s) => s.title === title));
+    return [shard, shard === -1 ? -1 : shards[shard].findIndex((s) => s.title === title)];
+  };
+  for (const [first, second] of together) {
+    const [a, i] = at(first);
+    const [b, j] = at(second);
+    if (a === -1 || b === -1) continue;
+    if (a !== b) problems.push(`"${first}" and "${second}" share state, so they must be in one shard`);
+    else if (i > j) problems.push(`"${first}" must run before "${second}", which reads what it recorded`);
+  }
+  return problems;
+}
+
+/** The title a suite file declares (`export const title = "…"`), or undefined for a helper module. */
+export function declaredTitle(source: string): string | undefined {
+  return /^export const title = "((?:[^"\\]|\\.)*)";/m.exec(source)?.[1];
+}

@@ -24,7 +24,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { check, eventually, failureCount, recordCrash, startFixtureServer, type SmokeContext } from "./smoke/harness.ts";
 import { descendants, extraHandles, type Leftover } from "./smoke/leaks.ts";
-import { parseShard, pickShard, withoutShard } from "./smoke/shards.ts";
+import { declaredTitle, parseShard, pickShard, shardProblems, withoutShard } from "./smoke/shards.ts";
 import { shards } from "./smoke/suites.ts";
 
 /** Processes still running under this one. `ps` is POSIX; on Windows the check is skipped and says so. */
@@ -64,6 +64,15 @@ const SMOKE_ACTION_TIMEOUT_MS = "15000";
 async function main(): Promise<void> {
   // `npm run smoke:run -- auth` runs only the suites whose title matches; `-- --shard 2/3` runs one shard of them.
   const args = process.argv.slice(2);
+  // The split itself, before anything runs: every suite file in one shard, and the suites that share state together.
+  const smokeDir = path.join(import.meta.dirname, "smoke");
+  const files = fs
+    .readdirSync(smokeDir)
+    .filter((f) => f.endsWith(".ts"))
+    .map((f) => declaredTitle(fs.readFileSync(path.join(smokeDir, f), "utf8")))
+    .filter((t): t is string => t !== undefined);
+  const problems = shardProblems(shards, files, [["read-only exploration", "cross-run memory, safe-write, uploads"]]);
+  if (problems.length > 0) throw new Error(`The shards in scripts/smoke/suites.ts are not right:\n  ${problems.join("\n  ")}`);
   const suites = pickShard(shards, parseShard(args));
   const only = withoutShard(args)[0]?.toLowerCase();
   process.env.SCENESCOUT_ACTION_TIMEOUT_MS ??= SMOKE_ACTION_TIMEOUT_MS;
