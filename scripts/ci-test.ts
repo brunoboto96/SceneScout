@@ -1930,16 +1930,46 @@ test("the suite runs on Windows for every pull request", () => {
   const filters = pull && typeof pull === "object" ? pull : {};
   assert.equal(filters.paths, undefined, "a paths filter would skip some pull requests");
   assert.equal(filters["paths-ignore"], undefined, "a paths-ignore filter would skip some pull requests");
-  const cells = workflow.jobs.suite.strategy.matrix.include as Array<{ os: string; node: number }>;
+  const cells = workflow.jobs.suite.strategy.matrix.platform as Array<{ os: string; node: number }>;
   assert.ok(
     cells.some((c) => c.os === "windows-latest"),
     "the suite matrix has no windows-latest cell",
   );
-  const suites = (workflow.jobs.suite.steps as Array<{ name?: string; run?: string; if?: string }>).find((s) => s.name === "All suites");
-  assert.equal(suites?.run, "npm test");
-  assert.equal(suites?.if, undefined, "the suites step must run on the Windows cell too");
+  const steps = workflow.jobs.suite.steps as Array<{ name?: string; run?: string; if?: string }>;
+  const shard = steps.find((s) => /smoke:run -- --shard/.test(s.run ?? ""));
+  assert.ok(shard, "no suite step runs a shard of the browser suite");
+  assert.equal(shard.if, undefined, "the browser suite must run on the Windows cell too");
+  const build = steps.find((s) => s.run === "npm run build");
+  assert.ok(build, "no suite step builds");
+  assert.equal(build.if, undefined, "every shard needs the build");
+  for (const run of ["npm run test:unit", "npm run mcp-check:run"]) {
+    const step = steps.find((s) => s.run === run);
+    assert.ok(step, `no suite step runs ${run}`);
+    assert.match(step.if ?? "", /^matrix\.shard == \d+$/, `${run} must run on every platform, on one shard`);
+  }
   const needs = workflow.jobs.test.needs as string[];
   assert.ok(needs.includes("suite"), "the required test check does not wait for the suite, so a Windows failure would not fail it");
+});
+
+test("every job that runs the browser suite in shards runs each shard it names", () => {
+  // The runner refuses a count that is not its own, but a matrix of [1, 2] running "--shard k/3" would pass both
+  // shards it ran and never run the third.
+  const workflow = parseYaml(readText(path.join(REPO, ".github", "workflows", "test.yml"))) as Record<string, any>;
+  let sharded = 0;
+  for (const [name, job] of Object.entries(workflow.jobs as Record<string, any>)) {
+    for (const step of (job.steps ?? []) as Array<{ run?: string }>) {
+      const m = /smoke:run -- --shard \$\{\{ matrix\.shard \}\}\/(\d+)/.exec(step.run ?? "");
+      if (!m) continue;
+      sharded += 1;
+      const count = Number(m[1]);
+      assert.deepEqual(
+        job.strategy?.matrix?.shard,
+        Array.from({ length: count }, (_, i) => i + 1),
+        `${name} runs --shard k/${count}`,
+      );
+    }
+  }
+  assert.equal(sharded, 2, "the suite and cross-browser jobs both run the browser suite in shards");
 });
 
 test("the same lines compare equal as LF and as CRLF, and one different line does not", () => {

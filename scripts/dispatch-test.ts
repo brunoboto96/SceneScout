@@ -21,6 +21,9 @@ import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles } from "./smoke/leaks.ts";
+import fs from "node:fs";
+import { parseShard, pickShard, withoutShard } from "./smoke/shards.ts";
+import { shards as smokeShards } from "./smoke/suites.ts";
 
 /** Stands in for work that takes a while, or yields to the timer queue. No assertion depends on how long one takes. */
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -304,6 +307,52 @@ test("the smoke open-handle check counts by type, so one more of a kind already 
   assert.deepEqual(extraHandles(["TTYWrap"], ["Timeout", "TCPServerWrap", "TTYWrap"]), ["Timeout", "TCPServerWrap"]);
   // Closing something that was open at the start is not a leak.
   assert.deepEqual(extraHandles(["TTYWrap", "Timeout"], ["TTYWrap"]), []);
+});
+
+test("a smoke shard runs its own suites, and every suite belongs to exactly one shard", () => {
+  const shards = [["a", "b"], ["c"], ["d", "e"]];
+  assert.deepEqual(pickShard(shards, undefined), ["a", "b", "c", "d", "e"]);
+  assert.deepEqual(pickShard(shards, parseShard(["--shard", "1/3"])), ["a", "b"]);
+  assert.deepEqual(pickShard(shards, parseShard(["--shard", "3/3"])), ["d", "e"]);
+  // The shards a workflow runs, taken together, are the whole suite.
+  assert.deepEqual(
+    [1, 2, 3].flatMap((k) => pickShard(shards, { index: k, count: 3 })),
+    pickShard(shards, undefined),
+  );
+});
+
+test("every browser suite is in exactly one shard, and the suites that share state share one, in order", () => {
+  const dir = path.join(import.meta.dirname, "smoke");
+  // A suite is a module under scripts/smoke/ that exports its title and run; the rest are helpers.
+  const suiteFiles = fs.readdirSync(dir).filter((f) => f.endsWith(".ts") && /^export const title = /m.test(fs.readFileSync(path.join(dir, f), "utf8")));
+  const titles = smokeShards.flat().map((s) => s.title);
+  assert.equal(new Set(titles).size, titles.length, "a suite is listed twice");
+  assert.equal(titles.length, suiteFiles.length, `${suiteFiles.length} suite files, ${titles.length} suites in the shards`);
+  const shardOf = (title: string) => smokeShards.findIndex((shard) => shard.some((s) => s.title === title));
+  const order = (title: string) => smokeShards[shardOf(title)].findIndex((s) => s.title === title);
+  // "cross-run memory, safe-write, uploads" checks that a second run sees the coverage "read-only exploration" recorded.
+  assert.equal(shardOf("read-only exploration"), shardOf("cross-run memory, safe-write, uploads"));
+  assert.ok(order("read-only exploration") < order("cross-run memory, safe-write, uploads"));
+});
+
+test("a smoke shard count that is not the runner's fails rather than skipping suites", () => {
+  // A workflow running two shards of three would never run the third.
+  assert.throws(() => pickShard([["a"], ["b"], ["c"]], { index: 1, count: 2 }), /has 3 shards, so the workflow must run 3/);
+  assert.throws(() => pickShard([["a"], ["b"]], { index: 1, count: 3 }), /has 2 shards/);
+});
+
+test("the smoke runner reads --shard k/n and leaves the title filter alone", () => {
+  assert.equal(parseShard([]), undefined);
+  assert.equal(parseShard(["auth"]), undefined);
+  assert.deepEqual(parseShard(["--shard", "2/3"]), { index: 2, count: 3 });
+  assert.deepEqual(parseShard(["auth", "--shard", "1/2"]), { index: 1, count: 2 });
+  for (const bad of ["", "2", "0/3", "4/3", "2/0", "a/b", "2/3x"]) {
+    assert.throws(() => parseShard(["--shard", bad]), /--shard/, `--shard ${JSON.stringify(bad)}`);
+  }
+  assert.throws(() => parseShard(["--shard"]), /takes k\/n/);
+  assert.deepEqual(withoutShard(["--shard", "2/3", "auth"]), ["auth"]);
+  assert.deepEqual(withoutShard(["auth", "--shard", "2/3"]), ["auth"]);
+  assert.deepEqual(withoutShard(["auth"]), ["auth"]);
 });
 
 test("a browser that was never downloaded gets one instruction, not a stack of text", () => {

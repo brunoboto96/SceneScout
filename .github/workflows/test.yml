@@ -12,15 +12,15 @@ on:
   workflow_dispatch:
 
 # Pushing again to a pull request makes the run already in flight pointless: it
-# is testing a commit nobody will merge. Cancelling it frees the six matrix
-# cells for the commit that replaced it.
+# is testing a commit nobody will merge. Cancelling it frees the matrix cells
+# for the commit that replaced it.
 #
 # Only pull requests share a group. Every other run gets a group of its own,
 # because a group does two things and only one of them is wanted here:
 # `cancel-in-progress` governs the run already going, but a newly queued run
 # ALSO cancels any run still pending in the group, whatever that setting says.
 # Grouping pushes to main by ref would therefore serialise them, and a third
-# merge arriving inside the suite's 20 minutes would cancel the second one's
+# merge arriving inside the suite's run would cancel the second one's
 # pending run. `test` is the required check and its job is `if: always()`, so it
 # would report that cancellation as a failure on a main commit that was never
 # actually tested. Keying on run_id instead leaves those runs alone. The same
@@ -36,14 +36,19 @@ permissions:
   contents: read
 
 jobs:
+  # `npm test`, split so no job runs it all: the browser suite is most of its
+  # time, so it runs in three shards (scripts/smoke/suites.ts lists them), and
+  # the second shard's job, the lightest, also runs the unit suites and
+  # mcp-check, which take about two minutes. The shard count here must be the
+  # runner's; a mismatch fails every shard rather than leaving suites unrun.
   suite:
-    name: ${{ matrix.os }} · node ${{ matrix.node }}
-    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.platform.os }} · node ${{ matrix.platform.node }} · shard ${{ matrix.shard }}/3
+    runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        include:
+        platform:
           # The supported floor and the current LTS, on the platform CI is cheapest on.
           - { os: ubuntu-latest, node: 20 }
           - { os: ubuntu-latest, node: 24 }
@@ -52,25 +57,33 @@ jobs:
           # Windows runs everything too: path handling, the installer's symlink
           # fallback, and the engine driving a real Chromium.
           - { os: windows-latest, node: 24 }
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: ${{ matrix.node }}
+          node-version: ${{ matrix.platform.node }}
           cache: npm
       - run: npm ci
       - name: Formatting
-        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        if: matrix.platform.os == 'ubuntu-latest' && matrix.platform.node == 24 && matrix.shard == 2
         run: npm run format:check
       - name: Install browser
         run: npx playwright install --with-deps chromium
-      - name: All suites
-        run: npm test
+      - run: npm run build
+      - name: Unit suites
+        if: matrix.shard == 2
+        run: npm run test:unit
+      - name: Browser suite, shard ${{ matrix.shard }} of 3
+        run: npm run smoke:run -- --shard ${{ matrix.shard }}/3
+      - name: MCP check
+        if: matrix.shard == 2
+        run: npm run mcp-check:run
       # The committed sample report must be what the engine produces today. The
       # demo app bundles its font, so this holds across platforms; a difference
       # here means the engine's output changed and examples/ was not regenerated.
       - name: Sample report is up to date
-        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        if: matrix.platform.os == 'ubuntu-latest' && matrix.platform.node == 24 && matrix.shard == 2
         run: |
           npx tsx scripts/demo.ts
           git diff --exit-code -- examples/report.md
@@ -79,13 +92,14 @@ jobs:
   # the browsers differ exactly where it matters: what the driver can intercept.
   # The browser suite therefore runs against the other two as well.
   cross-browser:
-    name: ubuntu-latest · ${{ matrix.browser }}
+    name: ubuntu-latest · ${{ matrix.browser }} · shard ${{ matrix.shard }}/3
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
         browser: [firefox, webkit]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -95,10 +109,11 @@ jobs:
       - run: npm ci
       - name: Install browser
         run: npx playwright install --with-deps ${{ matrix.browser }}
-      - name: Browser suite
+      - run: npm run build
+      - name: Browser suite, shard ${{ matrix.shard }} of 3
         env:
           SCENESCOUT_BROWSER: ${{ matrix.browser }}
-        run: npm run smoke
+        run: npm run smoke:run -- --shard ${{ matrix.shard }}/3
 
   # The GitHub Action at the repository root (action.yml), run the way a user
   # runs it, against the demo app, with the CLI built from this commit. The
