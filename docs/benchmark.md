@@ -192,7 +192,10 @@ Its runs are reported in [Held-out results](#held-out-results).
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
 re-scored against **one** key by `npm run bench -- --all`. The table below is
-key `c1786bc817`, which differs from `19cc8e67e8` only in saying which pages
+key `f915c444a2`, which adds the labels of
+[issue 420](#labelling-the-unmatched-findings-issue-420); under it only runs 2
+and 3 moved, and their last struck value is under `c1786bc817`.
+`c1786bc817` differs from `19cc8e67e8` only in saying which pages
 an entry is on (see [Ownership by route](#ownership-by-route-task-29)); no value
 moved. `19cc8e67e8` adds what run 11 found (see
 [Run 11 and held-out run 3](#run-11-and-held-out-run-3-wave-3s-engine-fixes)).
@@ -215,8 +218,8 @@ the run filed, including the ones set aside. The archived runs are in [`bench/ru
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
 | 0 | 2026-09-22 | Baseline, 3.4.0, briefs as written on the day | 11/13 | 14/19 (74%) | 21 (2 set aside) | 0 | 5 | 1 | 24/29 (83%), ECE 0.05, Brier 0.109 | ~725k tokens, 241 tool calls, longest lane 3m38s | — |
 | 1 | 2026-09-22 | **Lane briefs only** (engine unchanged) — see below | 12/13 | ~~25/25 (100%)~~ 24/24 (100%) | 28 (4 set aside) | 0 | 0 | 0 | ~~31/31 (100%), ECE 0.10, Brier 0.017~~ ~~30/30 (100%), ECE 0.11, Brier 0.017~~ 30/31 (97%), ECE 0.08, Brier 0.033 | ~698k tokens, 283 tool calls, longest lane 5m09s | Yes, into the skill |
-| 2 | 2026-09-22 | **Engine 3.5.0 only** — run 1's briefs verbatim | 9/13 | ~~20/20 (100%)~~ 19/19 (100%) | 26 (6 set aside) | 1 | 0 | 1 | ~~25/26 (96%), ECE 0.07, Brier 0.046~~ 24/25 (96%), ECE 0.07, Brier 0.048 | ~687k tokens, 266 tool calls, longest lane 5m37s | See runs 2–4 |
-| 3 | 2026-09-22 | Repeat of run 2 | 10/13 | ~~23/26 (88%)~~ 22/25 (88%) | 33 (7 set aside) | 1 | 3 | 0 | ~~24/27 (89%), ECE 0.08, Brier 0.082~~ 23/26 (88%), ECE 0.08, Brier 0.085 | ~680k tokens, 260 tool calls, longest lane 5m40s | See runs 2–4 |
+| 2 | 2026-09-22 | **Engine 3.5.0 only** — run 1's briefs verbatim | 9/13 | ~~20/20 (100%)~~ ~~19/19 (100%)~~ 19/20 (95%) | 26 (6 set aside) | ~~1~~ 0 | ~~0~~ 1 | 1 | ~~25/26 (96%), ECE 0.07, Brier 0.046~~ 24/25 (96%), ECE 0.07, Brier 0.048 | ~687k tokens, 266 tool calls, longest lane 5m37s | See runs 2–4 |
+| 3 | 2026-09-22 | Repeat of run 2 | 10/13 | ~~23/26 (88%)~~ ~~22/25 (88%)~~ 23/26 (88%) | 33 (7 set aside) | ~~1~~ 0 | 3 | 0 | ~~24/27 (89%), ECE 0.08, Brier 0.082~~ 23/26 (88%), ECE 0.08, Brier 0.085 | ~680k tokens, 260 tool calls, longest lane 5m40s | See runs 2–4 |
 | 4 | 2026-09-22 | Repeat of run 2 | 11/13 | ~~22/23 (96%)~~ 21/22 (95%) | 27 (5 set aside) | 0 | 1 | 1 | ~~25/29 (86%), ECE 0.05, Brier 0.080~~ 24/28 (86%), ECE 0.05, Brier 0.083 | ~683k tokens, 271 tool calls, longest lane 4m40s | See runs 2–4 |
 | 5 | 2026-09-23 | **Engine 3.6.1 only** — run 1's briefs verbatim | 11/13 | ~~25/26 (96%)~~ 24/25 (96%) | 31 (6 set aside) | 0 | 1 | 0 | ~~27/29 (93%), ECE 0.12, Brier 0.060~~ 26/28 (93%), ECE 0.12, Brier 0.061 | ~697k tokens, 248 tool calls, longest lane 9m30s | See runs 5–7 |
 | 6 | 2026-09-23 | Repeat of run 5 | 10/13 | ~~26/28 (93%)~~ 25/27 (93%) | 33 (6 set aside) | 0 | 2 | 0 | ~~28/30 (93%), ECE 0.06, Brier 0.064~~ 27/29 (93%), ECE 0.06, Brier 0.066 | ~685k tokens, 264 tool calls, longest lane 4m39s | See runs 5–7 |
@@ -822,7 +825,9 @@ What the numbers do **not** show:
 
 Each row is one run of the [held-out app](#the-held-out-app) at `medium`, in
 `safe-write`, eight parallel lanes, re-scored by `npm run bench -- --all`
-against key `b5a7933f32`, which differs from `1bc84f1a04` only in saying which
+against key `fe4c9a65a6`, which adds the labels of
+[issue 420](#labelling-the-unmatched-findings-issue-420) and moved no value in
+this table. Before it, `b5a7933f32` differs from `1bc84f1a04` only in saying which
 pages an entry is on (see [Ownership by route](#ownership-by-route-task-29); no
 value moved); `1bc84f1a04` adds what held-out run 3 found. Where a cell
 has two struck values, the first is under `77ebf9b0d9`, the key runs 1 and 2
@@ -1733,6 +1738,72 @@ one at a time: the `ci-fromrun-cap-demo-*` archives of 2026-10-09.
 
 **Decision: not shown to help, not shown to hurt.** Equal at 4 distinct
 defects in one chain of three runs; the option stays off by default.
+
+### Labelling the unmatched findings (issue 420)
+
+By 2026-10-10 the archived runs held 118 distinct findings that matched no
+entry of their app's key: 76 on the demo and 42 on the held-out app, the 21
+from the dedup runs of task 15 among them. Every run that had filed one carried it as
+unlabelled, so its precision was a bound rather than a number. The keys are
+now `f915c444a2` (demo) and `fe4c9a65a6` (held out).
+
+**How they were labelled.** The maintainer asked for the labels to come from
+three independent model judges instead of a person. Each judge read both apps'
+source and keys, and gave every finding one verdict: a rewording of an
+existing entry, a new genuine defect, not a defect, or a defect only under a
+convention, with the source evidence. The three agreed on 117 of 118. The
+one disagreement, a rapid double-click on Place hold, was settled by a fourth
+reading of `book.html`: the button stays enabled, the second request is
+refused with 409 and that error replaces "Hold placed", the same shape as the
+key's existing double-click on Drop. So it is a new also-real entry, not the
+existing "a second hold is refused" non-defect, which is about a deliberate
+second hold. These labels are model judgements checked against source, not
+a person's; a label that turns out wrong is corrected the same way as any
+other key entry.
+
+**What changed in the keys.**
+
+| Verdict | Demo | Held out | Change |
+|---|---:|---:|---|
+| Rewording of an existing entry | 62 | 8 | Patterns widened on 11 demo and 5 held-out entries, each finding added as an example |
+| New genuine defect | 1 | 3 | Also-real: the dashboard's stat tiles are fixed in the page; a failed reviews request reads "No reviews yet."; the Place hold double-click above |
+| Not a defect | 13 | 17 | "No visually dominant action" (12 demo, 14 held out) is now a non-defect on any page, as it already was on the demo's reports page; the book page with no id saying "Book not found"; an empty review the server refuses with its message shown; a placeholder a run filed instead of a finding |
+| Defect only under a convention | 0 | 14 | The held-out key gets the demo's `spacing-off-grid` contextual entry: neither app declares a spacing scale |
+
+Two findings that already matched an entry changed:
+
+- A run's "Email field has only a placeholder for its label", whose evidence
+  also gives the hint text's 1.73:1 contrast, would have matched both
+  entries. The widened email patterns skip text that mentions contrast, so it
+  keeps its earlier credit for the contrast defect.
+- "Account page lacks a visually dominant next action" in
+  `ci-caps-holdout-l2t80-2` was credited to the clipped Download my data
+  link only because its evidence names the `account-export` link's colour.
+  It now also matches the non-defect, so it is ambiguous and scored as
+  neither. That run's recall stays 4/10; its precision is 4/8 instead of 5/6.
+
+**What moved.** Unlabelled findings across all 101 archived runs went from
+101 to 5. The five left are findings that report two planted defects in one
+title and evidence, which the scorer counts for neither, and the account-page
+finding above. 62 rows changed, all but runs 2 and 3 unattended
+`scenescout ci` rows. Recall rose where a run had reported a planted defect in
+words the key did not know: most often the email field labelled only by its
+placeholder, the Settings save that sends nothing, and the scheduled-reports
+dead end. Precision fell where runs filed "no visually dominant action"
+notes, which are now false positives rather than unlabelled.
+
+The numbers in the earlier unattended sections are as they were recorded, under the old keys.
+Re-scored, none of the decisions they support changes:
+
+| Comparison | Mean recall, old key | Mean recall, new key | Decision |
+|---|---|---|---|
+| [Defaults](#choosing-the-defaults-issue-419), demo: 40 / 80 / 120 turns / 2 lanes × 80 | 3.0 / 4.7 / 4.0 / 6.0 | 3.7 / 5.7 / 5.0 / 6.7 | 2 lanes × 80 still leads; it stays the default |
+| [Seeded schedule](#a-seeded-exploration-schedule-issue-418), demo: seeded / unseeded | 3.3 / 3.3 | 4.0 / 4.3 | Still no gain; still rejected |
+| [Continue](#starting-from-an-earlier-run-issue-418), demo: continued / fresh | 5.0 / 5.7 | 5.7 / 6.3 | Still level within noise; still off unless asked for |
+| [Dedup judge runs](#judge-run-3-out-of-sample-the-lead-holds), demo / held out | 4.2 / 1.4 | 5.2 / 1.6 | Recall only; the judge's accuracy and Brier are scored on labelled pairs and did not move |
+
+Three runs per configuration, so a difference of one defect is within the
+noise these sections already describe.
 
 ## Finding dedup as a measured decision (task 15)
 
