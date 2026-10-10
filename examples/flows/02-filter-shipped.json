@@ -1,0 +1,10 @@
+{
+  "name": "filter orders by status",
+  "id": "TC-02",
+  "requirements": ["REQ-ORD-3"],
+  "steps": [
+    { "action": "navigate", "target": "/orders.html", "expected": "The orders register is shown" },
+    { "action": "select", "target": "testid=orders-status-filter", "value": "shipped", "expected": "Only shipped orders are listed" },
+    { "action": "expect-request", "request": "GET /api/orders", "status": 200 }
+  ]
+}
