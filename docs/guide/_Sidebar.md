@@ -2,6 +2,7 @@
 
 - [Start here](Start-here.md)
 - [Ways to use it](Ways-to-use-it.md)
+- [What it checks](What-it-checks.md)
 - [Signing in](Signing-in.md)
 - [Safety model](Safety-model.md)
 - [Recipes](Recipes.md)

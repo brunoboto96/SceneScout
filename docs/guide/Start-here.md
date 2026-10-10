@@ -67,7 +67,7 @@ npx -y scenescout install --client cursor     # or vscode, codex, gemini, copilo
 /plugin install scenescout@scenescout-marketplace
 ```
 
-Then start a new chat to use SceneScout; the test browser downloads on first use (to have it ready beforehand: `npx -y scenescout install --browser-only`). The command becomes `/scenescout:scenescout`.
+Then start a new chat to use SceneScout; the test browser downloads on first use (to have it ready beforehand: `npx -y scenescout install --browser-only`). The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
 
 An optional second plugin, `scenescout-mod`, adds a run pane and a model setting for lane agents in the Claude Code CLI and the desktop Code tab: [The Claude Code mod](Ways-to-use-it.md#the-claude-code-mod).
 
@@ -76,6 +76,22 @@ An optional second plugin, `scenescout-mod`, adds a run pane and a model setting
 Download `scenescout-X.Y.Z.mcpb` from the [latest release](https://github.com/brunoboto96/SceneScout/releases/latest) and open it, or in Claude Desktop choose Settings > Extensions > Advanced settings > Install Extension and pick the file. It is ready as soon as it is installed: start a new chat and ask *"Use SceneScout to test http://localhost:3000"*. Tell it which folder to keep its notes and report in, for example a new folder in Documents.
 
 The extension carries the engine, and the test browser downloads on first use: the first test says "Getting the test browser ready", downloads it once (about 200 MB) and carries on. No terminal step is needed. If the download fails, SceneScout says why and gives the command to run by hand, `npx -y scenescout install --browser-only`. `npx -y scenescout doctor` recognises the extension and checks it.
+
+### What `install --client` does for each client
+
+| `--client` | How it is registered |
+|---|---|
+| `claude-code` (default) | `claude mcp add`, plus the skill |
+| `cursor` | adds an entry to `~/.cursor/mcp.json`, keeping the others |
+| `vscode` | VS Code's own `code` command line; a `code` command that belongs to another editor is not used |
+| `codex` | `codex mcp add` |
+| `gemini` | `gemini mcp add --scope user` |
+| `copilot` | `copilot mcp add` (GitHub Copilot CLI) |
+| `windsurf` | adds an entry to `~/.codeium/windsurf/mcp_config.json`, keeping the others |
+
+A configuration file that is not valid JSON is left untouched, and the entry to add by hand is printed instead; one that is a link into a dotfiles repository is written through the link. When a client that registers through its own command is not installed, `install` says so and prints the command to run later; on Windows, a client installed through npm is a `.cmd` shim `install` cannot start, so it prints the command too. Restart the client afterwards.
+
+Registering through each command above has been run against Codex CLI, Gemini CLI, GitHub Copilot CLI and VS Code, and Cursor's command line agent has read the entry `install` wrote, connected and listed the tools. The Windsurf path follows its documentation. If a client behaves differently for you, a correction is welcome; say which client version you checked.
 
 ### A client that `install` does not know
 
@@ -88,6 +104,47 @@ Add a stdio server to the client's configuration whose command is `npx -y scenes
   }
 }
 ```
+
+That is the entry for Cursor (`~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project), Gemini CLI (`~/.gemini/settings.json`, or `.gemini/settings.json` in a project), Windsurf (`~/.codeium/windsurf/mcp_config.json`) and Cline (MCP Servers > Configure, or `~/.cline/mcp.json` for its CLI). The others differ:
+
+<details>
+<summary><strong>VS Code</strong> (Copilot agent mode): <code>.vscode/mcp.json</code></summary>
+
+```json
+{
+  "servers": {
+    "scenescout": { "type": "stdio", "command": "npx", "args": ["-y", "scenescout", "serve"] }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Codex CLI</strong>: <code>~/.codex/config.toml</code></summary>
+
+```toml
+[mcp_servers.scenescout]
+command = "npx"
+args = ["-y", "scenescout", "serve"]
+```
+
+</details>
+
+<details>
+<summary><strong>Zed</strong>: <code>settings.json</code> (command palette: <code>zed: open settings file</code>)</summary>
+
+```json
+{
+  "context_servers": {
+    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"], "env": {} }
+  }
+}
+```
+
+</details>
+
+Every client gets the testing method from the server itself: its instructions tell the agent to call `scout_playbook` before the first attach, and a client that lists server prompts as commands also has an `explore` prompt. So *"Use SceneScout to test http://localhost:3000"* is enough as a first message.
 
 ### Check the setup
 
@@ -137,11 +194,11 @@ A `medium` run is sized at around 150 actions. On the demo it typically finds th
 
 The level is a contract that `scout_report` enforces for what the engine can see, and the gap ledger discloses the rest.
 
-| Level | What it asks for |
-|---|---|
-| `minimal` | Every route visited, at least one design audit, the main journeys walked, problems from the crawl triaged |
-| `medium` (default) | minimal, plus design audits across several routes, every kind of control exercised and every form submitted valid and invalid |
-| `extensive` | medium, plus fuzzing, back and refresh resilience, a keyboard-only pass, a journey per module, two or more roles compared and the signed-out pages walked. The report refuses to finish while the gap ledger has entries |
+| Level | What it asks for | Rough size |
+|---|---|---|
+| `minimal` | Every route visited, at least one design audit, the main journeys walked, problems from the crawl triaged | about 40 actions |
+| `medium` (default) | minimal, plus design audits across several routes, every kind of control exercised and every form submitted valid and invalid | about 150 actions |
+| `extensive` | medium, plus fuzzing, back and refresh resilience, a keyboard-only pass, a journey per module, two or more roles compared and the signed-out pages walked. The report refuses to finish while the gap ledger has entries | capped by budget |
 
 ## Reading the report
 

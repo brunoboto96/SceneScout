@@ -54,6 +54,22 @@ Run `npx -y scenescout doctor` first (`--engine` for clients other than Claude C
 | `/scenescout qa` replies that there is no preview | Set `SCENESCOUT_QA_PREVIEW_URL`, or `SCENESCOUT_QA_ENVIRONMENT` if the deployments API lists several. The URL must be https |
 | The guide's wiki is out of date | The wiki is published from `docs/guide/` on each release, and a maintainer can run the `guide-wiki` workflow by hand |
 
+## Upgrading and uninstalling
+
+- **After an upgrade**, run `npx -y scenescout install` again, so the installed skill matches the server.
+- **Tools named `ft_*`** come from a version before v0.24; they are `scout_*` now, with no aliases. Run `install` again.
+- **Earlier names.** SceneScout was called SceneCraft, and before that frontend-tester. `install` removes the old skill link and the old `scenecraft` registration when they point at this install, and the first attach in a project moves its `.scenecraft/` folder to `.scenescout/`, so earlier coverage and findings carry over.
+
+To uninstall:
+
+```bash
+claude mcp remove --scope user scenescout    # Claude Code
+rm -rf ~/.claude/skills/scenescout             # or $CLAUDE_CONFIG_DIR/skills/scenescout
+codex mcp remove scenescout                  # likewise gemini mcp remove, copilot mcp remove
+```
+
+If `install` found a `scenescout` skill folder it had not created, it moved it aside to a `.backup-…` copy beside it rather than deleting it; remove that too if you no longer want it. For Cursor, Windsurf and VS Code, delete the `scenescout` entry from the client's MCP server list. `install` also put the `scenescout` command on your PATH: `npm uninstall -g scenescout` removes it (it is the same command for a clone, which `install` linked). Each tested project keeps its memory in its own `.scenescout/` folder; delete that folder to remove it.
+
 ## FAQ
 
 **Does SceneScout need an API key?**

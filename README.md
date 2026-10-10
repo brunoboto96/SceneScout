@@ -2,7 +2,7 @@
 
 # 🔭 SceneScout
 
-**Exploratory UI testing, driven by the AI agent you already use.**
+**Your coding agent, turned into an exploratory QA tester for any web app.**
 
 Works with Claude Code · Cursor · VS Code (Copilot) · Codex CLI · Gemini CLI · Copilot CLI · Windsurf · any [MCP](https://modelcontextprotocol.io) client
 
@@ -10,841 +10,159 @@ Works with Claude Code · Cursor · VS Code (Copilot) · Codex CLI · Gemini CLI
 [![npm](https://img.shields.io/npm/v/scenescout.svg)](https://www.npmjs.com/package/scenescout)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![node >= 20](https://img.shields.io/badge/node-%E2%89%A5%2020-339933?logo=node.js&logoColor=white)
-![MCP server](https://img.shields.io/badge/MCP-server-8A2BE2)
 
-[📖 Guide](docs/guide/Home.md) · [👀 See it work](#-see-it-work) · [✨ Why](#-why-its-different) · [🎯 Two ways to use it](#-two-ways-to-use-it) · [🚀 Quickstart](#-quickstart) · [🧰 Toolbox](#-the-toolbox) · [🔌 Other clients](#-other-mcp-clients) · [🔒 Safety](#-safety-model) · [🩺 Troubleshooting](#-troubleshooting)
+[📖 Guide](docs/guide/Home.md) · [🐛 What it catches](#-what-it-catches) · [🚀 Get started](#-get-started) · [🚦 CI](#-in-ci) · [🔒 Safety](#-safe-by-default) · [📚 Docs](#-documentation)
 
 </div>
 
-SceneScout is an [MCP](https://modelcontextprotocol.io) server that hands an agent a *structured view* of a running web app — every element, its geometry, and a set of always-on correctness oracles — and lets the agent explore it like a curious user. Your coding agent is the brain; SceneScout is the hands, eyes, and memory. Any MCP client can drive it, and the testing method comes with the server, so the agent knows how to use the tools wherever it runs.
+Scripted end-to-end tests answer one question: *does this exact flow still work?* They say nothing about the rest of the app. SceneScout lets the agent you already use explore a running web app like a curious, thorough tester. It clicks, fills forms, switches roles and calls the API behind a hidden button, then writes a report of what is **broken** and what could be **better**, with evidence for every line.
 
-```
-┌─────────────────────┐   MCP (stdio)   ┌───────────────────────────────┐
-│ Your coding agent   │ ──────────────▶ │ SceneScout engine             │
-│ (intent, judgment,  │ ◀────────────── │ Playwright · oracles · memory │
-│  your subscription) │  tool results   │ findings · report — no LLM    │
-└─────────────────────┘                 └───────────────────────────────┘
-```
-
-Scripted E2E suites answer one question — *"does this exact flow still work?"* — and say nothing about the 95% of the app they don't touch. SceneScout covers both gaps: it finds what's **broken** (crashes, dead ends, permission leaks) *and* reports how the product could be **better** (confusing flows, weak hierarchy, design-system drift), with concrete measurements.
-
-
-## 👀 See it work
-
-This is a real run against the small demo app bundled in this repository. The app has bugs planted in it on purpose, and two of them are visible on its dashboard:
-
-<p align="center"><img src="examples/screenshots/dashboard-annotated.png" alt="The demo app's dashboard with two defects outlined in red: 1, a yellow badge covering the All orders button; 2, the weekly chart image failing to load" width="760" /></p>
-
-**The broken chart is the demo app's bug, not this page's** — it is one of the twelve findings SceneScout filed, next to the badge sitting on a button. The red callouts were added for this README; the [unmarked screenshots](examples/screenshots/) are the ones the engine took.
-
-An excerpt of the report it wrote — [read the whole thing](examples/report.md):
-
-> **🔴 [HIGH] A double-click on Create order creates two orders**
-> Evidence: `2× click fired the same state-changing request 2× (POST /api/orders)`
-> The submit button stays enabled while the request is in flight, and the endpoint accepts the repeat.
->
-> **🔴 [HIGH] Filtering orders by Archived fails, and the page shows an empty table instead of an error**
-> Evidence: `GET /api/orders?status=archived → HTTP 500`
->
-> **🔴 [HIGH] A clerk can approve an order by calling the endpoint the page hides from them**
-> Evidence: `POST /api/orders/1037/approve 200 as clerk; POST /api/orders/1038/reject 403 as clerk` — the button was hidden, the server did not agree.
->
-> **🟠 [MEDIUM] The "New: bulk import" badge sits on top of the All orders button** *(callout 1)*
-> Evidence: `"All orders" overlaps "New: bulk import" (81%)` — measured from layout boxes, no screenshot needed.
->
-> **🟡 [LOW] The dashboard chart image is missing** *(callout 2)*
-> Evidence: `GET /img/weekly-chart.png → HTTP 404`
->
-> **Gap ledger — what was NOT tested:** 9 of 12 known routes visited this run and never design-audited · single-role run, so permission boundaries are untested
-
-Every finding comes with a repro trace and a Playwright regression-test skeleton. To try it yourself, clone this repository, run `npm run demo:serve`, then `/scenescout --url http://127.0.0.1:4173` — see [demo-app/](demo-app/). Its README lists every seeded defect and which oracle catches it.
-
----
-
-## ✨ Why it's different
-
-- 🧠 **Your agent is the brain — no API key.** The engine contains no LLM. Exploration runs on the agent and subscription you already have (Claude Code, Cursor, Copilot, Codex, Gemini CLI and others); SceneScout just gives it deterministic tools and the method for using them.
-- 📐 **Structured scene, not pixels.** The agent reads element lists *with layout geometry*, not screenshots. Overlap and off-screen bugs are computed from boxes — deterministic, no vision guessing. Images that failed to load are read from the DOM too. (Screenshots exist only for pixel-native residue like a canvas or a rendering glitch.)
-- 🛡️ **Read-only by default, enforced on the wire.** Destructive actions are blocked at the network layer, not by asking the model nicely. Opt into writes only against disposable data.
-- ✅ **Completion is a contract, not a vibe.** The engine knows the app's routes and *refuses* to file an "extensive" report while any known route is unvisited, unexercised, or un-audited. "Explored a bit and stopped" is structurally impossible.
-- 🧭 **It remembers.** UI states are fingerprinted and stored in the project's `.scenescout/`. Run N+1 skips what run N already covered, and every run starts smarter than the last.
-
----
-
-## 🎯 Two ways to use it
-
-SceneScout needs only a URL. Give it the source code as well and it gets noticeably better.
-
-| | 🏠 **Next to the codebase** *(recommended)* | 🌐 **Against a remote URL** |
-|---|---|---|
-| **You run it from** | the app's repository | any folder — an empty `qa/` directory is fine |
-| **It plays the role of** | a developer-tester who can read the code | a black-box QA tester, like a person with a browser |
-| **How it finds pages** | 📂 reads routes from the source **and** follows links: file-based routing (Next.js, SvelteKit, Nuxt) and router configuration written in code (React Router, Vue Router, Angular). Routes built at runtime are not seen | 🔗 follows same-origin links only — pages nothing links to, or on another subdomain, stay unknown |
-| **"Did we cover everything?"** | checked against the routes found in source *plus* discovered links — an unvisited one blocks the report | checked against the pages it managed to discover |
-| **Setup it figures out** | framework, dev command, saved Playwright logins (`playwright/.auth/`), whether the app uses `data-testid` | none — you pass the URL, and the path to a login state if the app needs one |
-| **What a finding looks like** | the symptom, **plus** the file behind it and a suggested fix | the symptom, a repro trace, and a regression-test skeleton |
-| **Typical target** | `localhost` while you build | staging, a preview deploy, a client's site |
-
-**Why the codebase helps.** The agent driving SceneScout is a coding agent, which can already read your repository. With the source at hand it knows the app's static routes before opening the browser, so coverage is measured against the real app instead of whatever happened to be linked. It can also check a suspicion against the code before reporting it: "there is no way to export this table" is a much stronger finding once the agent has confirmed no export handler exists. And when something breaks it can open the component or handler responsible and tell you *where* and *how* to fix it — "the save button does nothing" becomes "`OrderForm` swallows the rejected promise in `onSubmit`; surface the error and re-enable the button".
-
-**Why it still works without it.** Everything SceneScout *observes* comes from the running page — elements, layout geometry, console and network errors, design-audit scores, task-ease measurements — and none of that needs source code. Point it at a URL you are allowed to test and it behaves like a thorough QA tester: it explores, reproduces, and files findings with evidence.
-
-```
-# next to the code — run inside the app's repository
-/scenescout --url http://localhost:3000
-
-# remote — run from any folder; memory and the report are kept there
-/scenescout --url https://staging.example.com --role ./auth/qa.json
-```
-
-> [!IMPORTANT]
-> Only test sites you own or are authorized to test. A remote environment is more likely to hold real data, so for a remote URL with no source the skill attaches in **`observe`** mode: nothing but `GET` requests leaves the page. The default **read-only** mode blocks `PUT`/`PATCH`/`DELETE` and destructive-looking requests, but an ordinary form submission (a plain `POST`: contact form, comment, order, signup) still reaches the server and can create a record. Say so when that is acceptable on your target. See the [safety model](#-safety-model).
-
----
-
-## 🚀 Quickstart
-
-### ⚡ A first look, nothing to set up
-
-Node 20 or newer and the address of an app you are allowed to test:
+Try it on any app you are allowed to test. No account, no API key, no setup:
 
 ```bash
 npx -y scenescout http://localhost:3000
 ```
 
-It needs no model, no API key and no MCP client. It downloads the headless Chromium build if the machine has none (once, about 200 MB) and changes nothing else: no skill, no MCP registration, nothing on your PATH. Then it opens up to 20 pages in `observe` mode, where nothing but reads leaves the page (signing in and refreshing a token apart), starting none after 3 minutes. It measures each one the way [`scenescout check`](docs/guide/Ways-to-use-it.md#scenescout-check-a-gate-in-ci) does, writes `scenescout-report/report.md` in the current folder and prints the three issues to look at first:
+## 🐛 What it catches
 
-```
-Look at these first:
-  1. [medium] Request failed with a client error: GET /img/weekly-chart.png → HTTP 404 (on /)
-  2. [medium] Dead end: /reports-scheduled.html: 0 controls (on /reports-scheduled.html)
-  3. [medium] Control covered by pinned chrome: button "Save notes" is COVERED by pinned chrome [order-stickybar] at this scroll position — a click aimed at it lands on that element instead (on /order.html?id=1042)
+A real run against the small demo app in this repository, which has bugs planted on purpose:
 
-12 pages looked at in 12 s in observe mode: 0 high · 6 medium · 2 low · 5 worth a look, never counted.
-Report: scenescout-report/report.md
-```
+<p align="center"><img src="examples/screenshots/dashboard-annotated.png" alt="The demo app's dashboard with two defects outlined in red: 1, a yellow badge covering the All orders button; 2, the weekly chart image failing to load" width="760" /></p>
 
-That is the [demo app](demo-app/). It exits 0 whatever it finds (a look, not a gate), and 2 when the address cannot be reached or the report cannot be written. After the address, `--max-routes` and `--max-minutes` raise the limits, `--mode read-only` lets a plain POST through, and `--out` names another folder. A `scenescout-report/` holding files a first look did not write is left alone, and no report it did not write is ever replaced. A first look only opens pages. To have your agent click, fill forms, compare roles and remember what it learned, set SceneScout up as below.
+It filed twelve findings. A few from [the report](examples/report.md):
 
-### 📦 Prerequisites
+> **🔴 [HIGH] A double-click on Create order creates two orders**
+> `2× click fired the same state-changing request 2× (POST /api/orders)`
+>
+> **🔴 [HIGH] A clerk can approve an order by calling the endpoint the page hides from them**
+> `POST /api/orders/1037/approve 200 as clerk`: the button was hidden, the server did not agree.
+>
+> **🔴 [HIGH] Filtering orders by Archived fails, and the page shows an empty table instead of an error**
+> `GET /api/orders?status=archived → HTTP 500`
+>
+> **🟠 [MEDIUM] The "New: bulk import" badge sits on top of the All orders button** *(callout 1)*
+> `"All orders" overlaps "New: bulk import" (81%)`, measured from layout boxes, no screenshot needed.
 
-| | |
-|---|---|
-| **Node** | ≥ 20 |
-| **An MCP client** | Claude Code, Cursor, VS Code with Copilot, Codex CLI, Gemini CLI, GitHub Copilot CLI, Windsurf, or [any other](#-other-mcp-clients) |
-| **A web app to test** | SceneScout tests a *live* app: start yours locally first (e.g. `npm run dev`, `make dev-up`), or have the URL of a deployed one you're allowed to test |
+What it looks for, on every page, after every action:
 
-### 1️⃣ Install
+- 🧨 **Real breakage:** console errors, crashes, failed requests, 4xx and 5xx responses, broken images, dead-end pages.
+- 🔓 **Permission leaks:** it calls the app's own API as each role, so "the button is hidden" becomes "the server refuses it", or doesn't.
+- 🤥 **Pages that lie:** "Saved!" after the server refused the save, or an empty table after the request failed.
+- 👆 **Impatient users:** a double-click that sends the same order twice.
+- 📐 **Broken layout, from geometry:** controls that overlap, sit off-screen, hide under a sticky bar or can never be scrolled into view.
+- ♿ **Accessibility and craft:** contrast, focus, labels, target sizes, spacing and type, with a 0 to 100 score per page.
+- 🧭 **Friction:** how many steps a task takes, and where a user had to go back.
+- 💉 **Security smells:** typed markup that comes back as an element, and tokens posted to any window.
 
-It is on npm. Nothing to clone:
+Every finding comes with the evidence, the steps to reproduce it, a picture, and a Playwright regression-test skeleton. Next to the source code, it also names the file behind the bug and a likely fix. [Everything it checks](docs/guide/What-it-checks.md).
 
-```bash
-npx -y scenescout install                      # Claude Code: skill + server + Chromium (one-time download)
-npx -y scenescout install --client cursor      # or: vscode, codex, gemini, copilot, windsurf (comma-separated for several)
-```
+## 📺 Watch it work
 
-Either way it downloads the browser and registers the server with the client you named. Claude Code also gets the method as a skill; every other client receives the same method from the server. [What each client gets](#-other-mcp-clients).
-
-**Prefer a Claude Code plugin?** The skill and the server arrive together:
-
-```
-/plugin marketplace add brunoboto96/SceneScout
-/plugin install scenescout@scenescout-marketplace
-```
-
-Then start a new chat to use SceneScout; the test browser downloads on first use (to have it ready beforehand: `npx -y scenescout install --browser-only`). The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release lands here the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
-
-An optional second plugin, `scenescout-mod@scenescout-marketplace`, adds a run pane (`/scenescout-pane`) and a setting for the model lane agents run on, in the Claude Code CLI and the desktop Code tab. It is a mod: unsandboxed JavaScript that runs inside Claude Code, so it is opt-in. [The Claude Code mod](docs/guide/Ways-to-use-it.md#the-claude-code-mod).
-
-**Using Claude Desktop?** Install the extension: download `scenescout-X.Y.Z.mcpb` from the [latest release](https://github.com/brunoboto96/SceneScout/releases/latest) and open it (or Settings > Extensions > Advanced settings > Install Extension). It works as soon as it is installed, with no terminal step: the test browser downloads on first use. Start a new chat and ask *"Use SceneScout to test http://localhost:3000"*. [More in the guide](docs/guide/Start-here.md#as-a-claude-desktop-extension).
-
-**A client that is not in that list?** [Add the server to its config by hand](#-other-mcp-clients); the test browser downloads on first use.
-
-<details>
-<summary>What <code>install</code> actually does</summary>
-
-1. puts the `/scenescout` skill into `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`) — a `scenescout` folder it didn't create is moved aside to a `.backup-…` copy, never deleted,
-2. downloads the browser SceneScout drives (skipped if you already have it). By default that is Chromium, as two builds: the full browser for headed runs and the headless shell every other run uses. [Choose something else](#-choosing-browsers) with `--browsers`,
-3. registers the MCP server with Claude Code at user scope. Run through `npx`, the launcher is `npx -y scenescout serve`, with the absolute path of `npx` where one sits beside node, so it works under nvm/fnm. From a clone or a global install it is the absolute node path plus that install's `dist/mcp-server.js`,
-4. puts the `scenescout` command on your PATH, so `scenescout status`, `scenescout watch` and `scenescout doctor` work from any terminal. Run through `npx`, that is `npm install -g` of the version you just ran; from a clone it is `npm link`, so the command always runs what you last built. If npm refuses (a system-wide node usually needs `sudo` for this), the step prints the command to run by hand and the rest of the setup still counts as done: `npx -y scenescout <command>` works without it.
-
-Re-run it any time: after moving the folder or switching node versions it refreshes the stored paths. It exits non-zero if a step the tool depends on failed, so it is safe to chain. Opt out of a step with `--no-register`, `--skip-browser` or `--no-command`.
-
-If `claude` isn't on the PATH of the shell you ran it from, it prints the registration command instead of running it:
-
-```bash
-claude mcp add --scope user scenescout -- npx -y scenescout serve
-```
-
-</details>
-
-### 2️⃣ Check it
-
-```bash
-npx -y scenescout doctor --engine   # any client: node + build + browser
-npx -y scenescout doctor            # Claude Code: the above, plus the skill and the registration
-```
-
-Every line should be a ✓. Anything that isn't prints the exact command that fixes it. Then **start a fresh session** in your client so it picks up the new tools.
-
-### 3️⃣ Run it
-
-No app handy? Clone this repository and run `npm run demo:serve`: the [demo app](demo-app/) starts on `http://127.0.0.1:4173`.
-
-Open your agent inside the project you want to test (or, for a [remote URL](#-two-ways-to-use-it), any folder) and ask:
-
-```
-Use SceneScout to test http://localhost:3000 at medium level
-```
-
-In Claude Code the skill gives you a command with flags for the same thing:
-
-```
-/scenescout --level medium --url http://localhost:3000 --role qa
-```
-
-The agent scans the project (if there is one), attaches read-only, explores, and writes findings to `.scenescout/report.md`. That's it.
-
-**Common flags** — `--level minimal|medium|extensive` · `--url <app>` · `--role <name\|path>` (who to explore as: a login saved with `scenescout login`, a storage state found by the scan, or a path to a Playwright storage-state JSON) · `--focus <text>` (a ticket or a sentence to check) · `--observe` / `--read-only` / `--safe-write` / `--allow-destructive`.
-
-**No flags at all** (`/scenescout` on its own) and the agent asks four plain questions instead: the address, whether and how you sign in, what to check (tickets or a description), and whether the site holds real data. Where your client can show a form, `scout_intake` asks them as one form, never for a password; otherwise the agent asks in chat. Real data, or not being sure, means nothing but `GET` requests leave the page; you are never asked to pick a mode. Any flag skips the questions. See [Plain questions instead of flags](docs/guide/Ways-to-use-it.md#plain-questions-instead-of-flags).
-
-### 🔑 Signing in as a role
-
-For an app behind SSO or MFA, sign in once yourself and let every session reuse it:
-
-```bash
-scenescout login http://localhost:3000 --role admin
-```
-
-A browser window opens at the URL. Sign in however the app asks: once you are back on the app with a new session, the window saves it as `.scenescout/auth/admin.json` in the project and closes by itself. A trip through a single sign-on provider and back is followed, not taken for the end. Pressing **Enter** in the terminal saves at once, and `--save enter` makes Enter the only way, as before. Closing the window or pressing Ctrl+C saves nothing. From a conversation, the agent opens the same window with `scout_login`, so no terminal is needed. The file is readable by your account only, `.scenescout/` keeps itself out of git, and the command prints where it saved, how many cookies, origins and databases it holds, never what they are, and how long it will last: read from each cookie's expiry and the `exp` of any JWT in a cookie or in localStorage (the payload is decoded for that one claim, never verified, never printed). The profile keeps cookies, localStorage, IndexedDB and sessionStorage, so an app whose sign-in library keeps its token in sessionStorage or IndexedDB still comes back signed in; sessionStorage is put back only on the origin it came from, once per tab, so a lane that signs out stays signed out. A login saved by an earlier version has no sessionStorage or IndexedDB: record it again if the app keeps its token there. `--project <dir>` saves into another project; `--browser firefox|webkit` records in another browser.
-
-Then `/scenescout --role admin`, or `scout_attach { role: "admin" }` from any agent. Every session attached with the same role gets its own browser built from that one login, so parallel lanes can all run as `admin`. A role with no saved login is refused with the command to run. `role` and `storageStatePath` are alternatives: pass one.
-
-Sessions of one role share one saved login, so they share its refresh token too. An app that rotates refresh tokens and treats a second use of a spent one as theft would revoke the whole token family, and sign every session of that role out, the moment two of them refreshed with the same token. SceneScout stops that for a session attached by role. When the page is about to send a refresh token from the role's profile, the session first takes a lock beside the profile (`.scenescout/auth/<role>.json.lock`, owner-only, taken over if its holder has not touched it in 30 seconds). Holding the lock, it re-reads the profile: if another session has rotated the token in the meantime, it loads that profile into its own browser and sends the current token in place of the spent one. Once the page has stored the rotated token, the session writes its state back over the profile and releases the lock. Sessions in separate processes share the lock through the file. A refresh token is recognised by name (a cookie, a storage key, or a field inside a JSON storage value whose name contains `refresh`) and is never printed or logged. A token that is only in a cookie makes a request a refresh only when the request is plausibly the refresh call, a POST to a path named for one or an endpoint seen to rotate the cookie, so a refresh cookie scoped to `/` never holds back the app's other requests; scripts, stylesheets, images and fonts are never brokered, and a broker that cannot do its job lets the request through unchanged. See [the guide](docs/guide/Signing-in.md#sessions-that-share-a-refresh-token). An app whose sign-in renews through the identity provider's own session cookie needs none of this, since no refresh token is shared. `SCENESCOUT_REFRESH_BROKER=off` turns the broker off.
-
-In CI, where nobody can type, `--script` signs in headless as a test user from `SCENESCOUT_LOGIN_USERNAME`, `SCENESCOUT_LOGIN_PASSWORD` and, for a one-time code, `SCENESCOUT_LOGIN_TOTP_SECRET` or a fixed code the test environment accepts in `SCENESCOUT_LOGIN_OTP_CODE` (with no password for a passwordless sign-in), and saves the same profile. No credential value is ever printed. See [signing in from CI](docs/ci.md#signing-in-from-ci) for the options and the rules: a test tenant's user, never production or a real person's account.
-
-Before a parallel run, `scout_lane_brief` checks that the planner's saved login will outlast it: `runMinutes` (default 60) plus `expiryMarginMinutes` (default 10). It refuses only when it is sure, meaning every credential in the profile has a date, none was set for another host, and the last of them ends before the run does, and then names the `scenescout login` command to run again. A profile holds cookies other than the sign-in (analytics, preferences), so the first one to expire is reported as a warning rather than a reason to refuse, and a profile with undated credentials in it (a session cookie, or a refresh token with no expiry) is a warning that its lifetime is unknown.
-
----
-
-## 📺 Watching a run live
-
-When a session attaches, the engine starts a small live view and hands the agent its address on a `Live view:` line, which the agent passes on to you. On a local desktop it also opens that page in your default browser as the session attaches, and opens `report.html` when `scout_report` writes it, whether or not the browser window is shown. Nothing opens in CI, over SSH, or on Linux with no display. `SCENESCOUT_OPEN` (`live`, `report`, `both` or `none`) in the server's environment chooses otherwise, and `scout_attach {open}` wins over it. `scenescout ci` opens nothing unless `SCENESCOUT_OPEN` is set. From a terminal, `scenescout watch` opens the same page. There is one card per session:
+Each run opens a live view on your machine, with one card per agent: what it is doing, the page it is on, and a feed of every action. Three agents are testing the demo app in parallel here:
 
 <p align="center"><img src="examples/screenshots/live-view.png" alt="The live view during a run of three parallel agents against the demo app: one card per session, each with its role and objective, the task it is on, the tool it is running, the page it is on, a live thumbnail, and a feed of the actions it just took, tinted one colour per task" width="880" /></p>
 
-- **What it is doing:** the tool it is running and for how long, the page it is on, and a thumbnail of that page. This works for headless runs too, which have no window to look at.
-- **What it just did:** a rolling feed of its actions, each with its target and how it turned out, with failures in red. It is the same trail a finding's repro trace uses. The engine never sees the agent's reasoning, so this is what the session *did*, not what it thought.
-- **Stuck, not slow:** a call still running past its own tool's watchdog budget turns the card red, so a wedged session is visible without asking. A crawl legitimately runs for minutes; it is judged against the crawl's budget, not a click's.
-- **Live stream:** switch it on for one card, or for all of them. Click a thumbnail for a close-up.
-- **The report, as it stands:** the Report button in the top bar shows the same document `scout_report` writes at the end, rendered from the run's current state, so findings can be read while the agents are still working.
-- **What it is for:** the close-up puts the feed beside the session's brief — the objective it was given when it attached (`scout_attach {objective}`), and underneath it the task it is on right now (`scout_task`), which the engine requires before any tool will act. Each task tints its own block of actions, so a change of task is a change of colour; point at a block and the brief names the task those actions served.
-- **Scrub it back:** under the page is a tick per action, coloured by task. Click one to see the frame from that moment, and `Back to live` to return. On a run that was not recorded the ticks still read the trail; they just have no picture behind them.
+You can read the report while the agents are still working, and scrub back through any session's timeline. Beside `report.md`, every run writes `report.html`, the whole run as one self-contained page; ask for a recorded run and it also keeps a frame after every action.
 
-<p align="center"><img src="examples/screenshots/live-view-closeup.png" alt="A close-up of one session: a frame from a step picked out of the timeline, the timeline itself as a tick per action coloured by task, the feed of the session's actions in the same colours, and beside it the objective and the task it is on" width="880" /></p>
+## ✨ Why it's different
 
-<p align="center"><img src="examples/screenshots/live-view-report.png" alt="The report opened from the live view's top bar while the run is still going: summary table, gap ledger, and the findings filed so far, each with an accordion of the screenshots taken around it" width="880" /></p>
+- 🧠 **Your agent is the brain, so no extra API key.** The engine contains no model. It gives the agent you already pay for deterministic tools and the testing method to use them.
+- 📐 **It reads structure, not pixels.** The agent sees every element with its role, state and layout box, so overlap and broken images are measured, not guessed from a screenshot.
+- 🛡️ **Safety is enforced on the network, not requested in a prompt.** Nothing existing is changed unless you allow it, and a blocked write never reaches your server.
+- ✅ **"Done" is a contract.** The report lists everything not tested, and at the `extensive` level refuses to finish while any known page is unvisited.
+- 🧠 **It remembers.** Each run starts from what the last one learned, and re-tests the bugs earlier runs left open.
 
-The view is served on `127.0.0.1` only, behind a token that changes every time the engine starts. It answers `GET` and nothing else, so a viewer can watch a run but not act in it, and no frame it shows is written to disk ([ADR 7](docs/adr/0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md)) unless the run was recorded, which is asked for and off by default ([ADR 8](docs/adr/0008-a-recorded-run-is-evidence-and-must-be-asked-for.md)). A stream runs only while someone is watching it. `SCENESCOUT_LIVE=off` keeps the port closed.
+## 🚀 Get started
 
-**Try it with parallel agents.** The demo app has three roles and several separate areas, so a run can be split between agents. Start it with `npm run demo:serve`, then ask your agent to explore it with several agents in parallel, one role and one area each. The pictures above come from a run of three. Two things keep a parallel run efficient:
-
-- **Each agent opens its own session when it starts, and the planner closes it once it has folded that agent's report.** An agent waiting for its turn then holds no browser. Opening every session up front leaves browsers idling while the machine runs out of memory for the agents that are working. Closing before the fold loses the lane's decisions, which have nowhere to be kept.
-- **Slow it down to follow along.** `scout_attach {paceMs}` (or `scout_session {paceMs}` mid-run) sets a floor between actions, for when you want to watch a flow rather than let it run as fast as the page allows.
-- **Run about as many agents at once as your machine has cores, less two.** Each one drives a real browser.
-
----
-
-## 🎬 Recording a run, and reading it back
-
-A report says what happened. For QA work that is not always enough — the point
-is often to *show* what was checked, not to assert it.
-
-Every finding already carries a picture: the element it is about, with a margin,
-or the page as it was. It is kept in `.scenescout/recordings/`, shown under the
-finding in `report.html`, and returned with the `scout_finding` result, so a
-chat client shows the evidence the moment it is filed. Pictures are bounded in
-size and in how many reach the conversation, and a CI job keeps them on file
-only; `SCENESCOUT_EVIDENCE` and `scout_attach {evidence}` change that
-([configuration reference](docs/guide/Configuration-reference.md#environment-variables)).
-
-Ask for a recorded run and the engine also keeps a frame of the page after every action:
-
-```
-Use SceneScout to test http://localhost:3000, record the run
-```
-
-or, on the tool directly, `scout_attach {record: true}`. `SCENESCOUT_RECORD=on` in
-the server's environment records every run. A CI gate records too:
-`scenescout check --record` writes `replay.html`, every journey step by step with
-its frames ([recording a check](docs/ci.md#recording-a-check)), and
-`--template <file.json>` also writes it up as a test report laid out as a template
-says, with expected and actual results, deviations, blank sign-off rows and a
-SHA-256 manifest of the evidence ([test reports](docs/ci.md#a-test-report-from-a-template)).
-
-Then `scout_report` writes two files side by side in `.scenescout/`:
-`report.md` as always, and `report.html` — the whole run as one self-contained
-page. It opens from the file system with nothing running, needs no network, and
-holds:
-
-- **The report**, rendered from the same Markdown: the plain-language view
-  first (each problem's steps, what was expected, what happened and its
-  picture), with each problem's technical detail one click away.
-- **The screenshots around each finding**, in an accordion under it, from the
-  session that filed it.
-- **Every session's trail**, in the blocks its tasks made, each step with the
-  page as it was at that moment.
-
-<p align="center"><img src="examples/screenshots/run-page.png" alt="The saved copy of a run, opened from the file system with nothing running: a finding with its evidence accordion open, showing the four screenshots taken around it with the action and time under each" width="880" /></p>
-
-The live view serves the same document at `run` while the engine is still up,
-and sends you there when the run ends — so the address survives a refresh
-instead of a panel over a dead board.
-
-**What it costs.** Frames are pictures of the app under test, inside the tested
-project's folder, and the secret redaction that protects everything else the
-engine writes cannot read a picture. That is why it is off unless asked for,
-capped per session, and written only under `.scenescout/`, which ignores itself
-so `git add -A` in the tested project cannot pick the frames up. The reasoning is in
-[ADR 8](docs/adr/0008-a-recorded-run-is-evidence-and-must-be-asked-for.md).
-
----
-
-## 🔄 How a run works
-
-One curiosity loop, repeated — breadth first, then judgment where it matters:
-
-```
-scan ──▶ attach ──▶ crawl ──▶ investigate ──▶ measure ──▶ report
- │         │          │            │              │           │
-routes   browser   every route  reproduce &   journeys +   gap-checked
-& auth   (r/o)     in ONE call   file findings  design audit  markdown
-```
-
-1. **Scan** the project — framework, routes, auth states.
-2. **Attach** a browser (read-only unless you said otherwise).
-3. **Crawl** every known route in a *single* call — per-route HTTP status, element counts, oracle violations, dead ends.
-4. **Investigate** what the crawl flagged: navigate, snapshot, reproduce, file a structured finding.
-5. **Measure** task ease (`scout_journey`) and design quality (`scout_design_audit`) on representative pages.
-6. **Report** — the engine checks the gap ledger and writes `.scenescout/report.md`.
-
-Snapshots are cheap: re-snapshotting a route returns only *what changed*, with stable refs (measured on a 130-element page: 10.7 kB → 0.7 kB).
-
----
-
-## 🧰 The toolbox
-
-35 deterministic tools. The agent picks; you rarely call these by hand.
-
-| Phase | Tools | What they do |
-|---|---|---|
-| **Set up** | `scout_playbook` `scout_intake` `scout_scan` `scout_attach` `scout_session` | Hand the testing method to an agent that has no skill loaded; ask the start-of-run questions as one form where the client can show one; discover routes; launch a browser in a write-mode; keep several authenticated roles alive at once |
-| **Explore** | `scout_crawl` `scout_coverage` | Sweep every route in one call; ask what's still untested |
-| **Look** | `scout_snapshot` `scout_hover` `scout_screenshot` `scout_capture` | Read the structured scene (diffed); reveal tooltips/hover cards; capture pixels only when needed; save one element as a PNG to show someone |
-| **Ask the server** | `scout_request` `scout_network` | Call the app's own API as this session, with the UI bypassed — the check that turns a hidden button into a proven refusal; list the requests the page itself made since it loaded |
-| **Act** | `scout_click` `scout_type` `scout_select` `scout_upload` `scout_press` `scout_scroll` `scout_navigate` `scout_back` `scout_run_plan` | Drive the UI like a user; `scout_run_plan` batches a whole mechanical sequence into one call |
-| **Assess** | `scout_design_audit` `scout_journey` | Score a page's craft/a11y/consistency; measure how hard a task is to complete |
-| **Record** | `scout_note` `scout_finding` `scout_resolve` `scout_report` | Curate durable notes; file deduped findings; mark fixes; write the report, and on a recorded run the whole run as one page |
-| **Answer tickets** | `scout_tickets` `scout_criterion` | Read the acceptance criteria in pasted or uploaded tickets; record each criterion as passed, failed (with the findings that show it) or not tested (and why), with a confidence |
-| **Re-test** | `scout_verify` | List the findings earlier runs left open, worst route first, and record whether each is gone, still present, or changed |
-| **Split the work** | `scout_lane_brief` `scout_lane_report` | Divide the app between parallel agents by whole module, each with its own landing route and rules; fold what each hands back as one typed JSON object, and name any defect it judged but never filed |
-| **Close** | `scout_close` | Tear down one session or all |
-
-A few that punch above their weight:
-
-- **`scout_crawl`** — the entire breadth pass in one tool call. No visiting routes one-by-one.
-- **`scout_run_plan`** — up to 20 actions (fill form → submit → check) with semantic targets (`testid=…`, `text=…`), aborting at the first anomaly.
-- **`scout_journey`** — wraps one goal and reports interaction count, screens seen, and **backtracks**; an abandoned journey is a finding no passing E2E suite can produce.
-- **`scout_upload`** — generates a *valid* in-memory fixture (real PDF/PNG, kind inferred from `accept`) so file-upload flows stop being a blind spot.
-- **`scout_click {clicks: 2}`** — the impatient-user probe: states whether a double-click fired the same state-changing request twice (the classic double-submit bug).
-- **`scout_request`** — calls the app's own API as the session, so "the button is hidden" becomes "the server refuses it" (or doesn't).
-
-Beyond crashes and HTTP errors, two oracles catch a page **contradicting the server**: `refused_empty` (a list request was refused and the page shows its empty state with no error) and `false_success` (a save was refused and the page says it worked). A third, `dom_injection`, reports a typed markup value coming back as an element on any page any session opens. A fourth, `postmessage_token`, reports a page calling `postMessage` with targetOrigin `"*"` on a message that carries a token (a JWT, a `Bearer` value, or an opaque value under a key such as `access_token`): the report names where in the message it was, its shape and its first four characters, never the token.
-
----
-
-## 📊 Test levels
-
-Each level is a contract. `scout_report` enforces what the engine can see for itself — routes visited, pages audited, and at `extensive` an empty gap ledger (every route exercised and audited, every filled form submitted, a completed journey, two roles) — and the report's gap ledger discloses the rest.
-
-| Level | What it guarantees | Rough size |
-|---|---|---|
-| `minimal` | Every route visited, ≥1 design audit, key journeys as plans, crawl problems triaged. Remaining gaps **disclosed**. | ~40 actions |
-| `medium` *(default)* | minimal + design audits across several routes (enforced) + every element class exercised + every form submitted valid **and** invalid (asked of the agent) | ~150 actions |
-| `extensive` | medium + fuzzing, back/refresh/deep-link resilience, keyboard-only pass, a journey per module, ≥2 roles compared, anonymous auth-surface walk. **Refuses to finalize while any gap in the ledger remains.** | budget-capped |
-
-That refusal *is* the guarantee: an extensive report can only exist when nothing the engine can measure was left untested. Fuzzing, the keyboard pass and the auth-surface walk are the agent's to do; the engine cannot see whether they were done well.
-
----
-
-## 🔒 Safety model
-
-- 🔵 **`observe`** (`--observe`) lets nothing but `GET` requests leave the page. The one exception is what a session needs in order to exist: logging in, logging out and refreshing a token. Signing up, changing or resetting a password and creating users are blocked like any other write. WebSocket frames are not inspected; the engine says so when the app opens a socket. It is what the skill picks for a remote URL with no source, where an ordinary form POST would create a real record. Forms that could not be submitted are listed in the gap ledger.
-- 🟢 **`read-only` by default.** Destructive-labeled elements (delete/revoke/archive/…) **and** all `PUT/PATCH/DELETE` + destructive `POST`s are blocked at the network layer — see [`src/engine/policy.ts`](src/engine/policy.ts). Non-destructive `POST`s are allowed, because submitting forms is how a tester finds validation bugs — so read-only means *nothing existing is changed or removed*, not *nothing is ever created*.
-- 🟡 **`safe-write`** (`--safe-write`) lets the agent create data and edit/delete **only what it created** this run — never pre-existing records.
-- 🔴 **`destructive`** (`--allow-destructive`) allows everything, and only ever when *you* confirm the environment is disposable. The skill will never choose this itself.
-- 📂 Findings, memory, and reports live in a `.scenescout/` folder in the project. A client with no project folder, such as a desktop chat, gets one folder per tested site under `Documents/SceneScout/<host>/` by default, and the attach says where; `SCENESCOUT_PROJECTS_DIR` moves it. The folder ignores itself in git, so a stray `git add -A` never commits test data.
-
-A `🛡 WRITE-POLICY blocked` notice is the safety net doing its job, not an app bug. The server never sees a blocked request, but a page's own `fetch` or XHR is answered with a `403` in its place rather than dropped, so the page's handling of a refusal really runs: a page that then claims success is reported as a `false_success` ([ADR 9](docs/adr/0009-a-refused-write-is-answered-not-dropped.md)).
-
-A control is judged by its own label: a dropdown by the option picked, a row by its own text rather than the buttons inside it, and "Discard changes" on an unsent form is allowed. When a page asks to confirm leaving unsent input, the result says so; `observe` and `read-only` stay unless the call passes `leave: true`. See the [safety model](docs/guide/Safety-model.md).
-
----
-
-## 📋 What you get
-
-`.scenescout/report.md` and `report.html` open **In plain words**: a short summary, then each problem this run found, worst first, with its impact, the steps that led to it, what was expected, what happened and a picture when there is one. The technical detail (id, category, evidence, route) stays one click away.
-
-`.scenescout/report.md` — a deduplicated, worst-first report with:
-
-- 🐛 **Findings** with repro traces and generated Playwright regression-test skeletons.
-- 🔎 **Worth a look** — observations that are defects only under a convention of your project the run cannot see (a spacing scale, link styling in navigation, test ids on every control), each naming that convention. Listed below the findings and not counted as defects ([ADR 13](docs/adr/0013-a-convention-is-the-projects-to-decide.md)).
-- 💯 **Page scores** (0–100: a11y · craft · consistency · task-clarity), ranked worst-first, with stale scores from old runs marked as such.
-- 👥 **A role capability matrix** — what each role could and couldn't reach.
-- 🧾 **A gap ledger** — everything *not* done, so the report is honest about its own coverage.
-- ⏱️ **How the run was paced** — how closely each session kept working, and apart from that, how long finished lanes held their browsers waiting to be collected, so neither hides the other.
-- 🎯 **How well the lanes judged** — on a parallel run, whether the confidence each lane stated matched what the project went on to file, beside what later re-tests found ([ADR 10](docs/adr/0010-a-confidence-is-checked-not-trusted.md)).
-
-`.scenescout/report.html` — the same report as one self-contained page, with every session's trail beside it. Each finding shows a picture of the element it is about, or of the page as it was. A [recorded run](#-recording-a-run-and-reading-it-back) also shows the screenshots around each finding.
-
-👀 Watch a run live: `npx scenescout watch`, or `npx scenescout status <project-path>` for the same information as text.
-
----
-
-## 🚦 In CI: a deterministic check
-
-An exploratory run is driven by a model, so two runs never find exactly the same things. That suits a report, but not a gate. `scenescout check` is the part that needs no model. It visits the start URL, the project's scanned routes and every same-origin link it finds, and measures each page:
-
-- HTTP and page errors
-- layout geometry (covered, clipped and overlapping controls, blocking overlays)
-- broken images
-- controls with no name, and fields whose only label is a placeholder
-- contrast and focus
-- pages with no way out
-
-Some of what it measures is a defect only under a convention the check cannot see: paddings off a 4px grid, and links styled like body text. Those are listed under **Worth a look**, each with the convention that would make it a defect. They are never counted and never fail the gate, at any `--fail-on`; SARIF reports them at level `note` ([ADR 13](docs/adr/0013-a-convention-is-the-projects-to-decide.md)).
+**1. Install** for your agent (Node 20 or newer):
 
 ```bash
-npx scenescout check http://127.0.0.1:3000 --fail-on high
+npx -y scenescout install                      # Claude Code: skill, MCP server and the test browser
+npx -y scenescout install --client cursor      # or vscode, codex, gemini, copilot, windsurf
+npx -y scenescout doctor                       # every line should be a ✓
 ```
 
-| Exit code | Meaning |
-|---|---|
-| 0 | Passed the gate |
-| 1 | Failed it: something at the `--fail-on` severity or worse |
-| 2 | Could not run, or not all of it: a bad argument, an app that never answered, only the sign-in page reached, a saved flow that is not valid, or a flow step the write policy refused |
+<details>
+<summary>Other ways to install: a Claude Code plugin, the Claude Desktop extension, or by hand</summary>
 
-It writes `report.md`, `check.sarif` (for code-scanning dashboards) and `check.json` to `.scenescout/check/`, and on GitHub Actions it also puts the report on the job's summary page.
+- **Claude Code plugin:** `/plugin marketplace add brunoboto96/SceneScout`, then `/plugin install scenescout@scenescout-marketplace`. The command becomes `/scenescout:scenescout`.
+- **Claude Desktop:** download `scenescout-X.Y.Z.mcpb` from the [latest release](https://github.com/brunoboto96/SceneScout/releases/latest) and open it. No terminal needed.
+- **Any other MCP client:** add a stdio server whose command is `npx -y scenescout serve`. [Each client's config](docs/guide/Start-here.md#a-client-that-install-does-not-know).
 
-On GitHub Actions, this repository is also an action that installs everything and keeps the results:
+</details>
+
+**2. Start your app**, then a fresh session of your agent, and ask:
+
+```text
+Use SceneScout to test http://localhost:3000
+```
+
+In Claude Code there is a command too: `/scenescout --url http://localhost:3000 --level medium`. On its own, `/scenescout` asks you four plain questions instead: where the app is, how you sign in, what to check, and whether it holds real data.
+
+**3. Read the report** in `.scenescout/report.md`. It opens in plain words (each problem, its steps, what was expected and what happened), with the technical detail one click away. [A complete example](examples/report.md).
+
+**No app handy?** Clone this repository and run `npm run demo:serve`: the [demo app](demo-app/) starts on `http://127.0.0.1:4173`, and its README lists every planted bug.
+
+**Behind a sign-in?** Sign in once yourself, SSO and MFA included, and every session reuses it:
+
+```bash
+npx -y scenescout login http://localhost:3000 --role admin    # then: /scenescout --role admin
+```
+
+[Signing in](docs/guide/Signing-in.md) covers roles, expiry and scripted sign-in for CI.
+
+## 🚦 In CI
+
+| | What it does | Needs a model? |
+|---|---|---|
+| [`scenescout check`](docs/guide/Ways-to-use-it.md#scenescout-check-a-gate-in-ci) | A deterministic gate: measures every page, replays your saved flows and visual baselines, fails only on what it can prove | No |
+| [`scenescout ci`](docs/guide/Ways-to-use-it.md#scenescout-ci-an-unattended-exploratory-run) | An unattended exploratory run, driven by the Anthropic or OpenAI API. It reports and never fails the build | An API key |
+| [`/scenescout qa`](docs/guide/Ways-to-use-it.md#scenescout-qa-on-a-pull-request) | A comment on a pull request that tests its preview deploy and replies with the results; `/scenescout qa check` runs your own check instead | An API key (`qa check`: none) |
+| [`scenescout export`](docs/guide/Ways-to-use-it.md#filing-findings-as-issues) | Files the findings as GitHub or Jira issues, each once | No |
+
+A gate on every pull request, as a GitHub Action:
 
 ```yaml
-- uses: brunoboto96/SceneScout@v3.10.0
+- uses: brunoboto96/SceneScout@v3
   with:
     url: http://127.0.0.1:3000
 ```
 
-[docs/ci.md](docs/ci.md) has a complete workflow (start the app, wait for it, check it), the action's inputs and outputs, code-scanning upload, and the same check on GitLab CI, CircleCI or any shell.
+[docs/ci.md](docs/ci.md) has complete workflows, every option, and the same check on GitLab CI, CircleCI or any shell.
 
-With the default settings its saved flows send no HTTP write (they replay under observe's rule), and its crawl runs under `--mode observe` or `read-only`; `--flow-writes allow` lets flows write as `--mode` allows. By default it fails only on facts that mean a page is broken: a page that did not load, an uncaught exception, a 5xx, a failure shown as success. Other options:
+## 🔒 Safe by default
 
-- `--fail-on medium` or `low` makes the gate stricter.
-- `--ignore <rule>` drops a rule, worth-a-look rules included.
-- `--paths /a,/b` checks only those pages.
-- `--storage-state <file>` checks while signed in.
-- `--flows <dir>` or `off` chooses which saved flows to replay; `--retest off` skips re-testing open findings.
-- `--flow-writes never|allow` (default `never`): `never` replays flows under observe's rule whatever `--mode` says; `allow` replays them under `--mode`, so in `read-only` a flow's form submissions are sent to the target on every run.
-- `--on-refused-step report|stop` (default `report`): `report` marks a flow whose step was refused "could not run", keeps every other verdict and exits 2; `stop` exits 2 at that step with no results.
-- `--gate-retests never|high|all` (default `high`): which still-reproducing re-tested findings fail the gate.
-- `--baseline off|compare|update` (default `off`), with `--baselines <dir>` and `--baseline-threshold <percent>` (default `0.1`, so small anti-aliasing noise between machines passes): visual baselines, below.
-- `--record` (or `SCENESCOUT_RECORD=on`; the action's `record: on`) keeps a frame after each route visit and each saved-flow step and writes `replay.html` beside the report: each role, each journey with a pass or fail badge, each step with its caption, result and frame, the first failing step highlighted. `--video` (the action's `video: on`) adds a WebM of each journey, played on that page beside its steps. Both off by default. [docs/ci.md](docs/ci.md#recording-a-check) covers size, privacy and publishing it.
-
-The defaults are what an unconfigured check does, for a first try or an AI agent running it unattended: its flows send no HTTP write and it never silently hides a result. Each setting is a choice for the project; the report and `check.json` print the values a check ran with.
-
-`scenescout check --help` lists every option. Why the defaults are what they are: [ADR 11](docs/adr/0011-a-gate-is-deterministic-and-fails-only-on-what-it-can-prove.md).
-
-It also replays the flows saved in `.scenescout/flows/*.json`, with no model: the steps `scout_run_plan` takes (navigate, click, type, select, press, and upload, which attaches a generated file) plus `expect-text`, `expect-element` (a control is visible, hidden, enabled, disabled, checked or unchecked), `expect-url` and `expect-request`, and `repeat` to run actions until a condition holds (page through a document until Continue is enabled). A flow can name the `role` it runs as, signed in with a profile `scenescout login --role` saved, so a journey that passes between people (one submits, another approves) is a sequence of flows. Values can come from the environment, `${env:NAME}`, so a code or a password stays in the CI's secret store and is masked in everything the check writes. A flow whose step breaks fails the gate, naming the flow and the step. And it re-tests the open findings earlier runs left in the project's memory that a page load can reproduce, reporting each as still reproducing or possibly fixed; by default a finding filed high that still reproduces fails the gate. [docs/ci.md](docs/ci.md#saved-flows) has the flow format; [ADR 12](docs/adr/0012-a-check-replays-saved-flows-and-reports-re-tests.md) says why it works this way.
-
-With `--baseline compare` it also holds pages and elements to approved pictures: list them in a `targets.json`, take the baselines once with `--baseline update`, and a later check that finds one changed past `--baseline-threshold` fails the gate with the share of pixels changed and a diff picture beside the report. Baselines are kept per browser, in a git-ignored folder unless `--baselines` names one the project commits, and only `--baseline update` ever writes one. [The guide](docs/guide/Ways-to-use-it.md#visual-baselines) has the details; [ADR 19](docs/adr/0019-a-visual-baseline-changes-only-when-asked.md) says why.
-
-Beyond those flows it explores nothing and fills no forms. That is the exploratory run's job, and its findings belong in a report, not a gate.
-
-## 🤖 In CI: an unattended exploratory run
-
-`scenescout ci` runs the exploratory side in a CI job, with no person and no coding agent. A model reached through its API drives the same `scout_*` tools by the same method, and the run ends in the ordinary report:
-
-```bash
-export OPENAI_API_KEY=…          # or ANTHROPIC_API_KEY; read from the environment only
-npx scenescout ci http://127.0.0.1:3000
-```
-
-- **It reports and never gates.** Exit 0 when the run ran, whatever it found; exit 2 when it could not run (no key, a key the API refused, an app that never answered). Two runs of the same app find different things, so a finding is something to read, never a reason to fail a build. `scenescout check` is the gate.
-- **Providers:** the Anthropic Messages API (default model `claude-sonnet-5`) or the OpenAI Responses API (default `gpt-6-luna`), chosen by which key is set; with both set, `--provider` decides. `--model` and `--effort` (default `low`) override; `--base-url` points at another endpoint that implements the same API.
-- **Caps:** at most 80 model turns, 3,000,000 tokens and 20 minutes (`--max-turns`, `--max-tokens`, `--max-minutes`), shared by two model loops that each explore their own part of the app (`--lanes`, default 2). The first cap reached ends the exploration; the report is still written, and says which cap ended it. On the benchmark's demo app a run at these defaults cost about $0.03 on `gpt-6-luna` ([docs/benchmark.md](docs/benchmark.md#choosing-the-defaults-issue-419)).
-- **Mode:** `read-only` by default; `--mode observe` sends no form at all, `--mode safe-write` lets the run create records and change only the ones it created. `--mode destructive` runs only with `--allow-destructive` as well.
-- **Duplicates:** when the dedup rule keeps a filed finding apart, the run's model is asked at its lowest effort whether it is one already open on the same page, and merges it on a "same", keeping the filing's title, category, severity and evidence under that finding. The two findings' titles, categories and evidence, and the page's path, are sent; `--dedup rule` turns it off ([ADR 17](docs/adr/0017-a-model-judges-only-the-merges-the-rule-misses.md)).
-- **Starting from an earlier run (opt-in):** every run that writes its report leaves a record in `ci.json` and the project's memory: the routes it worked on, its steps, and what it left on each route. `--from-run <ci.json or project directory>` continues where that run left off (routes it never worked on first, then the ones it left work on, with exactly which forms, options and controls to take first), and `--from-run-mode replay` follows its routes and steps in order. `scout_lane_brief {fromRun, fromRunMode}` does the same for a parallel run. On the demo app a chain of continued runs found 8 defects against 7 for fresh runs at the default budget, and 4, 3 and 4 against 4 at a budget cut to stand in for a larger app, within the noise, so it stays off unless asked for ([the measurement](docs/benchmark.md#starting-from-an-earlier-run-issue-418)).
-- **Output**, in `.scenescout/ci/` (or `--out`): `report.md` and `report.html` (the report an agent's run writes), `summary.md` (also appended to the GitHub job summary), `ci.json` and `ci.sarif`, with a usage line: turns, tokens, time and an estimated cost where the model's price is known (`--price-in`, `--price-out` give one for any model).
-
-There is a GitHub Action for it (`uses: brunoboto96/SceneScout/ci@…`). [docs/ci.md](docs/ci.md#an-unattended-exploratory-run) has the workflow and every option; [ADR 14](docs/adr/0014-an-unattended-run-reports-and-never-gates.md) says why it works this way.
-
-On a pull request, an allowed account can comment `/scenescout qa` to run it against that pull request's deployed preview and get the results as a reply. The job that holds the key checks out nothing and runs SceneScout from an exact release tag, so the pull request's code never runs beside the key. A project without previews can comment `/scenescout qa check` instead: it dispatches the project's own recorded `scenescout check` workflow on the pull request's branch and replies with the verdict, per journey, with no model key involved. [docs/ci.md](docs/ci.md#a-qa-review-from-a-pull-request-comment) has the workflows to copy and what a project configures; [ADR 15](docs/adr/0015-a-qa-comment-tests-a-preview-and-never-runs-the-pull-requests-code.md) says why.
-
-## 📮 Filing findings as issues
-
-`scenescout export` turns the project's open findings into GitHub or Jira issues, where the team already works. It reads `.scenescout/memory.json`, so it runs after an interactive run, `scenescout ci` or anything else that wrote findings:
-
-```bash
-export GH_TOKEN=…        # or GITHUB_TOKEN; for Jira, JIRA_EMAIL and JIRA_API_TOKEN. Read from the environment only
-npx scenescout export --to github --repo owner/app          # a dry run: lists what it would file
-npx scenescout export --to github --repo owner/app --yes    # files it
-npx scenescout export --to jira --jira-url https://your-site.atlassian.net --jira-project QA --yes
-```
-
-- **Each finding once.** Every issue carries the `scenescout` label and a marker with the finding's id. Before filing, the export reads the labelled issues, open or closed, and skips every finding already filed, naming its issue, so a second export of the same run files only what the first left over the cap. A closed won't-fix is not filed again; `--refile-closed` files a finding again when its issue is closed.
-- **Jira issues are kept up to date and linked to the ticket.** A later export updates an open Jira issue instead of filing another, leaving text someone edited in Jira as they wrote it. The finding's picture is attached, and a finding that fails a ticket's acceptance criterion is linked to that ticket (`--jira-link-type`, default `Relates`).
-- **A dry run unless `--yes`**, and at most `--max-issues` (default 20) per export; the next export files the rest. `--min-severity`, `--only <ids>` and `--include-worth-a-look` choose what goes.
-- **Inert issues.** Titles, descriptions, steps and evidence come from the run and the app's pages, so no `@mention`, link, `#123` reference, HTML or Markdown in them does anything.
-- **Severity** becomes a label on GitHub and a priority in Jira; `--severity-map` renames them or turns them off. **Screenshots** from a recorded run are attached in Jira; GitHub's API takes no uploads, so a GitHub issue names the frames in the run's `.scenescout/` folder.
-- **Credentials** are never printed. Every request has a timeout, a short rate limit is waited out, failed reads are retried with backoff, and redirects are refused. Jira's search can take a little while to show a new issue, so leave a few minutes between two exports to the same Jira project.
-
-[The guide](docs/guide/Ways-to-use-it.md#filing-findings-as-issues) has the details and a GitHub Actions step.
-
----
-
-## 🩺 Troubleshooting
-
-Run `npx -y scenescout doctor` first — it checks every setup item below (everything but the last row, which is about your app) and prints the fix.
-
-| Symptom | Cause and fix |
+| Mode | What may leave the page |
 |---|---|
-| `/scenescout` isn't a known command | The skill isn't linked, or the session predates it. `npx -y scenescout install`, then start a **fresh** Claude Code session. |
-| The `scout_*` tools don't appear | The MCP server isn't registered, or points at an old path. `npx -y scenescout install` re-registers it; `claude mcp list` should show `scenescout` as connected. |
-| *"Executable not found in $PATH"* | The server was registered with a bare `node`. `npx -y scenescout install` registers an absolute path. |
-| Installed as a plugin, and the tools fail with *"Executable not found in $PATH: npx"* | A plugin starts the server with a bare `npx`, which Claude Code can only find if it was launched from an environment that has Node on its `PATH`. Under nvm or fnm that means starting Claude Code from a terminal, not from a dock or launcher. Or use `npx -y scenescout install` instead, which registers the absolute path of `npx`. |
-| *"… build has not been downloaded yet"* on attach | The attach downloads a missing browser itself, once, except in CI or with `SCENESCOUT_BROWSER_DOWNLOAD=off`; there, or when that download failed, it names the command to run. Run the command the message names, for example `npx -y scenescout install --browser-only --browsers firefox`. On Linux, system libraries may be missing too: `npx playwright install --with-deps chromium`. |
-| Tools broke after moving the folder or changing node version | The registration stores absolute paths. `npx -y scenescout install` refreshes them. |
-| Attach fails or every route lands on the login page | Your app isn't running at `--url`, or the `--role` session has expired. For a saved login, run `scenescout login <url> --role <name>` again; for a storage-state file, regenerate it the way your project's Playwright setup does. |
+| 🔵 `observe` | Reads only. The default for a first look, for `scenescout check`, and for an agent's run on a remote site with no source |
+| 🟢 `read-only` | Reads and ordinary form posts; nothing existing is changed or deleted. The default for an agent's run on a local app |
+| 🟡 `safe-write` | Creates records, and edits or deletes only the ones it created |
+| 🔴 `destructive` | Everything. Only when you say the data is disposable; the agent never picks it |
 
-### ⬆️ Upgrading from an older version
+The policy sits on the network, so a blocked request never reaches your server. The page gets a refusal instead, which is how SceneScout catches a page that claims success anyway. Findings, memory and reports stay in a `.scenescout/` folder that keeps itself out of git.
 
-- **Tools are now `scout_*`.** Up to v0.23 they were prefixed `ft_`. The rename happened before the first npm release, with no aliases, so an agent's context carries one tool list rather than two. Re-run `npx -y scenescout install` so the installed skill matches the server.
-- **Earlier names.** This tool was previously called SceneCraft (and, before that, frontend-tester). `scenescout install` cleans up after both: it removes the old skill link and the old `scenecraft` MCP registration when they point at this install, and the first attach in a project moves its `.scenecraft/` memory folder to `.scenescout/` so earlier coverage and findings carry over.
+> [!IMPORTANT]
+> Only test sites you own or are allowed to test. [Safety model](docs/guide/Safety-model.md).
 
-### 🧹 Uninstall
+## 📚 Documentation
 
-```bash
-# Claude Code
-claude mcp remove --scope user scenescout
-rm -rf ~/.claude/skills/scenescout
-# Codex / Gemini / Copilot CLI
-codex mcp remove scenescout        # likewise: gemini mcp remove …, copilot mcp remove …
-```
-
-For Cursor, Windsurf and VS Code, delete the `scenescout` entry from the client's MCP server list.
-
-Nothing else is installed: `npx` runs the package from npm's cache. Per-project memory lives in each tested project's `.scenescout/` folder; delete it there if you want it gone.
-
----
-
-## 🌐 Choosing browsers
-
-`install` downloads Chromium and nothing else unless you ask. `--browsers` takes one name, a comma-separated list, or `all`:
-
-| `--browsers` | What is downloaded | About, on disk |
-|---|---|---|
-| `chromium` *(default)* | the full browser and the headless shell | 550 MB |
-| `chromium-headless-shell` | the headless shell only: every run works except `headed` | 200 MB |
-| `firefox` | Firefox | 270 MB |
-| `webkit` | WebKit, the engine behind Safari | 290 MB |
-| `all` | Chromium, Firefox and WebKit | 1.1 GB |
-
-```bash
-npx -y scenescout install --browsers chromium-headless-shell   # the smallest working setup
-npx -y scenescout install --browser-only --browsers firefox,webkit   # add two more later
-```
-
-Sizes vary by platform. The builds go to Playwright's shared cache, so a build another tool already fetched is not downloaded again.
-
-The first attach that needs a build which is not on disk downloads it itself, once, and says so ("Getting the test browser ready"). It does not in CI unless `SCENESCOUT_BROWSER_DOWNLOAD=on` is set, and never with `SCENESCOUT_BROWSER_DOWNLOAD=off`, for a machine where nothing may be downloaded.
-
-To drive another browser, pass `browser` when attaching (`scout_attach { browser: "firefox" }`), or set `SCENESCOUT_BROWSER=webkit` in the server's environment to change the default. `scenescout doctor` checks the browser named by that variable in the shell it runs from, so check another one with `SCENESCOUT_BROWSER=webkit scenescout doctor`. Two things differ outside Chromium:
-
-- **Service workers are not allowed to register** in Firefox and WebKit. The write policy works by intercepting requests, and only Chromium lets a request issued by a service worker be intercepted. An app that depends on its worker may behave differently there.
-- **A Firefox or WebKit left behind by a crash is not cleaned up** on the next start the way a leftover Chromium is.
-
-In every browser, pages are not given shared workers unless the mode is `destructive`: a request a shared worker sends cannot be intercepted anywhere, so the app is made to do that work on the page, where the policy sees it.
-
-### Time limits
-
-An action on the page (a click, typing, a hover, a pick from a list) may take 5 s, and a page 20 s to load (15 s for a page the crawl opens). On a loaded machine these can run out while the app is fine; the timeout then says which limit ran out and how to raise it. Raise them per session with `scout_attach { actionTimeoutMs: 15000, navTimeoutMs: 60000 }`, for every session with `SCENESCOUT_ACTION_TIMEOUT_MS` and `SCENESCOUT_NAV_TIMEOUT_MS` in the server's environment, or on `scenescout check` and `scenescout ci` with `--action-timeout-ms` and `--nav-timeout-ms`. An option wins over the variable, and the variable over the default. The action limit takes 1000 to 120000 ms and the page-load limit 1000 to 300000 ms; anything else refuses the attach with a sentence naming the value to fix. Saving a login profile with `scenescout login` honours the two variables as well, and otherwise keeps its own longer waits (30 s for the page, 10 s for a field or the submit).
-
-## 🔌 Other MCP clients
-
-The engine is a plain MCP server over stdio, so any client can drive it, and the testing method reaches the agent through the server itself (see the end of this section). `install` can register it for you:
-
-```bash
-npx -y scenescout install --client cursor            # one client
-npx -y scenescout install --client vscode,codex      # several; add claude-code to keep that one too
-```
-
-| `--client` | How it is registered |
+| | |
 |---|---|
-| `claude-code` *(default)* | `claude mcp add`, plus the skill |
-| `cursor` | adds an entry to `~/.cursor/mcp.json`, keeping the others |
-| `vscode` | VS Code's own `code --add-mcp`. A `code` command that belongs to another editor is not used |
-| `codex` | `codex mcp add` |
-| `gemini` | `gemini mcp add --scope user` |
-| `copilot` | `copilot mcp add` (GitHub Copilot CLI) |
-| `windsurf` | adds an entry to `~/.codeium/windsurf/mcp_config.json`, keeping the others |
+| [Start here](docs/guide/Start-here.md) | A first look, install, a first run, reading the report, the live view |
+| [Ways to use it](docs/guide/Ways-to-use-it.md) | Interactive runs, parallel agents, CI, pull-request QA, filing issues |
+| [What it checks](docs/guide/What-it-checks.md) | Every check and every `scout_*` tool |
+| [Signing in](docs/guide/Signing-in.md) · [Safety model](docs/guide/Safety-model.md) | Roles and saved logins; what each mode refuses and why |
+| [Recipes](docs/guide/Recipes.md) | Setups for seven kinds of project |
+| [Configuration reference](docs/guide/Configuration-reference.md) | Every option, environment variable and action input |
+| [Troubleshooting](docs/guide/Troubleshooting.md) | Symptoms and fixes, upgrading and uninstalling |
+| [How it works](docs/how-it-works.md) | Diagrams of a run, an action, the write policy, lanes |
+| [Benchmark](docs/benchmark.md) · [Validation](docs/validation.md) | How runs are scored against answer keys, and runs on public apps |
+| [Design decisions](docs/adr/README.md) | Why the rules are what they are |
 
-A config file that is not valid JSON is left untouched, and the entry to add by hand is printed instead; a config that is a link into a dotfiles repository is written through the link. When a client that is registered through its own command is not installed, `install` says so and prints the command to run later. Cursor and Windsurf are files, so their entry is written whether or not the editor is installed yet. On Windows, a client installed through npm is a `.cmd` shim that `install` cannot start; it prints the command for you to run instead. Then restart the client and ask its agent: *"Use SceneScout to test http://localhost:3000"*.
+## 🔧 Contributing
 
-What has been checked: registering through each command above was run against Codex CLI, Gemini CLI, GitHub Copilot CLI and VS Code, and Cursor's command line agent read the entry `install` wrote, connected and listed the tools. The Windsurf path follows its documentation. A full test session has been run in Claude Code, with and without the skill. If a client behaves differently for you, a correction is welcome (say which client version you checked).
+Start with [VISION.md](VISION.md) (what is in scope) and [CONTRIBUTING.md](CONTRIBUTING.md) (local setup and how changes land). [AGENTS.md](AGENTS.md) holds the house rules for people and coding agents alike.
 
-To register by hand instead, the server entry is always the same command, `npx -y scenescout serve`:
+Found a way past the write policy, or another security problem? Report it privately: [SECURITY.md](SECURITY.md).
 
-<details>
-<summary><strong>Cursor</strong> — <code>~/.cursor/mcp.json</code> (or <code>.cursor/mcp.json</code> in a project)</summary>
-
-```json
-{
-  "mcpServers": {
-    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"] }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>VS Code</strong> (GitHub Copilot agent mode) — <code>.vscode/mcp.json</code></summary>
-
-```json
-{
-  "servers": {
-    "scenescout": { "type": "stdio", "command": "npx", "args": ["-y", "scenescout", "serve"] }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Codex CLI</strong> — <code>~/.codex/config.toml</code></summary>
-
-```toml
-[mcp_servers.scenescout]
-command = "npx"
-args = ["-y", "scenescout", "serve"]
-```
-
-</details>
-
-<details>
-<summary><strong>Gemini CLI</strong> — <code>~/.gemini/settings.json</code> (or <code>.gemini/settings.json</code> in a project)</summary>
-
-```json
-{
-  "mcpServers": {
-    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"] }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Windsurf</strong> — <code>~/.codeium/windsurf/mcp_config.json</code></summary>
-
-```json
-{
-  "mcpServers": {
-    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"] }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Cline</strong> — MCP Servers → Configure → Configure MCP Servers (or <code>~/.cline/mcp.json</code> for the CLI)</summary>
-
-```json
-{
-  "mcpServers": {
-    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"], "disabled": false, "autoApprove": [] }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Zed</strong> — <code>settings.json</code> (command palette: <code>zed: open settings file</code>)</summary>
-
-```json
-{
-  "context_servers": {
-    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"], "env": {} }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Anything else</strong></summary>
-
-Most clients accept the same `mcpServers` JSON shape shown for Cursor.
-
-</details>
-
-**The method travels with the server.** The tools are only hands and eyes; [`skills/scenescout/SKILL.md`](skills/scenescout/SKILL.md) is the method: what to look at first, when to stop, what counts as a finding. Claude Code loads it as a skill. Every other client gets the same text from the server, with nothing to copy:
-
-- the server's instructions tell the agent to call `scout_playbook` before its first attach, and that tool returns the method,
-- clients that list server prompts as commands also get an `explore` prompt, which loads the method and takes an optional URL, level and focus.
-
-So in any client, a first message like *"Use SceneScout to test http://localhost:3000"* is enough. If an agent starts clicking without having called `scout_playbook`, tell it to call that first; how closely a model follows server instructions varies by client.
-
-The CLI is also useful on its own:
-
-```bash
-npx -y scenescout scan <path>       # project discovery: framework, routes, saved logins
-npx -y scenescout status <path>     # what every session of a running engine is doing right now
-npx -y scenescout watch <path>      # the same, live in your browser, with each session's page
-npx -y scenescout login <url> --role admin   # sign in once in a visible browser; sessions attach with role: "admin"
-```
-
----
-
-## 📁 Project layout
-
-```
-src/
-  mcp-server.ts     the 29 tools + per-session dispatch
-  scan.ts           project discovery (framework, routes, auth)
-  cli.ts            scan · serve · install · doctor · check · ci · login · export · status · watch
-  check-run.ts      drives a check: attach, crawl every route, collect what was measured
-  ci-run.ts         drives a CI run: the MCP server as a child, the model's API, the agent loop
-  login-run.ts      drives `scenescout login` and scout_login: a visible browser that saves the role's profile once the sign-in is seen to finish (or on Enter); or --script, headless from the environment
-  export-run.ts     drives `scenescout export`: reads the findings, asks GitHub or Jira what is filed, files the rest
-  installer.ts      setup logic (skill link, MCP registration, diagnostics)
-  engine/
-    browser.ts      the engine class: attach, snapshot, actions, crawl, plans
-    probes.ts       in-page scroll + overlay + focus probes (needs a browser too)
-    fingerprint.ts  route + element-set identity (state hashing)
-    oracles.ts      console/page/network/HTTP error detection
-    injection.ts    the DOM-injection oracle's rules (what to watch for, how to find it)
-    claims.ts       when the page contradicts the server (refused_empty, false_success)
-    request.ts      what a replayed API call may be and where it may go
-    brief.ts        splitting the app between parallel lanes
-    lane.ts         the typed report a lane hands back
-    calibration.ts  whether a lane's confidence held up; what it judged and never filed
-    pace.ts         how a run spent its time
-    bench.ts        scoring a run against the demo app's answer key
-    policy.ts       the write-policy safety net
-    ownership.ts    safe-write: which records were created in this process?
-    uploads.ts      disk uploads, fenced to the project by real path
-    journey.ts      task-ease measurement from the action log
-    design.ts       the design audit + page scoring
-    memory.ts       cross-run storage + finding dedup
-    profiles.ts     saved sign-ins: role names, where a profile lives, owner-only files, attach by role, sessionStorage restore
-    refresh.ts      the refresh broker: which values are a role's refresh tokens, the lock beside the profile, swapping a spent token
-    scripted-login.ts  a CI sign-in: env and flags, TOTP (RFC 6238) or a fixed code, which field is which, redaction
-    signed-in.ts    when a person's sign-in in the window has finished: back on the app, a new session, past any SSO round trip
-    expiry.ts       how long a saved sign-in lasts: cookie dates and JWT exp, checked before lanes start
-    report.ts       the gap ledger + report generation
-    check.ts        the check's rules, gate, report and SARIF
-    baseline.ts     visual baselines: targets.json, where each picture is kept, when one is met
-    sarif.ts        which repository file a SARIF result points at, so code scanning keeps it
-    ci.ts           a CI run's options, provider choice, caps, key redaction, tools and files
-    export.ts       which findings an export files, the inert issue it writes, the marker that dedups it
-    provider.ts     the Anthropic and OpenAI message shapes, and retries
-    replay.ts       the run as one page: steps, tasks, frames under each finding
-    …               collector · dispatch · fixtures · authloss · reaper
-scripts/            the test suites (smoke/ holds the real-browser ones)
-test-app/           fixtures for the real-browser smoke tests
-skills/scenescout/   the testing method (SKILL.md): a skill in Claude Code, served by the server everywhere else
-docs/how-it-works.md  what happens at each stage, in diagrams
-docs/benchmark.md   measuring whether a change made runs better
-docs/validation.md  scorecards from runs against public open-source apps
-docs/adr/           why it's built this way
-```
-
-> Design principle: logic that *doesn't* need Playwright lives outside `browser.ts`, so it can be unit-tested without launching a browser. That's why `fingerprint`, `policy`, `memory`, `report`, etc. are their own modules.
-
----
-
-## 🧠 Design decisions
-
-**[How it works, stage by stage](docs/how-it-works.md)** — diagrams of the run lifecycle, what happens inside one action, the write policy on the wire, how a violation becomes a finding, how a parallel run is split and folded, how roles hand work to each other, where a run's time goes, and how a lane's confidence is checked afterwards.
-
-**[Measuring whether a change helped](docs/benchmark.md)** — the demo app's answer key, the scorecard (recall, precision, judged-not-filed, severity, calibration), and the results log of every run, including what did not help.
-
-**[Validation on public open-source apps](docs/validation.md)** — runs against three well-known open-source web apps, with a scorecard for each: issues by severity, how many were real and how many were false positives, and the engine problems the runs exposed.
-
-The load-bearing choices are recorded as ADRs — read the relevant one before changing a rule it covers:
-
-- [1 · Completion is an enforced contract, not a claim](docs/adr/0001-completion-is-a-contract-not-a-vibe.md)
-- [2 · The write policy is enforced on the wire, not in the prompt](docs/adr/0002-enforce-the-write-policy-at-the-network-layer.md)
-- [3 · A gap-ledger entry must be actionable, and suppression must be visible](docs/adr/0003-a-noisy-ledger-is-a-broken-ledger.md)
-- [4 · Findings dedup on machine signals, and a merge must never lose a finding](docs/adr/0004-dedup-on-machine-signals-not-prose.md)
-- [5 · Testable logic lives outside `browser.ts`](docs/adr/0005-keep-testable-logic-out-of-the-browser-module.md)
-- [6 · Nothing in this repo names or is tuned for a tested app](docs/adr/0006-stay-project-agnostic.md)
-- [7 · The live view is local, read-only, and leaves nothing behind](docs/adr/0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md)
-- [8 · Recording is opt-in, and a recorded run is one self-contained page](docs/adr/0008-a-recorded-run-is-evidence-and-must-be-asked-for.md)
-- [9 · A refused write is answered, not dropped](docs/adr/0009-a-refused-write-is-answered-not-dropped.md)
-- [10 · A lane's confidence is checked, not trusted](docs/adr/0010-a-confidence-is-checked-not-trusted.md)
-- [11 · A gate is deterministic, and fails only on what it can prove](docs/adr/0011-a-gate-is-deterministic-and-fails-only-on-what-it-can-prove.md)
-- [12 · A check replays saved flows and re-tests open findings, within settings whose defaults do the least harm](docs/adr/0012-a-check-replays-saved-flows-and-reports-re-tests.md)
-- [13 · What depends on a project's convention is the project's to decide](docs/adr/0013-a-convention-is-the-projects-to-decide.md)
-- [21 · Update the docs in the same pull request, unless the change has no user-facing surface](docs/adr/0021-update-the-docs-in-the-pull-request.md)
-
----
-
-## 🔧 Development
-
-Working on SceneScout itself is the only reason to clone it:
-
-```bash
-git clone https://github.com/brunoboto96/SceneScout.git scenescout && cd scenescout
-npm install        # installs dependencies and builds
-npm run setup      # same as `scenescout install`, but registers THIS checkout (the skill is linked, so edits are live)
-npm test           # build + 24 suites: 22 pure-logic suites (scan, oracle, policy, … bench, hygiene),
-                   #                     then smoke and mcp-check (the server over stdio), both with real browsers
-npm run bench -- --all   # re-score every archived benchmark run against the current answer key
-npm run demo       # regenerate examples/ from the demo app
-```
-
-Contributing? Start with [VISION.md](VISION.md) (what is in scope) and [CONTRIBUTING.md](CONTRIBUTING.md) (how changes land), then see [AGENTS.md](AGENTS.md) for the house rules — chiefly: bug fixes need a regression test at the cheapest layer that can fail, keep the repo project-agnostic (ADR 6), and `npm test` must pass.
-
-## 🔐 Security
-
-Found a way past the write policy, or another security problem? Please report it privately — see [SECURITY.md](SECURITY.md).
-
-## 📄 License
-
-[MIT](LICENSE).
-
-<details>
-<summary><strong>Full capability list</strong> — every behavior, for the curious</summary>
-
-- **Structured render-state, not pixels.** Element lists with geometry; screenshots reserved for pixel-native residue (canvas, rendering glitches). Images that failed to load are reported from the DOM, including ones whose URL answered 200 with something that is not an image.
-- **Diff snapshots with stable refs.** Re-snapshots return only what changed (10.7 kB → 0.7 kB on a 130-element page); old refs stay valid.
-- **Geometry oracles.** Overlap and off-screen defects computed from layout boxes.
-- **Oracles after every action.** Console errors, page errors, failed requests, HTTP 4xx/5xx drained into every tool result — and DOM injection: a markup-shaped value the agent typed that later renders as an element on any page (stored or reflected XSS).
-- **Multi-role, genuinely concurrent.** Commands to *different* sessions run in parallel; safe-write ownership is shared, so role A can create what role B approves. The report renders a role capability matrix.
-- **Task ease, not just correctness.** `scout_journey` measures interaction cost, distinct screens, path, and backtracks.
-- **Design audit with page scores.** Two tiers (⚠ measurable defects / → craft suggestions incl. AI-slop tells), per-page 0–100 score persisted per route, plus an automatic overlay/modal probe on every snapshot. Shared shell scored once, separately.
-- **Scrolls like a user — and notices when it can't.** Reports `SCROLL LOCKED` for a leaked modal scroll-lock, finds the real inner scroll pane on app-shell layouts, and flags `UNREACHABLE` controls clipped inside `overflow:hidden`.
-- **Uploads like a user.** Answers a styled file-chooser or sets a hidden input directly, with a valid in-memory fixture; `filePath` is fenced to the project under test; files violating `accept` are flagged at selection.
-- **Auth via Playwright storage states.** Expired tokens caught at attach; repeated login-bounces raise `SESSION AUTH LOST` (a session attached by role first re-attaches once from its role's latest saved profile and carries on); a bounced route is recorded as *not* covered — a dead session can't certify routes it never reached.
-- **A trustworthy gap ledger.** Entries must be actionable (a search box or wizard sub-step isn't "form filled but never submitted"); API/download URLs never enter the route contract.
-- **Honest reporting.** Shared chrome counted once, stale scores marked, role matrix compares only roles that actually attempted a route.
-- **Cross-run written knowledge.** `scout_note` curates `.scenescout/ASSUMPTIONS.md` — app model, personas, constraints, risks — in prose.
-- **Daemon-grade robustness.** Per-tool watchdogs, orphaned-browser reaping, bounded teardown, live status via `scenescout status <project>`, and a live view of every session's page: the agent gives you its address when it attaches, or run `scenescout watch <project>` (loopback only, read-only, nothing written to disk: [ADR 7](docs/adr/0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md)).
-
-</details>
+[MIT](LICENSE) licensed.
