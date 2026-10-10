@@ -412,7 +412,7 @@ ol.steps { list-style:none; margin:10px 0 0; padding:0; }
 .why { margin:4px 0; font-size:13px; overflow-wrap:anywhere; }
 a.frame { display:grid; margin:6px 0 2px; max-width:min(100%,720px); color:var(--muted); font-size:12px; }
 a.frame > * { grid-area:1 / 1; }
-a.frame img { position:relative; max-width:100%; max-height:400px; object-fit:cover; object-position:top; border:1px solid var(--line); border-radius:6px; display:block; background:var(--panel); }
+a.frame img { position:relative; width:100%; max-height:400px; object-fit:cover; object-position:top; border:1px solid var(--line); border-radius:6px; display:block; background:var(--panel); }
 .gone-note { align-self:end; padding:2.6em 12px 12px; border:1px dashed var(--line); border-radius:6px; }
 .noframe, .none { color:var(--muted); font-size:12px; font-style:italic; margin:4px 0; }
 .note { color:var(--muted); font-size:13px; }
