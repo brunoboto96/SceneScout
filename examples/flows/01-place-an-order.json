@@ -1,0 +1,13 @@
+{
+  "name": "place an order",
+  "id": "TC-01",
+  "requirements": ["REQ-ORD-1", "REQ-ORD-2"],
+  "steps": [
+    { "action": "navigate", "target": "/orders-new.html", "expected": "The new-order form is shown" },
+    { "action": "type", "target": "testid=new-order-customer", "value": "Harbour Bakery", "expected": "The customer is filled in" },
+    { "action": "type", "target": "testid=new-order-items", "value": "4", "replace": true, "expected": "The item count is 4" },
+    { "action": "click", "target": "testid=new-order-submit", "expected": "The order is created" },
+    { "action": "expect-request", "request": "POST /api/orders", "status": "2xx" },
+    { "action": "expect-element", "target": "testid=new-order-created-link", "state": "visible", "expected": "A link to the new order is shown" }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "see archived orders",
+  "id": "TC-03",
+  "requirements": ["REQ-ORD-4"],
+  "steps": [
+    { "action": "navigate", "target": "/orders.html", "expected": "The orders register is shown" },
+    { "action": "select", "target": "testid=orders-status-filter", "value": "archived", "expected": "Archived orders are listed" },
+    { "action": "expect-request", "request": "GET /api/orders", "status": 200 }
+  ]
+}
