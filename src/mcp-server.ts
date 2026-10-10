@@ -60,7 +60,7 @@ import {
   summarizeLaneReport,
 } from "./engine/lane.js";
 import { MAX_UNFILED_NAMED, unfiledDefects } from "./engine/calibration.js";
-import { SessionQueue, withWatchdog } from "./engine/dispatch.js";
+import { CallWork, SessionQueue, watchdogCap, withWatchdog } from "./engine/dispatch.js";
 import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
 import {
   feedForSession,
@@ -574,6 +574,33 @@ function watchdogTimeout(label: string, ms: number): ToolResult {
  */
 const sessionQueue = new SessionQueue();
 
+/** Every call's work until it settles, so a close can wait for what a watchdog let run on (engine/dispatch.ts). */
+const callWork = new CallWork();
+
+/** How long a close waits for that work once the browser is gone; anything page-bound has failed well before this. */
+const CLOSE_WORK_WAIT_MS = 10_000;
+
+/**
+ * Write the save that work finishing during a close's wait scheduled. The engine's own close has already flushed;
+ * this catches what came after it. A failure is recorded where the close reports it, as the engine's flush does.
+ */
+function flushAfterClose(eng: BrowserEngine): void {
+  try {
+    eng.memory?.flushPending();
+  } catch (err) {
+    if (eng.memory) eng.memory.lastSaveError = err instanceof Error ? err.message : String(err);
+  }
+}
+
+/** What a close says when work it waited for was still running at the end of the wait. */
+function stillRunningNote(count: number): string {
+  if (count === 0) return "";
+  return `\n⚠ ${count} tool call${count === 1 ? " was" : "s were"} still running ${CLOSE_WORK_WAIT_MS / 1000} s after the browser closed, so ${count === 1 ? "it" : "they"} may still write into .scenescout/.`;
+}
+
+/** SCENESCOUT_WATCHDOG_MS caps every tool's watchdog. Read once, at start, and a bad value stops the server here. */
+const WATCHDOG_CAP_MS = watchdogCap(process.env.SCENESCOUT_WATCHDOG_MS);
+
 function serializedPerSession<A>(
   label: string,
   fn: (args: A, session: string) => Promise<ToolResult>,
@@ -594,10 +621,13 @@ function serializedPerSession<A>(
     const exec = async (): Promise<ToolResult> => {
       // A session that raised its time limits gets its watchdog raised by as much (limits.ts).
       const current = engines.get(session);
-      const watchdogMs = current ? watchdogFor(timeoutMs, current.timeLimits) : timeoutMs;
+      const raised = current ? watchdogFor(timeoutMs, current.timeLimits) : timeoutMs;
+      const watchdogMs = Math.min(raised, WATCHDOG_CAP_MS ?? raised);
       writeStatus(session, "running", label, watchdogMs);
       try {
-        const out = await withWatchdog(label, fn(args, session), watchdogMs, watchdogTimeout);
+        const work = fn(args, session);
+        callWork.track(session, work);
+        const out = await withWatchdog(label, work, watchdogMs, watchdogTimeout);
         // `activeName` is process-global and every scout_attach moves it. With
         // several sessions live — the multi-role runs this tool encourages —
         // an omitted `session` silently binds to whichever browser attached
@@ -2816,15 +2846,24 @@ server.registerTool(
         for (const e of engines.values()) keepReport(e);
         for (const name of engines.keys()) live?.dropSession(name);
         const stores = new Set([...engines.values()].map((e) => e.memory).filter((m) => m !== null && m !== undefined));
-        await Promise.allSettled([...engines.values()].map((e) => e.close()));
+        const closing = [...engines.values()];
+        await Promise.allSettled(closing.map((e) => e.close()));
+        // Out of the live list before the wait, so a call queued behind abandoned work finds no session instead of
+        // reaching a closed one. Then wait for work a watchdog let run on to unwind, and write what it left pending,
+        // so nothing it writes lands after this answer.
         engines.clear();
+        const stillRunning = await callWork.settleAll(CLOSE_WORK_WAIT_MS);
+        for (const e of closing) flushAfterClose(e);
         for (const store of stores) store.endRun();
         sessionQueue.clear();
         board.clear();
         laneLedger.clear();
         lastWriter = null;
         await Promise.all([...dirs].map((dir) => settleProjectWrites(dir)));
-        return text(`All sessions closed (${names.join(", ") || "none were live"}). Memory and reports remain in .scenescout/.`, activeName);
+        return text(
+          `All sessions closed (${names.join(", ") || "none were live"}). Memory and reports remain in .scenescout/.` + stillRunningNote(stillRunning),
+          activeName,
+        );
       }
       const name = session ?? activeName;
       const eng = engines.get(name);
@@ -2834,8 +2873,11 @@ server.registerTool(
       keepReport(eng);
       live?.dropSession(name);
       await eng.close();
-      const saveError = eng.memory?.lastSaveError;
+      // As above: out of the live list, then wait for work a watchdog let run on and write what it left pending.
       engines.delete(name);
+      const stillRunning = await callWork.settle(name, CLOSE_WORK_WAIT_MS);
+      flushAfterClose(eng);
+      const saveError = eng.memory?.lastSaveError;
       openDecisions.delete(name);
       // The last session on this project ends its run.
       if (eng.memory && ![...engines.values()].some((e) => e.memory === eng.memory)) eng.memory.endRun();
@@ -2851,6 +2893,7 @@ server.registerTool(
       return text(
         `Session "${name}" closed. Memory and report remain in .scenescout/.` +
           (engines.size > 0 ? ` Default session → ${activeName}.` : "") +
+          stillRunningNote(stillRunning) +
           (saveError ? `\n⚠ The final memory write failed (${saveError}) — some coverage/findings from this session may not have been persisted to disk.` : ""),
         activeName,
       );

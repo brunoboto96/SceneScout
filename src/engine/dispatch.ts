@@ -106,3 +106,76 @@ export class SessionQueue {
     for (const key of [...this.chains.keys()]) this.forget(key);
   }
 }
+
+/**
+ * The work of every tool call still running, per session.
+ *
+ * The watchdog answers a slow call, but it cannot stop the call: the work goes
+ * on in the background and can still write into the project (its action log,
+ * a frame, a debounced memory save). Left alone, those writes land after
+ * `scout_close` has answered, and after another session has attached to the
+ * same folder. So close waits for them: it closes the browser first, which
+ * makes every page-bound step of the abandoned work fail at once, then waits
+ * here for the work to finish unwinding. The wait is bounded, so work that is
+ * stuck on something other than the browser cannot hold a close forever; the
+ * caller is told how many calls were still running when it gave up.
+ */
+export class CallWork {
+  private readonly running = new Map<string, Set<Promise<unknown>>>();
+
+  /** Record `work` as running for `key` until it settles, whether it resolves or rejects. */
+  track(key: string, work: Promise<unknown>): void {
+    let set = this.running.get(key);
+    if (!set) {
+      set = new Set();
+      this.running.set(key, set);
+    }
+    set.add(work);
+    const done = (): void => {
+      const left = this.running.get(key);
+      if (!left) return;
+      left.delete(work);
+      if (left.size === 0) this.running.delete(key);
+    };
+    // The rejection is the call's own caller's to handle; here it only means "finished".
+    work.then(done, done);
+  }
+
+  /** Calls still running for `key`. */
+  count(key: string): number {
+    return this.running.get(key)?.size ?? 0;
+  }
+
+  /** Wait up to `ms` for `key`'s running calls to finish; resolves with how many are still running. */
+  async settle(key: string, ms: number): Promise<number> {
+    return this.settleKeys([key], ms);
+  }
+
+  /** The same for every session (close-all). */
+  async settleAll(ms: number): Promise<number> {
+    return this.settleKeys([...this.running.keys()], ms);
+  }
+
+  private async settleKeys(keys: string[], ms: number): Promise<number> {
+    const work = keys.flatMap((k) => [...(this.running.get(k) ?? [])]);
+    if (work.length > 0) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([Promise.allSettled(work), new Promise<void>((resolve) => (timer = setTimeout(resolve, ms)))]);
+      clearTimeout(timer);
+    }
+    return keys.reduce((n, k) => n + this.count(k), 0);
+  }
+}
+
+/**
+ * The cap on every tool call's watchdog, from SCENESCOUT_WATCHDOG_MS. Unset
+ * means each tool keeps its own limit. Anything else must be a whole number
+ * of milliseconds of at least 100, or the server refuses to start: a typo
+ * here would otherwise run with limits nobody chose.
+ */
+export function watchdogCap(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const ms = Number(raw);
+  if (!Number.isInteger(ms) || ms < 100) throw new Error(`SCENESCOUT_WATCHDOG_MS must be a whole number of milliseconds, at least 100; got "${raw}"`);
+  return ms;
+}
