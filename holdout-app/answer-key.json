@@ -153,14 +153,20 @@
       "match": [
         "available=1",
         "available (now )?only.{0,120}(on loan|not available|unavailable|0 (of|available)|out on loan|checked out)",
-        "(on loan|unavailable).{0,80}available (now )?only"
+        "(on loan|unavailable).{0,80}available (now )?only",
+        "(available|availability).{0,30}filter.{0,40}(leaves|retains|keeps).{0,60}(all )?on.loan",
+        "catalogue-available checked.{0,80}all on loan",
+        "available-only=true retains"
       ],
       "examples": [
         "GET /api/books?available=1 returns titles with every copy on loan",
         "'Available now only' still lists books that are all on loan",
         "Available now only filter keeps unavailable titles",
         "Ticking Available now only hides only the withdrawn book; titles all on loan stay",
-        "Catalogue 'Available now only' still lists books that are all on loan"
+        "Catalogue 'Available now only' still lists books that are all on loan",
+        "Available-now filter leaves an all-on-loan title visible\ncatalogue filter checked; result A Field Guide to Moss marked all on loan",
+        "Availability-only catalogue filter retains an all-on-loan title\ncatalogue available-only=true retains catalogue-book-2 with status all on loan",
+        "Available-only catalogue filter retains an on-loan book\ncatalogue-available checked; catalogue-rows includes A Field Guide to Moss (all on loan)"
       ],
       "counterExamples": ["Catalogue shows 'all on loan' for The Salt Road", "Catalogue still shows 2 of 2 on the shelf after checking a copy out"]
     },
@@ -428,9 +434,14 @@
       "match": [
         "a hold needs a member",
         "(librarian|staff|branch head).{0,80}place hold.{0,80}(fails|refused|400|no way to (name|pick|choose))",
-        "place hold.{0,40}(offered|shown) to (staff|librarians?|a librarian).{0,80}(fails|no way to (name|pick|choose))"
+        "place hold.{0,40}(offered|shown) to (staff|librarians?|a librarian).{0,80}(fails|no way to (name|pick|choose))",
+        "place hold on book page fails for librarian",
+        "POST /api/holds → HTTP 400"
       ],
-      "examples": ["role=librarian testid=book-hold → \"A hold needs a member\"\nLibrarian is offered Place hold on the book page but it always fails"],
+      "examples": [
+        "role=librarian testid=book-hold → \"A hold needs a member\"\nLibrarian is offered Place hold on the book page but it always fails",
+        "Place hold on book page fails for librarian with 400\nPOST /api/holds → HTTP 400 on Place hold"
+      ],
       "counterExamples": ["A second hold on the same book is refused: That member already has a hold on this book"]
     },
     {
@@ -523,6 +534,38 @@
         "POST /api/fines/M-1004/waive 403 as librarian: Only the branch head can waive a fine",
         "click x2 testid=fines-waive-M-1002 -> 2x POST /api/fines/M-1002/waive 200 {fines:0}\nwaive-double-click-fires-twice-idempotent"
       ]
+    },
+    {
+      "id": "book-reviews-error-shown-as-empty",
+      "route": "/book.html",
+      "title": "A failed reviews request is shown as \"No reviews yet.\"",
+      "category": "data-inconsistency",
+      "severity": "low",
+      "level": "medium",
+      "match": [
+        "reviews.{0,30}404.{0,60}(no reviews|empty reviews)",
+        "(empty reviews state|presented as no reviews).{0,60}404|404 is presented as no reviews",
+        "failed reviews request is shown as .?no reviews"
+      ],
+      "examples": [
+        "Missing-book reviews 404 is presented as no reviews\nGET /api/books/0/reviews 404 with No reviews yet",
+        "Book detail renders an empty reviews state after reviews API 404\nGET /api/books/0/reviews 404 → book-reviews \"No reviews yet.\""
+      ],
+      "counterExamples": ["Book detail route requests book ID 0 and shows a not-found state\nGET /api/books/0 404; GET /api/books/0/reviews 404"]
+    },
+    {
+      "id": "hold-double-click-error",
+      "route": "/book.html",
+      "title": "Place hold stays enabled while it saves, so a double-click places the hold and then shows the 409 error",
+      "category": "data-inconsistency",
+      "severity": "low",
+      "level": "medium",
+      "match": ["POST /api/holds (repeated twice|x2|×2|twice)", "(rapid|double.?click).{0,30}place hold", "place hold stays enabled while it saves"],
+      "examples": ["Rapid repeat of Place hold sends duplicate requests\nPOST /api/holds repeated twice on rapid double-click"],
+      "counterExamples": [
+        "A second hold on the same book is refused with 409 already has a hold on this book",
+        "Place hold on book page fails for librarian with 400\nPOST /api/holds → HTTP 400 on Place hold"
+      ]
     }
   ],
   "nonDefects": [
@@ -531,10 +574,15 @@
       "title": "The members page refuses a member",
       "why": "The member list is for library staff; the server refuses it with a 403 and the page says so.",
       "match": [
-        "^(?![\\s\\S]*(M-\\d{4}|another|other member|any member|record|idor))[\\s\\S]*(members (page|list)|/api/members(?!/)).{0,40}(403|refus|forbidden|only library staff)"
+        "^(?![\\s\\S]*(M-\\d{4}|another|other member|any member|record|idor))[\\s\\S]*(members (page|list)|/api/members(?!/)).{0,40}(403|refus|forbidden|only library staff)",
+        "members\\.html displays members-error access-denied"
       ],
       "overrides": [],
-      "examples": ["GET /api/members 403 for a member; the members page shows the refusal", "Members page is forbidden to a member"],
+      "examples": [
+        "GET /api/members 403 for a member; the members page shows the refusal",
+        "Members page is forbidden to a member",
+        "Member role sees staff-only members route but gets access-denied alert\nGET /members.html displays members-error access-denied"
+      ],
       "counterExamples": ["A member can read any other member's record by id"]
     },
     {
@@ -615,13 +663,16 @@
       "why": "The checkbox sits inside its label, so its accessible name is \"Available now only\", and clicking the label text toggles it: the click target is the whole label, about 151x23 px, not the 13x13 box. The box is drawn at the browser's default size. A lane read the name as \"checkbox\" from the snapshot; the accessibility tree has the label's text.",
       "match": [
         "(catalogue-available|available.(now.)?only|availab\\w*.(filter.)?checkbox).{0,80}(no.accessible.name|unnamed|name=\"checkbox\"|13x13)",
-        "availab\\w*.{0,40}checkbox.{0,40}(no.accessible.name|13x13)"
+        "availab\\w*.{0,40}checkbox.{0,40}(no.accessible.name|13x13)",
+        "availability filter has no accessible name",
+        "catalogue-available accessible name empty"
       ],
       "overrides": [],
       "examples": [
         "testid=catalogue-available name=\"checkbox\" 13x13px\nAvailability filter checkbox has no accessible name and a 13x13 target",
         "testid=catalogue-available name=\"checkbox\" 13x13px\nAvailable-only checkbox has no accessible name and a 13x13 target",
-        "testid=catalogue-available name=\"checkbox\" 13x13px\navailable-checkbox-no-accessible-name-13px"
+        "testid=catalogue-available name=\"checkbox\" 13x13px\navailable-checkbox-no-accessible-name-13px",
+        "Catalogue availability filter has no accessible name\ncheckbox testid=catalogue-available accessible name empty"
       ],
       "counterExamples": ["'Available now only' still lists books that are all on loan", "Place hold button has no accessible label"]
     },
@@ -646,17 +697,70 @@
       "why": "The server adds a member to an event once: a repeat join from the same member answers 200 and takes no second seat, and the page leaves for the confirmation after the first answer. Two requests go out and nothing is spent twice, so the double-click costs the member nothing.",
       "match": [
         "\\bjoin\\b.{0,80}(double.?click|clicked twice|click(ed)? ?(x2|×2|2x)|two (join )?POSTs|POSTs? .{0,30}(x2|×2|twice))",
-        "(double.?click|clicked twice).{0,40}\\bjoin\\b"
+        "(double.?click|clicked twice).{0,40}\\bjoin\\b",
+        "join.{0,40}fired twice",
+        "rapid join clicks send duplicate"
       ],
       "overrides": [],
       "examples": [
         "testid=events-join click x2 -> POST /api/events/1/join x2 200\nJoin button stays enabled during submit; double click fires two join POSTs",
-        "Double-click on Join saves one seat"
+        "Double-click on Join saves one seat",
+        "Rapid Join clicks send duplicate event signup requests\nPOST /api/events/1/join fired twice",
+        "Rapid Join clicks send duplicate event-join requests\nPOST /api/events/1/join fired twice on rapid Join click"
       ],
       "counterExamples": [
         "POST /api/events/2/join 200 {\"left\":19} repeated, no joined marker in testid=events-rows\nEvents page does not show which events the member has already joined",
         "Dead end after Join on the events page"
       ]
+    },
+    {
+      "id": "no-dominant-action",
+      "title": "A page has no visually dominant primary action",
+      "why": "A design-audit craft note about pages whose actions carry equal weight; not a defect.",
+      "match": [
+        "(page|catalogue|controls)\\b.{0,40}(has|lacks?|offers|provides|gives).{0,30}no (clearly |visually )?(dominant|prominent) (next |primary )?(action|step)",
+        "(page|catalogue|controls)\\b.{0,10}lacks? a visually (dominant|prominent) (next |primary )?(action|step)",
+        "gives renewal actions no visual priority"
+      ],
+      "overrides": [],
+      "examples": [
+        "Loans page gives renewal actions no visual priority\nloans.html task-efficiency: no visually dominant action; task-clarity 92",
+        "Fines page lacks a visually dominant next step\nfines.html no visually dominant action",
+        "Catalogue page has no visually dominant next action\ncatalogue audit: 66% padding off 4px grid; 7 grays; no dominant action",
+        "Catalogue has no clearly prominent next action\ncatalogue audit: no visually dominant action",
+        "Catalogue controls lack a visually dominant next action\ncatalogue page audit: no visually dominant action; task-clarity 92",
+        "Catalogue provides no visually dominant next action\ncatalogue design audit: no visually dominant action; 21 interactive elements in first viewport",
+        "Catalogue has no visually dominant next action\ncatalogue page audit: no visually dominant action; 21 interactive elements in first viewport",
+        "Catalogue offers no visually dominant next action\ncatalogue.html design audit: no visually dominant action; task-clarity 92/100",
+        "Catalogue offers no visually prominent next action\ncatalogue no visually dominant action",
+        "Fines page has no visually dominant next step\ndesign audit /fines.html: no visually dominant action",
+        "Catalogue offers no visually dominant next action\ncatalogue.html no visually dominant action",
+        "Loans page has no visually dominant next action\nloans page no dominant action",
+        "Fines page has no visually prominent next action\nfines page audit: no visually dominant action",
+        "Loans page lacks a visually prominent next action\nloans page task-efficiency no visually dominant action"
+      ],
+      "counterExamples": ["Catalogue spacing is mostly off a 4px grid\ncatalogue spacing audit: 67% off 4px grid"]
+    },
+    {
+      "id": "book-route-without-id",
+      "title": "The book page opened with no id shows \"Book not found\"",
+      "why": "With no id the page asks for book 0, which does not exist, and says so; that is the right answer.",
+      "match": ["book detail route requests (nonexistent )?book (id )?0", "book page opened with no id shows .?book not found"],
+      "overrides": [],
+      "examples": [
+        "Bare book detail route requests nonexistent book 0\nGET /api/books/0 404; GET /api/books/0/reviews 404",
+        "Book detail route requests book ID 0 and shows a not-found state\nGET /api/books/0 404; GET /api/books/0/reviews 404"
+      ],
+      "counterExamples": ["Missing-book reviews 404 is presented as no reviews\nGET /api/books/0/reviews 404 with No reviews yet"]
+    },
+    {
+      "id": "review-empty-server-validated",
+      "title": "An empty review is refused by the server, and the page shows why",
+      "why": "Validation on the server with its message shown is correct behaviour.",
+      "match": ["empty review submission is rejected only after server request", "reviews empty body 400", "empty review is refused by the server"],
+      "overrides": [],
+      "examples": ["Empty review submission is rejected only after server request\nPOST /api/books/1/reviews empty body 400"],
+      "counterExamples": []
     }
   ],
   "contextual": [
@@ -728,6 +832,34 @@
         "GET /api/events order 2026-10-01, 2026-10-07, 2026-09-28\nevents-not-in-date-order"
       ],
       "counterExamples": ["Joining an event takes one seat: left 20 -> 19"]
+    },
+    {
+      "id": "spacing-off-grid",
+      "route": "/catalogue.html",
+      "title": "Padding off the 4px spacing grid",
+      "category": "ux-polish",
+      "reason": "A defect only where the project declares a spacing scale for components to keep to. This app declares none.",
+      "match": [
+        "^(?![\\s\\S]*dominant)[\\s\\S]*(spacing|padding).{0,60}(4px (grid|rhythm|spacing grid)|off.grid|ad-hoc padding|consistent grid|spacing rhythm)",
+        "^(?![\\s\\S]*dominant)[\\s\\S]*\\d+% (on|off|padding off) (a )?4px grid"
+      ],
+      "examples": [
+        "Fines page spacing is inconsistent with a 4px grid\nfines page padding: 9px×6; 50% off 4px grid",
+        "Catalogue spacing values drift from a consistent grid\ncatalogue spacing: 34% on 4px grid; 9px×58, 1px×16",
+        "Checkout form padding falls outside 4px grid\ncheckout paddings: 7px×4, 9px×4, 6px×4, 14px×4; 100% off grid",
+        "Catalogue spacing frequently misses a consistent spacing rhythm\ncatalogue.html design audit: 66% padding off 4px grid; 9px×58, 1px×16",
+        "Catalogue spacing uses mostly off-grid padding values\ncatalogue spacing: 66% off 4px grid; 9px×58; 1px×16",
+        "Book detail spacing uses inconsistent off-grid padding values\nbook detail spacing: 0% on 4px grid; padding 6px×4,14px×4,7px×2,9px×2",
+        "Book detail padding values drift from a 4px spacing grid\nbook detail spacing audit: 0% on 4px grid; 6px×4, 14px×4, 7px×2, 9px×2",
+        "Catalogue spacing uses many values off a 4px grid\ncatalogue.html design audit: spacing 37% on 4px grid; off-grid padding 9px×16, 7px×2, 1px×2",
+        "Checkout form spacing is entirely off the 4px grid\ncheckout.html design audit: spacing 0% on 4px grid; 7px×4, 9px×4, 6px×4, 14px×4",
+        "Catalogue padding is inconsistent with a 4px spacing grid\ncatalogue spacing: 66% padding off 4px grid; 9px×58; 1px×16",
+        "Book detail spacing consistently falls off a 4px grid\nbook detail spacing: 0% on 4px grid; 6/14/18/7/9px",
+        "Catalogue spacing is mostly off a 4px grid\ncatalogue spacing audit: 67% off 4px grid; 9px×58, 1px×16, 18px×4, 7px×2",
+        "Catalogue spacing values are inconsistent with a 4px rhythm\ncatalogue spacing audit: 66% off 4px grid; 9px×58, 1px×16, 7px×2",
+        "Catalogue spacing uses inconsistent ad-hoc padding\ncatalogue spacing audit: 66% off-grid; 9px×58; 7 gray values"
+      ],
+      "counterExamples": ["Catalogue page has no visually dominant next action\ncatalogue audit: 66% padding off 4px grid; 7 grays; no dominant action"]
     }
   ]
 }
