@@ -261,7 +261,7 @@ let liveError: string | null = null;
  */
 let lastRun: { markdown: string; at: string; dir: string; evidence: FindingEvidence[]; replay: string } | null = null;
 
-/** Every project folder a run page has been rendered from, so that page's pictures resolve against it later (#457). */
+/** Every project folder a run page or the board's report has been rendered from, so their pictures resolve against it later (#457, #463). */
 const pageProjects = new ProjectDirs();
 
 /** Render the report for a session that is about to close, so the live view keeps it. */

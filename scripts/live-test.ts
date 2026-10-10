@@ -1228,7 +1228,13 @@ test("the report carries the frames each finding was found on, and the page hang
   assert.match(shots, /if \(!found\) return null;/);
   assert.match(shots, /if \(!found\.frames\.length\) return picture;/);
   // A finding's picture is shown first, from the same route, and opens on its own.
-  assert.match(shots, /pic\.src = reportFramePrefix \+ found\.picture.file;/);
+  assert.match(shots, /pic\.src = reportFramePrefix \+ found\.picture\.file;/);
+  assert.match(shots, /link\.href = reportFramePrefix \+ found\.picture\.file;/, "the picture opens from the report's project too");
+  assert.doesNotMatch(shots, /'record\/' \+/, "no report picture is addressed outside the report's project");
+  // A change of project re-renders the panel, so no picture keeps the old project's address.
+  assert.match(script, /var key = d\.markdown \+ '\\u0000' \+ JSON\.stringify\(reportEvidence\) \+ '\\u0000' \+ reportFramePrefix;/);
+  // The live feed's own frames belong to the session their path names, not to the report's project.
+  assert.match(script, /getElementById\('focus-img'\)\.src = 'record\/' \+ line\.frame;/);
   assert.match(shots, /data-testid', 'live-report-picture-' \+ id/);
   assert.match(shots, /data-testid', 'live-report-picture-open'/);
   assert.ok(script.includes("/^\\*\\*Id:\\*\\* `([^`]+)`/"), "the id line is what the frames hang from");
