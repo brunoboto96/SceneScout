@@ -300,6 +300,11 @@ function reportFile(dir: string | undefined): ReportFile | undefined {
   }
 }
 
+/** The address a report's frames start with: keyed by project, and the folder is remembered so the key resolves (#463). */
+function framePrefixFor(dir: string): string {
+  return `record/${pageProjects.remember(dir)}/`;
+}
+
 const liveProvider: LiveProvider = {
   snapshot: () => ({
     pid: process.pid,
@@ -318,9 +323,15 @@ const liveProvider: LiveProvider = {
   // can shift between polls.
   report: () => {
     const eng = (lastWriter && engines.get(lastWriter.session)) ?? engines.values().next().value;
-    if (!eng?.memory) return lastRun ? { markdown: lastRun.markdown, at: lastRun.at, evidence: lastRun.evidence } : null;
+    if (!eng?.memory)
+      return lastRun ? { markdown: lastRun.markdown, at: lastRun.at, evidence: lastRun.evidence, framePrefix: framePrefixFor(lastRun.dir) } : null;
     const { markdown } = generateReport(eng.memory, eng.oracleLog.all, reportExtras(eng), { write: false });
-    return { markdown: redactSecrets(markdown), at: new Date().toISOString(), evidence: reportEvidence(eng.memory) };
+    return {
+      markdown: redactSecrets(markdown),
+      at: new Date().toISOString(),
+      evidence: reportEvidence(eng.memory),
+      framePrefix: framePrefixFor(eng.memory.dir),
+    };
   },
   /**
    * The whole run as one page, served at its own address. The live view sends

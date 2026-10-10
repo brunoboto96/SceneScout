@@ -297,6 +297,8 @@ export const LIVE_PAGE = `<!doctype html>
   var reportKey = null;
   // Per-finding frames from api/report: empty unless the run was recorded.
   var reportEvidence = [];
+  // Where the report's pictures are served from: the project it was rendered from (api/report names it).
+  var reportFramePrefix = 'record/';
   var savedACopy = false;
   // A result that reads as a failure is shown in red.
   var BAD_RESULT = /error|fail|refus|block|violation|abandoned/i;
@@ -509,13 +511,13 @@ export const LIVE_PAGE = `<!doctype html>
       picture = el('figure', 'picture');
       picture.setAttribute('data-testid', 'live-report-picture-' + id);
       var link = el('a');
-      link.href = 'record/' + found.picture.file;
+      link.href = reportFramePrefix + found.picture.file;
       link.target = '_blank';
       link.rel = 'noreferrer';
       link.setAttribute('data-testid', 'live-report-picture-open');
       var pic = el('img');
       pic.loading = 'lazy';
-      pic.src = 'record/' + found.picture.file;
+      pic.src = reportFramePrefix + found.picture.file;
       pic.alt = 'What the finding is about, when it was filed';
       pic.addEventListener('error', function () { picture.classList.add('gone'); });
       link.appendChild(pic);
@@ -533,7 +535,7 @@ export const LIVE_PAGE = `<!doctype html>
       var fig = el('figure');
       var img = el('img');
       img.loading = 'lazy';
-      img.src = 'record/' + f.frame;
+      img.src = reportFramePrefix + f.frame;
       img.alt = f.action + ' ' + f.detail;
       // A recording deleted since the run leaves a broken icon under a finding
       // that still counts it as evidence. Say which it is.
@@ -607,7 +609,7 @@ export const LIVE_PAGE = `<!doctype html>
         var fig = el('figure', 'picture');
         var pic = el('img');
         pic.loading = 'lazy';
-        pic.src = 'record/' + m[2];
+        pic.src = reportFramePrefix + m[2];
         pic.alt = m[1];
         fig.appendChild(pic);
         container.appendChild(fig);
@@ -680,12 +682,13 @@ export const LIVE_PAGE = `<!doctype html>
         }
         reportMarkdown = d.markdown;
         reportEvidence = d.evidence || [];
+        reportFramePrefix = d.framePrefix || 'record/';
         meta.textContent = (finished ? 'as the run left it at ' : 'as the run stands at ') + clock(d.at) + ' · ' + whereItIs();
         // The report is re-read every few seconds while the run goes on.
         // Re-rendering an unchanged document threw away what the reader was
         // doing with it: an opened accordion shut itself, and the page jumped
         // back to the top, every five seconds.
-        var key = d.markdown + '\\u0000' + JSON.stringify(reportEvidence);
+        var key = d.markdown + '\\u0000' + JSON.stringify(reportEvidence) + '\\u0000' + reportFramePrefix;
         if (key === reportKey) return;
         var open = {};
         var was = doc.querySelectorAll('details[open][data-testid]');
