@@ -97,10 +97,40 @@ first.
 
 ```bash
 git clone https://github.com/brunoboto96/SceneScout.git scenescout && cd scenescout
-npm install
-npx playwright install chromium
-npm test
+npm install              # installs dependencies and builds
+npm run setup            # like `scenescout install`, but registers this checkout; the skill is linked, so edits are live
+npm test                 # build, the pure-logic suites, then the two real-browser suites (smoke, mcp-check)
+npm run bench -- --all   # re-score every archived benchmark run against the current answer key
+npm run demo             # regenerate examples/ from the demo app
 ```
+
+## Where things are
+
+```
+src/
+  cli.ts            every command: scan, serve, install, doctor, check, ci, login, export, status, watch, and a first look
+  mcp-server.ts     the scout_* tools and per-session dispatch
+  scan.ts           project discovery: framework, routes, saved logins
+  installer.ts      setup and doctor
+  check-run.ts      drives scenescout check
+  ci-run.ts         drives scenescout ci: the server as a child, the model's API, the agent loop
+  login-run.ts      drives scenescout login and scout_login
+  export-run.ts     drives scenescout export
+  engine/
+    browser.ts      the one module that needs Playwright: attach, snapshot, actions, crawl, plans
+    *.ts            everything that can be table-tested without a browser: policy, memory, report,
+                    check, oracles, claims, design, journey, profiles, refresh, lanes, bench, …
+scripts/            the test suites; smoke/ holds the real-browser ones
+test-app/           fixtures for the real-browser suites
+demo-app/           the bundled demo with planted defects, and its answer key
+holdout-app/        the held-out benchmark app
+skills/scenescout/  the testing method: a skill in Claude Code, served by the server everywhere else
+docs/               the guide, how it works, CI, the benchmark, and the ADRs
+```
+
+Logic that does not need a browser lives outside `browser.ts` so it can be unit-tested
+([ADR 5](docs/adr/0005-keep-testable-logic-out-of-the-browser-module.md)). [AGENTS.md](AGENTS.md)
+says which test suite covers which module.
 
 ## License
 

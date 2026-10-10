@@ -65,6 +65,7 @@ const PAGE_NAMES = [
   "_Sidebar.md",
   "Start-here.md",
   "Ways-to-use-it.md",
+  "What-it-checks.md",
   "Signing-in.md",
   "Safety-model.md",
   "Recipes.md",
