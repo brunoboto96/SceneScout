@@ -17,7 +17,7 @@ import { sayVerification } from "./verify.js";
 import { describePicture, readFindingPicture } from "./capture.js";
 import type { WriteMode } from "./policy.js";
 import { feedForSession } from "./live.js";
-import { buildReplayHtml, evidenceFor, type FindingEvidence, type ReplaySession } from "./replay.js";
+import { buildReplayHtml, evidenceFor, projectKey, type FindingEvidence, type ReplaySession } from "./replay.js";
 import { calibrate, formatCalibration } from "./calibration.js";
 import { formatPace, measurePace } from "./pace.js";
 import { formatNeverSubmittedEmpty } from "./forms.js";
@@ -240,7 +240,8 @@ export function replayDocument(memory: MemoryStore, markdown: string, version = 
     project: projectName(memory.dir),
     at: new Date().toISOString(),
     version,
-    framePrefix: "record/",
+    // Keyed by project, so the page's pictures still load after a session attaches to another folder (replay.ts).
+    framePrefix: `record/${projectKey(memory.dir)}/`,
     savedAt: memory.dir,
   });
 }

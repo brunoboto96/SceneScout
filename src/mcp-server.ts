@@ -150,7 +150,7 @@ import {
 } from "./engine/limits.js";
 import { MAX_READ_POSTS, READ_POSTS_ENV } from "./engine/policy.js";
 import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "./engine/project-folder.js";
-import { RECORD_MAX_FRAMES, resolveFrame } from "./engine/replay.js";
+import { ProjectDirs, RECORD_MAX_FRAMES, resolveFrame, splitProjectFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { formElicitationSupported, INTAKE_FORM_MESSAGE, INTAKE_TOOL, intakeFormSchema, intakeFromForm, intakeReplyText, type FormOutcome } from "./intake.js";
@@ -261,6 +261,9 @@ let liveError: string | null = null;
  */
 let lastRun: { markdown: string; at: string; dir: string; evidence: FindingEvidence[]; replay: string } | null = null;
 
+/** Every project folder a run page has been rendered from, so that page's pictures resolve against it later (#457). */
+const pageProjects = new ProjectDirs();
+
 /** Render the report for a session that is about to close, so the live view keeps it. */
 function keepReport(eng: BrowserEngine): void {
   if (!eng.memory) return;
@@ -277,6 +280,7 @@ function keepReport(eng: BrowserEngine): void {
   }
   try {
     lastRun.evidence = reportEvidence(eng.memory);
+    pageProjects.remember(eng.memory.dir);
     lastRun.replay = replayDocument(eng.memory, lastRun.markdown, PKG_VERSION);
   } catch (err) {
     console.error(
@@ -328,6 +332,7 @@ const liveProvider: LiveProvider = {
     if (!eng?.memory) return lastRun?.replay || null;
     try {
       const { markdown } = generateReport(eng.memory, eng.oracleLog.all, reportExtras(eng), { write: false });
+      pageProjects.remember(eng.memory.dir);
       return replayDocument(eng.memory, redactSecrets(markdown), PKG_VERSION);
     } catch (err) {
       // This address is one people refresh and bookmark, so a throw here would
@@ -341,12 +346,18 @@ const liveProvider: LiveProvider = {
    * comes from a viewer, so it is resolved and then required to still be
    * inside that directory: nothing else in the project is reachable this way.
    */
-  frame: async (relPath) => {
-    // Sessions may hold different project directories, so the frame belongs to
-    // the session its own path names — not to whichever engine happens to be
-    // first. Falling back keeps a finished run's frames reachable.
-    const named = relPath.replace(/^recordings[\\/]/, "").split("/")[0];
-    const dir = engines.get(named)?.memory?.dir ?? engines.values().next().value?.memory?.dir ?? lastRun?.dir;
+  frame: async (address) => {
+    // A run page names the project it was rendered from, so its pictures load
+    // after a session attaches to another folder. The live board's own frames
+    // carry no project: they belong to the session their path names, and
+    // falling back keeps a finished run's frames reachable.
+    const { key, rest: relPath } = splitProjectFrame(address);
+    let dir: string | undefined;
+    if (key) dir = pageProjects.dir(key);
+    else {
+      const named = relPath.replace(/^recordings[\\/]/, "").split("/")[0];
+      dir = engines.get(named)?.memory?.dir ?? engines.values().next().value?.memory?.dir ?? lastRun?.dir;
+    }
     if (!dir) return null;
     const file = resolveFrame(path.join(dir, "recordings"), relPath);
     if (!file) return null;

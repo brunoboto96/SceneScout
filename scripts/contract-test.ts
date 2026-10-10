@@ -35,7 +35,19 @@ import {
 import { IMPACT, isSafeRelativePath, PLAIN_WORDING, pictureOf, plainFinding, plainStep, plainSteps, plainWording } from "../src/engine/plain.ts";
 import { FINDING_CATEGORIES } from "../src/engine/memory.ts";
 import { ORACLE_KINDS } from "../src/engine/oracles.ts";
-import { buildReplayHtml, escapeHtml, evidenceFor, framePath, RECORD_MAX_FRAMES, renderMarkdown, resolveFrame, taskBlocks } from "../src/engine/replay.ts";
+import {
+  buildReplayHtml,
+  escapeHtml,
+  evidenceFor,
+  framePath,
+  ProjectDirs,
+  projectKey,
+  RECORD_MAX_FRAMES,
+  renderMarkdown,
+  resolveFrame,
+  splitProjectFrame,
+  taskBlocks,
+} from "../src/engine/replay.ts";
 import type { ActivityLine } from "../src/engine/live.ts";
 
 let dirs: string[] = [];
@@ -812,6 +824,24 @@ test("replay: a frame request can only name a file inside the run's own recordin
   }
   // A sibling directory whose name merely starts the same way is not inside it.
   assert.equal(resolveFrame(path.join(path.sep, "p", "rec"), "../recordings-evil/x.jpg"), null);
+});
+
+test("replay: a run page's frame address names its project, and only a folder a page was rendered from can be named (#457)", () => {
+  const a = projectKey("/work/project-a");
+  assert.match(a, /^p-[0-9a-f]{12}$/);
+  assert.equal(projectKey("/work/project-a/"), a, "the same folder, written another way, has the same key");
+  assert.notEqual(projectKey("/work/project-b"), a);
+  assert.ok(!a.includes("project"), "the key reveals nothing of the folder's name");
+  assert.deepEqual(splitProjectFrame(`${a}/recordings/clerk/finding-1.png`), { key: a, rest: "recordings/clerk/finding-1.png" });
+  // The live board's frames carry no project, and keep resolving as before.
+  assert.deepEqual(splitProjectFrame("recordings/clerk/0001-click.jpg"), { rest: "recordings/clerk/0001-click.jpg" });
+  assert.deepEqual(splitProjectFrame("p-xyz/recordings/a.jpg"), { rest: "p-xyz/recordings/a.jpg" }, "not a key: left as a path");
+  const dirs = new ProjectDirs();
+  assert.equal(dirs.dir(a), undefined, "a key no page was rendered with names nothing");
+  assert.equal(dirs.remember("/work/project-a"), a);
+  dirs.remember("/work/project-b");
+  assert.equal(dirs.dir(a), "/work/project-a", "an earlier project stays reachable after a later one");
+  assert.equal(dirs.dir(projectKey("/work/project-b")), "/work/project-b");
 });
 
 test("replay: only the served copy watches for the engine going away", () => {

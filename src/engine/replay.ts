@@ -18,6 +18,7 @@
  * Everything here is pure string work — no browser, no filesystem — so the
  * escaping and the grouping are table-tested.
  */
+import crypto from "node:crypto";
 import path from "node:path";
 import type { ActivityLine } from "./live.js";
 import { isSafeRelativePath } from "./plain.js";
@@ -107,6 +108,44 @@ export function resolveFrame(root: string, relPath: string): string | null {
   const base = path.resolve(root);
   const file = path.resolve(base, inside);
   return file.startsWith(base + path.sep) ? file : null;
+}
+
+/**
+ * A short name for a project folder, used in the live view's frame addresses so
+ * a page says which project its pictures belong to. One engine can serve runs
+ * in several folders in turn, and a page already open in a browser loads its
+ * images later, after another folder may have attached. The name is derived
+ * from the folder's resolved path and reveals nothing of it.
+ */
+export function projectKey(dir: string): string {
+  return "p-" + crypto.createHash("sha256").update(path.resolve(dir)).digest("hex").slice(0, 12);
+}
+
+/** A frame address split into the project it names, when it names one, and the path inside that project's recordings. */
+export function splitProjectFrame(relPath: string): { key?: string; rest: string } {
+  const m = /^(p-[0-9a-f]{12})\/(.+)$/.exec(relPath);
+  return m ? { key: m[1], rest: m[2] } : { rest: relPath };
+}
+
+/**
+ * The project folders this process has rendered a run page for, by key. Only a
+ * folder a page was rendered from can be named, so a viewer cannot reach any
+ * other folder by guessing a key.
+ */
+export class ProjectDirs {
+  private readonly byKey = new Map<string, string>();
+
+  /** Remember `dir` and return its key. */
+  remember(dir: string): string {
+    const key = projectKey(dir);
+    this.byKey.set(key, dir);
+    return key;
+  }
+
+  /** The folder a key names, or undefined when no page was rendered from one with that key. */
+  dir(key: string): string | undefined {
+    return this.byKey.get(key);
+  }
 }
 
 /** Text from the app under test reaches this document, so nothing is interpolated unescaped. */
