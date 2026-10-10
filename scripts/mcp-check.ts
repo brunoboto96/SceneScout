@@ -1007,6 +1007,45 @@ async function intakeCheck(): Promise<void> {
   );
 }
 
+/**
+ * A call the watchdog gave up on keeps running in the background. Once
+ * scout_close has answered it must not write into the project any more: the
+ * folder may be removed, or another session attached to it. The watchdog is
+ * cut to one second for this server, and the session paced at four, so a
+ * navigation is still waiting out its pace when the watchdog answers and the
+ * close begins. Closing the browser ends that wait, and the navigation then
+ * unwinds and schedules a memory save; the close must wait for it and write
+ * that save before it answers.
+ */
+async function abandonedCallCheck(): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-abandoned-"));
+  const env = Object.fromEntries(
+    Object.entries({ ...process.env, SCENESCOUT_LIVE: "off", SCENESCOUT_OPEN: "none", SCENESCOUT_WATCHDOG_MS: "1000" }).filter(
+      (e): e is [string, string] => typeof e[1] === "string",
+    ),
+  );
+  const client = new Client({ name: "ft-check-abandoned", version: "0.0.1" });
+  await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env }));
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
+  try {
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "slow", mode: "read-only", paceMs: 4000 });
+    const slow = await call("scout_navigate", { session: "slow", target: "/", task: "Opening the start page at a slow pace" });
+    if (!/timed out|watchdog/i.test(slow)) fail(`a call held past the watchdog was not cut off:\n${slow}`);
+    const closed = await call("scout_close", { session: "slow" });
+    if (!closed.includes('Session "slow" closed')) fail(`the session did not close:\n${closed}`);
+    const settled = treeState(projectDir);
+    // Past the end of the pace the navigation was waiting out.
+    await new Promise((r) => setTimeout(r, 4000));
+    if (treeState(projectDir) !== settled) fail("a call the watchdog cut off still wrote into the project after scout_close answered");
+    console.log("✓ a call the watchdog cut off writes nothing into the project once scout_close has answered");
+  } finally {
+    await client.close();
+    await fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
 async function main(): Promise<void> {
   // On a desktop the server opens the live view and the report by default; a check opens nothing.
   const transport = new StdioClientTransport({ command: "node", args: [serverPath], env: { ...getDefaultEnvironment(), SCENESCOUT_OPEN: "none" } });
@@ -1289,6 +1328,7 @@ async function main(): Promise<void> {
   await findingPictureCapCheck();
   await openCheck();
   await intakeCheck();
+  await abandonedCallCheck();
   console.log("\nMCP CHECK PASSED");
 }
 

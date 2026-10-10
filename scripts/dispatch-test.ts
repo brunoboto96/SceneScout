@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { needsTask, normalizeTask, taskRefusal, TASK_MAX } from "../src/engine/task.ts";
 import test from "node:test";
-import { SessionQueue, withWatchdog } from "../src/engine/dispatch.ts";
+import { CallWork, SessionQueue, watchdogCap, withWatchdog } from "../src/engine/dispatch.ts";
 import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser, readyBrowser, type BrowserReadyDeps } from "../src/engine/launch.ts";
 import { browserPresence, type InstallTarget } from "../src/browsers.ts";
@@ -353,6 +353,48 @@ test("the smoke runner reads --shard k/n and leaves the title filter alone", () 
   assert.deepEqual(withoutShard(["--shard", "2/3", "auth"]), ["auth"]);
   assert.deepEqual(withoutShard(["auth", "--shard", "2/3"]), ["auth"]);
   assert.deepEqual(withoutShard(["auth"]), ["auth"]);
+});
+
+test("a close waits for a session's running calls, and only that session's", async () => {
+  const work = new CallWork();
+  let finishSlow!: () => void;
+  const slow = new Promise<void>((r) => (finishSlow = r));
+  work.track("admin", slow);
+  work.track("clerk", new Promise(() => {})); // another session's call, never finishing
+  assert.equal(work.count("admin"), 1);
+  setTimeout(finishSlow, 20);
+  assert.equal(await work.settle("admin", 5000), 0, "the wait ends when the call does, not at its bound");
+  assert.equal(work.count("admin"), 0);
+  assert.equal(work.count("clerk"), 1, "settling one session leaves the other's calls alone");
+});
+
+test("a call that fails counts as finished, and a wait for nothing returns at once", async () => {
+  const work = new CallWork();
+  const failing = Promise.reject(new Error("page closed"));
+  failing.catch(() => {}); // its caller handles the rejection; the tracker must not need to
+  work.track("s", failing);
+  assert.equal(await work.settle("s", 5000), 0);
+  assert.equal(await work.settle("nobody", 5000), 0);
+});
+
+test("a close stops waiting at its bound and says how many calls were still running", async () => {
+  const work = new CallWork();
+  work.track("a", new Promise(() => {}));
+  work.track("b", new Promise(() => {}));
+  work.track("b", new Promise(() => {}));
+  const started = Date.now();
+  assert.equal(await work.settle("b", 50), 2);
+  assert.equal(await work.settleAll(50), 3);
+  assert.ok(Date.now() - started < 2000, "the bound held");
+});
+
+test("SCENESCOUT_WATCHDOG_MS caps the watchdog only when it is a whole number of at least 100 ms", () => {
+  assert.equal(watchdogCap(undefined), undefined);
+  assert.equal(watchdogCap(""), undefined);
+  assert.equal(watchdogCap("  "), undefined);
+  assert.equal(watchdogCap("1000"), 1000);
+  assert.equal(watchdogCap("100"), 100);
+  for (const bad of ["99", "0", "-5", "1.5", "1s", "abc"]) assert.throws(() => watchdogCap(bad), /SCENESCOUT_WATCHDOG_MS must be a whole number/, bad);
 });
 
 test("a browser that was never downloaded gets one instruction, not a stack of text", () => {

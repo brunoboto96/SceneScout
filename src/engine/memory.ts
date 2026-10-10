@@ -2161,6 +2161,18 @@ export class MemoryStore {
     // process open so an exit without scout_close still lands the last save.
   }
 
+  /**
+   * Write now if a debounced save is waiting. A close calls it after the work
+   * it waited for has finished, so a save that work scheduled lands before the
+   * close answers rather than half a second after. Throws as flush() does.
+   */
+  flushPending(): void {
+    if (!this.saveTimer) return;
+    clearTimeout(this.saveTimer);
+    this.saveTimer = null;
+    this.flush();
+  }
+
   /** How many states the last open pruned. Reported once, so a shrinking history is never silent. */
   prunedStates = 0;
 
