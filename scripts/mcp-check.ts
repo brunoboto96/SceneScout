@@ -325,6 +325,52 @@ async function findingPictureCheck(client: Client): Promise<void> {
 }
 
 /** The inline count: past it, a session's pictures are kept and named but no longer returned. */
+/**
+ * The run page's pictures belong to the project the page was written for. One
+ * engine serving two runs in turn, each in its own project folder: a picture on
+ * the first run's page must still load after a session attaches to the second,
+ * since the page is already open in someone's browser and its images load later.
+ */
+async function runPagePicturesAcrossProjectsCheck(): Promise<void> {
+  const fixture = await startFixtureServer();
+  const first = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-pictures-a-"));
+  const second = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-pictures-b-"));
+  const env = Object.fromEntries(
+    Object.entries({ ...process.env, SCENESCOUT_OPEN: "none", SCENESCOUT_EVIDENCE: "file" }).filter((e): e is [string, string] => typeof e[1] === "string"),
+  );
+  const client = new Client({ name: "ft-check-run-pictures", version: "0.0.1" });
+  await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env }));
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
+  try {
+    const attached = await call("scout_attach", { url: fixture.baseUrl, projectPath: first, session: "first", mode: "read-only", objective: "pictures" });
+    const live = attached.match(LIVE_LINE)?.[1];
+    if (!live) fail(`no live view address on attach:\n${attached}`);
+    await call("scout_finding", {
+      session: "first",
+      severity: "low",
+      category: "ux-confusing",
+      title: "A heading repeats the page title",
+      detail: "Filed to give the run page a picture.",
+      evidence: "run page picture check",
+    });
+    await call("scout_close", { session: "first" });
+    const page = await (await fetch(`${live}run`)).text();
+    const src = /<img[^>]*\ssrc="(record\/[^"]+)"/.exec(page)?.[1];
+    if (!src) fail(`the run page has no picture:\n${page.slice(0, 400)}`);
+    const before = await fetch(`${live}${src}`);
+    if (before.status !== 200) fail(`the run page's picture did not load while its project was the last one attached: ${before.status} for ${src}`);
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: second, session: "second", mode: "read-only", objective: "another project" });
+    const after = await fetch(`${live}${src}`);
+    if (after.status !== 200) fail(`the first run's picture stopped loading once a session attached to another project: ${after.status} for ${src}`);
+    console.log("✓ a run page's pictures keep loading after a session attaches to another project");
+    await call("scout_close", { all: true });
+  } finally {
+    await client.close();
+    await fixture.close();
+    for (const dir of [first, second]) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
 async function findingPictureCapCheck(): Promise<void> {
   const fixture = await startFixtureServer();
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-picture-cap-"));
@@ -1326,6 +1372,7 @@ async function main(): Promise<void> {
   await dedupJudgeEnvCheck();
   await defaultFolderCheck();
   await findingPictureCapCheck();
+  await runPagePicturesAcrossProjectsCheck();
   await openCheck();
   await intakeCheck();
   await abandonedCallCheck();
