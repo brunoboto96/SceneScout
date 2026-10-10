@@ -112,7 +112,7 @@
     "dedup-bench": "tsx scripts/dedup-bench.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "playwright": "^1.63.0",
     "zod": "^3.25.0"
   },
