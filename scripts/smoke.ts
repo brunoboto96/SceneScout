@@ -24,69 +24,8 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { check, eventually, failureCount, recordCrash, startFixtureServer, type SmokeContext } from "./smoke/harness.ts";
 import { descendants, extraHandles, type Leftover } from "./smoke/leaks.ts";
-import * as readOnly from "./smoke/read-only.ts";
-import * as safeWrite from "./smoke/safe-write.ts";
-import * as multiSession from "./smoke/multi-session.ts";
-import * as authLoss from "./smoke/auth-loss.ts";
-import * as loginProfiles from "./smoke/login-profiles.ts";
-import * as scriptedLogin from "./smoke/scripted-login.ts";
-import * as passwordlessLogin from "./smoke/passwordless-login.ts";
-import * as ssoLogin from "./smoke/sso-login.ts";
-import * as reattach from "./smoke/reattach.ts";
-import * as refreshBroker from "./smoke/refresh-broker.ts";
-import * as refreshCookie from "./smoke/refresh-cookie.ts";
-import * as liveView from "./smoke/live-view.ts";
-import * as contradiction from "./smoke/contradiction.ts";
-import * as geometry from "./smoke/geometry.ts";
-import * as attribution from "./smoke/attribution.ts";
-import * as frames from "./smoke/frames.ts";
-import * as injection from "./smoke/injection.ts";
-import * as postmessage from "./smoke/postmessage.ts";
-import * as checkGate from "./smoke/check.ts";
-import * as baselines from "./smoke/baselines.ts";
-import * as firstRun from "./smoke/first-run.ts";
-import * as unload from "./smoke/unload.ts";
-import * as ciRun from "./smoke/ci.ts";
-import * as timeLimits from "./smoke/time-limits.ts";
-import * as snapshotContents from "./smoke/snapshot.ts";
-import * as refsAndDiffs from "./smoke/refs.ts";
-import * as targets from "./smoke/targets.ts";
-import * as fromRunPath from "./smoke/from-run-path.ts";
-import * as settleAfterLeaving from "./smoke/settle.ts";
-import * as actionResults from "./smoke/action-results.ts";
-
-const suites = [
-  readOnly,
-  safeWrite,
-  multiSession,
-  authLoss,
-  loginProfiles,
-  scriptedLogin,
-  passwordlessLogin,
-  ssoLogin,
-  reattach,
-  refreshBroker,
-  refreshCookie,
-  liveView,
-  injection,
-  postmessage,
-  contradiction,
-  geometry,
-  attribution,
-  frames,
-  snapshotContents,
-  refsAndDiffs,
-  targets,
-  fromRunPath,
-  settleAfterLeaving,
-  actionResults,
-  unload,
-  timeLimits,
-  checkGate,
-  baselines,
-  firstRun,
-  ciRun,
-];
+import { parseShard, pickShard, withoutShard } from "./smoke/shards.ts";
+import { shards } from "./smoke/suites.ts";
 
 /** Processes still running under this one. `ps` is POSIX; on Windows the check is skipped and says so. */
 function leftovers(): Leftover[] {
@@ -123,6 +62,10 @@ async function checkNothingLeft(suite: string): Promise<void> {
 const SMOKE_ACTION_TIMEOUT_MS = "15000";
 
 async function main(): Promise<void> {
+  // `npm run smoke:run -- auth` runs only the suites whose title matches; `-- --shard 2/3` runs one shard of them.
+  const args = process.argv.slice(2);
+  const suites = pickShard(shards, parseShard(args));
+  const only = withoutShard(args)[0]?.toLowerCase();
   process.env.SCENESCOUT_ACTION_TIMEOUT_MS ??= SMOKE_ACTION_TIMEOUT_MS;
   // What is open before anything runs (stdio), so what is open at the end can be compared with it.
   const baseline = process.getActiveResourcesInfo();
@@ -130,8 +73,6 @@ async function main(): Promise<void> {
   const server = await startFixtureServer();
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "scout-smoke-"));
   const ctx: SmokeContext = { baseUrl: server.baseUrl, foreignBaseUrl: server.foreignBaseUrl, projectDir, stats: server.stats };
-  // `npm run smoke:run -- auth` runs only the suites whose title matches.
-  const only = process.argv[2]?.toLowerCase();
   let ran = 0;
   try {
     for (const suite of suites) {
@@ -155,7 +96,12 @@ async function main(): Promise<void> {
   check("nothing is left open that would keep node running", extra.length === 0, `open: ${extra.join(", ")}`);
   if (ran === 0) {
     // A filter that matches nothing must not read as a pass.
-    console.error(`\nNo suite matched "${only}". Suites: ${suites.map((s) => s.title).join(" | ")}`);
+    console.error(
+      `\nNo suite matched "${only}". Suites: ${shards
+        .flat()
+        .map((s) => s.title)
+        .join(" | ")}`,
+    );
     process.exit(1);
   }
   if (failureCount() > 0) {
