@@ -523,10 +523,11 @@
       "category": "page-error",
       "severity": "medium",
       "level": "medium",
-      "match": ["orders/null", "not.found.{0,80}(enabled|button|control|action)"],
+      "match": ["orders/null", "not.found.{0,80}(enabled|button|control|action)", "order not found.{0,40}(still )?(offers|shows|keeps).{0,60}(save|delete)"],
       "examples": [
         "Order-not-found page still shows fully enabled action buttons that crash on click",
-        "POST /api/orders/null/request-approval 404; page_error: Unexpected token"
+        "POST /api/orders/null/request-approval 404; page_error: Unexpected token",
+        "\"Order not found\" page still offers Request approval, notes, Save and Delete\nGET /api/orders/99999 404; testid=order-request-approval,order-save,order-delete visible"
       ],
       "counterExamples": []
     },

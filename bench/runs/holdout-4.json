@@ -1,0 +1,844 @@
+{
+  "app": "holdout",
+  "run": "holdout-4",
+  "date": "2026-10-10",
+  "note": "Engine 3.23.1 (the MCP server process loaded 3.23.0, which differs only in how scout_close waits for timed-out calls); held-out run 1's briefs, lanes on Opus 5.5, a fresh held-out app and project directory",
+  "laneRoutes": {
+    "fines": ["/fines.html"],
+    "holds": ["/holds.html"],
+    "events": ["/events.html", "/events-joined.html"],
+    "catalogue": ["/catalogue.html"],
+    "account": ["/account.html", "/members.html"],
+    "lane-1": ["/", "/loans.html"],
+    "book": ["/book.html (reached from /catalogue.html via testid=catalogue-book-1; ids 1,2,3,5,6 and 999 via address bar)", "/signin.html"],
+    "checkout": ["/checkout.html"]
+  },
+  "findings": [
+    {
+      "title": "\"Download my data\" link is fully clipped and unreachable",
+      "severity": "medium",
+      "category": "dead-end",
+      "evidence": "testid=account-export clipped by overflow-hidden ancestor at 237,582; GET /api/export 200"
+    },
+    {
+      "title": "GET /api/notices returns 500 on page load",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Seat-saved confirmation page has no navigation or link back",
+      "severity": "medium",
+      "category": "dead-end",
+      "evidence": "/events-joined.html interactables=0"
+    },
+    {
+      "title": "Book reviews render stored HTML — stored XSS on the book page",
+      "severity": "high",
+      "category": "security",
+      "evidence": "POST /api/books/1/reviews <img onerror> rendered as markup on /book.html; document.title=xss"
+    },
+    {
+      "title": "Double-clicking Post review creates duplicate reviews",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/books/1/reviews x2 -> ids 5,6 identical text"
+    },
+    {
+      "title": "Drop-hold button is an icon with no accessible name",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "testid=holds-drop-32 button has no accessible name"
+    },
+    {
+      "title": "One click on the unlabeled icon cancels a hold immediately, with no confirmation, undo or message",
+      "severity": "medium",
+      "category": "ux-confusing",
+      "evidence": "click testid=holds-drop-34 -> DELETE /api/holds/34 without confirm"
+    },
+    {
+      "title": "\"Available now only\" filter keeps titles that are all on loan",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "testid=catalogue-available checked shows catalogue-book-1 \"all on loan\" (available:0)"
+    },
+    {
+      "title": "Events table is not in date order",
+      "severity": "low",
+      "category": "ux-confusing",
+      "evidence": "testid=events-rows order 2026-10-15,2026-10-21,2026-10-12"
+    },
+    {
+      "title": "A failed holds load is shown as \"No holds.\" instead of an error",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/holds !ok -> testid=holds-none shown, testid=holds-error hidden"
+    },
+    {
+      "title": "Holds table does not say whether a hold is ready to collect or still waiting",
+      "severity": "low",
+      "category": "ux-confusing",
+      "evidence": "testid=holds-rows columns Book/For/Placed; no status or position"
+    },
+    {
+      "title": "Notices panel never leaves \"Loading notices…\" when its request fails",
+      "severity": "medium",
+      "category": "ux-confusing",
+      "evidence": "testid=home-notices text \"Loading notices…\" after GET /api/notices 500"
+    },
+    {
+      "title": "Renew stays enabled on a loan already renewed 2 of 2 times",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "testid=loans-renew-202 enabled at renewals=2; POST /api/loans/202/renew 409"
+    },
+    {
+      "title": "Hold can be placed on a book withdrawn from the collection (0 copies)",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/holds book=6 (copies 0, withdrawn) 201"
+    },
+    {
+      "title": "\"Book not found\" page still shows Place hold (does nothing) and \"No reviews yet.\"",
+      "severity": "low",
+      "category": "ux-confusing",
+      "evidence": "/book.html?id=999 GET /api/books/999/reviews 404 shows \"No reviews yet.\"; testid=book-hold no-op"
+    },
+    {
+      "title": "Checkout reports success whatever the server answers",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/loans 403|409|404 → testid=checkout-msg \"Checked out ...\""
+    },
+    {
+      "title": "Book picker offers books with no copies available, unmarked",
+      "severity": "medium",
+      "category": "ux-confusing",
+      "evidence": "testid=checkout-book lists ids 1,2,4,7 with available:0 → POST /api/loans 409"
+    },
+    {
+      "title": "Check out form shown to members though only staff may use it",
+      "severity": "low",
+      "category": "ux-confusing",
+      "evidence": "role=member POST /api/loans 403 from testid=checkout-submit"
+    },
+    {
+      "title": "Check out button not guarded against double submit",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "click×2 testid=checkout-submit → 2× POST /api/loans"
+    }
+  ],
+  "decisions": [
+    {
+      "observation": "notices-500-on-fines-load",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "http-error",
+      "confidence": 0.85,
+      "evidence": "GET /api/notices 500",
+      "lane": "fines",
+      "at": "2026-10-10T19:12:20.558Z"
+    },
+    {
+      "observation": "member-fines-list-refused-403",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.7,
+      "evidence": "GET /api/fines 403 {\"error\":\"Fines are handled at the desk\"}",
+      "lane": "fines",
+      "at": "2026-10-10T19:12:20.558Z"
+    },
+    {
+      "observation": "member-waive-refused-by-server",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST /api/fines/M-1002/waive 403",
+      "lane": "fines",
+      "at": "2026-10-10T19:12:20.558Z"
+    },
+    {
+      "observation": "librarian-waive-refused-by-server",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST /api/fines/M-1005/waive 403",
+      "lane": "fines",
+      "at": "2026-10-10T19:12:20.558Z"
+    },
+    {
+      "observation": "librarian-fines-list-renders",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.8,
+      "evidence": "GET /api/fines 200 rows M-1002,M-1004,M-1005",
+      "lane": "fines",
+      "at": "2026-10-10T19:12:20.558Z"
+    },
+    {
+      "observation": "member-sees-empty-table-with-desk-error",
+      "verdict": "unsure",
+      "severity": null,
+      "category": null,
+      "confidence": 0.4,
+      "evidence": "testid=fines-error 'Fines are handled at the desk' under empty testid=fines-rows",
+      "lane": "fines",
+      "at": "2026-10-10T19:12:20.558Z"
+    },
+    {
+      "observation": "fine-row-id-inserted-unescaped-innerHTML",
+      "verdict": "unsure",
+      "severity": null,
+      "category": null,
+      "confidence": 0.3,
+      "evidence": "fines.html load(): tr.innerHTML '<td>'+m.id unescaped",
+      "lane": "fines",
+      "at": "2026-10-10T19:12:20.558Z"
+    },
+    {
+      "observation": "design-audit-spacing-off-grid",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.6,
+      "evidence": "design_audit /fines.html 96/100 padding 9px x24",
+      "lane": "fines",
+      "at": "2026-10-10T19:12:20.558Z"
+    },
+    {
+      "observation": "holds-drop-icon-button-no-accessible-name",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "a11y",
+      "confidence": 0.9,
+      "evidence": "testid=holds-drop-32 button has no accessible name",
+      "lane": "holds",
+      "at": "2026-10-10T19:12:28.373Z"
+    },
+    {
+      "observation": "drop-hold-one-click-no-confirm-or-feedback",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "ux-confusing",
+      "confidence": 0.65,
+      "evidence": "click testid=holds-drop-34 -> DELETE /api/holds/34 without confirm",
+      "lane": "holds",
+      "at": "2026-10-10T19:12:28.373Z"
+    },
+    {
+      "observation": "holds-load-failure-shown-as-no-holds",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "confidence": 0.6,
+      "evidence": "GET /api/holds !ok -> testid=holds-none shown, testid=holds-error hidden",
+      "lane": "holds",
+      "at": "2026-10-10T19:12:28.373Z"
+    },
+    {
+      "observation": "holds-table-no-ready-status-or-queue-position",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "ux-confusing",
+      "confidence": 0.45,
+      "evidence": "testid=holds-rows columns Book/For/Placed; no status or position",
+      "lane": "holds",
+      "at": "2026-10-10T19:12:28.373Z"
+    },
+    {
+      "observation": "holds-list-scoped-to-signed-in-member",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.8,
+      "evidence": "GET /api/holds?member=M-1001 200 returns only M-1002 holds",
+      "lane": "holds",
+      "at": "2026-10-10T19:12:28.373Z"
+    },
+    {
+      "observation": "duplicate-hold-rejected",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST /api/holds {book:4} 409",
+      "lane": "holds",
+      "at": "2026-10-10T19:12:28.373Z"
+    },
+    {
+      "observation": "hold-on-missing-book-rejected",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST /api/holds {book:99999} 404",
+      "lane": "holds",
+      "at": "2026-10-10T19:12:28.373Z"
+    },
+    {
+      "observation": "drop-own-hold-removes-row",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "DELETE /api/holds/34 -> testid=holds-row-34 gone",
+      "lane": "holds",
+      "at": "2026-10-10T19:12:28.373Z"
+    },
+    {
+      "observation": "holds-dates-render-correctly",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "placed 2026-10-08 -> 8 Oct 2026",
+      "lane": "holds",
+      "at": "2026-10-10T19:12:28.373Z"
+    },
+    {
+      "observation": "events-joined-page-no-navigation",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "dead-end",
+      "confidence": 0.85,
+      "evidence": "/events-joined.html interactables=0",
+      "lane": "events",
+      "at": "2026-10-10T19:12:34.680Z"
+    },
+    {
+      "observation": "events-table-not-date-ordered",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "ux-confusing",
+      "confidence": 0.55,
+      "evidence": "testid=events-rows order 2026-10-15,2026-10-21,2026-10-12",
+      "lane": "events",
+      "at": "2026-10-10T19:12:34.680Z"
+    },
+    {
+      "observation": "join-double-click-fires-two-posts",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.8,
+      "evidence": "POST /api/events/2/join x2 -> left 19 (idempotent per member)",
+      "lane": "events",
+      "at": "2026-10-10T19:12:34.680Z"
+    },
+    {
+      "observation": "join-seat-count-decrements-correctly",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "POST /api/events/3/join 200 left 13->12",
+      "lane": "events",
+      "at": "2026-10-10T19:12:34.680Z"
+    },
+    {
+      "observation": "join-missing-event-404",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "POST /api/events/999/join 404 {\"error\":\"No such event\"}",
+      "lane": "events",
+      "at": "2026-10-10T19:12:34.680Z"
+    },
+    {
+      "observation": "api-notices-500-shared-chrome",
+      "verdict": "unsure",
+      "severity": null,
+      "category": null,
+      "confidence": 0.5,
+      "evidence": "GET /api/notices 500 (from shared app.js, owned by / lane)",
+      "lane": "events",
+      "at": "2026-10-10T19:12:34.680Z"
+    },
+    {
+      "observation": "design-audit-spacing-off-grid",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.7,
+      "evidence": "57% paddings off 4px grid; score 95/100",
+      "lane": "events",
+      "at": "2026-10-10T19:12:34.680Z"
+    },
+    {
+      "observation": "available-now-filter-keeps-all-on-loan-titles",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "confidence": 0.92,
+      "evidence": "GET /api/books?available=1 200 returns ids 1,2,4,7 with available:0; testid=catalogue-available shows 'all on loan' rows",
+      "lane": "catalogue",
+      "at": "2026-10-10T19:12:41.552Z"
+    },
+    {
+      "observation": "search-title-author-punctuation-works",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "testid=catalogue-search 'moss','Petra','engines,' filter rows correctly",
+      "lane": "catalogue",
+      "at": "2026-10-10T19:12:41.552Z"
+    },
+    {
+      "observation": "search-no-match-empty-state",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "testid=catalogue-none 'No titles match.'",
+      "lane": "catalogue",
+      "at": "2026-10-10T19:12:41.552Z"
+    },
+    {
+      "observation": "withdrawn-title-label",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.75,
+      "evidence": "catalogue-book-6 copies:0 shown 'withdrawn'",
+      "lane": "catalogue",
+      "at": "2026-10-10T19:12:41.552Z"
+    },
+    {
+      "observation": "notices-500-not-from-catalogue",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.7,
+      "evidence": "GET /api/notices 500 not requested by /catalogue.html (home page request)",
+      "lane": "catalogue",
+      "at": "2026-10-10T19:12:41.552Z"
+    },
+    {
+      "observation": "filter-rapid-toggle-consistent",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.7,
+      "evidence": "click x2 testid=catalogue-available final rows match checked state",
+      "lane": "catalogue",
+      "at": "2026-10-10T19:12:41.552Z"
+    },
+    {
+      "observation": "spacing-off-4px-grid",
+      "verdict": "unsure",
+      "severity": null,
+      "category": null,
+      "confidence": 0.5,
+      "evidence": "design_audit 63% paddings off 4px grid",
+      "lane": "catalogue",
+      "at": "2026-10-10T19:12:41.552Z"
+    },
+    {
+      "observation": "book-link-opens-correct-id",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "testid=catalogue-book-3 -> /book.html?id=3",
+      "lane": "catalogue",
+      "at": "2026-10-10T19:12:41.552Z"
+    },
+    {
+      "observation": "account-export link fully clipped / unreachable",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "dead-end",
+      "confidence": 0.7,
+      "evidence": "testid=account-export clipped by overflow-hidden ancestor at 237,582; GET /api/export 200",
+      "lane": "account",
+      "at": "2026-10-10T19:12:48.400Z"
+    },
+    {
+      "observation": "GET /api/notices 500 on /account.html load",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "http-error",
+      "confidence": 0.9,
+      "evidence": "GET /api/notices 500",
+      "lane": "account",
+      "at": "2026-10-10T19:12:48.400Z"
+    },
+    {
+      "observation": "members list refused for non-staff member, shown gracefully",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "GET /api/members 403 {\"error\":\"Only library staff can see the member list\"}",
+      "lane": "account",
+      "at": "2026-10-10T19:12:48.400Z"
+    },
+    {
+      "observation": "export returns only signed-in member M-1002 own data",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "GET /api/export 200 member.id=M-1002 only",
+      "lane": "account",
+      "at": "2026-10-10T19:12:48.400Z"
+    },
+    {
+      "observation": "no visually dominant primary action on account/members pages",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.6,
+      "evidence": "design_audit task-clarity 92; PAGE SCORE 96/100",
+      "lane": "account",
+      "at": "2026-10-10T19:12:48.400Z"
+    },
+    {
+      "observation": "home-notices-api-500",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "http-error",
+      "confidence": 0.95,
+      "evidence": "GET /api/notices 500",
+      "lane": "lane-1",
+      "at": "2026-10-10T19:13:44.085Z"
+    },
+    {
+      "observation": "home-notices-stuck-loading",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "ux-confusing",
+      "confidence": 0.85,
+      "evidence": "testid=home-notices text \"Loading notices…\" after GET /api/notices 500",
+      "lane": "lane-1",
+      "at": "2026-10-10T19:13:44.085Z"
+    },
+    {
+      "observation": "loans-renew-enabled-at-limit",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "ux-polish",
+      "confidence": 0.55,
+      "evidence": "testid=loans-renew-202 enabled at renewals=2; POST /api/loans/202/renew 409",
+      "lane": "lane-1",
+      "at": "2026-10-10T19:13:44.085Z"
+    },
+    {
+      "observation": "loans-renew-double-click-second-409",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.8,
+      "evidence": "POST /api/loans/202/renew 409 \"A loan can be renewed 2 times\"",
+      "lane": "lane-1",
+      "at": "2026-10-10T19:13:44.085Z"
+    },
+    {
+      "observation": "loans-renew-extends-14-days-persisted",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "GET /api/loans due 2026-10-19 -> 2026-11-02 renewals 1",
+      "lane": "lane-1",
+      "at": "2026-10-10T19:13:44.085Z"
+    },
+    {
+      "observation": "loans-overdue-loan-renewable-from-old-due",
+      "verdict": "unsure",
+      "severity": null,
+      "category": null,
+      "confidence": 0.4,
+      "evidence": "POST /api/loans/201/renew 200 due 2026-10-07 -> 2026-10-21",
+      "lane": "lane-1",
+      "at": "2026-10-10T19:13:44.085Z"
+    },
+    {
+      "observation": "loans-member-return-refused-server-side",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST /api/loans/201/return 403",
+      "lane": "lane-1",
+      "at": "2026-10-10T19:13:44.085Z"
+    },
+    {
+      "observation": "home-summary-counts-match-api",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "GET /api/summary {loans:2,overdue:0,holds:2} = /api/loans, /api/holds",
+      "lane": "lane-1",
+      "at": "2026-10-10T19:13:44.085Z"
+    },
+    {
+      "observation": "loans-borrower-column-shows-member-name",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "th Borrower; /api/loans name=Ben Oduya member=M-1002",
+      "lane": "lane-1",
+      "at": "2026-10-10T19:13:44.085Z"
+    },
+    {
+      "observation": "shared-chrome-nav-links-no-underline",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.7,
+      "evidence": "design_audit shared chrome: links no underline rgba(93,99,87,1)",
+      "lane": "lane-1",
+      "at": "2026-10-10T19:13:44.085Z"
+    },
+    {
+      "observation": "spacing-off-4px-grid",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.6,
+      "evidence": "design_audit: 100% paddings off 4px grid on /, 58% on /loans.html",
+      "lane": "lane-1",
+      "at": "2026-10-10T19:13:44.085Z"
+    },
+    {
+      "observation": "book-review-stored-xss",
+      "verdict": "defect",
+      "severity": "high",
+      "category": "security",
+      "confidence": 0.97,
+      "evidence": "POST /api/books/1/reviews <img onerror> rendered as markup on /book.html; document.title=xss",
+      "lane": "book",
+      "at": "2026-10-10T19:13:53.243Z"
+    },
+    {
+      "observation": "book-review-double-submit-duplicates",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "confidence": 0.9,
+      "evidence": "POST /api/books/1/reviews x2 -> ids 5,6 identical text",
+      "lane": "book",
+      "at": "2026-10-10T19:13:53.243Z"
+    },
+    {
+      "observation": "hold-on-withdrawn-book-accepted",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "confidence": 0.8,
+      "evidence": "POST /api/holds book=6 (copies 0, withdrawn) 201",
+      "lane": "book",
+      "at": "2026-10-10T19:13:53.243Z"
+    },
+    {
+      "observation": "book-not-found-shows-dead-hold-and-empty-reviews",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "ux-confusing",
+      "confidence": 0.6,
+      "evidence": "/book.html?id=999 GET /api/books/999/reviews 404 shows \"No reviews yet.\"; testid=book-hold no-op",
+      "lane": "book",
+      "at": "2026-10-10T19:13:53.243Z"
+    },
+    {
+      "observation": "empty-review-rejected-with-message",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST /api/books/1/reviews 400 \"A review needs some text\"",
+      "lane": "book",
+      "at": "2026-10-10T19:13:53.243Z"
+    },
+    {
+      "observation": "duplicate-hold-refused-409",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST /api/holds 409 \"That member already has a hold on this book\"",
+      "lane": "book",
+      "at": "2026-10-10T19:13:53.243Z"
+    },
+    {
+      "observation": "book-shelf-status-matches-api",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "GET /api/books 200 available/copies match book-shelf text for ids 1,2,3,6",
+      "lane": "book",
+      "at": "2026-10-10T19:13:53.243Z"
+    },
+    {
+      "observation": "signin-unknown-role-refused",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST /api/signin {role:superadmin} 400 Unknown role",
+      "lane": "book",
+      "at": "2026-10-10T19:13:53.243Z"
+    },
+    {
+      "observation": "signin-role-switch-works",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "POST /api/signin head/librarian/member -> / with nav-switch label updated",
+      "lane": "book",
+      "at": "2026-10-10T19:13:53.243Z"
+    },
+    {
+      "observation": "spacing-off-4px-grid",
+      "verdict": "unsure",
+      "severity": null,
+      "category": null,
+      "confidence": 0.5,
+      "evidence": "design_audit /book.html,/signin.html paddings 6/7/9/14/18px off 4px grid",
+      "lane": "book",
+      "at": "2026-10-10T19:13:53.243Z"
+    },
+    {
+      "observation": "signin-no-dominant-action",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.7,
+      "evidence": "design_audit /signin.html no visually dominant action (three equal role buttons)",
+      "lane": "book",
+      "at": "2026-10-10T19:13:53.243Z"
+    },
+    {
+      "observation": "checkout-false-success-on-refused-loan",
+      "verdict": "defect",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "confidence": 0.93,
+      "evidence": "POST /api/loans 403|409|404 → testid=checkout-msg \"Checked out ...\"",
+      "lane": "checkout",
+      "at": "2026-10-10T19:14:13.451Z"
+    },
+    {
+      "observation": "api-notices-500-on-load",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "http-error",
+      "confidence": 0.85,
+      "evidence": "GET /api/notices 500",
+      "lane": "checkout",
+      "at": "2026-10-10T19:14:13.451Z"
+    },
+    {
+      "observation": "book-picker-lists-unavailable-books",
+      "verdict": "defect",
+      "severity": "medium",
+      "category": "ux-confusing",
+      "confidence": 0.6,
+      "evidence": "testid=checkout-book lists ids 1,2,4,7 with available:0 → POST /api/loans 409",
+      "lane": "checkout",
+      "at": "2026-10-10T19:14:13.451Z"
+    },
+    {
+      "observation": "checkout-form-offered-to-member-role",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "ux-confusing",
+      "confidence": 0.45,
+      "evidence": "role=member POST /api/loans 403 from testid=checkout-submit",
+      "lane": "checkout",
+      "at": "2026-10-10T19:14:13.451Z"
+    },
+    {
+      "observation": "checkout-submit-double-click-two-posts",
+      "verdict": "defect",
+      "severity": "low",
+      "category": "ux-polish",
+      "confidence": 0.4,
+      "evidence": "click×2 testid=checkout-submit → 2× POST /api/loans",
+      "lane": "checkout",
+      "at": "2026-10-10T19:14:13.451Z"
+    },
+    {
+      "observation": "server-refuses-member-checkout",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST /api/loans 403 {\"error\":\"Only library staff can check a book out\"}",
+      "lane": "checkout",
+      "at": "2026-10-10T19:14:13.451Z"
+    },
+    {
+      "observation": "server-refuses-unavailable-book",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "POST /api/loans 409; /api/books available unchanged",
+      "lane": "checkout",
+      "at": "2026-10-10T19:14:13.451Z"
+    },
+    {
+      "observation": "double-submit-no-duplicate-loan",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "loan 209 only; book 8 available 1→0",
+      "lane": "checkout",
+      "at": "2026-10-10T19:14:13.451Z"
+    },
+    {
+      "observation": "librarian-checkout-creates-loan",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.9,
+      "evidence": "POST /api/loans created id=208; book 5 available 2→1; due 2026-10-31",
+      "lane": "checkout",
+      "at": "2026-10-10T19:14:13.451Z"
+    },
+    {
+      "observation": "markup-card-number-rendered-as-text",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.8,
+      "evidence": "document.title unchanged after card=<img onerror>; POST /api/loans 404 no record",
+      "lane": "checkout",
+      "at": "2026-10-10T19:14:13.451Z"
+    },
+    {
+      "observation": "blank-form-client-validation",
+      "verdict": "not_a_defect",
+      "severity": null,
+      "category": null,
+      "confidence": 0.85,
+      "evidence": "testid=checkout-msg \"Enter the member's card number.\" no request",
+      "lane": "checkout",
+      "at": "2026-10-10T19:14:13.451Z"
+    },
+    {
+      "observation": "checkout-spacing-off-4px-grid",
+      "verdict": "unsure",
+      "severity": null,
+      "category": null,
+      "confidence": 0.3,
+      "evidence": "design-audit paddings 7px,9px,6px,14px",
+      "lane": "checkout",
+      "at": "2026-10-10T19:14:13.451Z"
+    }
+  ]
+}
