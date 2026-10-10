@@ -192,7 +192,9 @@ Its runs are reported in [Held-out results](#held-out-results).
 Each row is one run of the demo app at `medium`, in `safe-write`, eight
 parallel lanes on a mid-tier model, each lane on the same routes. Every row is
 re-scored against **one** key by `npm run bench -- --all`. The table below is
-key `f915c444a2`, which adds the labels of
+key `6daa97e78d`, which adds what run 12 found (see
+[Run 12 and held-out run 4](#run-12-and-held-out-run-4-engine-3231-issue-421));
+no earlier value moved under it. `f915c444a2`, the key before, adds the labels of
 [issue 420](#labelling-the-unmatched-findings-issue-420); under it only runs 2
 and 3 moved, and their last struck value is under `c1786bc817`.
 `c1786bc817` differs from `19cc8e67e8` only in saying which pages
@@ -228,6 +230,7 @@ the run filed, including the ones set aside. The archived runs are in [`bench/ru
 | 9 | 2026-09-26 | **Engine 3.10.0 (wave 1)** — run 1's briefs verbatim, demo served without its seeded-defect comments | 13/13 | ~~31/31 (100%)~~ 30/30 (100%) | 31 (1 set aside) | 0 | 0 | 0 | ~~30/33 (91%), ECE 0.12, Brier 0.123~~ 29/32 (91%), ECE 0.12, Brier 0.126 | not recorded | See runs 9–10 |
 | 10 | 2026-09-26 | Repeat of run 9 | 11/13 | 22/22 (100%) | 24 (2 set aside) | 0 | 0 | 0 | 23/26 (88%), ECE 0.14, Brier 0.109 | not recorded | See runs 9–10 |
 | 11 | 2026-09-27 | **Engine 3.11.1 (wave 3)** — run 1's briefs verbatim | 11/13 | ~~25/25 (100%)~~ 29/29 (100%) | 30 (1 set aside) | ~~4~~ 0 | 0 | 0 | ~~24/32 (75%), ECE 0.06, Brier 0.165~~ 26/34 (76%), ECE 0.08, Brier 0.169 | not recorded | See run 11 |
+| 12 | 2026-10-10 | **Engine 3.23.1** — run 1's briefs verbatim, lanes on Opus 5.5 | 12/13 | 28/28 (100%) | 33 (3 set aside) | 2 | 0 | 0 | 25/25 (100%), ECE 0.19, Brier 0.055 | ~682k tokens, 256 tool calls, longest lane 2m41s | See run 12 |
 
 **Brier is the number to compare; ECE says which way a lane is off.** Run 1's verdicts were
 right more often (97% against 84% under key `f8e0862a8b`; 97% against 83% now), and its expected calibration error is
@@ -240,6 +243,55 @@ ahead (0.113 → 0.035 under key `f8e0862a8b`; 0.109 → 0.033 now).
 The first version of this scorer counted the five "belongs to another lane"
 dismissals as wrong verdicts, which gave ECE 0.09 → 0.04 and read as an
 improvement; that one choice was enough to reverse the comparison.
+
+### Run 12 and held-out run 4: engine 3.23.1 (issue 421)
+
+The engine moved from 3.11.1 to 3.23.1, twelve minor versions that changed
+control names, snapshots, oracles, the design audit and the false-positive
+fixes from [validation](validation.md). Everything else was held as it was:
+run 1's eight briefs on the demo and held-out run 1's eight on the held-out
+app, recovered verbatim from the session that wrote them (only the project
+path differs), a fresh app and a fresh project directory for each, and every
+lane on Opus 5.5, as held-out run 3's were. Two things differ from runs 11 and
+held-out 3: the demo and held-out runs went one after the other instead of at
+the same time, and the MCP server's process had loaded 3.23.0, whose only
+difference from 3.23.1 is how `scout_close` waits for a call its watchdog cut
+off, which a lane never meets.
+
+| | Run 11 (3.11.1) | Run 12 (3.23.1) | Held-out 3 (3.11.1) | Held-out 4 (3.23.1) |
+|---|---:|---:|---:|---:|
+| Recall | 11/13 | 12/13 | 8/10 | 6/10 |
+| Precision (labelled) | 29/29 | 28/28 | 15/19 | 17/17 |
+| False positives | 0 | 0 | 4 | 0 |
+| Extra findings for a defect already filed | ≥ 3 | ≥ 3 | not reported | ≥ 1 |
+| Brier (lane calibration) | 0.169 | 0.055 | 0.157 | 0.081 |
+
+- **Demo.** Run 12 found the sticky bar covering Save notes, which run 11
+  missed; both missed the silent submit with a blank customer. Duplicates did
+  not move.
+- **Held out.** Held-out run 4 missed two defects held-out run 3 found: any
+  member's record readable by id, and a double-click on Renew. It filed no
+  false positive where run 3 filed four. Its `fines` lane came back
+  `partial`: a safety stop on the lane agent's side ended it before it
+  tested the waive flow's success path, which is in the report as its
+  `blocked_by`. Earlier held-out runs found 9, 7 and 8 of 10, so 6 is at
+  the low end of a range one run cannot narrow.
+- **Calibration** improved on both apps (Brier 0.169 → 0.055 and
+  0.157 → 0.081): the lanes were right on more of the verdicts the key
+  scores, and as confident.
+
+One run per app is noisy: a single defect is 8 points of demo recall and 10 of
+held-out recall, and these rows cannot separate the engine from run-to-run
+variance. The direction on precision and calibration holds on both apps.
+
+**Key changes.** Five findings matched no entry, labelled against the apps'
+source by the agent that ran the benchmark: on the demo, the order page for an
+unknown id still offering Save notes and Delete, a rewording of
+`order-not-found-live-controls`; on the held-out app, a double-click posting
+the same review twice, a failed holds request shown as "No holds.", and the
+checkout form offered to members the server refuses, each a new also-real
+entry, and "Check out button not guarded against double submit", a rewording
+of `checkout-double-submit`. No archived run's score moved.
 
 ### Ownership by route (task 29)
 
@@ -825,7 +877,9 @@ What the numbers do **not** show:
 
 Each row is one run of the [held-out app](#the-held-out-app) at `medium`, in
 `safe-write`, eight parallel lanes, re-scored by `npm run bench -- --all`
-against key `fe4c9a65a6`, which adds the labels of
+against key `87b7b2ccd5`, which adds what held-out run 4 found (see
+[Run 12 and held-out run 4](#run-12-and-held-out-run-4-engine-3231-issue-421))
+and moved no earlier value. `fe4c9a65a6`, the key before, adds the labels of
 [issue 420](#labelling-the-unmatched-findings-issue-420) and moved no value in
 this table. Before it, `b5a7933f32` differs from `1bc84f1a04` only in saying which
 pages an entry is on (see [Ownership by route](#ownership-by-route-task-29); no
@@ -843,6 +897,7 @@ runs are reported, never optimised against.
 | holdout-1 | 2026-09-26 | **Engine 3.10.0 (wave 1)**, first held-out run; briefs written by an agent that saw the app only through the browser | 9/10 | ~~11/11 (100%)~~ 15/18 (83%) | 20 (2 set aside) | ~~9~~ 0 | ~~0~~ 3 | 0 | ~~19/21 (90%), ECE 0.13, Brier 0.111~~ ~~23/26 (88%), ECE 0.12, Brier 0.098~~ 24/27 (89%), ECE 0.13, Brier 0.096 | not recorded | — |
 | holdout-2 | 2026-09-26 | Repeat of holdout-1, same briefs | ~~8/10~~ 7/10 | ~~11/11 (100%)~~ 22/23 (96%) | 24 (1 set aside) | ~~13~~ 0 | ~~0~~ 1 | 0 | ~~18/20 (90%), ECE 0.15, Brier 0.069~~ ~~29/32 (91%), ECE 0.16, Brier 0.113~~ 30/33 (91%), ECE 0.16, Brier 0.111 | not recorded | — |
 | holdout-3 | 2026-09-27 | **Engine 3.11.1 (wave 3)**, same briefs as holdout-1 | 8/10 | ~~14/17 (82%)~~ 15/19 (79%) | 23 (~~3~~ 4 set aside) | ~~3~~ 0 | ~~3~~ 4 | 0 | ~~18/24 (75%), ECE 0.13, Brier 0.157~~ 19/26 (73%), ECE 0.15, Brier 0.157 | not recorded | — |
+| holdout-4 | 2026-10-10 | **Engine 3.23.1**, same briefs as holdout-1, lanes on Opus 5.5 | 6/10 | 17/17 (100%) | 19 (1 set aside) | 1 | 0 | 0 | 24/25 (96%), ECE 0.16, Brier 0.081 | ~681k tokens, 255 tool calls, longest lane 3m09s | — |
 
 ### Held-out runs 1 and 2
 

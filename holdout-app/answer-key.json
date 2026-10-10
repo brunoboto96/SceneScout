@@ -371,11 +371,13 @@
         "(double|two).{0,15}(click|submit|press).{0,60}check.?out.{0,80}(two|2|duplicate|second) loans?",
         "check.?out.{0,60}(double.?click|double.?submit|clicked twice).{0,80}(two|2|duplicate) loans",
         "POST /api/loans (x2|×2|twice).{0,60}(loans \\d+,\\s*\\d+|two loans|duplicate)",
-        "check.?out.{0,60}double.?click.{0,80}(two loans|duplicate|lends.{0,40}twice)"
+        "check.?out.{0,60}double.?click.{0,80}(two loans|duplicate|lends.{0,40}twice)",
+        "check ?out button not guarded against double submit"
       ],
       "examples": [
         "POST /api/loans x2 -> loans 210,211 book=3 member=M-1002\nDouble-clicking Check out creates two loans of the same book for one member",
-        "A double-click on Check out creates duplicate loans"
+        "A double-click on Check out creates duplicate loans",
+        "Check out button not guarded against double submit\nclick×2 testid=checkout-submit → 2× POST /api/loans"
       ],
       "counterExamples": [
         "click x2 testid=checkout-submit -> POST /api/loans x2 (both 403)\ncheckout-submit-double-click-fires-twice",
@@ -566,6 +568,53 @@
         "A second hold on the same book is refused with 409 already has a hold on this book",
         "Place hold on book page fails for librarian with 400\nPOST /api/holds → HTTP 400 on Place hold"
       ]
+    },
+    {
+      "id": "review-double-submit",
+      "route": "/book.html",
+      "title": "Post review stays enabled while it saves, so a double-click posts the same review twice",
+      "category": "data-inconsistency",
+      "severity": "medium",
+      "level": "medium",
+      "match": [
+        "(double.?click|x2|×2|twice).{0,40}post review|post review.{0,60}(duplicate|twice|x2|×2)",
+        "reviews x2 .{0,30}ids \\d+,\\d+",
+        "post review stays enabled while it saves"
+      ],
+      "examples": ["Double-clicking Post review creates duplicate reviews\nPOST /api/books/1/reviews x2 -> ids 5,6 identical text"],
+      "counterExamples": ["Empty review submission is rejected only after server request\nPOST /api/books/1/reviews empty body 400"]
+    },
+    {
+      "id": "holds-load-failure-shown-empty",
+      "route": "/holds.html",
+      "title": "A failed holds request is shown as \"No holds.\" and the error line stays hidden",
+      "category": "data-inconsistency",
+      "severity": "medium",
+      "level": "medium",
+      "match": [
+        "(failed|refused) holds (load|request).{0,40}(shown|presented) as .?no holds",
+        "api/holds !ok.{0,40}holds-none",
+        "failed holds request is shown as"
+      ],
+      "examples": [
+        "A failed holds load is shown as \"No holds.\" instead of an error\nGET /api/holds !ok -> testid=holds-none shown, testid=holds-error hidden"
+      ],
+      "counterExamples": ["Holds rows lack status or queue position"]
+    },
+    {
+      "id": "checkout-offered-to-members",
+      "route": "/checkout.html",
+      "title": "The checkout form is offered to members, whom the server refuses",
+      "category": "ux-confusing",
+      "severity": "low",
+      "level": "medium",
+      "match": [
+        "check ?out form (shown|offered) to members",
+        "role=member POST /api/loans 403 from testid=checkout-submit",
+        "checkout form is offered to members"
+      ],
+      "examples": ["Check out form shown to members though only staff may use it\nrole=member POST /api/loans 403 from testid=checkout-submit"],
+      "counterExamples": ["Checkout says Checked out after the server refused the loan\nPOST /api/loans 403 → checkout-msg Checked out"]
     }
   ],
   "nonDefects": [
