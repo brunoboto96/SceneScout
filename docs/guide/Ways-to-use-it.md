@@ -167,9 +167,9 @@ It writes `report.md`, `check.json` and `check.sarif` to `.scenescout/check/` (o
 ```mermaid
 flowchart LR
   P["Pages: the start URL,<br/>scanned routes, links"] --> M["Measure<br/>each page"]
-  M --> F["Replay<br/>saved flows"]
-  F --> R["Re-test open<br/>findings"]
-  R --> V{"Anything that<br/>fails the gate?"}
+  M --> R["Re-test open<br/>findings"]
+  R --> F["Replay<br/>saved flows"]
+  F --> V{"Anything that<br/>fails the gate?"}
   V -- No --> E0["exit 0"]
   V -- Yes --> E1["exit 1"]
 ```
@@ -355,10 +355,11 @@ sequenceDiagram
   participant P as Deployed preview
   participant T as Report job, no key
   R->>G: comments /scenescout qa
-  G->>G: allowlist, fork refusal
-  G->>Q: allowed
+  G->>G: allowlist, fork refusal,<br/>the preview's address
+  G-->>R: a reaction on the comment
+  G->>Q: allowed, with the preview's address
   Q->>P: SceneScout from an exact release tag,<br/>no checkout of the pull request
-  Q->>T: the results
+  Q->>T: the results, as an artifact
   T-->>R: a reply in the thread
 ```
 

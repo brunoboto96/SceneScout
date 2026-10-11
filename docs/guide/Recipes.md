@@ -9,7 +9,7 @@ Each recipe describes an invented app of a common shape. Names, routes and hosts
 | Your app | Recipe | What matters most |
 |---|---|---|
 | Server-rendered pages, a session cookie, forms that post | [A server-rendered app](#a-server-rendered-app) | Pages reached only by a form post are invisible to the crawl |
-| A client-side router and a token in storage | [A single-page app with its token in storage](#a-single-page-app-with-its-token-in-storage) | Run next to the code; attach by `role` for the refresh broker |
+| A client-side router and a token in storage | [A single-page app with its token in storage](#a-single-page-app-with-its-token-in-storage) | Run from the app's repository, so routes come from the source; attach by `role` for the refresh broker |
 | A sign-in through an identity provider | [An app behind SSO](#an-app-behind-sso) | Sign in yourself once per role |
 | A payment form, chat or map in an iframe | [An app with embedded third-party widgets](#an-app-with-embedded-third-party-widgets) | `trustedEmbeds` to exercise one in test mode |
 | Many widgets, each with its own endpoint | [An API-heavy dashboard](#an-api-heavy-dashboard) | `expect-request` steps in saved flows |
