@@ -1133,10 +1133,32 @@
         gap: 14px;
         justify-items: center;
       }
-      .allies > span {
+      .allies-head {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        align-items: center;
+        gap: 6px 14px;
+        text-align: center;
+      }
+      .allies-head > span {
         font: 700 0.8rem/1 var(--display);
         letter-spacing: 0.08em;
         color: var(--gold);
+      }
+      /* Motion that runs on for more than five seconds has to be stoppable, by keyboard and touch as well as by hovering (WCAG 2.2.2). */
+      .march-toggle {
+        display: none;
+        border: 1px solid var(--gold-soft);
+        border-radius: 4px;
+        background: transparent;
+        color: var(--gold-hi);
+        font: 700 0.75rem/1 var(--body);
+        padding: 5px 9px;
+        cursor: pointer;
+      }
+      .march-toggle:hover {
+        background: rgba(217, 180, 91, 0.1);
       }
       .marquee {
         width: 100%;
@@ -1179,7 +1201,11 @@
         .marquee ul {
           animation: march 38s linear infinite;
         }
-        .marquee:hover ul {
+        .march-toggle {
+          display: inline-block;
+        }
+        .marquee:hover ul,
+        .allies.paused .marquee ul {
           animation-play-state: paused;
         }
         @keyframes march {
@@ -1197,9 +1223,13 @@
           flex: 1 1 auto;
           flex-wrap: wrap;
           justify-content: center;
-          row-gap: 8px;
+          gap: 8px 28px;
         }
-        .marquee li:last-child::after {
+        /* Wrapped, a trailing diamond would dangle at the end of each line and push the names off centre. */
+        .marquee li {
+          padding-right: 0;
+        }
+        .marquee li::after {
           display: none;
         }
       }
@@ -1221,6 +1251,13 @@
       }
       .chart.rise .bar {
         transform: scaleY(0);
+      }
+      @media print {
+        .rise,
+        .chart.rise .bar {
+          opacity: 1;
+          transform: none;
+        }
       }
       .chart.rise.shown .bar {
         transform: none;
@@ -1358,7 +1395,10 @@
           </figure>
         </div>
         <div class="allies wrap">
-          <span>Fights alongside the agent you already use</span>
+          <div class="allies-head">
+            <span>Fights alongside the agent you already use</span>
+            <button class="march-toggle" type="button" aria-pressed="false" data-testid="allies-marquee-pause">Pause</button>
+          </div>
           <div class="marquee">
             <ul>
               <li>Claude Code</li>
@@ -1764,7 +1804,7 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
             </p>
             <dl class="stats">
               <div>
-                <dt>bugs planted in the demo app</dt>
+                <dt>planted bugs each run is scored on</dt>
                 <dd data-count="13">13</dd>
               </div>
               <div>
@@ -1926,7 +1966,23 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
           el.classList.add("rise");
           io.observe(el);
         }
+        // A panel reached by Tab can stop at the foot of the screen, below the observer's margin: show it before it takes focus.
+        document.addEventListener("focusin", (e) => {
+          const el = e.target.closest?.(".rise:not(.shown)");
+          if (el) {
+            el.classList.add("shown");
+            io.unobserve(el);
+          }
+        });
       }
+
+      // The allies strip moves for as long as it is on screen, so it carries a control that stops it.
+      const allies = document.querySelector(".allies"),
+        marchToggle = document.querySelector(".march-toggle");
+      marchToggle.addEventListener("click", () => {
+        const paused = allies.classList.toggle("paused");
+        marchToggle.setAttribute("aria-pressed", String(paused));
+      });
 
       // The hero's star map: a route tree in square pixels, grown from a seeded random so it is the same on every visit.
       (() => {
@@ -1942,6 +1998,7 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
           h = 0,
           start = 0,
           raf = 0,
+          end = 0,
           visible = true;
         const rng = (seed) => () => {
           seed = (seed + 0x6d2b79f5) | 0;
@@ -1997,7 +2054,15 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
           branch(cols * 0.99, 0, 2.3, unit * 0.13, 5, 0);
           branch(cols * 1.0, rows * 0.55, 3.0, unit * 0.12, 5, 40);
           branch(cols * 0.72, rows * 1.0, -1.75, unit * 0.13, 5, 20);
-          for (let i = 0; i < (cols * rows) / 90; i++) dust.push({ x: Math.floor(r() * cols), y: Math.floor(r() * rows), phase: r() * 6.28, speed: 0.3 + r() });
+          for (let i = 0; i < (cols * rows) / 90; i++) {
+            const x = Math.floor(r() * cols),
+              y = Math.floor(r() * rows),
+              phase = r() * 6.28,
+              speed = 0.3 + r();
+            if (!keepOut.some(([l, t2, rr, b]) => x >= l && x <= rr && y >= t2 && y <= b)) dust.push({ x, y, phase, speed });
+          }
+          // The map grows for as long as its longest path, then settles: a still picture costs nothing to keep on screen.
+          end = cells.reduce((m, c) => Math.max(m, c.t), 0) / 34 + 1.5;
         };
         const size = () => {
           const dpr = Math.min(2, devicePixelRatio || 1);
@@ -2008,8 +2073,9 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
           ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
           grow();
         };
+        let settled = calm;
         const draw = (now) => {
-          const s = calm ? 1e9 : (now - start) / 1000,
+          const s = settled ? end : (now - start) / 1000,
             front = s * 34; // pixels of path drawn per second
           ctx.clearRect(0, 0, w, h);
           for (const d of dust) {
@@ -2028,24 +2094,29 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
           }
         };
         const loop = (now) => {
+          if ((now - start) / 1000 >= end) settled = true;
           draw(now);
-          raf = visible && !document.hidden ? requestAnimationFrame(loop) : 0;
+          raf = !settled && visible && !document.hidden ? requestAnimationFrame(loop) : 0;
         };
         const resume = () => {
-          if (!calm && !raf && visible && !document.hidden) raf = requestAnimationFrame(loop);
+          if (!settled && !raf && visible && !document.hidden) raf = requestAnimationFrame(loop);
         };
         size();
         start = performance.now();
-        if (calm) draw(0);
+        if (settled) draw(0);
         else resume();
+        // The hero changes size when the window does, and also when its web fonts arrive and the text rewraps: either way the map is redrawn to fit.
         let resizeTimer;
-        addEventListener("resize", () => {
+        const refit = () => {
           clearTimeout(resizeTimer);
           resizeTimer = setTimeout(() => {
+            if (canvas.width === Math.round(hero.clientWidth * Math.min(2, devicePixelRatio || 1)) && h === hero.clientHeight) return;
             size();
-            if (calm) draw(0);
+            if (settled) draw(0);
           }, 150);
-        });
+        };
+        if ("ResizeObserver" in window) new ResizeObserver(refit).observe(hero);
+        else addEventListener("resize", refit);
         document.addEventListener("visibilitychange", resume);
         if ("IntersectionObserver" in window)
           new IntersectionObserver(([e]) => {
