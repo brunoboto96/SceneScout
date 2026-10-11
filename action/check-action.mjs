@@ -262,16 +262,140 @@ export function isVersionSpec(version) {
   return /^[0-9A-Za-z.^~+-]+$/.test(version);
 }
 
-/** Install the published package into a directory of its own, so install and check use one copy with one Playwright. */
-export function installPackage(version) {
-  if (!isVersionSpec(version)) throw new Error(`the version input is not an npm version, range or tag: "${version}"`);
-  const prefix = path.join(process.env.RUNNER_TEMP || os.tmpdir(), `scenescout-${version.replace(/[^0-9A-Za-z.-]/g, "_")}`);
-  fs.mkdirSync(prefix, { recursive: true });
-  // --ignore-scripts: no dependency's install script runs in the user's workflow.
-  const npmArgs = ["install", "--prefix", prefix, "--no-save", "--no-package-lock", "--no-audit", "--no-fund", "--ignore-scripts", `scenescout@${version}`];
+/** The root package of the pinned install: it depends on one exact scenescout and nothing else. */
+const PINNED_ROOT = "scenescout-action";
+
+/** Why the repository's lockfile does not describe scenescout `version`, or null when it does. */
+export function lockMismatch(repoLock, version) {
+  const root = repoLock?.packages?.[""];
+  if (!root || typeof repoLock.packages !== "object") return "the action's package-lock.json is not an npm 7+ lockfile";
+  if (root.name !== "scenescout") return `the action's package-lock.json is ${root.name ?? "unnamed"}'s, not scenescout's`;
+  if (version !== root.version) return `the action's package-lock.json pins the tree of scenescout ${root.version}, not ${version}`;
+  return null;
+}
+
+/** An npm integrity value: sha512 and base64, nothing else. */
+const INTEGRITY = /^sha512-[A-Za-z0-9+/]+={0,2}$/;
+
+/**
+ * The dependency tree a release was built and tested with, as a package.json
+ * and lockfile `npm ci` installs exactly. It is read from the repository's own
+ * package-lock.json at the action's ref: at a release tag that is the lockfile
+ * the release was cut from, kept current by Dependabot and rewritten by the
+ * release's version bump. Production entries are kept as they are, integrity
+ * included; development tools are left out. The release's own tarball is
+ * checked against `integrity`, the registry's hash for that exact version, so
+ * it is verified as `npm install scenescout@<version>` would verify it.
+ * Returns { reason } when the lockfile does not describe `version`, so the
+ * caller can say why it floats.
+ */
+export function pinnedTree(repoLock, version, integrity) {
+  const reason = lockMismatch(repoLock, version);
+  if (reason) return { reason };
+  if (typeof integrity !== "string" || !INTEGRITY.test(integrity)) {
+    throw new Error(`the registry gave no sha512 integrity for scenescout ${version} (got ${JSON.stringify(String(integrity)).slice(0, 80)})`);
+  }
+  const packages = repoLock.packages;
+  const root = packages[""];
+  const out = {
+    "": { name: PINNED_ROOT, dependencies: { scenescout: version } },
+    "node_modules/scenescout": {
+      version,
+      resolved: `https://registry.npmjs.org/scenescout/-/scenescout-${version}.tgz`,
+      integrity,
+      ...(root.dependencies ? { dependencies: root.dependencies } : {}),
+      ...(root.optionalDependencies ? { optionalDependencies: root.optionalDependencies } : {}),
+      ...(root.bin ? { bin: root.bin } : {}),
+      ...(root.engines ? { engines: root.engines } : {}),
+    },
+  };
+  for (const [name, entry] of Object.entries(packages)) {
+    if (!name || entry.dev) continue;
+    if (entry.link) return { reason: `the action's package-lock.json links ${name} to a local folder` };
+    out[name] = entry;
+  }
+  return {
+    packageJson: { name: PINNED_ROOT, private: true, dependencies: { scenescout: version } },
+    lockfile: { name: PINNED_ROOT, lockfileVersion: 3, requires: true, packages: out },
+  };
+}
+
+/**
+ * npm's arguments. pinned: `npm ci`, which installs the lockfile exactly and
+ * fails rather than resolve anything anew. floating: the published package
+ * with its dependencies resolved now, as `npm install scenescout` would.
+ * --ignore-scripts on both: no dependency's install script runs in the job.
+ */
+export function npmInstallArgs(kind, prefix, version) {
+  if (kind === "pinned") return ["ci", "--prefix", prefix, "--ignore-scripts", "--no-audit", "--no-fund"];
+  return ["install", "--prefix", prefix, "--no-save", "--no-package-lock", "--no-audit", "--no-fund", "--ignore-scripts", `scenescout@${version}`];
+}
+
+const sortedEntries = (o) => JSON.stringify(Object.entries(o ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+
+/** Whether the installed package asks for exactly the dependencies the lockfile's root did. */
+export function sameDependencies(lockRoot, installed) {
+  return (
+    sortedEntries(lockRoot.dependencies) === sortedEntries(installed.dependencies) &&
+    sortedEntries(lockRoot.optionalDependencies) === sortedEntries(installed.optionalDependencies)
+  );
+}
+
+function defaultIo() {
   const npm = npmCommand(process.platform, process.execPath);
-  execFileSync(npm.file, [...npm.prefixArgs, ...npmArgs], { stdio: "inherit" });
-  return path.join(prefix, "node_modules", "scenescout", "dist", "cli.js");
+  return {
+    exec: (args) => execFileSync(npm.file, [...npm.prefixArgs, ...args], { stdio: "inherit" }),
+    // The registry's hash for that exact version, as npm install would check the tarball against.
+    integrityOf: (version) =>
+      JSON.parse(execFileSync(npm.file, [...npm.prefixArgs, "view", `scenescout@${version}`, "dist.integrity", "--json"], { encoding: "utf8" }) || "null"),
+    tmpDir: process.env.RUNNER_TEMP || os.tmpdir(),
+    warn: (message) => console.log(`::warning title=SceneScout dependencies not pinned::${escapeAnnotation(message)}`),
+  };
+}
+
+const PIN_HOW = "Leave the version input empty and use the action at a release tag to install the release's own locked dependency tree.";
+
+/**
+ * Install the published package into a directory of its own, so install and
+ * check use one copy with one Playwright. The version this action's ref was
+ * released as is installed with `npm ci` from the tree pinnedTree reads out of
+ * the lockfile in repoRoot, so this job (which may hold a model's key) runs
+ * the dependencies that release was tested with, not whatever is newest. Any
+ * other version, or a ref whose lockfile has moved on from the release it
+ * names, installs as npm would, with a warning that says so.
+ */
+export function installPackage(version, repoRoot, io = defaultIo()) {
+  if (!isVersionSpec(version)) throw new Error(`the version input is not an npm version, range or tag: "${version}"`);
+  const dir = (kind) => path.join(io.tmpDir, `scenescout-${kind}-${version.replace(/[^0-9A-Za-z.-]/g, "_")}`);
+  const cliIn = (prefix) => path.join(prefix, "node_modules", "scenescout", "dist", "cli.js");
+  const floating = (why) => {
+    io.warn(`scenescout ${version} is installed with its dependencies resolved now, not pinned: ${why}. ${PIN_HOW}`);
+    const prefix = dir("floating");
+    fs.mkdirSync(prefix, { recursive: true });
+    io.exec(npmInstallArgs("floating", prefix, version));
+    return { cli: cliIn(prefix), pinned: false };
+  };
+  let repoLock;
+  try {
+    repoLock = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8"));
+  } catch (err) {
+    return floating(`the action has no readable package-lock.json (${err instanceof Error ? err.message : String(err)})`);
+  }
+  const mismatch = lockMismatch(repoLock, version);
+  if (mismatch) return floating(mismatch);
+  const tree = pinnedTree(repoLock, version, io.integrityOf(version));
+  if (!tree.lockfile) return floating(tree.reason);
+  const prefix = dir("pinned");
+  fs.rmSync(prefix, { recursive: true, force: true });
+  fs.mkdirSync(prefix, { recursive: true });
+  fs.writeFileSync(path.join(prefix, "package.json"), JSON.stringify(tree.packageJson, null, 2) + "\n");
+  fs.writeFileSync(path.join(prefix, "package-lock.json"), JSON.stringify(tree.lockfile, null, 2) + "\n");
+  io.exec(npmInstallArgs("pinned", prefix, version));
+  const installed = JSON.parse(fs.readFileSync(path.join(prefix, "node_modules", "scenescout", "package.json"), "utf8"));
+  if (!sameDependencies(repoLock.packages[""], installed)) {
+    return floating(`the published scenescout ${version} declares other dependencies than this ref's package-lock.json, so the ref is not that release`);
+  }
+  return { cli: cliIn(prefix), pinned: true };
 }
 
 /** Whether a CLI's --help lists `check`: releases before it have no such command. */
@@ -330,7 +454,7 @@ function resolve() {
     const actionPath = process.env.GITHUB_ACTION_PATH || path.dirname(path.dirname(fileURLToPath(import.meta.url)));
     // The default is the version this action's ref was released as, so @v3.10.0 runs scenescout 3.10.0.
     const version = String(inputs.version ?? "").trim() || JSON.parse(fs.readFileSync(path.join(actionPath, "package.json"), "utf8")).version;
-    cli = installPackage(version);
+    cli = installPackage(version, actionPath).cli;
   }
   const packageRoot = path.dirname(path.dirname(cli));
   const version = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")).version;
