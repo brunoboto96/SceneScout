@@ -19,6 +19,7 @@
  * escaping and the grouping are table-tested.
  */
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import type { ActivityLine } from "./live.js";
 import { isSafeRelativePath } from "./plain.js";
@@ -109,6 +110,26 @@ export function resolveFrame(root: string, relPath: string): string | null {
   const base = path.resolve(root);
   const file = path.resolve(base, inside);
   return file.startsWith(base + path.sep) ? file : null;
+}
+
+/**
+ * A frame's file as it really is on disk, when it is a file inside the
+ * recordings folder: links are followed first, so a link to a file elsewhere,
+ * or a file under a linked folder, is not one. The live view serves what this
+ * names and `scenescout export` uploads it, so the two refuse the same files.
+ * Missing or unreadable is null too: the caller treats it as no such frame.
+ */
+export function frameOnDisk(root: string, relPath: string): string | null {
+  const named = resolveFrame(root, relPath);
+  if (!named) return null;
+  try {
+    const realRoot = fs.realpathSync(root);
+    const file = fs.realpathSync(named);
+    if (!file.startsWith(realRoot + path.sep)) return null;
+    return fs.statSync(file).isFile() ? file : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

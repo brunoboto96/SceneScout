@@ -17,6 +17,8 @@
  * - Reporting. One section per ticket in plain words, and a table per ticket
  *   in the technical report.
  */
+import fs from "node:fs";
+import path from "node:path";
 import type { Finding } from "./memory.js";
 
 /** The shape a criterion was written in. */
@@ -93,6 +95,57 @@ const UNSURE_BELOW = 0.6;
 export function isTicketFileName(name: string): boolean {
   const lower = name.toLowerCase();
   return TICKET_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+// ── Where a ticket file may be read from ──────────────────────────────────────
+
+/**
+ * Folders outside the project that `scout_tickets` may read a ticket file
+ * from, as absolute paths separated like PATH (`:`, or `;` on Windows). It is
+ * configuration, set where the server is started, so an agent cannot widen
+ * what it may read by the path it passes.
+ */
+export const TICKET_DIRS_ENV = "SCENESCOUT_TICKET_DIRS";
+
+/** The folders the configuration names, or what is wrong with it: a relative entry is refused rather than resolved against wherever the server happens to run. */
+export function ticketDirsFrom(env: NodeJS.ProcessEnv): { dirs: string[] } | { error: string } {
+  const dirs: string[] = [];
+  for (const raw of (env[TICKET_DIRS_ENV] ?? "").split(path.delimiter)) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    if (!path.isAbsolute(entry)) return { error: `${TICKET_DIRS_ENV} names "${entry}", which is not an absolute path` };
+    dirs.push(path.resolve(entry));
+  }
+  return { dirs };
+}
+
+const within = (file: string, dir: string): boolean => file.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+
+/**
+ * The real file a `scout_tickets` path names, when it may be read: inside the
+ * project folder, or inside a folder `SCENESCOUT_TICKET_DIRS` names. Links are
+ * followed first, so a link in the project to a file elsewhere is outside it.
+ * A path that does not exist throws, as reading it would.
+ */
+export function ticketFileFor(file: string, projectDir: string, env: NodeJS.ProcessEnv): { file: string } | { refused: string } {
+  // .native: the case stored on disk, so a path typed in another case on a case-insensitive disk still compares equal.
+  const project = fs.realpathSync.native(projectDir);
+  const full = fs.realpathSync.native(path.isAbsolute(file) ? file : path.resolve(project, file));
+  if (within(full, project)) return { file: full };
+  const configured = ticketDirsFrom(env);
+  if ("error" in configured) return { refused: `Not read: ${configured.error}.` };
+  for (const dir of configured.dirs) {
+    let real: string;
+    try {
+      real = fs.realpathSync.native(dir);
+    } catch {
+      continue; // A configured folder that is not there holds no ticket.
+    }
+    if (within(full, real)) return { file: full };
+  }
+  return {
+    refused: `Not read: ${full} is outside the project folder. Paste it as \`text\`, or add ${path.dirname(full)} to ${TICKET_DIRS_ENV} where the server is configured and restart it.`,
+  };
 }
 
 // ── Reading ───────────────────────────────────────────────────────────────────

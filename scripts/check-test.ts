@@ -125,7 +125,6 @@ import {
   journeyVideoPath,
   replayVideos,
   journeySteps,
-  redactPersonal,
   redactReplay,
   replayFramePath,
   replayFrames,
@@ -134,6 +133,7 @@ import {
   type CheckReplay,
   type ReplayMeta,
 } from "../src/engine/check-replay.ts";
+import { redactPersonal } from "../src/engine/sensitive.ts";
 import { framePath, RECORD_MAX_FRAMES } from "../src/engine/replay.ts";
 import { clearReplayOutput, replayPageConflict } from "../src/check-run.ts";
 import { film, type Screencast } from "../src/engine/film.ts";
@@ -1938,6 +1938,36 @@ test("flows: a token in a flow's page or request URL is redacted before anything
   assert.ok(!written.includes("Q7x9Rt2mLp4VzK8w"), written);
 });
 
+test("flows: an email address and a card number in a flow's reason, page or request are redacted from the report, check.json and the SARIF", () => {
+  // Built at run time: a real-looking address written out in full would be flagged by the hygiene suite.
+  const person = ["jo.sample", "contoso-mail.net"].join("@");
+  const encoded = ["jo.sample", "contoso-mail.net"].join("%40");
+  const v = { kind: "http_error" as const, severity: "high" as const, detail: "GET /x → HTTP 500", url: `${ORIGIN}/account?email=${encoded}` };
+  const [clean] = redactFlowRuns([
+    flowRun({
+      outcome: {
+        ...BROKE,
+        did: `type "${person}" into textbox "Email"`,
+        reason: `no visible text "Paid with 4111 1111 1111 1111" for ${person} within 5s`,
+        path: `/account?email=${encoded}`,
+      } as FlowRun["outcome"],
+      violations: [{ path: `/account?email=${encoded}`, violation: v }],
+      refusedBackground: [`POST https://collector.example/c?u=${encoded}`],
+      websockets: [`wss://live.example/socket?card=4111111111111111`],
+    }),
+  ]);
+  const r: CheckResult = { ...result(issuesFromRoutes([], ORIGIN, [], [clean])), flows: [clean] };
+  const written = formatCheck(r) + JSON.stringify(toSummaryJson(r, "1")) + JSON.stringify(toSarif(r, "1"));
+  for (const personal of [person, encoded, "4111 1111 1111 1111", "4111111111111111"]) assert.ok(!written.includes(personal), `${personal} in ${written}`);
+  assert.match(written, /\[email redacted\]/);
+  assert.match(written, /\[card number redacted\]/);
+  // The redaction names what it removed, and leaves the rest of the reason readable.
+  assert.equal(
+    clean.outcome.status === "passed" ? "" : clean.outcome.reason,
+    'no visible text "Paid with [card number redacted]" for [email redacted] within 5s',
+  );
+});
+
 test("flows: the flows directory is the one part of .scenescout/ that git does not ignore", (t) => {
   const git = spawnSync("git", ["--version"]);
   if (git.status !== 0) return t.skip("git is not installed");
@@ -3494,15 +3524,31 @@ test("replay: an address with its @ percent-encoded or in another script, and a 
     ["paid 2026-10-11 4111 1111 1111 1111", "paid 2026-10-11 [card number redacted]"],
     ["Visa 4222222222222", "Visa [card number redacted]"],
   ];
-  for (const [text, want] of redacted) assert.equal(redactPersonal(text), want, text);
+  // What the page shows: a visit's reason, through the replay's own redaction.
+  const onPage = (text: string) =>
+    redactReplay({
+      startedAt: "t",
+      roles: [{ role: "anonymous", own: true, visits: [visitOf({ path: "/", status: null, loadError: text, loginRedirect: false })], journeys: [] }],
+      framesLeftOut: 0,
+    }).roles[0].visits[0].reason;
+  for (const [text, want] of redacted) {
+    assert.equal(redactPersonal(text), want, text);
+    assert.equal(onPage(text), want, `on the page: ${text}`);
+  }
   const kept = [
     `/static/${at("logo", "2x.png")}`,
     `/img/${at("icon", "1.5x.webp")}`,
     "/feed?_=1696000000004",
     "npm i widget@18.3.1",
     at("qa", "sub.example.com"),
+    // Lists of small numbers whose digits, run together, happen to pass the Luhn check: the run's own redaction keeps them.
+    "widths 320 375 414 768 1024 1280 1440",
+    "sizes 8 16 24 32 40 48 56 64",
   ];
-  for (const text of kept) assert.equal(redactPersonal(text), text, text);
+  for (const text of kept) {
+    assert.equal(redactPersonal(text), text, text);
+    assert.equal(onPage(text), text, `on the page: ${text}`);
+  }
 });
 
 test("replay page: run metadata, a badge per journey, the first failing step highlighted and linked, and app text escaped", () => {

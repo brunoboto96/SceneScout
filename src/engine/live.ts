@@ -28,6 +28,7 @@ import http from "node:http";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { LIVE_PAGE } from "./live-page.js";
+import { writeOwnerOnly } from "./owner-file.js";
 import { isPng } from "./png.js";
 import { JOURNEY_END, JOURNEY_START, TASK_SET, type ActionLogEntry } from "./memory.js";
 
@@ -40,31 +41,11 @@ export function liveTokenFileName(pid: number): string {
 }
 /**
  * Hand the live view's token to `scenescout watch`: this engine's own file,
- * then the shared name. Each is born owner-only under a fresh temporary name
- * and renamed into place. Writing to the name itself would keep the bits of a
- * file already there (`mode` applies only on creation) and would follow a link
- * left at it, sending the token into whatever file the link points at; a
- * rename replaces the entry, link or file, and never writes through it.
+ * then the shared name, each written owner-only and never through a link left
+ * at the name (owner-file.ts).
  */
 export async function writeLiveToken(dir: string, pid: number, token: string): Promise<void> {
-  for (const name of [liveTokenFileName(pid), LIVE_TOKEN_FILE]) {
-    const file = path.join(dir, name);
-    const temp = `${file}.${pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-    // "wx": created here and now, so the mode given is the one it is born with, and never a link's target.
-    const handle = await fs.promises.open(temp, "wx", 0o600);
-    try {
-      try {
-        await handle.writeFile(token);
-      } finally {
-        await handle.close();
-      }
-      await fs.promises.rename(temp, file);
-    } catch (err) {
-      // The temporary file holds the token too: nothing that failed may leave it behind.
-      await fs.promises.rm(temp, { force: true }).catch(() => {});
-      throw err;
-    }
-  }
+  for (const name of [liveTokenFileName(pid), LIVE_TOKEN_FILE]) await writeOwnerOnly(path.join(dir, name), token);
 }
 
 /** `SCENESCOUT_LIVE=off` keeps the engine from opening the live view's port at all. */
@@ -347,16 +328,14 @@ export function liveEngines(dir: string, isAlive: (pid: number) => boolean): Arr
 }
 
 export function writeStatusFile(dir: string, body: string): Promise<void> {
-  const file = path.join(dir, "status.json");
-  const tmp = `${file}.${process.pid}.tmp`;
   // Both: status.json for readers from before per-pid files, and one named for
   // this process so a second engine on the same project does not erase it.
-  const mine = path.join(dir, statusFileName(process.pid));
+  // Each owner-only, and never through a link left at its name.
   const next = (statusWrites.get(dir) ?? Promise.resolve())
-    .then(() => fs.promises.writeFile(tmp, body))
-    .then(() => fs.promises.rename(tmp, file))
-    .then(() => fs.promises.writeFile(mine, body))
-    .catch(() => fs.promises.rm(tmp, { force: true }).catch(() => {}));
+    .then(() => writeOwnerOnly(path.join(dir, "status.json"), body))
+    .then(() => writeOwnerOnly(path.join(dir, statusFileName(process.pid)), body))
+    // Best effort, as before: a status line that could not be written must not fail the call that wrote it.
+    .catch(() => {});
   statusWrites.set(dir, next);
   return next;
 }

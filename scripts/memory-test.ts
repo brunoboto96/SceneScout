@@ -61,6 +61,7 @@ import {
   NAME_RULE,
 } from "../src/engine/memory.ts";
 import { keyAliases, keyAliasSteps } from "../src/engine/fingerprint.ts";
+import { appendOwnerOnlySync, writeDocument, writeDocumentSync, writeOwnerOnly, writeOwnerOnlySync } from "../src/engine/owner-file.ts";
 import { analyzeDesign, type StyleRecord } from "../src/engine/design.ts";
 import {
   FORMS_READ_FAILED,
@@ -1491,6 +1492,17 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     ["Amex 3782 822463 10005 on file", "Amex [card number redacted] on file"],
     ["card 4111111111111111", "card [card number redacted]"],
     ["Visa 4222 2222 2222 2", "Visa [card number redacted]"],
+    // Grouped with dots, or with the non-breaking spaces a formatted number or a French locale uses.
+    ["card 4111.1111.1111.1111 declined", "card [card number redacted] declined"],
+    ["card 4111\u00a01111\u00a01111\u00a01111 declined", "card [card number redacted] declined"],
+    ["card 4111\u202f1111\u202f1111\u202f1111 declined", "card [card number redacted] declined"],
+    ["paid 11.10.2026 4111.1111.1111.1111", "paid 11.10.2026 [card number redacted]"],
+    // Grouped with a thin space or a figure space, as typeset numbers are.
+    ["card 4111\u20091111\u20091111\u20091111 declined", "card [card number redacted] declined"],
+    ["card 4111\u20071111\u20071111\u20071111 declined", "card [card number redacted] declined"],
+    // A dot after a word ends an abbreviation, not a number: the card after it is still one.
+    ["Card no.4111 1111 1111 1111", "Card no.[card number redacted]"],
+    ["Ref.4111111111111111 declined", "Ref.[card number redacted] declined"],
   ];
   for (const [text, want] of redacted) {
     assert.equal(redactPersonal(text), want, text);
@@ -1505,6 +1517,18 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     // Lists of small numbers whose digits, run together, happen to pass the Luhn check.
     "widths 320 375 414 768 1024 1280 1440",
     "sizes 8 16 24 32 40 48 56 64",
+    // The same digits as a card number but failing the Luhn check, dotted: as kept as when spaced.
+    "build 4111.1111.1111.1112",
+    // Dotted numbers that are not laid out as a card is: an address, a version, a date, an amount.
+    "host 10.20.30.40 and 10.200.30.104",
+    "version 3.23.4 and 2026.10.11",
+    "total 4111.11 and 1\u00a0234\u00a0567,89",
+    // A decimal's fraction is never a card number on its own, however long and whatever its digits.
+    "took 747.4293391307649 ms",
+    "at 1696000000.4111111111111111",
+    "at 0.4111111111111111",
+    // A decimal whose digits, dot left out, pass the card check: a card's groups are at most six digits.
+    "total 4111111111.111111 and 411111111111.1111",
   ]) {
     assert.equal(redactPersonal(kept), kept, kept);
     assert.equal(redactSecrets(kept), kept, kept);
@@ -3191,3 +3215,186 @@ test("merging memory unions the run records and the notes, and doing it twice ch
   assert.equal(none.runRecords, undefined);
   assert.equal(none.fromRuns, undefined);
 });
+
+// ---- writes into .scenescout/ never go through a link ------------------------
+
+/** A project with a file outside .scenescout/ that a link left at each of `names` points at. */
+function linkedProject(names: string[]): { projectDir: string; dir: string; victim: string } {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-links-"));
+  const dir = path.join(projectDir, ".scenescout");
+  fs.mkdirSync(dir, { recursive: true });
+  const victim = path.join(projectDir, "elsewhere.txt");
+  fs.writeFileSync(victim, "not the engine's");
+  for (const name of names) fs.symlinkSync(victim, path.join(dir, name));
+  return { projectDir, dir, victim };
+}
+
+function assertOwnFile(file: string, ownerOnly = true): void {
+  const stat = fs.lstatSync(file);
+  assert.ok(stat.isFile(), `${path.basename(file)} is a file of its own, not a link`);
+  if (ownerOnly) assert.equal(stat.mode & 0o777, 0o600, `${path.basename(file)} can be read by its owner only`);
+}
+
+test(
+  "owner-only writes replace a link or a readable file at the name, never write through it, and leave no temporary file",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { projectDir, dir, victim } = linkedProject(["a.json", "b.json"]);
+    try {
+      fs.writeFileSync(path.join(dir, "c.json"), "old", { mode: 0o644 });
+      fs.chmodSync(path.join(dir, "c.json"), 0o644);
+      writeOwnerOnlySync(path.join(dir, "a.json"), "sync");
+      await writeOwnerOnly(path.join(dir, "b.json"), "async");
+      writeOwnerOnlySync(path.join(dir, "c.json"), "replaced");
+      for (const [name, text] of [
+        ["a.json", "sync"],
+        ["b.json", "async"],
+        ["c.json", "replaced"],
+      ]) {
+        assertOwnFile(path.join(dir, name));
+        assert.equal(fs.readFileSync(path.join(dir, name), "utf8"), text);
+      }
+      assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's", "the file the links pointed at is untouched");
+      assert.deepEqual(fs.readdirSync(dir).sort(), ["a.json", "b.json", "c.json"], "no temporary file is left behind");
+      // A write that fails (a folder at the name) leaves no temporary file either.
+      fs.mkdirSync(path.join(dir, "d.json", "inside"), { recursive: true });
+      assert.throws(() => writeOwnerOnlySync(path.join(dir, "d.json"), "x"));
+      await assert.rejects(writeOwnerOnly(path.join(dir, "d.json"), "x"));
+      assert.deepEqual(fs.readdirSync(dir).sort(), ["a.json", "b.json", "c.json", "d.json"]);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("an owner-only append creates the file owner-only, adds to it, and refuses a link at its name", { skip: process.platform === "win32" }, () => {
+  const { projectDir, dir, victim } = linkedProject(["linked.jsonl"]);
+  try {
+    const log = path.join(dir, "own.jsonl");
+    appendOwnerOnlySync(log, "one\n");
+    appendOwnerOnlySync(log, "two\n");
+    assertOwnFile(log);
+    assert.equal(fs.readFileSync(log, "utf8"), "one\ntwo\n");
+    assert.throws(() => appendOwnerOnlySync(path.join(dir, "linked.jsonl"), "three\n"), /is a symbolic link; SceneScout does not write through one/);
+    assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's");
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test(
+  "memory's files, its notes, its .gitignore and the report are never written through a link left at their names",
+  { skip: process.platform === "win32" },
+  () => {
+    const names = ["memory.json", "ASSUMPTIONS.md", "report.md", "report.html"];
+    const { projectDir, dir, victim } = linkedProject(names);
+    // A .gitignore that is there is left as it is; a link to nothing is replaced by the store's own.
+    fs.symlinkSync(path.join(projectDir, "nothing-here"), path.join(dir, ".gitignore"));
+    names.push(".gitignore");
+    try {
+      const store = new MemoryStore(projectDir);
+      store.addAssumption("app-model", "Orders belong to one customer.", "test");
+      store.addFinding({ severity: "low", category: "ux-confusing", title: "A finding", detail: "d", url: "http://app.test/", state: "/#0", evidence: "e" });
+      store.flush();
+      generateReport(store, [], undefined, { write: true });
+      // Only memory.json is owner-only; the documents keep the umask's mode (the test after the next).
+      for (const name of names) assertOwnFile(path.join(dir, name), name === "memory.json");
+      assert.equal(fs.existsSync(path.join(projectDir, "nothing-here")), false, "nothing was created where the dangling link pointed");
+      assert.match(fs.readFileSync(path.join(dir, "ASSUMPTIONS.md"), "utf8"), /Orders belong to one customer/);
+      assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's", "the file the links pointed at is untouched");
+
+      // The session log is appended to line by line: a link at its name is refused, not followed.
+      const log = (store as unknown as { sessionLogPath: string }).sessionLogPath;
+      fs.symlinkSync(victim, log);
+      assert.throws(() => store.logAction({ action: "click", url: "http://app.test/" }), /symbolic link/);
+      assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's");
+      fs.rmSync(log);
+      store.logAction({ action: "click", url: "http://app.test/" });
+      assertOwnFile(log);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("a note from a run on disk replaces a link at memory.json rather than writing through it", { skip: process.platform === "win32" }, () => {
+  const { projectDir, dir, victim } = linkedProject([]);
+  try {
+    fs.writeFileSync(victim, JSON.stringify({ version: 1, states: {}, findings: [] }));
+    fs.symlinkSync(victim, path.join(dir, "memory.json"));
+    noteFromRunOnDisk(projectDir, {
+      at: "2026-10-11T00:00:00.000Z",
+      mode: "continue",
+      source: "prev/ci.json",
+      runId: "r1",
+      recordAt: "2026-10-07T09:00:00.000Z",
+    });
+    assertOwnFile(path.join(dir, "memory.json"));
+    assert.equal(fs.readFileSync(victim, "utf8"), JSON.stringify({ version: 1, states: {}, findings: [] }), "the file the link pointed at is untouched");
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+/** Run `fn` with the umask set to 022, the usual one, and put the old one back. */
+async function withUmask022<T>(fn: () => T | Promise<T>): Promise<T> {
+  const old = process.umask(0o022);
+  try {
+    return await fn();
+  } finally {
+    process.umask(old);
+  }
+}
+
+test(
+  "a document write replaces a link like an owner-only one, but takes the mode the user's umask gives a new file",
+  { skip: process.platform === "win32" },
+  () =>
+    withUmask022(async () => {
+      const { projectDir, dir, victim } = linkedProject(["a.md", "b.png"]);
+      try {
+        writeDocumentSync(path.join(dir, "a.md"), "sync");
+        await writeDocument(path.join(dir, "b.png"), new Uint8Array([1, 2, 3]));
+        for (const name of ["a.md", "b.png"]) {
+          const stat = fs.lstatSync(path.join(dir, name));
+          assert.ok(stat.isFile(), `${name} is a file of its own, not a link`);
+          assert.equal(stat.mode & 0o777, 0o644, `${name} has the umask's mode`);
+        }
+        assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's");
+        assert.deepEqual(fs.readdirSync(dir).sort(), ["a.md", "b.png"], "no temporary file is left behind");
+      } finally {
+        fs.rmSync(projectDir, { recursive: true, force: true });
+      }
+    }),
+);
+
+test(
+  "which of memory's files are owner-only: what could open a session is, what a person reads or git reads keeps the umask's mode",
+  { skip: process.platform === "win32" },
+  () =>
+    withUmask022(() => {
+      const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-modes-"));
+      try {
+        const store = new MemoryStore(projectDir);
+        store.addAssumption("app-model", "Orders belong to one customer.", "test");
+        store.addFinding({ severity: "low", category: "ux-confusing", title: "A finding", detail: "d", url: "http://app.test/", state: "/#0", evidence: "e" });
+        store.flush();
+        store.logAction({ action: "click", url: "http://app.test/" });
+        generateReport(store, [], undefined, { write: true });
+        const log = path.basename((store as unknown as { sessionLogPath: string }).sessionLogPath);
+        const expected: Array<[string, number]> = [
+          ["memory.json", 0o600],
+          [log, 0o600],
+          ["report.md", 0o644],
+          ["report.html", 0o644],
+          ["ASSUMPTIONS.md", 0o644],
+          [".gitignore", 0o644],
+        ];
+        for (const [name, mode] of expected) {
+          assert.equal((fs.statSync(path.join(store.dir, name)).mode & 0o777).toString(8), mode.toString(8), `${name}'s mode`);
+        }
+      } finally {
+        fs.rmSync(projectDir, { recursive: true, force: true });
+      }
+    }),
+);

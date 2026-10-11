@@ -507,7 +507,7 @@ npx --yes scenescout@3 check http://127.0.0.1:3000 --fail-on high --out scenesco
 # exit 0: passed · 1: the gate failed · 2: could not run
 ```
 
-`scenescout-check/report.md` is the report, `check.json` the machine-readable verdict and `check.sarif` the SARIF 2.1.0 file that most code-quality dashboards import.
+`scenescout-check/report.md` is the report, `check.json` the machine-readable verdict and `check.sarif` the SARIF 2.1.0 file that most code-quality dashboards import. All three get the same redaction as the replay page. A page's address, a request URL, and what a saved flow did and why it broke are cleared of secrets in addresses, email addresses and card numbers before any of them is written. A value taken from the environment (`${env:NAME}`) is masked wherever the page echoed it.
 
 ### GitLab CI
 

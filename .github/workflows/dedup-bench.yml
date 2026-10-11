@@ -42,10 +42,10 @@ jobs:
     steps:
       # No actions cache anywhere in this job (setup-node's included): what a
       # job holding a key saves, later runs would restore.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       # --ignore-scripts: no dependency's install script runs in a job that holds a key.

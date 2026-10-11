@@ -25,6 +25,7 @@ import { DEFAULT_REPORT_AUDIENCE, formatPlainSection, pictureOf, type ReportAudi
 import { formatTicketsPlain, formatTicketsTechnical, ticketSummaryLine, type TicketReportInput } from "./tickets.js";
 import { COLLECTOR_CAP } from "./collector.js";
 import { buildRunRecord, fromRunLine, type RunRecord } from "./from-run.js";
+import { writeDocumentSync } from "./owner-file.js";
 
 function playwrightSkeleton(f: Finding): string {
   const routeClass = f.state.split("#")[0].split("?")[0];
@@ -1095,13 +1096,13 @@ export function generateReport(
   let htmlWritten = false;
   let htmlProblem = "";
   if (opts.write !== false) {
-    fs.writeFileSync(outPath, markdown);
+    writeDocumentSync(outPath, markdown);
     // The same run as one file that outlives the engine: the live view's
     // address is a port in a process, and refreshing after the run is over
     // gets nothing. This opens from the file system, offline, forever.
     try {
       const sessions = replaySessions(memory);
-      fs.writeFileSync(
+      writeDocumentSync(
         htmlPath,
         buildReplayHtml({
           markdown,

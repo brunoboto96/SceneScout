@@ -37,6 +37,7 @@ import {
   logLine,
   evidenceFor,
 } from "../server-context.js";
+import { writeDocumentSync } from "../engine/owner-file.js";
 
 type ImageContent = { type: "image"; data: string; mimeType: string };
 
@@ -67,7 +68,7 @@ async function findingPicture(eng: BrowserEngine, filed: FiledFinding, ref: stri
     const rel = findingPicturePath(eng.sessionKey, finding.id);
     const file = path.join(dir, rel);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, fitted.png);
+    writeDocumentSync(file, fitted.png);
     const picture = {
       width: fitted.width,
       height: fitted.height,
@@ -639,7 +640,7 @@ export function registerExploreTools(): void {
         const shot = await eng.captureElement({ ref, key }, margin ?? CAPTURE_MARGIN);
         const file = path.join(dir, CAPTURES_DIRNAME, captureFileName(name));
         fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, shot.png);
+        writeDocumentSync(file, shot.png);
         const size = { width: shot.png.readUInt32BE(16), height: shot.png.readUInt32BE(20) };
         return text(captureResultText({ file, key: shot.key, label: shot.label, url: shot.url, ...size }), session);
       } catch (err) {
