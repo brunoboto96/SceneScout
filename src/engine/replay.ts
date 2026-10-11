@@ -22,6 +22,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import type { ActivityLine } from "./live.js";
 import { isSafeRelativePath } from "./plain.js";
+import { scriptLiteral } from "./script-literal.js";
 
 /** One session's trail, as the document shows it. */
 export interface ReplaySession {
@@ -479,8 +480,8 @@ function exitWatch(savedFile: string): string {
   return (
     "<script>(function () {\n" +
     "  var saved = " +
-    // "<" escaped: a folder named with "</script>" must not end this element.
-    JSON.stringify(savedFile).replace(/</g, "\\u003c") +
+    // Escaped: a folder named with "</script>" must not end this element.
+    scriptLiteral(savedFile) +
     ";\n" +
     "  var gone = false;\n" +
     "  var bar = document.getElementById('gone-bar');\n" +
