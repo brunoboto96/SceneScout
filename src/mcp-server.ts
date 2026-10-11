@@ -128,6 +128,8 @@ import {
   formatCriteriaForLanes,
   formatReading,
   isTicketFileName,
+  ticketFileFor,
+  TICKET_DIRS_ENV,
   judgeCriterion,
   MAX_CRITERION_FINDINGS,
   MAX_REASON,
@@ -2725,7 +2727,9 @@ server.registerTool(
       path: z
         .string()
         .optional()
-        .describe(`A ticket file to read (${TICKET_FILE_EXTENSIONS.join(", ")}), absolute or relative to the project folder. Pass this or \`text\`.`),
+        .describe(
+          `A ticket file to read (${TICKET_FILE_EXTENSIONS.join(", ")}), absolute or relative to the project folder, and inside it unless the server's ${TICKET_DIRS_ENV} names the folder it is in. Pass this or \`text\`.`,
+        ),
       session: sessionParam,
     },
   },
@@ -2737,8 +2741,11 @@ server.registerTool(
       let body = pasted ?? "";
       let source = "pasted text";
       if (file !== undefined) {
-        // The file a link points at is what is read, so its name is what is checked: a "notes.md" link to a key file is refused.
-        const full = fs.realpathSync(path.isAbsolute(file) ? file : path.resolve(path.dirname(eng.memory.dir), file));
+        // The file a link points at is what is read, so where it is and its name are what is checked:
+        // inside the project, or a folder SCENESCOUT_TICKET_DIRS names, and a "notes.md" link to a key file is refused.
+        const found = ticketFileFor(file, path.dirname(eng.memory.dir), process.env);
+        if ("refused" in found) return text(found.refused, session);
+        const full = found.file;
         if (!isTicketFileName(full))
           return text(`Not read: a ticket file is one of ${TICKET_FILE_EXTENSIONS.join(", ")}. Paste anything else as \`text\`.`, session);
         const stat = fs.statSync(full);

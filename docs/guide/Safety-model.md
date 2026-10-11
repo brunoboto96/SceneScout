@@ -85,6 +85,10 @@ Frames that were not read are listed on a `FRAMES` line, and the summary should 
 - The live view writes nothing to disk ([ADR 7](../adr/0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md)). A recorded run does, which is why recording must be asked for ([ADR 8](../adr/0008-a-recorded-run-is-evidence-and-must-be-asked-for.md)).
 - `scout_upload` generates its file in memory. A `filePath` you give it is fenced to the project under test by its real path.
 
+## The project folder is the trust boundary
+
+The folder an attach names as `projectPath` decides what the run may touch on your machine. `.scenescout/` is kept there, a file `scout_upload` attaches must be inside it, and a ticket file `scout_tickets` reads must be inside it too, unless the server's `SCENESCOUT_TICKET_DIRS` names the folder the ticket is in. Both fences follow symbolic links first, so a link inside the project that points elsewhere is outside it. The agent chooses `projectPath` when it attaches, so these fences hold only while it names the project you meant: an agent told to attach with your home folder as the project could upload any file under it. Point it at the project, and treat a `projectPath` you did not expect in an attach's result as a reason to stop the run.
+
 ## Keys and forks in CI
 
 - **`scenescout check` needs no key and no secret.** It can run on every pull request, forks included.
