@@ -2387,4 +2387,9 @@ test("a valued option takes the next argument or its =value, and refuses a missi
   assert.deepEqual(readFlagValue(["--limit="], 0), { ok: true, name: "limit", value: "", last: 0 });
   assert.deepEqual(readFlagValue(["--limit"], 0), { ok: false, error: "--limit needs a value" });
   assert.deepEqual(readFlagValue(["--limit", "--other"], 0), { ok: false, error: "--limit needs a value" });
+  // Only a following `--option` is refused: a value starting with one dash (a negative number, or a lone `-`) is a value,
+  // and after `=` everything is the value, even when it starts with `--`.
+  assert.deepEqual(readFlagValue(["--limit", "-1"], 0), { ok: true, name: "limit", value: "-1", last: 1 });
+  assert.deepEqual(readFlagValue(["--from", "-"], 0), { ok: true, name: "from", value: "-", last: 1 });
+  assert.deepEqual(readFlagValue(["--limit=--other"], 0), { ok: true, name: "limit", value: "--other", last: 0 });
 });
