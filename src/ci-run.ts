@@ -1176,6 +1176,7 @@ export async function runCi(
       await host
         .call("scout_close", { all: true }, finishLeft())
         .catch((err: unknown) => log(`Closing the browser failed: ${err instanceof Error ? err.message : String(err)}`));
+      // The run is over and its outcome decided; a host that fails to close adds nothing to report.
       await host.close().catch(() => {});
     }
   }

@@ -276,6 +276,7 @@ export function writeRedirectHopsJudged(engine: BrowserEngineName): boolean {
  * the policy blocks nothing and the person has opted in to everything.
  */
 export const REMOVE_SHARED_WORKER_SCRIPT = `(() => {
+  // A page may have made the property non-configurable; the redefinition below is the fallback, and a page that allows neither keeps its constructor.
   try { delete globalThis.SharedWorker; } catch {}
   if ("SharedWorker" in globalThis) {
     try { Object.defineProperty(globalThis, "SharedWorker", { value: undefined, configurable: true, writable: true }); } catch {}

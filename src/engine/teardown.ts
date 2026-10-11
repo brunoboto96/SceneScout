@@ -33,6 +33,7 @@ export async function boundedTeardown(context: ContextLike | null, browser: Clos
     await context?.close().catch(() => {});
     await browser?.close().catch(() => {});
   })()
+    // Each close above already ignores its own failure; this keeps anything unexpected from becoming an unhandled rejection, since teardown never throws.
     .catch(() => {})
     .finally(() => {
       finished = true;
@@ -44,5 +45,6 @@ export async function boundedTeardown(context: ContextLike | null, browser: Clos
       timer = setTimeout(resolve, capMs);
     }),
   ]);
+  // Past the cap: one more try at the browser, whose failure changes nothing for a caller already released.
   if (!finished) void browser?.close().catch(() => {});
 }

@@ -397,7 +397,8 @@ function watch(projectPath: string, open: boolean): void {
   console.log("It is served on this machine only, and the address holds its access token: treat it like a password.");
   if (!open) return;
   const { command, args } = browserOpener(target.url);
-  const result = spawnSync(command, args, { stdio: "ignore" });
+  // An opener that never returns (no desktop session) must not hold the command; the address is printed above either way.
+  const result = spawnSync(command, args, { stdio: "ignore", timeout: 10_000 });
   if (result.error || result.status !== 0) console.log("Could not open a browser from here. Open the address above yourself.");
 }
 
