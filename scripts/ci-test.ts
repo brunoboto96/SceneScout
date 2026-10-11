@@ -2310,6 +2310,64 @@ test("dependabot: every action's own pins are watched, not only the workflows' a
 });
 
 /**
+ * Each `uses:` in a workflow or action file that names a remote action by anything but a full commit SHA with the
+ * release it is as a trailing `# vX.Y.Z` comment. A local action (`./…`) is exempt: it is this repository's own code.
+ */
+function unpinnedUses(text: string): string[] {
+  const problems: string[] = [];
+  for (const line of text.split("\n")) {
+    if (/^\s*#/.test(line) || !/\buses:/.test(line)) continue;
+    const m = /^\s*(?:-\s+)?uses:\s*(\S+)(.*)$/.exec(line);
+    // Any other shape (a flow mapping, a quoted value) is refused rather than read loosely.
+    if (!m) {
+      problems.push(line.trim());
+      continue;
+    }
+    const [, ref, rest] = m;
+    if (ref.startsWith("./")) continue;
+    if (!/^[\w.-]+\/[\w.\/-]+@[0-9a-f]{40}$/.test(ref) || !/^\s+#\s*v\d+\.\d+\.\d+\s*$/.test(rest)) problems.push(line.trim());
+  }
+  return problems;
+}
+
+test("actions: every remote action in a workflow or an action is pinned by commit, with its release beside it", () => {
+  const dir = path.join(REPO, ".github", "workflows");
+  const files = [
+    ...fs
+      .readdirSync(dir)
+      .filter((f) => /\.ya?ml$/.test(f))
+      .map((f) => path.join(".github", "workflows", f)),
+    ...["action.yml", "ci/action.yml", "qa/action.yml"],
+  ];
+  assert.ok(files.length >= 11, "every workflow and the three actions are read");
+  let remote = 0;
+  for (const f of files) {
+    const text = fs.readFileSync(path.join(REPO, f), "utf8");
+    remote += [...text.matchAll(/^\s*(?:-\s+)?uses:\s*[\w.-]+\//gm)].length;
+    assert.deepEqual(unpinnedUses(text), [], f);
+  }
+  assert.ok(remote >= 40, `the scan found the remote actions: ${remote}`);
+
+  // The rule itself: each refused shape beside the pinned one it differs from.
+  const sha = "3d3c42e5aac5ba805825da76410c181273ba90b1";
+  const cases: Array<[string, string, number]> = [
+    ["a commit with its release", `      - uses: actions/checkout@${sha} # v7.0.1`, 0],
+    ["an action in a subfolder", `        uses: actions/cache/restore@${sha} # v6.1.0`, 0],
+    ["a local action", "      - uses: ./ci", 0],
+    ["a major tag", "      - uses: actions/checkout@v7", 1],
+    ["a full tag", "      - uses: actions/checkout@v7.0.1", 1],
+    ["a branch", "      - uses: actions/checkout@main", 1],
+    ["a short commit", `      - uses: actions/checkout@${sha.slice(0, 12)} # v7.0.1`, 1],
+    ["a commit with no release", `      - uses: actions/checkout@${sha}`, 1],
+    ["a commit named by its major only", `      - uses: actions/checkout@${sha} # v7`, 1],
+    ["a flow mapping", "      - { uses: actions/checkout@v7 }", 1],
+    ["a commented-out line", "      # - uses: actions/checkout@v7", 0],
+    ["a reusable workflow at a tag", "    uses: some-org/workflows/.github/workflows/x.yml@v1", 1],
+  ];
+  for (const [what, line, n] of cases) assert.equal(unpinnedUses(line).length, n, what);
+});
+
+/**
  * What a workflow does wrong with the job token or a model key: a checkout that leaves the token in .git/config
  * in a job that never talks to the remote, or a job that can read a key and installs with dependencies' scripts.
  */

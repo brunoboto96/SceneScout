@@ -125,13 +125,13 @@ jobs:
           fi
       # No actions cache anywhere in this job (setup-node's included): what a
       # job that checks out a chosen ref saves, later runs on main would restore.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
       - id: commit
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       # --ignore-scripts: no dependency's install script runs in a job that holds a key. The build is run explicitly.
