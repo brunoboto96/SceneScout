@@ -271,14 +271,14 @@
       .hero {
         padding-block: clamp(52px, 7vw, 96px) clamp(72px, 8vw, 112px);
       }
-      .hero .wrap {
+      .hero-grid {
         display: grid;
         grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
         gap: clamp(36px, 5vw, 72px);
         align-items: center;
       }
       @media (max-width: 940px) {
-        .hero .wrap {
+        .hero-grid {
           grid-template-columns: minmax(0, 1fr);
         }
       }
@@ -1105,6 +1105,171 @@
         flex-wrap: wrap;
         gap: 18px;
       }
+      /* Motion. The hero's backdrop is the app's route map as a pixel constellation: it grows out from the start page, and the red stars are the
+         bugs found at the ends of its paths. Everything else moves once, when it first comes into view, and nothing moves under reduced motion. */
+      .hero {
+        position: relative;
+        overflow: hidden;
+      }
+      .hero > .wrap {
+        position: relative;
+        z-index: 1;
+      }
+      .starmap {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        opacity: 0.55;
+        -webkit-mask-image: radial-gradient(ellipse 75% 85% at 50% 55%, #000 35%, transparent 100%);
+        mask-image: radial-gradient(ellipse 75% 85% at 50% 55%, #000 35%, transparent 100%);
+      }
+      .allies {
+        position: relative;
+        z-index: 1;
+        margin-top: clamp(48px, 6vw, 72px);
+        display: grid;
+        gap: 14px;
+        justify-items: center;
+      }
+      .allies > span {
+        font: 700 0.8rem/1 var(--display);
+        letter-spacing: 0.08em;
+        color: var(--gold);
+      }
+      .marquee {
+        width: 100%;
+        overflow: hidden;
+        display: flex;
+        -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+        mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+      }
+      .marquee ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex: none;
+        align-items: center;
+      }
+      .marquee li {
+        display: flex;
+        align-items: center;
+        gap: 34px;
+        padding-right: 34px;
+        font: 600 1.05rem/1.4 var(--display);
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .marquee li::after {
+        content: "";
+        width: 7px;
+        height: 7px;
+        transform: rotate(45deg);
+        background: var(--gold-soft);
+      }
+      .marquee ul[aria-hidden] {
+        display: none;
+      }
+      @media (prefers-reduced-motion: no-preference) {
+        .marquee ul[aria-hidden] {
+          display: flex;
+        }
+        .marquee ul {
+          animation: march 38s linear infinite;
+        }
+        .marquee:hover ul {
+          animation-play-state: paused;
+        }
+        @keyframes march {
+          to {
+            transform: translateX(-100%);
+          }
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .marquee {
+          -webkit-mask-image: none;
+          mask-image: none;
+        }
+        .marquee ul {
+          flex: 1 1 auto;
+          flex-wrap: wrap;
+          justify-content: center;
+          row-gap: 8px;
+        }
+        .marquee li:last-child::after {
+          display: none;
+        }
+      }
+      /* Panels below the first screen rise into place as they are reached; the script only marks those, so the first screen is never hidden. */
+      .rise {
+        opacity: 0;
+        transform: translateY(18px);
+      }
+      .rise.shown {
+        opacity: 1;
+        transform: none;
+        transition:
+          opacity 0.6s ease-out var(--delay, 0s),
+          transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) var(--delay, 0s);
+      }
+      .chart .bar {
+        transform-box: fill-box;
+        transform-origin: 50% 100%;
+      }
+      .chart.rise .bar {
+        transform: scaleY(0);
+      }
+      .chart.rise.shown .bar {
+        transform: none;
+        transition: transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) calc(0.25s + var(--i) * 60ms);
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin: 8px 0 0;
+      }
+      .stats div {
+        display: grid;
+        gap: 4px;
+        align-content: start;
+        border-top: 1px solid var(--gold-soft);
+        padding-top: 10px;
+      }
+      .stats dd {
+        order: -1;
+        margin: 0;
+        font: 800 clamp(1.8rem, 3.4vw, 2.4rem)/1 var(--display);
+        color: var(--gold-hi);
+        font-variant-numeric: tabular-nums;
+      }
+      .stats dt {
+        font-size: 0.85rem;
+        line-height: 1.35;
+        color: var(--muted);
+      }
+      /* Loot catches the light when you hover it, as an item does in a bag. */
+      .item {
+        position: relative;
+        overflow: hidden;
+      }
+      @media (prefers-reduced-motion: no-preference) {
+        .item::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          background: linear-gradient(105deg, transparent 35%, rgba(255, 240, 200, 0.16) 50%, transparent 65%);
+          transform: translateX(-110%);
+        }
+        .item:hover::after {
+          transform: translateX(110%);
+          transition: transform 0.9s ease-out;
+        }
+      }
     </style>
   </head>
   <body>
@@ -1136,7 +1301,8 @@
 
     <main id="top">
       <section class="hero">
-        <div class="wrap">
+        <canvas class="starmap" aria-hidden="true"></canvas>
+        <div class="wrap hero-grid">
           <div class="hero-copy">
             <span class="quest-start"><i aria-hidden="true">!</i>New quest: scout your app</span>
             <h1>Your coding agent, turned into a QA tester for any web app.</h1>
@@ -1190,6 +1356,31 @@
               </li>
             </ol>
           </figure>
+        </div>
+        <div class="allies wrap">
+          <span>Fights alongside the agent you already use</span>
+          <div class="marquee">
+            <ul>
+              <li>Claude Code</li>
+              <li>Cursor</li>
+              <li>VS Code (Copilot)</li>
+              <li>Codex CLI</li>
+              <li>Gemini CLI</li>
+              <li>Copilot CLI</li>
+              <li>Windsurf</li>
+              <li>any MCP client</li>
+            </ul>
+            <ul aria-hidden="true">
+              <li>Claude Code</li>
+              <li>Cursor</li>
+              <li>VS Code (Copilot)</li>
+              <li>Codex CLI</li>
+              <li>Gemini CLI</li>
+              <li>Copilot CLI</li>
+              <li>Windsurf</li>
+              <li>any MCP client</li>
+            </ul>
+          </div>
         </div>
       </section>
 
@@ -1571,6 +1762,20 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
             <p class="lede">
               Every change to how it explores is scored against an app with bugs planted on purpose, and checked on a second app it is never tuned on.
             </p>
+            <dl class="stats">
+              <div>
+                <dt>bugs planted in the demo app</dt>
+                <dd data-count="13">13</dd>
+              </div>
+              <div>
+                <dt>found by the latest run</dt>
+                <dd data-count="12">12</dd>
+              </div>
+              <div>
+                <dt>runs scored against the same key</dt>
+                <dd data-count="13">13</dd>
+              </div>
+            </dl>
             <p>
               <a href="https://github.com/brunoboto96/SceneScout/blob/main/docs/benchmark.md">Read the benchmark log</a>, including the changes that didn't
               help.
@@ -1683,11 +1888,171 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
         r.setAttribute("height", h);
         r.setAttribute("rx", 2);
         r.setAttribute("class", i === runs.length - 1 ? "bar top" : "bar");
+        r.style.setProperty("--i", i);
         const t = document.createElementNS(ns, "title");
         t.textContent = `Run ${i}: ${v} of 13`;
         r.appendChild(t);
         g.appendChild(r);
       });
+      const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      // Panels below the first screen rise in as they are reached, a few at a time; counters tick up to their value.
+      if (!calm && "IntersectionObserver" in window) {
+        const countUp = (dd) => {
+          const to = Number(dd.dataset.count),
+            t0 = performance.now();
+          const tick = (now) => {
+            const k = Math.min(1, (now - t0) / 900);
+            dd.textContent = Math.round(to * (1 - Math.pow(1 - k, 3)));
+            if (k < 1) requestAnimationFrame(tick);
+          };
+          requestAnimationFrame(tick);
+        };
+        const io = new IntersectionObserver(
+          (entries) => {
+            let k = 0;
+            for (const e of entries) {
+              if (!e.isIntersecting) continue;
+              e.target.style.setProperty("--delay", `${k++ * 0.08}s`);
+              e.target.classList.add("shown");
+              for (const dd of e.target.querySelectorAll("[data-count]")) countUp(dd);
+              io.unobserve(e.target);
+            }
+          },
+          { rootMargin: "0px 0px -10% 0px" },
+        );
+        for (const el of document.querySelectorAll("main section:not(.hero) .section-head, main section:not(.hero) .gilded, .loot .item, .shot")) {
+          if (el.getBoundingClientRect().top < innerHeight) continue;
+          el.classList.add("rise");
+          io.observe(el);
+        }
+      }
+
+      // The hero's star map: a route tree in square pixels, grown from a seeded random so it is the same on every visit.
+      (() => {
+        const canvas = document.querySelector(".starmap"),
+          hero = document.querySelector(".hero"),
+          ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        const C = 6; // one pixel of the map, in CSS pixels
+        const colors = { path: [217, 180, 91], hi: [243, 216, 143], page: [111, 227, 255], bug: [255, 90, 106], dust: [169, 163, 204] };
+        let cells = [],
+          dust = [],
+          w = 0,
+          h = 0,
+          start = 0,
+          raf = 0,
+          visible = true;
+        const rng = (seed) => () => {
+          seed = (seed + 0x6d2b79f5) | 0;
+          let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+        const grow = () => {
+          const r = rng(7),
+            cols = Math.ceil(w / C),
+            rows = Math.ceil(h / C),
+            seen = new Set();
+          cells = [];
+          dust = [];
+          // Nothing is drawn under the text, so the map never sits behind a word.
+          const box = hero.getBoundingClientRect();
+          const keepOut = [...hero.querySelectorAll(".hero-copy, .allies")].map((el) => {
+            const b = el.getBoundingClientRect();
+            return [(b.left - box.left - 28) / C, (b.top - box.top - 28) / C, (b.right - box.left + 28) / C, (b.bottom - box.top + 28) / C];
+          });
+          const put = (x, y, t, kind) => {
+            const key = `${x},${y}`;
+            if (x < 0 || y < 0 || x >= cols || y >= rows || seen.has(key)) return;
+            if (keepOut.some(([l, t2, rr, b]) => x >= l && x <= rr && y >= t2 && y <= b)) return;
+            seen.add(key);
+            cells.push({ x, y, t, kind, phase: r() * 6.28, speed: 0.6 + r() * 1.6 });
+          };
+          const branch = (x, y, angle, len, depth, t) => {
+            for (let i = 0; i < len; i++) {
+              angle += (r() - 0.5) * 0.35;
+              x += Math.cos(angle);
+              y += Math.sin(angle);
+              put(Math.round(x), Math.round(y), t + i, r() < 0.12 ? "hi" : "path");
+              if (r() < 0.35) put(Math.round(x) + (r() < 0.5 ? 1 : -1), Math.round(y), t + i, "path");
+            }
+            t += len;
+            if (depth === 0) {
+              const kind = r() < 0.22 ? "bug" : "page";
+              for (const [dx, dy] of [
+                [0, 0],
+                [1, 0],
+                [0, 1],
+                [1, 1],
+              ])
+                put(Math.round(x) + dx, Math.round(y) + dy, t, kind);
+              return;
+            }
+            const n = r() < 0.3 ? 3 : 2;
+            for (let k = 0; k < n; k++) branch(x, y, angle + (k - (n - 1) / 2) * (0.5 + r() * 0.4), Math.max(4, len * (0.62 + r() * 0.2)), depth - 1, t);
+          };
+          // Trees grow from the edges around the picture: from the top right, the right edge and below it, and peek out around its frame.
+          const unit = Math.min(cols, rows * 1.6);
+          branch(cols * 0.99, 0, 2.3, unit * 0.13, 5, 0);
+          branch(cols * 1.0, rows * 0.55, 3.0, unit * 0.12, 5, 40);
+          branch(cols * 0.72, rows * 1.0, -1.75, unit * 0.13, 5, 20);
+          for (let i = 0; i < (cols * rows) / 90; i++) dust.push({ x: Math.floor(r() * cols), y: Math.floor(r() * rows), phase: r() * 6.28, speed: 0.3 + r() });
+        };
+        const size = () => {
+          const dpr = Math.min(2, devicePixelRatio || 1);
+          w = hero.clientWidth;
+          h = hero.clientHeight;
+          canvas.width = Math.round(w * dpr);
+          canvas.height = Math.round(h * dpr);
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          grow();
+        };
+        const draw = (now) => {
+          const s = calm ? 1e9 : (now - start) / 1000,
+            front = s * 34; // pixels of path drawn per second
+          ctx.clearRect(0, 0, w, h);
+          for (const d of dust) {
+            const a = 0.12 + 0.12 * Math.sin(s * d.speed + d.phase);
+            ctx.fillStyle = `rgba(${colors.dust},${a})`;
+            ctx.fillRect(d.x * C, d.y * C, C - 2, C - 2);
+          }
+          for (const c of cells) {
+            if (c.t > front) continue;
+            const age = front - c.t,
+              flash = age < 3 ? 1 - age / 3 : 0;
+            let a = (c.kind === "path" ? 0.55 : 0.85) + 0.25 * Math.sin(s * c.speed + c.phase);
+            if (c.kind === "bug") a = 0.65 + 0.35 * Math.sin(s * 3 + c.phase);
+            ctx.fillStyle = `rgba(${flash ? colors.hi : colors[c.kind]},${Math.min(1, a + flash)})`;
+            ctx.fillRect(c.x * C, c.y * C, C - 1, C - 1);
+          }
+        };
+        const loop = (now) => {
+          draw(now);
+          raf = visible && !document.hidden ? requestAnimationFrame(loop) : 0;
+        };
+        const resume = () => {
+          if (!calm && !raf && visible && !document.hidden) raf = requestAnimationFrame(loop);
+        };
+        size();
+        start = performance.now();
+        if (calm) draw(0);
+        else resume();
+        let resizeTimer;
+        addEventListener("resize", () => {
+          clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(() => {
+            size();
+            if (calm) draw(0);
+          }, 150);
+        });
+        document.addEventListener("visibilitychange", resume);
+        if ("IntersectionObserver" in window)
+          new IntersectionObserver(([e]) => {
+            visible = e.isIntersecting;
+            resume();
+          }).observe(hero);
+      })();
     </script>
   </body>
 </html>
