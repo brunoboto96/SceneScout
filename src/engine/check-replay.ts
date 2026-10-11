@@ -12,6 +12,7 @@
  * frame cap, the redaction and the page itself are table-tested. check-run.ts
  * gathers the frames from the browser and copies them beside the page.
  */
+import { cspMeta, savedPageCsp } from "./csp.js";
 import { redactRoute } from "./memory.js";
 import { describeStep, type FlowOutcome, type FlowStep } from "./flow.js";
 import { escapeHtml, plainSegment, RECORD_MAX_FRAMES } from "./replay.js";
@@ -507,6 +508,7 @@ export function buildCheckReplayHtml(replay: CheckReplay, meta: ReplayMeta): str
 <html lang="en">
 <head>
 <meta charset="utf-8">
+${cspMeta(savedPageCsp())}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="generator" content="${REPLAY_GENERATOR}">
 <title>SceneScout check replay — ${escapeHtml(meta.origin)}</title>

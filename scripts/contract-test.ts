@@ -48,6 +48,8 @@ import {
   splitProjectFrame,
   taskBlocks,
 } from "../src/engine/replay.ts";
+import { cspHash, cspMeta, savedPageCsp } from "../src/engine/csp.ts";
+import { assertSavedPagePolicy, pagePolicy } from "./saved-page-csp.ts";
 import type { ActivityLine } from "../src/engine/live.ts";
 
 let dirs: string[] = [];
@@ -860,6 +862,39 @@ test("replay: only the served copy watches for the engine going away", () => {
   // script at all, which is what lets it open from a file with nothing running.
   assert.ok(!saved.includes("run-engine-gone"));
   assert.ok(!saved.includes("<script>"), "the saved copy stays a document");
+});
+
+test("replay: the saved and the served page each carry a policy that lets only their own code run", () => {
+  const base = {
+    markdown: "## Findings\n\n![The broken button](recordings/clerk/0001-click.jpg)\n",
+    sessions: [{ session: "agent-0", role: "clerk", objective: "", steps: [step({ frame: "recordings/clerk/0001-click.jpg" })] }],
+    project: "demo-app",
+    at: "2026-09-20T16:21:00.000Z",
+    version: "3.1.0",
+  };
+  // Opened from disk, with no server to send a header: the page's own head is the only place a policy can be.
+  const saved = buildReplayHtml(base);
+  assertSavedPagePolicy(saved, "report.html");
+  assert.match(saved, /onerror=/, "the saved page has the picture handler the policy has to allow");
+  assert.equal(pagePolicy(saved).get("connect-src"), undefined, "the saved copy asks nothing of anyone");
+  // The same page served by the live view watches for the engine: its one script, and the fetch it makes, are allowed too.
+  const served = buildReplayHtml({ ...base, framePrefix: "record/", savedAt: "/p/.scenescout" });
+  assertSavedPagePolicy(served, "the served run page");
+  assert.deepEqual(pagePolicy(served).get("connect-src"), ["'self'"]);
+  // A page with no pictures and no script runs nothing.
+  assertSavedPagePolicy(buildReplayHtml({ ...base, markdown: "## Findings\n", sessions: [] }), "an empty report.html");
+  assert.deepEqual(pagePolicy(buildReplayHtml({ ...base, markdown: "## Findings\n", sessions: [] })).get("script-src"), ["'none'"]);
+});
+
+test("csp: a hash is the base64 SHA-256 of the exact text, and a policy holds nothing that could end its attribute", () => {
+  assert.equal(cspHash(""), "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='");
+  assert.equal(savedPageCsp().includes("script-src 'none'"), true);
+  assert.match(
+    savedPageCsp({ scripts: ["a()"], handlers: ["b()", "b()"] }),
+    /script-src 'unsafe-hashes' 'sha256-[^']+' 'sha256-[^']+';/,
+    "a handler named twice is listed once",
+  );
+  assert.throws(() => cspMeta('default-src "x"'), /markup characters/);
 });
 
 test("replay: a folder name cannot end the served copy's script", () => {

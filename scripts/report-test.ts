@@ -37,6 +37,7 @@ import {
   type ReportTemplate,
 } from "../src/engine/check-report.ts";
 import { parseFlow, type Flow, type FlowOutcome } from "../src/engine/flow.ts";
+import { assertSavedPagePolicy, pagePolicy } from "./saved-page-csp.ts";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXAMPLE = path.join(ROOT, "examples", "report-template.json");
@@ -208,6 +209,13 @@ test("golden: the same run, template and evidence always render the same page", 
     readText(GOLDEN),
     "the page matches scripts/golden/check-report.html (UPDATE_GOLDEN=1 rewrites it after an intended change)",
   );
+});
+
+test("the page's own policy runs no script and loads its frames only from its own origin", () => {
+  const html = buildTemplateReport(resultOf(), exampleTemplate(), fixedEvidence(resultOf()), META);
+  assert.ok(html.includes("<img "), "the page under test shows a frame");
+  assertSavedPagePolicy(html, "the test report");
+  assert.deepEqual(pagePolicy(html).get("script-src"), ["'none'"]);
 });
 
 test("the example template is valid and lays out every section in its order, with its document ID and fields filled", () => {

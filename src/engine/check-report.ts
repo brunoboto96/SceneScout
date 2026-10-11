@@ -19,6 +19,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { cspMeta, savedPageCsp } from "./csp.js";
 import { z } from "zod";
 import { REPLAY_FILE, replayFrames, replayVideos, type ReplayJourney, type ReplayStep, type ReplayStepResult } from "./check-replay.js";
 import { summarise, type CheckResult } from "./check.js";
@@ -588,6 +589,7 @@ export function buildTemplateReport(result: CheckResult, template: ReportTemplat
 <html lang="en">
 <head>
 <meta charset="utf-8">
+${cspMeta(savedPageCsp())}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="generator" content="${REPORT_GENERATOR}">
 <title>${escapeHtml(title)}</title>

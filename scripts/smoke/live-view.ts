@@ -6,6 +6,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { feedForSession, FEED_LINES, LiveServer, StatusBoard, type LiveProvider } from "../../dist/engine/live.js";
 import { buildReplayHtml, resolveFrame } from "../../dist/engine/replay.js";
@@ -203,10 +204,56 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     check("a closed session says it cannot stream, instead of streaming nothing under a LIVE tag", (await engine.startScreencast(() => {})) === null);
 
     await viewerKeepsUp(shot);
+    await savedReportOpensFromDisk();
   } finally {
     await live.stop();
     await engine.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * report.html opened from disk, under the Content-Security-Policy in its own
+ * head: a picture beside it still loads, a missing one still gets its note
+ * (the one handler the policy allows by hash), and nothing the policy refuses
+ * is attempted. A policy that blocked the page's own pictures would pass every
+ * table test and show a run with no evidence.
+ */
+async function savedReportOpensFromDisk(): Promise<void> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-saved-report-"));
+  fs.mkdirSync(path.join(dir, "recordings", "clerk"), { recursive: true });
+  fs.copyFileSync(path.join(process.cwd(), "test-app", "pixel.png"), path.join(dir, "recordings", "clerk", "0001-click.png"));
+  const at = "2026-09-20T16:21:00.000Z";
+  fs.writeFileSync(
+    path.join(dir, "report.html"),
+    buildReplayHtml({
+      markdown: "## Findings\n\n![The picture that travelled](recordings/clerk/0001-click.png)\n\n![The picture that did not](recordings/clerk/missing.png)\n",
+      sessions: [{ session: "agent-0", role: "clerk", objective: "", steps: [{ at, action: "click", url: "/", frame: "recordings/clerk/0001-click.png" }] }],
+      project: "saved",
+      at,
+      version: "smoke",
+    }),
+  );
+  const browser = await { chromium, firefox, webkit }[BROWSER].launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.addInitScript(
+      `window.__refused = []; document.addEventListener("securitypolicyviolation", (e) => window.__refused.push(e.violatedDirective + " " + e.blockedURI));`,
+    );
+    await page.goto(pathToFileURL(path.join(dir, "report.html")).href);
+    const shown = page.locator('img[src="recordings/clerk/0001-click.png"]');
+    await shown.first().scrollIntoViewIfNeeded();
+    await until("the picture beside the page to load", () => shown.first().evaluate((i: HTMLImageElement) => i.complete && i.naturalWidth > 0));
+    const missing = page.locator('img[src="recordings/clerk/missing.png"]');
+    await missing.scrollIntoViewIfNeeded();
+    const noted = await eventually(() => missing.evaluate((i: HTMLImageElement) => i.parentElement?.classList.contains("gone") ?? false));
+    const refused = (await page.evaluate("window.__refused")) as string[];
+    check("report.html opened from disk under its own policy shows the pictures beside it", (await shown.count()) === 2, `${await shown.count()} shown`);
+    check("...a missing one still gets its note, so the one handler the policy allows runs", noted);
+    check("...and the policy refuses nothing the page itself asks for", refused.length === 0, refused.join("; "));
+  } finally {
+    await browser.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 

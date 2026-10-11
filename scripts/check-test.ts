@@ -137,6 +137,7 @@ import {
 import { framePath, RECORD_MAX_FRAMES } from "../src/engine/replay.ts";
 import { clearReplayOutput, replayPageConflict } from "../src/check-run.ts";
 import { film, type Screencast } from "../src/engine/film.ts";
+import { assertSavedPagePolicy, pagePolicy } from "./saved-page-csp.ts";
 import {
   CHECK_OPTION_NAMES,
   CHECK_RULES,
@@ -3658,6 +3659,16 @@ test("replay page: a journey with a video plays it beside its steps and links it
   assert.ok(checkout.indexOf("<video ") > 0 && checkout.indexOf("<video ") < checkout.indexOf('<ol class="steps">'));
   assert.match(html, /<dt>Videos<\/dt><dd>1<\/dd>/);
   assert.ok(!buildCheckReplayHtml({ ...replay, roles: [{ ...replay.roles[0], journeys: [without] }] }, replayMeta).includes("<dt>Videos</dt>"));
+});
+
+test("replay page: its own policy runs no script and loads its frames and videos only from its own origin", () => {
+  const withVideo = { ...journeyOf(replayFlow, { status: "passed" }, [{ frame: "f1" }]), video: "replay-videos/journey-01-checkout.webm" };
+  const replay: CheckReplay = { startedAt: "t", roles: [{ role: "anonymous", own: true, visits: [], journeys: [withVideo] }], framesLeftOut: 0 };
+  const html = buildCheckReplayHtml(replay, replayMeta);
+  assert.ok(html.includes("<img ") && html.includes("<video "), "the page under test has a frame and a video");
+  assertSavedPagePolicy(html, "replay.html");
+  assert.deepEqual(pagePolicy(html).get("script-src"), ["'none'"]);
+  assert.deepEqual(pagePolicy(html).get("media-src"), ["'self'"]);
 });
 
 test("replay: a replay.html the project keeps in the output folder, without the generator mark, survives the clean-up", () => {

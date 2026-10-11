@@ -21,6 +21,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import type { ActivityLine } from "./live.js";
+import { cspMeta, savedPageCsp } from "./csp.js";
 import { isSafeRelativePath } from "./plain.js";
 import { scriptLiteral } from "./script-literal.js";
 
@@ -194,9 +195,12 @@ function stamp(iso: string): string {
 /**
  * What an image that will not load does. This page is meant to be handed on,
  * and a copy sent without its `recordings/` folder would otherwise show a row
- * of broken icons under a finding that still counts them as evidence.
+ * of broken icons under a finding that still counts them as evidence. It is
+ * the one event handler the page carries, and its policy allows it by hash, so
+ * the handler's text and the attribute's are one constant.
  */
-const GONE = `onerror="this.parentNode.classList.add('gone')"`;
+const GONE_HANDLER = "this.parentNode.classList.add('gone')";
+const GONE = `onerror="${GONE_HANDLER}"`;
 
 /** A result that reads as a failure, so a step that went wrong is visible without reading every line. */
 const BAD_RESULT = /error|fail|refus|block|violation|abandoned/i;
@@ -478,7 +482,7 @@ details.evidence figcaption { margin-top:4px; color:var(--muted); font:11px/1.5 
  */
 function exitWatch(savedFile: string): string {
   return (
-    "<script>(function () {\n" +
+    "(function () {\n" +
     "  var saved = " +
     // Escaped: a folder named with "</script>" must not end this element.
     scriptLiteral(savedFile) +
@@ -512,7 +516,7 @@ function exitWatch(savedFile: string): string {
     "    e.preventDefault();\n" +
     "    e.returnValue = '';\n" +
     "  });\n" +
-    "})();</script>"
+    "})();"
   );
 }
 
@@ -536,10 +540,19 @@ export function buildReplayHtml(input: ReplayInput): string {
   const prefix = input.framePrefix ?? "";
   const savedAt = input.savedAt ?? "";
   const sessions = input.sessions.map((s, i) => renderSession(s, i, prefix, savedAt)).join("\n");
+  const report = renderMarkdown(input.markdown, input.evidence ?? [], prefix, savedAt);
+  const watch = savedAt ? exitWatch(`${savedAt}/report.html`) : "";
+  // The copy on disk runs nothing but the picture handler; the served copy also runs its watch on the engine, and the fetch that watch makes.
+  const policy = savedPageCsp({
+    scripts: watch ? [watch] : [],
+    handlers: report.includes(GONE) || sessions.includes(GONE) ? [GONE_HANDLER] : [],
+    connect: Boolean(watch),
+  });
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+${cspMeta(policy)}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SceneScout run — ${escapeHtml(input.project)}</title>
 <style>${STYLE}</style>
@@ -562,7 +575,7 @@ ${
 }
 <main>
 <h2 id="report">Report</h2>
-${renderMarkdown(input.markdown, input.evidence ?? [], prefix, savedAt)}
+${report}
 <h2 id="steps">What each session did</h2>
 <p class="objective">Every action, in the blocks its tasks made. ${
     framed
@@ -571,7 +584,7 @@ ${renderMarkdown(input.markdown, input.evidence ?? [], prefix, savedAt)}
   }</p>
 ${sessions || "<p>No session recorded any action.</p>"}
 </main>
-${savedAt ? exitWatch(`${savedAt}/report.html`) : ""}
+${watch ? `<script>${watch}</script>` : ""}
 </body>
 </html>
 `;
