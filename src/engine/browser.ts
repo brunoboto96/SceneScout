@@ -584,6 +584,61 @@ const FORM_READ_MS = 1000;
 
 /** A form a collect found: its identity key, and whether the page itself refuses its empty submit. */
 type SeenForm = { key: string; guarded: boolean };
+
+/** One step of a scout_run_plan plan. */
+type PlanStep = {
+  action: "navigate" | "click" | "type" | "select" | "press" | "hover" | "scroll" | "upload";
+  target?: string;
+  value?: string;
+  pressEnter?: boolean;
+  replace?: boolean;
+};
+
+/** A page state a plan captured: its fingerprint, elements and URL. */
+type PlanCapture = { fp: string; elements: SnapshotElement[]; url: string };
+
+/** What a plan's steps share: its transcript, how it locates and names a target, and its last capture. */
+interface PlanRun {
+  page: Page;
+  transcript: string[];
+  planStartedAt: number;
+  /** Steps the plan went on past a new violation at (onViolation "continue"). */
+  continuedPast: number[];
+  onViolation: PlanViolationRule;
+  locatePlanTarget: (target: string) => Locator;
+  liveLabel: (loc: Locator) => Promise<string>;
+  /** Last state captured this plan — reused as the next step's pre-state while the page has not moved. */
+  lastCapture: PlanCapture | null;
+}
+
+/** What a crawl's steps share: the page, its options, the routes it set out to visit and the lines it reports. */
+interface CrawlRun {
+  page: Page;
+  memory: MemoryStore;
+  opts: { inspect?: boolean; limit?: number; measureOnly?: boolean; deadline?: number };
+  /** The caller named the paths, rather than the crawl choosing the unvisited routes. */
+  explicit: boolean;
+  targets: string[];
+  summary: string[];
+  problems: string[];
+}
+
+/** How one crawl step ended: not a URL it could load, a load that failed, a file or feed, or a page. */
+type CrawlStepOutcome = "skipped" | "load-failed" | "resource" | "page";
+
+/** What a flow's steps share while it replays. */
+interface FlowRun {
+  /** Responses since the most recent action step: what an expect-request looks through. */
+  sinceAction: { seen: SeenRequest[] };
+  /** The page's path and query, for a step's report. */
+  here: () => string;
+  /** Charge the oracles' violations to the flow, all but `except`. */
+  collect: (except?: string) => void;
+  /** Wait until `done`, at most `ms`. */
+  poll: (done: () => boolean, ms?: number) => Promise<boolean>;
+  /** Refused writes since the last call that a step is charged with. */
+  ownRefusals: () => string[];
+}
 /** What fillOrAppend reads about a field for sensitive.ts: its attributes and whatever labels it. */
 type FieldFactsRead = {
   type: string | null;
@@ -1551,6 +1606,21 @@ export class BrowserEngine {
     this.auth = auth;
     this.role = roleLabel(auth);
     this.authLoss.beginSession(auth.kind, this.role);
+    const profileNote = this.restoreProfile(opts, auth, brokered);
+    this.configureSession(opts);
+    await this.launchContext(opts, profile);
+    await this.wireContext(this.context!);
+    await this.firstNavigation(opts.url);
+    return this.attachSummary(opts, auth, storageStatePath, profileNote);
+  }
+
+  /**
+   * Attach, phase 1: the role's saved profile. A role's profile file is
+   * checked for its permissions and, when the refresh broker is on and the
+   * profile holds a refresh token, the broker is set up. Returns the note a
+   * loose profile file gets in the attach summary.
+   */
+  private restoreProfile(opts: AttachOptions, auth: AttachAuth, brokered: boolean): string {
     let profileNote = "";
     this.refresh = null;
     this.refreshCounts = { refreshed: 0, swapped: 0, failed: 0, learned: 0 };
@@ -1580,6 +1650,11 @@ export class BrowserEngine {
         }
       }
     }
+    return profileNote;
+  }
+
+  /** Attach, phase 2: the session's rules and state, set before the browser starts. */
+  private configureSession(opts: AttachOptions): void {
     this.currentMode = opts.mode ?? "read-only";
     this.writeRule = new WriteRule(this.currentMode);
     const trust = trustedEmbedOrigins(opts.trustedEmbeds);
@@ -1680,7 +1755,10 @@ export class BrowserEngine {
     } catch {
       this.knownRoutes = [];
     }
+  }
 
+  /** Attach, phase 3: launch the browser and open its context and first page, with the profile restored. */
+  private async launchContext(opts: AttachOptions, profile: ReturnType<typeof splitProfile> | undefined): Promise<void> {
     try {
       this.engineName = opts.browser ?? defaultEngine(process.env);
       this.browser = await this.launchWithRecovery(this.engineName, opts.headed ?? false);
@@ -1701,7 +1779,20 @@ export class BrowserEngine {
       await this.close();
       throw err;
     }
-    this.oracles.attach(this.page);
+  }
+
+  /** Attach, phase 4: wire the context: the oracles, request tracking, the routes, popups, dialogs and embeds. */
+  private async wireContext(context: BrowserContext): Promise<void> {
+    this.oracles.attach(this.page!);
+    this.watchTraffic(context);
+    await this.routeRequests(context);
+    this.adoptPopups(context);
+    this.wireDialogHandler(this.page!);
+    this.wireEmbedMoves(this.page!);
+  }
+
+  /** Wire the context, part 1: sockets, requests in flight and the requests each action sends. */
+  private watchTraffic(context: BrowserContext): void {
     // Label-based read-only blocking can't catch every mutation (an innocuous
     // "Add to Cart" fires a POST). Track non-GET traffic so actions that
     // changed server state are at least REPORTED in read-only runs.
@@ -1723,19 +1814,19 @@ export class BrowserEngine {
     };
     // The first page already exists by now; later ones (popups) arrive as events.
     if (this.page) watchPage(this.page);
-    this.context.on("page", watchPage);
-    this.context.on("requestfinished", (req) => requests.ended(req));
-    this.context.on("requestfailed", (req) => {
+    context.on("page", watchPage);
+    context.on("requestfinished", (req) => requests.ended(req));
+    context.on("requestfailed", (req) => {
       requests.ended(req, true);
       this.watchResponse(req, null);
       this.pageRequests.failed(req, req.failure()?.errorText ?? "", Date.now(), this.refusedByAnyPolicy(req));
     });
-    this.context.on("response", (res) => {
+    context.on("response", (res) => {
       this.noteAuthAnswer(res);
       this.watchResponse(res.request(), res.status());
       this.pageRequests.answered(res.request(), res.status(), Date.now(), this.refusedByAnyPolicy(res.request()));
     });
-    this.context.on("request", (req) => {
+    context.on("request", (req) => {
       // Who moved the driven page, decided on its navigation's first request
       // (this event fires before the route handler judges that page's writes).
       if (req.isNavigationRequest() && !req.redirectedFrom()) {
@@ -1806,14 +1897,17 @@ export class BrowserEngine {
         }
       }
     });
+  }
 
+  /** Wire the context, part 2: the refresh broker and the write policy on the wire. */
+  private async routeRequests(context: BrowserContext): Promise<void> {
     // The refresh broker. Registered before the write policy, so it runs after
     // it: the policy judges each request as the page sent it and hands on
     // (route.fallback) only what it lets out, and the broker sees only those.
     // A refresh the policy refuses is never sent, so it needs no lock.
     if (this.refresh) {
-      await this.context.route("**/*", (route) => this.brokerRefresh(route));
-      this.context.on("response", (res) => this.watchRotation(res));
+      await context.route("**/*", (route) => this.brokerRefresh(route));
+      context.on("response", (res) => this.watchRotation(res));
     }
 
     // Write policy — enforced on the wire, where the truth lives.
@@ -1983,7 +2077,7 @@ export class BrowserEngine {
         }
         return refuse();
       };
-      await this.context.route("**/*", (route) => this.judgeTracked(route, judge));
+      await context.route("**/*", (route) => this.judgeTracked(route, judge));
       // Chromium never routes a write a page sends as it is being left; it is judged at the browser level instead.
       if (unloadWriteInterception(this.engineName) === "browser-fetch" && this.browser) {
         try {
@@ -1995,11 +2089,14 @@ export class BrowserEngine {
         }
       }
     }
+  }
 
+  /** Wire the context, part 3: a same-origin popup becomes the session's page; another site's is closed. */
+  private adoptPopups(context: BrowserContext): void {
     // Popups / target=_blank: adopt same-origin pages as the active page (with
     // oracles attached); close foreign-origin popups so exploration cannot
     // silently escape the app under test.
-    this.context.on("page", (newPage) => {
+    context.on("page", (newPage) => {
       newPage
         .waitForLoadState("domcontentloaded", { timeout: this.limits.backNavMs })
         .then(() => {
@@ -2025,20 +2122,24 @@ export class BrowserEngine {
         // A popup that closes, or does not load before the wait ends, is neither adopted nor closed by the fence.
         .catch(() => {});
     });
+  }
 
-    this.wireDialogHandler(this.page);
-    this.wireEmbedMoves(this.page);
-
+  /** Attach, phase 5: the first navigation, to the app's URL. */
+  private async firstNavigation(url: string): Promise<void> {
     try {
-      await this.page.goto(opts.url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs });
+      await this.page!.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs });
     } catch (err) {
       // Don't leave a half-attached engine (leaked browser, snapshots of about:blank).
       await this.close();
       const explained = explainTimeout(err, "nav", this.limits.navMs);
-      throw new Error(`Could not load ${opts.url} — is the app running? (${explained instanceof Error ? explained.message.split("\n")[0] : explained})`);
+      throw new Error(`Could not load ${url} — is the app running? (${explained instanceof Error ? explained.message.split("\n")[0] : explained})`);
     }
     await this.settle();
-    this.logAction({ action: "attach", url: this.page.url() });
+    this.logAction({ action: "attach", url: this.page!.url() });
+  }
+
+  /** Attach, phase 6: what attaching found, and the warning when a saved sign-in landed on a login page. */
+  private async attachSummary(opts: AttachOptions, auth: AttachAuth, storageStatePath: string | undefined, profileNote: string): Promise<string> {
     // Attaching WITH a storage state and landing on a login page means the
     // stored credentials are dead. Saying "Attached … auth=<file>" here — which
     // is all this used to do — reads as success and names the very file that
@@ -2053,7 +2154,7 @@ export class BrowserEngine {
     // An earlier run may have written down how this app's login state is
     // regenerated. "Regenerate it" is advice the reader already had; the
     // command that worked last time is the part worth keeping.
-    const recipe = authFailed ? this.memory.setupRecipe() : [];
+    const recipe = authFailed ? this.memory!.setupRecipe() : [];
     const authWarning = authFailed
       ? `\n⚠ AUTH FAILED — the storage state at ${storageStatePath} did not produce a signed-in session: ` +
         `attaching landed on ${landed}, a login page. ` +
@@ -2066,14 +2167,14 @@ export class BrowserEngine {
           : `\n  Nothing is recorded about how this app's login state is made. Once the user tells you, write it down with scout_note { section: "setup" } so the next run is told instead of asking.`)
       : "";
     return (
-      `Attached to ${this.page.url()} (mode=${this.mode}` +
+      `Attached to ${this.page!.url()} (mode=${this.mode}` +
       `${this.engineName === "chromium" ? "" : `, browser=${this.engineName}, service workers blocked because their requests cannot be intercepted here`}` +
       `${focusAdvanceKey(this.engineName, process.platform) === "Tab" ? "" : `, keyboard: Tab stops only at text fields in this browser — press Alt+Tab to reach buttons and links`}` +
       `${auth.kind === "role" ? `, role=${auth.role}` : auth.kind === "file" ? `, auth=${auth.storageStatePath}` : ""}). ` +
-      `Memory: ${this.memory.dir}.${this.memory.loadWarning ? ` WARNING: ${this.memory.loadWarning}` : ""}` +
-      (this.memory.prunedStates > 0 ? ` Trimmed ${this.memory.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
-      `${this.memory.legacyDirNote ? ` ${this.memory.legacyDirNote}` : ""}` +
-      `${this.memory.gitIgnoreNote ? ` ${this.memory.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice} Call scout_snapshot to see the current state.` +
+      `Memory: ${this.memory!.dir}.${this.memory!.loadWarning ? ` WARNING: ${this.memory!.loadWarning}` : ""}` +
+      (this.memory!.prunedStates > 0 ? ` Trimmed ${this.memory!.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
+      `${this.memory!.legacyDirNote ? ` ${this.memory!.legacyDirNote}` : ""}` +
+      `${this.memory!.gitIgnoreNote ? ` ${this.memory!.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice} Call scout_snapshot to see the current state.` +
       profileNote +
       authWarning
     );
@@ -5152,6 +5253,7 @@ export class BrowserEngine {
 
     const summary: string[] = [];
     const problems: string[] = [];
+    const run: CrawlRun = { page, memory, opts, explicit, targets, summary, problems };
     this.authLoss.beginBatch();
     // A queue rather than the list itself: a session that re-attaches mid-sweep
     // visits the routes its loss bounced again, straight after.
@@ -5162,217 +5264,8 @@ export class BrowserEngine {
         summary.push(`… stopped at the time limit: ${queue.length - i} route(s) not started`);
         break;
       }
-      const resolved = resolveTarget(this.baseUrl, path);
-      if (!("url" in resolved)) {
-        summary.push(`${path} — SKIPPED (${resolved.offOrigin ? "off-origin" : resolved.problem})`);
-        continue;
-      }
-      const url = resolved.url;
-      this.actionStartedAt = Date.now();
-      this.oracles.drain(false); // discard pre-route leftovers WITHOUT marking their signatures as reported
-      let status: number | string = "ERR";
-      // The main document's response, as the browser received it. Kept apart from goto's own result: a browser that
-      // treats a PDF, a feed or an attachment as a download throws from goto, and this is then the only record of it.
-      const answered: { last: { url: string; status: number; contentType: string | undefined } | null } = { last: null };
-      const asked = new URL(url).href;
-      const onResponse = (r: Response): void => {
-        if (r.frame() !== page.mainFrame() || !r.request().isNavigationRequest()) return;
-        // A late event from the page before is not this route's: its redirect chain must start at the URL asked for.
-        let first = r.request();
-        for (let from = first.redirectedFrom(); from; from = from.redirectedFrom()) first = from;
-        if (first.url() !== asked) return;
-        answered.last = { url: r.url(), status: r.status(), contentType: mediaTypeOf(r.headers()["content-type"]) };
-      };
-      page.on("response", onResponse);
-      let resource: { url: string; status: number; contentType: string } | null = null;
-      try {
-        const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
-        status = resp?.status() ?? "no-response";
-        const contentType = mediaTypeOf(resp?.headers()["content-type"]);
-        if (resp && isNonPageResource({ status: resp.status(), contentType })) resource = { url: page.url(), status: resp.status(), contentType: contentType! };
-      } catch (err) {
-        // A browser that took the answer as a download failed the navigation, but the route did answer, with its status:
-        // a feed that is missing is the route's 404, not a page that did not load.
-        const seen = answered.last;
-        if (seen && isFileMediaType(seen.contentType)) resource = { url: seen.url, status: seen.status, contentType: seen.contentType! };
-        else {
-          const explained = explainTimeout(err, "nav", this.limits.crawlNavMs);
-          const reason = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
-          // Not retried by later crawls in this process (a check would otherwise try it
-          // on every discovery round). Deliberately not written to memory: one outage
-          // must not count a route as covered in every later run's gap ledger.
-          if (!opts.measureOnly) this.loadFailedRoutes.add(normalizePath(url));
-          await this.errorPageCommitted(page);
-          summary.push(`${path} — LOAD FAILED`);
-          // The page a re-attach went back to never loaded, so nothing says whether it worked.
-          if (this.authLoss.reattaching) this.authLoss.abortReattach(`the page it went back to, ${path}, did not load (${reason})`);
-          problems.push(`${path}: ${reason}`);
-          this.crawlHealth.push({
-            path,
-            url,
-            status: null,
-            loadError: reason,
-            loginRedirect: false,
-            elements: 0,
-            unnamed: [],
-            placeholderOnly: [],
-            violations: [],
-            geometry: [],
-            brokenImages: [],
-            design: [],
-          });
-          continue;
-        }
-      } finally {
-        page.off("response", onResponse);
-      }
-      // A feed, a file or data: recorded as what it is and left there. It has no controls to collect or audit, and one
-      // that answered leaves the route contract, so it is neither a dead end nor a gap.
-      if (resource) {
-        if (!opts.measureOnly) {
-          // Only a file that answered leaves the contract; a failing one is attempted with its status, as a failing page is.
-          if (isNonPageResource(resource)) memory.markResource(normalizePath(url), resource.contentType);
-          else memory.markAttempted(normalizePath(url), `status:${resource.status}`, this.role);
-        }
-        this.oracles.drain(false);
-        summary.push(`${path} — ${resource.status} · not a page (${resource.contentType})`);
-        if (!isNonPageResource(resource)) problems.push(`${path} → HTTP ${resource.status} (${resource.contentType})`);
-        this.crawlHealth.push({
-          path,
-          url: resource.url,
-          status: resource.status,
-          contentType: resource.contentType,
-          loginRedirect: false,
-          elements: 0,
-          unnamed: [],
-          placeholderOnly: [],
-          violations: [],
-          geometry: [],
-          brokenImages: [],
-          design: [],
-        });
-        continue;
-      }
-      await this.settle();
-      this.harvestPaused = opts.measureOnly === true;
-      const { elements, forms, aliases } = await this.collect().finally(() => (this.harvestPaused = false));
-      const finalUrl = page.url();
-      const route = normalizePath(finalUrl);
-      const fp = fingerprintState(finalUrl, trackedElements(elements));
-      if (!opts.measureOnly) {
-        memory.visitState(
-          fp,
-          finalUrl,
-          route,
-          trackedElements(elements).map((el) => el.key),
-          inertKeys(elements),
-          this.sessionKey,
-          aliases,
-        );
-        for (const f of forms) memory.recordForm(fp, f.key, f.guarded, this.sessionKey);
-        // A route remembered as a feed or a file that now answers as a page (a route class whose ids serve both, or
-        // one that served a plain-text maintenance reply once) is a page again, so it rejoins the contract.
-        memory.clearResource(normalizePath(url));
-        memory.recordRoleAccess(this.role, route, "reached");
-      }
-      // If we landed somewhere else (auth wall, canonical redirect), the
-      // REQUESTED route still counts as covered for THIS role — a role that
-      // can't see /admin must not block the completion contract forever. An
-      // auth-loss bounce is recorded under a prefix that does NOT count.
-      const requestedRoute = normalizePath(url);
-      const loginRedirect = this.authLoss.isLoginRedirect(path, finalUrl, this.baseUrl);
-      if (route !== requestedRoute && !opts.measureOnly) {
-        const outcome = loginRedirect ? `${AUTH_LOSS_PREFIX}${route}` : `landed:${route}`;
-        memory.markAttempted(requestedRoute, outcome, this.role);
-        memory.recordRoleAccess(this.role, requestedRoute, outcome);
-      }
-      // Feeds the streak. The per-route notice is discarded — crawl already
-      // flags AUTH-REDIRECT per route in its own summary, and the verdict for
-      // the sweep as a whole is emitted once at the end via batchVerdict().
-      this.authLoss.record({ requestedRoute, landedRoute: route, bounced: loginRedirect, role: this.role, target: path });
-      this.authLoss.clear();
-      // Error-status routes render but would otherwise be re-crawled forever —
-      // an attempt with the status satisfies the contract.
-      if (typeof status === "number" && status >= 400 && !opts.measureOnly) memory.markAttempted(requestedRoute, `status:${status}`, this.role);
-      this.logAction({ action: "crawl", target: path, url: finalUrl, ...(await this.frameFor("crawl")) });
-
-      await this.scanForInjections();
-      await this.scanForContradictions();
-      // Measured before the drain: the audit's Tab presses can load things too.
-      const inspected = opts.inspect ? await this.inspectRoute(page, elements, finalUrl) : null;
-      const violations = this.oracles.drain();
-      const own = elements.filter((el) => !el.frame?.foreign);
-      this.crawlHealth.push({
-        path,
-        url: finalUrl,
-        status: typeof status === "number" ? status : null,
-        loginRedirect,
-        elements: trackedElements(elements).length,
-        unnamed: own.filter(missingName).map(describeControl),
-        placeholderOnly: own.filter(placeholderOnly).map(placeholderEvidence),
-        violations: violations.map(({ kind, severity, detail, url, embed }) => ({ kind, severity, detail, url, ...(embed ? { embed } : {}) })),
-        geometry: inspected?.geometry ?? [],
-        brokenImages: inspected?.brokenImages ?? [],
-        design: inspected?.design ?? [],
-        ...(inspected?.auditError ? { auditError: inspected.auditError } : {}),
-      });
-      const deadEnd = trackedElements(elements).length === 0;
-      // A field labelled only by its placeholder counts here too: to someone reading the crawl, it has no label.
-      // Counted over the page's own controls, as the check's lists are: another site's frame is not this app's to fix.
-      const unnamed = own.filter((el) => missingName(el) || placeholderOnly(el)).length;
-      const missingTestid = trackedElements(elements).filter((el) => !el.testid && !el.disabled).length;
-      // What the page's main area holds besides controls: "41 el" alone cannot tell a page
-      // of text from a main area that rendered nothing.
-      const main = await this.readMainRegion(page);
-      // A main area holding only an alert or a loading placeholder is the usual look of a broken route that answered 200.
-      const shows = main && !deadEnd ? mainState(main) : null;
-      const stateFlag = mainStateFlag(shows);
-
-      const flags = [
-        loginRedirect ? "AUTH-REDIRECT" : null,
-        deadEnd ? "DEAD-END" : null,
-        stateFlag,
-        violations.length > 0 ? `${violations.length}⚠` : null,
-      ].filter((f): f is string => f !== null);
-      const outcome = { path, status, requestedRoute, landedRoute: route, loginRedirect, deadEnd, mainState: shows };
-      summary.push(crawlLine(outcome, { elements: trackedElements(elements).length, missingTestid, unnamed, main: main ? mainRegionTag(main) : null }, flags));
-      // A path asked for by name joins the route contract once it answered as a page (crawl.ts crawledRoute).
-      const joined = explicit && !opts.measureOnly ? crawledRoute(outcome) : null;
-      if (joined) memory.addDiscoveredRoutes([{ route: joined, example: path }]);
-      if (violations.length > 0 || deadEnd || stateFlag || loginRedirect || (typeof status === "number" && status >= 400)) {
-        const detail = violations
-          .slice(0, 3)
-          .map((v) => `    ${v.kind}: ${v.detail.slice(0, 160)}`)
-          .join("\n");
-        const showing =
-          shows === "error"
-            ? ` → main area shows only an error view${main?.text ? ` ("${main.text.slice(0, 80)}")` : ""}`
-            : shows === "loading"
-              ? ` → main area still shows only a loading placeholder after settling${main?.text ? ` ("${main.text.slice(0, 80)}")` : ""}`
-              : "";
-        problems.push(
-          `${path}${loginRedirect ? " → redirected to login (auth missing/expired?)" : ""}${deadEnd ? " → dead end" : ""}${showing}${detail ? `\n${detail}` : ""}`,
-        );
-      }
-      // A role session that lost its sign-in on this route re-attaches once
-      // and visits the routes the loss bounced again, next. Their bounced
-      // results leave the crawl's data, so a check reads the signed-in visit.
-      const plan = this.authLoss.takeReattach({ revisits: (t) => targets.includes(t) });
-      if (plan) {
-        const applied = await this.applyLatestProfile();
-        if (!applied.ok) {
-          this.authLoss.abortReattach(applied.why);
-        } else {
-          // Only this sweep's own paths: a streak that began with scout_navigate holds full URLs the sweep cannot join to its base.
-          const again = [plan.returnTo, ...plan.retry];
-          this.crawlHealth = this.crawlHealth.filter((h) => !(h.loginRedirect && again.includes(h.path)));
-          for (let k = problems.length - 1; k >= 0; k--) {
-            if (again.some((p) => problems[k].startsWith(`${p} → redirected to login`))) problems.splice(k, 1);
-          }
-          queue.splice(i + 1, 0, ...again);
-          summary.push(`↻ re-attached from role '${this.role}''s saved profile; visiting ${again.join(", ")} again`);
-        }
-      }
+      if ((await this.crawlStep(run, path)) !== "page") continue;
+      await this.reattachAfterBounce(run, queue, i);
     }
     // Crawl leaves the page wherever it ended — refs from before are gone.
     this.refs.clear();
@@ -5396,6 +5289,231 @@ export class BrowserEngine {
     );
   }
 
+  /** One route of a crawl: load it, record what it is, and add its line to the summary (and to the problems, if any). */
+  private async crawlStep(run: CrawlRun, path: string): Promise<CrawlStepOutcome> {
+    const { page, memory, opts, explicit, summary, problems } = run;
+    const resolved = resolveTarget(this.baseUrl, path);
+    if (!("url" in resolved)) {
+      summary.push(`${path} — SKIPPED (${resolved.offOrigin ? "off-origin" : resolved.problem})`);
+      return "skipped";
+    }
+    const url = resolved.url;
+    this.actionStartedAt = Date.now();
+    this.oracles.drain(false); // discard pre-route leftovers WITHOUT marking their signatures as reported
+    let status: number | string = "ERR";
+    // The main document's response, as the browser received it. Kept apart from goto's own result: a browser that
+    // treats a PDF, a feed or an attachment as a download throws from goto, and this is then the only record of it.
+    const answered: { last: { url: string; status: number; contentType: string | undefined } | null } = { last: null };
+    const asked = new URL(url).href;
+    const onResponse = (r: Response): void => {
+      if (r.frame() !== page.mainFrame() || !r.request().isNavigationRequest()) return;
+      // A late event from the page before is not this route's: its redirect chain must start at the URL asked for.
+      let first = r.request();
+      for (let from = first.redirectedFrom(); from; from = from.redirectedFrom()) first = from;
+      if (first.url() !== asked) return;
+      answered.last = { url: r.url(), status: r.status(), contentType: mediaTypeOf(r.headers()["content-type"]) };
+    };
+    page.on("response", onResponse);
+    let resource: { url: string; status: number; contentType: string } | null = null;
+    try {
+      const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
+      status = resp?.status() ?? "no-response";
+      const contentType = mediaTypeOf(resp?.headers()["content-type"]);
+      if (resp && isNonPageResource({ status: resp.status(), contentType })) resource = { url: page.url(), status: resp.status(), contentType: contentType! };
+    } catch (err) {
+      // A browser that took the answer as a download failed the navigation, but the route did answer, with its status:
+      // a feed that is missing is the route's 404, not a page that did not load.
+      const seen = answered.last;
+      if (seen && isFileMediaType(seen.contentType)) resource = { url: seen.url, status: seen.status, contentType: seen.contentType! };
+      else {
+        const explained = explainTimeout(err, "nav", this.limits.crawlNavMs);
+        const reason = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
+        // Not retried by later crawls in this process (a check would otherwise try it
+        // on every discovery round). Deliberately not written to memory: one outage
+        // must not count a route as covered in every later run's gap ledger.
+        if (!opts.measureOnly) this.loadFailedRoutes.add(normalizePath(url));
+        await this.errorPageCommitted(page);
+        summary.push(`${path} — LOAD FAILED`);
+        // The page a re-attach went back to never loaded, so nothing says whether it worked.
+        if (this.authLoss.reattaching) this.authLoss.abortReattach(`the page it went back to, ${path}, did not load (${reason})`);
+        problems.push(`${path}: ${reason}`);
+        this.crawlHealth.push({
+          path,
+          url,
+          status: null,
+          loadError: reason,
+          loginRedirect: false,
+          elements: 0,
+          unnamed: [],
+          placeholderOnly: [],
+          violations: [],
+          geometry: [],
+          brokenImages: [],
+          design: [],
+        });
+        return "load-failed";
+      }
+    } finally {
+      page.off("response", onResponse);
+    }
+    // A feed, a file or data: recorded as what it is and left there. It has no controls to collect or audit, and one
+    // that answered leaves the route contract, so it is neither a dead end nor a gap.
+    if (resource) {
+      if (!opts.measureOnly) {
+        // Only a file that answered leaves the contract; a failing one is attempted with its status, as a failing page is.
+        if (isNonPageResource(resource)) memory.markResource(normalizePath(url), resource.contentType);
+        else memory.markAttempted(normalizePath(url), `status:${resource.status}`, this.role);
+      }
+      this.oracles.drain(false);
+      summary.push(`${path} — ${resource.status} · not a page (${resource.contentType})`);
+      if (!isNonPageResource(resource)) problems.push(`${path} → HTTP ${resource.status} (${resource.contentType})`);
+      this.crawlHealth.push({
+        path,
+        url: resource.url,
+        status: resource.status,
+        contentType: resource.contentType,
+        loginRedirect: false,
+        elements: 0,
+        unnamed: [],
+        placeholderOnly: [],
+        violations: [],
+        geometry: [],
+        brokenImages: [],
+        design: [],
+      });
+      return "resource";
+    }
+    await this.settle();
+    this.harvestPaused = opts.measureOnly === true;
+    const { elements, forms, aliases } = await this.collect().finally(() => (this.harvestPaused = false));
+    const finalUrl = page.url();
+    const route = normalizePath(finalUrl);
+    const fp = fingerprintState(finalUrl, trackedElements(elements));
+    if (!opts.measureOnly) {
+      memory.visitState(
+        fp,
+        finalUrl,
+        route,
+        trackedElements(elements).map((el) => el.key),
+        inertKeys(elements),
+        this.sessionKey,
+        aliases,
+      );
+      for (const f of forms) memory.recordForm(fp, f.key, f.guarded, this.sessionKey);
+      // A route remembered as a feed or a file that now answers as a page (a route class whose ids serve both, or
+      // one that served a plain-text maintenance reply once) is a page again, so it rejoins the contract.
+      memory.clearResource(normalizePath(url));
+      memory.recordRoleAccess(this.role, route, "reached");
+    }
+    // If we landed somewhere else (auth wall, canonical redirect), the
+    // REQUESTED route still counts as covered for THIS role — a role that
+    // can't see /admin must not block the completion contract forever. An
+    // auth-loss bounce is recorded under a prefix that does NOT count.
+    const requestedRoute = normalizePath(url);
+    const loginRedirect = this.authLoss.isLoginRedirect(path, finalUrl, this.baseUrl);
+    if (route !== requestedRoute && !opts.measureOnly) {
+      const outcome = loginRedirect ? `${AUTH_LOSS_PREFIX}${route}` : `landed:${route}`;
+      memory.markAttempted(requestedRoute, outcome, this.role);
+      memory.recordRoleAccess(this.role, requestedRoute, outcome);
+    }
+    // Feeds the streak. The per-route notice is discarded — crawl already
+    // flags AUTH-REDIRECT per route in its own summary, and the verdict for
+    // the sweep as a whole is emitted once at the end via batchVerdict().
+    this.authLoss.record({ requestedRoute, landedRoute: route, bounced: loginRedirect, role: this.role, target: path });
+    this.authLoss.clear();
+    // Error-status routes render but would otherwise be re-crawled forever —
+    // an attempt with the status satisfies the contract.
+    if (typeof status === "number" && status >= 400 && !opts.measureOnly) memory.markAttempted(requestedRoute, `status:${status}`, this.role);
+    this.logAction({ action: "crawl", target: path, url: finalUrl, ...(await this.frameFor("crawl")) });
+
+    await this.scanForInjections();
+    await this.scanForContradictions();
+    // Measured before the drain: the audit's Tab presses can load things too.
+    const inspected = opts.inspect ? await this.inspectRoute(page, elements, finalUrl) : null;
+    const violations = this.oracles.drain();
+    const own = elements.filter((el) => !el.frame?.foreign);
+    this.crawlHealth.push({
+      path,
+      url: finalUrl,
+      status: typeof status === "number" ? status : null,
+      loginRedirect,
+      elements: trackedElements(elements).length,
+      unnamed: own.filter(missingName).map(describeControl),
+      placeholderOnly: own.filter(placeholderOnly).map(placeholderEvidence),
+      violations: violations.map(({ kind, severity, detail, url, embed }) => ({ kind, severity, detail, url, ...(embed ? { embed } : {}) })),
+      geometry: inspected?.geometry ?? [],
+      brokenImages: inspected?.brokenImages ?? [],
+      design: inspected?.design ?? [],
+      ...(inspected?.auditError ? { auditError: inspected.auditError } : {}),
+    });
+    const deadEnd = trackedElements(elements).length === 0;
+    // A field labelled only by its placeholder counts here too: to someone reading the crawl, it has no label.
+    // Counted over the page's own controls, as the check's lists are: another site's frame is not this app's to fix.
+    const unnamed = own.filter((el) => missingName(el) || placeholderOnly(el)).length;
+    const missingTestid = trackedElements(elements).filter((el) => !el.testid && !el.disabled).length;
+    // What the page's main area holds besides controls: "41 el" alone cannot tell a page
+    // of text from a main area that rendered nothing.
+    const main = await this.readMainRegion(page);
+    // A main area holding only an alert or a loading placeholder is the usual look of a broken route that answered 200.
+    const shows = main && !deadEnd ? mainState(main) : null;
+    const stateFlag = mainStateFlag(shows);
+
+    const flags = [
+      loginRedirect ? "AUTH-REDIRECT" : null,
+      deadEnd ? "DEAD-END" : null,
+      stateFlag,
+      violations.length > 0 ? `${violations.length}⚠` : null,
+    ].filter((f): f is string => f !== null);
+    const outcome = { path, status, requestedRoute, landedRoute: route, loginRedirect, deadEnd, mainState: shows };
+    summary.push(crawlLine(outcome, { elements: trackedElements(elements).length, missingTestid, unnamed, main: main ? mainRegionTag(main) : null }, flags));
+    // A path asked for by name joins the route contract once it answered as a page (crawl.ts crawledRoute).
+    const joined = explicit && !opts.measureOnly ? crawledRoute(outcome) : null;
+    if (joined) memory.addDiscoveredRoutes([{ route: joined, example: path }]);
+    if (violations.length > 0 || deadEnd || stateFlag || loginRedirect || (typeof status === "number" && status >= 400)) {
+      const detail = violations
+        .slice(0, 3)
+        .map((v) => `    ${v.kind}: ${v.detail.slice(0, 160)}`)
+        .join("\n");
+      const showing =
+        shows === "error"
+          ? ` → main area shows only an error view${main?.text ? ` ("${main.text.slice(0, 80)}")` : ""}`
+          : shows === "loading"
+            ? ` → main area still shows only a loading placeholder after settling${main?.text ? ` ("${main.text.slice(0, 80)}")` : ""}`
+            : "";
+      problems.push(
+        `${path}${loginRedirect ? " → redirected to login (auth missing/expired?)" : ""}${deadEnd ? " → dead end" : ""}${showing}${detail ? `\n${detail}` : ""}`,
+      );
+    }
+    return "page";
+  }
+
+  /**
+   * After a crawl step: a role session that lost its sign-in re-attaches once and puts the routes the loss bounced
+   * back on the queue, straight after the current one (`i`).
+   */
+  private async reattachAfterBounce(run: CrawlRun, queue: string[], i: number): Promise<void> {
+    const { targets, summary, problems } = run;
+    // A role session that lost its sign-in on this route re-attaches once
+    // and visits the routes the loss bounced again, next. Their bounced
+    // results leave the crawl's data, so a check reads the signed-in visit.
+    const plan = this.authLoss.takeReattach({ revisits: (t) => targets.includes(t) });
+    if (plan) {
+      const applied = await this.applyLatestProfile();
+      if (!applied.ok) {
+        this.authLoss.abortReattach(applied.why);
+      } else {
+        // Only this sweep's own paths: a streak that began with scout_navigate holds full URLs the sweep cannot join to its base.
+        const again = [plan.returnTo, ...plan.retry];
+        this.crawlHealth = this.crawlHealth.filter((h) => !(h.loginRedirect && again.includes(h.path)));
+        for (let k = problems.length - 1; k >= 0; k--) {
+          if (again.some((p) => problems[k].startsWith(`${p} → redirected to login`))) problems.splice(k, 1);
+        }
+        queue.splice(i + 1, 0, ...again);
+        summary.push(`↻ re-attached from role '${this.role}''s saved profile; visiting ${again.join(", ")} again`);
+      }
+    }
+  }
+
   /**
    * Execute a batch of actions in one call — targets resolve at execution
    * time by semantic locator (testid= / text= / label=), never by snapshot
@@ -5406,16 +5524,7 @@ export class BrowserEngine {
    * for a sweep of independent steps, where a later step does not depend on
    * an earlier one. A failed step or a policy refusal still stops it.
    */
-  async runPlan(
-    steps: Array<{
-      action: "navigate" | "click" | "type" | "select" | "press" | "hover" | "scroll" | "upload";
-      target?: string;
-      value?: string;
-      pressEnter?: boolean;
-      replace?: boolean;
-    }>,
-    onViolation: PlanViolationRule = "stop",
-  ): Promise<string> {
+  async runPlan(steps: PlanStep[], onViolation: PlanViolationRule = "stop"): Promise<string> {
     const page = this.requirePage();
     const transcript: string[] = [];
     const planStartedAt = Date.now();
@@ -5426,8 +5535,6 @@ export class BrowserEngine {
       if (!parsed) throw new Error(`Plan targets must be ${TARGET_HELP} (got: ${target})`);
       return BrowserEngine.locatorFor(page, parsed).first();
     };
-    /** Last state captured this plan — reused as the next step's pre-state while the page has not moved. */
-    let lastCapture: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
     const liveLabel = async (loc: ReturnType<typeof locatePlanTarget>): Promise<string> => {
       const [aria, testid, txt] = await Promise.all([
         bestEffort(loc.getAttribute("aria-label"), null),
@@ -5437,258 +5544,9 @@ export class BrowserEngine {
       return (aria ?? txt ?? testid ?? "").trim().slice(0, 120);
     };
 
+    const run: PlanRun = { page, transcript, planStartedAt, continuedPast, onViolation, locatePlanTarget, liveLabel, lastCapture: null };
     for (const [i, step] of steps.slice(0, 20).entries()) {
-      this.actionStartedAt = Date.now();
-      // A navigation or a scroll is not input: navigate() moves the action mark itself, and what a scroll loads is the page's own doing.
-      if (step.action !== "navigate" && step.action !== "scroll") await this.beginInput();
-      // A type step is described by its target, never its value: the value may be a password.
-      const desc = `${i + 1}. ${step.action} ${step.target ?? (step.action === "type" ? "(no target)" : (step.value ?? ""))}`;
-      // Identity captured BEFORE the action — buttons that relabel themselves
-      // (Add to Cart → View Cart) are unmatchable in the post-action DOM.
-      let preTestid: string | null = null;
-      let preLabel = "";
-      let forcedClick = false;
-      let cover: CoverFacts | null = null;
-      let coverReadAt = 0;
-      // What a type step has to say about the field it typed into; it goes on
-      // the step's own line, so it cannot read as the previous step's.
-      let note = "";
-      // A select step's options and choice, recorded against the dropdown the bookkeeping below finds.
-      let chose: { options: Array<{ value: string; label: string; selected: boolean }>; picked: string[] } | null = null;
-      let preState: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
-      // The form this step may submit, read before it went (forms.ts).
-      let form: { kind: "click" | "enter"; probe: FormProbe | null } | null = null;
-      try {
-        if (step.action === "navigate") {
-          const result = await this.navigate(step.target ?? step.value ?? "/");
-          if (result.startsWith("REFUSED")) {
-            transcript.push(`${desc} → ${result}`);
-            break;
-          }
-        } else if (step.action === "scroll") {
-          // performScroll, not this.scroll(): the shared drain below must
-          // still see scroll-triggered oracle violations (afterAction would
-          // consume them), and plans inherit the same native-user refusals.
-          const v = (step.value ?? step.target ?? "bottom").trim();
-          const edge = v === "top" || v === "bottom" ? (v as "top" | "bottom") : undefined;
-          const r = await performScroll(this.requirePage(), edge, edge ? undefined : Number.parseInt(v, 10) || 600);
-          if (r.refused) {
-            transcript.push(`${desc} → ${r.refused}`);
-            break;
-          }
-          if (r.note) transcript.push(`  ${r.note.trim()}`);
-        } else if (step.action === "press") {
-          const key = step.value ?? step.target ?? "Enter";
-          const refusal = await this.vetFocusedActivation(key);
-          if (refusal) {
-            transcript.push(`${desc} → ${refusal}`);
-            break;
-          }
-          if (BrowserEngine.ACTIVATION_KEY_RE.test(key)) {
-            const kind = /enter/i.test(key) ? "enter" : "click";
-            const probe = await this.probeFocusedForm();
-            if (BrowserEngine.isTrackedSubmit(kind, probe)) {
-              const reusable = lastCapture?.url === page.url() ? lastCapture : null;
-              preState = await this.stateHolding(probe, reusable, reusable !== null);
-              form = { kind, probe };
-            }
-          }
-          await page.keyboard.press(key);
-        } else {
-          if (!step.target) throw new Error(`${step.action} needs a target`);
-          const loc = locatePlanTarget(step.target);
-          // Coverage is recorded against the state the element LIVED IN, so it
-          // has to be captured before the action changes the page. Marking it
-          // afterwards (as this did) recorded against the state the click
-          // LANDED on: a tab switch or navigation produces a different
-          // fingerprint, that state never listed the clicked key, and
-          // markExercised correctly refuses an unknown key — so the click
-          // vanished and the route stayed "visited but NOTHING exercised" no
-          // matter how many plan steps hit it.
-          if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "upload") {
-            // Reuse the previous step's post-action capture when the page has
-            // not moved since: collect() waits for two stable probes, so a
-            // fresh one per step would add seconds per step against the plan's
-            // watchdog for a result identical to the one just taken.
-            preState = lastCapture?.url === page.url() ? lastCapture : await bestEffort(this.captureCoverageState(), null);
-          }
-          preTestid = await bestEffort(loc.getAttribute("data-testid"), null);
-          const label = await liveLabel(loc);
-          preLabel = label;
-          // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
-          const isSelect =
-            step.action === "select" &&
-            (await bestEffort(
-              loc.evaluate((n) => n.tagName.toLowerCase() === "select"),
-              false,
-            ));
-          // The option a select step means, settled before anything is picked: one naming none fails the step at once.
-          const pick = step.action === "select" ? await BrowserEngine.resolveSelectPick(loc, step.value ?? "") : null;
-          if (pick && "refused" in pick) {
-            transcript.push(`${desc} → FAILED: ${pick.refused}`);
-            break;
-          }
-          if (
-            this.readOnly &&
-            (step.action === "click" || step.action === "select" || step.action === "upload") &&
-            (isSelect ? pickIsDestructive(step.value, preTestid, pick ? pick.label : null) : isDestructive(label, step.value))
-          ) {
-            transcript.push(`${desc} → ${destructiveRefusal(label || step.target, this.mode)}`);
-            break;
-          }
-          if (step.action === "click") {
-            const probe = await this.probeForm(loc);
-            if (BrowserEngine.isTrackedSubmit("click", probe)) {
-              preState = await this.stateHolding(probe, preState, preState !== null && preState === lastCapture);
-              form = { kind: "click", probe };
-            }
-            ({ forced: forcedClick, cover, coverReadAt } = await this.resilientClick(loc, this.limits.actionMs));
-          } else if (step.action === "hover") {
-            const { before, bodyBefore, churning } = await this.hoverBaselines();
-            await loc.hover({ timeout: this.limits.actionMs });
-            const { revealed } = await this.detectHoverReveal(before, bodyBefore, churning);
-            transcript.push(
-              revealed.length > 0
-                ? `   hover revealed: ${revealed.join(" · ").slice(0, 300)}`
-                : `   hover revealed nothing within ${HOVER_REVEAL_WINDOW_MS / 1000}s`,
-            );
-          } else if (step.action === "type") {
-            await this.noteProbe(step.value ?? "", step.target ?? "the field");
-            note = (await this.fillOrAppend(loc, step.value ?? "", step.replace ?? false, label)).note;
-            if (step.pressEnter) {
-              if (this.readOnly) {
-                const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
-                const submitLabel = (await bestEffort(submit.textContent({ timeout: 1000 }), "")) ?? "";
-                if (isDestructive(submitLabel)) {
-                  transcript.push(`${desc} → filled, Enter withheld: ${destructiveRefusal(submitLabel.trim(), this.mode)}`);
-                  break;
-                }
-              }
-              const probe = await this.probeForm(loc);
-              if (BrowserEngine.isTrackedSubmit("enter", probe)) {
-                preState = await this.stateHolding(probe, preState, preState !== null && preState === lastCapture);
-                form = { kind: "enter", probe };
-              }
-              await loc.press("Enter", { timeout: this.limits.actionMs });
-            }
-          } else if (step.action === "select") {
-            const options = await readSelectOptions(loc);
-            const picked = await loc.selectOption(pick && !("refused" in pick) ? pick.arg : (step.value ?? ""), { timeout: this.limits.actionMs });
-            if (options) chose = { options, picked };
-          } else if (step.action === "upload") {
-            const r = await this.performUpload(loc, planUploadOptions(step.value));
-            if (r.refused) {
-              transcript.push(`${desc} → ${r.refused}`);
-              break;
-            }
-            transcript.push(`  ${r.summary}${r.notes}`);
-          }
-        }
-        await this.settle();
-        if (form) this.noteFormSubmit(preState, form.kind, form.probe);
-        // A plan is the RECOMMENDED way to run a mechanical sequence, so its
-        // steps are where most of a recorded run actually happens. Leaving
-        // them unframed reproduced, inside run_plan, the same hole that crawl
-        // had: a form filled and submitted with no picture of any of it.
-        this.logAction({
-          action: `plan:${step.action}`,
-          target: step.target ?? (step.action === "type" ? undefined : step.value),
-          url: page.url(),
-          ...(await this.frameFor(`plan-${step.action}`)),
-        });
-        // Plans must feed coverage like ref-based actions do: record the
-        // state and mark the acted-on element class as exercised.
-        // Hover is deliberately excluded: a hover is a look, not an
-        // interaction — marking it exercised would hide the element from
-        // scout_coverage before it was ever clicked.
-        if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "upload") {
-          try {
-            // Record the state the action LANDED on (it may be a new screen
-            // this plan just reached, and it deserves coverage of its own)…
-            const { elements, forms, aliases } = await this.collect();
-            const url = page.url();
-            const fp = fingerprintState(url, trackedElements(elements));
-            this.memory!.visitState(
-              fp,
-              url,
-              normalizePath(url),
-              trackedElements(elements).map((el) => el.key),
-              inertKeys(elements),
-              this.sessionKey,
-              aliases,
-            );
-            for (const f of forms) this.memory!.recordForm(fp, f.key, f.guarded, this.sessionKey);
-            this.memory!.recordRoleAccess(this.role, normalizePath(url), "reached");
-            lastCapture = { fp, elements, url };
-            // …but mark the acted-on element in the state it came FROM, using
-            // the pre-action capture. Falls back to the post-action state when
-            // the pre-capture failed, which is the old behaviour and still
-            // correct whenever the action did not change the page.
-            const spec = step.target ?? "";
-            const value = spec.slice(spec.indexOf("=") + 1);
-            // Match by pre-action identity first: testid survives relabeling;
-            // fall back to name only when nothing better exists.
-            const wantedTestid = spec.startsWith("testid=") ? value : preTestid;
-            const findIn = (list: SnapshotElement[]): SnapshotElement | undefined =>
-              (wantedTestid ? list.find((el) => el.testid === wantedTestid) : undefined) ??
-              list.find((el) => el.name.toLowerCase().includes(value.toLowerCase())) ??
-              (preLabel ? list.find((el) => el.name.toLowerCase().includes(preLabel.toLowerCase().slice(0, 30))) : undefined);
-            // Prefer the state the element lived in; fall back to the landed
-            // state so a target the pre-capture missed (or a failed capture)
-            // still records something rather than nothing.
-            const preHit = preState ? findIn(preState.elements) : undefined;
-            const postHit = preHit ? undefined : findIn(elements);
-            const hit = preHit ? { fp: preState!.fp, el: preHit } : postHit ? { fp, el: postHit } : undefined;
-            if (hit) {
-              this.memory!.markExercised(hit.fp, hit.el.key, `plan:${step.action}`);
-              // The lookup can fall back to a name match; options belong only to a dropdown.
-              if (chose && hit.el.tag === "select") this.recordSelectChoice(hit.fp, hit.el.key, chose.options, chose.picked);
-            }
-          } catch {
-            /* coverage bookkeeping must never fail the plan */
-          }
-        }
-        await this.scanForInjections();
-        await this.scanForContradictions();
-        const violations = this.oracles.drain();
-        const mutations = this.drainDialogs() + this.drainMutations() + this.drainBlocked() + this.drainRefresh() + this.drainCreated();
-        const forcedNote = !forcedClick
-          ? ""
-          : cover
-            ? ` (forced — the strict click timed out because at its centre it is ${describeCover(cover, this.blockedBetween(Math.max(planStartedAt, this.snapshotAt), coverReadAt))}; a forced click still landed)`
-            : " (forced — the strict click timed out on this element's hit-test/stability check but a forced click still landed; something may render on top of it or delegate via a label, cross-check GEOMETRY overlaps before calling it a bug)";
-        // Abort only on NEW violations: a known-failing endpoint repeating on
-        // every navigation must not make every plan abort at step 1.
-        if (planStopsAt(violations, onViolation)) {
-          transcript.push(`${desc} → OK${note}, but oracle fired:${formatViolations(violations)}${mutations}`);
-          transcript.push(`PLAN ABORTED at step ${i + 1} — investigate before continuing.`);
-          break;
-        }
-        if (violations.some((v) => !v.repeat)) {
-          continuedPast.push(i + 1);
-          transcript.push(
-            `${desc} → OK (${page.url()})${note}${forcedNote}, oracle fired (continuing: onViolation "continue"):${formatViolations(violations)}${mutations}`,
-          );
-          continue;
-        }
-        transcript.push(`${desc} → OK (${page.url()})${note}${mutations}${forcedNote}`);
-      } catch (err) {
-        const fullMsg = err instanceof Error ? err.message : String(err);
-        const firstLine = fullMsg.split("\n")[0];
-        // The actionable diagnostic (which element actually intercepted the
-        // hit-test) lives further down the multi-line Playwright error, not
-        // on line 1 — surface it instead of discarding it, or a genuine
-        // "wrong element is covering this" gets misread as a dead control.
-        const diagnosticLine = actionabilityDiagnostic(fullMsg);
-        let hint = "";
-        if (/Timeout/i.test(firstLine)) {
-          hint = ` (timeout${diagnosticLine ? ` — ${diagnosticLine}` : ""} — the target may no longer match: element relabeled, removed, or genuinely covered by an overlay; re-snapshot to see current state. Or ${limitHint("action", this.limits.actionMs)})`;
-        } else if (/Input of type "file" cannot be filled/i.test(firstLine)) {
-          hint = ` (this is a file input — use an {action:"upload"} step, or scout_upload)`;
-        }
-        transcript.push(`${desc} → FAILED: ${firstLine}${hint}`);
-        break;
-      }
+      if ((await this.runPlanStep(run, step, i)) === "stop") break;
     }
     this.refs.clear();
     this.forgetSnapshots();
@@ -5701,6 +5559,281 @@ export class BrowserEngine {
         ? `\nCONTINUED PAST new oracle violations at step${continuedPast.length > 1 ? "s" : ""} ${continuedPast.join(", ")} (onViolation "continue"); each is listed on its step's line and kept for the report.`
         : "";
     return `PLAN (${ran}/${Math.min(steps.length, 20)} steps ran):\n${transcript.join("\n")}${continued}\nTake scout_snapshot to see the resulting state.`;
+  }
+
+  /** One step of a plan: act, settle, record coverage and report it on the transcript. "stop" ends the plan. */
+  private async runPlanStep(run: PlanRun, step: PlanStep, i: number): Promise<"next" | "stop"> {
+    const { page, transcript, planStartedAt, continuedPast, onViolation, locatePlanTarget, liveLabel } = run;
+    this.actionStartedAt = Date.now();
+    // A navigation or a scroll is not input: navigate() moves the action mark itself, and what a scroll loads is the page's own doing.
+    if (step.action !== "navigate" && step.action !== "scroll") await this.beginInput();
+    // A type step is described by its target, never its value: the value may be a password.
+    const desc = `${i + 1}. ${step.action} ${step.target ?? (step.action === "type" ? "(no target)" : (step.value ?? ""))}`;
+    // Identity captured BEFORE the action — buttons that relabel themselves
+    // (Add to Cart → View Cart) are unmatchable in the post-action DOM.
+    let preTestid: string | null = null;
+    let preLabel = "";
+    let forcedClick = false;
+    let cover: CoverFacts | null = null;
+    let coverReadAt = 0;
+    // What a type step has to say about the field it typed into; it goes on
+    // the step's own line, so it cannot read as the previous step's.
+    let note = "";
+    // A select step's options and choice, recorded against the dropdown the bookkeeping below finds.
+    let chose: { options: Array<{ value: string; label: string; selected: boolean }>; picked: string[] } | null = null;
+    let preState: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
+    // The form this step may submit, read before it went (forms.ts).
+    let form: { kind: "click" | "enter"; probe: FormProbe | null } | null = null;
+    try {
+      if (step.action === "navigate") {
+        const result = await this.navigate(step.target ?? step.value ?? "/");
+        if (result.startsWith("REFUSED")) {
+          transcript.push(`${desc} → ${result}`);
+          return "stop";
+        }
+      } else if (step.action === "scroll") {
+        // performScroll, not this.scroll(): the shared drain below must
+        // still see scroll-triggered oracle violations (afterAction would
+        // consume them), and plans inherit the same native-user refusals.
+        const v = (step.value ?? step.target ?? "bottom").trim();
+        const edge = v === "top" || v === "bottom" ? (v as "top" | "bottom") : undefined;
+        const r = await performScroll(this.requirePage(), edge, edge ? undefined : Number.parseInt(v, 10) || 600);
+        if (r.refused) {
+          transcript.push(`${desc} → ${r.refused}`);
+          return "stop";
+        }
+        if (r.note) transcript.push(`  ${r.note.trim()}`);
+      } else if (step.action === "press") {
+        const key = step.value ?? step.target ?? "Enter";
+        const refusal = await this.vetFocusedActivation(key);
+        if (refusal) {
+          transcript.push(`${desc} → ${refusal}`);
+          return "stop";
+        }
+        if (BrowserEngine.ACTIVATION_KEY_RE.test(key)) {
+          const kind = /enter/i.test(key) ? "enter" : "click";
+          const probe = await this.probeFocusedForm();
+          if (BrowserEngine.isTrackedSubmit(kind, probe)) {
+            const reusable = run.lastCapture?.url === page.url() ? run.lastCapture : null;
+            preState = await this.stateHolding(probe, reusable, reusable !== null);
+            form = { kind, probe };
+          }
+        }
+        await page.keyboard.press(key);
+      } else {
+        if (!step.target) throw new Error(`${step.action} needs a target`);
+        const loc = locatePlanTarget(step.target);
+        // Coverage is recorded against the state the element LIVED IN, so it
+        // has to be captured before the action changes the page. Marking it
+        // afterwards (as this did) recorded against the state the click
+        // LANDED on: a tab switch or navigation produces a different
+        // fingerprint, that state never listed the clicked key, and
+        // markExercised correctly refuses an unknown key — so the click
+        // vanished and the route stayed "visited but NOTHING exercised" no
+        // matter how many plan steps hit it.
+        if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "upload") {
+          // Reuse the previous step's post-action capture when the page has
+          // not moved since: collect() waits for two stable probes, so a
+          // fresh one per step would add seconds per step against the plan's
+          // watchdog for a result identical to the one just taken.
+          preState = run.lastCapture?.url === page.url() ? run.lastCapture : await bestEffort(this.captureCoverageState(), null);
+        }
+        preTestid = await bestEffort(loc.getAttribute("data-testid"), null);
+        const label = await liveLabel(loc);
+        preLabel = label;
+        // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
+        const isSelect =
+          step.action === "select" &&
+          (await bestEffort(
+            loc.evaluate((n) => n.tagName.toLowerCase() === "select"),
+            false,
+          ));
+        // The option a select step means, settled before anything is picked: one naming none fails the step at once.
+        const pick = step.action === "select" ? await BrowserEngine.resolveSelectPick(loc, step.value ?? "") : null;
+        if (pick && "refused" in pick) {
+          transcript.push(`${desc} → FAILED: ${pick.refused}`);
+          return "stop";
+        }
+        if (
+          this.readOnly &&
+          (step.action === "click" || step.action === "select" || step.action === "upload") &&
+          (isSelect ? pickIsDestructive(step.value, preTestid, pick ? pick.label : null) : isDestructive(label, step.value))
+        ) {
+          transcript.push(`${desc} → ${destructiveRefusal(label || step.target, this.mode)}`);
+          return "stop";
+        }
+        if (step.action === "click") {
+          const probe = await this.probeForm(loc);
+          if (BrowserEngine.isTrackedSubmit("click", probe)) {
+            preState = await this.stateHolding(probe, preState, preState !== null && preState === run.lastCapture);
+            form = { kind: "click", probe };
+          }
+          ({ forced: forcedClick, cover, coverReadAt } = await this.resilientClick(loc, this.limits.actionMs));
+        } else if (step.action === "hover") {
+          const { before, bodyBefore, churning } = await this.hoverBaselines();
+          await loc.hover({ timeout: this.limits.actionMs });
+          const { revealed } = await this.detectHoverReveal(before, bodyBefore, churning);
+          transcript.push(
+            revealed.length > 0
+              ? `   hover revealed: ${revealed.join(" · ").slice(0, 300)}`
+              : `   hover revealed nothing within ${HOVER_REVEAL_WINDOW_MS / 1000}s`,
+          );
+        } else if (step.action === "type") {
+          await this.noteProbe(step.value ?? "", step.target ?? "the field");
+          note = (await this.fillOrAppend(loc, step.value ?? "", step.replace ?? false, label)).note;
+          if (step.pressEnter) {
+            if (this.readOnly) {
+              const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
+              const submitLabel = (await bestEffort(submit.textContent({ timeout: 1000 }), "")) ?? "";
+              if (isDestructive(submitLabel)) {
+                transcript.push(`${desc} → filled, Enter withheld: ${destructiveRefusal(submitLabel.trim(), this.mode)}`);
+                return "stop";
+              }
+            }
+            const probe = await this.probeForm(loc);
+            if (BrowserEngine.isTrackedSubmit("enter", probe)) {
+              preState = await this.stateHolding(probe, preState, preState !== null && preState === run.lastCapture);
+              form = { kind: "enter", probe };
+            }
+            await loc.press("Enter", { timeout: this.limits.actionMs });
+          }
+        } else if (step.action === "select") {
+          const options = await readSelectOptions(loc);
+          const picked = await loc.selectOption(pick && !("refused" in pick) ? pick.arg : (step.value ?? ""), { timeout: this.limits.actionMs });
+          if (options) chose = { options, picked };
+        } else if (step.action === "upload") {
+          const r = await this.performUpload(loc, planUploadOptions(step.value));
+          if (r.refused) {
+            transcript.push(`${desc} → ${r.refused}`);
+            return "stop";
+          }
+          transcript.push(`  ${r.summary}${r.notes}`);
+        }
+      }
+      await this.settle();
+      if (form) this.noteFormSubmit(preState, form.kind, form.probe);
+      // A plan is the RECOMMENDED way to run a mechanical sequence, so its
+      // steps are where most of a recorded run actually happens. Leaving
+      // them unframed reproduced, inside run_plan, the same hole that crawl
+      // had: a form filled and submitted with no picture of any of it.
+      this.logAction({
+        action: `plan:${step.action}`,
+        target: step.target ?? (step.action === "type" ? undefined : step.value),
+        url: page.url(),
+        ...(await this.frameFor(`plan-${step.action}`)),
+      });
+      // Plans must feed coverage like ref-based actions do: record the
+      // state and mark the acted-on element class as exercised.
+      // Hover is deliberately excluded: a hover is a look, not an
+      // interaction — marking it exercised would hide the element from
+      // scout_coverage before it was ever clicked.
+      if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "upload")
+        await this.recordPlanCoverage(run, step, { preState, preTestid, preLabel, chose });
+      await this.scanForInjections();
+      await this.scanForContradictions();
+      const violations = this.oracles.drain();
+      const mutations = this.drainDialogs() + this.drainMutations() + this.drainBlocked() + this.drainRefresh() + this.drainCreated();
+      const forcedNote = !forcedClick
+        ? ""
+        : cover
+          ? ` (forced — the strict click timed out because at its centre it is ${describeCover(cover, this.blockedBetween(Math.max(planStartedAt, this.snapshotAt), coverReadAt))}; a forced click still landed)`
+          : " (forced — the strict click timed out on this element's hit-test/stability check but a forced click still landed; something may render on top of it or delegate via a label, cross-check GEOMETRY overlaps before calling it a bug)";
+      // Abort only on NEW violations: a known-failing endpoint repeating on
+      // every navigation must not make every plan abort at step 1.
+      if (planStopsAt(violations, onViolation)) {
+        transcript.push(`${desc} → OK${note}, but oracle fired:${formatViolations(violations)}${mutations}`);
+        transcript.push(`PLAN ABORTED at step ${i + 1} — investigate before continuing.`);
+        return "stop";
+      }
+      if (violations.some((v) => !v.repeat)) {
+        continuedPast.push(i + 1);
+        transcript.push(
+          `${desc} → OK (${page.url()})${note}${forcedNote}, oracle fired (continuing: onViolation "continue"):${formatViolations(violations)}${mutations}`,
+        );
+        return "next";
+      }
+      transcript.push(`${desc} → OK (${page.url()})${note}${mutations}${forcedNote}`);
+    } catch (err) {
+      const fullMsg = err instanceof Error ? err.message : String(err);
+      const firstLine = fullMsg.split("\n")[0];
+      // The actionable diagnostic (which element actually intercepted the
+      // hit-test) lives further down the multi-line Playwright error, not
+      // on line 1 — surface it instead of discarding it, or a genuine
+      // "wrong element is covering this" gets misread as a dead control.
+      const diagnosticLine = actionabilityDiagnostic(fullMsg);
+      let hint = "";
+      if (/Timeout/i.test(firstLine)) {
+        hint = ` (timeout${diagnosticLine ? ` — ${diagnosticLine}` : ""} — the target may no longer match: element relabeled, removed, or genuinely covered by an overlay; re-snapshot to see current state. Or ${limitHint("action", this.limits.actionMs)})`;
+      } else if (/Input of type "file" cannot be filled/i.test(firstLine)) {
+        hint = ` (this is a file input — use an {action:"upload"} step, or scout_upload)`;
+      }
+      transcript.push(`${desc} → FAILED: ${firstLine}${hint}`);
+      return "stop";
+    }
+    return "next";
+  }
+
+  /**
+   * A plan step's coverage: the state it landed on is recorded, and the element it acted on is marked exercised in the
+   * state it was in before the step (`pre`), or failing that in the landed state.
+   */
+  private async recordPlanCoverage(
+    run: PlanRun,
+    step: PlanStep,
+    pre: {
+      preState: PlanCapture | null;
+      preTestid: string | null;
+      preLabel: string;
+      chose: { options: Array<{ value: string; label: string; selected: boolean }>; picked: string[] } | null;
+    },
+  ): Promise<void> {
+    const { page } = run;
+    const { preState, preTestid, preLabel, chose } = pre;
+    try {
+      // Record the state the action LANDED on (it may be a new screen
+      // this plan just reached, and it deserves coverage of its own)…
+      const { elements, forms, aliases } = await this.collect();
+      const url = page.url();
+      const fp = fingerprintState(url, trackedElements(elements));
+      this.memory!.visitState(
+        fp,
+        url,
+        normalizePath(url),
+        trackedElements(elements).map((el) => el.key),
+        inertKeys(elements),
+        this.sessionKey,
+        aliases,
+      );
+      for (const f of forms) this.memory!.recordForm(fp, f.key, f.guarded, this.sessionKey);
+      this.memory!.recordRoleAccess(this.role, normalizePath(url), "reached");
+      run.lastCapture = { fp, elements, url };
+      // …but mark the acted-on element in the state it came FROM, using
+      // the pre-action capture. Falls back to the post-action state when
+      // the pre-capture failed, which is the old behaviour and still
+      // correct whenever the action did not change the page.
+      const spec = step.target ?? "";
+      const value = spec.slice(spec.indexOf("=") + 1);
+      // Match by pre-action identity first: testid survives relabeling;
+      // fall back to name only when nothing better exists.
+      const wantedTestid = spec.startsWith("testid=") ? value : preTestid;
+      const findIn = (list: SnapshotElement[]): SnapshotElement | undefined =>
+        (wantedTestid ? list.find((el) => el.testid === wantedTestid) : undefined) ??
+        list.find((el) => el.name.toLowerCase().includes(value.toLowerCase())) ??
+        (preLabel ? list.find((el) => el.name.toLowerCase().includes(preLabel.toLowerCase().slice(0, 30))) : undefined);
+      // Prefer the state the element lived in; fall back to the landed
+      // state so a target the pre-capture missed (or a failed capture)
+      // still records something rather than nothing.
+      const preHit = preState ? findIn(preState.elements) : undefined;
+      const postHit = preHit ? undefined : findIn(elements);
+      const hit = preHit ? { fp: preState!.fp, el: preHit } : postHit ? { fp, el: postHit } : undefined;
+      if (hit) {
+        this.memory!.markExercised(hit.fp, hit.el.key, `plan:${step.action}`);
+        // The lookup can fall back to a name match; options belong only to a dropdown.
+        if (chose && hit.el.tag === "select") this.recordSelectChoice(hit.fp, hit.el.key, chose.options, chose.picked);
+      }
+    } catch {
+      /* coverage bookkeeping must never fail the plan */
+    }
   }
 
   /** A plan's or a flow's target as a Playwright locator (every match; callers pick). */
@@ -5786,9 +5919,9 @@ export class BrowserEngine {
       }
     };
     /** Responses since the most recent action step: what an expect-request looks through. */
-    let seen: SeenRequest[] = [];
+    const sinceAction: { seen: SeenRequest[] } = { seen: [] };
     const onResponse = (res: import("playwright").Response): void => {
-      seen.push({ method: res.request().method(), url: res.url(), status: res.status() });
+      sinceAction.seen.push({ method: res.request().method(), url: res.url(), status: res.status() });
     };
     context.on("response", onResponse);
     const appOrigin = new URL(this.baseUrl).origin;
@@ -5828,150 +5961,12 @@ export class BrowserEngine {
         await bestEffort((this.page ?? page).waitForTimeout(100));
       }
     };
-    /**
-     * Run one step that acts or asserts once, with the bookkeeping every step gets: the requests it caused, the
-     * writes the policy refused while it ran, and the oracles' violations. `actionMs` is how long it may wait; a
-     * repeat's condition is checked with a shorter wait, since the next repeat is what it waits for.
-     */
-    const runStep = async (step: FlowSingleStep, actionMs: number = this.limits.actionMs): Promise<{ failure: string | null; refusal: string | null }> => {
-      if (isAction(step)) seen = [];
-      let failure: string | null = null;
-      let refusal: string | null = null;
-      this.actionStartedAt = Date.now();
-      if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "press") await this.beginInput();
-      try {
-        const current = this.requirePage();
-        if (step.action === "navigate") {
-          const resolved = resolveTarget(this.baseUrl, step.target);
-          if (!("url" in resolved)) throw new Error(resolved.problem);
-          const url = resolved.url;
-          const resp = await current
-            .goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs })
-            .catch((err: unknown) => Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs)));
-          await this.settle();
-          const status = resp?.status() ?? null;
-          if (status !== null && status >= 400) {
-            failure = `the page answered HTTP ${status}`;
-            // The page's own status is this step's failure; the oracle's record of the same response is not a second issue.
-            // The oracle stores its details redacted (redactViolation), so the comparison is redacted too.
-            collect(redactSecrets(httpErrorDetail("GET", current.url().replace(/#.*$/, ""), status)));
-          }
-        } else if (step.action === "upload") {
-          const loc = step.target ? BrowserEngine.locatorFor(current, parseTarget(step.target)!).first() : null;
-          const outcome = await this.performUpload(loc, { ...(step.fixture ? { fixture: step.fixture } : {}), ...(step.name ? { name: step.name } : {}) });
-          if (outcome.refused) failure = outcome.refused.split("\n")[0];
-          else await this.settle();
-        } else if (step.action === "press") {
-          refusal = await this.vetFocusedActivation(step.value);
-          if (!refusal) {
-            await current.keyboard.press(step.value);
-            await this.settle();
-          }
-        } else if (step.action === "click" || step.action === "type" || step.action === "select") {
-          const loc = BrowserEngine.locatorFor(current, parseTarget(step.target)!).first();
-          const found = await loc
-            .waitFor({ state: "visible", timeout: actionMs })
-            .then(() => true)
-            .catch(() => false);
-          const blocked = found ? await this.waitUntilActionable(loc, step.action) : null;
-          if (!found) {
-            failure = `nothing visible matches ${step.target} within ${actionMs / 1000}s — ${limitHint("action", actionMs)}`;
-          } else if (blocked) {
-            // The state first, since it is what is true; the hint still applies when the app enables it late.
-            failure = `${step.target} ${blocked} after ${actionMs / 1000}s — ${limitHint("action", actionMs)}`;
-          } else {
-            const label = (
-              (await bestEffort(loc.getAttribute("aria-label"), null)) ??
-              (await bestEffort(loc.textContent({ timeout: 1000 }), null)) ??
-              ""
-            ).trim();
-            // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
-            const isSelect =
-              step.action === "select" &&
-              (await bestEffort(
-                loc.evaluate((n) => n.tagName.toLowerCase() === "select"),
-                false,
-              ));
-            const testid = await bestEffort(loc.getAttribute("data-testid"), null);
-            if (
-              this.readOnly &&
-              step.action !== "type" &&
-              (isSelect
-                ? pickIsDestructive(step.value, testid, await BrowserEngine.chosenOptionLabel(loc, step.value))
-                : isDestructive(label, step.action === "select" ? step.value : undefined))
-            ) {
-              refusal = destructiveRefusal(label || step.target, this.mode);
-            } else if (step.action === "click") {
-              await loc.click({ timeout: actionMs });
-            } else if (step.action === "select") {
-              await loc.selectOption(step.value, { timeout: actionMs });
-            } else {
-              await this.noteProbe(step.value, step.target);
-              await this.fillOrAppend(loc, step.value, step.replace ?? false);
-              if (step.pressEnter) {
-                const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
-                const submitLabel = ((await bestEffort(submit.textContent({ timeout: 1000 }), "")) ?? "").trim();
-                if (this.readOnly && isDestructive(submitLabel)) refusal = destructiveRefusal(submitLabel, this.mode);
-                else await loc.press("Enter", { timeout: actionMs });
-              }
-            }
-            if (!refusal) await this.settle();
-          }
-        } else if (step.action === "expect-text") {
-          const visible = current.getByText(step.text, { exact: false }).filter({ visible: true }).first();
-          const ok = await visible
-            .waitFor({ state: "visible", timeout: actionMs })
-            .then(() => true)
-            .catch(() => false);
-          if (!ok) failure = `no visible text ${JSON.stringify(step.text)} within ${actionMs / 1000}s — ${limitHint("action", actionMs)}`;
-        } else if (step.action === "expect-element") {
-          const matches = BrowserEngine.locatorFor(current, parseTarget(step.target)!);
-          const until = Date.now() + actionMs;
-          let verdict = elementStateMatches(step.state, await BrowserEngine.elementFacts(matches));
-          while (!verdict.ok && Date.now() < until) {
-            await bestEffort(current.waitForTimeout(100));
-            verdict = elementStateMatches(step.state, await BrowserEngine.elementFacts(matches));
-          }
-          if (!verdict.ok) failure = `${step.target} ${verdict.actual}, expected ${step.state}, after ${actionMs / 1000}s`;
-        } else if (step.action === "expect-url") {
-          const ok = await poll(() => urlMatches(step.pattern, this.page?.url() ?? ""), actionMs);
-          if (!ok) failure = `the page is at ${here()}, which does not match /${step.pattern}/`;
-        } else {
-          let last: ReturnType<typeof matchRequest> = { ok: false, reason: "" };
-          await poll(() => (last = matchRequest(step, seen)).ok, actionMs);
-          if (!last.ok) failure = last.reason;
-        }
-      } catch (err) {
-        failure = firstLineOf(explainTimeout(err, "action", actionMs));
-      }
-      await bestEffort(this.scanForInjections());
-      await bestEffort(this.scanForContradictions());
-      // What the write policy refused of the app's own requests while this step ran is the step's, whatever caused it.
-      const blocked = ownRefusals();
-      if (!refusal && blocked.length > 0) refusal = `the ${this.writeRule.at()} write policy refused ${blocked.join(", ")}`;
-      collect();
-      return { failure, refusal };
-    };
-    /** A repeat step: its condition first, then its actions and the condition again, at most `max` times. */
-    const runRepeat = async (step: Extract<FlowStep, { action: "repeat" }>): Promise<{ failure: string | null; refusal: string | null }> => {
-      for (let k = 0; ; k++) {
-        // A short wait every time, the first look included: an instant one misses what is already on the page.
-        const check = await runStep(step.until, Math.min(REPEAT_CHECK_MS, this.limits.actionMs));
-        if (check.refusal) return check;
-        if (!check.failure) return { failure: null, refusal: null };
-        if (k === step.max) return { failure: repeatFailure(step.until, step.max, check.failure), refusal: null };
-        for (const inner of step.steps) {
-          const r = await runStep(inner);
-          if (r.refusal || r.failure)
-            return { failure: r.failure && `repeat ${k + 1} of at most ${step.max}, ${describeStep(inner)}: ${r.failure}`, refusal: r.refusal };
-        }
-      }
-    };
+    const run: FlowRun = { sinceAction, here, collect, poll, ownRefusals };
     try {
       for (const [i, step] of steps.entries()) {
         const n = i + 1;
         const did = describeStep(step);
-        const { failure, refusal } = step.action === "repeat" ? await runRepeat(step) : await runStep(step);
+        const { failure, refusal } = step.action === "repeat" ? await this.replayRepeat(run, step) : await this.replayFlowStep(run, step);
         // Taken whatever the step's result: the frame of a step that broke is the evidence of how it broke.
         if (this.recording) {
           const pastCap = this.framePastCap();
@@ -6023,6 +6018,148 @@ export class BrowserEngine {
       this.refs.clear();
       this.forgetSnapshots();
       this.snapshotUrl = "";
+    }
+  }
+
+  /**
+   * Run one step that acts or asserts once, with the bookkeeping every step gets: the requests it caused, the
+   * writes the policy refused while it ran, and the oracles' violations. `actionMs` is how long it may wait; a
+   * repeat's condition is checked with a shorter wait, since the next repeat is what it waits for.
+   */
+  private async replayFlowStep(
+    run: FlowRun,
+    step: FlowSingleStep,
+    actionMs: number = this.limits.actionMs,
+  ): Promise<{ failure: string | null; refusal: string | null }> {
+    const { here, collect, poll, ownRefusals } = run;
+    if (isAction(step)) run.sinceAction.seen = [];
+    let failure: string | null = null;
+    let refusal: string | null = null;
+    this.actionStartedAt = Date.now();
+    if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "press") await this.beginInput();
+    try {
+      const current = this.requirePage();
+      if (step.action === "navigate") {
+        const resolved = resolveTarget(this.baseUrl, step.target);
+        if (!("url" in resolved)) throw new Error(resolved.problem);
+        const url = resolved.url;
+        const resp = await current
+          .goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs })
+          .catch((err: unknown) => Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs)));
+        await this.settle();
+        const status = resp?.status() ?? null;
+        if (status !== null && status >= 400) {
+          failure = `the page answered HTTP ${status}`;
+          // The page's own status is this step's failure; the oracle's record of the same response is not a second issue.
+          // The oracle stores its details redacted (redactViolation), so the comparison is redacted too.
+          collect(redactSecrets(httpErrorDetail("GET", current.url().replace(/#.*$/, ""), status)));
+        }
+      } else if (step.action === "upload") {
+        const loc = step.target ? BrowserEngine.locatorFor(current, parseTarget(step.target)!).first() : null;
+        const outcome = await this.performUpload(loc, { ...(step.fixture ? { fixture: step.fixture } : {}), ...(step.name ? { name: step.name } : {}) });
+        if (outcome.refused) failure = outcome.refused.split("\n")[0];
+        else await this.settle();
+      } else if (step.action === "press") {
+        refusal = await this.vetFocusedActivation(step.value);
+        if (!refusal) {
+          await current.keyboard.press(step.value);
+          await this.settle();
+        }
+      } else if (step.action === "click" || step.action === "type" || step.action === "select") {
+        const loc = BrowserEngine.locatorFor(current, parseTarget(step.target)!).first();
+        const found = await loc
+          .waitFor({ state: "visible", timeout: actionMs })
+          .then(() => true)
+          .catch(() => false);
+        const blocked = found ? await this.waitUntilActionable(loc, step.action) : null;
+        if (!found) {
+          failure = `nothing visible matches ${step.target} within ${actionMs / 1000}s — ${limitHint("action", actionMs)}`;
+        } else if (blocked) {
+          // The state first, since it is what is true; the hint still applies when the app enables it late.
+          failure = `${step.target} ${blocked} after ${actionMs / 1000}s — ${limitHint("action", actionMs)}`;
+        } else {
+          const label = ((await bestEffort(loc.getAttribute("aria-label"), null)) ?? (await bestEffort(loc.textContent({ timeout: 1000 }), null)) ?? "").trim();
+          // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
+          const isSelect =
+            step.action === "select" &&
+            (await bestEffort(
+              loc.evaluate((n) => n.tagName.toLowerCase() === "select"),
+              false,
+            ));
+          const testid = await bestEffort(loc.getAttribute("data-testid"), null);
+          if (
+            this.readOnly &&
+            step.action !== "type" &&
+            (isSelect
+              ? pickIsDestructive(step.value, testid, await BrowserEngine.chosenOptionLabel(loc, step.value))
+              : isDestructive(label, step.action === "select" ? step.value : undefined))
+          ) {
+            refusal = destructiveRefusal(label || step.target, this.mode);
+          } else if (step.action === "click") {
+            await loc.click({ timeout: actionMs });
+          } else if (step.action === "select") {
+            await loc.selectOption(step.value, { timeout: actionMs });
+          } else {
+            await this.noteProbe(step.value, step.target);
+            await this.fillOrAppend(loc, step.value, step.replace ?? false);
+            if (step.pressEnter) {
+              const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
+              const submitLabel = ((await bestEffort(submit.textContent({ timeout: 1000 }), "")) ?? "").trim();
+              if (this.readOnly && isDestructive(submitLabel)) refusal = destructiveRefusal(submitLabel, this.mode);
+              else await loc.press("Enter", { timeout: actionMs });
+            }
+          }
+          if (!refusal) await this.settle();
+        }
+      } else if (step.action === "expect-text") {
+        const visible = current.getByText(step.text, { exact: false }).filter({ visible: true }).first();
+        const ok = await visible
+          .waitFor({ state: "visible", timeout: actionMs })
+          .then(() => true)
+          .catch(() => false);
+        if (!ok) failure = `no visible text ${JSON.stringify(step.text)} within ${actionMs / 1000}s — ${limitHint("action", actionMs)}`;
+      } else if (step.action === "expect-element") {
+        const matches = BrowserEngine.locatorFor(current, parseTarget(step.target)!);
+        const until = Date.now() + actionMs;
+        let verdict = elementStateMatches(step.state, await BrowserEngine.elementFacts(matches));
+        while (!verdict.ok && Date.now() < until) {
+          await bestEffort(current.waitForTimeout(100));
+          verdict = elementStateMatches(step.state, await BrowserEngine.elementFacts(matches));
+        }
+        if (!verdict.ok) failure = `${step.target} ${verdict.actual}, expected ${step.state}, after ${actionMs / 1000}s`;
+      } else if (step.action === "expect-url") {
+        const ok = await poll(() => urlMatches(step.pattern, this.page?.url() ?? ""), actionMs);
+        if (!ok) failure = `the page is at ${here()}, which does not match /${step.pattern}/`;
+      } else {
+        let last: ReturnType<typeof matchRequest> = { ok: false, reason: "" };
+        await poll(() => (last = matchRequest(step, run.sinceAction.seen)).ok, actionMs);
+        if (!last.ok) failure = last.reason;
+      }
+    } catch (err) {
+      failure = firstLineOf(explainTimeout(err, "action", actionMs));
+    }
+    await bestEffort(this.scanForInjections());
+    await bestEffort(this.scanForContradictions());
+    // What the write policy refused of the app's own requests while this step ran is the step's, whatever caused it.
+    const blocked = ownRefusals();
+    if (!refusal && blocked.length > 0) refusal = `the ${this.writeRule.at()} write policy refused ${blocked.join(", ")}`;
+    collect();
+    return { failure, refusal };
+  }
+
+  /** A repeat step: its condition first, then its actions and the condition again, at most `max` times. */
+  private async replayRepeat(run: FlowRun, step: Extract<FlowStep, { action: "repeat" }>): Promise<{ failure: string | null; refusal: string | null }> {
+    for (let k = 0; ; k++) {
+      // A short wait every time, the first look included: an instant one misses what is already on the page.
+      const check = await this.replayFlowStep(run, step.until, Math.min(REPEAT_CHECK_MS, this.limits.actionMs));
+      if (check.refusal) return check;
+      if (!check.failure) return { failure: null, refusal: null };
+      if (k === step.max) return { failure: repeatFailure(step.until, step.max, check.failure), refusal: null };
+      for (const inner of step.steps) {
+        const r = await this.replayFlowStep(run, inner);
+        if (r.refusal || r.failure)
+          return { failure: r.failure && `repeat ${k + 1} of at most ${step.max}, ${describeStep(inner)}: ${r.failure}`, refusal: r.refusal };
+      }
     }
   }
 
