@@ -276,6 +276,7 @@ export function writeRedirectHopsJudged(engine: BrowserEngineName): boolean {
  * the policy blocks nothing and the person has opted in to everything.
  */
 export const REMOVE_SHARED_WORKER_SCRIPT = `(() => {
+  // Runs before the page's scripts, so the page cannot have locked the property. WebIDL makes it configurable, so the delete works in every engine and the redefinition is only a fallback; neither is expected to throw, and a throw must not stop the page loading.
   try { delete globalThis.SharedWorker; } catch {}
   if ("SharedWorker" in globalThis) {
     try { Object.defineProperty(globalThis, "SharedWorker", { value: undefined, configurable: true, writable: true }); } catch {}

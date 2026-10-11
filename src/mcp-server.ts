@@ -686,6 +686,7 @@ function serializedControl<A extends unknown[]>(fn: (...args: A) => Promise<Tool
     // The SDK passes the request's extra (progress token, notifications) after the arguments; it is kept for the call, as requestExtra.
     const call = (): Promise<ToolResult> => requestExtra.run(asRequestExtra(args[1]), () => fn(...args));
     const run = controlChain.then(call, call);
+    // The caller gets `run` and its error; the chain only needs to know the call has finished, so a failure must not block the next control call.
     controlChain = run.catch(() => {});
     return run;
   };
