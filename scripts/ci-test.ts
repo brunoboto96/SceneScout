@@ -2330,6 +2330,18 @@ function unpinnedUses(text: string): string[] {
   return problems;
 }
 
+/** Every action definition in the repository, at any depth: a composite action added in a new folder is read too. */
+function actionFiles(root: string, dir = ""): string[] {
+  const out: string[] = [];
+  for (const e of fs.readdirSync(path.join(root, dir), { withFileTypes: true })) {
+    const rel = dir ? `${dir}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      if (!["node_modules", ".git", "dist"].includes(e.name)) out.push(...actionFiles(root, rel));
+    } else if (/^action\.ya?ml$/.test(e.name)) out.push(rel);
+  }
+  return out;
+}
+
 test("actions: every remote action in a workflow or an action is pinned by commit, with its release beside it", () => {
   const dir = path.join(REPO, ".github", "workflows");
   const files = [
@@ -2337,8 +2349,9 @@ test("actions: every remote action in a workflow or an action is pinned by commi
       .readdirSync(dir)
       .filter((f) => /\.ya?ml$/.test(f))
       .map((f) => path.join(".github", "workflows", f)),
-    ...["action.yml", "ci/action.yml", "qa/action.yml"],
+    ...actionFiles(REPO),
   ];
+  for (const a of ["action.yml", "ci/action.yml", "qa/action.yml"]) assert.ok(files.includes(a), `${a} is read`);
   assert.ok(files.length >= 11, "every workflow and the three actions are read");
   let remote = 0;
   for (const f of files) {
