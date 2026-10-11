@@ -12,6 +12,7 @@
  * made inert before it goes into an issue.
  */
 import { createHash } from "node:crypto";
+import { readFlagValue } from "./args.js";
 import { readFindingPicture } from "./capture.js";
 import { CHECK_RULES, WORTH_A_LOOK_RULES } from "./check.js";
 import { readFindings } from "./ci.js";
@@ -227,10 +228,10 @@ export function parseExportArgs(args: readonly string[], cwd: string, env: Reado
       flags.set(name, "true");
       continue;
     }
-    const value = eq > 0 ? a.slice(eq + 1) : args[i + 1];
-    if (value === undefined || (eq < 0 && value.startsWith("--"))) return { ok: false, error: `--${name} needs a value` };
-    if (eq < 0) i += 1;
-    flags.set(name, value);
+    const read = readFlagValue(args, i);
+    if (!read.ok) return read;
+    i = read.last;
+    flags.set(name, read.value);
   }
 
   const to = flags.get("to");

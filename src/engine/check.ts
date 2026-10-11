@@ -24,6 +24,7 @@ import {
   type BaselineResult,
   type BaselineRun,
 } from "./baseline.js";
+import { readFlagValue } from "./args.js";
 import { isNonPageResource } from "./crawl.js";
 import type { DesignDefect } from "./design.js";
 import { flowStepEvidence, type FlowRun, type SkippedFlowFile } from "./flow.js";
@@ -719,10 +720,10 @@ export function parseCheckArgs(args: readonly string[], cwd: string): { ok: true
       flags.set(name, next !== undefined && [...SWITCH_ON, ...SWITCH_OFF].includes(next) ? next : "on");
       continue;
     }
-    const value = eq > 0 ? a.slice(eq + 1) : args[i + 1];
-    if (value === undefined || (eq < 0 && value.startsWith("--"))) return { ok: false, error: `--${name} needs a value` };
-    if (eq < 0) i += 1;
-    flags.set(name, value);
+    const read = readFlagValue(args, i);
+    if (!read.ok) return read;
+    i = read.last;
+    flags.set(name, read.value);
   }
   const known = new Set<string>(CHECK_OPTION_NAMES);
   for (const name of flags.keys()) if (!known.has(name)) return { ok: false, error: `unknown option --${name}` };
