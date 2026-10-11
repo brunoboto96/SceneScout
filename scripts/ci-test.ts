@@ -2291,6 +2291,25 @@ test("dedup benchmark workflow: dispatched only, reads the repository, and the k
   }
 });
 
+test("workflows: a checkout keeps no token unless its job talks to the remote, and no job holding a key runs install scripts", () => {
+  const dir = path.join(REPO, ".github", "workflows");
+  const files = fs.readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
+  assert.ok(files.length >= 8, "every workflow is read");
+  for (const file of files) {
+    for (const [name, job] of Object.entries(readWorkflow(file).jobs as Record<string, WorkflowJob>)) {
+      const steps = job.steps ?? [];
+      // Only these push, fetch or open pull requests through git with the checkout's own token.
+      const usesRemote = steps.some((s) => /\bgit (push|fetch|pull|ls-remote)\b/.test(s.run ?? "") || /^changesets\/action@/.test(s.uses ?? ""));
+      for (const s of steps.filter((s) => /^actions\/checkout@/.test(s.uses ?? "")))
+        if (!usesRemote)
+          assert.equal(String(s.with?.["persist-credentials"]), "false", `${file} ${name}: the checkout leaves the token in .git/config for every later step`);
+      // A key in any step means the job's install runs no dependency's script: it would share a runner with the key.
+      if (NAMES_A_KEY.test(JSON.stringify(job)) || /^\.\/\.github\/workflows\//.test(job.uses ?? ""))
+        for (const s of steps) if (/^npm (ci|install)\b/.test(s.run ?? "")) assert.match(s.run!, /--ignore-scripts/, `${file} ${name}: ${s.run}`);
+    }
+  }
+});
+
 test("weekly benchmark: every check it dispatches on the results branch accepts that branch, and wave hold accepts no other", () => {
   const jobs = readWorkflow("bench-weekly.yml").jobs as Record<string, WorkflowJob>;
   const script = jobs["test-results-pr"].steps!.map((s) => s.run ?? "").join("\n");
