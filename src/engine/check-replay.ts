@@ -202,21 +202,97 @@ export function capFrames(replay: CheckReplay, max: number = replay.frameCap ?? 
   return { ...replay, roles, framesLeftOut: leftOut, frameCap: max };
 }
 
-/** The report's redaction (memory.ts redactRoute) on every path, caption and reason the page shows. */
+/** Domains reserved for documentation (RFC 2606 / 6761) name nobody, so an address on one stays readable. */
+const RESERVED_DOMAIN_RE = /^(?:[\p{L}\p{N}-]+\.)*(?:example\.(?:com|org|net)|example|test|invalid|localhost)$/iu;
+/** An image's pixel-density suffix (`@2x` before its extension), which reads like an address but is a file name. */
+const DENSITY_DOMAIN_RE = /^\d+(?:\.\d+)?x\./i;
+/**
+ * An address in any script, its @ written out or percent-encoded (`%40`), as a
+ * path's query string carries it. Group 1 is the domain.
+ */
+const EMAIL_RE = /[\p{L}\p{N}._%+-]+(?:@|%40)([\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.(?:\p{L}{2,}|xn--[a-z0-9-]+))/giu;
+/** A run of digit groups split by single spaces or hyphens; a card number is some of its groups. */
+const DIGIT_RUN_RE = /(?<![\d.])\d+(?:[ -]\d+)*/g;
+/** A card number's first digit: the networks issue from 2 to 6 and 8, so a millisecond timestamp (a leading 1) is never one. */
+const CARD_FIRST_DIGIT_RE = /^[2-68]/;
+
+function luhnValid(digits: string): boolean {
+  let sum = 0;
+  for (let i = 0; i < digits.length; i++) {
+    let d = Number(digits[digits.length - 1 - i]);
+    if (i % 2 === 1) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+  }
+  return sum % 10 === 0;
+}
+
+/**
+ * Personal data a page or a flow can put in text the report shows: an email
+ * address, its @ written out or percent-encoded (a reserved example address
+ * and an image's `@2x` name excepted), and a card number (digits that start as
+ * a card network's do and pass the Luhn check, so an order number or a
+ * timestamp stays).
+ */
+export function redactPersonal(text: string): string {
+  return text
+    .replace(EMAIL_RE, (m, domain: string) => (RESERVED_DOMAIN_RE.test(domain) || DENSITY_DOMAIN_RE.test(domain) ? m : "[email redacted]"))
+    .replace(DIGIT_RUN_RE, redactCardsInRun);
+}
+
+function isCardNumber(digits: string): boolean {
+  return digits.length >= 13 && digits.length <= 19 && CARD_FIRST_DIGIT_RE.test(digits) && luhnValid(digits);
+}
+
+/**
+ * The card numbers among a run's digit groups, each the longest that starts at
+ * its group, so a date or a quantity written just before a card number does
+ * not hide it. A group is never split: digits inside a longer id stay.
+ */
+function redactCardsInRun(run: string): string {
+  const parts = run.split(/([ -])/);
+  const groups = parts.filter((_, i) => i % 2 === 0);
+  let out = "";
+  let i = 0;
+  while (i < groups.length) {
+    let end = -1;
+    let digits = "";
+    for (let j = i; j < groups.length && digits.length + groups[j].length <= 19; j++) {
+      digits += groups[j];
+      if (isCardNumber(digits)) end = j;
+    }
+    if (i > 0) out += parts[2 * i - 1];
+    if (end === -1) {
+      out += groups[i];
+      i += 1;
+    } else {
+      out += "[card number redacted]";
+      i = end + 1;
+    }
+  }
+  return out;
+}
+
+/** Secrets in addresses (memory.ts redactRoute) and personal data (redactPersonal), for any text the page shows. */
+const redactText = (text: string): string => redactPersonal(redactRoute(text));
+
+/** The report's redaction on every path, caption and reason the page shows. */
 export function redactReplay(replay: CheckReplay): CheckReplay {
   return {
     ...replay,
     roles: replay.roles.map((role) => ({
       ...role,
-      visits: role.visits.map((v) => ({ ...v, path: redactRoute(v.path), ...(v.reason !== undefined ? { reason: redactRoute(v.reason) } : {}) })),
+      visits: role.visits.map((v) => ({ ...v, path: redactText(v.path), ...(v.reason !== undefined ? { reason: redactText(v.reason) } : {}) })),
       journeys: role.journeys.map((j) => ({
         ...j,
         steps: j.steps.map((s) => ({
           ...s,
-          caption: redactRoute(s.caption),
-          ...(s.expected !== undefined ? { expected: redactRoute(s.expected) } : {}),
-          ...(s.reason !== undefined ? { reason: redactRoute(s.reason) } : {}),
-          ...(s.path !== undefined ? { path: redactRoute(s.path) } : {}),
+          caption: redactText(s.caption),
+          ...(s.expected !== undefined ? { expected: redactText(s.expected) } : {}),
+          ...(s.reason !== undefined ? { reason: redactText(s.reason) } : {}),
+          ...(s.path !== undefined ? { path: redactText(s.path) } : {}),
         })),
       })),
     })),
@@ -444,7 +520,7 @@ export function buildCheckReplayHtml(replay: CheckReplay, meta: ReplayMeta): str
 <main>
 <p class="note">Each role, then each journey it walked, step by step, with the page as it was after the step${
     frames === 0 ? " when the check was recorded (--record)" : ""
-  }. Typed values are never shown, and secrets in addresses are redacted as in the report.${
+  }. Typed values are never shown, and secrets in addresses are redacted as in the report, as are email addresses and card numbers.${
     replay.framesLeftOut > 0
       ? ` ${replay.framesLeftOut} step(s) and visit(s) have no frame because their session had already kept ${replay.frameCap ?? RECORD_MAX_FRAMES}, the most one session keeps.`
       : ""
