@@ -112,7 +112,9 @@ npm run demo             # regenerate examples/ from the demo app
 ```
 src/
   cli.ts            every command: scan, serve, install, doctor, check, ci, login, export, status, watch, and a first look
-  mcp-server.ts     the scout_* tools and per-session dispatch
+  mcp-server.ts     starts the MCP server and registers the tools in order
+  server-context.ts the server's shared state: sessions, status board, live view, per-session dispatch
+  tools/            the scout_* tools, one module per area (sessions, explore, lanes, results, status, guide)
   scan.ts           project discovery: framework, routes, saved logins
   installer.ts      setup and doctor
   check-run.ts      drives scenescout check

@@ -13,6 +13,10 @@
  * - a relative link to anything else in the repository becomes an absolute link
  *   to that file at the ref being published, so it opens the version the page
  *   describes;
+ * - a picture (`.png`, `.gif`, `.jpg`, `.svg`, `.webp`) points at its raw file at
+ *   that ref instead, because a `blob/` address is an HTML page and would not
+ *   render as an image;
+ * - a link ending in `/` is a folder, and opens as one (`tree/`);
  * - absolute URLs, `#anchors` and anything inside code are left alone.
  *
  * Plain Node with no dependencies: the workflow runs it without `npm ci`, in a
@@ -26,6 +30,7 @@ import { fileURLToPath } from "node:url";
 export const GUIDE_DIR = "docs/guide";
 
 const EXTERNAL = /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i;
+const PICTURE = /\.(?:png|gif|jpe?g|svg|webp)$/i;
 
 /**
  * Rewrite one page's links for the wiki. `pages` is the set of guide file
@@ -61,9 +66,11 @@ function rewriteLinks(text, pages, repo, ref) {
     const file = hash >= 0 ? target.slice(0, hash) : target;
     const anchor = hash >= 0 ? target.slice(hash) : "";
     if (!file.includes("/") && pages.has(file)) return `${open}${file.replace(/\.md$/, "")}${anchor}${close}`;
-    const resolved = path.posix.normalize(path.posix.join(GUIDE_DIR, file));
+    const resolved = path.posix.normalize(path.posix.join(GUIDE_DIR, file)).replace(/^\.\/$/, "");
     if (resolved.startsWith("..")) throw new Error(`link leaves the repository: ${target}`);
-    return `${open}https://github.com/${repo}/blob/${ref}/${resolved}${anchor}${close}`;
+    if (PICTURE.test(resolved)) return `${open}https://raw.githubusercontent.com/${repo}/${ref}/${resolved}${anchor}${close}`;
+    const kind = file.endsWith("/") ? "tree" : "blob";
+    return `${open}https://github.com/${repo}/${kind}/${ref}/${resolved}${anchor}${close}`;
   });
 }
 

@@ -1,0 +1,1 @@
+These pages are published from [`docs/guide/`](./) in the repository on each release, so an edit made here is replaced at the next one. To change a page, open a pull request; to report a mistake, [open an issue](https://github.com/brunoboto96/SceneScout/issues).

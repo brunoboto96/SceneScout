@@ -21,7 +21,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { inert as qaInert } from "../action/qa-action.mjs";
+import { CONTROL_CHARS as qaControlChars, inert as qaInert } from "../action/qa-action.mjs";
 import {
   checkTrackerUrl,
   credentialSecrets,
@@ -38,6 +38,7 @@ import {
   framesFor,
   githubIssue,
   githubMarker,
+  CONTROL_CHARS,
   inertMarkdown,
   inertPlain,
   isJiraKey,
@@ -428,16 +429,52 @@ test("inert: no mention, link, cross-reference, HTML or Markdown survives into a
   assert.equal(inertMarkdown("x".repeat(200), 50).length, 50, "capped, with an ellipsis");
 });
 
-test("inert: the same escaping as the /scenescout qa reply, with the cross-reference and marker breaks added", () => {
-  const inputs = [
-    "plain words",
-    "@alice <b>x</b> & [a](b) `c` *d* _e_ #f +g !h |i ~j {k} \\l",
-    "https://a.example.com www.b.example.com",
-    "fixes #12, GH-3 and scenescout-finding: x",
-    "tab\there\nnewline\u0007bell",
-    "y".repeat(400),
+// The qa reply's escaping (action/qa-action.mjs) ships in the action, which cannot import the npm package's
+// engine, and the engine cannot import the action, so there are two copies. These tables hold them equal.
+const PARITY_INPUTS = [
+  "plain words",
+  "@alice <b>x</b> & [a](b) `c` *d* _e_ #f +g !h |i ~j {k} \\l",
+  "https://a.example.com www.b.example.com",
+  "fixes #12, GH-3 and gh-4",
+  "tab\there\nnewline\u0007bell",
+  "y".repeat(400),
+  // GitHub renders `$…$` as maths even backslash-escaped; a zero-width space before each `$` stops it.
+  "$\\Huge\\color{green}\\text{All checks passed}$",
+  "$$x$$ and $`x`$ costs $5",
+  "see other/repo/issues/12, other/repo/pull/3, other/repo/pulls/4 and github.com/other/repo/discussions/4",
+  "Passed \u202edeliaf\u202c \u2066a\u2069 \u200eb\u200f",
+  "Passed \u061c12-3",
+  "a\u0085b\u009bc",
+];
+
+test("inert: the same escaping as the /scenescout qa reply, character for character, with the marker break added", () => {
+  for (const input of PARITY_INPUTS) assert.equal(inertMarkdown(input), qaInert(input), JSON.stringify(input));
+  // The one addition: quoted text cannot name another finding's marker.
+  assert.equal(inertMarkdown("scenescout-finding: x").replace(/\u200b/g, ""), qaInert("scenescout-finding: x").replace(/\u200b/g, ""));
+  assert.notEqual(inertMarkdown("scenescout-finding: x"), qaInert("scenescout-finding: x"));
+  assert.equal(CONTROL_CHARS.source, qaControlChars.source, "the same control characters become spaces");
+});
+
+// Each pattern is what GitHub's renderer acts on (see the qa reply's table in qa-test): a backslash before `$`
+// does not stop maths, and a cross-reference needs a zero-width space after `#`, `GH` or `issues/`.
+test("inert: an issue body cannot render maths, cross-reference an issue, or reorder the line", () => {
+  const rows: Array<[string, RegExp]> = [
+    ["$\\Huge\\color{green}\\text{All checks passed}$", /(^|[^\u200b])\$/],
+    ["$$x$$ and $`x`$", /(^|[^\u200b])\$/],
+    ["see other/repo/issues/12 and other/repo/pull/3", /\/(issues|pulls?|discussions)\/\d/],
+    ["github.com/other/repo/discussions/4", /\/(issues|pulls?|discussions)\/\d/],
+    ["Passed \u202edeliaf\u202c", /[\u061c\u202a-\u202e\u2066-\u2069\u200e\u200f]/],
+    ["Passed \u061c12-3", /\u061c/],
+    ["a\u0085b\u009bc", /[\u0080-\u009f]/],
   ];
-  for (const input of inputs) assert.equal(inertMarkdown(input).replace(/\u200b/g, ""), qaInert(input).replace(/\u200b/g, ""), input);
+  for (const [input, forbidden] of rows) {
+    assert.doesNotMatch(inertMarkdown(input, 500), forbidden, input);
+    assert.doesNotMatch(qaInert(input, 500), forbidden, `qa: ${input}`);
+  }
+  // What the reader sees is unchanged: only zero-width spaces are added.
+  assert.equal(inertMarkdown("costs $5, see o/r/issues/12").replace(/\u200b/g, ""), "costs $5, see o/r/issues/12");
+  // A plain title and a Jira text node break the reference and lose the bidirectional mark too.
+  assert.doesNotMatch(inertPlain("see o/r/issues/12 \u061c"), /\/issues\/\d|\u061c/);
 });
 
 test("inert: plain text (a title, a Jira text node) breaks the triggers and escapes nothing", () => {
@@ -571,10 +608,6 @@ test("issue: frames the run kept but that are gone are said to be gone, not that
   assert.match(githubIssue(finding(), { ...CTX, framesLeftOut: 2 }).body, /None: the run's frames of these steps are missing/);
   assert.match(githubIssue(finding(), CTX).body, /None: only a recorded run keeps a frame/);
   assert.match(JSON.stringify(jiraDescription(finding(), { screenshots: [], framesLeftOut: 1 })), /None: the run's frames of these steps are missing/);
-});
-
-test("inert: GitHub's maths delimiter is escaped too", () => {
-  assert.equal(inertMarkdown("costs $5 or $x^2$"), "costs \\$5 or \\$x^2\\$");
 });
 
 test("Jira issue: the fields, a priority from the map or none, labels, and a document with no empty text node", () => {
