@@ -1,5 +1,16 @@
 # scenescout
 
+## 3.23.4
+
+### Patch Changes
+
+- 83d639e: The live view's token files are now always owner-only: a token file left in the project with wider permissions, or a link left at its name, is replaced rather than written through.
+- ca10b22: Typed passwords and other secret fields are now masked in logs, reports and exported issues. A value typed into a password field, a field whose `autocomplete` marks a credential, a one-time code or a card, or a field whose name or label says so, is shown as `•••• (masked: password field)` in the tool's result, the action log, memory, the report, the live view's feed and a finding's steps, and so is what the field held before. Text the run keeps is also cleared of email addresses and card numbers, of a value typed after a label that names a secret, whatever its length, and of the value of a parameter named for a secret (`?password=…`, `?pin=…`).
+- a2fd38f: The `/scenescout qa` reply no longer lets a finding's title, a journey's name or anything else from the run render as maths (`$…$`), reference an issue or pull request (`#12`, `GH-12`, `owner/repo/issues/12`), or reorder the line with bidirectional control characters. GitHub acted on these even when backslash-escaped; the reply now breaks each with a zero-width space, so what the reader sees is unchanged. Names shown as code (the branch, the workflow, the artifact) drop bidirectional and C1 control characters too.
+- d1d2efc: The check replay page redacts email addresses and card numbers in the paths, captions, expectations and failure reasons it shows, as it already did for secrets in addresses. Addresses on reserved example domains and digit runs that are not card numbers stay readable.
+- 67fcab7: The live view's run page escapes the saved report's path where its script names it, so a project folder whose name contains `</script>` can no longer end that script early.
+- b2b1481: Refresh the transitive dependencies of the MCP SDK (express, hono, jose and others) within their existing ranges. No change in behaviour.
+
 ## 3.23.3
 
 ### Patch Changes
