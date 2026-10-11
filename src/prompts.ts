@@ -4,7 +4,7 @@
  * `explore` lives in playbook.ts because its text is the skill. `live` and
  * `login` are short instructions: hand back the loopback live-view address,
  * or call scout_login for a role. Neither accepts a password. The protocol
- * server in mcp-server.ts lists all three; the SDK prompt helper is not used,
+ * server in tools/guide.ts lists all three; the SDK prompt helper is not used,
  * because it rejects a request that omits `arguments`.
  */
 import { validateRoleName } from "./engine/profiles.js";
