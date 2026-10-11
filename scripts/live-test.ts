@@ -1039,6 +1039,31 @@ test("a shared token file left readable by others is replaced by an owner-only o
   }
 });
 
+test(
+  "status files are written owner-only, replacing a link left at their names instead of writing through it",
+  { skip: process.platform === "win32" },
+  async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-status-"));
+    try {
+      const victim = path.join(dir, "elsewhere.txt");
+      fs.writeFileSync(victim, "not the engine's");
+      fs.symlinkSync(victim, path.join(dir, "status.json"));
+      fs.symlinkSync(victim, path.join(dir, statusFileName(process.pid)));
+      await writeStatusFile(dir, '{"pid":1}');
+      for (const name of ["status.json", statusFileName(process.pid)]) {
+        const stat = fs.lstatSync(path.join(dir, name));
+        assert.ok(stat.isFile(), `${name} is a file of its own, not a link`);
+        assert.equal(stat.mode & 0o777, 0o600, `${name} can be read by its owner only`);
+        assert.equal(fs.readFileSync(path.join(dir, name), "utf8"), '{"pid":1}');
+      }
+      assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's", "the file a link pointed at is untouched");
+      assert.deepEqual(fs.readdirSync(dir).sort(), ["elsewhere.txt", "status.json", statusFileName(process.pid)].sort(), "no temporary file is left behind");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
 test("a token write that fails leaves no file holding the token behind", { skip: process.platform === "win32" }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-token-"));
   try {
