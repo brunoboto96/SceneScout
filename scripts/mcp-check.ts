@@ -747,6 +747,16 @@ async function ticketsCheck(client: Client): Promise<void> {
     const read = await call("scout_tickets", { session: "tickets", path: "WID-7.md" });
     if (!/Read 1 ticket with 2 acceptance criteria/.test(read) || !read.includes("AC2 [bullet] The file has a header row"))
       fail(`scout_tickets did not read the ticket file:\n${read}`);
+    // A ticket file outside the project is not read: the server here names no SCENESCOUT_TICKET_DIRS.
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-tickets-outside-"));
+    try {
+      fs.writeFileSync(path.join(outsideDir, "WID-8.md"), "# WID-8: Elsewhere\n\n- [ ] Nothing here is read\n");
+      const outside = await call("scout_tickets", { session: "tickets", path: path.join(outsideDir, "WID-8.md") });
+      if (!/is outside the project folder/.test(outside) || !outside.includes("SCENESCOUT_TICKET_DIRS") || /Read \d+ ticket/.test(outside))
+        fail(`scout_tickets read a ticket file outside the project:\n${outside}`);
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
     const bare = await call("scout_criterion", {
       session: "tickets",
       ticket: "WID-7",
@@ -795,7 +805,9 @@ async function ticketsCheck(client: Client): Promise<void> {
     if (plain < 0 || technical < 0 || !(plain < md.indexOf("## Technical detail") && md.indexOf("## Technical detail") < technical))
       fail(`the report does not answer the ticket in the plain view first and the technical report after:\n${md.slice(0, 1500)}`);
     assertClosedAll(await call("scout_close", { all: true }));
-    console.log("✓ scout_tickets reads a ticket file, scout_criterion records a verdict with its finding, and the report answers it");
+    console.log(
+      "✓ scout_tickets reads a ticket file in the project and refuses one outside it, scout_criterion records a verdict with its finding, and the report answers it",
+    );
   } finally {
     await fixture.close();
     fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

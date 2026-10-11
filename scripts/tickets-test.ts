@@ -32,6 +32,9 @@ import {
   mergeTicketData,
   parseTickets,
   tally,
+  ticketDirsFrom,
+  ticketFileFor,
+  TICKET_DIRS_ENV,
   ticketSummaryLine,
   type CriterionVerdict,
   type JudgeContext,
@@ -670,4 +673,57 @@ test("tickets are kept redacted, survive a reopen, and a later run shows only wh
     ["WID-1"],
     "judging an earlier reading makes it this run's",
   );
+});
+
+// ── Where a ticket file may be read from ─────────────────────────────────────
+
+test("the folders outside the project a ticket may be read from are only those configuration names, by absolute path", () => {
+  assert.equal(TICKET_DIRS_ENV, "SCENESCOUT_TICKET_DIRS");
+  assert.deepEqual(ticketDirsFrom({}), { dirs: [] });
+  assert.deepEqual(ticketDirsFrom({ [TICKET_DIRS_ENV]: "  " }), { dirs: [] });
+  const a = path.resolve(path.sep, "specs", "a");
+  const b = path.resolve(path.sep, "specs", "b");
+  assert.deepEqual(ticketDirsFrom({ [TICKET_DIRS_ENV]: [a, "", ` ${b} `].join(path.delimiter) }), { dirs: [a, b] });
+  const relative = ticketDirsFrom({ [TICKET_DIRS_ENV]: [a, "specs"].join(path.delimiter) });
+  assert.ok("error" in relative && /SCENESCOUT_TICKET_DIRS names "specs", which is not an absolute path/.test(relative.error), JSON.stringify(relative));
+});
+
+test("a ticket file is read from inside the project, or from a folder configuration names; anything else, through a link too, is refused", () => {
+  // .native, as the rule uses: on Windows the temporary folder can be named by its short (8.3) form.
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ss-ticket-paths-")));
+  try {
+    const project = path.join(root, "project");
+    const specs = path.join(root, "specs");
+    const elsewhere = path.join(root, "project-evil");
+    for (const dir of [project, specs, elsewhere]) fs.mkdirSync(dir, { recursive: true });
+    for (const file of [path.join(project, "t.md"), path.join(specs, "s.md"), path.join(elsewhere, "e.md")]) fs.writeFileSync(file, "- [ ] a criterion\n");
+    // Making a link needs a privilege Windows does not give by default, so the link case runs elsewhere; the rest runs everywhere.
+    const links = process.platform !== "win32";
+    if (links) fs.symlinkSync(path.join(elsewhere, "e.md"), path.join(project, "linked.md"));
+    const read = (file: string, env: NodeJS.ProcessEnv = {}) => ticketFileFor(file, project, env);
+
+    assert.deepEqual(read("t.md"), { file: path.join(project, "t.md") }, "relative to the project");
+    assert.deepEqual(read(path.join(project, "t.md")), { file: path.join(project, "t.md") }, "absolute, inside it");
+    // The refusal names the folder to allow: where the file really is, after links, which is what the setting is compared with.
+    for (const [outside, folder] of [
+      [path.join(elsewhere, "e.md"), elsewhere],
+      ["../project-evil/e.md", elsewhere],
+      ...(links ? [["linked.md", elsewhere]] : []),
+      [path.join(specs, "s.md"), specs],
+    ]) {
+      const refused = read(outside);
+      assert.ok(
+        "refused" in refused && /outside the project folder/.test(refused.refused) && refused.refused.includes(`add ${folder} to ${TICKET_DIRS_ENV}`),
+        `${outside}: ${JSON.stringify(refused)}`,
+      );
+    }
+    // Named in configuration, a folder outside is read from; the folder beside it still is not.
+    assert.deepEqual(read(path.join(specs, "s.md"), { [TICKET_DIRS_ENV]: specs }), { file: path.join(specs, "s.md") });
+    assert.ok("refused" in read(path.join(elsewhere, "e.md"), { [TICKET_DIRS_ENV]: specs }));
+    // A configuration that names a relative folder refuses rather than guess where it is.
+    const bad = read(path.join(specs, "s.md"), { [TICKET_DIRS_ENV]: "specs" });
+    assert.ok("refused" in bad && /not an absolute path/.test(bad.refused), JSON.stringify(bad));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
