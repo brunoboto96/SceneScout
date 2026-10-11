@@ -19,7 +19,7 @@ import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser, readyBrowser, type BrowserReadyDeps } from "../src/engine/launch.ts";
 import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
-import { bestEffort } from "../src/engine/best-effort.ts";
+import { bestEffort, settleWithin } from "../src/engine/best-effort.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles } from "./smoke/leaks.ts";
 import { declaredTitle, parseShard, pickShard, shardProblems, withoutShard } from "./smoke/shards.ts";
@@ -625,4 +625,14 @@ test("bestEffort's fallback is a fresh value per call, never shared between call
   const b = await bestEffort(Promise.reject(new Error("gone")), [] as string[]);
   a.push("x");
   assert.deepEqual(b, []);
+});
+
+test("settleWithin waits for the work, at most the bound, and never rejects", async () => {
+  let done = false;
+  await settleWithin(new Promise<void>((resolve) => setTimeout(() => ((done = true), resolve()), 5)), 1000);
+  assert.equal(done, true, "work that finishes in time is waited for");
+  const started = Date.now();
+  await settleWithin(new Promise<void>(() => {}), 20);
+  assert.ok(Date.now() - started < 1000, "work that never finishes is given up on at the bound");
+  await settleWithin(Promise.reject(new Error("gone")), 1000);
 });
