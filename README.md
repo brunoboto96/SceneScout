@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🔭 SceneScout
+<img src="site/favicon.svg" alt="" width="88" height="88" />
+
+# SceneScout
 
 **Your coding agent, turned into an exploratory QA tester for any web app.**
 
@@ -11,7 +13,7 @@ Works with Claude Code · Cursor · VS Code (Copilot) · Codex CLI · Gemini CLI
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![node >= 20](https://img.shields.io/badge/node-%E2%89%A5%2020-339933?logo=node.js&logoColor=white)
 
-[📖 Guide](docs/guide/Home.md) · [🐛 What it catches](#-what-it-catches) · [🎬 QA with evidence](#-automated-qa-with-evidence) · [🚀 Get started](#-get-started) · [🚦 CI](#-in-ci) · [🔒 Safety](#-safe-by-default) · [📚 Docs](#-documentation)
+[🌐 Website](https://brunoboto96.github.io/SceneScout/) · [📖 Guide](docs/guide/Home.md) · [🐛 What it catches](#-what-it-catches) · [🎬 QA with evidence](#-automated-qa-with-evidence) · [🚀 Get started](#-get-started) · [🚦 CI](#-in-ci) · [🔒 Safety](#-safe-by-default) · [📚 Docs](#-documentation)
 
 </div>
 
@@ -134,7 +136,7 @@ Everything is one self-contained HTML page per report, with no scripts, nothing 
 
 Each exploratory run opens a live view on your machine, with one card per agent: what it is doing, the page it is on, and a feed of every action. Three agents are testing the demo app in parallel here:
 
-<p align="center"><img src="examples/screenshots/live-view.png" alt="The live view during a run of three parallel agents against the demo app: one card per session, each with its role and objective, the task it is on, the tool it is running, the page it is on, a live thumbnail, and a feed of the actions it just took, tinted one colour per task" width="880" /></p>
+<p align="center"><img src="examples/screenshots/live-view.png" alt="The live view during a run of three parallel agents against the demo app, every one streaming its page live: one card per session, each with its role and objective, the task it is on, the tool it is running, a live picture of its page, and a feed of the actions it just took, tinted one colour per task" width="880" /></p>
 
 You can read the report while the agents are still working, and scrub back through any session's timeline. Beside `report.md`, every run writes `report.html`, the whole run as one self-contained page; ask for a recorded run and it also keeps a frame after every action.
 
@@ -217,6 +219,21 @@ A gate on every pull request that keeps its evidence, as a GitHub Action:
 ```
 
 [docs/ci.md](docs/ci.md) has complete workflows, every option, and the same check on GitLab CI, CircleCI or any shell.
+
+### Ask for it on a pull request
+
+Type a command in a pull request comment and SceneScout answers in the thread, with pictures taken by a real browser:
+
+| Comment | Reply |
+|---|---|
+| `/scenescout qa` | Explores the pull request's preview and replies with what it found |
+| `/scenescout qa show the Save button` | A picture of that element |
+| `/scenescout qa compare the Save button` | The element on the base and on the pull request, with the changed pixels highlighted |
+| `/scenescout qa check` | Runs your saved journeys on the branch and replies with each one's result; the video of every journey is in the run's files |
+
+<p align="center"><img src="examples/screenshots/pr-qa-compare.png" alt="A pull request comment, /scenescout qa compare the Save button, and SceneScout's reply: the button on the base branch in blue and on the pull request in green, with 61.2% of pixels changed highlighted" width="520" /></p>
+
+The preview commands test a deployed preview, so the pull request's code never runs beside the model's key; `qa check` runs your own workflow and uses no key. [Setting it up](docs/ci.md#a-qa-review-from-a-pull-request-comment).
 
 ## 🔒 Safe by default
 

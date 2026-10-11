@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="SceneScout">
+  <g fill="#17233B">
+    <rect x="18" y="19" width="30" height="13" rx="3" transform="rotate(-30 33 25.5)"/>
+    <rect x="9.5" y="31.5" width="9" height="8" rx="2" transform="rotate(-30 14 35.5)"/>
+  </g>
+  <g fill="none" stroke="#17233B" stroke-width="4.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M30 33 L21.5 56"/>
+    <path d="M30 33 L38.5 56"/>
+  </g>
+  <circle cx="56.5" cy="8" r="3.6" fill="#D3263A"/>
+</svg>
