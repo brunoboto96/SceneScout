@@ -1,5 +1,20 @@
 # scenescout
 
+## 3.24.0
+
+### Minor Changes
+
+- 5843e5c: `scout_tickets` reads a ticket file only from inside the project folder, following links first. A folder outside it can be allowed explicitly with `SCENESCOUT_TICKET_DIRS`, absolute paths separated as in `PATH`. The guide's safety model now says that the project folder is the trust boundary for uploads and ticket files.
+
+### Patch Changes
+
+- 73b8764: Card numbers grouped with dots (`4111.1111.1111.1111`) or with non-breaking, thin or figure spaces, and card numbers written straight after an abbreviation's dot (`no.4111…`), are now redacted like those grouped with spaces or hyphens. This applies wherever personal data is redacted: memory, the report, a check's `report.md`, `check.json`, SARIF and replay page, and exported issues. An address, a version, a date or a decimal written with dots stays: the digits after a number's dot never start a card number, and across a dot no group of a card number is longer than six digits. The check's replay page now uses the same redaction as the rest of the run, so a list of small numbers whose digits happen to pass the card check (`320 375 414 768 …`) is no longer redacted there.
+- c0be9f9: `scenescout export` escapes issue text the way the `/scenescout qa` reply does. In a GitHub issue body, text from a finding can no longer render as maths: a zero-width space goes before each `$`, because a backslash does not stop GitHub's renderer. It also can no longer reference another repository's issue, pull request or discussion through `owner/repo/issues/N`. The Arabic letter mark (U+061C), a bidirectional control that could reorder a line, now becomes a space like the other controls, in GitHub and Jira text alike.
+- e2e2aa3: Files under `.scenescout/` are never written through a symbolic link left at their names: the status files, memory and its notes, its `.gitignore`, the report, recorded frames, finding pictures and captures are each written under a temporary name and renamed into place, and the session log refuses a link rather than append through it. The status files, memory and the session log are owner-only; the report, `ASSUMPTIONS.md`, the `.gitignore`, frames, pictures and captures keep the mode your umask gives a new file, so other tools and teammates can still read them. The live view no longer serves a frame that is a link out of `recordings/`, matching `scenescout export`.
+- 8b08843: `report.html`, a recorded check's `replay.html` and its template test report each carry a Content-Security-Policy in their own head. The check pages run no script at all; `report.html` runs only its picture handler, and the copy the live view serves only its own watch on the engine. Pictures and videos beside the page load as before, opened from disk or served.
+- 836b381: `scout_scroll` with a `target` now says "Scroll target not found" only when nothing on the page matches it. Any other failure, such as the page navigating or closing during the scroll, or a target that did not answer within the action limit, is reported as it is.
+- d0d569e: `scenescout watch` now opens the live view the way the MCP server does: the opener starts detached and is not waited for, never through a shell, and on Windows through the URL protocol handler. It no longer waits up to ten seconds for an opener that keeps running. It says "Could not open a browser", with the reason, only when nothing was opened: in CI, over SSH or with no display, or when the opener could not start.
+
 ## 3.23.4
 
 ### Patch Changes
