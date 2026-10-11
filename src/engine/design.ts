@@ -155,7 +155,7 @@ export function focusedControl(doc: FocusDocument): FocusElement | "frame" | nul
   return el;
 }
 
-export interface DesignPagePayload {
+interface DesignPagePayload {
   /** Document scroll width vs window width — horizontal overflow detection. */
   scrollW: number;
   clientW: number;
@@ -178,7 +178,7 @@ export interface DesignPayload {
  * words, split at camelCase and punctuation, is filter(s) or facet(s). Whole
  * words only, so "filterable-list" or "unfiltered" says nothing.
  */
-export const FILTER_WORDS_SRC = `(s) => (s || "").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z]+/).some((w) => w === "filter" || w === "filters" || w === "facet" || w === "facets")`;
+const FILTER_WORDS_SRC = `(s) => (s || "").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z]+/).some((w) => w === "filter" || w === "filters" || w === "facet" || w === "facets")`;
 
 /** FILTER_WORDS_SRC run outside a page, from the same source, so a table test exercises the rule the collector ships. */
 export function namesFilter(text: string): boolean {
@@ -561,7 +561,7 @@ function gridValues(top: ReadonlyArray<[number, number]>): string {
 }
 
 /** The box a pointer user hits to operate the control: its label or drop zone where one operates it, else its own. */
-export function targetBox(r: StyleRecord): StyleRecord["rect"] {
+function targetBox(r: StyleRecord): StyleRecord["rect"] {
   return r.target ?? r.rect;
 }
 
@@ -666,7 +666,7 @@ export function distinguishingLayer(key: string, others: readonly string[]): str
  * stone), the shades text and surfaces are built from. Near-white and
  * near-black are left out, as before: every page has them.
  */
-export function grayOf(rgb: [number, number, number]): boolean {
+function grayOf(rgb: [number, number, number]): boolean {
   const avg = (rgb[0] + rgb[1] + rgb[2]) / 3;
   return hueOf(rgb) === null && avg > 20 && avg < 245;
 }
@@ -704,7 +704,7 @@ const GRAY_STEP = 4;
  * the audit and the snapshot agree on a page. Records with no name read are
  * left out rather than guessed.
  */
-export function unnamedControls(records: readonly StyleRecord[]): { unnamed: StyleRecord[]; placeholder: StyleRecord[] } {
+function unnamedControls(records: readonly StyleRecord[]): { unnamed: StyleRecord[]; placeholder: StyleRecord[] } {
   const named = records.filter((r) => r.interactive && typeof r.name === "string");
   const asSnapshot = (r: StyleRecord) => ({
     role: r.role,
@@ -740,7 +740,7 @@ function distanceToBox([px, py]: [number, number], b: StyleRecord["rect"]): numb
  * target's circle. `others` is every interactive record on the page, shell
  * included, since a neighbour in the shell is as easy to hit by mistake.
  */
-export function spacedApart(r: StyleRecord, others: readonly StyleRecord[]): boolean {
+function spacedApart(r: StyleRecord, others: readonly StyleRecord[]): boolean {
   const c = centreOf(targetBox(r));
   for (const o of others) {
     if (o === r || !o.interactive) continue;
@@ -758,7 +758,7 @@ export function spacedApart(r: StyleRecord, others: readonly StyleRecord[]): boo
  * A target that fails WCAG 2.5.8: under 24px, measured on what the user hits
  * (targetBox), and not saved by the spacing exception.
  */
-export function tooSmall(r: StyleRecord, all: readonly StyleRecord[]): boolean {
+function tooSmall(r: StyleRecord, all: readonly StyleRecord[]): boolean {
   return undersized(r) && !spacedApart(r, all);
 }
 
@@ -799,7 +799,7 @@ export interface PageImage {
 }
 
 /** Past this, a stretched image reads as distorted rather than as rounding. */
-export const ASPECT_TOLERANCE = 0.12;
+const ASPECT_TOLERANCE = 0.12;
 
 /**
  * How far an image is stretched out of its proportions, or null when it is not.

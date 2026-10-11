@@ -51,7 +51,7 @@ export const XPATH_OF_SRC = `(el) => {
  * says nothing. Kept apart from NAME_FACTS_SRC so the order can be
  * table-tested without a browser (contentSays).
  */
-export const CONTENT_SAYS_SRC = `(d) => {
+const CONTENT_SAYS_SRC = `(d) => {
     if (d.ariaLabel && d.ariaLabel.trim()) return d.ariaLabel;
     if (d.tag === "img") return d.alt && d.alt.trim() ? d.alt : d.title;
     if (d.tag === "svg") return d.svgTitle;
@@ -89,7 +89,7 @@ export function contentSays(facts: ContentFacts): string {
  * an <img>'s alt and an <svg>'s or role="img"'s aria-label or <title>: it is
  * read so a control renamed since keeps its coverage.
  */
-export const NAME_FACTS_SRC = `(el) => {
+const NAME_FACTS_SRC = `(el) => {
     const tag = el.tagName.toLowerCase();
     const role = el.getAttribute("role") || "";
     const inputType = tag === "input" ? el.type : "";
@@ -171,7 +171,7 @@ export const NAME_FACTS_SRC = `(el) => {
  * - A whitespace-only aria-label ends the name with nothing, as it always has
  *   here: the field it hides is reported as unnamed.
  */
-export const PICK_NAME_SRC = `(f) => {
+const PICK_NAME_SRC = `(f) => {
     const clean = (s) => (s || "").replace(/\\s+/g, " ").trim();
     const named = (s) => ({ name: s.slice(0, 80), from: null });
     const field = f.tag === "input" || f.tag === "textarea" || f.tag === "select";
@@ -352,9 +352,9 @@ export const FOCUS_MOVES_PROPS = [
 /** The most elements a snapshot lists in full; past it, what is left is counted (cutSummary). */
 export const COLLECTOR_CAP = 150;
 /** Pager and "load more" controls listed past the cap, so a lane can still reach the rest of a long list. */
-export const MAX_KEPT_PAST_CAP = 10;
+const MAX_KEPT_PAST_CAP = 10;
 /** How many elements past the cap are looked at, to keep them or count them, before the rest goes uncounted. */
-export const MAX_SCANNED_PAST_CAP = 2000;
+const MAX_SCANNED_PAST_CAP = 2000;
 
 /**
  * A control that pages a list or loads more of it, by its name: "Next",
@@ -1007,7 +1007,7 @@ export function cutSummary(cut: readonly CutElement[], groups = 8): string {
 }
 
 /** A key without the ordinal the collector adds to the second and later elements sharing it ("tid:row~3" → "tid:row"). */
-export function keyFamily(key: string): string {
+function keyFamily(key: string): string {
   return key.replace(/~\d+$/, "");
 }
 
@@ -1443,7 +1443,7 @@ export function mainRegionTag(m: MainRegion): string {
   return mainIsEmpty(m) ? `${where} EMPTY` : `${where} ${m.chars} chars`;
 }
 
-export interface BrokenImage {
+interface BrokenImage {
   alt: string;
   src: string;
   testid: string | null;
@@ -1488,7 +1488,7 @@ export function frameElementKey(baseKey: string, frame: FrameTag | undefined): s
 }
 
 /** The longest name kept for a control in another site's frame: a chat that renders messages as buttons would otherwise print them whole. */
-export const MAX_FOREIGN_NAME = 40;
+const MAX_FOREIGN_NAME = 40;
 
 /** A control's name from another site's frame, cut to MAX_FOREIGN_NAME. */
 export function capForeignName(name: string): string {

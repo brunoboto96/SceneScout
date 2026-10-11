@@ -28,7 +28,7 @@ export const FROM_RUN_ENV = "SCENESCOUT_FROM_RUN";
 /** How to use it: `continue` (the default) or `replay`. */
 export const FROM_RUN_MODE_ENV = "SCENESCOUT_FROM_RUN_MODE";
 /** How many model turns a continued run budgets for each page it takes on: what sets its page cap (pageCap). */
-export const FROM_RUN_TURNS_PER_PAGE_ENV = "SCENESCOUT_FROM_RUN_TURNS_PER_PAGE";
+const FROM_RUN_TURNS_PER_PAGE_ENV = "SCENESCOUT_FROM_RUN_TURNS_PER_PAGE";
 
 /**
  * Turns a continued run spends on one page by default: enough to exercise its
@@ -38,7 +38,7 @@ export const FROM_RUN_TURNS_PER_PAGE_ENV = "SCENESCOUT_FROM_RUN_TURNS_PER_PAGE";
  */
 export const DEFAULT_TURNS_PER_PAGE = 7;
 /** The bounds of the setting. */
-export const TURNS_PER_PAGE_RANGE = { min: 1, max: 200 } as const;
+const TURNS_PER_PAGE_RANGE = { min: 1, max: 200 } as const;
 
 /**
  * `continue`: start where the earlier run left off. `replay`: follow its route
@@ -46,7 +46,7 @@ export const TURNS_PER_PAGE_RANGE = { min: 1, max: 200 } as const;
  */
 export const FROM_RUN_MODES = ["continue", "replay"] as const;
 export type FromRunMode = (typeof FROM_RUN_MODES)[number];
-export const DEFAULT_FROM_RUN_MODE: FromRunMode = "continue";
+const DEFAULT_FROM_RUN_MODE: FromRunMode = "continue";
 
 /** An earlier run to start from, as a run was asked for it. */
 export interface FromRun {
@@ -180,11 +180,11 @@ export interface PrefixNote {
 }
 
 /** The most steps a record keeps: a replay of more would not fit a model's first message anyway. */
-export const MAX_RECORD_STEPS = 400;
+const MAX_RECORD_STEPS = 400;
 /** The most routes a record lists in any one list. */
-export const MAX_RECORD_ROUTES = 300;
+const MAX_RECORD_ROUTES = 300;
 /** The most controls, forms or options a record keeps per route. */
-export const MAX_RECORD_KEYS = 40;
+const MAX_RECORD_KEYS = 40;
 /** The most records a project's memory keeps; the oldest go first. */
 export const MAX_RECORDS = 20;
 

@@ -197,7 +197,7 @@ export function readRouteObjects(src: string): RouteRecord[] {
  * The source with comments blanked out, offsets preserved. `<Route>` tags are
  * found by pattern, so a commented-out route would otherwise be read as live.
  */
-export function maskComments(src: string): string {
+function maskComments(src: string): string {
   const out = src.split("");
   let i = 0;
   const blank = (from: number, to: number): void => {
@@ -278,7 +278,7 @@ export function readRouteElements(source: string): RouteRecord[] {
 const tidy = (p: string): string => `/${p}`.replace(/\/+/g, "/").replace(/(.)\/$/, "$1");
 
 /** The absolute path of one record, or null when it (or an ancestor) is a wildcard. */
-export function recordPath(records: RouteRecord[], idx: number, prefix = "", absoluteTopOnly = false): string | null {
+function recordPath(records: RouteRecord[], idx: number, prefix = "", absoluteTopOnly = false): string | null {
   const r = records[idx];
   if (/[*]/.test(r.path)) return null;
   // An absolute child path is absolute (React Router and Vue Router both allow it).

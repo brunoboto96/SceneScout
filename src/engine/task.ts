@@ -25,7 +25,7 @@ export const TASK_MAX = 120;
  * The tools that act on the app under test. Each changes what the person
  * watching is looking at, so each has to be able to say why.
  */
-export const NEEDS_TASK: ReadonlySet<string> = new Set([
+const NEEDS_TASK: ReadonlySet<string> = new Set([
   "scout_navigate",
   "scout_back",
   "scout_click",

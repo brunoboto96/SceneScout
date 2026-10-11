@@ -24,7 +24,7 @@ export type Tracker = (typeof TRACKERS)[number];
 export const TRACKER_LABEL: Record<Tracker, string> = { github: "GitHub", jira: "Jira" };
 
 export type Severity = Finding["severity"];
-export const SEVERITIES: readonly Severity[] = ["high", "medium", "low"];
+const SEVERITIES: readonly Severity[] = ["high", "medium", "low"];
 const SEVERITY_RANK: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
 
 /** Every option `scenescout export` accepts. guide-test holds the configuration reference equal to it. */
@@ -987,7 +987,7 @@ export interface JiraIssueState {
  * records none (an issue filed by an earlier version), so whether they were
  * edited cannot be told and they are left as they are.
  */
-export type JiraFieldsUpdate = "change" | "same" | "edited" | "no-revision";
+type JiraFieldsUpdate = "change" | "same" | "edited" | "no-revision";
 
 export interface JiraUpdatePlan {
   fields: JiraFieldsUpdate;

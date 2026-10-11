@@ -78,7 +78,7 @@ export interface ReplayJourney {
 }
 
 /** What a visited route answered. */
-export type ReplayVisitResult = "loaded" | "http-error" | "sign-in" | "not-loaded";
+type ReplayVisitResult = "loaded" | "http-error" | "sign-in" | "not-loaded";
 
 export interface ReplayVisit {
   path: string;
@@ -115,7 +115,7 @@ function shotFields(shot: StepShot | null | undefined): StepShot {
 }
 
 /** What a step should bring about: its own `expected`, else an expect-* step's assertion, else nothing. */
-export function expectedOf(step: FlowStep): string | undefined {
+function expectedOf(step: FlowStep): string | undefined {
   if (step.expected !== undefined) return step.expected;
   return step.action.startsWith("expect-") ? describeStep(step) : undefined;
 }

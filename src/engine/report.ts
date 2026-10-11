@@ -136,7 +136,7 @@ function projectName(dir: string): string {
  * when there are none. The first bullet names the id, as a finding's does, so
  * the live view hangs the frames recorded around it under the entry.
  */
-export function formatWorthALook(items: readonly Finding[], sessionStart: string): string[] {
+function formatWorthALook(items: readonly Finding[], sessionStart: string): string[] {
   if (items.length === 0) return [];
   const lines = [
     `## Worth a look (${items.length})`,
@@ -157,7 +157,7 @@ export function formatWorthALook(items: readonly Finding[], sessionStart: string
 }
 
 /** A finding's picture as a bullet, its path relative to report.md, or nothing when it has none. */
-export function pictureLine(f: Finding): string[] {
+function pictureLine(f: Finding): string[] {
   const p = readFindingPicture(f);
   return p ? [`- **Picture:** \`${p.file}\` (${describePicture(p)})`] : [];
 }
@@ -200,7 +200,7 @@ function replaySessions(memory: MemoryStore): ReplaySession[] {
 }
 
 /** The frames that were on screen while each finding was being found. */
-export function findingEvidence(memory: MemoryStore, sessions: readonly ReplaySession[]): FindingEvidence[] {
+function findingEvidence(memory: MemoryStore, sessions: readonly ReplaySession[]): FindingEvidence[] {
   const all = sessions.flatMap((s) => s.steps).sort((a, b) => a.at.localeCompare(b.at));
   return memory.findings
     .map((f) => {

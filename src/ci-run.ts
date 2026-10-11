@@ -132,7 +132,7 @@ const packageRoot = path.resolve(here, "..");
 const serverPath = path.join(packageRoot, "dist", "mcp-server.js");
 
 /** The longest one attempt at a model call may take. An attempt that runs longer, with wall time left, is retried like a server error. */
-export const MODEL_CALL_MS = 180_000;
+const MODEL_CALL_MS = 180_000;
 /** Retries of one model call after its first attempt. */
 export const MAX_RETRIES = 3;
 /**
@@ -141,7 +141,7 @@ export const MAX_RETRIES = 3;
  * the browser share this one budget, so a run ends at most this long after
  * its time cap, plus the few seconds the files take.
  */
-export const FINISH_MS = 180_000;
+const FINISH_MS = 180_000;
 /** Attaching before the exploration, which counts towards the time cap. */
 const ATTACH_MS = 120_000;
 /** Tool calls run from one model reply; any beyond are answered as not run. Bounds what one turn can spend. Set here only. */

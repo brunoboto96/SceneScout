@@ -414,7 +414,7 @@ function pathSegments(path: string): string[] {
  * `order-{id}` is a literal, and so is `**`, which some routers read as "any
  * number of segments": a template here stands for exactly one.
  */
-export function isTemplateSegment(seg: string): boolean {
+function isTemplateSegment(seg: string): boolean {
   return seg === "*" || /^\{[^/{}]+\}$/.test(seg) || /^:[a-z_][a-z0-9_-]*$/i.test(seg);
 }
 

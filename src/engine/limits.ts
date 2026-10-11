@@ -32,7 +32,7 @@ export const DEFAULT_NAV_TIMEOUT_MS = 20000;
 /** The crawl has always given each route less than a deliberate navigation. */
 export const DEFAULT_CRAWL_NAV_TIMEOUT_MS = 15000;
 /** Going back and a popup's load have always had the shortest wait. */
-export const DEFAULT_BACK_NAV_TIMEOUT_MS = 10000;
+const DEFAULT_BACK_NAV_TIMEOUT_MS = 10000;
 
 export const DEFAULT_TIME_LIMITS: TimeLimits = {
   actionMs: DEFAULT_ACTION_TIMEOUT_MS,
@@ -62,7 +62,7 @@ function boundsText(kind: LimitKind): string {
 }
 
 /** Check one value against its bounds. `source` names where it came from, so the error says what to fix. */
-export function checkLimit(kind: LimitKind, value: number, source: string): number {
+function checkLimit(kind: LimitKind, value: number, source: string): number {
   const { min, max } = LIMIT_BOUNDS[kind];
   if (!Number.isInteger(value) || value < min || value > max) {
     throw new Error(`${source} must be ${boundsText(kind)} (got ${value}).`);

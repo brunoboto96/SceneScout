@@ -29,7 +29,7 @@ import { failingSignatures, isWorthALook, type Finding } from "./memory.js";
 export const VERDICTS = ["gone", "present", "changed"] as const;
 export type Verdict = (typeof VERDICTS)[number];
 
-export const VERDICT_MEANING: Record<Verdict, string> = {
+const VERDICT_MEANING: Record<Verdict, string> = {
   gone: "re-tested and the evidence no longer reproduces — resolved",
   present: "re-tested and still reproduces exactly as filed",
   changed: "re-tested and something is different — still broken, but not as described",
@@ -211,7 +211,7 @@ export interface LoadRetest {
 }
 
 /** How the finding's page is reached again, or null when a check cannot re-test it deterministically. */
-export function loadRetest(item: VerifyItem): LoadRetest | null {
+function loadRetest(item: VerifyItem): LoadRetest | null {
   const signatures = [...failingSignatures(item.evidence)];
   // A POST that failed is not re-sent by loading a page, and a check would refuse to send it anyway.
   if (signatures.length === 0 || signatures.some((s) => !s.startsWith("GET "))) return null;
@@ -231,8 +231,8 @@ export function loadRetest(item: VerifyItem): LoadRetest | null {
   return { item, path: `${url.pathname}${url.search}`, signatures };
 }
 
-export const RETEST_VERDICTS = ["reproduces", "possibly-fixed", "not-reached"] as const;
-export type RetestVerdict = (typeof RETEST_VERDICTS)[number];
+const RETEST_VERDICTS = ["reproduces", "possibly-fixed", "not-reached"] as const;
+type RetestVerdict = (typeof RETEST_VERDICTS)[number];
 
 export interface CheckRetest {
   id: string;

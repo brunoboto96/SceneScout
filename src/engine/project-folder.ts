@@ -26,7 +26,7 @@ import { MEMORY_DIRNAME } from "./memory.js";
 /** The setting: an absolute folder that holds one folder per tested site, or `off`. */
 export const PROJECTS_DIR_ENV = "SCENESCOUT_PROJECTS_DIR";
 /** The folder made under the documents folder when the setting is unset. */
-export const DEFAULT_PROJECTS_DIRNAME = "SceneScout";
+const DEFAULT_PROJECTS_DIRNAME = "SceneScout";
 
 /** The parts of the environment the documents folder depends on. */
 export interface Home {

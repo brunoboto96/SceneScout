@@ -21,23 +21,23 @@ import { fromRunLine, resolveFromRun, type FromRun, type FromRunMode, type RunRe
 
 // ── options ─────────────────────────────────────────────────────────────────
 
-export const PROVIDERS = ["anthropic", "openai"] as const;
+const PROVIDERS = ["anthropic", "openai"] as const;
 export type ProviderName = (typeof PROVIDERS)[number];
 
 /** Where each provider's key is read from. Nothing else is: no flag, no file, no input. */
 export const KEY_ENV: Record<ProviderName, string> = { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY" };
 
-export const DEFAULT_MODEL: Record<ProviderName, string> = { anthropic: "claude-sonnet-5", openai: "gpt-6-luna" };
+const DEFAULT_MODEL: Record<ProviderName, string> = { anthropic: "claude-sonnet-5", openai: "gpt-6-luna" };
 
 /** The API root each request path is joined to. `--base-url` replaces it, for a compatible endpoint. */
-export const DEFAULT_BASE_URL: Record<ProviderName, string> = { anthropic: "https://api.anthropic.com/v1", openai: "https://api.openai.com/v1" };
+const DEFAULT_BASE_URL: Record<ProviderName, string> = { anthropic: "https://api.anthropic.com/v1", openai: "https://api.openai.com/v1" };
 
 /** Reasoning effort each API accepts. The Messages API has no "none": thinking is lowered, not switched off. */
-export const EFFORTS: Record<ProviderName, readonly string[]> = {
+const EFFORTS: Record<ProviderName, readonly string[]> = {
   anthropic: ["low", "medium", "high", "xhigh", "max"],
   openai: ["none", "low", "medium", "high", "xhigh", "max"],
 };
-export const DEFAULT_EFFORT = "low";
+const DEFAULT_EFFORT = "low";
 
 /**
  * The write policies a CI run may use. `destructive` lets the model send any
@@ -46,10 +46,10 @@ export const DEFAULT_EFFORT = "low";
  * workflow or typed by an agent, never enables it. What CI may do is the
  * developer's decision; the default stays read-only (ADR 14).
  */
-export const CI_MODES = ["observe", "read-only", "safe-write", "destructive"] as const;
+const CI_MODES = ["observe", "read-only", "safe-write", "destructive"] as const;
 export type CiMode = (typeof CI_MODES)[number];
 
-export const CI_LEVELS = ["minimal", "medium", "extensive"] as const;
+const CI_LEVELS = ["minimal", "medium", "extensive"] as const;
 export type CiLevel = (typeof CI_LEVELS)[number];
 
 /**
@@ -63,11 +63,11 @@ export type CiLevel = (typeof CI_LEVELS)[number];
  */
 export const DEDUP_MODES = ["rule", "judge"] as const;
 export type DedupMode = (typeof DEDUP_MODES)[number];
-export const DEFAULT_CI_DEDUP: DedupMode = "judge";
+const DEFAULT_CI_DEDUP: DedupMode = "judge";
 /** Turns the dedup judge on for the MCP server: `rule` (the default) or `judge`. An attach's `dedup` wins over it. */
 export const DEDUP_ENV = "SCENESCOUT_DEDUP";
 /** Which provider the MCP server's dedup judge uses when both keys are in its environment. */
-export const DEDUP_PROVIDER_ENV = "SCENESCOUT_DEDUP_PROVIDER";
+const DEDUP_PROVIDER_ENV = "SCENESCOUT_DEDUP_PROVIDER";
 
 export interface Caps {
   /** Model calls. */
@@ -90,7 +90,7 @@ const CAP_BOUNDS = { turns: [1, 500], tokens: [1_000, 20_000_000], minutes: [1, 
  * lanes) runs as one loop rather than failing; --lanes given explicitly is
  * held to those rules.
  */
-export const DEFAULT_LANES = 2;
+const DEFAULT_LANES = 2;
 export const MAX_CI_LANES = MAX_LANES;
 
 /** Every option `scenescout ci` accepts; the ci action's inputs are these names (ci-test holds them equal). */
@@ -126,7 +126,7 @@ export const CI_OPTION_NAMES = [
 ] as const;
 
 /** The longest --show description: it becomes a line of the model's prompt. */
-export const MAX_SHOW = 200;
+const MAX_SHOW = 200;
 
 export interface CiOptions {
   url: string;
@@ -635,7 +635,7 @@ export interface Price {
   cacheWrite?: number;
   output: number;
 }
-export const PRICES: Record<string, Price> = {
+const PRICES: Record<string, Price> = {
   "gpt-6-luna": { input: 0.1, cachedInput: 0.01, output: 0.5 },
   "gpt-5.6-luna": { input: 0.2, cachedInput: 0.02, output: 1.2 },
   "claude-sonnet-5": { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 },
@@ -800,7 +800,7 @@ export function guardToolArgs(
 }
 
 /** The longest tool result handed back to the model, in characters. The report keeps everything; this only bounds the context. */
-export const TOOL_RESULT_MAX_CHARS = 16_000;
+const TOOL_RESULT_MAX_CHARS = 16_000;
 
 /** One tool result as text: images named rather than sent, and the length bounded. */
 export function toolResultText(content: ReadonlyArray<{ type: string; text?: string }> | undefined, max = TOOL_RESULT_MAX_CHARS): string {
@@ -970,10 +970,10 @@ export interface JudgeCalls {
 }
 
 /** How a run deduplicated: by the rule alone, or with the model judge, and what the judge's calls cost. */
-export type CiDedup = { by: "rule" } | ({ by: "judge"; /** The effort the judge was asked at. */ effort?: string } & JudgeCalls);
+type CiDedup = { by: "rule" } | ({ by: "judge"; /** The effort the judge was asked at. */ effort?: string } & JudgeCalls);
 
 /** One line on how a run deduplicated, for the summary. */
-export function dedupLine(d: CiDedup): string {
+function dedupLine(d: CiDedup): string {
   if (d.by === "rule") return "the rule alone";
   const tokens = d.usage.input + d.usage.output;
   return (

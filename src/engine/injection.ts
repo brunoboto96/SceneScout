@@ -41,7 +41,7 @@ export const MAX_PROBES = 60;
 /** Text is compared on this many characters, on both sides, so a long fuzz value still matches its element. */
 export const INJECTION_TEXT_MAX = 200;
 /** Most matching elements reported per probe per page. */
-export const MAX_HITS = 20;
+const MAX_HITS = 20;
 
 const OPEN_RE = /<([a-zA-Z][a-zA-Z0-9-]*)/;
 // One attribute at a time, anchored where the last one ended: a slash between

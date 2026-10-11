@@ -27,7 +27,7 @@ import { normalizePath } from "./fingerprint.js";
 /** Most lanes worth running at once. Past this the planner spends longer reading reports than the lanes spend testing. */
 export const MAX_LANES = 8;
 /** A lane name is a session name: short, and it shows in the live view. */
-export const LANE_NAME_MAX = 40;
+const LANE_NAME_MAX = 40;
 
 export interface LaneBrief {
   /** The session name to attach with. */

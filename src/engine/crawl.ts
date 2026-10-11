@@ -77,7 +77,7 @@ export function crawlLine(
 }
 
 /** The media types a browser renders as a page: anything else a route answers with is a file, a feed or data. */
-export const PAGE_MEDIA_TYPES: readonly string[] = ["text/html", "application/xhtml+xml"];
+const PAGE_MEDIA_TYPES: readonly string[] = ["text/html", "application/xhtml+xml"];
 
 /**
  * A Content-Type header's media type, lowercased and without its parameters
