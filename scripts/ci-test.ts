@@ -2291,6 +2291,24 @@ test("dedup benchmark workflow: dispatched only, reads the repository, and the k
   }
 });
 
+test("dependabot: every action's own pins are watched, not only the workflows' and the root action's", () => {
+  const config = parseYaml(fs.readFileSync(path.join(REPO, ".github", "dependabot.yml"), "utf8")) as {
+    updates: Array<{ "package-ecosystem": string; directory?: string; directories?: string[] }>;
+  };
+  const actions = config.updates.find((u) => u["package-ecosystem"] === "github-actions");
+  assert.ok(actions, "github-actions updates are configured");
+  const watched = (actions.directories ?? [actions.directory ?? ""]).map((d) => d.replace(/\/+$/, "") || "/");
+  // "/" covers .github/workflows and the root action.yml; an action in a subdirectory is read only when its directory is listed.
+  const withRemotePins = ["action.yml", ...fs.readdirSync(REPO).map((d) => path.join(d, "action.yml"))]
+    .filter((f) => fs.existsSync(path.join(REPO, f)))
+    .filter((f) => /^\s*uses:\s*[\w.-]+\/[\w.-]+.*@[0-9a-f]{40}/m.test(fs.readFileSync(path.join(REPO, f), "utf8")));
+  assert.ok(withRemotePins.length >= 3, `the three actions pin remote actions: ${withRemotePins.join(", ")}`);
+  for (const f of withRemotePins) {
+    const dir = path.dirname(f) === "." ? "/" : `/${path.dirname(f)}`;
+    assert.ok(watched.includes(dir), `${f} pins actions by commit and Dependabot does not read ${dir}`);
+  }
+});
+
 test("weekly benchmark: every check it dispatches on the results branch accepts that branch, and wave hold accepts no other", () => {
   const jobs = readWorkflow("bench-weekly.yml").jobs as Record<string, WorkflowJob>;
   const script = jobs["test-results-pr"].steps!.map((s) => s.run ?? "").join("\n");

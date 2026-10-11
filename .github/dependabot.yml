@@ -27,7 +27,9 @@ updates:
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
-    directory: /
+    # / reads .github/workflows and the root action.yml only; the ci and qa
+    # actions pin their own actions by commit, so their folders are listed too.
+    directories: ["/", "/ci", "/qa"]
     schedule:
       interval: weekly
     groups:
