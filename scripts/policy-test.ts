@@ -79,7 +79,8 @@ import {
   unseenWriteSource,
 } from "../src/engine/unload.ts";
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
-import { marksRouteExercised, pathnameOf, routedWriteVerdict } from "../src/engine/route-guard.ts";
+import type { Request, Route } from "playwright";
+import { marksRouteExercised, pathnameOf, RouteGuard, routedWriteVerdict, type RouteGuardHost } from "../src/engine/route-guard.ts";
 
 // ---------------------------------------------------------------------------
 // isDestructiveWire — argument order is load-bearing
@@ -1604,4 +1605,139 @@ test("a write marks its page's forms exercised only when the route handler will 
 test("pathnameOf reads a request URL's path, and keeps what does not parse", () => {
   assert.equal(pathnameOf("https://app.example.com/api/things/7?x=1"), "/api/things/7");
   assert.equal(pathnameOf("not a url"), "not a url");
+});
+
+// The handler itself, driven through RouteGuardHost with a stand-in route: what each verdict does to the request.
+type GuardCall = string;
+function guardRig(
+  rule: (typeof WRITE_MODES)[number],
+  opts: { foreign?: string | null; owned?: (pathname: string) => boolean; readPost?: string; frameDoc?: "foreign" | "app" | null } = {},
+) {
+  const calls: GuardCall[] = [];
+  const owned = new Set<string>();
+  const host: RouteGuardHost = {
+    appUrl: () => "https://app.example.com",
+    rule: () => rule,
+    pageUrl: () => "https://app.example.com/things",
+    trustedEmbeds: () => new Set(),
+    movedByEmbed: () => null,
+    noteBlocked: (e) => void calls.push(`noteBlocked ${e.sig} answered=${e.answered}${e.why ? ` why=${e.why}` : ""}`),
+    logAction: (e) => void calls.push(`log ${e.action}`),
+    notePolicyBlock: () => void calls.push("notePolicyBlock"),
+    noteSentWrite: () => void calls.push("noteSentWrite"),
+    foreignWriteOf: () => opts.foreign ?? null,
+    embedEscapeNavigation: () => false,
+    frameDocumentKind: () => opts.frameDoc ?? null,
+    sentByMainFrame: () => true,
+    readPostOf: (r, method, url) =>
+      opts.readPost && r === "observe" && method === "POST" && pathnameOf(url) === opts.readPost
+        ? { entry: `POST ${opts.readPost}`, origin: null, segments: opts.readPost.split("/").filter(Boolean) }
+        : null,
+    noteObserveRefusedPost: (url) => void calls.push(`noteObserveRefusedPost ${pathnameOf(url)}`),
+    clearRefusedPost: (url) => void calls.push(`clearRefusedPost ${pathnameOf(url)}`),
+    isOwnedResource: (pathname) => owned.has(pathname) || (opts.owned?.(pathname) ?? false),
+    recordCreation: async (res) => {
+      owned.add(String((res as unknown as { created: string }).created));
+    },
+  };
+  const guard = new RouteGuard(host);
+  const send = (
+    method: string,
+    path: string,
+    { type = "xhr", body = null as string | null, created = undefined as string | undefined, answerAfterMs = 0 } = {},
+  ) => {
+    const url = `https://app.example.com${path}`;
+    const request = {
+      method: () => method,
+      url: () => url,
+      resourceType: () => type,
+      postData: () => body,
+      postDataBuffer: () => (body === null ? null : Buffer.from(body)),
+      headers: () => ({ origin: "https://app.example.com" }),
+      frame: () => {
+        throw new Error("no frame");
+      },
+      response: () => new Promise((resolve) => setTimeout(() => resolve({ ok: () => true, created }), answerAfterMs)),
+    };
+    let outcome = "unanswered";
+    const route = {
+      request: () => request,
+      fallback: async () => void (outcome = "fallback"),
+      continue: async () => void (outcome = "continue"),
+      fulfill: async (r: { status?: number }) => void (outcome = `fulfill ${r.status}`),
+      abort: async (code: string) => void (outcome = `abort ${code}`),
+      fetch: async () => {
+        throw new Error("not fetched in this rig");
+      },
+    };
+    const done = guard.handle(route as unknown as Route).then(() => outcome);
+    return { request: request as unknown as Request, done };
+  };
+  return { calls, guard, send };
+}
+
+test("RouteGuard: each verdict is applied to the request, and a refusal is recorded and reported", async () => {
+  // Read-only: a plain POST goes out; the same POST carrying a destructive command is answered with a refusal (the contrastive pair).
+  {
+    const { calls, guard, send } = guardRig("read-only");
+    const plain = send("POST", "/api/things", { body: '{"note":"draft"}' });
+    assert.equal(await plain.done, "fallback");
+    assert.equal(guard.refused(plain.request), false);
+    assert.deepEqual(calls, ["clearRefusedPost /api/things"], "a POST that went out is no longer a gap");
+    calls.length = 0;
+    const destructive = send("POST", "/api/things", { body: '{"action":"delete"}' });
+    assert.equal(await destructive.done, "fulfill 403");
+    assert.equal(guard.refused(destructive.request), true, "the request event's report must know the policy stopped it");
+    assert.deepEqual(calls, ["noteBlocked POST https://app.example.com/api/things answered=true", "log write-policy:blocked", "notePolicyBlock"]);
+    // A navigation's refused write is dropped, not answered.
+    const form = send("DELETE", "/api/things/1", { type: "document" });
+    assert.equal(await form.done, "abort blockedbyclient");
+    assert.equal(guard.refused(form.request), true);
+  }
+  // Reads go out in every mode, and are never recorded.
+  {
+    const { calls, send } = guardRig("observe");
+    for (const method of ["GET", "HEAD", "OPTIONS"]) assert.equal(await send(method, "/api/things").done, "fallback");
+    assert.deepEqual(calls, []);
+  }
+  // A foreign frame's write is refused before sign-in is considered, with the reason.
+  {
+    const { calls, guard, send } = guardRig("safe-write", { foreign: "https://chat.example.com" });
+    const login = send("POST", "/api/auth/login", { body: "{}" });
+    assert.equal(await login.done, "fulfill 403");
+    assert.equal(guard.refused(login.request), true);
+    assert.equal(calls[0], "noteBlocked POST https://app.example.com/api/auth/login answered=true why=sent from a frame of https://chat.example.com");
+  }
+  // Observe: a sign-in and a POST named as a read go out; any other POST is refused and remembered for the gap ledger.
+  {
+    const { calls, guard, send } = guardRig("observe", { readPost: "/api/search" });
+    assert.equal(await send("POST", "/api/auth/login", { body: "{}" }).done, "fallback");
+    assert.deepEqual(calls, []);
+    assert.equal(await send("POST", "/api/search", { body: '{"q":"x"}' }).done, "fallback");
+    assert.deepEqual(calls, ["log write-policy:read-post", "clearRefusedPost /api/search"]);
+    calls.length = 0;
+    const other = send("POST", "/api/things", { body: "{}" });
+    assert.equal(await other.done, "fulfill 403");
+    assert.equal(guard.refused(other.request), true);
+    assert.equal(calls[0], "noteObserveRefusedPost /api/things");
+  }
+  // Safe-write: PUT, PATCH and DELETE go out only on this run's own records.
+  {
+    const { guard, send } = guardRig("safe-write", { owned: (p) => p === "/api/things/mine" });
+    for (const method of ["PUT", "PATCH", "DELETE"]) {
+      assert.equal(await send(method, "/api/things/mine").done, "fallback", `${method} of an owned record`);
+      const theirs = send(method, "/api/things/theirs");
+      assert.equal(await theirs.done, "fulfill 403", `${method} of a record this run did not create`);
+      assert.equal(guard.refused(theirs.request), true);
+    }
+  }
+});
+
+test("RouteGuard: a safe-write PUT right after the POST that created its record waits for the creation to be recorded", async () => {
+  const { send } = guardRig("safe-write");
+  const create = send("POST", "/api/things", { body: "{}", created: "/api/things/9", answerAfterMs: 30 });
+  assert.equal(await create.done, "fallback");
+  // Judged while the POST's answer is still on its way: allowed only because the handler waits for the pending creation.
+  assert.equal(await send("PUT", "/api/things/9", { body: "{}" }).done, "fallback");
+  assert.equal(await send("PUT", "/api/things/10", { body: "{}" }).done, "fulfill 403");
 });
