@@ -63,6 +63,7 @@ const readYaml = (rel: string) => parseYaml(read(rel)) as Record<string, any>;
 const PAGE_NAMES = [
   "Home.md",
   "_Sidebar.md",
+  "_Footer.md",
   "Start-here.md",
   "Ways-to-use-it.md",
   "What-it-checks.md",
@@ -226,17 +227,38 @@ const sorted = (xs: Iterable<string>): string[] => [...new Set(xs)].sort();
 
 // ── Rendering ────────────────────────────────────────────────────────────────
 
+/** The wiki's sidebar and footer: shown around every page, never pages themselves. */
+const CHROME = new Set(["_Sidebar.md", "_Footer.md"]);
+
 test("the guide is the pages Home and the sidebar link to, and nothing else", () => {
   const onDisk = fs.readdirSync(path.join(REPO, GUIDE_DIR)).filter((f) => f.endsWith(".md"));
   assert.deepEqual(sorted(onDisk), sorted(PAGE_NAMES));
   for (const index of ["Home.md", "_Sidebar.md"]) {
     const linked = new Set(links(pages.get(index)!).map((l) => l.target.split("#")[0]));
     for (const name of PAGE_NAMES) {
-      if (name === "_Sidebar.md" || name === index) continue;
+      if (CHROME.has(name) || name === index) continue;
       assert.ok(linked.has(name), `${index} does not link to ${name}`);
     }
   }
-  for (const [name, text] of pages) if (name !== "_Sidebar.md") assert.match(text, /^# \S/, `${name} starts with its title`);
+  for (const [name, text] of pages) if (!CHROME.has(name)) assert.match(text, /^# \S/, `${name} starts with its title`);
+});
+
+test("the sidebar groups the pages under headings, and the footer stays a line or two", () => {
+  const sidebar = pages.get("_Sidebar.md")!;
+  const groups = [...sidebar.matchAll(/^#{2,4} (.+)$/gm)].map((m) => m[1]);
+  assert.deepEqual(groups, ["Getting started", "Using it", "Reference", "Help"]);
+  const footer = pages.get("_Footer.md")!;
+  assert.doesNotMatch(footer, /^#/m, "the footer has no heading");
+  assert.ok(footer.trim().split("\n").length <= 3, "the footer is short");
+});
+
+test("each page opens by saying who it is for and what it lets you do, before its first section", () => {
+  for (const [name, text] of pages) {
+    if (name === "Home.md" || name.startsWith("_")) continue;
+    const opening = lf(text).split(/\n## /)[0];
+    assert.match(opening, /^> \*\*Who this is for:\*\* \S/m, `${name}: its opening says who it is for`);
+    assert.match(opening, /^> \*\*What you will be able to do:\*\* \S/m, `${name}: its opening says what you will be able to do`);
+  }
 });
 
 test("every page renders as GitHub Markdown: whole tables, closed code fences", () => {
@@ -575,6 +597,34 @@ test("a guide page's links are rewritten for the wiki", () => {
   assert.equal(wiki("[demo](../../demo-app/README.md)"), "[demo](https://github.com/owner/repo/blob/v1.2.3/demo-app/README.md)");
   assert.equal(wiki("[here](#levels) and [out](https://example.com/a.md)"), "[here](#levels) and [out](https://example.com/a.md)");
   assert.equal(wiki("[unknown](Missing.md)"), "[unknown](https://github.com/owner/repo/blob/v1.2.3/docs/guide/Missing.md)", "only a real page loses .md");
+});
+
+test("a picture from the repository renders on the wiki, and a folder opens as a folder", () => {
+  assert.equal(
+    wiki("![The dashboard](../../examples/screenshots/dashboard.png)"),
+    "![The dashboard](https://raw.githubusercontent.com/owner/repo/v1.2.3/examples/screenshots/dashboard.png)",
+    "a blob URL is an HTML page, so an image must point at the raw file",
+  );
+  assert.equal(
+    wiki("[![a](../../examples/x.gif)](../../examples/report.md)"),
+    "[![a](https://raw.githubusercontent.com/owner/repo/v1.2.3/examples/x.gif)](https://github.com/owner/repo/blob/v1.2.3/examples/report.md)",
+  );
+  for (const ext of ["png", "PNG", "gif", "jpg", "jpeg", "svg", "webp"]) assert.match(wiki(`![x](../../a/b.${ext})`), /raw\.githubusercontent\.com/, ext);
+  assert.equal(wiki("[the guide](./)"), "[the guide](https://github.com/owner/repo/tree/v1.2.3/docs/guide/)");
+  assert.equal(wiki("[examples](../../examples/)"), "[examples](https://github.com/owner/repo/tree/v1.2.3/examples/)");
+  assert.equal(wiki("[the repository](../../)"), "[the repository](https://github.com/owner/repo/tree/v1.2.3/)");
+  assert.equal(wiki('![x](../../a.png "A title")'), '![x](https://raw.githubusercontent.com/owner/repo/v1.2.3/a.png "A title")');
+  assert.equal(wiki("![x](../../a.svg#dark)"), "![x](https://raw.githubusercontent.com/owner/repo/v1.2.3/a.svg#dark)");
+});
+
+test("no page uses an HTML src or href the transform would leave relative", () => {
+  for (const [name, text] of pages) {
+    for (const l of prose(text)) {
+      for (const m of l.text.matchAll(/\b(?:src|href)\s*=\s*["']([^"']+)["']/gi)) {
+        assert.match(m[1], /^(?:https:\/\/|#)/, `${name}:${l.n}: ${m[1]} would break on the wiki; use a Markdown link`);
+      }
+    }
+  }
 });
 
 test("code is never rewritten, and a link out of the repository is refused", () => {

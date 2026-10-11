@@ -1,5 +1,17 @@
 # Start here
 
+> **Who this is for:** anyone trying SceneScout for the first time, developer or not.
+>
+> **What you will be able to do:** take a first look at an app with one command, install SceneScout for your agent, run it against the demo app, and read the report and the live view.
+
+```mermaid
+flowchart LR
+  A["1. A first look<br/>npx -y scenescout #lt;url#gt;"] --> B["2. Install<br/>for your agent"]
+  B --> C["3. Check the setup<br/>doctor"]
+  C --> D["4. A first run<br/>against the demo app"]
+  D --> E["5. Read the report<br/>and the live view"]
+```
+
 ## A first look, with nothing set up
 
 All it takes is Node 20 or newer and the address of an app you are allowed to test, on your machine or deployed:
@@ -8,7 +20,7 @@ All it takes is Node 20 or newer and the address of an app you are allowed to te
 npx -y scenescout http://localhost:3000
 ```
 
-No model, no API key, no MCP client and no setup step:
+No model, no API key, no MCP client and no setup step. It does three things:
 
 1. **The browser, if it is missing.** It downloads the headless Chromium build once (about 200 MB) and changes nothing else on the machine: no skill, no MCP server registration, no command on your PATH.
 2. **A look that sends nothing.** It runs in `observe` mode, so nothing but reads leaves the page, signing in and refreshing a token apart. It visits the start page and the pages it finds by following links, up to 20 pages and starting none after 3 minutes, and measures each one by the [check rules](Configuration-reference.md#check-rules): failed requests, uncaught errors, dead ends, controls covered or out of reach, fields with no label, contrast and more. It fills in no form and reads nothing from the folder it runs in.
@@ -24,7 +36,9 @@ Look at these first:
 Report: scenescout-report/report.md
 ```
 
-The three are chosen by severity, then by how many pages show the issue, and one failure seen several ways takes one of the three places: a missing image is a failed request, a broken image and the browser's console line about it. The counts and the report list every issue, the pages it looked at and what it found but did not reach. It exits 0 whatever it finds, because it is a look and not a gate, and 2 when the address cannot be reached or the report cannot be written. After the address, `--max-routes` and `--max-minutes` raise the limits, and `--mode read-only` lets through the plain POSTs a page sends as it loads ([its options](Configuration-reference.md#scenescout-url)).
+- **Which three come first.** They are chosen by severity, then by how many pages show the issue. One failure seen several ways takes one of the three places: a missing image is a failed request, a broken image and the browser's console line about it. The counts and the report list every issue, the pages it looked at and what it found but did not reach.
+- **Exit code.** 0 whatever it finds, because it is a look and not a gate; 2 when the address cannot be reached or the report cannot be written.
+- **Going further.** After the address, `--max-routes` and `--max-minutes` raise the limits, and `--mode read-only` lets through the plain POSTs a page sends as it loads ([its options](Configuration-reference.md#scenescout-url)).
 
 A first look only opens pages. Everything below is the full setup: your coding agent drives SceneScout to click, fill forms, compare roles and remember what it learned, and [`scenescout check`](Ways-to-use-it.md#scenescout-check-a-gate-in-ci) gates pull requests with the same measurements.
 
@@ -32,9 +46,10 @@ A first look only opens pages. Everything below is the full setup: your coding a
 
 SceneScout tests a running web app the way an exploratory tester does: it opens pages, clicks, fills forms, compares roles and writes down what is wrong. It does this as an MCP server, so the thinking is done by the coding agent you already use and pay for. The engine itself contains no language model.
 
-```text
-your agent  ──MCP──▶  SceneScout engine  ──▶  a real browser on your app
-(intent, judgement)   (tools, checks, memory, report)
+```mermaid
+flowchart LR
+  A["Your coding agent<br/>intent and judgement"] -- MCP --> S["SceneScout engine<br/>tools, checks, memory, report"]
+  S --> B["A real browser<br/>on your app"]
 ```
 
 What the engine adds to an agent with a browser:
@@ -181,6 +196,11 @@ In Claude Code the skill also gives a command:
 
 What happens next, in order:
 
+```mermaid
+flowchart LR
+  scan[Scan] --> attach[Attach] --> crawl[Crawl] --> inv[Investigate] --> measure[Measure] --> report[Report]
+```
+
 1. **Scan.** `scout_scan` reads the project: framework, routes found in the source, saved logins. The demo is plain HTML, so it finds no framework and the route list is built from links instead.
 2. **Attach.** `scout_attach` opens a browser in a write mode (`read-only` for a local app). Its result has a `Live view:` line with an address; the agent passes it on to you.
 3. **Crawl.** `scout_crawl` visits every known route in one call and reports each one's status, element count and problems. A route that landed on another page is marked `REDIRECTED`, and a path crawled by name that answers as a page joins the route list.
@@ -208,20 +228,28 @@ When the run was given tickets, the plain section answers them before listing th
 
 `scout_report {report}` chooses which parts a report carries: `both` (default) the plain section and then the technical report, `qa` the plain section alone, `dev` the technical report alone. It applies to the files `scout_report` writes; the live view's report always shows both.
 
-The technical report follows, worst first:
+### The technical report
 
-- **Summary**: open findings, route coverage, design audits, oracle violations, and how many errors the write policy itself caused (these are not counted as the app's).
-- **Acceptance criteria**: on a run given tickets, each criterion's verdict with the confidence the agent stated, the ids of the findings it linked, its reason and the sessions that judged it.
-- **Page quality scores**: 0 to 100 per audited route, for accessibility, craft, consistency and task clarity, worst first.
-- **Gap ledger**: what was not tested. Treat it as the honest limit of the run, not as noise.
-- **Findings**: each with a severity, category, the evidence as a machine signature (`GET /api/orders?status=archived → HTTP 500`), where it happened, a repro trace of the last actions and a Playwright regression-test skeleton.
-- **Worth a look**: observations that are defects only under a convention the run cannot see, such as a 4px spacing scale. They are listed and never counted as defects.
-- **Role capability matrix**: which role could reach what, on a run with more than one role.
-- **Pace and lane calibration**: on a parallel run, how the time was spent and whether each lane's stated confidence matched what was filed.
+It follows the plain section, worst first:
+
+| Section | What it tells you |
+|---|---|
+| **Summary** | Open findings, route coverage, design audits, oracle violations, and how many errors the write policy itself caused (these are not counted as the app's) |
+| **Acceptance criteria** | On a run given tickets, each criterion's verdict with the confidence the agent stated, the ids of the findings it linked, its reason and the sessions that judged it |
+| **Page quality scores** | 0 to 100 per audited route, for accessibility, craft, consistency and task clarity, worst first |
+| **Gap ledger** | What was not tested. Treat it as the honest limit of the run, not as noise |
+| **Findings** | Each with a severity, category, the evidence as a machine signature (`GET /api/orders?status=archived → HTTP 500`), where it happened, a repro trace of the last actions and a Playwright regression-test skeleton |
+| **Worth a look** | Observations that are defects only under a convention the run cannot see, such as a 4px spacing scale. They are listed and never counted as defects |
+| **Role capability matrix** | Which role could reach what, on a run with more than one role |
+| **Pace and lane calibration** | On a parallel run, how the time was spent and whether each lane's stated confidence matched what was filed |
 
 [examples/report.md](../../examples/report.md) is a complete report from the demo app.
 
+### A picture of each finding
+
 Each finding is filed with a picture of what it is about: the element the agent names, with a margin around it, or the page as it was. The picture is kept in `.scenescout/recordings/`, shown under the finding in `.scenescout/report.html`, and returned with the agent's `scout_finding` result, so a chat client shows the evidence as it is filed. Pictures are held to 800 pixels on their longer side and 200 KB, and a session returns the first 10 in the conversation; later ones are kept and in the report. `scout_attach {evidence: "file"}` keeps them out of the conversation, `{evidence: "off"}` takes none, and a CI job keeps them on file by default. The [configuration reference](Configuration-reference.md#environment-variables) has the settings. A picture shows whatever the page showed, and the engine's secret redaction reads text, not pixels: on a page that displays secrets, turn pictures off.
+
+### What the next run remembers
 
 Findings stay in `.scenescout/memory.json`. The next run skips states already covered, deduplicates findings on their evidence and lists older findings as an index; `scout_report {history: "full"}` prints every one in full. `.scenescout/` writes its own `.gitignore`, so a `git add -A` in the project does not pick it up.
 
@@ -229,18 +257,28 @@ Findings stay in `.scenescout/memory.json`. The next run skips states already co
 
 Every attach starts a small local page that shows each session: the tool it is running and for how long, the page it is on as a thumbnail, and a feed of what it just did. A call stuck past its time budget turns its card red. The report button shows the report as it stands mid-run.
 
+![The live view during a run of three parallel agents against the demo app: one card per session, each with its role and objective, the task it is on, the tool it is running, a picture of its page, and a feed of the actions it just took](../../examples/screenshots/live-view.png)
+
 ```bash
 scenescout watch            # open the live view for the project in this folder
 scenescout status           # the same information as text
 ```
 
+### In the conversation
+
 Ask the agent how the run is going and it calls `scout_status`. In a client that renders MCP Apps, that puts a small pane in the conversation which refreshes itself every few seconds: each session's objective and task, open findings by severity, coverage, and a button that opens the live view. It shows nothing the live view does not, and loads nothing from outside. A client without MCP Apps gets the same as text, starting with the live view's address.
+
+### Who can reach it
 
 The page is served on `127.0.0.1` only, behind a token that changes on each start, and answers `GET` and nothing else. No frame it shows is written to disk. `SCENESCOUT_LIVE=off` in the server's environment keeps it closed.
 
 A client that lists the server's prompts has `live`. It takes no arguments and no password: the agent returns the loopback address already printed in a tool result, and may open it where the host can open a URL.
 
+### When it opens by itself
+
 On a desktop, the engine also opens the live view in your default browser as a session attaches, and the report when `scout_report` writes it, whether or not the browser window is shown. In CI, over SSH, or on Linux with no display, nothing opens. To choose yourself, set `SCENESCOUT_OPEN` to `live`, `report`, `both` or `none` in the server's environment (`none` if you want no tabs), or ask the agent (`scout_attach {open: "none"}`). Opening the page changes nothing about who can reach it.
+
+### Recording a run
 
 To keep a copy of the whole run, ask for a recording (`Use SceneScout to test … and record the run`, or `scout_attach {record: true}`). The engine then keeps a frame after every action, and `.scenescout/report.html`, the self-contained page `scout_report` writes beside the report, shows the screenshots around each finding and each session's trail. Recording is off by default because frames are pictures of the app, which the engine's secret redaction cannot read. A team that wants every QA run recorded sets `SCENESCOUT_RECORD=on` in the server's environment once.
 

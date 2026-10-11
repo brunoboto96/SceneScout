@@ -25,6 +25,10 @@ updates:
       # @modelcontextprotocol/sdk builds its tool schemas against zod v3's API.
       - dependency-name: zod
         update-types: ["version-update:semver-major"]
+      # Playwright 1.64 hangs a click whose navigation is answered with 204 No
+      # Content (#487). Remove this once a release fixes it.
+      - dependency-name: "playwright"
+        versions: [">=1.64.0 <1.65.0"]
 
   - package-ecosystem: github-actions
     # / reads .github/workflows and the root action.yml only; the ci and qa

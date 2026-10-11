@@ -20,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { findingPicturePath } from "../src/engine/capture.ts";
 import { MEMORY_DIRNAME, writeSelfIgnore } from "../src/engine/memory.ts";
 
@@ -314,4 +315,43 @@ test("no JSON Web Token outside the redaction fixtures", () => {
 test("no public IP address is tracked", () => {
   const found = hits(PUBLIC_IPV4_RE, SELF).filter((h) => !isReservedIpv4(h.slice(h.lastIndexOf(" ") + 1)));
   assert.deepEqual(found, [], "use 127.0.0.1 or a documentation address (192.0.2.x); a public address names a real host");
+});
+
+test("every name a script imports from src/ is exported there", () => {
+  // tsx strips types without checking them, so a script can import a type its
+  // module never exported and still run. This lists each module's exports with
+  // the compiler (no type check of the scripts) and names each import missing.
+  const scripts = tracked.filter((f) => /^scripts\/.*\.ts$/.test(f)).map((f) => path.join(root, f));
+  const program = ts.createProgram(scripts, {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    allowImportingTsExtensions: true,
+    noEmit: true,
+    skipLibCheck: true,
+  });
+  const checker = program.getTypeChecker();
+  const missing: string[] = [];
+  for (const file of scripts) {
+    const source = program.getSourceFile(file);
+    if (!source) continue;
+    for (const statement of source.statements) {
+      if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+      if (!/(^|\/)src\//.test(statement.moduleSpecifier.text)) continue;
+      const bindings = statement.importClause?.namedBindings;
+      if (!bindings || !ts.isNamedImports(bindings)) continue;
+      const moduleSymbol = checker.getSymbolAtLocation(statement.moduleSpecifier);
+      const where = `${path.relative(root, file)}: ${statement.moduleSpecifier.text}`;
+      if (!moduleSymbol) {
+        missing.push(`${where} (module not found)`);
+        continue;
+      }
+      const exported = new Set(checker.getExportsOfModule(moduleSymbol).map((s) => s.name));
+      for (const element of bindings.elements) {
+        const name = (element.propertyName ?? element.name).text;
+        if (!exported.has(name)) missing.push(`${where} does not export ${name}`);
+      }
+    }
+  }
+  assert.deepEqual(missing, [], "import the name from the module that declares and exports it");
 });

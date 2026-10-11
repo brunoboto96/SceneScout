@@ -162,7 +162,7 @@ runs:
 
     - name: Install Node.js
       if: steps.node.outputs.present != 'true'
-      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: "24"
 
@@ -176,7 +176,7 @@ runs:
 
     - name: Download the run's pictures
       if: inputs.stage == 'shots' && inputs.artifact-name != ''
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ runner.temp }}/scenescout-qa-shots
@@ -193,7 +193,7 @@ runs:
     - name: Download the run's results
       if: inputs.stage == 'report' && inputs.result != 'cancelled' && inputs.artifact-name != ''
       continue-on-error: true
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ runner.temp }}/scenescout-qa-results
@@ -218,7 +218,7 @@ runs:
       id: download
       if: inputs.stage == 'check' && steps.dispatch.outputs.download == 'true'
       continue-on-error: true
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: ${{ steps.dispatch.outputs.artifact }}
         run-id: ${{ steps.dispatch.outputs.run-id }}

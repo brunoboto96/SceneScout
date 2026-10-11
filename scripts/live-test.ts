@@ -53,6 +53,7 @@ import {
 import { statusPanePage } from "../src/engine/status-pane-page.ts";
 import * as mod from "../mods/scenescout-mod/hooks/pane.js";
 import {
+  COULD_NOT_OPEN,
   decideOpen,
   OPEN_CHOICES,
   OPEN_ENV,
@@ -60,6 +61,7 @@ import {
   openChoiceFromEnv,
   openerCommand,
   openInBrowser,
+  openOrSay,
   type OpenChoice,
   type OpenContext,
   type Spawner,
@@ -1578,6 +1580,59 @@ test("open: the opener is spawned without a shell, detached, and a refused targe
     throw new Error("EPERM");
   };
   assert.deepEqual(openInBrowser("http://127.0.0.1:1/t/", { ...deps, spawn: throwing }), { ok: false, why: "xdg-open could not start: EPERM" });
+});
+
+test("open from the CLI: 'Could not open a browser' is said only when the opener could not start", () => {
+  const url = "http://127.0.0.1:4567/tok/";
+  const started =
+    (onError?: (fire: (err: Error) => void) => void): Spawner =>
+    () => ({
+      on: (_event, listener) => onError?.(listener),
+      unref: () => undefined,
+    });
+  const desktop = { DISPLAY: ":0" };
+  const refuse: Spawner = () => {
+    throw new Error("nothing is spawned when nobody would see the window");
+  };
+  const cases: Array<{ name: string; target: string; spawn: Spawner; said: string[]; env?: Record<string, string> }> = [
+    // An opener that started and has not exited (xdg-open still running, say) is a success: nothing waits on it.
+    { name: "started", target: url, spawn: started(), said: [] },
+    {
+      name: "not installed",
+      target: url,
+      spawn: started((fire) => fire(new Error("spawn xdg-open ENOENT"))),
+      said: [`${COULD_NOT_OPEN} (xdg-open could not start: spawn xdg-open ENOENT)`],
+    },
+    {
+      name: "spawn throws",
+      target: url,
+      spawn: () => {
+        throw new Error("EPERM");
+      },
+      said: [`${COULD_NOT_OPEN} (xdg-open could not start: EPERM)`],
+    },
+    {
+      name: "refused target",
+      target: "https://example.com/",
+      spawn: started(),
+      said: [`${COULD_NOT_OPEN} (only the live view's loopback address or an absolute file path is opened)`],
+    },
+    // Nobody would see a window, so nothing is spawned and the reason is said rather than an opener failing silently.
+    {
+      name: "over SSH",
+      target: url,
+      env: { ...desktop, SSH_CONNECTION: "192.0.2.1 22 192.0.2.2 22" },
+      spawn: refuse,
+      said: [`${COULD_NOT_OPEN} (no display to show a window on)`],
+    },
+    { name: "no display server", target: url, env: {}, spawn: refuse, said: [`${COULD_NOT_OPEN} (no display to show a window on)`] },
+    { name: "CI", target: url, env: { ...desktop, CI: "true" }, spawn: refuse, said: [`${COULD_NOT_OPEN} (a CI run)`] },
+  ];
+  for (const c of cases) {
+    const said: string[] = [];
+    openOrSay(c.target, { env: c.env ?? desktop, platform: "linux", spawn: c.spawn, say: (line) => said.push(line) });
+    assert.deepEqual(said, c.said, c.name);
+  }
 });
 
 // ---- the run-status pane (MCP Apps) -------------------------------------------

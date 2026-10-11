@@ -1,5 +1,9 @@
 # Safety model
 
+> **Who this is for:** anyone about to point SceneScout at an app with data in it, and anyone setting it up in CI.
+>
+> **What you will be able to do:** choose a write mode, read a refusal, name what may get through, and keep keys away from pull-request code.
+
 An agent that clicks around an app will, sooner or later, click Delete. SceneScout does not rely on the agent's judgement to prevent that: every request the page sends is checked on the network against the session's write mode, and a request the mode refuses never reaches the server. Why it is enforced there and not in the prompt: [ADR 2](../adr/0002-enforce-the-write-policy-at-the-network-layer.md).
 
 Only test apps you own or are authorised to test.
@@ -21,9 +25,20 @@ Only test apps you own or are authorised to test.
 
 ## What a refusal looks like
 
+```mermaid
+flowchart LR
+  P["A request<br/>the page sends"] --> W{"Does the session's<br/>write mode allow it?"}
+  W -- Yes --> S["Your server"]
+  W -- No --> R["Refused, never sent: a fetch or XHR<br/>gets a 403 in the server's place, and<br/>the result says WRITE-POLICY blocked"]
+```
+
 A refused request is logged as `🛡 WRITE-POLICY blocked` in the tool result. That is the safety net working, not a defect in the app, and it is not filed as one: the errors it causes are counted separately in the report's summary.
 
 Each refused endpoint is named in full, with the explanation, the first time a session meets it. After that it is counted on one line (`3 repeat blocks of 1 known endpoint (POST …/beacon ×3, background)`), so a page that beacons to a monitoring endpoint on every load does not bury each result. Every request is still refused and still counted.
+
+The server never sees a refused request, but the page's own `fetch` or XHR is answered with a `403` in the server's place rather than dropped. The page's handling of a refusal then really runs, which is useful: a page that shows an error is behaving correctly, and a page that claims "Saved" is lying to its user. That second case is reported as `false_success`, a high finding ([ADR 9](../adr/0009-a-refused-write-is-answered-not-dropped.md)). The errors the stand-in causes are not held against the app: a console or page error raised just after a block that reads as that refusal ("Failed to fetch", "Request failed with status code 403", "403 Forbidden", or the stand-in's own message) is left out of the findings, and the same wording with no block just before it is still reported. An alert or live region that appeared after the policy refused one of the current action's requests is marked `(after a write-policy block)` in the snapshot, so a message such as "You do not have permission" is read as the page answering the engine, not as a permission defect.
+
+`scout_request`, which calls the app's API directly as the session, meets the same policy. It carries the session's cookies and the Authorization header the page last sent to the app's own origin, on a read or a write; a header the page sent to another origin, such as an embedded widget's token, is never replayed. When a replay gets 401 while the page's own latest authorised request succeeded, the result says the replayed credential may be stale. A refused call returns `REFUSED by the write policy` instead of a status, because the server was never asked and the result proves nothing either way. Whatever a `scout_request` call meets, its answer is in that tool's result and nowhere else: a probe the server refuses is not reported as an `http_error` or `console_error` of the page the session visits next.
 
 ## How a control's label is judged
 
@@ -51,10 +66,6 @@ When you know an endpoint only reads, name it: `scout_attach {mode: "observe", r
 
 A page holding unsent input can ask the browser to confirm leaving (`beforeunload`). The result says so by name, with what the engine answered. In `observe` and `read-only` it answers "stay" unless told otherwise, so the navigation is cancelled and nothing is lost; pass `leave: true` to `scout_navigate`, `scout_click` or `scout_back` to leave and discard the input. Other modes leave unless given `leave: false`. Leaving sends no write of its own, and any request the page sends as it goes is judged by the policy like any other. Other native dialogs (alert, confirm, prompt) are dismissed in `observe` and `read-only`, accepted otherwise, and named in the result too.
 
-The server never sees a refused request, but the page's own `fetch` or XHR is answered with a `403` in the server's place rather than dropped. The page's handling of a refusal then really runs, which is useful: a page that shows an error is behaving correctly, and a page that claims "Saved" is lying to its user. That second case is reported as `false_success`, a high finding ([ADR 9](../adr/0009-a-refused-write-is-answered-not-dropped.md)). The errors the stand-in causes are not held against the app: a console or page error raised just after a block that reads as that refusal ("Failed to fetch", "Request failed with status code 403", "403 Forbidden", or the stand-in's own message) is left out of the findings, and the same wording with no block just before it is still reported. An alert or live region that appeared after the policy refused one of the current action's requests is marked `(after a write-policy block)` in the snapshot, so a message such as "You do not have permission" is read as the page answering the engine, not as a permission defect.
-
-`scout_request`, which calls the app's API directly as the session, meets the same policy. It carries the session's cookies and the Authorization header the page last sent to the app's own origin, on a read or a write; a header the page sent to another origin, such as an embedded widget's token, is never replayed. When a replay gets 401 while the page's own latest authorised request succeeded, the result says the replayed credential may be stale. A refused call returns `REFUSED by the write policy` instead of a status, because the server was never asked and the result proves nothing either way. Whatever a `scout_request` call meets, its answer is in that tool's result and nowhere else: a probe the server refuses is not reported as an `http_error` or `console_error` of the page the session visits next.
-
 ## How `safe-write` knows what the run created
 
 The engine records the identifiers of records created in this server process, from the responses to create requests. A later `PUT`, `PATCH` or `DELETE` is allowed only when its path names one of them. When it is unsure whether an identifier is the run's, the answer is no and the write is refused, and records in user or account collections are never claimed. Every session on the project shares that record, so a record the clerk's session created can be approved or deleted by the manager's session. The record lasts until the server process exits.
@@ -81,9 +92,13 @@ Frames that were not read are listed on a `FRAMES` line, and the summary should 
 - Everything a run keeps is in `.scenescout/` in the project: memory, findings, notes, reports, saved logins. That folder writes its own `.gitignore`, so `git add -A` does not commit it. The one exception is `flows/*.json`, which are meant to be committed.
 - Saved logins are owner-only files, and their values are never printed.
 - What is typed into a secret field is never written down. A field counts as secret when it is `type="password"`, when its `autocomplete` is `current-password`, `new-password`, `one-time-code`, `cc-number`, `cc-csc` or `cc-exp…`, when it takes one character (a box of a code split one box per character), or when its name, id, label or placeholder says password, passphrase, passcode, PIN, one-time code, verification code, 2FA, MFA, authenticator code, CVC, CVV, security code, card number, credit card, secret, token, API key, recovery or backup code, private key, seed phrase or security answer. The value, and what the field held before, show as `•••• (masked: password field)` (or one-time code, card, secret) in the tool's result, the action log, memory, the report, the live view's feed, a finding's steps and an exported issue. What is typed into any other field is kept, since a finding's steps need it.
-- Text the run keeps (findings, notes, the action log, addresses) is also cleared of credential shapes, values typed after a label that names a secret, the value of a parameter named for one (`?password=…` from a form sent by GET, `#access_token=…`), email addresses and card numbers. When the browser refuses to fill a secret field, the error says so without the value Playwright quotes. An address on a reserved example domain (`example.com`, `.test`) stays, and so do digits that are not a card number (an order number, a timestamp). A picture is not text: the redaction cannot read a screenshot or a recorded frame.
+- Text the run keeps (findings, notes, the action log, addresses) is also cleared of credential shapes, values typed after a label that names a secret, the value of a parameter named for one (`?password=…` from a form sent by GET, `#access_token=…`), email addresses and card numbers (in one run of digits, or grouped by spaces, non-breaking, thin or figure spaces, hyphens or dots). When the browser refuses to fill a secret field, the error says so without the value Playwright quotes. An address on a reserved example domain (`example.com`, `.test`) stays, and so do digits that are not a card number (an order number, a timestamp, an address, a version, a date or a decimal written with dots). A picture is not text: the redaction cannot read a screenshot or a recorded frame.
 - The live view writes nothing to disk ([ADR 7](../adr/0007-the-live-view-is-local-read-only-and-leaves-nothing-behind.md)). A recorded run does, which is why recording must be asked for ([ADR 8](../adr/0008-a-recorded-run-is-evidence-and-must-be-asked-for.md)).
 - `scout_upload` generates its file in memory. A `filePath` you give it is fenced to the project under test by its real path.
+
+## The project folder is the trust boundary
+
+The folder an attach names as `projectPath` decides what the run may touch on your machine. `.scenescout/` is kept there, a file `scout_upload` attaches must be inside it, and a ticket file `scout_tickets` reads must be inside it too, unless the server's `SCENESCOUT_TICKET_DIRS` names the folder the ticket is in. Both fences follow symbolic links first, so a link inside the project that points elsewhere is outside it. The agent chooses `projectPath` when it attaches, so these fences hold only while it names the project you meant: an agent told to attach with your home folder as the project could upload any file under it. Point it at the project, and treat a `projectPath` you did not expect in an attach's result as a reason to stop the run.
 
 ## Keys and forks in CI
 

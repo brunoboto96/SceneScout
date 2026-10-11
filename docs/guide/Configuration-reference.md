@@ -1,5 +1,18 @@
 # Configuration reference
 
+> **Who this is for:** anyone who needs the exact name or default of a setting.
+>
+> **What you will be able to do:** look up any command, option, environment variable, action input or MCP setting, with its default.
+
+| Section | What is in it |
+|---|---|
+| [Commands](#commands) | Every `scenescout` command and its options, and the check's rules |
+| [Environment variables](#environment-variables) | What the server and each command read from the environment |
+| [GitHub Action inputs](#github-action-inputs) | The inputs and outputs of the check, ci and qa actions |
+| [Repository variables and secrets](#repository-variables-and-secrets-for-scenescout-qa) | What the `/scenescout qa` workflows read |
+| [`scout_login`](#scout_login-options) and [`scout_attach`](#scout_attach-options) options | What an agent can pass when it signs in or attaches |
+| [MCP prompts](#mcp-prompts) and [mod settings](#claude-code-mod-settings) | The prompts a client lists, and the optional Claude Code mod's settings |
+
 Every command-line option, environment variable, GitHub Action input, `/scenescout qa` repository setting, `scout_attach` option and MCP prompt, with its default. A test (`guide-test`, and `mcp-check` for `scout_attach`, `scout_login` and the MCP prompts) compares these tables with the code, so an option added or removed in one place and not the other fails the build. `scenescout --help` prints the same options in short.
 
 An option takes its value after a space or an equals sign: `--fail-on high` or `--fail-on=high`. Relative paths are resolved from the directory the command runs in.
@@ -169,6 +182,8 @@ Every issue carries the `scenescout` label, which a later export lists issues by
 |---|---|---|
 | `--no-open` | off | Print the live view's address without opening a browser |
 
+The address is always printed. A browser is not opened in CI, over SSH or where no display server is running; the command says why, and the address can be opened by hand.
+
 `scenescout scan`, `scenescout status` and `scenescout serve` take no options.
 
 ### Check rules
@@ -242,6 +257,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_PROJECTS_DIR` | the server | The absolute folder that holds one folder per tested site, for an attach with no `projectPath` and a client with no workspace folder. Default: `SceneScout` in the documents folder (`~/Documents` on macOS, `%USERPROFILE%\Documents` on Windows, `XDG_DOCUMENTS_DIR` else `~/Documents` on Linux). `off` makes `projectPath` required. A `scout_attach` `projectPath` wins over it |
 | `USERPROFILE` | the server | Windows: the folder whose `Documents` holds the default `SceneScout` folder |
 | `XDG_DOCUMENTS_DIR` | the server | Linux: the documents folder that holds the default `SceneScout` folder, read before `~/.config/user-dirs.dirs` |
+| `SCENESCOUT_TICKET_DIRS` | the server | Folders outside the project that `scout_tickets` may read a ticket file from, as absolute paths separated as in `PATH` (`:`, or `;` on Windows). Unset: a ticket file is read only from inside the project folder. A relative entry is refused ([Safety model](Safety-model.md#the-project-folder-is-the-trust-boundary)) |
 | `SCENESCOUT_DEDUP` | the server | `judge` asks a model, with a key below, whether a filing the dedup rule keeps apart from everything recorded is one of the open findings on its page; `rule` (default) does not. A `scout_attach` `dedup` wins over it |
 | `SCENESCOUT_DEDUP_PROVIDER` | the server | `anthropic` or `openai`: which key the dedup judge uses when both are set |
 | `SCENESCOUT_FROM_RUN` | the server, `ci` | An earlier run's `ci.json` or project directory, for every `ci` run and `scout_lane_brief` that does not name its own: the run starts from that run's record. Unset (default): a fresh run. `--from-run` and the brief's `fromRun` win over it |
