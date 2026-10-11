@@ -1,0 +1,54 @@
+name: site
+
+# Publishes the project's website, site/index.html, to GitHub Pages
+# (https://brunoboto96.github.io/SceneScout/). The screenshots it shows are the
+# README's, in examples/screenshots, copied in beside the page here so the
+# repository keeps one copy of each.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "examples/screenshots/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# One deploy at a time, and a deploy in progress is never cancelled: Pages
+# would be left half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Put the page and its screenshots together
+        run: |
+          mkdir -p _site
+          cp site/index.html _site/
+          cp -R examples/screenshots _site/screenshots
+          touch _site/.nojekyll
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Only this job can publish, and it checks nothing out.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5

@@ -11,7 +11,7 @@ Works with Claude Code · Cursor · VS Code (Copilot) · Codex CLI · Gemini CLI
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![node >= 20](https://img.shields.io/badge/node-%E2%89%A5%2020-339933?logo=node.js&logoColor=white)
 
-[📖 Guide](docs/guide/Home.md) · [🐛 What it catches](#-what-it-catches) · [🎬 QA with evidence](#-automated-qa-with-evidence) · [🚀 Get started](#-get-started) · [🚦 CI](#-in-ci) · [🔒 Safety](#-safe-by-default) · [📚 Docs](#-documentation)
+[🌐 Website](https://brunoboto96.github.io/SceneScout/) · [📖 Guide](docs/guide/Home.md) · [🐛 What it catches](#-what-it-catches) · [🎬 QA with evidence](#-automated-qa-with-evidence) · [🚀 Get started](#-get-started) · [🚦 CI](#-in-ci) · [🔒 Safety](#-safe-by-default) · [📚 Docs](#-documentation)
 
 </div>
 
