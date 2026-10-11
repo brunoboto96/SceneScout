@@ -43,6 +43,8 @@ jobs:
       # No actions cache anywhere in this job (setup-node's included): what a
       # job holding a key saves, later runs would restore.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 24
