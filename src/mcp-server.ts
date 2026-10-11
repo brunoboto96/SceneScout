@@ -37,6 +37,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
+import { ticketDirsFrom } from "./engine/tickets.js";
 import { LIVE_TOKEN_FILE, liveEngines, liveTokenFileName, pidAlive, statusFileName } from "./engine/live.js";
 import { engines, server, live, liveDirs, liveTokenWrites, pendingLogins } from "./server-context.js";
 import { registerGuideTools } from "./tools/guide.js";
@@ -55,6 +56,12 @@ registerResultTools();
 registerCloseTool();
 
 async function main(): Promise<void> {
+  // Configuration that can only be wrong is reported now, by the person who set it, not to an agent mid-run.
+  const ticketDirs = ticketDirsFrom(process.env);
+  if ("error" in ticketDirs) {
+    console.error(`SceneScout MCP server not started: ${ticketDirs.error}. Fix it where the server is configured and start it again.`);
+    process.exit(1);
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // A client that exits by closing the pipe sends no signal. Without this the

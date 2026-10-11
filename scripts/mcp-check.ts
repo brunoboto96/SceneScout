@@ -1159,6 +1159,29 @@ async function abandonedCallCheck(): Promise<void> {
   }
 }
 
+/**
+ * A SCENESCOUT_TICKET_DIRS entry that is not an absolute path stops the server
+ * as it starts, naming the entry, rather than being found the first time a
+ * ticket outside the project is asked for. Stdin is closed at once, so a server
+ * that does start ends too, and the check reads what it said and how it ended.
+ */
+function ticketDirsStartupCheck(): void {
+  const base = Object.fromEntries(
+    Object.entries({ ...process.env, SCENESCOUT_LIVE: "off", SCENESCOUT_OPEN: "none" }).filter((e): e is [string, string] => typeof e[1] === "string"),
+  );
+  const start = (dirs: string) =>
+    spawnSync(process.execPath, [serverPath], { input: "", encoding: "utf8", timeout: 30_000, env: { ...base, SCENESCOUT_TICKET_DIRS: dirs } });
+  for (const entry of ["specs", "~/specs"]) {
+    const run = start([os.tmpdir(), entry].join(path.delimiter));
+    if (run.status === 0 || !run.stderr.includes(`SCENESCOUT_TICKET_DIRS names "${entry}"`))
+      fail(`a server with SCENESCOUT_TICKET_DIRS naming "${entry}" did not stop at startup naming it (exit ${run.status}):\n${run.stderr}`);
+  }
+  const good = start([os.tmpdir(), ""].join(path.delimiter));
+  if (good.status !== 0 || good.stderr.includes("SCENESCOUT_TICKET_DIRS"))
+    fail(`a server with an absolute SCENESCOUT_TICKET_DIRS and an empty entry did not start cleanly (exit ${good.status}):\n${good.stderr}`);
+  console.log("✓ a relative or ~ entry in SCENESCOUT_TICKET_DIRS stops the server at startup, naming it; an absolute one and an empty one do not");
+}
+
 async function main(): Promise<void> {
   // On a desktop the server opens the live view and the report by default; a check opens nothing.
   const transport = new StdioClientTransport({ command: "node", args: [serverPath], env: { ...getDefaultEnvironment(), SCENESCOUT_OPEN: "none" } });
@@ -1444,6 +1467,7 @@ async function main(): Promise<void> {
   await openCheck();
   await intakeCheck();
   await abandonedCallCheck();
+  ticketDirsStartupCheck();
   console.log("\nMCP CHECK PASSED");
 }
 
