@@ -862,6 +862,19 @@ test("replay: only the served copy watches for the engine going away", () => {
   assert.ok(!saved.includes("<script>"), "the saved copy stays a document");
 });
 
+test("replay: a folder name cannot end the served copy's script", () => {
+  // The saved file's path is written into the script as a string. A folder
+  // name holding "</script>" ended the element there, and what followed ran as
+  // a script of its own on the live view's origin.
+  const savedAt = "/work/a</script><script>window.hit=1</script><!--/.scenescout";
+  const html = buildReplayHtml({ markdown: "## Findings\n", sessions: [], project: "demo-app", at: "2026-09-20T16:21:00.000Z", version: "3.1.0", savedAt });
+  assert.equal(html.match(/<script>/g)?.length, 1, "one script element, the page's own");
+  assert.ok(!html.includes("<script>window.hit"), "the folder name is not markup");
+  const script = html.slice(html.indexOf("<script>") + "<script>".length, html.indexOf("</script>"));
+  const named = /var saved = ("(?:[^"\\]|\\.)*");/.exec(script)?.[1];
+  assert.equal(JSON.parse(named ?? "null"), `${savedAt}/report.html`, "the path the copy button copies is still the folder's own");
+});
+
 // ---- the report as a worklist -------------------------------------------
 
 test("history is indexed by default, so the findings this run made are not buried", () => {

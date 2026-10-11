@@ -479,7 +479,8 @@ function exitWatch(savedFile: string): string {
   return (
     "<script>(function () {\n" +
     "  var saved = " +
-    JSON.stringify(savedFile) +
+    // "<" escaped: a folder named with "</script>" must not end this element.
+    JSON.stringify(savedFile).replace(/</g, "\\u003c") +
     ";\n" +
     "  var gone = false;\n" +
     "  var bar = document.getElementById('gone-bar');\n" +
