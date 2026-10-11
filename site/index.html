@@ -8,64 +8,42 @@
       name="description"
       content="SceneScout turns the coding agent you already use into an exploratory QA tester: it finds broken layouts, failed requests, permission leaks and pages that lie, and keeps evidence you can hand to anyone."
     />
+    <meta name="theme-color" content="#0B0A1A" />
     <meta property="og:title" content="SceneScout" />
     <meta property="og:description" content="Your coding agent, turned into an exploratory QA tester for any web app." />
     <meta property="og:image" content="https://brunoboto96.github.io/SceneScout/screenshots/dashboard-annotated.png" />
-    <link
-      rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2317233B'/%3E%3Crect x='7' y='9' width='18' height='12' rx='2' fill='none' stroke='%23F4D35E' stroke-width='2.4'/%3E%3Ccircle cx='22.5' cy='22.5' r='3.6' fill='%23D3263A'/%3E%3C/svg%3E"
-    />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Cinzel:wght@600;700;800&family=JetBrains+Mono:wght@400;600&display=swap"
       rel="stylesheet"
     />
     <style>
+      /* A fantasy MMO's interface: gilded frames on twilight indigo. Bugs get nameplates, findings are loot, journeys are quests. */
       :root {
-        --paper: #f6f7f9;
-        --sheet: #ffffff;
-        --ink: #17233b;
-        --ink-soft: #4a566d;
-        --rule: #dde2ea;
-        --defect: #d3263a;
-        --defect-wash: #fce9eb;
-        --defect-ink: #b51f31;
-        --on-defect: #ffffff;
-        --observe: #2f6fd0;
-        --caution: #8a5f0c;
-        --pass: #1f7a54;
-        --pass-wash: #e5f3ec;
-        --mark: #f4d35e;
-        --code-bg: #17233b;
-        --code-ink: #f6f7f9;
-        --shadow: 0 1px 2px rgba(23, 35, 59, 0.06), 0 12px 32px -12px rgba(23, 35, 59, 0.18);
-        --display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", sans-serif;
+        --night: #0b0a1a;
+        --night-2: #110f25;
+        --panel: #17142f;
+        --panel-2: #1e1a3d;
+        --rule: #2c2752;
+        --gold: #d9b45b;
+        --gold-soft: #a88a46;
+        --gold-hi: #f3d88f;
+        --text: #ece8ff;
+        --muted: #a9a3cc;
+        --arcane: #6fe3ff;
+        --enemy: #ff5a6a;
+        /* Item rarity, used for severity: low is rare blue, medium is epic purple, high is legendary orange. */
+        --rare: #5aa8ff;
+        --epic: #c07bff;
+        --legendary: #ffa24a;
+        --heal: #4fd98a;
+        --on-chip: #0b0a1a;
+        --display: "Cinzel", "Trajan Pro", Georgia, serif;
         --body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
         --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-        color-scheme: light;
-      }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --paper: #0f1729;
-          --sheet: #17213a;
-          --ink: #e8ecf3;
-          --ink-soft: #a7b1c4;
-          --rule: #2a3652;
-          --defect: #ff5a6e;
-          --defect-wash: #3a1a26;
-          --defect-ink: #ff5a6e;
-          --on-defect: #0f1729;
-          --observe: #6fa3f0;
-          --caution: #e0a83a;
-          --pass: #4cc38a;
-          --pass-wash: #14322a;
-          --mark: #f4d35e;
-          --code-bg: #0a1120;
-          --code-ink: #e8ecf3;
-          --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 40px -16px rgba(0, 0, 0, 0.6);
-          color-scheme: dark;
-        }
+        color-scheme: dark;
       }
       *,
       *::before,
@@ -75,13 +53,19 @@
       html {
         -webkit-text-size-adjust: 100%;
         scroll-behavior: smooth;
+        scroll-padding-top: 84px;
+        background: var(--night);
       }
       body {
         margin: 0;
-        background: var(--paper);
-        color: var(--ink);
-        font: 18px/1.6 var(--body);
+        min-height: 100vh;
+        color: var(--text);
+        font: 18px/1.65 var(--body);
         padding-block: env(safe-area-inset-top, 0px) env(safe-area-inset-bottom, 0px);
+        overflow-x: hidden;
+        background:
+          radial-gradient(ellipse 80% 50% at 70% -10%, rgba(111, 227, 255, 0.1), transparent 60%),
+          radial-gradient(ellipse 60% 40% at 0% 30%, rgba(192, 123, 255, 0.08), transparent 60%), var(--night);
       }
       img {
         max-width: 100%;
@@ -89,20 +73,22 @@
         display: block;
       }
       a {
-        color: inherit;
-        text-underline-offset: 3px;
+        color: var(--gold-hi);
+        text-underline-offset: 4px;
         text-decoration-thickness: 1px;
+        text-decoration-color: rgba(217, 180, 91, 0.55);
       }
       a:hover {
+        text-decoration-color: var(--gold-hi);
         text-decoration-thickness: 2px;
       }
       :focus-visible {
-        outline: 3px solid var(--mark);
+        outline: 2px solid var(--arcane);
         outline-offset: 3px;
         border-radius: 4px;
       }
       .wrap {
-        width: min(1160px, 100%);
+        width: min(1180px, 100%);
         margin: 0 auto;
         padding-inline: 24px;
       }
@@ -116,34 +102,36 @@
       }
 
       h1,
-      h2,
-      h3 {
+      h2 {
         font-family: var(--display);
-        line-height: 1.08;
-        letter-spacing: -0.02em;
+        line-height: 1.15;
+        letter-spacing: 0.01em;
         text-wrap: balance;
         margin: 0;
+        color: var(--gold-hi);
       }
       h1 {
-        font-size: clamp(2.3rem, 4.6vw, 3.5rem);
+        font-size: clamp(1.9rem, 3.6vw, 2.75rem);
         font-weight: 800;
+        color: var(--text);
       }
       h2 {
-        font-size: clamp(1.8rem, 3.4vw, 2.6rem);
-        font-weight: 800;
+        font-size: clamp(1.6rem, 3vw, 2.3rem);
+        font-weight: 700;
       }
       h3 {
-        font-size: 1.25rem;
+        margin: 0;
+        font-size: 1.15rem;
         font-weight: 700;
-        letter-spacing: -0.01em;
+        line-height: 1.35;
       }
       p {
         margin: 0;
         max-width: 64ch;
       }
       .lede {
-        font-size: 1.2rem;
-        color: var(--ink-soft);
+        font-size: 1.15rem;
+        color: var(--muted);
       }
       code,
       kbd {
@@ -151,15 +139,69 @@
         font-size: 0.86em;
       }
       section {
-        padding-block: clamp(64px, 9vw, 112px);
+        padding-block: clamp(72px, 9vw, 120px);
+        position: relative;
       }
-      section + section {
-        border-top: 1px solid var(--rule);
+      /* Sections part at a gilded divider with a jewel at its centre. */
+      section + section::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 50%;
+        width: min(760px, 86%);
+        height: 1px;
+        transform: translateX(-50%);
+        background: linear-gradient(90deg, transparent, var(--gold-soft) 25%, var(--gold) 50%, var(--gold-soft) 75%, transparent);
+      }
+      section + section::after {
+        content: "";
+        position: absolute;
+        top: -5px;
+        left: 50%;
+        width: 10px;
+        height: 10px;
+        transform: translateX(-50%) rotate(45deg);
+        background: var(--night);
+        border: 1px solid var(--gold);
       }
       .section-head {
         display: grid;
         gap: 14px;
-        margin-bottom: 40px;
+        margin-bottom: 44px;
+      }
+      .tag {
+        justify-self: start;
+        font: 700 0.8rem/1 var(--display);
+        letter-spacing: 0.08em;
+        color: var(--gold);
+      }
+
+      /* A gilded frame: the panel style everything in the world shares. */
+      .gilded {
+        position: relative;
+        background: linear-gradient(180deg, var(--panel-2), var(--panel));
+        border: 1px solid var(--gold-soft);
+        border-radius: 6px;
+        box-shadow:
+          inset 0 0 0 3px var(--panel),
+          inset 0 0 0 4px rgba(217, 180, 91, 0.25),
+          0 18px 40px -24px rgba(0, 0, 0, 0.8);
+      }
+      .gilded::before,
+      .gilded::after {
+        content: "";
+        position: absolute;
+        width: 9px;
+        height: 9px;
+        transform: rotate(45deg);
+        background: var(--gold);
+        top: -5px;
+      }
+      .gilded::before {
+        left: -5px;
+      }
+      .gilded::after {
+        right: -5px;
       }
 
       /* Header */
@@ -167,16 +209,16 @@
         position: sticky;
         top: env(safe-area-inset-top, 0px);
         z-index: 10;
-        background: color-mix(in srgb, var(--paper) 88%, transparent);
-        backdrop-filter: blur(10px);
-        border-bottom: 1px solid var(--rule);
+        background: rgba(11, 10, 26, 0.82);
+        backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--gold-soft);
       }
       .top .wrap {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 16px;
-        height: 64px;
+        height: 66px;
       }
       .brand {
         display: flex;
@@ -184,29 +226,31 @@
         gap: 10px;
         font-family: var(--display);
         font-weight: 800;
-        font-size: 1.2rem;
+        font-size: 1.15rem;
+        letter-spacing: 0.02em;
         text-decoration: none;
+        color: var(--gold-hi);
       }
       .brand svg {
-        width: 28px;
-        height: 28px;
+        width: 30px;
+        height: 30px;
         flex: none;
+        color: var(--gold);
       }
       .top nav {
         display: flex;
-        gap: 22px;
+        gap: 24px;
         font-size: 0.95rem;
       }
       .top nav a {
         text-decoration: none;
-        color: var(--ink-soft);
+        color: var(--muted);
         white-space: nowrap;
       }
       .top nav a:hover {
-        color: var(--ink);
-        text-decoration: underline;
+        color: var(--gold-hi);
       }
-      @media (max-width: 720px) {
+      @media (max-width: 760px) {
         .top nav a.opt {
           display: none;
         }
@@ -222,40 +266,59 @@
 
       /* Hero */
       .hero {
-        padding-block: clamp(48px, 7vw, 88px) clamp(64px, 8vw, 104px);
-        border-top: 0;
+        padding-block: clamp(52px, 7vw, 96px) clamp(72px, 8vw, 112px);
       }
       .hero .wrap {
         display: grid;
         grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
-        gap: clamp(32px, 5vw, 64px);
+        gap: clamp(36px, 5vw, 72px);
         align-items: center;
       }
-      @media (max-width: 920px) {
+      @media (max-width: 940px) {
         .hero .wrap {
-          grid-template-columns: 1fr;
+          grid-template-columns: minmax(0, 1fr);
         }
       }
       .hero-copy {
         display: grid;
-        gap: 24px;
+        gap: 26px;
+      }
+      .quest-start {
+        justify-self: start;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        font: 700 0.85rem var(--display);
+        letter-spacing: 0.06em;
+        color: var(--gold);
+      }
+      .quest-start i {
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        background: var(--gold);
+        color: var(--on-chip);
+        font: 800 0.8rem/1 var(--display);
+        font-style: normal;
       }
       .try {
         display: grid;
         gap: 10px;
       }
-      .try-label {
+      .try-label,
+      .try-note {
         font-size: 0.95rem;
-        color: var(--ink-soft);
+        color: var(--muted);
       }
       .cmd {
         display: flex;
         align-items: stretch;
-        background: var(--code-bg);
-        color: var(--code-ink);
-        border-radius: 12px;
+        background: var(--night-2);
+        border: 1px solid var(--gold-soft);
+        border-radius: 8px;
         overflow: hidden;
-        box-shadow: var(--shadow);
         max-width: 100%;
       }
       .cmd code {
@@ -267,25 +330,21 @@
         overflow-x: auto;
       }
       .cmd code b {
-        color: var(--mark);
+        color: var(--arcane);
         font-weight: 600;
       }
       .copy {
         flex: none;
         border: 0;
-        border-left: 1px solid rgba(255, 255, 255, 0.12);
+        border-left: 1px solid var(--gold-soft);
         background: transparent;
-        color: var(--code-ink);
-        font: 600 0.9rem var(--body);
+        color: var(--gold-hi);
+        font: 700 0.9rem var(--body);
         padding: 0 18px;
         cursor: pointer;
       }
       .copy:hover {
-        background: rgba(255, 255, 255, 0.08);
-      }
-      .try-note {
-        font-size: 0.9rem;
-        color: var(--ink-soft);
+        background: rgba(217, 180, 91, 0.1);
       }
       .actions {
         display: flex;
@@ -296,121 +355,153 @@
         display: inline-flex;
         align-items: center;
         gap: 8px;
-        padding: 12px 20px;
-        border-radius: 999px;
-        font-weight: 700;
+        padding: 13px 24px;
+        border-radius: 6px;
+        font: 700 0.95rem var(--display);
+        letter-spacing: 0.03em;
         text-decoration: none;
-        border: 2px solid var(--ink);
+        border: 1px solid var(--gold-soft);
+        color: var(--gold-hi);
       }
       .btn.primary {
-        background: var(--ink);
-        color: var(--paper);
+        color: var(--on-chip);
+        border-color: var(--gold-hi);
+        background: linear-gradient(180deg, var(--gold-hi), var(--gold) 55%, #b8913f);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
       }
       .btn.primary:hover {
-        background: color-mix(in srgb, var(--ink) 85%, var(--defect));
+        filter: brightness(1.08);
         text-decoration: none;
       }
       .btn.ghost:hover {
-        background: var(--sheet);
+        background: rgba(217, 180, 91, 0.08);
         text-decoration: none;
       }
 
-      /* The marked-up screenshot: the one bold thing */
-      .markup {
-        position: relative;
+      /* The hero: the real dashboard in a gilded frame, swept once by an arcane scan; each defect gets an enemy nameplate. */
+      .scene {
         margin: 0;
+        padding: 12px;
       }
-      .markup .frame {
+      .screen {
         position: relative;
-        border-radius: 14px;
+        border-radius: 4px;
         overflow: hidden;
-        border: 1px solid var(--rule);
-        box-shadow: var(--shadow);
-        background: var(--sheet);
-      }
-      .markup .frame {
         aspect-ratio: 1060 / 640;
+        background: #f6f8fa;
       }
       /* The dashboard cropped to where the defects are: 1060×640 of the 1280×900 shot, from x=110. */
-      .markup .frame img {
+      .screen img {
         width: 120.7547%;
         max-width: none;
         margin-left: -10.3774%;
       }
-      .mark {
+      .sweep {
         position: absolute;
-        border: 3px solid var(--defect);
-        border-radius: 8px;
-        box-shadow: 0 0 0 4px color-mix(in srgb, var(--defect) 18%, transparent);
+        inset: 0;
+        pointer-events: none;
+        background: linear-gradient(180deg, transparent 0%, rgba(111, 227, 255, 0) 40%, rgba(111, 227, 255, 0.3) 49%, var(--arcane) 50%, transparent 51%);
+        background-size: 100% 220%;
+        background-position: 0 120%;
+        opacity: 0;
       }
-      .mark .num {
+      .foe {
         position: absolute;
-        top: -15px;
-        left: -15px;
-        width: 30px;
-        height: 30px;
-        border-radius: 50%;
-        background: var(--defect);
-        color: var(--on-defect);
-        font: 800 0.95rem/30px var(--display);
-        text-align: center;
+        border: 2px solid var(--enemy);
+        border-radius: 4px;
       }
-      .mark.m1 {
+      .foe.f1 {
         left: 16.2%;
         top: 50.2%;
         width: 14.8%;
         height: 9.4%;
       }
-      .mark.m2 {
+      .foe.f2 {
         left: 5.2%;
         top: 74.2%;
         width: 20.6%;
         height: 6.8%;
       }
-      .notes {
-        list-style: none;
-        padding: 0;
-        margin: 18px 0 0;
-        display: grid;
-        gap: 10px;
-      }
-      .notes li {
-        display: grid;
-        grid-template-columns: 30px 1fr;
-        gap: 12px;
-        align-items: start;
-        font-size: 0.98rem;
-      }
-      .notes .num {
-        width: 30px;
-        height: 30px;
-        border-radius: 50%;
-        background: var(--defect);
-        color: var(--on-defect);
-        font: 800 0.95rem/30px var(--display);
+      /* The nameplate floats above its target, as an enemy's does: a name, a level and a health bar. */
+      .plate {
+        position: absolute;
+        left: calc(100% + 12px);
+        top: 50%;
+        transform: translateY(-50%);
+        min-width: 150px;
+        padding: 5px 8px 6px;
+        background: rgba(11, 10, 26, 0.92);
+        border: 1px solid var(--enemy);
+        border-radius: 4px;
         text-align: center;
+        box-shadow: 0 0 14px rgba(255, 90, 106, 0.45);
       }
-      .notes code {
-        color: var(--ink-soft);
-        font-size: 0.8rem;
+      .plate b {
         display: block;
+        font: 700 0.72rem/1.2 var(--display);
+        color: var(--enemy);
+        white-space: nowrap;
+      }
+      .plate small {
+        display: block;
+        font: 0.62rem/1.2 var(--mono);
+        color: var(--muted);
         margin-top: 2px;
-        overflow-wrap: anywhere;
+      }
+      .plate .hp {
+        display: block;
+        height: 5px;
+        margin-top: 5px;
+        border-radius: 3px;
+        background: var(--enemy);
+      }
+      @media (max-width: 520px) {
+        .plate {
+          min-width: 0;
+          padding: 3px 6px 4px;
+          left: calc(100% + 6px);
+        }
+        .plate b {
+          font-size: 0.58rem;
+        }
+        .plate small {
+          font-size: 0.5rem;
+        }
+        .plate .hp {
+          height: 3px;
+          margin-top: 3px;
+        }
       }
       @media (prefers-reduced-motion: no-preference) {
-        .mark {
-          animation: draw 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+        .sweep {
+          animation: sweep 1.5s ease-in-out 0.3s both;
         }
-        .mark.m1 {
-          animation-delay: 0.5s;
+        .foe {
+          animation: spotted 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both;
         }
-        .mark.m2 {
-          animation-delay: 1.1s;
+        .foe.f1 {
+          animation-delay: 1.15s;
         }
-        @keyframes draw {
+        .foe.f2 {
+          animation-delay: 1.45s;
+        }
+        @keyframes sweep {
+          0% {
+            opacity: 1;
+            background-position: 0 120%;
+          }
+          90% {
+            opacity: 1;
+          }
+          100% {
+            opacity: 0;
+            background-position: 0 -20%;
+          }
+        }
+        @keyframes spotted {
           from {
             opacity: 0;
-            transform: scale(1.35);
+            transform: translateY(-6px);
           }
           to {
             opacity: 1;
@@ -418,182 +509,226 @@
           }
         }
       }
-
-      /* What it catches */
-      .catches {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 0 48px;
-      }
-      @media (max-width: 760px) {
-        .catches {
-          grid-template-columns: 1fr;
-        }
-      }
-      .catch {
-        display: grid;
-        grid-template-columns: 44px 1fr;
-        gap: 16px;
-        padding-block: 22px;
-        border-top: 1px solid var(--rule);
-      }
-      .catch .ico {
-        width: 44px;
-        height: 44px;
-        border-radius: 12px;
-        display: grid;
-        place-items: center;
-        background: var(--defect-wash);
-        color: var(--defect);
-      }
-      .catch .ico svg {
-        width: 24px;
-        height: 24px;
-      }
-      .catch h3 {
-        margin-bottom: 6px;
-      }
-      .catch p {
-        color: var(--ink-soft);
-        font-size: 1rem;
-      }
-      .slips {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 16px;
-        margin-top: 48px;
-      }
-      @media (max-width: 900px) {
-        .slips {
-          grid-template-columns: 1fr;
-        }
-      }
-      .slip {
-        background: var(--sheet);
-        border-radius: 12px;
-        border: 1px solid var(--rule);
-        border-left: 5px solid var(--defect);
-        padding: 18px 20px;
+      .combat-log {
+        list-style: none;
+        padding: 0;
+        margin: 16px 4px 0;
         display: grid;
         gap: 10px;
-        align-content: start;
       }
-      .slip .sev {
-        font-weight: 700;
-        color: var(--defect);
-        font-size: 0.9rem;
+      .combat-log li {
+        display: grid;
+        grid-template-columns: 26px minmax(0, 1fr);
+        gap: 12px;
+        align-items: start;
+        font-size: 0.98rem;
       }
-      .slip strong {
-        font-family: var(--display);
-        font-size: 1.08rem;
-        line-height: 1.3;
+      .combat-log .n {
+        width: 26px;
+        height: 26px;
+        transform: rotate(45deg) scale(0.82);
+        display: grid;
+        place-items: center;
+        background: var(--enemy);
+        color: var(--on-chip);
+        font: 800 0.85rem/1 var(--display);
+        border-radius: 3px;
       }
-      .slip code {
-        background: var(--paper);
-        border-radius: 6px;
-        padding: 6px 8px;
-        font-size: 0.78rem;
+      .combat-log .n span {
+        transform: rotate(-45deg);
+      }
+      .combat-log code {
+        display: block;
+        margin-top: 3px;
+        color: var(--arcane);
+        font-size: 0.8rem;
         overflow-wrap: anywhere;
-        color: var(--ink-soft);
-      }
-      .aside {
-        margin-top: 20px;
-        font-size: 0.95rem;
-        color: var(--ink-soft);
       }
 
-      /* Two readers */
-      .readers {
+      /* The bestiary: what it hunts */
+      .bestiary {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+      }
+      @media (max-width: 900px) {
+        .bestiary {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+      @media (max-width: 600px) {
+        .bestiary {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      .beast {
+        padding: 24px 22px;
+        display: grid;
+        gap: 12px;
+        align-content: start;
+      }
+      .beast .sigil {
+        width: 46px;
+        height: 46px;
+        display: grid;
+        place-items: center;
+        color: var(--gold-hi);
+        border: 1px solid var(--gold-soft);
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(217, 180, 91, 0.16), transparent 70%);
+      }
+      .beast .sigil svg {
+        width: 22px;
+        height: 22px;
+      }
+      .beast p {
+        color: var(--muted);
+        font-size: 1rem;
+      }
+
+      /* Loot: findings as item tooltips, coloured by severity like item rarity */
+      .loot {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+        margin-top: 44px;
+      }
+      @media (max-width: 900px) {
+        .loot {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      .item {
+        background: rgba(11, 10, 26, 0.94);
+        border: 1px solid var(--legendary);
+        border-radius: 6px;
+        padding: 16px 18px;
+        display: grid;
+        gap: 8px;
+        align-content: start;
+      }
+      .item .rarity {
+        font: 700 0.78rem/1 var(--display);
+        letter-spacing: 0.05em;
+        color: var(--legendary);
+      }
+      .item strong {
+        color: var(--legendary);
+        font-size: 1.02rem;
+        line-height: 1.4;
+      }
+      .item code {
+        color: var(--muted);
+        font-size: 0.78rem;
+        overflow-wrap: anywhere;
+        border-top: 1px solid var(--rule);
+        padding-top: 8px;
+      }
+      .aside {
+        margin-top: 22px;
+        font-size: 0.95rem;
+        color: var(--muted);
+      }
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        margin-top: 10px;
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+      .legend span::before {
+        content: "";
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        margin-right: 6px;
+        border-radius: 2px;
+        background: var(--c);
+        vertical-align: 0;
+      }
+
+      /* Choose your class */
+      .classes {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 24px;
       }
-      @media (max-width: 820px) {
-        .readers {
-          grid-template-columns: 1fr;
+      @media (max-width: 840px) {
+        .classes {
+          grid-template-columns: minmax(0, 1fr);
         }
       }
-      .reader {
-        background: var(--sheet);
-        border: 1px solid var(--rule);
-        border-radius: 18px;
+      .class {
         padding: clamp(24px, 3vw, 36px);
         display: grid;
-        gap: 18px;
+        gap: 16px;
         align-content: start;
       }
-      .reader h3 {
-        font-size: 1.6rem;
+      .class .role {
+        font: 700 0.85rem/1 var(--display);
+        letter-spacing: 0.08em;
+        color: var(--arcane);
       }
-      .reader > p {
-        color: var(--ink-soft);
+      .class > p {
+        color: var(--muted);
       }
-      .reader ul {
+      .class ul {
         margin: 0;
         padding: 0;
         list-style: none;
         display: grid;
         gap: 12px;
       }
-      .reader li {
-        padding-left: 28px;
+      .class li {
+        padding-left: 26px;
         position: relative;
       }
-      .reader li::before {
+      .class li::before {
         content: "";
         position: absolute;
-        left: 0;
+        left: 2px;
         top: 0.55em;
-        width: 14px;
-        height: 9px;
-        border-left: 3px solid var(--pass);
-        border-bottom: 3px solid var(--pass);
-        transform: rotate(-45deg);
-      }
-      .reader .sample {
-        margin-top: 4px;
-        border-radius: 10px;
-        border: 1px solid var(--rule);
-        overflow: hidden;
+        width: 8px;
+        height: 8px;
+        transform: rotate(45deg);
+        background: var(--gold);
       }
 
-      /* QA with evidence */
-      .flow {
+      /* The quest log: a sequence, so its objectives are numbered */
+      .objectives {
         list-style: none;
         margin: 0 0 48px;
         padding: 0;
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 16px;
+        gap: 18px;
         counter-reset: step;
       }
-      @media (max-width: 820px) {
-        .flow {
-          grid-template-columns: 1fr;
+      @media (max-width: 840px) {
+        .objectives {
+          grid-template-columns: minmax(0, 1fr);
         }
       }
-      .flow li {
+      .objectives li {
         counter-increment: step;
         display: grid;
-        gap: 8px;
+        gap: 10px;
         padding: 22px;
-        border-radius: 14px;
-        background: var(--sheet);
-        border: 1px solid var(--rule);
       }
-      .flow li::before {
-        content: counter(step);
-        width: 34px;
-        height: 34px;
-        border-radius: 50%;
-        display: grid;
-        place-items: center;
-        background: var(--ink);
-        color: var(--paper);
-        font: 800 1rem var(--display);
+      .objectives li::marker {
+        content: none;
       }
-      .flow li p {
-        color: var(--ink-soft);
+      .objectives .step {
+        font: 700 0.8rem var(--display);
+        letter-spacing: 0.06em;
+        color: var(--gold);
+      }
+      .objectives .step::before {
+        content: "Objective " counter(step);
+      }
+      .objectives li p {
+        color: var(--muted);
         font-size: 1rem;
       }
       .evidence {
@@ -604,7 +739,7 @@
       }
       @media (max-width: 900px) {
         .evidence {
-          grid-template-columns: 1fr;
+          grid-template-columns: minmax(0, 1fr);
         }
       }
       figure.shot {
@@ -617,18 +752,18 @@
         min-width: 0;
       }
       figure.shot .frame {
-        border-radius: 12px;
-        overflow: hidden;
-        border: 1px solid var(--rule);
-        box-shadow: var(--shadow);
-        background: var(--sheet);
+        padding: 8px;
+      }
+      figure.shot .frame img {
+        border-radius: 3px;
+        background: #fff;
       }
       figure.shot figcaption {
         font-size: 0.95rem;
-        color: var(--ink-soft);
+        color: var(--muted);
       }
       figure.shot figcaption b {
-        color: var(--ink);
+        color: var(--text);
       }
       .evidence .wide {
         grid-column: 1 / -1;
@@ -636,22 +771,23 @@
       /* The failed replay is tall; the steps that tell the story are at the top. */
       .frame.tall {
         max-height: 640px;
+        overflow: hidden;
       }
-      .journey-json {
-        background: var(--code-bg);
-        color: var(--code-ink);
-        border-radius: 12px;
+      .scroll {
+        background: var(--night-2);
+        color: var(--text);
+        border: 1px solid var(--gold-soft);
+        border-radius: 6px;
         padding: 18px 20px;
-        font: 0.8rem/1.6 var(--mono);
+        font: 0.8rem/1.65 var(--mono);
         overflow-x: auto;
         margin: 0;
-        box-shadow: var(--shadow);
       }
-      .journey-json .k {
-        color: #9db4e0;
+      .scroll .k {
+        color: var(--muted);
       }
-      .journey-json .s {
-        color: var(--mark);
+      .scroll .s {
+        color: var(--arcane);
       }
       .verdicts {
         display: flex;
@@ -660,52 +796,54 @@
         margin-top: 4px;
       }
       .pill {
-        font-weight: 700;
-        font-size: 0.85rem;
-        padding: 4px 12px;
-        border-radius: 999px;
+        font: 700 0.78rem var(--display);
+        letter-spacing: 0.03em;
+        padding: 6px 11px;
+        border-radius: 4px;
+        color: var(--on-chip);
       }
       .pill.ok {
-        background: var(--pass-wash);
-        color: var(--pass);
+        background: var(--heal);
       }
       .pill.no {
-        background: var(--defect-wash);
-        color: var(--defect-ink);
+        background: var(--enemy);
       }
 
-      /* Live view */
-      .live {
+      /* Your party */
+      .party {
         display: grid;
         grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
         gap: clamp(28px, 4vw, 56px);
         align-items: center;
       }
       @media (max-width: 900px) {
-        .live {
-          grid-template-columns: 1fr;
+        .party {
+          grid-template-columns: minmax(0, 1fr);
         }
       }
-      .live .copy-col {
+      .party .copy-col {
         display: grid;
         gap: 16px;
       }
+      .party .copy-col > p:last-child {
+        color: var(--muted);
+      }
 
-      /* Start */
+      /* Begin your quest */
       .steps {
         list-style: none;
         margin: 0;
         padding: 0;
         display: grid;
         grid-template-columns: minmax(0, 1fr);
-        gap: 28px;
+        gap: 30px;
         counter-reset: s;
-        max-width: 860px;
+        max-width: 880px;
       }
       .steps > li {
         counter-increment: s;
         display: grid;
-        grid-template-columns: 48px minmax(0, 1fr);
+        grid-template-columns: 50px minmax(0, 1fr);
         gap: 20px;
       }
       @media (max-width: 520px) {
@@ -715,116 +853,129 @@
         }
       }
       .steps > li::before {
-        content: counter(s);
-        width: 48px;
-        height: 48px;
-        border-radius: 14px;
-        background: var(--mark);
-        color: #17233b;
+        content: "";
+        width: 46px;
+        height: 46px;
+        margin: 2px;
+        transform: rotate(45deg);
+        border: 1px solid var(--gold);
+        background: var(--panel);
         display: grid;
         place-items: center;
-        font: 800 1.3rem var(--display);
+      }
+      .steps > li > div {
+        position: relative;
+      }
+      .steps .num {
+        position: absolute;
+        left: -70px;
+        top: 12px;
+        width: 50px;
+        text-align: center;
+        font: 800 1.15rem var(--display);
+        color: var(--gold-hi);
+      }
+      @media (max-width: 520px) {
+        .steps .num {
+          left: 0;
+          top: -52px;
+          width: 50px;
+        }
       }
       .steps h3 {
         margin-bottom: 8px;
       }
       .steps p {
-        color: var(--ink-soft);
+        color: var(--muted);
       }
       .steps pre {
         margin: 12px 0 0;
-        background: var(--code-bg);
-        color: var(--code-ink);
-        border-radius: 10px;
+        background: var(--night-2);
+        color: var(--text);
+        border: 1px solid var(--gold-soft);
+        border-radius: 6px;
         padding: 14px 16px;
-        font: 0.85rem/1.65 var(--mono);
+        font: 0.85rem/1.7 var(--mono);
         overflow-x: auto;
       }
       .steps pre .c {
-        color: #8a97b0;
+        color: var(--muted);
       }
       .clients {
         margin-top: 10px;
         font-size: 0.95rem;
-        color: var(--ink-soft);
       }
 
-      /* Safety gauge */
-      .gauge {
+      /* Zones: from sanctuary to the wilds */
+      .zones {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        border-radius: 16px;
-        overflow: hidden;
-        border: 1px solid var(--rule);
-        background: var(--sheet);
+        gap: 18px;
       }
-      @media (max-width: 820px) {
-        .gauge {
-          grid-template-columns: 1fr 1fr;
+      @media (max-width: 840px) {
+        .zones {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
       }
       @media (max-width: 480px) {
-        .gauge {
-          grid-template-columns: 1fr;
+        .zones {
+          grid-template-columns: minmax(0, 1fr);
         }
       }
-      .mode {
-        padding: 22px;
+      .zone {
+        padding: 22px 20px;
         display: grid;
         gap: 8px;
         align-content: start;
-        border-top: 6px solid var(--c);
+        border-top: 3px solid var(--c);
       }
-      .mode + .mode {
-        border-left: 1px solid var(--rule);
-      }
-      .mode code {
-        font-size: 1rem;
-        font-weight: 600;
+      .zone .name {
+        font: 700 1.05rem var(--display);
         color: var(--c);
       }
-      .mode p {
+      .zone code {
         font-size: 0.95rem;
-        color: var(--ink-soft);
+        color: var(--text);
       }
-      .mode .def {
-        font-size: 0.82rem;
+      .zone p {
+        font-size: 0.95rem;
+        color: var(--muted);
+      }
+      .zone .def {
+        font-size: 0.85rem;
         font-weight: 700;
-        color: var(--ink);
       }
-      .mode.observe {
-        --c: var(--observe);
+      .zone.sanctuary {
+        --c: var(--arcane);
       }
-      .mode.ro {
-        --c: var(--pass);
+      .zone.town {
+        --c: var(--heal);
       }
-      .mode.sw {
-        --c: var(--caution);
+      .zone.frontier {
+        --c: var(--legendary);
       }
-      .mode.de {
-        --c: var(--defect);
+      .zone.wilds {
+        --c: var(--enemy);
       }
       .safe-note {
         margin-top: 24px;
+        color: var(--muted);
       }
 
-      /* Measured */
-      .measured {
+      /* Achievements */
+      .achievements {
         display: grid;
         grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
         gap: clamp(28px, 4vw, 56px);
         align-items: center;
       }
       @media (max-width: 900px) {
-        .measured {
-          grid-template-columns: 1fr;
+        .achievements {
+          grid-template-columns: minmax(0, 1fr);
         }
       }
       .chart {
-        background: var(--sheet);
-        border: 1px solid var(--rule);
-        border-radius: 16px;
-        padding: 20px 20px 12px;
+        padding: 22px 22px 16px;
       }
       .chart svg {
         width: 100%;
@@ -832,14 +983,16 @@
         display: block;
       }
       .chart text {
-        fill: var(--ink-soft);
-        font: 12px var(--body);
+        fill: var(--muted);
+        font: 12px var(--mono);
       }
       .chart .bar {
-        fill: var(--ink);
+        fill: var(--epic);
+        opacity: 0.75;
       }
       .chart .bar.top {
-        fill: var(--pass);
+        fill: var(--legendary);
+        opacity: 1;
       }
       .chart .grid {
         stroke: var(--rule);
@@ -848,44 +1001,45 @@
         stroke: none;
       }
       .chart .cap {
-        font-size: 0.85rem;
-        color: var(--ink-soft);
-        margin-top: 6px;
+        font-size: 0.88rem;
+        color: var(--muted);
+        margin-top: 8px;
       }
 
-      /* Docs + footer */
-      .docs {
+      /* The codex: docs */
+      .codex {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 0 32px;
+        gap: 16px;
       }
-      @media (max-width: 820px) {
-        .docs {
-          grid-template-columns: 1fr;
+      @media (max-width: 840px) {
+        .codex {
+          grid-template-columns: minmax(0, 1fr);
         }
       }
-      .docs a {
+      .codex a {
         display: grid;
         gap: 4px;
-        padding-block: 18px;
-        border-top: 1px solid var(--rule);
+        padding: 18px 20px;
         text-decoration: none;
+        color: var(--text);
       }
-      .docs a b {
+      .codex a b {
         font-family: var(--display);
-        font-size: 1.12rem;
+        font-size: 1.02rem;
+        color: var(--gold-hi);
       }
-      .docs a span {
-        color: var(--ink-soft);
+      .codex a span {
+        color: var(--muted);
         font-size: 0.95rem;
       }
-      .docs a:hover b {
-        text-decoration: underline;
+      .codex a:hover {
+        border-color: var(--gold-hi);
       }
       footer {
         padding-block: 40px 56px;
-        border-top: 1px solid var(--rule);
-        color: var(--ink-soft);
+        border-top: 1px solid var(--gold-soft);
+        color: var(--muted);
         font-size: 0.95rem;
       }
       footer .wrap {
@@ -894,13 +1048,10 @@
         justify-content: space-between;
         gap: 16px;
       }
-      .sr {
-        position: absolute;
-        width: 1px;
-        height: 1px;
-        overflow: hidden;
-        clip: rect(0 0 0 0);
-        white-space: nowrap;
+      footer nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 18px;
       }
     </style>
   </head>
@@ -908,16 +1059,22 @@
     <header class="top">
       <div class="wrap">
         <a class="brand" href="#top" aria-label="SceneScout, back to top">
-          <svg viewBox="0 0 32 32" aria-hidden="true">
-            <rect width="32" height="32" rx="7" fill="#17233B" />
-            <rect x="7" y="9" width="18" height="12" rx="2" fill="none" stroke="#F4D35E" stroke-width="2.4" />
-            <circle cx="22.5" cy="22.5" r="3.6" fill="#D3263A" />
+          <svg viewBox="0 0 64 64" aria-hidden="true">
+            <g fill="currentColor">
+              <rect x="18" y="19" width="30" height="13" rx="3" transform="rotate(-30 33 25.5)" />
+              <rect x="9.5" y="31.5" width="9" height="8" rx="2" transform="rotate(-30 14 35.5)" />
+            </g>
+            <g fill="none" stroke="currentColor" stroke-width="4.6" stroke-linecap="round">
+              <path d="M30 33 L21.5 56" />
+              <path d="M30 33 L38.5 56" />
+            </g>
+            <circle cx="56.5" cy="8" r="3.6" fill="#6FE3FF" />
           </svg>
           SceneScout
         </a>
         <nav aria-label="Main">
-          <a class="opt" href="#catches">What it finds</a>
-          <a class="opt" href="#qa">QA evidence</a>
+          <a class="opt" href="#bestiary">What it finds</a>
+          <a class="opt" href="#quests">QA evidence</a>
           <a class="opt2" href="#start">Get started</a>
           <a href="https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Home.md">Guide</a>
           <a href="https://github.com/brunoboto96/SceneScout">GitHub</a>
@@ -929,6 +1086,7 @@
       <section class="hero">
         <div class="wrap">
           <div class="hero-copy">
+            <span class="quest-start"><i aria-hidden="true">!</i>New quest: scout your app</span>
             <h1>Your coding agent, turned into a QA tester for any web app.</h1>
             <p class="lede">
               SceneScout explores your running app the way a careful tester would: it clicks, fills forms, switches roles and calls the API behind a hidden
@@ -946,11 +1104,11 @@
             </div>
             <div class="actions">
               <a class="btn primary" href="#start">Set it up with your agent</a>
-              <a class="btn ghost" href="#catches">See what it finds</a>
+              <a class="btn ghost" href="#bestiary">See what it finds</a>
             </div>
           </div>
-          <figure class="markup">
-            <div class="frame">
+          <figure class="scene gilded">
+            <div class="screen">
               <img
                 src="screenshots/dashboard.png"
                 width="1280"
@@ -958,134 +1116,134 @@
                 alt="The demo app's dashboard, as SceneScout saw it during a real run"
                 fetchpriority="high"
               />
-              <span class="mark m1" aria-hidden="true"><span class="num">1</span></span>
-              <span class="mark m2" aria-hidden="true"><span class="num">2</span></span>
+              <span class="sweep" aria-hidden="true"></span>
+              <span class="foe f1" aria-hidden="true"
+                ><span class="plate"><b>Covered button</b><small>medium · 81% overlap</small><span class="hp"></span></span
+              ></span>
+              <span class="foe f2" aria-hidden="true"
+                ><span class="plate"><b>Missing chart</b><small>low · HTTP 404</small><span class="hp"></span></span
+              ></span>
             </div>
-            <ol class="notes" aria-label="What SceneScout marked on this page">
+            <ol class="combat-log" aria-label="What SceneScout marked on this page">
               <li>
-                <span class="num" aria-hidden="true">1</span
+                <span class="n" aria-hidden="true"><span>1</span></span
                 ><span
                   >A "New" badge sits on top of the All orders button, so a click lands on the badge.
                   <code>"All orders" overlaps "New: bulk import" (81%)</code></span
                 >
               </li>
               <li>
-                <span class="num" aria-hidden="true">2</span><span>The weekly chart never loads. <code>GET /img/weekly-chart.png → HTTP 404</code></span>
+                <span class="n" aria-hidden="true"><span>2</span></span
+                ><span>The weekly chart never loads. <code>GET /img/weekly-chart.png → HTTP 404</code></span>
               </li>
             </ol>
           </figure>
         </div>
       </section>
 
-      <section id="catches">
+      <section id="bestiary">
         <div class="wrap">
           <div class="section-head">
+            <span class="tag">The bestiary</span>
             <h2>It finds what a person would notice, and what they wouldn't.</h2>
             <p class="lede">As it explores, it checks for these, and files each one with the steps to repeat it.</p>
           </div>
-          <div class="catches">
-            <div class="catch">
-              <span class="ico" aria-hidden="true"
+          <div class="bestiary">
+            <div class="beast gilded">
+              <span class="sigil" aria-hidden="true"
                 ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <rect x="3" y="5" width="12" height="9" rx="1.5" />
                   <rect x="9" y="10" width="12" height="9" rx="1.5" /></svg
               ></span>
-              <div>
-                <h3>Broken layout</h3>
-                <p>
-                  Buttons hidden under a sticky bar, controls that overlap, text pushed off screen. Measured from the page itself, so nothing is guessed from a
-                  picture.
-                </p>
-              </div>
+              <h3>Broken layout</h3>
+              <p>
+                Buttons hidden under a sticky bar, controls that overlap, text pushed off screen. Measured from the page itself, so nothing is guessed from a
+                picture.
+              </p>
             </div>
-            <div class="catch">
-              <span class="ico" aria-hidden="true"
+            <div class="beast gilded">
+              <span class="sigil" aria-hidden="true"
                 ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M12 3 2 20h20L12 3Z" />
                   <path d="M12 10v4M12 17v.5" /></svg
               ></span>
-              <div>
-                <h3>Things that break</h3>
-                <p>Errors, crashes, failed requests, broken images and pages with no way out.</p>
-              </div>
+              <h3>Things that break</h3>
+              <p>Errors, crashes, failed requests, broken images and pages with no way out.</p>
             </div>
-            <div class="catch">
-              <span class="ico" aria-hidden="true"
+            <div class="beast gilded">
+              <span class="sigil" aria-hidden="true"
                 ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <rect x="5" y="11" width="14" height="9" rx="2" />
                   <path d="M8 11V8a4 4 0 0 1 7.5-2" /></svg
               ></span>
-              <div>
-                <h3>Permission leaks</h3>
-                <p>It calls the app's own API as each role, so "the button is hidden" becomes "the server refuses it", or doesn't.</p>
-              </div>
+              <h3>Permission leaks</h3>
+              <p>It calls the app's own API as each role, so "the button is hidden" becomes "the server refuses it", or doesn't.</p>
             </div>
-            <div class="catch">
-              <span class="ico" aria-hidden="true"
+            <div class="beast gilded">
+              <span class="sigil" aria-hidden="true"
                 ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M4 12h6l2 3 2-6 2 3h4" />
                   <circle cx="12" cy="12" r="9" /></svg
               ></span>
-              <div>
-                <h3>Pages that lie</h3>
-                <p>"Saved!" after the server refused the save, or an empty table after the request behind it failed.</p>
-              </div>
+              <h3>Pages that lie</h3>
+              <p>"Saved!" after the server refused the save, or an empty table after the request behind it failed.</p>
             </div>
-            <div class="catch">
-              <span class="ico" aria-hidden="true"
+            <div class="beast gilded">
+              <span class="sigil" aria-hidden="true"
                 ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M8 4v8M8 4l-2 2M8 4l2 2" />
                   <path d="M16 4v8M16 4l-2 2M16 4l2 2" />
                   <rect x="4" y="14" width="16" height="6" rx="1.5" /></svg
               ></span>
-              <div>
-                <h3>Impatient users</h3>
-                <p>A double-click that sends the same order twice, the bug real people find first.</p>
-              </div>
+              <h3>Impatient users</h3>
+              <p>A double-click that sends the same order twice, the bug real people find first.</p>
             </div>
-            <div class="catch">
-              <span class="ico" aria-hidden="true"
+            <div class="beast gilded">
+              <span class="sigil" aria-hidden="true"
                 ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <circle cx="12" cy="12" r="9" />
                   <path d="M12 7v5l3 2" /></svg
               ></span>
-              <div>
-                <h3>Hard to read, hard to use</h3>
-                <p>Low contrast, missing labels, tiny targets, no visible focus, and how many steps a task really takes.</p>
-              </div>
+              <h3>Hard to read, hard to use</h3>
+              <p>Low contrast, missing labels, tiny targets, no visible focus, and how many steps a task really takes.</p>
             </div>
           </div>
-          <div class="slips" role="group" aria-label="Three findings from a real run of the demo app">
-            <div class="slip">
-              <span class="sev">High</span><strong>A clerk can approve an order by calling the endpoint the page hides from them</strong
+          <div class="loot" role="group" aria-label="Three findings from a real run of the demo app">
+            <div class="item">
+              <span class="rarity">High severity</span><strong>A clerk can approve an order by calling the endpoint the page hides from them</strong
               ><code>POST /api/orders/1037/approve 200 as clerk</code>
             </div>
-            <div class="slip">
-              <span class="sev">High</span><strong>Filtering orders by Archived fails, and the page shows an empty table instead of an error</strong
+            <div class="item">
+              <span class="rarity">High severity</span><strong>Filtering orders by Archived fails, and the page shows an empty table instead of an error</strong
               ><code>GET /api/orders?status=archived → HTTP 500</code>
             </div>
-            <div class="slip">
-              <span class="sev">High</span><strong>A double-click on Create order creates two orders</strong
+            <div class="item">
+              <span class="rarity">High severity</span><strong>A double-click on Create order creates two orders</strong
               ><code>2× click fired the same state-changing request 2× (POST /api/orders)</code>
             </div>
           </div>
+          <div class="legend" aria-label="How severity is coloured">
+            <span style="--c: var(--legendary)">High</span><span style="--c: var(--epic)">Medium</span><span style="--c: var(--rare)">Low</span>
+          </div>
           <p class="aside">
-            From a run against the demo app in the repository, which has bugs planted on purpose.
+            Three findings from a run against the demo app in the repository, which has bugs planted on purpose.
             <a href="https://github.com/brunoboto96/SceneScout/blob/main/examples/report.md">Read the whole report</a>.
           </p>
         </div>
       </section>
 
-      <section id="readers">
+      <section id="classes">
         <div class="wrap">
           <div class="section-head">
+            <span class="tag">Choose your class</span>
             <h2>One run, read two ways.</h2>
             <p class="lede">
               The same report opens in plain words for the people who need to know what is wrong, with the detail one click away for the people who will fix it.
             </p>
           </div>
-          <div class="readers">
-            <div class="reader">
+          <div class="classes">
+            <div class="class gilded">
+              <span class="role">The Seer</span>
               <h3>For QA, product and anyone who doesn't open a terminal</h3>
               <p>Every problem is written as what was done, what was expected and what happened, with a picture of the page.</p>
               <ul>
@@ -1095,7 +1253,8 @@
                 <li>Findings filed straight into GitHub or Jira, each one once.</li>
               </ul>
             </div>
-            <div class="reader">
+            <div class="class gilded">
+              <span class="role">The Artificer</span>
               <h3>For developers</h3>
               <p>Every finding carries the request that failed, the steps that led to it, and a test to keep it fixed.</p>
               <ul>
@@ -1109,32 +1268,36 @@
         </div>
       </section>
 
-      <section id="qa">
+      <section id="quests">
         <div class="wrap">
           <div class="section-head">
+            <span class="tag">The quest log</span>
             <h2>QA you can hand to someone, with the proof attached.</h2>
             <p class="lede">
               Save the journeys that matter, the happy paths and the ones that must fail politely. Every pull request replays them, with no AI involved, and
               keeps the evidence.
             </p>
           </div>
-          <ol class="flow">
-            <li>
+          <ol class="objectives">
+            <li class="gilded">
+              <span class="step" aria-hidden="true"></span>
               <h3>Save a journey</h3>
               <p>A few lines describing a task: open the form, fill it in, expect the order to be created.</p>
             </li>
-            <li>
+            <li class="gilded">
+              <span class="step" aria-hidden="true"></span>
               <h3>Replay it on every change</h3>
               <p>The check runs it in a real browser and fails the pull request when a step breaks.</p>
             </li>
-            <li>
+            <li class="gilded">
+              <span class="step" aria-hidden="true"></span>
               <h3>Keep the evidence</h3>
               <p>A picture after every step, a video of each journey, and a test report anyone can read.</p>
             </li>
           </ol>
           <div class="evidence">
             <figure class="shot">
-              <div class="frame">
+              <div class="frame gilded">
                 <img
                   src="screenshots/journey-place-order.gif"
                   width="760"
@@ -1146,7 +1309,7 @@
               <figcaption><b>The happy path, as it ran.</b> One of the videos a check films.</figcaption>
             </figure>
             <figure class="shot">
-              <pre class="journey-json" tabindex="0" role="region" aria-label="The saved journey behind the video, shortened"><code>{
+              <pre class="scroll" tabindex="0" role="region" aria-label="The saved journey behind the video, shortened"><code>{
   <span class="k">"name"</span>: <span class="s">"place an order"</span>,
   <span class="k">"steps"</span>: [
     { <span class="k">"action"</span>: <span class="s">"navigate"</span>, <span class="k">"target"</span>: <span class="s">"/orders-new.html"</span> },
@@ -1163,12 +1326,12 @@
                 >). Written by hand, or kept from a flow your agent just walked.
               </figcaption>
               <div class="verdicts" role="group" aria-label="This run's results">
-                <span class="pill ok">Passed: place an order</span><span class="pill ok">Passed: filter by status</span
-                ><span class="pill no">Failed: archived orders</span>
+                <span class="pill ok">Quest complete: place an order</span><span class="pill ok">Quest complete: filter by status</span
+                ><span class="pill no">Quest failed: archived orders</span>
               </div>
             </figure>
             <figure class="shot wide">
-              <div class="frame tall">
+              <div class="frame gilded tall">
                 <img
                   src="screenshots/check-replay-failed.png"
                   width="1100"
@@ -1182,7 +1345,7 @@
               </figcaption>
             </figure>
             <figure class="shot wide">
-              <div class="frame">
+              <div class="frame gilded">
                 <img
                   src="screenshots/test-report-results.png"
                   width="1200"
@@ -1200,15 +1363,16 @@
         </div>
       </section>
 
-      <section id="live">
-        <div class="wrap live">
+      <section id="party">
+        <div class="wrap party">
           <div class="copy-col">
+            <span class="tag">Your party</span>
             <h2>Watch it work, or read along later.</h2>
             <p class="lede">Each run opens a live view on your machine: one card per agent, the page it is on, and every action it took.</p>
             <p>You can read the report while it is still being written, scrub back through any step, and keep the whole run as one page that opens offline.</p>
           </div>
           <figure class="shot">
-            <div class="frame">
+            <div class="frame gilded">
               <img
                 src="screenshots/live-view.png"
                 width="2560"
@@ -1217,7 +1381,7 @@
                 loading="lazy"
               />
             </div>
-            <figcaption>Three agents testing the demo app at once.</figcaption>
+            <figcaption>A party of three agents testing the demo app at once.</figcaption>
           </figure>
         </div>
       </section>
@@ -1225,12 +1389,14 @@
       <section id="start">
         <div class="wrap">
           <div class="section-head">
+            <span class="tag">Begin your quest</span>
             <h2>Start in three steps.</h2>
             <p class="lede">You need Node 20 or newer and an app you are allowed to test.</p>
           </div>
           <ol class="steps">
             <li>
               <div>
+                <span class="num" aria-hidden="true">1</span>
                 <h3>Install it for your agent</h3>
                 <p>One command sets up the server, the testing method and the test browser.</p>
                 <pre
@@ -1247,6 +1413,7 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
             </li>
             <li>
               <div>
+                <span class="num" aria-hidden="true">2</span>
                 <h3>Start your app, then ask</h3>
                 <p>In a new chat with your agent:</p>
                 <pre><code>Use SceneScout to test http://localhost:3000</code></pre>
@@ -1255,6 +1422,7 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
             </li>
             <li>
               <div>
+                <span class="num" aria-hidden="true">3</span>
                 <h3>Read the report</h3>
                 <p>
                   It lands in <code>.scenescout/report.md</code>, opening with each problem in plain words. Add a check to your pull requests when you want it
@@ -1266,28 +1434,33 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
         </div>
       </section>
 
-      <section id="safety">
+      <section id="zones">
         <div class="wrap">
           <div class="section-head">
+            <span class="tag">The zones</span>
             <h2>Safe by default, enforced where it counts.</h2>
             <p class="lede">The rule sits on the network, not in an instruction to the AI. A blocked request never reaches your server.</p>
           </div>
-          <div class="gauge">
-            <div class="mode observe">
+          <div class="zones">
+            <div class="zone gilded sanctuary">
+              <span class="name">Sanctuary</span>
               <code>observe</code>
               <p>Reads only.</p>
               <span class="def">Default for a first look, for the check, and for an agent on a remote site</span>
             </div>
-            <div class="mode ro">
+            <div class="zone gilded town">
+              <span class="name">Town</span>
               <code>read-only</code>
               <p>Forms can be sent; nothing existing is changed or deleted.</p>
               <span class="def">Default for an agent on a local app</span>
             </div>
-            <div class="mode sw">
+            <div class="zone gilded frontier">
+              <span class="name">Frontier</span>
               <code>safe-write</code>
               <p>Creates records, and changes only the ones it created.</p>
             </div>
-            <div class="mode de">
+            <div class="zone gilded wilds">
+              <span class="name">The Wilds</span>
               <code>destructive</code>
               <p>Everything. Only when you say the data is disposable.</p>
             </div>
@@ -1299,9 +1472,10 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
         </div>
       </section>
 
-      <section id="measured">
-        <div class="wrap measured">
+      <section id="achievements">
+        <div class="wrap achievements">
           <div class="section-head" style="margin: 0">
+            <span class="tag">Achievements</span>
             <h2>Measured, not promised.</h2>
             <p class="lede">
               Every change to how it explores is scored against an app with bugs planted on purpose, and checked on a second app it is never tuned on.
@@ -1311,7 +1485,7 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
               help.
             </p>
           </div>
-          <div class="chart">
+          <div class="chart gilded">
             <svg viewBox="0 0 520 250" role="img" aria-labelledby="chart-t chart-d">
               <title id="chart-t">Planted bugs found per benchmark run</title>
               <desc id="chart-d">Thirteen runs of the demo app, which has 13 planted bugs. Runs found between 9 and 13; the latest found 12.</desc>
@@ -1324,26 +1498,29 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
         </div>
       </section>
 
-      <section id="docs">
+      <section id="codex">
         <div class="wrap">
-          <div class="section-head"><h2>Go further.</h2></div>
-          <nav class="docs" aria-label="Documentation">
-            <a href="https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Start-here.md"
+          <div class="section-head">
+            <span class="tag">The codex</span>
+            <h2>Go further.</h2>
+          </div>
+          <nav class="codex" aria-label="Documentation">
+            <a class="gilded" href="https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Start-here.md"
               ><b>Start here</b><span>Install, a first run, reading the report</span></a
             >
-            <a href="https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Ways-to-use-it.md"
+            <a class="gilded" href="https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Ways-to-use-it.md"
               ><b>Ways to use it</b><span>With your agent, in CI, on pull requests</span></a
             >
-            <a href="https://github.com/brunoboto96/SceneScout/blob/main/docs/ci.md"
+            <a class="gilded" href="https://github.com/brunoboto96/SceneScout/blob/main/docs/ci.md"
               ><b>Running it in CI</b><span>Saved journeys, recording, test reports</span></a
             >
-            <a href="https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/What-it-checks.md"
+            <a class="gilded" href="https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/What-it-checks.md"
               ><b>What it checks</b><span>Every check and every tool</span></a
             >
-            <a href="https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Signing-in.md"
+            <a class="gilded" href="https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Signing-in.md"
               ><b>Signing in</b><span>Roles, saved logins, SSO and CI</span></a
             >
-            <a href="https://github.com/brunoboto96/SceneScout/blob/main/docs/how-it-works.md"
+            <a class="gilded" href="https://github.com/brunoboto96/SceneScout/blob/main/docs/how-it-works.md"
               ><b>How it works</b><span>Diagrams of a run from start to report</span></a
             >
           </nav>
@@ -1354,10 +1531,11 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
     <footer>
       <div class="wrap">
         <span>SceneScout is open source under the MIT licence.</span>
-        <span
-          ><a href="https://github.com/brunoboto96/SceneScout">Source on GitHub</a> &nbsp; <a href="https://www.npmjs.com/package/scenescout">npm</a> &nbsp;
-          <a href="https://github.com/brunoboto96/SceneScout/blob/main/SECURITY.md">Report a security issue</a></span
-        >
+        <nav aria-label="Project">
+          <a href="https://github.com/brunoboto96/SceneScout">Source on GitHub</a>
+          <a href="https://www.npmjs.com/package/scenescout">npm</a>
+          <a href="https://github.com/brunoboto96/SceneScout/blob/main/SECURITY.md">Report a security issue</a>
+        </nav>
       </div>
     </footer>
 
@@ -1412,7 +1590,7 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
         r.setAttribute("y", base - h);
         r.setAttribute("width", w);
         r.setAttribute("height", h);
-        r.setAttribute("rx", 4);
+        r.setAttribute("rx", 2);
         r.setAttribute("class", i === runs.length - 1 ? "bar top" : "bar");
         const t = document.createElementNS(ns, "title");
         t.textContent = `Run ${i}: ${v} of 13`;

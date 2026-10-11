@@ -33,7 +33,7 @@ jobs:
       - name: Put the page and its screenshots together
         run: |
           mkdir -p _site
-          cp site/index.html _site/
+          cp site/* _site/
           cp -R examples/screenshots _site/screenshots
       - uses: actions/upload-pages-artifact@v5
         with:
