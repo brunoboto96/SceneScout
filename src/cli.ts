@@ -12,7 +12,7 @@
  *   scenescout login <url> --role r Sign in once in a visible browser and save it as a named role
  *   scenescout export --to github   File the project's findings as GitHub or Jira issues, each once
  */
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -60,6 +60,7 @@ import { credentialRedactor, LOGIN_ENV, readScriptedLogin } from "./engine/scrip
 import { parseLoginArgs } from "./engine/profiles.js";
 import { detectProvider, EXIT_CI, judgeEffort, KEY_ENV, parseCiArgs, redactKeys, secretValues } from "./engine/ci.js";
 import { VISUAL_DIRNAME } from "./engine/baseline.js";
+import { openOrSay } from "./engine/open.js";
 import {
   EXIT,
   exitCodeOf,
@@ -396,22 +397,12 @@ function watch(projectPath: string, open: boolean): void {
   console.log(`Live view: ${target.url}`);
   console.log("It is served on this machine only, and the address holds its access token: treat it like a password.");
   if (!open) return;
-  const { command, args } = browserOpener(target.url);
-  // An opener that never returns (no desktop session) must not hold the command; the address is printed above either way.
-  const result = spawnSync(command, args, { stdio: "ignore", timeout: 10_000 });
-  if (result.error || result.status !== 0) console.log("Could not open a browser from here. Open the address above yourself.");
-}
-
-/** The platform's own "open this URL" command. */
-function browserOpener(url: string): { command: string; args: string[] } {
-  switch (process.platform) {
-    case "darwin":
-      return { command: "open", args: [url] };
-    case "win32":
-      return { command: "cmd", args: ["/c", "start", "", url] };
-    default:
-      return { command: "xdg-open", args: [url] };
-  }
+  openOrSay(target.url, {
+    env: process.env,
+    platform: process.platform,
+    spawn: (command, args, options) => spawn(command, args, options),
+    say: (line) => console.log(line),
+  });
 }
 
 /**

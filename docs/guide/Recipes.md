@@ -1,14 +1,20 @@
 # Recipes by project type
 
-Each recipe describes an invented app of a common shape, the setup it needs, the commands, what a run usually turns up and the pitfalls. Names, routes and hosts are placeholders; replace them with yours.
+> **Who this is for:** a developer setting SceneScout up on a real project.
+>
+> **What you will be able to do:** start from the setup closest to your app, with the commands, what a run usually finds and the pitfalls to avoid.
 
-- [A server-rendered app](#a-server-rendered-app)
-- [A single-page app with its token in storage](#a-single-page-app-with-its-token-in-storage)
-- [An app behind SSO](#an-app-behind-sso)
-- [An app with embedded third-party widgets](#an-app-with-embedded-third-party-widgets)
-- [An API-heavy dashboard](#an-api-heavy-dashboard)
-- [A static marketing site](#a-static-marketing-site)
-- [A monorepo with preview deployments](#a-monorepo-with-preview-deployments)
+Each recipe describes an invented app of a common shape. Names, routes and hosts are placeholders; replace them with yours.
+
+| Your app | Recipe | What matters most |
+|---|---|---|
+| Server-rendered pages, a session cookie, forms that post | [A server-rendered app](#a-server-rendered-app) | Pages reached only by a form post are invisible to the crawl |
+| A client-side router and a token in storage | [A single-page app with its token in storage](#a-single-page-app-with-its-token-in-storage) | Run from the app's repository, so routes come from the source; attach by `role` for the refresh broker |
+| A sign-in through an identity provider | [An app behind SSO](#an-app-behind-sso) | Sign in yourself once per role |
+| A payment form, chat or map in an iframe | [An app with embedded third-party widgets](#an-app-with-embedded-third-party-widgets) | `trustedEmbeds` to exercise one in test mode |
+| Many widgets, each with its own endpoint | [An API-heavy dashboard](#an-api-heavy-dashboard) | `expect-request` steps in saved flows |
+| A static site with no sign-in | [A static marketing site](#a-static-marketing-site) | `observe` mode and `scenescout check` |
+| Several apps, a preview per pull request | [A monorepo with preview deployments](#a-monorepo-with-preview-deployments) | One `.scenescout/` per app |
 
 ## A server-rendered app
 

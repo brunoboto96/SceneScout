@@ -2071,6 +2071,60 @@ test("reply stage: reads the downloaded check.json, links the run and the artifa
 
 const CHECK_EXAMPLE = path.join(REPO, "examples", "workflows", "scenescout-qa-check.yml");
 
+/** Every `brunoboto96/SceneScout[/subaction]@ref` an example names, as [file, ref]: Dependabot does not read examples/. */
+function exampleReleases(files: Array<[string, string]>): Array<[string, string]> {
+  return files.flatMap(([file, text]) => [...text.matchAll(/brunoboto96\/SceneScout(?:\/[\w-]+)?@([^\s"'`)]+)/g)].map((m): [string, string] => [file, m[1]]));
+}
+
+/** What is wrong with the releases the examples name: they must be one exact release, and one that exists by this version. */
+function exampleReleaseProblems(found: Array<[string, string]>, version: string): string[] {
+  const refs = [...new Set(found.map(([, ref]) => ref))];
+  const problems = refs.length > 1 ? [`the examples name ${refs.length} releases: ${found.map(([f, r]) => `${f} ${r}`).join(", ")}`] : [];
+  for (const ref of refs) {
+    if (!/^v\d+\.\d+\.\d+$/.test(ref)) problems.push(`${ref} is not an exact release`);
+    else if (
+      ref
+        .slice(1)
+        .split(".")
+        .map(Number)
+        .reduce((c, n, i) => c || n - Number(version.split("-")[0].split(".")[i]), 0) > 0
+    )
+      problems.push(`${ref} is newer than ${version}`);
+  }
+  return problems;
+}
+
+test("examples: every SceneScout reference across examples/ names the same exact release", () => {
+  const walk = (dir: string): string[] =>
+    fs
+      .readdirSync(dir, { withFileTypes: true })
+      .flatMap((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : /\.(ya?ml|md|json)$/.test(e.name) ? [path.join(dir, e.name)] : []));
+  const files = walk(path.join(REPO, "examples")).map((f): [string, string] => [path.relative(REPO, f), fs.readFileSync(f, "utf8")]);
+  const found = exampleReleases(files);
+  assert.ok(found.length >= 6, `the scan found the examples' references: ${found.length}`);
+  assert.ok(new Set(found.map(([f]) => f)).size >= 2, "in both example workflows");
+  const version = (JSON.parse(fs.readFileSync(path.join(REPO, "package.json"), "utf8")) as { version: string }).version;
+  assert.deepEqual(exampleReleaseProblems(found, version), []);
+
+  // The rule itself: each refused shape beside the accepted one it differs from.
+  const at = (...refs: string[]) => exampleReleases(refs.map((r, i): [string, string] => [`f${i}.yml`, `uses: brunoboto96/SceneScout/qa@${r}`]));
+  const cases: Array<[string, Array<[string, string]>, number]> = [
+    ["one release everywhere", at("v3.4.0", "v3.4.0"), 0],
+    ["two releases", at("v3.4.0", "v3.3.9"), 1],
+    ["a moving major tag", at("v3", "v3"), 1],
+    ["a branch", at("main"), 1],
+    ["a release after this version", at("v3.5.1"), 1],
+    ["this version itself", at("v3.5.0"), 0],
+  ];
+  for (const [what, refs, n] of cases) assert.equal(exampleReleaseProblems(refs, "3.5.0").length, n, what);
+  assert.equal(exampleReleaseProblems(at("v3.6.0"), "3.6.0-next.0").length, 0, "a prerelease of that version");
+  assert.equal(exampleReleaseProblems(at("v3.7.0"), "3.6.0-next.0").length, 1, "a release after a prerelease");
+  assert.deepEqual(exampleReleases([["x.md", "`brunoboto96/SceneScout@v1.2.3` and brunoboto96/SceneScout/ci@v1.2.4"]]), [
+    ["x.md", "v1.2.3"],
+    ["x.md", "v1.2.4"],
+  ]);
+});
+
 test("example check workflow: dispatched with the three inputs, records, uploads under the variable's name, and never pastes the focus into a script", () => {
   const text = fs.readFileSync(CHECK_EXAMPLE, "utf8");
   const wf = parseYaml(text) as Record<string, any>;
