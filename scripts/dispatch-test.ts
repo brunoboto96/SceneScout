@@ -19,6 +19,7 @@ import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser, readyBrowser, type BrowserReadyDeps } from "../src/engine/launch.ts";
 import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
+import { bestEffort } from "../src/engine/best-effort.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles } from "./smoke/leaks.ts";
 import { declaredTitle, parseShard, pickShard, shardProblems, withoutShard } from "./smoke/shards.ts";
@@ -589,4 +590,37 @@ test("a failed download says why and what to run by hand", async () => {
     readyBrowser({ engine: "firefox", headed: false }, missing.deps),
     /download finished, but the firefox build is still not where Playwright looks.*--browsers firefox/s,
   );
+});
+
+// ---------------------------------------------------------------------------
+// bestEffort — a probe of a live page that may navigate or close under it
+
+test("bestEffort answers the work's value when it resolves, even a falsy one", async () => {
+  assert.equal(await bestEffort(Promise.resolve("label"), null), "label");
+  assert.equal(await bestEffort(Promise.resolve(0), -1), 0);
+  assert.equal(await bestEffort(Promise.resolve(null), "fallback"), null);
+  assert.equal(await bestEffort(Promise.resolve(false), true), false);
+});
+
+test("bestEffort answers the fallback when the work rejects, and never rejects itself", async () => {
+  const closed = (): Promise<string> => Promise.reject(new Error("Target page, context or browser has been closed"));
+  assert.equal(await bestEffort(closed(), null), null);
+  assert.equal(await bestEffort(closed(), ""), "");
+  assert.deepEqual(await bestEffort(closed(), []), []);
+  assert.equal(await bestEffort(Promise.reject("not even an Error"), -1), -1);
+  // No fallback: undefined, as `.catch(() => {})` gave.
+  assert.equal(await bestEffort(closed()), undefined);
+});
+
+test("bestEffort answers the fallback when there is no work to wait on (an optional chain that found nothing)", async () => {
+  const context: { storageState(): Promise<string> } | undefined = undefined;
+  assert.equal(await bestEffort(context?.storageState(), null), null);
+  assert.equal(await bestEffort(undefined), undefined);
+});
+
+test("bestEffort's fallback is a fresh value per call, never shared between callers", async () => {
+  const a = await bestEffort(Promise.reject(new Error("gone")), [] as string[]);
+  const b = await bestEffort(Promise.reject(new Error("gone")), [] as string[]);
+  a.push("x");
+  assert.deepEqual(b, []);
 });
