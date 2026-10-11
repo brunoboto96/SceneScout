@@ -1610,6 +1610,13 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     ["Visa 4111 1111 1111 14", "Visa [card number redacted]"],
     ["Visa 4111 1111 1111 1111 18", "Visa [card number redacted]"],
     ["Mastercard 2223 1111 1111 1111 115", "Mastercard [card number redacted]"],
+    // National networks outside the big ones' ranges: China T-Union (31, 19 digits), BORICA (2205), UzCard (8600), Humo (9860), Troy (9792), and JCB's older 3088 to 3094.
+    ["T-Union 3100 1111 1111 1111 114", "T-Union [card number redacted]"],
+    ["BORICA 2205 1111 1111 1112", "BORICA [card number redacted]"],
+    ["UzCard 8600 1111 1111 1110", "UzCard [card number redacted]"],
+    ["Humo 9860 1111 1111 1113", "Humo [card number redacted]"],
+    ["Troy 9792 1111 1111 1116", "Troy [card number redacted]"],
+    ["JCB 3088 1111 1111 1112", "JCB [card number redacted]"],
     ["Visa 4222 2222 2222 2", "Visa [card number redacted]"],
     // Grouped with dots, or with the non-breaking spaces a formatted number or a French locale uses.
     ["card 4111.1111.1111.1111 declined", "card [card number redacted] declined"],
@@ -1679,6 +1686,8 @@ test("redactSecrets masks a parameter named for a secret, whatever its value loo
     ["http://x/login?usuario=bo&contraseña=clave1", "clave1", "http://x/login?usuario=bo&contraseña=[redacted]"],
     ["http://x/login?has%C5%82o=tajne1", "tajne1", "http://x/login?has%C5%82o=[redacted]"],
     ["http://x/entrar?senha=segredo1", "segredo1", "http://x/entrar?senha=[redacted]"],
+    // A name in a script other than Latin, percent-encoded as a browser sends it (пароль).
+    ["http://x/vhod?%D0%BF%D0%B0%D1%80%D0%BE%D0%BB%D1%8C=tajna1", "tajna1", "http://x/vhod?%D0%BF%D0%B0%D1%80%D0%BE%D0%BB%D1%8C=[redacted]"],
   ];
   for (const [text, secret, want] of masked) {
     const out = redactSecrets(text);

@@ -205,7 +205,7 @@ export function maskSecretFieldValues(text: string): { text: string; hits: numbe
  * what was typed into the address (`?password=…`), and the address is logged
  * with every action. Group 1 is what precedes it, 2 the name, 3 the value.
  */
-const PARAM_RE = /(^|[?&;#\s"'(])(\p{L}[\p{L}\p{N}_.%[\]-]*)=([^&#;\s"')]+)/gu;
+const PARAM_RE = /(^|[?&;#\s"'(])((?:\p{L}|%[\dA-Fa-f]{2})[\p{L}\p{N}_.%[\]-]*)=([^&#;\s"')]+)/gu;
 
 /** A parameter's name as a person wrote it: percent-escapes decoded (`has%C5%82o`), or left as they are when they do not decode. */
 function decodedName(name: string): string {
@@ -270,8 +270,10 @@ const DIGIT_RUN_RE = new RegExp(String.raw`(?<!\d)(?<!\d\.)\d+(?:${DIGIT_SEPARAT
  * digits. The ranges err towards hiding: every prefix a network issues from,
  * however few its cards (Maestro's 50, 56 to 58 and 6 cover several national
  * networks), and every length from 13 to 19 where a network issues more than
- * one. What is left out is what no network issues from: a leading 1, 7 or 9,
- * a 2 outside 2200 to 2720, a 3 outside 30, 34 to 39, a 59, and an 8 outside 81 and 82.
+ * one. What is left out is what no network issues from at that length: a
+ * leading 1 or 7, a 2 outside 2200 to 2205 and 2221 to 2720, a 3 outside 30,
+ * 34 to 39 and a 19-digit 31, a 59, an 8 outside 81, 82 and 8600, and a 9
+ * outside 9792 and 9860.
  */
 const ANY_LENGTH = [13, 14, 15, 16, 17, 18, 19] as const;
 const CARD_NETWORKS: ReadonlyArray<{ from: string; to: string; lengths: readonly number[] }> = [
@@ -281,8 +283,9 @@ const CARD_NETWORKS: ReadonlyArray<{ from: string; to: string; lengths: readonly
   { from: "2200", to: "2204", lengths: [16, 17, 18, 19] }, // Mir
   { from: "34", to: "34", lengths: [15] }, // American Express
   { from: "37", to: "37", lengths: [15] }, // American Express
-  { from: "300", to: "305", lengths: ANY_LENGTH }, // Diners Club
-  { from: "3095", to: "3095", lengths: ANY_LENGTH }, // Diners Club
+  { from: "30", to: "30", lengths: ANY_LENGTH }, // Diners Club (300 to 305, 3095), JCB (3088 to 3102)
+  { from: "31", to: "31", lengths: [19] }, // China T-Union
+  { from: "2205", to: "2205", lengths: [16] }, // BORICA
   { from: "36", to: "36", lengths: ANY_LENGTH }, // Diners Club
   { from: "38", to: "39", lengths: ANY_LENGTH }, // Diners Club
   { from: "35", to: "35", lengths: [16, 17, 18, 19] }, // JCB (3528 to 3589), RuPay (353, 356)
@@ -290,6 +293,9 @@ const CARD_NETWORKS: ReadonlyArray<{ from: string; to: string; lengths: readonly
   { from: "56", to: "58", lengths: ANY_LENGTH }, // Maestro
   { from: "60", to: "69", lengths: ANY_LENGTH }, // Maestro, Discover, UnionPay, RuPay, Hipercard, InstaPayment
   { from: "81", to: "82", lengths: [16, 17, 18, 19] }, // RuPay, UnionPay
+  { from: "8600", to: "8600", lengths: [16] }, // UzCard
+  { from: "9792", to: "9792", lengths: [16] }, // Troy
+  { from: "9860", to: "9860", lengths: [16] }, // Humo
 ];
 
 /** Whether a network issues card numbers that start with these digits and are this long. */
