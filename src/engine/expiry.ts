@@ -24,10 +24,10 @@ import fs from "node:fs";
 import { sayDuration } from "./pace.js";
 
 /** Where a dated credential was found. */
-export type CredentialSource = "cookie" | "cookie-jwt" | "local-storage-jwt";
+type CredentialSource = "cookie" | "cookie-jwt" | "local-storage-jwt";
 
 /** One credential the profile holds, by name only. `expiresAt` is epoch ms, or null for a session cookie with no date. */
-export interface Credential {
+interface Credential {
   source: CredentialSource;
   name: string;
   expiresAt: number | null;
@@ -169,7 +169,7 @@ export function readLifetime(state: unknown, opts: { url?: string } = {}): Profi
 }
 
 /** A span as a person says it; days past two, since "73h00m" reads badly. */
-export function sayLifetime(ms: number): string {
+function sayLifetime(ms: number): string {
   const days = Math.floor(ms / 86_400_000);
   return days >= 2 ? `${days} days` : sayDuration(ms);
 }

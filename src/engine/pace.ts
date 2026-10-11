@@ -45,7 +45,7 @@ export const IDLE_GAP_MS = 30_000;
 /** A session with no action for this long is probably forgotten, and is holding a browser for nothing. */
 export const STALE_SESSION_MS = 5 * 60_000;
 
-export interface SessionPace {
+interface SessionPace {
   session: string;
   actions: number;
   /** First to last action, in milliseconds. */
@@ -84,7 +84,7 @@ export interface SessionPace {
 }
 
 /** The run's working time against its waiting time, summed over sessions. */
-export interface RunWaiting {
+interface RunWaiting {
   /** First-to-last action, summed over sessions. */
   workingMs: number;
   /** Of that, gaps over IDLE_GAP_MS. */

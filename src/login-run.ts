@@ -101,7 +101,7 @@ export async function captureState(context: BrowserContext): Promise<unknown> {
 }
 
 /** How the interactive sign-in ended: signed in (seen, or Enter pressed), or not. */
-export type LoginEnd = "signed-in" | "enter" | "window-closed" | "input-ended" | "interrupted" | "timed-out";
+type LoginEnd = "signed-in" | "enter" | "window-closed" | "input-ended" | "interrupted" | "timed-out";
 
 /** How long after the prompt input still counts as typed before it. */
 const EARLY_INPUT_MS = 300;
@@ -145,7 +145,7 @@ const NOT_SAVED: Record<Exclude<LoginEnd, "enter" | "signed-in">, string> = {
 };
 
 /** A visible browser opened at the sign-in URL, and a promise that settles when it closes. */
-export interface LoginWindow {
+interface LoginWindow {
   browser: Browser;
   context: BrowserContext;
   page: Page;
@@ -154,7 +154,7 @@ export interface LoginWindow {
 }
 
 /** Open the window a person signs in in. Throws a sentence when the browser cannot start or the page cannot load. */
-export async function openLoginWindow(options: Pick<LoginOptions, "url" | "browser">, opts: { headless?: boolean } = {}): Promise<LoginWindow> {
+async function openLoginWindow(options: Pick<LoginOptions, "url" | "browser">, opts: { headless?: boolean } = {}): Promise<LoginWindow> {
   const engine: BrowserEngineName = options.browser ?? defaultEngine(process.env);
   const types: Record<BrowserEngineName, BrowserType> = { chromium, firefox, webkit };
   // Checked before a window opens: a limit out of bounds is a sentence, not a browser left behind.
@@ -240,7 +240,7 @@ async function lookAt(win: LoginWindow, watch: SignInWatch): Promise<SignInLook 
 }
 
 /** What the watch said last, for whoever asks how the sign-in is going. */
-export interface WatchProgress {
+interface WatchProgress {
   reason: WaitReason | "starting";
   url: string;
 }
@@ -250,7 +250,7 @@ export interface WatchProgress {
  * when), the window closes, or `signal` aborts. Resolves with how it ended;
  * the caller saves and closes.
  */
-export async function watchForSignIn(
+async function watchForSignIn(
   win: LoginWindow,
   options: { url: string; successUrl?: string },
   opts: { signal?: AbortSignal; progress?: (p: WatchProgress) => void } = {},

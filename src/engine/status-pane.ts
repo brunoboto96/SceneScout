@@ -34,7 +34,7 @@ export const STATUS_POLL_TOOL = "scout_status_poll";
 /** How often the pane polls, in milliseconds: inside the 2–3 s the system-monitor example uses. */
 export const STATUS_POLL_MS = 2500;
 
-export interface PaneSession {
+interface PaneSession {
   session: string;
   role: string;
   state: SessionState;

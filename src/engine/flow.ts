@@ -28,16 +28,16 @@ import { MEMORY_DIRNAME, SELF_IGNORE_KEEP } from "./memory.js";
 import { validateRoleName } from "./profiles.js";
 
 /** Most steps one flow may hold. A longer flow is several flows, and each would fail more usefully on its own. */
-export const MAX_FLOW_STEPS = 50;
+const MAX_FLOW_STEPS = 50;
 /** Most flows one check replays. */
-export const MAX_FLOWS = 50;
+const MAX_FLOWS = 50;
 /**
  * How long a flow waits after its last step for a write that step set off
  * late (a save on a timer, a debounced autosave), before it counts as passed.
  */
 export const FLOW_AFTER_LAST_STEP_MS = 750;
 /** Where a project keeps its flows, relative to the project directory. */
-export const FLOWS_SUBDIR = path.join(MEMORY_DIRNAME, SELF_IGNORE_KEEP);
+const FLOWS_SUBDIR = path.join(MEMORY_DIRNAME, SELF_IGNORE_KEEP);
 
 /** How a step names the control it acts on. The same grammar as scout_run_plan's targets, plus role. */
 export type FlowTarget =
@@ -50,7 +50,7 @@ export const TARGET_HELP = 'testid=…, text=…, label=… or role=<role>[name=
  * getByRole accepts them). A misspelt role matches nothing, so a flow using
  * one would only ever fail at replay; it is refused when the file is read.
  */
-export const ARIA_ROLE_LIST = [
+const ARIA_ROLE_LIST = [
   "alert",
   "alertdialog",
   "application",
@@ -143,7 +143,7 @@ export const ARIA_ROLES: ReadonlySet<string> = new Set(ARIA_ROLE_LIST);
  */
 type PlaywrightRole = Parameters<Page["getByRole"]>[0];
 type Unlisted = Exclude<PlaywrightRole, (typeof ARIA_ROLE_LIST)[number]>;
-export const ARIA_ROLES_MATCH_PLAYWRIGHT: [Unlisted] extends [never] ? readonly PlaywrightRole[] : Unlisted = ARIA_ROLE_LIST;
+const ARIA_ROLES_MATCH_PLAYWRIGHT: [Unlisted] extends [never] ? readonly PlaywrightRole[] : Unlisted = ARIA_ROLE_LIST;
 
 /** Parse a target string, or null when it is not one. */
 export function parseTarget(target: string): FlowTarget | null {
@@ -176,7 +176,7 @@ export function notActionable(action: "click" | "type" | "select", facts: { enab
  * when nothing matches: "the receipt was never shown" and "the dialog closed"
  * are both the absence of a visible element.
  */
-export const ELEMENT_STATES = ["visible", "hidden", "enabled", "disabled", "checked", "unchecked"] as const;
+const ELEMENT_STATES = ["visible", "hidden", "enabled", "disabled", "checked", "unchecked"] as const;
 export type ElementState = (typeof ELEMENT_STATES)[number];
 
 /** What an element is, as far as an expect-element step asks. Null for a property the element does not have (a button is never checked). */
@@ -237,7 +237,7 @@ const target = z
 const expected = z.string().trim().min(1, "is the result the step should bring about, in words").max(500).optional();
 
 /** Most times a repeat step may run its steps. A longer loop is a page that should be reached another way. */
-export const MAX_REPEATS = 100;
+const MAX_REPEATS = 100;
 
 const SINGLE_STEP_SCHEMAS = [
   z.object({ action: z.literal("navigate"), expected, target: z.string().regex(/^\//, "must be a path on the app, starting with /") }).strict(),
@@ -302,7 +302,7 @@ const stepSchema = z.discriminatedUnion("action", [...STEP_SCHEMAS]);
 export type FlowStep = z.infer<typeof stepSchema>;
 /** A step that acts or asserts once: every step but repeat, which holds them. */
 export type FlowSingleStep = Exclude<FlowStep, { action: "repeat" }>;
-export const FLOW_ACTIONS = STEP_SCHEMAS.map((s) => s.shape.action.value);
+const FLOW_ACTIONS = STEP_SCHEMAS.map((s) => s.shape.action.value);
 
 const flowSchema = z
   .object({
@@ -594,7 +594,7 @@ export interface FlowReplay {
  * (browsers.ts `beaconResourceType`). They are fire-and-forget by design, a
  * page sends them on its own schedule, and no step waits for one.
  */
-export const BACKGROUND_REQUEST_TYPES: ReadonlySet<string> = new Set(["ping", ...BROWSER_ENGINES.map(beaconResourceType)]);
+const BACKGROUND_REQUEST_TYPES: ReadonlySet<string> = new Set(["ping", ...BROWSER_ENGINES.map(beaconResourceType)]);
 
 /**
  * Split what the write policy refused during a step into what the step is
@@ -627,7 +627,7 @@ export interface FlowRun extends FlowReplay {
 /** A value taken from the environment when the flow runs: `${env:NAME}` in a type or select step's value. */
 const ENV_REF = /\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}/g;
 /** Shortest substituted value masked in the check's output. Shorter ones would mask ordinary words and numbers. */
-export const MIN_MASKED_ENV_VALUE = 4;
+const MIN_MASKED_ENV_VALUE = 4;
 
 /** Every step that takes a value, the steps inside a repeat included. */
 function valueSteps(steps: readonly FlowStep[]): Array<Extract<FlowStep, { value: string }>> {

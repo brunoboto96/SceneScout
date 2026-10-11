@@ -230,7 +230,7 @@ export function isRouteCancellation(message: string, c: PageErrorContext): boole
 }
 
 /** Appended to a page error read as a route-change cancellation, saying which evidence it was read on. */
-export function routeCancelNote(message: string): string {
+function routeCancelNote(message: string): string {
   const why = ROUTE_CANCEL_RE.test(message)
     ? "the click left the URL unchanged and the error says the route change was cancelled"
     : "the click on a link left the URL unchanged and the page opened a dialog instead";
@@ -508,7 +508,7 @@ export type PlanViolationRule = "stop" | "continue";
  * uncaught exception, a failed request, typed markup coming back, a page
  * contradicting the server, a token posted to any origin) stops a plan either way.
  */
-export const CONTINUABLE_KINDS: ReadonlySet<OracleViolation["kind"]> = new Set(["http_error", "console_error"]);
+const CONTINUABLE_KINDS: ReadonlySet<OracleViolation["kind"]> = new Set(["http_error", "console_error"]);
 
 /** Whether these violations, drained after one plan step, end the plan. Repeats of already-reported violations never do. */
 export function planStopsAt(violations: readonly Pick<OracleViolation, "kind" | "repeat">[], rule: PlanViolationRule): boolean {

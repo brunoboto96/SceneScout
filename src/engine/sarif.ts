@@ -94,12 +94,12 @@ export function resolveSarifAnchor(o: { option?: string; env: { GITHUB_WORKFLOW_
 }
 
 /** The repository root the paths are relative to: the Actions checkout when there is one, else the project. */
-export function repositoryRoot(env: { GITHUB_WORKSPACE?: string }, projectDir: string): string {
+function repositoryRoot(env: { GITHUB_WORKSPACE?: string }, projectDir: string): string {
   return env.GITHUB_WORKSPACE || projectDir;
 }
 
 /** `target` relative to `root` with forward slashes, or null when it is outside it. */
-export function repoRelative(root: string, target: string): string | null {
+function repoRelative(root: string, target: string): string | null {
   const rel = path.relative(path.resolve(root), path.resolve(target));
   if (rel === "") return "";
   if (rel.startsWith("..") || path.isAbsolute(rel)) return null;

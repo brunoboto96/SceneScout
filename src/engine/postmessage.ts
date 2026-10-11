@@ -52,18 +52,18 @@ import { normalizePath } from "./fingerprint.js";
 export const POSTMESSAGE_BINDING = "__scenescoutPostMessage";
 
 /** Strings shorter than this are not sent to the engine: nothing token-shaped is shorter. */
-export const MIN_CANDIDATE_LENGTH = 16;
+const MIN_CANDIDATE_LENGTH = 16;
 /** Longest string sent; a JWT carrying many claims runs to a few kilobytes. */
-export const MAX_CANDIDATE_LENGTH = 8192;
+const MAX_CANDIDATE_LENGTH = 8192;
 /** Longest JSON-looking string sent whole, so the engine can parse it; a longer one is cut and its contents go unread. */
-export const MAX_JSON_LENGTH = 262144;
+const MAX_JSON_LENGTH = 262144;
 /** Most values the walk visits per message: a large array or a binary buffer must not stall the app's call. */
-export const MAX_VISITS = 2000;
+const MAX_VISITS = 2000;
 /** Most items read from any one array or object. */
 export const MAX_ITEMS = 200;
 /** Most strings sent per message, and the deepest nesting walked. */
-export const MAX_CANDIDATES = 50;
-export const MAX_DEPTH = 6;
+const MAX_CANDIDATES = 50;
+const MAX_DEPTH = 6;
 
 /** Whether a targetOrigin lets any origin read the message. Only "*" does; "/" is the sender's own origin. */
 export function postsToAnyOrigin(targetOrigin: unknown): boolean {
@@ -154,7 +154,7 @@ export interface TokenHit {
 }
 
 /** Key names, lower-cased with `_` and `-` removed, whose value is a credential. */
-export const CREDENTIAL_KEYS: ReadonlySet<string> = new Set([
+const CREDENTIAL_KEYS: ReadonlySet<string> = new Set([
   "accesstoken",
   "idtoken",
   "refreshtoken",

@@ -28,18 +28,18 @@ import { escapeHtml } from "./replay.js";
 /** The page's generator mark: an earlier run's report is removed or replaced only when it carries it. */
 export const REPORT_GENERATOR = "scenescout-check-report";
 /** The file the report is written to when the template names none. */
-export const DEFAULT_REPORT_FILE = "report.html";
+const DEFAULT_REPORT_FILE = "report.html";
 /** What the cell of a missing value shows. */
 export const MISSING = "—";
 
 /** A report's file name: plain, in the output folder itself, ending .html. */
-export const REPORT_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.html$/;
+const REPORT_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.html$/;
 
 /** A name Windows reserves for a device whatever its extension (CON.html opens the console): never a report's file. */
-export const WINDOWS_DEVICE_RE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])\./i;
+const WINDOWS_DEVICE_RE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])\./i;
 
 /** Whether a name may be a report's file: plain, ending .html, not replay.html and not a Windows device name. */
-export function isReportFileName(name: string): boolean {
+function isReportFileName(name: string): boolean {
   return REPORT_FILE_RE.test(name) && !WINDOWS_DEVICE_RE.test(name) && name.toLowerCase() !== REPLAY_FILE;
 }
 
@@ -62,14 +62,14 @@ export function isGeneratedReport(html: string): boolean {
 // ── the template ────────────────────────────────────────────────────────────
 
 /** The columns a test table may have, in any order. */
-export const REPORT_COLUMNS = ["testId", "requirements", "step", "expected", "actual", "result", "evidence"] as const;
-export type ReportColumn = (typeof REPORT_COLUMNS)[number];
+const REPORT_COLUMNS = ["testId", "requirements", "step", "expected", "actual", "result", "evidence"] as const;
+type ReportColumn = (typeof REPORT_COLUMNS)[number];
 
 /** The sections a template may order. Each data section appears at most once; `text` as often as wanted. */
-export const REPORT_SECTIONS = ["summary", "tests", "deviations", "manifest", "signoff", "text"] as const;
+const REPORT_SECTIONS = ["summary", "tests", "deviations", "manifest", "signoff", "text"] as const;
 
 /** The tokens the title block may use, each replaced by a fact of the run. */
-export const REPORT_TOKENS = {
+const REPORT_TOKENS = {
   date: "the day the run started, YYYY-MM-DD (UTC)",
   time: "the time the run started, HH:MM:SS (UTC)",
   run: "the run's start as YYYYMMDD-HHMMSS (UTC)",
@@ -79,7 +79,7 @@ export const REPORT_TOKENS = {
 type ReportToken = keyof typeof REPORT_TOKENS;
 
 /** Every word the page writes that is not data. A template may replace any of them, so it carries its own vocabulary. */
-export const DEFAULT_LABELS = {
+const DEFAULT_LABELS = {
   pass: "Pass",
   fail: "Fail",
   refused: "Could not run",
@@ -125,7 +125,7 @@ export const DEFAULT_LABELS = {
   meaning: "Meaning of signature",
   documentId: "Document ID",
 } as const;
-export type ReportLabel = keyof typeof DEFAULT_LABELS;
+type ReportLabel = keyof typeof DEFAULT_LABELS;
 
 const text = (what: string, max: number) => z.string().trim().min(1, `is ${what}`).max(max, `is at most ${max} characters`);
 

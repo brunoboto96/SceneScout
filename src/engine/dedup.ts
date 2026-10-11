@@ -155,7 +155,7 @@ export function samplePairs(pairs: readonly LabelledPair[], cap: number): Labell
 
 // ── deciders ────────────────────────────────────────────────────────────────
 
-export type Verdict = "same" | "different" | "unsure";
+type Verdict = "same" | "different" | "unsure";
 
 export interface Judgement {
   verdict: Verdict;
@@ -164,7 +164,7 @@ export interface Judgement {
 }
 
 /** What a pair's judge and rule read of a finding: what a tester filed. */
-export type JudgedFinding = Pick<PairFinding, "title" | "category" | "evidence">;
+type JudgedFinding = Pick<PairFinding, "title" | "category" | "evidence">;
 
 /** Two findings on one page, the earlier (stored) as `a`. */
 export interface JudgedPair {
@@ -216,11 +216,7 @@ export const JUDGE_SYSTEM =
   "Example: verdict different with confidence 0.9 means a 10% chance they are one defect. Use unsure only when the findings give too little to go on.";
 
 /** What the judge is shown: the fields a tester filed, nothing from the key. */
-export function judgeKickoff(
-  route: string,
-  a: Pick<PairFinding, "title" | "category" | "evidence">,
-  b: Pick<PairFinding, "title" | "category" | "evidence">,
-): string {
+function judgeKickoff(route: string, a: Pick<PairFinding, "title" | "category" | "evidence">, b: Pick<PairFinding, "title" | "category" | "evidence">): string {
   const show = (f: typeof a) => ({ title: f.title, category: f.category, evidence: f.evidence ?? "" });
   return `Both findings were filed on the page ${route}.\n\nFinding A: ${JSON.stringify(show(a))}\nFinding B: ${JSON.stringify(show(b))}`;
 }
@@ -323,7 +319,7 @@ export async function decideDuplicate(p: JudgedPair, ask?: Ask, ruleVerdict?: ()
 // ── the judge the store asks ────────────────────────────────────────────────
 
 /** Calls made about one filing at most: its most alike open findings on the page. */
-export const JUDGE_MAX_CALLS = 3;
+const JUDGE_MAX_CALLS = 3;
 /** The longest one judge call may take. */
 export const JUDGE_CALL_MS = 15_000;
 /**
@@ -331,9 +327,9 @@ export const JUDGE_CALL_MS = 15_000;
  * scout_finding's 60-second watchdog, so a slow provider costs a filing its
  * judge and never the filing.
  */
-export const JUDGE_FILING_MS = 40_000;
+const JUDGE_FILING_MS = 40_000;
 /** Failed calls in a row after which the judge is switched off for the rest of the run. */
-export const JUDGE_MAX_FAILURES = 3;
+const JUDGE_MAX_FAILURES = 3;
 /** The most output one judge call may produce: the answer is one short tool call (24 to 26 tokens when measured). */
 export const JUDGE_MAX_OUTPUT_TOKENS = 2_000;
 /**

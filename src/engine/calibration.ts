@@ -92,7 +92,7 @@ export function joinKeys(evidence: string): Set<string> {
   return failingSignatures(evidence);
 }
 
-export interface Bucket {
+interface Bucket {
   label: string;
   decisions: number;
   /** Mean confidence the lanes stated in this bucket. */

@@ -56,7 +56,7 @@ export interface Conversation {
 }
 
 /** The most output one model call may produce. Large enough for a plan of steps; small enough that one reply cannot spend the budget. */
-export const MAX_OUTPUT_TOKENS = 16_000;
+const MAX_OUTPUT_TOKENS = 16_000;
 
 export interface ConversationOptions {
   baseUrl: string;

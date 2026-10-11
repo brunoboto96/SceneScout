@@ -20,7 +20,7 @@
 import type { Finding } from "./memory.js";
 
 /** The shape a criterion was written in. */
-export type CriterionShape = "given-when-then" | "checklist" | "numbered" | "labelled" | "bullet";
+type CriterionShape = "given-when-then" | "checklist" | "numbered" | "labelled" | "bullet";
 
 export interface Criterion {
   /** "AC1", "AC2", …: the ticket's own number when it labelled the criterion "AC3", else its place in the ticket. */
@@ -77,17 +77,17 @@ export const MAX_TICKET_TEXT = 200_000;
 export const MAX_TICKETS = 50;
 /** Most tickets the project keeps across runs: the newest readings. */
 export const MAX_TICKETS_KEPT = 100;
-export const MAX_CRITERIA_PER_TICKET = 50;
-export const MAX_CRITERION_TEXT = 500;
+const MAX_CRITERIA_PER_TICKET = 50;
+const MAX_CRITERION_TEXT = 500;
 export const MAX_REASON = 300;
 export const MAX_CRITERION_FINDINGS = 20;
-export const MAX_CRITERION_VERDICTS = 1000;
+const MAX_CRITERION_VERDICTS = 1000;
 /** A ticket file is read only up to this size. */
 export const MAX_TICKET_FILE_BYTES = 1_000_000;
 /** The file types a ticket is read from: text, never a binary or a document format. */
 export const TICKET_FILE_EXTENSIONS = [".md", ".markdown", ".txt", ".text", ".feature"] as const;
 /** Below this confidence, the plain report says the verdict is unsure. */
-export const UNSURE_BELOW = 0.6;
+const UNSURE_BELOW = 0.6;
 
 /** Whether a file name has one of the extensions a ticket is read from. */
 export function isTicketFileName(name: string): boolean {
@@ -375,7 +375,7 @@ function numberCriteria(drafts: readonly Draft[]): Criterion[] {
 }
 
 /** The key a ticket's heading carries, if any: "PROJ-12" or "#12". */
-export function ticketKey(heading: string): string | undefined {
+function ticketKey(heading: string): string | undefined {
   const key = TICKET_KEY.exec(heading)?.[1];
   if (key) return key;
   const issue = ISSUE_NUMBER.exec(heading)?.[1];
@@ -647,7 +647,7 @@ export function answerTicket(ticket: Ticket, verdicts: readonly CriterionVerdict
 // ── Reporting ─────────────────────────────────────────────────────────────────
 
 /** Why a criterion was not tested, in plain words. */
-export const NOT_TESTED_WORDS: Record<NotTestedReason | "not-judged", string> = {
+const NOT_TESTED_WORDS: Record<NotTestedReason | "not-judged", string> = {
   "no-access": "the account the run used could not reach this part of the site",
   "observe-blocked": "the run was only allowed to look, not to send changes, so this could not be tried",
   "out-of-scope": "it is outside what this run could check",

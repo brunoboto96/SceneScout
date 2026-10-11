@@ -18,12 +18,12 @@ export type BrowserEngineName = (typeof BROWSER_ENGINES)[number];
  * a headed run opens, and the headless shell, which every headless run uses.
  * Installing "chromium" brings both, which is what install has always done.
  */
-export const INSTALL_TARGETS = ["chromium", "chromium-headless-shell", "firefox", "webkit"] as const;
+const INSTALL_TARGETS = ["chromium", "chromium-headless-shell", "firefox", "webkit"] as const;
 export type InstallTarget = (typeof INSTALL_TARGETS)[number];
 
-export const DEFAULT_ENGINE: BrowserEngineName = "chromium";
+const DEFAULT_ENGINE: BrowserEngineName = "chromium";
 /** Environment variable naming the browser an attach uses when it does not name one. */
-export const DEFAULT_ENGINE_ENV = "SCENESCOUT_BROWSER";
+const DEFAULT_ENGINE_ENV = "SCENESCOUT_BROWSER";
 
 /** Approximate size on disk, so the install output can say what it is about to fetch. */
 export const APPROX_DISK_MB: Record<InstallTarget, number> = {
@@ -129,7 +129,7 @@ export function browserPresence(executables: Record<BrowserEngineName, string | 
 }
 
 /** The command that downloads one build, for the way this copy of SceneScout was installed. */
-export function installCommandFor(target: InstallTarget, fromCheckout: boolean): string {
+function installCommandFor(target: InstallTarget, fromCheckout: boolean): string {
   const flags = `--browser-only --browsers ${target}`;
   return fromCheckout ? `node dist/cli.js install ${flags}` : `npx -y scenescout install ${flags}`;
 }
@@ -306,9 +306,9 @@ export function defaultAttachNote(opts: { selected: readonly InstallTarget[]; de
 /** Environment variable deciding whether an attach downloads a missing browser build itself. */
 export const BROWSER_DOWNLOAD_ENV = "SCENESCOUT_BROWSER_DOWNLOAD";
 /** `auto` downloads except in CI; `on` downloads in CI too; `off` never downloads, for a machine where nothing may be fetched. */
-export const BROWSER_DOWNLOAD_SETTINGS = ["auto", "on", "off"] as const;
-export type BrowserDownloadSetting = (typeof BROWSER_DOWNLOAD_SETTINGS)[number];
-export const DEFAULT_BROWSER_DOWNLOAD: BrowserDownloadSetting = "auto";
+const BROWSER_DOWNLOAD_SETTINGS = ["auto", "on", "off"] as const;
+type BrowserDownloadSetting = (typeof BROWSER_DOWNLOAD_SETTINGS)[number];
+const DEFAULT_BROWSER_DOWNLOAD: BrowserDownloadSetting = "auto";
 
 /**
  * What an attach does when the build it needs is not on disk: download it

@@ -147,7 +147,7 @@ const Key = z
   .strict();
 
 export type KeyEntry = z.infer<typeof Entry>;
-export type KeyNonDefect = z.infer<typeof NonDefect>;
+type KeyNonDefect = z.infer<typeof NonDefect>;
 export type KeyContextual = z.infer<typeof Contextual>;
 export type AnswerKey = z.infer<typeof Key>;
 
@@ -429,7 +429,7 @@ function lanePaths(lane: string, laneRoutes: LaneRoutes | undefined): Set<string
 }
 
 /** Why a not-a-defect was set aside as another lane's: by the lane's routes (with the entry it matched), or by its wording. */
-export type OwnershipRemark = { by: "routes"; id: string } | { by: "wording" };
+type OwnershipRemark = { by: "routes"; id: string } | { by: "wording" };
 
 /**
  * A not-a-defect that is a remark about who owns the thing, not a verdict on
@@ -449,7 +449,7 @@ export type OwnershipRemark = { by: "routes"; id: string } | { by: "wording" };
  * any lane that reported no route — the wording rule decides, unchanged, so
  * those runs score as they always have.
  */
-export function ownershipRemark(d: RecordedDecision, key: AnswerKey, laneRoutes?: LaneRoutes): OwnershipRemark | null {
+function ownershipRemark(d: RecordedDecision, key: AnswerKey, laneRoutes?: LaneRoutes): OwnershipRemark | null {
   if (d.verdict !== "not_a_defect") return null;
   const own = lanePaths(d.lane, laneRoutes);
   if (!own) return isScopeDismissal(d) ? { by: "wording" } : null;

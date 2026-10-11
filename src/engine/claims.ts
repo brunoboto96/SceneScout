@@ -329,7 +329,7 @@ function pathNames(req: WatchedRequest, subject: readonly string[]): boolean {
 }
 
 /** How an empty-state sentence relates to the page's refused reads (#413). */
-export type EmptyStatePairing =
+type EmptyStatePairing =
   /** It names nothing in particular, or names what this refused read fetched: reported at high. */
   | { certain: true; read: WatchedRequest }
   /** It names something a read on the page loaded successfully, and no refused read: it is about that, and is not reported. */
@@ -343,7 +343,7 @@ export type EmptyStatePairing =
  * sentence naming what they fetched is a genuinely empty section rather than
  * a refusal hidden behind an empty state.
  */
-export function pairEmptyState(text: string, refusedReads: readonly WatchedRequest[], loaded: readonly WatchedRequest[]): EmptyStatePairing {
+function pairEmptyState(text: string, refusedReads: readonly WatchedRequest[], loaded: readonly WatchedRequest[]): EmptyStatePairing {
   const subject = emptyStateSubject(text);
   if (subject.length === 0) return { certain: true, read: refusedReads[0] };
   const named = refusedReads.find((r) => pathNames(r, subject));
@@ -578,7 +578,7 @@ const CONTROL_CONTAINER_SEL =
   'dialog, [role="dialog"], [role="alertdialog"], fieldset, form, [role="group"], [role="radiogroup"], [role="toolbar"], [role="region"], section, aside, [role="complementary"]';
 
 /** Most counters read for one control. */
-export const MAX_COUNTERS = 20;
+const MAX_COUNTERS = 20;
 
 /**
  * Page-side reader of an acted-on control: `(${ACTED_CONTROL_SRC})(node)`
@@ -688,10 +688,10 @@ export function saidSince(text: string, baseline: PageState | null): boolean {
 }
 
 /** Most announced regions read from one page. */
-export const MAX_ANNOUNCED = 40;
+const MAX_ANNOUNCED = 40;
 
 /** Most pieces of text read from one page. A page with more than this has nothing useful to say in the extra ones. */
-export const MAX_CLAIM_TEXTS = 120;
+const MAX_CLAIM_TEXTS = 120;
 
 /**
  * Page-side reader for the two signals `findContradictions` needs. Shipped as
