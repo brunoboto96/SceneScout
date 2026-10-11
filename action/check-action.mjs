@@ -296,6 +296,14 @@ const INTEGRITY = /^sha512-[A-Za-z0-9+/]+={0,2}$/;
  * it is verified as `npm install scenescout@<version>` would verify it.
  * Returns { reason } when the lockfile does not describe `version`, so the
  * caller can say why it floats.
+ *
+ * @param {{ packages?: Record<string, unknown>, [key: string]: unknown }} repoLock  A parsed package-lock.json.
+ * @param {string} version
+ * @param {unknown} integrity
+ * @returns {{ reason: string } | {
+ *   packageJson: { name: string, private: boolean, dependencies: Record<string, string> },
+ *   lockfile: { name: string, lockfileVersion: number, requires: boolean, packages: Record<string, Record<string, unknown>> },
+ * }}
  */
 export function pinnedTree(repoLock, version, integrity) {
   const reason = lockMismatch(repoLock, version);
@@ -371,6 +379,10 @@ const PIN_HOW = "Leave the version input empty and use the action at a release t
  * the dependencies that release was tested with, not whatever is newest. Any
  * other version, or a ref whose lockfile has moved on from the release it
  * names, installs as npm would, with a warning that says so.
+ *
+ * @param {string} version
+ * @param {string} repoRoot
+ * @param {{ exec: (args: string[]) => unknown, integrityOf: (version: string) => unknown, tmpDir: string, warn: (message: string) => void }} [io]
  */
 export function installPackage(version, repoRoot, io = defaultIo()) {
   if (!isVersionSpec(version)) throw new Error(`the version input is not an npm version, range or tag: "${version}"`);
