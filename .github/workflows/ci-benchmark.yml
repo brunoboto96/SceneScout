@@ -128,7 +128,21 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
+          fetch-depth: 0
           persist-credentials: false
+      # A commit id must be on main or in a release tag's history: GitHub
+      # serves a fork's commits under this repository's name too, and nothing
+      # from a fork or an unmerged branch runs beside the key. The checkout
+      # fetches all history and tags for this; nothing has run yet.
+      - name: A commit id is on main or in a release
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            if git merge-base --is-ancestor "$REF" origin/main 2>/dev/null; then exit 0; fi
+            if [ -n "$(git tag --list 'v[0-9]*' --contains "$REF" 2>/dev/null)" ]; then exit 0; fi
+            echo "::error::$REF is neither on main nor in a release tag's history, so it does not run beside the model's key"; exit 1
+          fi
       - id: commit
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v7

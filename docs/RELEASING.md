@@ -28,6 +28,20 @@ Nothing is published while the repository variable `NPM_PUBLISH` is anything
 other than `enabled`. The version pull request is still opened and kept up to
 date, so merged changesets stay visible; only the publish step is skipped.
 
+## The example workflows
+
+The workflows in [examples/workflows/](../examples/workflows/) name SceneScout
+at one exact release (`@vX.Y.Z`), because the job that holds a model's key
+should run a reviewed version. Dependabot does not read `examples/`, so move
+them by hand after a release, all at once:
+
+```bash
+sed -i.bak -E 's#(brunoboto96/SceneScout(/(qa|ci))?)@v[0-9]+\.[0-9]+\.[0-9]+#\1@vX.Y.Z#' examples/workflows/*.yml && rm examples/workflows/*.bak
+```
+
+`qa-test` fails when the examples name more than one release, a moving ref,
+or a release newer than `package.json`.
+
 ## Skipping a release run
 
 A merged pull request labelled `skip-publish` makes the release workflow stand

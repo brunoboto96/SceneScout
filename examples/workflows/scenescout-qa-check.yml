@@ -93,7 +93,7 @@ jobs:
       # scenescout check --record --video, uploading its output folder as the
       # artifact the comment workflow reads. Keep the name equal to the
       # SCENESCOUT_QA_CHECK_ARTIFACT variable (default scenescout-check).
-      - uses: brunoboto96/SceneScout@v3.20.2
+      - uses: brunoboto96/SceneScout@v3.23.4
         with:
           url: http://127.0.0.1:3000
           flows: ${{ steps.flows.outputs.dir }}

@@ -2072,6 +2072,60 @@ test("benchmark workflow: started by hand or called, reads the repository and no
   assert.equal(String(run.with?.cache), "false", "the ci action keeps the browser out of the cache");
 });
 
+test("benchmark workflow: a commit id runs only when it is on main or in a release tag's history", () => {
+  const steps = Object.values(readWorkflow("ci-benchmark.yml").jobs as Record<string, WorkflowJob>).flatMap((j) => j.steps ?? []);
+  const checkout = steps.findIndex((s) => /^actions\/checkout@/.test(s.uses ?? ""));
+  assert.equal(String(steps[checkout].with?.["fetch-depth"]), "0", "all of history and the tags, or the step cannot tell");
+  const origin = steps.findIndex((s, i) => i > checkout && s.env?.REF === "${{ inputs.ref }}" && /merge-base/.test(s.run ?? ""));
+  assert.ok(origin > checkout, "the commit's origin is checked after the checkout");
+  const firstRun = steps.findIndex((s, i) => i > checkout && i !== origin && (s.run || s.uses));
+  assert.ok(origin < firstRun, "and before any other step runs the checked-out code");
+
+  // A repository shaped like this one's: main, a release tagged on a branch off it, an unmerged branch, and a tag that is not a release.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-ref-"));
+  try {
+    const env = {
+      PATH: process.env.PATH,
+      HOME: dir,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.com",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.com",
+    };
+    const git = (cwd: string, ...args: string[]) => {
+      const r = spawnSync("git", args, { cwd, env, encoding: "utf8" });
+      assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    const upstream = path.join(dir, "upstream");
+    fs.mkdirSync(upstream);
+    git(upstream, "init", "-q", "-b", "main");
+    const commit = (msg: string) => (git(upstream, "commit", "-q", "--allow-empty", "-m", msg), git(upstream, "rev-parse", "HEAD"));
+    const onMain = commit("first");
+    git(upstream, "switch", "-q", "-c", "release-line");
+    const releaseParent = commit("release prep");
+    const released = commit("release");
+    git(upstream, "tag", "v1.2.3");
+    git(upstream, "switch", "-q", "main");
+    const mainTip = commit("second");
+    git(upstream, "switch", "-q", "-c", "unmerged");
+    const unmerged = commit("unmerged");
+    const notARelease = commit("tagged, not released");
+    git(upstream, "tag", "nightly");
+    git(upstream, "switch", "-q", "main");
+    const clone = path.join(dir, "clone");
+    git(dir, "clone", "-q", "--no-local", upstream, clone);
+
+    const accepts = (ref: string) => spawnSync("bash", ["-eo", "pipefail", "-c", steps[origin].run!], { cwd: clone, env: { ...env, REF: ref } }).status === 0;
+    for (const ref of [onMain, mainTip, released, releaseParent, "", "main", "v1.2.3"]) assert.ok(accepts(ref), `refuses ${ref || "(empty)"}`);
+    // The near misses: a commit beside a release but in no release's history, one tagged by a tag that is not vX.Y.Z, and one this repository lacks.
+    for (const ref of [unmerged, notARelease, "0123456789abcdef0123456789abcdef01234567"]) assert.ok(!accepts(ref), `accepts ${ref}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("benchmark workflow: from-run-record starts a dispatched run from an earlier run's record, kept outside the project", () => {
   const wf = readWorkflow("ci-benchmark.yml");
   assert.equal(wf.on.workflow_dispatch.inputs["from-run-record"].default, "", "a fresh run unless asked");
