@@ -252,6 +252,15 @@ test("the sidebar groups the pages under headings, and the footer stays a line o
   assert.ok(footer.trim().split("\n").length <= 3, "the footer is short");
 });
 
+test("each page opens by saying who it is for and what it lets you do, before its first section", () => {
+  for (const [name, text] of pages) {
+    if (name === "Home.md" || name.startsWith("_")) continue;
+    const opening = lf(text).split(/\n## /)[0];
+    assert.match(opening, /^> \*\*Who this is for:\*\* \S/m, `${name}: its opening says who it is for`);
+    assert.match(opening, /^> \*\*What you will be able to do:\*\* \S/m, `${name}: its opening says what you will be able to do`);
+  }
+});
+
 test("every page renders as GitHub Markdown: whole tables, closed code fences", () => {
   for (const [name, text] of pages) {
     const { problems } = tables(text);

@@ -1,5 +1,9 @@
 # Troubleshooting and FAQ
 
+> **Who this is for:** anyone whose setup, run or CI job is not doing what they expected.
+>
+> **What you will be able to do:** find the symptom, its cause and the fix, and answer the questions that come up most.
+
 Run `npx -y scenescout doctor` first (`--engine` for clients other than Claude Code). It checks node, the build, the browser, the skill and the registration, and prints the command that fixes whatever is missing.
 
 ## Setup
@@ -94,4 +98,4 @@ Into `.scenescout/` in the project folder (or the folder you ran from, for a rem
 Chromium by default, and Firefox and WebKit once downloaded (`npx -y scenescout install --browser-only --browsers firefox,webkit`). Firefox and WebKit do not let service workers register, because the write policy can intercept a service worker's requests only in Chromium.
 
 **How do I uninstall it?**
-`claude mcp remove --scope user scenescout` and remove the `scenescout` folder from Claude Code's skills folder (for other clients, their own `mcp remove`, or delete the entry from the client's configuration). Delete each project's `.scenescout/` folder if you want its memory gone.
+See [Upgrading and uninstalling](#upgrading-and-uninstalling).

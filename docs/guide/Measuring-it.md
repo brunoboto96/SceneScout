@@ -1,5 +1,9 @@
 # Measuring it
 
+> **Who this is for:** anyone deciding how far to trust a run, and anyone changing how SceneScout explores.
+>
+> **What you will be able to do:** read the parts of a report that say what a run missed, run the benchmark, and read a scorecard.
+
 An exploratory run is driven by a model, so two runs of the same app never find exactly the same things. This page is about how much to trust a run, and how SceneScout itself is measured so that a change to it is known to help rather than assumed to.
 
 ## Inside every report
@@ -23,6 +27,14 @@ The [demo app](../../demo-app/README.md) has fourteen planted defects. Its [answ
 ### Running it
 
 From a clone of the repository:
+
+```mermaid
+flowchart LR
+  S["Serve the demo app<br/>fresh"] --> R["Run SceneScout into<br/>a fresh project folder"]
+  R --> B["Score it<br/>npm run bench"]
+  B --> A["Archive it<br/>--archive"]
+  A --> K["Key changed?<br/>re-score all with --all"]
+```
 
 ```bash
 npm run demo:serve                                    # restart before each run: created records stay in memory
