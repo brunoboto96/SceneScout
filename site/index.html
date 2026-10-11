@@ -10,7 +10,7 @@
     />
     <meta property="og:title" content="SceneScout" />
     <meta property="og:description" content="Your coding agent, turned into an exploratory QA tester for any web app." />
-    <meta property="og:image" content="screenshots/dashboard-annotated.png" />
+    <meta property="og:image" content="https://brunoboto96.github.io/SceneScout/screenshots/dashboard-annotated.png" />
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2317233B'/%3E%3Crect x='7' y='9' width='18' height='12' rx='2' fill='none' stroke='%23F4D35E' stroke-width='2.4'/%3E%3Ccircle cx='22.5' cy='22.5' r='3.6' fill='%23D3263A'/%3E%3C/svg%3E"
@@ -30,6 +30,10 @@
         --rule: #dde2ea;
         --defect: #d3263a;
         --defect-wash: #fce9eb;
+        --defect-ink: #b51f31;
+        --on-defect: #ffffff;
+        --observe: #2f6fd0;
+        --caution: #8a5f0c;
         --pass: #1f7a54;
         --pass-wash: #e5f3ec;
         --mark: #f4d35e;
@@ -50,6 +54,10 @@
           --rule: #2a3652;
           --defect: #ff5a6e;
           --defect-wash: #3a1a26;
+          --defect-ink: #ff5a6e;
+          --on-defect: #0f1729;
+          --observe: #6fa3f0;
+          --caution: #e0a83a;
           --pass: #4cc38a;
           --pass-wash: #14322a;
           --mark: #f4d35e;
@@ -343,7 +351,7 @@
         height: 30px;
         border-radius: 50%;
         background: var(--defect);
-        color: #fff;
+        color: var(--on-defect);
         font: 800 0.95rem/30px var(--display);
         text-align: center;
       }
@@ -378,7 +386,7 @@
         height: 30px;
         border-radius: 50%;
         background: var(--defect);
-        color: #fff;
+        color: var(--on-defect);
         font: 800 0.95rem/30px var(--display);
         text-align: center;
       }
@@ -663,7 +671,7 @@
       }
       .pill.no {
         background: var(--defect-wash);
-        color: var(--defect);
+        color: var(--defect-ink);
       }
 
       /* Live view */
@@ -785,13 +793,13 @@
         color: var(--ink);
       }
       .mode.observe {
-        --c: #2f6fd0;
+        --c: var(--observe);
       }
       .mode.ro {
         --c: var(--pass);
       }
       .mode.sw {
-        --c: #b9831a;
+        --c: var(--caution);
       }
       .mode.de {
         --c: var(--defect);
@@ -929,10 +937,12 @@
             <div class="try">
               <span class="try-label">Try it on an app you are allowed to test. No account, no API key:</span>
               <div class="cmd">
-                <code id="try-cmd"><b>npx -y scenescout</b> http://localhost:3000</code>
+                <code id="try-cmd" tabindex="0"><b>npx -y scenescout</b> http://localhost:3000</code>
                 <button class="copy" type="button" data-copy="npx -y scenescout http://localhost:3000" aria-label="Copy the command">Copy</button>
               </div>
-              <span class="try-note">It only reads pages, changes nothing, and writes a short report beside you.</span>
+              <span class="try-note"
+                >It only reads pages, changes nothing, and writes a short report to <code>scenescout-report/</code> in the current folder.</span
+              >
             </div>
             <div class="actions">
               <a class="btn primary" href="#start">Set it up with your agent</a>
@@ -960,7 +970,7 @@
                 >
               </li>
               <li>
-                <span class="num" aria-hidden="true">2</span><span>The weekly chart never loads. <code>GET /img/weekly-chart.png → 404</code></span>
+                <span class="num" aria-hidden="true">2</span><span>The weekly chart never loads. <code>GET /img/weekly-chart.png → HTTP 404</code></span>
               </li>
             </ol>
           </figure>
@@ -971,7 +981,7 @@
         <div class="wrap">
           <div class="section-head">
             <h2>It finds what a person would notice, and what they wouldn't.</h2>
-            <p class="lede">After every click it checks the page for these, and files each one with the steps to repeat it.</p>
+            <p class="lede">As it explores, it checks for these, and files each one with the steps to repeat it.</p>
           </div>
           <div class="catches">
             <div class="catch">
@@ -1045,17 +1055,18 @@
               </div>
             </div>
           </div>
-          <div class="slips" aria-label="Three findings from a real run of the demo app">
+          <div class="slips" role="group" aria-label="Three findings from a real run of the demo app">
             <div class="slip">
-              <span class="sev">High</span><strong>A clerk can approve an order the page hides from them</strong
+              <span class="sev">High</span><strong>A clerk can approve an order by calling the endpoint the page hides from them</strong
               ><code>POST /api/orders/1037/approve 200 as clerk</code>
             </div>
             <div class="slip">
-              <span class="sev">High</span><strong>Filtering by Archived fails, and the page shows an empty table instead of an error</strong
-              ><code>GET /api/orders?status=archived → 500</code>
+              <span class="sev">High</span><strong>Filtering orders by Archived fails, and the page shows an empty table instead of an error</strong
+              ><code>GET /api/orders?status=archived → HTTP 500</code>
             </div>
             <div class="slip">
-              <span class="sev">High</span><strong>A double-click on Create order creates two orders</strong><code>2× click → 2× POST /api/orders</code>
+              <span class="sev">High</span><strong>A double-click on Create order creates two orders</strong
+              ><code>2× click fired the same state-changing request 2× (POST /api/orders)</code>
             </div>
           </div>
           <p class="aside">
@@ -1090,7 +1101,7 @@
               <ul>
                 <li>Runs from the agent already in your editor: Claude Code, Cursor, VS Code, Codex, Gemini CLI and more.</li>
                 <li>Next to the source, it names the file behind the bug and a likely fix.</li>
-                <li>A playwright regression-test skeleton for every finding.</li>
+                <li>A Playwright regression-test skeleton for every finding.</li>
                 <li>A deterministic gate for pull requests, with code-scanning results.</li>
               </ul>
             </div>
@@ -1135,7 +1146,7 @@
               <figcaption><b>The happy path, as it ran.</b> One of the videos a check films.</figcaption>
             </figure>
             <figure class="shot">
-              <pre class="journey-json" aria-label="The saved journey behind the video, shortened"><code>{
+              <pre class="journey-json" tabindex="0" role="region" aria-label="The saved journey behind the video, shortened"><code>{
   <span class="k">"name"</span>: <span class="s">"place an order"</span>,
   <span class="k">"steps"</span>: [
     { <span class="k">"action"</span>: <span class="s">"navigate"</span>, <span class="k">"target"</span>: <span class="s">"/orders-new.html"</span> },
@@ -1151,7 +1162,7 @@
                   >the whole file</a
                 >). Written by hand, or kept from a flow your agent just walked.
               </figcaption>
-              <div class="verdicts" aria-label="This run's results">
+              <div class="verdicts" role="group" aria-label="This run's results">
                 <span class="pill ok">Passed: place an order</span><span class="pill ok">Passed: filter by status</span
                 ><span class="pill no">Failed: archived orders</span>
               </div>
@@ -1222,7 +1233,11 @@
               <div>
                 <h3>Install it for your agent</h3>
                 <p>One command sets up the server, the testing method and the test browser.</p>
-                <pre><code>npx -y scenescout install                    <span class="c"># Claude Code</span>
+                <pre
+                  tabindex="0"
+                  role="region"
+                  aria-label="Install commands"
+                ><code>npx -y scenescout install                    <span class="c"># Claude Code</span>
 npx -y scenescout install --client cursor    <span class="c"># or vscode, codex, gemini, copilot, windsurf</span></code></pre>
                 <p class="clients">
                   Prefer an app? The Claude Desktop extension installs with a double-click from the
@@ -1235,7 +1250,7 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
                 <h3>Start your app, then ask</h3>
                 <p>In a new chat with your agent:</p>
                 <pre><code>Use SceneScout to test http://localhost:3000</code></pre>
-                <p class="clients">Not sure what to say? Type <code>/scenescout</code> and it asks four plain questions instead.</p>
+                <p class="clients">Not sure what to say? In Claude Code, type <code>/scenescout</code> and it asks four plain questions instead.</p>
               </div>
             </li>
             <li>
@@ -1261,12 +1276,12 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
             <div class="mode observe">
               <code>observe</code>
               <p>Reads only.</p>
-              <span class="def">Default for a first look and for a site with real data</span>
+              <span class="def">Default for a first look, for the check, and for an agent on a remote site</span>
             </div>
             <div class="mode ro">
               <code>read-only</code>
               <p>Forms can be sent; nothing existing is changed or deleted.</p>
-              <span class="def">Default on your own machine</span>
+              <span class="def">Default for an agent on a local app</span>
             </div>
             <div class="mode sw">
               <code>safe-write</code>
