@@ -16,6 +16,7 @@
  * its parent window. Like live-page.ts, the client script avoids template
  * literals because the page is one; status-pane tests check the script parses.
  */
+import { scriptLiteral } from "./script-literal.js";
 import { MCP_APPS_PROTOCOL, STATUS_POLL_MS, STATUS_POLL_TOOL } from "./status-pane.js";
 
 export function statusPanePage(version: string): string {
@@ -141,10 +142,10 @@ export function statusPanePage(version: string): string {
 <script>
 (function () {
   "use strict";
-  var POLL_TOOL = ${JSON.stringify(STATUS_POLL_TOOL)};
+  var POLL_TOOL = ${scriptLiteral(STATUS_POLL_TOOL)};
   var POLL_MS = ${STATUS_POLL_MS};
-  var PROTOCOL = ${JSON.stringify(MCP_APPS_PROTOCOL)};
-  var VERSION = ${JSON.stringify(version)};
+  var PROTOCOL = ${scriptLiteral(MCP_APPS_PROTOCOL)};
+  var VERSION = ${scriptLiteral(version)};
   var REQUEST_MS = 10000;
 
   var nextId = 1;

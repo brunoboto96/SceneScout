@@ -55,6 +55,7 @@ import {
   stricterMode,
   WriteRule,
 } from "../src/engine/policy.ts";
+import { scriptLiteral } from "../src/engine/script-literal.ts";
 import {
   deriveCollection,
   extractCreatedIds,
@@ -930,6 +931,14 @@ test("sandboxedRedirectPage: navigates to the target, and a target cannot close 
   const page = sandboxedRedirectPage("https://x.test/a?b=</script><script>alert(1)</script>");
   assert.match(page, /location\.replace\("https:\/\/x\.test\/a\?b=\\u003c\/script>\\u003cscript>alert\(1\)\\u003c\/script>"\)/);
   assert.equal(page.split("</script>").length, 2, "exactly one closing tag: the page's own");
+});
+
+test("scriptLiteral: nothing in the value can end or comment out an inline script", () => {
+  for (const value of ["</script><script>alert(1)</script>", "<!-- a", "<script", "</SCRIPT >", "a\u2028b\u2029c", "]]>", "plain"]) {
+    const literal = scriptLiteral(value);
+    assert.ok(!literal.includes("<"), `no "<" survives in ${literal}`);
+    assert.equal(JSON.parse(literal), value, "the script reads back the same string");
+  }
 });
 
 test("hostileForEmbed: what is never typed into another site's frame", () => {

@@ -3,6 +3,8 @@
  * with elements whose accessible name / testid / id matches these patterns —
  * enforcement lives here, at the tool layer, never in the model's prompt.
  */
+import { scriptLiteral } from "./script-literal.js";
+
 const DESTRUCTIVE_PATTERNS: RegExp[] = [
   /\bdelete\b/i,
   // "Remove" a filter chip drops a condition from the view: "Remove Status:
@@ -705,9 +707,8 @@ export function offAppPageWrite(appUrl: string, pageUrl: string | undefined, des
  * the browser without asking, and the page it lands on was not sandboxed.
  */
 export function sandboxedRedirectPage(target: string): string {
-  const json = JSON.stringify(target).replace(/</g, "\\u003c");
   // No referrer: the next hop would otherwise name this stand-in page, where a real redirect names the app.
-  return `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><script>location.replace(${json});</script>`;
+  return `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><script>location.replace(${scriptLiteral(target)});</script>`;
 }
 
 /** The last path segment of a page that is a sign-in page, and nothing else: not a verification step, where a payment provider's frame sits. */
