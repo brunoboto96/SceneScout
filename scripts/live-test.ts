@@ -1022,6 +1022,21 @@ test("the live view's token files are written owner-only, whatever was at their 
   }
 });
 
+test("a shared token file left readable by others is replaced by an owner-only one", { skip: process.platform === "win32" }, async () => {
+  // The per-pid name was chmod-ed after its write; the shared name never was, so a leftover one kept its bits.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-token-"));
+  try {
+    fs.writeFileSync(path.join(dir, LIVE_TOKEN_FILE), "old", { mode: 0o644 });
+    fs.chmodSync(path.join(dir, LIVE_TOKEN_FILE), 0o644);
+    await writeLiveToken(dir, 4242, "t".repeat(32));
+    const stat = fs.lstatSync(path.join(dir, LIVE_TOKEN_FILE));
+    assert.equal(stat.mode & 0o777, 0o600, "the shared token file can be read by its owner only");
+    assert.equal(fs.readFileSync(path.join(dir, LIVE_TOKEN_FILE), "utf8"), "t".repeat(32));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a token write that fails leaves no file holding the token behind", { skip: process.platform === "win32" }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-token-"));
   try {
