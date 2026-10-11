@@ -428,12 +428,17 @@ export function checkDecision({ pr, checkWorkflow }) {
 /**
  * Text from ci.json as inert Markdown. Finding titles and paths are written
  * by a model that read the preview's pages, so they can say anything: here
- * they cannot mention anyone, link anywhere, embed an image, add HTML or
- * break the table. One line, cut to `max` characters.
+ * they cannot mention anyone, link anywhere, embed an image, add HTML,
+ * render maths, cross-reference an issue, reorder the line or break the table.
+ * One line, cut to `max` characters.
+ *
+ * A backslash does not stop GitHub rendering `$…$` as maths or `\#12` as a
+ * reference, so those get a zero-width space instead: before every `$`, and
+ * between `#`, `GH-` or `issues/`, `pull/`, `discussions/` and a number.
  */
 export function inert(text, max = 160) {
   let s = String(text ?? "")
-    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (s.length > max) s = `${s.slice(0, max - 1)}…`;
@@ -444,7 +449,11 @@ export function inert(text, max = 160) {
     .replace(/([\\`*_{}[\]()#+!|~])/g, "\\$1")
     .replace(/@/g, "@\u200b")
     .replace(/:\/\//g, ":\u200b//")
-    .replace(/www\./gi, (m) => `${m.slice(0, 3)}\u200b.`);
+    .replace(/www\./gi, (m) => `${m.slice(0, 3)}\u200b.`)
+    .replace(/\$/g, "\u200b$")
+    .replace(/#(?=\d)/g, "#\u200b")
+    .replace(/\bgh-(?=\d)/gi, (m) => `${m.slice(0, 2)}\u200b-`)
+    .replace(/\/(issues|pulls?|discussions)\/(?=\d)/gi, "/$1/\u200b");
 }
 
 const SEVERITY_ORDER = { high: 0, medium: 1, low: 2 };

@@ -382,6 +382,28 @@ test("inert: model-written text cannot mention, link, embed, add HTML or break t
   assert.equal(inert("A plain finding title"), "A plain finding title", "ordinary text reads as written");
 });
 
+// Each pattern is what GitHub's renderer acts on, checked against its /markdown endpoint: a backslash before `$`
+// or `#` does not stop it, a zero-width space before `$` and after the `#` (or `GH`, or `issues/`) does.
+test("inert: model-written text cannot render maths, cross-reference an issue, or reorder the line", () => {
+  const rows: Array<[string, RegExp]> = [
+    // `$…$` and `$$…$$` render as maths, so a title could put a large "All checks passed" in the bot's reply.
+    ["$\\Huge\\color{green}\\text{All checks passed}$", /(^|[^\u200b])\$/],
+    ["$$x$$ and $`x`$", /(^|[^\u200b])\$/],
+    // Another repository's issue, referenced from the reply, gets a "mentioned this" event from the bot.
+    ["see #12", /#\d/],
+    ["see other/repo#12", /#\d/],
+    ["see GH-12 and gh-3", /\bgh-\d/i],
+    ["see other/repo/issues/12 and other/repo/pull/3", /\/(issues|pulls?|discussions)\/\d/],
+    ["github.com/other/repo/discussions/4", /\/(issues|pulls?|discussions)\/\d/],
+    // Bidirectional overrides reorder what the reader sees; C1 controls are invisible.
+    ["Passed \u202edeliaf\u202c", /[\u202a-\u202e\u2066-\u2069\u200e\u200f]/],
+    ["a\u0085b\u009bc", /[\u0080-\u009f]/],
+  ];
+  for (const [input, forbidden] of rows) assert.doesNotMatch(inert(input, 500), forbidden, input);
+  // What the reader sees is unchanged: only zero-width spaces are added.
+  assert.equal(inert("costs $5 and fixes #12").replace(/\u200b/g, ""), "costs $5 and fixes \\#12");
+});
+
 const CI_JSON = {
   tool: "scenescout",
   command: "ci",
