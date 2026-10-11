@@ -95,6 +95,28 @@ export const isAllowedEmail = (email: string): boolean => ALLOWED_EMAIL_RE.test(
  */
 export const HOME_PATH_RE = /(?:\/Users\/|\/home\/)[A-Za-z][A-Za-z0-9._-]+|[A-Za-z]:[\\/]+[Uu]sers[\\/]+[A-Za-z][^\\/\s"']+/g;
 
+/**
+ * An IPv4 address outside the ranges set aside for loopback, private networks,
+ * link-local use and documentation (RFC 1918, 3927, 5737): a public address
+ * names a real host, often the app under test or the machine it ran on.
+ */
+export const PUBLIC_IPV4_RE = /(?<![\d.])(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?![\d]|\.\d)/g;
+export const isReservedIpv4 = (ip: string): boolean => {
+  const [a, b, c] = ip.split(".").map(Number);
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    a === 255 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 192 && b === 0 && c === 2) ||
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113)
+  );
+};
+
 /** Credential shapes issued by real services. */
 export const SECRET_RE = new RegExp(
   [
@@ -178,6 +200,14 @@ test("the rules fire on the shapes they exist for, and stay quiet on placeholder
   assert.equal(homes("C:/Users/jsmith/AppData and c:\\users\\jsmith\\x"), 2);
   assert.equal(homes("DELETE /api/users/bulk-delete and /users/3/delete"), 0, "a REST route is not a home directory");
 
+  const publicIps = (s: string) => [...s.matchAll(PUBLIC_IPV4_RE)].filter((m) => !isReservedIpv4(m[0])).length;
+  assert.equal(publicIps("connect to 8.8.4.4 today"), 1);
+  assert.equal(publicIps("host=52.14.9.200:8080"), 1, "a port does not hide it");
+  assert.equal(publicIps("127.0.0.1 0.0.0.0 10.1.2.3 172.16.0.1 172.31.9.9 192.168.1.1 169.254.1.1"), 0, "loopback, private and link-local ranges");
+  assert.equal(publicIps("192.0.2.7 198.51.100.7 203.0.113.7"), 0, "documentation ranges");
+  assert.equal(publicIps("172.32.0.1"), 1, "172.32 is outside the private block");
+  assert.equal(publicIps("version 1.2.3.4.5 and 300.1.1.1"), 0, "a longer dotted string and an impossible octet are not addresses");
+
   const secrets = (s: string) => [...s.matchAll(SECRET_RE)].length;
   assert.equal(secrets(`token: npm_${"a1".repeat(18)}`), 1);
   assert.equal(secrets(`ghp_${"Z9".repeat(18)}`), 1);
@@ -260,4 +290,9 @@ test("no JSON Web Token outside the redaction fixtures", () => {
     [],
     "a JWT is a live session for someone; the only ones allowed are the invented ones the redaction tests need",
   );
+});
+
+test("no public IP address is tracked", () => {
+  const found = hits(PUBLIC_IPV4_RE, SELF).filter((h) => !isReservedIpv4(h.slice(h.lastIndexOf(" ") + 1)));
+  assert.deepEqual(found, [], "use 127.0.0.1 or a documentation address (192.0.2.x); a public address names a real host");
 });
