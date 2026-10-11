@@ -50,10 +50,12 @@ render.
   again.
 - **Issue text is inert.** Everything taken from a finding is redacted again,
   escaped, and given zero-width breaks where a tracker would act: after `@`,
-  inside `://` and `www.`, between `#` or `GH-` and a number, and inside the
-  marker's own word, so quoted text cannot pose as another finding's marker.
-  The escaping is the `/scenescout qa` reply's, which a test holds it to, plus
-  `$`.
+  inside `://` and `www.`, between `#`, `GH-` or `issues/`, `pull/`,
+  `discussions/` and a number, before every `$` (a backslash does not stop
+  GitHub rendering maths), and inside the marker's own word, so quoted text
+  cannot pose as another finding's marker. Bidirectional and C1 control
+  characters become spaces. The escaping is the `/scenescout qa` reply's
+  character for character, which a test holds it to, plus the marker break.
 - **GitHub gets no uploads.** GitHub's REST API cannot attach a file to an
   issue, and SceneScout hosts nothing, so a GitHub issue names the finding's
   picture and the run's frames in its `.scenescout/` folder. Jira gets them as
