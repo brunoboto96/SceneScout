@@ -1247,7 +1247,8 @@ function qaWorkflowProblems(wf: Record<string, any>): string[] {
       if (ci.with?.show !== undefined && ci.with.show !== "${{ needs.gate.outputs.show }}") problems.push("the element to show comes from the gate");
       if (ci.with?.["compare-url"] !== undefined && ci.with["compare-url"] !== "${{ needs.gate.outputs.base }}")
         problems.push("the base URL comes from the gate, which checked it");
-      if (ci.with?.cli !== undefined || ci.with?.version !== undefined) problems.push("the ci action runs the release its ref names");
+      if (ci.with?.cli !== undefined || ci.with?.version !== undefined)
+        problems.push("the ci action runs the release its ref names, from its locked dependency tree");
       if (["destructive", "safe-write"].includes(String(ci.with?.mode))) problems.push("a QA run on a preview is read-only or observe");
       if (ci.with?.["allow-destructive"] !== undefined) problems.push("no allow-destructive");
       const minutes = Number(ci.with?.["max-minutes"] ?? 20);
@@ -1334,6 +1335,12 @@ test("workflow: each unsafe change to the template is caught", () => {
       /qa: checks out code/,
     ],
     ["a script in the key job", (wf) => wf.jobs.qa.steps.unshift({ run: "npm ci && npm start &" }), /no script of its own/],
+    // A version input makes the ci action resolve the release's dependencies anew, beside the key (ADR 23).
+    [
+      "a version in the key job",
+      (wf) => (wf.jobs.qa.steps.find((s: { uses?: string }) => /SceneScout\/ci@/.test(s.uses ?? "")).with.version = "^3"),
+      /runs the release its ref names/,
+    ],
     ["gh pr checkout in the report", (wf) => wf.jobs.report.steps.unshift({ run: "gh pr checkout 7" }), /report: fetches code/],
     ["the key in the gate", (wf) => (wf.jobs.gate.env = { OPENAI_API_KEY: "${{ secrets.OPENAI_API_KEY }}" }), /only the qa job may reference a secret/],
     ["the key in the report", (wf) => (wf.jobs.report.steps[0].env = { OPENAI_API_KEY: "${{ secrets.OPENAI_API_KEY }}" }), /only the qa job/],
