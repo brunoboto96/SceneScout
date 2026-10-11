@@ -10,7 +10,8 @@ import type http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { chromium, firefox, webkit } from "playwright";
 // @ts-expect-error — plain .mjs, no types; it exports createDemoServer().
 import { createDemoServer } from "../../demo-app/server.mjs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
@@ -1217,6 +1218,41 @@ async function templateReport({
     `${run.status} manifest=${manifest.length} hashesMatch=${hashesMatch} ${run.out.slice(-600)}`,
   );
   check("...and no typed value reaches the report", html.length > 0 && !html.includes(typed), "the typed value is in the report");
+  for (const saved of ["test-report.html", "replay.html"]) {
+    const opened = await openSavedPage(path.join(out, saved));
+    check(
+      `${saved} opened from disk under its own policy shows every frame beside it, and the policy refuses nothing it asks for`,
+      opened.images > 0 && opened.loaded === opened.images && opened.refused.length === 0,
+      `${opened.loaded}/${opened.images} loaded (not: ${opened.unloaded.join(", ")}); refused: ${opened.refused.join("; ")}`,
+    );
+  }
+}
+
+/** A saved page opened from disk in the suite's browser: how many of its pictures loaded, and what its own Content-Security-Policy refused. */
+async function openSavedPage(file: string): Promise<{ images: number; loaded: number; refused: string[]; unloaded: string[] }> {
+  const browser = await { chromium, firefox, webkit }[BROWSER].launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.addInitScript(
+      `window.__refused = []; document.addEventListener("securitypolicyviolation", (e) => window.__refused.push(e.violatedDirective + " " + e.blockedURI));`,
+    );
+    await page.goto(pathToFileURL(file).href);
+    // Lazy pictures load as they come into view: every fold is opened and each picture brought into view before it is counted.
+    await page.evaluate(`document.querySelectorAll("details").forEach((d) => { d.open = true; })`);
+    const images = page.locator("img");
+    const count = await images.count();
+    let loaded = 0;
+    const unloaded: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      await images.nth(i).scrollIntoViewIfNeeded();
+      if (await eventually(() => images.nth(i).evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0))) loaded += 1;
+      else
+        unloaded.push(await images.nth(i).evaluate((img: HTMLImageElement) => `${img.getAttribute("src")} complete=${img.complete} width=${img.naturalWidth}`));
+    }
+    return { images: count, loaded, refused: (await page.evaluate("window.__refused")) as string[], unloaded };
+  } finally {
+    await browser.close();
+  }
 }
 
 /**
