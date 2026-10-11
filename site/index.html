@@ -809,6 +809,55 @@
         background: var(--enemy);
       }
 
+      /* Summon a scout: PR comments */
+      .summon {
+        display: grid;
+        grid-template-columns: minmax(0, 6fr) minmax(0, 5fr);
+        gap: clamp(28px, 4vw, 56px);
+        align-items: start;
+      }
+      @media (max-width: 900px) {
+        .summon {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      .summon .copy-col {
+        display: grid;
+        gap: 18px;
+      }
+      .summon .frame.gilded {
+        max-height: 720px;
+        overflow: hidden;
+      }
+      .commands {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 14px;
+      }
+      .commands li {
+        display: grid;
+        gap: 4px;
+        padding: 14px 16px;
+        background: var(--night-2);
+        border: 1px solid var(--rule);
+        border-radius: 6px;
+      }
+      .commands code {
+        color: var(--arcane);
+        font-size: 0.88rem;
+        overflow-wrap: anywhere;
+      }
+      .commands span {
+        color: var(--muted);
+        font-size: 0.97rem;
+      }
+      .summon .note {
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
       /* Your party */
       .party {
         display: grid;
@@ -1363,6 +1412,45 @@
         </div>
       </section>
 
+      <section id="summon">
+        <div class="wrap summon">
+          <div class="copy-col">
+            <span class="tag">Summon a scout</span>
+            <h2>Ask for it on any pull request.</h2>
+            <p class="lede">Type a command in a comment and SceneScout answers in the thread, with pictures taken by a real browser.</p>
+            <ul class="commands">
+              <li><code>/scenescout qa</code><span>Explores the pull request's preview and replies with what it found.</span></li>
+              <li><code>/scenescout qa show the Save button</code><span>Replies with a picture of that element.</span></li>
+              <li>
+                <code>/scenescout qa compare the Save button</code
+                ><span>Pictures it on the base and on the pull request, with the changed pixels highlighted.</span>
+              </li>
+              <li>
+                <code>/scenescout qa check</code
+                ><span>Runs your saved journeys on the branch and replies with each one's result. The video of every journey is in the run's files.</span>
+              </li>
+            </ul>
+            <p class="note">
+              The preview commands test a deployed preview, so the pull request's code never runs beside the model's key. <code>qa check</code> runs your own
+              workflow on the branch and uses no key at all.
+              <a href="https://github.com/brunoboto96/SceneScout/blob/main/docs/ci.md#a-qa-review-from-a-pull-request-comment">Set it up</a>.
+            </p>
+          </div>
+          <figure class="shot">
+            <div class="frame gilded">
+              <img
+                src="screenshots/pr-qa-compare.png"
+                width="1048"
+                height="1676"
+                alt="A pull request comment, /scenescout qa compare the Save button, and SceneScout's reply: the button on the base branch in blue and on the pull request in green, with 61.2% of pixels changed highlighted"
+                loading="lazy"
+              />
+            </div>
+            <figcaption>A real exchange from the project's sandbox repository.</figcaption>
+          </figure>
+        </div>
+      </section>
+
       <section id="party">
         <div class="wrap party">
           <div class="copy-col">
@@ -1376,12 +1464,12 @@
               <img
                 src="screenshots/live-view.png"
                 width="2560"
-                height="1520"
-                alt="The live view during a run of three agents: one card per agent with its task, the page it is on and a feed of its actions"
+                height="1320"
+                alt="The live view with three agents streaming at once: each card shows its lane, its task, its page live and the actions it just took"
                 loading="lazy"
               />
             </div>
-            <figcaption>A party of three agents testing the demo app at once.</figcaption>
+            <figcaption>A party of three agents, every one streaming its page live.</figcaption>
           </figure>
         </div>
       </section>
