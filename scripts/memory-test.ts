@@ -83,7 +83,7 @@ import {
   type FormProbe,
 } from "../src/engine/forms.ts";
 import { coverageView, generateReport, runRecordOf } from "../src/engine/report.ts";
-import { maskedValue, redactPersonal, secretFieldKind, type SecretFieldFacts } from "../src/engine/sensitive.ts";
+import { maskedValue, maskFillCalls, redactPersonal, secretFieldKind, type SecretFieldFacts } from "../src/engine/sensitive.ts";
 import type { FromRunNote, RunRecord } from "../src/engine/from-run.ts";
 
 /** One styled element for a design audit; override only what a case is about. */
@@ -1395,6 +1395,20 @@ test("a field is secret by its type, its autocomplete token, or a name, id, labe
     [{ name: "cc-num" }, "card"],
     [{ label: "CCV" }, "card"],
     [{ label: "Card no." }, "card"],
+    [{ label: "Credit card" }, "card"],
+    [{ label: "2FA code" }, "one-time code"],
+    [{ name: "mfaCode" }, "one-time code"],
+    [{ label: "Authenticator code" }, "one-time code"],
+    [{ label: "Two-factor code" }, "one-time code"],
+    [{ label: "Recovery code" }, "secret"],
+    [{ label: "Backup code" }, "secret"],
+    [{ label: "Private key" }, "secret"],
+    [{ label: "Seed phrase" }, "secret"],
+    [{ label: "Security answer" }, "secret"],
+    // A code split into one box per character: no box is named for what it holds.
+    [{ type: "text", maxLength: 1, label: "Digit 1" }, "one-time code"],
+    [{ type: "tel", maxLength: 1 }, "one-time code"],
+    [{ maxLength: 1 }, "one-time code"],
   ];
   for (const [facts, kind] of secret) assert.equal(secretFieldKind(facts), kind, JSON.stringify(facts));
   const ordinary: SecretFieldFacts[] = [
@@ -1421,6 +1435,10 @@ test("a field is secret by its type, its autocomplete token, or a name, id, labe
     { label: "CCVs saved" },
     { label: "Card notes" },
     { label: "Card nominee" },
+    { type: "text", maxLength: 2, label: "State" },
+    { type: "email", maxLength: 1 },
+    { type: "text", maxLength: 6, label: "Postal code" },
+    { label: "Fan speed" },
   ];
   for (const facts of ordinary) assert.equal(secretFieldKind(facts), null, JSON.stringify(facts));
 });
@@ -1491,6 +1509,47 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     assert.equal(redactPersonal(kept), kept, kept);
     assert.equal(redactSecrets(kept), kept, kept);
   }
+});
+
+test("redactSecrets masks a parameter named for a secret, whatever its value looks like; other parameters stay", () => {
+  const masked: Array<[string, string, string]> = [
+    // A GET form puts what was typed into the address, and the address is logged with every action.
+    ["http://x/login?user=bob&password=hunter2", "hunter2", "http://x/login?user=bob&password=[redacted]"],
+    ["http://x/verify?pin=4821#otp=99", "4821", "http://x/verify?pin=[redacted]#otp=[redacted]"],
+    ["http://x/cb#access_token=abc", "abc", "http://x/cb#access_token=[redacted]"],
+    ["body user[password]=pw1&remember=1", "pw1", "body user[password]=[redacted]&remember=1"],
+    ["/s?user%5Bpassword%5D=pw2", "pw2", "/s?user%5Bpassword%5D=[redacted]"],
+    ["password=short&user=bob", "short", "password=[redacted]&user=bob"],
+  ];
+  for (const [text, secret, want] of masked) {
+    const out = redactSecrets(text);
+    assert.ok(!out.includes(secret), `${secret} must not survive: ${out}`);
+    assert.equal(out.replace(/ \[\d+ secrets? redacted\]$/, ""), want, text);
+    assert.match(out, /\[\d+ secrets? redacted\]$/, `the edit is disclosed: ${out}`);
+  }
+  for (const kept of ["/search?q=password+reset&page=2", 'input type="password" name="login"', "/things?sort=pinned&max_tokens=500"]) {
+    assert.equal(redactSecrets(kept), kept, `must not touch: ${kept}`);
+  }
+  // Masked once, counted once.
+  assert.equal(redactSecrets("note api_key=[redacted]"), "note api_key=[redacted]");
+});
+
+test("a failed fill's error names the action but not the secret value Playwright's call log quotes", () => {
+  const message = [
+    "locator.fill: Error: Cannot type text into input[type=number]",
+    "Call log:",
+    "  - waiting for locator('#pin')",
+    // Playwright does not escape a quote inside the value.
+    '    - fill("Tr1cky "quoted" phrase")',
+    "  - attempting fill action",
+  ].join("\n");
+  const out = maskFillCalls(message);
+  assert.ok(!out.includes("Tr1cky") && !out.includes("quoted") && !out.includes("phrase"), out);
+  assert.ok(out.includes("fill((masked))"), out);
+  assert.ok(out.startsWith("locator.fill: Error: Cannot type text into input[type=number]"), "the first line, which says what went wrong, stays");
+  // A value split over lines by a newline in it is removed wherever it appears.
+  const split = maskFillCalls('Call log:\n    - fill("first\nsecond-half")', ["first\nsecond-half"]);
+  assert.ok(!split.includes("second-half"), split);
 });
 
 test("a password typed into a labelled field never reaches the session log, even when it is short", () => {

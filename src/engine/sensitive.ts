@@ -18,6 +18,8 @@ export interface SecretFieldFacts {
   /** The field's accessible name, its <label>s, its aria-label: whatever names it to a person. One text, or several. */
   label?: string | readonly string[] | null;
   placeholder?: string | null;
+  /** The field's maxlength; 1 is a box of a code split into one box per character. */
+  maxLength?: number | null;
 }
 
 export type SecretKind = "password" | "one-time code" | "card" | "secret";
@@ -44,14 +46,24 @@ const AUTOCOMPLETE_KINDS: Record<string, SecretKind> = {
  */
 const WORD_KINDS: Array<{ kind: SecretKind; whole: string[]; suffix: string[]; phrases: string[] }> = [
   { kind: "password", whole: ["pwd"], suffix: ["password", "passwd", "passphrase"], phrases: [] },
-  { kind: "one-time code", whole: ["pin", "onetime", "otpcode"], suffix: ["otp", "passcode"], phrases: ["one time", "verification code", "pass code"] },
+  {
+    kind: "one-time code",
+    whole: ["pin", "onetime", "otpcode", "mfa", "authenticator"],
+    suffix: ["otp", "passcode"],
+    phrases: ["one time", "verification code", "pass code", "auth code", "authentication code", "two factor"],
+  },
   {
     kind: "card",
     whole: ["cvc", "cvv", "csc", "ccv", "ccnum"],
     suffix: ["cardnumber", "ccnumber"],
-    phrases: ["security code", "card number", "card no", "cc number", "cc num", "cc csc", "cc exp"],
+    phrases: ["security code", "card number", "card no", "credit card", "cc number", "cc num", "cc csc", "cc exp"],
   },
-  { kind: "secret", whole: ["token"], suffix: ["secret", "apikey"], phrases: ["api key"] },
+  {
+    kind: "secret",
+    whole: ["token"],
+    suffix: ["secret", "apikey"],
+    phrases: ["api key", "recovery code", "backup code", "private key", "seed phrase", "recovery phrase", "security answer"],
+  },
 ];
 
 /** A name's words, lower-case: `newPassword` → new password, `PINCode` → pin code, `cvv2` → cvv. */
@@ -67,6 +79,8 @@ function wordsOf(text: string): string[] {
 
 /** Which kind of secret a field's name, label or placeholder names, if any. */
 export function secretWordKind(text: string): SecretKind | null {
+  // "2FA" splits into "2" and "fa" below, so it is read before the split.
+  if (/(?:^|[^\p{L}\p{N}])2fa(?![\p{L}\p{N}])/iu.test(text)) return "one-time code";
   const words = wordsOf(text);
   if (words.length === 0) return null;
   const joined = ` ${words.join(" ")} `;
@@ -77,6 +91,9 @@ export function secretWordKind(text: string): SecretKind | null {
   return null;
 }
 
+/** The input types a split code's boxes use (scripted-login.ts reads the same boxes). */
+const SINGLE_CHARACTER_TYPES = new Set(["", "text", "tel", "number", "password"]);
+
 /** Whether what is typed into this field is a secret, and which kind; null for an ordinary field. */
 export function secretFieldKind(facts: SecretFieldFacts): SecretKind | null {
   if ((facts.type ?? "").trim().toLowerCase() === "password") return "password";
@@ -84,6 +101,8 @@ export function secretFieldKind(facts: SecretFieldFacts): SecretKind | null {
     const kind = AUTOCOMPLETE_KINDS[token];
     if (kind) return kind;
   }
+  // One box per character is a split one-time code, whatever each box is called ("Digit 1").
+  if (facts.maxLength === 1 && SINGLE_CHARACTER_TYPES.has((facts.type ?? "").trim().toLowerCase())) return "one-time code";
   const labels = typeof facts.label === "string" ? [facts.label] : (facts.label ?? []);
   for (const text of [facts.name, facts.id, ...labels, facts.placeholder]) {
     const kind = text ? secretWordKind(text) : null;
@@ -131,6 +150,38 @@ export function maskSecretFieldValues(text: string): { text: string; hits: numbe
     last += rest.length;
   }
   return { text: out + text.slice(last), hits };
+}
+
+/**
+ * `name=value` in a query string, a fragment or a form body. A GET form puts
+ * what was typed into the address (`?password=…`), and the address is logged
+ * with every action. Group 1 is what precedes it, 2 the name, 3 the value.
+ */
+const PARAM_RE = /(^|[?&;#\s"'(])([A-Za-z][\w.%[\]-]*)=([^&#;\s"')]+)/g;
+
+/** Mask the value of every parameter whose name names a secret (`pin=`, `otp=`, `password=`, `access_token=`), whatever its length. */
+export function maskSecretParams(text: string): { text: string; hits: number } {
+  let hits = 0;
+  const out = text.replace(PARAM_RE, (m, before: string, name: string, value: string) => {
+    // A form's nested names (`user[password]`, `user%5Bpassword%5D`) name the field last; a value already masked stays.
+    if (value.startsWith("[") || !secretWordKind(name.replace(/%5[BD]/gi, " "))) return m;
+    hits += 1;
+    return `${before}${name}=[redacted]`;
+  });
+  return { text: out, hits };
+}
+
+/**
+ * Playwright's call log names the value an action was given (`- fill("…")`),
+ * so the error from a failed fill of a secret field quotes the secret. It does
+ * not escape a quote inside the value, so the call is masked to the end of its
+ * line, and every value the fill was given is removed wherever else it appears.
+ */
+export function maskFillCalls(message: string, values: readonly string[] = []): string {
+  let out = message;
+  // Longest first, so a value inside another is not left behind as part of it.
+  for (const value of [...values].sort((a, b) => b.length - a.length)) if (value !== "") out = out.split(value).join("(masked)");
+  return out.replace(/\b(fill|type|pressSequentially|insertText)\(.*$/gm, "$1((masked))");
 }
 
 // ---------------------------------------------------------------------------

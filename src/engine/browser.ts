@@ -42,7 +42,7 @@ import {
   type KeyAliasSteps,
 } from "./memory.js";
 import type { SessionDescription } from "./live.js";
-import { maskedValue, secretFieldKind, type SecretKind } from "./sensitive.js";
+import { maskedValue, maskFillCalls, secretFieldKind, type SecretKind } from "./sensitive.js";
 import { normalizeTask } from "./task.js";
 import {
   ACTED_CONTROL_SRC,
@@ -589,6 +589,7 @@ type FieldFactsRead = {
   name: string | null;
   id: string | null;
   placeholder: string | null;
+  maxLength: number | null;
   labels: string[];
 };
 
@@ -3695,6 +3696,7 @@ export class BrowserEngine {
             name: n.getAttribute("name"),
             id: n.id || null,
             placeholder: n.getAttribute("placeholder"),
+            maxLength: typeof n.maxLength === "number" && n.maxLength >= 0 ? n.maxLength : null,
             labels: [
               n.getAttribute("aria-label") ?? "",
               byIds(n.getAttribute("aria-labelledby")),
@@ -3717,9 +3719,27 @@ export class BrowserEngine {
         `Could not read the field's existing content before typing — aborting rather than risk overwriting it (${err instanceof Error ? err.message.split("\n")[0] : err}). Take a new scout_snapshot and retry.`,
       );
     }
-    const { existing, caretAppendable, type, facts } = state;
+    const { facts, existing } = state;
     // A secret field's value, and what it held before, are never quoted: the note goes to the log, the report and exported issues.
     const secret = secretFieldKind({ ...facts, label: [label, ...facts.labels] });
+    try {
+      return { note: await this.writeField(locator, text, replace, state, secret), secret };
+    } catch (err) {
+      // Playwright's call log quotes the value it was asked to fill.
+      if (secret && err instanceof Error) err.message = maskFillCalls(err.message, [text, existing, existing + text]);
+      throw err;
+    }
+  }
+
+  /** fillOrAppend's write, once the field has been read; returns the note. */
+  private async writeField(
+    locator: import("playwright").Locator,
+    text: string,
+    replace: boolean,
+    state: { existing: string; caretAppendable: boolean; type: string },
+    secret: SecretKind | null,
+  ): Promise<string> {
+    const { existing, caretAppendable, type } = state;
     const quoted = (value: string): string => (secret ? `(masked: ${secret} field)` : JSON.stringify(value.slice(0, 60)));
     if (APP_FILLED_TYPES.has(type)) {
       // A date or time field holds one value in one format: anything else is
@@ -3732,18 +3752,18 @@ export class BrowserEngine {
       const note =
         (date.note && !secret ? ` (${date.note})` : "") +
         (existing && existing !== date.value ? ` (replaced existing content ${quoted(existing)}: a ${type} field holds one value)` : "");
-      return { note, secret };
+      return note;
     }
     if (replace || !existing || text === "") {
       await locator.fill(text, { timeout: this.limits.actionMs });
-      return { note: existing && (replace || text === "") ? ` (replaced existing content ${quoted(existing)})` : "", secret };
+      return existing && (replace || text === "") ? ` (replaced existing content ${quoted(existing)})` : "";
     }
     const appendNote = ` (APPENDED after existing content ${quoted(existing)} — pass replace=true to overwrite instead)`;
     if (!caretAppendable) {
       // Data-typed inputs (number, email, date): concatenate without a
       // separator — an injected space would invalidate the value.
       await locator.fill(existing + text, { timeout: this.limits.actionMs });
-      return { note: appendNote, secret };
+      return appendNote;
     }
     // Native append: focus, move the caret to the end, insert via the
     // keyboard — preserves rich composer content that fill() would clear.
@@ -3771,7 +3791,7 @@ export class BrowserEngine {
     // "user@" + "x" must not become "user@ x".
     const separator = /\w$/.test(existing) && /^\w/.test(text) ? " " : "";
     await this.requirePage().keyboard.insertText(separator + text);
-    return { note: appendNote, secret };
+    return appendNote;
   }
 
   async type(ref: string, text: string, pressEnter = false, replace = false): Promise<string> {

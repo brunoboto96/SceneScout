@@ -6,7 +6,7 @@ import type { PictureShot } from "./capture.js";
 import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
-import { maskSecretFieldValues, redactPersonal } from "./sensitive.js";
+import { maskSecretFieldValues, maskSecretParams, redactPersonal } from "./sensitive.js";
 import type { InjectionProbe } from "./injection.js";
 import { readFromRunNotes, readRunRecords, recordFromJson, unionFromRunNotes, unionRecords, type FromRunNote, type RunRecord } from "./from-run.js";
 import { addReading, addVerdict, MAX_TICKETS_KEPT, mergeTicketData, type CriterionVerdict, type StoredTicket, type Ticket } from "./tickets.js";
@@ -440,7 +440,8 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
 /**
  * Strip anything that looks like a credential from text we are about to
  * persist: credential shapes, a value typed into a field whose label names a
- * secret (`textbox "Password" ← "…"`, whatever its length), and personal data
+ * secret (`textbox "Password" ← "…"`, whatever its length), the value of a
+ * parameter named for one (`?password=…`), and personal data
  * (email addresses and card numbers, sensitive.ts).
  *
  * Silent edits are their own hazard, so a redaction announces itself: a reader
@@ -450,8 +451,10 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
  */
 export function redactSecrets(text: string): string {
   const masked = maskSecretFieldValues(text);
-  let out = masked.text;
-  let hits = masked.hits;
+  // A parameter named for a secret (`?pin=…` from a GET form) is masked whatever its value looks like.
+  const params = maskSecretParams(masked.text);
+  let out = params.text;
+  let hits = masked.hits + params.hits;
   for (const [re, replacement] of SECRET_PATTERNS) {
     out = out.replace(re, (...args) => {
       hits += 1;

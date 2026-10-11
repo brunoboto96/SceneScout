@@ -18,6 +18,9 @@ const SECRET = "Tr1cky-Phrase-77";
 const OLD_SECRET = "Old-phrase-42";
 const CODE = "482913";
 const PLAN_SECRET = "Plan-phrase-31";
+/** Letters in a number field: the browser refuses the fill, and Playwright's error quotes the value without escaping its quote. */
+const REFUSED_PIN = 'Pin"refused-93';
+const DIGIT = "7";
 
 export async function run({ baseUrl }: SmokeContext): Promise<void> {
   console.log("masked typing: a secret field's value never reaches the log, an ordinary field's does");
@@ -58,6 +61,25 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       typedCode.slice(0, 300),
     );
 
+    let refused = "";
+    try {
+      refused = await engine.type(refOf(/(e\d+) [a-z]+ "PIN"/), REFUSED_PIN, false, true);
+    } catch (err) {
+      refused = `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    check(
+      "a fill the browser refuses on a PIN field fails without quoting the value",
+      refused.startsWith("ERROR:") && !refused.includes("refused-93") && refused.includes("(masked)"),
+      refused.slice(0, 400),
+    );
+
+    const typedDigit = await engine.type(refOf(/(e\d+) textbox "Digit 1"/), DIGIT, false, true);
+    check(
+      "a one-character box of a split code is masked, though nothing names it a code",
+      !typedDigit.includes(`"${DIGIT}"`) && typedDigit.includes("masked: one-time code field"),
+      typedDigit.slice(0, 300),
+    );
+
     const plan = await engine.runPlan([{ action: "type", target: "testid=phrase-hidden", value: PLAN_SECRET, replace: true }]);
     check("a plan's type step into the password field quotes neither value", !plan.includes(PLAN_SECRET) && !plan.includes(SECRET), plan.slice(0, 400));
     check("...and says the previous content was masked", plan.includes("existing content (masked: password field)"), plan.slice(0, 400));
@@ -65,7 +87,7 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     const log = JSON.stringify(engine.memory?.actionLog ?? []);
     check(
       "the action log holds no secret value and still holds the ordinary one",
-      ![SECRET, OLD_SECRET, CODE, PLAN_SECRET].some((s) => log.includes(s)) && log.includes("New-shown-42"),
+      ![SECRET, OLD_SECRET, CODE, PLAN_SECRET, "refused-93"].some((s) => log.includes(s)) && !log.includes(`"${DIGIT}"`) && log.includes("New-shown-42"),
       log.slice(0, 600),
     );
   } finally {
@@ -81,7 +103,7 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     }
   };
   walk(projectDir);
-  const leaking = files.filter((f) => [SECRET, OLD_SECRET, CODE, PLAN_SECRET].some((s) => fs.readFileSync(f, "utf8").includes(s)));
+  const leaking = files.filter((f) => [SECRET, OLD_SECRET, CODE, PLAN_SECRET, "refused-93"].some((s) => fs.readFileSync(f, "utf8").includes(s)));
   check(
     "no file the run wrote holds a secret value",
     files.length > 0 && leaking.length === 0,
