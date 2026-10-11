@@ -246,7 +246,7 @@ export function checkReplyMarkdown({
   testedSha,
   login,
   focus,
-  recording = { replay: false, videos: [] },
+  recording = /** @type {{ replay: boolean, videos: string[] }} */ ({ replay: false, videos: [] }),
   problem = "",
 }) {
   const lines = [COMMENT_MARKER, "## SceneScout QA check", ""];

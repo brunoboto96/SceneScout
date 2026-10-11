@@ -1126,6 +1126,7 @@ test("dedup judge: the judge states confidence in its own verdict, and p_same is
 });
 
 test("dedup judge: only a coherent judge_pair call is read; a contradiction is told apart from an error, and neither is a guess", () => {
+  const declined: ModelTurn = { text: "They look the same.", calls: [], usage: NO_USAGE, note: "the model declined to continue" };
   for (const [bad, why, failure] of [
     [turn({ verdict: "same", confidence: 0.3 }), /contradicts its confidence 0\.3/, "contradiction"],
     [turn({ verdict: "different", confidence: 0.2 }), /contradicts its confidence 0\.2/, "contradiction"],
@@ -1135,7 +1136,7 @@ test("dedup judge: only a coherent judge_pair call is read; a contradiction is t
     [turn({ verdict: "same", p_same: 0.9 }), /confidence undefined is not a probability/, "error"],
     [turn({ verdict: "maybe", confidence: 0.5 }), /not same, different or unsure/, "error"],
     [turn({ verdict: "same", confidence: 0.9 }, "other_tool"), /did not call judge_pair/, "error"],
-    [{ text: "They look the same.", calls: [], usage: NO_USAGE, note: "the model declined to continue" }, /declined/, "error"],
+    [declined, /declined/, "error"],
   ] as const) {
     const r = parseJudgement(bad) as { ok: boolean; error: string; failure: string };
     assert.equal(r.ok, false);

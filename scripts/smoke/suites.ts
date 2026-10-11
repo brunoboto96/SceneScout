@@ -36,8 +36,15 @@ import * as fromRunPath from "./from-run-path.ts";
 import * as settleAfterLeaving from "./settle.ts";
 import * as actionResults from "./action-results.ts";
 import * as maskedTyping from "./masked-typing.ts";
+import type { SmokeContext } from "./harness.ts";
 
-export const shards = [
+/** What the runner needs of a suite's module: its title, and the run it awaits. */
+export interface SmokeSuite {
+  title: string;
+  run(ctx: SmokeContext): Promise<void>;
+}
+
+export const shards: SmokeSuite[][] = [
   // ~8 minutes
   [readOnly, safeWrite, multiSession, authLoss, loginProfiles, scriptedLogin, passwordlessLogin, ssoLogin, reattach, refreshBroker, refreshCookie, liveView],
   // ~6 minutes

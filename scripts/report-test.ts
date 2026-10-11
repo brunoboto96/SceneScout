@@ -135,10 +135,10 @@ function resultOf(replay: CheckReplay = replayOf()): CheckResult {
       {
         rule: "flow-step-failed",
         severity: "high",
-        title: "Saved flow broke",
         routes: ["/orders"],
         evidence: 'flow "cancel an order" (02-cancel.json) step 3 of 4',
-      } as CheckResult["issues"][number],
+        fingerprint: "flow-step-failed-cancel-an-order",
+      },
     ],
     worthALook: [],
     unvisited: [],

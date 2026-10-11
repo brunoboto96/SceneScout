@@ -8,6 +8,7 @@ import { BrowserEngine } from "../../dist/engine/browser.js";
 import { feedForSession } from "../../dist/engine/live.js";
 import { computeGaps, generateReport } from "../../dist/engine/report.js";
 import { FORMS_INVENTORY_SCRIPT } from "../../dist/engine/forms.js";
+import type { StyleRecord } from "../../dist/engine/design.js";
 import { focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
 import { BROWSER, check, eventually, settle, WAIT_MS, type SmokeContext } from "./harness.ts";
 
@@ -444,7 +445,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       rawPayload.records.some((r) => r.fixed),
       `fixed records: ${rawPayload.records.filter((r) => r.fixed).length}`,
     );
-    const mk = (over: Record<string, unknown>) => ({
+    const mk = (over: Partial<StyleRecord>): StyleRecord => ({
       tag: "div",
       testid: null,
       text: "chrome",
@@ -468,6 +469,14 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
       fixed: false,
       required: false,
       submitish: false,
+      inputType: "",
+      role: "",
+      filled: false,
+      inForm: false,
+      inRow: false,
+      inSearch: false,
+      inBreadcrumb: false,
+      shell: false,
       sideStripe: false,
       gradientText: false,
       glass: false,

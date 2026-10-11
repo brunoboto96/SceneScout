@@ -276,6 +276,19 @@ export function chooseBaseUrl({ configured, deployment }) {
  * put on the comment, and the reply to post (null for none). Nothing is
  * posted to a commenter who may not start a run beyond a reaction, so the
  * command cannot be used to make the bot write on a pull request.
+ *
+ * @typedef {object} GateDecision
+ * @property {boolean} run
+ * @property {string} reason
+ * @property {string | null} reaction
+ * @property {string | null} reply
+ * @property {boolean} [check] Set for `/scenescout qa check`: dispatch the check workflow rather than run here.
+ * @property {string} [workflow]
+ * @property {string} [ref]
+ * @property {string} [url] The preview a run tests.
+ * @property {string} [show] What a capture command asked to picture.
+ * @property {string} [base] The deployment a comparison compares with.
+ * @returns {GateDecision}
  */
 export function gateDecision({
   command,

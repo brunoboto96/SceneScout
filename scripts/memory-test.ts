@@ -87,13 +87,19 @@ import { coverageView, generateReport, runRecordOf } from "../src/engine/report.
 import { maskedValue, maskFillCalls, redactPersonal, secretFieldKind, type SecretFieldFacts } from "../src/engine/sensitive.ts";
 import type { FromRunNote, RunRecord } from "../src/engine/from-run.ts";
 
+/** The action log a store writes this run: the one session-*.jsonl file in its folder. */
+function sessionLogOf(store: MemoryStore): string {
+  const logs = fs.readdirSync(store.dir).filter((f) => /^session-.*\.jsonl$/.test(f));
+  assert.equal(logs.length, 1, `one session log in ${store.dir}: ${logs.join(", ")}`);
+  return path.join(store.dir, logs[0]);
+}
+
 /** One styled element for a design audit; override only what a case is about. */
 function designRecord(over: Partial<StyleRecord>): StyleRecord {
   return {
     tag: "div",
     testid: null,
     text: "text",
-    textLen: 4,
     interactive: false,
     rect: { x: 300, y: 20, w: 200, h: 40 },
     fontSize: 16,
@@ -299,7 +305,9 @@ test("a finding merged from another route records that route; a re-filing on a k
     evidence: "GET /api/users 403",
   };
   const [finding] = store.addFinding(first);
-  assert.equal(finding.seenOn, undefined, "one route: no field");
+  // Read through a call: addFinding changes `finding` in place, which an assertion on the field itself would hide from the type checker.
+  const seenOn = (): Finding["seenOn"] => finding.seenOn;
+  assert.equal(seenOn(), undefined, "one route: no field");
   const [, , , onOthers] = store.addFinding({
     ...first,
     state: "/others/:id#f2",
@@ -319,8 +327,8 @@ test("a finding merged from another route records that route; a re-filing on a k
 
   // At most MAX_SEEN_ON, the oldest dropped.
   for (let i = 0; i < MAX_SEEN_ON + 3; i++) store.addFinding({ ...first, state: `/page-${i}#f`, title: `Page ${i} refused`, evidence: "GET /api/users 403" });
-  assert.equal(finding.seenOn?.length, MAX_SEEN_ON);
-  assert.equal(finding.seenOn?.at(-1), `/page-${MAX_SEEN_ON + 2}`);
+  assert.equal(seenOn()?.length, MAX_SEEN_ON);
+  assert.equal(seenOn()?.at(-1), `/page-${MAX_SEEN_ON + 2}`);
 
   // The report names every route.
   const report = generateReport(store, [], undefined, { write: false }).markdown;
@@ -1351,7 +1359,7 @@ test("typed text and URLs are redacted at the log, not just on findings", () => 
   // fields left the same secrets flowing by a parallel route.
   const store = freshStore();
   store.logAction({ action: "type", target: 'password "sk-live-AAAABBBBCCCCDDDD"', url: "http://x/cb?token=abcdef123456789012" });
-  const line = fs.readFileSync(store.sessionLogPath, "utf8");
+  const line = fs.readFileSync(sessionLogOf(store), "utf8");
   assert.ok(!line.includes("AAAABBBBCCCCDDDD"), "the typed secret never reaches the log");
   assert.ok(!line.includes("abcdef123456789012"), "nor does a token in the URL");
 });
@@ -1579,7 +1587,7 @@ test("a failed fill's error names the action but not the secret value Playwright
 test("a password typed into a labelled field never reaches the session log, even when it is short", () => {
   const store = freshStore();
   store.logAction({ action: "type", target: 'textbox "Password" ← "hunter2"', url: "http://x/login" });
-  const line = fs.readFileSync(store.sessionLogPath, "utf8");
+  const line = fs.readFileSync(sessionLogOf(store), "utf8");
   assert.ok(!line.includes("hunter2"), line);
   assert.ok(line.includes("masked: password field"), line);
 });
@@ -2018,7 +2026,7 @@ test("a run's shared state ends with the run, and the project's memory does not"
   store.auditsThisRun = 2;
   store.probes = [{ payload: "<b x>", tag: "b", attrs: [["x", ""]], text: null, selector: "b[x]", field: "f", typedOn: "/a", baseline: 0 }];
   store.injectionsReported.add("<b x>|/list");
-  store.addFinding({ severity: "low", category: "other", title: "kept", detail: "d", evidence: "e", url: "http://x/", state: "s", repro: [] });
+  store.addFinding({ severity: "low", category: "other", title: "kept", detail: "d", evidence: "e", url: "http://x/", state: "s" });
   store.endRun();
   assert.equal(store.auditsThisRun, 0);
   assert.deepEqual(store.probes, []);

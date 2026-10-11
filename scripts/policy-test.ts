@@ -458,7 +458,7 @@ test("a session not attached by role reports the loss exactly as before", () => 
     begun.beginSession(kind, "someone");
     const before = loseSignIn(plain);
     const after = loseSignIn(begun);
-    assert.equal(begun.takeReattach({ requeued: false }), null, `${kind}: never re-attaches`);
+    assert.equal(begun.takeReattach(), null, `${kind}: never re-attaches`);
     assert.equal(after, before, `${kind}: the same verdict text`);
     assert.equal(begun.reattachSummary(), "", `${kind}: nothing to say about a re-attach`);
   }

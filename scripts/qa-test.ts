@@ -877,9 +877,12 @@ test("command: show and compare name an element; a URL may come first; the plain
     ["/scenescout qa show-stoppers in checkout", { url: "", focus: "show-stoppers in checkout" }],
   ];
   for (const [body, expected] of rows) assert.deepEqual(parseQaCommand(body), expected, body);
-  const long = parseQaCommand(`/scenescout qa compare ${"x".repeat(500)}`)!;
-  assert.equal(long.capture.what.length, MAX_FOCUS);
-  assert.equal(parseQaCommand("/scenescout qa show the\u0007 button")!.capture.what, "the button", "control characters never reach the prompt");
+  const long = parseQaCommand(`/scenescout qa compare ${"x".repeat(500)}`)?.capture;
+  assert.ok(long, "a comparison is a capture");
+  assert.equal(long.what.length, MAX_FOCUS);
+  const shown = parseQaCommand("/scenescout qa show the\u0007 button")?.capture;
+  assert.ok(shown, "a show is a capture");
+  assert.equal(shown.what, "the button", "control characters never reach the prompt");
 });
 
 test("gate: show needs words; compare needs an https base URL; each says how to fix it", () => {
@@ -1154,6 +1157,7 @@ test("report stage: shows the pictures the shots job pushed, and no others", asy
 
 type Step = { uses?: string; run?: string; env?: Record<string, string>; with?: Record<string, unknown> };
 type Job = {
+  name?: string;
   if?: string;
   needs?: string | string[];
   permissions?: Record<string, string>;
