@@ -2374,6 +2374,66 @@ test("dependabot: every action's own pins are watched, not only the workflows' a
   }
 });
 
+/** The npm commands a run step starts, one per command: `npm ci …`, `npx …`, `npm exec …`. */
+function npmCommandsIn(run: string): string[] {
+  return run
+    .split(/\r?\n|&&|\|\||;|\|/)
+    .map((c) => c.trim())
+    .filter((c) => /^(?:sudo\s+)?(?:npm|npx|pnpm|yarn)\b/.test(c));
+}
+
+test("key-holding jobs: every dependency install is npm ci --ignore-scripts from a committed lockfile, and SceneScout comes from the pinned tree", () => {
+  const files = [
+    ...fs.readdirSync(path.join(REPO, ".github", "workflows")).map((f) => path.join(".github", "workflows", f)),
+    ...fs.readdirSync(path.join(REPO, "examples", "workflows")).map((f) => path.join("examples", "workflows", f)),
+  ].filter((f) => /\.ya?ml$/.test(f));
+  let keyJobs = 0;
+  let ciUses = 0;
+  for (const file of files) {
+    const wf = parseYaml(fs.readFileSync(path.join(REPO, file), "utf8")) as { jobs?: Record<string, WorkflowJob> };
+    for (const [name, job] of Object.entries(wf.jobs ?? {})) {
+      if (!NAMES_A_KEY.test(JSON.stringify(job))) continue;
+      keyJobs++;
+      for (const step of job.steps ?? []) {
+        for (const cmd of npmCommandsIn(step.run ?? "")) {
+          // npm run starts a script of the checked-out repository, whose dependencies an npm ci in this job installed.
+          if (/^npm (?:run|run-script)\b/.test(cmd)) continue;
+          assert.match(cmd, /^npm ci --ignore-scripts\b/, `${file} ${name}: "${cmd}" installs beside the model key without the committed lockfile`);
+        }
+        // The ci action installs the pinned tree for the release it is; a version input would make it float.
+        if (/^(?:\.\/ci|brunoboto96\/SceneScout\/ci@)/.test(step.uses ?? "")) {
+          ciUses++;
+          assert.ok(!step.with?.version, `${file} ${name}: the ci action is given a version, so its dependencies are not pinned`);
+        }
+      }
+    }
+  }
+  assert.ok(keyJobs >= 4, `the benchmark, dedup and qa workflows hold a key: found ${keyJobs} jobs`);
+  assert.ok(ciUses >= 2, `the qa example and the benchmark run the ci action: found ${ciUses}`);
+  // The lockfile both kinds of install read is the repository's, which Dependabot keeps current.
+  const config = parseYaml(fs.readFileSync(path.join(REPO, ".github", "dependabot.yml"), "utf8")) as {
+    updates: Array<{ "package-ecosystem": string; directory?: string; directories?: string[] }>;
+  };
+  const npm = config.updates.find((u) => u["package-ecosystem"] === "npm");
+  assert.ok(npm && [...(npm.directories ?? []), npm.directory].includes("/"), "Dependabot keeps package-lock.json current");
+});
+
+test("ci action: SceneScout is installed only through the pinned install, from the lockfile beside the action", () => {
+  const ci = fs.readFileSync(path.join(REPO, "action", "ci-action.mjs"), "utf8");
+  // One install, given the repository root so it reads package-lock.json there.
+  assert.equal(ci.split("installPackage(").length - 1, 1, "one call");
+  assert.ok(ci.includes('installPackage(version, path.join(actionPath, "..")).cli'));
+  for (const file of ["ci-action.mjs", "qa-action.mjs", "qa-check.mjs", "zip.mjs"]) {
+    const text = fs.readFileSync(path.join(REPO, "action", file), "utf8");
+    assert.ok(!/npmCommand|["'](?:npm|npx)["']/.test(text), `${file} starts npm itself instead of through installPackage`);
+  }
+  const check = fs.readFileSync(path.join(REPO, "action", "check-action.mjs"), "utf8");
+  assert.deepEqual(
+    check.match(/installPackage\([^)]*\)/g)?.filter((c) => !/^installPackage\(version, repoRoot/.test(c)),
+    ["installPackage(version, actionPath)"],
+  );
+});
+
 /**
  * Each `uses:` in a workflow or action file that names a remote action by anything but a full commit SHA with the
  * release it is as a trailing `# vX.Y.Z` comment. A local action (`./…`) is exempt: it is this repository's own code.

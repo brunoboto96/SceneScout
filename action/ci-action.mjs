@@ -123,7 +123,7 @@ function resolve() {
     // This action lives in ci/ of the repository; the package it was released as is one up.
     const actionPath = process.env.GITHUB_ACTION_PATH || path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), "ci");
     const version = String(inputs.version ?? "").trim() || JSON.parse(fs.readFileSync(path.join(actionPath, "..", "package.json"), "utf8")).version;
-    cli = installPackage(version);
+    cli = installPackage(version, path.join(actionPath, "..")).cli;
   }
   const packageRoot = path.dirname(path.dirname(cli));
   const version = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")).version;
