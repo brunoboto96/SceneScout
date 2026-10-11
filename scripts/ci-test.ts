@@ -2374,12 +2374,15 @@ test("dependabot: every action's own pins are watched, not only the workflows' a
   }
 });
 
-/** The npm commands a run step starts, one per command: `npm ci …`, `npx …`, `npm exec …`. */
+/**
+ * The npm commands a run step starts, one per command: `npm ci …`, `npx …`, `npm exec …`. Leading environment
+ * assignments, `sudo` and `env` are dropped, so `CI=1 npm install x` is read as the install it is.
+ */
 function npmCommandsIn(run: string): string[] {
   return run
     .split(/\r?\n|&&|\|\||;|\|/)
-    .map((c) => c.trim())
-    .filter((c) => /^(?:sudo\s+)?(?:npm|npx|pnpm|yarn)\b/.test(c));
+    .map((c) => c.trim().replace(/^(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)|sudo(?:\s+-\w+)*|env)\s+)*/, ""))
+    .filter((c) => /^(?:npm|npx|pnpm|yarn)\b/.test(c));
 }
 
 test("key-holding jobs: every dependency install is npm ci --ignore-scripts from a committed lockfile, and SceneScout comes from the pinned tree", () => {
@@ -2387,6 +2390,12 @@ test("key-holding jobs: every dependency install is npm ci --ignore-scripts from
     ...fs.readdirSync(path.join(REPO, ".github", "workflows")).map((f) => path.join(".github", "workflows", f)),
     ...fs.readdirSync(path.join(REPO, "examples", "workflows")).map((f) => path.join("examples", "workflows", f)),
   ].filter((f) => /\.ya?ml$/.test(f));
+  // A command after an environment assignment, sudo, or another command on the line is still an install.
+  assert.deepEqual(npmCommandsIn("CI=1 npm install left-pad"), ["npm install left-pad"]);
+  assert.deepEqual(npmCommandsIn("A=1 B=x sudo npm i x"), ["npm i x"]);
+  for (const prefixed of [`FOO="a b" npm i x`, "FOO='a b' npm i x", "sudo CI=1 npm i x", "sudo -E npm i x", "env CI=1 npm i x"])
+    assert.deepEqual(npmCommandsIn(prefixed), ["npm i x"], prefixed);
+  assert.deepEqual(npmCommandsIn("cd app && npm ci --ignore-scripts; npx tool"), ["npm ci --ignore-scripts", "npx tool"]);
   let keyJobs = 0;
   let ciUses = 0;
   for (const file of files) {
