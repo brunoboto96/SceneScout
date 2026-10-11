@@ -38,6 +38,7 @@ SceneScout is a **generic** exploratory-testing engine used against arbitrary we
 
 - **typescript stays on 5.x.** TypeScript 7 was tried and reverted: it breaks this project's module resolution (`Cannot find name 'node:fs'` and cascading implicit-any errors). The caret range `^5.9.3` prevents an accidental jump, but `npm install typescript@latest` would still do it — re-test the build before changing that line.
 - **zod stays on 3.x.** `@modelcontextprotocol/sdk` builds its tool schemas against zod v3's API; v4 is a breaking change for that surface.
+- **playwright stays on 1.63.** On 1.64 a click on a link whose navigation is answered with `204 No Content` never returns, so the engine's own click would hang ([#487](https://github.com/brunoboto96/SceneScout/issues/487)); the caret range `^1.63.0` still admits 1.64, so `.github/dependabot.yml` ignores 1.64.x and a bump to it is declined until a release fixes that; then remove the ignore and re-run the smoke suite on all three browsers.
 
 ## More than one browser
 
