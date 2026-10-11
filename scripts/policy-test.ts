@@ -79,6 +79,8 @@ import {
   unseenWriteSource,
 } from "../src/engine/unload.ts";
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
+import type { Request, Route } from "playwright";
+import { marksRouteExercised, pathnameOf, RouteGuard, routedWriteVerdict, type RouteGuardHost } from "../src/engine/route-guard.ts";
 
 // ---------------------------------------------------------------------------
 // isDestructiveWire — argument order is load-bearing
@@ -1491,4 +1493,251 @@ test("refusedPostPage: a refused POST is charged to the page that sent it, not t
     "a query is more than the origin",
   );
   assert.equal(refusedPostPage(app, undefined, undefined), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// The route handler's decisions: route-guard.ts
+// ---------------------------------------------------------------------------
+
+test("the route handler judges a write in order: a foreign frame, then a page moved off the app, then sign-in, then a read POST", () => {
+  const base = {
+    rule: "safe-write",
+    method: "POST",
+    pathname: "/api/things",
+    destructiveWire: false,
+    foreign: null,
+    offApp: null,
+    readPost: false,
+  } as const;
+  assert.deepEqual(routedWriteVerdict(base), { kind: "by-ownership" });
+  // A foreign frame's write is refused before any other rule, a sign-in included.
+  assert.deepEqual(routedWriteVerdict({ ...base, pathname: "/api/auth/login", foreign: "https://chat.example.com" }), {
+    kind: "refuse",
+    why: "sent from a frame of https://chat.example.com",
+  });
+  // A page an embed moved off the app: refused, unless the write is a sign-in.
+  assert.deepEqual(routedWriteVerdict({ ...base, offApp: "https://idp.example.com" }), {
+    kind: "refuse",
+    why: "sent from a page of https://idp.example.com, outside the app",
+  });
+  assert.deepEqual(routedWriteVerdict({ ...base, pathname: "/api/auth/login", offApp: "https://idp.example.com" }), { kind: "auth" });
+  assert.deepEqual(routedWriteVerdict({ ...base, pathname: "/api/auth/login" }), { kind: "auth" });
+  // A destructive-looking sign-in is not exempt.
+  assert.deepEqual(routedWriteVerdict({ ...base, pathname: "/api/auth/login", destructiveWire: true }), { kind: "by-ownership" });
+  assert.deepEqual(routedWriteVerdict({ ...base, rule: "observe", readPost: true }), { kind: "read-post" });
+  // Sign-in is checked before the read POST: a read-named login is still let out as a login.
+  assert.deepEqual(routedWriteVerdict({ ...base, rule: "observe", pathname: "/api/auth/login", readPost: true }), { kind: "auth" });
+  assert.deepEqual(routedWriteVerdict({ ...base, rule: "observe", readPost: true, foreign: "https://chat.example.com" }).kind, "refuse");
+});
+
+test("the route handler and the browser-level interception reach the same verdict on every write", () => {
+  for (const rule of ["read-only", "observe", "safe-write"] as const)
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"])
+      for (const pathname of ["/api/auth/login", "/api/things/1", "/api/things/1/delete"])
+        for (const destructiveWire of [false, true])
+          for (const foreign of [null, "https://chat.example.com"])
+            for (const offApp of [null, "https://idp.example.com"])
+              for (const readPost of [false, true])
+                for (const owned of [false, true]) {
+                  const verdict = routedWriteVerdict({ rule, method, pathname, destructiveWire, foreign, offApp, readPost });
+                  const routed =
+                    verdict.kind === "refuse"
+                      ? { allow: false, why: verdict.why }
+                      : verdict.kind === "by-ownership"
+                        ? allowsWrite(rule, method, destructiveWire, owned)
+                          ? { allow: true }
+                          : { allow: false }
+                        : { allow: true };
+                  assert.deepEqual(
+                    routed,
+                    judgeUnseenWrite({ mode: rule, method, pathname, destructiveWire, foreign, offApp, owned, readPost }),
+                    `${rule} ${method} ${pathname} destructive=${destructiveWire} foreign=${foreign} offApp=${offApp} readPost=${readPost} owned=${owned}`,
+                  );
+                }
+});
+
+test("a write marks its page's forms exercised only when the route handler will let it out", () => {
+  const exercised = (
+    rule: (typeof WRITE_MODES)[number],
+    pathname: string,
+    body: string | null,
+    extra: { foreign?: string | null; offApp?: string | null } = {},
+  ): boolean =>
+    marksRouteExercised({
+      rule,
+      method: "POST",
+      pathname,
+      destructiveWire: isDestructiveWire(pathname, body),
+      foreign: () => extra.foreign ?? null,
+      offApp: () => extra.offApp ?? null,
+    });
+  // Observe: only a sign-in goes out.
+  assert.equal(exercised("observe", "/api/things", "{}"), false);
+  assert.equal(exercised("observe", "/api/auth/login", "{}"), true);
+  // Read-only: a plain POST goes out, a destructive one is refused (the contrastive pair).
+  assert.equal(exercised("read-only", "/api/things", '{"note":"draft"}'), true);
+  assert.equal(exercised("read-only", "/api/things", '{"action":"delete"}'), false);
+  assert.equal(exercised("safe-write", "/api/things", '{"action":"delete"}'), true, "safe-write leaves the destructive POST to ownership");
+  // A foreign frame's write is refused in every mode the route handler runs in; destructive has no route handler.
+  assert.equal(exercised("safe-write", "/api/things", "{}", { foreign: "https://chat.example.com" }), false);
+  assert.equal(exercised("destructive", "/api/things", "{}", { foreign: "https://chat.example.com" }), true);
+  // A page moved off the app: refused unless a sign-in.
+  assert.equal(exercised("read-only", "/api/things", "{}", { offApp: "https://idp.example.com" }), false);
+  assert.equal(exercised("read-only", "/api/auth/login", "{}", { offApp: "https://idp.example.com" }), true);
+  // The frame and page are read only when the rule needs them.
+  const asked: string[] = [];
+  const probe = (rule: (typeof WRITE_MODES)[number], pathname: string) =>
+    marksRouteExercised({
+      rule,
+      method: "POST",
+      pathname,
+      destructiveWire: false,
+      foreign: () => (asked.push("foreign"), null),
+      offApp: () => (asked.push("offApp"), null),
+    });
+  assert.equal(probe("destructive", "/api/things"), true);
+  assert.equal(probe("observe", "/api/things"), false);
+  assert.deepEqual(asked, [], "neither destructive nor a refused observe write asks");
+  assert.equal(probe("read-only", "/api/things"), true);
+  assert.deepEqual(asked, ["foreign", "offApp"]);
+});
+
+test("pathnameOf reads a request URL's path, and keeps what does not parse", () => {
+  assert.equal(pathnameOf("https://app.example.com/api/things/7?x=1"), "/api/things/7");
+  assert.equal(pathnameOf("not a url"), "not a url");
+});
+
+// The handler itself, driven through RouteGuardHost with a stand-in route: what each verdict does to the request.
+type GuardCall = string;
+function guardRig(
+  rule: (typeof WRITE_MODES)[number],
+  opts: { foreign?: string | null; owned?: (pathname: string) => boolean; readPost?: string; frameDoc?: "foreign" | "app" | null } = {},
+) {
+  const calls: GuardCall[] = [];
+  const owned = new Set<string>();
+  const host: RouteGuardHost = {
+    appUrl: () => "https://app.example.com",
+    rule: () => rule,
+    pageUrl: () => "https://app.example.com/things",
+    trustedEmbeds: () => new Set(),
+    movedByEmbed: () => null,
+    noteBlocked: (e) => void calls.push(`noteBlocked ${e.sig} answered=${e.answered}${e.why ? ` why=${e.why}` : ""}`),
+    logAction: (e) => void calls.push(`log ${e.action}`),
+    notePolicyBlock: () => void calls.push("notePolicyBlock"),
+    noteSentWrite: () => void calls.push("noteSentWrite"),
+    foreignWriteOf: () => opts.foreign ?? null,
+    embedEscapeNavigation: () => false,
+    frameDocumentKind: () => opts.frameDoc ?? null,
+    sentByMainFrame: () => true,
+    readPostOf: (r, method, url) =>
+      opts.readPost && r === "observe" && method === "POST" && pathnameOf(url) === opts.readPost
+        ? { entry: `POST ${opts.readPost}`, origin: null, segments: opts.readPost.split("/").filter(Boolean) }
+        : null,
+    noteObserveRefusedPost: (url) => void calls.push(`noteObserveRefusedPost ${pathnameOf(url)}`),
+    clearRefusedPost: (url) => void calls.push(`clearRefusedPost ${pathnameOf(url)}`),
+    isOwnedResource: (pathname) => owned.has(pathname) || (opts.owned?.(pathname) ?? false),
+    recordCreation: async (res) => {
+      owned.add(String((res as unknown as { created: string }).created));
+    },
+  };
+  const guard = new RouteGuard(host);
+  const send = (
+    method: string,
+    path: string,
+    { type = "xhr", body = null as string | null, created = undefined as string | undefined, answerAfterMs = 0 } = {},
+  ) => {
+    const url = `https://app.example.com${path}`;
+    const request = {
+      method: () => method,
+      url: () => url,
+      resourceType: () => type,
+      postData: () => body,
+      postDataBuffer: () => (body === null ? null : Buffer.from(body)),
+      headers: () => ({ origin: "https://app.example.com" }),
+      frame: () => {
+        throw new Error("no frame");
+      },
+      response: () => new Promise((resolve) => setTimeout(() => resolve({ ok: () => true, created }), answerAfterMs)),
+    };
+    let outcome = "unanswered";
+    const route = {
+      request: () => request,
+      fallback: async () => void (outcome = "fallback"),
+      continue: async () => void (outcome = "continue"),
+      fulfill: async (r: { status?: number }) => void (outcome = `fulfill ${r.status}`),
+      abort: async (code: string) => void (outcome = `abort ${code}`),
+      fetch: async () => {
+        throw new Error("not fetched in this rig");
+      },
+    };
+    const done = guard.handle(route as unknown as Route).then(() => outcome);
+    return { request: request as unknown as Request, done };
+  };
+  return { calls, guard, send };
+}
+
+test("RouteGuard: each verdict is applied to the request, and a refusal is recorded and reported", async () => {
+  // Read-only: a plain POST goes out; the same POST carrying a destructive command is answered with a refusal (the contrastive pair).
+  {
+    const { calls, guard, send } = guardRig("read-only");
+    const plain = send("POST", "/api/things", { body: '{"note":"draft"}' });
+    assert.equal(await plain.done, "fallback");
+    assert.equal(guard.refused(plain.request), false);
+    assert.deepEqual(calls, ["clearRefusedPost /api/things"], "a POST that went out is no longer a gap");
+    calls.length = 0;
+    const destructive = send("POST", "/api/things", { body: '{"action":"delete"}' });
+    assert.equal(await destructive.done, "fulfill 403");
+    assert.equal(guard.refused(destructive.request), true, "the request event's report must know the policy stopped it");
+    assert.deepEqual(calls, ["noteBlocked POST https://app.example.com/api/things answered=true", "log write-policy:blocked", "notePolicyBlock"]);
+    // A navigation's refused write is dropped, not answered.
+    const form = send("DELETE", "/api/things/1", { type: "document" });
+    assert.equal(await form.done, "abort blockedbyclient");
+    assert.equal(guard.refused(form.request), true);
+  }
+  // Reads go out in every mode, and are never recorded.
+  {
+    const { calls, send } = guardRig("observe");
+    for (const method of ["GET", "HEAD", "OPTIONS"]) assert.equal(await send(method, "/api/things").done, "fallback");
+    assert.deepEqual(calls, []);
+  }
+  // A foreign frame's write is refused before sign-in is considered, with the reason.
+  {
+    const { calls, guard, send } = guardRig("safe-write", { foreign: "https://chat.example.com" });
+    const login = send("POST", "/api/auth/login", { body: "{}" });
+    assert.equal(await login.done, "fulfill 403");
+    assert.equal(guard.refused(login.request), true);
+    assert.equal(calls[0], "noteBlocked POST https://app.example.com/api/auth/login answered=true why=sent from a frame of https://chat.example.com");
+  }
+  // Observe: a sign-in and a POST named as a read go out; any other POST is refused and remembered for the gap ledger.
+  {
+    const { calls, guard, send } = guardRig("observe", { readPost: "/api/search" });
+    assert.equal(await send("POST", "/api/auth/login", { body: "{}" }).done, "fallback");
+    assert.deepEqual(calls, []);
+    assert.equal(await send("POST", "/api/search", { body: '{"q":"x"}' }).done, "fallback");
+    assert.deepEqual(calls, ["log write-policy:read-post", "clearRefusedPost /api/search"]);
+    calls.length = 0;
+    const other = send("POST", "/api/things", { body: "{}" });
+    assert.equal(await other.done, "fulfill 403");
+    assert.equal(guard.refused(other.request), true);
+    assert.equal(calls[0], "noteObserveRefusedPost /api/things");
+  }
+  // Safe-write: PUT, PATCH and DELETE go out only on this run's own records.
+  {
+    const { guard, send } = guardRig("safe-write", { owned: (p) => p === "/api/things/mine" });
+    for (const method of ["PUT", "PATCH", "DELETE"]) {
+      assert.equal(await send(method, "/api/things/mine").done, "fallback", `${method} of an owned record`);
+      const theirs = send(method, "/api/things/theirs");
+      assert.equal(await theirs.done, "fulfill 403", `${method} of a record this run did not create`);
+      assert.equal(guard.refused(theirs.request), true);
+    }
+  }
+});
+
+test("RouteGuard: a safe-write PUT right after the POST that created its record waits for the creation to be recorded", async () => {
+  const { send } = guardRig("safe-write");
+  const create = send("POST", "/api/things", { body: "{}", created: "/api/things/9", answerAfterMs: 30 });
+  assert.equal(await create.done, "fallback");
+  // Judged while the POST's answer is still on its way: allowed only because the handler waits for the pending creation.
+  assert.equal(await send("PUT", "/api/things/9", { body: "{}" }).done, "fallback");
+  assert.equal(await send("PUT", "/api/things/10", { body: "{}" }).done, "fulfill 403");
 });
