@@ -128,9 +128,9 @@ export function splitProjectFrame(relPath: string): { key?: string; rest: string
 }
 
 /**
- * The project folders this process has rendered a run page for, by key. Only a
- * folder a page was rendered from can be named, so a viewer cannot reach any
- * other folder by guessing a key.
+ * The project folders this process has rendered a run page or a board report
+ * for, by key. Only a folder one was rendered from can be named, so a viewer
+ * cannot reach any other folder by guessing a key.
  */
 export class ProjectDirs {
   private readonly byKey = new Map<string, string>();
@@ -142,7 +142,7 @@ export class ProjectDirs {
     return key;
   }
 
-  /** The folder a key names, or undefined when no page was rendered from one with that key. */
+  /** The folder a key names, or undefined when nothing was rendered from one with that key. */
   dir(key: string): string | undefined {
     return this.byKey.get(key);
   }

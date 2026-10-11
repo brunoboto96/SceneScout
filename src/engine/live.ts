@@ -432,9 +432,11 @@ export interface LiveProvider {
    * The run's report as it stands now, rendered without being written — and
    * once the run's sessions have closed, the last rendering of it, because a
    * finished run is exactly when someone wants to read it. On a recorded run
-   * it carries the frames each finding was found on.
+   * it carries the frames each finding was found on, and `framePrefix`, the
+   * address those frames start with: it names the project the report was
+   * rendered from, so they still load after a session attaches to another.
    */
-  report(): { markdown: string; at: string; evidence?: FindingFrames[] } | null;
+  report(): { markdown: string; at: string; evidence?: FindingFrames[]; framePrefix?: string } | null;
   /** The whole run as one page, to serve at its own address, or null when there is no run to show. */
   replay(): string | null;
   /**
