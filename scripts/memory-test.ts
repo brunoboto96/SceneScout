@@ -1444,6 +1444,91 @@ test("a field is secret by its type, its autocomplete token, or a name, id, labe
   for (const facts of ordinary) assert.equal(secretFieldKind(facts), null, JSON.stringify(facts));
 });
 
+test("a field labelled for a secret in another language is secret too; near misses in the same languages are not", () => {
+  // After a show-password toggle the field is type=text, so its label is all that says it holds a secret.
+  const secret: Array<[string, string]> = [
+    // German
+    ["Passwort", "password"],
+    ["Kennwort", "password"],
+    ["Neues Passwort", "password"],
+    ["Benutzerpasswort", "password"],
+    ["Passwortbestätigung", "password"],
+    ["PIN-Code", "one-time code"],
+    ["Geheimzahl", "one-time code"],
+    ["Bestätigungscode", "one-time code"],
+    ["Einmalcode", "one-time code"],
+    ["Kartennummer", "card"],
+    ["Kreditkartennummer", "card"],
+    ["Prüfnummer", "card"],
+    // French
+    ["Mot de passe", "password"],
+    ["Confirmer le mot de passe", "password"],
+    ["Code de vérification", "one-time code"],
+    ["Code à usage unique", "one-time code"],
+    ["Numéro de carte", "card"],
+    ["Cryptogramme visuel", "card"],
+    // Spanish
+    ["Contraseña", "password"],
+    ["Código de verificación", "one-time code"],
+    ["Código de un solo uso", "one-time code"],
+    ["Número de tarjeta", "card"],
+    ["Código de seguridad", "card"],
+    // Portuguese
+    ["Senha", "password"],
+    ["Palavra-passe", "password"],
+    ["Código de verificação", "one-time code"],
+    ["Número do cartão", "card"],
+    ["Código de segurança", "card"],
+    // Italian
+    ["Codice di verifica", "one-time code"],
+    ["Numero della carta", "card"],
+    ["Codice di sicurezza", "card"],
+    // Dutch
+    ["Wachtwoord", "password"],
+    ["Verificatiecode", "one-time code"],
+    ["Kaartnummer", "card"],
+    // Polish, Czech
+    ["Hasło", "password"],
+    ["Heslo", "password"],
+    ["Kod weryfikacyjny", "one-time code"],
+    ["Numer karty", "card"],
+    // Swedish, Danish, Norwegian, Finnish
+    ["Lösenord", "password"],
+    ["Adgangskode", "password"],
+    ["Passord", "password"],
+    ["Salasana", "password"],
+    ["Engångskod", "one-time code"],
+    ["Kortnummer", "card"],
+    // An accent written as a letter and a combining mark reads the same as one written as one letter.
+    ["Contrasen\u0303a", "password"],
+  ];
+  for (const [label, kind] of secret) assert.equal(secretFieldKind({ type: "text", label }), kind, label);
+  // Each near miss shares a word or a stem with a label above and names nothing secret.
+  for (const label of [
+    "Palavra-chave",
+    "Passagier",
+    "Passe-partout",
+    "Mot clé",
+    "Kennung",
+    "Kennzeichen",
+    "Kartenart",
+    "Kartenzahlung",
+    "Numéro de commande",
+    "Número de pedido",
+    "Número de teléfono",
+    "Código postal",
+    "Código de descuento",
+    "Codice fiscale",
+    "Gutscheincode",
+    "Code promo",
+    "Bestätigung",
+    "Parola",
+    "Senhorio",
+    "Kortnummerets type",
+  ])
+    assert.equal(secretFieldKind({ type: "text", label }), null, label);
+});
+
 test("a secret field's typed value is shown as a fixed mask that says why, never its length", () => {
   assert.equal(maskedValue("password"), "•••• (masked: password field)");
   assert.equal(maskedValue("card"), "•••• (masked: card field)");
@@ -1491,6 +1576,18 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     ["paid 2026-10-11 4111 1111 1111 1111", "paid 2026-10-11 [card number redacted]"],
     ["Amex 3782 822463 10005 on file", "Amex [card number redacted] on file"],
     ["card 4111111111111111", "card [card number redacted]"],
+    // Each network's prefixes and lengths (IIN ranges): what a card number starts with is what makes it one.
+    ["Mastercard 5555 5555 5555 4444", "Mastercard [card number redacted]"],
+    ["Mastercard 2223 0031 2200 3222", "Mastercard [card number redacted]"],
+    ["Amex 3714 496353 98431", "Amex [card number redacted]"],
+    ["Discover 6011 1111 1111 1117", "Discover [card number redacted]"],
+    ["Discover 6445 6445 6445 6445", "Discover [card number redacted]"],
+    ["JCB 3530 1113 3330 0000", "JCB [card number redacted]"],
+    ["Diners 3056 930902 5904", "Diners [card number redacted]"],
+    ["Diners 3622 720627 1667", "Diners [card number redacted]"],
+    ["UnionPay 6200 0000 0000 0005", "UnionPay [card number redacted]"],
+    ["Maestro 6759 6498 2643 8453", "Maestro [card number redacted]"],
+    ["Mir 2200 0000 0000 0004", "Mir [card number redacted]"],
     ["Visa 4222 2222 2222 2", "Visa [card number redacted]"],
     // Grouped with dots, or with the non-breaking spaces a formatted number or a French locale uses.
     ["card 4111.1111.1111.1111 declined", "card [card number redacted] declined"],
@@ -1514,6 +1611,19 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     "/feed?_=1696000000004",
     "npm i widget@18.3.1",
     "order 4111111111111112",
+    // Contrastive with the cards above: Luhn-valid and card-shaped, but no network issues from these prefixes or at this length.
+    "id 2111 1111 1111 1115",
+    "id 3111 1111 1111 1113",
+    "id 5611 1111 1111 1113",
+    "id 8111 1111 1111 1112",
+    "ref ORD-2111-1111-1111-1115",
+    "ref 3111.1111.1111.1113",
+    // A Visa prefix at a length Visa never issues (15 digits), and an Amex prefix at 16.
+    "id 4111 1111 1111 116",
+    "id 3711 1111 1111 1117",
+    // Lists of years and of five-digit numbers whose digits, run together, pass the Luhn check.
+    "years 2026 1993 1995 2012",
+    "codes 54321 12345 12348 67890",
     // Lists of small numbers whose digits, run together, happen to pass the Luhn check.
     "widths 320 375 414 768 1024 1280 1440",
     "sizes 8 16 24 32 40 48 56 64",
