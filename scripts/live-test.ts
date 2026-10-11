@@ -32,7 +32,9 @@ import {
   type SessionStatus,
   liveEngines,
   liveTokenFileName,
+  LIVE_TOKEN_FILE,
   statusFileName,
+  writeLiveToken,
 } from "../src/engine/live.ts";
 import { LIVE_PAGE } from "../src/engine/live-page.ts";
 import {
@@ -986,6 +988,48 @@ test("overlapping status writes never leave a torn file, and the last one wins",
     // is what this guards against.
     assert.deepEqual(fs.readdirSync(dir).sort(), [statusFileName(process.pid), "status.json"].sort(), "no temp file is left behind");
     assert.equal(fs.readFileSync(path.join(dir, statusFileName(process.pid)), "utf8"), bodies[bodies.length - 1], "both land the same body");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the live view's token files are written owner-only, whatever was at their names before", { skip: process.platform === "win32" }, async () => {
+  // The token is the live view's only credential. `mode` on a write applies
+  // only when the file is created, and a write follows a link: a leftover
+  // token file other accounts could read kept its bits, and a link shipped at
+  // the shared name sent the token into whatever file it pointed at.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-token-"));
+  try {
+    const victim = path.join(dir, "elsewhere.txt");
+    fs.writeFileSync(victim, "not the engine's");
+    fs.writeFileSync(path.join(dir, liveTokenFileName(4242)), "old", { mode: 0o644 });
+    fs.chmodSync(path.join(dir, liveTokenFileName(4242)), 0o644);
+    fs.symlinkSync(victim, path.join(dir, LIVE_TOKEN_FILE));
+
+    await writeLiveToken(dir, 4242, "t".repeat(32));
+
+    for (const name of [liveTokenFileName(4242), LIVE_TOKEN_FILE]) {
+      const file = path.join(dir, name);
+      const stat = fs.lstatSync(file);
+      assert.ok(stat.isFile(), `${name} is a file of its own, not a link`);
+      assert.equal(stat.mode & 0o777, 0o600, `${name} can be read by its owner only`);
+      assert.equal(fs.readFileSync(file, "utf8"), "t".repeat(32));
+    }
+    assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's", "the file a link pointed at is untouched");
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["elsewhere.txt", LIVE_TOKEN_FILE, liveTokenFileName(4242)].sort(), "no temporary file is left behind");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a token write that fails leaves no file holding the token behind", { skip: process.platform === "win32" }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-token-"));
+  try {
+    // A folder at the shared name: the rename onto it fails after the temporary file was written.
+    fs.mkdirSync(path.join(dir, LIVE_TOKEN_FILE, "inside"), { recursive: true });
+    await assert.rejects(writeLiveToken(dir, 4242, "t".repeat(32)));
+    const left = fs.readdirSync(dir).filter((name) => name !== LIVE_TOKEN_FILE && name !== liveTokenFileName(4242));
+    assert.deepEqual(left, [], "no temporary file is left behind");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

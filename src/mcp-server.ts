@@ -65,6 +65,7 @@ import { FIXTURE_KINDS, type FixtureKind } from "./engine/fixtures.js";
 import {
   feedForSession,
   LIVE_ENV,
+  writeLiveToken,
   writeStatusFile,
   type FindingFrames as FindingEvidence,
   type ReportFile,
@@ -417,17 +418,13 @@ function publishLiveToken(dir: string): void {
   // Named for this process: two engines on one project would otherwise hand
   // `watch` one token for two ports, and whichever wrote last would win.
   const file = path.join(dir, liveTokenFileName(process.pid));
-  const write = fs.promises
-    .writeFile(file, liveAddress.token, { mode: 0o600 })
-    // The shared name stays too, for a `watch` from before per-pid files.
-    .then(() => fs.promises.writeFile(path.join(dir, LIVE_TOKEN_FILE), liveAddress!.token, { mode: 0o600 }))
-    // `mode` applies only when the file is created; a leftover one keeps its old bits.
-    .then(() => fs.promises.chmod(file, 0o600))
+  // The shared name is written too, for a `watch` from before per-pid files.
+  const write = writeLiveToken(dir, process.pid, liveAddress.token)
     .then(() => {
       liveDirs.add(dir);
     })
     .catch((err: unknown) => {
-      // A file with the wrong bits, or none: either way nothing to take back later.
+      // Whatever was written before the failure is taken back: nothing is left to remove at shutdown.
       void fs.promises.rm(file, { force: true }).catch(() => {});
       if (!liveTokenWarned)
         console.error(`[scenescout] could not write the live view's token file in ${dir}: ${err instanceof Error ? err.message : String(err)}`);
