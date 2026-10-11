@@ -7,9 +7,10 @@
  *
  * Every secret field is painted, empty or not, so the paint does not depend on
  * when the field was read, and two pictures of the same page still compare. A
- * frame whose fields cannot be read has all of its fields painted: masking errs
- * towards hiding. The rule is masksToPaint, table-tested in memory-test;
- * secretFieldMasks reads the page for it and is what browser.ts calls.
+ * frame whose fields cannot be read, or that has more than MAX_FIELD_MASKS
+ * secret ones, has all of its fields painted: masking errs towards hiding. The
+ * rule is masksToPaint, table-tested in memory-test; secretFieldMasks reads the
+ * page for it and is what browser.ts calls.
  */
 import type { Frame, Locator, Page, PageScreenshotOptions } from "playwright";
 import { secretFieldKind, type SecretFieldFacts } from "./sensitive.js";
@@ -35,9 +36,18 @@ export const SECRET_BY_ATTRIBUTE = [
 ].join(", ");
 
 /**
+ * The most fields of one frame painted by their place. Playwright finds each
+ * such field again on its own as it paints, at a cost that grows with the page:
+ * a grid of 625 one-character boxes took 14 s a picture in Firefox, longer than
+ * a live-view still or a recorded frame may take. Past this many, every field
+ * of the frame is painted by one selector instead.
+ */
+export const MAX_FIELD_MASKS = 32;
+
+/**
  * For each frame, in order, which of its fields (by their place in the frame's
  * FIELD_SELECTOR matches) to paint, or "all" when the frame's fields could not
- * be read (null).
+ * be read (null) or more than MAX_FIELD_MASKS of them are secret.
  */
 export function masksToPaint(frames: ReadonlyArray<readonly SecretFieldFacts[] | null>): Array<number[] | "all"> {
   return frames.map((fields) => {
@@ -46,7 +56,7 @@ export function masksToPaint(frames: ReadonlyArray<readonly SecretFieldFacts[] |
     fields.forEach((facts, i) => {
       if (secretFieldKind(facts)) paint.push(i);
     });
-    return paint;
+    return paint.length > MAX_FIELD_MASKS ? "all" : paint;
   });
 }
 
