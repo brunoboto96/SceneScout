@@ -257,7 +257,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `SCENESCOUT_PROJECTS_DIR` | the server | The absolute folder that holds one folder per tested site, for an attach with no `projectPath` and a client with no workspace folder. Default: `SceneScout` in the documents folder (`~/Documents` on macOS, `%USERPROFILE%\Documents` on Windows, `XDG_DOCUMENTS_DIR` else `~/Documents` on Linux). `off` makes `projectPath` required. A `scout_attach` `projectPath` wins over it |
 | `USERPROFILE` | the server | Windows: the folder whose `Documents` holds the default `SceneScout` folder |
 | `XDG_DOCUMENTS_DIR` | the server | Linux: the documents folder that holds the default `SceneScout` folder, read before `~/.config/user-dirs.dirs` |
-| `SCENESCOUT_TICKET_DIRS` | the server | Folders outside the project that `scout_tickets` may read a ticket file from, as absolute paths separated as in `PATH` (`:`, or `;` on Windows). Unset: a ticket file is read only from inside the project folder. A relative entry is refused ([Safety model](Safety-model.md#the-project-folder-is-the-trust-boundary)) |
+| `SCENESCOUT_TICKET_DIRS` | the server | Folders outside the project that `scout_tickets` may read a ticket file from, as absolute paths separated as in `PATH` (`:`, or `;` on Windows). Unset: a ticket file is read only from inside the project folder. An entry that is relative or starts with `~` stops the server as it starts, with a message naming it; a folder that is not there is named in a warning as the server starts, and no ticket is read from it until it is; an empty entry is skipped ([Safety model](Safety-model.md#the-project-folder-is-the-trust-boundary)) |
 | `SCENESCOUT_DEDUP` | the server | `judge` asks a model, with a key below, whether a filing the dedup rule keeps apart from everything recorded is one of the open findings on its page; `rule` (default) does not. A `scout_attach` `dedup` wins over it |
 | `SCENESCOUT_DEDUP_PROVIDER` | the server | `anthropic` or `openai`: which key the dedup judge uses when both are set |
 | `SCENESCOUT_FROM_RUN` | the server, `ci` | An earlier run's `ci.json` or project directory, for every `ci` run and `scout_lane_brief` that does not name its own: the run starts from that run's record. Unset (default): a fresh run. `--from-run` and the brief's `fromRun` win over it |
@@ -332,7 +332,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `video` | empty | As `--video` (`on` or `off`); empty means off. The journey videos go in the artifact |
 | `template` | empty | As `--template`, relative to `working-directory`; needs `record: on`. The test report goes in the artifact |
 | `working-directory` | `.` | Where the check runs; other relative paths are resolved from here |
-| `version` | empty | The scenescout npm version to run; empty means the version of the action's ref |
+| `version` | empty | The scenescout npm version to run; empty means the version of the action's ref, installed with `npm ci` from that release's lockfile. A version other than that release installs with its dependencies resolved at run time, with a warning |
 | `cli` | empty | A built `dist/cli.js` to run instead of the npm package, for testing the action itself |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
@@ -376,7 +376,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `project` | empty | As `--project`; empty means `working-directory` |
 | `out` | empty | As `--out` |
 | `working-directory` | `.` | Where the run happens |
-| `version` | empty | The scenescout npm version to run |
+| `version` | empty | The scenescout npm version to run; empty means the version of the action's ref, installed with `npm ci` from that release's lockfile. A version other than that release installs with its dependencies resolved at run time, with a warning |
 | `cli` | empty | A built `dist/cli.js` to run instead, for testing the action itself |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |

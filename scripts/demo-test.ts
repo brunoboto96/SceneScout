@@ -11,7 +11,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
-// @ts-expect-error — plain .mjs, no types; it exports createDemoServer().
 import { createDemoServer } from "../demo-app/server.mjs";
 
 let server: http.Server;

@@ -1,0 +1,17 @@
+// The test scripts' type check (`npm run typecheck:scripts`, part of `npm test`).
+// tsx runs them without checking types, so this is what notices a test whose types are wrong.
+// The browser suites import the built engine, so it runs after `npm run build`, which writes
+// the declarations they are checked against. The actions' and the mod's plain JavaScript modules
+// are read for their inferred types (allowJs) and not themselves checked (checkJs: false).
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["scripts/**/*.ts"]
+}

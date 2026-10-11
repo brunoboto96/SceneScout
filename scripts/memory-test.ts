@@ -87,13 +87,19 @@ import { coverageView, generateReport, runRecordOf } from "../src/engine/report.
 import { maskedValue, maskFillCalls, redactPersonal, secretFieldKind, type SecretFieldFacts } from "../src/engine/sensitive.ts";
 import type { FromRunNote, RunRecord } from "../src/engine/from-run.ts";
 
+/** The action log a store writes this run: the one session-*.jsonl file in its folder. */
+function sessionLogOf(store: MemoryStore): string {
+  const logs = fs.readdirSync(store.dir).filter((f) => /^session-.*\.jsonl$/.test(f));
+  assert.equal(logs.length, 1, `one session log in ${store.dir}: ${logs.join(", ")}`);
+  return path.join(store.dir, logs[0]);
+}
+
 /** One styled element for a design audit; override only what a case is about. */
 function designRecord(over: Partial<StyleRecord>): StyleRecord {
   return {
     tag: "div",
     testid: null,
     text: "text",
-    textLen: 4,
     interactive: false,
     rect: { x: 300, y: 20, w: 200, h: 40 },
     fontSize: 16,
@@ -299,7 +305,9 @@ test("a finding merged from another route records that route; a re-filing on a k
     evidence: "GET /api/users 403",
   };
   const [finding] = store.addFinding(first);
-  assert.equal(finding.seenOn, undefined, "one route: no field");
+  // Read through a call: addFinding changes `finding` in place, which an assertion on the field itself would hide from the type checker.
+  const seenOn = (): Finding["seenOn"] => finding.seenOn;
+  assert.equal(seenOn(), undefined, "one route: no field");
   const [, , , onOthers] = store.addFinding({
     ...first,
     state: "/others/:id#f2",
@@ -319,8 +327,8 @@ test("a finding merged from another route records that route; a re-filing on a k
 
   // At most MAX_SEEN_ON, the oldest dropped.
   for (let i = 0; i < MAX_SEEN_ON + 3; i++) store.addFinding({ ...first, state: `/page-${i}#f`, title: `Page ${i} refused`, evidence: "GET /api/users 403" });
-  assert.equal(finding.seenOn?.length, MAX_SEEN_ON);
-  assert.equal(finding.seenOn?.at(-1), `/page-${MAX_SEEN_ON + 2}`);
+  assert.equal(seenOn()?.length, MAX_SEEN_ON);
+  assert.equal(seenOn()?.at(-1), `/page-${MAX_SEEN_ON + 2}`);
 
   // The report names every route.
   const report = generateReport(store, [], undefined, { write: false }).markdown;
@@ -1351,7 +1359,7 @@ test("typed text and URLs are redacted at the log, not just on findings", () => 
   // fields left the same secrets flowing by a parallel route.
   const store = freshStore();
   store.logAction({ action: "type", target: 'password "sk-live-AAAABBBBCCCCDDDD"', url: "http://x/cb?token=abcdef123456789012" });
-  const line = fs.readFileSync(store.sessionLogPath, "utf8");
+  const line = fs.readFileSync(sessionLogOf(store), "utf8");
   assert.ok(!line.includes("AAAABBBBCCCCDDDD"), "the typed secret never reaches the log");
   assert.ok(!line.includes("abcdef123456789012"), "nor does a token in the URL");
 });
@@ -1444,6 +1452,104 @@ test("a field is secret by its type, its autocomplete token, or a name, id, labe
   for (const facts of ordinary) assert.equal(secretFieldKind(facts), null, JSON.stringify(facts));
 });
 
+test("a field labelled for a secret in another language is secret too; near misses in the same languages are not", () => {
+  // After a show-password toggle the field is type=text, so its label is all that says it holds a secret.
+  const secret: Array<[string, string]> = [
+    // German
+    ["Passwort", "password"],
+    ["Kennwort", "password"],
+    ["Neues Passwort", "password"],
+    ["Benutzerpasswort", "password"],
+    ["Passwortbestätigung", "password"],
+    ["PIN-Code", "one-time code"],
+    ["Geheimzahl", "one-time code"],
+    ["Bestätigungscode", "one-time code"],
+    ["Einmalcode", "one-time code"],
+    ["Kartennummer", "card"],
+    ["Kreditkartennummer", "card"],
+    ["Prüfnummer", "card"],
+    // French
+    ["Mot de passe", "password"],
+    ["Confirmer le mot de passe", "password"],
+    ["Code de vérification", "one-time code"],
+    ["Code à usage unique", "one-time code"],
+    ["Numéro de carte", "card"],
+    ["Cryptogramme visuel", "card"],
+    // Spanish
+    ["Contraseña", "password"],
+    ["Código de verificación", "one-time code"],
+    ["Código de un solo uso", "one-time code"],
+    ["Número de tarjeta", "card"],
+    ["Código de seguridad", "card"],
+    // Portuguese
+    ["Senha", "password"],
+    ["Palavra-passe", "password"],
+    ["Código de verificação", "one-time code"],
+    ["Número do cartão", "card"],
+    ["Código de segurança", "card"],
+    // Italian
+    ["Codice di verifica", "one-time code"],
+    ["Numero della carta", "card"],
+    ["Codice di sicurezza", "card"],
+    // Dutch
+    ["Wachtwoord", "password"],
+    ["Verificatiecode", "one-time code"],
+    ["Kaartnummer", "card"],
+    // Polish, Czech
+    ["Hasło", "password"],
+    ["Heslo", "password"],
+    ["Kod weryfikacyjny", "one-time code"],
+    ["Numer karty", "card"],
+    // Swedish, Danish, Norwegian, Finnish
+    ["Lösenord", "password"],
+    ["Adgangskode", "password"],
+    ["Passord", "password"],
+    ["Salasana", "password"],
+    ["Engångskod", "one-time code"],
+    ["Kortnummer", "card"],
+    // A card's security code, as each language names it.
+    ["Sicherheitscode", "card"],
+    ["Beveiligingscode", "card"],
+    ["Säkerhetskod", "card"],
+    ["Sikkerhetskode", "card"],
+    ["Sikkerhedskode", "card"],
+    // The same words typed without their accents, as a field's name or id usually is.
+    ["haslo", "password"],
+    ["contrasena", "password"],
+    ["losenord", "password"],
+    ["passwortBestaetigung", "password"],
+    ["bestaetigungscode", "one-time code"],
+    ["numero_de_tarjeta", "card"],
+    // An accent written as a letter and a combining mark reads the same as one written as one letter.
+    ["Contrasen\u0303a", "password"],
+  ];
+  for (const [label, kind] of secret) assert.equal(secretFieldKind({ type: "text", label }), kind, label);
+  // Each near miss shares a word or a stem with a label above and names nothing secret.
+  for (const label of [
+    "Palavra-chave",
+    "Passagier",
+    "Passe-partout",
+    "Mot clé",
+    "Kennung",
+    "Kennzeichen",
+    "Kartenart",
+    "Kartenzahlung",
+    "Numéro de commande",
+    "Número de pedido",
+    "Número de teléfono",
+    "Código postal",
+    "Código de descuento",
+    "Codice fiscale",
+    "Gutscheincode",
+    "Code promo",
+    "Bestätigung",
+    "Parola",
+    "Senhorio",
+    "Kortnummerets type",
+  ])
+    assert.equal(secretFieldKind({ type: "text", label }), null, label);
+});
+
 test("a secret field's typed value is shown as a fixed mask that says why, never its length", () => {
   assert.equal(maskedValue("password"), "•••• (masked: password field)");
   assert.equal(maskedValue("card"), "•••• (masked: card field)");
@@ -1491,6 +1597,34 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     ["paid 2026-10-11 4111 1111 1111 1111", "paid 2026-10-11 [card number redacted]"],
     ["Amex 3782 822463 10005 on file", "Amex [card number redacted] on file"],
     ["card 4111111111111111", "card [card number redacted]"],
+    // Each network's prefixes and lengths (IIN ranges): what a card number starts with is what makes it one.
+    ["Mastercard 5555 5555 5555 4444", "Mastercard [card number redacted]"],
+    ["Mastercard 2223 0031 2200 3222", "Mastercard [card number redacted]"],
+    ["Amex 3714 496353 98431", "Amex [card number redacted]"],
+    ["Discover 6011 1111 1111 1117", "Discover [card number redacted]"],
+    ["Discover 6445 6445 6445 6445", "Discover [card number redacted]"],
+    ["JCB 3530 1113 3330 0000", "JCB [card number redacted]"],
+    ["Diners 3056 930902 5904", "Diners [card number redacted]"],
+    ["Diners 3622 720627 1667", "Diners [card number redacted]"],
+    ["UnionPay 6200 0000 0000 0005", "UnionPay [card number redacted]"],
+    ["Maestro 6759 6498 2643 8453", "Maestro [card number redacted]"],
+    ["Mir 2200 0000 0000 0004", "Mir [card number redacted]"],
+    // Networks with fewer cards in circulation, and lengths a network issues less often, are cards all the same.
+    ["Maestro 6703 1111 1111 1110", "Maestro [card number redacted]"],
+    ["Dankort 5019 1111 1111 1111", "Dankort [card number redacted]"],
+    ["Hipercard 6062 1111 1111 1115", "Hipercard [card number redacted]"],
+    ["RuPay 8171 1111 1111 1119", "RuPay [card number redacted]"],
+    ["Diners 3095 1111 1111 1113", "Diners [card number redacted]"],
+    ["Visa 4111 1111 1111 14", "Visa [card number redacted]"],
+    ["Visa 4111 1111 1111 1111 18", "Visa [card number redacted]"],
+    ["Mastercard 2223 1111 1111 1111 115", "Mastercard [card number redacted]"],
+    // National networks outside the big ones' ranges: China T-Union (31, 19 digits), BORICA (2205), UzCard (8600), Humo (9860), Troy (9792), and JCB's older 3088 to 3094.
+    ["T-Union 3100 1111 1111 1111 114", "T-Union [card number redacted]"],
+    ["BORICA 2205 1111 1111 1112", "BORICA [card number redacted]"],
+    ["UzCard 8600 1111 1111 1110", "UzCard [card number redacted]"],
+    ["Humo 9860 1111 1111 1113", "Humo [card number redacted]"],
+    ["Troy 9792 1111 1111 1116", "Troy [card number redacted]"],
+    ["JCB 3088 1111 1111 1112", "JCB [card number redacted]"],
     ["Visa 4222 2222 2222 2", "Visa [card number redacted]"],
     // Grouped with dots, or with the non-breaking spaces a formatted number or a French locale uses.
     ["card 4111.1111.1111.1111 declined", "card [card number redacted] declined"],
@@ -1514,6 +1648,18 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     "/feed?_=1696000000004",
     "npm i widget@18.3.1",
     "order 4111111111111112",
+    // Contrastive with the cards above: Luhn-valid and card-shaped, but no network issues from these prefixes or at this length.
+    "id 2111 1111 1111 1115",
+    "id 3111 1111 1111 1113",
+    "id 5911 1111 1111 1110",
+    "id 8311 1111 1111 1110",
+    "ref ORD-2111-1111-1111-1115",
+    "ref 3111.1111.1111.1113",
+    // An American Express prefix at a length it never issues (16 digits).
+    "id 3711 1111 1111 1117",
+    // Lists of years and of five-digit numbers whose digits, run together, pass the Luhn check.
+    "years 2026 1993 1995 2012",
+    "codes 54321 12345 12348 67890",
     // Lists of small numbers whose digits, run together, happen to pass the Luhn check.
     "widths 320 375 414 768 1024 1280 1440",
     "sizes 8 16 24 32 40 48 56 64",
@@ -1544,6 +1690,12 @@ test("redactSecrets masks a parameter named for a secret, whatever its value loo
     ["body user[password]=pw1&remember=1", "pw1", "body user[password]=[redacted]&remember=1"],
     ["/s?user%5Bpassword%5D=pw2", "pw2", "/s?user%5Bpassword%5D=[redacted]"],
     ["password=short&user=bob", "short", "password=[redacted]&user=bob"],
+    // A parameter named in another language, written out or percent-encoded.
+    ["http://x/login?usuario=bo&contraseña=clave1", "clave1", "http://x/login?usuario=bo&contraseña=[redacted]"],
+    ["http://x/login?has%C5%82o=tajne1", "tajne1", "http://x/login?has%C5%82o=[redacted]"],
+    ["http://x/entrar?senha=segredo1", "segredo1", "http://x/entrar?senha=[redacted]"],
+    // A name in a script other than Latin, percent-encoded as a browser sends it (пароль).
+    ["http://x/vhod?%D0%BF%D0%B0%D1%80%D0%BE%D0%BB%D1%8C=tajna1", "tajna1", "http://x/vhod?%D0%BF%D0%B0%D1%80%D0%BE%D0%BB%D1%8C=[redacted]"],
   ];
   for (const [text, secret, want] of masked) {
     const out = redactSecrets(text);
@@ -1551,7 +1703,13 @@ test("redactSecrets masks a parameter named for a secret, whatever its value loo
     assert.equal(out.replace(/ \[\d+ secrets? redacted\]$/, ""), want, text);
     assert.match(out, /\[\d+ secrets? redacted\]$/, `the edit is disclosed: ${out}`);
   }
-  for (const kept of ["/search?q=password+reset&page=2", 'input type="password" name="login"', "/things?sort=pinned&max_tokens=500"]) {
+  for (const kept of [
+    "/search?q=password+reset&page=2",
+    'input type="password" name="login"',
+    "/things?sort=pinned&max_tokens=500",
+    "/buscar?categoría=libros&palavra=chave",
+    "/x?bad=%E0%A4%A",
+  ]) {
     assert.equal(redactSecrets(kept), kept, `must not touch: ${kept}`);
   }
   // Masked once, counted once.
@@ -1579,7 +1737,7 @@ test("a failed fill's error names the action but not the secret value Playwright
 test("a password typed into a labelled field never reaches the session log, even when it is short", () => {
   const store = freshStore();
   store.logAction({ action: "type", target: 'textbox "Password" ← "hunter2"', url: "http://x/login" });
-  const line = fs.readFileSync(store.sessionLogPath, "utf8");
+  const line = fs.readFileSync(sessionLogOf(store), "utf8");
   assert.ok(!line.includes("hunter2"), line);
   assert.ok(line.includes("masked: password field"), line);
 });
@@ -2018,7 +2176,7 @@ test("a run's shared state ends with the run, and the project's memory does not"
   store.auditsThisRun = 2;
   store.probes = [{ payload: "<b x>", tag: "b", attrs: [["x", ""]], text: null, selector: "b[x]", field: "f", typedOn: "/a", baseline: 0 }];
   store.injectionsReported.add("<b x>|/list");
-  store.addFinding({ severity: "low", category: "other", title: "kept", detail: "d", evidence: "e", url: "http://x/", state: "s", repro: [] });
+  store.addFinding({ severity: "low", category: "other", title: "kept", detail: "d", evidence: "e", url: "http://x/", state: "s" });
   store.endRun();
   assert.equal(store.auditsThisRun, 0);
   assert.deepEqual(store.probes, []);

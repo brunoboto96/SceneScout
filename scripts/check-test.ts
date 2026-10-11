@@ -24,9 +24,13 @@ import {
   explainError,
   hasCheckCommand,
   noCheckCommand,
+  installPackage,
   installTarget,
   isVersionSpec,
   npmCommand,
+  npmInstallArgs,
+  pinnedTree,
+  sameDependencies,
   outDirFor,
   picturesDir,
   REPLAY_GENERATOR_META,
@@ -59,6 +63,7 @@ import {
   statusMatches,
   urlMatches,
   type FlowRun,
+  type FlowStep,
 } from "../src/engine/flow.ts";
 import { writeSelfIgnore, type Finding } from "../src/engine/memory.ts";
 import {
@@ -1362,6 +1367,180 @@ test("action: npm is started without a shell, and only a plain version, range or
   assert.throws(() => npmCommand("win32", "C:\\node\\node.exe", () => false), /npm was not found/);
   for (const ok of ["3.10.0", "^3.10", "~3.10.1", "latest", "3.10.0-next.1"]) assert.ok(isVersionSpec(ok), ok);
   for (const bad of ["", "3 && curl x", "3|x", "$(id)", "3;x", "3>x"]) assert.ok(!isVersionSpec(bad), bad);
+});
+
+/** The registry's integrity hash for the stand-in release. */
+const INTEGRITY = "sha512-" + "A".repeat(86) + "==";
+
+/** A lockfile shaped like the repository's: the package at the root, one production and one development dependency. */
+const LOCK = () => ({
+  name: "scenescout",
+  version: "3.10.0",
+  lockfileVersion: 3,
+  requires: true,
+  packages: {
+    "": {
+      name: "scenescout",
+      version: "3.10.0",
+      dependencies: { lib: "^1.0.0" },
+      devDependencies: { tool: "^2.0.0" },
+      bin: { scenescout: "dist/cli.js" },
+      engines: { node: ">=20" },
+    },
+    "node_modules/lib": { version: "1.2.3", resolved: "https://registry.npmjs.org/lib/-/lib-1.2.3.tgz", integrity: "sha512-lib" },
+    "node_modules/lib/node_modules/inner": { version: "0.1.0", resolved: "https://registry.npmjs.org/inner/-/inner-0.1.0.tgz", integrity: "sha512-inner" },
+    "node_modules/tool": { version: "2.0.0", resolved: "https://registry.npmjs.org/tool/-/tool-2.0.0.tgz", integrity: "sha512-tool", dev: true },
+  },
+});
+
+test("action: the pinned tree is the release's own lockfile, production entries only, under a root that depends on that exact release", () => {
+  const tree = pinnedTree(LOCK(), "3.10.0", INTEGRITY);
+  assert.ok("lockfile" in tree, JSON.stringify(tree));
+  assert.deepEqual(tree.packageJson, { name: "scenescout-action", private: true, dependencies: { scenescout: "3.10.0" } });
+  const packages = tree.lockfile.packages;
+  assert.deepEqual(packages[""], { name: "scenescout-action", dependencies: { scenescout: "3.10.0" } });
+  assert.deepEqual(packages["node_modules/scenescout"], {
+    version: "3.10.0",
+    resolved: "https://registry.npmjs.org/scenescout/-/scenescout-3.10.0.tgz",
+    // npm ci checks the downloaded tarball against this, as npm install checks it against the registry's.
+    integrity: INTEGRITY,
+    dependencies: { lib: "^1.0.0" },
+    bin: { scenescout: "dist/cli.js" },
+    engines: { node: ">=20" },
+  });
+  // Every production entry is kept exactly, nested ones included, with its integrity.
+  assert.deepEqual(packages["node_modules/lib"], LOCK().packages["node_modules/lib"]);
+  assert.deepEqual(packages["node_modules/lib/node_modules/inner"], LOCK().packages["node_modules/lib/node_modules/inner"]);
+  assert.equal(packages["node_modules/tool"], undefined, "a development dependency is never installed beside the key");
+  // Any other version is not what this lockfile describes.
+  for (const other of ["3.9.0", "^3.10.0", "latest", "3.10.0-next.1"])
+    assert.match(String((pinnedTree(LOCK(), other, INTEGRITY) as { reason: string }).reason), /3\.10\.0/, other);
+  assert.match(
+    (pinnedTree({ ...LOCK(), packages: { ...LOCK().packages, "": { ...LOCK().packages[""], name: "other" } } }, "3.10.0", INTEGRITY) as { reason: string })
+      .reason,
+    /not scenescout's/,
+  );
+  assert.match((pinnedTree({ lockfileVersion: 1, dependencies: {} }, "3.10.0", INTEGRITY) as { reason: string }).reason, /lockfile/);
+  const linked = LOCK() as ReturnType<typeof LOCK> & { packages: Record<string, unknown> };
+  linked.packages["node_modules/local"] = { resolved: "../local", link: true };
+  assert.match((pinnedTree(linked, "3.10.0", INTEGRITY) as { reason: string }).reason, /link/);
+  // Without the registry's hash the release's own tarball would be installed unchecked: refused, never written without one.
+  for (const bad of ["", "undefined", "sha1-abc", "sha512-not base64!", `${INTEGRITY}\n`])
+    assert.throws(() => pinnedTree(LOCK(), "3.10.0", bad), /integrity/, JSON.stringify(bad));
+});
+
+test("action: the repository's own lockfile pins the release this ref runs, with the runtime dependencies and no build tools", () => {
+  const lock = JSON.parse(fs.readFileSync(path.join(REPO, "package-lock.json"), "utf8"));
+  const version = JSON.parse(fs.readFileSync(path.join(REPO, "package.json"), "utf8")).version;
+  const tree = pinnedTree(lock, version, INTEGRITY);
+  assert.ok("lockfile" in tree, JSON.stringify(tree));
+  const names = Object.keys(tree.lockfile.packages);
+  for (const runtime of [
+    "node_modules/scenescout",
+    "node_modules/playwright",
+    "node_modules/playwright-core",
+    "node_modules/zod",
+    "node_modules/@modelcontextprotocol/sdk",
+  ])
+    assert.ok(names.includes(runtime), runtime);
+  for (const tool of ["node_modules/typescript", "node_modules/prettier", "node_modules/tsx", "node_modules/@changesets/cli"])
+    assert.ok(!names.includes(tool), tool);
+  for (const [name, entry] of Object.entries(tree.lockfile.packages) as [string, { integrity?: string }][]) {
+    if (name && name !== "node_modules/scenescout") assert.ok(entry.integrity, `${name} has an integrity hash`);
+  }
+});
+
+test("action: the pinned install is npm ci with no install scripts; only a version the lockfile does not describe floats", () => {
+  assert.deepEqual(npmInstallArgs("pinned", "/tmp/p", "3.10.0"), ["ci", "--prefix", "/tmp/p", "--ignore-scripts", "--no-audit", "--no-fund"]);
+  assert.deepEqual(npmInstallArgs("floating", "/tmp/p", "^3.10"), [
+    "install",
+    "--prefix",
+    "/tmp/p",
+    "--no-save",
+    "--no-package-lock",
+    "--no-audit",
+    "--no-fund",
+    "--ignore-scripts",
+    "scenescout@^3.10",
+  ]);
+  assert.ok(sameDependencies({ dependencies: { lib: "^1.0.0" } }, { dependencies: { lib: "^1.0.0" } }));
+  assert.ok(!sameDependencies({ dependencies: { lib: "^1.0.0" } }, { dependencies: { lib: "^1.0.0", added: "^1.0.0" } }));
+  assert.ok(!sameDependencies({ dependencies: { lib: "^1.0.0" } }, { dependencies: { lib: "^2.0.0" } }));
+  assert.ok(!sameDependencies({ dependencies: {} }, { dependencies: {}, optionalDependencies: { opt: "1" } }));
+});
+
+/** Runs installPackage against a repository folder holding LOCK, with npm replaced by a recorder that lays out what npm would. */
+function installWith(version: string, published: Record<string, string> = { lib: "^1.0.0" }) {
+  const asked: string[] = [];
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-action-root-"));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-action-tmp-"));
+  fs.writeFileSync(path.join(root, "package-lock.json"), JSON.stringify(LOCK()));
+  const calls: { args: string[]; lock?: Record<string, any>; pkg?: Record<string, any> }[] = [];
+  const warnings: string[] = [];
+  const exec = (args: string[]) => {
+    const prefix = args[args.indexOf("--prefix") + 1];
+    const read = (f: string) => (fs.existsSync(path.join(prefix, f)) ? JSON.parse(fs.readFileSync(path.join(prefix, f), "utf8")) : undefined);
+    calls.push({ args, lock: read("package-lock.json"), pkg: read("package.json") });
+    const installed = path.join(prefix, "node_modules", "scenescout");
+    fs.mkdirSync(path.join(installed, "dist"), { recursive: true });
+    fs.writeFileSync(path.join(installed, "package.json"), JSON.stringify({ name: "scenescout", version: "3.10.0", dependencies: published }));
+  };
+  const integrityOf = (v: string) => (asked.push(v), INTEGRITY);
+  const result = installPackage(version, root, { exec, integrityOf, tmpDir: tmp, warn: (m: string) => warnings.push(m) });
+  return { result, calls, warnings, tmp, asked };
+}
+
+test("action: the default install is npm ci from the committed lockfile, and nothing floats", () => {
+  const { result, calls, warnings, tmp, asked } = installWith("3.10.0");
+  assert.deepEqual(asked, ["3.10.0"], "the registry's hash for that exact release is read once");
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args.slice(0, 1), ["ci"]);
+  assert.ok(calls[0].args.includes("--ignore-scripts"));
+  assert.ok(!calls[0].args.some((a) => a.startsWith("scenescout@")), "npm ci installs what the lockfile names, nothing else");
+  assert.deepEqual(calls[0].pkg, { name: "scenescout-action", private: true, dependencies: { scenescout: "3.10.0" } });
+  assert.deepEqual(calls[0].lock, (pinnedTree(LOCK(), "3.10.0", INTEGRITY) as { lockfile: unknown }).lockfile);
+  assert.equal(calls[0].lock?.packages["node_modules/scenescout"].integrity, INTEGRITY);
+  assert.deepEqual(warnings, []);
+  assert.equal(result.pinned, true);
+  assert.ok(result.cli.startsWith(tmp) && result.cli.endsWith(path.join("node_modules", "scenescout", "dist", "cli.js")), result.cli);
+});
+
+test("action: a version input naming this release itself is the same pinned install", () => {
+  // installWith passes the input as given; an explicit "3.10.0" is the release the lockfile describes.
+  const { result, calls, warnings } = installWith("3.10.0");
+  assert.equal(result.pinned, true);
+  assert.deepEqual(
+    calls.map((c) => c.args[0]),
+    ["ci"],
+  );
+  assert.deepEqual(warnings, []);
+});
+
+test("action: another version, or a release whose dependencies differ from the lockfile, installs as npm would and says so", () => {
+  const other = installWith("^3.9");
+  assert.deepEqual(other.asked, [], "a floating install asks the registry nothing extra");
+  assert.equal(other.calls.length, 1);
+  assert.equal(other.calls[0].args[0], "install");
+  assert.ok(other.calls[0].args.includes("scenescout@^3.9"));
+  assert.equal(other.result.pinned, false);
+  assert.equal(other.warnings.length, 1);
+  assert.match(other.warnings[0], /not pinned/);
+  assert.match(other.warnings[0], /\^3\.9/);
+
+  // The ref's lockfile has moved on since the release it names: the pinned install is checked, found different, and replaced.
+  const drifted = installWith("3.10.0", { lib: "^1.0.0", added: "^1.0.0" });
+  assert.deepEqual(
+    drifted.calls.map((c) => c.args[0]),
+    ["ci", "install"],
+  );
+  assert.notEqual(
+    drifted.calls[0].args[drifted.calls[0].args.indexOf("--prefix") + 1],
+    drifted.calls[1].args[drifted.calls[1].args.indexOf("--prefix") + 1],
+    "the floating install never lands on top of the pinned tree",
+  );
+  assert.equal(drifted.result.pinned, false);
+  assert.equal(drifted.warnings.length, 1);
+  assert.match(drifted.warnings[0], /dependencies/);
 });
 
 test("action: the exit code decides how the step ends, and a setup problem never reads as a failing app", () => {

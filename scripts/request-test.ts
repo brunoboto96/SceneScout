@@ -207,12 +207,22 @@ test("the signature is the line a finding quotes", () => {
     truncated: false,
     ms: 8,
     url: "http://localhost:3000/api/equipment",
+    refusedByPolicy: null,
   });
   assert.match(out.split("\n")[0], /^POST \/api\/equipment 402 Payment Required$/, "the signature leads, because that is what gets quoted");
   assert.match(out, /took 8 ms/);
   assert.match(out, /feature_not_in_plan/);
   assert.match(
-    formatReplay("GET", { status: 204, statusText: "No Content", headers: {}, body: "", truncated: false, ms: 3, url: "http://localhost:3000/api/x" }),
+    formatReplay("GET", {
+      status: 204,
+      statusText: "No Content",
+      headers: {},
+      body: "",
+      truncated: false,
+      ms: 3,
+      url: "http://localhost:3000/api/x",
+      refusedByPolicy: null,
+    }),
     /\(empty body\)/,
   );
 });

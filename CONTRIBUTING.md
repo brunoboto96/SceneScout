@@ -102,7 +102,7 @@ first.
 git clone https://github.com/brunoboto96/SceneScout.git scenescout && cd scenescout
 npm install              # installs dependencies and builds
 npm run setup            # like `scenescout install`, but registers this checkout; the skill is linked, so edits are live
-npm test                 # build, the pure-logic suites, then the two real-browser suites (smoke, mcp-check)
+npm test                 # build, type-check scripts/, the pure-logic suites, then the two real-browser suites (smoke, mcp-check)
 npm run bench -- --all   # re-score every archived benchmark run against the current answer key
 npm run demo             # regenerate examples/ from the demo app
 ```

@@ -43,8 +43,9 @@ fs.mkdirSync(stage, { recursive: true });
 // What the npm package ships (package.json "files"), plus the lock file so the
 // bundle holds exactly the dependency versions the release was tested with.
 // The server reads its playbook from skills/, so that folder is not optional.
+// The build's .d.ts files are left out, as "files" leaves them out of the package.
 for (const entry of ["dist", "skills", "README.md", "LICENSE", "package.json", "package-lock.json"]) {
-  fs.cpSync(path.join(root, entry), path.join(stage, entry), { recursive: true });
+  fs.cpSync(path.join(root, entry), path.join(stage, entry), { recursive: true, filter: (src) => !src.endsWith(".d.ts") });
 }
 fs.writeFileSync(path.join(stage, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 

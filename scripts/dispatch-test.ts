@@ -613,7 +613,9 @@ test("bestEffort answers the fallback when the work rejects, and never rejects i
 });
 
 test("bestEffort answers the fallback when there is no work to wait on (an optional chain that found nothing)", async () => {
-  const context: { storageState(): Promise<string> } | undefined = undefined;
+  // Typed as the engine holds it, a context that may be gone, so the optional chain is the one the engine runs.
+  const noContext = (): { storageState(): Promise<string> } | undefined => undefined;
+  const context = noContext();
   assert.equal(await bestEffort(context?.storageState(), null), null);
   assert.equal(await bestEffort(undefined), undefined);
 });
