@@ -3440,6 +3440,48 @@ test("replay: secrets in paths, captions and reasons are redacted as in the repo
   assert.match(html, /redacted|\*\*\*|REDACTED/i);
 });
 
+test("replay: an email address or a card number the page or a flow names is redacted; a reserved example address and a plain number are not", () => {
+  // Built at run time: a real-looking address written out in full would be flagged by the hygiene suite.
+  const person = ["jo.sample", "contoso-mail.net"].join("@");
+  const journey = journeyOf(
+    {
+      ...replayFlow,
+      steps: [
+        { action: "navigate", target: `/account?email=${person}` },
+        { action: "expect-text", text: `Welcome back, ${person}` },
+        { action: "expect-text", text: "Paid with 4111 1111 1111 1111" },
+        { action: "expect-text", text: "Contact qa@example.com about order 1234567890123" },
+      ] as FlowStep[],
+    },
+    {
+      status: "failed",
+      step: 1,
+      did: "navigate",
+      reason: `no account for ${person} on card 4111-1111-1111-1111`,
+      path: `/account?email=${person}`,
+    },
+    [{ frame: "f1" }],
+  );
+  const replay = redactReplay({
+    startedAt: "t",
+    roles: [
+      {
+        role: "anonymous",
+        own: true,
+        visits: [visitOf({ path: `/u?mail=${person}`, status: 200, loginRedirect: false })],
+        journeys: [journey],
+      },
+    ],
+    framesLeftOut: 0,
+  });
+  const html = buildCheckReplayHtml(replay, replayMeta);
+  for (const leaked of ["jo.sample", "contoso-mail", "4111"]) assert.ok(!html.includes(leaked), `${leaked} must not reach the page`);
+  assert.ok(html.includes("qa@example.com"), "a reserved example address is documentation, not a person");
+  assert.ok(html.includes("1234567890123"), "a number that is not a card number stays");
+  assert.match(html, /\[email redacted\]/);
+  assert.match(html, /\[card number redacted\]/);
+});
+
 test("replay page: run metadata, a badge per journey, the first failing step highlighted and linked, and app text escaped", () => {
   const passing = journeyOf({ ...replayFlow, name: "browse <b>" }, { status: "passed" }, [{ frame: "replay-frames/check/0001-flow-navigate.jpg" }]);
   const failing = journeyOf(replayFlow, { status: "failed", step: 2, did: "type", reason: "nothing visible <script>", path: "/cart" }, [

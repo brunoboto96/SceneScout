@@ -202,21 +202,57 @@ export function capFrames(replay: CheckReplay, max: number = replay.frameCap ?? 
   return { ...replay, roles, framesLeftOut: leftOut, frameCap: max };
 }
 
-/** The report's redaction (memory.ts redactRoute) on every path, caption and reason the page shows. */
+/** Addresses on domains reserved for documentation (RFC 2606 / 6761) name nobody, so they stay readable. */
+const RESERVED_EMAIL_RE = /@(?:[a-z0-9-]+\.)*(?:example\.(?:com|org|net)|example|test|invalid|localhost)$/i;
+const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
+/** Thirteen to nineteen digits, grouped by single spaces or hyphens. */
+const CARD_RE = /(?<![\d.])\d(?:[ -]?\d){12,18}(?![\d])/g;
+
+function luhnValid(digits: string): boolean {
+  let sum = 0;
+  for (let i = 0; i < digits.length; i++) {
+    let d = Number(digits[digits.length - 1 - i]);
+    if (i % 2 === 1) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+  }
+  return sum % 10 === 0;
+}
+
+/**
+ * Personal data a page or a flow can put in text the report shows: an email
+ * address (a reserved example address excepted) and a card number (digits that
+ * pass the Luhn check, so an order number or a timestamp stays).
+ */
+export function redactPersonal(text: string): string {
+  return text
+    .replace(EMAIL_RE, (m) => (RESERVED_EMAIL_RE.test(m) ? m : "[email redacted]"))
+    .replace(CARD_RE, (m) => {
+      const digits = m.replace(/\D/g, "");
+      return digits.length >= 13 && digits.length <= 19 && luhnValid(digits) ? "[card number redacted]" : m;
+    });
+}
+
+/** Secrets in addresses (memory.ts redactRoute) and personal data (redactPersonal), for any text the page shows. */
+const redactText = (text: string): string => redactPersonal(redactRoute(text));
+
+/** The report's redaction on every path, caption and reason the page shows. */
 export function redactReplay(replay: CheckReplay): CheckReplay {
   return {
     ...replay,
     roles: replay.roles.map((role) => ({
       ...role,
-      visits: role.visits.map((v) => ({ ...v, path: redactRoute(v.path), ...(v.reason !== undefined ? { reason: redactRoute(v.reason) } : {}) })),
+      visits: role.visits.map((v) => ({ ...v, path: redactText(v.path), ...(v.reason !== undefined ? { reason: redactText(v.reason) } : {}) })),
       journeys: role.journeys.map((j) => ({
         ...j,
         steps: j.steps.map((s) => ({
           ...s,
-          caption: redactRoute(s.caption),
-          ...(s.expected !== undefined ? { expected: redactRoute(s.expected) } : {}),
-          ...(s.reason !== undefined ? { reason: redactRoute(s.reason) } : {}),
-          ...(s.path !== undefined ? { path: redactRoute(s.path) } : {}),
+          caption: redactText(s.caption),
+          ...(s.expected !== undefined ? { expected: redactText(s.expected) } : {}),
+          ...(s.reason !== undefined ? { reason: redactText(s.reason) } : {}),
+          ...(s.path !== undefined ? { path: redactText(s.path) } : {}),
         })),
       })),
     })),
@@ -444,7 +480,7 @@ export function buildCheckReplayHtml(replay: CheckReplay, meta: ReplayMeta): str
 <main>
 <p class="note">Each role, then each journey it walked, step by step, with the page as it was after the step${
     frames === 0 ? " when the check was recorded (--record)" : ""
-  }. Typed values are never shown, and secrets in addresses are redacted as in the report.${
+  }. Typed values are never shown, and secrets in addresses are redacted as in the report, as are email addresses and card numbers.${
     replay.framesLeftOut > 0
       ? ` ${replay.framesLeftOut} step(s) and visit(s) have no frame because their session had already kept ${replay.frameCap ?? RECORD_MAX_FRAMES}, the most one session keeps.`
       : ""
