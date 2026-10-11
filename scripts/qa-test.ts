@@ -55,6 +55,7 @@ import zlib from "node:zlib";
 import {
   checkArtifactName,
   checkReplyMarkdown,
+  codeSpan,
   dispatchRefusal,
   MAX_ARTIFACT_BYTES,
   redactedDetail,
@@ -396,12 +397,23 @@ test("inert: model-written text cannot render maths, cross-reference an issue, o
     ["see other/repo/issues/12 and other/repo/pull/3", /\/(issues|pulls?|discussions)\/\d/],
     ["github.com/other/repo/discussions/4", /\/(issues|pulls?|discussions)\/\d/],
     // Bidirectional overrides reorder what the reader sees; C1 controls are invisible.
-    ["Passed \u202edeliaf\u202c", /[\u202a-\u202e\u2066-\u2069\u200e\u200f]/],
+    ["Passed \u202edeliaf\u202c", /[\u061c\u202a-\u202e\u2066-\u2069\u200e\u200f]/],
+    // U+061C (Arabic letter mark) is a bidirectional control too, like U+200F.
+    ["Passed \u061c12-3", /\u061c/],
     ["a\u0085b\u009bc", /[\u0080-\u009f]/],
   ];
   for (const [input, forbidden] of rows) assert.doesNotMatch(inert(input, 500), forbidden, input);
   // What the reader sees is unchanged: only zero-width spaces are added.
   assert.equal(inert("costs $5 and fixes #12").replace(/\u200b/g, ""), "costs $5 and fixes \\#12");
+});
+
+// A name shown as code (the head branch, a workflow, an artifact) renders no Markdown, but a bidirectional control
+// still reorders it: a branch named with U+202E reads backwards in the reply.
+test("codeSpan: a name drops bidirectional and C1 controls as well as backticks", () => {
+  for (const name of ["fix/\u202edeliaf\u202c", "a\u2066b\u2069", "a\u061cb", "a\u200fb", "a\u0085b\u009bc", "a`b"]) {
+    assert.doesNotMatch(codeSpan(name), /[\u0080-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]|.`./, JSON.stringify(name));
+  }
+  assert.equal(codeSpan("feature/login-form"), "`feature/login-form`", "an ordinary name reads as written");
 });
 
 const CI_JSON = {
