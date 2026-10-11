@@ -1395,7 +1395,7 @@ test("GitHub: the body names the run's frames, since GitHub cannot take an uploa
     );
     const run = await exportOnce([...GH, "--yes"], { GH_TOKEN, GITHUB_API_URL: gh.url }, dir);
     assert.equal(run.exitCode, EXIT_EXPORT.done, run.err.join("\n"));
-    assert.match(gh.issues[0].body, /- recordings\/default\/0007-click\.jpg/);
+    assert.match(gh.issues[0].body ?? "(no body)", /- recordings\/default\/0007-click\.jpg/);
   } finally {
     await gh.close();
   }
@@ -2630,6 +2630,7 @@ test("GitHub: --from a check.json files its issues with the usual marker, and a 
       [[`check-${FP_SERVER}`], [`check-${FP_CLIENT}`]],
     );
     const body = gh.issues[0].body;
+    assert.ok(body !== null, "the issue has a body");
     assert.ok(body.startsWith(githubMarker(`check-${FP_SERVER}`)));
     assert.match(body, /\| Category \| server-error \|/);
     assert.match(body, /Seen on 2 pages: \/things, \/things\/new\./);

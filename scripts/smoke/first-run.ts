@@ -22,7 +22,6 @@ import type { AddressInfo, Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-// @ts-expect-error — plain .mjs, no types; it exports createDemoServer().
 import { createDemoServer } from "../../demo-app/server.mjs";
 import { browsersPath } from "../../action/check-action.mjs";
 import { BrowserEngine } from "../../dist/engine/browser.js";

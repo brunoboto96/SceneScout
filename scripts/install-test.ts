@@ -620,6 +620,19 @@ test("the desktop extension's manifest has every required field, the package's v
   assert.equal(manifest.user_config, undefined);
 });
 
+test("the build's declaration files stay out of the npm package and the bundle", () => {
+  // The build writes .d.ts files so the test scripts can be type-checked against the built engine.
+  // They are not part of what the package offers (it names no "types"), so neither it nor the bundle carries them.
+  const tsconfig = JSON.parse(fs.readFileSync(path.join(repoRoot, "tsconfig.json"), "utf8")) as { compilerOptions: { declaration?: boolean } };
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { files: string[]; types?: string };
+  assert.equal(pkg.types, undefined, "the package promises no typed API");
+  if (tsconfig.compilerOptions.declaration) {
+    assert.ok(pkg.files.includes("!dist/**/*.d.ts"), 'package.json "files" leaves out dist/**/*.d.ts');
+    const script = fs.readFileSync(path.join(repoRoot, "scripts", "build-mcpb.mjs"), "utf8");
+    assert.match(script, /filter: \(src\) => !src\.endsWith\("\.d\.ts"\)/, "the bundle build leaves out the declaration files too");
+  }
+});
+
 test("the bundle build ships what the server reads at runtime, and the release attaches it from a job that runs no repository code", () => {
   const script = fs.readFileSync(path.join(repoRoot, "scripts", "build-mcpb.mjs"), "utf8");
   const shipped =
@@ -628,7 +641,8 @@ test("the bundle build ships what the server reads at runtime, and the release a
       .match(/"([^"]+)"/g)
       ?.map((s) => s.slice(1, -1)) ?? [];
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { files: string[]; scripts: Record<string, string> };
-  for (const entry of pkg.files.filter((f) => f !== "CHANGELOG.md")) assert.ok(shipped.includes(entry), `the bundle ships ${entry}, as the npm package does`);
+  for (const entry of pkg.files.filter((f) => f !== "CHANGELOG.md" && !f.startsWith("!")))
+    assert.ok(shipped.includes(entry), `the bundle ships ${entry}, as the npm package does`);
   assert.ok(shipped.includes(PLAYBOOK_RELATIVE_PATH.split(path.sep)[0]), "the server reads its playbook from skills/");
   assert.match(script, /"ci", "--omit=dev", "--ignore-scripts"/, "production dependencies only, and no install scripts");
   assert.equal(pkg.scripts.mcpb, "node scripts/build-mcpb.mjs");

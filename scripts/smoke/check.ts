@@ -12,7 +12,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, firefox, webkit } from "playwright";
-// @ts-expect-error — plain .mjs, no types; it exports createDemoServer().
 import { createDemoServer } from "../../demo-app/server.mjs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { writeRedirectHopsJudged } from "../../dist/browsers.js";
@@ -20,7 +19,7 @@ import { firstLook } from "../../dist/first-run.js";
 import { BROWSER, check, eventually, settle, SIGN_IN_COOKIE, until, type SmokeContext } from "./harness.ts";
 import { writeProfile } from "../../dist/engine/profiles.js";
 import { readCheckInputs, runCheck } from "../../dist/check-run.js";
-import { parseCheckArgs } from "../../dist/engine/check.js";
+import { parseCheckArgs, type CheckIssue } from "../../dist/engine/check.js";
 
 export const title = "check (deterministic gate)";
 
@@ -29,7 +28,8 @@ const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", 
 type Summary = {
   gate: { failOn: string; passed: boolean };
   routes: Array<{ path: string; controls: number }>;
-  issues: Array<{ rule: string; severity: string; evidence: string; routes: string[] }>;
+  /** check.json's issues, as the check wrote them. */
+  issues: CheckIssue[];
 };
 
 /** Asynchronous on purpose: the demo app is served from this process, and a synchronous spawn would stop it answering. */
@@ -78,7 +78,7 @@ async function framedModalLock({ baseUrl, work }: { baseUrl: string; work: strin
   const framed = await checkPage("iframe-modal");
   const leaked = await checkPage("iframe-modal-leaked");
   const overlays = (s: Summary) => s.issues.filter((i) => i.rule === "blocking-overlay");
-  const picked = (s: Summary) => firstLook(s.issues as Parameters<typeof firstLook>[0], s.routes.length).map((i) => `${i.severity} ${i.rule}`);
+  const picked = (s: Summary) => firstLook(s.issues, s.routes.length).map((i) => `${i.severity} ${i.rule}`);
   check(
     "a scroll lock behind a modal open in a full-viewport frame is not a leaked lock",
     overlays(framed.summary).length === 0 && framed.status === 0,

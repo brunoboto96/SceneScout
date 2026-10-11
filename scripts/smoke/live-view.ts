@@ -107,6 +107,7 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
 
     const frames: Buffer[] = [];
     const stop = await engine.startScreencast((jpeg) => frames.push(jpeg));
+    if (!stop) throw new Error("the screencast did not start: the session has no open page");
     // A screencast emits on REPAINT, so the page needs something to repaint and
     // the wait has to survive a loaded machine: this failed once at 8s with one
     // navigation while two dozen other browsers were running. Keep repainting

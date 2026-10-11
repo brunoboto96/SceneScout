@@ -898,11 +898,11 @@ test("frame helpers: names capped, link queries dropped, rects placed on the pag
   assert.equal(stripForeignHref("https://chat.example.com/conv/1?token=SECRET&email=a@b.c#m2"), "https://chat.example.com/conv/1");
   assert.equal(stripForeignHref("/conv/1?token=SECRET"), "/conv/1", "a relative address, as the attribute gives it");
   // A control at (10, 20) inside a frame at (100, 300) on screen, the frame scrolled by 5 and the page by 40.
-  assert.deepEqual(frameToPageRect({ x: 10, y: 20, width: 30, height: 10 }, { x: 100, y: 300 }, { x: 0, y: 5 }, { x: 0, y: 40 }), {
+  assert.deepEqual(frameToPageRect({ x: 10, y: 20, w: 30, h: 10 }, { x: 100, y: 300 }, { x: 0, y: 5 }, { x: 0, y: 40 }), {
     x: 110,
     y: 355,
-    width: 30,
-    height: 10,
+    w: 30,
+    h: 10,
   });
   // Two srcdoc frames of the app are told apart by their titles.
   const srcdoc = (title: string) => ({ url: "about:srcdoc", origin: "", title, foreign: false });
