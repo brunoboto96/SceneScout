@@ -28,3 +28,14 @@ export function bestEffort<T, F>(work: Promise<T> | undefined, fallback: F): Pro
 export function bestEffort<T, F>(work: Promise<T> | undefined, fallback?: F): Promise<T | F | undefined> {
   return work === undefined ? Promise.resolve(fallback) : work.catch(() => fallback);
 }
+
+/** Await `p` for at most `ms`, clearing the timer either way (never rejects, never leaks a timer). */
+export async function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    p.catch(() => {}).finally(() => clearTimeout(timer)),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]);
+}

@@ -17,7 +17,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
-// @ts-expect-error — plain .mjs, no types; it exports createHoldoutServer().
 import { createHoldoutServer, SIGNED_IN_MEMBER } from "../holdout-app/server.mjs";
 
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../holdout-app");
