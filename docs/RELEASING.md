@@ -36,7 +36,7 @@ should run a reviewed version. Dependabot does not read `examples/`, so move
 them by hand after a release, all at once:
 
 ```bash
-sed -i.bak -E 's#(brunoboto96/SceneScout(/(qa|ci))?)@v[0-9]+\.[0-9]+\.[0-9]+#\1@vX.Y.Z#' examples/workflows/*.yml && rm examples/workflows/*.bak
+sed -i.bak -E 's#(brunoboto96/SceneScout(/[A-Za-z0-9_-]+)?)@v[0-9]+\.[0-9]+\.[0-9]+#\1@vX.Y.Z#' examples/workflows/*.yml && rm examples/workflows/*.bak
 ```
 
 `qa-test` fails when the examples name more than one release, a moving ref,
