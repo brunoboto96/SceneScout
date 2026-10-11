@@ -45,18 +45,52 @@ const AUTOCOMPLETE_KINDS: Record<string, SecretKind> = {
  * start it: "passwordless" and "secretary" are not secrets.
  */
 const WORD_KINDS: Array<{ kind: SecretKind; whole: string[]; suffix: string[]; phrases: string[] }> = [
-  { kind: "password", whole: ["pwd"], suffix: ["password", "passwd", "passphrase"], phrases: [] },
+  {
+    kind: "password",
+    whole: ["pwd", "senha", "haslo", "heslo", "пароль"],
+    // German compounds put the head last, so a password's confirmation ends in "bestätigung", not in "passwort".
+    suffix: [
+      "password",
+      "passwd",
+      "passphrase",
+      ...["passwort", "kennwort", "passwortbestatigung", "passwortbestaetigung", "kennwortbestatigung", "kennwortbestaetigung"],
+      ...["passwortwiederholung", "contrasena", "wachtwoord", "losenord", "passord", "adgangskode", "salasana"],
+    ],
+    phrases: ["mot de passe", "palavra passe"],
+  },
   {
     kind: "one-time code",
-    whole: ["pin", "onetime", "otpcode", "mfa", "authenticator"],
-    suffix: ["otp", "passcode"],
-    phrases: ["one time", "verification code", "pass code", "auth code", "authentication code", "two factor"],
+    whole: ["pin", "onetime", "otpcode", "mfa", "authenticator", "geheimzahl"],
+    suffix: [
+      "otp",
+      "passcode",
+      ...["bestatigungscode", "bestaetigungscode", "verifizierungscode", "einmalcode", "verificatiecode", "bevestigingscode"],
+      ...["engangskod", "verifieringskod", "engangskode", "vahvistuskoodi"],
+    ],
+    phrases: [
+      ...["one time", "verification code", "pass code", "auth code", "authentication code", "two factor"],
+      ...["code de verification", "code de confirmation", "code a usage unique"],
+      ...["codigo de verificacion", "codigo de confirmacion", "codigo de un solo uso"],
+      ...["codigo de verificacao", "codigo de confirmacao", "codigo de uso unico"],
+      ...["codice di verifica", "codice di conferma", "codice monouso"],
+      ...["kod weryfikacyjny", "kod jednorazowy", "overovaci kod"],
+    ],
   },
   {
     kind: "card",
-    whole: ["cvc", "cvv", "csc", "ccv", "ccnum"],
-    suffix: ["cardnumber", "ccnumber"],
-    phrases: ["security code", "card number", "card no", "credit card", "cc number", "cc num", "cc csc", "cc exp"],
+    whole: ["cvc", "cvv", "csc", "ccv", "ccnum", "cryptogramme"],
+    suffix: [
+      ...["cardnumber", "ccnumber", "kartennummer", "prufnummer", "pruefnummer", "kaartnummer", "kortnummer"],
+      ...["sicherheitscode", "beveiligingscode", "sakerhetskod", "sikkerhetskode", "sikkerhedskode"],
+    ],
+    phrases: [
+      ...["security code", "card number", "card no", "credit card", "cc number", "cc num", "cc csc", "cc exp"],
+      ...["numero de carte", "carte bancaire", "carte de credit", "code de securite"],
+      ...["numero de tarjeta", "tarjeta de credito", "codigo de seguridad"],
+      ...["numero do cartao", "numero de cartao", "cartao de credito", "codigo de seguranca"],
+      ...["numero della carta", "numero di carta", "carta di credito", "codice di sicurezza"],
+      ...["numer karty", "cislo karty", "kortin numero"],
+    ],
   },
   {
     kind: "secret",
@@ -66,9 +100,23 @@ const WORD_KINDS: Array<{ kind: SecretKind; whole: string[]; suffix: string[]; p
   },
 ];
 
+/**
+ * The letters without their accents, so "Contraseña", "contrasena" and an
+ * "ñ" written as "n" and a combining tilde all read alike. A name or an id is
+ * usually typed without accents, so the word lists are written without them.
+ */
+function foldAccents(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/\p{M}+/gu, "")
+    .replace(/[łŁ]/g, (c) => (c === "ł" ? "l" : "L"))
+    .replace(/[øØ]/g, (c) => (c === "ø" ? "o" : "O"))
+    .replace(/ß/g, "ss");
+}
+
 /** A name's words, lower-case: `newPassword` → new password, `PINCode` → pin code, `cvv2` → cvv. */
 function wordsOf(text: string): string[] {
-  return text
+  return foldAccents(text)
     .replace(/([a-z\d])([A-Z])/g, "$1 $2")
     .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
     .toLowerCase()
@@ -157,14 +205,23 @@ export function maskSecretFieldValues(text: string): { text: string; hits: numbe
  * what was typed into the address (`?password=…`), and the address is logged
  * with every action. Group 1 is what precedes it, 2 the name, 3 the value.
  */
-const PARAM_RE = /(^|[?&;#\s"'(])([A-Za-z][\w.%[\]-]*)=([^&#;\s"')]+)/g;
+const PARAM_RE = /(^|[?&;#\s"'(])((?:\p{L}|%[\dA-Fa-f]{2})[\p{L}\p{N}_.%[\]-]*)=([^&#;\s"')]+)/gu;
+
+/** A parameter's name as a person wrote it: percent-escapes decoded (`has%C5%82o`), or left as they are when they do not decode. */
+function decodedName(name: string): string {
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name; // A malformed escape is part of the name as written; it still names what it names.
+  }
+}
 
 /** Mask the value of every parameter whose name names a secret (`pin=`, `otp=`, `password=`, `access_token=`), whatever its length. */
 export function maskSecretParams(text: string): { text: string; hits: number } {
   let hits = 0;
   const out = text.replace(PARAM_RE, (m, before: string, name: string, value: string) => {
     // A form's nested names (`user[password]`, `user%5Bpassword%5D`) name the field last; a value already masked stays.
-    if (value.startsWith("[") || !secretWordKind(name.replace(/%5[BD]/gi, " "))) return m;
+    if (value.startsWith("[") || !secretWordKind(decodedName(name).replace(/[[\]]/g, " "))) return m;
     hits += 1;
     return `${before}${name}=[redacted]`;
   });
@@ -204,8 +261,51 @@ const EMAIL_RE = /[\p{L}\p{N}._%+-]+(?:@|%40)([\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)
  */
 const DIGIT_SEPARATOR = "[ \\u00a0\\u2007\\u2009\\u202f.-]";
 const DIGIT_RUN_RE = new RegExp(String.raw`(?<!\d)(?<!\d\.)\d+(?:${DIGIT_SEPARATOR}\d+)*`, "g");
-/** A card number's first digit: the networks issue from 2 to 6 and 8, so a millisecond timestamp (a leading 1) is never one. */
-const CARD_FIRST_DIGIT_RE = /^[2-68]/;
+/**
+ * The card networks' issuer prefixes (IIN ranges) and the lengths each
+ * issues. A digit run is a card number only when a network could have issued
+ * it: about one random id in ten passes the Luhn check, so the check alone
+ * redacts order ids, lists of years and lists of five-digit numbers. `from`
+ * and `to` are the first and last prefix, written with the same number of
+ * digits. The ranges err towards hiding: every prefix a network issues from,
+ * however few its cards (Maestro's 50, 56 to 58 and 6 cover several national
+ * networks), and every length from 13 to 19 where a network issues more than
+ * one. What is left out is what no network issues from at that length: a
+ * leading 1 or 7, a 2 outside 2200 to 2205 and 2221 to 2720, a 3 outside 30,
+ * 34 to 39 and a 19-digit 31, a 59, an 8 outside 81, 82 and 8600, and a 9
+ * outside 9792 and 9860.
+ */
+const ANY_LENGTH = [13, 14, 15, 16, 17, 18, 19] as const;
+const CARD_NETWORKS: ReadonlyArray<{ from: string; to: string; lengths: readonly number[] }> = [
+  { from: "4", to: "4", lengths: ANY_LENGTH }, // Visa, Visa Electron
+  { from: "51", to: "55", lengths: [16, 17, 18, 19] }, // Mastercard
+  { from: "2221", to: "2720", lengths: [16, 17, 18, 19] }, // Mastercard
+  { from: "2200", to: "2204", lengths: [16, 17, 18, 19] }, // Mir
+  { from: "34", to: "34", lengths: [15] }, // American Express
+  { from: "37", to: "37", lengths: [15] }, // American Express
+  { from: "30", to: "30", lengths: ANY_LENGTH }, // Diners Club (300 to 305, 3095), JCB (3088 to 3102)
+  { from: "31", to: "31", lengths: [19] }, // China T-Union
+  { from: "2205", to: "2205", lengths: [16] }, // BORICA
+  { from: "36", to: "36", lengths: ANY_LENGTH }, // Diners Club
+  { from: "38", to: "39", lengths: ANY_LENGTH }, // Diners Club
+  { from: "35", to: "35", lengths: [16, 17, 18, 19] }, // JCB (3528 to 3589), RuPay (353, 356)
+  { from: "50", to: "50", lengths: ANY_LENGTH }, // Maestro, Dankort, Elo, Verve, RuPay
+  { from: "56", to: "58", lengths: ANY_LENGTH }, // Maestro
+  { from: "60", to: "69", lengths: ANY_LENGTH }, // Maestro, Discover, UnionPay, RuPay, Hipercard, InstaPayment
+  { from: "81", to: "82", lengths: [16, 17, 18, 19] }, // RuPay, UnionPay
+  { from: "8600", to: "8600", lengths: [16] }, // UzCard
+  { from: "9792", to: "9792", lengths: [16] }, // Troy
+  { from: "9860", to: "9860", lengths: [16] }, // Humo
+];
+
+/** Whether a network issues card numbers that start with these digits and are this long. */
+function issuedByANetwork(digits: string): boolean {
+  return CARD_NETWORKS.some(({ from, to, lengths }) => {
+    if (!lengths.includes(digits.length)) return false;
+    const prefix = digits.slice(0, from.length);
+    return prefix >= from && prefix <= to;
+  });
+}
 
 function luhnValid(digits: string): boolean {
   let sum = 0;
@@ -221,7 +321,7 @@ function luhnValid(digits: string): boolean {
 }
 
 function isCardNumber(digits: string): boolean {
-  return digits.length >= 13 && digits.length <= 19 && CARD_FIRST_DIGIT_RE.test(digits) && luhnValid(digits);
+  return issuedByANetwork(digits) && luhnValid(digits);
 }
 
 /**
@@ -274,8 +374,9 @@ function redactCardsInRun(run: string): string {
  * Personal data a page, a flow or a typed value can put in text the tool
  * keeps: an email address, its @ written out or percent-encoded (a reserved
  * example address and an image's `@2x` name excepted), and a card number
- * (digits that start as a card network's do and pass the Luhn check, so an
- * order number or a timestamp stays). Each replacement names what it removed.
+ * (digits that start as a card network's do, at a length it issues, and pass
+ * the Luhn check, so an order number, a list of years or a timestamp stays).
+ * Each replacement names what it removed.
  */
 export function redactPersonal(text: string): string {
   return text
