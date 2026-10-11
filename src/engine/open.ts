@@ -135,3 +135,24 @@ export function openInBrowser(target: string, deps: { platform: NodeJS.Platform;
     return { ok: false, why: `${command} could not start: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
+
+/** What `scenescout watch` prints when the opener could not start. The address is printed above it either way. */
+export const COULD_NOT_OPEN = "Could not open a browser from here. Open the address above yourself.";
+
+/**
+ * Open a target for a command-line user, and say so only when it was not
+ * opened: nobody would see a window (CI, SSH, no display server), the target
+ * was refused, or the opener could not start. The opener is not waited for,
+ * so one that keeps running neither holds the command nor reads as a failure;
+ * one that starts and then fails on its own goes unreported.
+ */
+export function openOrSay(
+  target: string,
+  deps: { env: Record<string, string | undefined>; platform: NodeJS.Platform; spawn: Spawner; say: (line: string) => void },
+): void {
+  const say = (why: string) => deps.say(`${COULD_NOT_OPEN} (${why})`);
+  const where = decideOpen(undefined, { env: deps.env, platform: deps.platform });
+  if (!where.live) return say(where.why);
+  const outcome = openInBrowser(target, { platform: deps.platform, spawn: deps.spawn, onError: say });
+  if (!outcome.ok) say(outcome.why);
+}
