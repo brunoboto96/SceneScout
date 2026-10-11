@@ -61,7 +61,7 @@ import {
   NAME_RULE,
 } from "../src/engine/memory.ts";
 import { keyAliases, keyAliasSteps } from "../src/engine/fingerprint.ts";
-import { appendOwnerOnlySync, writeOwnerOnly, writeOwnerOnlySync } from "../src/engine/owner-file.ts";
+import { appendOwnerOnlySync, writeDocument, writeDocumentSync, writeOwnerOnly, writeOwnerOnlySync } from "../src/engine/owner-file.ts";
 import { analyzeDesign, type StyleRecord } from "../src/engine/design.ts";
 import {
   FORMS_READ_FAILED,
@@ -3206,10 +3206,10 @@ function linkedProject(names: string[]): { projectDir: string; dir: string; vict
   return { projectDir, dir, victim };
 }
 
-function assertOwnFile(file: string): void {
+function assertOwnFile(file: string, ownerOnly = true): void {
   const stat = fs.lstatSync(file);
   assert.ok(stat.isFile(), `${path.basename(file)} is a file of its own, not a link`);
-  assert.equal(stat.mode & 0o777, 0o600, `${path.basename(file)} can be read by its owner only`);
+  if (ownerOnly) assert.equal(stat.mode & 0o777, 0o600, `${path.basename(file)} can be read by its owner only`);
 }
 
 test(
@@ -3260,7 +3260,7 @@ test("an owner-only append creates the file owner-only, adds to it, and refuses 
 });
 
 test(
-  "memory's files, its notes, its .gitignore and the report are written owner-only, never through a link left at their names",
+  "memory's files, its notes, its .gitignore and the report are never written through a link left at their names",
   { skip: process.platform === "win32" },
   () => {
     const names = ["memory.json", "ASSUMPTIONS.md", "report.md", "report.html"];
@@ -3274,7 +3274,8 @@ test(
       store.addFinding({ severity: "low", category: "ux-confusing", title: "A finding", detail: "d", url: "http://app.test/", state: "/#0", evidence: "e" });
       store.flush();
       generateReport(store, [], undefined, { write: true });
-      for (const name of names) assertOwnFile(path.join(dir, name));
+      // Only memory.json is owner-only; the documents keep the umask's mode (the test after the next).
+      for (const name of names) assertOwnFile(path.join(dir, name), name === "memory.json");
       assert.equal(fs.existsSync(path.join(projectDir, "nothing-here")), false, "nothing was created where the dangling link pointed");
       assert.match(fs.readFileSync(path.join(dir, "ASSUMPTIONS.md"), "utf8"), /Orders belong to one customer/);
       assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's", "the file the links pointed at is untouched");
@@ -3311,3 +3312,66 @@ test("a note from a run on disk replaces a link at memory.json rather than writi
     fs.rmSync(projectDir, { recursive: true, force: true });
   }
 });
+
+/** Run `fn` with the umask set to 022, the usual one, and put the old one back. */
+async function withUmask022<T>(fn: () => T | Promise<T>): Promise<T> {
+  const old = process.umask(0o022);
+  try {
+    return await fn();
+  } finally {
+    process.umask(old);
+  }
+}
+
+test(
+  "a document write replaces a link like an owner-only one, but takes the mode the user's umask gives a new file",
+  { skip: process.platform === "win32" },
+  () =>
+    withUmask022(async () => {
+      const { projectDir, dir, victim } = linkedProject(["a.md", "b.png"]);
+      try {
+        writeDocumentSync(path.join(dir, "a.md"), "sync");
+        await writeDocument(path.join(dir, "b.png"), new Uint8Array([1, 2, 3]));
+        for (const name of ["a.md", "b.png"]) {
+          const stat = fs.lstatSync(path.join(dir, name));
+          assert.ok(stat.isFile(), `${name} is a file of its own, not a link`);
+          assert.equal(stat.mode & 0o777, 0o644, `${name} has the umask's mode`);
+        }
+        assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's");
+        assert.deepEqual(fs.readdirSync(dir).sort(), ["a.md", "b.png"], "no temporary file is left behind");
+      } finally {
+        fs.rmSync(projectDir, { recursive: true, force: true });
+      }
+    }),
+);
+
+test(
+  "which of memory's files are owner-only: what could open a session is, what a person reads or git reads keeps the umask's mode",
+  { skip: process.platform === "win32" },
+  () =>
+    withUmask022(() => {
+      const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-modes-"));
+      try {
+        const store = new MemoryStore(projectDir);
+        store.addAssumption("app-model", "Orders belong to one customer.", "test");
+        store.addFinding({ severity: "low", category: "ux-confusing", title: "A finding", detail: "d", url: "http://app.test/", state: "/#0", evidence: "e" });
+        store.flush();
+        store.logAction({ action: "click", url: "http://app.test/" });
+        generateReport(store, [], undefined, { write: true });
+        const log = path.basename((store as unknown as { sessionLogPath: string }).sessionLogPath);
+        const expected: Array<[string, number]> = [
+          ["memory.json", 0o600],
+          [log, 0o600],
+          ["report.md", 0o644],
+          ["report.html", 0o644],
+          ["ASSUMPTIONS.md", 0o644],
+          [".gitignore", 0o644],
+        ];
+        for (const [name, mode] of expected) {
+          assert.equal((fs.statSync(path.join(store.dir, name)).mode & 0o777).toString(8), mode.toString(8), `${name}'s mode`);
+        }
+      } finally {
+        fs.rmSync(projectDir, { recursive: true, force: true });
+      }
+    }),
+);

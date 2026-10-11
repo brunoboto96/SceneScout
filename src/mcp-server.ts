@@ -151,7 +151,7 @@ import {
 } from "./engine/limits.js";
 import { MAX_READ_POSTS, READ_POSTS_ENV } from "./engine/policy.js";
 import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "./engine/project-folder.js";
-import { writeOwnerOnlySync } from "./engine/owner-file.js";
+import { writeDocumentSync } from "./engine/owner-file.js";
 import { frameOnDisk, ProjectDirs, RECORD_MAX_FRAMES, splitProjectFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
@@ -1551,7 +1551,7 @@ async function findingPicture(eng: BrowserEngine, filed: FiledFinding, ref: stri
     const rel = findingPicturePath(eng.sessionKey, finding.id);
     const file = path.join(dir, rel);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    writeOwnerOnlySync(file, fitted.png);
+    writeDocumentSync(file, fitted.png);
     const picture = {
       width: fitted.width,
       height: fitted.height,
@@ -2313,7 +2313,7 @@ server.registerTool(
       const shot = await eng.captureElement({ ref, key }, margin ?? CAPTURE_MARGIN);
       const file = path.join(dir, CAPTURES_DIRNAME, captureFileName(name));
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      writeOwnerOnlySync(file, shot.png);
+      writeDocumentSync(file, shot.png);
       const size = { width: shot.png.readUInt32BE(16), height: shot.png.readUInt32BE(20) };
       return text(captureResultText({ file, key: shot.key, label: shot.label, url: shot.url, ...size }), session);
     } catch (err) {

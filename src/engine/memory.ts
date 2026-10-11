@@ -6,7 +6,7 @@ import type { PictureShot } from "./capture.js";
 import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
-import { appendOwnerOnlySync, writeOwnerOnlySync } from "./owner-file.js";
+import { appendOwnerOnlySync, writeDocumentSync, writeOwnerOnlySync } from "./owner-file.js";
 import { maskSecretFieldValues, maskSecretParams, redactPersonal } from "./sensitive.js";
 import type { InjectionProbe } from "./injection.js";
 import { readFromRunNotes, readRunRecords, recordFromJson, unionFromRunNotes, unionRecords, type FromRunNote, type RunRecord } from "./from-run.js";
@@ -1335,7 +1335,7 @@ export function writeSelfIgnore(dir: string): string | null {
   try {
     const ignorePath = path.join(dir, ".gitignore");
     if (fs.existsSync(ignorePath)) return null;
-    writeOwnerOnlySync(
+    writeDocumentSync(
       ignorePath,
       "# SceneScout exploratory-test artifacts: memory, session logs, status, report.\n" +
         "# Self-ignoring so a `git add -A` in the tested project can never commit them.\n" +
@@ -1923,7 +1923,7 @@ export class MemoryStore {
     } else {
       content += `\n${heading}\n${bullet}\n`;
     }
-    writeOwnerOnlySync(this.assumptionsPath, content);
+    writeDocumentSync(this.assumptionsPath, content);
     return true;
   }
 

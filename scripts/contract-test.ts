@@ -850,6 +850,16 @@ test(
       assert.equal(frameOnDisk(root, "recordings/clerk/missing.jpg"), null, "a frame that is not there");
       assert.equal(frameOnDisk(root, "recordings/clerk"), null, "a folder is not a frame");
       assert.equal(frameOnDisk(root, "../elsewhere/secret.jpg"), null);
+      // A project reached through a linked path (as /tmp is on macOS) still has its frames: both sides are followed.
+      const viaLink = `${project}-via-link`;
+      fs.symlinkSync(project, viaLink, "dir");
+      try {
+        const linkedRoot = path.join(viaLink, ".scenescout", "recordings");
+        assert.equal(frameOnDisk(linkedRoot, "recordings/clerk/0001-click.jpg"), fs.realpathSync(path.join(root, "clerk", "0001-click.jpg")));
+        assert.equal(frameOnDisk(linkedRoot, "recordings/clerk/0002-click.jpg"), null);
+      } finally {
+        fs.unlinkSync(viaLink);
+      }
     } finally {
       fs.rmSync(project, { recursive: true, force: true });
     }
