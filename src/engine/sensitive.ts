@@ -194,8 +194,14 @@ const RESERVED_DOMAIN_RE = /^(?:[\p{L}\p{N}-]+\.)*(?:example\.(?:com|org|net)|ex
 const DENSITY_DOMAIN_RE = /^\d+(?:\.\d+)?x\./i;
 /** An address in any script, its @ written out or percent-encoded (`%40`), as a query string carries it. Group 1 is the domain. */
 const EMAIL_RE = /[\p{L}\p{N}._%+-]+(?:@|%40)([\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.(?:\p{L}{2,}|xn--[a-z0-9-]+))/giu;
-/** A run of digit groups split by single spaces or hyphens; a card number is some of its groups. */
-const DIGIT_RUN_RE = /(?<![\d.])\d+(?:[ -]\d+)*/g;
+/**
+ * A run of digit groups split by single separators: a space, a non-breaking
+ * or narrow non-breaking space (a formatted number, a French locale), a hyphen
+ * or a dot. A card number is some of its groups; cardShaped keeps an address,
+ * a version or a date, whose groups are short, from reading as one.
+ */
+const DIGIT_SEPARATOR = "[ \\u00a0\\u202f.-]";
+const DIGIT_RUN_RE = new RegExp(String.raw`(?<![\d.])\d+(?:${DIGIT_SEPARATOR}\d+)*`, "g");
 /** A card number's first digit: the networks issue from 2 to 6 and 8, so a millisecond timestamp (a leading 1) is never one. */
 const CARD_FIRST_DIGIT_RE = /^[2-68]/;
 
@@ -233,14 +239,16 @@ function cardShaped(groups: readonly string[], i: number, j: number): boolean {
  * not hide it. A group is never split: digits inside a longer id stay.
  */
 function redactCardsInRun(run: string): string {
-  const parts = run.split(/([ -])/);
+  const parts = run.split(new RegExp(`(${DIGIT_SEPARATOR})`));
   const groups = parts.filter((_, i) => i % 2 === 0);
   let out = "";
   let i = 0;
   while (i < groups.length) {
     let end = -1;
     let digits = "";
-    for (let j = i; j < groups.length && digits.length + groups[j].length <= 19; j++) {
+    // A group after a dot is a decimal's fraction or a version's part, never the start of a card number.
+    const afterDot = i > 0 && parts[2 * i - 1] === ".";
+    for (let j = i; !afterDot && j < groups.length && digits.length + groups[j].length <= 19; j++) {
       digits += groups[j];
       if (cardShaped(groups, i, j) && isCardNumber(digits)) end = j;
     }
